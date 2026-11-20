@@ -634,6 +634,11 @@ private data class StoredUndecided(
     val createdAt: String,
     val linkIdB64: String,
     val linkSecretB64: String,
+    /** The requester's reply grant: what opens their mailbox for the
+     *  Welcome. Kept in the row (sealed under the device key, as the link
+     *  secret is) so a pass that runs before the reach manager is bound, at
+     *  a cold start, still finds it. */
+    val replyGrantB64: String? = null,
 )
 
 private val UNDECIDED_LIST = ListSerializer(StoredUndecided.serializer())
@@ -655,6 +660,9 @@ internal fun encodeUndecided(rows: List<UndecidedLinkRequest>): ByteArray =
                 createdAt = r.request.createdAt,
                 linkIdB64 = b64(r.linkId),
                 linkSecretB64 = b64(r.linkSecret),
+                replyGrantB64 = r.request.replyGrant?.let { grant ->
+                    runCatching { b64(uniffi.lakko_ffi_uniffi.encodeReachGrant(grant)) }.getOrNull()
+                },
             )
         },
     ).toByteArray(Charsets.UTF_8)
@@ -671,6 +679,9 @@ internal fun decodeUndecided(bytes: ByteArray): List<UndecidedLinkRequest>? =
                     validAfterMs = s.validAfterMs.toULong(),
                     intro = s.intro,
                     createdAt = s.createdAt,
+                    replyGrant = s.replyGrantB64?.let { wire ->
+                        runCatching { uniffi.lakko_ffi_uniffi.decodeReachGrant(unb64(wire)) }.getOrNull()
+                    },
                 ),
                 linkId = unb64(s.linkIdB64),
                 linkSecret = unb64(s.linkSecretB64),

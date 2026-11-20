@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0089 step 3: the pure rules of suspended mode. The `403
+ * ADR-0098 step 3: the pure rules of suspended mode. The `403
  * account-suspended` body, the suspension details, the reason name to its
  * catalog key, the one transition rule (enter on a landing, enter through a
  * refresh, leave on a normal refresh), and the appeal (sent once).

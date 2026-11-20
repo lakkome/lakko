@@ -92,6 +92,8 @@ pub(crate) fn build_internal_app(state: AppState) -> Router {
         .layer(axum::extract::DefaultBodyLimit::max(
             MAX_INTERNAL_BODY_BYTES,
         ))
+        // Requests by route template, method and status class (ADR-0096).
+        .layer(lakko_metrics::red_layer("push-gw"))
         .layer(TraceLayer::new_for_http().make_span_with(lakko_log_hygiene::request_span))
         .with_state(state)
 }

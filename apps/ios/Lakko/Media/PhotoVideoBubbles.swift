@@ -19,13 +19,12 @@ import UIKit
 
 private let mediaCorner = LakkoRadius.bubble
 
-private struct MediaFailedLabel: View {
+struct MediaFailedLabel: View {
     let text: String
 
     var body: some View {
         VStack(spacing: 4) {
-            Image(systemName: "arrow.clockwise")
-                .font(.body.weight(.semibold))
+            LkIconView(.arrowClockwise, size: 20)
             Text(text)
                 .font(.caption)
         }
@@ -38,7 +37,7 @@ private struct MediaFailedLabel: View {
 
 /// ADR-0065 / UX 4.1, 4.2 — what a photo or video shows when it did not
 /// open: the gone notice, the limit line, or the kind's own failure.
-private struct MediaFailureOverlay: View {
+struct MediaFailureOverlay: View {
     let failure: MediaLoadFailure
     let genericText: String
 
@@ -58,7 +57,7 @@ private struct MediaFailureOverlay: View {
     }
 }
 
-private struct CornerSpinner: View {
+struct CornerSpinner: View {
     var body: some View {
         ProgressView()
             .controlSize(.small)
@@ -249,8 +248,7 @@ struct VideoBubble: View {
                     if downloading {
                         ProgressView().tint(Color.white)
                     } else {
-                        Image(systemName: "play.fill")
-                            .font(.title2)
+                        LkIconView(.playFill, size: 26, relativeTo: .title2)
                             .foregroundStyle(Color.white)
                             .offset(x: 2)
                     }
@@ -336,7 +334,7 @@ struct VideoBubble: View {
 /// sheet recognises ("Save Image" / "Save Video" need the right extension).
 /// The name is derived from the sender-chosen `name` through
 /// ``AttachmentBridge/safeFileName(_:fallback:)``.
-private enum MediaShareCopy {
+enum MediaShareCopy {
     static func extensionFor(mime: String?) -> String {
         switch (mime ?? "").lowercased().split(separator: ";").first.map(String.init) ?? "" {
         case "image/png": return "png"
@@ -396,8 +394,7 @@ private struct ViewerBar: View {
     var body: some View {
         HStack {
             Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.body.weight(.semibold))
+                LkIconView(.xmark, size: 20)
                     .frame(width: 44, height: 44)
             }
             .accessibilityLabel(Localization.text("common.close"))
@@ -406,7 +403,7 @@ private struct ViewerBar: View {
                 Button {
                     exporting = ExportedFile(url: shareURL)
                 } label: {
-                    Label(Localization.text("common.save"), systemImage: "square.and.arrow.down")
+                    Label(Localization.text("common.save"), icon: .download)
                         .font(.body.weight(.medium))
                         .frame(minHeight: 44)
                 }
@@ -632,7 +629,7 @@ struct VideoPlayerScreen: View {
 }
 
 /// The platform's standard video controls.
-private struct PlayerControllerView: UIViewControllerRepresentable {
+struct PlayerControllerView: UIViewControllerRepresentable {
     let player: AVPlayer
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {

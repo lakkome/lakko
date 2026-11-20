@@ -127,9 +127,12 @@ import {
   claimUsername,
   loginHandleFor,
   nameTargetFor,
+  RegistrationClosedError,
+  SupporterCodeUsedError,
   type LoginHandle,
   type NameTarget,
 } from "./login-handle";
+import { defaultPlaceStorage, dropHeldPlace, readHeldPlace } from "../supporters/supporter-code";
 import { createLoginHandleSync } from "./login-handle-sync";
 import { decideSilentRestore } from "./silent-restore";
 import {
@@ -236,6 +239,7 @@ import { clearLeaveRequestedForAccount } from "../chat/membership-ended";
 // this device defer to a candidate it has no current evidence about.
 import { clearBeaconObservationsForAccount } from "../chat/committer-beacon";
 import { rehydrateMlsState } from "../chat/rehydrate";
+import { retireOwnPublisherLeaves } from "../channels/publisher-devices";
 import { subscribeToPush, unsubscribeFromPush } from "../push/subscribe";
 import { SessionBinding, StaleBindingError } from "./binding-epoch";
 import { releaseWakeBinding } from "../push/wake-binding";
@@ -269,10 +273,12 @@ import {
 import {
   attestationGate,
   clearKeyResetOwed,
+  directoryCooldownSecs,
   directoryResetOutcome,
   isKeyResetOwed,
   readKeyResetOwed,
   remainingKeyResetSteps,
+  withDirectoryWait,
   withKeyResetStepDone,
   writeKeyResetOwed,
   keyResetAttestationSignedAtMs,
@@ -292,7 +298,27 @@ import {
   type PreparedRotation,
 } from "./key-rotation-store";
 import { mintConversationLink } from "./conversation-link-mint";
-import { bindingVerdict, rebindsAfterStateBundle } from "../devices/own-conversation-key";
+import {
+  OWN_LINK_ABSENT,
+  OWN_LINK_UNKNOWN,
+  bindingVerdict,
+  ownLinkOfBundle,
+  rebindsAfterStateBundle,
+  type OwnLink,
+} from "../devices/own-conversation-key";
+import { readOwnLinkRecord, writeOwnLinkRecord } from "./own-conversation-key-store";
+import { accountKeyHexOfSeed, applyOwnPredecessors } from "../devices/state-bundle";
+import type { RecoveredPredecessor } from "../devices/recovery-payload";
+import {
+  EARLIER_KEYS_RETRY_MS,
+  EarlierKeysMissingError,
+  ParkedLandingGuard,
+  persistRecoveredKeysInOrder,
+  runEarlierKeysGate,
+  tryEarlierKeysOnce,
+  type BindingFacts,
+  type EarlierKeysGateAnswer,
+} from "./earlier-keys";
 import { loadMlsSnapshot } from "../chat/mls-store";
 import { stampPredecessorAdoption } from "../contacts/address-resolver";
 import { markSpendOwed } from "../contacts/rotation-spent";
@@ -306,7 +332,6 @@ import {
   rotatedNoticeOwed,
   rotationIntake,
   rotationWithholdsPhrase,
-  supersededStep,
   upgradeVerdict,
   withPendingRotation,
   type CommitProbe,
@@ -314,7 +339,10 @@ import {
   type PendingRotation,
   type UpgradeVerdict,
 } from "../devices/key-rotation";
-import { awaitKeyRotationPort } from "../devices/sync/key-rotation-port";
+import { keyRotationPort, readJournalOnce } from "../devices/sync/key-rotation-port";
+import { readJournalStandalone } from "../devices/sync/standalone-journal-read";
+import { classifyStandaloneFetchError, openStandaloneDeviceGroupJournal } from "../devices/sync/standalone-journal";
+import { settleSuperseded } from "../devices/superseded-adoption";
 import { deviceGroupIdOf } from "../devices/lifecycle";
 import { transferRoot } from "../ds/ownership";
 import { DsClient } from "../ds/client";
@@ -432,6 +460,13 @@ export type AuthState =
   | {
       readonly kind: "needs-recovery-phrase";
       readonly account: SessionAccount;
+      /** ADR-0074 "Joining after a rotation" (UX 8a): the device HOLDS the
+       *  account's current keys, but the account's chats use earlier keys
+       *  this device does not hold yet. It waits, signed in, with the app
+       *  shell not started; only another device (or a key reset) is offered,
+       *  and it looks for the earlier keys by itself. Absent = no keys at
+       *  all (section 8). */
+      readonly missing?: "earlier-keys";
     }
   /** ADR-0017 lost-everything fallback (the ONLY sanctioned
    *  publish-without-a-supersession-proof path). Reached ONLY from
@@ -700,6 +735,9 @@ export interface AuthApi {
    *  has not seen an explicit sign-in: the phrase screen asks for one
    *  ("Sign in again to finish publishing your new keys."). */
   readonly freshPublishSignInNeeded: Accessor<boolean>;
+  /** Unix milliseconds until which the directory refuses the reset's new
+   *  keys (its cool-down; UX 15.4 "Waiting for the directory"), or `null`. */
+  readonly freshPublishWaitUntilMs: Accessor<number | null>;
   /** Retry the owed publishing steps for the identity `mintFreshIdentity`
    *  reset. Never resets again. Throws what the step threw (offline, `429`,
    *  `503`, a refusal). */
@@ -752,6 +790,14 @@ export interface AuthApi {
    *  marked known for this session, and the own-username register, which
    *  carries the name to the account's other devices. */
   applyRenamedUsername(username: string): Promise<void>;
+  /** The username of this account, learned after the session landed with
+   *  none (a passkey sign-in on a new device, `docs/ux/identity-recovery.md`
+   *  section 8b) and confirmed by auth (`POST /auth/login-handle/check`
+   *  answered `same` for its handle): kept exactly as a sign-in by name
+   *  keeps it - the local marker, the live session, the handle marked known,
+   *  and the own-username register seeded when it is empty. The caller
+   *  checked the name first; this checks nothing. */
+  adoptVerifiedUsername(username: string): Promise<void>;
   /** Whether the signed-in account's FIRST password is still owed (a guest
    *  whose name was saved and whose password step did not finish). */
   firstPasswordOwed(): boolean;
@@ -778,7 +824,7 @@ export interface AuthApi {
   /** URL-safe base64 of this device's id for a landing of `username`'s
    *  account, when this device already holds its keys; else `undefined`. */
   landingDeviceIdFor(username: string): string | undefined;
-  /** ADR-0089: when `err` is a landing route's `403 account-suspended`
+  /** ADR-0098: when `err` is a landing route's `403 account-suspended`
    *  (thrown by a route this context does not drive itself, the email
    *  recovery's password step), land the account in suspended mode and
    *  answer `true`; otherwise `false` and nothing changes. */
@@ -792,7 +838,7 @@ export interface AuthApi {
    *  refused. While true both route guards render the refusal screen. Never
    *  true on the web, where nothing throws `KeyStoreUnavailableError`. */
   readonly keyStoreUnavailable: Accessor<boolean>;
-  /** ADR-0089 (UX `reporting-and-moderation.md` section 4): this device is
+  /** ADR-0098 (UX `reporting-and-moderation.md` section 4): this device is
    *  in suspended mode, or `null`. While it is set and not `reading`, both
    *  route guards render the suspended screen in place of any route. */
   readonly suspension: Accessor<SuspensionMode | null>;
@@ -871,6 +917,10 @@ export interface AuthApi {
     password: string,
     options?: { readonly signal?: AbortSignal },
   ): Promise<SignupOutcome>;
+  /** `GET /signup/open` (`docs/ux/beta-account-cap.md`): whether a new
+   *  account with a username fits under the beta cap. Never rejects; a
+   *  failed question resolves `true`. */
+  signupOpen(): Promise<boolean>;
   /** ADR-0032 guest join — create a FULL account with NO username and no
    *  user-chosen password, so a visitor who opened a `/c/` link without an
    *  account goes straight into the call. Reuses the `signup` machinery:
@@ -886,6 +936,10 @@ export interface AuthApi {
   /** The session is a guest account (`guest-account.ts`): made to join a
    *  call from a link, not yet kept. */
   readonly isGuest: Accessor<boolean>;
+  /** The username an earlier `Create account` of this guest already bound
+   *  (the guest marker's `claimedUsername`), or `null`. Such a guest holds a
+   *  place under the beta cap (`docs/ux/beta-account-cap.md`). */
+  readonly guestReservedUsername: Accessor<string | null>;
   /** Delete a guest account at once: on the servers (in the order
    *  `guestDeletePlan` gives, which frees a username an unfinished
    *  `Create account` took), and every trace of it on this device. Lands
@@ -1054,6 +1108,8 @@ export interface AuthApi {
    *  succeeded; ADR-0074: a key rotation with a publishing step owed). While
    *  it does, the phrase is not shown anywhere. */
   publishOwed(): boolean;
+  /** For the signed-in account, as `freshPublishWaitUntilMs`. */
+  owedPublishWaitUntilMs(): number | null;
   /** Retry the owed publishing steps for the signed-in account with the
    *  seed this session holds. Resolves when nothing is owed (any more).
    *  Throws what the step threw (offline, `429`, `503`, a refusal). */
@@ -1157,7 +1213,7 @@ export interface AuthApi {
    *  and completes the session — preferring the redeemed fresh
    *  `sessionToken` when present, else the pending login's token.
    *
-   *  Recovery payload v2: what arrives is the 16-byte entropy of the
+   *  Recovery payload v3: what arrives is the 16-byte entropy of the
    *  recovery phrase. The phrase and the 64-byte seed are rebuilt from it,
    *  the seed is checked, and only then are the seed AND the phrase stored
    *  on this device.
@@ -1173,6 +1229,10 @@ export interface AuthApi {
      *  earlier keys must be stored before the conversation identity is
      *  minted). Best effort. */
     persistJoinState?: (deviceKey: DeviceCipher) => Promise<void>,
+    /** Recovery payload v3: the account's earlier keys (own predecessors,
+     *  oldest first) the row carried. CONSUMED: stored before the seed and
+     *  the landing, zeroed on every path. */
+    predecessors?: readonly RecoveredPredecessor[],
   ): Promise<void>;
   /** ADR-0018 factor (a), path (b) — the NO-PASSWORD entry of the
    *  recovery cascade. The fresh device ran the pairing
@@ -1188,7 +1248,7 @@ export interface AuthApi {
     readonly accountIdBytes: Uint8Array;
     readonly accountIdB64: string;
     readonly username: string;
-    /** 16-byte entropy of the recovery phrase (recovery payload v2).
+    /** 16-byte entropy of the recovery phrase (recovery payload v3).
      *  CONSUMED: zeroized here, and the seed derived from it is zeroized
      *  on every refusal path. */
     readonly phraseEntropy: Uint8Array;
@@ -1201,6 +1261,9 @@ export interface AuthApi {
     /** The restore was reached through "Forgot password?": offer the
      *  new-password step once the session lands (UX spec section 7). */
     readonly forgotPassword?: boolean;
+    /** Recovery payload v3: the account's earlier keys the row carried.
+     *  CONSUMED like `phraseEntropy`. */
+    readonly predecessors?: readonly RecoveredPredecessor[];
   }): Promise<void>;
   /** "Reset account keys" (ADR-0073 section 2.3, UX 15.1): the one path
    *  that gives the account a new identity. Callable ONLY while
@@ -1378,7 +1441,7 @@ function utf8(s: string): Uint8Array {
 }
 
 /**
- * ADR-0089: run a landing route; a `403 account-suspended` carrying the
+ * ADR-0098: run a landing route; a `403 account-suspended` carrying the
  * restricted session comes back as `{ suspended }` instead of a throw, so the
  * caller lands the account in suspended mode.
  */
@@ -1501,7 +1564,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // then only clears the screen and the person repeats the step.
   const [keyStoreUnavailable, setKeyStoreUnavailable] = createSignal(false);
   let keyStoreRetry: (() => Promise<unknown>) | null = null;
-  // ADR-0089: suspended mode (`suspension.ts`). Every change goes through
+  // ADR-0098: suspended mode (`suspension.ts`). Every change goes through
   // `nextSuspension`; the module flag the composers and the DS client read
   // follows it.
   const [suspension, setSuspensionSignal] = createSignal<SuspensionMode | null>(null);
@@ -1701,7 +1764,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     if (s.kind === "session" || s.kind === "needs-recovery-phrase") {
       return { accountIdB64: s.account.accountId, username: s.account.username };
     }
-    // ADR-0089: a suspended account on a device that holds none of its keys
+    // ADR-0098: a suspended account on a device that holds none of its keys
     // proves its password to delete itself.
     const suspended = suspension();
     if (suspended !== null) {
@@ -1871,7 +1934,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       },
     });
   }
-  /** ADR-0089: `POST /auth/session/logout` with a suspended account's
+  /** ADR-0098: `POST /auth/session/logout` with a suspended account's
    *  restricted session (refreshed first when it expired). Never throws. */
   function restrictedServerLogout(restricted: RestrictedSession): Promise<LogoutAttempt> {
     return runServerLogout(
@@ -1914,7 +1977,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       console.warn(`session-pair persist (${context}) failed`, err);
     }
   }
-  /** ADR-0089: persist a restricted session under the device key. Best
+  /** ADR-0098: persist a restricted session under the device key. Best
    *  effort: logged. */
   async function persistRestricted(accountIdB64: string, restricted: RestrictedSession): Promise<void> {
     try {
@@ -1982,7 +2045,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       }
     }),
   );
-  // ADR-0089: a refresh that answered a pair while suspended ends suspended
+  // ADR-0098: a refresh that answered a pair while suspended ends suspended
   // mode, silently.
   onCleanup(
     sessionTokens.subscribe((event) => {
@@ -1992,7 +2055,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       leaveSuspension(mode, event.pair);
     }),
   );
-  // ADR-0089: while suspended, ask whether the suspension ended every ten
+  // ADR-0098: while suspended, ask whether the suspension ended every ten
   // minutes and whenever the app comes back to the foreground.
   createEffect(() => {
     if (suspension() === null) return;
@@ -2006,7 +2069,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   });
 
   /**
-   * ADR-0089: the refresh route answered `403 account-suspended` (a bearer
+   * ADR-0098: the refresh route answered `403 account-suspended` (a bearer
    * route of auth refused the session, the periodic check ran, or a reload
    * refreshed). The provider already holds the restricted session and has
    * persisted it. A session on screen for this account goes into suspended
@@ -2030,7 +2093,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   /**
-   * ADR-0089: the suspension ended (a refresh answered a pair). A session
+   * ADR-0098: the suspension ended (a refresh answered a pair). A session
    * that is open goes back to normal and runs the steps its suspended landing
    * skipped; a device that showed the screen alone has no keys on it, so it
    * lands on the sign-in screen and the person signs in again.
@@ -2071,7 +2134,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   /**
-   * ADR-0089: a landing route answered `403 account-suspended`. Keep both
+   * ADR-0098: a landing route answered `403 account-suspended`. Keep both
    * credentials (in memory and under the device key), then land the account
    * in suspended mode: a device that holds the account's keys lands it as a
    * reload would, with nothing sent to any server, and offers "Read my
@@ -2120,7 +2183,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     await landSuspendedWith(accountIdB64, landing.session, username, seed, flow);
   }
 
-  /** ADR-0089: the anonymous-token pool draws `blob-read` alone, with the
+  /** ADR-0098: the anonymous-token pool draws `blob-read` alone, with the
    *  restricted session (files in chats still open while suspended). */
   function suspendTokenPool(restricted: RestrictedSession): void {
     anonTokens.setSuspended(true);
@@ -2453,6 +2516,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     // Compared with the ACCOUNT identity: since ADR-0050 `chats.identity()`
     // is the device identity, never this instance.
     if (chats.accountIdentity() !== canonical) return "unknown";
+    // ADR-0074 "Joining after a rotation": the landing-time read of the own
+    // bundle also records the account's own conversation link.
+    if (current !== undefined) {
+      void recordOwnLinkAtLanding(accountIdB64, canonical, current?.conversation_link);
+    }
     const verdict = landingVerdict(
       current === undefined
         ? undefined
@@ -2594,6 +2662,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
      *  (a sign-out freed them, or another landing replaced them), nothing
      *  more is installed and `null` is returned. */
     stillBound: () => boolean = () => true,
+    /** ADR-0074 "Joining after a rotation": the account's own conversation
+     *  link as the landing's gate read it. A non-live install whose verdict
+     *  is `wait` mints nothing, stores nothing and throws
+     *  `EarlierKeysMissingError` (the gate parks the device before this is
+     *  reached; this is the defence in depth). */
+    link: OwnLink = OWN_LINK_ABSENT,
   ): Promise<Uint8Array | null> {
     // A live session that already answers to an earlier key learns nothing
     // here, and its predecessor identity may hold state (the account's
@@ -2628,8 +2702,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           // eslint-disable-next-line no-console
           console.warn("key-rotation state unreadable; treating the account as never rotated", err);
         }
-        const predecessors: { identity: WasmIdentity; seed: Uint8Array; keyB64: string }[] = [];
-        const currentKeyB64 = base64Encode(canonical.signaturePublicKey);
+        const predecessors: {
+          identity: WasmIdentity;
+          seed: Uint8Array;
+          key: Uint8Array;
+          keyB64: string;
+        }[] = [];
+        const currentKey = canonical.signaturePublicKey;
+        const currentKeyB64 = base64Encode(currentKey);
         for (const [index, seed] of seeds.entries()) {
           const identity = wasm.Identity.fromSeed(seed);
           const keyB64 = base64Encode(identity.signaturePublicKey);
@@ -2642,11 +2722,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             identity.free();
             continue;
           }
-          predecessors.push({ identity, seed, keyB64 });
+          predecessors.push({ identity, seed, key: identity.signaturePublicKey, keyB64 });
         }
         const seed = await ensureDeviceIdentitySeed(accountIdB64, deviceKey);
         const stored = await getDeviceBinding(accountIdB64);
-        let boundKeyB64: string | null = null;
+        let boundKey: Uint8Array | null = null;
         /** Overtaken: nothing parsed here was handed to the chats yet. */
         const abandon = (): null => {
           for (const p of predecessors) p.identity.free();
@@ -2659,8 +2739,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         if (stored !== null) {
           try {
             device = wasm.Identity.fromSeedWithBinding(seed, stored);
-            const bound = device.accountPublicKey;
-            boundKeyB64 = bound === undefined ? null : base64Encode(bound);
+            boundKey = device.accountPublicKey ?? null;
           } catch (err) {
             // A binding that no longer verifies: re-mint below.
             // eslint-disable-next-line no-console
@@ -2679,25 +2758,39 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           }
         }
         if (!stillBound()) return abandon();
-        const verdict = bindingVerdict({
-          boundKeyB64,
-          currentKeyB64,
-          predecessorKeysB64: predecessors.map((p) => p.keyB64),
+        const decision = bindingVerdict(wasm, {
+          boundKey,
+          currentKey,
+          predecessorKeys: predecessors.map((p) => p.key),
+          link,
           holdsConversations,
         });
+        if (decision.kind === "wait") {
+          // The account's chats use a key this device does not hold yet:
+          // nothing is minted, stored or handed to the chats.
+          abandon();
+          if (live) return null;
+          throw new EarlierKeysMissingError();
+        }
+        const boundKeyB64 = boundKey === null ? null : base64Encode(boundKey);
         // The own key the conversation leaves are bound to: the one a kept
-        // binding names, else the oldest predecessor; `-1` is the current key.
+        // binding names, the one a mint names; `-1` is the current key.
         let conversationIndex = predecessors.length > 0 ? 0 : -1;
-        if (verdict === "keep") {
+        if (decision.kind === "keep") {
           conversationIndex = predecessors.findIndex((p) => p.keyB64 === boundKeyB64);
-        } else if (verdict === "keep-under-current-key") {
+        } else if (decision.kind === "keep-under-current-key") {
           conversationIndex = -1;
           // eslint-disable-next-line no-console
           console.warn(
             "the device binding names the current account key and this device holds conversations; kept",
           );
+        } else if (decision.mintKey !== null) {
+          const mintB64 = base64Encode(decision.mintKey);
+          conversationIndex = predecessors.findIndex((p) => p.keyB64 === mintB64);
         }
-        const remint = live ? rebindsAfterStateBundle(verdict) : verdict === "mint" || verdict === "remint";
+        const remint = live
+          ? rebindsAfterStateBundle(decision, boundKey, currentKey)
+          : decision.kind === "mint";
         if (remint || live) {
           // ADR-0073 section 2.3 step 5 covers `mint`: a binding minted
           // before a key reset names the OLD key (a reset keeps no
@@ -2734,6 +2827,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         }
       }
     } catch (err) {
+      // The device waits for the account's earlier keys: never a fallback
+      // to the account identity (that is the state G-56 forbids).
+      if (err instanceof EarlierKeysMissingError) throw err;
       // eslint-disable-next-line no-console
       console.warn("device identity install failed; chats fall back to the account identity", err);
       device = null;
@@ -2760,6 +2856,372 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       writeKnownDeviceId(plainStorage(), accountIdB64, deviceIdB64Url(installed));
     }
     return conversationSeedBytes;
+  }
+
+  // ---- ADR-0074 "Joining after a rotation" (G-56) ------------------------
+
+  /** The facts of the stored binding of `accountIdB64` the earlier-keys
+   *  gate reads (the same reads as `installSessionIdentities`, nothing
+   *  minted). */
+  async function readBindingFacts(
+    wasm: Wasm,
+    accountIdB64: string,
+    currentKey: Uint8Array,
+    deviceKey: DeviceCipher,
+  ): Promise<BindingFacts> {
+    let seeds: Uint8Array[] = [];
+    try {
+      seeds = predecessorSeeds(await getKeyRotationState(accountIdB64, deviceKey));
+    } catch {
+      seeds = [];
+    }
+    const currentB64 = base64Encode(currentKey);
+    const predecessorKeys: Uint8Array[] = [];
+    const seen = new Set<string>();
+    for (const [index, seed] of seeds.entries()) {
+      const identity = wasm.Identity.fromSeed(seed);
+      const key = identity.signaturePublicKey;
+      identity.free();
+      seed.fill(0);
+      const keyB64 = base64Encode(key);
+      // The "predecessor" is the key this session holds: nothing rotated.
+      if (index === 0 && keyB64 === currentB64) break;
+      if (keyB64 === currentB64 || seen.has(keyB64)) continue;
+      seen.add(keyB64);
+      predecessorKeys.push(key);
+    }
+    for (const seed of seeds) seed.fill(0);
+    let boundKey: Uint8Array | null = null;
+    const stored = await getDeviceBinding(accountIdB64);
+    if (stored !== null) {
+      const seed = await ensureDeviceIdentitySeed(accountIdB64, deviceKey);
+      try {
+        const device = wasm.Identity.fromSeedWithBinding(seed, stored);
+        boundKey = device.accountPublicKey ?? null;
+        device.free();
+      } catch {
+        boundKey = null;
+      } finally {
+        seed.fill(0);
+      }
+    }
+    let holdsConversations = chats.groups().length > 0;
+    if (!holdsConversations) {
+      try {
+        const snapshot = await loadMlsSnapshot(accountIdB64, deviceKey);
+        holdsConversations = (snapshot?.knownGroupIds.length ?? 0) > 0;
+      } catch {
+        holdsConversations = true;
+      }
+    }
+    return { boundKey, currentKey, predecessorKeys, holdsConversations };
+  }
+
+  /** The own conversation link the directory serves, verified against
+   *  `currentKey` (THIS device's key). `unknown` when the bundle could not be
+   *  read; a missing bundle has no link. */
+  async function fetchOwnLink(
+    wasm: Wasm,
+    accountIdBytes: Uint8Array,
+    currentKey: Uint8Array,
+  ): Promise<OwnLink> {
+    try {
+      const bundle = await discovery.identityFetch(accountIdBytes);
+      if (bundle === null) return OWN_LINK_ABSENT;
+      return ownLinkOfBundle(wasm, bundle.conversation_link, currentKey);
+    } catch {
+      return OWN_LINK_UNKNOWN;
+    }
+  }
+
+  /** The landing's earlier-keys gate (`earlier-keys.ts`), with this
+   *  provider's stores and directory. */
+  async function earlierKeysGate(args: {
+    readonly wasm: Wasm;
+    readonly accountIdentitySeed: Uint8Array;
+    readonly accountIdBytes: Uint8Array;
+    readonly accountIdB64: string;
+    readonly link?: OwnLink;
+    readonly exempt?: boolean;
+  }): Promise<EarlierKeysGateAnswer> {
+    const current = args.wasm.Identity.fromSeed(args.accountIdentitySeed);
+    const currentKey = current.signaturePublicKey;
+    current.free();
+    let deviceKey: DeviceCipher | null = null;
+    try {
+      deviceKey = await getDeviceKey(args.accountIdB64);
+    } catch (err) {
+      // ADR-0085: an unusable OS key store is not "no key".
+      if (err instanceof KeyStoreUnavailableError) throw err;
+      deviceKey = null;
+    }
+    const answer = await runEarlierKeysGate(
+      {
+        readFacts: () =>
+          deviceKey === null
+            ? Promise.resolve(null)
+            : readBindingFacts(args.wasm, args.accountIdB64, currentKey, deviceKey),
+        readRecord: () =>
+          deviceKey === null ? Promise.resolve(null) : readOwnLinkRecord(args.accountIdB64, deviceKey),
+        fetchLink: () => fetchOwnLink(args.wasm, args.accountIdBytes, currentKey),
+        writeRecord: (link) =>
+          deviceKey === null ? Promise.resolve() : writeOwnLinkRecord(args.accountIdB64, deviceKey, link),
+        verdict: (facts, link) => bindingVerdict(args.wasm, { ...facts, link }),
+      },
+      {
+        ...(args.link !== undefined ? { link: args.link } : {}),
+        ...(args.exempt === true ? { exempt: true } : {}),
+      },
+    );
+    if (answer.kind === "wait") {
+      // eslint-disable-next-line no-console
+      console.info(`earlier-keys gate: wait (link ${answer.link.kind})`);
+    }
+    return answer;
+  }
+
+  /** The landing-time read of the own bundle (`refreshPublishedIdentity`)
+   *  also records the account's own link. A device kept under the current
+   *  key that the new link would make wait parks at the NEXT landing; the
+   *  running session is not torn down. Never throws. */
+  async function recordOwnLinkAtLanding(
+    accountIdB64: string,
+    canonical: WasmIdentity,
+    conversationLinkB64: string | undefined,
+  ): Promise<void> {
+    try {
+      const wasm = await loadWasm();
+      const deviceKey = await getDeviceKey(accountIdB64);
+      if (deviceKey === null) return;
+      const currentKey = canonical.signaturePublicKey;
+      const link = ownLinkOfBundle(wasm, conversationLinkB64, currentKey);
+      await writeOwnLinkRecord(accountIdB64, deviceKey, link);
+      const facts = await readBindingFacts(wasm, accountIdB64, currentKey, deviceKey);
+      if (bindingVerdict(wasm, { ...facts, link }).kind === "wait") {
+        // eslint-disable-next-line no-console
+        console.warn("this device lacks the account's earlier keys; it waits for them at the next landing");
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("own conversation link check failed", err instanceof Error ? err.name : "unknown");
+    }
+  }
+
+  /**
+   * Park an authenticated device whose account's chats use earlier keys it
+   * does not hold (UX 8a). Signed in (the session is installed, so the reset
+   * and the proofs work), the app shell not started: no device identity, no
+   * KeyPackage, no DeviceGroup. It looks for the keys by itself.
+   */
+  async function parkForEarlierKeys(args: {
+    readonly accountIdBytes: Uint8Array;
+    readonly accountIdB64: string;
+    readonly exportKey: Uint8Array;
+    readonly session: SessionPair;
+    readonly username: string;
+  }): Promise<void> {
+    let deviceKey: DeviceCipher | null = null;
+    try {
+      deviceKey = await getDeviceKey(args.accountIdB64);
+    } catch {
+      deviceKey = null;
+    }
+    keyPackageAccount = null;
+    installSession(args.accountIdB64, args.session);
+    await persistSessionPair(args.accountIdB64, args.session, "earlier keys");
+    setIdentitySecrets(null);
+    setPendingRecovery({
+      accountIdBytes: args.accountIdBytes,
+      accountIdB64: args.accountIdB64,
+      exportKey: args.exportKey,
+      deviceKey,
+      session: args.session,
+      username: args.username,
+    });
+    setState({
+      kind: "needs-recovery-phrase",
+      account: { accountId: args.accountIdB64, username: args.username },
+      missing: "earlier-keys",
+    });
+    // eslint-disable-next-line no-console
+    console.info("the account's earlier keys are not on this device; waiting for them");
+    startEarlierKeysRetry(args.accountIdB64);
+  }
+
+  /** Whether this page is parked for the earlier keys of `accountIdB64`. */
+  function parkedForEarlierKeys(accountIdB64: string): boolean {
+    const s = state();
+    return (
+      s.kind === "needs-recovery-phrase" &&
+      s.missing === "earlier-keys" &&
+      s.account.accountId === accountIdB64 &&
+      pendingRecovery()?.accountIdB64 === accountIdB64
+    );
+  }
+
+  /** One landing of a parked account at a time: the look below skips while a
+   *  completion is in flight, and a completion waits out a look in progress
+   *  (the completions are wrapped at the end of the provider). */
+  const parkedLanding = new ParkedLandingGuard();
+  interface EarlierKeysRetry {
+    readonly accountIdB64: string;
+    timer: ReturnType<typeof setInterval> | null;
+    running: boolean;
+  }
+  let earlierKeysRetry: EarlierKeysRetry | null = null;
+  function stopEarlierKeysRetry(): void {
+    if (earlierKeysRetry?.timer != null) clearInterval(earlierKeysRetry.timer);
+    earlierKeysRetry = null;
+  }
+  /** At entry (this park, a page load that parked again) and every five
+   *  minutes while the parked screen is in the foreground; no backoff, no
+   *  cap (contract section 4.2). */
+  function startEarlierKeysRetry(accountIdB64: string): void {
+    if (earlierKeysRetry?.accountIdB64 === accountIdB64) return;
+    stopEarlierKeysRetry();
+    const entry: EarlierKeysRetry = { accountIdB64, timer: null, running: false };
+    earlierKeysRetry = entry;
+    entry.timer = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      void lookForEarlierKeys(entry);
+    }, EARLIER_KEYS_RETRY_MS);
+    // At entry. A park reached inside a completion (it holds the landing
+    // guard) looks once that completion has let go.
+    void parkedLanding.idle().then(() => lookForEarlierKeys(entry));
+  }
+  createEffect(() => {
+    const s = state();
+    const entry = earlierKeysRetry;
+    if (entry === null) return;
+    if (!(s.kind === "needs-recovery-phrase" && s.missing === "earlier-keys" && s.account.accountId === entry.accountIdB64)) {
+      stopEarlierKeysRetry();
+    }
+  });
+
+  /** One look for the earlier keys: the backup under the phrase this device
+   *  holds, then the own bundle; the parked landing runs again when the gate
+   *  lets it. A failed look is not shown. */
+  function lookForEarlierKeys(entry: EarlierKeysRetry): Promise<void> {
+    if (entry.running || earlierKeysRetry !== entry) return Promise.resolve();
+    return parkedLanding.tryRun(() => lookForEarlierKeysNow(entry)) ?? Promise.resolve();
+  }
+  async function lookForEarlierKeysNow(entry: EarlierKeysRetry): Promise<void> {
+    // Re-checked under the guard: a completion that held it may have landed.
+    if (entry.running || earlierKeysRetry !== entry || !parkedForEarlierKeys(entry.accountIdB64)) return;
+    entry.running = true;
+    const accountIdB64 = entry.accountIdB64;
+    let seed: Uint8Array | null = null;
+    try {
+      const pending = pendingRecovery();
+      if (pending === null || pending.accountIdB64 !== accountIdB64) return;
+      const deviceKey = pending.deviceKey ?? (await getDeviceKey(accountIdB64));
+      if (deviceKey === null) return;
+      seed = await getAccountIdentitySeed(accountIdB64, deviceKey);
+      if (seed === null) return;
+      const heldSeed = seed;
+      const wasm = await loadWasm();
+      const current = wasm.Identity.fromSeed(heldSeed);
+      const currentKey = current.signaturePublicKey;
+      current.free();
+      const still = (): boolean =>
+        earlierKeysRetry === entry && parkedForEarlierKeys(accountIdB64) && stillParked(pending);
+      const outcome = await tryEarlierKeysOnce({
+        stillParked: still,
+        fetchBackup: async () => {
+          let phrase: string | null = null;
+          try {
+            phrase = await readDevicePhraseWith(accountIdB64, deviceKey);
+          } catch {
+            phrase = null;
+          }
+          if (phrase === null) return;
+          const token =
+            (sessionTokens.accountIdB64() === accountIdB64 ? await sessionTokens.current() : null) ??
+            pending.session.sessionToken;
+          await prefetchAccountBackup({
+            accountIdBytes: pending.accountIdBytes,
+            accountIdB64,
+            deviceKey,
+            sessionToken: token,
+            phrase,
+          });
+        },
+        fetchLink: () => fetchOwnLink(wasm, pending.accountIdBytes, currentKey),
+        gate: (link) =>
+          earlierKeysGate({
+            wasm,
+            accountIdentitySeed: heldSeed,
+            accountIdBytes: pending.accountIdBytes,
+            accountIdB64,
+            link,
+          }),
+        land: async (link) => {
+          const session =
+            sessionTokens.accountIdB64() === accountIdB64
+              ? (sessionTokens.pair() ?? pending.session)
+              : pending.session;
+          // Handed to the landing (it becomes the session's secret).
+          seed = null;
+          await finishCanonicalSession({
+            wasm,
+            accountIdentitySeed: heldSeed,
+            accountIdBytes: pending.accountIdBytes,
+            accountIdB64,
+            exportKey: pending.exportKey,
+            session,
+            username: pending.username,
+            ownLink: link,
+          });
+        },
+      });
+      if (outcome === "landed") {
+        // eslint-disable-next-line no-console
+        console.info("the account's earlier keys arrived; the session landed");
+      }
+    } catch (err) {
+      if (!(err instanceof StaleBindingError)) {
+        // eslint-disable-next-line no-console
+        console.warn("looking for the earlier keys failed", err instanceof Error ? err.name : "unknown");
+      }
+    } finally {
+      seed?.fill(0);
+      entry.running = false;
+    }
+  }
+
+  /** Store the earlier keys a recovery row carried, BEFORE the account seed
+   *  and the landing (contract section 3.3 step 4). Zeroes the seeds. A
+   *  failure is logged: the gate then parks the device. */
+  async function storeRecoveredPredecessors(
+    accountIdB64: string,
+    deviceKey: DeviceCipher,
+    predecessors: readonly RecoveredPredecessor[],
+  ): Promise<void> {
+    if (predecessors.length === 0) return;
+    try {
+      const wasm = await loadWasm();
+      const added = await applyOwnPredecessors(
+        {
+          ownPredecessors: predecessors.map((p) => ({
+            seedB64: base64Encode(p.seed),
+            adoptedAtMs: p.adoptedAtMs,
+          })),
+        },
+        accountIdB64,
+        deviceKey,
+        (seed) => accountKeyHexOfSeed(wasm, seed),
+      );
+      // eslint-disable-next-line no-console
+      console.info(`recovery row: ${added} earlier account keys stored`);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "recovery row: the earlier account keys were not stored",
+        err instanceof Error ? err.name : "unknown",
+      );
+    } finally {
+      for (const p of predecessors) p.seed.fill(0);
+    }
   }
 
   /**
@@ -2885,16 +3347,38 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const persist = (next: KeyResetOwed): void => {
         record = next;
         writeKeyResetOwed(storage, ctx.accountIdB64, next);
+        // The phrase screen and Settings read the record again.
+        setOwedVersion((v) => v + 1);
+        setRotationVersion((v) => v + 1);
       };
       for (const step of remainingKeyResetSteps(record.done)) {
-        if (step === "directory") {
-          await publishResetIdentity(canonical, ctx.accountIdBytes, attestation);
-        } else {
-          await refoundDeviceGroupAfterReset(ctx);
+        try {
+          if (step === "directory") {
+            await publishResetIdentity(canonical, ctx.accountIdBytes, attestation);
+          } else {
+            await refoundDeviceGroupAfterReset(ctx);
+          }
+        } catch (err) {
+          // UX 15.4 "Waiting for the directory": the directory's cool-down
+          // names how long is left; the screen says so and retries by itself
+          // then. Any other failure ends a wait recorded earlier.
+          const cooldown =
+            step === "directory" && err instanceof DiscoveryHttpError
+              ? directoryCooldownSecs({
+                  status: err.status,
+                  errorCode: err.errorCode,
+                  retryAfterSecs: err.retryAfterSecs,
+                })
+              : null;
+          if (cooldown !== null) persist(withDirectoryWait(record, Date.now() + cooldown * 1000));
+          else if (record.waitUntilMs !== undefined) persist(withDirectoryWait(record, null));
+          throw err;
         }
         persist(withKeyResetStepDone(record, step satisfies KeyResetStep));
       }
       clearKeyResetOwed(storage, ctx.accountIdB64);
+      setOwedVersion((v) => v + 1);
+      setRotationVersion((v) => v + 1);
     } finally {
       canonical.free();
     }
@@ -3862,7 +4346,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
      *  registration. A person who was sent a call link is not asked whether
      *  this site may send notifications. */
     guest?: boolean;
-    /** ADR-0089: the account is suspended. `session` is the restricted
+    /** ADR-0098: the account is suspended. `session` is the restricted
      *  session (the provider already holds it). The landing is local only:
      *  the keys, the chats on this device and the state, nothing sent to any
      *  server; the steps it skips run when the suspension ends. */
@@ -3877,6 +4361,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
      *  landing that is not the end of such a route (a page-load restore, the
      *  sign-ups, which mint a new account). */
     wipes?: WipeMark;
+    /** ADR-0074 "Joining after a rotation": the own conversation link the
+     *  route already read with its seed check (no second fetch). */
+    ownLink?: OwnLink;
+    /** The landing after a key reset or recall on THIS device: no link can
+     *  name a key it lacks, so the earlier-keys gate does not read one. */
+    linkExempt?: boolean;
   }): Promise<void> {
     // A landing runs across many awaits, and Sign out is on screen during
     // some of them (the restore prompt). A sign-out that lands in one must
@@ -3933,16 +4423,43 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       }
       requireNotSignedOut();
     }
+    // ADR-0074 "Joining after a rotation": nothing binds, publishes or opens
+    // the DeviceGroup while the account's chats use a key this device does
+    // not hold yet. The device parks instead of landing.
+    const gate = await earlierKeysGate({
+      wasm: args.wasm,
+      accountIdentitySeed: args.accountIdentitySeed,
+      accountIdBytes: args.accountIdBytes,
+      accountIdB64: args.accountIdB64,
+      ...(args.ownLink !== undefined ? { link: args.ownLink } : {}),
+      exempt: args.linkExempt === true || args.registered === true,
+    });
+    requireNotSignedOut();
+    if (gate.kind === "wait") {
+      await parkForEarlierKeys(args);
+      return;
+    }
     const canonical = args.wasm.Identity.fromSeed(args.accountIdentitySeed);
     // The keys are on this device now; nothing is left to explain.
     setRestoreNotice(null);
-    const conversationIdentitySeed = await installSessionIdentities(
-      args.wasm,
-      canonical,
-      args.accountIdB64,
-      false,
-      stillBound,
-    );
+    let conversationIdentitySeed: Uint8Array | null;
+    try {
+      conversationIdentitySeed = await installSessionIdentities(
+        args.wasm,
+        canonical,
+        args.accountIdB64,
+        false,
+        stillBound,
+        gate.link,
+      );
+    } catch (err) {
+      if (!(err instanceof EarlierKeysMissingError)) throw err;
+      // Defence in depth: the install's own verdict said wait.
+      chats.clear();
+      requireNotSignedOut();
+      await parkForEarlierKeys(args);
+      return;
+    }
     requireNotSignedOut();
     keyPackageAccount = {
       accountIdBytes: args.accountIdBytes,
@@ -4059,7 +4576,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       kind: "session",
       account: { accountId: args.accountIdB64, username: args.username },
     });
-    // ADR-0089: a suspension that came in while this landing was running (a
+    // ADR-0098: a suspension that came in while this landing was running (a
     // bearer route answered `403 account-suspended` before the state was a
     // session): suspended mode now.
     {
@@ -4765,6 +5282,37 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     }
   }
 
+  /**
+   * A sign-up refused at its first login-handle bind (the beta account cap,
+   * `docs/ux/beta-account-cap.md` section 2 item 4): delete the account the
+   * sign-up just made, then remove it from this device the way a declined
+   * guest is removed. Auth deletes an account with no login handle and no
+   * passkey on its session alone. A failed delete is logged and the device
+   * is wiped anyway: the server's unclaimed-account sweep removes the
+   * account within a day. Nothing of it was persisted as this device's
+   * account yet (the account marker is written after the claim), so another
+   * account cached on this browser is left alone, and the route state stays
+   * where it is.
+   */
+  async function discardRefusedSignup(accountIdB64: string, sessionToken: string): Promise<void> {
+    try {
+      const webauthn = new WebauthnClient();
+      webauthn.setSessionToken(sessionToken);
+      await webauthn.deleteAccount(null);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "registration closed: the new account was not deleted; left to the server's sweep",
+        err instanceof WebauthnHttpError ? err.status : err instanceof Error ? err.name : "unknown",
+      );
+    }
+    dropSession();
+    await wipeAccountLocalData(accountIdB64);
+    anonTokens.forgetAccount(accountIdB64);
+    // eslint-disable-next-line no-console
+    console.info("registration closed");
+  }
+
   /** Page-load restore; a key-store refusal (desktop) puts up the refusal
    *  screen, whose Try again runs the restore again. */
   async function restoreSessionOnLoad(): Promise<void> {
@@ -4780,7 +5328,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   /**
-   * ADR-0089: the page-load restore of a suspended account. Refreshes with
+   * ADR-0098: the page-load restore of a suspended account. Refreshes with
    * the stored credential: still suspended (or no answer) lands in suspended
    * mode and returns `true`; a pair means the suspension ended while this
    * device was closed, the pair is persisted, and `false` lets the ordinary
@@ -4843,7 +5391,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         });
       });
     }
-    // ADR-0089: the account was suspended when this device last asked. A
+    // ADR-0098: the account was suspended when this device last asked. A
     // refresh decides: a pair is a normal restore, the same refusal (or no
     // answer) stays in suspended mode.
     if (!logoutOwed && probe.cachedAccount !== null && probe.deviceKey !== null && probe.suspended) {
@@ -5421,33 +5969,47 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     const wasm = await loadWasm();
     const accountIdBytes = base64Decode(accountIdB64);
     const heldKeyB64 = base64Encode(publicKeyOfSeed(wasm, heldSeed));
-    const tried: string[] = [];
-    let journal: "not-read" | "read" | "unreadable" = "not-read";
-    for (;;) {
-      let state: KeyRotationState;
-      try {
-        state = await getKeyRotationState(accountIdB64, deviceKey);
-      } catch {
-        state = EMPTY_KEY_ROTATION_STATE;
-      }
-      const pending = withPendingRotation(state.pending, null, Date.now(), (preparedAtMs, nowMs) =>
-        wasm.keyRotationPendingExpired(BigInt(Math.max(0, preparedAtMs)), BigInt(nowMs)),
-      );
-      const step = supersededStep({ heldKeyB64, pending, tried, journal });
-      if (step.kind === "reset") return "reset";
-      if (step.kind === "read-journal") {
-        const port = await awaitKeyRotationPort(KEY_ROTATION_PORT_WAIT_MS);
-        if (port === null) {
-          // No DeviceGroup handle in this page. Inside a session that is a
-          // loading order, not a verdict; outside one nothing will load it.
-          return state_isSessionFor(accountIdB64) ? "later" : "reset";
+    const activeDeviceKey = deviceKey;
+    const activePair = pair;
+    return settleSuperseded({
+      heldKeyB64,
+      pending: async () => {
+        let stored: KeyRotationState;
+        try {
+          stored = await getKeyRotationState(accountIdB64, activeDeviceKey);
+        } catch {
+          stored = EMPTY_KEY_ROTATION_STATE;
         }
-        const read = await port.catchUp();
-        if (read === "offline") return "later";
-        journal = read;
-        continue;
-      }
-      for (const keyB64 of step.keysB64) {
+        return withPendingRotation(stored.pending, null, Date.now(), (preparedAtMs, nowMs) =>
+          wasm.keyRotationPendingExpired(BigInt(Math.max(0, preparedAtMs)), BigInt(nowMs)),
+        );
+      },
+      inSession: () => state_isSessionFor(accountIdB64),
+      readJournal: async () => {
+        // Inside a session the page's own handle reads (it may still be
+        // loading: a loading order, not a verdict). Outside one (a page load
+        // whose refresh was refused, the new-phrase screen) this device's
+        // own persisted DeviceGroup is opened for one read with the DS proof
+        // of its epoch (ADR-0074 section 3.3: the DS needs no session);
+        // `not-loaded` then means the device holds no DeviceGroup state.
+        if (state_isSessionFor(accountIdB64)) {
+          return readJournalOnce({ port: keyRotationPort(), inSession: true, waitMs: KEY_ROTATION_PORT_WAIT_MS });
+        }
+        return readJournalStandalone({
+          open: () =>
+            openStandaloneDeviceGroupJournal({
+              accountIdB64,
+              accountIdBytes,
+              deviceKey: activeDeviceKey,
+              accountIdentitySeed: heldSeed,
+            }),
+          intake: async (envelope) => {
+            await storeKeyRotationEnvelope(wasm, accountIdB64, activeDeviceKey, heldSeed, envelope);
+          },
+          classify: classifyStandaloneFetchError,
+        });
+      },
+      tryKey: async (keyB64, pending) => {
         let seed: Uint8Array;
         let entropy: Uint8Array | null = null;
         if (keyB64 === heldKeyB64) {
@@ -5455,18 +6017,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         } else {
           const found = pendingFor(pending, keyB64);
           const carried = found === null ? null : await seedOfPending(found);
-          if (carried === null) {
-            tried.push(keyB64);
-            continue;
-          }
+          if (carried === null) return "not-accepted";
           seed = carried.seed;
           entropy = carried.entropy;
         }
-        const upgraded = await upgradeSessionWith(accountIdBytes, pair.refreshToken, seed);
-        if (upgraded.verdict === "not-accepted") {
-          tried.push(keyB64);
-          continue;
-        }
+        const upgraded = await upgradeSessionWith(accountIdBytes, activePair.refreshToken, seed);
+        if (upgraded.verdict === "not-accepted") return "not-accepted";
         if (upgraded.verdict === "device-revoked") return "device-revoked";
         if (upgraded.verdict === "sign-in") return "sign-in";
         if (upgraded.verdict !== "accepted" || upgraded.pair === null) return "later";
@@ -5474,7 +6030,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         if (entropy !== null) {
           await adoptRotatedKeys({
             accountIdB64,
-            deviceKey,
+            deviceKey: activeDeviceKey,
             oldSeed: heldSeed,
             newEntropy: entropy,
             newPubkeyB64: keyB64,
@@ -5498,8 +6054,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           if (typeof window !== "undefined") window.location.reload();
         }
         return "adopted";
-      }
-    }
+      },
+    });
   }
 
   function state_isSessionFor(accountIdB64: string): boolean {
@@ -5536,51 +6092,69 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     try {
       const deviceKey = await getDeviceKey(accountIdB64);
       if (deviceKey === null) return true;
-      const heldKey = publicKeyOfSeed(wasm, secrets.accountIdentitySeed);
-      const nowMs = Date.now();
-      const stateNow = await getKeyRotationState(accountIdB64, deviceKey);
-      const candidates = [heldKey, ...stateNow.pending.map((p) => base64Decode(p.newSignaturePubkeyB64))];
-      let verified: { newKeyB64: string; preparedAtMs: number } | null = null;
-      for (const key of candidates) {
-        try {
-          const v = wasm.verifyKeyRotationEnvelope(envelope, key, BigInt(Math.floor(nowMs / 1000)));
-          try {
-            verified = {
-              newKeyB64: base64Encode(v.newSignaturePubkey),
-              preparedAtMs: Number(v.preparedAtMs),
-            };
-          } finally {
-            v.free();
-          }
-          break;
-        } catch {
-          // Not by this key; the next candidate.
-        }
+      if (await storeKeyRotationEnvelope(wasm, accountIdB64, deviceKey, secrets.accountIdentitySeed, envelope)) {
+        // The commit may already have landed: ask the directory once. If it
+        // has not, this device learns it at its next refresh.
+        void adoptIfDirectoryShowsPending(accountIdB64);
       }
-      const intake = rotationIntake({
-        fromOwnDeviceGroup: true,
-        verified: verified !== null,
-        newKeyIsHeldKey: verified !== null && verified.newKeyB64 === base64Encode(heldKey),
-      });
-      if (intake === "drop" || verified === null) return true;
-      const row: PendingRotation = {
-        newSignaturePubkeyB64: verified.newKeyB64,
-        envelopeB64: base64Encode(envelope),
-        preparedAtMs: verified.preparedAtMs,
-      };
-      await updateKeyRotationState(accountIdB64, deviceKey, (st) => ({
-        ...st,
-        pending: withPendingRotation(st.pending, row, nowMs, (preparedAtMs, now) =>
-          wasm.keyRotationPendingExpired(BigInt(Math.max(0, preparedAtMs)), BigInt(now)),
-        ),
-      }));
-      // The commit may already have landed: ask the directory once. If it
-      // has not, this device learns it at its next refresh.
-      void adoptIfDirectoryShowsPending(accountIdB64);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("key rotation: the envelope could not be stored", err instanceof Error ? err.name : "unknown");
     }
+    return true;
+  }
+
+  /**
+   * Verify a `key-rotation` envelope against the key this device holds (or a
+   * key a pending envelope already names) and store it as PENDING. Nothing
+   * else changes. Resolves whether it was stored. Needs no session: a
+   * superseded device reading its journal outside one calls it too.
+   */
+  async function storeKeyRotationEnvelope(
+    wasm: Wasm,
+    accountIdB64: string,
+    deviceKey: DeviceCipher,
+    heldSeed: Uint8Array,
+    envelope: Uint8Array,
+  ): Promise<boolean> {
+    const heldKey = publicKeyOfSeed(wasm, heldSeed);
+    const nowMs = Date.now();
+    const stateNow = await getKeyRotationState(accountIdB64, deviceKey);
+    const candidates = [heldKey, ...stateNow.pending.map((p) => base64Decode(p.newSignaturePubkeyB64))];
+    let verified: { newKeyB64: string; preparedAtMs: number } | null = null;
+    for (const key of candidates) {
+      try {
+        const v = wasm.verifyKeyRotationEnvelope(envelope, key, BigInt(Math.floor(nowMs / 1000)));
+        try {
+          verified = {
+            newKeyB64: base64Encode(v.newSignaturePubkey),
+            preparedAtMs: Number(v.preparedAtMs),
+          };
+        } finally {
+          v.free();
+        }
+        break;
+      } catch {
+        // Not by this key; the next candidate.
+      }
+    }
+    const intake = rotationIntake({
+      fromOwnDeviceGroup: true,
+      verified: verified !== null,
+      newKeyIsHeldKey: verified !== null && verified.newKeyB64 === base64Encode(heldKey),
+    });
+    if (intake === "drop" || verified === null) return false;
+    const row: PendingRotation = {
+      newSignaturePubkeyB64: verified.newKeyB64,
+      envelopeB64: base64Encode(envelope),
+      preparedAtMs: verified.preparedAtMs,
+    };
+    await updateKeyRotationState(accountIdB64, deviceKey, (st) => ({
+      ...st,
+      pending: withPendingRotation(st.pending, row, nowMs, (preparedAtMs, now) =>
+        wasm.keyRotationPendingExpired(BigInt(Math.max(0, preparedAtMs)), BigInt(now)),
+      ),
+    }));
     return true;
   }
 
@@ -5929,6 +6503,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     identitySecrets,
     freshPhrase: () => pendingFreshPhrase()?.phrase ?? null,
     freshPublishOwed: () => freshOwedRecord() !== null,
+    freshPublishWaitUntilMs: () => freshOwedRecord()?.waitUntilMs ?? null,
     freshPublishSignInNeeded: () => {
       const record = freshOwedRecord();
       return (
@@ -6011,6 +6586,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       rememberUsername(accountIdB64, reg.normalisedUsername);
       setState({ kind: "session", account: { accountId: accountIdB64, username: reg.normalisedUsername } });
       return { username: reg.normalisedUsername, certificate: reg.usernameCertificate };
+    },
+    async adoptVerifiedUsername(username) {
+      const s = state();
+      if (s.kind !== "session") throw new KeyedError("common.error.session_not_ready");
+      // No register write here: `applyOwnUsername` marks the name confirmed,
+      // and the register effect seeds an empty register from it, as after a
+      // sign-in by name. A register that already names it changes nothing.
+      await applyOwnUsername(s.account.accountId, username);
     },
     async applyRenamedUsername(username) {
       const s = state();
@@ -6223,17 +6806,45 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // again (so a retry is not refused by our own half claim). Either
       // "taken" surfaces as the form's taken copy.
       const handle = await loginHandleFor(trimmed);
-      const reg = await claimUsername({
-        username: trimmed,
-        bind: async () => {
-          await client.bindLoginHandle(result.session.sessionToken, handle.wire);
-          loginHandleSync.markBound(result.session.sessionToken, handle.wire);
-        },
-        register: () => discovery.registerUsername(result.accountId, trimmed),
-        release: async () => {
-          await client.releaseLoginHandle(result.session.sessionToken);
-        },
-      });
+      // ADR-0097: a supporter place held on this device rides the first
+      // bind; auth spends it only if the beta cap refuses the bind.
+      const placeStorage = defaultPlaceStorage();
+      const heldPlace = readHeldPlace(placeStorage, Date.now());
+      let reg: Awaited<ReturnType<typeof discovery.registerUsername>>;
+      try {
+        reg = await claimUsername({
+          username: trimmed,
+          bind: async () => {
+            await client.bindLoginHandle(
+              result.session.sessionToken,
+              handle.wire,
+              undefined,
+              heldPlace?.header,
+            );
+            loginHandleSync.markBound(result.session.sessionToken, handle.wire);
+          },
+          register: () => discovery.registerUsername(result.accountId, trimmed),
+          release: async () => {
+            await client.releaseLoginHandle(result.session.sessionToken);
+          },
+        });
+      } catch (err) {
+        // `docs/ux/beta-account-cap.md` section 2 item 4: the beta filled
+        // between the question and the bind. The account just made holds no
+        // name (auth refused the bind before discovery was asked), so it is
+        // deleted at once and leaves this device; the screen shows the full
+        // state.
+        if (err instanceof RegistrationClosedError) {
+          await discardRefusedSignup(accountIdB64, result.session.sessionToken);
+        }
+        // `docs/ux/supporters.md` 1.2: the held place was already spent by
+        // another account. Same discard; the place is dropped.
+        if (err instanceof SupporterCodeUsedError) {
+          dropHeldPlace(placeStorage);
+          await discardRefusedSignup(accountIdB64, result.session.sessionToken);
+        }
+        throw err;
+      }
       const normalisedUsername = reg.normalisedUsername;
 
       savePersisted({
@@ -6443,6 +7054,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       });
       return { recoveryPhrase: result.recoveryPhrase };
     },
+    signupOpen: () => client.signupOpen(),
     async signupGuest(options) {
       // ADR-0032 guest join. This is the `signup` flow up to (but NOT
       // including) the username claim: OPAQUE registration under a RANDOM
@@ -6588,6 +7200,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       });
     },
     isGuest: () => guestState() !== null,
+    guestReservedUsername: () => guestState()?.claimedUsername ?? null,
     async discardGuestAccount() {
       const current = state();
       const secrets = identitySecrets();
@@ -6642,7 +7255,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         }),
       );
       if ("suspended" in outcome) {
-        // ADR-0089: the password was right and the account is suspended.
+        // ADR-0098: the password was right and the account is suspended.
         await landSuspended(outcome.suspended, resolvedUsername, flow);
         return;
       }
@@ -6986,7 +7599,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // what the device stores once the check below has passed.
       const canonicalPhrase = mnemonic.phrase;
       mnemonic.free();
-      await verifySeedAgainstPublishedIdentity({
+      const ownLink = await verifySeedAgainstPublishedIdentity({
         wasm,
         discovery,
         accountIdBytes: pending.accountIdBytes,
@@ -7076,15 +7689,20 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         username: pending.username,
         restorePhrase: canonicalPhrase,
         wipes: flow.wipes,
+        ownLink,
       });
     },
-    async completeFromPairing(phraseEntropy, session, persistJoinState) {
+    async completeFromPairing(phraseEntropy, session, persistJoinState, predecessors = []) {
       // ADR-0018 factor (a), path (a) — same precondition as
       // `provideRecoveryPhrase`: only valid while a login/passkey
       // auth is parked in the `needs-recovery-phrase` fail-safe.
       const pending = pendingRecovery();
+      const dropPredecessors = (): void => {
+        for (const p of predecessors) p.seed.fill(0);
+      };
       if (pending === null) {
         phraseEntropy.fill(0);
+        dropPredecessors();
         throw new Error("no pending identity recovery — sign in first");
       }
       const flow = startFlow();
@@ -7092,9 +7710,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const wasm = await loadWasm();
       if (!stillParked(pending) || !flow.current()) {
         phraseEntropy.fill(0);
+        dropPredecessors();
         throw new StaleBindingError();
       }
-      // Recovery payload v2: rebuild the phrase and the 64-byte seed from
+      // Recovery payload v3: rebuild the phrase and the 64-byte seed from
       // the transferred entropy (which is zeroized here). Nothing is
       // written before the check below.
       const { phrase: transferredPhrase, seed: phraseSeed } = phraseFromTransferredEntropy(
@@ -7105,17 +7724,24 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // (ADR-0017 + lakko-security finding #1): the transferred seed
       // must reproduce the account's PUBLISHED AccountIdentity key;
       // hard-block + zeroize on mismatch or an unverifiable bundle.
-      await verifySeedAgainstPublishedIdentity({
-        wasm,
-        discovery,
-        accountIdBytes: pending.accountIdBytes,
-        accountIdentitySeed: phraseSeed,
-        source: "device",
-      });
+      let ownLink: OwnLink;
+      try {
+        ownLink = await verifySeedAgainstPublishedIdentity({
+          wasm,
+          discovery,
+          accountIdBytes: pending.accountIdBytes,
+          accountIdentitySeed: phraseSeed,
+          source: "device",
+        });
+      } catch (err) {
+        dropPredecessors();
+        throw err;
+      }
       // Signed out, or another account landed, while the bundle was being
       // fetched: persist nothing.
       if (!stillParked(pending) || !flow.current()) {
         phraseSeed.fill(0);
+        dropPredecessors();
         throw new StaleBindingError();
       }
 
@@ -7135,65 +7761,65 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         bootstrappedDeviceKey = true;
       }
 
-      // Cache the seed under the device key (on the password /
-      // passkey paths it already existed; on the TOTP path it was
-      // just bootstrapped). Best-effort.
-      try {
-        await putAccountIdentitySeed(
-          pending.accountIdB64,
-          phraseSeed,
-          deviceKey,
-        );
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          "account-identity-seed persist (completeFromPairing) failed",
-          err,
-        );
-      }
-      // This device now holds the phrase like the one that confirmed it.
-      await storeDevicePhrase(pending.accountIdB64, transferredPhrase, deviceKey, "device-pairing");
-
-      // Prefer the redeemed fresh session when the pairing carried one; the
-      // pending login's otherwise.
+      // ADR-0074 "Joining after a rotation": the account's earlier keys
+      // the recovery row carried FIRST, then the seed, the phrase and the
+      // rest, so the landing below binds under the conversation key.
+      const keyStore = deviceKey;
       let effective = pending.session;
-      if (session !== undefined) {
-        effective = session;
-        installSession(pending.accountIdB64, session);
-      }
-      // Persist the effective pair when a fresh one arrived (the
-      // pre-existing behavior) OR when the key was just bootstrapped
-      // (the pending pair was never persisted — there was no key at park
-      // time). Best-effort.
-      if (session !== undefined || bootstrappedDeviceKey) {
-        try {
-          await putSessionPair(pending.accountIdB64, effective, deviceKey);
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn(
-            "session-pair persist (completeFromPairing) failed",
-            err,
-          );
-        }
-      }
-
-      // The anonymous join (no device key at pairing time) held its
-      // DeviceIdentity seed in memory and fetched the history and state
-      // bundles without applying them: land all of it under the device key
-      // that now exists, before the session does. Best-effort, as in
-      // `completeFromDeviceRestore` - a failure orphans the DeviceGroup leaf
-      // locally and a re-pair recovers it.
-      if (persistJoinState !== undefined) {
-        try {
-          await persistJoinState(deviceKey);
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn(
-            "join-state persist (completeFromPairing) failed",
-            err instanceof Error ? err.name : "unknown",
-          );
-        }
-      }
+      await persistRecoveredKeysInOrder({
+        predecessors: () => storeRecoveredPredecessors(pending.accountIdB64, keyStore, predecessors),
+        seed: async () => {
+          // Cache the seed under the device key (on the password /
+          // passkey paths it already existed; on the TOTP path it was
+          // just bootstrapped). Best-effort.
+          try {
+            await putAccountIdentitySeed(pending.accountIdB64, phraseSeed, keyStore);
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn("account-identity-seed persist (completeFromPairing) failed", err);
+          }
+        },
+        // This device now holds the phrase like the one that confirmed it.
+        phrase: async () => {
+          await storeDevicePhrase(pending.accountIdB64, transferredPhrase, keyStore, "device-pairing");
+        },
+        rest: async () => {
+          // Prefer the redeemed fresh session when the pairing carried one;
+          // the pending login's otherwise.
+          if (session !== undefined) {
+            effective = session;
+            installSession(pending.accountIdB64, session);
+          }
+          // Persist the effective pair when a fresh one arrived OR when the
+          // key was just bootstrapped (the pending pair was never persisted
+          // - there was no key at park time). Best-effort.
+          if (session !== undefined || bootstrappedDeviceKey) {
+            try {
+              await putSessionPair(pending.accountIdB64, effective, keyStore);
+            } catch (err) {
+              // eslint-disable-next-line no-console
+              console.warn("session-pair persist (completeFromPairing) failed", err);
+            }
+          }
+          // The anonymous join (no device key at pairing time) held its
+          // DeviceIdentity seed in memory and fetched the history and state
+          // bundles without applying them: land all of it under the device
+          // key that now exists, before the session does. Best-effort, as in
+          // `completeFromDeviceRestore` - a failure orphans the DeviceGroup
+          // leaf locally and a re-pair recovers it.
+          if (persistJoinState !== undefined) {
+            try {
+              await persistJoinState(keyStore);
+            } catch (err) {
+              // eslint-disable-next-line no-console
+              console.warn(
+                "join-state persist (completeFromPairing) failed",
+                err instanceof Error ? err.name : "unknown",
+              );
+            }
+          }
+        },
+      });
 
       if (!stillParked(pending) || !flow.current()) {
         phraseSeed.fill(0);
@@ -7208,6 +7834,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         session: effective,
         username: pending.username,
         wipes: flow.wipes,
+        ownLink,
       });
     },
     async completeFromDeviceRestore(restoreArgs) {
@@ -7223,6 +7850,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         persistJoinState,
         forgotPassword,
       } = restoreArgs;
+      const predecessors = restoreArgs.predecessors ?? [];
+      const dropPredecessors = (): void => {
+        for (const p of predecessors) p.seed.fill(0);
+      };
+      // The own conversation link from the seed check's fetch.
+      let ownLink: OwnLink | undefined;
       explicitSignInThisPage = true;
       // The binding this restore starts under. Overtaken (a sign-out, or
       // another account landing while the gates below ran): the transferred
@@ -7231,9 +7864,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const wasm = await loadWasm();
       if (!flow.current()) {
         phraseEntropy.fill(0);
+        dropPredecessors();
         throw new StaleBindingError();
       }
-      // Recovery payload v2: rebuild the phrase and the 64-byte seed from
+      // Recovery payload v3: rebuild the phrase and the 64-byte seed from
       // the transferred entropy (which is zeroized here). Nothing is
       // written before the gates below.
       const { phrase: transferredPhrase, seed: phraseSeed } = phraseFromTransferredEntropy(
@@ -7243,6 +7877,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const requireCurrent = (): void => {
         if (flow.current()) return;
         phraseSeed.fill(0);
+        dropPredecessors();
         throw new StaleBindingError();
       };
       // The persistence and the session landing; runs only after every
@@ -7268,19 +7903,29 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         requireCurrent();
         await putDeviceKey(accountIdB64, deviceKey);
         requireCurrent();
-        try {
-          await putAccountIdentitySeed(accountIdB64, phraseSeed, deviceKey);
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn(
-            "account-identity-seed persist (completeFromDeviceRestore) failed",
-            err,
-          );
-        }
-        requireCurrent();
-        // This device now holds the phrase like the one that confirmed it.
-        await storeDevicePhrase(accountIdB64, transferredPhrase, deviceKey, "device-restore");
-        requireCurrent();
+        // ADR-0074 "Joining after a rotation": the earlier keys the recovery
+        // row carried FIRST, then the seed and the phrase, then the rest.
+        await persistRecoveredKeysInOrder({
+          predecessors: async () => {
+            await storeRecoveredPredecessors(accountIdB64, deviceKey, predecessors);
+            requireCurrent();
+          },
+          seed: async () => {
+            try {
+              await putAccountIdentitySeed(accountIdB64, phraseSeed, deviceKey);
+            } catch (err) {
+              // eslint-disable-next-line no-console
+              console.warn("account-identity-seed persist (completeFromDeviceRestore) failed", err);
+            }
+            requireCurrent();
+          },
+          // This device now holds the phrase like the one that confirmed it.
+          phrase: async () => {
+            await storeDevicePhrase(accountIdB64, transferredPhrase, deviceKey, "device-restore");
+            requireCurrent();
+          },
+          rest: () => Promise.resolve(),
+        });
         // The redeemed pair is REQUIRED on this path — persist it so a
         // reload re-attaches without any credential. Best-effort.
         try {
@@ -7328,6 +7973,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           session,
           username,
           wipes: flow.wipes,
+          ...(ownLink !== undefined ? { ownLink } : {}),
         });
       };
       // FAIL CLOSED FIRST — before ANY persistence. A mismatched /
@@ -7346,7 +7992,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           phraseSeed,
           sessionToken: session.sessionToken,
           verifySeed: async () => {
-            await verifySeedAgainstPublishedIdentity({
+            ownLink = await verifySeedAgainstPublishedIdentity({
               wasm,
               discovery,
               accountIdBytes,
@@ -7370,6 +8016,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       } catch (err) {
         // Whatever a gate answered after the binding ended, the person has
         // moved on: an abandonment, not a refusal to show.
+        dropPredecessors();
         if (!flow.current() && !(err instanceof StaleBindingError)) {
           phraseSeed.fill(0);
           throw new StaleBindingError();
@@ -7406,7 +8053,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           landingDevice({ accountIdB64: account.accountIdB64 }),
         );
       } catch (err) {
-        // ADR-0089: a suspended account's password sign-in still carries a
+        // ADR-0098: a suspended account's password sign-in still carries a
         // fresh-auth grant (so it can delete itself) and a new restricted
         // session for the same account.
         const suspended = suspendedLandingFrom(err);
@@ -7642,6 +8289,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         exportKey: new Uint8Array(0),
         session: pending.session,
         username: pending.username,
+        // The landing after a key reset (or a recall) on this device.
+        linkExempt: true,
       });
     },
     async recover(mnemonicPhrase, newPassword, username, source = "vault") {
@@ -7711,7 +8360,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           }),
         );
         if ("suspended" in outcome) {
-          // ADR-0089: the phrase was right; nothing was changed on the
+          // ADR-0098: the phrase was right; nothing was changed on the
           // server (the password stays as it was).
           accountIdentitySeed.fill(0);
           await landSuspended(outcome.suspended, resolvedUsername, flow);
@@ -7875,6 +8524,22 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           phrase: canonicalPhrase,
         });
         flow.require();
+        // ADR-0074 "Joining after a rotation": the backup above may have
+        // brought the earlier keys; without them the device waits, bound to
+        // nothing.
+        const gate = await earlierKeysGate({ wasm, accountIdentitySeed, accountIdBytes, accountIdB64 });
+        flow.require();
+        if (gate.kind === "wait") {
+          markBackupRestoreOwed(accountIdB64);
+          await parkForEarlierKeys({
+            accountIdBytes,
+            accountIdB64,
+            exportKey: result.exportKey,
+            session: result.session,
+            username: resolvedUsername,
+          });
+          return;
+        }
         const canonical = wasm.Identity.fromSeed(accountIdentitySeed);
         const conversationIdentitySeed = await installSessionIdentities(
           wasm,
@@ -7882,6 +8547,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           accountIdB64,
           false,
           flow.current,
+          gate.link,
         );
         flow.require();
         keyPackageAccount = { accountIdBytes, accountIdB64 };
@@ -8218,6 +8884,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           rotationWithholdsPhrase(readRotation(plainStorage(), st.account.accountId)))
       );
     },
+    owedPublishWaitUntilMs() {
+      const st = state();
+      rotationVersion();
+      if (st.kind !== "session") return null;
+      const record = readKeyResetOwed(plainStorage(), st.account.accountId);
+      return record !== null && remainingKeyResetSteps(record.done).length > 0
+        ? (record.waitUntilMs ?? null)
+        : null;
+    },
     async retryOwedPublish() {
       const st = state();
       const secrets = identitySecrets();
@@ -8256,7 +8931,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // `decideSilentRestore`) for ONE retry at the next launch.
       const heldPair = sessionTokens.pair();
       const heldAccount = sessionTokens.accountIdB64();
-      // ADR-0089: a suspended account signs out with its restricted session.
+      // ADR-0098: a suspended account signs out with its restricted session.
       const heldRestricted = sessionTokens.restricted();
       const serverSide: Promise<LogoutAttempt> =
         heldPair !== null && heldAccount !== null
@@ -8384,6 +9059,18 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // effort, once: the wipe below leaves nothing to retry it with. (The
       // row delete above tombstoned this device's id; the wipe removes the
       // device seed, so the next setup on this browser mints a new one.)
+      // ADR-0090 section 2.4: a retire request for this device's own leaf of
+      // every channel PublisherGroup it holds, before the wipe; another device
+      // of the account (or the owner's) applies it. Best effort, bounded.
+      {
+        const lineage = chats.conversationAccountIdentity();
+        if (lineage !== null) {
+          await Promise.race([
+            retireOwnPublisherLeaves(lineage).catch(() => undefined),
+            new Promise((resolve) => setTimeout(resolve, 5_000)),
+          ]);
+        }
+      }
       void serverLogout(sessionTokens.pair());
       // The device-key-wrapped phrase cache is wiped below, so an owed phrase
       // can no longer be shown on this device; drop the in-memory copy (the
@@ -8455,6 +9142,18 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   api.provideRecoveryPhrase = guardKeyStore(api.provideRecoveryPhrase.bind(api));
   api.completeFromPairing = guardKeyStore(api.completeFromPairing.bind(api));
   api.completeFromDeviceRestore = guardKeyStore(api.completeFromDeviceRestore.bind(api));
+  // ADR-0074 "Joining after a rotation": one landing of a parked account at a
+  // time. Each completion reads the parked context only once it holds the
+  // guard, and refuses (`StaleBindingError` / "no pending identity
+  // recovery") when a look for the earlier keys landed first.
+  {
+    const provide = api.provideRecoveryPhrase;
+    api.provideRecoveryPhrase = (...a) => parkedLanding.runExclusive(() => provide(...a));
+    const pairing = api.completeFromPairing;
+    api.completeFromPairing = (...a) => parkedLanding.runExclusive(() => pairing(...a));
+    const restore = api.completeFromDeviceRestore;
+    api.completeFromDeviceRestore = (...a) => parkedLanding.runExclusive(() => restore(...a));
+  }
   api.recover = guardKeyStore(api.recover.bind(api));
   api.recoverWithTotp = guardKeyStore(api.recoverWithTotp.bind(api));
   api.recoverWithThreeWords = guardKeyStore(api.recoverWithThreeWords.bind(api));
@@ -8485,7 +9184,7 @@ async function probeStoredSecrets(): Promise<{
   deviceKey: DeviceCipher | null;
   sessionPair: SessionPair | null;
   identitySeed: Uint8Array | null;
-  /** ADR-0089: the restricted session of a suspended account, when the row
+  /** ADR-0098: the restricted session of a suspended account, when the row
    *  holds one in place of a pair. */
   suspended?: RestrictedSession | null;
 }> {
@@ -8659,7 +9358,7 @@ async function verifySeedAgainstPublishedIdentity(args: {
   /** Where the seed came from, carried on the mismatch error so the screen
    *  says "phrase" or "your other device". Defaults to the phrase. */
   readonly source?: "phrase" | "device";
-}): Promise<void> {
+}): Promise<OwnLink> {
   const derivedIdentity = args.wasm.Identity.fromSeed(
     args.accountIdentitySeed,
   );
@@ -8682,6 +9381,10 @@ async function verifySeedAgainstPublishedIdentity(args: {
       args.accountIdentitySeed.fill(0);
       throw new SupersessionPhraseMismatch(args.source ?? "phrase");
     }
+    // ADR-0074 "Joining after a rotation": the account's own conversation
+    // link, from this same fetch, verified against the key the seed derives
+    // (the device's current key, never the fetched one).
+    return ownLinkOfBundle(args.wasm, bundle.conversation_link, derivedPubkey);
   } catch (err) {
     if (
       err instanceof SupersessionPhraseMismatch ||
@@ -8703,11 +9406,11 @@ async function verifySeedAgainstPublishedIdentity(args: {
   }
 }
 
-/** Entropy length of the 12-word phrase (recovery payload v2). */
+/** Entropy length of the 12-word phrase (recovery payload v3). */
 const PHRASE_ENTROPY_LENGTH = 16;
 
 /**
- * Recovery payload v2 (`devices/recovery-payload.ts`): another device sent
+ * Recovery payload v3 (`devices/recovery-payload.ts`): another device sent
  * the 16-byte entropy of the recovery phrase. Rebuild the phrase and derive
  * the 64-byte AccountIdentity seed from it.
  *

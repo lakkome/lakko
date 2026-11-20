@@ -13,7 +13,9 @@
   (section 13, 2026-10-30); S4 is built and the tunnel runs on the test stack (section 14, 2026-10-30), with
   no call placed through it; S5 is built in part on macOS (2026-10-31): files and
   `lakko://` links, not yet walked by hand; the TUF repository, install and
-  packaging are not started.
+  packaging are not started. Translation and transcription on macOS through
+  a host helper, `lakko-engines`, built 2026-11-18 (section 16), not walked
+  on screen.
 - **Date:** 2026-10-16
 - **Amends:** [ADR-0002](0002-rust-core.md) (the desktop row of the
   per-platform UI table, and its open question "is Tauri 2.x mature enough").
@@ -335,6 +337,21 @@ clock.
   five-second slow requests through the handler ran without a break (23 in
   120 s). `document.visibilityState` reported `hidden`. Longer hidden periods
   (App Nap after minutes) are not measured.
+- **Measured again 2026-11-10 on macOS 27.2, window minimised, no call**
+  (the probe's `LAKKO_DESKTOP_PROBE_HIDE=minimize`, `_THROTTLING=default`,
+  `_LOCK=1`): a 50 ms page timer fired once a second; worker timers fired
+  5.3 (100 ms), 7.3 (50 ms) and 8.3 (33 ms) times a second; neither the
+  inactive scheduling policy `none` nor a held Web Lock changed any rate. With
+  WebKit's default policy the page stopped altogether about four minutes after
+  it was minimised (no report, a request waiting 177 s) until the window came
+  back; with `none` it ran for the seven minutes measured. So the main window
+  keeps the policy `none` for the whole run, and the collapsed call window's
+  clock runs in a worker. A `<video>` fed through a loopback peer connection
+  (VP8, from a canvas redrawn on every worker tick) kept decoding while the
+  window was minimised, as many frames as the source sent (about 7.2 a
+  second), and a canvas drawing it on each tick read a new frame about 6 times
+  a second. Windows and Linux are not measured; a call (with the microphone in
+  use, SFrame on the frames) is not measured.
 - **Call media (section 6):** WKWebView has `RTCRtpScriptTransform`, and one
   attaches to an audio sender; `createEncodedStreams` is absent; an offer
   carries audio and video with Opus and VP8. `getUserMedia` exists but was not
@@ -628,6 +645,48 @@ browser and the Windows build are unchanged. Unverified: anything on screen
 in the Lakko window itself; the test app with Lakko's stylesheet showed the
 call tile, the self view, a video note, a GIF, an avatar and a video with
 native controls through their canvases.
+
+### 16. Translation and transcription through a helper on macOS (2026-11-18)
+
+The webview has no on-device translation, detection or speech recognition
+(ADR-0082 section 1, web row), so the desktop app offered neither. The host
+gains a component for it, macOS only (ADR-0082 note of 2026-11-18 is the
+decision and the details):
+
+- **`lakko-engines`**, a Swift program (`apps/desktop/macos-engines/
+  main.swift`) that `just dev-desktop` builds with `swiftc` for macOS 26.4
+  and arm64, copies into `Lakko.app/Contents/MacOS` next to the host and
+  signs before the bundle. It runs Apple's `TranslationSession`,
+  `SpeechAnalyzer` + `SpeechTranscriber` and `NLLanguageRecognizer`, and
+  speaks one JSON object per line on its standard input and output. A child
+  process rather than FFI, because the host crate forbids `unsafe`.
+- **`engines.rs`** in the host: runs `lakko-engines --probe` while Tauri
+  starts and gives the page a read-only `__LAKKO_SYSTEM_ENGINES__` global
+  through an initialization script; starts the helper on the first request
+  and keeps it; serves `/__host/engines/*` on the app scheme (capabilities,
+  detect, translation state, translate, speech state, speech install,
+  transcribe with 16 kHz mono PCM as the body, and opening
+  System Settings > Language & Region for a translation pack). Only the
+  fields of the operation reach the helper; text and audio stay in memory;
+  the log names the operation and its outcome only.
+- **`packs-blocked`** was true whenever anti-censorship was switched on (the
+  tunnel's route not direct), and the speech-pack install route then refused.
+  **Removed 2026-11-19 (maintainer, ADR-0082 note of that date):** packs are
+  offered with anti-censorship on; the route is gone and the engines handler
+  no longer takes the tunnel.
+- The bundle's `Info.plist` gains `NSSpeechRecognitionUsageDescription`.
+  On this Mac (macOS 27.2) transcription through `SpeechAnalyzer` ran
+  without a permission prompt; the key is there for the system that asks.
+- Windows and Linux: no helper; the probe reports nothing and the page says
+  the features are not available on this device.
+
+Built and host-tested (2026-11-18): the helper answered over its pipe from a
+`cargo test` against the binary `just dev-desktop` built (detection,
+translation state, a refused malformed recording, an unknown operation), and
+by hand in a terminal (translation and speech states, an English recording
+transcribed word for word); the running app logged both engines present. Not
+seen on screen: the walk through the app's settings and a message menu
+needed full-screen control, which was not approved during the session.
 
 ## Alternatives
 

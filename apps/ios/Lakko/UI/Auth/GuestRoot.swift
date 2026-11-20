@@ -70,13 +70,17 @@ struct GuestRoot: View {
 
     var body: some View {
         content
-            // The one full-screen call and the collapsed bar, as on every
-            // signed-in screen.
+            // The one full-screen call, as on every signed-in screen. A
+            // guest has no app to put a call away into, so the call screen
+            // offers no collapse here (`docs/ux/calls.md` section 4.5.3); the
+            // system window of section 4.5.4 still opens when the app leaves
+            // the screen.
             .callHostOverlay(
                 oneToOne: services.callHost,
                 group: services.groupCallHost,
                 link: services.linkCallHost,
-                inviteIntake: inviteIntake
+                inviteIntake: inviteIntake,
+                allowsCollapse: false
             )
             // The call shows the guest's own name on its tile and announces
             // it to the other people in it. Idempotent: the guest sign-up

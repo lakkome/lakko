@@ -113,6 +113,29 @@ public final class AuthClient {
         try await postNoBody(endpoint: "/pow/challenge")
     }
 
+    /// `GET /signup/open` - whether sign-up is open now (the beta account
+    /// cap, `docs/ux/beta-account-cap.md`). Anonymous. Throws on any failure;
+    /// ``signupOpen()`` is what screens ask.
+    public func signupOpenStatus() async throws -> Bool {
+        let url = try buildURL(endpoint: "/signup/open")
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        let resp: SignupOpenResponse = try await execute(endpoint: "/signup/open", request: request)
+        return resp.open
+    }
+
+    /// ``signupOpenStatus()`` with every failure (no connection, an error,
+    /// an older server answering `404`, a body that does not parse) read as
+    /// open: the username bind decides later.
+    public func signupOpen() async -> Bool {
+        do {
+            return SignupCap.isOpen(.success(try await signupOpenStatus()))
+        } catch {
+            NSLog("[auth] sign-up open check failed, treated as open: %@", String(describing: type(of: error)))
+            return SignupCap.isOpen(.failure(error))
+        }
+    }
+
     /// `POST /signup/start`.
     public func signupStart(
         _ request: SignupStartRequest
@@ -250,7 +273,7 @@ public final class AuthClient {
     /// Returns the RAW 153-byte attestation (URL-safe-no-pad decoded from the
     /// response), ready to hand to `DiscoveryClient.uploadIdentityBundle`.
     ///
-    /// ADR-0089 F3: `identity` is the account identity whose key is
+    /// ADR-0098 F3: `identity` is the account identity whose key is
     /// recorded; the request carries its `signIdentityProof` over
     /// `accountId` (``IdentityProof``).
     public func mintGenesisAttestation(
@@ -592,7 +615,7 @@ public final class AuthClient {
                 )
             )
         } catch var suspended as AccountSuspendedError {
-            // ADR-0089 step 3 — the password was right and the account is
+            // ADR-0098 step 3 — the password was right and the account is
             // suspended: the export key goes with the credentials, so the
             // device key is written as on any sign-in.
             suspended.exportKey = out.exportKey()
@@ -915,7 +938,7 @@ public final class AuthClient {
     /// `429 too-many-attempts`, `503 rate-limiter-unavailable`) or
     /// ``AuthClientError/network(endpoint:underlying:)``.
     ///
-    /// ADR-0089 F3: the finish carries `signIdentityProof` by the identity
+    /// ADR-0098 F3: the finish carries `signIdentityProof` by the identity
     /// `seed` seeds (which must be `newSignaturePubkey`) over `accountId`.
     public func resetAccountKeys(
         sessionToken: String,
@@ -1014,7 +1037,7 @@ public final class AuthClient {
         guard revokeDeviceIds.count <= KeyRotationWire.maxRevokedDevices else {
             throw AuthClientError.argument("at most 8 device ids may be revoked with a rotation")
         }
-        // ADR-0089 F3: by the NEW key, over the account id.
+        // ADR-0098 F3: by the NEW key, over the account id.
         let identityProof = try IdentityProof.b64(
             seed: seed, accountId: accountId, expectedPubkey: newSignaturePubkey)
         let reg = try OpaqueRegister.startRecovery(seed: seed)
@@ -1179,7 +1202,7 @@ public final class AuthClient {
         }
         let oldSeed = attempt.record.oldSeed
         let accountIdB64 = base64UrlEncodeNoPad(accountId)
-        // ADR-0089 F3: by the NEW key (the one `newSeed` seeds), over the
+        // ADR-0098 F3: by the NEW key (the one `newSeed` seeds), over the
         // account id. Computed once, so a re-sent finish is byte-identical.
         let identityProof = try IdentityProof.b64(
             seed: attempt.newSeed, accountId: accountId, expectedPubkey: attempt.newSignaturePubkey)
@@ -1390,6 +1413,30 @@ public final class AuthClient {
         )
     }
 
+    /// The first bind carrying a held supporter place (ADR-0097) in
+    /// `x-lakko-anon-token`. Auth reads the token only when the beta cap
+    /// refuses the bind; `403 supporter-code-used` when it was spent by
+    /// another account. `nil` is the plain ``bindLoginHandle(handle:sessionToken:)``.
+    public func bindLoginHandle(handle: Data, sessionToken: String, supporterToken: String?) async throws {
+        guard let supporterToken else {
+            try await bindLoginHandle(handle: handle, sessionToken: sessionToken)
+            return
+        }
+        try requireHandle(handle)
+        guard !sessionToken.isEmpty else {
+            throw AuthClientError.argument("sessionToken must be non-empty")
+        }
+        let endpoint = "/auth/login-handle"
+        var request = URLRequest(url: try buildURL(endpoint: endpoint))
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(sessionToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(supporterToken, forHTTPHeaderField: AnonTokenRoute.headerName)
+        request.httpBody = try encodeBody(
+            endpoint: endpoint, LoginHandleBindRequest(handle: base64UrlEncodeNoPad(handle)))
+        let _: LoginHandleBindResponse = try await execute(endpoint: endpoint, request: request)
+    }
+
     /// `PUT /auth/login-handle` that CHANGES the account's handle (ADR-0076
     /// section 2): needs the fresh-auth grant and names the handle held now.
     /// With `recoveryEmail` the server re-keys the stored recovery email to
@@ -1586,7 +1633,7 @@ public final class AuthClient {
             )
         }
         guard (200..<300).contains(httpResponse.statusCode) else {
-            // ADR-0089 step 3 — read before the body is truncated: the
+            // ADR-0098 step 3 — read before the body is truncated: the
             // landing's credentials do not fit the diagnostic text.
             if let suspended = AccountSuspendedError.from(status: httpResponse.statusCode, body: data) {
                 throw suspended

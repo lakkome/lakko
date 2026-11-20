@@ -43,13 +43,16 @@ import {
   pendingContactOf,
   pendingContactsToAdd,
 } from "./carried-state";
+import { carriedSeedsOf } from "./state-bundle";
+import { channelSubscriptionPort, liveChannelSubscriptionIds } from "../channels/channel-subscription-register";
+import { channelsState, offerCarriedChannelSeeds } from "../state/channels-state";
 import type {
   CarriedExtras,
   CarriedGroupName,
   CarriedHeldMessage,
   CarriedPendingContact,
   CarriedProfile,
-  StateBundleV3,
+  StateBundle,
 } from "./state-bundle";
 
 function hexToBytes(hex: string): Uint8Array {
@@ -111,6 +114,8 @@ export function carriedProfilesFromRow(
           : base64Decode(p.usernameCertificateB64),
         undefined,
         avatar,
+        // ADR-0092 section 7 — the person's own "my card may be shared".
+        p.cardShareable !== false,
       );
       out.push({ personKeyB64, envelopeB64: base64Encode(envelope) });
     } catch {
@@ -190,7 +195,18 @@ export async function collectCarriedExtras(args: {
     console.warn("state bundle: pending contacts not read", err instanceof Error ? err.name : "");
   }
 
-  return { groupNames, profiles, pendingContacts };
+  // v4: the epoch seeds of every channel the account's register holds live,
+  // from this session's channel state (only when it is this account's).
+  const channelSeeds = new Map<string, ReadonlyMap<number, Uint8Array>>();
+  const registers = channelSubscriptionPort();
+  if (registers !== null && registers.accountIdB64 === args.accountIdB64 && channelsState.hydrated()) {
+    const live = liveChannelSubscriptionIds();
+    for (const [idHex, inner] of channelsState.subscribedSeedsByChannel()) {
+      if (live.has(idHex) && inner.size > 0) channelSeeds.set(idHex, inner);
+    }
+  }
+
+  return { groupNames, profiles, pendingContacts, channelSeeds };
 }
 
 /**
@@ -200,10 +216,21 @@ export async function collectCarriedExtras(args: {
  * Never throws; returns what it did, for the log line.
  */
 export async function applyCarriedExtras(
-  bundle: StateBundleV3,
+  bundle: StateBundle,
   accountIdB64: string,
   wasm: Pick<Wasm, "decodeGroupNameEnvelope" | "decodeProfileEnvelope">,
-): Promise<{ groupNames: number; profiles: number; pendingContacts: number }> {
+): Promise<{ groupNames: number; profiles: number; pendingContacts: number; channelSeeds: number }> {
+  // v4: the carried channel seeds wait for this account's channel state
+  // (never replacing a seed held for an epoch).
+  let channelSeeds = 0;
+  try {
+    const carried = carriedSeedsOf(bundle);
+    channelSeeds = carried.size;
+    if (carried.size > 0) offerCarriedChannelSeeds(accountIdB64, carried);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("state bundle: channel seeds not applied", err instanceof Error ? err.name : "");
+  }
   let groupNames = 0;
   let profiles = 0;
   try {
@@ -240,5 +267,5 @@ export async function applyCarriedExtras(
       }
     }
   }
-  return { groupNames, profiles, pendingContacts };
+  return { groupNames, profiles, pendingContacts, channelSeeds };
 }

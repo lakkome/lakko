@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The suspension snapshot and its bucket query ([ADR-0089] section 5,
+//! The suspension snapshot and its bucket query ([ADR-0098] section 5,
 //! step 4).
 //!
 //! Once a period (a day by default) the moderation service builds, from its
@@ -44,7 +44,7 @@
 //! root-signed moderator list). A snapshot whose builder was compromised can
 //! then only hide a mark, not invent one.
 //!
-//! [ADR-0089]: ../../../docs/adr/0089-reporting-and-moderation.md
+//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
 
 use std::collections::BTreeMap;
 

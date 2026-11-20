@@ -33,12 +33,26 @@ import java.time.ZoneId
  * [CallHistoryStore].
  */
 
-/** One call, as the cross-conversation index records it. */
+/**
+ * One call, as the cross-conversation index records it.
+ *
+ * Two kinds of row share the type. A call placed inside a conversation names
+ * that conversation ([conversationIdHex], [kind]). A call with no conversation
+ * (`docs/ux/navigation.md` section 5.1.1: started with `New call`, or joined
+ * from a call link) names none: [conversationIdHex] and [kind] are `null`, and
+ * it carries the call's own id ([callIdHex]) instead, so the same call is
+ * filed once. A call has no name of its own, so such a row is always titled
+ * `Group call`. Build one with [noConversationCallEntry].
+ */
 public data class CallHistoryEntry(
-    /** The conversation the call belongs to; the group id in lowercase hex. */
-    val conversationIdHex: String,
-    /** Which screen the row opens — the conversation's persisted kind. */
-    val kind: ConversationKind,
+    /**
+     * The conversation the call belongs to; the group id in lowercase hex.
+     * `null` for a call with no conversation.
+     */
+    val conversationIdHex: String?,
+    /** Which screen the row opens — the conversation's persisted kind.
+     *  `null` for a call with no conversation. */
+    val kind: ConversationKind?,
     val outcome: CallOutcome,
     /** The call carried video. Picks the call-back mode and the row's icon. */
     val video: Boolean,
@@ -46,6 +60,39 @@ public data class CallHistoryEntry(
     val startedAtMs: Long,
     /** How long media flowed, or `null` when the call never connected. */
     val durationSecs: Long? = null,
+    /**
+     * A call with no conversation: the call's 16-byte `call_id` in lowercase
+     * hex, which is what makes a second write for the same call a no-op
+     * ([callHistoryWith]). `null` on a conversation row.
+     */
+    val callIdHex: String? = null,
+)
+
+/** The row belongs to no conversation (section 5.1.1). */
+public val CallHistoryEntry.hasNoConversation: Boolean
+    get() = conversationIdHex == null
+
+/**
+ * A row for a call with no conversation (`docs/ux/navigation.md` section 5.1.1).
+ *
+ * [outgoing] is `true` when this device started the call (`New call`) and
+ * `false` when it joined from a link. Such a call never rings, so it is never
+ * missed or declined: the outcome is one of the two directions only.
+ */
+public fun noConversationCallEntry(
+    callIdHex: String,
+    outgoing: Boolean,
+    video: Boolean,
+    startedAtMs: Long,
+    durationSecs: Long?,
+): CallHistoryEntry = CallHistoryEntry(
+    conversationIdHex = null,
+    kind = null,
+    outcome = if (outgoing) CallOutcome.OUTGOING else CallOutcome.INCOMING,
+    video = video,
+    startedAtMs = startedAtMs,
+    durationSecs = durationSecs,
+    callIdHex = callIdHex.lowercase(),
 )
 
 /** The transcript row this index entry stands for. */
@@ -58,8 +105,11 @@ public fun CallHistoryEntry.toTranscriptEntry(): CallTranscriptEntry =
  */
 public const val CALL_HISTORY_MAX: Int = 300
 
-/** The `|`-separated record version. */
+/** The `|`-separated record version of a conversation row. */
 private const val RECORD_VERSION = "v1"
+
+/** The record tag of a row for a call with no conversation (section 5.1.1). */
+private const val NO_CONVERSATION_RECORD = "n1"
 private const val SEPARATOR = '|'
 
 /**
@@ -68,16 +118,45 @@ private const val SEPARATOR = '|'
  * Positional and `|`-separated: a hex id, two enum names, a flag and two
  * numbers, none of which can contain a `|`, so the split is unambiguous
  * without escaping.
+ *
+ * A call with no conversation is its own record, tagged [NO_CONVERSATION_RECORD]:
+ * `n1|<call id hex>|<outcome>|<video>|<started>|<duration>`.
  */
-public fun encodeCallHistoryEntry(entry: CallHistoryEntry): String = listOf(
-    RECORD_VERSION,
-    entry.conversationIdHex.lowercase(),
-    entry.kind.name,
-    entry.outcome.name,
-    if (entry.video) "1" else "0",
-    entry.startedAtMs.toString(),
-    entry.durationSecs?.toString() ?: "",
-).joinToString(SEPARATOR.toString())
+public fun encodeCallHistoryEntry(entry: CallHistoryEntry): String {
+    val conversation = entry.conversationIdHex
+    if (conversation == null) {
+        return listOf(
+            NO_CONVERSATION_RECORD,
+            (entry.callIdHex ?: "").lowercase(),
+            entry.outcome.name,
+            if (entry.video) "1" else "0",
+            entry.startedAtMs.toString(),
+            entry.durationSecs?.toString() ?: "",
+        ).joinToString(SEPARATOR.toString())
+    }
+    return listOf(
+        RECORD_VERSION,
+        conversation.lowercase(),
+        (entry.kind ?: ConversationKind.Group).name,
+        entry.outcome.name,
+        if (entry.video) "1" else "0",
+        entry.startedAtMs.toString(),
+        entry.durationSecs?.toString() ?: "",
+    ).joinToString(SEPARATOR.toString())
+}
+
+private fun decodeFlag(text: String): Boolean? = when (text) {
+    "1" -> true
+    "0" -> false
+    else -> null
+}
+
+private fun decodeDuration(text: String): Result<Long?> = if (text.isEmpty()) {
+    Result.success(null)
+} else {
+    text.toLongOrNull()?.takeIf { it >= 0L }?.let { Result.success(it) }
+        ?: Result.failure(IllegalArgumentException("duration"))
+}
 
 /**
  * Read one stored line, or `null` when it is not one this build understands.
@@ -90,23 +169,16 @@ public fun encodeCallHistoryEntry(entry: CallHistoryEntry): String = listOf(
  */
 public fun decodeCallHistoryEntry(line: String): CallHistoryEntry? {
     val parts = line.split(SEPARATOR)
+    if (parts.firstOrNull() == NO_CONVERSATION_RECORD) return decodeNoConversationEntry(parts)
     if (parts.size != 7) return null
     if (parts[0] != RECORD_VERSION) return null
     val id = parts[1].trim().lowercase()
     if (id.isEmpty()) return null
     val kind = ConversationKind.entries.firstOrNull { it.name == parts[2] } ?: return null
     val outcome = CallOutcome.entries.firstOrNull { it.name == parts[3] } ?: return null
-    val video = when (parts[4]) {
-        "1" -> true
-        "0" -> false
-        else -> return null
-    }
+    val video = decodeFlag(parts[4]) ?: return null
     val startedAtMs = parts[5].toLongOrNull() ?: return null
-    val duration = if (parts[6].isEmpty()) {
-        null
-    } else {
-        parts[6].toLongOrNull()?.takeIf { it >= 0L } ?: return null
-    }
+    val duration = decodeDuration(parts[6]).getOrElse { return null }
     return CallHistoryEntry(
         conversationIdHex = id,
         kind = kind,
@@ -117,20 +189,54 @@ public fun decodeCallHistoryEntry(line: String): CallHistoryEntry? {
     )
 }
 
+/** The `n1` record of a call with no conversation: six fields. */
+private fun decodeNoConversationEntry(parts: List<String>): CallHistoryEntry? {
+    if (parts.size != 6) return null
+    val callId = parts[1].trim().lowercase()
+    if (callId.isEmpty() || !callId.all { it in '0'..'9' || it in 'a'..'f' }) return null
+    // Such a call never rings: only the two directions are a record.
+    val outcome = when (parts[2]) {
+        CallOutcome.OUTGOING.name -> CallOutcome.OUTGOING
+        CallOutcome.INCOMING.name -> CallOutcome.INCOMING
+        else -> return null
+    }
+    val video = decodeFlag(parts[3]) ?: return null
+    val startedAtMs = parts[4].toLongOrNull() ?: return null
+    val duration = decodeDuration(parts[5]).getOrElse { return null }
+    return noConversationCallEntry(
+        callIdHex = callId,
+        outgoing = outcome == CallOutcome.OUTGOING,
+        video = video,
+        startedAtMs = startedAtMs,
+        durationSecs = duration,
+    )
+}
+
 /**
  * The list after [entry] is added: newest first, capped at [max].
  *
- * Ties break on the conversation id so the order is total. Two calls that
- * started in the same millisecond — a pair placed by a script, two rows
- * restored from a blob that rounded — would otherwise sit in whatever order the
- * store happened to yield, and a list that reshuffles on a refresh reads as a
- * bug and is impossible to report.
+ * Ties break on the conversation id (or, for a call with no conversation, the
+ * call id) so the order is total. Two calls that started in the same
+ * millisecond — a pair placed by a script, two rows restored from a blob that
+ * rounded — would otherwise sit in whatever order the store happened to yield,
+ * and a list that reshuffles on a refresh reads as a bug and is impossible to
+ * report.
+ *
+ * A call with no conversation is filed once per call (section 5.1.1): when a
+ * row for the same [CallHistoryEntry.callIdHex] is already held, [entry] is
+ * dropped and the first write stands.
  */
 public fun callHistoryWith(
     existing: List<CallHistoryEntry>,
     entry: CallHistoryEntry,
     max: Int = CALL_HISTORY_MAX,
-): List<CallHistoryEntry> = callHistoryOrdered(existing + entry, max)
+): List<CallHistoryEntry> {
+    val callId = entry.callIdHex
+    if (callId != null && existing.any { it.callIdHex.equals(callId, ignoreCase = true) }) {
+        return callHistoryOrdered(existing, max)
+    }
+    return callHistoryOrdered(existing + entry, max)
+}
 
 /** [entries] in display order, capped at [max]. */
 public fun callHistoryOrdered(
@@ -139,7 +245,8 @@ public fun callHistoryOrdered(
 ): List<CallHistoryEntry> = entries
     .sortedWith(
         compareByDescending<CallHistoryEntry> { it.startedAtMs }
-            .thenBy { it.conversationIdHex },
+            .thenBy { it.conversationIdHex ?: "" }
+            .thenBy { it.callIdHex ?: "" },
     )
     .take(max.coerceAtLeast(0))
 
@@ -196,3 +303,28 @@ public fun callDirectionGlyph(outcome: CallOutcome): CallDirectionGlyph = when (
  */
 public fun callHistoryIsUnanswered(outcome: CallOutcome): Boolean =
     outcome == CallOutcome.MISSED || outcome == CallOutcome.DECLINED || outcome == CallOutcome.FAILED
+
+/**
+ * How a row of the Calls list is drawn and what it answers to
+ * (`docs/ux/navigation.md` sections 5.1 and 5.1.1).
+ */
+public data class CallHistoryRowShape(
+    /** A tap opens the conversation. `false`: the row is not a tap target. */
+    val opensConversation: Boolean,
+    /** A trailing button calls back in the row's mode. */
+    val callBack: Boolean,
+    /** The avatar is the group-call glyph, never initials. */
+    val groupCallGlyph: Boolean,
+)
+
+/**
+ * The shape of [entry]'s row. A call with no conversation has nothing to open
+ * and cannot be called back (an ended link call cannot be joined again), so it
+ * is neither a tap target nor carries a call button.
+ */
+public fun callHistoryRowShape(entry: CallHistoryEntry): CallHistoryRowShape =
+    if (entry.hasNoConversation) {
+        CallHistoryRowShape(opensConversation = false, callBack = false, groupCallGlyph = true)
+    } else {
+        CallHistoryRowShape(opensConversation = true, callBack = true, groupCallGlyph = false)
+    }

@@ -36,14 +36,46 @@ import org.webrtc.RtpParameters
 /** The main camera's encoding: one spatial layer, three temporal layers. */
 internal const val CAMERA_SCALABILITY_MODE: String = "L1T3"
 
-/** The light sender's picture is the camera's scaled down by this, each side. */
+/**
+ * The light sender's picture is the camera's scaled down by this, each side.
+ *
+ * Applied at the copy's own video source ([cameraCopySize], set by
+ * `CameraVideoCapture.copySource`), never as the encoding's
+ * `scaleResolutionDownBy`. On the Pixel 7a call of 2026-11-10 a light
+ * encoding created with `scaleResolutionDownBy` 4 started its encoder at
+ * 320x180, then received the camera's 1280x720 frames unscaled and
+ * re-initialised at that size, so the light sender sent 1280x720 at its
+ * 150 kbit/s ceiling for the whole call.
+ */
 internal const val CAMERA_LIGHT_SCALE_DOWN: Double = 4.0
 
 /** The light sender's bitrate ceiling, bits a second. */
 internal const val CAMERA_LIGHT_MAX_BITRATE_BPS: Int = 150_000
 
-/** The middle sender's picture is the camera's scaled down by this, each side. */
+/** The middle sender's picture is the camera's scaled down by this, each
+ *  side, at its own source as for [CAMERA_LIGHT_SCALE_DOWN]. */
 internal const val CAMERA_MIDDLE_SCALE_DOWN: Double = 2.0
+
+/**
+ * The `scaleResolutionDownBy` of a copy's encoding: 1, since the copy's
+ * source already delivers frames at the copy's size. Stated rather than left
+ * out so that a platform encoding that carried another value is reset, and
+ * the picture is never scaled down twice.
+ */
+internal const val CAMERA_COPY_ENCODING_SCALE: Double = 1.0
+
+/**
+ * The largest picture, landscape width and height, the [kind] copy's own
+ * source hands its encoder when the camera captures [captureWidth] x
+ * [captureHeight]: the capture divided by the copy's [CameraCopyKind.scaleDown],
+ * each side, rounded down and at least 1. libwebrtc's adapter keeps the
+ * aspect ratio within this box and also turns it for a portrait frame.
+ */
+internal fun cameraCopySize(kind: CameraCopyKind, captureWidth: Int, captureHeight: Int): Pair<Int, Int> {
+    val width = (captureWidth / kind.scaleDown).toInt().coerceAtLeast(1)
+    val height = (captureHeight / kind.scaleDown).toInt().coerceAtLeast(1)
+    return width to height
+}
 
 /** The middle sender's bitrate ceiling, bits a second. */
 internal const val CAMERA_MIDDLE_MAX_BITRATE_BPS: Int = 500_000
@@ -106,7 +138,7 @@ internal fun cameraMainEncoding(): RtpParameters.Encoding =
  * the encoding active, as every encoding is by default.
  */
 internal fun cameraCopyEncoding(kind: CameraCopyKind, active: Boolean? = null): RtpParameters.Encoding =
-    RtpParameters.Encoding(null, active ?: true, kind.scaleDown).apply {
+    RtpParameters.Encoding(null, active ?: true, CAMERA_COPY_ENCODING_SCALE).apply {
         maxBitrateBps = kind.maxBitrateBps
     }
 
@@ -236,8 +268,9 @@ internal fun <S> addCopySender(
 }
 
 /**
- * Give an already-added copy's sender its size and its bitrate ceiling (the
- * second way, for a sender whose transceiver was added without them).
+ * Give an already-added copy's sender its encoding scale of 1
+ * ([CAMERA_COPY_ENCODING_SCALE]) and its bitrate ceiling (the second way, for
+ * a sender whose transceiver was added without them).
  * `false` when the platform refuses this too, or when the sender has no
  * encoding to set them on.
  *
@@ -253,7 +286,7 @@ internal fun configureCopyEncoding(
     apply: () -> Boolean,
 ): Boolean {
     val first = encodings.firstOrNull() ?: return false
-    first.scaleResolutionDownBy = kind.scaleDown
+    first.scaleResolutionDownBy = CAMERA_COPY_ENCODING_SCALE
     first.maxBitrateBps = kind.maxBitrateBps
     if (active != null) first.active = active
     return try {

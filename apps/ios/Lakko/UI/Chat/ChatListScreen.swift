@@ -21,9 +21,9 @@ import SwiftUI
 /// filter with it, and channels are mapped in from their own store.
 ///
 /// **The row says nothing about which kind it is.** No badge, no label, no
-/// differing avatar; the kind only routes a tap. A channel additionally draws
-/// no pin, mute or archive mark, because those are keyed on a conversation id
-/// a channel does not carry. Its unread badge is its count of new posts
+/// differing avatar; the kind only routes a tap. A channel's pin, mute and
+/// archive are the same synced flags as a group's, keyed on the channel id
+/// (``ChannelFlags``). Its unread badge is its count of new posts
 /// (`docs/ux/feed.md` section 5, "Channel posts"), kept on this device.
 ///
 /// Rendered as the root of the Chats tab's `NavigationStack`; tapping a row
@@ -51,8 +51,11 @@ public struct ChatListScreen: View {
     @ObservedObject var feedReading: FeedReadingModel
     /// ADR-0061 — the title follows the interface language.
     @ObservedObject private var l10n = Localization.shared
-    /// ADR-0089 step 3 — the read-only app of a suspended account.
+    /// ADR-0098 step 3 — the read-only app of a suspended account.
     @Environment(\.accountSuspended) private var accountSuspended
+    /// The ledger openings of bare `/g/` links a row's second line reads
+    /// (``BareGroupLink``): a finished opening redraws the row.
+    @ObservedObject private var bareGroupLinks = BareGroupLinks.shared
     /// Open the conversation this row names, whichever kind it is.
     public var onOpen: (ConversationListRow) -> Void
     /// One of the three create-menu items.
@@ -175,7 +178,7 @@ public struct ChatListScreen: View {
             // search is over everything (section 2.4).
             .safeAreaInset(edge: .top, spacing: 0) {
               VStack(spacing: 0) {
-                // ADR-0089 step 3 — reading a suspended account's chats: the
+                // ADR-0098 step 3 — reading a suspended account's chats: the
                 // suspended screen is one tap away.
                 if accountSuspended {
                     SuspendedBanner { SuspensionCenter.shared.showScreen() }
@@ -213,7 +216,13 @@ public struct ChatListScreen: View {
             .lakkoActionSheet(isPresented: $createMenuOpen) { createMenuItems(includeSaved: createMenuWithSaved) }
             .navigationTitle(l10n.t("nav.chats"))
             .navigationBarTitleDisplayMode(.large)
-            .searchable(text: $searchText, prompt: Text(l10n.t("chats.search.placeholder")))
+            // Always shown: with the folder bar inset above the list the system
+            // collapsed the field and never brought it back, so Chats had no
+            // search once a folder existed (base scenario 31, 2026-11-11).
+            .searchable(
+                text: $searchText,
+                placement: .navigationBarDrawer(displayMode: .always),
+                prompt: Text(l10n.t("chats.search.placeholder")))
             .onChange(of: searchText) { _, text in peopleSearch?.update(query: text) }
             // Receiving is automatic; the pull gesture runs the same poll
             // once more, on demand (UX spec section 2, principle 3).
@@ -244,7 +253,7 @@ public struct ChatListScreen: View {
                 if let keysUpdatingLabel, !viewModel.synchronizing {
                     ToolbarItem(placement: .navigationBarLeading) { keysUpdatingLabel }
                 }
-                // ADR-0089 step 3 — a suspended account starts nothing.
+                // ADR-0098 step 3 — a suspended account starts nothing.
                 if !accountSuspended {
                     ToolbarItem(placement: .navigationBarTrailing) { createMenu }
                 }
@@ -261,7 +270,7 @@ public struct ChatListScreen: View {
             createMenuWithSaved = true
             createMenuOpen = true
         } label: {
-            Image(systemName: "square.and.pencil")
+            LkIconView(.compose, size: 24)
         }
         .accessibilityLabel(l10n.t("chats.create.menu"))
     }
@@ -269,12 +278,12 @@ public struct ChatListScreen: View {
     /// The create menu's rows (Lakko's own action sheet, never a system menu).
     private func createMenuItems(includeSaved: Bool) -> [LakkoMenuItem] {
         var items: [LakkoMenuItem] = [
-            .action(l10n.t("chats.create.chat"), systemImage: "bubble.left") { onCreate(.chat) },
-            .action(l10n.t("chats.create.group"), systemImage: "person.3") { onCreate(.group) },
-            .action(l10n.t("chats.create.channel"), systemImage: "megaphone") { onCreate(.channel) },
+            .action(l10n.t("chats.create.chat"), icon: .chat) { onCreate(.chat) },
+            .action(l10n.t("chats.create.group"), icon: .person3) { onCreate(.group) },
+            .action(l10n.t("chats.create.channel"), icon: .megaphone) { onCreate(.channel) },
         ]
         if includeSaved {
-            items.append(.action(l10n.t("saved.title"), systemImage: "bookmark") { onCreate(.saved) })
+            items.append(.action(l10n.t("saved.title"), icon: .bookmark) { onCreate(.saved) })
         }
         return items
     }
@@ -339,7 +348,8 @@ public struct ChatListScreen: View {
         let chatRows = Self.chatRows(viewModel: viewModel, flags: flags, readCursors: readCursors)
         return ConversationList.sorted(
             chatRows + Self.channelRows(
-                channels: channels, channelUnread: channelUnread, lastPosts: channelLastPosts))
+                channels: channels, channelUnread: channelUnread, lastPosts: channelLastPosts,
+                flags: flags))
     }
 
     /// The chat and group rows, in the shape the ordering takes. One
@@ -385,8 +395,28 @@ public struct ChatListScreen: View {
                 markedUnread: flags?.unreadOverride == true,
                 personKey: kind == .group ? nil : viewModel.peerSignatureKey(groupIdHex: thread.groupIdHex),
                 photoGroupIdHex: kind == .group ? thread.groupIdHex : nil,
-                hasUnseenReactions: viewModel.hasUnseenReactions(groupIdHex: thread.groupIdHex))
+                hasUnseenReactions: viewModel.hasUnseenReactions(groupIdHex: thread.groupIdHex),
+                previewMedia: thread.leaveRequested || thread.membershipEnded ? nil : viewModel.previewMedia(thread: thread))
         }
+    }
+
+    /// The line a channel's row shows for its newest post: its words, else
+    /// `docs/ux/media-messages.md` section 11's words for its photos, videos
+    /// or files, else the post's own line.
+    static func channelPostLine(_ post: PersistedChannelPost) -> String {
+        if post.content == nil, let caption = post.caption {
+            let trimmed = caption.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return ChatListFormatting.textWithFileWords(
+                    trimmed.replacingOccurrences(of: "\n", with: " "), refs: post.attachmentRefs)
+            }
+            if let words = ChatListFormatting.attachmentWords(
+                ChatListFormatting.attachmentCounts(post.attachmentRefs)) {
+                return words
+            }
+        }
+        return post.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\n", with: " ")
     }
 
     /// A subscribed channel, in the shape the ordering takes.
@@ -399,19 +429,27 @@ public struct ChatListScreen: View {
     /// the bottom of a long list until a fetch lands.
     static func channelRows(
         channels: ChannelsUiState, channelUnread: [String: Int],
-        lastPosts: [String: PersistedChannelPost] = [:]
+        lastPosts: [String: PersistedChannelPost] = [:],
+        flags flagsMap: [String: FlagsState] = [:],
+        coPublished: (String) -> Bool = { CoPublishedJournals.shared.journalIdHex(channelIdHex: $0) != nil }
     ) -> [ConversationListRow] {
         let nowMs = ChatRepository.nowMs()
         return channels.channels.map { channel in
-            let posts = channels.postsByChannel[channel.id] ?? []
             let lastPost = lastPosts[channel.id]
+            let flags = flagsMap[ChannelFlags.key(channelIdHex: channel.id)]
+            // The newest REAL post's time, the post the second line shows
+            // (the channel-post log holds text posts only). The raw rows the
+            // server holds (`postsByChannel`) include ban lists and metadata
+            // records: seen live 2026-11-12, a ban at 22:48 stood as the time
+            // of a channel whose newest post was at 22:39.
             let lastPostMs = ChannelsFormatting.newestPostMs(
-                posts.map(\.serverTsMs) + [lastPost.map { UInt64(clamping: max(0, $0.serverTsMs)) }].compactMap { $0 })
+                [lastPost.map { UInt64(clamping: max(0, $0.serverTsMs)) }].compactMap { $0 })
             let model = ChannelsFormatting.rowModel(
                 sharedName: channel.sharedName,
                 name: channel.localName,
                 handle: channel.handle,
-                isOwner: channels.keysByChannel[channel.id] != nil,
+                role: ChannelRowRole.of(
+                    publishes: channels.keysByChannel[channel.id] != nil, coPublished: coPublished(channel.id)),
                 subscriberCount: channels.subscriberCountByChannel[channel.id],
                 newestPostMs: lastPostMs,
                 nowMs: nowMs,
@@ -427,12 +465,19 @@ public struct ChatListScreen: View {
                 // the @name and role only while no post can be read here.
                 preview: channels.orphanedByReset(channelId: channel.id)
                     ? Localization.text("channels.keys_reset.row_sub")
-                    : (lastPost.map {
-                        $0.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                            .replacingOccurrences(of: "\n", with: " ")
-                    } ?? model.secondLine),
+                    : (lastPost.map(Self.channelPostLine) ?? model.secondLine),
                 lastActivityMs: lastPostMs ?? Int64(clamping: channel.addedAtMs),
-                unread: channelUnread[channel.id] ?? 0)
+                unread: channelUnread[channel.id] ?? 0,
+                // UX group-and-channel-privacy 12 — pinned, muted and archived
+                // like a group's row, through the same synced flags, keyed on
+                // the channel id (``ChannelFlags``).
+                pinned: flags?.pinned == true,
+                muted: flags?.muted == true,
+                archived: flags?.archived == true,
+                // `docs/ux/media-messages.md` section 11 — the post's first
+                // photo or video, as in a chat's row.
+                previewMedia: channels.orphanedByReset(channelId: channel.id)
+                    ? nil : lastPost.flatMap { ChatListFormatting.previewMedia($0.attachmentRefs) })
         }
     }
 
@@ -469,13 +514,12 @@ public struct ChatListScreen: View {
             if !requests.isEmpty {
                 Button { requestsSentOpen = true } label: {
                     HStack {
-                        Label(l10n.t("requests_sent.title"), systemImage: "paperplane")
+                        Label(l10n.t("requests_sent.title"), icon: .send)
                             .foregroundStyle(Color.lakkoText)
                         Spacer()
                         Text(requests.count.formatted(.number.locale(l10n.locale)))
                             .foregroundStyle(Color.lakkoTextMuted)
-                        Image(systemName: "chevron.forward")
-                            .font(.footnote.weight(.semibold))
+                        LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
                     .padding(.horizontal, 16)
@@ -497,7 +541,7 @@ public struct ChatListScreen: View {
     private var restoredNotice: RestoredListNotice {
         RestoredListNotice.decide(
             record: restored, listEmpty: allRows.isEmpty && invitedRows.isEmpty,
-            otherDeviceSignedIn: deviceGroupSync.otherDeviceSignedIn)
+            rejoinAnswer: deviceGroupSync.rejoinAnswer)
     }
 
     private func reloadRestored() {
@@ -533,16 +577,6 @@ public struct ChatListScreen: View {
         .padding(.top, 80)
     }
 
-    private var restoredBanner: some View {
-        Text(l10n.t("chats.restored.banner_other_devices"))
-            .font(.footnote)
-            .foregroundStyle(Color.lakkoTextMuted)
-            .multilineTextAlignment(.center)
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
-    }
-
     /// One page: All chats (`folder == nil`) or one folder's rows.
     @ViewBuilder
     private func listPage(rows visible: [ConversationListRow], folder: FolderView?) -> some View {
@@ -558,9 +592,6 @@ public struct ChatListScreen: View {
                     switch restoredNotice {
                     case .card:
                         restoredCard
-                    case .banner:
-                        restoredBanner
-                        emptyState
                     case .none:
                         emptyState
                     }
@@ -598,7 +629,7 @@ public struct ChatListScreen: View {
                 ForEach(visible) { row in
                     VStack(spacing: 8) {
                         Button { onOpen(row) } label: {
-                            ConversationRowView(row: row, timeLabel: timeLabel(row))
+                            ConversationRowView(row: row, timeLabel: timeLabel(row), playsVideoOnHover: true)
                         }
                         .buttonStyle(.plain)
                         // `docs/ux/calls.md` section 2.1.1 — a muted
@@ -723,52 +754,57 @@ public struct ChatListScreen: View {
             let atLimit = !pinned && folder.pinned.count >= ChatFolders.maxPins
             items.append(.action(
                 l10n.t(pinned ? "chats.action.unpin" : "chats.action.pin"),
-                systemImage: pinned ? "pin.slash" : "pin", enabled: !atLimit
+                icon: pinned ? .pinSlash : .pin, enabled: !atLimit
             ) { Task { await toggleFolderPin(folder: folder, row: row) } })
             if atLimit { items.append(.text(ChatFolders.pinLimitLine, secondary: true)) }
-        } else if row.kind != .channel {
+        } else {
             items.append(.action(
                 l10n.t(row.pinned ? "chats.action.unpin" : "chats.action.pin"),
-                systemImage: row.pinned ? "pin.slash" : "pin"
+                icon: row.pinned ? .pinSlash : .pin
             ) { Task { await toggleFlag(groupIdHex: row.id, field: .pin) } })
         }
-        if row.kind != .channel {
-            items.append(.action(
-                l10n.t(row.muted ? "chats.action.unmute" : "chats.action.mute"),
-                systemImage: row.muted ? "bell" : "bell.slash"
-            ) { Task { await toggleFlag(groupIdHex: row.id, field: .mute) } })
-            items.append(.action(
-                l10n.t(row.archived ? "chats.action.unarchive" : "chats.action.archive"),
-                systemImage: row.archived ? "tray.and.arrow.up" : "archivebox"
-            ) { Task { await toggleFlag(groupIdHex: row.id, field: .archive) } })
-        }
+        // A channel's row offers what a group's does (UX
+        // group-and-channel-privacy 12); its flags are keyed on the channel id.
+        items.append(.action(
+            l10n.t(row.muted ? "chats.action.unmute" : "chats.action.mute"),
+            icon: row.muted ? .bell : .bellSlash
+        ) { Task { await toggleFlag(groupIdHex: row.id, field: .mute) } })
+        items.append(.action(
+            l10n.t(row.archived ? "chats.action.unarchive" : "chats.action.archive"),
+            icon: row.archived ? .unarchive : .archive
+        ) { Task { await toggleFlag(groupIdHex: row.id, field: .archive) } })
         let folders = deviceGroupSync.folders
         let openEditor = {
             editor = FolderEditorRequest(folder: nil, prefill: ChatFolders.ref(for: row), rows: allRows)
         }
         if folders.isEmpty {
-            items.append(.action(l10n.t("folders.add_to_folder"), systemImage: "folder.badge.plus", perform: openEditor))
+            items.append(.action(l10n.t("folders.add_to_folder"), icon: .folderPlus, perform: openEditor))
         } else {
             var sub: [LakkoMenuItem] = folders.map { f in
                 let isIn = ChatFolders.matches(f, row)
                 return .action(
-                    f.meta.name, systemImage: isIn ? "checkmark" : nil,
+                    f.meta.name, icon: isIn ? .checkmark : nil,
                     enabled: isIn || ChatFolders.handState(f, rowId: row.id) == .excluded
                         || !ChatFolders.handAddLimitReached(f)
                 ) { Task { await toggleMembership(folder: f, row: row) } }
             }
             sub.append(.action(
-                l10n.t("folders.new_ellipsis"), systemImage: "folder.badge.plus",
+                l10n.t("folders.new_ellipsis"), icon: .folderPlus,
                 enabled: folders.count < ChatFolders.maxFolders, perform: openEditor))
             if folders.count >= ChatFolders.maxFolders { sub.append(.text(ChatFolders.folderLimitLine, secondary: true)) }
-            items.append(.submenu(l10n.t("folders.add_to_folder"), systemImage: "folder.badge.plus", items: sub))
+            items.append(.submenu(l10n.t("folders.add_to_folder"), icon: .folderPlus, items: sub))
         }
         if let folder {
-            items.append(.action(l10n.t("folders.remove_from_folder"), systemImage: "folder.badge.minus") {
+            items.append(.action(l10n.t("folders.remove_from_folder"), icon: .folderMinus) {
                 Task { await toggleMembership(folder: folder, row: row) }
             })
         }
         return items
+    }
+
+    /// The channel rows Mark all read reads: those with new posts.
+    static func channelIdsToMarkRead(_ rows: [ConversationListRow]) -> [String] {
+        rows.filter { $0.kind == .channel && $0.unread > 0 }.map(\.id)
     }
 
     private func toggleMembership(folder: FolderView, row: ConversationListRow) async {
@@ -806,14 +842,17 @@ public struct ChatListScreen: View {
     /// Section 2.2 — for every conversation in the tab that has something
     /// unread, the same mark-read the chat itself does: the local badge, the
     /// read cursor every device of the account folds, and a manual "mark as
-    /// unread" cleared. Channels carry no unread state on this client.
+    /// unread" cleared. A channel with new posts is read through the newest
+    /// post this device holds, as opening it does (the feed's read state).
     private func markAllRead(in folder: FolderView?) async {
         let all = allRows
-        let targets = all.filter { row in
-            guard ChatFolders.hasUnread(row), row.kind != .channel else { return false }
+        let inTab = all.filter { row in
+            guard ChatFolders.hasUnread(row) else { return false }
             guard let folder else { return true }
             return ChatFolders.matches(folder, row)
         }
+        feedReading.markChannelsRead(ChatListScreen.channelIdsToMarkRead(inTab))
+        let targets = inTab.filter { $0.kind != .channel }
         let now = UInt64(Date().timeIntervalSince1970 * 1000)
         for row in targets {
             guard let groupId = Self.hexToBytes(row.id) else { continue }
@@ -950,11 +989,10 @@ public struct ChatListScreen: View {
     /// The row's own actions, rendered both as a trailing swipe and as the
     /// long-press menu (spec section 2.1).
     ///
-    /// Pin / mute / archive are keyed on a conversation id a channel does not
-    /// carry, so in All chats a channel row offers none of them rather than
-    /// offering one that could not be honoured. Inside a folder, Pin acts on
-    /// that folder's own pin list (`docs/ux/chat-folders.md` 2.3), which does
-    /// name channels.
+    /// A channel's row offers the same pin / mute / archive as a group's (UX
+    /// group-and-channel-privacy 12), keyed on the channel id
+    /// (``ChannelFlags``). Inside a folder, Pin acts on that folder's own pin
+    /// list (`docs/ux/chat-folders.md` 2.3).
     @ViewBuilder
     private func rowActions(
         row: ConversationListRow, folder: FolderView?, inMenu: Bool = false
@@ -965,37 +1003,35 @@ public struct ChatListScreen: View {
             Button {
                 Task { await toggleFolderPin(folder: folder, row: row) }
             } label: {
-                Label(l10n.t(pinned ? "chats.action.unpin" : "chats.action.pin"), systemImage: pinned ? "pin.slash" : "pin")
+                Label(l10n.t(pinned ? "chats.action.unpin" : "chats.action.pin"), icon: pinned ? .pinSlash : .pin)
             }
             .tint(Color.lakkoAccent)
             .disabled(atLimit)
             if atLimit && inMenu {
                 Text(ChatFolders.pinLimitLine)
             }
-        } else if row.kind != .channel {
+        } else {
             Button {
                 Task { await toggleFlag(groupIdHex: row.id, field: .pin) }
             } label: {
-                Label(l10n.t(row.pinned ? "chats.action.unpin" : "chats.action.pin"), systemImage: row.pinned ? "pin.slash" : "pin")
+                Label(l10n.t(row.pinned ? "chats.action.unpin" : "chats.action.pin"), icon: row.pinned ? .pinSlash : .pin)
             }
             .tint(Color.lakkoAccent)
         }
-        if row.kind != .channel {
-            Button {
-                Task { await toggleFlag(groupIdHex: row.id, field: .mute) }
-            } label: {
-                Label(l10n.t(row.muted ? "chats.action.unmute" : "chats.action.mute"), systemImage: row.muted ? "bell" : "bell.slash")
-            }
-            .tint(.gray)
-            Button {
-                Task { await toggleFlag(groupIdHex: row.id, field: .archive) }
-            } label: {
-                Label(
-                    l10n.t(row.archived ? "chats.action.unarchive" : "chats.action.archive"),
-                    systemImage: row.archived ? "tray.and.arrow.up" : "archivebox")
-            }
-            .tint(Color.lakkoTextMuted)
+        Button {
+            Task { await toggleFlag(groupIdHex: row.id, field: .mute) }
+        } label: {
+            Label(l10n.t(row.muted ? "chats.action.unmute" : "chats.action.mute"), icon: row.muted ? .bell : .bellSlash)
         }
+        .tint(.gray)
+        Button {
+            Task { await toggleFlag(groupIdHex: row.id, field: .archive) }
+        } label: {
+            Label(
+                l10n.t(row.archived ? "chats.action.unarchive" : "chats.action.archive"),
+                icon: row.archived ? .unarchive : .archive)
+        }
+        .tint(Color.lakkoTextMuted)
     }
 
     private enum FlagField {
@@ -1004,8 +1040,10 @@ public struct ChatListScreen: View {
 
     @MainActor
     private func toggleFlag(groupIdHex: String, field: FlagField) async {
+        // A chat's or group's conversation id (32 bytes), or a channel's id
+        // (16 bytes, ``ChannelFlags``): the synced flags take either.
         guard let groupId = Self.hexToBytes(groupIdHex) else { return }
-        let cur = deviceGroupSync.flags[groupIdHex]
+        let cur = deviceGroupSync.flags[groupIdHex.lowercased()]
         var pinned = cur?.pinned ?? false
         var muted = cur?.muted ?? false
         var archived = cur?.archived ?? false
@@ -1048,8 +1086,7 @@ public struct ChatListScreen: View {
     @ViewBuilder
     private var emptyState: some View {
         VStack(spacing: 12) {
-            Image(systemName: "bubble.left.and.bubble.right")
-                .font(.system(size: 40))
+            LkIconView(.bubbles, size: 48, relativeTo: nil)
                 .foregroundStyle(Color.lakkoTextMuted)
             Text(l10n.t("chats.empty.title"))
                 .font(.headline)
@@ -1082,6 +1119,14 @@ struct ConversationRowView: View {
     let row: ConversationListRow
     /// The last activity's time, `nil` when nothing has happened yet.
     let timeLabel: String?
+    /// ADR-0084, UX profile-screen section 7 — the Chats list plays a profile
+    /// (or group) video while a pointer hovers the row; other lists drawing
+    /// this row (Forward to, the folder picker) keep the still.
+    var playsVideoOnHover: Bool = false
+
+    /// A pointer (iPad trackpad or mouse) is over the row. `.onHover` never
+    /// fires for a finger, so on a touch-only screen the still stays.
+    @State private var hovering = false
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -1089,7 +1134,8 @@ struct ConversationRowView: View {
                 // The id is hashed for the tint only, never shown.
                 name: row.title, identity: row.tintIdentity, size: 40,
                 isGroup: row.kind == .group,
-                photo: row.personKey.map(AvatarPhoto.person) ?? row.photoGroupIdHex.map(AvatarPhoto.group))
+                photo: row.personKey.map(AvatarPhoto.person) ?? row.photoGroupIdHex.map(AvatarPhoto.group),
+                playsVideo: playsVideoOnHover && hovering)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(row.title)
@@ -1108,6 +1154,9 @@ struct ConversationRowView: View {
                     }
                 }
                 HStack(alignment: .center, spacing: 6) {
+                    if row.endedLine == nil, let media = row.previewMedia {
+                        PreviewMediaThumbnail(media: media)
+                    }
                     Text(row.secondLine)
                         .font(.subheadline)
                         .foregroundStyle(Color.lakkoTextMuted)
@@ -1119,6 +1168,7 @@ struct ConversationRowView: View {
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
+        .onHover { hovering = $0 }
         .opacity(row.archived ? 0.6 : 1)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityText)
@@ -1130,25 +1180,21 @@ struct ConversationRowView: View {
     private var trailingMarks: some View {
         HStack(spacing: 6) {
             if row.muted {
-                Image(systemName: "bell.slash.fill")
-                    .font(.caption2)
+                LkIconView(.bellSlashFill, size: 14, relativeTo: .caption2)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
             if row.pinned {
-                Image(systemName: "pin.fill")
-                    .font(.caption2)
+                LkIconView(.pinFill, size: 14, relativeTo: .caption2)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
             if row.archived {
-                Image(systemName: "archivebox.fill")
-                    .font(.caption2)
+                LkIconView(.archiveFill, size: 14, relativeTo: .caption2)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
             if row.hasUnseenReactions {
-                Image(systemName: "heart.fill")
-                    .font(.caption2)
+                LkIconView(.heartFill, size: 14, relativeTo: .caption2,
+                           label: Localization.text("chats.row.unseen_reactions"))
                     .foregroundStyle(Color.lakkoAccent)
-                    .accessibilityLabel(Localization.text("chats.row.unseen_reactions"))
             }
             if row.showsUnread {
                 // Accent capsule; a muted conversation renders it grey so a
@@ -1236,7 +1282,7 @@ public final class ChatListViewModel: ObservableObject {
             accountIdB64: accountIdB64, heldGroups: Set(threads.map(\.groupIdHex)))
     }
 
-    /// UX 6.2 — `Ask again` on a request over 7 days old.
+    /// UX 6.2 — `Ask again` on a request a day old or more.
     func askAgain(_ entry: RequestsSentStore.Entry) async {
         guard let accountIdB64 = AcceptedContactsStore.boundAccountIdB64 else { return }
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
@@ -1338,7 +1384,7 @@ public final class ChatListViewModel: ObservableObject {
     /// Only messages the timeline draws count (a bookkeeping system row is
     /// not a last message).
     func preview(thread: ChatThread, isGroup: Bool) -> String {
-        guard let last = thread.messages.last(where: { !ChatTimeline.isHiddenSystemRow($0) }) else {
+        guard let last = thread.messages.last(where: { ChatTimeline.isListPreviewRow($0) }) else {
             return Localization.text("chats.row.no_messages")
         }
         let senderName = last.authorKeyB64.flatMap {
@@ -1350,16 +1396,26 @@ public final class ChatListViewModel: ObservableObject {
         // them from (the conversation's current group).
         var text = last.text
         if let channel = last.channelInvite(conversationIdHex: thread.groupIdHex) {
-            text = ChatListFormatting.channelInvitePreview(channelName: channel.name, publisher: false)
+            text = ChatListFormatting.channelInvitePreview(channelName: channel.displayName, publisher: false)
         } else if let publisher = last.coPublisherInvite(conversationIdHex: thread.groupIdHex) {
             text = ChatListFormatting.channelInvitePreview(
-                channelName: publisher.channelName, publisher: true)
+                channelName: publisher.displayName, publisher: true)
+        } else if let line = ContentPreview.line(last) {
+            // ADR-0092 — `Poll: {question}`, `Location`, ...
+            text = line
+        } else if !last.deleted, let link = BareGroupLink.link(of: text) {
+            // A bare `/g/` link with no card (an older message): never its
+            // secret (``BareGroupLink``; seen live 2026-11-13).
+            text = BareGroupLink.rowLine(text: text, opening: BareGroupLinks.shared.opening(link)) ?? text
+        }
+        // `docs/ux/media-messages.md` section 11 — files only: the words, then
+        // the text ("2 files · Weekend plans").
+        if !last.deleted, last.content == nil, CallTranscriptRow.parse(text) == nil {
+            text = ChatListFormatting.textWithFileWords(text, refs: last.attachments)
         }
         return ChatListFormatting.preview(
             text: text,
-            attachmentLabels: last.attachments.map {
-                ChatListFormatting.mediaLabel(kind: $0.kind, mime: $0.mime)
-            },
+            attachmentLabels: last.content != nil ? [] : ChatListFormatting.attachmentLabels(last.attachments),
             direction: last.direction,
             deleted: last.deleted,
             unsupported: last.unsupportedVersion != nil,
@@ -1367,10 +1423,18 @@ public final class ChatListViewModel: ObservableObject {
             senderName: senderName)
     }
 
+    /// `docs/ux/media-messages.md` section 11 — the row's thumbnail of the
+    /// last message's first photo or video.
+    func previewMedia(thread: ChatThread) -> ConversationPreviewMedia? {
+        guard let last = thread.messages.last(where: { ChatTimeline.isListPreviewRow($0) }),
+              !last.deleted, last.content == nil, last.unsupportedVersion == nil else { return nil }
+        return ChatListFormatting.previewMedia(last.attachments)
+    }
+
     /// The server time of the last drawn message, for the row's time and the
     /// list order; `nil` when there is none or it does not parse.
     func lastMessageMs(thread: ChatThread) -> Int64? {
-        guard let last = thread.messages.last(where: { !ChatTimeline.isHiddenSystemRow($0) }) else {
+        guard let last = thread.messages.last(where: { ChatTimeline.isListPreviewRow($0) }) else {
             return nil
         }
         return ChatRepository.parseDsTimestampMs(last.createdAt)
@@ -1422,6 +1486,9 @@ public final class ChatListViewModel: ObservableObject {
 /// badge), opening the pending chat.
 struct InvitedChatRow: View {
     let contact: PendingContact
+    /// ADR-0084, UX profile-screen section 7 — the photo's video plays while
+    /// a pointer hovers the row; `.onHover` never fires for a finger.
+    @State private var hovering = false
 
     var body: some View {
         let title = PendingContacts.name(contact) ?? Localization.text("invite.contact.page.unnamed")
@@ -1429,7 +1496,7 @@ struct InvitedChatRow: View {
             HStack(alignment: .center, spacing: 12) {
                 InitialsAvatar(
                     name: title, identity: contact.accountIdHex, size: 40,
-                    photo: .person(contact.signaturePubkey))
+                    photo: .person(contact.signaturePubkey), playsVideo: hovering)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title)
                         .font(.body)
@@ -1442,6 +1509,8 @@ struct InvitedChatRow: View {
                 }
             }
             .padding(.vertical, 4)
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
         }
         .buttonStyle(.plain)
     }
@@ -1476,7 +1545,7 @@ struct MembershipEndToast: View {
 }
 
 /// UX 6.2 — the requests to join this device sent: avatar, name, one line;
-/// `Ask again` after 7 days with no answer. A request is never withdrawn, and
+/// `Ask again` after a day with no answer. A request is never withdrawn, and
 /// the person is never told one was refused.
 struct RequestsSentList: View {
     @ObservedObject var viewModel: ChatListViewModel

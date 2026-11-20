@@ -108,7 +108,7 @@ import { defaultAnonTokenStore, type AnonTokenStore } from "./anon-token-store";
  * `channel-react` and `channel-comment` are ADR-0087 section 13a: one per
  * write under a channel post (nothing on the web spends them yet: channel
  * reactions and comments are phase B);
- * `report` is ADR-0089 section 2: one report to Lakko's moderators.
+ * `report` is ADR-0098 section 2: one report to Lakko's moderators.
  */
 export const ANON_TOKEN_CONTEXTS = [
   "discovery-lookup",
@@ -158,7 +158,7 @@ export const POOL_TARGET: Readonly<Record<AnonTokenContext, number>> = {
   // measured.
   "channel-react": 4,
   "channel-comment": 4,
-  // ADR-0089 section 2: reports to the moderators. Kept on hand so issuance
+  // ADR-0098 section 2: reports to the moderators. Kept on hand so issuance
   // time says nothing about when a report is sent. Chosen, not measured.
   report: 2,
 };
@@ -242,7 +242,7 @@ export class AnonTokenUnavailableError extends Error {
 }
 
 /**
- * ADR-0089 step 3: the account is suspended. While it is, the restricted
+ * ADR-0098 step 3: the account is suspended. While it is, the restricted
  * session may draw `blob-read` tokens only (files in chats still open);
  * every other context answers `403 account-suspended`. Not a failure to
  * retry: "not now", until the suspension ends.
@@ -434,7 +434,7 @@ interface Bucket {
   /** Unix ms until which the background refill is not retried. */
   backoffUntil: number;
   disabledUntil: number;
-  /** ADR-0089: unix ms until which issuance for this context is not asked
+  /** ADR-0098: unix ms until which issuance for this context is not asked
    *  again, after it answered `403 account-suspended`. */
   suspendedUntil: number;
   /** The pending scheduled refill of this context. */
@@ -506,7 +506,7 @@ export class AnonTokenPool {
   private readonly refillOnDemand: boolean;
 
   private sessionToken: string | null = null;
-  /** ADR-0089: the account is suspended; only `blob-read` is issued. */
+  /** ADR-0098: the account is suspended; only `blob-read` is issued. */
   private suspended = false;
   /** The load of the stored tokens for the current account, once started. */
   private hydration: Promise<void> | null = null;
@@ -564,7 +564,7 @@ export class AnonTokenPool {
   }
 
   /**
-   * ADR-0089 step 3: the account is (or is no longer) suspended. While it
+   * ADR-0098 step 3: the account is (or is no longer) suspended. While it
    * is, the session is the restricted one and only `blob-read` is drawn: no
    * other context is refilled, and a take of one finds what is held or is
    * refused at once ("not now"), never waiting on an issuance.
@@ -919,16 +919,51 @@ export class AnonTokenPool {
     return run;
   }
 
-  private async runRefill(context: AnonTokenContext, bucket: Bucket): Promise<void> {
+  /**
+   * Hold at least `count` live tokens of `context`, issuing now as many
+   * batches as that takes (the pool cap is raised to `count` for this).
+   * For a known burst of spends that cannot wait for a refill: an account
+   * deletion unsubscribes every push subscription after auth no longer
+   * issues. Returns how many are held after; never throws.
+   */
+  async ensureAtLeast(context: AnonTokenContext, count: number): Promise<number> {
+    const bucket = this.bucket(context);
+    try {
+      await this.ready();
+      if (bucket.refill !== null) await bucket.refill.catch(() => undefined);
+      const wasm = await this.wasmLoader();
+      const current = this.currentEpoch(wasm);
+      bucket.tokens = bucket.tokens.filter((t) => wasm.anonTokenIsLive(t.epoch, current));
+      while (bucket.tokens.length < count) {
+        const before = bucket.tokens.length;
+        const run = this.runRefill(context, bucket, count).finally(() => {
+          bucket.refill = null;
+        });
+        bucket.refill = run;
+        await run;
+        if (bucket.tokens.length <= before) break;
+      }
+    } catch {
+      /* best-effort: the caller proceeds with what is held */
+    }
+    return bucket.tokens.length;
+  }
+
+  private async runRefill(
+    context: AnonTokenContext,
+    bucket: Bucket,
+    want?: number,
+  ): Promise<void> {
     const session = this.sessionToken;
     if (session === null) throw new AnonTokenUnavailableError(context, "no session");
     if (this.heldBack(context, bucket, this.now())) throw new AnonTokensSuspendedError(context);
     const generation = this.generation;
     const wasm = await this.wasmLoader();
+    const cap = Math.max(MAX_POOL, want ?? 0);
     // A top-up to the target, in one issuance.
     const count = Math.min(
-      poolTarget(context) - bucket.tokens.length,
-      MAX_POOL - bucket.tokens.length,
+      (want ?? poolTarget(context)) - bucket.tokens.length,
+      cap - bucket.tokens.length,
       wasm.anonTokenMaxBatch(),
     );
     if (count <= 0) return;
@@ -970,7 +1005,7 @@ export class AnonTokenPool {
           if (generation !== this.generation) return; // signed out meanwhile
           bucket.lastFailure = null;
           bucket.tokens.push(...pooled);
-          if (bucket.tokens.length > MAX_POOL) bucket.tokens.length = MAX_POOL;
+          if (bucket.tokens.length > cap) bucket.tokens.length = cap;
           this.persist(context);
           return;
         } finally {

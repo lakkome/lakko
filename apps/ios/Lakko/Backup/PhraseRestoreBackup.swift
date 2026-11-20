@@ -100,6 +100,36 @@ enum PhraseRestoreBackup {
     /// first binding is minted from the slot. One that runs after it (a
     /// retried restore) re-mints as the bundle path does
     /// (``ChatRepository/rebindAfterStateBundle(accountIdB64:)``).
+    /// The own predecessors of a backup alone (the first step of
+    /// ``apply(_:accountIdB64:context:defaults:ownPredecessors:)``): what a
+    /// device parked for the account's earlier keys (G-56) takes from a
+    /// backup it already applied once. Returns how many seeds are held after
+    /// (`0` when the backup carries none or the slot could not be written).
+    @discardableResult
+    static func applyOwnPredecessors(
+        _ parsed: ParsedBackupPayload,
+        accountIdB64: String,
+        context: String,
+        defaults: UserDefaults = .standard,
+        ownPredecessors: OwnPredecessorStoring = KeychainOwnPredecessorStore()
+    ) -> Int {
+        guard !parsed.ownPredecessors.isEmpty else { return 0 }
+        do {
+            return try StateBundle.storeOwnPredecessors(
+                parsed.ownPredecessors.map {
+                    StateBundle.OwnPredecessor(
+                        seedB64: $0.seed.base64EncodedString(),
+                        adoptedAtMs: Int64(clamping: $0.adoptedAtMs))
+                },
+                accountIdB64: accountIdB64,
+                store: ownPredecessors,
+                adoptions: PredecessorMailbox.AdoptionStore(defaults: defaults))
+        } catch {
+            NSLog("backup restore (\(context)): the account's own predecessors were not stored")
+            return 0
+        }
+    }
+
     @discardableResult
     static func apply(
         _ parsed: ParsedBackupPayload,
@@ -110,21 +140,9 @@ enum PhraseRestoreBackup {
     ) -> AppliedBackup {
         var applied = AppliedBackup()
 
-        if !parsed.ownPredecessors.isEmpty {
-            do {
-                applied.ownPredecessors = try StateBundle.storeOwnPredecessors(
-                    parsed.ownPredecessors.map {
-                        StateBundle.OwnPredecessor(
-                            seedB64: $0.seed.base64EncodedString(),
-                            adoptedAtMs: Int64(clamping: $0.adoptedAtMs))
-                    },
-                    accountIdB64: accountIdB64,
-                    store: ownPredecessors,
-                    adoptions: PredecessorMailbox.AdoptionStore(defaults: defaults))
-            } catch {
-                NSLog("backup restore (\(context)): the account's own predecessors were not stored")
-            }
-        }
+        applied.ownPredecessors = applyOwnPredecessors(
+            parsed, accountIdB64: accountIdB64, context: context, defaults: defaults,
+            ownPredecessors: ownPredecessors)
 
         // The backup does not carry the inbox metadata, so the reconstructed
         // request holds sentinels (ADR-0021): a negative messageId, a zero
@@ -345,7 +363,7 @@ public enum RestoredDeviceStore {
             accountIdB64: accountIdB64, defaults: defaults)
     }
 
-    /// The first conversation arrived: neither the card nor the banner shows
+    /// The first conversation arrived: the card does not show
     /// again.
     public static func noteConversationArrived(accountIdB64: String, defaults: UserDefaults = .standard) {
         guard var record = load(accountIdB64: accountIdB64, defaults: defaults),
@@ -368,26 +386,68 @@ public enum RestoredDeviceStore {
     }
 }
 
+/// Whether another device of the account answered this device's
+/// DeviceGroup rejoin knock (ADR-0081 third amendment): the input of section
+/// 7.2 that decides whether the card shows. Written when the rejoin decides,
+/// per account in `UserDefaults`, so a restart shows the same state; the
+/// latest decision replaces an earlier one. Removed by
+/// ``AccountLocalDataWipe`` with the restored marker.
+public enum RestoredRejoinAnswerStore {
+
+    public enum Answer: String, Codable, Equatable {
+        /// A presence note or a Welcome came back within the answer window.
+        case answered
+        /// Nobody answered, or no other device was listed: this device
+        /// founded the DeviceGroup.
+        case founded
+    }
+
+    static let keyPrefix = "lakko.devicegroup.rejoin-answer.v1."
+
+    static func key(accountIdB64: String) -> String { keyPrefix + accountIdB64 }
+
+    public static func load(accountIdB64: String, defaults: UserDefaults = .standard) -> Answer? {
+        defaults.string(forKey: key(accountIdB64: accountIdB64)).flatMap(Answer.init(rawValue:))
+    }
+
+    public static func record(
+        _ answer: Answer, accountIdB64: String, defaults: UserDefaults = .standard
+    ) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        defaults.set(answer.rawValue, forKey: key(accountIdB64: accountIdB64))
+    }
+
+    public static func clear(accountIdB64: String, defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: key(accountIdB64: accountIdB64))
+    }
+}
+
 /// What the chat list says about a restored device, pure (section 7.2).
 public enum RestoredListNotice: Equatable {
     /// The ordinary list.
     case none
     /// `chats.restored.card` with the button to Contacts.
     case card
-    /// `chats.restored.banner_other_devices`.
-    case banner
 
     /// - Parameters:
-    ///   - record: the marker, `nil` on a device that was not restored.
+    ///   - record: the marker, `nil` on a device that was not restored. Its
+    ///     `knownConversations` is how many conversations the backup named.
     ///   - listEmpty: no conversation is on the list.
-    ///   - otherDeviceSignedIn: `nil` while that is not known yet.
+    ///   - rejoinAnswer: whether another device answered this device's
+    ///     DeviceGroup rejoin; `nil` while the rejoin has not decided. The
+    ///     card shows only when this device founded: when another device
+    ///     answered, it is adding this one and the list says nothing (a
+    ///     person cannot act on that background work). Whether another
+    ///     device is merely listed in the directory plays no part: a lost
+    ///     device stays listed.
     public static func decide(
-        record: RestoredDeviceStore.Record?, listEmpty: Bool, otherDeviceSignedIn: Bool?
+        record: RestoredDeviceStore.Record?, listEmpty: Bool,
+        rejoinAnswer: RestoredRejoinAnswerStore.Answer?
     ) -> RestoredListNotice {
         guard let record, record.awaitingFirstConversation, listEmpty,
-              let otherDeviceSignedIn else { return .none }
-        if otherDeviceSignedIn { return .banner }
-        return record.knownConversations > 0 ? .card : .none
+              record.knownConversations > 0, rejoinAnswer == .founded else { return .none }
+        return .card
     }
 }
 

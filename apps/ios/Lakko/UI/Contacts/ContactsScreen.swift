@@ -43,9 +43,9 @@ public struct ContactsScreen: View {
     @State private var scanPresented = false
     @State private var addMenuOpen = false
     @State private var sentExpanded = false
-    /// ADR-0089 / UX 1.1 — the request whose `Block` asks for confirmation.
+    /// ADR-0098 / UX 1.1 — the request whose `Block` asks for confirmation.
     @State private var blockingRequest: BlockingRequest?
-    /// ADR-0089 / UX 2.1 — the report sheet for a request.
+    /// ADR-0098 / UX 2.1 — the report sheet for a request.
     @State private var reportRequest: ReportRequest?
 
     struct BlockingRequest: Identifiable {
@@ -194,7 +194,7 @@ public struct ContactsScreen: View {
             .overlay {
                 if showsEmptyState {
                     ContentUnavailableView {
-                        Label(l10n.t("contacts.list.empty.title"), systemImage: "person.crop.circle.badge.plus")
+                        Label(l10n.t("contacts.list.empty.title"), icon: .personCirclePlus, size: 48, relativeTo: nil)
                     } description: {
                         Text(l10n.t("contacts.list.empty.body"))
                     } actions: {
@@ -215,7 +215,7 @@ public struct ContactsScreen: View {
         .navigationTitle(l10n.t("nav.contacts"))
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
-            // ADR-0089 step 3 — a suspended account adds no contacts.
+            // ADR-0098 step 3 — a suspended account adds no contacts.
             if !accountSuspended {
                 ToolbarItem(placement: .topBarTrailing) {
                     addMenu
@@ -224,14 +224,14 @@ public struct ContactsScreen: View {
         }
         .lakkoActionSheet(isPresented: $addMenuOpen) {
             [
-                .action(l10n.t("contacts.add.share_invite"), systemImage: "link") { inviteLinksPresented = true },
-                .action(l10n.t("contacts.scan_qr"), systemImage: "qrcode.viewfinder") { scanPresented = true },
+                .action(l10n.t("contacts.add.share_invite"), icon: .link) { inviteLinksPresented = true },
+                .action(l10n.t("contacts.scan_qr"), icon: .qrcodeScan) { scanPresented = true },
             ]
         }
         .sheet(isPresented: $inviteLinksPresented) {
             InviteLinksSheet(viewModel: viewModel, onDismiss: { inviteLinksPresented = false })
         }
-        // ADR-0089 / UX 1.2 — Block asks first.
+        // ADR-0098 / UX 1.2 — Block asks first.
         .lakkoDialog(item: $blockingRequest) { pending in
             LakkoDialogContent(
                 title: l10n.t("block.confirm.title", texts: ["name": pending.name]),
@@ -283,7 +283,7 @@ public struct ContactsScreen: View {
     /// (`docs/ux/call-links.md` section 3), not in a menu about contacts.
     private var addMenu: some View {
         Button { addMenuOpen = true } label: {
-            Image(systemName: "person.badge.plus")
+            LkIconView(.personPlus, size: 24)
         }
         .accessibilityLabel(l10n.t("contacts.list.add"))
     }
@@ -383,6 +383,9 @@ private struct SentRequestRow: View {
     @ObservedObject private var l10n = Localization.shared
     let request: SentContactRequest
     let onDismiss: () -> Void
+    /// ADR-0084, UX profile-screen section 7 — the photo's video plays while
+    /// a pointer hovers the row; `.onHover` never fires for a finger.
+    @State private var hovering = false
 
     var body: some View {
         let line = ContactListPresentation.sentRow(request)
@@ -391,8 +394,9 @@ private struct SentRequestRow: View {
                 name: line.name ?? "",
                 identity: request.recipientAccountIdB64,
                 size: 40,
-                placeholderSymbol: "person.fill",
-                photo: request.recipientKeyB64.flatMap(base64Decode).map { .person($0) }
+                placeholderIcon: .personFill,
+                photo: request.recipientKeyB64.flatMap(base64Decode).map { .person($0) },
+                playsVideo: hovering
             )
             VStack(alignment: .leading, spacing: 2) {
                 Text(line.name ?? l10n.t("contacts.request.someone"))
@@ -411,6 +415,8 @@ private struct SentRequestRow: View {
                 .buttonStyle(.borderless)
                 .accessibilityLabel(l10n.t("contacts.list.sent_dismiss"))
         }
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
     }
 }
 
@@ -441,6 +447,9 @@ enum ContactRowId: Hashable {
 private struct InvitedRow: View {
     @ObservedObject private var l10n = Localization.shared
     let contact: PendingContact
+    /// ADR-0084, UX profile-screen section 7 — the photo's video plays while
+    /// a pointer hovers the row; `.onHover` never fires for a finger.
+    @State private var hovering = false
 
     var body: some View {
         let stated = PendingContacts.name(contact)
@@ -450,8 +459,9 @@ private struct InvitedRow: View {
                     name: stated ?? "",
                     identity: base64Encode(contact.signaturePubkey),
                     size: 40,
-                    placeholderSymbol: "person.fill",
-                    photo: .person(contact.signaturePubkey)
+                    placeholderIcon: .personFill,
+                    photo: .person(contact.signaturePubkey),
+                    playsVideo: hovering
                 )
                 VStack(alignment: .leading, spacing: 2) {
                     Text(stated ?? l10n.t("invite.contact.page.unnamed"))
@@ -464,6 +474,8 @@ private struct InvitedRow: View {
                 }
             }
             .padding(.vertical, 2)
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
         }
     }
 }
@@ -472,6 +484,9 @@ private struct InvitedRow: View {
 /// detail through the tab's route table.
 private struct ContactRow: View {
     let contact: AcceptedContact
+    /// ADR-0084, UX profile-screen section 7 — the photo's video plays while
+    /// a pointer hovers the row; `.onHover` never fires for a finger.
+    @State private var hovering = false
 
     var body: some View {
         ResolvedName(signatureKey: contact.request.fromPubkey) { resolved in
@@ -481,8 +496,9 @@ private struct ContactRow: View {
                         name: resolved.isPlaceholder ? "" : resolved.name,
                         identity: base64Encode(contact.request.fromPubkey),
                         size: 40,
-                        placeholderSymbol: "person.fill",
-                        photo: .person(contact.request.fromPubkey)
+                        placeholderIcon: .personFill,
+                        photo: .person(contact.request.fromPubkey),
+                        playsVideo: hovering
                     )
                     VStack(alignment: .leading, spacing: 2) {
                         Text(resolved.name)
@@ -495,6 +511,8 @@ private struct ContactRow: View {
                     }
                 }
                 .padding(.vertical, 2)
+                .contentShape(Rectangle())
+                .onHover { hovering = $0 }
             }
         }
     }
@@ -536,11 +554,14 @@ struct IncomingRequestRow: View {
     let accepting: Bool
     let onAccept: () -> Void
     let onDecline: () -> Void
-    /// ADR-0089 / UX 1.1, 2.1 — the row's overflow: Block and Report, each
+    /// ADR-0098 / UX 1.1, 2.1 — the row's overflow: Block and Report, each
     /// handed the name the row shows.
     var onBlock: (String) -> Void = { _ in }
     var onReport: (String) -> Void = { _ in }
     @State private var overflowOpen = false
+    /// ADR-0084, UX profile-screen section 7 — the photo's video plays while
+    /// a pointer hovers the row; `.onHover` never fires for a finger.
+    @State private var hovering = false
 
     var body: some View {
         ResolvedName(signatureKey: request.fromPubkey) { resolved in
@@ -549,8 +570,9 @@ struct IncomingRequestRow: View {
                     name: resolved.isPlaceholder ? "" : resolved.name,
                     identity: base64Encode(request.fromPubkey),
                     size: 40,
-                    placeholderSymbol: "person.fill",
-                    photo: .person(request.fromPubkey)
+                    placeholderIcon: .personFill,
+                    photo: .person(request.fromPubkey),
+                    playsVideo: hovering
                 )
                 VStack(alignment: .leading, spacing: 6) {
                     Text(resolved.isPlaceholder ? l10n.t("contacts.request.someone") : resolved.name)
@@ -585,7 +607,7 @@ struct IncomingRequestRow: View {
                         .controlSize(.small)
                         .disabled(accepting)
                         Button { overflowOpen = true } label: {
-                            Image(systemName: "ellipsis")
+                            LkIconView(.ellipsis, size: 20)
                                 .frame(minWidth: 28, minHeight: 28)
                         }
                         .buttonStyle(.bordered)
@@ -597,10 +619,10 @@ struct IncomingRequestRow: View {
                     .lakkoActionSheet(isPresented: $overflowOpen) {
                         let name = resolved.isPlaceholder ? l10n.t("contacts.request.someone") : resolved.name
                         return [
-                            .action(l10n.t("block.action"), systemImage: "hand.raised", destructive: true) {
+                            .action(l10n.t("block.action"), icon: .personCircleXmark, destructive: true) {
                                 onBlock(name)
                             },
-                            .action(l10n.t("report.action"), systemImage: "flag", destructive: true) {
+                            .action(l10n.t("report.action"), icon: .flag, destructive: true) {
                                 onReport(name)
                             },
                         ]
@@ -614,6 +636,8 @@ struct IncomingRequestRow: View {
                 }
             }
             .padding(.vertical, 4)
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
         }
     }
 }

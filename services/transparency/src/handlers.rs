@@ -41,6 +41,7 @@ use base64::engine::general_purpose::{
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
+use crate::metrics::AppendOutcome;
 use crate::AppState;
 
 /// Maximum identity-pubkey length we accept on append. Ed25519 is 32
@@ -125,48 +126,67 @@ pub(crate) struct AppendRes {
 /// TOFU (a self-sig does not PREVENT first-entry squatting — that residual is
 /// detected via CONIKS self-monitoring + the ADR-0016 fail-closed peer gate).
 pub(crate) async fn append(
+    state: State<AppState>,
+    req: Json<AppendReq>,
+) -> Result<Json<AppendRes>, (StatusCode, &'static str)> {
+    append_checked(state, req)
+        .await
+        .map_err(|(outcome, refusal)| {
+            crate::metrics::append(outcome);
+            refusal
+        })
+}
+
+/// The body of [`append`]. A refusal carries its ADR-0096 outcome; the two
+/// success outcomes (`appended`, `unchanged`) are counted in the store,
+/// where they are decided.
+async fn append_checked(
     State(state): State<AppState>,
     Json(req): Json<AppendReq>,
-) -> Result<Json<AppendRes>, (StatusCode, &'static str)> {
+) -> Result<Json<AppendRes>, (AppendOutcome, (StatusCode, &'static str))> {
+    let invalid = |r: (StatusCode, &'static str)| (AppendOutcome::Invalid, r);
     let username_hash_vec = B64.decode(req.username_hash_b64.as_bytes()).map_err(|_| {
-        (
+        invalid((
             StatusCode::BAD_REQUEST,
             "username_hash_b64 not valid base64",
-        )
+        ))
     })?;
     let username_hash: [u8; 32] = username_hash_vec
         .as_slice()
         .try_into()
-        .map_err(|_| (StatusCode::BAD_REQUEST, "username_hash must be 32 bytes"))?;
+        .map_err(|_| invalid((StatusCode::BAD_REQUEST, "username_hash must be 32 bytes")))?;
 
     let identity_pubkey = B64
         .decode(req.identity_pubkey_b64.as_bytes())
         .map_err(|_| {
-            (
+            invalid((
                 StatusCode::BAD_REQUEST,
                 "identity_pubkey_b64 not valid base64",
-            )
+            ))
         })?;
     if identity_pubkey.is_empty() || identity_pubkey.len() > MAX_PUBKEY_LEN {
-        return Err((
+        return Err(invalid((
             StatusCode::BAD_REQUEST,
             "identity_pubkey must be 1..=64 bytes",
-        ));
+        )));
     }
 
     // G-30 #2 (ADR-0019): decode the optional client leaf authorisation.
-    let leaf_auth: Option<Vec<u8>> = match req.leaf_auth_b64.as_deref() {
-        Some(s) => Some(
-            B64.decode(s.as_bytes())
-                .map_err(|_| (StatusCode::BAD_REQUEST, "leaf_auth_b64 not valid base64"))?,
-        ),
-        None => None,
-    };
+    let leaf_auth: Option<Vec<u8>> =
+        match req.leaf_auth_b64.as_deref() {
+            Some(s) => Some(B64.decode(s.as_bytes()).map_err(|_| {
+                invalid((StatusCode::BAD_REQUEST, "leaf_auth_b64 not valid base64"))
+            })?),
+            None => None,
+        };
     // Presence policy: when configured to require leaf authorisation, an absent
     // value is the operator-side reject. The store still verifies a PRESENT
     // value regardless of this flag (an invalid auth is always refused).
     if state.require_leaf_auth && leaf_auth.is_none() {
-        return Err((StatusCode::FORBIDDEN, "leaf authorisation required"));
+        return Err((
+            AppendOutcome::LeafAuthMissing,
+            (StatusCode::FORBIDDEN, "leaf authorisation required"),
+        ));
     }
 
     // ADR-0036 S4: decode the optional auth-attested genesis attestation. Its
@@ -175,10 +195,10 @@ pub(crate) async fn append(
     // is a genesis or a rotation.
     let genesis_attest: Option<Vec<u8>> = match req.genesis_attest_b64.as_deref() {
         Some(s) => Some(B64.decode(s.as_bytes()).map_err(|_| {
-            (
+            invalid((
                 StatusCode::BAD_REQUEST,
                 "genesis_attest_b64 not valid base64",
-            )
+            ))
         })?),
         None => None,
     };
@@ -202,11 +222,17 @@ pub(crate) async fn append(
         .map_err(|e| match e {
             crate::store::StoreError::Unauthorised(detail) => {
                 tracing::warn!(detail, "transparency append refused: leaf authorisation");
-                (StatusCode::FORBIDDEN, "leaf authorisation rejected")
+                (
+                    AppendOutcome::Refused,
+                    (StatusCode::FORBIDDEN, "leaf authorisation rejected"),
+                )
             },
             other => {
                 tracing::error!(error = %other, "transparency append failed");
-                (StatusCode::INTERNAL_SERVER_ERROR, "append failed")
+                (
+                    AppendOutcome::Error,
+                    (StatusCode::INTERNAL_SERVER_ERROR, "append failed"),
+                )
             },
         })?;
 

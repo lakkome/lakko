@@ -41,6 +41,15 @@ public struct ChannelPublisherKeys: Equatable, Sendable {
     public let seed: Data
     /// 32-byte Ed25519 signing-key seed.
     public let signingKeySeed: Data
+    /// The channel epoch `seed` serves: the PublisherGroup epoch it was read
+    /// at (owner and co-publisher alike: only the owner commits, and each of
+    /// its commits has exactly one reseal moving the channel service by
+    /// one). Never stored: re-derived from the group whenever the keys are
+    /// built or refreshed. `nil`: not known yet (keys rebuilt at sign-in
+    /// before the group was opened); the seed then serves the channel's
+    /// current epoch, the rule before this field. See
+    /// ``ChannelPublisherSeed``.
+    public var seedEpoch: UInt32? = nil
 }
 
 /// Subscriber-side X25519 keypair (Phase 4b G4-3c).
@@ -127,7 +136,8 @@ public enum ChannelsComposer {
         accountIdB64: String?,
         channelIdHex: String,
         existingSigningSeed: Data? = nil,
-        joinedGroupId: Data? = nil
+        joinedGroupId: Data? = nil,
+        mayFound: Bool = false
     ) throws -> ChannelPublisherKeys {
         let channelId = try channelIdFromHex(channelIdHex)
         // ADR-0078 section 6 — a co-published channel's group id is the
@@ -152,6 +162,7 @@ public enum ChannelsComposer {
         // `crates/lakko-mls/src/publisher_group.rs` for the
         // Rust-core invariant.
         let seedBytes: Data
+        var groupEpoch: UInt64?
         do {
             // ADR-0057 — a PublisherGroup founded here is marked, so its first
             // journal claim may reset one the same root claimed before.
@@ -162,16 +173,19 @@ public enum ChannelsComposer {
                     throw ChannelsComposerError.ffi("the co-published group is not in this provider")
                 }
                 group = joined
-            } else if let existing = try LakkoCore.publisherGroupLoad(identity: identity, channelId: channelId) {
+            } else if let existing = try CoPublisher.loadPublisherGroup(
+                identity: identity, channelIdHex: channelIdHex) {
                 group = existing
             } else {
-                group = try LakkoCore.publisherGroupOpenOrCreate(
-                    identity: identity,
-                    channelId: channelId
-                )
-                CoPublisher.markFounded(group, accountIdB64: accountIdB64)
+                // ADR-0090 — only New channel (and decision A's re-founding)
+                // founds; anywhere else a missing group means this device
+                // reads the channel and waits to be admitted.
+                guard mayFound else { throw CoPublisherError.notOnThisDevice }
+                group = try CoPublisher.foundPublisherGroup(
+                    identity: identity, accountIdB64: accountIdB64, channelIdHex: channelIdHex)
             }
             seedBytes = try group.channelSeed(identity: identity)
+            groupEpoch = try? group.epoch()
         } catch let FfiError.Group(msg) {
             // Retired v1 state refuses here and cannot be repaired.
             if msg.contains(LegacyChannelV1.rustRefusalMarker) {
@@ -204,7 +218,8 @@ public enum ChannelsComposer {
         }
         return ChannelPublisherKeys(
             seed: seed,
-            signingKeySeed: signer.toSeed()
+            signingKeySeed: signer.toSeed(),
+            seedEpoch: groupEpoch.map { UInt32(clamping: $0) }
         )
     }
 

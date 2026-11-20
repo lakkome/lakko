@@ -1072,3 +1072,27 @@ a garbage address. The flag belongs to arm64 only. Not run to confirm.
 device run has to show the capability line with both setters `yes`, the
 probe's "passed" line, and `ask=` values followed by the measured delay of
 that receiver over the next readings.
+
+## Note, 2026-11-10: a native copy is sized at its own source
+
+On a live call on the test stack the Pixel 7a reported its light sender at
+1280x720, at its 150 kbit/s ceiling, for the whole call. The engine's log
+shows why: the light encoder was created at 320x180 (the encoding's
+`scaleResolutionDownBy` 4 of the 1280x720 capture), and 0.3 s later the
+hardware encoder was re-initialised at 1280x720 by a frame of that size,
+without a new `initEncode`. The frames reaching the copy's encoder were not
+scaled by the encoding's factor.
+
+Each native copy already has a video source of its own (`CapturerFan`), so
+Android and iOS now size a copy there: the copy's source is asked for the
+capture divided by the copy's factor (`adaptOutputFormat`; 320x180 for the
+light copy, 640x360 for the middle one), and the copy's encoding carries
+`scaleResolutionDownBy` 1, so the picture is never scaled twice. A source
+that refuses the size gives no copy on Android.
+
+Seen on the Pixel 7a after the change, in a call alone on the test stack:
+the light sender at 320x180 and about 150 kbit/s for 30 s, its encoder
+never re-initialised. iOS has the same change and its unit tests; it has
+not been measured with a camera. The web client is unchanged: a browser
+applies the factor to the cloned track it sends, and this was not
+re-measured here.

@@ -319,6 +319,31 @@ public final class CallUiState: ObservableObject {
     /// Applies a saved name to the live call; set by the call's adapter.
     private var callNameSave: ((String) -> Void)?
 
+    // MARK: - The call's chat (`docs/ux/calls.md` section 4.1.4)
+
+    /// The chat of a group or link call: its messages, panel, unread count
+    /// and preview. Observed on its own by the views that draw it;
+    /// ``CallChatModel/available`` is `false` until the call's adapter wires
+    /// the send, which a one-to-one call never does.
+    let chat = CallChatModel()
+    /// Whether the call carries a chat, and whether its panel is open:
+    /// mirrored from ``chat`` so the call screen re-lays its tiles and row on
+    /// these two alone, not on every message.
+    @Published private(set) var chatAvailable = false
+    @Published private(set) var chatPanelOpen = false
+    private var chatMirrors: [AnyCancellable] = []
+
+    public init() {
+        // The name over a bubble is the name the sender's tile shows now.
+        chat.tileName = { [weak self] peerId in
+            self?.participants.first(where: { $0.id == "peer-\(peerId)" })?.displayName
+        }
+        chatMirrors = [
+            chat.$available.removeDuplicates().sink { [weak self] in self?.chatAvailable = $0 },
+            chat.$panelOpen.removeDuplicates().sink { [weak self] in self?.chatPanelOpen = $0 },
+        ]
+    }
+
     /// The call's adapter: this call carries a name, starting at `ownName`,
     /// with `defaultName` shown when none is typed; `save` applies a new one.
     func setCallNameControl(
@@ -507,6 +532,23 @@ public final class CallUiState: ObservableObject {
             Participant(
                 id: p.id, displayName: p.displayName, isLocal: p.isLocal,
                 micOn: p.micOn, camOn: on, handRaised: p.handRaised,
+                quality: p.quality, speaking: p.speaking,
+                screenSharing: p.screenSharing
+            )
+        }
+    }
+
+    /// Set a remote participant's `micOn` by roster id: what that person
+    /// last announced about their microphone (the sealed media state of a
+    /// group / link call, the call-signalling media state of a one-to-one).
+    /// Drives the mute mark on the tile and in the participant list
+    /// (`docs/ux/group-call-grid.md` 7.2). A no-op if `id` is not in the
+    /// roster. Mirrors the web `setParticipantMic`.
+    public func setParticipantMic(_ id: String, _ on: Bool) {
+        patch(id: id) { p in
+            Participant(
+                id: p.id, displayName: p.displayName, isLocal: p.isLocal,
+                micOn: on, camOn: p.camOn, handRaised: p.handRaised,
                 quality: p.quality, speaking: p.speaking,
                 screenSharing: p.screenSharing
             )
@@ -905,6 +947,8 @@ public final class CallUiState: ObservableObject {
         self.ownCallName = ""
         self.callNameDefault = ""
         self.callNameSave = nil
+        // A chat belongs to its call.
+        chat.reset()
     }
 
     /// Seed mock state — same shape as the web `seedMockParticipants`.
@@ -1032,8 +1076,13 @@ extension CallUiState {
             let remoteTrack = session.remoteVideoTrack
             // A track handle is not a picture — `camOn` must mean the tile has
             // something to draw, or it paints a black rectangle over an avatar.
+            // A camera the other person turned off is a track `isEnabled =
+            // false` on their side, which still arrives here as a track
+            // (black frames from a web sender); their `mediaState` signal is
+            // what says it is off.
             let remotePicture = CallScreenPresentation.hasRemotePicture(
                 trackPresent: remoteTrack != nil, framesArrived: session.remoteVideoFlowing)
+                && session.remoteCameraOn
             // G3-1-conn-quality — local participant's quality dot
             // is the path quality bucketed from the live RTT.
             let tier = Self.qualityTier(forRttMs: session.rttMs)
@@ -1049,7 +1098,9 @@ extension CallUiState {
                 roster.append(
                     Participant(
                         id: "remote", displayName: self.peerName ?? "", isLocal: false,
-                        micOn: true, camOn: remotePicture,
+                        // What the other person last said about their
+                        // microphone: the mute mark (group-call-grid 7.2).
+                        micOn: session.remoteMicOn, camOn: remotePicture,
                         handRaised: false, quality: .good, speaking: false,
                         screenSharing: false
                     )
@@ -1141,6 +1192,13 @@ extension CallUiState {
         let undecryptable = session.$remoteMediaUndecryptable
             .receive(on: DispatchQueue.main)
             .sink { _ in onMain(rebuild) }
+        // The other person's microphone and camera, as they announced them.
+        let remoteMic = session.$remoteMicOn
+            .receive(on: DispatchQueue.main)
+            .sink { _ in onMain(rebuild) }
+        let remoteCamera = session.$remoteCameraOn
+            .receive(on: DispatchQueue.main)
+            .sink { _ in onMain(rebuild) }
         // The share, its track and its first frame are inputs like the rest.
         let share = session.$screenShare
             .receive(on: DispatchQueue.main)
@@ -1157,7 +1215,7 @@ extension CallUiState {
         return [
             state, localTrack, remoteTrack, mic, camera, e2ee,
             rtt, relay, down, up, videoPublish, remoteFlowing, undecryptable,
-            share, screenTrack, screenFlowing,
+            share, screenTrack, screenFlowing, remoteMic, remoteCamera,
         ]
     }
 

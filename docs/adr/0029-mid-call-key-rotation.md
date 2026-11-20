@@ -127,6 +127,33 @@ the clamp (a previous key never lingers past `OVERLAP_MAX_MS`).
   (wasm is loaded inside the worker), so it is accepted for v1; a per-leaf cache
   inside the ring is a later optimisation if a measurement shows it matters.
 
+## Amendment 2026-11-10: one set of call keys per call on the native clients
+
+Seen on an iPhone (iOS 27.2) in a call link the iPhone started: after a web
+joiner was admitted the web opened none of the iPhone's frames, sound included,
+while the iPhone showed and heard the web and both safety numbers matched. The
+iOS rekey found its encryptors and decryptors by walking
+`RTCPeerConnection.senders` / `.receivers`, which build new wrapper objects on
+every read and carry none of the transforms the shim attached as associated
+objects, so it rotated nothing; the decryptor for the joiner had been armed
+after the rekey, at the new seed. So the rekey never reached an iOS sender.
+Android kept its own list of transforms and was not affected.
+
+Decision: the native bridge (`apps/shared/sframe-bridge`) holds the keying
+state of a call in one refcounted `LakkoCallKeys` (one `CallKeyRing` and a
+generation number) that every encryptor and decryptor of the call is built on.
+A rekey is one `LakkoCallKeys::Rekey`; an encryptor compares the generation
+before each frame and derives its new seal key from the ring when it moved (a
+fresh key starts its counter at a random value, ADR-0069); a decryptor opens
+through the shared ring; the prune is one `Prune`. The per-transform `Rekey` /
+`Prune` are removed, so no platform enumerates transforms again. iOS
+(`SFrameCallKeys` in `SFrameAttach`) and Android (`me.lakko.sframe.LakkoCallKeys`,
+`CallKeysSlot`) each hold one per peer connection. An arm at a new seed rekeys
+the keys first; an arm at a seed the keys have left behind (read before a
+rekey, or a publish deferred past one) uses the current keys and never rolls
+the call back (iOS `CallKeysSeeds`, Android `CallKeysSlot`, the last 16 seeds).
+The web is unchanged: its worker holds the ring and is rekeyed by message.
+
 ## Open questions
 
 - The trigger cadence for `prune_expired` — a periodic clock tick vs. lazy on the

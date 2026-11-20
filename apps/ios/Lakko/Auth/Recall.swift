@@ -746,7 +746,7 @@ struct RecallFinishRequest: Codable, Equatable {
     /// Absent, never null, when the session is to name no device yet.
     let deviceIdB64: String?
     let statementB64: String
-    /// ADR-0089 F3 — `signIdentityProof` by the NEW key over the account id.
+    /// ADR-0098 F3 — `signIdentityProof` by the NEW key over the account id.
     let identityProofB64: String
 
     enum CodingKeys: String, CodingKey {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import AVFoundation
 import LakkoCore
 import PhotosUI
 import SwiftUI
@@ -63,18 +64,27 @@ public struct ChatScreen: View {
     // result callback. Both routes funnel into
     // ``ChatViewModel/onAttachmentPicked(bytes:mime:name:)``.
     @State private var photoPickerItems: [PhotosPickerItem] = []
-    /// ADR-0089 — the blocked set the banner, the collapsed rows and the
+    /// ADR-0098 — the blocked set the banner, the collapsed rows and the
     /// card follow.
     @ObservedObject private var blocks = BlockList.shared
-    /// ADR-0089 step 4 — the suspension marks the one-to-one's top banner
+    /// ADR-0098 step 4 — the suspension marks the one-to-one's top banner
     /// and the member list follow.
     @ObservedObject private var suspensions = SuspensionMarks.shared
-    /// ADR-0089 / UX 2.2 — the open report sheet.
+    /// ADR-0098 / UX 2.2 — the open report sheet.
     @State private var reportRequest: ReportRequest?
     /// UX 1.2 — collapsed rows of a blocked person the reader tapped open.
     @State private var revealedBlocked: Set<Int64> = []
     @State private var fileImporterPresented: Bool = false
     @State private var attachActionSheetPresented: Bool = false
+    /// ADR-0092 — the menu item picked, run once the menu sheet has gone.
+    @State private var pendingMenuItem: AttachmentMenuItem?
+    /// ADR-0092 — the editor or reader on screen.
+    @State private var contentScreen: ContentScreenRequest?
+    @State private var audioImporterPresented = false
+    /// UX 7.3 / 8.2 — `Close this poll?` / `Close this checklist?`.
+    @State private var closeConfirm: ContentCloseConfirm?
+    /// ADR-0092 section 7 — what each contact card's button says after a tap.
+    @State private var contactCardStates: [String: ContactCardButton] = [:]
     // Inline preview of an image attachment — set when a
     // bubble-chip "Open" tap resolves the bytes. Sheet
     // dismisses on `nil`.
@@ -87,7 +97,7 @@ public struct ChatScreen: View {
     @StateObject private var media: ChatMediaController
     /// ADR-0047 §4 — the caret the emoji picker inserts at.
     @StateObject private var caret = ComposerCaret()
-    /// ADR-0089 step 3 — a suspended account reads its chats: no composer,
+    /// ADR-0098 step 3 — a suspended account reads its chats: no composer,
     /// no call controls.
     @Environment(\.accountSuspended) private var accountSuspended
     /// ADR-0047 §4 — the open picker, if any.
@@ -96,7 +106,7 @@ public struct ChatScreen: View {
     /// The composer field's focus. Owned here so the view model can ask for
     /// the keyboard (choosing Reply focuses the composer,
     /// `docs/ux/message-actions.md` section 3.1).
-    @FocusState private var composerFocused: Bool
+    @State private var composerFocused = false
 
     /// ADR-0052 / section 3.1 "tap to jump" — the row a tapped quote pointed
     /// at, highlighted for about a second and a half, then `nil`.
@@ -284,7 +294,7 @@ public struct ChatScreen: View {
                     selected: request.emoji,
                     onOpenPerson: nil)
             }
-            // ADR-0089 / UX 2.2 — the report sheet; the checked follow-up
+            // ADR-0098 / UX 2.2 — the report sheet; the checked follow-up
             // (Also block / Leave the group) applies when the report goes.
             .reportSheet($reportRequest) { follow in
                 switch follow {
@@ -306,7 +316,7 @@ public struct ChatScreen: View {
     @ViewBuilder
     private var chatBody: some View {
         VStack(spacing: 0) {
-            // ADR-0089 step 4 / UX `reporting-and-moderation.md` section 3 —
+            // ADR-0098 step 4 / UX `reporting-and-moderation.md` section 3 —
             // the other person's account is suspended (verified in the
             // moderation log): one line at the top, no action, the chat still
             // works. A blocked person's banner stands alone.
@@ -399,7 +409,7 @@ public struct ChatScreen: View {
             messagesWidth = width
         }
         .background(Color.lakkoBackground)
-        // ADR-0089 step 4 — ask about the other person when the one-to-one
+        // ADR-0098 step 4 — ask about the other person when the one-to-one
         // opens (and when its roster first names them).
         .task(id: viewModel.oneToOnePeerKey) {
             if let peer = viewModel.oneToOnePeerKey { _ = await suspensions.standing(peer) }
@@ -652,27 +662,43 @@ public struct ChatScreen: View {
             }
             openedModel.chatScreenClosed()
         }
-        // 1.19c3 — Attach action sheet → Photo / Document.
-        // Compactly hosts the two picker entry points without
-        // crowding the composer toolbar with two buttons.
-        .lakkoActionSheet(
-            isPresented: $attachActionSheetPresented,
-            title: l10n.t("chat.composer.attach")
-        ) {[
-            .action(l10n.t("chat.composer.photo_library"), systemImage: "photo.on.rectangle") {
-                // Trigger the PhotosPicker by giving it a fresh
-                // empty selection — the PhotosPicker `Button`
-                // below opens immediately when bound to a
-                // populated $photoPickerItems. SwiftUI's
-                // `PhotosPicker` doesn't have a programmatic
-                // show-trigger; we route through a transparent
-                // overlay (`photoPickerTrigger` below).
-                photoPickerOpenRequested = true
-            },
-            .action(l10n.t("chat.media.file"), systemImage: "doc") {
-                fileImporterPresented = true
-            },
-        ]}
+        // ADR-0092 / `docs/ux/attachments.md` section 2 — the one menu the
+        // paperclip opens: rows from the core, an in-app bottom sheet. The
+        // picked row runs once the sheet has gone, so a picker it presents is
+        // not refused by the dismissal still in flight.
+        .sheet(isPresented: $attachActionSheetPresented, onDismiss: runPendingMenuItem) {
+            AttachmentMenuSheet(rows: viewModel.attachmentMenuRows(
+                hasCamera: ContentDevice.hasCamera, hasLocation: ContentDevice.hasLocation)
+            ) { item in
+                pendingMenuItem = item
+                attachActionSheetPresented = false
+            }
+        }
+        .fullScreenCover(item: $contentScreen) { request in
+            contentScreenView(request)
+        }
+        .lakkoDialog(item: $closeConfirm) { confirm in
+            LakkoDialogContent(
+                title: l10n.t(confirm.isPoll ? "poll.close_confirm" : "checklist.close_confirm"),
+                message: nil, field: nil,
+                actions: [
+                    .danger(l10n.t(confirm.isPoll ? "poll.close" : "checklist.close")) {
+                        viewModel.closeContent(messageId: confirm.message.messageId)
+                    },
+                    .cancel(),
+                ])
+        }
+        .background(
+            // UX section 6 — the document picker filtered to audio. On its own
+            // view: SwiftUI keeps one file importer per view.
+            Color.clear.fileImporter(
+                isPresented: $audioImporterPresented, allowedContentTypes: [.audio],
+                allowsMultipleSelection: true
+            ) { result in
+                guard case .success(let urls) = result else { return }
+                viewModel.tray.add(urls.map { .audio($0) })
+            }
+        )
         // PhotosPicker — multi-select, resolved on `.onChange`.
         .photosPicker(
             isPresented: $photoPickerOpenRequested,
@@ -687,11 +713,12 @@ public struct ChatScreen: View {
             // after kicking off the work so the same photo can
             // be re-picked later if the user wants to attach it
             // again.
+            // `docs/ux/media-messages.md` section 11 — the picked items join
+            // the composer tray, in the order picked.
             let items = newItems
             photoPickerItems = []
-            for item in items {
-                Task { await sendPicked(item) }
-            }
+            guard !items.isEmpty else { return }
+            Task { await addPicked(items, to: viewModel.tray) }
         }
         // File importer for arbitrary files.
         .fileImporter(
@@ -701,17 +728,18 @@ public struct ChatScreen: View {
         ) { result in
             switch result {
             case .success(let urls):
+                // Attachments UX section 4 — the picked files join the tray
+                // as file chips; a file over the cap is not added and says so.
+                var sources: [ComposerTraySource] = []
                 for url in urls {
-                    Task {
-                        if let payload = readFileURL(url) {
-                            await viewModel.onAttachmentPicked(
-                                bytes: payload.bytes,
-                                mime: payload.mime,
-                                name: payload.name
-                            )
-                        }
+                    guard let payload = readFileURL(url) else { continue }
+                    guard payload.bytes.count <= AttachmentBridge.maxAttachmentBytes else {
+                        viewModel.tray.report(.key("attach.preview.file_too_big"))
+                        continue
                     }
+                    sources.append(.file(payload.bytes, name: payload.name ?? "file", mime: payload.mime))
                 }
+                viewModel.tray.add(sources)
             case .failure:
                 // Cancelled or denied — silent.
                 break
@@ -800,6 +828,29 @@ public struct ChatScreen: View {
     }
 
     /// The last row the timeline draws, for the scroll-to-bottom.
+    /// The anchor at the end of the timeline (see the list's last view).
+    private static let timelineBottomId = "timeline-bottom"
+
+    /// Scroll to the end of the timeline, and again once the lazy stack has
+    /// measured the new rows: a photo or a video note is far taller than the
+    /// estimate it is first laid out with, and one scroll stopped short of it
+    /// (seen on an iPhone 2026-11-10: the newest video note half off screen).
+    private func scrollToNewest(_ proxy: ScrollViewProxy, animated: Bool = true) {
+        if animated {
+            withAnimation {
+                proxy.scrollTo(Self.timelineBottomId, anchor: .bottom)
+            }
+        } else {
+            proxy.scrollTo(Self.timelineBottomId, anchor: .bottom)
+        }
+        Task { @MainActor in
+            for delayMs in [0, 150, 600] {
+                try? await Task.sleep(for: .milliseconds(delayMs))
+                proxy.scrollTo(Self.timelineBottomId, anchor: .bottom)
+            }
+        }
+    }
+
     private var lastDrawnMessageId: Int64? {
         viewModel.messages.last(where: {
             !ChatTimeline.isHiddenSystemRow($0, isGroup: viewModel.presentsAsGroup)
@@ -838,8 +889,7 @@ public struct ChatScreen: View {
                 viewModel.repositoryMarkSeen(oldest)
             } label: {
                 ZStack(alignment: .topTrailing) {
-                    Image(systemName: "heart.fill")
-                        .font(.system(size: 17, weight: .semibold))
+                    LkIconView(.heartFill, size: 20, relativeTo: nil)
                         .foregroundStyle(Color.lakkoAccent)
                         .frame(width: 44, height: 44)
                         .background(Circle().fill(Color.lakkoSurface))
@@ -937,8 +987,17 @@ public struct ChatScreen: View {
                                 readState: viewModel.readState(of: entry.message),
                                 onRetrySend: { viewModel.onRetrySend(localId: $0) },
                                 onPreview: openAttachmentPreview,
-                                onEdit: { viewModel.beginEdit(entry.message) },
+                                onEdit: {
+                                    if entry.message.content != nil {
+                                        contentScreen = .article(editing: entry.message)
+                                    } else {
+                                        viewModel.beginEdit(entry.message)
+                                    }
+                                },
                                 onDelete: { viewModel.deleteMessage(entry.message) },
+                                contentContext: entry.message.content == nil ? nil : contentContext,
+                                contentActions: contentMenuActions(entry.message),
+                                onContentAction: { performContentAction($0, entry.message) },
                                 onReact: { emoji in
                                     viewModel.react(to: entry.message, emoji: emoji)
                                 },
@@ -989,7 +1048,7 @@ public struct ChatScreen: View {
                                 selecting: selection != nil,
                                 onSelect: { enterSelection(with: entry.message.messageId) },
                                 quotesOwnMessage: viewModel.quotesOwnMessage(entry.message),
-                                // ADR-0089 / UX 2.1 — Report on someone else's
+                                // ADR-0098 / UX 2.1 — Report on someone else's
                                 // message: its author, with this message.
                                 // Built on tap: it reads the whole timeline.
                                 onReport: viewModel.canReport(entry.message)
@@ -1046,6 +1105,13 @@ public struct ChatScreen: View {
                         .padding(.top, 12)
                         .accessibilityElement(children: .combine)
                     }
+                    // The very end of the timeline: what "scroll to the
+                    // newest" scrolls to, so the last row is whole even
+                    // while the lazy stack is still measuring it.
+                    Color.clear
+                        .frame(height: 1)
+                        .id(Self.timelineBottomId)
+                        .accessibilityHidden(true)
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
@@ -1067,25 +1133,17 @@ public struct ChatScreen: View {
                 // (`docs/ux/conversation-info.md` section 3).
                 guard !timelineOpenedAtNewest else { return }
                 timelineOpenedAtNewest = true
-                guard let last = lastDrawnMessageId else { return }
-                scrollProxy.scrollTo(last, anchor: .bottom)
-                Task { @MainActor in
-                    scrollProxy.scrollTo(last, anchor: .bottom)
-                }
+                guard lastDrawnMessageId != nil else { return }
+                scrollToNewest(scrollProxy, animated: false)
             }
             .onChange(of: viewModel.messages.count) { _, _ in
                 // Scroll to the latest message whenever the list grows.
-                if let last = lastDrawnMessageId {
-                    withAnimation {
-                        scrollProxy.scrollTo(last, anchor: .bottom)
-                    }
-                }
+                guard lastDrawnMessageId != nil else { return }
+                scrollToNewest(scrollProxy)
             }
             .onChange(of: media.pendingSends.count) { old, new in
-                guard new > old, let last = media.pendingSends.last else { return }
-                withAnimation {
-                    scrollProxy.scrollTo("pending-\(last.id)", anchor: .bottom)
-                }
+                guard new > old else { return }
+                scrollToNewest(scrollProxy)
             }
             .onChange(of: quoteJump) { _, jump in
                 // ADR-0052 / section 3.1 — scroll to the quoted row (the same
@@ -1211,7 +1269,7 @@ public struct ChatScreen: View {
             // + SFrame) and a 1×1 chat stays P2P.
             viewModel.onCallButton(video: video)
         } label: {
-            Image(systemName: video ? "video" : "phone")
+            LkIconView(video ? .video : .phone, size: 24)
         }
         .accessibilityLabel(callButtonLabel(video: video))
         .disabled(viewModel.chatCallAction == .unavailable)
@@ -1238,7 +1296,7 @@ public struct ChatScreen: View {
             if case .joinable(_, let joinedCount, _) = affordance {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 10) {
-                        Image(systemName: "phone.connection.fill")
+                        LkIconView(.phoneConnectionFill, size: 20)
                             .foregroundStyle(.white)
                             .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 2) {
@@ -1342,6 +1400,14 @@ public struct ChatScreen: View {
         selectedMessagesOldestFirst.allSatisfy { $0.direction == .outgoing }
     }
 
+    /// The selection holds a message carrying a channel invitation card,
+    /// which is never forwarded (maintainer, 2026-11-13).
+    private var selectionHoldsInvitation: Bool {
+        selectedMessagesOldestFirst.contains {
+            $0.invitationLine(conversationIdHex: viewModel.groupIdHex) != nil
+        }
+    }
+
     /// Section 8 — the bar that takes the composer's slot: `Forward` and
     /// `Delete`, each with its icon and label, and the helper line under it
     /// when Delete is disabled for someone else's message (or the progress
@@ -1349,6 +1415,12 @@ public struct ChatScreen: View {
     @ViewBuilder
     private func selectionActionBar(_ selection: MessageSelection) -> some View {
         let allOwn = selectionIsAllOwn
+        // ADR-0092 — a selection holding a poll, a checklist or a card that
+        // may not be shared cannot be forwarded as a whole; nor one holding a
+        // channel invitation card (maintainer, 2026-11-13).
+        let forwardEnabled = selection.forwardEnabled(holdsInvitation: selectionHoldsInvitation)
+            && selection.forwardEnabled(
+                allForwardable: selectedMessagesOldestFirst.allSatisfy(viewModel.isForwardable))
         let helper = bulkNotice ?? selection.deleteHelper(allOwn: allOwn)
         VStack(spacing: 6) {
             HStack(spacing: 0) {
@@ -1356,36 +1428,36 @@ public struct ChatScreen: View {
                     bulkNotice = nil
                     bulkForwardOpen = true
                 } label: {
-                    Label(l10n.t("chat.message.forward"), systemImage: "arrowshape.turn.up.right")
+                    Label(l10n.t("chat.message.forward"), icon: .forward)
                         .font(.body.weight(.medium))
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(Color.lakkoAccent)
-                .disabled(!selection.forwardEnabled || bulkRunning)
-                .opacity(selection.forwardEnabled && !bulkRunning ? 1 : 0.4)
+                .disabled(!forwardEnabled || bulkRunning)
+                .opacity(forwardEnabled && !bulkRunning ? 1 : 0.4)
                 .accessibilityIdentifier("selection-forward")
                 // ADR-0065 / UX section 2 — Save acts on the whole set.
                 Button {
                     bulkNotice = nil
                     runBulkSave()
                 } label: {
-                    Label(l10n.t("chat.select.save"), systemImage: "bookmark")
+                    Label(l10n.t("chat.select.save"), icon: .bookmark)
                         .font(.body.weight(.medium))
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(Color.lakkoAccent)
-                .disabled(!selection.forwardEnabled || bulkRunning)
-                .opacity(selection.forwardEnabled && !bulkRunning ? 1 : 0.4)
+                .disabled(!selection.saveEnabled || bulkRunning)
+                .opacity(selection.saveEnabled && !bulkRunning ? 1 : 0.4)
                 .accessibilityIdentifier("selection-save")
                 Button {
                     bulkNotice = nil
                     confirmBulkDelete = true
                 } label: {
-                    Label(l10n.t("common.delete"), systemImage: "trash")
+                    Label(l10n.t("common.delete"), icon: .trash)
                         .font(.body.weight(.medium))
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .contentShape(Rectangle())
@@ -1446,6 +1518,10 @@ public struct ChatScreen: View {
     /// bubbles in their original order; on a failure stay here with the unsent
     /// ones still selected.
     private func runBulkForward(to targetGroupIdHex: String) {
+        // A channel invitation card is never forwarded (maintainer,
+        // 2026-11-13): Forward is disabled for such a selection; this is the
+        // floor.
+        guard !selectionHoldsInvitation else { return }
         let messages = selectedMessagesOldestFirst
         guard !messages.isEmpty, !bulkRunning else { return }
         bulkRunning = true
@@ -1513,11 +1589,11 @@ public struct ChatScreen: View {
 
     @ViewBuilder
     private var composer: some View {
-        // ADR-0089 step 3 — a suspended account sends nothing: one muted
+        // ADR-0098 step 3 — a suspended account sends nothing: one muted
         // line in the composer's slot, no send control.
         if accountSuspended {
             SuspendedComposerLine()
-        // ADR-0089 / UX 1.2 — in the one-to-one with a blocked person the
+        // ADR-0098 / UX 1.2 — in the one-to-one with a blocked person the
         // banner replaces the composer.
         } else if let blocked = blocks.entries.isEmpty ? nil : viewModel.blockedOneToOnePeer {
             blockedBanner(blocked)
@@ -1550,11 +1626,11 @@ public struct ChatScreen: View {
         .buttonStyle(.plain)
     }
 
-    /// ADR-0089 step 4 — the suspended peer's banner: inline, sunken, an
+    /// ADR-0098 step 4 — the suspended peer's banner: inline, sunken, an
     /// icon and one sentence, no action (Block is on the card).
     private func suspendedPeerBanner(_ key: Data) -> some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "exclamationmark.shield")
+            LkIconView(.shieldExclamation, size: 20)
                 .foregroundStyle(Color.lakkoTextMuted)
                 .accessibilityHidden(true)
             Text(l10n.t("suspended.banner", texts: [
@@ -1642,7 +1718,7 @@ public struct ChatScreen: View {
         VStack(spacing: 8) {
             // Reactions-and-emoji spec section 13 — `:word` suggestions.
             colonStrip
-            if let err = viewModel.sendError {
+            if let err = viewModel.sendError ?? viewModel.tray.problem {
                 Text(err.text)
                     .font(.footnote)
                     .foregroundStyle(Color.lakkoDanger)
@@ -1653,16 +1729,12 @@ public struct ChatScreen: View {
                     .font(.footnote)
                     .foregroundStyle(Color.lakkoDanger)
                     .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            // 1.19c3 — pending-attachments tray. Renders only
-            // when ≥1 file is staged or an upload is in
-            // flight. Each chip shows `name · size` with a ×
-            // to drop it; the chips don't preview locally
-            // because the picked bytes were freed after encrypt
-            // (re-decrypt would round-trip through storage,
-            // overkill for a composer scratch row).
-            if !viewModel.pendingAttachments.isEmpty || viewModel.uploading {
-                pendingAttachmentsTray
+            } else if media.sendStorageFull {
+                // UX storage-full — the server has no room for new files.
+                Text(l10n.t("chat.attachment.full.send"))
+                    .font(.footnote)
+                    .foregroundStyle(Color.lakkoDanger)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             // ADR-0047 §6 — the permission-denied card, above the composer.
             if let denied = media.denied {
@@ -1680,6 +1752,13 @@ public struct ChatScreen: View {
             if let armed = viewModel.replyingTo {
                 ReplyStrip(reply: armed.shown) { viewModel.cancelReply() }
             }
+            // `docs/ux/media-messages.md` section 11 — the tray, directly
+            // above the message field; hidden when empty.
+            if !viewModel.tray.tray.isEmpty || viewModel.tray.limitNotice != nil {
+                ComposerTrayView(
+                    store: viewModel.tray, callActive: media.callActive,
+                    fetchVideo: { [media] ref in try await media.mediaFile(for: ref) })
+            }
             // UX spec section 5.2: attach, the growing field, the emoji / GIF
             // picker, then a trailing button that is the microphone with an
             // empty draft and the send arrow otherwise.
@@ -1695,28 +1774,24 @@ public struct ChatScreen: View {
                     Button {
                         attachActionSheetPresented = true
                     } label: {
-                        if viewModel.uploading {
-                            ProgressView().controlSize(.small)
-                                .frame(width: 40, height: 40)
-                        } else {
-                            composerIcon("paperclip")
-                        }
+                        composerIcon(.paperclip)
                     }
                     .buttonStyle(.plain)
-                    .disabled(viewModel.uploading || viewModel.sending)
+                    .disabled(viewModel.sending)
                     .accessibilityLabel(l10n.t("chat.composer.attach"))
                     ComposerTextField(
                         text: $viewModel.draft, caret: caret, disabled: viewModel.sending,
                         onReturn: {
-                            guard !viewModel.uploading, !media.recState.isCapturing else { return }
+                            guard !media.recState.isCapturing else { return }
                             viewModel.onSendClicked()
                         },
-                        focus: $composerFocused)
+                        focus: $composerFocused,
+                        onPasteMedia: { openPastedMedia($0) })
                     // ADR-0047 §4 — the smiley opens the picker on Emoji.
                     Button {
                         picker = PickerRequest(mode: .compose, message: nil)
                     } label: {
-                        composerIcon("face.smiling")
+                        composerIcon(.faceSmiling)
                     }
                     .buttonStyle(.plain)
                     .disabled(viewModel.sending)
@@ -1728,13 +1803,14 @@ public struct ChatScreen: View {
         .animation(.easeInOut(duration: 0.15), value: media.hint)
         .padding(.horizontal, 8)
         .padding(.vertical, 8)
+        // The bar spans the screen whatever its content measures.
+        .frame(maxWidth: .infinity)
         .background(Color.lakkoSurface)
     }
 
     /// A composer icon button's face: 40 pt square, muted.
-    private func composerIcon(_ systemName: String) -> some View {
-        Image(systemName: systemName)
-            .font(.system(size: 22))
+    private func composerIcon(_ icon: LkIcon) -> some View {
+        LkIconView(icon, size: 20, relativeTo: nil)
             .foregroundStyle(Color.lakkoTextMuted)
             .frame(width: 40, height: 40)
             .contentShape(Rectangle())
@@ -1773,7 +1849,7 @@ public struct ChatScreen: View {
             Button { media.stopLocked() } label: {
                 ZStack {
                     Circle().fill(Color.lakkoDanger)
-                    Image(systemName: "stop.fill")
+                    LkIconView(.stopFill, size: 20)
                         .foregroundStyle(Color.white)
                 }
                 .frame(width: 40, height: 40)
@@ -1786,7 +1862,7 @@ public struct ChatScreen: View {
                 .frame(width: 44, height: 44)
         case .preview:
             Button { media.sendPreview() } label: {
-                sendFace { Image(systemName: "paperplane.fill") }
+                sendFace { LkIconView(.sendFill, size: 20) }
             }
             .buttonStyle(.plain)
             .accessibilityLabel(l10n.t("chat.record.send"))
@@ -1801,12 +1877,12 @@ public struct ChatScreen: View {
                             ProgressView().controlSize(.small)
                                 .tint(Color.lakkoAccentForeground)
                         } else {
-                            Image(systemName: "paperplane.fill")
+                            LkIconView(.sendFill, size: 20)
                         }
                     }
                 }
                 .buttonStyle(.plain)
-                .disabled(viewModel.sending || viewModel.uploading)
+                .disabled(viewModel.sending || !viewModel.tray.tray.canSend(hasText: draftHasText))
                 .accessibilityLabel(l10n.t("chat.composer.send"))
             } else {
                 RecordButton(media: media)
@@ -1814,144 +1890,29 @@ public struct ChatScreen: View {
         }
     }
 
-    private var composerHasContent: Bool {
+    private var draftHasText: Bool {
         !viewModel.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || !viewModel.pendingAttachments.isEmpty
-            || viewModel.uploading
     }
 
-    @ViewBuilder
-    private var pendingAttachmentsTray: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(
-                    Array(viewModel.pendingAttachments.enumerated()),
-                    id: \.offset
-                ) { idx, ref in
-                    HStack(spacing: 6) {
-                        if let thumb = ref.thumb.flatMap({
-                            MediaSessionCache.shared.cachedData(MediaSessionCache.key(for: $0))
-                        }), let image = UIImage(data: thumb) {
-                            TrayThumbnail(image: image)
-                        } else {
-                            Image(systemName: pendingChipIcon(ref))
-                                .foregroundStyle(.secondary)
-                        }
-                        VStack(alignment: .leading, spacing: 0) {
-                            Text(ref.name ?? l10n.t("chat.attachment.unnamed"))
-                                .font(.caption)
-                                .lineLimit(1)
-                            Text(AttachmentBridge.formatSize(ref.size))
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                        Button {
-                            viewModel.onRemovePendingAttachment(at: idx)
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(l10n.t("chat.composer.remove_attachment"))
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .background(Color(.secondarySystemBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                }
-                if viewModel.uploading {
-                    HStack(spacing: 6) {
-                        if let data = viewModel.uploadingThumbnail, let image = UIImage(data: data) {
-                            TrayThumbnail(image: image)
-                        }
-                        ProgressView().controlSize(.small)
-                        // Polish 1.x — surface the active pick's
-                        // file name + stage instead of a generic
-                        // "Encrypting…" caption. Falls back to
-                        // the generic copy when the stage hasn't
-                        // landed yet (the brief race between
-                        // setting `uploading = true` and the
-                        // first `uploadStage` mutation).
-                        Text(uploadCaption(viewModel.uploadStage))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
+    private var composerHasContent: Bool {
+        draftHasText || !viewModel.tray.tray.isEmpty
+    }
+
+    /// `docs/ux/attachments.md` section 2.5 — a pasted photo or video joins
+    /// the composer tray, as a picked one does.
+    private func openPastedMedia(_ providers: [NSItemProvider]) {
+        let tray = viewModel.tray
+        Task {
+            for loaded in await PastedMedia.load(providers) {
+                switch loaded {
+                case .photo(let data): tray.add([.photo(data)])
+                case .video(let url): tray.add([.video(url)])
+                case .failed(let isVideo):
+                    tray.report(
+                        .key(isVideo ? "chat.attachment.error.open_video" : "chat.attachment.error.open_photo"))
                 }
             }
-            .padding(.horizontal, 2)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func pendingChipIcon(_ ref: AttachmentRef) -> String {
-        switch InlineMedia.decision(for: ref).bubble {
-        case .video: return "video"
-        case .photo: return "photo"
-        default: return AttachmentBridge.isInlinePreviewable(ref) ? "photo" : "doc"
-        }
-    }
-
-    /// Map [``ChatViewModel/UploadStage``] to the caption shown
-    /// in the composer tray's progress chip. `nil` collapses to
-    /// a generic "Encrypting…" — matches the pre-polish copy so
-    /// the brief race window doesn't show an empty caption.
-    private func uploadCaption(_ stage: ChatViewModel.UploadStage?) -> String {
-        switch stage {
-        case .none:
-            return l10n.t("chat.upload.working")
-        case .encrypting(let fileName):
-            return l10n.t("chat.upload.encrypting", texts: ["name": fileName])
-        case .uploading(let fileName):
-            return l10n.t("chat.upload.uploading", texts: ["name": fileName])
-        }
-    }
-
-    /// UX spec section 10 — a picked library item becomes a photo or video
-    /// bubble: the video is exported to MP4 and the photo converted to an
-    /// inline format (HEIC to JPEG) off the main actor, each with its size and
-    /// a preview. An image ImageIO cannot decode is sent as a plain file.
-    private func sendPicked(_ item: PhotosPickerItem) async {
-        let stamp = Self.pickStamp()
-        let isVideo = item.supportedContentTypes.contains { $0.conforms(to: .movie) }
-        if isVideo {
-            guard let movie = try? await item.loadTransferable(type: PickedMovie.self) else {
-                viewModel.reportAttachmentProblem(.key("chat.attachment.error.open_video"))
-                return
-            }
-            let prepared = await PhotoVideoPrep.prepareVideo(movie.url, stamp: stamp)
-            try? FileManager.default.removeItem(at: movie.url.deletingLastPathComponent())
-            guard let prepared else {
-                viewModel.reportAttachmentProblem(
-                    .key(
-                        "chat.attachment.error.prepare_video",
-                        texts: ["limit": AttachmentBridge.formatSize(50_000_000)]))
-                return
-            }
-            await viewModel.onMediaPrepared(prepared)
-            return
-        }
-        guard let bytes = try? await item.loadTransferable(type: Data.self), !bytes.isEmpty else {
-            viewModel.reportAttachmentProblem(.key("chat.attachment.error.open_photo"))
-            return
-        }
-        let prepared = await Task.detached(priority: .userInitiated) {
-            PhotoVideoPrep.preparePhoto(bytes, stamp: stamp)
-        }.value
-        if let prepared {
-            await viewModel.onMediaPrepared(prepared)
-        } else {
-            let mime = PhotoVideoPrep.sniffInlineImageMime(bytes)
-            await viewModel.onAttachmentPicked(bytes: bytes, mime: mime, name: "file-\(stamp)")
-        }
-    }
-
-    private static func pickStamp() -> String {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "yyyyMMdd-HHmmss"
-        return f.string(from: Date()) + "-" + String(UUID().uuidString.prefix(4)).lowercased()
     }
 
     /// File-importer handoff — read the URL's bytes + sniff
@@ -1978,6 +1939,265 @@ public struct ChatScreen: View {
     /// attachment chip's "Open" tap. Routes the bytes into
     /// `previewImageData` so the body-level `.sheet` modifier
     /// surfaces them inline.
+    // MARK: - ADR-0092: the attachment menu and the content kinds
+
+    /// Run the menu row picked, once the menu has gone (UX section 2.2).
+    private func runPendingMenuItem() {
+        guard let item = pendingMenuItem else { return }
+        pendingMenuItem = nil
+        switch item {
+        case .photoOrVideo: photoPickerOpenRequested = true
+        case .camera: contentScreen = .camera
+        case .file: fileImporterPresented = true
+        case .audio: audioImporterPresented = true
+        case .poll: contentScreen = .poll
+        case .checklist: contentScreen = .checklist(editing: nil)
+        case .location: contentScreen = .location
+        case .contact: contentScreen = .contact
+        case .article: contentScreen = .article(editing: nil)
+        }
+    }
+
+    @ViewBuilder
+    private func contentScreenView(_ request: ContentScreenRequest) -> some View {
+        switch request {
+        case .poll:
+            PollEditorScreen(anonymity: viewModel.pollAnonymityHere, onCreate: { draft in
+                contentScreen = nil
+                viewModel.sendContent(draft)
+            }, onCancel: { contentScreen = nil })
+        case .checklist(let editing):
+            ChecklistEditorScreen(
+                initial: editing.flatMap { ChecklistView.make(message: $0) }.map {
+                    ChecklistBody(
+                        title: $0.state.title, othersAdd: $0.state.othersAdd, othersMark: $0.state.othersMark,
+                        items: $0.state.items.compactMap { item in
+                            if case .author(let id) = item.item { return ChecklistItem(id: id, text: item.text) }
+                            return nil
+                        })
+                },
+                onDone: { body in
+                    contentScreen = nil
+                    if let editing {
+                        viewModel.editChecklist(messageId: editing.messageId, body: body)
+                    } else {
+                        viewModel.sendContent(.checklist(body))
+                    }
+                },
+                onCancel: { contentScreen = nil })
+        case .location:
+            LocationScreen(onSend: { location in
+                contentScreen = nil
+                viewModel.sendContent(.location(location))
+            }, onCancel: { contentScreen = nil })
+        case .contact:
+            ContactCardPickerScreen(candidates: contactCandidates, onSend: { card in
+                contentScreen = nil
+                viewModel.sendContent(.contactCard(card))
+            }, onCancel: { contentScreen = nil })
+        case .article(let editing):
+            ArticleEditorScreen(
+                groupIdHex: viewModel.groupIdHex,
+                editing: editing.flatMap { m in
+                    m.content.flatMap(ContentModel.content).flatMap { content -> ArticleDraft? in
+                        if case .article(let article) = content {
+                            return ArticleDraft(article: article, attachments: m.attachments)
+                        }
+                        return nil
+                    }
+                },
+                upload: { await viewModel.uploadArticleImage($0) },
+                onPublish: { article, refs in
+                    contentScreen = nil
+                    if let editing {
+                        viewModel.editArticle(messageId: editing.messageId, article: article, attachments: refs)
+                    } else {
+                        viewModel.sendContent(.article(article), attachments: refs)
+                    }
+                },
+                onCancel: { contentScreen = nil })
+        case .reader(let message):
+            if let stored = message.content, case .article(let article)? = ContentModel.content(stored) {
+                ArticleReaderScreen(
+                    article: article, attachments: message.attachments,
+                    author: message.authorKeyB64.flatMap { viewModel.personName(signatureKeyB64: $0) } ?? "",
+                    date: message.createdAt,
+                    onClose: { contentScreen = nil },
+                    menu: { readerMenu(message: message, article: article) })
+            }
+        case .results(let message):
+            if let view = PollView.make(
+                message: message, ownAccountKey: viewModel.ownContentKey, registerChoice: nil,
+                nowMs: ChatRepository.nowMs()) {
+                PollResultsScreen(
+                    view: view,
+                    nameOf: { viewModel.personName(signatureKeyB64: $0.base64EncodedString()) ?? "" },
+                    onClose: { contentScreen = nil })
+            }
+        case .camera:
+            CameraCaptureScreen(onSend: { media in
+                // `docs/ux/media-messages.md` section 11 — what was captured
+                // joins the composer tray.
+                contentScreen = nil
+                viewModel.tray.add([ComposerTraySource.captured(media)])
+            }, onClose: { contentScreen = nil })
+        }
+    }
+
+    /// UX section 11.3 — the message menu from the reader's `…`: react,
+    /// reply, forward, copy text, save, pin, as on the bubble. An action that
+    /// opens something of its own closes the reader first.
+    private func readerMenu(message: ChatMessage, article: Article) -> [LakkoMenuItem] {
+        func leaving(_ run: @escaping () -> Void) -> () -> Void {
+            {
+                contentScreen = nil
+                Task {
+                    try? await Task.sleep(nanoseconds: 400_000_000)
+                    run()
+                }
+            }
+        }
+        var items: [LakkoMenuItem] = []
+        if viewModel.messageActionsAvailable {
+            items.append(.action(l10n.t("chat.message.react"), icon: .faceSmiling,
+                                 perform: leaving { picker = PickerRequest(mode: .reaction, message: message) }))
+            items.append(.action(MessageMenuAction.reply.title, icon: MessageMenuAction.reply.icon,
+                                 perform: leaving { viewModel.beginReply(message) }))
+        }
+        items.append(.action(MessageMenuAction.forward.title, icon: MessageMenuAction.forward.icon,
+                             perform: leaving { viewModel.beginForward(message) }))
+        items.append(.action(MessageMenuAction.copy.title, icon: MessageMenuAction.copy.icon) {
+            MessageClipboard.copy(ArticleReaderScreen.plainText(article))
+        })
+        switch viewModel.saveMenuState(for: message, saved: saved.entries) {
+        case .save:
+            items.append(.action(MessageMenuAction.save.title, icon: MessageMenuAction.save.icon) {
+                viewModel.toggleSave(message)
+            })
+        case .unsave:
+            items.append(.action(MessageMenuAction.unsave.title, icon: MessageMenuAction.unsave.icon) {
+                viewModel.toggleSave(message)
+            })
+        case .unavailable:
+            break
+        }
+        switch viewModel.pinMenuState(for: message) {
+        case .pin:
+            items.append(.action(MessageMenuAction.pin.title, icon: MessageMenuAction.pin.icon,
+                                 perform: leaving { viewModel.beginPin(message) }))
+        case .unpin:
+            items.append(.action(MessageMenuAction.unpin.title, icon: MessageMenuAction.unpin.icon,
+                                 perform: leaving { viewModel.beginPin(message) }))
+        case .unavailable:
+            break
+        }
+        return items
+    }
+
+    /// UX section 10.1 — the person's contacts, with the username their own
+    /// profile carries (none = disabled).
+    private var contactCandidates: [ContactCardCandidate] {
+        contacts.repositoryState.accepted.map { c in
+            ContactCardCandidate.make(
+                accountKey: c.request.fromPubkey,
+                name: viewModel.personName(signatureKeyB64: c.request.fromPubkey.base64EncodedString())
+                    ?? c.displayLabel)
+        }
+        .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// What a content bubble reaches back for.
+    private var contentContext: ContentBubbleContext {
+        ContentBubbleContext(
+            groupIdHex: viewModel.groupIdHex,
+            ownAccountKey: viewModel.ownContentKey,
+            nameOf: { viewModel.personName(signatureKeyB64: $0.base64EncodedString()) },
+            isOwnerOrAdmin: { viewModel.isOwnerOrAdmin($0) },
+            vote: { viewModel.votePoll(messageId: $0, choices: $1) },
+            tick: { viewModel.tickChecklist(messageId: $0, item: $1, done: $2) },
+            addItem: { viewModel.addChecklistItem(messageId: $0, text: $1) },
+            openArticle: { contentScreen = .reader($0) },
+            openResults: { contentScreen = .results($0) },
+            contactCardState: { card in
+                let keyB64 = card.accountKey.base64EncodedString()
+                if let shown = contactCardStates[keyB64] { return shown }
+                if card.accountKey == viewModel.ownContentKey { return .thisIsYou }
+                if contacts.contactMessageId(forPersonKey: card.accountKey) != nil { return .openChat }
+                return .add
+            },
+            contactCardAction: { card, message in Task { await contactCardTapped(card, from: message) } })
+    }
+
+    /// UX section 10.2 — `Open chat`, or the lookup behind `Add contact`.
+    private func contactCardTapped(_ card: SharedContactCard, from message: ChatMessage) async {
+        let keyB64 = card.accountKey.base64EncodedString()
+        if let messageId = contacts.contactMessageId(forPersonKey: card.accountKey),
+           let contact = contacts.contact(messageId: messageId) {
+            if let groupIdHex = await contacts.openOrStartChat(for: contact) {
+                onOpenConversation(groupIdHex, nil)
+            }
+            return
+        }
+        contactCardStates[keyB64] = .working
+        switch await contacts.addFromContactCard(username: card.username, accountKey: card.accountKey) {
+        case .sent:
+            contactCardStates[keyB64] = .notice(l10n.t("contact.request_sent"))
+        case .otherKey:
+            contactCardStates[keyB64] = .notice(l10n.t("contact.username_changed"))
+        case .notFound:
+            contactCardStates[keyB64] = .notice(l10n.t(
+                "contact.not_findable", texts: ["name": card.name,
+                         "sender": message.authorKeyB64.flatMap { viewModel.personName(signatureKeyB64: $0) } ?? ""]))
+        case .failed:
+            contactCardStates[keyB64] = nil
+            viewModel.reportAttachmentProblem(.key("attach.error.not_sent"))
+        }
+    }
+
+    /// ADR-0092 — the message-menu rows a content message adds (UX 7.3,
+    /// 8.2, 9.3).
+    private func contentMenuActions(_ message: ChatMessage) -> [MessageMenuAction] {
+        guard message.messageId > 0, !message.deleted, let stored = message.content,
+              let content = ContentModel.content(stored) else { return [] }
+        let own = viewModel.ownContentKey
+        let isAuthor = message.direction == .outgoing
+        switch content {
+        case .poll:
+            guard let view = PollView.make(
+                message: message, ownAccountKey: own,
+                registerChoice: viewModel.registerChoice(messageId: message.messageId),
+                nowMs: ChatRepository.nowMs()), !view.closed else { return [] }
+            var actions: [MessageMenuAction] = []
+            if view.ownChoices != nil { actions.append(.retractVote) }
+            if isAuthor || (own.map(viewModel.isOwnerOrAdmin) ?? false) { actions.append(.closePoll) }
+            return actions
+        case .checklist:
+            guard isAuthor, let view = ChecklistView.make(message: message), !view.closed else { return [] }
+            return [.editChecklist, .closeChecklist]
+        case .location:
+            return [.copyCoordinates]
+        default:
+            return []
+        }
+    }
+
+    private func performContentAction(_ action: MessageMenuAction, _ message: ChatMessage) {
+        switch action {
+        case .retractVote:
+            viewModel.votePoll(messageId: message.messageId, choices: [])
+        case .closePoll, .closeChecklist:
+            closeConfirm = ContentCloseConfirm(message: message, isPoll: action == .closePoll)
+        case .editChecklist:
+            contentScreen = .checklist(editing: message)
+        case .copyCoordinates:
+            if let stored = message.content, case .location(let l)? = ContentModel.content(stored) {
+                MessageClipboard.copy(LocationText.coordinates(latE7: l.latE7, lonE7: l.lonE7))
+            }
+        default:
+            break
+        }
+    }
+
     fileprivate func openAttachmentPreview(_ ref: AttachmentRef) {
         Task {
             do {
@@ -1992,21 +2212,6 @@ public struct ChatScreen: View {
                 print("preview download failed: \(error)")
             }
         }
-    }
-}
-
-/// UX spec section 10 — the preview of a photo or video in the composer's
-/// attachment tray.
-private struct TrayThumbnail: View {
-    let image: UIImage
-
-    var body: some View {
-        Image(uiImage: image)
-            .resizable()
-            .scaledToFill()
-            .frame(width: 32, height: 32)
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            .accessibilityHidden(true)
     }
 }
 
@@ -2097,8 +2302,7 @@ struct SelectableMessageRow<Row: View>: View {
         case .unselected, .selected:
             let selected = state == .selected
             HStack(alignment: .center, spacing: 0) {
-                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 22))
+                LkIconView(selected ? .checkmarkCircleFill : .circle, size: 26, relativeTo: nil)
                     .foregroundStyle(selected ? Color.lakkoAccent : Color.lakkoTextMuted)
                     .frame(width: SelectionRowState.markColumnWidth)
                     .accessibilityHidden(true)
@@ -2173,6 +2377,11 @@ struct MessageRow: View {
     /// outgoing messages (gated below); React on any message.
     let onEdit: () -> Void
     let onDelete: () -> Void
+    /// ADR-0092 — set for a content message: what its bubble reaches back for.
+    var contentContext: ContentBubbleContext? = nil
+    /// ADR-0092 — the message-menu rows a content message adds.
+    var contentActions: [MessageMenuAction] = []
+    var onContentAction: (MessageMenuAction) -> Void = { _ in }
     let onReact: (String) -> Void
     /// ADR-0047 §4 — the reaction bar's trailing `+`: any single emoji.
     var onMoreReactions: () -> Void = {}
@@ -2227,7 +2436,7 @@ struct MessageRow: View {
     /// quote names it "You" on this device, whatever name the snapshot
     /// carries (`docs/ux/message-actions.md` section 3.1).
     var quotesOwnMessage: Bool = false
-    /// ADR-0089 — the menu's Report; `nil` where it is not offered (an own
+    /// ADR-0098 — the menu's Report; `nil` where it is not offered (an own
     /// message, a conversation this device cannot act in).
     var onReport: (() -> Void)? = nil
     /// ADR-0087 section 12 — this row is a channel post: it is drawn as an
@@ -2236,10 +2445,12 @@ struct MessageRow: View {
     /// (`.publisher`) rather than to its author.
     var channelPost: ChannelPostRole? = nil
 
+    /// The width of the column a media bubble sits in, when narrower.
+    @Environment(\.mediaColumnWidth) private var mediaColumnWidth
     /// `docs/ux/message-actions.md` — where the menu goes when it opens, `nil`
     /// outside a ``MessageMenuHost``.
     @Environment(\.messageMenuPresenter) private var menuPresenter
-    /// ADR-0089 step 3 — a suspended account's chips are not taps: a tap
+    /// ADR-0098 step 3 — a suspended account's chips are not taps: a tap
     /// would send a reaction.
     @Environment(\.accountSuspended) private var accountSuspended
     /// ADR-0082 — the conversation this row belongs to, for translation and
@@ -2275,33 +2486,32 @@ struct MessageRow: View {
         return InlineMedia.decision(for: ref).bubble == .videoNote
     }
 
-    /// UX spec section 10 — a message that is exactly one photo or video
-    /// renders as the media itself, the time in a pill on top of it.
+    /// `docs/ux/media-messages.md` sections 10 and 11 — a message that is
+    /// only photos and videos renders as the mosaic itself, the time in a
+    /// pill on top of it.
     ///
     /// ADR-0052 — never for a reply, for the same reason as ``isBareVideoNote``.
-    private var bareVisualMedia: AttachmentRef? {
-        guard !message.deleted, message.reply == nil, message.forward == nil, message.text.isEmpty,
-              message.attachments.count == 1,
-              let ref = message.attachments.first else { return nil }
-        switch InlineMedia.decision(for: ref).bubble {
-        case .photo, .video: return ref
-        default: return nil
+    private var bareVisualMedia: [AttachmentRef]? {
+        guard !message.deleted, message.unsupportedVersion == nil, message.content == nil,
+              message.reply == nil, message.forward == nil, message.text.isEmpty,
+              !message.attachments.isEmpty else { return nil }
+        let media = mosaicItems(message.attachments)
+        let allMedia = message.attachments.allSatisfy {
+            let bubble = InlineMedia.decision(for: $0).bubble
+            return bubble == .photo || bubble == .video
         }
+        return allMedia && !media.isEmpty ? media : nil
+    }
+
+    /// Section 11 — the photos and videos a bubble draws as its mosaic.
+    private var mosaicRefs: [AttachmentRef] {
+        guard !message.deleted, message.unsupportedVersion == nil, message.content == nil else { return [] }
+        return mosaicItems(message.attachments)
     }
 
     @ViewBuilder
-    private func visualMedia(_ ref: AttachmentRef) -> some View {
-        menuTarget(visualMediaContent(ref))
-    }
-
-    private func visualMediaContent(_ ref: AttachmentRef) -> some View {
-        Group {
-            if InlineMedia.decision(for: ref).bubble == .video {
-                VideoBubble(ref: ref, overlay: AnyView(mediaMetaPill))
-            } else {
-                PhotoBubble(ref: ref, overlay: AnyView(mediaMetaPill))
-            }
-        }
+    private func visualMedia(_ refs: [AttachmentRef]) -> some View {
+        menuTarget(MediaMosaicView(refs: refs, rounded: true, overlay: AnyView(mediaMetaPill)))
     }
 
     /// The bare video note plus its time, which is the whole bubble for that
@@ -2313,7 +2523,12 @@ struct MessageRow: View {
     private func videoNoteColumn(alignment: HorizontalAlignment) -> some View {
         VStack(alignment: alignment, spacing: 2) {
             bareVideoNote
-            metaRow
+            // No bubble behind it: the bubble's own text colour on an outgoing
+            // note is dark on the dark screen, and the time and ticks of an own
+            // note could not be seen (seen on an iPhone 2026-11-10).
+            metaContent
+                .foregroundStyle(Color.lakkoTextMuted)
+                .padding(.bottom, 1)
         }
     }
 
@@ -2333,6 +2548,13 @@ struct MessageRow: View {
 
     /// React is offered on any non-system message with an id.
     private var canReact: Bool {
+        readable
+    }
+
+    /// Not a system row, landed, not a tombstone, readable here: the facts
+    /// React, Forward and Pin share (React additionally needs to be able to
+    /// send).
+    private var readable: Bool {
         actionsAvailable
             && message.direction != .system
             && message.messageId > 0
@@ -2355,8 +2577,24 @@ struct MessageRow: View {
     ///
     /// ADR-0061 section 6 — not on a message from a newer version: this build
     /// holds none of its content, so a forward would carry nothing.
+    /// Landed, readable and not a tombstone: the gate Forward and Pin share
+    /// (section 4.1).
+    private var sendLanded: Bool {
+        readable && message.ack == .sent && message.unsupportedVersion == nil
+    }
+
     private var canForward: Bool {
-        canReact && message.ack == .sent && message.unsupportedVersion == nil
+        // Maintainer, 2026-11-13 — a message carrying a channel invitation
+        // card is never forwarded (Pin still is offered on it).
+        sendLanded && message.invitationLine(conversationIdHex: conversationIdHex) == nil
+    }
+
+    /// ADR-0092 (forwarding, amended 2026-11-18) — Forward itself is offered
+    /// on that set minus what may not be forwarded: a poll or checklist, and
+    /// a contact card whose person does not let others share it. The pin
+    /// and Select gates keep ``canForward``.
+    private var forwardOffered: Bool {
+        canForward && ChatViewModel.isForwardable(message)
     }
 
     /// Section 8 — Select is offered on the rows the mode can select, which is
@@ -2380,8 +2618,8 @@ struct MessageRow: View {
                 bubbleColumn(alignment: .trailing) {
                     if isBareVideoNote {
                         menuTarget(videoNoteColumn(alignment: .trailing))
-                    } else if let ref = bareVisualMedia {
-                        visualMedia(ref)
+                    } else if let refs = bareVisualMedia {
+                        visualMedia(refs)
                     } else {
                         bubble
                     }
@@ -2413,8 +2651,8 @@ struct MessageRow: View {
                     }
                     if isBareVideoNote {
                         menuTarget(videoNoteColumn(alignment: .leading))
-                    } else if let ref = bareVisualMedia {
-                        visualMedia(ref)
+                    } else if let refs = bareVisualMedia {
+                        visualMedia(refs)
                     } else {
                         bubble
                     }
@@ -2425,6 +2663,15 @@ struct MessageRow: View {
         case .system:
             if let call = ChatTimeline.callRow(message) {
                 callRow(call)
+            } else if ChatTimeline.reentryGapRow(message) != nil {
+                // ADR-0091 phase 2, `docs/ux/conversation-rejoin.md` 2.4 —
+                // styled as the date separators, local to this device.
+                Text(ConversationReentryRules.gapSentence())
+                    .font(.caption)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 4)
             } else if let membership = ChatTimeline.membershipRow(message) {
                 // `docs/ux/second-device.md` section 4 — one sentence per
                 // person, the name resolved now, never stored.
@@ -2459,8 +2706,7 @@ struct MessageRow: View {
     private func callRow(_ call: CallTranscriptRow) -> some View {
         Button(action: { onCallBack(call.video) }) {
             HStack(spacing: 6) {
-                Image(systemName: glyph(for: call))
-                    .font(.caption2)
+                LkIconView(glyph(for: call), size: 14, relativeTo: .caption2)
                 Text(call.text)
                     .font(.caption)
                 if let timeLabel {
@@ -2481,13 +2727,13 @@ struct MessageRow: View {
         .accessibilityLabel(call.accessibilityLabel)
     }
 
-    private func glyph(for call: CallTranscriptRow) -> String {
+    private func glyph(for call: CallTranscriptRow) -> LkIcon {
         switch call.outcome {
         case .answered:
-            if call.video { return "video" }
-            return call.direction == .outgoing ? "phone.arrow.up.right" : "phone.arrow.down.left"
+            if call.video { return .video }
+            return call.direction == .outgoing ? .phoneOutgoing : .phoneIncoming
         case .missed, .declined, .failed:
-            return call.video ? "video.slash" : "phone.down"
+            return call.video ? .videoSlash : .phoneDown
         }
     }
 
@@ -2534,7 +2780,7 @@ struct MessageRow: View {
         actionsAvailable
             && message.direction != .system
             && !message.deleted
-            && (!message.text.isEmpty || copyText != nil)
+            && copyText != nil
             // ADR-0073 R.5 — a row of an older group of the conversation is
             // read-only: its menu offers nothing but Unpin (below).
             && !isHistoryRow
@@ -2543,10 +2789,23 @@ struct MessageRow: View {
     /// ADR-0082 / UX 3.2 — Copy is "the text I see": a translation while it
     /// is shown, a transcript on a voice message with one.
     private var copyText: String? {
-        guard let conversation = translationConversation else {
-            return message.text.isEmpty ? nil : message.text
+        // ADR-0087 section 14 — a bubble drawn as a channel invitation card
+        // shows no text; its text is the `/g/` link with its secret.
+        let cardDrawn = message.invitationLine(conversationIdHex: conversationIdHex) != nil
+        // A bare `/g/` link (``BareGroupLink``): the card, or the words the
+        // bubble shows in place of the link; never the secret.
+        if !cardDrawn, let link = BareGroupLink.link(of: message.text) {
+            switch BareGroupLinks.shared.openings[link] {
+            case .channel?, .publisher?: return nil
+            case let opening: if let words = BareGroupLink.bubbleWords(link: link, opening: opening) { return words }
+            }
         }
-        return MessageTranslationCenter.shared.copyText(conversation: conversation, message: message)
+        guard let conversation = translationConversation else {
+            return InvitationCopy.copyText(message.text, cardDrawn: cardDrawn)
+        }
+        return InvitationCopy.copyText(
+            MessageTranslationCenter.shared.copyText(conversation: conversation, message: message),
+            cardDrawn: cardDrawn)
     }
 
     /// ADR-0082 / UX 3.1 — the `Translate` row, from the shared rule.
@@ -2564,23 +2823,33 @@ struct MessageRow: View {
 
     /// `docs/ux/message-actions.md` §3 — the card's rows for THIS message.
     private var menuActions: [MessageMenuAction] {
-        MessageMenuAction.offered(
-            canReply: canReply, canForward: canForward, canEditOrDelete: canEditOrDelete,
+        var actions = MessageMenuAction.offered(
+            canReply: canReply, canForward: forwardOffered, canEditOrDelete: canEditOrDelete,
             hasText: canCopy,
             // Section 4.1 — on any message whose send is complete and that
             // is not deleted, which is the set Forward is offered on.
             // ADR-0073 R.5 — ...and on a pinned row of an older segment,
             // which offers Unpin alone (the view model decides).
-            pin: (canForward || isHistoryRow) ? pinState : .unavailable,
+            pin: (sendLanded || isHistoryRow) ? pinState : .unavailable,
             canSelect: canSelect,
             // UX section 2 — on any message that is not deleted.
             // An older segment's row may be saved too (round-6 rule).
             save: saveState,
             translate: translateState,
+            canEdit: message.invitationLine(conversationIdHex: conversationIdHex) == nil,
             canReport: canReport)
+        // ADR-0092 / UX 7.3 — `Edit` is offered on an article only; a
+        // checklist has `Edit checklist`, a poll none. The content rows sit
+        // before Edit / Delete.
+        if let stored = message.content {
+            if case .article? = ContentModel.content(stored) {} else { actions.removeAll { $0 == .edit } }
+        }
+        let at = actions.firstIndex { $0 == .edit || $0 == .delete || $0 == .report } ?? actions.count
+        actions.insert(contentsOf: contentActions, at: at)
+        return actions
     }
 
-    /// ADR-0089 / UX 2.1 — Report on someone else's landed message.
+    /// ADR-0098 / UX 2.1 — Report on someone else's landed message.
     private var canReport: Bool {
         onReport != nil && actionsAvailable && !isOutgoing && message.direction != .system
             && !message.deleted && message.messageId > 0 && !isHistoryRow
@@ -2696,6 +2965,8 @@ struct MessageRow: View {
                         break
                     case .report:
                         onReport?()
+                    case .retractVote, .closePoll, .editChecklist, .closeChecklist, .copyCoordinates:
+                        onContentAction(action)
                     }
                 }
             )
@@ -2738,17 +3009,94 @@ struct MessageRow: View {
 
     @ViewBuilder
     private var bubbleContent: some View {
-        HStack(alignment: .bottom, spacing: 8) {
+        let mosaic = mosaicRefs
+        if mosaic.isEmpty {
+            plainBubbleContent
+        } else {
+            mosaicBubbleContent(mosaic)
+        }
+    }
+
+    /// `docs/ux/media-messages.md` section 11 — one bubble, top to bottom:
+    /// a forward or reply line, the mosaic (flush with the bubble's edges, so
+    /// its outer corners are the bubble's), the file chips, the text. With
+    /// text the time sits at the end of the text; without, in the pill on the
+    /// mosaic.
+    private func mosaicBubbleContent(_ mosaic: [AttachmentRef]) -> some View {
+        let hasText = !message.text.isEmpty
+        let others = message.attachments.contains {
+            let bubble = InlineMedia.decision(for: $0).bubble
+            return bubble != .photo && bubble != .video
+        }
+        return VStack(alignment: .leading, spacing: 0) {
+            if message.forward != nil || message.reply != nil {
+                VStack(alignment: .leading, spacing: 6) {
+                    if let forward = message.forward {
+                        ForwardedLine(forward: forward, outgoing: isOutgoing) {
+                            onForwardTap(forward)
+                        }
+                    }
+                    if let reply = message.reply {
+                        ReplyQuoteBlock(
+                            reply: quotesOwnMessage ? ReplySnapshot.shownAsOwn(reply) : reply,
+                            outgoing: isOutgoing
+                        ) {
+                            onQuoteTap(reply.target)
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+                .padding(.bottom, 6)
+            }
+            MediaMosaicView(refs: mosaic, overlay: hasText ? nil : AnyView(mediaMetaPill))
+            if others {
+                attachmentChips
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+                    .padding(.bottom, hasText ? 0 : 8)
+            }
+            if hasText {
+                HStack(alignment: .bottom, spacing: 8) {
+                    TranslatableMessageText(
+                        message: message,
+                        outgoing: isOutgoing,
+                        linkColor: isOutgoing ? Color.lakkoAccentForeground : Color.lakkoAccent,
+                        onOwnLink: onOpenOwnLink
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    metaRow
+                }
+                .padding(.horizontal, 12)
+                .padding(.top, 6)
+                .padding(.bottom, 8)
+            }
+        }
+        .frame(width: CGFloat(mosaicLayout(mosaic, column: mediaColumnWidth).width), alignment: .leading)
+        .background(isOutgoing ? Color.lakkoAccent : Color.lakkoSurfaceSunken)
+        .foregroundStyle(isOutgoing ? Color.lakkoAccentForeground : Color.lakkoText)
+        .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.bubble, style: .continuous))
+    }
+
+    @ViewBuilder
+    private var plainBubbleContent: some View {
+        // Beside short content the time sits on the last line; under a GIF,
+        // photo or video it goes below, or the picture squeezed it into two
+        // lines ("22:" / "04", seen on an iPhone 2026-11-10).
+        let layout = hasVisualAttachment
+            ? AnyLayout(VStackLayout(alignment: .trailing, spacing: 4))
+            : AnyLayout(HStackLayout(alignment: .bottom, spacing: 8))
+        layout {
             VStack(alignment: .leading, spacing: 6) {
                 if message.deleted {
                     // Muted tombstone — no original text / attachments.
-                    Label(l10n.t("chat.message.deleted"), systemImage: "trash")
+                    Label(l10n.t("chat.message.deleted"), icon: .trash)
                         .chatFont(.body, italic: true)
                         .opacity(0.7)
                 } else if message.unsupportedVersion != nil {
                     // ADR-0061 section 6 — a message from a newer version of
                     // Lakko. The core hands no text; the sentence is ours.
-                    Label(l10n.t("chat.message.unsupported"), systemImage: "arrow.down.app")
+                    Label(l10n.t("chat.message.unsupported"), icon: .arrowDownSquare)
                         .chatFont(.body, italic: true)
                         .opacity(0.7)
                 } else {
@@ -2772,13 +3120,25 @@ struct MessageRow: View {
                             onQuoteTap(reply.target)
                         }
                     }
-                    if let channel = message.channelInvite(conversationIdHex: conversationIdHex) {
+                    if message.content != nil, let contentContext {
+                        // ADR-0092 — a poll, checklist, location, contact card
+                        // or article: its own card.
+                        ContentBubble(message: message, context: contentContext)
+                    } else if let channel = message.channelInvite(conversationIdHex: conversationIdHex) {
                         // ADR-0087 section 14 — a channel invitation: the card,
                         // with `Subscribe` (or `Open`), not its link.
                         ChannelInvitationCard(facts: channel, outgoing: isOutgoing)
                     } else if let publisher = message.coPublisherInvite(conversationIdHex: conversationIdHex) {
                         // Section 15.2 — an invitation to publish.
                         CoPublisherInvitationCard(facts: publisher, outgoing: isOutgoing)
+                    } else if let link = BareGroupLink.link(of: message.text) {
+                        // A bare `/g/` link with no card (an older message):
+                        // the card once the ledger says it is a channel's,
+                        // never the link's secret otherwise (``BareGroupLink``).
+                        BareGroupLinkBubble(
+                            link: link, outgoing: isOutgoing,
+                            linkColor: isOutgoing ? Color.lakkoAccentForeground : Color.lakkoAccent,
+                            onOwnLink: onOpenOwnLink)
                     } else if let invite = CallInviteLink.callInviteOf(
                         message.text, ownOrigin: CallInviteUrl.defaultOrigin) {
                         // `docs/ux/call-links.md` section 3 — a message whose
@@ -2809,7 +3169,7 @@ struct MessageRow: View {
                             onOwnLink: onOpenOwnLink
                         )
                     }
-                    if !message.attachments.isEmpty {
+                    if !message.attachments.isEmpty, message.content == nil {
                         attachmentChips
                     }
                 }
@@ -2818,9 +3178,18 @@ struct MessageRow: View {
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
-        .background(isOutgoing ? Color.lakkoAccent : Color.lakkoSurfaceSunken)
-        .foregroundStyle(isOutgoing ? Color.lakkoAccentForeground : Color.lakkoText)
+        // ADR-0092 — a content card reads on the surface on both sides.
+        .background(isOutgoing && message.content == nil ? Color.lakkoAccent : Color.lakkoSurfaceSunken)
+        .foregroundStyle(isOutgoing && message.content == nil ? Color.lakkoAccentForeground : Color.lakkoText)
         .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.bubble, style: .continuous))
+    }
+
+    /// The bubble holds a GIF drawn inline (photos and videos take the
+    /// mosaic's layout).
+    private var hasVisualAttachment: Bool {
+        !message.deleted && message.attachments.contains { ref in
+            InlineMedia.decision(for: ref).bubble == .gif
+        }
     }
 
     /// "(edited)", the time, and — on own messages — the delivery glyph.
@@ -2848,9 +3217,8 @@ struct MessageRow: View {
         HStack(spacing: 3) {
             // ADR-0065 / UX section 2 — the saved mark, seen by this person only.
             if saveState == .unsave {
-                Image(systemName: "bookmark.fill")
-                    .chatFont(.caption2)
-                    .accessibilityLabel(l10n.t("chat.message.saved_mark"))
+                LkIconView(.bookmarkFill, size: 14, relativeTo: .caption2,
+                           label: l10n.t("chat.message.saved_mark"))
             }
             if message.edited, !message.deleted {
                 Text(l10n.t("chat.message.edited"))
@@ -2886,7 +3254,13 @@ struct MessageRow: View {
                 // other ref (no kind, unknown kind, mismatched or refused MIME)
                 // stays a file chip.
                 let decision = InlineMedia.decision(for: ref)
-                if decision.bubble == .file {
+                if decision.bubble == .photo || decision.bubble == .video {
+                    // Section 11 — drawn in the mosaic above.
+                    EmptyView()
+                } else if ref.kind == "audio", decision.inline == .audio {
+                    // ADR-0092 section 2 / UX section 6 — an audio file.
+                    AudioBubble(ref: ref)
+                } else if decision.bubble == .file {
                     AttachmentChip(
                         ref: ref,
                         direction: message.direction,
@@ -3040,18 +3414,9 @@ struct MessageRow: View {
         case .none:
             EmptyView()
         case .sent:
-            Image(systemName: "checkmark")
-                .chatFont(size: 10, relativeTo: .caption2, weight: .semibold)
-                .accessibilityLabel(l10n.t("chat.message.sent"))
+            LkIconView(.checkmark, size: 14, relativeTo: .caption2, label: l10n.t("chat.message.sent"))
         case .read:
-            ZStack(alignment: .leading) {
-                Image(systemName: "checkmark")
-                Image(systemName: "checkmark")
-                    .offset(x: 4)
-            }
-            .chatFont(size: 10, relativeTo: .caption2, weight: .semibold)
-            .padding(.trailing, 4)
-            .accessibilityLabel(l10n.t("chat.message.read"))
+            LkIconView(.checkmarkDouble, size: 14, relativeTo: .caption2, label: l10n.t("chat.message.read"))
         }
     }
 }
@@ -3186,7 +3551,7 @@ private struct AttachmentChip: View {
 
     private var chipRow: some View {
         HStack(spacing: 6) {
-            Image(systemName: chipIcon).font(.caption)
+            LkIconView(chipIcon, size: 14, relativeTo: .caption)
             VStack(alignment: .leading, spacing: 0) {
                 Text(ref.name ?? l10n.t("chat.attachment.unnamed"))
                     .font(.caption)
@@ -3246,11 +3611,11 @@ private struct AttachmentChip: View {
         }
     }
 
-    private var chipIcon: String {
+    private var chipIcon: LkIcon {
         if AttachmentBridge.isInlinePreviewable(ref) {
-            return "photo"
+            return .photo
         }
-        return "doc"
+        return .doc
     }
 
     private var chipBackground: Color {
@@ -3408,9 +3773,9 @@ struct GroupInfoScreen: View {
     var onOpenContact: (Int64) -> Void = { _ in }
     /// ADR-0061 — observed so a language switch re-renders the panel.
     @ObservedObject var l10n = Localization.shared
-    /// ADR-0089 step 4 — the member list's suspension markers.
+    /// ADR-0098 step 4 — the member list's suspension markers.
     @ObservedObject private var suspensions = SuspensionMarks.shared
-    /// ADR-0089 step 3 — a suspended account adds and invites nobody.
+    /// ADR-0098 step 3 — a suspended account adds and invites nobody.
     @Environment(\.accountSuspended) private var accountSuspended
 
     /// ADR-0045 (UX §6) — the `Leave group` confirmation. Local to the sheet:
@@ -3430,17 +3795,17 @@ struct GroupInfoScreen: View {
     /// that an assumption rather than a fact.
     @State private var deleteConfirmPresented = false
 
-    /// Reactions-and-emoji spec section 9 — the `Reactions` screen.
-    @State private var reactionsOpen = false
-    /// UX 4.1 — the `Group type` screen.
-    @State private var groupTypeOpen = false
-    /// UX section 14.2 — the invite-link screen.
-    @State private var inviteLinksOpen = false
+    /// Push a screen over the info (a route on the tab's path): the
+    /// `Reactions` screen (reactions-and-emoji spec section 9), `Group type`
+    /// (UX 4.1), the invite links (UX section 14.2), the ownership transfer.
+    var onOpenSubscreen: (GroupInfoSubscreen) -> Void = { _ in }
+    /// Close a screen pushed over the info.
+    var onCloseSubscreen: (GroupInfoSubscreen) -> Void = { _ in }
     /// UX section 8 — the `Reject all requests?` confirmation.
     @State private var rejectAllConfirm = false
     /// ADR-0087 section 11 — the `Delete this group?` confirmation.
     @State private var deleteGroupConfirm = false
-    /// ADR-0089 / UX 2.1 — the report sheet for the group.
+    /// ADR-0098 / UX 2.1 — the report sheet for the group.
     @State private var reportRequest: ReportRequest?
 
     /// What the screen does after the chat is gone: the row it was reached from
@@ -3526,22 +3891,21 @@ struct GroupInfoScreen: View {
                 if sections.contains(.groupType), viewModel.groupHandle == nil {
                     Section {
                         Text(l10n.t("group_info.handle.lapsed")).font(.footnote)
-                        Button(l10n.t("group_info.handle.choose")) { groupTypeOpen = true }
+                        Button(l10n.t("group_info.handle.choose")) { onOpenSubscreen(.groupType) }
                             .foregroundStyle(Color.lakkoAccent)
                     }
                 }
                 // Section 4.1 — the owner's `Who can join` row, opening Group type.
                 if sections.contains(.groupType) {
                     Section {
-                        Button { groupTypeOpen = true } label: {
+                        Button { onOpenSubscreen(.groupType) } label: {
                             HStack {
                                 Text(l10n.t("group_type.who_can_join")).foregroundStyle(Color.lakkoText)
                                 Spacer()
                                 Text(l10n.t(viewModel.groupHandle?.isPublic == true
                                             ? "group_type.public" : "group_type.private"))
                                     .foregroundStyle(Color.lakkoTextMuted)
-                                Image(systemName: "chevron.forward")
-                                    .font(.footnote.weight(.semibold))
+                                LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                                     .foregroundStyle(Color.lakkoTextMuted)
                             }
                         }
@@ -3559,7 +3923,7 @@ struct GroupInfoScreen: View {
                             Button {
                                 MessageClipboard.copy("@" + handle.handle)
                             } label: {
-                                Image(systemName: "doc.on.doc")
+                                LkIconView(.copy, size: 20)
                             }
                             .buttonStyle(.plain)
                             .foregroundStyle(Color.lakkoAccent)
@@ -3623,15 +3987,14 @@ struct GroupInfoScreen: View {
                 // with the current value on the right.
                 if sections.contains(.reactions) {
                     Section {
-                        Button { reactionsOpen = true } label: {
+                        Button { onOpenSubscreen(.reactions) } label: {
                             HStack {
-                                Label(l10n.t("group_reactions.title"), systemImage: "face.smiling")
+                                Label(l10n.t("group_reactions.title"), icon: .faceSmiling)
                                     .foregroundStyle(Color.lakkoText)
                                 Spacer()
                                 Text(viewModel.allowedReactionsSummary)
                                     .foregroundStyle(Color.lakkoTextMuted)
-                                Image(systemName: "chevron.forward")
-                                    .font(.footnote.weight(.semibold))
+                                LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                                     .foregroundStyle(Color.lakkoTextMuted)
                             }
                         }
@@ -3677,13 +4040,12 @@ struct GroupInfoScreen: View {
                 // approved via the pending list.
                 if sections.contains(.inviteLink) {
                     Section {
-                        Button { inviteLinksOpen = true } label: {
+                        Button { onOpenSubscreen(.inviteLinks) } label: {
                             HStack {
-                                Label(l10n.t("chat.invite_link.label"), systemImage: "link")
+                                Label(l10n.t("chat.invite_link.label"), icon: .link)
                                     .foregroundStyle(Color.lakkoText)
                                 Spacer()
-                                Image(systemName: "chevron.forward")
-                                    .font(.footnote.weight(.semibold))
+                                LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                                     .foregroundStyle(Color.lakkoTextMuted)
                             }
                         }
@@ -3720,7 +4082,7 @@ struct GroupInfoScreen: View {
                             HStack {
                                 InitialsAvatar(
                                     name: viewModel.pendingJoinLabel(ref), identity: base64Encode(ref),
-                                    size: 32, placeholderSymbol: "person.fill",
+                                    size: 32, placeholderIcon: .personFill,
                                     photo: .person(viewModel.pendingJoinPhotoKey(ref)))
                                 VStack(alignment: .leading, spacing: 2) {
                                     // ADR-0048 — the one resolver: a contact's
@@ -3818,7 +4180,7 @@ struct GroupInfoScreen: View {
                                 InitialsAvatar(
                                     name: Self.initialsName(keyB64: request.addSignatureKeyB64),
                                     identity: request.addSignatureKeyB64 ?? "",
-                                    size: 32, placeholderSymbol: "person.fill",
+                                    size: 32, placeholderIcon: .personFill,
                                     photo: request.addSignatureKeyB64
                                         .flatMap(base64Decode).map(AvatarPhoto.person))
                                 Text(Self.pendingAddLabel(request))
@@ -3857,7 +4219,7 @@ struct GroupInfoScreen: View {
                             HStack {
                                 InitialsAvatar(
                                     name: Self.initialsName(keyB64: item.addSignatureKeyB64), identity: item.addSignatureKeyB64,
-                                    size: 32, placeholderSymbol: "person.fill",
+                                    size: 32, placeholderIcon: .personFill,
                                     photo: base64Decode(item.addSignatureKeyB64).map(AvatarPhoto.person))
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(Self.unappliedLabel(item))
@@ -3916,7 +4278,7 @@ struct GroupInfoScreen: View {
                                     Text(l10n.t("chat.members.add.action"))
                                         .foregroundStyle(Color.lakkoAccent)
                                 } icon: {
-                                    Image(systemName: "person.badge.plus")
+                                    LkIconView(.personPlus, size: 20)
                                         .foregroundStyle(Color.lakkoAccent)
                                 }
                             }
@@ -3925,7 +4287,7 @@ struct GroupInfoScreen: View {
                         ForEach(viewModel.members, id: \.leafIndex) { member in
                             HStack {
                                 memberIdentity(member)
-                                    // ADR-0089 step 4 — ask about the rows on
+                                    // ADR-0098 step 4 — ask about the rows on
                                     // screen.
                                     .task(id: member.signaturePublicKey) {
                                         if viewModel.ownLeafIndex != member.leafIndex {
@@ -4041,14 +4403,14 @@ struct GroupInfoScreen: View {
                     ShareChannelsSection(
                         hub: viewModel.sharedChannelsHub, groupIdHex: viewModel.groupIdHex)
                 }
-                // ADR-0089 / UX 2.1 — Report the group, by its `@name`, for
+                // ADR-0098 / UX 2.1 — Report the group, by its `@name`, for
                 // anyone but the owner (the shared rule decides).
                 if sections.contains(.report), viewModel.groupHandle != nil {
                     Section {
                         Button(role: .destructive) {
                             reportRequest = viewModel.groupReportRequest()
                         } label: {
-                            Label(l10n.t("report.action"), systemImage: "flag")
+                            Label(l10n.t("report.action"), icon: .flag)
                                 .foregroundStyle(Color.lakkoDanger)
                         }
                     }
@@ -4168,17 +4530,11 @@ struct GroupInfoScreen: View {
             // choice, because splitting it would put the warning and the button
             // on different screens.
             // Reactions-and-emoji spec section 9 / UX 4.1 — pushed screens.
-            .navigationDestination(isPresented: $inviteLinksOpen) {
-                GroupInviteLinksScreen(viewModel: viewModel)
-            }
-            .navigationDestination(isPresented: $reactionsOpen) {
-                AllowedReactionsScreen(viewModel: viewModel) { reactionsOpen = false }
-            }
-            .navigationDestination(isPresented: $groupTypeOpen) {
-                GroupTypeScreen(viewModel: viewModel) { groupTypeOpen = false }
-            }
-            .navigationDestination(isPresented: $viewModel.transferStepOpen) {
-                TransferOwnershipStep(viewModel: viewModel)
+            // The pushed screens are routes on the tab's path
+            // (``GroupInfoSubscreen``). The transfer step is opened and closed
+            // by the view model; the path follows it.
+            .onChange(of: viewModel.transferStepOpen) { _, open in
+                if open { onOpenSubscreen(.transferOwnership) } else { onCloseSubscreen(.transferOwnership) }
             }
             // UX §3 / §6 — the confirmation is the LAST EXIT, not a courtesy: a
             // published request cannot be withdrawn (there is no wire withdraw,
@@ -4192,7 +4548,7 @@ struct GroupInfoScreen: View {
             ) {
                 [.danger(l10n.t("chat.leave.confirm")) { viewModel.onLeaveGroup() }, .cancel()]
             }
-            // ADR-0089 / UX 2.3 — `Leave the group`, when checked, goes with
+            // ADR-0098 / UX 2.3 — `Leave the group`, when checked, goes with
             // the report.
             .reportSheet($reportRequest) { follow in
                 if follow == .leave { viewModel.onLeaveGroup() }
@@ -4230,6 +4586,19 @@ struct GroupInfoScreen: View {
             }
             .onAppear { viewModel.groupInfoAppeared() }
             .onDisappear { viewModel.groupInfoDisappeared() }
+            // The conversation's receive loop is a `.task` of the chat screen,
+            // which this screen covers, so it stops while the info is up. It
+            // runs here too: a membership change made on this screen (remove,
+            // make admin) is applied by the owner's sweep only once the poll
+            // has read the proposal back, and without a poll it waited until
+            // the chat was opened again (seen on an iPhone 2026-11-10: "2
+            // membership changes are waiting to apply" on the owner's device).
+            .task {
+                while !Task.isCancelled, viewModel.pollLoopShouldContinue {
+                    await viewModel.pollOnceLongPoll()
+                    await Task.yield()
+                }
+            }
             // UX 9.1 — the dialog over whichever screen of the conversation is
             // up; a cover cannot be presented from a screen under this one.
             .modifier(EndDialogPresenter(viewModel: viewModel, active: viewModel.conversationInfoOpen))
@@ -4250,13 +4619,13 @@ struct GroupInfoScreen: View {
             InitialsAvatar(
                 name: viewModel.memberInitialsName(member),
                 identity: base64Encode(member.signaturePublicKey),
-                size: 32, placeholderSymbol: "person.fill",
+                size: 32, placeholderIcon: .personFill,
                 photo: viewModel.memberPhoto(member))
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(viewModel.memberLabel(member))
                         .foregroundStyle(Color.lakkoText)
-                    // ADR-0089 step 4 — a suspended member: a muted marker
+                    // ADR-0098 step 4 — a suspended member: a muted marker
                     // after the name. The remove control stays as it is.
                     if SuspensionMarkRules.showsMemberMarker(
                         isOwnRow: viewModel.ownLeafIndex == member.leafIndex,
@@ -4345,7 +4714,7 @@ struct GroupInfoScreen: View {
 /// the safe one and the warning would read as being about the other one. It is
 /// also what puts *"This cannot be undone"* ahead of the control that does it in
 /// VoiceOver's focus order (UX §13).
-private struct TransferOwnershipStep: View {
+struct TransferOwnershipStep: View {
     @ObservedObject var viewModel: ChatViewModel
     @ObservedObject private var l10n = Localization.shared
 
@@ -4379,7 +4748,7 @@ private struct TransferOwnershipStep: View {
                             }
                             Spacer()
                             if viewModel.transferPick == row.signatureKeyB64 {
-                                Image(systemName: "checkmark")
+                                LkIconView(.checkmark, size: 20)
                             }
                         }
                     }
@@ -4417,7 +4786,7 @@ private struct TransferOwnershipStep: View {
                             }
                             Spacer()
                             if viewModel.transferOutgoing == option.value {
-                                Image(systemName: "checkmark")
+                                LkIconView(.checkmark, size: 20)
                             }
                         }
                     }
@@ -4502,7 +4871,10 @@ private struct ChatTitleView: View {
         HStack(spacing: 8) {
             InitialsAvatar(
                 name: title, identity: personKey?.base64EncodedString() ?? identity, size: 32, isGroup: isGroup,
-                photo: personKey.map(AvatarPhoto.person) ?? (isGroup ? AvatarPhoto.group(identity) : nil))
+                photo: personKey.map(AvatarPhoto.person) ?? (isGroup ? AvatarPhoto.group(identity) : nil),
+                // UX profile-screen section 7: the chat header plays the
+                // video always on a touch platform.
+                playsVideo: true)
             VStack(alignment: .leading, spacing: 0) {
                 Text(title)
                     .font(.headline)
@@ -4547,4 +4919,46 @@ private struct EndDialogPresenter: ViewModifier {
                 actions: [.primary(Localization.text("common.ok")) {}])
         }
     }
+}
+
+// MARK: - ADR-0092 helpers
+
+/// The editor or reader the chat screen presents (UX sections 5, 7-11).
+enum ContentScreenRequest: Identifiable {
+    case poll
+    case checklist(editing: ChatMessage?)
+    case location
+    case contact
+    case article(editing: ChatMessage?)
+    case reader(ChatMessage)
+    case results(ChatMessage)
+    case camera
+
+    var id: String {
+        switch self {
+        case .poll: return "poll"
+        case .checklist(let m): return "checklist-\(m?.messageId ?? 0)"
+        case .location: return "location"
+        case .contact: return "contact"
+        case .article(let m): return "article-\(m?.messageId ?? 0)"
+        case .reader(let m): return "reader-\(m.messageId)"
+        case .results(let m): return "results-\(m.messageId)"
+        case .camera: return "camera"
+        }
+    }
+}
+
+/// `Close this poll?` / `Close this checklist?` for one message.
+struct ContentCloseConfirm: Identifiable {
+    let message: ChatMessage
+    let isPoll: Bool
+    var id: Int64 { message.messageId }
+}
+
+/// UX section 2.4 — what this device has.
+enum ContentDevice {
+    static var hasCamera: Bool { UIImagePickerController.isSourceTypeAvailable(.camera) }
+    /// Every iPhone and iPad has a location service; whether it may be used
+    /// is the location screen's question (UX section 9.4).
+    static let hasLocation = true
 }

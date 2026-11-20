@@ -5,11 +5,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   decideLinkCallStart,
+  linkCallHistoryEntry,
   linkCallNotice,
   linkCallOccupiesSlot,
   linkCallOverlayShown,
   reduceLinkCallPhase,
   type LinkCallEvent,
+  type LinkCallJournal,
   type LinkCallPhase,
 } from "./link-call-host";
 
@@ -191,5 +193,53 @@ describe("linkCallNotice", () => {
       "The call failed. Joined the wrong call.",
     );
     expect(linkCallNotice("error", "owner", false, null)?.text).toBe("The call failed.");
+  });
+});
+
+describe("linkCallHistoryEntry", () => {
+  function journal(over: Partial<LinkCallJournal> = {}): LinkCallJournal {
+    return {
+      callIdHex: "00112233445566778899aabbccddeeff",
+      role: "owner",
+      video: true,
+      liveAtMs: 3_000,
+      recorded: false,
+      ...over,
+    };
+  }
+  const facts = { endedAtMs: 63_000, isGuest: false };
+
+  it("writes an outgoing row for a call this device started", () => {
+    expect(linkCallHistoryEntry(journal(), facts)).toEqual({
+      id: "00112233445566778899aabbccddeeff",
+      outcome: "outgoing",
+      video: true,
+      // Filed at the moment this device got past the join step, and as long
+      // as it was in the call from then.
+      startedAtMs: 3_000,
+      durationMs: 60_000,
+    });
+  });
+
+  it("writes an incoming row for a call joined from a link", () => {
+    expect(linkCallHistoryEntry(journal({ role: "joiner", video: false }), facts)?.outcome).toBe(
+      "incoming",
+    );
+  });
+
+  it("writes nothing for a device that never got past the join step", () => {
+    expect(linkCallHistoryEntry(journal({ role: "joiner", liveAtMs: null }), facts)).toBeNull();
+  });
+
+  it("writes nothing for a guest account", () => {
+    expect(linkCallHistoryEntry(journal(), { ...facts, isGuest: true })).toBeNull();
+  });
+
+  it("writes nothing a second time for the same attempt", () => {
+    expect(linkCallHistoryEntry(journal({ recorded: true }), facts)).toBeNull();
+  });
+
+  it("never reports a negative duration when the clock moved backwards", () => {
+    expect(linkCallHistoryEntry(journal(), { ...facts, endedAtMs: 0 })?.durationMs).toBe(0);
   });
 });

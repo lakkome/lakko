@@ -51,6 +51,7 @@
 #![forbid(unsafe_code)]
 
 pub(crate) mod handlers;
+pub(crate) mod metrics;
 pub(crate) mod operator_key;
 pub(crate) mod service_auth;
 pub(crate) mod store;
@@ -133,6 +134,7 @@ pub(crate) struct AppState {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
     #[cfg(debug_assertions)]
     {
@@ -142,6 +144,13 @@ async fn main() -> Result<()> {
     }
 
     init_tracing();
+    // /metrics on its own localhost port, off when unset (ADR-0096).
+    lakko_metrics::start_from_env(
+        "transparency",
+        env!("CARGO_PKG_VERSION"),
+        "LAKKO_TRANSPARENCY_METRICS_BIND",
+    )
+    .await?;
 
     let bind: SocketAddr = std::env::var("LAKKO_BIND")
         .unwrap_or_else(|_| DEFAULT_BIND.to_string())
@@ -162,6 +171,10 @@ async fn main() -> Result<()> {
         .context("connect to MariaDB")?;
 
     MIGRATIONS.run(&pool).await.context("run sqlx migrations")?;
+    // Connections in use and idle (ADR-0096).
+    let pool_for_gauge = pool.clone();
+    let _pool_gauge =
+        lakko_metrics::spawn_pool_gauge(move || (pool_for_gauge.size(), pool_for_gauge.num_idle()));
 
     // Operator signing key — generated on first boot, persisted, rebuilt
     // from the seed at every start. The derived verifying key is the
@@ -242,6 +255,7 @@ async fn main() -> Result<()> {
              K-of-N co-signature bundle"
         );
     }
+    metrics::witnesses_configured(witnesses.len());
     let witness = Arc::new(witnesses);
 
     let state = AppState {
@@ -344,6 +358,8 @@ pub(crate) fn build_app(state: AppState) -> Router {
 
     open.merge(protected)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        // Requests by route template, method and status class (ADR-0096).
+        .layer(lakko_metrics::red_layer("transparency"))
         .layer(TraceLayer::new_for_http().make_span_with(lakko_log_hygiene::request_span))
         .with_state(state)
 }

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0089 section 1 - attested chat messages on the web client.
+ * ADR-0098 section 1 - attested chat messages on the web client.
  *
  * A chat plaintext is `lakko/attested-message/v1\0 || 0x01 || sig(64) ||
  * envelope`, signed by the sending device's conversation leaf key over the

@@ -1309,6 +1309,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-metrics"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "lakko-log-hygiene",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "lakko-sfu-proto"
 version = "0.0.0"
 dependencies = [
@@ -1329,9 +1343,9 @@ dependencies = [
  "futures",
  "lakko-call-jwt",
  "lakko-log-hygiene",
+ "lakko-metrics",
  "lakko-sfu-proto",
  "metrics",
- "metrics-exporter-prometheus",
  "reqwest",
  "serde",
  "serde_json",

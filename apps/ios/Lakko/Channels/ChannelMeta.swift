@@ -141,17 +141,33 @@ public enum ChannelMetaRecord {
             throw ChannelMetaError.notAPublisher
         }
         let plaintext = try composeChannelMeta(meta: meta.ffi)
-        let epoch = state.epochByChannel[channelId] ?? 0
+        // ADR-0087 section 15 — sealed under an epoch the channel service has
+        // reached (``ChannelPublisherSeed``).
+        guard let sealing = state.composerSeed(channelId: channelId) else {
+            throw ChannelPublisherSeedUnavailable()
+        }
         let counter = try state.nextCounter(channelId: channelId)
         let wire = try ChannelsComposer.compose(
-            keys: keys,
+            keys: ChannelPublisherKeys(seed: sealing.seed, signingKeySeed: keys.signingKeySeed),
             channelIdHex: channelId,
-            epochId: epoch,
+            epochId: sealing.epoch,
             messageCounter: counter,
             plaintext: plaintext
         )
         _ = try await client.publishPost(channelIdHex: channelId, payload: wire, accountIdentity: accountIdentity)
         state.recordSharedMeta(channelId: channelId, meta: meta)
+    }
+
+    /// The first record of a channel this device created, kept as its own
+    /// copy and marked owed before it is sent (seen live 2026-11-13: a first
+    /// record that did not post was never sent again, and a re-issue with no
+    /// record held has no flag to state). ``post(state:client:channelId:meta:accountIdentity:)``
+    /// keeps the same record again on success, a no-op at the same stamp;
+    /// the caller clears the owed mark once it landed.
+    @MainActor
+    public static func keepFirst(state: ChannelsUiState, channelId: String, meta: SharedChannelMeta) {
+        _ = state.recordSharedMeta(channelId: channelId, meta: meta)
+        state.updateExtras(channelId) { $0.recordOwed = true }
     }
 
     /// A fresh record for an edit or the creation: the trimmed fields with a

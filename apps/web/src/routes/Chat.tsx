@@ -33,6 +33,26 @@
  */
 import { accountSuspended } from "../auth/suspension-state";
 import { SuspendedComposerLine } from "../auth/SuspendedReadOnly";
+import { contentFromPersisted } from "../attach/preview";
+import { Portal } from "solid-js/web";
+import { openMessageMenu } from "../chat/message-menu-registry";
+import { AttachComposer, type AttachEditRequest } from "../attach/AttachComposer";
+import { ComposerTray } from "../chat/ComposerTray";
+import { backspaceRemovesLast, messageRefs, traySendable, type TrayStatus } from "../chat/compose-tray";
+import { release as releaseTrayItem, trayFor, type TrayStore } from "../chat/tray-store";
+import type { ContentHost } from "../attach/ContentBubble";
+import { ArticleReader } from "../attach/ArticleReader";
+import { checklistContentOf, contentRetryAllowed, pollContentOf } from "../attach/actions";
+import { receiveContent } from "../attach/receive";
+import { loadContent as loadAttachContent, updateContent as updateAttachContent, withArticleEdit, withOp as withAttachOp } from "../attach/content-store";
+import { heldOpOf } from "../attach/receive";
+import { persistedFromAttachmentRef as persistedAttachmentOf } from "../chat/persisted-attachment";
+import { reencodePhoto } from "../attach/photo-encode";
+import { addContactFromCard } from "../attach/contact-card-add";
+import type { ArticleDraftOut, ChecklistDraft, PollDraft, ShareableContact } from "../attach/types";
+import type { Article, ContentState, MessageContent, SharedContactCard } from "../../wasm/lakko_ffi_wasm";
+import { loadWasm as loadAttachWasm } from "../wasm";
+import { openHostUrl } from "../platform/host";
 import {
   createEffect,
   createMemo,
@@ -67,6 +87,7 @@ import {
   forwardJumpRow,
   forwardJumpTarget,
   forwardPayloadOf,
+  canForwardContent,
   forwardRefFromPersisted,
   persistedFromForwardRef,
 } from "../chat/forward";
@@ -88,7 +109,7 @@ import {
   type Selection,
 } from "../chat/selection";
 import { blobIdsOfRefs, bytesToHex as blobHex } from "../chat/blob-ids";
-import { goneLines, isSendLimit, openFailureOf, openLimitText, sendLimitText } from "../chat/attachment-failure";
+import { goneLines, openFailureOf, openLimitText, sendRefusalText } from "../chat/attachment-failure";
 import {
   chunkSaveEdits,
   saveEdit,
@@ -101,6 +122,7 @@ import {
 } from "../chat/saved-messages";
 import type { ConversationRef } from "../chat/folders/folder-model";
 import { deleteBlobs } from "../storage/blob-deletes";
+import { StorageClient } from "../storage/client";
 import {
   persistedFromReplyRef,
   replyRefFromPersisted,
@@ -109,6 +131,7 @@ import {
   type ReplySnapshot,
 } from "../chat/reply-snapshot";
 import { opsFromPersisted, persistedWithOps } from "../chat/message-ops-store";
+import { channelInviteRowPreview } from "../chat/channel-invite-preview";
 import { screenAnchor } from "../ui/screen-anchor";
 import { sendFailureNotice, withSendAck } from "../chat/send-failure";
 import { memberKeysOf, peerName } from "../chat/peer-name";
@@ -158,7 +181,7 @@ import {
   base64UrlDecodeNoPad,
   base64UrlEncodeNoPad,
 } from "../auth/account-id";
-import { ChatClient, HeldForSuccessor, type PollMessagesResult } from "../chat/client";
+import { ChatClient, HeldForSuccessor, isConversationBehind, type PollMessagesResult } from "../chat/client";
 import { isDsNetworkFailure } from "../ds/client";
 import { dsAccess, dsClockSkewNotice, journalHex } from "../ds/access";
 import {
@@ -285,6 +308,9 @@ import { markReactionsSeen, markUnseenReaction, unseenReactionIds } from "../cha
 import { colonQueryAt, replaceColonQuery, type ColonQuery } from "../chat/colon-query";
 import { MAX_GIF_FULL_BYTES, fetchGifMedia, type GifItem } from "../media/gif-client";
 import {
+  composeArticleEditEnvelope,
+  composeContentEnvelope,
+  contentPartsOfForward,
   composeEnvelope,
   composeForwardEnvelope,
   composeReplyEnvelope,
@@ -306,7 +332,6 @@ import {
   type AttachmentRefBytes,
   type ThumbRefBytes,
   AttachmentSizeError,
-  MAX_ATTACHMENT_BYTES,
 } from "../chat/attachments";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
 import { recordRemovedDevices } from "../chat/device-readmission";
@@ -558,7 +583,6 @@ import {
 } from "../chat/timeline-layout";
 import { conversationKindOf, type ConversationKind } from "../chat/conversation-kind";
 import { createDraftSeed } from "../chat/draft-seed";
-import { pastedImages } from "../chat/pasted-files";
 import {
   membershipNoticeAfterAttempt,
   membershipNoticeLanded,
@@ -590,6 +614,10 @@ import { attachmentsPreviewLabel } from "../chat/list-preview";
 import { openReport } from "../moderation/report-session";
 import { CONVERSATION_GROUP, CONVERSATION_ONE_TO_ONE, type PickCandidate } from "../moderation/report-model";
 import { unblockPerson } from "../moderation/block-actions";
+import { chatErrorsHidden, conversationBehind } from "../chat/conversation-behind";
+import { gapLines, gapLinesVersion, type GapLine } from "../chat/reentry-store";
+import { insertByMessageId, placeGapLines } from "../chat/gap-line";
+import { onGapHistoryFiled, requestGapHistoryLook } from "../chat/reentry-history";
 
 /**
  * `/chat/:id` (from the Chats list) and `/groups/:id` (from the Groups list)
@@ -1035,7 +1063,11 @@ function ChatView(props: {
     // The snapshot carries the author's REAL name, the account's own for an
     // own message (decided 2026-11-04): it goes on the wire, and "You" is the
     // viewer's word, drawn locally by the author's own devices.
-    const snapshot = replySnapshotFor({ text, attachments }, forwardAuthorLabelOf(row), (a) => hub.decision(a).bubble);
+    const snapshot = replySnapshotFor(
+      { text, attachments, invitationLine: rowInvitationLine(row, text) },
+      forwardAuthorLabelOf(row),
+      (a) => hub.decision(a).bubble,
+    );
     setEditingId(null);
     setReplyingTo({ target: messageId, ...snapshot });
     composerInput?.focus();
@@ -1104,6 +1136,16 @@ function ChatView(props: {
       own: rows().find((r) => rowMessageId(r) === id)?.kind === "outgoing",
     }));
   const deleteState = createMemo(() => deleteDecision(selectedItems()));
+  /** The selection holds a message carrying a channel invitation card, which
+   *  is never forwarded (maintainer, 2026-11-13). */
+  const selectionHoldsInvitation = createMemo(() =>
+    oldestFirst(selection()).some((id) => {
+      const row = rows().find((r) => rowMessageId(r) === id);
+      if (row === undefined) return false;
+      if (row.kind === "outgoing") return row.channelInviteB64 !== undefined;
+      return row.event.kind === "application" && row.event.channelInvite !== undefined && row.event.channelInvite.length > 0;
+    }),
+  );
   // Section 8 "Leaving" — Escape on web. On the capture phase, so it is
   // decided before whatever is stacked on top of the mode (the confirmation,
   // the picker) handles the same key: while one of those is open, Escape is
@@ -1223,6 +1265,12 @@ function ChatView(props: {
   async function forwardSelectionTo(target: ForwardPickerRow): Promise<void> {
     const entry = chats.get(target.id);
     if (entry === undefined) throw new KeyedError("chat.error.conversation_gone");
+    // A channel invitation card is never forwarded (maintainer, 2026-11-13);
+    // the bar's Forward is disabled for such a selection, this is the floor.
+    if (selectionHoldsInvitation()) {
+      setBulkForwardOpen(false);
+      return;
+    }
     const ids = oldestFirst(selection());
     const done: number[] = [];
     setError(null);
@@ -1251,6 +1299,17 @@ function ChatView(props: {
    * picker's state are the callers'. A throw means nothing was sent for THIS
    * message.
    */
+  /** UX `attachments.md` section 11a — whether the message `messageId` may be
+   *  forwarded by its content (the bulk Forward button; the single one is the
+   *  bubble's). A message this timeline does not hold reads as forwardable:
+   *  `forwardOne` refuses it as gone. */
+  function messageForwardable(messageId: number): boolean {
+    const row = rows().find((r) => rowMessageId(r) === messageId);
+    if (row === undefined) return true;
+    const content =
+      row.kind === "outgoing" ? row.content : row.event.kind === "application" ? row.event.content : undefined;
+    return canForwardContent(content, (k) => profiles.cardShareableOf(k));
+  }
   async function forwardOne(messageId: number, entry: ActiveGroup): Promise<void> {
     const row = rows().find((r) => rowMessageId(r) === messageId);
     if (row === undefined) throw new KeyedError("chat.error.message_gone");
@@ -1264,6 +1323,14 @@ function ChatView(props: {
           : [];
     const carried =
       row.kind === "outgoing" ? row.forward : row.event.kind === "application" ? row.event.forward : undefined;
+    // ADR-0092 / UX `attachments.md` section 11a — the content travels too;
+    // a poll, a checklist or a card its person does not let be shared is
+    // never forwarded (the menu does not offer it; this is the backstop).
+    const content =
+      row.kind === "outgoing" ? row.content : row.event.kind === "application" ? row.event.content : undefined;
+    if (!canForwardContent(content, (k) => profiles.cardShareableOf(k))) {
+      throw new KeyedError("chat.forward.error.generic");
+    }
     const payload = forwardPayloadOf(
       {
         text: original,
@@ -1271,6 +1338,7 @@ function ChatView(props: {
         attachments,
         messageId,
         forward: carried,
+        content,
       },
       forwardAuthorLabelOf(row),
       props.entry.groupIdB64,
@@ -1282,7 +1350,10 @@ function ChatView(props: {
     // uploaded and orphaned, and a forward is rarely more than a few files.
     const fresh: AttachmentRefBytes[] = [];
     for (const a of payload.attachments) fresh.push(await reencryptAttachmentRef(a));
-    const bytes = await composeForwardEnvelope(payload.text, fresh, payload.forward);
+    const bytes =
+      payload.content === undefined
+        ? await composeForwardEnvelope(payload.text, fresh, payload.forward)
+        : await composeContentEnvelope(payload.content, fresh, contentPartsOfForward(payload.forward));
     let result: Awaited<ReturnType<typeof chat.sendMessage>>;
     try {
       result = await chat.sendMessage(props.requireIdentity(), entry.group, bytes);
@@ -1294,7 +1365,13 @@ function ChatView(props: {
       if (err instanceof HeldForSuccessor) {
         heldSends.hold(
           lineageView.conversationHexOf(entry.group.groupId),
-          { text: payload.text, attached: fresh, reply: undefined, forward: payload.forward },
+          {
+            text: payload.text,
+            attached: fresh,
+            reply: undefined,
+            forward: payload.forward,
+            ...(payload.content === undefined ? {} : { content: payload.content }),
+          },
           Date.now(),
         );
         void persistHeldSends(accountIdB64ForLog());
@@ -1327,6 +1404,7 @@ function ChatView(props: {
           createdAt: result.createdAt,
           authorKey,
           forward: payload.forward,
+          ...(payload.content === undefined ? {} : { content: payload.content }),
         },
       ]);
       return;
@@ -1349,6 +1427,8 @@ function ChatView(props: {
           createdAt: result.createdAt,
           authorKeyB64: authorIdentityToPersisted(authorKey),
           forward: persistedFromForwardRef(payload.forward),
+          // ADR-0092 — the content object, verbatim (as a sent row persists).
+          ...(payload.content === undefined ? {} : { content: payload.content }),
         };
         await updateMessageLog(s.account.accountId, deviceKey, (existing) => {
           const groups = existing?.groups ?? {};
@@ -1513,15 +1593,16 @@ function ChatView(props: {
     return peers.length === 1 ? (peers[0] ?? null) : null;
   };
   /** Under the name (docs/ux section 5.2): "typing..." while a typing
-   *  indicator is live, else the person's "@username" in a 1x1, else the size
-   *  of the group in people. Which of the two follows the conversation kind, so
-   *  a two-person group says "2 people" like the list it is filed under. */
+   *  indicator is live, else the person's "@username" in a 1x1, else "N
+   *  members" (docs/ux/client-redesign.md 5.2, as iOS and Android say it; web
+   *  said "N people" here until 2026-11-10). Which of the two follows the
+   *  conversation kind, so a two-person group says "2 members". */
   const headerSub = (): string => {
     const typing = typingIndicator();
     if (typing !== null && !membershipEnded()) return typing;
     const peer = isGroupChat() ? null : peerKeyB64();
     if (peer !== null) return profiles.resolve(peer).username ?? "";
-    return t("chats.row.people", { count: memberCount() });
+    return t("chat.members.count", { count: memberCount() });
   };
   /**
    * The name at the top opens this conversation's info
@@ -1623,11 +1704,14 @@ function ChatView(props: {
 
   /** What this chat's call buttons (and the in-chat "call in progress"
    *  banner) offer — `calls/group-call-host.ts`. */
-  // ADR-0089 step 3: a suspended account places and joins no call.
+  // ADR-0098 step 3: a suspended account places and joins no call.
   const callAffordance = (): ChatCallAffordance =>
     accountSuspended()
       ? "hidden"
       : chatCallAffordance({
+      // ADR-0091 UX 2.6 — the buttons stay while this device is behind; a
+      // call pressed then fails like any call that could not start
+      // (`CallHostContext`, `callStartHeldWhileBehind`).
       membershipEnded: membershipEnded(),
       callInProgress: callHost.anyCallInProgress(),
       liveCallInThisChat: liveGroupCall() !== null,
@@ -1868,14 +1952,6 @@ function ChatView(props: {
       draftBroadcastTimer = null;
     }
   });
-  // 1.19c2 — attachments staged in the composer. The user picks
-  // file(s); each gets encrypt+upload immediately so the ref is
-  // ready by the time they hit Send. Cleared on Send, on
-  // explicit per-chip remove, and on navigation away.
-  const [pendingAttachments, setPendingAttachments] = createSignal<
-    AttachmentRefBytes[]
-  >([]);
-
   // ----- ADR-0065: file lifetime and saved messages ---------------------
 
   /** The signed-in account, for the blob deletes it owes. */
@@ -1911,27 +1987,6 @@ function ChatView(props: {
     return target !== null && savedKeys().has(savedEntryKey(blobHex(target.groupId), target.messageId));
   };
   const [uploading, setUploading] = createSignal(false);
-  /** Per-file upload-progress snapshot — drives the
-   *  "Uploading hello.png (2/5)…" indicator in the composer
-   *  tray. `null` when no upload is in flight. The granularity
-   *  is one entry per file × two stages (encrypt → upload);
-   *  byte-level progress within a single PUT would need a
-   *  fetch-stream rewrite (`fetch` doesn't expose upload
-   *  progress; XHR does, but the trade-off in code complexity
-   *  beats the marginal UX win for sub-MAX_ATTACHMENT_BYTES
-   *  files). */
-  const [uploadProgress, setUploadProgress] = createSignal<
-    | {
-        fileIndex: number;
-        total: number;
-        fileName: string;
-        stage: "encrypting" | "uploading";
-        /** UX spec section 10 — the local thumb shown while a photo or
-         *  video uploads, filed in the media hub under this key. */
-        previewKey?: string;
-      }
-    | null
-  >(null);
   // ADR-0047 — the media runtime every bubble shares: decrypted media as
   // object URLs (revoked when this view unmounts — before this, every
   // previewed image stayed in memory for the life of the tab), the
@@ -1959,6 +2014,20 @@ function ChatView(props: {
         ];
       }),
   });
+  // `docs/ux/media-messages.md` section 11 — the composer tray: what the next
+  // message carries, uploaded as it is added. It belongs to this
+  // conversation's draft on this device, so it outlives this view
+  // (`chat/tray-store.ts`) and is found again when the conversation reopens.
+  const tray: TrayStore = trayFor(
+    `${auth.state().kind === "session" ? (auth.state() as { account: { accountId: string } }).account.accountId : "none"}:${props.entry.groupIdB64}`,
+    {
+      storage: () => new StorageClient(),
+      inlineType: (mime) => hub.inlineType(mime),
+      discard: (refs) => deleteUnsent(refs),
+      onError: (text) => setError(() => text),
+    },
+  );
+  const trayStatuses = (): TrayStatus[] => tray.items().map((i) => i.status);
   onCleanup(() => hub.dispose());
   // ADR-0051 — the `Group name` row of the group info (UX spec §3.1.2 / §5).
   const [groupNameInput, setGroupNameInput] = createSignal("");
@@ -2033,14 +2102,14 @@ function ChatView(props: {
   // one-to-one never becomes one. The member count above is display only.
   const conversationKind = createMemo<ConversationKind>(() => conversationKindOf(props.entry.group));
   const isGroupChat = (): boolean => conversationKind() === "group";
-  /** ADR-0089 section 6 - the other person of this one-to-one when this
+  /** ADR-0098 section 6 - the other person of this one-to-one when this
    *  account blocked them, else `null` (a group, or nobody blocked). */
   const blockedPeerKey = (): string | null => {
     if (isGroupChat()) return null;
     const peer = oneToOnePeer(props.entry.group, chats.identity());
     return peer !== null && isBlockedKeyB64(peer) ? peer : null;
   };
-  /** ADR-0089 step 4, UX 3 - this one-to-one's other person when the
+  /** ADR-0098 step 4, UX 3 - this one-to-one's other person when the
    *  moderation log confirms their account is suspended and they are not
    *  blocked (a block's banner wins). The chat still works. */
   const suspendedPeer = (): boolean => {
@@ -2050,7 +2119,7 @@ function ChatView(props: {
     return personMark(isBlockedKeyB64(peer), isSuspendedKeyB64(peer)) === "suspended";
   };
   const [unblocking, setUnblocking] = createSignal(false);
-  // ----- ADR-0089 section 2: reporting from this conversation -----------
+  // ----- ADR-0098 section 2: reporting from this conversation -----------
   /** The person this conversation is about, for a report's target. */
   function reportPersonTarget(keyB64: string): { kind: "person"; accountKeyB64: string; name: string } {
     return { kind: "person", accountKeyB64: keyB64, name: memberNameOf(profiles.resolve(keyB64), "a report") };
@@ -2234,7 +2303,7 @@ function ChatView(props: {
     // A membership that ended offers nothing here: the exit block says what
     // is left (ADR-0045 UX 6.2), and the end itself wipes the group.
     if (membershipEnded()) return [];
-    // ADR-0089 step 3: a suspended account adds nobody and invites nobody.
+    // ADR-0098 step 3: a suspended account adds nobody and invites nobody.
     return sectionsWhileSuspended(conversationInfoSectionsFor(uiRules(), {
       kind: "group",
       role: ownRole() ?? "member",
@@ -2463,6 +2532,40 @@ function ChatView(props: {
    *  as a function rather than through the memo directly so a call site reads
    *  as the question it is asking. */
   const membershipEnded = (): boolean => membershipHasEnded(membership());
+  // ADR-0091 phase 2 — where this device stands in the conversation:
+  // suspected or confirmed behind stops it acting (C-93). The chat looks as
+  // always (maintainer, 2026-11-20): the composer stays, a message sent
+  // meanwhile is shown not sent, other actions fail with their ordinary
+  // failure text; nothing says why (UX 2.2).
+  const behindState = () => conversationBehind.state(props.entry.groupIdB64);
+  const behindStopsActing = (): boolean => behindState().stopsActing;
+  // ADR-0091 section 7 — the gap's messages the device that brought this one
+  // back sent: shown at once in an open chat (they were filed into the log
+  // already; the timeline dedups by DS id and places them by it).
+  onMount(() => {
+    const off = onGapHistoryFiled((groupIdB64, filed) => {
+      if (groupIdB64 !== props.entry.groupIdB64 || filed.length === 0) return;
+      setRows(insertByMessageId(rows(), filed.map(persistedToTimelineRow), rowMessageId));
+    });
+    onCleanup(off);
+  });
+  // Live walk 2026-11-19 — opening the chat looks for the gap's messages
+  // (at most once a minute per group; a no-op without a pending look).
+  createEffect(() => {
+    const groupIdB64 = props.entry.groupIdB64;
+    untrack(() => requestGapHistoryLook(groupIdB64));
+  });
+  // UX 2.4 — the "can't be shown" lines of this chat, placed among the
+  // timeline's entries.
+  const gapPlacement = createMemo(() => {
+    gapLinesVersion();
+    const lines = gapLines(props.entry.groupIdB64);
+    if (lines.length === 0) return null;
+    return placeGapLines(
+      timelineEntries().map((e) => (e.kind === "call" ? e.call.startedAtMs : Date.parse(rowCreatedAt(e.row) ?? ""))),
+      lines,
+    );
+  });
 
   /** §6.2.5 — the bar that REPLACES the composer, or `null` while the
    *  membership holds. Narrowed to the one variant the template renders, the
@@ -2757,6 +2860,9 @@ function ChatView(props: {
     // — but it is the half that is a GATE, and the gate is what makes a
     // surviving timer harmless rather than merely unlikely.
     if (membershipEnded()) return;
+    // ADR-0091 section 2 (C-64, C-93) — a device behind in this conversation
+    // emits no beacon: it would claim it can sweep a group it cannot read.
+    if (behindStopsActing()) return;
     if (!usesProposalPath()) return;
     const wasm = await loadWasmForCalls();
     let ownRank: number | undefined;
@@ -2832,6 +2938,8 @@ function ChatView(props: {
     }
     if (outcome === null) return null;
     if (outcome.kind !== "committed") return outcome;
+    // ADR-0092 section 3.9 — an admission that added a leaf hands the open
+    // polls and checklists over, sealed at the new epoch.
 
     setMemberCount(peopleCountOf(props.entry.group));
     setMembersVersion(membersVersion() + 1);
@@ -4575,7 +4683,9 @@ function ChatView(props: {
     try {
       await pollOnce(0, undefined, false);
     } catch (err) {
-      setError(errorText(err, "chat.error.refresh"));
+      // Live walk 2 — a behind chat's reads are refused by design: no
+      // banner for them (UX 2.2: nothing says why).
+      if (!chatErrorsHidden(behindState())) setError(errorText(err, "chat.error.refresh"));
     } finally {
       setBusy(false);
     }
@@ -4947,12 +5057,26 @@ function ChatView(props: {
   async function onSend(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     const text = input();
-    const attached = pendingAttachments();
-    // 1.19c2: attachment-only messages are valid (empty text +
-    // ≥1 attachment); pre-1.19 text-only messages still valid
-    // (≥1 char text + zero attachments). The only invalid
-    // input is the all-empty composer.
-    if (text.length === 0 && attached.length === 0) return;
+    // `docs/ux/media-messages.md` section 11 — one message carries the text
+    // and every item of the tray; Send waits until each item is uploaded.
+    if (!traySendable(text, trayStatuses())) return;
+    const items = tray.take();
+    // ADR-0047 section 6 — the micro thumbnail stays on the first photo or
+    // video (by type, however it was added) only.
+    const attached: AttachmentRefBytes[] = messageRefs(items, (mime) => hub.inlineType(mime));
+    for (const item of items) {
+      if (item.ref === null) continue;
+      // The sender's own bubble shows the local bytes rather than downloading
+      // its own upload.
+      if (item.kind !== "file") {
+        hub.fileLocal(mediaKey(item.ref.blobId), item.file, item.ref.mime);
+        const thumb = item.ref.thumb;
+        if (thumb !== undefined && item.thumbBlob !== null) {
+          hub.fileLocal(`thumb:${mediaKey(thumb.blobId)}`, item.thumbBlob, "image/jpeg");
+        }
+      }
+      releaseTrayItem(item);
+    }
     setError(null);
     draftSeed.touched();
 
@@ -4983,7 +5107,6 @@ function ChatView(props: {
       },
     ]);
     setInput("");
-    setPendingAttachments([]);
     await publishOutgoing(tempId, text, attached, reply);
   }
 
@@ -5043,8 +5166,21 @@ function ChatView(props: {
       // Empty refs ⇒ pure-text envelope; non-empty ⇒ multi-
       // attachment envelope via the wasm EnvelopeBuilder. A reply is the
       // same envelope plus the reference (ADR-0052).
+      // ADR-0092 — a poll, checklist, location, contact card or article.
+      const contentRow = rows().find((r) => r.kind === "outgoing" && r.tempId === tempId);
+      const content = contentRow?.kind === "outgoing" ? contentRow.content : undefined;
       const envelopeBytes =
-        forward !== undefined
+        content !== undefined
+          ? await composeContentEnvelope(
+              content,
+              attached,
+              forward !== undefined
+                ? contentPartsOfForward(forward)
+                : reply === undefined
+                  ? undefined
+                  : { replyTo: reply.target, replyAuthor: reply.author ?? null, replyExcerpt: reply.excerpt ?? null },
+            )
+          : forward !== undefined
           ? await composeForwardEnvelope(text, attached, forward)
           : reply === undefined
             ? await composeEnvelope(text, attached)
@@ -5067,6 +5203,12 @@ function ChatView(props: {
             : r,
         ),
       );
+      // ADR-0092 — our own poll or checklist never comes back to us (the
+      // echo is filtered), so it is filed here.
+      const own = ownSignatureKeyB64();
+      if (content !== undefined && own !== undefined) {
+        await receiveContent(props.entry.group, props.entry.groupIdB64, result.messageId, result.createdAt, own, content);
+      }
     } catch (err) {
       // The publish itself refused the superseded session (a reset accepted
       // between the route above and the send): held, exactly as if the
@@ -5177,6 +5319,7 @@ function ChatView(props: {
         messageId,
         author: profiles.ownProfile().displayName ?? profiles.ownUsername() ?? t("chat.author.you"),
         text: (msgOps().get(rowId) ?? historyOps().get(rowId))?.editedText ?? row.plaintext,
+        invitationLine: rowInvitationLine(row, row.plaintext),
         attachments: row.attachments,
         sentAtMs: row.createdAt === undefined ? 0 : new Date(row.createdAt).getTime(),
       };
@@ -5190,6 +5333,7 @@ function ChatView(props: {
         // the account (ADR-0065), so a placeholder would stay there for good.
         author: (ev.senderKey === undefined ? null : realNameOf(ev.senderKey)) ?? "",
         text: (msgOps().get(rowId) ?? historyOps().get(rowId))?.editedText ?? ev.text,
+        invitationLine: rowInvitationLine(row, ev.text),
         attachments: ev.attachments,
         sentAtMs: new Date(ev.createdAt).getTime(),
       };
@@ -5373,6 +5517,7 @@ function ChatView(props: {
           at = (
             await chat.broadcastControl(props.requireIdentity(), props.entry.group, envelopeBytes, {
               attest: true,
+              personAction: true,
             })
           ).messageId;
         }
@@ -5439,22 +5584,29 @@ function ChatView(props: {
    */
   async function publishQuiet(
     envelopeBytes: Uint8Array,
-    /** ADR-0089 section 1 - an edit or a delete is attested; a typing
+    /** ADR-0098 section 1 - an edit or a delete is attested; a typing
      *  signal and a read receipt are not. */
     attest: boolean,
   ): Promise<{ messageId: number }> {
-    return chat.broadcastControl(props.requireIdentity(), props.entry.group, envelopeBytes, { attest });
+    // The person's own action (edit, delete, content op): ADR-0091 live walk 3.
+    return chat.broadcastControl(props.requireIdentity(), props.entry.group, envelopeBytes, {
+      attest,
+      personAction: true,
+    });
   }
 
   async function publishEphemeral(envelopeBytes: Uint8Array): Promise<void> {
     // ADR-0073 R.7 case 1 — a typing signal or a read receipt is not sent
     // into a superseded one-to-one either (the publish would refuse it).
     if (opRouteNow() !== "send") return;
-    // ADR-0089 section 6 - nor to a blocked person.
+    // ADR-0098 section 6 - nor to a blocked person.
     if (signalsWithheldFrom(props.entry.group, chats.identity())) return;
     try {
-      await publishQuiet(envelopeBytes, false);
+      // Automatic: held also after a refused read (ADR-0091 live walk 3).
+      await chat.broadcastControl(props.requireIdentity(), props.entry.group, envelopeBytes);
     } catch (err) {
+      // ADR-0091: no typing signal or read receipt while behind.
+      if (isConversationBehind(err)) return;
       // eslint-disable-next-line no-console
       console.warn("publishEphemeral failed", err);
     }
@@ -5630,97 +5782,6 @@ function ChatView(props: {
   });
 
   /**
-   * Encrypt + upload an iterable of files sequentially (so a
-   * slow user-stream doesn't fan out N parallel storage PUTs),
-   * appending the resulting refs to the pending list. Failed
-   * uploads surface a per-file error and stop the loop.
-   *
-   * Shared between the `<input type="file">` Change handler and
-   * the drag-drop handler — both surface a `FileList`-ish
-   * iterable; this helper is the one place we own the upload
-   * loop.
-   */
-  async function processFiles(files: ArrayLike<File>): Promise<void> {
-    if (files.length === 0) return;
-    setError(null);
-    setUploading(true);
-    const list = Array.from(files);
-    try {
-      for (let i = 0; i < list.length; i += 1) {
-        const file = list[i];
-        if (file === undefined) continue;
-        try {
-          // Polish 1.x: drive `uploadProgress` so the composer
-          // tray can render "Uploading <file> (i/n)…" with a
-          // stage indicator. The encrypt-vs-upload split lets
-          // the user see the slow phase (network) separately
-          // from the fast one (in-memory AEAD).
-          // UX spec section 10 — a photo or video carries its pixel size
-          // and a JPEG thumb so the receiver can lay the bubble out before
-          // downloading. Produced before the upload so the composer shows
-          // the thumb meanwhile; any failure sends the file without them.
-          const inline = hub.inlineType(file.type.length > 0 ? file.type : undefined);
-          let preview: VisualPreview | null = null;
-          let previewKey: string | undefined;
-          if (inline === "image" || inline === "video") {
-            preview = inline === "image" ? await describeImage(file) : await describeVideo(file);
-            if (preview.thumb !== null) {
-              previewKey = `compose-preview:${nextTempId++}`;
-              hub.fileLocal(previewKey, preview.thumb.blob, "image/jpeg");
-            }
-          }
-          let ref: AttachmentRefBytes;
-          try {
-            ref = await encryptAndUploadFile(
-              file,
-              undefined,
-              (stage) => {
-                setUploadProgress({
-                  fileIndex: i,
-                  total: list.length,
-                  fileName: file.name,
-                  stage,
-                  ...(previewKey === undefined ? {} : { previewKey }),
-                });
-              },
-            );
-            if (preview !== null) ref = await withVisualPreview(ref, file, preview);
-          } finally {
-            if (previewKey !== undefined) hub.revoke(previewKey);
-          }
-          setPendingAttachments([...pendingAttachments(), ref]);
-        } catch (err) {
-          if (err instanceof AttachmentSizeError) {
-            const { got, max } = err;
-            const name = file.name;
-            setError(() =>
-              t("chat.attachment.error.too_large_named", {
-                name,
-                size: formatAttachmentSize(got),
-                limit: formatAttachmentSize(max),
-              }),
-            );
-          } else if (isSendLimit(err)) {
-            // UX 4.2 — the text stays in the composer.
-            setError(() => sendLimitText());
-          } else {
-            const name = file.name;
-            console.warn("[chat] attachment upload failed", err);
-            setError(() => t("chat.attachment.error.upload", { name }));
-          }
-          // Stop the loop on the first failure — a network
-          // outage isn't going to be fixed by trying the next
-          // file. The user picks again after surfacing.
-          break;
-        }
-      }
-    } finally {
-      setUploading(false);
-      setUploadProgress(null);
-    }
-  }
-
-  /**
    * UX spec section 10 — attach the pixel size and upload the thumb of a
    * photo or video, then file the local bytes in the media hub so this
    * device's own bubble shows them without downloading its own upload. A
@@ -5756,23 +5817,6 @@ function ChatView(props: {
       ...(preview.size === null ? {} : { width: preview.size.width, height: preview.size.height }),
       ...(thumb === undefined ? {} : { thumb }),
     };
-  }
-
-  /**
-   * Handle the composer's `<input type="file">` change event.
-   * Delegates to [`processFiles`] then resets the input so the
-   * same file can be re-picked (browsers suppress the change
-   * event when the value is identical).
-   */
-  async function onFilesPicked(e: Event): Promise<void> {
-    const target = e.currentTarget as HTMLInputElement;
-    const files = target.files;
-    if (files === null) return;
-    try {
-      await processFiles(files);
-    } finally {
-      target.value = "";
-    }
   }
 
   // Drag-drop polish (1.x): a drop anywhere on the chat surface
@@ -5819,16 +5863,306 @@ function ChatView(props: {
     setIsDragOver(false);
     const files = e.dataTransfer?.files;
     if (files === undefined || files.length === 0) return;
-    await processFiles(files);
+    // Like the paperclip and a paste: into the composer tray (section 11).
+    if (editingId() !== null) return;
+    tray.add(Array.from(files), "media");
   }
 
-  function removePendingAttachment(index: number): void {
-    const removed = pendingAttachments()[index];
-    setPendingAttachments(
-      pendingAttachments().filter((_, i) => i !== index),
-    );
-    // ADR-0065 section 6 — removed from the composer: never sent, so gone.
-    if (removed !== undefined) deleteUnsent([removed]);
+  // ----- ADR-0092 attachment kinds ---------------------------------------
+  //
+  // The paperclip opens one menu (`attach/AttachComposer.tsx`); this view
+  // sends what its screens return. Photos, videos, files and audio go one
+  // message each (the caption on the first); a poll, checklist, location,
+  // contact card or article is a content message whose row carries the
+  // content object, so Retry re-sends the same thing (`publishOutgoing`).
+
+  const [attachEdit, setAttachEdit] = createSignal<AttachEditRequest | null>(null);
+  const [articleOpen, setArticleOpen] = createSignal<
+    | {
+        messageId: number;
+        article: Article;
+        attachments: readonly AttachmentRefBytes[];
+        authorKeyB64: string | undefined;
+        createdAt: string | undefined;
+        own: boolean;
+      }
+    | null
+  >(null);
+
+  /** The 32-byte Ed25519 seed of the key this account's leaf is bound to
+   *  (ADR-0074 section 3.5): what signs a poll or checklist and casts a
+   *  ballot. */
+  function conversationSeed32(): Uint8Array | null {
+    const identity = chats.conversationAccountIdentity();
+    if (identity === null) return null;
+    try {
+      return identity.ed25519Seed;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Every account in the conversation now (the ring of an anonymous poll). */
+  function rosterAccountKeysNow(): string[] {
+    return members().map((m) => base64Encode(m.sigPubkey));
+  }
+
+  /** One content message: an optimistic row, then the ordinary publish. */
+  async function sendContentMessage(content: MessageContent, refs: AttachmentRefBytes[] = []): Promise<void> {
+    setError(null);
+    const reply = takeArmedReply();
+    const tempId = nextTempId++;
+    setRows([
+      ...rows(),
+      {
+        kind: "outgoing",
+        tempId,
+        plaintext: "",
+        attachments: refs,
+        ack: "pending",
+        authorKey: ownSignatureKeyB64(),
+        content,
+        ...(reply === undefined ? {} : { reply }),
+      },
+    ]);
+    await publishOutgoing(tempId, "", refs, reply);
+  }
+
+  /** Upload one image of an article and return its ref (dimensions and thumb
+   *  included). `null` when it could not be sent; the error is shown. */
+  async function uploadForSend(original: File): Promise<AttachmentRefBytes | null> {
+    let file = original;
+    const wasm = await loadAttachWasm();
+    // UX section 3 — a photo is re-encoded (longest side at most the core's
+    // constant, metadata dropped); GIFs keep their animation.
+    if (file.type.startsWith("image/") && file.type !== "image/gif") {
+      try {
+        file = await reencodePhoto(file, wasm.photoMaxLongestSidePx());
+      } catch {
+        setError(() => t("attach.preview.photo_unreadable"));
+        return null;
+      }
+    }
+    try {
+      const inline = hub.inlineType(file.type.length > 0 ? file.type : undefined);
+      let preview: VisualPreview | null = null;
+      if (inline === "image" || inline === "video") {
+        preview = inline === "image" ? await describeImage(file) : await describeVideo(file);
+      }
+      let ref = await encryptAndUploadFile(file);
+      if (preview !== null) ref = await withVisualPreview(ref, file, preview);
+      return ref;
+    } catch (err) {
+      if (err instanceof AttachmentSizeError) {
+        setError(() => t("attach.preview.file_too_big"));
+      } else if (sendRefusalText(err) !== null) {
+        // UX 4.2 and docs/ux/storage-full.md — the text stays in the composer.
+        setError(() => sendRefusalText(err) ?? "");
+      } else {
+        console.warn("[chat] attachment upload failed", err);
+        setError(() => t("chat.attachment.error.upload", { name: file.name }));
+      }
+      return null;
+    }
+  }
+
+  async function sendPollDraft(d: PollDraft): Promise<void> {
+    const seed = conversationSeed32();
+    if (seed === null) {
+      setError(() => t("chat.send.failed"));
+      return;
+    }
+    const content = await pollContentOf(d, props.entry.group.groupId, seed, rosterAccountKeysNow(), Date.now());
+    await sendContentMessage(content);
+  }
+
+  async function sendChecklistDraft(d: ChecklistDraft, editTarget: number | undefined): Promise<void> {
+    const seed = conversationSeed32();
+    if (seed === null) {
+      setError(() => t("chat.send.failed"));
+      return;
+    }
+    const content = await checklistContentOf(d, props.entry.group.groupId, seed);
+    if (editTarget === undefined) {
+      await sendContentMessage(content);
+      return;
+    }
+    // `Edit checklist` (UX 8.2): the author's signed replacement; ticks stay
+    // with item ids.
+    try {
+      const wasm = await loadAttachWasm();
+      // ADR-0098 section 1 - an edit, attested like any edit.
+      const sent = await publishQuiet(wasm.composeChecklistEditEnvelope(BigInt(editTarget), content.checklist), true);
+      const own = ownSignatureKeyB64();
+      const op = own === undefined
+        ? null
+        : heldOpOf({ op: "edit-checklist", target: editTarget, checklist: content.checklist }, sent.messageId, Date.now(), own, false);
+      if (op !== null) {
+        await updateAttachContent(props.entry.groupIdB64, (c) => {
+          const next = withAttachOp(c, op);
+          const e = next.entries[String(editTarget)];
+          return e?.kind === "checklist"
+            ? { ...next, entries: { ...next.entries, [String(editTarget)]: { ...e, currentSigned: content.checklist } } }
+            : next;
+        });
+      }
+    } catch (err) {
+      setError(errorText(err, "chat.error.edit"));
+    }
+  }
+
+  async function sendArticleDraft(out: ArticleDraftOut, editTarget: number | undefined): Promise<void> {
+    setUploading(true);
+    try {
+      const wasm = await loadAttachWasm();
+      const refs: AttachmentRefBytes[] = [];
+      for (const image of out.images) {
+        const asFile = image instanceof File ? image : new File([image], "image.jpg", { type: image.type || "image/jpeg" });
+        const ref = await uploadForSend(asFile);
+        if (ref === null) return;
+        refs.push(ref);
+      }
+      try {
+        wasm.validateArticle(out.article);
+      } catch {
+        setError(() => t("article.at_limit"));
+        return;
+      }
+      if (editTarget === undefined) {
+        await sendContentMessage({ kind: "article", article: out.article }, refs);
+        return;
+      }
+      // UX 11.3 — the edit replaces the whole article.
+      // ADR-0098 section 1 - an edit, attested like any edit.
+      const sent = await publishQuiet(await composeArticleEditEnvelope(editTarget, out.article, refs), true);
+      const own = ownSignatureKeyB64();
+      if (own !== undefined) {
+        await updateAttachContent(props.entry.groupIdB64, (c) =>
+          withArticleEdit(c, editTarget, {
+            messageId: sent.messageId,
+            editor: own,
+            article: out.article,
+            attachments: refs.map((r) => persistedAttachmentOf(r)),
+          }),
+        );
+      }
+    } catch (err) {
+      setError(errorText(err, "chat.error.edit"));
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  /** UX section 10 — the contacts this person may share: every accepted
+   *  contact, its verified username when there is one. */
+  function shareableContacts(): ShareableContact[] {
+    return loadAccepted().map((c) => {
+      const resolved = profiles.resolve(c.signaturePubkeyB64);
+      const username = resolved.username?.replace(/^@/, "") ?? undefined;
+      return {
+        name: resolved.name,
+        accountKeyB64: c.signaturePubkeyB64,
+        ...(username === undefined || username.length === 0 ? {} : { username }),
+        // ADR-0092 section 7 — the newest profile held from them decides.
+        ...(profiles.cardShareableOf(c.signaturePubkeyB64) ? {} : { cardShareable: false }),
+      };
+    });
+  }
+
+  /** What a content bubble needs from this conversation. */
+  const contentHost: ContentHost = {
+    groupIdB64: props.entry.groupIdB64,
+    groupId: () => props.entry.group.groupId,
+    oneToOne: () => !isGroupChat(),
+    isAdmin: () => ownRole() === "owner" || ownRole() === "admin",
+    canAct: () => messageActionsAvailable(),
+    ownKeyB64: () => ownSignatureKeyB64(),
+    nameOf: (k) => profiles.resolve(k).name,
+    hub,
+    async sendOp(bytes) {
+      // A named content op (a vote, a tick, a close) is a chat envelope,
+      // attested like an edit or a reaction (ADR-0098 section 1), as on iOS
+      // and Android. An anonymous ballot never comes here (`enqueueBallot`).
+      const sent = await publishQuiet(bytes, true);
+      return { messageId: sent.messageId, createdAt: new Date().toISOString() };
+    },
+    voterSeed: async () => conversationSeed32(),
+    contactRelation(card: SharedContactCard) {
+      const own = ownSignatureKeyB64();
+      if (own !== undefined && sameB64(own, card.accountKey)) return "self";
+      return loadAccepted().some((c) => sameB64(c.signaturePubkeyB64, card.accountKey)) ? "contact" : "other";
+    },
+    async addContact(card: SharedContactCard, senderName: string) {
+      const discovery = new DiscoveryClient(undefined, {
+        sessionToken: () => auth.identitySecrets()?.sessionToken ?? null,
+      });
+      try {
+        const outcome = await addContactFromCard(card, {
+          lookup: async (u) => (await discovery.lookup(u)).account,
+          identity: async (account) => {
+            const b = await discovery.identityFetch(account);
+            return b === null ? null : { signaturePubkeyB64: b.signature_pubkey, x25519PubkeyB64: b.x25519_pubkey };
+          },
+          send: async (account, sig, x) => {
+            await contacts.sendContactRequestToBundle(auth.identitySecrets(), account, sig, x, new Uint8Array(0));
+          },
+        });
+        if (outcome === "sent") return null;
+        if (outcome === "changed") return t("contact.username_changed");
+        return t("contact.not_findable", { name: card.name, sender: senderName });
+      } catch (err) {
+        console.warn("[chat] contact card add failed", err instanceof Error ? err.name : "unknown");
+        return t("chat.send.failed");
+      }
+    },
+    openChat(card: SharedContactCard) {
+      const contact = loadAccepted().find((c) => sameB64(c.signaturePubkeyB64, card.accountKey));
+      const target = chats.groups().find((g) => g.groupIdB64 === contact?.groupIdB64);
+      if (target !== undefined) navigate(hrefOfConversation(target));
+    },
+    openArticle(args) {
+      setArticleOpen({ ...args });
+    },
+    editContent(messageId, content, attachments) {
+      if (content.kind !== "article" || attachments.length === 0) {
+        setAttachEdit({ messageId, content });
+        return;
+      }
+      void (async () => {
+        const images: Blob[] = [];
+        for (const ref of attachments) {
+          try {
+            const url = await hub.load(ref);
+            images.push(await (await fetch(url)).blob());
+          } catch {
+            setError(() => t("chat.attachment.error.download"));
+            return;
+          }
+        }
+        setAttachEdit({ messageId, content, images });
+      })();
+    },
+    copyText(text) {
+      void copyMessageText(text);
+    },
+    rosterKeys: () => rosterAccountKeysNow(),
+    openUrl(url) {
+      if (isDesktop()) void openHostUrl(url);
+      else window.open(url, "_blank", "noopener,noreferrer");
+    },
+    onError(text) {
+      setError(() => text);
+    },
+  };
+  void loadAttachContent(props.entry.groupIdB64);
+
+  /** Two standard-base64 keys name the same bytes. */
+  function sameB64(a: string, b: string): boolean {
+    try {
+      return base64Encode(base64Decode(a)) === base64Encode(base64Decode(b));
+    } catch {
+      return false;
+    }
   }
 
   // ----- ADR-0047 media messages ----------------------------------------
@@ -5863,7 +6197,9 @@ function ChatView(props: {
   // ADR-0065 section 6 — leaving the chat abandons what was uploaded and not
   // sent: the composer's staged files and media takes that never went out.
   onCleanup(() => {
-    const unsent: AttachmentRefBytes[] = [...pendingAttachments()];
+    // The composer tray is not here: it is the conversation's draft and
+    // outlives this view (section 11).
+    const unsent: AttachmentRefBytes[] = [];
     for (const job of mediaJobs.values()) {
       if (job.uploaded === undefined) continue;
       unsent.push(job.uploaded);
@@ -6034,7 +6370,7 @@ function ChatView(props: {
       }
       setMediaUpload(job.tempId, "failed");
       setMediaRowAck(job.tempId, "failed");
-      if (isSendLimit(err)) setError(() => sendLimitText());
+      if (sendRefusalText(err) !== null) setError(() => sendRefusalText(err) ?? "");
       if (err instanceof AttachmentSizeError) {
         const { got, max } = err;
         setError(() =>
@@ -6077,7 +6413,17 @@ function ChatView(props: {
     const row = rows().find((r) => r.kind === "outgoing" && r.tempId === tempId);
     if (row === undefined || row.kind !== "outgoing") return;
     setError(null);
-    void publishOutgoing(tempId, row.plaintext, row.attachments, row.reply);
+    // `publishOutgoing` re-reads the row's content (ADR-0092) and sends it
+    // with its files; the forward line is passed here, so a failed forward
+    // is re-sent as the same forward. An anonymous poll whose roster changed
+    // cannot be re-sent as it is and is refused (`contentRetryAllowed`).
+    void (async () => {
+      if (!(await contentRetryAllowed(row.content, rosterAccountKeysNow()))) {
+        setError(() => t("poll.resend_refused"));
+        return;
+      }
+      await publishOutgoing(tempId, row.plaintext, row.attachments, row.reply, Date.now(), row.forward);
+    })();
   }
 
   /** A finished recording the user chose to send. */
@@ -7242,8 +7588,14 @@ function ChatView(props: {
   /** Hold one outgoing row until the successor exists (the row stays in the
    *  ordinary sending state). The give-up puts it in the ordinary failed
    *  state, whose Retry enters the same path again. */
-  function holdOutgoing(tempId: number, payload: HeldMessage, heldAtMs: number): void {
+  function holdOutgoing(tempId: number, given: HeldMessage, heldAtMs: number): void {
     const key = conversationHex();
+    // ADR-0092 — a held content message keeps its content (the row holds
+    // it), so the release sends the same message.
+    const row = rows().find((r) => r.kind === "outgoing" && r.tempId === tempId);
+    const rowContent = row?.kind === "outgoing" ? row.content : undefined;
+    const payload: HeldMessage =
+      given.content === undefined && rowContent !== undefined ? { ...given, content: rowContent } : given;
     heldSends.hold(key, payload, heldAtMs);
     // Mirrored into the message log, so a reload does not lose it.
     void persistHeldSends(accountIdB64ForLog());
@@ -7297,6 +7649,7 @@ function ChatView(props: {
           authorKey: ownSignatureKeyB64(),
           ...(reply === undefined ? {} : { reply }),
           ...(held.payload.forward === undefined ? {} : { forward: held.payload.forward }),
+          ...(held.payload.content === undefined ? {} : { content: held.payload.content }),
         },
       ]);
       void publishOutgoing(
@@ -7617,7 +7970,7 @@ function ChatView(props: {
    *  the boundary, so a stale answer here costs a refused envelope, never a
    *  pin nobody agreed to. */
   const maySetSharedPin = (): boolean =>
-    // ADR-0089 step 3: a shared pin or unpin sends; a suspended account has
+    // ADR-0098 step 3: a shared pin or unpin sends; a suspended account has
     // the personal pin alone.
     !accountSuspended() && !membershipEnded() && (pinsOneToOne() || ownRole() !== "member");
   /** The stored pin an on-screen row id stands for: the row itself in this
@@ -7728,7 +8081,7 @@ function ChatView(props: {
       const text =
         (msgOps().get(item.messageId) ?? historyOps().get(item.messageId))?.editedText ?? original;
       const snapshot = replySnapshotFor(
-        { text, attachments },
+        { text, attachments, invitationLine: rowInvitationLine(row, text) },
         authorLabelOf(row),
         (a) => hub.decision(a).bubble,
       );
@@ -7841,7 +8194,7 @@ function ChatView(props: {
           title={t("chat.header.back")}
           onClick={props.onLeave}
         >
-          <Icon name="back" size={20} />
+          <Icon name="chevron-back" size={24} />
         </button>
         {/* `docs/ux/conversation-info.md` section 1 — the avatar and the name
             open this conversation's info, and are the only way in. A real
@@ -7863,6 +8216,7 @@ function ChatView(props: {
             size="sm"
             personKey={isGroupChat() ? undefined : (peerKeyB64() ?? undefined)}
             conversationKey={isGroupChat() ? props.entry.groupIdB64 : undefined}
+            playVideo="header"
           />
           <div class="lk-chat-title-text">
             {/* ADR-0021 follow-up: show the linked contact's user-chosen
@@ -7897,7 +8251,7 @@ function ChatView(props: {
               onClick={() => onCallButton(false)}
               disabled={busy()}
             >
-              <Icon name="phone" size={20} />
+              <Icon name="phone" size={24} />
             </button>
             <button
               type="button"
@@ -7907,7 +8261,7 @@ function ChatView(props: {
               onClick={() => onCallButton(true)}
               disabled={busy()}
             >
-              <Icon name="video" size={20} />
+              <Icon name="video" size={24} />
             </button>
           </Show>
           {/* No overflow menu: its one item, `Add member`, became the first
@@ -7918,7 +8272,7 @@ function ChatView(props: {
       </header>
       </Show>
 
-      {/* ADR-0089 step 4, reporting UX section 3 - the other person's account
+      {/* ADR-0098 step 4, reporting UX section 3 - the other person's account
           is suspended: a banner under the header, with no action. It replaces
           nothing (the composer stays), and a block's banner wins over it. */}
       <Show when={suspendedPeer()}>
@@ -8124,7 +8478,7 @@ function ChatView(props: {
       {/* ADR-0082 / UX 3.6 — "Messages here are in Spanish." */}
       <TranslateBar conversation={props.entry.groupIdB64} candidates={translateBarCandidates} />
       <Show
-        when={timelineEntries().length > 0 || carriedCopies().length > 0}
+        when={timelineEntries().length > 0 || carriedCopies().length > 0 || (gapPlacement()?.trailing.length ?? 0) > 0}
         fallback={
           <p
             style={{
@@ -8159,6 +8513,9 @@ function ChatView(props: {
                 timelineLayout()[i()] ?? { dayLabel: null, startsRun: true, endsRun: true };
               return (
               <>
+              <For each={gapPlacement()?.before.get(i()) ?? []}>
+                {(line) => <GapLineRow line={line} />}
+              </For>
               <Show when={place().dayLabel}>
                 {(label) => (
                   <li class="lk-day-sep" aria-label={label()}>
@@ -8180,7 +8537,7 @@ function ChatView(props: {
               <Show
                 when={!collapsedBlocked(row())}
                 fallback={
-                  // ADR-0089 section 6, UX 1.2 - a blocked person's message in
+                  // ADR-0098 section 6, UX 1.2 - a blocked person's message in
                   // a group: one muted row that shows the message when tapped.
                   <li class="lk-system-row lk-blocked-row">
                     <button
@@ -8194,6 +8551,7 @@ function ChatView(props: {
                 }
               >
               <TimelineBubble
+                contentHost={contentHost}
                 conversationId={props.entry.groupIdB64}
                 row={row()}
                 isGroup={isGroupChat()}
@@ -8228,7 +8586,7 @@ function ChatView(props: {
                   setEditingId(id);
                 }}
                 onCancelEdit={() => setEditingId(null)}
-                onReply={onStartReply}
+                onReply={(id) => onStartReply(id)}
                 onJumpTo={jumpToMessage}
                 onForward={(id) => setForwardingId(id)}
                 pinLabelOf={pinLabelOf}
@@ -8238,8 +8596,8 @@ function ChatView(props: {
                 onOpenForwardOrigin={onOpenForwardOrigin}
                 onSaveEdit={onSaveEdit}
                 onDeleteMessage={onDeleteMessage}
-                onReact={onReact}
-                onQuickReact={onQuickReact}
+                onReact={(id, emoji) => onReact(id, emoji)}
+                onQuickReact={(id) => onQuickReact(id)}
                 reactionAllowed={reactionAllowed}
                 chipConversation={isGroupChat() ? "group" : "one-to-one"}
                 reactionRowFor={reactionRowFor}
@@ -8285,6 +8643,9 @@ function ChatView(props: {
               </>
               );
             }}
+          </For>
+          <For each={gapPlacement()?.trailing ?? []}>
+            {(line) => <GapLineRow line={line} />}
           </For>
           {/* State bundle v3 — display-only copies of what was written on
               another device of this account; never sent from here. */}
@@ -8369,7 +8730,7 @@ function ChatView(props: {
             if (first !== undefined) jumpToMessage(first);
           }}
         >
-          <Icon name="heart" size={18} />
+          <Icon name="heart-fill" size={20} />
           <span class="lk-unseen-reactions-count">{unseenReactions().length}</span>
         </button>
       </Show>
@@ -8411,127 +8772,6 @@ function ChatView(props: {
             <span>{row().consequence}</span>
           </div>
         )}
-      </Show>
-
-      {/* 1.19c2 — pending-attachments tray. Renders above the
-         text composer when ≥1 file is staged; each chip shows
-         the filename + size with a × to drop it. A photo or
-         video chip shows its thumb (UX spec section 10), filed
-         in the media hub from the local bytes before upload. */}
-      <Show when={pendingAttachments().length > 0 || uploading()}>
-        <div
-          style={{
-            display: "flex",
-            "flex-wrap": "wrap",
-            gap: "0.4rem",
-            padding: "0.5rem",
-            border: "1px solid var(--surface-border)",
-            "border-radius": "var(--radius-md)",
-            background: "var(--surface-elevated)",
-          }}
-        >
-          <For each={pendingAttachments()}>
-            {(ref, i) => (
-              <span
-                style={{
-                  display: "inline-flex",
-                  "align-items": "center",
-                  gap: "0.35rem",
-                  padding: "0.2rem 0.5rem",
-                  background: "var(--surface-bg)",
-                  border: "1px solid var(--surface-border)",
-                  "border-radius": "var(--radius-sm)",
-                  "font-size": "0.8rem",
-                }}
-              >
-                <Show
-                  when={
-                    ref.thumb !== undefined
-                      ? hub.urlFor(`thumb:${mediaKey(ref.thumb.blobId)}`)
-                      : null
-                  }
-                >
-                  {(url) => (
-                    <img
-                      src={url()}
-                      alt=""
-                      style={{
-                        width: "28px",
-                        height: "28px",
-                        "object-fit": "cover",
-                        "border-radius": "4px",
-                      }}
-                    />
-                  )}
-                </Show>
-                <span>{ref.name ?? t("chat.attachment.unnamed")}</span>
-                <span style={{ color: "var(--surface-muted)" }}>
-                  · {formatAttachmentSize(ref.size)}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => removePendingAttachment(i())}
-                  disabled={busy()}
-                  aria-label={t("chat.composer.remove_attachment")}
-                  style={{
-                    border: "none",
-                    background: "transparent",
-                    cursor: "pointer",
-                    "font-size": "1rem",
-                    "line-height": 1,
-                    padding: 0,
-                  }}
-                >
-                  ×
-                </button>
-              </span>
-            )}
-          </For>
-          <Show when={uploading()}>
-            <Show
-              when={(() => {
-                const key = uploadProgress()?.previewKey;
-                return key === undefined ? null : hub.urlFor(key);
-              })()}
-            >
-              {(url) => (
-                <img
-                  src={url()}
-                  alt=""
-                  style={{
-                    width: "36px",
-                    height: "36px",
-                    "object-fit": "cover",
-                    "border-radius": "var(--radius-sm)",
-                    "align-self": "center",
-                  }}
-                />
-              )}
-            </Show>
-            <span
-              style={{
-                color: "var(--surface-muted)",
-                "font-size": "0.8rem",
-                "align-self": "center",
-              }}
-            >
-              {(() => {
-                const p = uploadProgress();
-                if (p === null) return t("chat.upload.working");
-                const name = p.fileName;
-                if (p.total > 1) {
-                  const args = { name, index: p.fileIndex + 1, total: p.total };
-                  return p.stage === "encrypting"
-                    ? t("chat.upload.encrypting_of", args)
-                    : t("chat.upload.uploading_of", args);
-                }
-                return p.stage === "encrypting"
-                  ? t("chat.upload.encrypting", { name })
-                  : t("chat.upload.uploading", { name });
-              })()}
-            </span>
-          </Show>
-        </div>
       </Show>
 
       {/* ADR-0024 — typing indicator. Sits just above the compose
@@ -8634,16 +8874,16 @@ function ChatView(props: {
       <Show when={selecting()}>
         <div class="lk-select-actions" role="toolbar" aria-label={t("chat.select.toolbar")}>
           <div class="lk-select-actions-row">
-            {/* ADR-0089 step 3: Forward and Delete send; a suspended account
+            {/* ADR-0098 step 3: Forward and Delete send; a suspended account
                 is offered Save alone. */}
             <button
               type="button"
               class="lk-select-action"
               style={accountSuspended() ? { display: "none" } : undefined}
-              disabled={!forwardEnabled(selection())}
+              disabled={!forwardEnabled(selection(), selectionHoldsInvitation(), messageForwardable)}
               onClick={() => setBulkForwardOpen(true)}
             >
-              <Icon name="forward" size={18} />
+              <Icon name="forward" size={20} />
               <span>{t("chat.message.forward")}</span>
             </button>
             <button
@@ -8652,7 +8892,7 @@ function ChatView(props: {
               disabled={selection().size === 0}
               onClick={() => void saveSelection()}
             >
-              <Icon name="bookmark" size={18} />
+              <Icon name="bookmark" size={20} />
               <span>{t("chat.select.save")}</span>
             </button>
             <button
@@ -8662,7 +8902,7 @@ function ChatView(props: {
               disabled={!deleteState().enabled}
               onClick={() => void deleteSelection()}
             >
-              <Icon name="trash" size={18} />
+              <Icon name="trash" size={20} />
               <span>{t("common.delete")}</span>
             </button>
           </div>
@@ -8701,7 +8941,7 @@ function ChatView(props: {
                 composerInput?.focus();
               }}
             >
-              <Icon name="close" size={18} />
+              <Icon name="xmark" size={20} />
             </button>
           </div>
         )}
@@ -8724,7 +8964,7 @@ function ChatView(props: {
           </For>
         </div>
       </Show>
-      {/* ADR-0089 section 6, UX 1.2 - in the one-to-one with a blocked
+      {/* ADR-0098 section 6, UX 1.2 - in the one-to-one with a blocked
           person a banner replaces the composer. */}
       <Show when={blockedPeerKey()}>
         {(peer) => (
@@ -8741,14 +8981,16 @@ function ChatView(props: {
           </div>
         )}
       </Show>
-      {/* ADR-0089 step 3: a suspended account's composer is the muted line,
+      {/* ADR-0098 step 3: a suspended account's composer is the muted line,
           with no send control. */}
       <SuspendedComposerLine />
       <form
         onSubmit={onSend}
         class="lk-composer"
+        classList={{ "with-tray": tray.items().length > 0 || tray.notice() !== null }}
         style={blockedPeerKey() !== null || accountSuspended() ? { display: "none" } : undefined}
       >
+        <ComposerTray tray={tray} />
         <Show when={composerPickerOpen() && !recorderBusy(recorder)}>
           <EmojiPicker
             mode="compose"
@@ -8762,36 +9004,63 @@ function ChatView(props: {
           when={!recorderBusy(recorder)}
           fallback={<RecordingBar recorder={recorder} />}
         >
-        {/* 1.19c2 — Attach button. The hidden `<input
-            type="file" multiple>` is keyed by uploading() so
-            the same file can be re-picked after a failed
-            upload, and the label drives the click for a tidy
-            chrome-less control. */}
-        <label
-          class="lk-icon-button"
-          style={{
-            cursor: uploading() ? "wait" : "pointer",
-            opacity: uploading() ? 0.6 : 1,
-          }}
-          aria-label={t("chat.composer.attach")}
-          title={t("chat.composer.attach_limit", { limit: formatAttachmentSize(MAX_ATTACHMENT_BYTES) })}
-        >
-          <Icon name="clip" size={20} />
-          <input
-            type="file"
-            multiple
-            disabled={uploading()}
-            onChange={(e) => {
-              void onFilesPicked(e);
-            }}
-            style={{ display: "none" }}
-          />
-        </label>
+        {/* docs/ux/attachments.md section 2 — the paperclip opens one menu;
+            Photo or Video, File and Audio open the system pickers behind
+            the send preview, the rest are Lakko's own screens. Hidden while
+            the composer edits a message (section 2.4). */}
+        <AttachComposer
+          conversation={() => (isGroupChat() ? "group" : "chat")}
+          role={() => ownRole() ?? "member"}
+          accounts={() => members().length}
+          callHoldsCamera={() => callOwnsCapture()}
+          hidden={() => uploading() || editingId() !== null}
+          draftKey={props.entry.groupIdB64}
+          contacts={shareableContacts}
+          editRequest={attachEdit}
+          clearEditRequest={() => setAttachEdit(null)}
+          acceptPaste={() => true}
+          addFiles={(files, source) => tray.add(files, source)}
+          sendPoll={sendPollDraft}
+          sendChecklist={sendChecklistDraft}
+          sendLocation={(l) => sendContentMessage({ kind: "location", location: l })}
+          sendContact={(c) => sendContentMessage({ kind: "contactCard", card: c })}
+          sendArticle={sendArticleDraft}
+        />
+        <Show when={articleOpen()}>
+          {(a) => (
+            <Portal>
+              <ArticleReader
+                article={a().article}
+                imageUrl={async (index) => {
+                  const ref = a().attachments[index];
+                  if (ref === undefined) return null;
+                  try {
+                    return await hub.load(ref);
+                  } catch {
+                    return null;
+                  }
+                }}
+                author={a().own ? t("chat.author.you") : a().authorKeyB64 === undefined ? "" : profiles.resolve(a().authorKeyB64!).name}
+                dateText={a().createdAt === undefined ? "" : new Date(a().createdAt!).toLocaleString(displayLocale())}
+                onClose={() => setArticleOpen(null)}
+                onMenu={() => {
+                  // UX 11.3 — the message menu from the reader: close the
+                  // reader and open the bubble's menu.
+                  const id = a().messageId;
+                  setArticleOpen(null);
+                  openMessageMenu(props.entry.groupIdB64, id);
+                }}
+                onLink={(url) => contentHost.openUrl(url)}
+              />
+            </Portal>
+          )}
+        </Show>
         {/* docs/ux section 5.2 — attach, the field, the emoji / GIF button,
             then the trailing microphone-or-send. The field is a textarea that
             grows to five lines; Enter sends, Shift+Enter breaks the line. */}
         <textarea
           ref={composerInput}
+          data-paste-files=""
           class="lk-composer-input"
           data-lk-composer=""
           rows={1}
@@ -8808,12 +9077,6 @@ function ChatView(props: {
             if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "Home" || e.key === "End") {
               refreshColonQuery();
             }
-          }}
-          onPaste={(e) => {
-            const images = pastedImages(e.clipboardData);
-            if (images.length === 0) return;
-            e.preventDefault();
-            void processFiles(images);
           }}
           onKeyDown={(e) => {
             // Reactions section 13 — the strip takes the arrows, Enter, Tab
@@ -8843,6 +9106,21 @@ function ChatView(props: {
               }
             }
             if (e.key === " ") setColonQuery(null);
+            // Section 11 — Backspace in an empty field removes the tray's
+            // last item.
+            if (
+              backspaceRemovesLast({
+                key: e.key,
+                fieldEmpty: e.currentTarget.value.length === 0,
+                modified: e.altKey || e.ctrlKey || e.metaKey || e.shiftKey,
+                composing: e.isComposing,
+                items: tray.items().length,
+              })
+            ) {
+              e.preventDefault();
+              tray.removeLast();
+              return;
+            }
             if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
               e.preventDefault();
               e.currentTarget.form?.requestSubmit();
@@ -8855,7 +9133,7 @@ function ChatView(props: {
                 key: e.key,
                 modified: e.altKey || e.ctrlKey || e.metaKey || e.shiftKey,
                 composing: e.isComposing,
-                empty: input().length === 0 && pendingAttachments().length === 0,
+                empty: input().length === 0 && tray.items().length === 0,
                 editing: editingId() !== null,
                 actionsAvailable: messageActionsAvailable(),
               })
@@ -8896,7 +9174,7 @@ function ChatView(props: {
             setComposerPickerOpen(!composerPickerOpen());
           }}
         >
-          <Icon name="smile" size={20} />
+          <Icon name="face-smiling" size={20} />
         </button>
         </Show>
         {/* UX spec §1 — Send while the field or tray has content, otherwise
@@ -8905,7 +9183,7 @@ function ChatView(props: {
             on. */}
         <Show
           when={
-            (input().length > 0 || pendingAttachments().length > 0 || uploading()) &&
+            (input().length > 0 || tray.items().length > 0 || uploading()) &&
             !recorderBusy(recorder)
           }
           fallback={<RecordButton recorder={recorder} />}
@@ -8915,12 +9193,9 @@ function ChatView(props: {
           type="submit"
           aria-label={t("chat.composer.send")}
           title={t("chat.composer.send")}
-          disabled={
-            uploading() ||
-            (input().length === 0 && pendingAttachments().length === 0)
-          }
+          disabled={uploading() || !traySendable(input(), trayStatuses())}
         >
-          <Icon name="send" size={18} />
+          <Icon name="send-fill" size={20} />
         </button>
         </Show>
       </form>
@@ -8949,7 +9224,7 @@ function ChatView(props: {
             title={t("common.back")}
             onClick={closeInfo}
           >
-            <Icon name="back" size={20} />
+            <Icon name="chevron-back" size={24} />
           </button>
           <h1 id="lk-group-info-title" class="lk-info-title">
             {infoTargetHeading()}
@@ -9559,7 +9834,7 @@ function ChatView(props: {
                     onClick={() => goToInfoScreen("add-members")}
                   >
                     <span class="lk-member-add-icon" aria-hidden="true">
-                      <Icon name="userPlus" size={18} />
+                      <Icon name="person-plus" size={20} />
                     </span>
                     <span class="lk-row-title">{t("chat.members.add.action")}</span>
                   </button>
@@ -9605,7 +9880,7 @@ function ChatView(props: {
                       >
                         <span class="lk-row-title">
                           {label()}
-                          {/* ADR-0089 step 4, UX 3 - a member whose account
+                          {/* ADR-0098 step 4, UX 3 - a member whose account
                               is suspended: a muted word after the name. */}
                           <Show when={!isSelf && isSuspendedKeyB64(memberKeyB64)}>
                             <span class="lk-member-suspended">{" "}{t("suspended.member")}</span>
@@ -9738,7 +10013,7 @@ function ChatView(props: {
 
                 Only on the proposal path: a legacy group's core has no
                 self-remove route and no owner to transfer from. */}
-            {/* ADR-0089 section 2 - Report, first in the exit block, for
+            {/* ADR-0098 section 2 - Report, first in the exit block, for
                 anyone but the owner and only for a group with an `@name` (the
                 shared rule). */}
             <Show when={groupSections().includes("report")}>
@@ -10213,7 +10488,7 @@ function ShareLinkRow(props: {
         aria-label={copied() ? t("common.copied") : t("chat.invite_link.copy")}
         onClick={() => void copy()}
       >
-        <Icon name={copied() ? "check" : "copy"} size={16} />
+        <Icon name={copied() ? "checkmark" : "copy"} size={20} />
       </button>
       <button
         type="button"
@@ -10466,6 +10741,11 @@ function timelineRowToPersisted(
       ...(row.reply === undefined ? {} : { reply: persistedFromReplyRef(row.reply) }),
       // ADR-0052 decision 2 — the forward attribution, verbatim.
       ...(row.forward === undefined ? {} : { forward: persistedFromForwardRef(row.forward) }),
+      // ADR-0087 section 14 — the invitation card, verbatim.
+      ...(row.channelInviteB64 === undefined ? {} : { channelInviteB64: row.channelInviteB64 }),
+      // ADR-0092 — the content object, verbatim.
+      ...(row.content === undefined ? {} : { content: row.content }),
+      ...(row.contentState === undefined ? {} : { contentState: row.contentState }),
     };
   }
   // Incoming: split application vs system.
@@ -10558,9 +10838,10 @@ function timelineRowToPersisted(
     // sealed contact request.
     return null;
   }
-  if (row.event.kind === "serviceEnvelope") {
-    // An unrecognised `lakko/…` service envelope: never a row, never
-    // persisted, so it can never become the chat-list preview line.
+  if (row.event.kind === "serviceEnvelope" || row.event.kind === "contentOp" || row.event.kind === "openItems") {
+    // An unrecognised `lakko/…` service envelope, or an ADR-0092 op or
+    // hand-over: never a row, never persisted, so it can never become the
+    // chat-list preview line.
     return null;
   }
   if (row.event.kind === "membershipProposal") {
@@ -10603,12 +10884,42 @@ function timelineRowToPersisted(
  */
 let restoredTempId = -1;
 
+/** ADR-0087 section 14 — what stands for a row's `text` when the row is a
+ *  channel invitation (its card, or a `/g/` link sent as text): the line its
+ *  Chats row reads, never the link's secret. `null` for any other row. */
+function rowInvitationLine(row: TimelineRow, text: string): string | null {
+  const cardB64 =
+    row.kind === "outgoing"
+      ? row.channelInviteB64
+      : row.event.kind === "application" && row.event.channelInvite !== undefined
+        ? base64Encode(row.event.channelInvite)
+        : undefined;
+  try {
+    return channelInviteRowPreview(text, publicOrigin(), cardB64);
+  } catch {
+    return null;
+  }
+}
+
+/** A stored invitation card back as bytes; an unreadable one is left out. */
+function cardBytesOf(b64: string | undefined): { channelInvite?: Uint8Array } {
+  if (typeof b64 !== "string" || b64.length === 0) return {};
+  try {
+    return { channelInvite: base64Decode(b64) };
+  } catch {
+    return {};
+  }
+}
+
 function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
   const attachments = m.attachments.map((a) => attachmentRefFromPersisted(a).ref);
   // ADR-0052 — absent on a plain message and on a row written before v4.
   const reply = replyRefFromPersisted(m.reply);
   // ADR-0052 decision 2 — absent unless forwarded, and on a row before v5.
   const forward = forwardRefFromPersisted(m.forward);
+  // ADR-0092 — a stored content object; anything not shaped like one is
+  // dropped.
+  const restoredContent = contentFromPersisted(m.content);
   if (m.direction === "outgoing") {
     restoredTempId -= 1;
     return {
@@ -10621,12 +10932,17 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
       createdAt: m.createdAt,
       ...(reply === undefined ? {} : { reply }),
       ...(forward === undefined ? {} : { forward }),
+      ...(typeof m.channelInviteB64 === "string" ? { channelInviteB64: m.channelInviteB64 } : {}),
       // Absent on a row written before this field existed, and
       // `null` when it could not be resolved — both restore as
       // `undefined`, which fails the edit/delete gate closed rather
       // than falling back to our CURRENT key (which a self-update
       // may since have rotated).
       authorKey: persistedAuthorIdentity(m.authorKeyB64),
+      ...(restoredContent === undefined ? {} : { content: restoredContent }),
+      ...(restoredContent === undefined || m.contentState === undefined || m.contentState === null
+        ? {}
+        : { contentState: m.contentState as ContentState }),
     };
   }
   if (m.direction === "incoming") {
@@ -10656,8 +10972,14 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
         ...(forward === undefined ? {} : { forward }),
         // ADR-0061 section 6 — a message from a newer Lakko stays one.
         ...(typeof m.unsupportedVersion === "number" ? { unsupportedVersion: m.unsupportedVersion } : {}),
-        // ADR-0089 section 1 - the report evidence captured at receipt.
+        // ADR-0098 section 1 - the report evidence captured at receipt.
         ...(evidence === undefined ? {} : { evidence }),
+        // ADR-0087 section 14 — the invitation card, opened offline when drawn.
+        ...(cardBytesOf(m.channelInviteB64)),
+        ...(restoredContent === undefined ? {} : { content: restoredContent }),
+        ...(restoredContent === undefined || m.contentState === undefined || m.contentState === null
+          ? {}
+          : { contentState: m.contentState as ContentState }),
       },
     };
   }
@@ -10675,4 +10997,13 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
   };
 }
 
-
+/** ADR-0091 / UX conversation-rejoin 2.4 — one "Some messages are not
+ *  available" line where messages are missing, styled as the date
+ *  separators are. Local to this device; never sent, never read. */
+function GapLineRow(_props: { readonly line: GapLine }): JSX.Element {
+  return (
+    <li class="lk-day-sep lk-gap-line" role="note">
+      <span>{t("chat.reentry.gap")}</span>
+    </li>
+  );
+}

@@ -408,16 +408,18 @@ public data class PersistedMessage(
      */
     val membershipJoined: List<String> = emptyList(),
     val membershipLeft: List<String> = emptyList(),
-    /** ADR-0089 section 1 — the report evidence of a received row; absent on
+    /** ADR-0098 section 1 — the report evidence of a received row; absent on
      *  own rows, deleted rows and rows written before reporting existed. */
     val evidence: PersistedEvidence? = null,
+    /** ADR-0092 — a content message's body and the ops it collected. */
+    val content: PersistedContent? = null,
 ) {
     /** Explicit companion so the conversion helpers below can
      *  attach as `PersistedMessage.Companion.from(msg)`. */
     public companion object
 }
 
-/** ADR-0089 section 1 — a stored [me.lakko.app.moderation.MessageEvidence]. */
+/** ADR-0098 section 1 — a stored [me.lakko.app.moderation.MessageEvidence]. */
 @Serializable
 public data class PersistedEvidence(
     val verdict: String,
@@ -500,6 +502,10 @@ public data class PersistedAttachment(
     val width: UInt? = null,
     val height: UInt? = null,
     val thumb: PersistedThumb? = null,
+    /** ADR-0047 section 6 — the micro thumbnail (standard base64 of a JPEG of
+     *  at most 4096 bytes), kept so the list row draws it after a restart
+     *  with no fetch. Only on the first photo or video of a message. */
+    val inlineThumbB64: String? = null,
 ) {
     public companion object
 }
@@ -602,7 +608,7 @@ public fun PersistedMessage.Companion.from(msg: ChatMessage): PersistedMessage =
         lastOpId = msg.lastOpId,
         membershipJoined = msg.membershipJoined,
         membershipLeft = msg.membershipLeft,
-        // ADR-0089 — the evidence holds the message's words, so it goes the
+        // ADR-0098 — the evidence holds the message's words, so it goes the
         // way the words go.
         evidence = if (msg.deleted) {
             null
@@ -616,6 +622,7 @@ public fun PersistedMessage.Companion.from(msg: ChatMessage): PersistedMessage =
                 )
             }
         },
+        content = persistContent(msg),
     )
 
 /** Inverse — reconstruct a runtime [ChatMessage] from the JSON
@@ -681,7 +688,10 @@ public fun PersistedMessage.toChatMessage(): ChatMessage? {
                 )
             }
         },
-    )
+    ).let { m ->
+        val restored = content?.let(::restoreContent) ?: return@let m
+        m.copy(content = restored.first, contentExtras = restored.second)
+    }
 }
 
 /** `null` for an unrecognised outcome — see [PersistedMessage.toChatMessage]. */
@@ -729,6 +739,7 @@ public fun PersistedAttachment.Companion.from(
             height = t.height,
         )
     },
+    inlineThumbB64 = me.lakko.app.media.inlineThumbOrNull(ref.inlineThumb)?.let(b64Encoder::encodeToString),
 )
 
 /**
@@ -765,6 +776,8 @@ public fun PersistedAttachment.toAttachmentRef(): uniffi.lakko_ffi_uniffi.Attach
                     )
                 }.getOrNull()
             },
+            inlineThumb = inlineThumbB64?.let { runCatching { b64Decoder.decode(it) }.getOrNull() }
+                ?.let { me.lakko.app.media.inlineThumbOrNull(it) },
         )
     } catch (_: IllegalArgumentException) {
         null

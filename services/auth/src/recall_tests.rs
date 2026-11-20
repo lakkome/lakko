@@ -112,6 +112,7 @@ pub(crate) fn build_state(pool: MySqlPool, limits: Limits) -> AppState {
         room_cap: std::sync::Arc::new(crate::room_cap::RoomAdmissionCap::disabled()),
         backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
         anon_tokens: None,
+        anon_cred: None,
         handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
         recovery_email: None,
         limits: Arc::new(limits),
@@ -142,7 +143,7 @@ pub(crate) fn account_of_token(bearer: &str) -> [u8; 16] {
         .expect("16 bytes")
 }
 
-/// `key`'s identity proof for `account` (ADR-0089 F3), as a client sends
+/// `key`'s identity proof for `account` (ADR-0098 F3), as a client sends
 /// it beside a key auth records.
 pub(crate) fn identity_proof(account: &[u8; 16], key: &SigningKey) -> String {
     b64u(&lakko_attest::sign_identity_proof(&key.to_seed(), account))
@@ -361,7 +362,7 @@ pub(crate) async fn new_account(
         .execute(&state.db)
         .await
         .expect("insert account");
-    // What the genesis mint claims beside the key (ADR-0089 F3).
+    // What the genesis mint claims beside the key (ADR-0098 F3).
     sqlx::query(
         "INSERT INTO account_identity_targets (target, account_id, added_at_ms) VALUES (?, ?, 0)",
     )
@@ -2202,6 +2203,10 @@ async fn account_deletion_is_refused_while_a_recall_window_is_open() {
         identity_of(&pool, &account.id).await.0,
         2,
         "the account is still there"
+    );
+    assert!(
+        !crate::purge::is_queued(&pool, &account.id).await,
+        "a delete refused for the recall window queued a purge"
     );
     // Without the grant it is the grant's refusal, as before: the window is
     // not an oracle for a bare session.

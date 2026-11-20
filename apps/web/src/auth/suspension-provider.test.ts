@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0089 step 3: the session token provider in suspended mode, driven with
+ * ADR-0098 step 3: the session token provider in suspended mode, driven with
  * a fake refresh transport and a fake `fetch`. Entering it from a bearer
  * route's `403 account-suspended` (through the refresh), the local refusal of
  * everything a restricted session does not open, the restricted routes going

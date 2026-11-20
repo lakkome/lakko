@@ -17,10 +17,11 @@
 //!   into memory at startup, for development, tests and a single instance
 //!   with no database.
 //!
-//! The trait carries the blob rows only. The vault rows of ADR-0064 (one row
-//! per vault: its write key, version counter and node; one row per object)
-//! are meant to join it as further methods of the same trait and further
-//! tables of the same database when ADR-0064 is built.
+//! [`BlobIndex`] carries the blob rows. Its sibling [`VaultIndex`] carries the
+//! vault rows of ADR-0064 section 1 (one row per vault: its write key, the
+//! bytes it uses, its write-rate counter and its node; one row per object:
+//! its current version, size and any reservation), implemented by the same
+//! two structs over the same database or index file.
 //!
 //! # What a row holds
 //!
@@ -94,11 +95,11 @@ pub(crate) enum UploadOutcome {
     /// A row already existed; its last access was moved to the upload day
     /// and its delete key left as it was (the first uploader's).
     Existed,
-    /// A moderator deleted this id (ADR-0089); no row was written.
+    /// A moderator deleted this id (ADR-0098); no row was written.
     Removed,
 }
 
-/// A moderator's checked BlobDelete statement (ADR-0089 step 5).
+/// A moderator's checked BlobDelete statement (ADR-0098 step 5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ModerationDelete {
     /// The statement id; applied once.
@@ -157,7 +158,7 @@ pub(crate) trait BlobIndex: Send + Sync {
     /// ([`UploadOutcome::Removed`]).
     async fn record_upload(&self, row: BlobRow) -> Result<UploadOutcome, IndexError>;
 
-    /// Whether a moderator deleted `id` (ADR-0089).
+    /// Whether a moderator deleted `id` (ADR-0098).
     async fn is_tombstoned(&self, id: &BlobId) -> Result<bool, IndexError>;
 
     /// Apply a moderator's BlobDelete in one step: a list older than the
@@ -171,7 +172,7 @@ pub(crate) trait BlobIndex: Send + Sync {
     ) -> Result<ModerationOutcome, IndexError>;
 
     /// Raise the moderator-list floor (the highest list version seen) to
-    /// `list_version` when it is higher, on its own (ADR-0089 F1: a newer
+    /// `list_version` when it is higher, on its own (ADR-0098 F1: a newer
     /// list is kept even when the statement beside it is refused). `false`
     /// when `list_version` is older than the floor (nothing changed).
     async fn raise_moderation_list_floor(&self, list_version: u64) -> Result<bool, IndexError>;
@@ -212,11 +213,578 @@ pub(crate) trait BlobIndex: Send + Sync {
     async fn import(&self, rows: Vec<BlobRow>, node: &str, day: u32) -> Result<usize, IndexError>;
 }
 
+// ============================================================================
+// The vault index (ADR-0064 section 1)
+// ============================================================================
+
+/// A vault id: 32 bytes the client derives from its vault root and the
+/// vault's reference. Names no account.
+pub(crate) type VaultId = [u8; 32];
+
+/// A reservation token: 16 random bytes that name one reservation, so a
+/// stale writer cannot commit over the writer that took its reservation, and
+/// so every object file name is written once.
+pub(crate) type ReservationToken = [u8; 16];
+
+/// Which object of a vault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum ObjectAddr {
+    /// The head.
+    Head,
+    /// Chunk `n`.
+    Chunk(u32),
+}
+
+impl ObjectAddr {
+    /// The kind byte stored in the index (the `lakko-vault` object kind: 1
+    /// head, 2 chunk).
+    pub(crate) const fn kind_byte(self) -> u8 {
+        match self {
+            Self::Head => 1,
+            Self::Chunk(_) => 2,
+        }
+    }
+
+    /// The chunk number stored in the index (0 for the head).
+    pub(crate) const fn chunk_no(self) -> u32 {
+        match self {
+            Self::Head => 0,
+            Self::Chunk(n) => n,
+        }
+    }
+
+    /// Read back what [`Self::kind_byte`] and [`Self::chunk_no`] stored.
+    pub(crate) const fn from_parts(kind: u8, chunk_no: u32) -> Option<Self> {
+        match (kind, chunk_no) {
+            (1, 0) => Some(Self::Head),
+            (2, n) => Some(Self::Chunk(n)),
+            _ => None,
+        }
+    }
+}
+
+/// One vault's index row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VaultRow {
+    /// The vault id.
+    pub(crate) id: VaultId,
+    /// The Ed25519 key every head, chunk and delete request is signed with.
+    pub(crate) write_pk: [u8; 32],
+    /// The storage node holding the vault's objects.
+    pub(crate) node: String,
+    /// Day of the claim.
+    pub(crate) created_day: u32,
+    /// Bytes of the vault's committed objects.
+    pub(crate) bytes_used: u64,
+}
+
+/// One object's committed state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ObjectRow {
+    /// The current version, at least 1.
+    pub(crate) version: u64,
+    /// The reservation that wrote it; part of the file name.
+    pub(crate) token: ReservationToken,
+    /// Stored bytes (version prefix excluded).
+    pub(crate) size: u64,
+}
+
+/// What [`VaultIndex::claim`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaimOutcome {
+    /// A new vault row was written.
+    Created,
+    /// The vault was already claimed under the same key.
+    SameKey,
+    /// The vault is claimed under another key.
+    OtherKey,
+}
+
+/// The per-vault limits (all chosen, not measured; see `crate::vault`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VaultLimits {
+    /// Most bytes a vault's objects may hold, counting live reservations.
+    pub(crate) max_bytes: u64,
+    /// Most chunk numbers a vault may hold.
+    pub(crate) max_chunks: u32,
+    /// Most write reservations per vault per clock hour.
+    pub(crate) max_writes_per_hour: u32,
+    /// How long a reservation holds its version before another writer may
+    /// take it.
+    pub(crate) reservation_ms: u64,
+}
+
+/// A write a client asks to reserve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WriteRequest {
+    /// Which object.
+    pub(crate) addr: ObjectAddr,
+    /// The version the body carries.
+    pub(crate) version: u64,
+    /// The bytes it will store.
+    pub(crate) size: u64,
+    /// The server clock, unix milliseconds.
+    pub(crate) now_ms: u64,
+}
+
+/// What [`VaultIndex::reserve`] decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReserveOutcome {
+    /// The version is held for this writer under `token` until the
+    /// reservation times out.
+    Reserved(ReservationToken),
+    /// No vault row.
+    NoVault,
+    /// The version is not `current + 1`, or another writer holds a live
+    /// reservation on the object.
+    VersionConflict,
+    /// A chunk number above the vault's chunk count, or at the count when
+    /// the vault already holds the most chunks it may.
+    ChunkOutOfRange,
+    /// The write would take the vault past its byte limit.
+    VaultFull,
+    /// The vault used its writes for this hour.
+    RateLimited,
+}
+
+/// What [`VaultIndex::commit`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommitOutcome {
+    /// The version is current; the object it replaced (if any) may be
+    /// deleted.
+    Committed {
+        /// The replaced object's version and token.
+        replaced: Option<(u64, ReservationToken)>,
+    },
+    /// The reservation is gone (taken by another writer after it timed out,
+    /// or the vault was deleted); the written file is an orphan to remove.
+    Lost,
+}
+
+/// The unix clock hour of `now_ms`, the write-rate window.
+pub(crate) const fn hour_of(now_ms: u64) -> u64 {
+    now_ms / 3_600_000
+}
+
+/// A fresh reservation token.
+pub(crate) fn new_token() -> ReservationToken {
+    let mut t = [0u8; 16];
+    lakko_crypto::random::fill(&mut t);
+    t
+}
+
+/// What an index knows about a vault and one of its objects when a write
+/// asks to reserve; [`decide_reserve`] turns it into a decision, so both
+/// implementations decide alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ReserveFacts {
+    /// The object's row: its committed version (0 = none yet) and size.
+    pub(crate) object: Option<(u64, u64)>,
+    /// Another writer holds a reservation on this object that has not timed
+    /// out.
+    pub(crate) object_reserved: bool,
+    /// Chunk rows the vault holds (committed or reserved).
+    pub(crate) chunk_rows: u64,
+    /// Bytes of the vault's committed objects.
+    pub(crate) bytes_used: u64,
+    /// Bytes held by live reservations on the vault's other objects.
+    pub(crate) other_reserved_bytes: u64,
+    /// Reservations already made in the current hour.
+    pub(crate) writes_this_hour: u32,
+}
+
+/// Decide a reservation: `Ok(())` to reserve, else the refusal. Checked in
+/// this order: version, chunk number, bytes, write rate, so a refused write
+/// costs no write from the hour's allowance.
+pub(crate) fn decide_reserve(
+    req: &WriteRequest,
+    facts: &ReserveFacts,
+    limits: &VaultLimits,
+) -> Result<(), ReserveOutcome> {
+    if facts.object_reserved {
+        return Err(ReserveOutcome::VersionConflict);
+    }
+    let (current, current_size) = facts.object.unwrap_or((0, 0));
+    if current.checked_add(1) != Some(req.version) {
+        return Err(ReserveOutcome::VersionConflict);
+    }
+    if let ObjectAddr::Chunk(n) = req.addr {
+        if facts.object.is_none() {
+            let n = u64::from(n);
+            if n > facts.chunk_rows || facts.chunk_rows >= u64::from(limits.max_chunks) {
+                return Err(ReserveOutcome::ChunkOutOfRange);
+            }
+        }
+    }
+    let after = facts
+        .bytes_used
+        .saturating_add(facts.other_reserved_bytes)
+        .saturating_sub(current_size)
+        .saturating_add(req.size);
+    if after > limits.max_bytes {
+        return Err(ReserveOutcome::VaultFull);
+    }
+    if facts.writes_this_hour >= limits.max_writes_per_hour {
+        return Err(ReserveOutcome::RateLimited);
+    }
+    Ok(())
+}
+
+/// The vault index.
+///
+/// A write is three steps: [`Self::reserve`] holds `current + 1` (one
+/// conditional update; a second writer gets [`ReserveOutcome::VersionConflict`]),
+/// the caller stores the object file, then [`Self::commit`] makes the version
+/// current, or [`Self::release`] drops the reservation when the file could
+/// not be stored. A reservation whose writer never came back stops blocking
+/// once it times out: the next reservation takes it over.
+#[async_trait]
+pub(crate) trait VaultIndex: Send + Sync {
+    /// The row of `id`, if any.
+    async fn vault(&self, id: &VaultId) -> Result<Option<VaultRow>, IndexError>;
+
+    /// Claim `row.id` for `row.write_pk`: the first claim wins.
+    async fn claim(&self, row: VaultRow) -> Result<ClaimOutcome, IndexError>;
+
+    /// Remove a vault row that has no object, after its claim object could
+    /// not be stored. Returns whether a row was removed.
+    async fn unclaim(&self, id: &VaultId) -> Result<bool, IndexError>;
+
+    /// The committed state of an object, if it has a committed version.
+    async fn object(&self, id: &VaultId, addr: ObjectAddr)
+        -> Result<Option<ObjectRow>, IndexError>;
+
+    /// Reserve `req.version` of `req.addr`; see [`ReserveOutcome`].
+    async fn reserve(
+        &self,
+        id: &VaultId,
+        req: WriteRequest,
+        limits: &VaultLimits,
+    ) -> Result<ReserveOutcome, IndexError>;
+
+    /// Make the reservation `token` of `addr` current with `size` bytes.
+    async fn commit(
+        &self,
+        id: &VaultId,
+        addr: ObjectAddr,
+        token: &ReservationToken,
+        size: u64,
+    ) -> Result<CommitOutcome, IndexError>;
+
+    /// Drop the reservation `token` of `addr` (an object that never had a
+    /// committed version is forgotten with it).
+    async fn release(
+        &self,
+        id: &VaultId,
+        addr: ObjectAddr,
+        token: &ReservationToken,
+    ) -> Result<(), IndexError>;
+
+    /// Remove the vault row and every object row. Returns whether a row was
+    /// removed.
+    async fn delete_vault(&self, id: &VaultId) -> Result<bool, IndexError>;
+}
+
 #[cfg(test)]
 pub(crate) mod contract {
     //! The behaviour both implementations must share, run against each.
 
-    use super::{BlobIndex, BlobRow, UploadOutcome};
+    use std::sync::Arc;
+
+    use super::{
+        BlobIndex, BlobRow, ClaimOutcome, CommitOutcome, ObjectAddr, ReservationToken,
+        ReserveOutcome, UploadOutcome, VaultId, VaultIndex, VaultLimits, VaultRow, WriteRequest,
+    };
+
+    /// Small limits so every refusal is reachable in a test.
+    pub(crate) const fn limits() -> VaultLimits {
+        VaultLimits {
+            max_bytes: 1_000,
+            max_chunks: 3,
+            max_writes_per_hour: 20,
+            reservation_ms: 60_000,
+        }
+    }
+
+    /// A vault row with a random id (so a persistent database can be reused)
+    /// and a write key of `key` bytes.
+    pub(crate) fn vault_row(key: u8) -> VaultRow {
+        let mut id = [0u8; 32];
+        lakko_crypto::random::fill(&mut id);
+        VaultRow {
+            id,
+            write_pk: [key; 32],
+            node: "local".to_string(),
+            created_day: 100,
+            bytes_used: 0,
+        }
+    }
+
+    /// A clock well inside one hour.
+    pub(crate) const NOW: u64 = 1_700_000_100_000;
+
+    async fn reserve_at(
+        index: &dyn VaultIndex,
+        id: &VaultId,
+        addr: ObjectAddr,
+        version: u64,
+        size: u64,
+        now_ms: u64,
+        limits: &VaultLimits,
+    ) -> ReserveOutcome {
+        index
+            .reserve(
+                id,
+                WriteRequest {
+                    addr,
+                    version,
+                    size,
+                    now_ms,
+                },
+                limits,
+            )
+            .await
+            .unwrap()
+    }
+
+    /// Reserve and expect success.
+    pub(crate) async fn reserve_ok(
+        index: &dyn VaultIndex,
+        id: &VaultId,
+        addr: ObjectAddr,
+        version: u64,
+        size: u64,
+        limits: &VaultLimits,
+    ) -> ReservationToken {
+        match reserve_at(index, id, addr, version, size, NOW, limits).await {
+            ReserveOutcome::Reserved(t) => t,
+            other => panic!("expected a reservation, got {other:?}"),
+        }
+    }
+
+    /// Reserve, store, commit.
+    async fn write(
+        index: &dyn VaultIndex,
+        id: &VaultId,
+        addr: ObjectAddr,
+        version: u64,
+        size: u64,
+        limits: &VaultLimits,
+    ) -> CommitOutcome {
+        let t = reserve_ok(index, id, addr, version, size, limits).await;
+        index.commit(id, addr, &t, size).await.unwrap()
+    }
+
+    /// The vault behaviour both implementations must share.
+    pub(crate) async fn run_vault(index: &dyn VaultIndex) {
+        let lim = limits();
+        let a = vault_row(1);
+        let id = a.id;
+
+        // Claim: first wins, same key is idempotent, another key is refused.
+        assert_eq!(index.vault(&id).await.unwrap(), None);
+        assert_eq!(
+            reserve_at(index, &id, ObjectAddr::Head, 1, 1, NOW, &lim).await,
+            ReserveOutcome::NoVault
+        );
+        assert_eq!(index.claim(a.clone()).await.unwrap(), ClaimOutcome::Created);
+        assert_eq!(index.claim(a.clone()).await.unwrap(), ClaimOutcome::SameKey);
+        let mut other = a.clone();
+        other.write_pk = [2; 32];
+        assert_eq!(index.claim(other).await.unwrap(), ClaimOutcome::OtherKey);
+        assert_eq!(index.vault(&id).await.unwrap().unwrap().write_pk, [1; 32]);
+
+        // Version rule: only current + 1.
+        assert_eq!(
+            reserve_at(index, &id, ObjectAddr::Head, 2, 10, NOW, &lim).await,
+            ReserveOutcome::VersionConflict
+        );
+        assert_eq!(index.object(&id, ObjectAddr::Head).await.unwrap(), None);
+        let t1 = reserve_ok(index, &id, ObjectAddr::Head, 1, 100, &lim).await;
+        // A second writer for the same version meets the live reservation.
+        assert_eq!(
+            reserve_at(index, &id, ObjectAddr::Head, 1, 100, NOW, &lim).await,
+            ReserveOutcome::VersionConflict
+        );
+        // Not yet committed: nothing to read.
+        assert_eq!(index.object(&id, ObjectAddr::Head).await.unwrap(), None);
+        assert_eq!(
+            index.commit(&id, ObjectAddr::Head, &t1, 100).await.unwrap(),
+            CommitOutcome::Committed { replaced: None }
+        );
+        let head = index.object(&id, ObjectAddr::Head).await.unwrap().unwrap();
+        assert_eq!((head.version, head.token, head.size), (1, t1, 100));
+        // A committed token commits nothing again.
+        assert_eq!(
+            index.commit(&id, ObjectAddr::Head, &t1, 100).await.unwrap(),
+            CommitOutcome::Lost
+        );
+        assert_eq!(
+            reserve_at(index, &id, ObjectAddr::Head, 1, 100, NOW, &lim).await,
+            ReserveOutcome::VersionConflict
+        );
+        assert_eq!(
+            write(index, &id, ObjectAddr::Head, 2, 120, &lim).await,
+            CommitOutcome::Committed {
+                replaced: Some((1, t1))
+            }
+        );
+        assert_eq!(index.vault(&id).await.unwrap().unwrap().bytes_used, 120);
+
+        // A stale reservation is taken over; the stale writer's commit is lost.
+        let stale = reserve_ok(index, &id, ObjectAddr::Head, 3, 10, &lim).await;
+        let later = NOW + lim.reservation_ms + 1;
+        let ReserveOutcome::Reserved(fresh) =
+            reserve_at(index, &id, ObjectAddr::Head, 3, 10, later, &lim).await
+        else {
+            panic!("a timed-out reservation must be taken over");
+        };
+        assert_eq!(
+            index
+                .commit(&id, ObjectAddr::Head, &stale, 10)
+                .await
+                .unwrap(),
+            CommitOutcome::Lost
+        );
+        assert!(matches!(
+            index
+                .commit(&id, ObjectAddr::Head, &fresh, 10)
+                .await
+                .unwrap(),
+            CommitOutcome::Committed {
+                replaced: Some((2, _))
+            }
+        ));
+        assert_eq!(index.vault(&id).await.unwrap().unwrap().bytes_used, 10);
+
+        // A released reservation frees its version.
+        let t = reserve_ok(index, &id, ObjectAddr::Head, 4, 10, &lim).await;
+        index.release(&id, ObjectAddr::Head, &t).await.unwrap();
+        let t = reserve_ok(index, &id, ObjectAddr::Head, 4, 10, &lim).await;
+        index.commit(&id, ObjectAddr::Head, &t, 10).await.unwrap();
+        vault_chunks_bytes_rate_delete(index, &a).await;
+    }
+
+    /// The second half of [`run_vault`], on the vault `a` it left behind.
+    async fn vault_chunks_bytes_rate_delete(index: &dyn VaultIndex, a: &VaultRow) {
+        let lim = limits();
+        let id = a.id;
+
+        // Chunks: a number at most the count; the count is capped.
+        assert_eq!(
+            reserve_at(index, &id, ObjectAddr::Chunk(1), 1, 10, NOW, &lim).await,
+            ReserveOutcome::ChunkOutOfRange
+        );
+        for n in 0..3 {
+            write(index, &id, ObjectAddr::Chunk(n), 1, 10, &lim).await;
+        }
+        assert_eq!(
+            reserve_at(index, &id, ObjectAddr::Chunk(3), 1, 10, NOW, &lim).await,
+            ReserveOutcome::ChunkOutOfRange
+        );
+        // An existing chunk takes a new version.
+        write(index, &id, ObjectAddr::Chunk(1), 2, 20, &lim).await;
+        assert_eq!(
+            index
+                .object(&id, ObjectAddr::Chunk(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .version,
+            2
+        );
+        // A released first reservation of a chunk forgets the chunk number.
+        let second = vault_row(3);
+        index.claim(second.clone()).await.unwrap();
+        let t = reserve_ok(index, &second.id, ObjectAddr::Chunk(0), 1, 10, &lim).await;
+        index
+            .release(&second.id, ObjectAddr::Chunk(0), &t)
+            .await
+            .unwrap();
+        assert_eq!(
+            reserve_at(index, &second.id, ObjectAddr::Chunk(1), 1, 10, NOW, &lim).await,
+            ReserveOutcome::ChunkOutOfRange
+        );
+
+        // Bytes: committed plus live reservations, the replaced object's
+        // size freed. Vault `a` holds 10 (head) + 10 + 20 + 10 (chunks).
+        assert_eq!(index.vault(&id).await.unwrap().unwrap().bytes_used, 50);
+        assert_eq!(
+            reserve_at(index, &id, ObjectAddr::Head, 5, 961, NOW, &lim).await,
+            ReserveOutcome::VaultFull
+        );
+        let pending = reserve_ok(index, &id, ObjectAddr::Chunk(0), 2, 500, &lim).await;
+        assert_eq!(
+            reserve_at(index, &id, ObjectAddr::Head, 5, 461, NOW, &lim).await,
+            ReserveOutcome::VaultFull
+        );
+        index
+            .release(&id, ObjectAddr::Chunk(0), &pending)
+            .await
+            .unwrap();
+        write(index, &id, ObjectAddr::Head, 5, 950, &lim).await;
+        assert_eq!(index.vault(&id).await.unwrap().unwrap().bytes_used, 990);
+
+        // Write rate: a refused write costs nothing; the hour's allowance
+        // ends at the limit and comes back the next hour.
+        let third = vault_row(4);
+        index.claim(third.clone()).await.unwrap();
+        for v in 1..=u64::from(lim.max_writes_per_hour) {
+            write(index, &third.id, ObjectAddr::Head, v, 1, &lim).await;
+        }
+        let next = u64::from(lim.max_writes_per_hour) + 1;
+        assert_eq!(
+            reserve_at(index, &third.id, ObjectAddr::Head, next, 1, NOW, &lim).await,
+            ReserveOutcome::RateLimited
+        );
+        let next_hour = (NOW / 3_600_000 + 1) * 3_600_000;
+        assert!(matches!(
+            reserve_at(index, &third.id, ObjectAddr::Head, next, 1, next_hour, &lim).await,
+            ReserveOutcome::Reserved(_)
+        ));
+
+        // Delete: the vault and its objects go; the id can be claimed again.
+        assert!(index.delete_vault(&id).await.unwrap());
+        assert!(!index.delete_vault(&id).await.unwrap());
+        assert_eq!(index.vault(&id).await.unwrap(), None);
+        assert_eq!(index.object(&id, ObjectAddr::Head).await.unwrap(), None);
+        let mut again = a.clone();
+        again.write_pk = [9; 32];
+        assert_eq!(index.claim(again).await.unwrap(), ClaimOutcome::Created);
+        assert_eq!(index.vault(&id).await.unwrap().unwrap().bytes_used, 0);
+
+        // Unclaim removes only a vault with no object.
+        assert!(index.unclaim(&id).await.unwrap());
+        assert!(!index.unclaim(&third.id).await.unwrap());
+        for v in [&second.id, &third.id] {
+            index.delete_vault(v).await.unwrap();
+        }
+    }
+
+    /// Many concurrent reservations of one version: exactly one wins.
+    pub(crate) async fn run_vault_race<I: VaultIndex + 'static>(index: Arc<I>) {
+        let l = limits();
+        let a = vault_row(5);
+        index.claim(a.clone()).await.unwrap();
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let index = index.clone();
+            let id = a.id;
+            tasks.push(tokio::spawn(async move {
+                reserve_at(index.as_ref(), &id, ObjectAddr::Head, 1, 10, NOW, &l).await
+            }));
+        }
+        let mut won = 0;
+        for t in tasks {
+            match t.await.unwrap() {
+                ReserveOutcome::Reserved(_) => won += 1,
+                ReserveOutcome::VersionConflict => {},
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(won, 1);
+        index.delete_vault(&a.id).await.unwrap();
+    }
 
     pub(crate) fn row(seed: u8, day: u32, key: Option<u8>) -> BlobRow {
         BlobRow {
@@ -322,7 +890,7 @@ pub(crate) mod contract {
         assert!(!index.remove(&a.id).await.unwrap());
     }
 
-    /// The ADR-0089 tombstone. `ids` (two blob ids) and `statement` (the
+    /// The ADR-0098 tombstone. `ids` (two blob ids) and `statement` (the
     /// seed of the statement ids) are random, so a persistent database can
     /// be reused across runs (a tombstone is kept forever); `version` is the
     /// list version every statement carries (it only grows in a shared

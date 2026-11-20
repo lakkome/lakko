@@ -116,13 +116,21 @@ impl TokenRejection {
 
 impl IntoResponse for TokenRejection {
     fn into_response(self) -> Response {
-        (
+        let mut res = (
             self.status(),
             Json(serde_json::json!({ "error": self.code() })),
         )
-            .into_response()
+            .into_response();
+        res.extensions_mut()
+            .insert(lakko_metrics::ErrorCode(self.code()));
+        res
     }
 }
+
+/// Spends by token context and outcome (`ok` or the rejection's code),
+/// labelled `context` and `outcome` (ADR-0096 section 3). A counter of
+/// closed sets: no token, nonce or spend identifier is a label.
+pub const SPENDS_TOTAL: &str = "lakko_anon_token_spends_total";
 
 /// Where a verifier records spent tokens.
 #[derive(Debug, Clone)]
@@ -225,6 +233,26 @@ impl TokenVerifier {
         context: TokenContext,
         now_unix_secs: u64,
     ) -> Result<VerifiedToken, TokenRejection> {
+        let result = self.spend_unrecorded(headers, context, now_unix_secs).await;
+        let outcome = match &result {
+            Ok(_) => "ok",
+            Err(rejection) => rejection.code(),
+        };
+        lakko_metrics::metrics::counter!(
+            SPENDS_TOTAL,
+            "context" => context.name(),
+            "outcome" => outcome,
+        )
+        .increment(1);
+        result
+    }
+
+    async fn spend_unrecorded(
+        &self,
+        headers: &HeaderMap,
+        context: TokenContext,
+        now_unix_secs: u64,
+    ) -> Result<VerifiedToken, TokenRejection> {
         let Some(config) = &self.config else {
             return Err(TokenRejection::Disabled);
         };
@@ -247,9 +275,7 @@ impl TokenVerifier {
                 spend(pool, verified.context, &verified.spend_id, verified.epoch).await
             },
             SpentSet::Memory(set) => {
-                let current =
-                    lakko_anon_token::epoch_at(now_unix_secs, config.window_secs).unwrap_or(0);
-                spend_in_memory(set, &verified, current)
+                spend_in_memory(set, &verified, now_unix_secs, config.window_secs)
             },
         };
         match recorded {
@@ -278,20 +304,25 @@ impl TokenVerifier {
 }
 
 /// Record `verified` in a process-local spent-set, dropping entries older
-/// than the previous epoch (they no longer verify, so they cannot be
-/// replayed). A poisoned lock is recovered: the set holds only spend
+/// than the previous epoch of their own context's window (they no longer
+/// verify, so they cannot be replayed). A poisoned lock is recovered: the set holds only spend
 /// identifiers, and dropping the whole set would let every token be spent
 /// again.
 fn spend_in_memory(
     set: &Mutex<HashMap<(u8, SpendId), u64>>,
     verified: &VerifiedToken,
-    current_epoch: u64,
+    now_unix_secs: u64,
+    window_secs: u64,
 ) -> Result<(), SpendError> {
     let mut guard = set
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let floor = current_epoch.saturating_sub(1);
-    guard.retain(|_, epoch| *epoch >= floor);
+    guard.retain(|(context, _), epoch| {
+        let window =
+            TokenContext::from_u8(*context).map_or(window_secs, |c| c.window_secs(window_secs));
+        let current = lakko_anon_token::epoch_at(now_unix_secs, window).unwrap_or(0);
+        *epoch >= current.saturating_sub(1)
+    });
     let key = (verified.context.as_u8(), verified.spend_id);
     if guard.contains_key(&key) {
         return Err(SpendError::AlreadySpent);
@@ -353,6 +384,30 @@ mod tests {
             assert_eq!(r.status().as_u16(), status, "{r:?}");
             assert_eq!(r.code(), code, "{r:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn spends_are_counted_by_context_and_outcome_and_carry_the_code() {
+        let metrics = lakko_metrics::install("test", "0.0.0").unwrap();
+        let verifier = TokenVerifier::in_memory(None);
+        let refused = verifier
+            .spend_header(&HeaderMap::new(), TokenContext::DsKnock)
+            .await
+            .unwrap_err();
+        assert_eq!(refused, TokenRejection::Disabled);
+        let res = refused.into_response();
+        assert_eq!(
+            res.extensions().get::<lakko_metrics::ErrorCode>(),
+            Some(&lakko_metrics::ErrorCode("anon-tokens-disabled"))
+        );
+        let text = metrics.render();
+        lakko_metrics::exposition::assert_clean(&text, &["context"], &[]);
+        assert!(
+            text.contains(
+                r#"lakko_anon_token_spends_total{context="ds-knock",outcome="anon-tokens-disabled"} 1"#
+            ),
+            "{text}"
+        );
     }
 
     #[test]

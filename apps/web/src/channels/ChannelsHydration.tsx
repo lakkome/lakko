@@ -22,17 +22,26 @@
  */
 
 import type { DeviceCipher } from "../auth/device-cipher";
-import { createEffect, untrack, type Component } from "solid-js";
+import { createEffect, onCleanup, untrack, type Component } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
 import { useChats } from "../chat/ChatContext";
 import {
+  channelsActions,
   clearChannelsSession,
   hydrateChannelsState,
+  installPublisherProviderPersister,
   markChannelsHydrationUnavailable,
 } from "../state/channels-state";
+import { awaitProviderSettled } from "../mls/provider-settled";
+import { installPublisherDeviceSource } from "./publisher-device";
+import { notePublisherCommitLanded } from "./channel-access";
+import { republishChannelMeta } from "./channel-meta";
 import { replayPublisherCommits } from "./copublisher";
+import { withPublisherGroup } from "./publisher-group-registry";
+import { settleOwedRecord } from "./owed-record";
+import { afterReplayedPublisherCommits } from "./replayed-commit-followup";
 
 export const ChannelsHydration: Component = () => {
   const auth = useAuth();
@@ -44,23 +53,36 @@ export const ChannelsHydration: Component = () => {
   };
 
   let bound: string | null = null;
+  let boundDevice: object | null = null;
+  let uninstallPersister: (() => void) | null = null;
+  onCleanup(() => uninstallPersister?.());
   // Monotone token so a hydration that resolves after the session it
   // belonged to ended does not arm write-through for the wrong account.
   let generation = 0;
 
+  // ADR-0090: the PublisherGroups live in the DEVICE identity's provider,
+  // persisted with the conversation snapshot.
+  const uninstallDevice = installPublisherDeviceSource(() => chats.identity());
+  onCleanup(uninstallDevice);
+
   createEffect(() => {
     const account = accountId();
     const identity = chats.conversationAccountIdentity();
+    const device = chats.identity();
     untrack(() => {
-      const key = account === null || identity === null ? null : account;
-      if (key === bound) return;
+      const key = account === null || identity === null || device === null ? null : account;
+      if (key === bound && device === boundDevice) return;
+      boundDevice = device;
       bound = key;
       generation += 1;
       const mine = generation;
       // Always drop the previous session's in-memory state first: a null
       // account is a logout; a different one is an account switch.
       void clearChannelsSession();
-      if (key === null || identity === null) return;
+      uninstallPersister?.();
+      uninstallPersister = null;
+      if (key === null || identity === null || device === null) return;
+      uninstallPersister = installPublisherProviderPersister(() => chats.persistSnapshotDurable(key, device));
 
       void (async (): Promise<void> => {
         let deviceKey: DeviceCipher | null = null;
@@ -70,6 +92,10 @@ export const ChannelsHydration: Component = () => {
           // eslint-disable-next-line no-console
           console.warn("channels hydration: getDeviceKey failed", err);
         }
+        if (mine !== generation) return;
+        // ADR-0090: open nothing in the device provider before the MLS
+        // rehydrate restored it (`restoreStorage` replaces the provider).
+        await awaitProviderSettled(device);
         if (mine !== generation) return;
         if (deviceKey === null) {
           // No device root key (half-reset state): nothing can be read or
@@ -81,6 +107,7 @@ export const ChannelsHydration: Component = () => {
           accountIdB64: key,
           deviceKey,
           identity,
+          device,
           isCurrent: (): boolean => mine === generation,
           // Read at flush time: `null` once the session has freed the
           // identity, so a late flush keeps the last good snapshot.
@@ -97,7 +124,23 @@ export const ChannelsHydration: Component = () => {
         // G-50 — resume the PublisherGroup commits whose steps had not all
         // landed before the reload, against the provider just restored.
         if (mine !== generation) return;
-        await replayPublisherCommits(identity);
+        const landed = await replayPublisherCommits(identity);
+        if (mine !== generation || landed.length === 0) return;
+        // What the live approve, removal and rotation do after the reseal:
+        // the composer's seed and the channel record under the new epoch.
+        await afterReplayedPublisherCommits(landed, {
+          seedOf: (id) =>
+            withPublisherGroup(identity, id, async (g, d) => (g.isActive() ? g.channelSeed(d) : null)),
+          landed: (id, epoch, seed) => {
+            notePublisherCommitLanded(id, epoch, seed);
+            channelsActions.notePublisherGroupChanged();
+          },
+          reissueRecord: async (id) => {
+            // Owed since the commit was recorded; a failure here is retried
+            // by the publisher pass.
+            await settleOwedRecord(id, () => republishChannelMeta(id, identity));
+          },
+        });
       })();
     });
   });

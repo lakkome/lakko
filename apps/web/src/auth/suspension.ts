@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * A suspended account, seen by its owner (ADR-0089 step 3, UX
+ * A suspended account, seen by its owner (ADR-0098 step 3, UX
  * `reporting-and-moderation.md` section 4). The pure rules; the fetch, the
  * provider and the screen use them.
  *
@@ -143,7 +143,7 @@ export type AppealState = "none" | "sent" | "declined";
 
 /** What the screen shows. */
 export interface SuspensionDetails {
-  /** The reason byte (ADR-0089), kept for diagnostics only. */
+  /** The reason byte (ADR-0098), kept for diagnostics only. */
   readonly reason: number;
   /** The reason's name as the server writes it (`child-safety`, ...). */
   readonly reasonName: string;

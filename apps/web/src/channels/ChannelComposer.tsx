@@ -18,11 +18,13 @@
  * Every file a post carries is uploaded with the channel file life
  * (ADR-0087 section 13: 45 idle days).
  */
-import { createSignal, For, onCleanup, Show, type JSX } from "solid-js";
+import { createSignal, onCleanup, Show, type JSX } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
 import {
   AttachmentSizeError,
+  composeArticleEditEnvelope,
+  composeContentEnvelope,
   composeEditEnvelope,
   composeEnvelope,
   encryptAndUploadBytes,
@@ -43,6 +45,17 @@ import { fetchGifMedia, MAX_GIF_FULL_BYTES, type GifItem } from "../media/gif-cl
 import { t } from "../l10n";
 import { Icon } from "../ui/icons";
 import { channelErrorText } from "./channel-error-copy";
+import { AttachComposer, type AttachEditRequest } from "../attach/AttachComposer";
+import { checklistBodyOf, pollBodyOf } from "../attach/actions";
+import { reencodePhoto } from "../attach/photo-encode";
+import { ComposerTray } from "../chat/ComposerTray";
+import { backspaceRemovesLast, messageRefs, traySendable } from "../chat/compose-tray";
+import { release as releaseTrayItem, trayFor } from "../chat/tray-store";
+import { mediaKey } from "../media/media-hub";
+import { deleteBlobs } from "../storage/blob-deletes";
+import { blobIdsOfRefs } from "../chat/blob-ids";
+import type { MessageContent } from "../../wasm/lakko_ffi_wasm";
+import { loadWasm } from "../wasm";
 
 export interface ChannelComposerProps {
   /** Publishes one plaintext; resolves once the post is on the server. */
@@ -52,21 +65,40 @@ export interface ChannelComposerProps {
   readonly onCancelEdit: () => void;
   /** The timeline's media hub: a take's object URLs are filed there. */
   readonly hub: MediaHub;
+  /** ADR-0092 — an `Edit checklist` / article `Edit` the timeline asked for. */
+  readonly contentEdit?: () => AttachEditRequest | null;
+  readonly clearContentEdit?: () => void;
+  /** Names this channel's composer tray, which outlives the view
+   *  (`docs/ux/media-messages.md` section 11). */
+  readonly trayKey: string;
 }
 
 export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
   const auth = useAuth();
   const [text, setText] = createSignal("");
-  const [files, setFiles] = createSignal<readonly File[]>([]);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [emojiOpen, setEmojiOpen] = createSignal(false);
   let field: HTMLTextAreaElement | undefined;
-  let picker: HTMLInputElement | undefined;
   let lastEditCursor: number | null = null;
   // ADR-0087 section 13 — a channel file asks for its shorter idle life.
   const storage = new StorageClient(DEFAULT_BASE_URL, CHANNEL_FILE_IDLE_DAYS);
   const callHost = useCallHost();
+  // Section 11 — what the next post carries, uploaded as it is added, with
+  // the channel file life.
+  const accountOf = (): string | null => {
+    const st = auth.state();
+    return st.kind === "session" ? st.account.accountId : null;
+  };
+  const tray = trayFor(`${accountOf() ?? "none"}:channel:${props.trayKey}`, {
+    storage: () => storage,
+    inlineType: (mime) => props.hub.inlineType(mime),
+    discard: (refs) => {
+      const account = accountOf();
+      if (account !== null) void deleteBlobs(account, blobIdsOfRefs(refs));
+    },
+    onError: (msg) => setError(msg),
+  });
 
   /** A finished take the person chose to send: its poster first (a video
    *  note's still), then the take, as one post. */
@@ -143,7 +175,6 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
       lastEditCursor = e.cursor;
       queueMicrotask(() => {
         setText(e.text);
-        setFiles([]);
         grow();
         field?.focus();
       });
@@ -152,10 +183,13 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
     return e;
   };
 
-  const empty = (): boolean => text().trim().length === 0 && (editing() !== null || files().length === 0);
+  const empty = (): boolean => text().trim().length === 0 && (editing() !== null || tray.items().length === 0);
+  /** Every tray item is uploaded (section 11: Send waits for them). */
+  const sendable = (): boolean =>
+    editing() !== null ? text().trim().length > 0 : traySendable(text().trim(), tray.items().map((i) => i.status));
 
   async function onSend(): Promise<void> {
-    if (busy() || empty()) return;
+    if (busy() || empty() || !sendable()) return;
     setBusy(true);
     setError(null);
     try {
@@ -164,10 +198,18 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
         await props.publish(await composeEditEnvelope(edit.cursor, text().trim()));
         props.onCancelEdit();
       } else {
-        const refs: AttachmentRefBytes[] = [];
-        for (const f of files()) refs.push(await encryptAndUploadFile(f, storage));
+        // Taken out of the tray only once the post is published: a refused
+        // publish leaves the tray as it was, to send again.
+        // ADR-0047 section 6 — the micro thumbnail stays on the first photo
+        // or video (by type, however it was added) only.
+        const refs: AttachmentRefBytes[] = messageRefs(tray.items(), (mime) => props.hub.inlineType(mime));
         await props.publish(await composeEnvelope(text().trim(), refs));
-        setFiles([]);
+        for (const item of tray.take()) {
+          if (item.ref !== null && item.kind !== "file") {
+            props.hub.fileLocal(mediaKey(item.ref.blobId), item.file, item.ref.mime);
+          }
+          releaseTrayItem(item);
+        }
       }
       setText("");
       queueMicrotask(grow);
@@ -184,6 +226,61 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
       }
     } finally {
       setBusy(false);
+    }
+  }
+
+  /** The draft key of this composer (one channel per mounted composer). */
+  const draftKeyOf = (): string => "post";
+
+  /** ADR-0092 — a poll, checklist, location, contact card or article post. */
+  async function publishContent(content: MessageContent, refs: AttachmentRefBytes[] = []): Promise<void> {
+    setBusy(true);
+    setError(null);
+    try {
+      await props.publish(await composeContentEnvelope(content, refs));
+    } catch (err) {
+      setError(channelErrorText(err, () => t("channels.publish.error.generic")));
+      throw err;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** An op post (an edit of a content post). */
+  async function publishOp(bytes: Uint8Array): Promise<void> {
+    setBusy(true);
+    setError(null);
+    try {
+      await props.publish(bytes);
+    } catch (err) {
+      setError(channelErrorText(err, () => t("channels.publish.error.generic")));
+      throw err;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** One image of an article, uploaded with the channel file life. */
+  async function uploadOne(original: File): Promise<AttachmentRefBytes | null> {
+    let file = original;
+    try {
+      if (file.type.startsWith("image/") && file.type !== "image/gif") {
+        const w = await loadWasm();
+        try {
+          file = await reencodePhoto(file, w.photoMaxLongestSidePx());
+        } catch {
+          setError(t("attach.preview.photo_unreadable"));
+          return null;
+        }
+      }
+      return await encryptAndUploadFile(file, storage);
+    } catch (err) {
+      setError(
+        err instanceof AttachmentSizeError
+          ? t("attach.preview.file_too_big")
+          : channelErrorText(err, () => t("channels.publish.error.generic")),
+      );
+      return null;
     }
   }
 
@@ -240,65 +337,74 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
               props.onCancelEdit();
             }}
           >
-            <Icon name="close" size={16} />
+            <Icon name="xmark" size={20} />
           </button>
         </div>
       </Show>
-      <Show when={files().length > 0}>
-        <ul class="lk-channel-files">
-          <For each={files()}>
-            {(f) => (
-              <li class="lk-channel-file">
-                <Icon name="clip" size={14} />
-                <span>{f.name}</span>
-                <span class="lk-meta">{formatAttachmentSize(f.size)}</span>
-                <button
-                  type="button"
-                  class="lk-icon-button"
-                  aria-label={t("chat.composer.remove_attachment")}
-                  disabled={busy()}
-                  onClick={() => setFiles(files().filter((x) => x !== f))}
-                >
-                  <Icon name="close" size={14} />
-                </button>
-              </li>
-            )}
-          </For>
-        </ul>
-      </Show>
       <form
         class="lk-composer"
+        classList={{ "with-tray": tray.items().length > 0 || tray.notice() !== null }}
         onSubmit={(e): void => {
           e.preventDefault();
           void onSend();
         }}
       >
+        <Show when={editing() === null}>
+          <ComposerTray tray={tray} disabled={busy()} />
+        </Show>
         <Show when={!recorderBusy(recorder)} fallback={<RecordingBar recorder={recorder} />}>
         <Show when={editing() === null}>
-          <button
-            type="button"
-            class="lk-icon-button"
-            title={t("chat.composer.attach")}
-            aria-label={t("chat.composer.attach")}
-            disabled={busy()}
-            onClick={() => picker?.click()}
-          >
-            <Icon name="clip" size={20} />
-          </button>
-          <input
-            ref={picker}
-            type="file"
-            multiple
-            hidden
-            onChange={(e) => {
-              const picked = Array.from(e.currentTarget.files ?? []);
-              e.currentTarget.value = "";
-              if (picked.length > 0) setFiles([...files(), ...picked]);
+          {/* docs/ux/attachments.md section 2 — the owner's and publishers'
+              paperclip: the same menu as a chat (the core gives a channel's
+              publishers all nine rows; a subscriber has no composer). */}
+          <AttachComposer
+            conversation={() => "channel"}
+            role={() => "admin"}
+            accounts={() => 0}
+            callHoldsCamera={() => callOwnsCaptureNow(uiRules(), callHost)}
+            hidden={() => busy()}
+            draftKey={`channel:${draftKeyOf()}`}
+            contacts={() => []}
+            editRequest={() => props.contentEdit?.() ?? null}
+            clearEditRequest={() => props.clearContentEdit?.()}
+            addFiles={(files, source) => tray.add(files, source)}
+            acceptPaste={() => true}
+            sendPoll={async (d) => {
+              const body = await pollBodyOf({ ...d, anonymous: false }, [], Date.now());
+              await publishContent({ kind: "poll", poll: { body, authorSig: null } });
+            }}
+            sendChecklist={async (d, editTarget) => {
+              const body = checklistBodyOf({ ...d, othersAdd: false, othersMark: false });
+              if (editTarget === undefined) {
+                await publishContent({ kind: "checklist", checklist: { body, authorSig: null } });
+                return;
+              }
+              // UX 8.2 — the edit is a post naming the checklist's cursor.
+              const w = await loadWasm();
+              await publishOp(w.composeChecklistEditEnvelope(BigInt(editTarget), { body, authorSig: null }));
+            }}
+            sendLocation={(l) => publishContent({ kind: "location", location: l })}
+            sendContact={(c) => publishContent({ kind: "contactCard", card: c })}
+            sendArticle={async (out, editTarget) => {
+              const refs: AttachmentRefBytes[] = [];
+              for (const image of out.images) {
+                const file = image instanceof File ? image : new File([image], "image.jpg", { type: image.type || "image/jpeg" });
+                const ref = await uploadOne(file);
+                if (ref === null) return;
+                refs.push(ref);
+              }
+              if (editTarget === undefined) {
+                await publishContent({ kind: "article", article: out.article }, refs);
+                return;
+              }
+              // UX 11.3 — the edit replaces the whole article.
+              await publishOp(await composeArticleEditEnvelope(editTarget, out.article, refs));
             }}
           />
         </Show>
         <textarea
           ref={field}
+          data-paste-files=""
           class="lk-composer-input"
           rows={1}
           placeholder={t("channels.compose.placeholder")}
@@ -314,6 +420,20 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
             // Enter publishes, Shift+Enter breaks the line, as in a chat.
             // The value is taken from the field itself, so a key pressed
             // before the input event was handled still sends what is shown.
+            if (
+              editing() === null &&
+              backspaceRemovesLast({
+                key: e.key,
+                fieldEmpty: e.currentTarget.value.length === 0,
+                modified: e.altKey || e.ctrlKey || e.metaKey || e.shiftKey,
+                composing: e.isComposing,
+                items: tray.items().length,
+              })
+            ) {
+              e.preventDefault();
+              tray.removeLast();
+              return;
+            }
             if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
               e.preventDefault();
               if (e.currentTarget.value !== text()) setText(e.currentTarget.value);
@@ -334,7 +454,7 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
             disabled={busy()}
             onClick={() => setEmojiOpen((v) => !v)}
           >
-            <Icon name="smile" size={20} />
+            <Icon name="face-smiling" size={20} />
           </button>
           <Show when={emojiOpen()}>
             <EmojiPicker
@@ -367,9 +487,9 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
           title={busy() ? t("channels.compose.publishing") : t("channels.compose.publish")}
           aria-label={busy() ? t("channels.compose.publishing") : t("channels.compose.publish")}
           aria-busy={busy() ? "true" : undefined}
-          disabled={busy() || empty()}
+          disabled={busy() || empty() || !sendable()}
         >
-          <Icon name="send" size={20} />
+          <Icon name="send-fill" size={20} />
         </button>
         </Show>
       </form>

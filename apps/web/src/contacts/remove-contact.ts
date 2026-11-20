@@ -3,7 +3,7 @@
 
 /**
  * Remove contact, the one way it runs (the Contacts card, and since
- * ADR-0089 the block that performs it too, UX `reporting-and-moderation.md`
+ * ADR-0098 the block that performs it too, UX `reporting-and-moderation.md`
  * section 1.2).
  *
  * Three steps, each the one already in place: the row leaves the contact

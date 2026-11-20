@@ -11,8 +11,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -33,6 +31,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.lakko.app.transport.AntiCensorshipManager
 import me.lakko.app.transport.AntiCensorshipState
 import me.lakko.app.l10n.t
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
 
 /**
  * ADR-0026 Phase 4 — the anti-censorship settings surface (the Kotlin twin of
@@ -58,7 +58,7 @@ public fun AntiCensorshipSettingsScreen(
                 title = { Text(t("settings.anti_censorship.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )

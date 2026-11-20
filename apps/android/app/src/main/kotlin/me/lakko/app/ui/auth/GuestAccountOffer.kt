@@ -40,6 +40,7 @@ import me.lakko.app.auth.GuestScreen
 import me.lakko.app.auth.guestScreen
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
+import me.lakko.app.ui.components.BetaNoticeBanner
 
 /**
  * What a guest is shown outside a call (`docs/ux/call-links.md` section 9).
@@ -83,7 +84,29 @@ public fun GuestAccountOffer(
 
     Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         when (state.step) {
-            GuestOfferStep.ASK -> {
+            GuestOfferStep.ASK -> if (state.closed) {
+                // `docs/ux/beta-account-cap.md` section 3: the beta is full.
+                // `OK` does exactly what `No, thanks` does.
+                Text(t("call.guest.closed.body"), style = MaterialTheme.typography.bodyMedium)
+                if (state.deleteFailed) FormError(t("guest.offer.delete_failed"))
+                Button(
+                    onClick = viewModel::onDecline,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    if (state.busy == GuestOfferBusy.DELETING) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(t("guest.offer.deleting"))
+                    } else {
+                        Text(t("call.guest.closed.ok"))
+                    }
+                }
+            } else {
                 Text(t("guest.offer.title"), style = MaterialTheme.typography.titleLarge)
                 Text(t("guest.offer.body"), style = MaterialTheme.typography.bodyMedium)
                 FormError(state.error)
@@ -114,6 +137,9 @@ public fun GuestAccountOffer(
             }
             GuestOfferStep.FORM -> {
                 Text(t("auth.signup.title"), style = MaterialTheme.typography.titleLarge)
+                // docs/ux/beta-notice.md section 3 item 3: a guest who creates
+                // an account is signing up; before the form.
+                BetaNoticeBanner()
                 Lead(t("username.claim.body"))
                 if (claimedUsername != null) {
                     Lead(t("guest.claim.username_taken_for_you", mapOf("username" to claimedUsername)))
@@ -166,6 +192,8 @@ public fun GuestAccountOffer(
                     onClick = viewModel::onCreate,
                     enabled = !busy,
                 )
+                // docs/ux/legal-pages.md section 2 item 2.
+                LegalSignupNotice()
                 TextButton(
                     onClick = viewModel::onBackToAsk,
                     enabled = !busy,

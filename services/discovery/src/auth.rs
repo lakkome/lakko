@@ -87,11 +87,11 @@ pub(crate) async fn require_session(
 }
 
 /// [`require_session`], also accepting the `s1` restricted session of a
-/// suspended account ([ADR-0089] step 3). Used on `DELETE /discovery/account`
+/// suspended account ([ADR-0098] step 3). Used on `DELETE /discovery/account`
 /// alone, so a suspended person who deletes the account at auth also removes
 /// its username, identity bundle and KeyPackages here.
 ///
-/// [ADR-0089]: ../../../docs/adr/0089-reporting-and-moderation.md
+/// [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
 pub(crate) async fn require_session_or_restricted(
     State(state): State<AppState>,
     request: Request,

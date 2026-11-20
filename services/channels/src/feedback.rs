@@ -94,6 +94,8 @@ pub(crate) struct MemoryFeedback {
     comment_reactions: HashMap<(ChannelId, u64, u64), BTreeSet<(WriterKey, Label)>>,
     last_comment_id: u64,
     nonces: HashMap<[u8; WRITE_NONCE_LEN], u64>,
+    /// Channel poll votes (ADR-0092 section 4.3).
+    pub(crate) votes: crate::votes::MemoryVotes,
 }
 
 impl MemoryFeedback {
@@ -316,6 +318,7 @@ impl MemoryFeedback {
         self.reactions.retain(|(c, p), _| keep(*c, *p));
         self.comments.retain(|(c, p), _| keep(*c, *p));
         self.comment_reactions.retain(|(c, p, _), _| keep(*c, *p));
+        self.votes.retain_posts(keep);
     }
 }
 

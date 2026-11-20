@@ -80,6 +80,23 @@ public class ChannelsUiState(
      *  with the notice and `Remove from this device`, never a composer. */
     public val orphaned: StateFlow<Set<String>> = _orphaned.asStateFlow()
 
+    /** docs/ux/second-device.md section 4a — orphaned channels removed with
+     *  `Remove from this device` (kept so the register never adds them back). */
+    @Volatile
+    private var orphansRemoved: Set<String> = emptySet()
+
+    /** The channels the channel subscription register reconcile leaves alone:
+     *  orphaned by a key reset, listed or removed from this device. */
+    public fun registerSkipSet(): Set<String> = (_orphaned.value + orphansRemoved).mapTo(HashSet()) { it.lowercase() }
+
+    /** UX 16.6 `Remove from this device` on an orphaned channel: the channel
+     *  goes, and is recorded so the register reconcile never re-adds it. */
+    public fun removeOrphanedFromDevice(channelId: String) {
+        boundAccountIdB64?.let { acct -> orphanStore?.markRemoved(acct, channelId) }
+        orphansRemoved = orphansRemoved + channelId
+        removeChannel(channelId)
+    }
+
     public companion object {
         private const val TAG = "ChannelsUiState"
 
@@ -174,6 +191,71 @@ public class ChannelsUiState(
                 ?.remove(PUBLISHER_SIGNING_SEEDS_PREF_KEY)
                 ?.remove(PUBLISHER_COUNTERS_PREF_KEY)
                 ?.apply()
+        }
+
+        /**
+         * `docs/ux/channel-notifications.md` — the channels [accountIdB64]
+         * publishes to from this device (it holds a publisher signing seed
+         * for them), read from [publisherPrefs] without binding a state. The
+         * background read uses it: every post of such a channel is the
+         * person's own and never notifies. Empty on any read failure.
+         */
+        public fun publisherChannelIds(publisherPrefs: SharedPreferences?, accountIdB64: String): Set<String> {
+            val raw = try {
+                publisherPrefs?.getString(accountKey(PUBLISHER_SIGNING_SEEDS_PREF_KEY, accountIdB64), null)
+            } catch (_: Throwable) {
+                null
+            } ?: return emptySet()
+            val arr = runCatching { JSONArray(raw) }.getOrNull() ?: return emptySet()
+            val out = HashSet<String>(arr.length())
+            for (i in 0 until arr.length()) {
+                val id = arr.optJSONObject(i)?.optString("channelId")?.takeIf { it.isNotEmpty() } ?: continue
+                out += id.lowercase()
+            }
+            return out
+        }
+
+        /**
+         * docs/ux/second-device.md section 4a — a pairing bundle's channel
+         * seeds into [accountIdB64]'s stored seed map when no state is bound
+         * to it: a seed held for an epoch is never overwritten; seeds of a
+         * channel not listed (its register not here yet) are kept. Answers the
+         * number added.
+         */
+        public fun storeCarriedSeeds(
+            logStore: ChannelLogStore,
+            accountIdB64: String,
+            seeds: Map<String, Map<UInt, ByteArray>>,
+        ): Int {
+            val held = logStore.loadSubscribedSeeds(accountIdB64)
+            val (merged, added) = mergeCarriedSeeds(held, seeds)
+            if (added > 0) {
+                me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+                    logStore.saveSubscribedSeeds(accountIdB64, merged)
+                }
+            }
+            return added
+        }
+
+        /** [held] with every seed of [carried] for an epoch [held] has none
+         *  of (never overwriting), and how many were added. */
+        internal fun mergeCarriedSeeds(
+            held: Map<String, Map<UInt, ByteArray>>,
+            carried: Map<String, Map<UInt, ByteArray>>,
+        ): Pair<Map<String, Map<UInt, ByteArray>>, Int> {
+            val out = LinkedHashMap(held)
+            var added = 0
+            for ((rawId, byEpoch) in carried) {
+                val id = held.keys.firstOrNull { it.equals(rawId, ignoreCase = true) } ?: rawId.lowercase()
+                val inner = LinkedHashMap(out[id] ?: emptyMap())
+                for ((epoch, seed) in byEpoch) {
+                    if (seed.size != 32 || inner.containsKey(epoch)) continue
+                    inner[epoch] = seed.copyOf()
+                    added += 1
+                }
+                if (inner.isNotEmpty()) out[id] = inner
+            }
+            return out to added
         }
 
         /** Per channel, the higher of two counter floors (a counter never
@@ -312,12 +394,79 @@ public class ChannelsUiState(
                 }
             }
             publisher?.bind(accountIdB64, accountIdentitySeed, currentAccountSeed)
+            ChannelEpochOffsets.boundAccount = accountIdB64
             // ADR-0073 phase 2 / UX 16.6 — re-read: the reset that records
             // the set runs between two binds of the same account.
             _orphaned.value = orphanStore?.load(accountIdB64) ?: emptySet()
+            orphansRemoved = orphanStore?.loadRemoved(accountIdB64) ?: emptySet()
             reopenPublisherKeys()
+            _publisherKeysReady.value = true
             replayPublisherCommits(accountIdB64)
         }
+    }
+
+    private val _publisherKeysReady = MutableStateFlow(false)
+
+    /** Whether [bind] has re-opened the publisher keys of the bound account
+     *  (until then a channel this device publishes holds no keys yet, and is
+     *  not yet known to be read-only here). */
+    public val publisherKeysReady: StateFlow<Boolean> = _publisherKeysReady.asStateFlow()
+
+    /** Whether this device publishes [channelId]: it holds the channel's
+     *  PublisherGroup (its publisher keys come only from a loaded group, or
+     *  from New channel). */
+    public fun publishesHere(channelId: String): Boolean =
+        channelId in _keysByChannel.value && channelId !in _orphaned.value
+
+    /**
+     * What the ACCOUNT is in [channelId] (docs/ux/second-device.md section
+     * 4a): a co-publisher when the channel carries the group id its link
+     * conveyed, the register's role when it names one, the owner when this
+     * device publishes it (holds its PublisherGroup) with no co-publisher
+     * mark, else a subscriber.
+     */
+    public fun accountRoleOf(channelId: String): ChannelAccountRole {
+        if (joinedGroupIdOf(channelId) != null) return ChannelAccountRole.CO_PUBLISHER
+        val listed = _channels.value.firstOrNull { it.id == channelId }?.role ?: ChannelAccountRole.SUBSCRIBER
+        if (listed != ChannelAccountRole.SUBSCRIBER) return listed
+        // This device publishes it, or did (a signing seed is kept per channel
+        // it published from): an owned channel, the group or not.
+        return if (channelId in _keysByChannel.value || channelId in publisherSigningSeedByChannel) {
+            ChannelAccountRole.OWNER
+        } else {
+            ChannelAccountRole.SUBSCRIBER
+        }
+    }
+
+    /**
+     * docs/ux/second-device.md section 4a — the account's role when this
+     * device is a READER of a channel the account owns or co-publishes (it
+     * holds no PublisherGroup for it), else `null`. `null` too until the
+     * publisher keys are re-opened, so a publishing device never flashes the
+     * reader line at launch.
+     */
+    public fun readerDeviceRoleOf(channelId: String): ChannelAccountRole? =
+        readerDeviceRole(
+            role = accountRoleOf(channelId),
+            publishesHere = publishesHere(channelId),
+            orphaned = channelId in _orphaned.value,
+            keysReady = _publisherKeysReady.value,
+        )
+
+    /** Record the account's role in [channelId] from the register. */
+    public fun setAccountRole(channelId: String, role: ChannelAccountRole) {
+        var changed = false
+        _channels.update { list ->
+            list.map {
+                if (it.id == channelId && it.role != role) {
+                    changed = true
+                    it.copy(role = role)
+                } else {
+                    it
+                }
+            }
+        }
+        if (changed) persistChannels()
     }
 
     /** G-50 — resume the PublisherGroup commits whose steps had not all
@@ -327,11 +476,20 @@ public class ChannelsUiState(
     private suspend fun replayPublisherCommits(accountIdB64: String) {
         val pub = publisher ?: return
         val store = commitStore ?: return
-        val finished = try {
-            pub.withIdentity { identity ->
+        val landed = try {
+            pub.withChannel { ids ->
                 me.lakko.app.ds.DsClient().use { ds ->
                     ChannelsClient().use { client ->
-                        CoPublisher.replayPublisherCommits(ds, client, identity, accountIdB64, store, coPublished)
+                        val finished = CoPublisher.replayPublisherCommits(ds, client, ids, accountIdB64, store, coPublished)
+                        // The epoch each finished commit's reseal landed at.
+                        finished.map { id ->
+                            id to try {
+                                client.fetchEpoch(id)
+                            } catch (e: Throwable) {
+                                me.lakko.app.rethrowIfCancelled(e)
+                                null
+                            }
+                        }
                     }
                 }
             }
@@ -340,40 +498,123 @@ public class ChannelsUiState(
             Log.w(TAG, "recorded publisher commits not replayed", e)
             return
         }
-        for (channelId in finished) refreshPublisherKey(channelId)
+        for ((channelId, epoch) in landed) {
+            refreshPublisherKey(channelId, epoch)
+            // The record is issued again under the new epoch by the publisher
+            // pass ([takeReplayedCommit]), as after a live commit.
+            synchronized(replayedCommits) { replayedCommits += channelId }
+        }
     }
 
-    /** Re-derive [channelId]'s content seed from its PublisherGroup (the
-     *  signing seed kept), after a commit of the group finished. */
-    public suspend fun refreshPublisherKey(channelId: String) {
+    /** Channels whose recorded commit a bind-time replay finished, until the
+     *  publisher pass takes them to re-issue the channel record. */
+    private val replayedCommits = HashSet<String>()
+
+    /** Whether a bind-time replay finished a commit of [channelId] since the
+     *  last call (the publisher pass then owes the channel record). */
+    public fun takeReplayedCommit(channelId: String): Boolean =
+        synchronized(replayedCommits) { replayedCommits.remove(channelId) }
+
+    /**
+     * Re-derive [channelId]'s content seed from its PublisherGroup (the
+     * signing seed kept), after a commit of the group finished. [landedEpoch]:
+     * the channel epoch the owner's own reseal landed at, which the new seed
+     * serves and which becomes the channel's current epoch; `null` (not
+     * known, or a co-publisher) serves the group's epoch and leaves the
+     * channel's current epoch alone ([notePublisherSeedAt]).
+     */
+    public suspend fun refreshPublisherKey(channelId: String, landedEpoch: UInt? = null) {
         val pub = publisher ?: return
         if (channelId !in _keysByChannel.value) return
         try {
-            val keys = pub.withIdentity(persist = false) { identity ->
+            val keys = pub.withChannel { ids ->
                 ChannelsComposer.freshPublisherKeys(
-                    identity = identity,
+                    ids = ids,
                     channelIdHex = channelId,
                     existingSigningSeed = persistedPublisherSigningSeed(channelId),
                     joinedGroupId = joinedGroupIdOf(channelId),
                 )
             }
-            // Section 13 — the seed being replaced still opens what this
-            // device posted under its epoch (the channel's record at creation
-            // first): kept as an older epoch's seed, or the publisher's own
-            // channel reads "Earlier posts aren't available." after every
-            // approve or rotation.
-            outgoingPublisherSeed(
-                previousSeed = _keysByChannel.value[channelId]?.seed,
-                previousEpoch = _epochByChannel.value[channelId],
-                nextSeed = keys.seed,
-                held = subscribedSeeds(channelId),
-            )?.let { (epoch, seed) -> setSubscribedSeed(channelId, epoch, seed) }
-            setKeys(channelId, keys)
+            when {
+                landedEpoch != null -> {
+                    // 2026-11-20 — the service now serves the group's current
+                    // seed at [landedEpoch]: the epoch mapping is anchored
+                    // there, whatever commits before had no reseal of their
+                    // own, and the seed overwrites one kept for that epoch
+                    // under the old mapping.
+                    keys.seedEpoch?.let { derived ->
+                        val mls = derived.toLong() - ChannelEpochOffsets.get(channelId)
+                        ChannelEpochOffsets.set(channelId, landedEpoch.toLong() - mls)
+                    }
+                    notePublisherCommitLanded(channelId, landedEpoch, keys.seed)
+                    anchorSeed(channelId, landedEpoch, keys.seed)
+                }
+                keys.seedEpoch != null -> notePublisherSeedAt(channelId, keys.seedEpoch, keys.seed)
+                else -> setKeys(channelId, keys)
+            }
         } catch (e: Throwable) {
             me.lakko.app.rethrowIfCancelled(e)
             Log.w(TAG, "publisher key not refreshed for a channel", e)
         }
     }
+
+    /**
+     * Section 13 / 15 — the composer's seed moves to [seed], which serves
+     * channel epoch [epoch]. The seed being replaced stays filed under the
+     * epoch it served (the publisher still reads what it posted under it),
+     * the new one is filed under its own epoch, and the channel's current
+     * epoch is left alone: on a co-publisher the owner's reseal may not have
+     * moved it yet, and posts keep going out under the epoch the service
+     * has reached ([sealingSeed]). Idempotent.
+     */
+    public fun notePublisherSeedAt(channelId: String, epoch: UInt, seed: ByteArray) {
+        val move = movePublisherSeed(_keysByChannel.value[channelId], epoch, seed, subscribedSeeds(channelId))
+        move.kept?.let { (e, s) -> setSubscribedSeed(channelId, e, s) }
+        move.keys?.let { setKeys(channelId, it) }
+        move.filed?.let { (e, s) -> setSubscribedSeed(channelId, e, s) }
+    }
+
+    /** 2026-11-20 — the service serves (or is next to serve) [seed] at
+     *  [epoch]: it overwrites a seed kept for that epoch, and every seed kept
+     *  above it (filed under a mapping that no longer holds) goes. */
+    public fun anchorSeed(channelId: String, epoch: UInt, seed: ByteArray) {
+        if (subscribedSeeds(channelId)[epoch]?.contentEquals(seed) != true) setSubscribedSeed(channelId, epoch, seed)
+        dropSubscribedSeedsAbove(channelId, epoch)
+    }
+
+    /** A PublisherGroup commit of this (the owner's) device finished and its
+     *  reseal landed the channel at [epoch] with [seed]: the composer takes
+     *  the seed and [epoch] is the channel's current epoch. */
+    public fun notePublisherCommitLanded(channelId: String, epoch: UInt, seed: ByteArray) {
+        notePublisherSeedAt(channelId, epoch, seed)
+        setEpoch(channelId, epoch)
+    }
+
+    /** The seed and epoch a post, a subscriber envelope or the public seed of
+     *  [channelId] is sealed with when the channel service is at
+     *  [channelEpoch] ([composerSeedFor]); `null` when this device holds no
+     *  publisher keys or no seed of an epoch the service has reached. */
+    public fun sealingSeed(channelId: String, channelEpoch: UInt): SealingSeed? {
+        val keys = _keysByChannel.value[channelId] ?: return null
+        return composerSeedFor(keys, channelEpoch) { subscribedSeeds(channelId)[it] }
+    }
+
+    /** Every seed of [channelId] this device holds, by epoch: the seeds kept
+     *  per epoch and the composer's under the epoch it serves (ADR-0087
+     *  section 15: what the owner hands a new publisher). */
+    public fun heldEpochSeeds(channelId: String): Map<UInt, ByteArray> {
+        val held = subscribedSeeds(channelId)
+        val keys = _keysByChannel.value[channelId] ?: return held
+        val served = keys.seedEpoch ?: _epochByChannel.value[channelId] ?: return held
+        return if (held.containsKey(served)) held else held + (served to keys.seed)
+    }
+
+    /** The seed this device reads [epoch] of [channelId] with: the
+     *  composer's seed only for the epoch it serves ([publisherReadSeed]). */
+    public fun readSeed(channelId: String, epoch: UInt): ByteArray? =
+        publisherReadSeed(_keysByChannel.value[channelId], _epochByChannel.value[channelId], epoch) {
+            subscribedSeeds(channelId)[it]
+        }
 
     /** ADR-0078 section 6 — the group id a co-published channel's link
      *  conveyed, or `null` for a channel this account owns. */
@@ -389,7 +630,7 @@ public class ChannelsUiState(
     /** Re-open the publisher keys ([channelsToReopen]) on the bound
      *  [publisher]. A channel whose open fails is skipped and logged; the
      *  owner sees it as a channel without a composer until the next bind. */
-    private suspend fun reopenPublisherKeys() {
+    public suspend fun reopenPublisherKeys() {
         val pub = publisher ?: return
         val targets = channelsToReopenExcludingOrphaned(
             channelsToReopen(
@@ -402,16 +643,25 @@ public class ChannelsUiState(
             orphaned = _orphaned.value,
         )
         for (channel in targets) {
+            // ADR-0090 security pass — a suspected reset: no composer until an
+            // owner-signed Welcome replaces the group.
+            if (ChannelSuspensions.isSuspendedNow(channel.id)) continue
             try {
-                val keys = pub.withIdentity { identity ->
+                // docs/ux/second-device.md section 4a — load only: a channel
+                // whose PublisherGroup this device does not hold is READ here,
+                // never founded again (founding at the derived id would reset
+                // the live channel journal).
+                val keys = pub.withChannel { ids ->
                     ChannelsComposer.freshPublisherKeys(
-                        identity = identity,
+                        ids = ids,
                         channelIdHex = channel.id,
                         existingSigningSeed = persistedPublisherSigningSeed(channel.id),
                         joinedGroupId = joinedGroupIdOf(channel.id),
                     )
                 }
                 setKeys(channel.id, keys)
+            } catch (e: ChannelsComposerException.NotPublishedHere) {
+                Log.i(TAG, "a channel is read on this device: its publishing state is on another one")
             } catch (e: Throwable) {
                 Log.w(TAG, "publisher keys not re-opened for a channel", e)
             }
@@ -422,7 +672,14 @@ public class ChannelsUiState(
      *  identity; everything persisted stays for the next sign-in. Logout. */
     public fun unbind() {
         publisher?.unbind()
+        // A held channel is tried again at the next binding (2026-11-20).
+        PublisherCommitRetry.shared.reset()
+        ChannelSubscriptionSync.readerKeyRetry.reset()
+        ChannelOwnerRepair.reset()
+        ChannelEpochOffsets.boundAccount = null
         boundAccountIdB64 = null
+        _publisherKeysReady.value = false
+        orphansRemoved = emptySet()
         _channels.value = emptyList()
         _postsByChannel.value = emptyMap()
         _epochByChannel.value = emptyMap()
@@ -586,6 +843,21 @@ public class ChannelsUiState(
         persistPublisherSigningSeeds()
     }
 
+    /**
+     * ADR-0090 section 2.5 - this device no longer publishes [channelId]
+     * (its journal was reset under it by a re-founding on another device of
+     * the account): the composer goes and the device reads, until another
+     * device admits it again. The seeds kept per epoch stay (its older posts
+     * stay readable), and so do the signing seed and the publish counter (a
+     * later admission signs on under them, never rewinding the counter).
+     */
+    public fun dropPublisherKeys(channelId: String) {
+        val keys = _keysByChannel.value[channelId] ?: return
+        val served = keys.seedEpoch ?: _epochByChannel.value[channelId]
+        if (served != null && subscribedSeeds(channelId)[served] == null) setSubscribedSeed(channelId, served, keys.seed)
+        _keysByChannel.update { it - channelId }
+    }
+
     /** The persisted per-channel publisher signing seed, or `null`
      *  when this device has never published to [channelId]. The
      *  publisher-open path hands it to
@@ -646,6 +918,34 @@ public class ChannelsUiState(
             outer + (channelId to (inner + (epoch to seed)))
         }
         persistSubscribedSeeds()
+    }
+
+    /** 2026-11-20 — drop every kept seed of [channelId] above [epoch]: seeds
+     *  filed under an epoch mapping that no longer holds
+     *  ([ChannelEpochOffsets.anchor]). The service never served an epoch above
+     *  its next one. */
+    public fun dropSubscribedSeedsAbove(channelId: String, epoch: UInt) {
+        val inner = _subscribedSeedsByChannel.value[channelId] ?: return
+        if (inner.keys.none { it > epoch }) return
+        _subscribedSeedsByChannel.update { outer ->
+            val held = outer[channelId] ?: return@update outer
+            outer + (channelId to held.filterKeys { it <= epoch })
+        }
+        persistSubscribedSeeds()
+    }
+
+    /** docs/ux/second-device.md section 4a — a pairing bundle's channel
+     *  seeds, added where no seed of that epoch is held; kept for a channel
+     *  not listed yet. Answers the number added. */
+    public fun addCarriedSeeds(seeds: Map<String, Map<UInt, ByteArray>>): Int {
+        var added = 0
+        _subscribedSeedsByChannel.update { held ->
+            val (merged, n) = mergeCarriedSeeds(held, seeds)
+            added = n
+            merged
+        }
+        if (added > 0) persistSubscribedSeeds()
+        return added
     }
 
     /** Snapshot the `epoch -> seed` map recovered so far for
@@ -897,7 +1197,17 @@ public data class ChannelHandle(
     /** ADR-0087 section 18.2 — the newest record's own plaintext (base64),
      *  carrying the @name, photo and reactions setting; "" when none. */
     public val sharedRecordB64: String = "",
+    /** What the ACCOUNT is in the channel, as the account's channel
+     *  subscription register says (docs/ux/second-device.md section 4a). A
+     *  channel this device publishes is the owner's or a co-publisher's by its
+     *  own state ([ChannelsUiState.accountRoleOf]); this field is what a
+     *  device that does not publish it learned from the register. */
+    public val role: ChannelAccountRole = ChannelAccountRole.SUBSCRIBER,
 )
+
+/** What an account is in a channel (the channel subscription register's
+ *  role, docs/ux/second-device.md section 4a). */
+public enum class ChannelAccountRole { SUBSCRIBER, OWNER, CO_PUBLISHER }
 
 /**
  * The (epoch, seed) a publisher keeps when its keys are replaced: the
@@ -916,4 +1226,55 @@ internal fun outgoingPublisherSeed(
     if (seed.contentEquals(nextSeed)) return null
     if (held.containsKey(epoch)) return null
     return epoch to seed.copyOf()
+}
+
+/**
+ * docs/ux/second-device.md section 4a — the account's role when this device
+ * reads a channel the account owns or co-publishes without holding its
+ * PublisherGroup, else `null`: a subscriber's channel, one this device
+ * publishes, an orphaned one (it has its own notice), and any channel before
+ * the publisher keys are re-opened are not "reader" channels.
+ */
+internal fun readerDeviceRole(
+    role: ChannelAccountRole,
+    publishesHere: Boolean,
+    orphaned: Boolean,
+    keysReady: Boolean,
+): ChannelAccountRole? = when {
+    role == ChannelAccountRole.SUBSCRIBER -> null
+    publishesHere || orphaned || !keysReady -> null
+    else -> role
+}
+
+/** The catalog key of the line a reader device shows in place of the
+ *  composer (docs/ux/second-device.md section 4a). */
+internal fun readerDeviceLineKey(role: ChannelAccountRole): String? = when (role) {
+    ChannelAccountRole.OWNER -> "channels.reader_device.owner"
+    ChannelAccountRole.CO_PUBLISHER -> "channels.reader_device.publisher"
+    ChannelAccountRole.SUBSCRIBER -> null
+}
+
+/**
+ * docs/ux/second-device.md section 4a — the info sections of a channel on a
+ * reader device of its owner or a publisher: what a subscriber sees, with the
+ * exit block empty (no Unsubscribe, no Delete channel, no Step down: those
+ * live on the publishing device). [sections] unchanged when [readerRole] is
+ * `null`.
+ */
+internal fun readerDeviceSections(
+    readerRole: ChannelAccountRole?,
+    sections: List<uniffi.lakko_ffi_uniffi.InfoSection>,
+): List<uniffi.lakko_ffi_uniffi.InfoSection> {
+    if (readerRole == null) return sections
+    val hidden = setOf(
+        uniffi.lakko_ffi_uniffi.InfoSection.UNSUBSCRIBE,
+        uniffi.lakko_ffi_uniffi.InfoSection.DELETE_GROUP,
+        uniffi.lakko_ffi_uniffi.InfoSection.INVITE_PEOPLE,
+        uniffi.lakko_ffi_uniffi.InfoSection.INVITE_LINK,
+        uniffi.lakko_ffi_uniffi.InfoSection.ADMINS,
+        uniffi.lakko_ffi_uniffi.InfoSection.GROUP_TYPE,
+        uniffi.lakko_ffi_uniffi.InfoSection.REACTIONS,
+        uniffi.lakko_ffi_uniffi.InfoSection.RENAME_GROUP,
+    )
+    return sections.filter { it !in hidden }
 }

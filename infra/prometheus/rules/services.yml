@@ -1,0 +1,175 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Alert rules for every Lakko service (ADR-0096 section 7).
+#
+# Thresholds and durations are first guesses, to be tuned on the test
+# stack; none was measured. Alert text carries service names and numbers
+# only: it leaves Lakko for a Telegram bot and e-mail.
+
+groups:
+  - name: lakko_services
+    interval: 30s
+    rules:
+      - alert: LakkoServiceDown
+        expr: up{job="lakko_services"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} ({{ $labels.stack }}): /metrics unreachable for 2 minutes"
+          description: |
+            The service is down, its metrics listener is off
+            (LAKKO_<SVC>_METRICS_BIND unset), or the metrics server block
+            does not route to it. Check `systemctl status` and
+            `journalctl -u` for the service's unit.
+
+      - alert: LakkoServiceErrorRatio
+        expr: |
+          sum by (stack, service) (rate(lakko_http_requests_total{status="5xx"}[5m]))
+            /
+          sum by (stack, service) (rate(lakko_http_requests_total[5m]))
+            > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} ({{ $labels.stack }}): {{ $value | humanizePercentage }} of requests answer 5xx"
+
+      - alert: LakkoProbeFailing
+        expr: probe_success{job=~"blackbox_.*"} == 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.probe }} has failed from outside for 3 minutes"
+
+      - alert: LakkoCertificateExpiringSoon
+        expr: (probe_ssl_earliest_cert_expiry{job=~"blackbox_.*"} - time()) / 86400 < 14
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "The certificate behind {{ $labels.probe }} expires in {{ $value | humanize }} days"
+          description: |
+            certbot's renewal should have run by now. Check
+            `certbot renew --dry-run` on the host.
+
+      # A background job (pruner, sweep, reconciler) that stopped prints
+      # nothing until its table grows. The job's name is the `task` label
+      # (not `job`, which is the scrape job). Every job runs at least hourly
+      # except the storage blob sweep, which runs daily, so the window is
+      # three periods: three hours, three days for blob_sweep. The backups
+      # have their own rules below. A job reports its start as a success
+      # (lakko_metrics::job_registered), so one that never succeeds fires here
+      # too.
+      - alert: LakkoJobStale
+        expr: |
+          (time() - lakko_job_last_success_timestamp_seconds{task!~"backup_.*|blob_sweep"} > 3 * 3600)
+            or
+          (time() - lakko_job_last_success_timestamp_seconds{task="blob_sweep"} > 3 * 86400)
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} ({{ $labels.stack }}): job {{ $labels.task }} last succeeded {{ $value | humanizeDuration }} ago"
+
+      # Written by infra/scripts/backup.sh through node_exporter's textfile
+      # collector (scrape job "host"). One nightly restic run writes both
+      # tasks; dumps are stale after 26 hours, the blob side after 8 days.
+      - alert: LakkoBackupStale
+        expr: |
+          (time() - lakko_job_last_success_timestamp_seconds{task="backup_db"} > 26 * 3600)
+            or
+          (time() - lakko_job_last_success_timestamp_seconds{task="backup_blobs"} > 8 * 86400)
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.task }} on {{ $labels.host }} last succeeded {{ $value | humanizeDuration }} ago"
+          description: |
+            Check `journalctl -u lakko-backup` and
+            `systemctl list-timers lakko-backup.timer`.
+
+      # Absent: the heartbeat file was never written (timer not enabled, or
+      # node_exporter not reading the textfile directory).
+      # Only while prod's host exporters are scraped at all: a monitoring
+      # setup without prod (LAKKO_MONITORING_STACKS) must not fire it.
+      - alert: LakkoBackupNeverRan
+        expr: |
+          absent(lakko_job_last_success_timestamp_seconds{task="backup_db", stack="prod"})
+            and on()
+          (count(up{job="host", stack="prod"}) > 0)
+        for: 30h
+        labels:
+          severity: warning
+        annotations:
+          summary: "No database backup has ever reported on prod"
+
+  # ----------------------------------------------------------------------
+  # Domain signals (ADR-0096 P2). Thresholds are first guesses.
+  # ----------------------------------------------------------------------
+  - name: lakko_domain
+    interval: 30s
+    rules:
+      # Push deliveries the provider refused for transport reasons (not an
+      # invalid token, which is the device's own state).
+      - alert: LakkoPushProviderFailing
+        expr: |
+          sum by (stack, provider) (rate(lakko_push_gw_deliveries_total{outcome="transport"}[10m]))
+            /
+          sum by (stack, provider) (rate(lakko_push_gw_deliveries_total[10m]))
+            > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.provider }} ({{ $labels.stack }}): {{ $value | humanizePercentage }} of push deliveries fail"
+
+      # Clients need K of the configured witnesses (ADR-0039); the server
+      # does not know K, so any missing witness warns and none at all is
+      # critical.
+      - alert: LakkoWitnessMissing
+        expr: lakko_transparency_witnesses_answered < lakko_transparency_witnesses_configured
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} of the configured KT witnesses answered on {{ $labels.stack }}"
+      - alert: LakkoNoWitnessAnswers
+        expr: lakko_transparency_witnesses_answered == 0 and lakko_transparency_witnesses_configured > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No KT witness answers on {{ $labels.stack }}: clients that pin witnesses refuse new keys"
+
+      # The log grew and no co-signed root covers the new entries. A
+      # co-sign round runs when a root is fetched, so this also grows when
+      # nobody fetches roots.
+      - alert: LakkoKtCosignLagging
+        expr: lakko_transparency_log_size - lakko_transparency_cosigned_log_size > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} KT log entries on {{ $labels.stack }} have no co-signed root for an hour"
+
+      # Identity changes discovery has not yet appended to the KT log.
+      - alert: LakkoKtAppendBacklog
+        expr: lakko_discovery_kt_append_oldest_pending_age_seconds > 3600
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The oldest unappended identity change on {{ $labels.stack }} is {{ $value | humanizeDuration }} old"
+
+      # A burst of refused DS proofs: a broken client release, or someone
+      # probing journals.
+      - alert: LakkoDsProofRefusalsHigh
+        expr: sum by (stack) (rate(lakko_ds_proof_refusals_total[10m])) > 5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The DS on {{ $labels.stack }} refuses {{ $value | humanize }} proofs a second"

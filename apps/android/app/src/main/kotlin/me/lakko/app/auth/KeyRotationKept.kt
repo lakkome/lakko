@@ -45,6 +45,10 @@ public interface SealedBlobStorage {
     public fun write(name: String, plaintext: ByteArray)
 
     public fun delete(name: String)
+
+    /** Whether something is stored under [name], readable or not: what tells
+     *  an unreadable store from an empty one. */
+    public fun exists(name: String): Boolean = read(name)?.also { it.fill(0) } != null
 }
 
 /** [SealedBlobStorage] on the device: `noBackupFilesDir`, sealed with the
@@ -71,6 +75,8 @@ internal class DeviceSealedBlobStorage(private val context: Context, private val
     override fun delete(name: String) {
         file(name).delete()
     }
+
+    override fun exists(name: String): Boolean = file(name).exists()
 }
 
 /** The directory the rotation's sealed files live in, and their names. The
@@ -81,6 +87,14 @@ public object KeyRotationFiles {
     public const val PENDING_SUFFIX: String = ".pending"
     public const val PREDECESSOR_SUFFIX: String = ".pred"
     public const val PREPARED_SUFFIX: String = ".prepared"
+
+    /** G-56: what this device last read of the account's own conversation
+     *  link ([OwnConversationKeyStore]). */
+    public const val CONVERSATION_KEY_SUFFIX: String = ".convkey"
+
+    /** G-56: the DeviceGroup id this device joined by pairing
+     *  ([me.lakko.app.devices.JoinedDeviceGroupIdStore]). */
+    public const val JOINED_GROUP_SUFFIX: String = ".joinedgroup"
 
     public fun hexOf(accountIdB64: String): String? = try {
         base64Decode(accountIdB64).joinToString("") { "%02x".format(it) }
@@ -96,7 +110,7 @@ public object KeyRotationFiles {
     public fun deleteAll(context: Context, accountIdB64: String) {
         val hex = hexOf(accountIdB64) ?: return
         val dir = File(context.noBackupFilesDir, DIR)
-        for (suffix in listOf(PENDING_SUFFIX, PREDECESSOR_SUFFIX, PREPARED_SUFFIX)) {
+        for (suffix in listOf(PENDING_SUFFIX, PREDECESSOR_SUFFIX, PREPARED_SUFFIX, CONVERSATION_KEY_SUFFIX, JOINED_GROUP_SUFFIX)) {
             File(dir, hex + suffix).delete()
         }
     }
@@ -465,6 +479,19 @@ public class OwnPredecessorStore(private val storage: SealedBlobStorage) {
         }
     }
 
+    /** [load], except that a store that exists and cannot be read or decoded
+     *  is `null` rather than empty (G-56: the confirming side of a pairing
+     *  must not send "no earlier keys" when it only failed to read them). */
+    public fun loadOrNull(accountIdB64: String): List<OwnPredecessor>? {
+        val name = nameOf(accountIdB64) ?: return null
+        val plain = storage.read(name) ?: return if (storage.exists(name)) null else emptyList()
+        return try {
+            OwnPredecessorCodec.decode(plain)
+        } finally {
+            plain.fill(0)
+        }
+    }
+
     /** The identity the conversation leaves that exist are bound to: the
      *  EARLIEST predecessor, or `null` when the account never rotated. */
     public fun conversationSeed(accountIdB64: String): ByteArray? {
@@ -548,47 +575,8 @@ public fun conversationLinkOf(
     }
 }
 
-/** What to do with a device's stored conversation binding (ADR-0074 part 3). */
-public enum class BindingVerdict {
-    /** The binding is this account's and is kept. */
-    Keep,
-
-    /** No usable binding, or one naming a key that is not this account's:
-     *  mint one under the conversation key. */
-    Mint,
-
-    /** The binding names the CURRENT key although the account has
-     *  predecessors (it was minted before a pairing bundle or a backup
-     *  brought them) and this device holds no conversation yet: mint it again
-     *  under the conversation key, before any KeyPackage naming the current
-     *  key admits this device anywhere. */
-    Remint,
-
-    /** The same, but this device already holds conversations whose leaves
-     *  carry the current-key binding: it is kept, since a new mint would
-     *  split the device between two account keys. Such a device is not
-     *  admitted to the account's older conversations. */
-    KeepUnderCurrentKey,
-}
-
-/**
- * The rule over a stored binding. [boundKey] is the account key it names
- * (`null` when there is none or it did not verify), [predecessorKeys] the own
- * predecessor keys, oldest first. Mirror of the iOS
- * `OwnAccountKeys.bindingVerdict`.
- */
-public fun bindingVerdict(
-    boundKey: ByteArray?,
-    currentKey: ByteArray,
-    predecessorKeys: List<ByteArray>,
-    holdsConversations: Boolean,
-): BindingVerdict {
-    if (boundKey == null) return BindingVerdict.Mint
-    if (predecessorKeys.any { it.contentEquals(boundKey) }) return BindingVerdict.Keep
-    if (!boundKey.contentEquals(currentKey)) return BindingVerdict.Mint
-    if (predecessorKeys.isEmpty()) return BindingVerdict.Keep
-    return if (holdsConversations) BindingVerdict.KeepUnderCurrentKey else BindingVerdict.Remint
-}
+// The binding verdict (ADR-0074 part 3, G-56) is the core's
+// `ownBindingVerdict`, read through [EarlierKeys].
 
 /**
  * The 64-byte seed of the account identity the conversation leaves that

@@ -78,7 +78,7 @@ struct ChannelTypeScreen: View {
         List {
             Section {
                 LakkoPicker(
-                    l10n.t("channel_type.who_can_subscribe"), systemImage: "person.2",
+                    l10n.t("channel_type.who_can_subscribe"), icon: .person2,
                     selection: $isPublic,
                     options: [
                         LakkoPickerOption(value: false, label: l10n.t("group_type.private")),

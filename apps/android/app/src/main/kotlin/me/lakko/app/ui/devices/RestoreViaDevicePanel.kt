@@ -67,6 +67,10 @@ public fun RestoreViaDevicePanel(
     known: PairingOrchestrator.KnownAccount?,
     onRecovered: suspend (PairingOrchestrator.JoinRecoveryOutcome) -> Unit,
     modifier: Modifier = Modifier,
+    /** G-56 — the parked earlier-keys screen: a device already in the
+     *  DeviceGroup pairs again with a self-removal proof
+     *  ([PairingOrchestrator.prepareRejoinPairingFlow]). */
+    rejoinsHeldLeaf: Boolean = false,
 ) {
     // ADR-0049 section 2 (amended 2026-09-28) — the code route is the
     // default; the QR route stays one tap away ("Show a QR code instead").
@@ -83,6 +87,7 @@ public fun RestoreViaDevicePanel(
             onShowQr = { showQr = true },
             place = place,
             modifier = modifier,
+            rejoinsHeldLeaf = rejoinsHeldLeaf,
         )
         return
     }
@@ -120,11 +125,12 @@ public fun RestoreViaDevicePanel(
                         // has arrived within the bound; the code is never rebuilt for it.
                         val envelope = DeviceCardCenter.pairingCardEnvelope(place.settled())
                         try {
-                            val js = PairingOrchestrator.prepareJoinFlow(
+                            val js = PairingOrchestrator.preparePairingFlow(
                                 context = context,
                                 loginHandle = loginHandle,
                                 known = known,
                                 deviceCardEnvelope = envelope,
+                                rejoinsHeldLeaf = rejoinsHeldLeaf,
                             )
                             session = js
                             ui = RestoreViaDeviceUi.Waiting(js.qrPayload)

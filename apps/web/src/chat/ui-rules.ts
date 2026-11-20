@@ -53,8 +53,8 @@ export type UiRules = Pick<
   // and the two part company for a ringing offer nobody has answered;
   // `calls/capture-rule.ts` is the adapter the composer reaches it through.
   | "callHoldsCapture"
-  // Whether a live call is put away into the bar across the top of the app,
-  // and what that bar's one status line says (`docs/ux/calls.md` section 4.5).
+  // Whether a live call is put away into the floating window (section 4.5;
+  // the rule kept the bar's name), and what its one status line says (`docs/ux/calls.md` section 4.5).
   // Here because the second decision is a PAIR - a kind and, only for one of
   // the kinds, a running time - and three clients each expressing it as three
   // independent booleans is one careless `if` from a line that says two
@@ -80,6 +80,10 @@ export type UiRules = Pick<
   | "orderConversationsInFolder"
   | "isValidFolderName"
   | "mintFolderId"
+  // What follows the first comments under a collapsed channel post
+  // (`docs/ux/group-and-channel-privacy.md` 13.2): never a count of
+  // comments this reader hides; `channels/comment-thread.ts` asks it.
+  | "collapsedComments"
 >;
 
 const [rules, setRules] = createSignal<UiRules | null>(null);

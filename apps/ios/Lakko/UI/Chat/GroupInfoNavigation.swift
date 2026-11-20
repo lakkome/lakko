@@ -7,7 +7,34 @@
 /// and a member's contact screen a push over the info; each back returns to
 /// the screen it covered, which on a path-based stack is simply the route
 /// below it. Pure, so the destinations run in a test.
+/// A screen pushed over a group's info. They used to be
+/// `navigationDestination(isPresented:)` on the info's `List`, inside a
+/// path-based stack, and on an iPhone none of them opened (seen 2026-11-10:
+/// Invite link, Reactions and Who can join did nothing); they are routes on
+/// the path now, as Add members always was.
+enum GroupInfoSubscreen: Hashable {
+    case inviteLinks
+    case reactions
+    case groupType
+    case transferOwnership
+}
+
 enum GroupInfoNavigation {
+
+    /// Open a screen over the info. Already on top: nothing.
+    static func openSubscreen(
+        _ path: [TabRoute], groupIdHex: String, _ screen: GroupInfoSubscreen
+    ) -> [TabRoute] {
+        let route = TabRoute.groupInfoSubscreen(groupIdHex: groupIdHex, screen: screen)
+        return path.last == route ? path : path + [route]
+    }
+
+    /// Close a screen opened over the info (its Done, or its own end).
+    static func closeSubscreen(
+        _ path: [TabRoute], groupIdHex: String, _ screen: GroupInfoSubscreen
+    ) -> [TabRoute] {
+        dropping(.groupInfoSubscreen(groupIdHex: groupIdHex, screen: screen), from: path)
+    }
 
     /// Open a group's info over its conversation. Already on top: nothing.
     static func openInfo(_ path: [TabRoute], groupIdHex: String) -> [TabRoute] {

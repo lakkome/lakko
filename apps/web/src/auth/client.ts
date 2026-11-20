@@ -297,7 +297,7 @@ export class AuthHttpError extends Error {
 }
 
 /**
- * ADR-0089 section 4: the account is suspended. Auth answers `403
+ * ADR-0098 section 4: the account is suspended. Auth answers `403
  * {"error":"account-suspended"}`; a route that authenticated the person
  * (a sign-in, a recovery, the refresh) adds the restricted session, which
  * `landing` carries. The credentials never reach `body` or the message: an
@@ -344,6 +344,13 @@ export async function authHttpErrorFrom(response: Response, endpoint: string): P
   );
 }
 
+/** The answer of `GET /signup/open`: `false` only for an explicit
+ *  `{"open": false}`; anything else reads as open. */
+export function signupOpenFromBody(body: unknown): boolean {
+  if (typeof body !== "object" || body === null) return true;
+  return (body as { open?: unknown }).open !== false;
+}
+
 /** Read `{"error": code, "retry_after_secs": N}` leniently. */
 function parseLimitBody(body: string): { error: string | null; retryAfterSecs: number | null } {
   try {
@@ -388,6 +395,28 @@ export class AuthClient {
   // -----------------------------------------------------------------
   // Low-level: 1:1 HTTP endpoints
   // -----------------------------------------------------------------
+
+  /** `GET /signup/open` (ADR-0046 amendment, `docs/ux/beta-account-cap.md`):
+   *  whether a new account with a username fits under the beta cap now.
+   *  Anonymous. Any failure (no connection, a non-2xx such as an older
+   *  server's `404`, a body that is not `{"open": boolean}`) reads as open:
+   *  the first login-handle bind decides later. */
+  async signupOpen(): Promise<boolean> {
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}/signup/open`, { method: "GET" });
+    } catch {
+      return true;
+    }
+    if (!response.ok) return true;
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      return true;
+    }
+    return signupOpenFromBody(body);
+  }
 
   /** `POST /pow/challenge` — used by signup only. */
   async powChallenge(): Promise<PowChallengeResponse> {
@@ -1585,7 +1614,8 @@ export class AuthClient {
 
   /** `PUT /vault/passkey` — store the phrase entropy sealed under one of
    *  this account's passkeys, so that passkey can restore the keys on a new
-   *  device (ADR-0072 decision 6; opt-in per passkey). Bearer-authenticated. */
+   *  device (ADR-0072 decision 6, amended 2026-11-11: every passkey that can).
+   *  Bearer-authenticated. */
   async passkeyVaultPut(
     sessionToken: string,
     credentialId: Uint8Array,
@@ -1801,6 +1831,9 @@ export class AuthClient {
         readonly sealedEntropy?: string;
       };
     },
+    /** ADR-0097: a held supporter place (`x-lakko-anon-token` header
+     *  value) for a first bind past the beta cap. */
+    supporterPlace?: string,
   ): Promise<void> {
     if (sessionToken.length === 0) {
       throw new AuthClientArgError("sessionToken must be non-empty");
@@ -1825,6 +1858,7 @@ export class AuthClient {
       "/auth/login-handle",
       body,
       sessionToken,
+      supporterPlace !== undefined ? { "x-lakko-anon-token": supporterPlace } : undefined,
     );
   }
 
@@ -1862,9 +1896,10 @@ export class AuthClient {
     endpoint: string,
     body: Req,
     bearer: string,
+    extraHeaders?: Readonly<Record<string, string>>,
   ): Promise<Res> {
     const url = `${this.baseUrl}${endpoint}`;
-    const headers: Record<string, string> = { authorization: `Bearer ${bearer}` };
+    const headers: Record<string, string> = { ...extraHeaders, authorization: `Bearer ${bearer}` };
     if (body !== undefined) {
       headers["content-type"] = "application/json";
     }

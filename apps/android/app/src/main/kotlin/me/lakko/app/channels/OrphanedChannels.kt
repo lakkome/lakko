@@ -54,16 +54,44 @@ public class OrphanedChannelsStore(private val prefs: SharedPreferences) {
         save(accountIdB64, current - channelId)
     }
 
+    /**
+     * docs/ux/second-device.md section 4a — the orphaned channels removed
+     * with `Remove from this device`. The account's channel subscription
+     * register may still list one as live (another device of the account, or
+     * this one before the reset, wrote it): the register reconcile never adds
+     * such a channel back and never writes it.
+     */
+    public fun loadRemoved(accountIdB64: String): Set<String> =
+        try {
+            prefs.getStringSet(removedKey(accountIdB64), emptySet()).orEmpty().toSet()
+        } catch (_: Throwable) {
+            emptySet()
+        }
+
+    /** Record that `Remove from this device` removed [channelId]. */
+    public fun markRemoved(accountIdB64: String, channelId: String) {
+        val current = loadRemoved(accountIdB64)
+        if (channelId in current) return
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            prefs.edit().putStringSet(removedKey(accountIdB64), current + channelId).apply()
+        }
+    }
+
     public fun deleteAccount(accountIdB64: String) {
-        prefs.edit().remove(key(accountIdB64)).apply()
+        prefs.edit().remove(key(accountIdB64)).remove(removedKey(accountIdB64)).apply()
     }
 
     public companion object {
         public const val PREFS_NAME: String = "lakko-orphaned-channels"
         private const val KEY_PREFIX = "orphaned-v1:"
 
+        private const val REMOVED_KEY_PREFIX = "orphan-removed-v1:"
+
         private fun key(accountIdB64: String): String =
             KEY_PREFIX + me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+
+        private fun removedKey(accountIdB64: String): String =
+            REMOVED_KEY_PREFIX + me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
 
         public fun onDevice(context: Context): OrphanedChannelsStore =
             OrphanedChannelsStore(

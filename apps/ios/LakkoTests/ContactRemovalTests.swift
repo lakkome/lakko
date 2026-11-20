@@ -648,7 +648,7 @@ final class ContactRemovalTests: XCTestCase {
         XCTAssertEqual(repository.state.pending.count, 1)
     }
 
-    /// ADR-0089 step 4 — a group-carried request from a sender already known
+    /// ADR-0098 step 4 — a group-carried request from a sender already known
     /// suspended is dropped unseen before anything else decides; one not yet
     /// known is filed and its sender asked about.
     func testAGroupRequestFromAKnownSuspendedSenderIsDroppedFirst() throws {
@@ -674,7 +674,7 @@ final class ContactRemovalTests: XCTestCase {
         XCTAssertEqual(asked, [them.signaturePublicKey()])
     }
 
-    /// ADR-0089 step 4 — an undecided link-answer request held from an
+    /// ADR-0098 step 4 — an undecided link-answer request held from an
     /// earlier poll is dropped when it is decided and its sender is verified
     /// suspended; another sender's row is decided as before (here: waits).
     func testAHeldLinkRequestFromAVerifiedSuspendedSenderIsDroppedWhenDecided() async {

@@ -137,8 +137,7 @@ struct ScreenSharePicture: View {
             }
             if !state.screenShareHasPicture {
                 VStack(spacing: 10) {
-                    Image(systemName: "display")
-                        .font(.system(size: 28, weight: .regular))
+                    LkIconView(.display, size: 33, relativeTo: nil)
                     ProgressView()
                         .progressViewStyle(.circular)
                         .tint(Color.white)
@@ -185,8 +184,7 @@ struct ScreenShareTile: View {
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
                 HStack(spacing: 6) {
-                    Image(systemName: "display")
-                        .font(.caption)
+                    LkIconView(.display, size: 14, relativeTo: .caption)
                         .accessibilityHidden(true)
                     Text(l10n.t(
                         "call.screen_share.tile",
@@ -230,8 +228,7 @@ struct ScreenSharePinnedChip: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: "display")
-                .font(.caption)
+            LkIconView(.display, size: 14, relativeTo: .caption)
                 .accessibilityHidden(true)
             Text(l10n.t(
                 "call.screen_share.pinned_chip",

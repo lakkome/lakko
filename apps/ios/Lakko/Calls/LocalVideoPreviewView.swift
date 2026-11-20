@@ -19,7 +19,8 @@ import WebRTC
 /// render the other party's stream.
 ///
 /// **Why Metal over GL:** `RTCEAGLVideoView` is deprecated in
-/// iOS 12+ and removed from `stasel/WebRTC` 125. Metal is the
+/// iOS 12+ and absent from the M125 iOS builds Lakko has linked (stasel 125.0.0,
+/// webrtc-sdk 125.6422.07). Metal is the
 /// only supported path in 2026.
 ///
 /// **Mirroring:** `videoMirrored = true` is the standard

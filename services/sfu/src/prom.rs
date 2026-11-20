@@ -8,19 +8,16 @@
 //! sprinkle `metrics::counter!` / `metrics::gauge!` calls
 //! against the canonical names listed in [`names`] below.
 //!
-//! The exporter binds on a separate port (default 9641) so
-//! nginx applies mTLS exclusively to the metrics endpoint
-//! without affecting the WebSocket signaling path. See
-//! [`infra/nginx/sites-available/sfu.conf`].
+//! The recorder and the `/metrics` listener are `lakko-metrics`'s
+//! (ADR-0096), shared with every service; this module names the SFU's own
+//! metrics and describes them. The listener binds on a separate port
+//! (default 9641) so nginx applies mTLS exclusively to the metrics endpoint
+//! without affecting the WebSocket signaling path.
 //!
 //! Wire-shape stability is a contract — every alert rule in
 //! `infra/prometheus/rules/calls.yml` references one of the
 //! names below. Renaming a metric is a wire-format break.
 
-use std::net::SocketAddr;
-
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
-use thiserror::Error;
 use tracing::info;
 
 /// Canonical metric names. The Prometheus alert rules in
@@ -39,8 +36,13 @@ pub mod names {
     /// verify failed, kid unknown, expired, etc.
     pub const PEERS_REJECTED_TOTAL: &str = "lakko_sfu_peers_rejected_total";
     /// Cumulative count of distinct calls observed since
-    /// boot.
+    /// boot: a room's first admitted socket, counted by
+    /// `crate::call_lifetime::CallLifetimes::admit`. A call revived
+    /// within its empty grace is not counted again.
     pub const CALLS_TOTAL: &str = "lakko_sfu_calls_total";
+    /// Rooms with at least one connected socket (ADR-0096 section 3). A
+    /// count, never a series per room.
+    pub const ROOMS_ACTIVE: &str = "lakko_sfu_rooms_active";
     /// Cumulative count of peers the signaling socket dropped
     /// because they sent nothing for the idle window (see
     /// `SignalingLiveness`). A live peer answers protocol pings,
@@ -168,185 +170,140 @@ pub mod names {
         "lakko_sfu_downlink_probe_padding_bytes_total";
 }
 
-/// Failures while installing the recorder. The exporter
-/// install is `std::sync::Once`-y — only the first call
-/// succeeds, which is exactly what we want in production.
-#[derive(Debug, Error)]
-pub enum MetricsError {
-    /// The Prometheus recorder failed to install — usually
-    /// because someone else already installed one.
-    #[error("metrics recorder install failed: {0}")]
-    Install(String),
-}
-
-/// Installed Prometheus exporter handle. `render` produces
-/// the text-format exposition the `/metrics` HTTP handler
-/// returns.
-#[derive(Clone)]
-pub struct MetricsExporter {
-    handle: PrometheusHandle,
-}
-
-impl MetricsExporter {
-    /// Install the global recorder and stand up the
-    /// scraping handle. Must be called exactly once per
-    /// process at startup.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MetricsError::Install`] if a recorder is
-    /// already installed (e.g. when the integration tests
-    /// reuse the global state across iterations — those
-    /// tests opt out by using `install_test_recorder` or
-    /// run inside their own process).
-    pub fn install() -> Result<Self, MetricsError> {
-        let handle = PrometheusBuilder::new()
-            .install_recorder()
-            .map_err(|e| MetricsError::Install(e.to_string()))?;
-        info!("metrics: prometheus exporter installed");
-        // Touch every counter so the first scrape sees a
-        // zero value rather than an empty exposition. This
-        // matters for the alert-rule pattern
-        // `increase(metric[5m]) == 0` — without an initial
-        // sample, the rate evaluator yields NaN and the
-        // alert stays NoData.
-        metrics::describe_counter!(
-            names::PEERS_ADMITTED_TOTAL,
-            "Cumulative count of accepted WS upgrades"
-        );
-        metrics::describe_counter!(
-            names::PEERS_REJECTED_TOTAL,
-            "Cumulative count of rejected WS upgrades"
-        );
-        metrics::describe_counter!(
-            names::CALLS_TOTAL,
-            "Cumulative count of distinct calls observed since boot"
-        );
-        metrics::describe_counter!(
-            names::PEERS_DROPPED_IDLE_TOTAL,
-            "Peers dropped by the signaling socket for sending nothing during the idle window"
-        );
-        metrics::describe_counter!(
-            names::SIGNALING_FRAMES_TOTAL,
-            "Cumulative count of signaling frames, labelled by `direction` \
-             (inbound = received from a peer / outbound = broadcast to peers) \
-             and `kind` (the typed frame kind, or `invalid` for an \
-             undecodable inbound frame)"
-        );
-        metrics::describe_gauge!(names::PEERS_ACTIVE, "Number of peers currently registered");
-        metrics::describe_gauge!(
-            names::JWKS_CACHE_AGE_SECS,
-            "JWKS cache age in seconds since last successful refresh"
-        );
-        metrics::describe_counter!(
-            names::MEDIA_FRAMES_FORWARDED_TOTAL,
-            "RTP frames forwarded to a downstream peer (one per destination per frame)"
-        );
-        metrics::describe_counter!(
-            names::MEDIA_FRAMES_DROPPED_TOTAL,
-            "Fanout attempts that did not reach the wire, labelled by reason"
-        );
-        metrics::describe_counter!(
-            names::SIMULCAST_LAYER_SWITCHES_TOTAL,
-            "Simulcast layer switches the bandwidth policy made, labelled by \
-             `direction` (up = recovery / down = congestion)"
-        );
-        // The three video FEC counters are described and, like the labelled
-        // ones, not pre-initialised: with the feature off they never appear.
-        metrics::describe_counter!(
-            names::VIDEO_FEC_PACKETS_TOTAL,
-            "Video FEC packets received from publishers"
-        );
-        metrics::describe_counter!(
-            names::VIDEO_FEC_RECOVERED_TOTAL,
-            "Video media packets rebuilt from a publisher's FEC and forwarded"
-        );
-        metrics::describe_counter!(
-            names::VIDEO_FEC_SENT_TOTAL,
-            "Video FEC packets computed for and sent to subscribers"
-        );
-        // Like the FEC counters, described and not pre-initialised: it only
-        // appears under `LAKKO_SFU_BITRATE_CONTROL=server`.
-        metrics::describe_counter!(
-            names::BITRATE_REMB_SENT_TOTAL,
-            "REMB requests toward publishers under server-side bitrate control"
-        );
-        metrics::describe_counter!(
-            names::PUBLISH_BUDGET_SENT_TOTAL,
-            "publish-budget frames sent to publishers under server-side bitrate control"
-        );
-        // Described and not pre-initialised: it only appears once a
-        // simulcast publisher has a subscriber.
-        metrics::describe_counter!(
-            names::LIGHT_COMPANION_PACKETS_FORWARDED_TOTAL,
-            "RTP packets forwarded on light companion tracks of simulcast video"
-        );
-        // Described and not pre-initialised, like the counter above: they
-        // appear with the first light companion packet sent twice and the
-        // first playout delay raised.
-        metrics::describe_counter!(
-            names::LIGHT_DUPLICATES_SENT_TOTAL,
-            "Second copies of light companion packets sent to subscribers"
-        );
-        metrics::describe_counter!(
-            names::PLAYOUT_DELAY_RAISES_TOTAL,
-            "Times a subscriber's minimum playout delay for a publisher was raised after a burst"
-        );
-        // Described and not pre-initialised: labelled, and only under
-        // downlink control.
-        metrics::describe_counter!(
-            names::DOWNLINK_GIVEN_CHANGES_TOTAL,
-            "Changes of what a subscriber is given of a publisher's video under downlink control"
-        );
-        metrics::describe_counter!(
-            names::DOWNLINK_PROBES_TOTAL,
-            "Probes of subscribers' downlinks that ended, by outcome"
-        );
-        metrics::describe_counter!(
-            names::DOWNLINK_PROBE_PADDING_BYTES_TOTAL,
-            "Bytes of padding sent for probes of subscribers' downlinks"
-        );
-        // Initialise each counter / gauge so it ships a zero
-        // sample at the first scrape.
-        metrics::counter!(names::PEERS_ADMITTED_TOTAL).absolute(0);
-        metrics::counter!(names::PEERS_REJECTED_TOTAL).absolute(0);
-        metrics::counter!(names::CALLS_TOTAL).absolute(0);
-        metrics::counter!(names::PEERS_DROPPED_IDLE_TOTAL).absolute(0);
-        // SIGNALING_FRAMES_TOTAL is now labelled by `direction` + `kind`; an
-        // unlabelled zero-init would ship a meaningless empty-label series
-        // alongside the real ones, so — like the labelled
-        // MEDIA_FRAMES_DROPPED_TOTAL — it is not pre-initialised and first
-        // appears once traffic flows.
-        metrics::gauge!(names::PEERS_ACTIVE).set(0.0);
-        metrics::gauge!(names::JWKS_CACHE_AGE_SECS).set(0.0);
-        metrics::counter!(names::MEDIA_FRAMES_FORWARDED_TOTAL).absolute(0);
-        Ok(Self { handle })
-    }
-
-    /// Render the Prometheus text-format exposition.
-    pub fn render(&self) -> String {
-        self.handle.render()
-    }
-}
-
-/// Run a tiny axum HTTP server that serves `GET /metrics`.
-/// Exposed on a dedicated socket so nginx can mTLS-gate the
-/// metrics endpoint without touching the signaling path.
-pub async fn serve(exporter: MetricsExporter, bind: SocketAddr) -> anyhow::Result<()> {
-    use axum::{routing::get, Router};
-
-    let router = Router::new().route(
-        "/metrics",
-        get({
-            let exporter = exporter.clone();
-            move || async move { exporter.render() }
-        }),
+/// Install the process-wide recorder ([`lakko_metrics::install`], which also
+/// records `lakko_build_info` and the RED layer's buckets) and describe the
+/// SFU's own metrics. Must be called before anything emits a metric:
+/// `metrics::counter!` calls before the recorder exists are lost.
+///
+/// # Errors
+///
+/// [`lakko_metrics::MetricsError::Install`] when another recorder is already
+/// installed in the process.
+pub fn install() -> Result<lakko_metrics::Metrics, lakko_metrics::MetricsError> {
+    let metrics = lakko_metrics::install("sfu", crate::VERSION)?;
+    info!("metrics: prometheus recorder installed");
+    // Touch every counter so the first scrape sees a
+    // zero value rather than an empty exposition. This
+    // matters for the alert-rule pattern
+    // `increase(metric[5m]) == 0` — without an initial
+    // sample, the rate evaluator yields NaN and the
+    // alert stays NoData.
+    metrics::describe_counter!(
+        names::PEERS_ADMITTED_TOTAL,
+        "Cumulative count of accepted WS upgrades"
     );
-
-    let listener = tokio::net::TcpListener::bind(bind).await?;
-    info!(%bind, "metrics: exporter listening");
-    axum::serve(listener, router).await?;
-    Ok(())
+    metrics::describe_counter!(
+        names::PEERS_REJECTED_TOTAL,
+        "Cumulative count of rejected WS upgrades"
+    );
+    metrics::describe_counter!(
+        names::CALLS_TOTAL,
+        "Cumulative count of distinct calls observed since boot"
+    );
+    metrics::describe_counter!(
+        names::PEERS_DROPPED_IDLE_TOTAL,
+        "Peers dropped by the signaling socket for sending nothing during the idle window"
+    );
+    metrics::describe_counter!(
+        names::SIGNALING_FRAMES_TOTAL,
+        "Cumulative count of signaling frames, labelled by `direction` \
+         (inbound = received from a peer / outbound = broadcast to peers) \
+         and `kind` (the typed frame kind, or `invalid` for an \
+         undecodable inbound frame)"
+    );
+    metrics::describe_gauge!(names::PEERS_ACTIVE, "Number of peers currently registered");
+    metrics::describe_gauge!(
+        names::ROOMS_ACTIVE,
+        "Rooms with at least one connected socket"
+    );
+    metrics::describe_gauge!(
+        names::JWKS_CACHE_AGE_SECS,
+        "JWKS cache age in seconds since last successful refresh"
+    );
+    metrics::describe_counter!(
+        names::MEDIA_FRAMES_FORWARDED_TOTAL,
+        "RTP frames forwarded to a downstream peer (one per destination per frame)"
+    );
+    metrics::describe_counter!(
+        names::MEDIA_FRAMES_DROPPED_TOTAL,
+        "Fanout attempts that did not reach the wire, labelled by reason"
+    );
+    metrics::describe_counter!(
+        names::SIMULCAST_LAYER_SWITCHES_TOTAL,
+        "Simulcast layer switches the bandwidth policy made, labelled by \
+         `direction` (up = recovery / down = congestion)"
+    );
+    // The three video FEC counters are described and, like the labelled
+    // ones, not pre-initialised: with the feature off they never appear.
+    metrics::describe_counter!(
+        names::VIDEO_FEC_PACKETS_TOTAL,
+        "Video FEC packets received from publishers"
+    );
+    metrics::describe_counter!(
+        names::VIDEO_FEC_RECOVERED_TOTAL,
+        "Video media packets rebuilt from a publisher's FEC and forwarded"
+    );
+    metrics::describe_counter!(
+        names::VIDEO_FEC_SENT_TOTAL,
+        "Video FEC packets computed for and sent to subscribers"
+    );
+    // Like the FEC counters, described and not pre-initialised: it only
+    // appears under `LAKKO_SFU_BITRATE_CONTROL=server`.
+    metrics::describe_counter!(
+        names::BITRATE_REMB_SENT_TOTAL,
+        "REMB requests toward publishers under server-side bitrate control"
+    );
+    metrics::describe_counter!(
+        names::PUBLISH_BUDGET_SENT_TOTAL,
+        "publish-budget frames sent to publishers under server-side bitrate control"
+    );
+    // Described and not pre-initialised: it only appears once a
+    // simulcast publisher has a subscriber.
+    metrics::describe_counter!(
+        names::LIGHT_COMPANION_PACKETS_FORWARDED_TOTAL,
+        "RTP packets forwarded on light companion tracks of simulcast video"
+    );
+    // Described and not pre-initialised, like the counter above: they
+    // appear with the first light companion packet sent twice and the
+    // first playout delay raised.
+    metrics::describe_counter!(
+        names::LIGHT_DUPLICATES_SENT_TOTAL,
+        "Second copies of light companion packets sent to subscribers"
+    );
+    metrics::describe_counter!(
+        names::PLAYOUT_DELAY_RAISES_TOTAL,
+        "Times a subscriber's minimum playout delay for a publisher was raised after a burst"
+    );
+    // Described and not pre-initialised: labelled, and only under
+    // downlink control.
+    metrics::describe_counter!(
+        names::DOWNLINK_GIVEN_CHANGES_TOTAL,
+        "Changes of what a subscriber is given of a publisher's video under downlink control"
+    );
+    metrics::describe_counter!(
+        names::DOWNLINK_PROBES_TOTAL,
+        "Probes of subscribers' downlinks that ended, by outcome"
+    );
+    metrics::describe_counter!(
+        names::DOWNLINK_PROBE_PADDING_BYTES_TOTAL,
+        "Bytes of padding sent for probes of subscribers' downlinks"
+    );
+    // Initialise each counter / gauge so it ships a zero
+    // sample at the first scrape.
+    metrics::counter!(names::PEERS_ADMITTED_TOTAL).absolute(0);
+    metrics::counter!(names::PEERS_REJECTED_TOTAL).absolute(0);
+    metrics::counter!(names::CALLS_TOTAL).absolute(0);
+    metrics::counter!(names::PEERS_DROPPED_IDLE_TOTAL).absolute(0);
+    // SIGNALING_FRAMES_TOTAL is now labelled by `direction` + `kind`; an
+    // unlabelled zero-init would ship a meaningless empty-label series
+    // alongside the real ones, so — like the labelled
+    // MEDIA_FRAMES_DROPPED_TOTAL — it is not pre-initialised and first
+    // appears once traffic flows.
+    metrics::gauge!(names::PEERS_ACTIVE).set(0.0);
+    metrics::gauge!(names::ROOMS_ACTIVE).set(0.0);
+    metrics::gauge!(names::JWKS_CACHE_AGE_SECS).set(0.0);
+    metrics::counter!(names::MEDIA_FRAMES_FORWARDED_TOTAL).absolute(0);
+    Ok(metrics)
 }
 
 #[cfg(test)]

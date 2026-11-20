@@ -180,7 +180,7 @@ internal suspend fun publishEveryone(
 
 private const val ACCOUNT_ID_LEN = 16
 
-/** ADR-0089 step 5 — the discovery code for an account moderators removed
+/** ADR-0098 step 5 — the discovery code for an account moderators removed
  *  from search. */
 public const val HIDDEN_FROM_SEARCH_CODE: String = "hidden-from-search"
 
@@ -199,7 +199,7 @@ public fun isHiddenFromSearch(cause: Throwable?): Boolean {
 }
 
 /**
- * ADR-0089 step 5 — whether Everyone can be chosen on Who can find me: not
+ * ADR-0098 step 5 — whether Everyone can be chosen on Who can find me: not
  * while moderators keep the account out of search. A setting already on
  * Everyone stays as the person chose it.
  */

@@ -16,21 +16,26 @@ import XCTest
 /// collapse outlives the call, when the running time started, the words on the
 /// line, and whether a finished drag was the swipe.
 ///
-/// The view's side of it is ``CollapsedCallBarUITests`` in the `LakkoUITests`
-/// bundle, which drives the shipping ``CollapsedCallBar`` on a real screen: that
-/// it prints the rule's verdict and only one of the four things it can say, that
-/// a tap brings the call back, that mute is there with both faces, and that
-/// there is no End control on it. (An earlier version of this paragraph said
-/// this client had no XCUITest target; it has had one since the record-gesture
-/// tests landed.)
+/// Since 2026-11-09 the collapsed call is a floating window
+/// (``FloatingCallWindow``) rather than a bar; every decision pinned here
+/// carried over unchanged, since the window replaces the bar's picture, not
+/// its decisions. Its placement and contents are ``CallWindowPlacementTests``
+/// and ``CallWindowContentTests``.
 ///
-/// Three things are still NOT covered by any test and are covered by structure
-/// instead: that the bar is drawn in the top inset above every screen, that the
-/// call screen's `onDisappear` skips `state.reset()` during a collapse, and that
-/// the mute circle's touch target is 44 pt. Nor is ``CallHostOverlay``'s own
-/// question — it asks the rule with `callScreenUp: presentedNow != nil`, and
-/// reaching that needs a live call of one of three kinds, so which ARGUMENTS the
-/// overlay passes is read rather than run.
+/// The view's side of it is ``CollapsedCallBarUITests`` in the `LakkoUITests`
+/// bundle, which drives the shipping ``FloatingCallWindow`` on a real screen:
+/// that it prints the rule's verdict and only one of the four things it can
+/// say, that a tap brings the call back, that mute is there with both faces,
+/// that there is no End control on it, that a drag lands it in a corner and
+/// that a flick past the edge tucks it.
+///
+/// Still NOT covered by any test and covered by structure instead: that the
+/// window floats over every screen, that the call screen's `onDisappear` skips
+/// `state.reset()` during a collapse, and that the mute circle's touch target
+/// is 44 pt. Nor is ``CallHostOverlay``'s own question — it asks the rule with
+/// `callScreenUp: presentedNow != nil`, and reaching that needs a live call of
+/// one of three kinds, so which ARGUMENTS the overlay passes is read rather
+/// than run.
 @MainActor
 final class CollapsedCallBarTests: XCTestCase {
 

@@ -16,7 +16,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0089 F2 — a `suspended` answer is acted on only after the moderation
+ * ADR-0098 F2 — a `suspended` answer is acted on only after the moderation
  * log entry behind it proves a moderator signed it. The host suite has no
  * native core, so the snapshot check and the core's prove call are fakes;
  * what is tested is the client's rule: unproven = UNKNOWN at every site, a

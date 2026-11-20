@@ -115,7 +115,7 @@ export class RecoveryEmailClient {
       throw new AuthNetworkError(endpoint, err);
     }
     if (!response.ok) {
-      // ADR-0089: a suspended account's refusal is read whole.
+      // ADR-0098: a suspended account's refusal is read whole.
       if (response.status === 403) throw await authHttpErrorFrom(response, endpoint);
       throw new AuthHttpError(response.status, endpoint, await safeBody(response), retryAfterHeader(response));
     }

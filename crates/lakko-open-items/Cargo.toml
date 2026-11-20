@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-open-items"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "ADR-0092 section 3.9: the typed half of the open-items hand-over (building items from a committer's polls and checklists, checking and adopting them on a newcomer)"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+# The wire codec, the planner and the assembler of the hand-over.
+lakko-contacts.workspace = true
+
+# Poll and checklist bodies, their author signatures and their op records.
+# This crate exists so that lakko-contacts need not depend on these two
+# (lakko-attachments depends on lakko-contacts, and the iOS notification
+# extension links lakko-contacts but has no use for lakko-ballot).
+lakko-attachments.workspace = true
+
+# The ring and its version-0 hash.
+lakko-ballot.workspace = true
+
+[dev-dependencies]
+lakko-crypto.workspace = true
+proptest = "1"

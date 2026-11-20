@@ -88,6 +88,25 @@ install -m 644 "$REPO_ROOT/systemd/lakko-coturn.service" \
 systemctl daemon-reload
 
 # ----------------------------------------------------------
+# 4b. node_exporter on loopback, and journald retention (ADR-0096 P3).
+# ----------------------------------------------------------
+# node_exporter used to listen on 0.0.0.0:9100 with the port open in
+# the firewall and no authentication. It now listens on 127.0.0.1 and
+# is scraped through nginx on :9642/node/metrics, like coturn's own
+# exporter.
+note "node_exporter on 127.0.0.1:9100, journald retention"
+cat >/etc/default/prometheus-node-exporter <<'NODEEOF'
+# Written by infra/scripts/deploy-coturn.sh (ADR-0096 P3).
+ARGS="--web.listen-address=127.0.0.1:9100 --collector.systemd --collector.systemd.unit-include=(coturn.*|nginx)\.service"
+NODEEOF
+systemctl enable prometheus-node-exporter >/dev/null
+systemctl restart prometheus-node-exporter
+install -d -m 755 /etc/systemd/journald.conf.d
+install -m 644 "$REPO_ROOT/journald/lakko.conf" /etc/systemd/journald.conf.d/lakko.conf
+install -d -m 2755 -g systemd-journal /var/log/journal
+systemctl restart systemd-journald
+
+# ----------------------------------------------------------
 # 5. nginx mTLS-fronted Prometheus scrape.
 # ----------------------------------------------------------
 # coturn's internal Prometheus exporter speaks plain HTTP on
@@ -144,11 +163,25 @@ ufw allow 22/tcp comment 'ssh'
 ufw allow 443/tcp comment 'turn-over-tls'
 ufw allow 3478 comment 'turn (udp+tcp)'
 ufw allow 49152:65535/udp comment 'turn relay range'
-ufw allow 9100/tcp comment 'node_exporter'  # mTLS-protected
+# node_exporter is scraped through nginx on 9642 (ADR-0096 P3); the
+# rule an earlier version added for 9100 is removed.
+ufw delete allow 9100/tcp >/dev/null 2>&1 || true
 # G3-turn-deploy — mTLS-fronted Prometheus scrape lives on
 # 9642 (see nginx vhost). 9641 stays internal-only because
-# coturn's exporter speaks plain HTTP.
-ufw allow 9642/tcp comment 'coturn prometheus (mTLS via nginx)'
+# coturn's exporter speaks plain HTTP. With MONITORING_IP set (the
+# monitoring VPS's address(es), comma-separated; `just deploy-coturn` passes
+# LAKKO_MONITORING_IP) only that address reaches 9642, as on the main
+# VPS's 9643; the client certificate stays the gate either way.
+if [[ -n "${MONITORING_IP:-}" ]]; then
+    ufw delete allow 9642/tcp >/dev/null 2>&1 || true
+    IFS=',' read -ra monitoring_addrs <<<"$MONITORING_IP"
+    for addr in "${monitoring_addrs[@]}"; do
+        ufw allow from "$addr" to any port 9642 proto tcp comment 'coturn metrics (mTLS via nginx)'
+    done
+else
+    warn "MONITORING_IP not set: 9642 stays open to everyone (the client certificate still gates it)"
+    ufw allow 9642/tcp comment 'coturn prometheus (mTLS via nginx)'
+fi
 ufw --force enable
 
 # ----------------------------------------------------------
@@ -160,4 +193,5 @@ systemctl enable --now coturn
 note "done. tail logs with: journalctl -u coturn -f"
 note "verify TURN-over-TLS: openssl s_client -connect $TURN_DOMAIN:443 -servername $TURN_DOMAIN < /dev/null 2>&1 | head -5"
 note "verify Prometheus:    curl --cert /path/to/monitoring.crt --key /path/to/monitoring.key https://$TURN_DOMAIN:9642/metrics | head -20"
+note "                      (and https://$TURN_DOMAIN:9642/node/metrics)"
 note "test smoke harness:   bash infra/scripts/turn-smoke.sh $TURN_DOMAIN"

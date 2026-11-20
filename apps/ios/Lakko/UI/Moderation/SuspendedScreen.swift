@@ -7,7 +7,7 @@ import SwiftUI
 // the one screen that says why, the appeal sheet, and the read-only app's
 // banner and composer line.
 
-/// Whether the signed-in account is suspended (ADR-0089 step 3). Read by
+/// Whether the signed-in account is suspended (ADR-0098 step 3). Read by
 /// every surface that sends: composers, call buttons, add-contact and invite
 /// entry points. Set at the app root from ``SuspensionCenter``.
 private struct AccountSuspendedKey: EnvironmentKey {
@@ -228,15 +228,14 @@ struct SuspendedBanner: View {
     var body: some View {
         Button(action: onOpen) {
             HStack(spacing: 10) {
-                Image(systemName: "exclamationmark.shield")
+                LkIconView(.shieldExclamation, size: 20)
                     .foregroundStyle(Color.lakkoDanger)
                     .accessibilityHidden(true)
                 Text(l10n.t("suspended.self.title"))
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(Color.lakkoText)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Image(systemName: "chevron.forward")
-                    .font(.footnote)
+                LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                     .foregroundStyle(Color.lakkoTextMuted)
                     .accessibilityHidden(true)
             }

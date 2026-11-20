@@ -210,9 +210,18 @@ protocol LoginHandleBinder {
     /// `PUT /auth/login-handle`. Throws `AuthClientError.http(409, ...)` when
     /// another account holds the handle.
     func bindLoginHandle(handle: Data, sessionToken: String) async throws
+    /// The same bind carrying a held supporter place (ADR-0097) in
+    /// `x-lakko-anon-token`; `nil` is the plain bind.
+    func bindLoginHandle(handle: Data, sessionToken: String, supporterToken: String?) async throws
     /// `DELETE /auth/login-handle`.
     @discardableResult
     func removeLoginHandle(sessionToken: String) async throws -> Bool
+}
+
+extension LoginHandleBinder {
+    func bindLoginHandle(handle: Data, sessionToken: String, supporterToken: String?) async throws {
+        try await bindLoginHandle(handle: handle, sessionToken: sessionToken)
+    }
 }
 
 extension AuthClient: LoginHandleBinder {}
@@ -241,14 +250,16 @@ extension AuthClient: LoginHandleBinder {}
 /// client). A guest account (ADR-0032) has no username and never calls this.
 ///
 /// - Returns: the canonical username the server bound.
-/// - Throws: ``UsernameTaken``; ``UsernameRuleViolation`` for a name that
-///   fails the rule; any other error unchanged.
+/// - Throws: ``UsernameTaken``; ``RegistrationClosed`` when the beta is full
+///   (`403 registration-closed` at the bind); ``UsernameRuleViolation`` for a
+///   name that fails the rule; any other error unchanged.
 func claimSignupUsername(
     accountId: Data,
     username: String,
     sessionToken: String,
     directory: AccountDirectory,
     binder: LoginHandleBinder,
+    supporterToken: String? = nil,
     derive: (String) throws -> Data = { try loginHandle(username: $0) }
 ) async throws -> String {
     let name = try LoginName.make(
@@ -257,10 +268,22 @@ func claimSignupUsername(
         derive: derive
     )
     do {
-        try await binder.bindLoginHandle(handle: name.handle, sessionToken: sessionToken)
+        try await binder.bindLoginHandle(
+            handle: name.handle, sessionToken: sessionToken, supporterToken: supporterToken)
     } catch AuthClientError.http(let status, _, _) where status == 409 {
         throw UsernameTaken(username: name.canonical)
     } catch let error as AuthClientError {
+        // `docs/ux/beta-account-cap.md` — the beta is full: a first username
+        // is refused at auth, and discovery is never asked.
+        if SignupCap.isRegistrationClosed(error) {
+            NSLog("[auth] registration closed")
+            throw RegistrationClosed()
+        }
+        // ADR-0097 — the held supporter place was spent by another account.
+        if SignupCap.isSupporterCodeUsed(error) {
+            NSLog("[auth] supporter code already used")
+            throw SupporterCodeUsed()
+        }
         // ADR-0054 S5 + anti-abuse section 2 — too many handle changes: stop
         // before discovery like a taken name, with its own copy.
         if let refusal = AuthRateLimit.refusal(in: error),

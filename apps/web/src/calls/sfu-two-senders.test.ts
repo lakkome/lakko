@@ -83,6 +83,36 @@ const hooks = vi.hoisted(() => ({
   events: [] as string[],
   /** Every offer that named screen-share lines (ADR-0083). */
   screenOffers: [] as Array<{ screenMids: string[] }>,
+  /** ADR-0089: the background stages made, and the state each one reaches
+   *  after `starting`. */
+  stages: [] as Array<{ track: unknown; raw: unknown; disposed: boolean }>,
+  stageEnds: "failed" as "starting" | "working" | "failed",
+  makeProcessedTrack: null as (() => { stop(): void }) | null,
+}));
+
+// ADR-0089: the background stage replaced by one whose processed track is a
+// fake track of its own; whether it works or fails is the test's.
+vi.mock("./background-stage", () => ({
+  createBackgroundStage: (raw: unknown, onState: (s: "starting" | "working" | "failed") => void) => {
+    const track = hooks.makeProcessedTrack?.();
+    if (track === undefined) throw new Error("no fake track maker");
+    const stage = {
+      track,
+      raw,
+      disposed: false,
+      setMode(): void {},
+      setEnabled(): void {},
+      dispose(): void {
+        stage.disposed = true;
+        track.stop();
+      },
+    };
+    hooks.stages.push(stage);
+    onState("starting");
+    const ends = hooks.stageEnds;
+    if (ends !== "starting") queueMicrotask(() => onState(ends));
+    return stage;
+  },
 }));
 
 vi.mock("../wasm", async () => {
@@ -149,6 +179,8 @@ vi.mock("./sframe-transform", async (importOriginal) => {
 });
 
 import { SfuCallSession, type SfuCallConfig } from "./sfu-call-session";
+import { resetBackgroundChoiceForTest, setBackgroundChoice } from "./background-choice";
+import { onCameraBackgroundFailure } from "./background-status";
 import { shownLayerLedger } from "./layer-display";
 import { videoFrameSourceOf } from "./video-frame-watch";
 
@@ -500,6 +532,10 @@ beforeEach(() => {
   hooks.attachFailsFor = null;
   hooks.events = [];
   hooks.screenOffers = [];
+  hooks.stages = [];
+  hooks.stageEnds = "failed";
+  hooks.makeProcessedTrack = (): FakeTrack => fakeTrack("video", "processed");
+  resetBackgroundChoiceForTest();
   pcs.length = 0;
   sockets.length = 0;
   captured.length = 0;
@@ -539,6 +575,7 @@ afterEach(() => {
   warn.mockRestore();
   vi.unstubAllGlobals();
   vi.useRealTimers();
+  resetBackgroundChoiceForTest();
 });
 
 // ---- The first publish ----------------------------------------------------
@@ -2143,5 +2180,83 @@ describe("a screen share", () => {
     await flush();
     expect(screen?.sender.params.encodings[0]?.["maxBitrate"]).toBe(1_200_000);
     expect(screen?.sender.params.encodings[0]?.["maxFramerate"]).toBe(15);
+  });
+});
+
+// ---- The camera background (ADR-0089) --------------------------------------
+
+/** The track a (possibly cloned) track was made from. */
+function rootOf(t: FakeTrack | null | undefined): FakeTrack | null {
+  let at = t ?? null;
+  while (at?.cloneOf != null) at = at.cloneOf;
+  return at;
+}
+
+describe("the camera background", () => {
+  it("with a background selected and failing, no sender ever carries the raw camera", async () => {
+    setBackgroundChoice({ kind: "blur", strong: false }, null);
+    let failures = 0;
+    const off = onCameraBackgroundFailure(() => {
+      failures += 1;
+    });
+    const { session, pc } = await connected();
+    await flush();
+    const raws = (): FakeTrack[] => captured.filter((t) => t.kind === "video");
+    const carriedRaw = (): FakeTrack[] =>
+      pc.transceivers
+        .map((t) => rootOf(t.sender.track))
+        .filter((t): t is FakeTrack => t !== null && raws().includes(t));
+    expect(raws()).toHaveLength(1);
+    // Every camera sender carries the processed track or a clone of it.
+    expect(rootOf(pc.main()?.sender.track)?.label).toBe("processed");
+    expect(pc.lights().every((l) => rootOf(l.sender.track)?.label === "processed")).toBe(true);
+    expect(pc.middles().every((l) => rootOf(l.sender.track)?.label === "processed")).toBe(true);
+    expect(carriedRaw()).toEqual([]);
+    expect(failures).toBe(1);
+
+    // Off and on again (the background starts again and fails again), and a
+    // camera switch: still never the raw camera, on any sender, ever.
+    session.setCameraEnabled(false);
+    await session.publishVideo();
+    await flush();
+    await session.switchVideoInput("back-camera");
+    await flush();
+    expect(raws()).toHaveLength(2);
+    expect(carriedRaw()).toEqual([]);
+    for (const t of pc.transceivers) {
+      for (const replaced of t.sender.replaced) expect(raws()).not.toContain(rootOf(replaced));
+    }
+    expect(failures).toBe(3);
+    off();
+  });
+
+  it("switching to none puts the raw camera on the main sender and every copy, and back", async () => {
+    setBackgroundChoice({ kind: "blur", strong: true }, null);
+    hooks.stageEnds = "working";
+    const { pc } = await connected();
+    await flush();
+    const raw = captured.find((t) => t.kind === "video");
+    expect(rootOf(pc.main()?.sender.track)?.label).toBe("processed");
+
+    setBackgroundChoice({ kind: "none" }, null);
+    await flush();
+    await flush();
+    expect(pc.main()?.sender.track).toBe(raw);
+    expect(pc.lights().every((l) => rootOf(l.sender.track) === raw)).toBe(true);
+    expect(hooks.stages[0]?.disposed).toBe(true);
+    expect(raw?.readyState).toBe("live");
+
+    setBackgroundChoice({ kind: "builtin", id: "dawn" }, null);
+    await flush();
+    await flush();
+    expect(rootOf(pc.main()?.sender.track)?.label).toBe("processed");
+    expect(pc.lights().every((l) => rootOf(l.sender.track)?.label === "processed")).toBe(true);
+    expect(raw?.readyState).toBe("live");
+  });
+
+  it("with no background selected nothing is processed", async () => {
+    const { pc } = await connected();
+    expect(hooks.stages).toHaveLength(0);
+    expect(pc.main()?.sender.track).toBe(captured.find((t) => t.kind === "video"));
   });
 });

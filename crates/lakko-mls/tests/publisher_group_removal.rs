@@ -4,9 +4,10 @@
 //! Removing a publisher from a channel's PublisherGroup, and a publisher
 //! stepping down ([ADR-0087] section 15, note of 2026-11-05).
 //!
-//! A PublisherGroup carries no role table, so who may remove whom is held by
-//! the owner's device (`remove_publisher` refuses anyone but the owner, and
-//! refuses the owner as a target). What these tests pin is what the commit
+//! A PublisherGroup carries no role table; since ADR-0090 every commit is
+//! staged by a device of the owner's account and every peer refuses one from
+//! anyone else (`stage_remove_publisher` refuses a co-publisher's device and
+//! the owner's account as a target). What these tests pin is what the commit
 //! does for the channel's key:
 //!
 //! - a removed publisher cannot derive the channel seed of the epoch the
@@ -20,13 +21,14 @@
 //! [ADR-0087]: ../../../docs/adr/0087-group-and-channel-handles-and-privacy.md
 
 use lakko_mls::{
-    is_publisher_step_down, key_package, ChannelId, Identity, Incoming, PublisherGroup,
-    CHANNEL_ID_LEN,
+    is_publisher_step_down, key_package, publisher_owner_account_key, ChannelId, Identity,
+    Incoming, PublisherGroup, CHANNEL_ID_LEN,
 };
 use proptest::prelude::*;
 
-/// A channel of `publishers + 1` members: the owner at index 0, the
-/// publishers after it, every one joined through its Welcome.
+/// A channel of `publishers + 1` accounts: the owner's device, the
+/// publishers' devices after it, every one joined through its Welcome
+/// (ADR-0090: every leaf a bound device, every commit staged then merged).
 struct Channel {
     owner: Identity,
     owner_pg: PublisherGroup,
@@ -34,25 +36,39 @@ struct Channel {
     cid: ChannelId,
 }
 
+fn account_seed(tag: u8) -> [u8; 32] {
+    [tag; 32]
+}
+
+fn bound(seed_tag: u8, account: &[u8; 32]) -> Identity {
+    Identity::from_seed_bound(&[seed_tag; 64], account, 1).expect("device")
+}
+
 fn channel(publishers: usize, tag: u8) -> Channel {
-    let owner = Identity::generate("pg-owner").expect("owner");
+    let owner_account = account_seed(tag);
+    let owner = bound(tag, &owner_account);
     let cid = ChannelId::try_from_slice(&[tag; CHANNEL_ID_LEN]).expect("cid");
-    let mut owner_pg = PublisherGroup::create(&owner, &cid).expect("create");
+    let mut owner_pg = PublisherGroup::create(&owner, &owner_account, &cid).expect("create");
     let gid = owner_pg.group_id();
+    let owner_key = publisher_owner_account_key(&owner_account);
     let mut joined: Vec<(Identity, PublisherGroup)> = Vec::new();
     for i in 0..publishers {
-        let id = Identity::generate(&format!("pg-publisher-{i}")).expect("publisher");
+        let n = u8::try_from(i).expect("small");
+        let id = bound(
+            tag.wrapping_add(0x40 + n),
+            &account_seed(tag.wrapping_add(0x80 + n)),
+        );
         let kp = key_package::serialize(&id.create_key_package().expect("kp")).expect("kp wire");
+        owner_pg.retain_join_request(&owner, &kp).expect("retain");
         let addition = owner_pg
-            .inner_mut()
-            .add_member_from_wire(&owner, &kp)
-            .expect("add");
-        let commit = lakko_mls::group::encode_message(&addition.commit).expect("commit");
-        let welcome = lakko_mls::group::encode_message(&addition.welcome).expect("welcome");
+            .stage_approve_external_join(&owner, id.signature_public_key())
+            .expect("approve");
+        assert!(owner_pg.merge_staged_commit(&owner).expect("merge"));
         for (pid, pg) in &mut joined {
-            apply(pg, pid, &commit);
+            apply(pg, pid, &addition.commit);
         }
-        let pg = PublisherGroup::join_from_welcome(&id, &welcome, &gid, &cid).expect("join");
+        let pg = PublisherGroup::join_from_welcome(&id, &addition.welcome, &gid, &cid, &owner_key)
+            .expect("join");
         joined.push((id, pg));
     }
     Channel {
@@ -64,15 +80,26 @@ fn channel(publishers: usize, tag: u8) -> Channel {
 }
 
 fn apply(pg: &mut PublisherGroup, id: &Identity, wire: &[u8]) {
-    let out = pg
-        .inner_mut()
-        .process_incoming_verifying_roles(id, wire)
-        .expect("apply");
+    let out = pg.process_incoming(id, wire).expect("apply");
     assert!(matches!(out, Incoming::Commit), "a commit");
 }
 
 fn account_of(id: &Identity) -> Vec<u8> {
-    id.signature_public_key().to_vec()
+    id.account_public_key().expect("bound").to_vec()
+}
+
+fn rotate(pg: &mut PublisherGroup, id: &Identity) -> Vec<u8> {
+    let commit = pg.stage_rotate(id).expect("stage rotate");
+    assert!(pg.merge_staged_commit(id).expect("merge"));
+    commit
+}
+
+fn remove(pg: &mut PublisherGroup, id: &Identity, account: &[u8]) -> Vec<u8> {
+    let commit = pg
+        .stage_remove_publisher(id, account)
+        .expect("stage remove");
+    assert!(pg.merge_staged_commit(id).expect("merge"));
+    commit
 }
 
 proptest! {
@@ -93,17 +120,14 @@ proptest! {
         let victim = victim_pick % publishers;
         let mut c = channel(publishers, 0x31);
         for _ in 0..rotations_before {
-            let commit = c.owner_pg.rotate(&c.owner).expect("rotate");
+            let commit = rotate(&mut c.owner_pg, &c.owner);
             for (id, pg) in &mut c.publishers {
                 apply(pg, id, &commit);
             }
         }
         let before = c.owner_pg.channel_seed(&c.owner).expect("seed");
         let victim_key = account_of(&c.publishers[victim].0);
-        let removal = c
-            .owner_pg
-            .remove_publisher(&c.owner, &victim_key)
-            .expect("owner removes");
+        let removal = remove(&mut c.owner_pg, &c.owner, &victim_key);
         prop_assert_eq!(c.owner_pg.members().len(), publishers);
         let after = c.owner_pg.channel_seed(&c.owner).expect("seed");
         prop_assert_ne!(after, before);
@@ -111,7 +135,7 @@ proptest! {
         for (i, (id, pg)) in c.publishers.iter_mut().enumerate() {
             if i == victim {
                 if victim_applies {
-                    let _ = pg.inner_mut().process_incoming_verifying_roles(id, &removal);
+                    let _ = pg.process_incoming(id, &removal);
                     prop_assert!(!pg.is_active(), "the removed device knows it is out");
                 }
                 let seed = pg.channel_seed(id);
@@ -123,13 +147,13 @@ proptest! {
         }
 
         for _ in 0..rotations_after {
-            let commit = c.owner_pg.rotate(&c.owner).expect("rotate");
+            let commit = rotate(&mut c.owner_pg, &c.owner);
             let now = c.owner_pg.channel_seed(&c.owner).expect("seed");
             for (i, (id, pg)) in c.publishers.iter_mut().enumerate() {
                 if i == victim {
                     // The rotation cannot be applied, and nothing the device
                     // still holds derives the new seed.
-                    let applied = pg.inner_mut().process_incoming_verifying_roles(id, &commit);
+                    let applied = pg.process_incoming(id, &commit);
                     prop_assert!(applied.is_err() || !pg.is_active());
                     prop_assert!(pg.channel_seed(id).map_or(true, |s| s != now));
                 } else {
@@ -156,8 +180,7 @@ proptest! {
 
         let incoming = c
             .owner_pg
-            .inner_mut()
-            .process_incoming_verifying_roles(&c.owner, &message)
+            .process_incoming(&c.owner, &message)
             .expect("owner reads it");
         let Incoming::Application { bytes, sender_account, .. } = incoming else {
             panic!("an application message");
@@ -167,7 +190,7 @@ proptest! {
         prop_assert_eq!(&sender, &account_of(&c.publishers[leaver].0));
 
         for _ in 0..rotations_between {
-            let commit = c.owner_pg.rotate(&c.owner).expect("owner still rotates");
+            let commit = rotate(&mut c.owner_pg, &c.owner);
             for (id, pg) in &mut c.publishers {
                 apply(pg, id, &commit);
             }
@@ -175,14 +198,14 @@ proptest! {
             prop_assert_eq!(c.publishers[leaver].1.channel_seed(&c.publishers[leaver].0).expect("seed"), seed);
         }
 
-        let removal = c.owner_pg.remove_publisher(&c.owner, &sender).expect("owner applies it");
+        let removal = remove(&mut c.owner_pg, &c.owner, &sender);
         let after = c.owner_pg.channel_seed(&c.owner).expect("seed");
-        let commit = c.owner_pg.rotate(&c.owner).expect("owner rotates after");
+        let commit = rotate(&mut c.owner_pg, &c.owner);
         let now = c.owner_pg.channel_seed(&c.owner).expect("seed");
         prop_assert_ne!(after, now);
         for (i, (id, pg)) in c.publishers.iter_mut().enumerate() {
             if i == leaver {
-                let _ = pg.inner_mut().process_incoming_verifying_roles(id, &removal);
+                let _ = pg.process_incoming(id, &removal);
                 prop_assert!(!pg.is_active());
                 prop_assert!(pg.channel_seed(id).map_or(true, |s| s != now));
             } else {
@@ -202,16 +225,23 @@ fn only_the_owner_removes_and_the_owner_is_never_removed() {
 
     // A co-publisher may not remove anyone.
     let (pid, ppg) = &mut c.publishers[0];
-    assert!(!ppg.is_owned_by(pid));
-    let refused = ppg.remove_publisher(pid, &other);
+    assert!(!ppg.is_owner_device(pid));
+    assert!(!ppg.is_owned_by(&account_seed(0x33u8.wrapping_add(0x80))));
+    let refused = ppg.stage_remove_publisher(pid, &other);
     assert!(refused.is_err(), "a co-publisher is refused");
+    assert!(!ppg.has_staged_commit());
 
     // The owner may not remove itself, nor a key nobody holds.
-    assert!(c.owner_pg.is_owned_by(&c.owner));
-    assert!(c.owner_pg.remove_publisher(&c.owner, &owner_key).is_err());
-    assert!(c.owner_pg.remove_publisher(&c.owner, &[0x55; 32]).is_err());
-    let epoch = c.owner_pg.epoch();
-    assert_eq!(c.owner_pg.epoch(), epoch, "a refusal commits nothing");
+    assert!(c.owner_pg.is_owned_by(&account_seed(0x33)));
+    assert!(c
+        .owner_pg
+        .stage_remove_publisher(&c.owner, &owner_key)
+        .is_err());
+    assert!(c
+        .owner_pg
+        .stage_remove_publisher(&c.owner, &[0x55; 32])
+        .is_err());
+    assert!(!c.owner_pg.has_staged_commit(), "a refusal stages nothing");
 
     // The owner does not step down.
     assert!(c.owner_pg.step_down(&c.owner).is_err());

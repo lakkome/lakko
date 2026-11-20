@@ -72,6 +72,7 @@ import {
 } from "../state/call-state";
 import { CallSoundController } from "../calls/CallSoundController";
 import {
+  encryptionSheetHint,
   encryptionSheetSentence,
   safetyNumberGroups,
   safetyNumberSpokenLabel,
@@ -101,7 +102,11 @@ import {
   TileFrameTally,
   type LayerShown,
 } from "../calls/layer-display";
-import { canWatchVideoFrames, watchVideoFrames } from "../calls/video-frame-watch";
+import {
+  BindingFrameGate,
+  canWatchVideoFrames,
+  watchVideoFrames,
+} from "../calls/video-frame-watch";
 import {
   askedQuality,
   coversHeavySwap,
@@ -128,6 +133,8 @@ import {
   onNoiseSuppressionChange,
   setNoiseSuppression,
 } from "../calls/noise-setting";
+import { CallBackgroundSection } from "../calls/CallBackgroundSection";
+import { cameraBackgroundState, ownCameraPreparing } from "../calls/background-status";
 import {
   gridLayout,
   gridPage,
@@ -175,6 +182,9 @@ const PhotoOrInitials: Component<{ name: string; personKey: string | undefined; 
 );
 import { t } from "../l10n";
 import { callNameState } from "../calls/call-name";
+import { callChatActions, callChatState } from "../calls/call-chat";
+import { chatPanelShape, CHAT_COLUMN_MIN_WIDTH, previewAllowed } from "../calls/call-chat-panel-state";
+import { CallChatPanel } from "../calls/CallChatPanel";
 import { createDisplayNameCheck } from "../profile/username-field";
 import { maySaveDisplayName, savedDisplayName } from "../profile/rules";
 import { displayLocale } from "../l10n/display-locale";
@@ -351,7 +361,7 @@ const EncryptionChip: Component<{ onOpen: () => void }> = (props) => (
       // Not armed. Says so rather than claiming protection, and is not a
       // button: there is nothing to show behind it.
       <span class="lk-call-chip negotiating" role="status">
-        <Icon name="lock" size={13} />
+        <Icon name="lock" size={14} />
         <span>{t("call.encryption.setting_up")}</span>
       </span>
     }
@@ -366,13 +376,21 @@ const EncryptionChip: Component<{ onOpen: () => void }> = (props) => (
         props.onOpen();
       }}
     >
-      <Icon name="lock" size={13} />
+      <Icon name="lock-fill" size={14} />
       <span>{t("call.encryption.chip")}</span>
     </button>
   </Show>
 );
 
-const EncryptionSheet: Component<{ peerName: string | null; onClose: () => void }> = (props) => {
+const EncryptionSheet: Component<{
+  /** A group call or a call from a link: the sheet names nobody (§5). */
+  groupCall: boolean;
+  /** Other people in the call now. */
+  othersInCall: number;
+  /** The other person on a one-to-one call. */
+  peerName: string | null;
+  onClose: () => void;
+}> = (props) => {
   const [copied, setCopied] = createSignal(false);
   let doneButton: HTMLButtonElement | undefined;
 
@@ -423,8 +441,11 @@ const EncryptionSheet: Component<{ peerName: string | null; onClose: () => void 
       }}
     >
       <div class="lk-call-modal lk-encryption-sheet">
+        <span class="lk-encryption-sheet-lock" aria-hidden="true">
+          <Icon name="lock-fill" size={26} />
+        </span>
         <h2 id="lk-encryption-sheet-title">{t("call.encryption.title")}</h2>
-        <p class="lk-encryption-sheet-lead">{encryptionSheetSentence(props.peerName)}</p>
+        <p class="lk-encryption-sheet-lead">{encryptionSheetSentence(props)}</p>
 
         {/* One atomic thing to a screen reader: `role="img"` with a label that
             pauses between the groups (§8), rather than sixteen digits run
@@ -439,11 +460,11 @@ const EncryptionSheet: Component<{ peerName: string | null; onClose: () => void 
           </For>
         </p>
 
-        <p class="lk-encryption-sheet-hint">{t("call.encryption.compare_hint")}</p>
+        <p class="lk-encryption-sheet-hint">{encryptionSheetHint(props)}</p>
 
         <div class="lk-encryption-sheet-actions">
           <button type="button" class="ghost" onClick={copy}>
-            <Icon name="copy" size={16} />
+            <Icon name="copy" size={20} />
             {copied() ? t("common.copied") : t("common.copy")}
           </button>
           <button
@@ -635,6 +656,8 @@ const CallSettingsSheet: Component<{ onClose: () => void }> = (props) => {
               </button>
             </div>
           </section>
+          {/* ADR-0089: under Sound, above the device lists. */}
+          <CallBackgroundSection />
           <Show
             when={sections().length > 0}
             fallback={<p class="lk-call-settings-empty">{t("call.settings.no_devices")}</p>}
@@ -655,7 +678,7 @@ const CallSettingsSheet: Component<{ onClose: () => void }> = (props) => {
                         >
                           <span class="lk-ellipsis">{option.label}</span>
                           <Show when={option.selected}>
-                            <Icon name="check" size={18} />
+                            <Icon name="checkmark" size={20} />
                           </Show>
                         </button>
                       )}
@@ -754,8 +777,15 @@ const ControlButton: Component<{
           props.onPress();
         }}
       >
-        <Show when={props.busy === true} fallback={<Icon name={props.spec.icon} size={26} />}>
+        <Show when={props.busy === true} fallback={<Icon name={props.spec.icon} size={28} />}>
           <Spinner size={26} />
+        </Show>
+        <Show when={props.spec.badge}>
+          {(badge) => (
+            <span class="lk-call-ctl-badge" aria-hidden="true">
+              {badge()}
+            </span>
+          )}
         </Show>
       </button>
       <span class="lk-call-ctl-label" aria-hidden="true">
@@ -930,6 +960,8 @@ const CallPortrait: Component<{ name: string; toneId: string; personKey?: string
 const SelfView: Component<{
   stream: MediaStream | undefined;
   starting: boolean;
+  /** The camera background is starting (ADR-0089): nothing is sent yet. */
+  preparing?: boolean;
   canFlip: boolean;
   onFlip: () => void;
 }> = (props) => {
@@ -991,7 +1023,7 @@ const SelfView: Component<{
         when={props.stream}
         fallback={
           <div class="lk-call-self-blank" aria-hidden="true">
-            <Icon name="video" size={20} strokeWidth={1.4} />
+            <Icon name="video" size={20} />
           </div>
         }
       >
@@ -1009,6 +1041,12 @@ const SelfView: Component<{
           <span>{t("call.self.starting_camera")}</span>
         </div>
       </Show>
+      <Show when={!props.starting && props.preparing === true}>
+        <div class="lk-call-self-overlay" role="status" aria-live="polite">
+          <Spinner size={18} />
+          <span class="lk-visually-hidden">{t("call.background.preparing")}</span>
+        </div>
+      </Show>
 
       <Show when={props.canFlip}>
         <button
@@ -1021,7 +1059,7 @@ const SelfView: Component<{
             props.onFlip();
           }}
         >
-          <Icon name="cameraFlip" size={16} />
+          <Icon name="camera-flip" size={20} />
         </button>
       </Show>
     </div>
@@ -1421,6 +1459,14 @@ const LocalVideo: Component<{
  * the same pictures were decoded. A little after each bind the element's
  * state and its place on screen are written to the console once
  * (`describeRemotePicture`).
+ *
+ * After each bind the element is transparent until the first frame of the
+ * stream it was given (`BindingFrameGate`, `calls/video-frame-watch.ts`):
+ * Firefox shows a remote track's last decoded frame at once, however old,
+ * and the SFU stops forwarding a camera track nobody wants, so a tile that
+ * switched to such a track showed a frame from minutes earlier. Frames that
+ * are not of the binding are not reported either. Where the element's frames
+ * cannot be observed at all it is never held transparent.
  */
 const LayerVideo: Component<{
   stream: MediaStream;
@@ -1445,11 +1491,22 @@ const LayerVideo: Component<{
   const binder = new LocalPreviewBinder<MediaStreamTrack, MediaProvider>(
     (track) => new MediaStream([track]),
   );
+  const gate = new BindingFrameGate();
+  /** Bound, and no frame of the binding presented yet: held transparent. */
+  const [awaitingFrame, setAwaitingFrame] = createSignal(false);
+  const trackOf = (): MediaStreamTrack | undefined => props.stream.getVideoTracks()[0];
   let diagTimer: ReturnType<typeof setTimeout> | undefined;
   const look = (): void => {
     if (el === undefined) return;
     if (!el.muted) el.muted = true;
-    if (!binder.sync(el, props.stream)) return;
+    const at = performance.now();
+    if (!binder.sync(el, props.stream)) {
+      // A browser whose frames cannot be observed is never held transparent.
+      if (awaitingFrame() && !canWatchVideoFrames(el, trackOf)) setAwaitingFrame(false);
+      return;
+    }
+    gate.bind(at);
+    setAwaitingFrame(canWatchVideoFrames(el, trackOf));
     if (PICTURES_THROUGH_CANVAS) picture.restart();
     if (diagTimer !== undefined) clearTimeout(diagTimer);
     if (binder.track() === null) return;
@@ -1484,9 +1541,14 @@ const LayerVideo: Component<{
     const timer = setInterval(look, PREVIEW_CHECK_MS);
     const stopFrames = watchVideoFrames(
       el,
-      (now) => props.onFrame(now),
+      (now, frame) => {
+        // A frame the track decoded before this element was given it.
+        if (!gate.admit(frame)) return;
+        if (awaitingFrame()) setAwaitingFrame(false);
+        props.onFrame(now);
+      },
       // Read each time: the stream this element plays can be replaced.
-      () => props.stream.getVideoTracks()[0],
+      trackOf,
     );
     onCleanup(() => {
       clearInterval(timer);
@@ -1498,10 +1560,17 @@ const LayerVideo: Component<{
       props.elRef(undefined);
     });
   });
+  /** Held transparent while awaiting the binding's first frame, whether or
+   *  not the element is one of two stacked pictures. */
+  const shown = (): boolean | undefined => (awaitingFrame() ? false : props.shown);
+  const cls = (): string =>
+    shown() !== undefined && !props.class.includes("lk-call-layer")
+      ? `${props.class} lk-call-layer`
+      : props.class;
   const video = (
     <video
-      class={props.class}
-      data-shown={props.shown === undefined ? undefined : String(props.shown)}
+      class={cls()}
+      data-shown={shown() === undefined ? undefined : String(shown())}
       aria-label={props.ariaLabel}
       aria-hidden={props.ariaHidden === true ? "true" : undefined}
       autoplay
@@ -1515,8 +1584,8 @@ const LayerVideo: Component<{
     <>
       {video}
       <canvas
-        class={`${props.class} lk-video-canvas`}
-        data-shown={props.shown === undefined ? undefined : String(props.shown)}
+        class={`${cls()} lk-video-canvas`}
+        data-shown={shown() === undefined ? undefined : String(shown())}
         aria-hidden="true"
         ref={canvasEl}
       />
@@ -1668,7 +1737,10 @@ const ParticipantTile: Component<TileProps> = (props) => {
       }}
     >
       <Show
-        when={props.participant.camOn}
+        when={
+          props.participant.camOn &&
+          !(local && ownCameraPreparing(cameraBackgroundState(), callState.videoPublishState() === "starting"))
+        }
         fallback={
           <div class="lk-call-tile-avatar" aria-hidden="true">
             <PhotoOrInitials
@@ -1686,7 +1758,7 @@ const ParticipantTile: Component<TileProps> = (props) => {
           when={tileStream() !== undefined}
           fallback={
             <div class="lk-call-tile-blank" aria-hidden="true">
-              <Icon name="video" size={props.large ? 36 : 24} strokeWidth={1.4} />
+              <Icon name="video" size={props.large ? 40 : 24} />
             </div>
           }
         >
@@ -1720,6 +1792,20 @@ const ParticipantTile: Component<TileProps> = (props) => {
           <span>{t("call.self.starting_camera")}</span>
         </div>
       </Show>
+      {/* ADR-0089: the background is starting; nothing is sent until it is
+          ready, so the tile shows the avatar with a small spinner. */}
+      <Show
+        when={
+          props.participant.isLocal &&
+          props.participant.camOn &&
+          ownCameraPreparing(cameraBackgroundState(), callState.videoPublishState() === "starting")
+        }
+      >
+        <div class="lk-call-tile-overlay lk-call-tile-overlay-quiet" role="status" aria-live="polite">
+          <Spinner size={props.large ? 22 : 18} />
+          <span class="lk-visually-hidden">{t("call.background.preparing")}</span>
+        </div>
+      </Show>
 
       <div class="lk-call-tile-strip">
         <Show when={!props.participant.micOn}>
@@ -1728,11 +1814,11 @@ const ParticipantTile: Component<TileProps> = (props) => {
             aria-label={t("call.participant.muted_a11y")}
             title={t("call.participant.muted")}
           >
-            <Icon name="micOff" size={14} />
+            <Icon name="mic-slash-fill" size={14} />
           </span>
         </Show>
         <span class="lk-call-tile-name">{name()}</span>
-        {/* ADR-0089 section 6 - a blocked person stays in the call; their
+        {/* ADR-0098 section 6 - a blocked person stays in the call; their
             tile carries a muted label (the shared rule's "label"). */}
         <Show
           when={
@@ -1750,7 +1836,7 @@ const ParticipantTile: Component<TileProps> = (props) => {
         </Show>
         <Show when={isPinned()}>
           <span class="lk-call-tile-pin" title={t("call.participant.pinned")}>
-            <Icon name="pin" size={14} />
+            <Icon name="pin-fill" size={14} />
           </span>
         </Show>
       </div>
@@ -1771,7 +1857,7 @@ const ParticipantTile: Component<TileProps> = (props) => {
             props.onPin?.(participantId);
           }}
         >
-          <Icon name="pin" size={props.compact === true ? 14 : 16} />
+          <Icon name={isPinned() ? "pin-fill" : "pin"} size={props.compact === true ? 14 : 20} />
         </button>
       </Show>
     </div>
@@ -1848,7 +1934,7 @@ const ScreenShareView: Component<{
       when={!props.share.isOwn}
       fallback={
         <div class={`lk-call-share own ${props.class ?? ""}`} role="img" aria-label={t("call.screen_share.own_tile")}>
-          <Icon name="monitor" size={props.large ? 36 : 22} strokeWidth={1.4} />
+          <Icon name="display" size={props.large ? 33 : 20} />
           <span class="lk-call-share-own-text">{t("call.screen_share.own_tile")}</span>
         </div>
       }
@@ -1919,14 +2005,14 @@ const ScreenShareView: Component<{
         />
         <Show when={!hasFrame()}>
           <div class="lk-call-share-waiting" role="status">
-            <Icon name="monitor" size={props.large ? 36 : 22} strokeWidth={1.4} />
+            <Icon name="display" size={props.large ? 33 : 20} />
             <Spinner size={props.large ? 24 : 18} />
             <span>{t("call.screen_share.waiting", { name: nameOrUnnamed(props.share.name) })}</span>
           </div>
         </Show>
         <div class="lk-call-tile-strip">
           <span class="lk-call-share-glyph" aria-hidden="true">
-            <Icon name="monitor" size={14} />
+            <Icon name="display" size={14} />
           </span>
           <span class="lk-call-tile-name">{label()}</span>
         </div>
@@ -1956,7 +2042,7 @@ const ScreenShareView: Component<{
                 zoomReset();
               }}
             >
-              <Icon name="monitor" size={14} />
+              <Icon name="display" size={14} />
             </button>
             <button
               type="button"
@@ -2215,7 +2301,7 @@ const GroupArea: Component<{
             disabled={shown().page === 0}
             onClick={(): void => void setPage(Math.max(0, shown().page - 1))}
           >
-            <Icon name="chevron" size={20} />
+            <Icon name="chevron-forward" size={20} />
           </button>
           <button
             type="button"
@@ -2224,7 +2310,7 @@ const GroupArea: Component<{
             disabled={shown().page >= shown().pages - 1}
             onClick={(): void => void setPage(Math.min(shown().pages - 1, shown().page + 1))}
           >
-            <Icon name="chevron" size={20} />
+            <Icon name="chevron-forward" size={20} />
           </button>
           <div class="lk-call-pages" role="tablist">
             <For each={Array.from({ length: shown().pages }, (_, i) => i)}>
@@ -2264,7 +2350,7 @@ const GroupArea: Component<{
             by a chip, never moved onto the stage over the pin. */}
         <Show when={callState.pinnedId() !== null && isRemoteShare(screenShareState.current())}>
           <div class="lk-call-share-chip" role="status">
-            <Icon name="monitor" size={16} />
+            <Icon name="display" size={14} />
             <span>
               {t("call.screen_share.pinned_chip", {
                 name: nameOrUnnamed(screenShareState.current()?.name ?? ""),
@@ -2327,7 +2413,7 @@ const LayoutSwitch: Component = () => {
         }
       }}
     >
-      <Icon name={kind() === "grid" ? "layoutFocus" : "layoutGrid"} size={20} />
+      <Icon name={kind() === "grid" ? "layout-focus" : "layout-grid"} size={20} />
     </button>
   );
 };
@@ -2347,7 +2433,7 @@ const ParticipantList: Component = () => (
           aria-label={t("call.participants.close_a11y")}
           onClick={(): void => callActions.setParticipantListOpen(false)}
         >
-          <Icon name="close" size={18} />
+          <Icon name="xmark" size={20} />
         </button>
       </div>
       <ul class="lk-call-people">
@@ -2365,7 +2451,7 @@ const ParticipantList: Component = () => (
                   title={t("call.participant.muted")}
                   aria-label={t("call.participant.muted")}
                 >
-                  <Icon name="micOff" size={14} />
+                  <Icon name="mic-slash-fill" size={14} />
                 </span>
               </Show>
             </li>
@@ -2830,6 +2916,10 @@ const Call: Component<{
       othersPresent: remotes().length > 0,
       canInvite: props.onCopyInviteLink !== undefined,
       inviteBusy: props.inviteBusy === true,
+      chat:
+        callChatState.control() !== null
+          ? { open: callChatState.panel().open, unread: callChatState.panel().unread }
+          : undefined,
     }),
   );
 
@@ -2840,6 +2930,60 @@ const Call: Component<{
       msSinceInteraction: now() - lastInteraction(),
     }),
   );
+
+  // ----- the call's chat (section 4.1.4) --------------------------------------
+
+  /** Wide enough for the chat to be a column beside the call. */
+  const [wideScreen, setWideScreen] = createSignal(
+    typeof window !== "undefined" ? chatPanelShape(window.innerWidth) === "column" : false,
+  );
+  onMount(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia(`(min-width: ${CHAT_COLUMN_MIN_WIDTH}px)`);
+    const sync = (): void => void setWideScreen(query.matches);
+    sync();
+    query.addEventListener?.("change", sync);
+    onCleanup(() => query.removeEventListener?.("change", sync));
+  });
+  const chatOpen = (): boolean => callChatState.control() !== null && callChatState.panel().open;
+  const chatShape = (): "sheet" | "column" => (wideScreen() ? "column" : "sheet");
+
+  /** The name a sender's tile shows (section 4.4), and the last one it
+   *  showed once the person left. */
+  const chatNameOf = (peerId: string): string => {
+    const tile = callState.participants().find((p) => p.id === `peer-${peerId}`);
+    const name = tile?.displayName ?? callChatState.lastName(peerId) ?? "";
+    return name !== "" ? name : t("call.participant.unnamed");
+  };
+  createEffect(() => {
+    for (const p of callState.participants()) {
+      if (!p.isLocal && p.id.startsWith("peer-")) {
+        callChatActions.rememberName(p.id.slice("peer-".length), p.displayName);
+      }
+    }
+  });
+
+  /** Close the panel and give focus back to the `Chat` circle. */
+  function closeChat(): void {
+    callChatActions.close();
+    requestAnimationFrame(() => {
+      document.querySelector<HTMLElement>('.lk-call [data-control="chat"] .lk-call-ctl-btn')?.focus();
+    });
+  }
+
+  /** The preview above the control bar, while the panel is closed. */
+  const chatPreview = createMemo(() => {
+    if (callChatState.control() === null) return null;
+    const p = callChatState.panel();
+    if (p.open || p.preview === null) return null;
+    const allowed = previewAllowed({
+      barFaded: barHidden(),
+      settingsOpen: settingsOpen() || encryptionSheetOpen(),
+      participantsOpen: callState.participantListOpen(),
+      menuOpen: inviteMenuOpen() || endMenuOpen(),
+    });
+    return allowed ? p.preview : null;
+  });
 
   // ----- actions ------------------------------------------------------------
 
@@ -2865,6 +3009,10 @@ const Call: Component<{
         // since a menu of one item is a second step for nothing.
         if (props.onCopyInviteLink !== undefined) setInviteMenuOpen(!inviteMenuOpen());
         else callActions.setParticipantListOpen(!callState.participantListOpen());
+        return;
+      case "chat":
+        if (callChatState.panel().open) closeChat();
+        else callChatActions.open();
         return;
       case "settings":
         void refreshCallDevices();
@@ -2918,14 +3066,13 @@ const Call: Component<{
    * order rather than on anything meaningful. Asking the state directly is
    * order-independent.
    *
-   * The participant list and the chat panel are deliberately NOT treated the
-   * same way: neither closes on `Esc` today, so guarding on them would make the
-   * key do nothing at all while one is open. They are panels inside the call and
-   * keep their state for when the person comes back.
+   * The participant list is deliberately NOT treated the same way: it does
+   * not close on `Esc`, so guarding on it would make the key do nothing at all
+   * while it is open. The chat panel does close on `Esc`, before the call is
+   * put away (section 4.1.4).
    */
   createEffect(() => {
     const collapse = props.onCollapse;
-    if (collapse === undefined) return;
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== "Escape") return;
       if (encryptionSheetOpen() || settingsOpen()) return;
@@ -2939,6 +3086,14 @@ const Call: Component<{
         setEndMenuOpen(false);
         return;
       }
+      // Section 4.1.4: `Esc` closes the chat first, and only then puts the
+      // call away.
+      if (chatOpen()) {
+        event.preventDefault();
+        closeChat();
+        return;
+      }
+      if (collapse === undefined) return;
       event.preventDefault();
       collapse();
     };
@@ -2947,8 +3102,10 @@ const Call: Component<{
   });
 
   return (
+    <>
     <div
       class="lk-call"
+      data-chat={chatOpen() ? chatShape() : undefined}
       data-surface={surface()}
       data-phase={phaseKind()}
       data-notice={callState.notice() !== null ? "" : undefined}
@@ -2979,7 +3136,7 @@ const Call: Component<{
               collapse()();
             }}
           >
-            <Icon name="chevron" size={22} />
+            <Icon name="chevron-down" size={24} />
           </button>
         )}
       </Show>
@@ -3042,13 +3199,33 @@ const Call: Component<{
         )}
       </Show>
       <Show when={fill() === "local"}>
-        <Show when={props.localStream?.() !== undefined}>
-          <LocalVideo
-            stream={props.localStream?.()}
-            where="fill"
-            class="lk-call-fill mirrored"
-            ariaLabel={t("call.self.camera_a11y")}
-          />
+        {/* ADR-0089: while the background starts nothing is sent, so the
+            full-screen own camera shows the avatar with a small spinner, as
+            the own tile and the self view do. */}
+        <Show
+          when={!ownCameraPreparing(cameraBackgroundState(), callState.videoPublishState() === "starting")}
+          fallback={
+            <div class="lk-call-fill lk-call-fill-preparing" role="status" aria-live="polite">
+              <div class="lk-call-portrait-avatar" aria-hidden="true">
+                <PhotoOrInitials
+                  name={local()?.displayName || t("call.participant.you")}
+                  personKey={local()?.personKeyB64}
+                  class="lk-call-photo"
+                />
+              </div>
+              <Spinner size={22} />
+              <span class="lk-visually-hidden">{t("call.background.preparing")}</span>
+            </div>
+          }
+        >
+          <Show when={props.localStream?.() !== undefined}>
+            <LocalVideo
+              stream={props.localStream?.()}
+              where="fill"
+              class="lk-call-fill mirrored"
+              ariaLabel={t("call.self.camera_a11y")}
+            />
+          </Show>
         </Show>
       </Show>
 
@@ -3088,6 +3265,10 @@ const Call: Component<{
         <SelfView
           stream={props.localStream?.()}
           starting={callState.videoPublishState() === "starting"}
+          preparing={ownCameraPreparing(
+            cameraBackgroundState(),
+            callState.videoPublishState() === "starting",
+          )}
           canFlip={videoInputs().length >= 2}
           onFlip={flipCamera}
         />
@@ -3098,7 +3279,7 @@ const Call: Component<{
       <Show when={share()?.isOwn === true ? share() : null}>
         {(s) => (
           <div class="lk-call-share-strip" role="status" aria-live="polite">
-            <Icon name="monitor" size={18} />
+            <Icon name="display" size={20} />
             <span>
               {s().withSound ? t("call.screen_share.own_strip_sound") : t("call.screen_share.own_strip")}
             </span>
@@ -3131,6 +3312,24 @@ const Call: Component<{
 
       <ParticipantList />
 
+      {/* A message from someone else while the chat is closed: one line for
+          four seconds above the control bar (section 4.1.4). */}
+      <Show when={chatPreview()}>
+        {(preview) => (
+          <button
+            type="button"
+            class="lk-call-chat-preview"
+            onClick={(event): void => {
+              event.stopPropagation();
+              callChatActions.open();
+            }}
+          >
+            <span class="lk-call-chat-preview-name">{chatNameOf(preview().peerId)}</span>
+            <span class="lk-call-chat-preview-text">{preview().text}</span>
+          </button>
+        )}
+      </Show>
+
       {/* Participants: the list of who is here and the two ways to invite, in a
           menu of the app's own, never the system's share sheet
           (`docs/ux/call-links.md` section 3). */}
@@ -3158,7 +3357,7 @@ const Call: Component<{
                 callActions.setParticipantListOpen(true);
               }}
             >
-              <Icon name="groups" size={20} />
+              <Icon name="person-2" size={20} />
               <span>{t("call.control.participants")}</span>
             </button>
           </Show>
@@ -3185,7 +3384,7 @@ const Call: Component<{
                   invite()();
                 }}
               >
-                <Icon name="user" size={20} />
+                <Icon name="person-plus" size={20} />
                 <span>{t("call.invite.menu_contact")}</span>
               </button>
             )}
@@ -3232,7 +3431,7 @@ const Call: Component<{
               props.onEndForEveryone?.();
             }}
           >
-            <Icon name="phoneEnd" size={20} />
+            <Icon name="phone-down-fill" size={20} />
             <span>{t("call.end_menu.end_for_all")}</span>
           </button>
         </div>
@@ -3244,7 +3443,11 @@ const Call: Component<{
 
       <Show when={encryptionSheetOpen()}>
         <EncryptionSheet
-          peerName={props.peerName ?? remotes()[0]?.displayName ?? null}
+          groupCall={props.group === true}
+          othersInCall={remotes().length}
+          peerName={
+            props.group === true ? null : (props.peerName ?? remotes()[0]?.displayName ?? null)
+          }
           onClose={(): void => {
             setEncryptionSheetOpen(false);
           }}
@@ -3259,6 +3462,10 @@ const Call: Component<{
         />
       </Show>
     </div>
+    <Show when={chatOpen() && phaseKind() !== "ended"}>
+      <CallChatPanel shape={chatShape()} nameOf={chatNameOf} onClose={closeChat} />
+    </Show>
+    </>
   );
 };
 
@@ -3270,3 +3477,12 @@ function endedAtMs(phase: ReturnType<typeof callState.phase>): number {
 }
 
 export default Call;
+
+/**
+ * The pieces the collapsed call's window draws with (`calls/CallWindow.tsx`,
+ * `docs/ux/calls.md` section 4.5.1): it shows a subset of this screen and
+ * draws a person exactly as their tile does, so it uses these rather than a
+ * second copy of each.
+ */
+export { LocalVideo, PhotoOrInitials, RemoteVideo, ScreenShareView, withShareTile, peerIdOfParticipant };
+export type { LayoutTile };

@@ -67,6 +67,7 @@ use crate::access::{
     registration_db_error, verify_header, HandlerError, MAX_ACCESS_EPOCH,
 };
 use crate::journal::{self, PublishResponse, Queue, PSEUDONYM_LEN};
+use crate::metrics::{self, CommitOutcome, ProofRefusal};
 use crate::ownership::{apply_register, is_heard, registration_at, standing_of, Registration};
 use crate::AppState;
 
@@ -159,7 +160,10 @@ pub(crate) async fn post_commit(
     let group_id = journal::decode_pseudonym(&group_hex)?;
     let wake = crate::wake::parse_wake_header(&headers)?;
     let request = parse_body(&body, &group_id)?;
-    request.statement.verify(now_ms()).map_err(|_| refused())?;
+    request
+        .statement
+        .verify(now_ms())
+        .map_err(|e| refused(ProofRefusal::of_statement(e)))?;
 
     let mut conn = state
         .db
@@ -180,15 +184,26 @@ pub(crate) async fn post_commit(
     tx.commit()
         .await
         .map_err(registration_db_error("commit the commit"))?;
-    match decision? {
-        Outcome::Appended(resp) => {
+    match decision {
+        Ok(Outcome::Appended(resp)) => {
+            metrics::commit(CommitOutcome::Appended);
+            metrics::appended(Queue::Group);
             state.notifiers.wake((Queue::Group, group_id));
             if let Some(wake) = wake {
                 state.waker.fire(&group_id, wake, resp.id);
             }
             Ok((StatusCode::CREATED, Json(resp)).into_response())
         },
-        Outcome::Resent(resp) => Ok((StatusCode::OK, Json(resp)).into_response()),
+        Ok(Outcome::Resent(resp)) => {
+            metrics::commit(CommitOutcome::Resent);
+            Ok((StatusCode::OK, Json(resp)).into_response())
+        },
+        Err(refusal) => {
+            if refusal.0 == StatusCode::CONFLICT {
+                metrics::commit(CommitOutcome::Conflict);
+            }
+            Err(refusal)
+        },
     }
 }
 
@@ -205,15 +220,17 @@ async fn decide_commit(
     let keys = group_keys_on(&mut *conn, group_id).await?;
     // Any retained epoch identifies the caller; the write tier is asked below,
     // after a re-send (which writes nothing) has been recognised.
-    let Ok(proof) = verify_header(headers, req_parts, |epoch| {
+    // `verify_header` counts its own refusal; it is passed on as it is.
+    let proof = match verify_header(headers, req_parts, |epoch| {
         keys.iter().find(|k| k.epoch == epoch).map(|k| k.key)
-    }) else {
-        return Ok(Err(refused()));
+    }) {
+        Ok(proof) => proof,
+        Err(refusal) => return Ok(Err(refusal)),
     };
     let signer = &request.statement.signer;
     let standing = standing_of(&mut *conn, group_id, signer).await?;
     if !is_heard(StatementKind::RegisterEpoch, standing) {
-        return Ok(Err(refused()));
+        return Ok(Err(refused(ProofRefusal::NotHeard)));
     }
     let row_hash = commit_row_hash(&request.row);
     if let Some(resp) = resend_of(&mut *conn, group_id, request, &row_hash).await? {
@@ -246,19 +263,19 @@ async fn decide_commit(
         .enumerate()
         .any(|(index, k)| k.epoch == proof.epoch && in_write_tier(index, k.epoch, floor));
     if !writable {
-        return Ok(Err(refused()));
+        return Ok(Err(refused(ProofRefusal::WrongEpoch)));
     }
     if !consume_nonce(&mut *conn, group_id, &proof.nonce)
         .await
         .map_err(registration_db_error("record commit proof nonce"))?
     {
-        return Ok(Err(refused()));
+        return Ok(Err(refused(ProofRefusal::Replay)));
     }
     if !consume_nonce(&mut *conn, group_id, &request.statement.nonce)
         .await
         .map_err(registration_db_error("record commit statement nonce"))?
     {
-        return Ok(Err(refused()));
+        return Ok(Err(refused(ProofRefusal::Replay)));
     }
     if proof.epoch.checked_add(1) != Some(request.epoch) {
         return Ok(Err(bad_request(
@@ -578,6 +595,7 @@ mod tests {
         let Some((app, pool)) = app().await else {
             return;
         };
+        let metrics = lakko_metrics::install("ds", env!("CARGO_PKG_VERSION")).unwrap();
         let (gid, root) = claimed(&app, 0x72).await;
         let (status, first) = post(
             &app,
@@ -622,6 +640,118 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(again["id"].as_u64(), Some(id));
         assert_eq!(rows(&pool, &gid).await.len(), 2);
+        assert!(
+            commit_series_present(&metrics, "resent"),
+            "{}",
+            metrics.render()
+        );
+    }
+
+    /// Whether the commit counter has a series for `outcome` (ADR-0096). The
+    /// recorder is shared by the whole test binary, so this checks presence.
+    fn commit_series_present(metrics: &lakko_metrics::Metrics, outcome: &str) -> bool {
+        let line = format!(r#"lakko_ds_commits_total{{outcome="{outcome}"}}"#);
+        metrics.render().lines().any(|l| l.starts_with(&line))
+    }
+
+    /// ADR-0090 S2: a PublisherGroup journal is claimed under a root every
+    /// owner device derives alike (`journal_root_seed` of the owner's account
+    /// seed), so the DS cannot tell two owner devices apart and takes one
+    /// commit per epoch: the first gets `201`, the second `409`, the first's
+    /// identical re-send `200`. A same-root reset (ADR-0090 decision A, the
+    /// re-founding) then drops the chain the old device holds: its signed
+    /// read under the old epoch key is refused.
+    #[tokio::test]
+    async fn two_owner_devices_get_one_commit_per_epoch_and_a_reset_drops_the_chain() {
+        let Some((app, pool)) = app().await else {
+            return;
+        };
+        let gid = fresh_name(0x7E);
+        let owner_account_seed = [0x5A; 32];
+        // Each device derives the root itself.
+        let device_a = StatementSigner::from_seed(&lakko_ds_proof::journal_root_seed(
+            &owner_account_seed,
+            &gid,
+        ));
+        let device_b = StatementSigner::from_seed(&lakko_ds_proof::journal_root_seed(
+            &owner_account_seed,
+            &gid,
+        ));
+        assert_eq!(device_a.public_key(), device_b.public_key());
+        assert_eq!(
+            claim(&app, &gid, &device_a, 1, &key(1)).await,
+            StatusCode::NO_CONTENT
+        );
+
+        let (status, first) = post(
+            &app,
+            &gid,
+            body_for(&gid, &device_a, 2, &key(2), &[], b"rotation by A"),
+            &key(1),
+            1,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, _) = post(
+            &app,
+            &gid,
+            body_for(&gid, &device_b, 2, &key(0x2B), &[], b"rotation by B"),
+            &key(1),
+            1,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "one commit per epoch");
+        let (status, again) = post(
+            &app,
+            &gid,
+            body_for(&gid, &device_a, 2, &key(2), &[], b"rotation by A"),
+            &key(1),
+            1,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "the identical re-send");
+        assert_eq!(again["id"], first["id"]);
+        assert_eq!(rows(&pool, &gid).await.len(), 1);
+
+        // The old chain reads.
+        let read = |proof_key: SigningKey, epoch: u64| {
+            let app = app.clone();
+            let uri = messages_uri("group", &gid);
+            async move {
+                send(
+                    &app,
+                    Req {
+                        method: "GET",
+                        uri: &uri,
+                        body: Vec::new(),
+                        proof: Some((&proof_key, epoch)),
+                    },
+                )
+                .await
+                .0
+            }
+        };
+        assert_eq!(read(key(2), 2).await, StatusCode::OK);
+
+        // Decision A: a restored device founds again and resets under the
+        // same root; the chain the old device holds is gone.
+        assert_eq!(
+            send_statement(
+                &app,
+                &gid,
+                &device_b,
+                lakko_ds_proof::StatementBody::Reset {
+                    epoch: 0,
+                    epoch_key: key(0x30).verifying_key().to_bytes(),
+                    registrars: None,
+                },
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(epochs(&pool, &gid).await, vec![0]);
+        assert_eq!(read(key(2), 2).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(read(key(0x30), 0).await, StatusCode::OK);
     }
 
     /// Decision 1: any other append at an existing epoch is 409, and leaves
@@ -631,6 +761,7 @@ mod tests {
         let Some((app, pool)) = app().await else {
             return;
         };
+        let metrics = lakko_metrics::install("ds", env!("CARGO_PKG_VERSION")).unwrap();
         let (gid, root) = claimed(&app, 0x73).await;
         let (status, _) = post(
             &app,
@@ -682,6 +813,13 @@ mod tests {
         assert_eq!(payloads.len(), 2);
         assert_eq!(payloads[0], b"winner".to_vec());
         assert!(!payloads.iter().any(|p| p == b"loser" || p == b"late row"));
+        for outcome in ["appended", "conflict"] {
+            assert!(
+                commit_series_present(&metrics, outcome),
+                "{outcome}: {}",
+                metrics.render()
+            );
+        }
     }
 
     /// Open question 2: a member, an admin and the root each commit through
@@ -862,6 +1000,7 @@ mod tests {
         let Some((app, pool)) = app().await else {
             return;
         };
+        let metrics = lakko_metrics::install("ds", env!("CARGO_PKG_VERSION")).unwrap();
         let (gid, root) = claimed(&app, 0x78).await;
         assert_eq!(
             epochs(&pool, &gid).await,
@@ -909,6 +1048,15 @@ mod tests {
             StatusCode::NO_CONTENT
         );
         assert_eq!(epochs(&pool, &gid).await, vec![1, 2]);
+        // ADR-0096: the refusal carries its code into the request metrics.
+        let text = metrics.render();
+        assert!(
+            text.lines()
+                .any(|l| l.starts_with("lakko_http_requests_total{")
+                    && l.contains(r#"route="/ds/group/{group_hex}/access""#)
+                    && l.contains(r#"code="append-needs-commit""#)),
+            "{text}"
+        );
     }
 
     /// The nonces are spent by an append: replaying the exact request is the
@@ -970,5 +1118,78 @@ mod tests {
         )
         .encode();
         assert_eq!(send_raw(other, header).await, StatusCode::UNAUTHORIZED);
+    }
+
+    /// ADR-0091: a signed read names the registered commit row of every
+    /// epoch above the one it was signed at, so a client can tell THE commit
+    /// from a commit-shaped row posted through the plain publish route.
+    #[tokio::test]
+    async fn a_signed_read_names_the_registered_commit_rows_above_its_epoch() {
+        let Some((app, _pool)) = app().await else {
+            return;
+        };
+        let (gid, root) = claimed(&app, 0x7e).await;
+        let body = body_for(&gid, &root, 2, &key(2), &[], b"commit 1->2");
+        let (status, json) = post(&app, &gid, body, &key(1), 1).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id2 = json["id"].as_u64().unwrap();
+        // A row through the plain publish route at the same epoch: never
+        // named.
+        let (status, json) = send(
+            &app,
+            Req {
+                method: "POST",
+                uri: &messages_uri("group", &gid),
+                body: b"garbage shaped like a commit".to_vec(),
+                proof: Some((&key(2), 2)),
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let garbage: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        let garbage_id = garbage["id"].as_u64().unwrap();
+        let body = body_for(&gid, &root, 3, &key(3), &[], b"commit 2->3");
+        let (status, json) = post(&app, &gid, body, &key(2), 2).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id3 = json["id"].as_u64().unwrap();
+        assert!(garbage_id > id2 && id3 > garbage_id);
+
+        let read = |signed_at: u64, after: u64| {
+            let app = app.clone();
+            async move {
+                let (status, body) = send(
+                    &app,
+                    Req {
+                        method: "GET",
+                        uri: &format!("{}?after={after}", messages_uri("group", &gid)),
+                        body: vec![],
+                        proof: Some((&key(u8::try_from(signed_at).unwrap()), signed_at)),
+                    },
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK);
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+            }
+        };
+        // Signed at 1: both commits, whatever the window.
+        let parsed = read(1, 0).await;
+        assert_eq!(parsed["latest_epoch"], 3);
+        assert_eq!(
+            parsed["commits"],
+            serde_json::json!([{ "epoch": 2, "id": id2 }, { "epoch": 3, "id": id3 }])
+        );
+        // The cursor past every row (a rolled-back snapshot): still named.
+        let parsed = read(1, id3).await;
+        assert_eq!(parsed["messages"].as_array().map(Vec::len), Some(0));
+        assert_eq!(parsed["commits"][0]["id"], id2);
+        // Signed at 2: only the commit leaving 2.
+        let parsed = read(2, 0).await;
+        assert_eq!(
+            parsed["commits"],
+            serde_json::json!([{ "epoch": 3, "id": id3 }])
+        );
+        // At the head: an empty list, present.
+        let parsed = read(3, 0).await;
+        assert_eq!(parsed["commits"], serde_json::json!([]));
     }
 }

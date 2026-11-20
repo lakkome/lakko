@@ -36,7 +36,7 @@ import {
   decodeStateBundle,
   encodeStateBundle,
   type CarriedPendingContact,
-  type StateBundleV3,
+  type StateBundle,
 } from "./state-bundle";
 
 beforeAll(async () => {
@@ -89,8 +89,8 @@ function pending(i: number, held = 0): CarriedPendingContact {
   };
 }
 
-const empty: StateBundleV3 = {
-  v: 3,
+const empty: StateBundle = {
+  v: 4,
   contacts: [],
   pins: [],
   knownGroupIdsB64: [GROUP_A],
@@ -98,6 +98,7 @@ const empty: StateBundleV3 = {
   groupNames: [],
   profiles: [],
   pendingContacts: [],
+  channelSeeds: [],
 };
 
 describe("state bundle v3 round trip", () => {

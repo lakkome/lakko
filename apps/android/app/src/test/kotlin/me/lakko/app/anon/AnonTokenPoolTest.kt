@@ -177,7 +177,7 @@ class AnonTokenPoolTest {
     private val lookupTarget = anonPoolTargetFor(AnonTokenContext.DISCOVERY_LOOKUP)
     private val push = AnonTokenContext.PUSH_REGISTER
 
-    // ------------------------------------------------------------ a suspended account (ADR-0089 section 4)
+    // ------------------------------------------------------------ a suspended account (ADR-0098 section 4)
 
     @Test
     fun aSuspendedAccountIsIssuedBlobReadOnlyAndTheRestIsNotAskedFor() = runTest {
@@ -937,5 +937,45 @@ class AnonTokenPoolTest {
             anonTokenFailureCopy(AnonTokenDisabled(AnonTokenContext.DS_KNOCK), ACTION_ALLOWANCE_USED_COPY),
         )
         assertNull(anonTokenFailureCopy(RuntimeException("x"), ACTION_ALLOWANCE_USED_COPY))
+    }
+
+    // ------------------------------------------------------------ reserve (Delete account)
+
+    @Test
+    fun reserveTakesWhatIsHeldThenIssuesTheRestBeyondTheHoldCap() = runTest {
+        val core = FakeCore()
+        val pool = pool(core, FakeApi(), { alice })
+        pool.bindSession()
+        settle()
+        val held = pool.held(push)
+        assertEquals(8, held)
+
+        val got = pool.reserve(push, 50)
+
+        assertEquals(50, got.size)
+        assertEquals(50, got.map { it.headerValue }.toSet().size)
+        assertEquals(0, pool.held(push))
+        // After the scheduled batch of 8: 42 issued in batches of at most 32.
+        assertEquals(listOf(8, 32, 10), core.issuesFor(push).map { it.third })
+    }
+
+    @Test
+    fun reserveStopsAtAUsedUpQuotaAndReturnsWhatItHas() = runTest {
+        val core = FakeCore()
+        val api = FakeApi()
+        val pool = pool(core, api, { alice })
+        pool.bindSession()
+        settle()
+        api.script(push, AnonIssueOutcome.QuotaExhausted(3_600))
+
+        val got = pool.reserve(push, 20)
+
+        assertEquals(8, got.size)
+    }
+
+    @Test
+    fun reserveWithNoSessionReturnsNothing() = runTest {
+        val pool = pool(FakeCore(), FakeApi(), { null })
+        assertTrue(pool.reserve(push, 5).isEmpty())
     }
 }

@@ -618,11 +618,12 @@ mod tests {
             username_certificate: None,
             grants: Vec::new(),
             avatar: None,
+            card_shareable: true,
         };
         for sibling in [
             wrap_call_welcome(&[0xAB; 256]),
             wrap_call_kp_forward(&[0xCD; 512]),
-            compose_media_state(true),
+            compose_media_state(true, true),
             compose_push_routing_secret(7, &[0x11; 32]),
             compose_committer_beacon(),
             compose_profile(&profile).unwrap(),

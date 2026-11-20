@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-segment-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Raw wasm exports of lakko-segment for the web client's background worker, ADR-0089"
+
+[lib]
+# cdylib: the `.wasm` the web client's background worker instantiates itself
+# (`apps/web/wasm/lakko_segment.wasm`, built by `npm run build:segment`).
+# rlib: so the host tests below can call the exports.
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+lakko-segment = { workspace = true, features = ["model"] }
+
+# `tract` reaches `getrandom` 0.4 through its dependencies. On
+# `wasm32-unknown-unknown` that crate needs a backend; this module supplies a
+# custom one that refuses (the segmentation model draws no random numbers),
+# so the module imports nothing. `scripts/build-segment-wasm.mjs` passes
+# `--cfg getrandom_backend="custom"`.
+[target.'cfg(target_family = "wasm")'.dependencies]
+getrandom = "0.4"

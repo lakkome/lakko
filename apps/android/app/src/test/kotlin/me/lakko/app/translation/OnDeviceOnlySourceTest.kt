@@ -77,15 +77,34 @@ class OnDeviceOnlySourceTest {
     }
 
     @Test
-    fun `the fallback engine is silent while anti-censorship is on`() {
-        val engine = sources.single { it.name == "MlKitTranslationEngine.kt" }
-        val code = codeLines(engine).joinToString("\n")
-        // Every entry point that could make ML Kit talk to Google checks the
-        // switch first.
-        for (entry in listOf("fun available()", "fun state(", "fun sources(", "fun download(")) {
-            val body = code.substringAfter(entry).substringBefore("override")
-            assertTrue(entry, "antiCensorshipArmed()" in body || "state(source, target)" in body)
+    fun `no source reaches the platform text classifier's language detection`() {
+        // ADR-0082 section 1: `TextClassifier` may run in an OEM process. The
+        // language of a message comes from the shared core (CoreLanguageDetector).
+        val bad = Regex("""TextClassificationManager|TextClassifier|(?<![A-Za-z])TextLanguage\b|\.detectLanguage\s*\(""")
+        assertEquals(emptyList<String>(), offenders { bad.containsMatchIn(it) })
+    }
+
+    @Test
+    fun `a pack is offered with anti-censorship on`() {
+        // ADR-0082 amendment of 2026-11-19: a pack download, and ML Kit's
+        // report of the languages, is ordinary platform traffic; nothing in
+        // translation decides on anti-censorship, so the pack dialog and the
+        // ML Kit fallback behave the same with it on. TranslationCenter needs
+        // the native core, which the host JVM does not load, so this reads
+        // the sources: no translation file consults the switch, and the pack
+        // dialog has a single shape whose confirm button downloads.
+        val translation = sources.filter { f ->
+            f.parentFile.name == "translation" &&
+                (f.parentFile.parentFile.name == "app" || f.parentFile.parentFile.name == "ui")
         }
+        assertTrue(translation.any { it.name == "TranslationCenter.kt" })
+        assertTrue(translation.any { it.name == "TranslationViews.kt" })
+        val consulting = translation.filter { f -> codeLines(f).any { "AntiCensorship" in it || "antiCensorship" in it } }
+        assertEquals(emptyList<String>(), consulting.map { it.name })
+        val views = codeLines(translation.single { it.name == "TranslationViews.kt" }).joinToString("\n")
+        val dialog = views.substringAfter("fun TranslationDialogs(").substringBefore("picker?.let")
+        assertTrue("onClick = TranslationCenter::acceptPack" in dialog)
+        assertTrue("blocked" !in dialog)
     }
 
     @Test

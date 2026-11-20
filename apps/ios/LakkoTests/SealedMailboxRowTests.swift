@@ -411,10 +411,14 @@ final class PendingPublisherRequestTests: XCTestCase {
 
     private func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
 
-    private func record(channel: String, group: String, joiner: Data, name: String = "Pixel Pub Walk") throws {
+    private func record(
+        channel: String, group: String, joiner: Data, name: String = "Pixel Pub Walk",
+        ownerKey: Data = Data(repeating: 0x0A, count: 32)
+    ) throws {
         try PendingPublisherRequests.record(
             PendingPublisherRequest(
                 channelIdHex: channel, groupIdHex: group, joinerKeyB64: base64Encode(joiner),
+                ownerAccountKeyB64: base64Encode(ownerKey),
                 name: name, description: "", requestedAtMs: 1),
             accountIdB64: account)
     }
@@ -439,26 +443,36 @@ final class PendingPublisherRequestTests: XCTestCase {
     }
 
     func testARawWelcomeInARendezvousRowLandsTheRecordedRequest() throws {
-        let owner = try Identity.fromSeed(seed: Data(repeating: 0x51, count: 32))
-        let joiner = try Identity.fromSeed(seed: Data(repeating: 0x52, count: 32))
+        // ADR-0090 — PublisherGroup leaves are bound DEVICE identities.
+        let ownerSeed = Data(repeating: 0x51, count: 32)
+        let owner = try Identity.fromSeedBound(
+            seed: Data(repeating: 0x61, count: 32), accountSeed: ownerSeed, issuedAtUnixSecs: 1_700_000_000)
+        let joinerAccount = try Identity.fromSeed(seed: Data(repeating: 0x52, count: 32))
+        let joiner = try Identity.fromSeedBound(
+            seed: Data(repeating: 0x62, count: 32), accountSeed: joinerAccount.ed25519Seed(),
+            issuedAtUnixSecs: 1_700_000_000)
         let channelId = Data(repeating: 0x07, count: 16)
-        let group = try PublisherGroup.create(identity: owner, channelId: channelId)
+        let group = try PublisherGroup.create(identity: owner, ownerAccountSeed: ownerSeed, channelId: channelId)
+        let ownerKey = try publisherOwnerAccountKey(ownerAccountSeed: ownerSeed)
         // The joiner knocks with a KeyPackage and records the request.
         let keyPackage = try joiner.createKeyPackage()
-        try record(channel: hex(channelId), group: hex(try group.groupId()), joiner: joiner.signaturePublicKey())
-        // The owner approves, any time later.
+        try record(
+            channel: hex(channelId), group: hex(try group.groupId()), joiner: joiner.signaturePublicKey(),
+            ownerKey: ownerKey)
+        // The owner approves, any time later: staged, merged once the DS took it.
         let request = try group.retainJoinRequest(identity: owner, keyPackage: keyPackage)
-        let welcome = try group.approveExternalJoin(identity: owner, proposalRef: request.joinerSignatureKey).welcome
+        let welcome = try group.stageApproveExternalJoin(identity: owner, proposalRef: request.joinerSignatureKey).welcome
+        XCTAssertTrue(try group.mergeStagedCommit(identity: owner))
 
         // Its Welcome reaches the joiner's mailbox as a rendezvous row whose
         // body is the raw Welcome.
         let target = try MailboxTarget.verified(
-            binding: signMailboxBinding(accountIdentity: joiner), accountKey: joiner.signaturePublicKey())
+            binding: signMailboxBinding(accountIdentity: joinerAccount), accountKey: joinerAccount.signaturePublicKey())
         let row = MailboxMessage(id: 40, payload: try target.seal(kind: .welcomeRendezvous, body: welcome), createdAt: "t")
         let result = ContactsClient.dispatch(
             rows: [row], after: 0, hasMore: false,
-            mailboxKey: MailboxKey.fromAccountIdentity(accountIdentity: joiner),
-            myX25519Secret: joiner.x25519SecretKey())
+            mailboxKey: MailboxKey.fromAccountIdentity(accountIdentity: joinerAccount),
+            myX25519Secret: joinerAccount.x25519SecretKey())
         guard case .publisherWelcome(_, let welcomeBytes) = result.events.first else {
             return XCTFail("expected a publisher welcome, got \(result.events)")
         }
@@ -468,11 +482,11 @@ final class PendingPublisherRequestTests: XCTestCase {
         var joinedGroups: [Data] = []
         let landed = try CoPublisherJoin.landPendingWelcome(
             welcomeBytes, accountIdB64: account, identity: joiner, state: state,
-            join: { identity, welcome, groupId, channelIdHex, _ in
+            join: { identity, welcome, groupId, channelIdHex, ownerKey, _ in
                 // The real join through the PublisherGroup entry point.
                 _ = try publisherGroupJoinFromWelcome(
                     identity: identity, welcome: welcome, groupId: groupId,
-                    channelId: CoPublisher.hexToData(channelIdHex) ?? Data())
+                    channelId: CoPublisher.hexToData(channelIdHex) ?? Data(), ownerAccountKey: ownerKey)
                 joinedGroups.append(groupId)
                 return self.keys
             },
@@ -508,7 +522,7 @@ final class PendingPublisherRequestTests: XCTestCase {
         var tried = false
         XCTAssertNil(try CoPublisherJoin.landPendingWelcome(
             Data([1]), accountIdB64: account, identity: joiner, state: ChannelsUiState(accountIdB64: account),
-            join: { _, _, _, _, _ in tried = true; return self.keys }, persist: {}))
+            join: { _, _, _, _, _, _ in tried = true; return self.keys }, persist: {}))
         XCTAssertFalse(tried)
     }
 
@@ -518,7 +532,7 @@ final class PendingPublisherRequestTests: XCTestCase {
         struct DiskFull: Error {}
         XCTAssertThrowsError(try CoPublisherJoin.landPendingWelcome(
             Data([1]), accountIdB64: account, identity: joiner, state: ChannelsUiState(accountIdB64: account),
-            join: { _, _, _, _, _ in self.keys }, persist: { throw DiskFull() }))
+            join: { _, _, _, _, _, _ in self.keys }, persist: { throw DiskFull() }))
         XCTAssertTrue(PendingPublisherRequests.isPending(channelIdHex: "dd", accountIdB64: account))
     }
 }

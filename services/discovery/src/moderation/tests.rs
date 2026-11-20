@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Tests of ADR-0089 step 5 at discovery: the internal statement route, its
+//! Tests of ADR-0098 step 5 at discovery: the internal statement route, its
 //! effect on the public routes, and the panel read.
 //!
 //! The pure checks run everywhere; the routes are gated on

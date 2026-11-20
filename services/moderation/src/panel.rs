@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The moderators' panel: a third listener (ADR-0089 step 5, UX
+//! The moderators' panel: a third listener (ADR-0098 step 5, UX
 //! `reporting-and-moderation.md` section 5).
 //!
 //! Bound to `LAKKO_MODERATION_PANEL_BIND` (default [`DEFAULT_PANEL_BIND`],

@@ -43,12 +43,13 @@
 import { createEffect, createMemo, createSignal, For, Index, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { useLocation, useNavigate } from "@solidjs/router";
 
+import { channelFlagsOf } from "../channels/channel-flags";
 import { useAuth } from "../auth/AuthContext";
 import { base64Encode, base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
 import { composeReadReceiptEnvelope } from "../chat/attachments";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
-import { ChatClient, HeldForSuccessor } from "../chat/client";
+import { ChatClient, HeldForSuccessor, isConversationBehind } from "../chat/client";
 import { readIsActive } from "../chat/membership-ended";
 import { conversationKindOf } from "../chat/conversation-kind";
 import { conversationTitle } from "../chat/conversation-title";
@@ -106,12 +107,19 @@ import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 import { Avatar } from "../ui/Avatar";
 import { conversationAvatarKeys } from "../chat/conversation-avatar";
 import { MediaAttachment } from "../media/MediaBubbles";
+import { MediaMosaic } from "../media/MediaMosaic";
 import { createMediaHub, mediaKey } from "../media/media-hub";
 import { ownAvatarLabel } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
 import { signalsWithheldFrom } from "../moderation/block-conversation";
 import { Icon } from "../ui/icons";
-import { composeForwardEnvelope, reencryptAttachmentRef, type AttachmentRefBytes } from "../chat/attachments";
+import {
+  composeContentEnvelope,
+  composeForwardEnvelope,
+  contentPartsOfForward,
+  reencryptAttachmentRef,
+  type AttachmentRefBytes,
+} from "../chat/attachments";
 import { appendToGroupSlot } from "../chat/background-log";
 import { attachmentRefFromPersisted, persistedFromAttachmentRef } from "../chat/persisted-attachment";
 import { persistedFromForwardRef } from "../chat/forward";
@@ -120,7 +128,7 @@ import type { ForwardPickerRow } from "../chat/forward-picker";
 import { MESSAGE_LOG_VERSION, updateMessageLog, type PersistedMessage } from "../chat/message-log-store";
 import { dsClockSkewNotice } from "../ds/access";
 import { sealedWakeForGroup } from "../push/group-routing";
-import { feedForwardPayload } from "../feed/feed-forward";
+import { feedForwardPayload, feedItemForwardable } from "../feed/feed-forward";
 import { feedIconName, PRESET_ICONS } from "../feed/feed-icons";
 import {
   dividerIndex,
@@ -147,6 +155,7 @@ import { readFeedSelection, writeFeedSelection } from "../feed/feed-selection-st
 import { screenAnchor } from "../ui/screen-anchor";
 import { durableSnapshotHook } from "../chat/persist-hooks";
 import { publicOrigin } from "../platform";
+import { MenuBackdrop } from "../ui/MenuBackdrop";
 
 /** Within this many pixels of the top, new items are shown at once;
  *  further down they wait behind the pill so the list does not move under
@@ -434,7 +443,8 @@ export default function Feed(): JSX.Element {
         idHex: c.id,
         slug: c.id,
         title: channelTitle(shared.get(c.id)?.name, c.localName, c.localHandle),
-        muted: flags[c.id]?.muted === true,
+        // The channel row's Mute (`channels/channel-flags.ts`).
+        muted: channelFlagsOf(flags, c.id).muted,
         audience: 0,
       }),
     );
@@ -694,7 +704,7 @@ export default function Feed(): JSX.Element {
     for (const [hex, upTo] of advanced) {
       const entry = chats.groups().find((g) => syncGroupIdHex(g.group.groupId) === hex);
       if (entry === undefined || readIsActive(entry.group) === false) continue;
-      // ADR-0089 section 6 - no read receipt to a blocked person.
+      // ADR-0098 section 6 - no read receipt to a blocked person.
       if (signalsWithheldFrom(entry.group, chats.identity())) continue;
       const secrets = auth.identitySecrets();
       if (secrets !== null && chats.identity() !== null) {
@@ -702,6 +712,8 @@ export default function Feed(): JSX.Element {
         void composeReadReceiptEnvelope(Number(upTo))
           .then((bytes) => receiptPublisher.broadcastControl(secrets, entry.group, bytes))
           .catch((err: unknown) => {
+            // ADR-0091: no read receipt while behind.
+            if (isConversationBehind(err)) return;
             // eslint-disable-next-line no-console
             console.warn("[feed] read receipt failed", err);
           });
@@ -945,7 +957,13 @@ export default function Feed(): JSX.Element {
     // share a blob (ADR-0052 decision 2); one at a time, as the chat does.
     const fresh: AttachmentRefBytes[] = [];
     for (const a of payload.attachments) fresh.push(await reencryptAttachmentRef(attachmentRefFromPersisted(a).ref));
-    const bytes = await composeForwardEnvelope(payload.text, fresh, payload.forward);
+    if (!feedItemForwardable(ref.message, (k) => profiles.cardShareableOf(k))) {
+      throw new KeyedError("chat.forward.error.generic");
+    }
+    const bytes =
+      payload.content === undefined
+        ? await composeForwardEnvelope(payload.text, fresh, payload.forward)
+        : await composeContentEnvelope(payload.content, fresh, contentPartsOfForward(payload.forward));
     let result: Awaited<ReturnType<typeof forwardClient.sendMessage>>;
     const openTarget = (): void => {
       setForwarding(null);
@@ -963,7 +981,13 @@ export default function Feed(): JSX.Element {
       if (err instanceof HeldForSuccessor) {
         heldSends.hold(
           lineageView.conversationHexOf(entry.group.groupId),
-          { text: payload.text, attached: fresh, reply: undefined, forward: payload.forward },
+          {
+            text: payload.text,
+            attached: fresh,
+            reply: undefined,
+            forward: payload.forward,
+            ...(payload.content === undefined ? {} : { content: payload.content }),
+          },
           Date.now(),
         );
         void persistHeldSends(accountId());
@@ -985,6 +1009,7 @@ export default function Feed(): JSX.Element {
         attachments: fresh.map((a) => persistedFromAttachmentRef(a)),
         createdAt: result.createdAt,
         forward: persistedFromForwardRef(payload.forward),
+        ...(payload.content === undefined ? {} : { content: payload.content }),
       };
       await updateMessageLog(account, deviceKey, (existing) => {
         const groups = existing?.groups ?? {};
@@ -1005,6 +1030,11 @@ export default function Feed(): JSX.Element {
     ref.message.attachments
       .map((a) => attachmentRefFromPersisted(a).ref)
       .filter((a) => mediaHub.decision(a).bubble !== "file");
+  /** A photo or video: drawn in the message's mosaic. */
+  const isMosaicRef = (a: AttachmentRefBytes): boolean => {
+    const b = mediaHub.decision(a).bubble;
+    return b === "photo" || b === "video";
+  };
 
   /** A one-line text for a place that draws no bubble: a reply, a preview. */
   const bodyOf = (ref: FeedCandidateRef): string =>
@@ -1109,10 +1139,10 @@ export default function Feed(): JSX.Element {
               aria-expanded={feedMenuOpen()}
               onClick={() => setFeedMenuOpen(!feedMenuOpen())}
             >
-              <Icon name="more" size={20} />
+              <Icon name="ellipsis-circle" size={24} />
             </button>
             <Show when={feedMenuOpen()}>
-              <div class="lk-menu-backdrop" onClick={() => setFeedMenuOpen(false)} />
+              <MenuBackdrop onClose={() => setFeedMenuOpen(false)} />
               <div class="lk-menu" role="menu" aria-label={t("feed.menu.a11y")}>
                 <button
                   type="button"
@@ -1123,7 +1153,7 @@ export default function Feed(): JSX.Element {
                     setEditing({ mode: "new" });
                   }}
                 >
-                  <Icon name="plus" size={16} />
+                  <Icon name="plus" size={20} />
                   {t("feed.new")}
                 </button>
                 <button
@@ -1134,7 +1164,7 @@ export default function Feed(): JSX.Element {
                     setHiddenOpen(true);
                   }}
                 >
-                  <Icon name="eyeOff" size={16} />
+                  <Icon name="eye-slash" size={20} />
                   {t("feed.hidden.title")}
                 </button>
               </div>
@@ -1151,7 +1181,7 @@ export default function Feed(): JSX.Element {
                 aria-selected={selection() === p.key}
                 onClick={() => choose(p.key)}
               >
-                <Icon name={PRESET_ICONS[p.key]} size={16} />
+                <Icon name={PRESET_ICONS[p.key]} size={20} />
                 {t(p.labelKey)}
               </button>
             )}
@@ -1163,7 +1193,7 @@ export default function Feed(): JSX.Element {
             aria-selected={selection() === "discover"}
             onClick={() => choose("discover")}
           >
-            <Icon name={PRESET_ICONS.discover} size={16} />
+            <Icon name={PRESET_ICONS.discover} size={20} />
             {t("feed.preset.discover")}
           </button>
           <For each={saved()}>
@@ -1175,7 +1205,7 @@ export default function Feed(): JSX.Element {
                 aria-selected={selection() === `custom:${v.id}`}
                 onClick={() => choose(`custom:${v.id}`)}
               >
-                <Icon name={feedIconName(v.draft.icon)} size={16} />
+                <Icon name={feedIconName(v.draft.icon)} size={20} />
                 {v.draft.name}
               </button>
             )}
@@ -1221,7 +1251,7 @@ export default function Feed(): JSX.Element {
 
       <Show when={selection() !== "discover" && feedRefreshFailed()}>
         <div class="lk-feed-banner" role="alert">
-          <Icon name="info" size={18} />
+          <Icon name="warning" size={20} />
           <span>{t("feed.refresh_failed")}</span>
           <button
             type="button"
@@ -1329,7 +1359,7 @@ export default function Feed(): JSX.Element {
                           openMenuAt(item.ref, r.right - 200, r.bottom + 4);
                         }}
                       >
-                        <Icon name="more" size={18} />
+                        <Icon name="ellipsis" size={20} />
                       </button>
                       <div class="lk-feed-source-avatar" aria-hidden="true">
                         <Avatar
@@ -1370,9 +1400,16 @@ export default function Feed(): JSX.Element {
                           </p>
                         </Show>
                       </button>
-                      <Show when={mediaRefsOf(item.ref).length > 0}>
+                      {/* docs/ux/media-messages.md section 11 — the photos and
+                          videos of one message as one mosaic. */}
+                      <Show when={mediaRefsOf(item.ref).filter((r) => isMosaicRef(r)).length > 0}>
                         <div class="lk-feed-media">
-                          <Index each={mediaRefsOf(item.ref)}>
+                          <MediaMosaic refs={mediaRefsOf(item.ref).filter((r) => isMosaicRef(r))} hub={mediaHub} />
+                        </div>
+                      </Show>
+                      <Show when={mediaRefsOf(item.ref).filter((r) => !isMosaicRef(r)).length > 0}>
+                        <div class="lk-feed-media">
+                          <Index each={mediaRefsOf(item.ref).filter((r) => !isMosaicRef(r))}>
                             {(ref) => (
                               <MediaAttachment
                                 attachment={ref()}
@@ -1513,7 +1550,7 @@ export default function Feed(): JSX.Element {
       <Show when={menu()}>
         {(m) => (
           <>
-            <div class="lk-menu-backdrop" onClick={() => setMenu(null)} />
+            <MenuBackdrop onClose={() => setMenu(null)} />
             <div
               class="lk-menu lk-menu-floating"
               role="menu"
@@ -1528,7 +1565,7 @@ export default function Feed(): JSX.Element {
                   open(m().ref);
                 }}
               >
-                <Icon name="chevron" size={16} />
+                <Icon name="arrow-up-right" size={20} />
                 {t("common.open")}
               </button>
               {/* A channel is one-way: its posts have no reply. A row of an
@@ -1543,7 +1580,7 @@ export default function Feed(): JSX.Element {
                     reply(m().ref);
                   }}
                 >
-                  <Icon name="reply" size={16} />
+                  <Icon name="reply" size={20} />
                   {t("chat.message.reply")}
                 </button>
               </Show>
@@ -1556,20 +1593,24 @@ export default function Feed(): JSX.Element {
                   copyText(m().ref);
                 }}
               >
-                <Icon name="copy" size={16} />
+                <Icon name="copy" size={20} />
                 {t("common.copy")}
               </button>
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  setMenu(null);
-                  setForwarding(m().ref);
-                }}
-              >
-                <Icon name="forward" size={16} />
-                {t("chat.message.forward")}
-              </button>
+              {/* UX `attachments.md` section 11a: never a poll or checklist,
+                  a contact card only while its person lets it be shared. */}
+              <Show when={feedItemForwardable(m().ref.message, (k) => profiles.cardShareableOf(k))}>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenu(null);
+                    setForwarding(m().ref);
+                  }}
+                >
+                  <Icon name="forward" size={20} />
+                  {t("chat.message.forward")}
+                </button>
+              </Show>
               <div class="lk-menu-sep" />
               <button
                 type="button"
@@ -1581,7 +1622,7 @@ export default function Feed(): JSX.Element {
                   void hideFromFeeds(id);
                 }}
               >
-                <Icon name="eyeOff" size={16} />
+                <Icon name="eye-slash" size={20} />
                 {t("feed.action.hide")}
               </button>
             </div>

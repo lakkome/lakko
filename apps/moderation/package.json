@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "license": "AGPL-3.0-or-later",
-  "description": "Lakko moderators' panel (ADR-0089 section 7). Uses the web client's stylesheet and wasm core; build apps/web's wasm first.",
+  "description": "Lakko moderators' panel (ADR-0098 section 7). Uses the web client's stylesheet and wasm core; build apps/web's wasm first.",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",

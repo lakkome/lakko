@@ -123,6 +123,8 @@ public enum AttachmentBridge {
             )
         } catch StorageClientError.limited {
             throw AttachmentBridgeError.uploadLimited
+        } catch StorageClientError.storageFull {
+            throw AttachmentBridgeError.storageFull
         } catch {
             throw AttachmentBridgeError.upload(error)
         }
@@ -527,6 +529,8 @@ public enum AttachmentBridgeError: Error {
     case uploadLimited
     /// ADR-0065 / UX 4.2 — the allowance for opening files is used up.
     case readLimited
+    /// UX storage-full — the server has no room for new files right now.
+    case storageFull
 }
 
 extension AttachmentBridgeError {
@@ -557,6 +561,8 @@ extension AttachmentBridgeError {
             return .key("chat.attachment.limit.send")
         case .readLimited:
             return .key("chat.attachment.limit.open")
+        case .storageFull:
+            return .key("chat.attachment.full.send")
         }
     }
 }
@@ -580,6 +586,8 @@ extension AttachmentBridgeError: LocalizedError {
             return "the upload allowance is used up"
         case .readLimited:
             return "the download allowance is used up"
+        case .storageFull:
+            return "the server has no room for new files"
         }
     }
 }

@@ -92,7 +92,8 @@ export type CallSignalingBodyKind =
   | "groupStart"
   | "groupJoin"
   | "groupLeave"
-  | "screenShare";
+  | "screenShare"
+  | "mediaState";
 
 /**
  * Leading wire tag of an embedded `CallSignalingPayload.body` oneof field
@@ -108,6 +109,8 @@ export type CallSignalingBodyKind =
  *   field 17 (screen_share) -> 0x8A 0x01 (tag 138; ADR-0083, a one-to-one
  *                              call's share state; missing here until
  *                              2026-10-29, so it rendered as a garbage bubble)
+ *   field 18 (media_state) -> 0x92 0x01 (tag 146; a one-to-one call's camera
+ *                              and microphone state, 2026-11-07)
  *
  * A chat envelope is JSON and starts with `{` (0x7B); every `lakko/...`
  * service envelope starts with `l` (0x6C). Neither overlaps this set.
@@ -140,6 +143,9 @@ export function callSignalingBodyKind(
   }
   if (first === 0x8a && bytes.length > 1 && bytes[1] === 0x01) {
     return "screenShare";
+  }
+  if (first === 0x92 && bytes.length > 1 && bytes[1] === 0x01) {
+    return "mediaState";
   }
   return null;
 }

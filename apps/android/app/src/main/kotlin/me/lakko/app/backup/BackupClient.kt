@@ -132,7 +132,9 @@ public class BackupClient(
      * `TAG ‖ head ‖ envelope` (ADR-0037 §5). Soft-fail: a mint / framing failure
      * (network, 5xx, no session token) falls back to the UNFRAMED legacy
      * envelope so a backup never fails because the head could not be minted —
-     * the mirror image of the restore-side fail-open on an absent head.
+     * the mirror image of the restore-side fail-open on an absent head. A `401`
+     * from auth ([BackupHeadSessionRefused]) is not such a failure: it stops
+     * the upload before the PUT.
      */
     private suspend fun frameWithHead(envelope: ByteArray): Pair<ByteArray, BackupFloor?> {
         val headClient = BackupHeadClient()
@@ -142,6 +144,13 @@ public class BackupClient(
             val blob = frameBackupBlob(minted.head, envelope)
             blob to BackupFloor(version = minted.version, envelopeHash = hash)
         } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            // Auth refused the session: nothing is written (a superseded or
+            // removed device must not overwrite the account's backup).
+            if (!headMintFailureAllowsLegacy(cause)) {
+                Log.w("lakko-backup", "backup-head mint refused the session; backup not written")
+                throw cause
+            }
             Log.w(
                 "lakko-backup",
                 "backup-head mint failed, writing legacy envelope",

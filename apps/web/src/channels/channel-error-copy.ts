@@ -19,6 +19,7 @@ export type ChannelErrorCode =
   | "setup-failed"
   | "photo-upload"
   | "photo-limit"
+  | "photo-full"
   | "link-invalid"
   | "link-damaged"
   | "not-publisher"
@@ -34,6 +35,7 @@ const CODES: ReadonlySet<string> = new Set<ChannelErrorCode>([
   "setup-failed",
   "photo-upload",
   "photo-limit",
+  "photo-full",
   "link-invalid",
   "link-damaged",
   "not-publisher",
@@ -54,7 +56,7 @@ export type ChannelErrorPlace = "handle" | "photo" | "form";
 
 export function channelErrorPlace(code: ChannelErrorCode | null): ChannelErrorPlace {
   if (code === "handle-held" || code === "handle-malformed") return "handle";
-  if (code === "photo-upload" || code === "photo-limit") return "photo";
+  if (code === "photo-upload" || code === "photo-limit" || code === "photo-full") return "photo";
   return "form";
 }
 
@@ -78,6 +80,8 @@ export function channelErrorText(err: unknown, failed: () => string): string {
       return t("group_photo.error.upload");
     case "photo-limit":
       return t("group_photo.error.limit");
+    case "photo-full":
+      return t("group_photo.error.full");
     case "link-invalid":
       return t("invite.link.invalid");
     case "link-damaged":

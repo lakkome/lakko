@@ -32,7 +32,10 @@ export type MailboxRowKind =
   | "welcome-rendezvous"
   /** ADR-0079 amendment of 2026-10-19: the inviter refused a request whose
    *  invite link no longer counts. */
-  | "link-refusal";
+  | "link-refusal"
+  /** ADR-0091 section 3, route 2: the other person of a one-to-one asks to
+   *  be brought back into it. */
+  | "conversation-reentry";
 
 /** Where one write goes: the person's verified mailbox key and its address. */
 export interface MailboxTarget {
@@ -50,6 +53,7 @@ export interface MailboxRowWasm {
     readonly ContactAck: WasmMailboxKind | number;
     readonly WelcomeRendezvous: WasmMailboxKind | number;
     readonly LinkRefusal: WasmMailboxKind | number;
+    readonly ConversationReentry: WasmMailboxKind | number;
   };
   sealMailboxRow(mailboxPk: Uint8Array, kind: WasmMailboxKind, body: Uint8Array): Uint8Array;
   openMailboxRow(key: MailboxKey, row: Uint8Array): {
@@ -72,6 +76,8 @@ export function wasmKindOf(wasm: MailboxRowWasm, kind: MailboxRowKind): WasmMail
       return wasm.MailboxKind.WelcomeRendezvous as WasmMailboxKind;
     case "link-refusal":
       return wasm.MailboxKind.LinkRefusal as WasmMailboxKind;
+    case "conversation-reentry":
+      return wasm.MailboxKind.ConversationReentry as WasmMailboxKind;
   }
 }
 
@@ -81,6 +87,7 @@ function nameOf(wasm: MailboxRowWasm, kind: number): MailboxRowKind | null {
   if (kind === wasm.MailboxKind.ContactAck) return "contact-ack";
   if (kind === wasm.MailboxKind.WelcomeRendezvous) return "welcome-rendezvous";
   if (kind === wasm.MailboxKind.LinkRefusal) return "link-refusal";
+  if (kind === wasm.MailboxKind.ConversationReentry) return "conversation-reentry";
   return null;
 }
 

@@ -198,7 +198,8 @@ final class UsernameDirectoryTests: XCTestCase {
             persistence: persistence,
             nowMs: { 1_000_000 },
             accountDirectory: directory,
-            restoreDirectory: OfflineRestoreDirectory()
+            restoreDirectory: OfflineRestoreDirectory(),
+            earlierKeysInputs: skipEarlierKeysGate
         )
     }
 
@@ -289,6 +290,29 @@ final class UsernameDirectoryTests: XCTestCase {
         }
         XCTAssertEqual(directory.calls, [.bind(handle: handle("alice"), sessionToken: "tok-signup")],
                        "discovery is never asked and nothing is released")
+    }
+
+    /// `docs/ux/beta-account-cap.md` — `403 registration-closed` stops the
+    /// claim before discovery: no name is left in the directory.
+    func testRegistrationClosedStopsBeforeDiscovery() async {
+        let directory = FakeDirectory()
+        let binder = FakeBinder(log: directory)
+        binder.bindError = AuthClientError.http(
+            status: 403, endpoint: "/auth/login-handle", body: #"{"error":"registration-closed"}"#)
+        do {
+            _ = try await claimSignupUsername(
+                accountId: randomAccountId(),
+                username: "alice",
+                sessionToken: "tok-signup",
+                directory: directory,
+                binder: binder
+            )
+            XCTFail("a refused bind must not claim")
+        } catch is RegistrationClosed {
+        } catch {
+            XCTFail("expected RegistrationClosed, got \(error)")
+        }
+        XCTAssertEqual(directory.calls, [.bind(handle: handle("alice"), sessionToken: "tok-signup")])
     }
 
     func testTheHandleBindLimitCopy() {

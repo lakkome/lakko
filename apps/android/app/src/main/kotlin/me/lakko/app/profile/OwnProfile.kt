@@ -45,7 +45,40 @@ public data class OwnProfile(
      * and the photo as one.
      */
     val avatar: AvatarRefs? = null,
+    /**
+     * ADR-0092 section 7 — whether others may share this person's contact
+     * card (profile v5 flags bit 0). `false` exactly while this account's
+     * "who can find me" setting is `Nobody` ([cardShareableUnder]); kept here
+     * rather than read at compose time so a change moves [updatedAtMs]
+     * ([withCardShareable]): a receiver keeps only a strictly newer profile,
+     * so a flag sent at the old stamp would never arrive.
+     */
+    val cardShareable: Boolean = true,
 )
+
+/** ADR-0092 section 7 — the card-sharing flag a profile carries under the
+ *  "who can find me" [setting]: off exactly for `Nobody`. No setting (before
+ *  a session binds) reads as shareable. */
+public fun cardShareableUnder(setting: uniffi.lakko_ffi_uniffi.FfiVisibilitySetting?): Boolean =
+    cardShareableForMode(setting?.mode)
+
+/** [cardShareableUnder] by the setting's mode alone. */
+public fun cardShareableForMode(mode: uniffi.lakko_ffi_uniffi.FfiVisibilityMode?): Boolean =
+    mode != uniffi.lakko_ffi_uniffi.FfiVisibilityMode.NOBODY
+
+/**
+ * The own profile once it carries [shareable], or `null` when it already does
+ * or none is stored (nothing to save or republish). The change moves
+ * [OwnProfile.updatedAtMs] strictly forward so every receiver takes it; the
+ * name's stamp stays (the name did not change).
+ */
+public fun withCardShareable(current: OwnProfile?, shareable: Boolean, nowMs: Long): OwnProfile? {
+    if (current == null || current.cardShareable == shareable) return null
+    return current.copy(
+        cardShareable = shareable,
+        updatedAtMs = nextProfileStamp(maxOf(current.updatedAtMs, current.nameUpdatedAtMs), nowMs),
+    )
+}
 
 /**
  * The stamp for a profile changed at [nowMs] after one stamped [previousMs].
@@ -117,6 +150,7 @@ public fun applyOwnProfileChange(
         updatedAtMs = stamp,
         nameUpdatedAtMs = if (contentChanged) stamp else current?.nameUpdatedAtMs ?: 0L,
         avatar = newAvatar,
+        cardShareable = current?.cardShareable ?: true,
     )
 }
 
@@ -153,6 +187,7 @@ public fun OwnProfile.toFfi(
         usernameCertificate = usernameCertificate?.takeIf { stated != null && it.size == USERNAME_CERTIFICATE_BYTES },
         grants = grants,
         avatar = avatar?.toFfi(),
+        cardShareable = cardShareable,
     )
 }
 
@@ -181,6 +216,8 @@ public object OwnProfileStore {
         /** ADR-0084 — sealed under the device's avatar key (the refs carry
          *  the AEAD keys); absent before the profile photo. */
         val avatarSealed: String? = null,
+        /** ADR-0092 section 7; absent before it, read as shareable. */
+        val cardShareable: Boolean? = null,
     )
 
     private fun key(accountId: ByteArray): String =
@@ -197,6 +234,7 @@ public object OwnProfileStore {
                 updatedAtMs = s.updatedAtMs,
                 nameUpdatedAtMs = s.nameUpdatedAtMs ?: if (s.displayName != null) s.updatedAtMs else 0L,
                 avatar = me.lakko.app.avatar.openAvatarRefs(me.lakko.app.avatar.KeystoreAvatarSeal, s.avatarSealed),
+                cardShareable = s.cardShareable ?: true,
             )
         } catch (_: Exception) {
             null
@@ -209,7 +247,8 @@ public object OwnProfileStore {
         // the row; nothing writes it back).
         me.lakko.app.account.AccountStoreGate.write(me.lakko.app.auth.base64Encode(accountId)) {
             val stored = Stored(profile.displayName, profile.username, profile.updatedAtMs, profile.nameUpdatedAtMs,
-                me.lakko.app.avatar.sealAvatarRefs(me.lakko.app.avatar.KeystoreAvatarSeal, profile.avatar))
+                me.lakko.app.avatar.sealAvatarRefs(me.lakko.app.avatar.KeystoreAvatarSeal, profile.avatar),
+                profile.cardShareable)
             prefs(context).edit().putString(key(accountId), json.encodeToString(stored)).apply()
             mutableRevision.update { it + 1 }
         }
@@ -257,6 +296,19 @@ public object OwnProfileStore {
         save(context, accountId, updated)
         return updated to true
     }
+
+    /**
+     * ADR-0092 section 7 — make the stored profile's card-sharing flag follow
+     * the "who can find me" [setting] (a local change or one adopted from
+     * another device). Returns whether it changed, so the caller republishes
+     * the profile everywhere it goes.
+     */
+    public fun reconcileCardShareable(
+        context: Context,
+        accountId: ByteArray,
+        setting: uniffi.lakko_ffi_uniffi.FfiVisibilitySetting,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Boolean = update(context, accountId) { withCardShareable(it, cardShareableUnder(setting), nowMs) }
 
     private fun prefs(context: Context) =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

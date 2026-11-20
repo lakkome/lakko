@@ -35,6 +35,9 @@ export const paths = {
   recover: "/recover",
   /** Authenticated home / inbox. */
   home: "/",
+  /** docs/ux/donations.md: the ways to donate. Public; the address the
+   *  previous app used, so old links keep working. */
+  donations: "/donations",
   /** ADR-0065 — the account's saved messages. */
   saved: "/saved",
   /** Group conversations — the second primary destination. */
@@ -80,7 +83,8 @@ export const paths = {
       | "account"
       | "recovery"
       | "translation"
-      | "text-size",
+      | "text-size"
+      | "supporters",
   ): string {
     return `/settings/${section}`;
   },

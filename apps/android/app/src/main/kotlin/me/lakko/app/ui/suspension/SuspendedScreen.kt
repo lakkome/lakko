@@ -15,9 +15,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Block
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -67,7 +64,7 @@ import me.lakko.app.ui.auth.BusyButton
 import me.lakko.app.ui.auth.Lead
 
 /**
- * ADR-0089 section 4 (UX `docs/ux/reporting-and-moderation.md` section 4) -
+ * ADR-0098 section 4 (UX `docs/ux/reporting-and-moderation.md` section 4) -
  * the one screen that tells a suspended person why: the reason, the end
  * date or that there is none, what still works, and [Appeal] [Read my
  * chats] [Sign out]. Drawn by the app root in place of the app until "Read
@@ -279,16 +276,17 @@ public fun SuspendedListRow(onOpen: () -> Unit, modifier: Modifier = Modifier) {
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
-            Icon(Icons.Filled.Block, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+            me.lakko.app.ui.components.LkIcon(me.lakko.app.R.drawable.ic_lk_nosign, contentDescription = null, size = me.lakko.app.ui.components.LkIconSize.Row, tint = MaterialTheme.colorScheme.error)
             Spacer(Modifier.width(12.dp))
             Text(
                 t("suspended.self.title"),
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.weight(1f),
             )
-            Icon(
-                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            me.lakko.app.ui.components.LkIcon(
+                me.lakko.app.R.drawable.ic_lk_chevron_forward,
                 contentDescription = null,
+                size = me.lakko.app.ui.components.LkIconSize.Row,
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }

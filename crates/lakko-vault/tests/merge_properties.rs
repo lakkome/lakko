@@ -44,6 +44,7 @@ fn row() -> impl Strategy<Value = VaultMessage> {
                     .collect(),
                 call: None,
                 unsupported_version: None,
+                content: None,
             },
         )
 }

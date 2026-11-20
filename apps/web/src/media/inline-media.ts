@@ -115,6 +115,30 @@ export function soleMediaBubble(
 }
 
 /**
+ * `docs/ux/media-messages.md` section 11 — a message that is nothing but
+ * photos and videos (one or several, no text, nothing else attached): its
+ * mosaic fills the bubble and the time goes on the mosaic in a pill, as for
+ * one photo.
+ */
+export function onlyVisualMedia(
+  args: {
+    readonly deleted: boolean;
+    readonly text: string;
+    readonly attachments: ReadonlyArray<{
+      readonly kind?: string | undefined;
+      readonly mime?: string | undefined;
+    }>;
+  },
+  allowlist: WasmInlineMediaType,
+): boolean {
+  if (args.deleted || args.text.length > 0 || args.attachments.length === 0) return false;
+  return args.attachments.every((a) => {
+    const b = renderDecision(a, allowlist).bubble;
+    return b === "photo" || b === "video";
+  });
+}
+
+/**
  * Where a message's meta line — the time, the edited marker, the delivery
  * ticks — is drawn.
  *

@@ -31,6 +31,9 @@ public enum CallControl: String, CaseIterable, Identifiable, Sendable {
     /// (`docs/ux/calls.md` section 4.1, `docs/ux/call-links.md` section 3).
     /// Never present in a 1x1 call.
     case participants
+    /// The group call's own chat (`docs/ux/calls.md` section 4.1.4): opens
+    /// and closes its panel. Never present in a 1x1 call.
+    case chat
     /// Which microphone, camera and speaker the call uses: opens the call's
     /// own settings sheet.
     case settings
@@ -47,6 +50,7 @@ public enum CallControl: String, CaseIterable, Identifiable, Sendable {
         case .microphone: return Localization.text("call.control.mute")
         case .camera: return Localization.text("call.control.camera")
         case .participants: return Localization.text("call.control.participants")
+        case .chat: return Localization.text("call.control.chat")
         case .settings: return Localization.text("call.control.settings")
         case .end: return Localization.text("call.control.end")
         }
@@ -362,9 +366,11 @@ public enum CallScreenPresentation {
     /// one-to-one voice call starts on the earpiece as before. Moving the
     /// sound by hand is one of the three choices behind `Settings`.
     ///
-    /// **The chat, the old settings panel and the overflow button that held
-    /// them are gone**: the chat sent nothing anywhere, and a control that
-    /// does nothing is worse than none (removed 2026-10-02).
+    /// **The old settings panel and the overflow button are gone** (removed
+    /// 2026-10-02). The chat of that first screen sent nothing anywhere and
+    /// went with them; a group call has a real chat again since 2026-11-07
+    /// (section 4.1.4): `Chat` follows `Participants`, from the first second,
+    /// alone in the call too.
     ///
     /// `Participants` is there only where it leads somewhere
     /// (``participantsPress(canInvite:hasOthers:)``): on a call that can hand
@@ -375,13 +381,19 @@ public enum CallScreenPresentation {
     /// - Parameters:
     ///   - canInvite: this call has a link to offer.
     ///   - hasOthers: at least one other person is in the call.
+    ///   - chat: this call carries a chat (a group or link call through the
+    ///     SFU, ``CallChatModel/available``).
     public static func controls(
-        layout: CallScreenLayout, canInvite: Bool = false, hasOthers: Bool = false
+        layout: CallScreenLayout, canInvite: Bool = false, hasOthers: Bool = false,
+        chat: Bool = false
     ) -> [CallControl] {
         var row: [CallControl] = [.microphone, .camera]
         if layout == .gallery,
            participantsPress(canInvite: canInvite, hasOthers: hasOthers) != .nothing {
             row.append(.participants)
+        }
+        if layout == .gallery, chat {
+            row.append(.chat)
         }
         row.append(.settings)
         row.append(.end)
@@ -469,7 +481,7 @@ public enum CallScreenPresentation {
     /// cannot be heard wants it before anyone answers.
     public static func isEnabled(_ control: CallControl, phase: CallUiState.CallPhase) -> Bool {
         if control == .end { return true }
-        if control == .participants || control == .settings {
+        if control == .participants || control == .chat || control == .settings {
             if case .ended = phase { return false }
             return true
         }
@@ -493,7 +505,7 @@ public enum CallScreenPresentation {
         switch control {
         case .microphone, .camera:
             return on ? .outline : .solid
-        case .participants, .settings, .end:
+        case .participants, .chat, .settings, .end:
             return .outline
         }
     }
@@ -654,6 +666,10 @@ public enum CallStatusText {
             // named by ``spokenParticipantsLabel(press:listOpen:)``.
             return Localization.text(
                 on ? "call.control.participants_hide_a11y" : "call.control.participants_show_a11y")
+        case .chat:
+            // `on` is "the panel is open"; the unread count joins the name in
+            // ``CallChatModel/spokenCircleLabel(open:unread:)``.
+            return Localization.text(on ? "call.control.chat_hide_a11y" : "call.control.chat_show_a11y")
         case .settings:
             return Localization.text("call.settings.title")
         case .end:

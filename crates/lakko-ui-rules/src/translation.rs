@@ -14,14 +14,18 @@
 //! Nothing here sees message text. A client runs its own language detector and
 //! hands over the tag it produced and how sure it was; this module compares
 //! tags. That keeps the rule free of any platform and keeps the text where it
-//! is.
+//! is. A client with no usable platform detector (Android; the web without the
+//! browser's model) gets its tag and confidence from
+//! [`crate::language_detect::detect_text_language`], which reads the text on
+//! the device and answers on the same confidence scale.
 
 /// Detections below this confidence, in thousandths, are treated as guesses.
 ///
-/// Chosen, not measured: the detectors the clients use (NaturalLanguage, ML Kit
-/// Language Identification, the browser `LanguageDetector`) each report a
-/// probability, and a short message ("ok", "lol") comes back from all of them
-/// below this. Revisit with data from real conversations.
+/// Chosen, not measured: the detectors the clients use (NaturalLanguage, the
+/// browser `LanguageDetector`) each report a probability, and a short message
+/// ("ok", "lol") comes back from all of them below this. The core detector of
+/// [`crate::language_detect`] is mapped onto this scale by a measurement (see
+/// its module doc). Revisit with data from real conversations.
 pub const DETECTION_CONFIDENT_PERMILLE: u16 = 700;
 
 /// How many of the newest incoming messages the conversation bar looks at.

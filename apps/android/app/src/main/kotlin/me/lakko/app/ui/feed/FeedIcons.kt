@@ -11,27 +11,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Bolt
-import androidx.compose.material.icons.filled.Book
-import androidx.compose.material.icons.filled.ChatBubble
-import androidx.compose.material.icons.filled.Code
-import androidx.compose.material.icons.filled.DynamicFeed
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.Flag
-import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.PhotoCamera
-import androidx.compose.material.icons.filled.Public
-import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
@@ -40,32 +25,37 @@ import androidx.compose.ui.unit.dp
 import me.lakko.app.feed.FeedIcon
 import me.lakko.app.feed.FeedPresetKey
 import me.lakko.app.l10n.t
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
 
-/** The Material symbol for each of the twelve feed icons (UX spec section 4.1). */
-internal fun FeedIcon.vector(): ImageVector = when (this) {
-    FeedIcon.FEED -> Icons.Filled.DynamicFeed
-    FeedIcon.STAR -> Icons.Filled.Star
-    FeedIcon.HEART -> Icons.Filled.Favorite
-    FeedIcon.LIGHTNING -> Icons.Filled.Bolt
-    FeedIcon.BOOK -> Icons.Filled.Book
-    FeedIcon.CODE -> Icons.Filled.Code
-    FeedIcon.MUSIC -> Icons.Filled.MusicNote
-    FeedIcon.CAMERA -> Icons.Filled.PhotoCamera
-    FeedIcon.GLOBE -> Icons.Filled.Public
-    FeedIcon.SPEECH_BUBBLE -> Icons.Filled.ChatBubble
-    FeedIcon.BELL -> Icons.Filled.Notifications
-    FeedIcon.FLAG -> Icons.Filled.Flag
+/** The Lakko icon for each of the twelve feed icons (UX spec section 4.1). */
+@androidx.annotation.DrawableRes
+internal fun FeedIcon.drawable(): Int = when (this) {
+    FeedIcon.FEED -> R.drawable.ic_lk_feed
+    FeedIcon.STAR -> R.drawable.ic_lk_star
+    FeedIcon.HEART -> R.drawable.ic_lk_heart
+    FeedIcon.LIGHTNING -> R.drawable.ic_lk_bolt
+    FeedIcon.BOOK -> R.drawable.ic_lk_book
+    FeedIcon.CODE -> R.drawable.ic_lk_code
+    FeedIcon.MUSIC -> R.drawable.ic_lk_music_note
+    FeedIcon.CAMERA -> R.drawable.ic_lk_camera
+    FeedIcon.GLOBE -> R.drawable.ic_lk_globe
+    FeedIcon.SPEECH_BUBBLE -> R.drawable.ic_lk_chat
+    FeedIcon.BELL -> R.drawable.ic_lk_bell
+    FeedIcon.FLAG -> R.drawable.ic_lk_flag
 }
 
 /** The presets' fixed icons, not editable. */
-internal fun FeedPresetKey.vector(): ImageVector = when (this) {
-    FeedPresetKey.LATEST -> FeedIcon.FEED.vector()
-    FeedPresetKey.POPULAR -> FeedIcon.LIGHTNING.vector()
-    FeedPresetKey.FOR_ME -> Icons.Filled.Person
+@androidx.annotation.DrawableRes
+internal fun FeedPresetKey.drawable(): Int = when (this) {
+    FeedPresetKey.LATEST -> FeedIcon.FEED.drawable()
+    FeedPresetKey.POPULAR -> FeedIcon.LIGHTNING.drawable()
+    FeedPresetKey.FOR_ME -> R.drawable.ic_lk_person
 }
 
 /** Discover's fixed icon: the globe. */
-internal val DiscoverIcon: ImageVector = FeedIcon.GLOBE.vector()
+@androidx.annotation.DrawableRes
+internal val DiscoverIcon: Int = FeedIcon.GLOBE.drawable()
 
 /** The editor's icon grid: twelve choices under the name, two rows of six. */
 @Composable
@@ -97,8 +87,8 @@ internal fun FeedIconPicker(selected: UByte, onSelect: (UByte) -> Unit, modifier
                                 this.selected = isSelected
                             },
                     ) {
-                        Icon(
-                            icon.vector(),
+                        LkIcon(
+                            icon.drawable(),
                             contentDescription = null,
                             tint = if (isSelected) {
                                 MaterialTheme.colorScheme.primary

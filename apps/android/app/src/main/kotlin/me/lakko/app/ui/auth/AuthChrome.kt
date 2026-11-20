@@ -18,11 +18,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -54,6 +49,8 @@ import me.lakko.app.R
 import me.lakko.app.l10n.UiText
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * Shared chrome for the signed-out screens (docs/ux/client-redesign.md
@@ -80,7 +77,7 @@ public fun AuthScaffold(
                 navigationIcon = {
                     if (onBack != null) {
                         IconButton(onClick = onBack) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                            LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                         }
                     }
                 },
@@ -138,9 +135,10 @@ public fun PasswordField(
         supportingText = supportingText?.let { { Text(it) } },
         trailingIcon = {
             IconButton(onClick = { visible = !visible }) {
-                Icon(
-                    if (visible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                LkIcon(
+                    if (visible) R.drawable.ic_lk_eye_slash else R.drawable.ic_lk_eye,
                     contentDescription = if (visible) t("auth.password.hide") else t("auth.password.show"),
+                    size = LkIconSize.Row,
                 )
             }
         },
@@ -247,7 +245,7 @@ public fun PasswordExplainerSheet(onDismiss: () -> Unit) {
 /** A tappable method row: icon, title, one-line subtitle (the Recover list). */
 @Composable
 public fun MethodRow(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    @androidx.annotation.DrawableRes icon: Int,
     title: String,
     subtitle: String,
     onClick: () -> Unit,
@@ -257,13 +255,14 @@ public fun MethodRow(
         headlineContent = { Text(title) },
         supportingContent = { Text(subtitle) },
         leadingContent = {
-            Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            LkIcon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary, size = LkIconSize.Row)
         },
         trailingContent = {
-            Icon(
-                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            LkIcon(
+                R.drawable.ic_lk_chevron_forward,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                size = LkIconSize.Mark,
             )
         },
         colors = androidx.compose.material3.ListItemDefaults.colors(

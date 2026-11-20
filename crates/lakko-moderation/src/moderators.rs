@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The moderator list ([ADR-0089] section 3), signed by the offline root.
+//! The moderator list ([ADR-0098] section 3), signed by the offline root.
 //!
 //! ```text
 //! list  = DOMAIN ‖ version(1) ‖ list_version(8) ‖ issued_at_ms(8)
@@ -21,7 +21,7 @@
 //! A list is monotone by `list_version`: whoever pins the root refuses a
 //! lower version than one it accepted. That rule is the caller's.
 //!
-//! [ADR-0089]: ../../../docs/adr/0089-reporting-and-moderation.md
+//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
 
 use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey, SIGNATURE_LEN};
 

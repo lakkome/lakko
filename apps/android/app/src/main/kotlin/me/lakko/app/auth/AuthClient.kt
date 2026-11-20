@@ -135,6 +135,22 @@ public class AuthClient(
     public suspend fun powChallenge(): PowChallengeResponse =
         postNoBody("/pow/challenge")
 
+    /**
+     * `GET /signup/open` (anonymous, `docs/ux/beta-account-cap.md`): whether
+     * the beta has room for one more account. Asked before the sign-up proof
+     * of work. Any failure (no connection, a non-2xx, an older server's
+     * `404`, a body that does not parse) answers `true`: the form is shown
+     * and the login-handle bind decides.
+     */
+    public suspend fun signupOpen(): Boolean =
+        try {
+            doRequest<SignupOpenResponse>(HttpMethod.Get, SIGNUP_OPEN_PATH) {}.open
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            true
+        }
+
     /** `POST /signup/start`. */
     public suspend fun signupStart(req: SignupStartRequest): SignupStartResponse =
         post("/signup/start", req)
@@ -878,7 +894,7 @@ public class AuthClient(
     }
 
     // -----------------------------------------------------------------
-    // ADR-0089 section 4 - a suspended account (the `s1` restricted session)
+    // ADR-0098 section 4 - a suspended account (the `s1` restricted session)
     // -----------------------------------------------------------------
 
     /** `GET /account/suspension` with [bearer] (the `s1`, or an access token). */
@@ -1005,7 +1021,7 @@ public class AuthClient(
         freshGrant: String,
         seed: ByteArray,
         newSignaturePubkey: ByteArray,
-        /** ADR-0089 F3: `signIdentityProof` by the NEW key over the account id. */
+        /** ADR-0098 F3: `signIdentityProof` by the NEW key over the account id. */
         identityProof: ByteArray,
     ): KeyResetResult {
         requireSession(sessionToken)
@@ -1124,7 +1140,7 @@ public class AuthClient(
         newPassword: ByteArray,
         newSeed: ByteArray,
         newSignaturePubkey: ByteArray,
-        /** ADR-0089 F3: `signIdentityProof` by the NEW key over [accountId]. */
+        /** ADR-0098 F3: `signIdentityProof` by the NEW key over [accountId]. */
         identityProof: ByteArray,
         deviceId: ByteArray? = null,
         /** ADR-0075 section 8: the 64-byte seed of the OLD recovery phrase.
@@ -1346,7 +1362,7 @@ public class AuthClient(
         newSignaturePubkey: ByteArray,
         supersessionProof: ByteArray,
         revokeDeviceIds: List<ByteArray>,
-        /** ADR-0089 F3: `signIdentityProof` by the NEW key over the account id. */
+        /** ADR-0098 F3: `signIdentityProof` by the NEW key over the account id. */
         identityProof: ByteArray,
         /** ADR-0075 section 3: this rotation is "Save a recovery phrase". */
         phraseSaved: Boolean = false,
@@ -1793,20 +1809,6 @@ public class AuthClient(
         return resp.sealed_entropy_b64?.let { base64Decode(it) }
     }
 
-    /** `DELETE /vault/passkey`: drop the blob stored for a passkey ("Stop
-     *  restoring keys"). [credentialIdB64] is base64url without padding, as
-     *  the credential list gives it. Returns whether a blob was deleted. */
-    public suspend fun passkeyVaultDelete(sessionToken: String, credentialIdB64: String): Boolean {
-        requireSession(sessionToken)
-        val resp: PasskeyVaultDeleteResponse = sendJson(
-            HttpMethod.Delete,
-            "/vault/passkey",
-            PasskeyVaultCredentialRequest(credential_id_b64 = credentialIdB64),
-            bearer = sessionToken,
-        )
-        return resp.deleted
-    }
-
     /** `GET /vault/passkeys`: the credential ids (base64url, no padding) of
      *  the account's passkeys that restore keys. */
     public suspend fun passkeyVaultList(sessionToken: String): List<String> {
@@ -1945,7 +1947,9 @@ public class AuthClient(
      * already holds.
      *
      * @return [LoginHandleBinding.Taken] when another account holds the
-     *   handle (`409 handle-taken`; nothing changed server-side).
+     *   handle (`409 handle-taken`; nothing changed server-side);
+     *   [LoginHandleBinding.Closed] when this is the account's first handle
+     *   and the beta is full (`403 registration-closed`, nothing changed).
      * @throws AuthHttpError on any other refusal (`503
      *   login-by-name-disabled` included).
      */
@@ -1959,6 +1963,9 @@ public class AuthClient(
         previousHandle: ByteArray? = null,
         /** Re-key the recovery email to [handle] instead of dropping it. */
         recoveryEmail: LoginHandleRecoveryEmail? = null,
+        /** ADR-0097: a held supporter place (the `x-lakko-anon-token`
+         *  value), attached to a first bind at sign-up. */
+        placeToken: String? = null,
     ): LoginHandleBinding {
         if (sessionToken.isEmpty()) {
             throw AuthClientArgError("sessionToken must be non-empty")
@@ -1976,6 +1983,7 @@ public class AuthClient(
                     recovery_email = recoveryEmail,
                 ),
                 bearer = sessionToken,
+                extraHeader = placeToken?.let { SUPPORTER_PLACE_HEADER to it },
             )
             LoginHandleBinding.Bound
         } catch (e: AuthHttpError) {
@@ -1983,6 +1991,10 @@ public class AuthClient(
             // `409 handle-mismatch` is a refusal of its own.
             if (e.status == HTTP_CONFLICT && (e.code == null || e.code == "handle-taken")) {
                 LoginHandleBinding.Taken
+            } else if (isRegistrationClosed(e)) {
+                LoginHandleBinding.Closed
+            } else if (isSupporterCodeUsed(e)) {
+                LoginHandleBinding.SupporterCodeUsed
             } else {
                 throw e
             }
@@ -2056,10 +2068,14 @@ public class AuthClient(
         endpoint: String,
         body: Req,
         bearer: String? = null,
+        extraHeader: Pair<String, String>? = null,
     ): Res = doRequest(method, endpoint) {
         contentType(ContentType.Application.Json)
         if (bearer != null) {
             header(HttpHeaders.Authorization, "Bearer $bearer")
+        }
+        if (extraHeader != null) {
+            header(extraHeader.first, extraHeader.second)
         }
         setBody(body)
     }
@@ -2151,7 +2167,7 @@ public class AuthClient(
         /** Ed25519 identity pubkey length (ADR-0036 genesis-attest mint). */
         private const val PUBKEY_LEN: Int = 32
 
-        /** ADR-0089 F3: an identity proof is one Ed25519 signature. */
+        /** ADR-0098 F3: an identity proof is one Ed25519 signature. */
         public const val IDENTITY_PROOF_LEN: Int = 64
 
         private fun requireIdentityProof(proof: ByteArray) {
@@ -2184,13 +2200,15 @@ public class AuthClient(
         public const val LOGIN_HANDLE_LEN: Int = 32
 
         private const val LOGIN_HANDLE_PATH: String = "/auth/login-handle"
+
+        private const val SIGNUP_OPEN_PATH: String = "/signup/open"
     }
 }
 
 /** The length of the error body an [AuthHttpError] keeps. */
 private const val ERROR_BODY_KEEP: Int = 512
 
-/** The status of a suspension refusal (ADR-0089 section 4). */
+/** The status of a suspension refusal (ADR-0098 section 4). */
 private const val HTTP_FORBIDDEN_SUSPENDED: Int = 403
 
 private suspend fun HttpResponse.readBodyOrNull(): String? = try {
@@ -2443,7 +2461,21 @@ public enum class LoginHandleBinding {
 
     /** Another account holds it (`409 handle-taken`): the name is taken. */
     Taken,
+
+    /** The account's first handle, refused because the beta is full
+     *  (`403 registration-closed`, `docs/ux/beta-account-cap.md`). A rename
+     *  or a re-bind never gets this answer. */
+    Closed,
+
+    /** The bind carried a supporter place that another account already
+     *  used (`403 supporter-code-used`, ADR-0097); nothing changed. */
+    SupporterCodeUsed,
 }
+
+/** The header a held supporter place rides in on the first bind (the
+ *  anonymous-token header, ADR-0054); a literal so host tests need no
+ *  native library. */
+public const val SUPPORTER_PLACE_HEADER: String = "x-lakko-anon-token"
 
 // -----------------------------------------------------------------
 // Errors
@@ -2475,7 +2507,7 @@ public class AuthHttpError(
     public val code: String? = null,
     /** The wait a `429` states (`retry_after_secs` or `Retry-After`). */
     public val retryAfterSecs: Long? = null,
-    /** ADR-0089 section 4 - a landing or the refresh route answered `403
+    /** ADR-0098 section 4 - a landing or the refresh route answered `403
      *  account-suspended` with the restricted session and a refresh
      *  credential (read from the whole body, before [body] is truncated). */
     public val suspended: SuspendedCredentials? = null,

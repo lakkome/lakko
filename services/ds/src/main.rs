@@ -111,6 +111,7 @@ mod access;
 mod commit;
 mod directory;
 mod journal;
+mod metrics;
 mod ownership;
 mod reach;
 #[cfg(test)]
@@ -173,6 +174,8 @@ async fn main() -> Result<()> {
     }
 
     init_tracing();
+    // /metrics on its own localhost port, off when unset (ADR-0096).
+    lakko_metrics::start_from_env("ds", env!("CARGO_PKG_VERSION"), "LAKKO_DS_METRICS_BIND").await?;
 
     let bind: SocketAddr = std::env::var("LAKKO_BIND")
         .unwrap_or_else(|_| DEFAULT_BIND.to_string())
@@ -214,6 +217,11 @@ async fn main() -> Result<()> {
         .context("connect to MariaDB")?;
 
     MIGRATIONS.run(&pool).await.context("run sqlx migrations")?;
+
+    // Connections in use and idle (ADR-0096).
+    let gauge_pool = pool.clone();
+    let _pool_gauge =
+        lakko_metrics::spawn_pool_gauge(move || (gauge_pool.size(), gauge_pool.num_idle()));
 
     // ADR-0054 S3 - a malformed secret or window refuses startup; an unset
     // secret leaves the knock answering 503.
@@ -327,6 +335,8 @@ pub(crate) fn build_app(state: AppState) -> Router {
         // The request span names the method and the route template, never
         // the URI: a path carries a mailbox address or a journal id, which a
         // log line must not (ADR-0078).
+        // Requests by route template, method and status class (ADR-0096).
+        .layer(lakko_metrics::red_layer("ds"))
         .layer(TraceLayer::new_for_http().make_span_with(lakko_log_hygiene::request_span))
         .with_state(state)
 }

@@ -28,6 +28,8 @@
 import { t } from "../l10n";
 import type { AttachmentRefBytes, ForwardOrigin, ForwardRef } from "./attachments";
 import type { PersistedForward } from "./message-log-store";
+import type { MessageContent } from "../../wasm/lakko_ffi_wasm";
+import { forwardableContentKind } from "../profile/card-share";
 
 /** The message being forwarded, as the timeline holds it. */
 export interface ForwardSource<A = AttachmentRefBytes> {
@@ -40,6 +42,9 @@ export interface ForwardSource<A = AttachmentRefBytes> {
   readonly messageId: number;
   /** Set when the source is itself a forward: its attribution is kept. */
   readonly forward?: ForwardRef | undefined;
+  /** ADR-0092 — the source's content (a location, contact card, article,
+   *  poll or checklist), absent on an ordinary message. */
+  readonly content?: MessageContent | undefined;
 }
 
 /** What the forward composes and sends. */
@@ -49,6 +54,30 @@ export interface ForwardPayload<A = AttachmentRefBytes> {
    *  composing (decision 2, OQ1): the two conversations never share a blob. */
   readonly attachments: readonly A[];
   readonly forward: ForwardRef;
+  /** UX `attachments.md` section 11a — the same content, for a location, a
+   *  contact card or an article (an article's images are `attachments`, in
+   *  their order, so the blocks' indices still hold). */
+  readonly content?: MessageContent;
+}
+
+/**
+ * UX `attachments.md` section 11a / ADR-0092 section 7 — whether a message
+ * whose content is `content` may be forwarded: text and files always; a
+ * location or an article; a contact card only while the newest profile held
+ * from the person on it does not say no (`cardShareableOf`, true for a
+ * person this device holds no profile of); a poll or a checklist never.
+ */
+export function canForwardContent(
+  content: MessageContent | undefined,
+  cardShareableOf: (accountKeyB64: string) => boolean,
+): boolean {
+  if (content === undefined) return true;
+  return forwardableContentKind(
+    content.kind === "contactCard"
+      ? { kind: "contactCard", accountKeyB64: content.card.accountKey }
+      : { kind: content.kind },
+    cardShareableOf,
+  );
 }
 
 /**
@@ -93,7 +122,19 @@ export function forwardPayloadOf<A>(
     ...(author === undefined ? {} : { author }),
     ...(origin === undefined ? {} : { origin }),
   };
-  return { text, attachments: source.attachments, forward };
+  // A poll or checklist is refused by the caller (`canForwardContent`);
+  // were one passed here it is still never carried.
+  const content =
+    source.content !== undefined && source.content.kind !== "poll" && source.content.kind !== "checklist"
+      ? source.content
+      : undefined;
+  return {
+    // A content message has no text of its own.
+    text: content === undefined ? text : "",
+    attachments: source.attachments,
+    forward,
+    ...(content === undefined ? {} : { content }),
+  };
 }
 
 /** Section 5.1 "The bubble" — the one line, which is also the button's

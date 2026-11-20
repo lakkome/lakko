@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0089 section 2 - the production ports of `report-send.ts`: the pinned
+ * ADR-0098 section 2 - the production ports of `report-send.ts`: the pinned
  * root key, the moderation service, the wasm core, the `@name` lookup and
  * the evidence stored with each message at receipt.
  *

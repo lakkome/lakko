@@ -19,7 +19,7 @@ struct ChannelCommentsView: View {
     /// The message menu every message and post uses (quick reactions on top,
     /// then the actions that apply), opened on a comment too.
     @Environment(\.messageMenuPresenter) private var menuPresenter
-    /// ADR-0089 step 3 — a suspended account reads the comments only.
+    /// ADR-0098 step 3 — a suspended account reads the comments only.
     @Environment(\.accountSuspended) private var accountSuspended
     /// Each comment's last on-screen frame, for where the menu draws it.
     @State private var frames = CommentFrames()
@@ -30,11 +30,10 @@ struct ChannelCommentsView: View {
     private var thread: ChannelConversationModel.CommentThread? { model.threads[item.cursor] }
     private var comments: [ChannelConversationModel.Comment] { model.visibleComments(item.cursor) }
     private var expanded: Bool { thread?.expanded ?? false }
-    /// The post's comment count: the service's (ADR-0087 phase B), else the
-    /// comments loaded.
-    private var total: Int {
-        max(Int(clamping: model.commentCountByPost[item.cursor] ?? 0), comments.count)
-    }
+    /// What follows the first two (section 13.2): never a count of
+    /// comments this reader hides.
+    private var more: ChannelConversationModel.CollapsedMore { model.collapsedMore(item.cursor) }
+    /// ADR-0098 — not for a suspended account, nor in a removed channel.
     private var canWrite: Bool {
         !accountSuspended && model.writable && (model.access == .reading || model.access == .publisher)
     }
@@ -59,23 +58,20 @@ struct ChannelCommentsView: View {
                 failedRow(failed)
             }
             if !expanded {
-                if total > 2 || thread?.mayHaveMore == true {
-                    Button {
-                        model.expandComments(item)
-                    } label: {
-                        Text(l10n.t("channels.comments.show_more", counts: [
-                            "count": UInt64(max(total - min(comments.count, 2), 1))]))
-                            .font(.footnote.weight(.medium))
+                switch more {
+                case .count(let n):
+                    showMoreButton(l10n.t("channels.comments.show_more", counts: ["count": UInt64(n)]))
+                case .unknown:
+                    showMoreButton(l10n.t("channels.comments.show_more_unknown"))
+                case .comment, .none:
+                    if canWrite, more == .comment || !comments.isEmpty {
+                        Button { model.expandComments(item) } label: {
+                            Text(l10n.t(more == .comment ? "channels.comments.comment" : "channels.comments.write"))
+                                .font(.footnote)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Color.lakkoTextMuted)
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Color.lakkoAccent)
-                } else if model.writable, model.access == .reading || model.access == .publisher {
-                    Button { model.expandComments(item) } label: {
-                        Text(l10n.t(total == 0 ? "channels.comments.comment" : "channels.comments.write"))
-                            .font(.footnote)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Color.lakkoTextMuted)
                 }
             } else {
                 if thread?.mayHaveMore == true, model.writable {
@@ -98,6 +94,16 @@ struct ChannelCommentsView: View {
                 .foregroundStyle(Color.lakkoTextMuted)
             }
         }
+    }
+
+    private func showMoreButton(_ label: String) -> some View {
+        Button {
+            model.expandComments(item)
+        } label: {
+            Text(label).font(.footnote.weight(.medium))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Color.lakkoAccent)
     }
 
     private func commentRow(_ comment: ChannelConversationModel.Comment) -> some View {
@@ -230,7 +236,7 @@ struct ChannelCommentsView: View {
         if accountSuspended {
             SuspendedComposerLine()
         } else if !model.writable {
-            // ADR-0089 step 5 — a removed channel: the line is under the posts.
+            // ADR-0098 step 5 — a removed channel: the line is under the posts.
             EmptyView()
         } else if model.access == .reading || model.access == .publisher {
             VStack(alignment: .leading, spacing: 4) {
@@ -241,7 +247,7 @@ struct ChannelCommentsView: View {
                             .foregroundStyle(Color.lakkoTextMuted)
                             .lineLimit(1)
                         Spacer()
-                        Button { self.replyTo = nil } label: { Image(systemName: "xmark") }
+                        Button { self.replyTo = nil } label: { LkIconView(.xmark, size: 20) }
                             .buttonStyle(.plain)
                             .accessibilityLabel(l10n.t("common.cancel"))
                     }
@@ -266,8 +272,7 @@ struct ChannelCommentsView: View {
                             sending = false
                         }
                     } label: {
-                        Image(systemName: "arrow.up.circle.fill")
-                            .font(.system(size: 26))
+                        LkIconView(.arrowUpCircleFill, size: 31, relativeTo: nil)
                             .foregroundStyle(
                                 draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                                     ? Color.lakkoTextMuted : Color.lakkoAccent)

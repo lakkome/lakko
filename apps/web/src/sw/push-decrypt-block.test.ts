@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0089 sections 1 and 6 on the BACKGROUND notification path
+ * ADR-0098 sections 1 and 6 on the BACKGROUND notification path
  * (`public/sw-push-decrypt.js`): nothing from a blocked person becomes a
  * notification or a ring, and an attested message is previewed as the
  * envelope inside it.

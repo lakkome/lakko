@@ -31,6 +31,7 @@ import {
   matchesContactQuery,
   sentRowLines,
   sortIncomingRequests,
+  subLineUsername,
   type SentRequestRecord,
 } from "./contact-list-model";
 import type { AcceptedContact } from "./local-store";
@@ -38,6 +39,7 @@ import { blockPerson, confirmBlock } from "../moderation/block-actions";
 import { openReport } from "../moderation/report-session";
 import { CONVERSATION_CONTACT_REQUEST } from "../moderation/report-model";
 import { pendingNameOf, type PendingContact } from "./pending-contacts";
+import { MenuBackdrop } from "../ui/MenuBackdrop";
 
 /** What the add menu offers. Web has no contact QR flow, so there is no
  *  "Show my QR code" / "Scan QR code" here, and "Add by username" is gone:
@@ -96,7 +98,7 @@ export interface ContactListPaneProps {
 
 export function ContactListPane(props: ContactListPaneProps): JSX.Element {
   const profiles = useProfiles();
-  /** ADR-0089 UX 1.2 - block the requester: the request goes with it. */
+  /** ADR-0098 UX 1.2 - block the requester: the request goes with it. */
   async function blockRequester(req: IncomingContactRequest, name: string): Promise<void> {
     if (!(await confirmBlock(name))) return;
     try {
@@ -107,7 +109,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
       console.warn("[block] not written", err instanceof Error ? err.name : "unknown");
     }
   }
-  /** ADR-0089 UX 2.1 - report the requester; the request itself, intro
+  /** ADR-0098 UX 2.1 - report the requester; the request itself, intro
    *  included, is what the report carries. */
   function reportRequest(req: IncomingContactRequest, name: string): void {
     openReport({
@@ -124,7 +126,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
   const nameOf = (c: AcceptedContact): string =>
     memberNameOf(profiles.resolve(c.signaturePubkeyB64), "the contact list");
   const usernameOf = (c: AcceptedContact): string | null =>
-    profiles.resolve(c.signaturePubkeyB64).username;
+    subLineUsername(nameOf(c), profiles.resolve(c.signaturePubkeyB64).username);
 
   /** One row of the alphabetical list: a contact, or an inviter added
    *  through their link (ADR-0079) who is shown exactly like one. */
@@ -142,7 +144,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
         kind: "invited",
         p,
         name: invitedName(p),
-        username: p.username.length > 0 ? `@${p.username}` : null,
+        username: subLineUsername(invitedName(p), p.username.length > 0 ? `@${p.username}` : null),
       }),
     ),
   ];
@@ -170,7 +172,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
     <aside class="lk-pane" aria-label={t("nav.contacts")}>
       <div class="lk-pane-head">
         <h1>{t("nav.contacts")}</h1>
-        {/* ADR-0089 step 3: a suspended account adds no contact and shares
+        {/* ADR-0098 step 3: a suspended account adds no contact and shares
             no invite link. */}
         <div class="lk-menu-anchor" style={accountSuspended() ? { display: "none" } : undefined}>
           <button
@@ -182,10 +184,10 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
             aria-expanded={menuOpen()}
             onClick={() => setMenuOpen(!menuOpen())}
           >
-            <Icon name="plus" size={18} />
+            <Icon name="person-plus" size={24} />
           </button>
           <Show when={menuOpen()}>
-            <div class="lk-menu-backdrop" onClick={() => setMenuOpen(false)} />
+            <MenuBackdrop onClose={() => setMenuOpen(false)} />
             <div class="lk-menu" role="menu">
               <For each={ADD_ITEMS}>
                 {(item) => (
@@ -197,7 +199,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                       props.onAdd(item.mode);
                     }}
                   >
-                    <Icon name={item.icon} size={18} />
+                    <Icon name={item.icon} size={20} />
                     {t(item.labelKey)}
                   </button>
                 )}
@@ -207,7 +209,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
         </div>
       </div>
       <div class="lk-search">
-        <Icon name="search" size={18} />
+        <Icon name="search" size={20} />
         <input
           ref={searchInput}
           type="search"
@@ -234,10 +236,12 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
               const r = (): ReturnType<typeof profiles.resolve> => profiles.resolve(req.fromPubkey);
               return (
                 <div class="lk-row lk-request-row">
-                  <Avatar label={memberNameOf(r(), "a contact request avatar")} id={base64Encode(req.fromPubkey)} personKey={base64Encode(req.fromPubkey)} />
+                  <Avatar label={memberNameOf(r(), "a contact request avatar")} id={base64Encode(req.fromPubkey)} personKey={base64Encode(req.fromPubkey)} playVideo="hover" />
                   <div class="lk-row-body">
                     <span class="lk-row-title">{memberNameOf(r(), "a contact request row")}</span>
-                    <Show when={r().username}>{(u) => <span class="lk-row-sub">{u()}</span>}</Show>
+                    <Show when={subLineUsername(memberNameOf(r(), "a contact request row"), r().username)}>
+                      {(u) => <span class="lk-row-sub">{u()}</span>}
+                    </Show>
                     <Show when={props.viaGroupName?.(req) ?? null}>
                       {(name) => <span class="lk-row-sub">{viaGroupLine(name())}</span>}
                     </Show>
@@ -263,7 +267,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                       <button class="small" type="button" onClick={() => props.onDecline(req)}>
                         {t("contacts.request.decline")}
                       </button>
-                      {/* ADR-0089 UX 1.1 / 2.1 - Block beside Accept and
+                      {/* ADR-0098 UX 1.1 / 2.1 - Block beside Accept and
                           Decline; Report carries the request itself. Inline
                           on a wide pane; behind the row's overflow menu on a
                           phone width (`.lk-request-more`). */}
@@ -295,7 +299,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                           aria-expanded={requestMenu() === req.messageId}
                           onClick={() => setRequestMenu(requestMenu() === req.messageId ? null : req.messageId)}
                         >
-                          <Icon name="more" size={18} />
+                          <Icon name="ellipsis" size={18} />
                         </button>
                         <Show when={requestMenu() === req.messageId}>
                           <div class="lk-menu-backdrop" onClick={() => setRequestMenu(null)} />
@@ -309,7 +313,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                                 void blockRequester(req, memberNameOf(r(), "a contact request row"));
                               }}
                             >
-                              <Icon name="shieldAlert" size={18} />
+                              <Icon name="shield-exclamation" size={18} />
                               {t("block.action")}
                             </button>
                             <button
@@ -345,7 +349,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
               aria-expanded={sentOpen()}
               onClick={() => setSentOpen(!sentOpen())}
             >
-              <Icon name="chevron" size={14} class={sentOpen() ? "open" : ""} />
+              <Icon name="chevron-forward" size={14} class={sentOpen() ? "open" : ""} />
               {t("contacts.list.sent", { count: props.sent().length })}
             </button>
             <Show when={sentOpen()}>
@@ -356,6 +360,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                       label={sentRowLines(record).title}
                       id={record.recipientAccountIdHex}
                       personKey={record.recipientKeyB64}
+                      playVideo="hover"
                     />
                     <div class="lk-row-body">
                       <span class="lk-row-title">{sentRowLines(record).title}</span>
@@ -383,7 +388,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
           when={!nothingAtAll() || searching()}
           fallback={
             <div class="lk-empty">
-              <Icon name="contacts" size={40} strokeWidth={1.4} />
+              <Icon name="person-circle-plus" size={48} />
               <strong>{t("contacts.list.empty.title")}</strong>
               <span>{t("contacts.list.empty.body")}</span>
               {/* Finding someone is the search field above (UX who-can-find-me
@@ -424,7 +429,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                             }
                           }}
                         >
-                          <Avatar label={row.name} id={key} personKey={key} />
+                          <Avatar label={row.name} id={key} personKey={key} playVideo="hover" />
                           <div class="lk-row-body">
                             <span class="lk-row-title">{row.name}</span>
                             <Show when={row.username}>

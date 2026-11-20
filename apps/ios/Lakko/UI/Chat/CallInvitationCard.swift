@@ -19,13 +19,12 @@ struct CallInvitationCard: View {
     let onJoin: () -> Void
 
     @ObservedObject private var l10n = Localization.shared
-    /// ADR-0089 step 3 — a suspended account joins no calls: no Join pill.
+    /// ADR-0098 step 3 — a suspended account joins no calls: no Join pill.
     @Environment(\.accountSuspended) private var accountSuspended
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: "phone.fill")
-                .font(.system(size: 16, weight: .semibold))
+            LkIconView(.phoneFill, size: 20, relativeTo: nil)
                 .frame(width: 36, height: 36)
                 .background(
                     Circle().fill(

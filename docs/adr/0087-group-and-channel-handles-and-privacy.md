@@ -6,8 +6,8 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 # ADR-0087: Every group and channel has an @name, and is public or private
 
 - **Status:** Proposed (2026-10-31, amended 2026-11-01; section 18, the photo, added
-  2026-11-02). The product decisions in Context are the maintainer's and are final; the
-  mechanism below is proposed. Nothing is built, apart from the group of one and the
+  2026-11-02; a new publisher's earlier seeds and its waiting request, 2026-11-08). The
+  product decisions in Context are the maintainer's and are final; the mechanism below is proposed. Nothing is built, apart from the group of one and the
   end-of-membership groundwork.
 - **Date:** 2026-10-31
 - **Context:** product, the scale requirement in `CLAUDE.md`, invariants #1, #2,
@@ -135,7 +135,8 @@ What exists, read in the tree on 2026-10-31:
   (ADR-0060) are the only names, and `MembersPanel` already shows them, on a separate
   screen.
 - **A co-publisher is what a group calls an admin, nearly.** It can post, let
-  subscribers in, rotate and rename. A PublisherGroup has no role table, so its client
+  subscribers in and rename. (This bullet also said "rotate"; corrected 2026-11-08 by
+  the maintainer: only the owner's device rotates the channel key, section 15.) A PublisherGroup has no role table, so its client
   can approve another co-publisher; what holds a stranger back is the owner-signed
   appointment at the channels service, without which `require_publisher` refuses it.
 - **The chat survives the end of a membership** (ADR-0045 UX section 6.2):
@@ -169,6 +170,18 @@ the account.**
   table. `usernames` and `handles` (section 2) each insert into it in the
   transaction that takes a name, so a person and a group can never hold one name.
   A refused claim is `409 name-taken` on every path.
+  *Note, 2026-11-14:* a claim of a current row by the write key that holds it is
+  not refused: `POST /discovery/handle/claim` answers it as the first claim (a
+  fresh certificate, the lease renewed, the visibility and the public content
+  replaced). A New channel that failed after its claim landed retries under the
+  same kept channel id, hence the same key, and so takes its own name back. A
+  claim by another key, of a username, or of a retired row stays `409 name-taken`;
+  the claim route does not take back a retired name. A New group founds a new group,
+  hence a new key, on every attempt, so its clients keep the group ids of earlier
+  attempts at a name and a retry moves the name with `POST /discovery/handle/rekey`
+  signed by an earlier attempt's key, then writes the new group's content with
+  `PUT /discovery/handle`. A rekey answered `404` (no earlier claim landed) is
+  followed by a plain claim; `401` from every earlier key means the name is held.
 - `POST /discovery/lookup` answers for either kind. `POST /discovery/channel/*`
   goes.
 - A retired name, of any kind, is held 30 days as ADR-0076 holds a username, and
@@ -392,7 +405,7 @@ without.
 
 | Layer | Bound |
 |---|---|
-| Requester | one `ds-knock` token per knock (quota 200 a day); a device asks once per group per 7 days |
+| Requester | one `ds-knock` token per knock (quota 200 a day); a device asks once per group per day (7 days until 2026-11-12) |
 | DS, per journal | new cap: 4,096 rows (chosen, not measured), refused with `429 knock-queue-full` before a token is spent. The count and the insert are not one transaction, so knocks arriving on one journal at the same moment can end the queue at most their own payloads (4 per knock) past the cap; locking would give every unclaimed journal a lock row (decided 2026-11-02) |
 | DS, row | 16 KiB, 7 days (existing) |
 | Admin device | 64 retained (`MAX_PENDING_EXTERNAL_JOINS`); **the knock cursor stops while the queue is full**, so the backlog stays on the DS instead of being lost |
@@ -518,6 +531,58 @@ because the read key never changes. The receiver keeps it only when it is addres
 its own account and the MLS sender resolves to the owner. Dispatched as
 `IncomingEnvelope::ChannelReadKey`; fuzz `channel_read_key_decode`.
 
+**Earlier channel seeds to a new publisher (amended 2026-11-08, maintainer decision).**
+Before this, a person added as a publisher joined the PublisherGroup at a later epoch and
+held no seed of an earlier channel epoch: the owner's epoch-0 channel record and every
+earlier post were unreadable to them, and an empty new channel read "Earlier posts aren't
+available." The rule "newcomers read nothing from before" (section 8) stays for
+subscribers; **a publisher now reads what the owner's device still can.** After it
+approves a publisher (and beside the read key), the owner's device sends that person
+`lakko-contacts::channel_epoch_seeds`, as a PublisherGroup application message:
+
+```text
+"lakko/channel-epoch-seeds/v1\0" (29) ‖ version(1)=0x01 ‖ channel_id(16)
+  ‖ member_account_key(32) ‖ count(1) ‖ sealed(48 + 36 × count)
+sealed = eph_pub(32) ‖ ChaCha20-Poly1305(count × (epoch_id(4 BE) ‖ seed(32))) ‖ tag(16),
+         AAD = every byte before it
+```
+
+One envelope carries 1 to 64 seeds (`CHANNEL_EPOCH_SEEDS_MAX`), strictly ascending by
+epoch, sealed once to the member's account X25519 key with the `crate::envelope` box; the
+count is in the clear so the length is checked exactly before anything is opened, and the
+plaintext is checked again after (count, strictly ascending, no duplicate). 64 is chosen,
+not measured: the channels service keeps a subscriber's envelopes for the newest 4 epochs
+(`LAKKO_CHANNELS_ENVELOPE_RETENTION_EPOCHS`, ADR-0031), which bounds what a subscriber can
+fetch, not what the owner holds; the owner's device keeps every channel seed it filed in its
+local epoch map, and posts are kept 30 days (`LAKKO_CHANNELS_RETENTION_SECS`); at the
+default rotation of one a day plus one epoch per publisher change, a channel's live posts
+span about 31 epochs, so 64 covers them with room and keeps one envelope at most 2,431 bytes. A
+channel rotating faster (the 1,000-post rule) can hold readable posts older than the 64th
+epoch; the owner sends its newest 64 and older posts read "Earlier posts aren't available."
+on the new publisher's device. One envelope per (channel, publisher, send); the owner may
+send a second one later with seeds the first lacked.
+
+*Sender rule (the owner's device).* After approving a publisher, beside the read key, send
+the newest 64 seeds of its epoch map that it has not yet recorded as sent to that person,
+and record per (channel, publisher account key, epoch) what it sent once the publish
+succeeded; a failed send is retried on the next pass of the publisher loop. A publisher
+removed and added again is a new hand-over. A co-publisher never sends one.
+
+*Receiver rule.* A device keeps the seeds only when: it arrived on the PublisherGroup
+journal of the channel `channel_id` names and this device publishes that channel;
+`member_account_key` is this device's own account key; the MLS sender resolves at receipt
+(C-68) to the channel's owner; and the box opens and the plaintext is well formed. It adds
+a seed only for an epoch it holds none of, and never replaces a seed it holds. Anything
+else is dropped whole. A wrong seed from the owner at worst fails to open a post, which
+then shows as unreadable, never as another post.
+
+Dispatched as `IncomingEnvelope::ChannelEpochSeeds`; fuzz `channel_epoch_seeds_decode`.
+The iOS notification extension recognises it only, to suppress it. No server, no
+`lakko-mls` and no wire change elsewhere; invariant #2 holds (the server relays ciphertext
+it cannot open) and #5 (no new server state). What it gives up: a publisher reads the
+earlier posts the owner could read, so adding a publisher is now also handing over the
+channel's recent history, which the UX states (section 15.2.1).
+
 **Invite links in the link register (phase B, 2026-11-06).** The ADR-0079 register now
 holds `/g/` links: kinds `group` (3), `channel` (4) and `publisher` (5), each with its
 target (the 32-byte group id, or the 16-byte channel id), the sealed capability the
@@ -544,7 +609,7 @@ recorded as owed before the first step and retried.
 | Group: new knock from a stale record | dropped, no capability; the asker waits out its 7 days | taken |
 | Channel: subscribers | stay; a new epoch, the public seed deleted, the seed sealed to each key once (ADR-0030 stage and commit) | stay; a new epoch, the read key and public seed published |
 | Channel: Discover | listing withdrawn | listed (section 16) |
-| History | newcomers read nothing from before, as always | same |
+| History | newcomers read nothing from before, as always; a new publisher reads the seeds the owner hands over (section 7, 2026-11-08) | same |
 
 Going private at one million subscribers costs one 80 MB reseal, or one tree build.
 Stated in the UI, resumable.
@@ -686,7 +751,22 @@ What the Manage cards did moves or goes:
 **The machinery leaves the screen.** The rotation cron and the co-publisher knock poll
 move out of `RotationPanel` and `CoPublishersPanel` into app-wide loops beside
 `SubscriberAdmission`, on all three clients, so a channel rotates whether or not its
-owner opens it. Each pass reads only channels this device publishes.
+owner opens its screen. Each pass reads only channels this device publishes; the rotation
+pass runs only for channels this device owns (2026-11-08, section 15).
+
+**Amended 2026-11-13 (maintainer).** "This device owns" and "this device publishes" mean
+"this device holds the channel's PublisherGroup", not "this account owns the channel".
+The channels now reach every device of the account (the `lakko-sync` channel-subscription
+register, ADR-0050 section 2.9 as amended that day) with the account's one subscriber key,
+so a second device of the owner or of a publisher lists and reads the channel. It runs no
+publisher pass, no rotation and no admission for it, shows no composer and no owner or
+publisher control (UX `second-device.md` section 4a), and never founds a PublisherGroup
+or resets the channel journal: founding happens only in create-channel. A lost
+publishing device leaves the channel without anyone who can post (G-54).
+
+**Amended again 2026-11-13 ([ADR-0090](0090-publisher-group-device-leaves.md), accepted,
+not built).** Every device of the owner and of each publisher will hold its own
+PublisherGroup leaf and post; the reader rule above stays until that is built.
 
 ### 13. A post carries what a message can
 
@@ -914,6 +994,70 @@ a removed publisher cannot derive the next epoch's seed, and after a step-down t
 owner rotates with the remaining publishers. `PublisherGroup::members()` lists the
 publishers with their account keys, which is the member list the `Publishers` block
 and `DELETE .../copublishers/{pk}` needed.
+
+**A day, not 7 days (amended 2026-11-12, maintainer decision).** A device asks once per
+group, and once per channel for a publisher request, per day: "No answer yet." and `Ask
+again` appear a day after the request, not 7 days. Seen walking base scenario 20: the page
+a group's invite link opens offered `Request again` at once (the September invite-page
+spec), while the Requests sent list said "Waiting for an admin." for the same request, so a
+refused person could re-send without limit. The invite page now follows section 6 of the
+UX spec: "Request sent. An admin will see it when they next open Lakko.", no button until
+the day is over, and the chat opens by itself when the join lands. Where this ADR says 7
+days for a request below, read a day; the DS row lifetime of 7 days is unchanged (a second
+request from the same device is the same joiner to the admin's pending list, ADR-0027
+dedup by signature key).
+
+**A publisher request with no answer (amended 2026-11-08, maintainer decision).** A
+publisher request the owner's device rejected or never answered follows a group request
+(UX section 6.2, applied in UX section 15.2.2): the invitation card shows the waiting line
+for 7 days, then "No answer yet." with `Ask again`; a rejection sends nothing, so the
+person is never told of a refusal. `Ask again` re-sends the same request through the same
+`/g/` link the card carries: fetch the ledger row again, consume it again (the ledger
+counts a joiner once, ADR-0028 OQ1, so a one-use link is not used up), and knock again
+as the first `Accept` did, replacing the device's pending-request record and restarting the 7 days.
+A device asks again at most once per channel per 7 days. When the ledger answers the link
+is gone, revoked, expired or used up, the card shows "This invite link is invalid or has
+expired." and keeps the earlier pending record, so a late approval still lands. No server
+or core change.
+
+**Only the owner rotates (amended 2026-11-08, maintainer decision).** The channel key is
+rotated by the owner's device alone: the scheduled rotation (24 h or 1,000 posts, ADR-0031
+`rotation_policy`) and the rotation after a membership change (an approved, removed or
+stepped-down publisher). A co-publisher's device never runs the rotation policy and never
+commits a rotation. The reason is the DS: a PublisherGroup journal accepts a commit only
+from the owner (its registrar chain, ADR-0057), so a co-publisher's rotation merged
+locally and refused on the wire forks that device's group from the owner's, and its
+later posts are sealed under a seed no subscriber holds. The cost: a channel whose owner
+does not open Lakko does not rotate, on schedule or after a membership change, until the
+owner returns (a removal is itself the owner's commit, so the rotation after it runs on
+the owner's device at once; a step-down waits for the owner's device anyway). No core or
+server change; the clients drop the rotation pass for channels they
+do not own.
+
+**Any owner device rotates (amended 2026-11-13, maintainer decision,
+[ADR-0090](0090-publisher-group-device-leaves.md)).** "The owner's device alone" above
+becomes: any device of the owner that holds the PublisherGroup runs the rotation policy,
+every PublisherGroup commit is staged and sent through the ADR-0081 commit route, and the
+DS takes exactly one commit per epoch; the loser abandons its staged commit and reseals
+nothing. Co-publisher devices still never rotate. Nothing of ADR-0090 is built yet; until
+it is, the 2026-11-13 note of section 12 holds (only the device holding the
+PublisherGroup publishes).
+
+**A publisher asks the owner to rotate (amended 2026-11-08, maintainer decision).** A
+publisher may remove a subscriber (this section), and a removal is followed by a rotation
+so the removed key reads nothing new; a co-publisher can no longer rotate, so it asks.
+`lakko-contacts::channel_rotate_request` is a fixed 49-byte envelope
+`lakko/channel-rotate-request/v1\0 ‖ 0x01 ‖ channel_id(16)`, sent by the publisher as a
+PublisherGroup application message right after the removal; it carries no subscriber, no
+reason and no time. The owner's device rotates at its next publisher pass when it read one
+on that channel's PublisherGroup from a current publisher (the MLS sender resolved at
+receipt, C-68) and drops one from anyone else; requests that arrive before the rotation
+collapse into it. Dispatched as `IncomingEnvelope::ChannelRotateRequest` (the channel id);
+fuzz `channel_rotate_request_decode`; recognised only by the iOS notification extension.
+The cost, stated in the UX (section 15.2): a subscriber a publisher removes stops reading
+new posts only once the owner's device next opens Lakko. The removal at the channels
+service is immediate, so a removed subscriber stops receiving new seed envelopes at once;
+what it keeps until the rotation is the current seed, which opens what is posted under it.
 
 The info blocks, in `lakko_ui_rules::info`:
 
@@ -1300,7 +1444,11 @@ one filesystem on one host (`services/storage`), and it will not carry that egre
 - **Positive:** the known stale-knock loss and the cleartext knock row both go, for
   link joins too.
 - **Positive:** channels drop a second screen vocabulary, and get media by reusing the
-  chat body. A channel rotates whether or not its owner opens it.
+  chat body. A channel rotates whether or not its owner opens its screen.
+- **Negative (2026-11-08):** only the owner's device rotates the channel key, so a
+  channel whose owner does not open Lakko does not rotate (neither on schedule nor after
+  a membership change) until the owner returns; its publishers keep posting under the
+  current key meanwhile.
 - **Negative:** every private group takes a global name. The client's proposed name
   hides that, and a private group can still take a good name from the public pool.
 - **Negative:** a refused claim says a name is held (section 2).

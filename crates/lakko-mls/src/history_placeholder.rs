@@ -39,7 +39,7 @@
 //! ambiguity, no floating-point, no map iteration order):
 //!
 //! ```text
-//! version:           u8  == HISTORY_PLACEHOLDER_VERSION (2)
+//! version:           u8  == HISTORY_PLACEHOLDER_VERSION (6)
 //! message_id:        u64 (big-endian)
 //! direction:         u8  (0 = outgoing, 1 = incoming, 2 = system)
 //! created_at_len:    u16 (big-endian)   + created_at UTF-8 bytes
@@ -58,12 +58,42 @@
 //!     width_present:  u8 (0 | 1)  [ + width: u32 ]
 //!     height_present: u8 (0 | 1)  [ + height: u32 ]
 //!     thumb_present:  u8 (0 | 1)  [ + thumb ]
+//!     title_present:  u8 (0 | 1)  [ + title_len: u16 + title UTF-8 ]
+//!     artist_present: u8 (0 | 1)  [ + artist_len: u16 + artist UTF-8 ]
+//!     inline_thumb_present: u8 (0 | 1)  [ + inline_thumb_len: u16 + bytes ]
 //!   thumb:
 //!     blob_id: 32 bytes, key: 32 bytes, nonce: 12 bytes, size: u64
 //!     mime_present:  u8 (0 | 1)  [ + mime_len: u16 + mime UTF-8 ]
 //!     width_present:  u8 (0 | 1)  [ + width: u32 ]
 //!     height_present: u8 (0 | 1)  [ + height: u32 ]
+//! card_present:      u8 (0 | 1)  [ + card_len: u16 + card bytes ]
+//! reply_present:     u8 (0 | 1)  [ + reply ]
+//!   reply:
+//!     target:        i64 (big-endian)
+//!     author_present:  u8 (0 | 1)  [ + author_len: u16 + author UTF-8 ]
+//!     excerpt_present: u8 (0 | 1)  [ + excerpt_len: u16 + excerpt UTF-8 ]
+//! forward_present:   u8 (0 | 1)  [ + forward ]
+//!   forward:
+//!     author_present:  u8 (0 | 1)  [ + author_len: u16 + author UTF-8 ]
+//!     origin_present:  u8 (0 | 1)  [ + origin ]
+//!   origin:
+//!     group_len: u8 + group id bytes, message_id: i64 (big-endian)
+//! content_present:   u8 (0 | 1)
+//!   [ content_kind:  u8 (1..=5)
+//!     payload_len:   u32 (big-endian, 1..=MAX_CONTENT_PAYLOAD_BYTES) + payload
+//!     state_len:     u16 (big-endian, 0..=MAX_CONTENT_STATE_BYTES) + state ]
+//! author_present:    u8 (0 | 1)  [ + author_key: 32 bytes ]
 //! ```
+//!
+//! ## Version 3: the channel invitation card, the reply, the forward
+//!
+//! Version 2 carried the text and the attachments only, so a message that
+//! was a channel invitation (ADR-0087 section 14) reached a new device as
+//! its bare `/g/` link, and a reply or a forward lost its quote or its
+//! "Forwarded from" line. Version 3 appends the card bytes (opaque here,
+//! 1 to [`MAX_CHANNEL_INVITE_BYTES`]), the reply (target `messageId`, the
+//! author and excerpt snapshot) and the forward (author snapshot, the
+//! origin group id and `messageId`). Version 2 is refused (flag day).
 //!
 //! ## Version 2: media metadata (ADR-0047)
 //!
@@ -72,6 +102,45 @@
 //! adds the ADR-0047 attachment fields (`kind`, `duration_ms`, `waveform`,
 //! `width`, `height`, `thumb`). Nothing is deployed, so there is no
 //! version-1 reader: the decoder refuses it.
+//!
+//! ## Version 4: audio tags and content messages (ADR-0092)
+//!
+//! Version 4 adds the `title` and `artist` tags of an `audio` attachment
+//! after the thumb (ADR-0092 section 2), so a music file restored from a
+//! history bundle keeps its title line. It also appends, after the
+//! version-3 card, reply and forward, the ADR-0092 section 3.11 content
+//! block: a poll, checklist, location, contact card or article is not text,
+//! so earlier versions restored it as an empty row. The block carries the
+//! content kind, the content payload (the JSON value of the envelope's
+//! content field, exactly what the envelope carried, the latest edit for an
+//! edited checklist or article) and, for a poll or a checklist, a snapshot
+//! of its folded state as the sending device saw it (empty when none). All
+//! three are opaque here and bounded by length only; the FFI decodes them
+//! with `lakko_attachments::Content::from_payload` and
+//! `lakko_attachments::content_state::ContentState::decode`, the decoders
+//! the envelope route uses. Flag day: versions 1 to 3 are refused.
+//!
+//! ## Version 5: the micro thumbnail (ADR-0047 section 6)
+//!
+//! Version 5 adds, after the `artist` tag, the attachment's `inline_thumb`:
+//! the small JPEG the envelope carries inline so a notification or a list
+//! row draws the picture without fetching a blob. Here it is opaque bytes
+//! bounded by [`MAX_INLINE_THUMB_BYTES`]; the JPEG check and the rule that
+//! only the first image or video of a message carries it are
+//! `lakko-attachments`' and are applied by the FFI crates. Flag day:
+//! versions 1 to 4 are refused.
+//!
+//! ## Version 6: the author (ADR-0091 live walk 3)
+//!
+//! Version 6 appends, after the content block, the message author's key as
+//! the sending device stored it (the 32-byte key a live message's author is
+//! resolved to at receipt and named by, C-68). Without it a message brought
+//! by a history bundle, the ADR-0091 gap bundle included, carried no author
+//! at all and every receiving client drew it with no name. A device writes
+//! the author it stored for a received message and its own account's key for
+//! one it sent, and nothing for a system row. Like the rest of a bundled row
+//! it is the sending device's claim (that device could write any text under
+//! any author already). Flag day: versions 1 to 5 are refused.
 //!
 //! This codec enforces **structure** only (lengths, caps, presence bytes).
 //! The **semantic** ADR-0047 bounds (a duration only for a voice or video
@@ -100,7 +169,7 @@ use crate::error::{Error, Result};
 /// Wire-format version byte. Bump on any layout change; the
 /// decoder refuses any other value so an older binary fails
 /// loudly rather than mis-parsing a newer placeholder.
-pub const HISTORY_PLACEHOLDER_VERSION: u8 = 2;
+pub const HISTORY_PLACEHOLDER_VERSION: u8 = 6;
 
 /// Hard cap on the message text, in UTF-8 bytes (1 MiB). Larger
 /// inputs are refused at encode time and rejected at decode.
@@ -127,6 +196,47 @@ pub const MAX_KIND_BYTES: usize = 32;
 /// Hard cap on the waveform, in bytes (one amplitude per bar), matching
 /// ADR-0047's `MAX_WAVEFORM_BYTES`.
 pub const MAX_WAVEFORM_BYTES: usize = 128;
+
+/// Hard cap on an attachment's micro thumbnail, in bytes, matching
+/// `lakko_attachments::MAX_INLINE_THUMB_BYTES` (ADR-0047 section 6; pinned
+/// in the FFI crates).
+pub const MAX_INLINE_THUMB_BYTES: usize = 4096;
+
+/// Hard cap on an audio attachment's `title` or `artist`, in UTF-8 bytes,
+/// matching ADR-0092's `MAX_AUDIO_TAG_BYTES`.
+pub const MAX_AUDIO_TAG_BYTES: usize = 255;
+
+/// Largest content payload, bytes, matching
+/// `lakko_attachments::content_state::MAX_CONTENT_PAYLOAD_BYTES` (chosen).
+pub const MAX_CONTENT_PAYLOAD_BYTES: usize = 196_608;
+
+/// Largest content state snapshot, bytes, matching
+/// `lakko_attachments::content_state::MAX_CONTENT_STATE_BYTES` (chosen).
+pub const MAX_CONTENT_STATE_BYTES: usize = 8_192;
+
+/// Content kind bytes this codec carries (1 poll, 2 checklist, 3 location,
+/// 4 contact card, 5 article).
+pub const CONTENT_KINDS: core::ops::RangeInclusive<u8> = 1..=5;
+/// Hard cap on a channel invitation card (ADR-0087 section 14), in bytes.
+/// Equal to `lakko_attachments::MAX_CHANNEL_INVITE_BYTES`, which `lakko-mls`
+/// does not depend on; the FFI crates pin the two equal in a test.
+pub const MAX_CHANNEL_INVITE_BYTES: usize = 2048;
+
+/// Hard cap on a reply's or a forward's author snapshot, in UTF-8 bytes.
+/// Equal to `lakko_attachments::MAX_REPLY_AUTHOR_BYTES` and
+/// `MAX_FORWARDED_FROM_BYTES` (pinned in the FFI crates).
+pub const MAX_SNAPSHOT_AUTHOR_BYTES: usize = 255;
+
+/// Hard cap on a reply's excerpt snapshot, in UTF-8 bytes. Equal to
+/// `lakko_attachments::MAX_REPLY_EXCERPT_BYTES` (pinned in the FFI crates).
+pub const MAX_REPLY_EXCERPT_BYTES: usize = 512;
+
+/// Hard cap on a forward's origin group id, in bytes: the decoded size of
+/// the envelope's `MAX_FORWARD_ORIGIN_GROUP_BYTES` (128) base64 characters.
+pub const MAX_ORIGIN_GROUP_BYTES: usize = 96;
+
+/// Length of the author key (an Ed25519 public key).
+pub const AUTHOR_KEY_LEN: usize = 32;
 
 /// SHA-256 blob id length.
 const BLOB_ID_LEN: usize = 32;
@@ -197,6 +307,13 @@ pub struct HistoryAttachmentPlaceholder {
     pub height: Option<u32>,
     /// ADR-0047 poster-frame blob.
     pub thumb: Option<HistoryThumbPlaceholder>,
+    /// ADR-0092 audio title tag, at most [`MAX_AUDIO_TAG_BYTES`].
+    pub title: Option<String>,
+    /// ADR-0092 audio artist tag, at most [`MAX_AUDIO_TAG_BYTES`].
+    pub artist: Option<String>,
+    /// ADR-0047 section 6 micro thumbnail (JPEG bytes), at most
+    /// [`MAX_INLINE_THUMB_BYTES`]; opaque here.
+    pub inline_thumb: Option<Vec<u8>>,
 }
 
 /// A poster-frame blob attached to a [`HistoryAttachmentPlaceholder`]
@@ -219,6 +336,48 @@ pub struct HistoryThumbPlaceholder {
     pub height: Option<u32>,
 }
 
+/// The reply a [`HistoryMessagePlaceholder`] carries (ADR-0052): the target's
+/// DS `messageId` and the snapshot the replier saw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryReplyPlaceholder {
+    /// The target's DS `messageId`.
+    pub target: i64,
+    /// The quoted author's name as the replier saw it.
+    pub author: Option<String>,
+    /// The quoted excerpt as the replier saw it.
+    pub excerpt: Option<String>,
+}
+
+/// The forward a [`HistoryMessagePlaceholder`] carries (ADR-0052 decision 2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryForwardPlaceholder {
+    /// The original author's name, a snapshot.
+    pub author: Option<String>,
+    /// The origin conversation and message, kept only as a whole.
+    pub origin: Option<HistoryForwardOrigin>,
+}
+
+/// Where a forwarded message came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryForwardOrigin {
+    /// The origin conversation's group id, 1 to [`MAX_ORIGIN_GROUP_BYTES`].
+    pub group_id: Vec<u8>,
+    /// The original's DS `messageId`.
+    pub message_id: i64,
+}
+
+/// An ADR-0092 content message inside a placeholder. Opaque here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryContentPlaceholder {
+    /// Content kind byte, in [`CONTENT_KINDS`].
+    pub kind: u8,
+    /// The content payload, 1..=[`MAX_CONTENT_PAYLOAD_BYTES`] bytes.
+    pub payload: Vec<u8>,
+    /// The folded-state snapshot, 0..=[`MAX_CONTENT_STATE_BYTES`] bytes;
+    /// empty when none.
+    pub state: Vec<u8>,
+}
+
 /// The decoded display projection of one history-bundle message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryMessagePlaceholder {
@@ -235,6 +394,21 @@ pub struct HistoryMessagePlaceholder {
     pub text: String,
     /// Attachment references.
     pub attachments: Vec<HistoryAttachmentPlaceholder>,
+    /// ADR-0092 content, for a poll, checklist, location, contact card or
+    /// article message.
+    pub content: Option<HistoryContentPlaceholder>,
+    /// ADR-0087 section 14 — the channel invitation card the message's
+    /// envelope carried, opaque here, 1 to [`MAX_CHANNEL_INVITE_BYTES`].
+    pub channel_invite: Option<Vec<u8>>,
+    /// ADR-0052 — the reply this message is.
+    pub reply: Option<HistoryReplyPlaceholder>,
+    /// ADR-0052 decision 2 — the forward attribution this message carries.
+    pub forward: Option<HistoryForwardPlaceholder>,
+    /// Version 6 — the author's key as the sending device stored it (the
+    /// 32-byte key a live message's author is resolved to at receipt).
+    /// `None` for this account's own messages and system rows when the
+    /// sender held none.
+    pub author_key: Option<[u8; AUTHOR_KEY_LEN]>,
 }
 
 impl HistoryMessagePlaceholder {
@@ -325,8 +499,97 @@ impl HistoryMessagePlaceholder {
                     encode_opt_u32(&mut out, thumb.height);
                 },
             }
+            encode_opt_string(&mut out, att.title.as_deref(), MAX_AUDIO_TAG_BYTES, "title")?;
+            encode_opt_string(
+                &mut out,
+                att.artist.as_deref(),
+                MAX_AUDIO_TAG_BYTES,
+                "artist",
+            )?;
+            encode_opt_bytes(
+                &mut out,
+                att.inline_thumb.as_deref(),
+                MAX_INLINE_THUMB_BYTES,
+                "inline_thumb",
+            )?;
+        }
+
+        self.encode_extras(&mut out)?;
+        encode_content(&mut out, self.content.as_ref())?;
+        match &self.author_key {
+            None => out.push(0),
+            Some(key) => {
+                out.push(1);
+                out.extend_from_slice(key);
+            },
         }
         Ok(out)
+    }
+
+    /// Append the card, reply and forward (added in version 3).
+    fn encode_extras(&self, out: &mut Vec<u8>) -> Result<()> {
+        match &self.channel_invite {
+            None => out.push(0),
+            Some(card) => {
+                if card.is_empty() || card.len() > MAX_CHANNEL_INVITE_BYTES {
+                    return Err(Error::Codec(format!(
+                        "history placeholder: channel invite {} bytes not in 1..={MAX_CHANNEL_INVITE_BYTES}",
+                        card.len()
+                    )));
+                }
+                encode_opt_bytes(out, Some(card), MAX_CHANNEL_INVITE_BYTES, "channel invite")?;
+            },
+        }
+        match &self.reply {
+            None => out.push(0),
+            Some(reply) => {
+                out.push(1);
+                out.extend_from_slice(&reply.target.to_be_bytes());
+                encode_opt_string(
+                    out,
+                    reply.author.as_deref(),
+                    MAX_SNAPSHOT_AUTHOR_BYTES,
+                    "reply author",
+                )?;
+                encode_opt_string(
+                    out,
+                    reply.excerpt.as_deref(),
+                    MAX_REPLY_EXCERPT_BYTES,
+                    "reply excerpt",
+                )?;
+            },
+        }
+        match &self.forward {
+            None => out.push(0),
+            Some(forward) => {
+                out.push(1);
+                encode_opt_string(
+                    out,
+                    forward.author.as_deref(),
+                    MAX_SNAPSHOT_AUTHOR_BYTES,
+                    "forward author",
+                )?;
+                match &forward.origin {
+                    None => out.push(0),
+                    Some(origin) => {
+                        let len = u8::try_from(origin.group_id.len())
+                            .ok()
+                            .filter(|n| *n != 0 && usize::from(*n) <= MAX_ORIGIN_GROUP_BYTES)
+                            .ok_or_else(|| {
+                                Error::Codec(format!(
+                                    "history placeholder: forward origin group {} bytes not in 1..={MAX_ORIGIN_GROUP_BYTES}",
+                                    origin.group_id.len()
+                                ))
+                            })?;
+                        out.push(1);
+                        out.push(len);
+                        out.extend_from_slice(&origin.group_id);
+                        out.extend_from_slice(&origin.message_id.to_be_bytes());
+                    },
+                }
+            },
+        }
+        Ok(())
     }
 
     /// Parse the canonical wire bytes. Bounded: every length is
@@ -384,6 +647,9 @@ impl HistoryMessagePlaceholder {
             } else {
                 None
             };
+            let title = r.opt_string(MAX_AUDIO_TAG_BYTES, "title")?;
+            let artist = r.opt_string(MAX_AUDIO_TAG_BYTES, "artist")?;
+            let inline_thumb = r.opt_bytes(MAX_INLINE_THUMB_BYTES, "inline_thumb")?;
             attachments.push(HistoryAttachmentPlaceholder {
                 blob_id,
                 key,
@@ -397,8 +663,19 @@ impl HistoryMessagePlaceholder {
                 width,
                 height,
                 thumb,
+                title,
+                artist,
+                inline_thumb,
             });
         }
+
+        let (channel_invite, reply, forward) = decode_extras(&mut r)?;
+        let content = decode_content(&mut r)?;
+        let author_key = if r.presence("author")? {
+            Some(r.array::<AUTHOR_KEY_LEN>("author key")?)
+        } else {
+            None
+        };
 
         if !r.is_empty() {
             return Err(Error::Codec(format!(
@@ -413,8 +690,123 @@ impl HistoryMessagePlaceholder {
             created_at,
             text,
             attachments,
+            content,
+            channel_invite,
+            reply,
+            forward,
+            author_key,
         })
     }
+}
+
+/// The version-3 card, reply and forward, read after the attachments.
+type Extras = (
+    Option<Vec<u8>>,
+    Option<HistoryReplyPlaceholder>,
+    Option<HistoryForwardPlaceholder>,
+);
+
+/// Read the version-3 card, reply and forward.
+fn decode_extras(r: &mut Reader<'_>) -> Result<Extras> {
+    let channel_invite = r.opt_bytes(MAX_CHANNEL_INVITE_BYTES, "channel invite")?;
+    if channel_invite.as_ref().is_some_and(Vec::is_empty) {
+        return Err(Error::Codec(
+            "history placeholder: channel invite is empty".into(),
+        ));
+    }
+    let reply = if r.presence("reply")? {
+        Some(HistoryReplyPlaceholder {
+            target: r.i64("reply target")?,
+            author: r.opt_string(MAX_SNAPSHOT_AUTHOR_BYTES, "reply author")?,
+            excerpt: r.opt_string(MAX_REPLY_EXCERPT_BYTES, "reply excerpt")?,
+        })
+    } else {
+        None
+    };
+    let forward = if r.presence("forward")? {
+        let author = r.opt_string(MAX_SNAPSHOT_AUTHOR_BYTES, "forward author")?;
+        let origin = if r.presence("forward origin")? {
+            let len = usize::from(r.u8()?);
+            if len == 0 || len > MAX_ORIGIN_GROUP_BYTES {
+                return Err(Error::Codec(format!(
+                    "history placeholder: forward origin group length {len} not in 1..={MAX_ORIGIN_GROUP_BYTES}"
+                )));
+            }
+            Some(HistoryForwardOrigin {
+                group_id: r.take(len, "forward origin group")?.to_vec(),
+                message_id: r.i64("forward origin message")?,
+            })
+        } else {
+            None
+        };
+        Some(HistoryForwardPlaceholder { author, origin })
+    } else {
+        None
+    };
+    Ok((channel_invite, reply, forward))
+}
+
+/// Encode the optional ADR-0092 content block.
+fn encode_content(out: &mut Vec<u8>, content: Option<&HistoryContentPlaceholder>) -> Result<()> {
+    match content {
+        None => out.push(0),
+        Some(content) => {
+            if !CONTENT_KINDS.contains(&content.kind)
+                || content.payload.is_empty()
+                || content.payload.len() > MAX_CONTENT_PAYLOAD_BYTES
+                || content.state.len() > MAX_CONTENT_STATE_BYTES
+            {
+                return Err(Error::Codec(
+                    "history placeholder: content out of bounds".into(),
+                ));
+            }
+            out.push(1);
+            out.push(content.kind);
+            let payload_len = u32::try_from(content.payload.len())
+                .map_err(|_| Error::Codec("history placeholder: payload length overflow".into()))?;
+            out.extend_from_slice(&payload_len.to_be_bytes());
+            out.extend_from_slice(&content.payload);
+            let state_len = u16::try_from(content.state.len())
+                .map_err(|_| Error::Codec("history placeholder: state length overflow".into()))?;
+            out.extend_from_slice(&state_len.to_be_bytes());
+            out.extend_from_slice(&content.state);
+        },
+    }
+    Ok(())
+}
+
+/// Decode the optional ADR-0092 content block.
+fn decode_content(r: &mut Reader<'_>) -> Result<Option<HistoryContentPlaceholder>> {
+    let content = if r.presence("content")? {
+        let kind = r.u8()?;
+        if !CONTENT_KINDS.contains(&kind) {
+            return Err(Error::Codec(format!(
+                "history placeholder: unknown content kind {kind}"
+            )));
+        }
+        let payload_len = r.u32("payload_len")? as usize;
+        if payload_len == 0 || payload_len > MAX_CONTENT_PAYLOAD_BYTES {
+            return Err(Error::Codec(format!(
+                "history placeholder: payload length {payload_len} not in 1..={MAX_CONTENT_PAYLOAD_BYTES}"
+            )));
+        }
+        let payload = r.take(payload_len, "payload")?.to_vec();
+        let state_len = r.u16()? as usize;
+        if state_len > MAX_CONTENT_STATE_BYTES {
+            return Err(Error::Codec(format!(
+                "history placeholder: state length {state_len} exceeds cap {MAX_CONTENT_STATE_BYTES}"
+            )));
+        }
+        let state = r.take(state_len, "state")?.to_vec();
+        Some(HistoryContentPlaceholder {
+            kind,
+            payload,
+            state,
+        })
+    } else {
+        None
+    };
+    Ok(content)
 }
 
 /// Encode an optional string as `present:u8 [+ len:u16 + utf8]`.
@@ -520,6 +912,10 @@ impl<'a> Reader<'a> {
         Ok(u64::from_be_bytes(arr))
     }
 
+    fn i64(&mut self, field: &str) -> Result<i64> {
+        Ok(i64::from_be_bytes(self.array::<8>(field)?))
+    }
+
     fn array<const N: usize>(&mut self, field: &str) -> Result<[u8; N]> {
         let b = self.take(N, field)?;
         let mut arr = [0u8; N];
@@ -618,6 +1014,9 @@ mod tests {
             width: Some(640),
             height: Some(480),
             thumb: None,
+            title: None,
+            artist: None,
+            inline_thumb: Some(vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]),
         }
     }
 
@@ -635,6 +1034,9 @@ mod tests {
             width: None,
             height: None,
             thumb: None,
+            title: None,
+            artist: None,
+            inline_thumb: None,
         }
     }
 
@@ -660,6 +1062,9 @@ mod tests {
                 width: Some(240),
                 height: None,
             }),
+            title: None,
+            artist: None,
+            inline_thumb: Some(vec![0xFF; MAX_INLINE_THUMB_BYTES]),
         }
     }
 
@@ -670,6 +1075,11 @@ mod tests {
             created_at: "2026-06-04T12:00:00Z".into(),
             text: "hello \u{1f600} world".into(),
             attachments: vec![sample_attachment()],
+            content: None,
+            channel_invite: None,
+            reply: None,
+            forward: None,
+            author_key: None,
         }
     }
 
@@ -689,6 +1099,11 @@ mod tests {
             created_at: String::new(),
             text: String::new(),
             attachments: vec![],
+            content: None,
+            channel_invite: None,
+            reply: None,
+            forward: None,
+            author_key: None,
         };
         let bytes = msg.encode().expect("encode");
         assert_eq!(
@@ -713,6 +1128,9 @@ mod tests {
             width: None,
             height: None,
             thumb: None,
+            title: None,
+            artist: None,
+            inline_thumb: None,
         }];
         let bytes = msg.encode().expect("encode");
         assert_eq!(
@@ -740,11 +1158,256 @@ mod tests {
     }
 
     #[test]
-    fn version_1_is_refused() {
+    fn the_author_round_trips_and_a_truncated_one_is_refused() {
+        let mut msg = sample();
+        msg.author_key = Some([0x7E; AUTHOR_KEY_LEN]);
+        let bytes = msg.encode().expect("encode");
+        let back = HistoryMessagePlaceholder::decode(&bytes).expect("decode");
+        assert_eq!(back.author_key, Some([0x7E; AUTHOR_KEY_LEN]));
+        assert_eq!(back, msg);
+        // The key is the last field: 1 presence byte + 32 key bytes.
+        assert_eq!(bytes[bytes.len() - AUTHOR_KEY_LEN - 1], 1);
+        assert!(HistoryMessagePlaceholder::decode(&bytes[..bytes.len() - 1]).is_err());
+        // An unknown presence byte is refused.
+        let mut bad = bytes.clone();
+        let at = bad.len() - AUTHOR_KEY_LEN - 1;
+        bad[at] = 2;
+        assert!(HistoryMessagePlaceholder::decode(&bad).is_err());
+    }
+
+    #[test]
+    fn versions_1_to_5_are_refused() {
+        for old in [1u8, 2, 3, 4, 5] {
+            let mut bytes = sample().encode().expect("encode");
+            bytes[0] = old;
+            let err = HistoryMessagePlaceholder::decode(&bytes).expect_err("old version refused");
+            assert!(matches!(err, Error::Codec(m) if m.contains("version")));
+        }
+    }
+
+    #[test]
+    fn content_round_trips_and_is_bounded() {
+        let mut msg = sample();
+        msg.text = String::new();
+        msg.attachments = vec![];
+        msg.content = Some(HistoryContentPlaceholder {
+            kind: 1,
+            payload: b"{\"body\":\"x\"}".to_vec(),
+            state: vec![1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        });
+        let bytes = msg.encode().expect("encode");
+        assert_eq!(
+            HistoryMessagePlaceholder::decode(&bytes).expect("decode"),
+            msg
+        );
+
+        for bad in [
+            HistoryContentPlaceholder {
+                kind: 0,
+                payload: vec![1],
+                state: vec![],
+            },
+            HistoryContentPlaceholder {
+                kind: 6,
+                payload: vec![1],
+                state: vec![],
+            },
+            HistoryContentPlaceholder {
+                kind: 3,
+                payload: vec![],
+                state: vec![],
+            },
+            HistoryContentPlaceholder {
+                kind: 3,
+                payload: vec![1; MAX_CONTENT_PAYLOAD_BYTES + 1],
+                state: vec![],
+            },
+            HistoryContentPlaceholder {
+                kind: 2,
+                payload: vec![1],
+                state: vec![0; MAX_CONTENT_STATE_BYTES + 1],
+            },
+        ] {
+            msg.content = Some(bad);
+            assert!(msg.encode().is_err());
+        }
+
+        // A hand-made unknown kind byte is refused on decode.
+        msg.content = Some(HistoryContentPlaceholder {
+            kind: 5,
+            payload: vec![7],
+            state: vec![],
+        });
+        let mut bytes = msg.encode().expect("encode");
+        // content_present, kind, payload_len(4), payload(1), state_len(2),
+        // then the author presence byte.
+        let kind_at = bytes.len() - (1 + 4 + 1 + 2 + 1);
+        assert_eq!(bytes[kind_at], 5);
+        bytes[kind_at] = 9;
+        assert!(HistoryMessagePlaceholder::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn audio_tags_round_trip_and_are_capped() {
+        let mut att = voice_note_attachment();
+        att.kind = Some("audio".into());
+        att.waveform = None;
+        att.title = Some("Song \u{1f3b5}".into());
+        att.artist = Some("Band".into());
+        let mut msg = sample();
+        msg.attachments = vec![att.clone()];
+        let bytes = msg.encode().expect("encode");
+        let back = HistoryMessagePlaceholder::decode(&bytes).expect("decode");
+        assert_eq!(back, msg);
+        assert_eq!(back.attachments[0].title.as_deref(), Some("Song \u{1f3b5}"));
+
+        let mut long = att;
+        long.artist = Some("a".repeat(MAX_AUDIO_TAG_BYTES + 1));
+        msg.attachments = vec![long];
+        assert!(msg.encode().is_err());
+    }
+
+    #[test]
+    fn version_2_is_refused() {
         let mut bytes = sample().encode().expect("encode");
-        bytes[0] = 1;
-        let err = HistoryMessagePlaceholder::decode(&bytes).expect_err("v1 must be refused");
+        bytes[0] = 2;
+        let err = HistoryMessagePlaceholder::decode(&bytes).expect_err("v2 must be refused");
         assert!(matches!(err, Error::Codec(m) if m.contains("version")));
+    }
+
+    fn with_card_reply_forward() -> HistoryMessagePlaceholder {
+        let mut msg = sample();
+        msg.channel_invite = Some(vec![0x5A; 300]);
+        msg.reply = Some(HistoryReplyPlaceholder {
+            target: -7,
+            author: Some("Ann".into()),
+            excerpt: Some("see you \u{1f600}".into()),
+        });
+        msg.forward = Some(HistoryForwardPlaceholder {
+            author: Some("Bob".into()),
+            origin: Some(HistoryForwardOrigin {
+                group_id: vec![0x42; 32],
+                message_id: 1234,
+            }),
+        });
+        msg
+    }
+
+    #[test]
+    fn card_reply_and_forward_round_trip() {
+        let msg = with_card_reply_forward();
+        let bytes = msg.encode().expect("encode");
+        assert_eq!(
+            HistoryMessagePlaceholder::decode(&bytes).expect("decode"),
+            msg
+        );
+
+        let mut bare = msg;
+        bare.reply = Some(HistoryReplyPlaceholder {
+            target: 0,
+            author: None,
+            excerpt: None,
+        });
+        bare.forward = Some(HistoryForwardPlaceholder {
+            author: None,
+            origin: None,
+        });
+        let bytes = bare.encode().expect("encode");
+        assert_eq!(
+            HistoryMessagePlaceholder::decode(&bytes).expect("decode"),
+            bare
+        );
+    }
+
+    #[test]
+    fn card_bounds_are_enforced_both_ways() {
+        let mut msg = sample();
+        msg.channel_invite = Some(vec![1; MAX_CHANNEL_INVITE_BYTES]);
+        let at_bound = msg.encode().expect("a card at the bound encodes");
+        assert_eq!(
+            HistoryMessagePlaceholder::decode(&at_bound).expect("decode"),
+            msg
+        );
+
+        msg.channel_invite = Some(vec![1; MAX_CHANNEL_INVITE_BYTES + 1]);
+        assert!(msg.encode().is_err());
+        msg.channel_invite = Some(Vec::new());
+        assert!(msg.encode().is_err());
+
+        // A declared card length over the cap, or an empty present card, is
+        // refused on decode.
+        let mut bytes = sample().encode().expect("encode");
+        let card_presence_at = bytes.len() - 5;
+        assert_eq!(bytes[card_presence_at], 0);
+        bytes.truncate(card_presence_at);
+        let mut over = bytes.clone();
+        over.push(1);
+        over.extend_from_slice(
+            &u16::try_from(MAX_CHANNEL_INVITE_BYTES + 1)
+                .expect("fits")
+                .to_be_bytes(),
+        );
+        over.extend(std::iter::repeat_n(0u8, MAX_CHANNEL_INVITE_BYTES + 1));
+        over.extend_from_slice(&[0, 0, 0, 0]);
+        assert!(HistoryMessagePlaceholder::decode(&over).is_err());
+        let mut empty = bytes;
+        empty.extend_from_slice(&[1, 0, 0, 0, 0, 0, 0]);
+        assert!(HistoryMessagePlaceholder::decode(&empty).is_err());
+    }
+
+    #[test]
+    fn forward_origin_group_bounds_are_enforced_both_ways() {
+        let mut msg = with_card_reply_forward();
+        let origin = |len: usize| HistoryForwardOrigin {
+            group_id: vec![9; len],
+            message_id: 1,
+        };
+        msg.forward = Some(HistoryForwardPlaceholder {
+            author: None,
+            origin: Some(origin(MAX_ORIGIN_GROUP_BYTES)),
+        });
+        assert!(msg.encode().is_ok());
+        msg.forward = Some(HistoryForwardPlaceholder {
+            author: None,
+            origin: Some(origin(MAX_ORIGIN_GROUP_BYTES + 1)),
+        });
+        assert!(msg.encode().is_err());
+        msg.forward = Some(HistoryForwardPlaceholder {
+            author: None,
+            origin: Some(origin(0)),
+        });
+        assert!(msg.encode().is_err());
+
+        // Hand-built: forward present, no author, origin present with a zero
+        // group length.
+        let mut bytes = sample().encode().expect("encode");
+        bytes.pop();
+        bytes.extend_from_slice(&[1, 0, 1, 0]);
+        bytes.extend_from_slice(&1i64.to_be_bytes());
+        assert!(HistoryMessagePlaceholder::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn oversized_reply_and_forward_snapshots_are_refused() {
+        let mut msg = sample();
+        msg.reply = Some(HistoryReplyPlaceholder {
+            target: 1,
+            author: Some("a".repeat(MAX_SNAPSHOT_AUTHOR_BYTES + 1)),
+            excerpt: None,
+        });
+        assert!(msg.encode().is_err());
+        msg.reply = Some(HistoryReplyPlaceholder {
+            target: 1,
+            author: None,
+            excerpt: Some("e".repeat(MAX_REPLY_EXCERPT_BYTES + 1)),
+        });
+        assert!(msg.encode().is_err());
+        msg.reply = None;
+        msg.forward = Some(HistoryForwardPlaceholder {
+            author: Some("f".repeat(MAX_SNAPSHOT_AUTHOR_BYTES + 1)),
+            origin: None,
+        });
+        assert!(msg.encode().is_err());
     }
 
     #[test]
@@ -767,11 +1430,51 @@ mod tests {
         att.waveform = Some(vec![1; 3]);
         att.width = None;
         att.height = None;
+        att.inline_thumb = None;
         msg.attachments = vec![att];
         let mut bytes = msg.encode().expect("encode");
-        let waveform_len_at = bytes.len() - (1 + 1 + 1 + 3 + 2);
+        // From the end: the author, content, forward, reply and card
+        // presence bytes, then the inline thumb, artist, title, thumb, height
+        // and width presence bytes, the 3 waveform bytes, then its u16 length.
+        let waveform_len_at = bytes.len() - (5 + 6 + 3 + 2);
+        assert_eq!(
+            &bytes[waveform_len_at..waveform_len_at + 2],
+            &3u16.to_be_bytes()
+        );
         bytes[waveform_len_at..waveform_len_at + 2].copy_from_slice(
             &u16::try_from(MAX_WAVEFORM_BYTES + 1)
+                .expect("fits")
+                .to_be_bytes(),
+        );
+        assert!(HistoryMessagePlaceholder::decode(&bytes).is_err());
+    }
+
+    /// ADR-0047 section 6: the micro thumbnail rides the bundle; over its
+    /// cap it is refused on encode and on decode.
+    #[test]
+    fn inline_thumb_round_trips_and_is_bounded_both_ways() {
+        let mut msg = sample();
+        msg.attachments = vec![video_note_attachment(), sample_attachment()];
+        let bytes = msg.encode().expect("encode");
+        assert_eq!(
+            HistoryMessagePlaceholder::decode(&bytes).expect("decode"),
+            msg
+        );
+
+        let mut over = sample();
+        over.attachments[0].inline_thumb = Some(vec![0xFF; MAX_INLINE_THUMB_BYTES + 1]);
+        assert!(over.encode().is_err());
+
+        // A hand-edited length over the cap is refused on decode.
+        let mut msg = sample();
+        msg.attachments[0].inline_thumb = Some(vec![0xFF, 0xD8, 0xFF]);
+        let mut bytes = msg.encode().expect("encode");
+        // From the end: the author, content, forward, reply and card
+        // presence bytes, the 3 thumbnail bytes, then its u16 length.
+        let len_at = bytes.len() - (5 + 3 + 2);
+        assert_eq!(&bytes[len_at..len_at + 2], &3u16.to_be_bytes());
+        bytes[len_at..len_at + 2].copy_from_slice(
+            &u16::try_from(MAX_INLINE_THUMB_BYTES + 1)
                 .expect("fits")
                 .to_be_bytes(),
         );
@@ -783,10 +1486,12 @@ mod tests {
         let mut msg = sample();
         msg.attachments = vec![voice_note_attachment()];
         let bytes = msg.encode().expect("encode");
-        // The last byte of a voice attachment without a thumb is the thumb
-        // presence byte.
+        // In a voice attachment without a thumb, title, artist or inline
+        // thumb, the thumb presence byte is ninth from the end: title,
+        // artist, inline thumb, card, reply, forward, content and author
+        // presence bytes follow.
         let mut bad = bytes;
-        let last = bad.len() - 1;
+        let last = bad.len() - 9;
         assert_eq!(bad[last], 0);
         bad[last] = 2;
         let err = HistoryMessagePlaceholder::decode(&bad).expect_err("must reject");
@@ -847,12 +1552,21 @@ mod tests {
                     any::<Option<u32>>(),
                     proptest::option::of(thumb()),
                 ),
+                (
+                    opt_string(MAX_AUDIO_TAG_BYTES),
+                    opt_string(MAX_AUDIO_TAG_BYTES),
+                    proptest::option::of(proptest::collection::vec(
+                        any::<u8>(),
+                        0..=MAX_INLINE_THUMB_BYTES,
+                    )),
+                ),
             )
                 .prop_map(
                     |(
                         (blob_id, key, nonce, size),
                         (mime, name, kind),
                         (duration_ms, waveform, width, height, thumb),
+                        (title, artist, inline_thumb),
                     )| {
                         HistoryAttachmentPlaceholder {
                             blob_id,
@@ -867,9 +1581,42 @@ mod tests {
                             width,
                             height,
                             thumb,
+                            title,
+                            artist,
+                            inline_thumb,
                         }
                     },
                 )
+        }
+
+        fn reply() -> impl Strategy<Value = HistoryReplyPlaceholder> {
+            (
+                any::<i64>(),
+                opt_string(MAX_SNAPSHOT_AUTHOR_BYTES),
+                opt_string(MAX_REPLY_EXCERPT_BYTES),
+            )
+                .prop_map(|(target, author, excerpt)| HistoryReplyPlaceholder {
+                    target,
+                    author,
+                    excerpt,
+                })
+        }
+
+        fn forward() -> impl Strategy<Value = HistoryForwardPlaceholder> {
+            (
+                opt_string(MAX_SNAPSHOT_AUTHOR_BYTES),
+                proptest::option::of((
+                    proptest::collection::vec(any::<u8>(), 1..=MAX_ORIGIN_GROUP_BYTES),
+                    any::<i64>(),
+                )),
+            )
+                .prop_map(|(author, origin)| HistoryForwardPlaceholder {
+                    author,
+                    origin: origin.map(|(group_id, message_id)| HistoryForwardOrigin {
+                        group_id,
+                        message_id,
+                    }),
+                })
         }
 
         proptest! {
@@ -886,6 +1633,17 @@ mod tests {
                 created_at in opt_string(40),
                 text in opt_string(200),
                 attachments in proptest::collection::vec(attachment(), 0..4),
+                content in proptest::option::of((
+                    1u8..=5,
+                    proptest::collection::vec(any::<u8>(), 1..64),
+                    proptest::collection::vec(any::<u8>(), 0..64),
+                )),
+                channel_invite in proptest::option::of(
+                    proptest::collection::vec(any::<u8>(), 1..=MAX_CHANNEL_INVITE_BYTES),
+                ),
+                reply in proptest::option::of(reply()),
+                forward in proptest::option::of(forward()),
+                author_key in proptest::option::of(any::<[u8; AUTHOR_KEY_LEN]>()),
             ) {
                 let msg = HistoryMessagePlaceholder {
                     message_id,
@@ -893,6 +1651,15 @@ mod tests {
                     created_at: created_at.unwrap_or_default(),
                     text: text.unwrap_or_default(),
                     attachments,
+                    content: content.map(|(kind, payload, state)| HistoryContentPlaceholder {
+                        kind,
+                        payload,
+                        state,
+                    }),
+                    channel_invite,
+                    reply,
+                    forward,
+                    author_key,
                 };
                 let bytes = msg.encode().expect("within caps");
                 let back = HistoryMessagePlaceholder::decode(&bytes).expect("decodes");
@@ -983,6 +1750,11 @@ mod tests {
             created_at: "t".into(),
             text: "a".repeat(MAX_TEXT_BYTES + 1),
             attachments: vec![],
+            content: None,
+            channel_invite: None,
+            reply: None,
+            forward: None,
+            author_key: None,
         };
         assert!(msg.encode().is_err());
     }
@@ -995,6 +1767,11 @@ mod tests {
             created_at: "t".into(),
             text: "x".into(),
             attachments: vec![sample_attachment(); MAX_ATTACHMENTS + 1],
+            content: None,
+            channel_invite: None,
+            reply: None,
+            forward: None,
+            author_key: None,
         };
         assert!(msg.encode().is_err());
     }

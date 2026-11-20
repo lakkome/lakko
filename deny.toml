@@ -33,6 +33,33 @@ ignore = [
     # parking_lot 0.11 -> instant). It stays an open documented accept until
     # openmls ships a release dropping fluvio-wasm-timer (0.9 unreleased as of
     # 2026-06-23). See known-gaps G-25.
+    #
+    # 2026-11-19 (beta advisory pass): rustls, rustls-webpki, webpki-roots,
+    # webpki-root-certs, quinn-proto, quinn-udp, lettre, tokio, openssl,
+    # ctutils and the yanked chacha20 are FIXED by compatible `cargo update`;
+    # RUSTSEC-2026-0459 (bundled SQLite) is FIXED by rusqlite 0.32 -> 0.41 in
+    # crates/lakko-storage. The five below cannot be fixed by an update today.
+    #
+    # libcrux-sha3 0.0.8 / libcrux-secrets 0.0.5: pulled only by hpke-rs
+    # 0.6.1 (openmls_rust_crypto), which requires libcrux-sha3 =0.0.8 and
+    # calls it only to derive X-Wing and ML-KEM keys (hpke-rs src/kem.rs
+    # derive_key_pair), with the one-shot `shake256`. Lakko's ciphersuites are
+    # X25519 and P-384 (crates/lakko-mls/src/ciphersuite.rs), so neither the
+    # incremental squeeze, the AVX2 x4 SHAKE nor the aarch64 swap/select is
+    # reached. Drop when openmls moves to hpke-rs >= 0.7.
+    { id = "RUSTSEC-2026-0207", reason = "libcrux-sha3 incremental squeeze: not reached, hpke-rs uses one-shot shake256 for ML-KEM/X-Wing only, unused ciphersuites" },
+    { id = "RUSTSEC-2026-0208", reason = "libcrux-sha3 AVX2 x4 SHAKE-256: not reached, see above" },
+    { id = "RUSTSEC-2026-0212", reason = "libcrux-secrets aarch64 swap/select: only reached through libcrux ML-KEM paths Lakko does not use" },
+    # crypto-bigint 0.5.5 (timing variability): through elliptic-curve 0.13
+    # (p256 / p384 / k256), used by the SFU's DTLS (dimpl), opaque-ke 3 (whose
+    # Lakko suite is Ristretto255, not crypto-bigint), hpke-rs-rust-crypto and
+    # the FIPS ciphersuite. The fix is crypto-bigint 0.7, which needs the
+    # elliptic-curve 0.14 generation in each of those upstreams. OPEN:
+    # recorded in docs/beta-launch-checklist.md; revisit when they move.
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 timing: fix needs elliptic-curve 0.14 in str0m/dimpl, opaque-ke, hpke-rs; tracked in the beta checklist" },
+    # chrono is unmaintained (not a vulnerability): required by sqlx and used
+    # directly by services/ds, services/push-gw and lakko-tuf.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, no known vulnerability; required by sqlx" },
 ]
 
 [licenses]

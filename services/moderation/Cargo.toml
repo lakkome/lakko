@@ -10,7 +10,7 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Report intake and receipts for Lakko's moderators (ADR-0089)"
+description = "Report intake and receipts for Lakko's moderators (ADR-0098)"
 
 [lints]
 workspace = true
@@ -33,23 +33,25 @@ serde_json.workspace = true
 
 # ADR-0078 section 11: the request span that records the route template.
 lakko-log-hygiene.workspace = true
+# ADR-0096: RED metrics on the public routes and /metrics on its own port.
+lakko-metrics.workspace = true
 
-# The report format, the moderator list and its root check (ADR-0089).
+# The report format, the moderator list and its root check (ADR-0098).
 lakko-moderation.workspace = true
 
-# A report spends one anonymous token of context `report` (ADR-0089
+# A report spends one anonymous token of context `report` (ADR-0098
 # section 2) through the shared gate and spent-set.
 lakko-anon-token.workspace = true
 lakko-anon-token-server.workspace = true
 
 # The moderation log: the KT log's Merkle construction, its signed root and
-# the witness v2 co-signatures under the `moderation` log (ADR-0089 section 5).
+# the witness v2 co-signatures under the `moderation` log (ADR-0098 section 5).
 lakko-transparency.workspace = true
 # The log's Ed25519 operator key.
 lakko-crypto.workspace = true
 
 axum = { version = "0.8", features = ["macros"] }
-# `fs` serves the built panel app (ADR-0089 step 5).
+# `fs` serves the built panel app (ADR-0098 step 5).
 tower-http = { version = "0.6", features = ["trace", "limit", "fs"] }
 sqlx = { version = "0.9", default-features = false, features = [
     "runtime-tokio",

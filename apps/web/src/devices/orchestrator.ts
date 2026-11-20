@@ -22,7 +22,7 @@
  * acknowledged transaction (scan happens, ack happens, done).
  */
 import { resendServiceEnvelopes } from "../reach/service-envelope-outbox";
-import { loadWasm } from "../wasm";
+import { loadWasm, type Wasm } from "../wasm";
 import type {
   DeviceGroup as WasmDeviceGroup,
   Identity as WasmIdentity,
@@ -35,6 +35,7 @@ import {
 import { AuthClient } from "../auth/client";
 import type { SessionPair } from "../auth/session-pair";
 import {
+  base64Decode,
   base64Encode,
   base64UrlDecodeNoPad,
   base64UrlEncodeNoPad,
@@ -44,7 +45,10 @@ import {
   generateRendezvousPseudonym,
   parsePairingQrPayload,
 } from "./pairing";
-import { encodeJournalEntry } from "./journal-envelope";
+import { buildPairingCommit } from "./pairing-commit";
+import { recordJoinedDeviceGroupId, readJoinedDeviceGroupId } from "./joined-device-group-id";
+import { getDeviceGroupSnapshotState } from "./device-group-snapshot-store";
+import { DsClient } from "../ds/client";
 import type { DeviceCipher } from "../auth/device-cipher";
 import { persistDeviceGroupSnapshot, type EnsuredDeviceGroup } from "./lifecycle";
 import { commitDeviceGroupChange } from "./device-group-commit-runtime";
@@ -60,12 +64,13 @@ import {
   applyHistoryBundleToLog,
 } from "./history-bundle";
 import {
-  RECOVERY_EXPORTER_KEY_LENGTH,
-  RECOVERY_EXPORTER_LABEL,
-  buildRecoveryPayload,
-  parseRecoveryPayload,
+  composeRecoveryPlaintext,
+  decodeRecoveryPlaintext,
   pollForRecoveryPayload,
-  publishRecoveryPayload,
+  publishRecoveryRow,
+  zeroOpenedRecoveryPayload,
+  type OpenedRecoveryPayload,
+  type RecoveredPredecessor,
 } from "./recovery-payload";
 import { applyCarriedExtras, collectCarriedExtras } from "./carried-state-io";
 import {
@@ -74,6 +79,7 @@ import {
   accountKeyHexOfSeed,
   applyOwnPredecessors,
   applyStateBundle,
+  boundedOwnPredecessors,
   buildStateBundle,
   collectOwnPredecessors,
   decodeStateBundle,
@@ -81,7 +87,7 @@ import {
   pollForStateBundle,
   publishStateBundle,
   type CarriedOwnPredecessor,
-  type StateBundleV3,
+  type StateBundle,
 } from "./state-bundle";
 import { loadMlsSnapshot } from "../chat/mls-store";
 import {
@@ -107,6 +113,9 @@ async function buildPairingPayloads(
   keyPackage: Uint8Array,
   rendezvous: Uint8Array,
   place: PairingPlace,
+  /** G-56 — the self-removal proof of a device already in the DeviceGroup
+   *  that pairs again; carried by both payloads. */
+  selfRemovalProof: Uint8Array | null = null,
 ): Promise<{ qrPayload: Uint8Array; atSeal: () => Promise<Uint8Array> }> {
   // This device's own card rides the payload so the signed-in device can
   // name it; none is no failure.
@@ -115,6 +124,7 @@ async function buildPairingPayloads(
     keyPackage,
     rendezvous,
     await composePairingCardEnvelope(place),
+    selfRemovalProof,
   );
   const builtWithPlace = place.current() !== null;
   return {
@@ -127,6 +137,7 @@ async function buildPairingPayloads(
           keyPackage,
           rendezvous,
           await pairingCardEnvelopeNow(place),
+          selfRemovalProof,
         );
       } catch {
         return qrPayload;
@@ -142,12 +153,17 @@ async function buildPairingPayloads(
  *  [`JoinSession.accept`] / [`AnonymousJoinSession.accept`]. */
 export interface JoinRecoveryOutcome {
   /** The 16-byte entropy of the 12-word recovery phrase, transferred
-   *  from the existing device (recovery payload v2). The caller OWNS this
+   *  from the existing device (recovery payload v3). The caller OWNS this
    *  buffer: rebuild the phrase from it, derive the 64-byte
    *  AccountIdentity seed, verify that seed fail-closed against the
    *  published bundle, and only then store the seed and the phrase;
    *  zeroize on any refusal. */
   readonly phraseEntropy: Uint8Array;
+  /** The account's earlier keys (own predecessors, oldest first) the
+   *  confirming device holds (recovery payload v3, ADR-0074 "Joining after a
+   *  rotation"). The caller OWNS the seeds: it stores them BEFORE the
+   *  account seed and the landing, and zeroes them on every path. */
+  readonly predecessors: readonly RecoveredPredecessor[];
   /** The fresh session pair from redeeming the device grant (ACCESS half,
    *  ADR-0073), or `null` when the redeem failed (grant expired / already
    *  consumed / auth service unreachable) — the entropy is still usable on
@@ -260,20 +276,46 @@ export async function prepareJoinFlow(args: {
   /** The city of this pairing, started when the screen opened
    *  (`startPairingLocate`); one is started here when absent. */
   readonly place?: PairingPlace;
+  /** G-56 — the pairing runs from the earlier-keys parked screen: when this
+   *  device is already in the DeviceGroup it joined by pairing, the payload
+   *  carries its self-removal proof ({@link heldLeafSelfRemovalProof}) so
+   *  the confirming device replaces its leaf instead of refusing a second
+   *  one with the same key. Otherwise the ordinary join. */
+  readonly rejoinsHeldLeaf?: boolean;
+  /** The DeviceGroup's latest epoch, by an empty DS knock (the ADR-0081
+   *  rejoin probe); `null` when the journal names none. Injectable for tests. */
+  readonly latestEpoch?: (groupId: Uint8Array) => Promise<bigint | null>;
 }): Promise<JoinSession> {
   const wasm = await loadWasm();
   const seed = await ensureDeviceIdentitySeed(args.accountIdB64, args.deviceKey);
   let identity: WasmIdentity | null = wasm.Identity.fromSeed(seed);
-  // Best-effort scrub.
-  seed.fill(0);
 
   const keyPackage = identity.createKeyPackage();
+  let selfRemovalProof: Uint8Array | null = null;
+  try {
+    if (args.rejoinsHeldLeaf === true) {
+      selfRemovalProof = await heldLeafSelfRemovalProof({
+        wasm,
+        accountIdBytes: args.accountIdBytes,
+        accountIdB64: args.accountIdB64,
+        deviceKey: args.deviceKey,
+        deviceIdentitySeed: seed,
+        joiningIdentity: identity,
+        keyPackage,
+        latestEpoch: args.latestEpoch ?? probeLatestDeviceGroupEpoch,
+      });
+    }
+  } finally {
+    // Best-effort scrub.
+    seed.fill(0);
+  }
   const rendezvous = generateRendezvousPseudonym();
   const { qrPayload, atSeal } = await buildPairingPayloads(
     args.loginHandle,
     keyPackage,
     rendezvous,
     args.place ?? startPairingLocate(),
+    selfRemovalProof,
   );
 
   let group: WasmDeviceGroup | null = null;
@@ -310,6 +352,9 @@ export async function prepareJoinFlow(args: {
         args.accountIdB64,
         args.deviceKey,
       );
+      // G-56 — the DeviceGroup id this device joined, for a later pairing
+      // from the earlier-keys parked screen that has to name it.
+      await recordJoinedDeviceGroupId(args.accountIdB64, args.deviceKey, group.groupId());
       // docs/ux/second-device.md section 3: a device that has just joined
       // sends its own card at once.
       void sendOwnCardAfterJoin(args.accountIdB64);
@@ -379,7 +424,7 @@ export async function prepareJoinFlow(args: {
               console.info(
                 `state bundle: ${applied.contacts} contacts, ${applied.pins} pins, ` +
                   `${extras.groupNames} group names, ${extras.profiles} profiles, ` +
-                  `${extras.pendingContacts} pending contacts`,
+                  `${extras.pendingContacts} pending contacts, ${extras.channelSeeds} channels with seeds`,
               );
             }
           } catch (err) {
@@ -415,11 +460,101 @@ export async function prepareJoinFlow(args: {
   };
 }
 
+/** The DeviceGroup's latest epoch, by an empty knock (the ADR-0081 rejoin
+ *  probe, one `ds-knock` token); `null` when the journal names none. */
+async function probeLatestDeviceGroupEpoch(groupId: Uint8Array): Promise<bigint | null> {
+  const probe = await new DsClient().knock(groupId, []);
+  return probe.epoch === null ? null : BigInt(probe.epoch);
+}
+
+/**
+ * G-56 — the self-removal proof a device already in the account's DeviceGroup
+ * signs when it pairs again from the earlier-keys parked screen, or `null`
+ * when the ordinary join applies: this device recorded no joined DeviceGroup
+ * id, holds no DeviceGroup snapshot it can read, or its leaf is no longer in
+ * that group's roster.
+ *
+ * The device keeps its device identity (no new seed), so the payload's
+ * KeyPackage carries the leaf key already in the group, which an Add would
+ * refuse (`DuplicateSignatureKey`). With its old leaf key (the same key) it
+ * signs that the leaf may be replaced by `keyPackage` in the commit leaving
+ * the DeviceGroup's latest epoch, learned by an empty knock as the ADR-0081
+ * rejoin knock does (this device's own epoch when the probe gets no answer).
+ * Never throws.
+ */
+export async function heldLeafSelfRemovalProof(args: {
+  readonly wasm: Wasm;
+  readonly accountIdBytes: Uint8Array;
+  readonly accountIdB64: string;
+  readonly deviceKey: DeviceCipher;
+  /** The 32-byte device identity seed (not consumed). */
+  readonly deviceIdentitySeed: Uint8Array;
+  /** The joining identity (the same seed, an empty provider): the signer. */
+  readonly joiningIdentity: WasmIdentity;
+  readonly keyPackage: Uint8Array;
+  readonly latestEpoch: (groupId: Uint8Array) => Promise<bigint | null>;
+}): Promise<Uint8Array | null> {
+  const { wasm } = args;
+  const groupId = await readJoinedDeviceGroupId(args.accountIdB64, args.deviceKey);
+  if (groupId === null) return null;
+  let snapshot: Uint8Array | null = null;
+  try {
+    snapshot = (await getDeviceGroupSnapshotState(args.accountIdB64, args.deviceKey))?.snapshot ?? null;
+  } catch {
+    snapshot = null;
+  }
+  if (snapshot === null || snapshot.length === 0) return null;
+  let heldEpoch: bigint;
+  const held = wasm.Identity.fromSeed(args.deviceIdentitySeed);
+  try {
+    held.restoreStorage(snapshot);
+    const group = wasm.loadDeviceGroupById(held, args.accountIdBytes, groupId);
+    if (group === undefined) return null;
+    try {
+      const ownKey = held.signaturePublicKey;
+      const members = group.devices() as { signaturePublicKey: Uint8Array }[];
+      if (!members.some((m) => bytesEqual(m.signaturePublicKey, ownKey))) return null;
+      heldEpoch = group.epoch();
+    } finally {
+      group.free();
+    }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("pairing: the held DeviceGroup state could not be read; the ordinary join applies", refusalCode(err));
+    return null;
+  } finally {
+    held.free();
+  }
+  let probed: bigint | null = null;
+  try {
+    probed = await args.latestEpoch(groupId);
+  } catch {
+    // eslint-disable-next-line no-console
+    console.warn("pairing: the DeviceGroup epoch probe failed; this device's own epoch is used");
+    probed = null;
+  }
+  try {
+    const proof = wasm.signDeviceGroupSelfRemoval(
+      args.joiningIdentity,
+      groupId,
+      probed ?? heldEpoch,
+      args.keyPackage,
+    );
+    // eslint-disable-next-line no-console
+    console.info("pairing: this device is in the DeviceGroup already; it pairs again with a self-removal proof");
+    return proof;
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("pairing: the self-removal proof was not signed; the ordinary join applies", refusalCode(err));
+    return null;
+  }
+}
+
 /** ADR-0074 — store a bundle's own predecessors under the device key. Best
  *  effort and never throws: a failure leaves the device as one that knows
  *  only the current key (logged without any key material). */
 async function storeOwnPredecessors(
-  bundle: StateBundleV3,
+  bundle: StateBundle,
   accountIdB64: string,
   deviceKey: DeviceCipher,
 ): Promise<void> {
@@ -448,7 +583,7 @@ async function receiveStateBundle(
   identity: WasmIdentity,
   rendezvous: Uint8Array,
   welcomeCursor: number,
-): Promise<StateBundleV3 | null> {
+): Promise<StateBundle | null> {
   const outcome = await pollForStateBundle(rendezvous, welcomeCursor);
   if (outcome.kind !== "received") return null;
   const wasm = await loadWasm();
@@ -516,17 +651,32 @@ export async function runJoinerRecovery(args: {
   if (outcome.kind !== "received") return null;
 
   const wasm = await loadWasm();
+  // The core reads the row: `undefined` is not a recovery row, a throw is a
+  // recovery row of another version (v2) or an empty one. Either way no keys
+  // are handed over.
+  let sealed: Uint8Array | undefined;
+  try {
+    sealed = wasm.unwrapRecoveryRow(outcome.row);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("recovery row refused", refusalCode(err));
+    return null;
+  }
+  if (sealed === undefined) return null;
   let key: Uint8Array | null = null;
   let plaintext: Uint8Array | null = null;
+  let opened: OpenedRecoveryPayload | null = null;
   try {
     key = args.exporter.exportSecret(
       args.identity,
-      RECOVERY_EXPORTER_LABEL,
+      wasm.recoveryExporterLabel(),
       args.rendezvous,
-      RECOVERY_EXPORTER_KEY_LENGTH,
+      wasm.recoveryExporterKeyLen(),
     );
-    plaintext = wasm.openWithKey(key, outcome.sealedBlob);
-    const parsed = parseRecoveryPayload(plaintext);
+    plaintext = wasm.openWithKey(key, sealed);
+    opened = decodeRecoveryPlaintext(wasm, plaintext);
+    // eslint-disable-next-line no-console
+    console.info(`recovery row: ${opened.predecessors.length} earlier account keys`);
 
     // Redeem the grant for ACCESS. A failure here (expired /
     // consumed grant, auth service down) downgrades the outcome to
@@ -536,7 +686,7 @@ export async function runJoinerRecovery(args: {
     try {
       const redeem =
         args.redeem ?? ((grant: string) => new AuthClient().deviceAuthorizeRedeem(grant));
-      const redeemed = await redeem(base64UrlEncodeNoPad(parsed.grantToken));
+      const redeemed = await redeem(base64UrlEncodeNoPad(opened.grant));
       if (
         args.expectedAccountIdBytes !== null &&
         !bytesEqual(redeemed.accountId, args.expectedAccountIdBytes)
@@ -551,21 +701,30 @@ export async function runJoinerRecovery(args: {
       // eslint-disable-next-line no-console
       console.warn("device grant redeem failed", err);
     }
-    parsed.grantToken.fill(0);
+    opened.grant.fill(0);
+    const handed = opened;
+    opened = null;
     return {
-      phraseEntropy: parsed.phraseEntropy,
+      phraseEntropy: handed.phraseEntropy,
+      predecessors: handed.predecessors,
       session,
       accountIdBytes,
     };
   } catch (err) {
     // Wrong key / tampered blob / malformed payload — drop it.
     // eslint-disable-next-line no-console
-    console.warn("recovery payload open failed", err);
+    console.warn("recovery payload open failed", refusalCode(err));
     return null;
   } finally {
     key?.fill(0);
     plaintext?.fill(0);
+    if (opened !== null) zeroOpenedRecoveryPayload(opened);
   }
+}
+
+/** The code of a core refusal (`"<code>: <reason>"`), never the payload. */
+function refusalCode(err: unknown): string {
+  return err instanceof Error ? (err.message.split(":")[0] ?? "unknown") : "unknown";
 }
 
 // ---- Anonymous joining side (ADR-0018 factor (a), path (b)) -------
@@ -670,7 +829,7 @@ export async function prepareAnonymousJoinFlow(args: {
   // scanner published was never read on this route, and a confirmed device
   // opened every chat empty.
   let pendingHistory: { secret: Uint8Array; sealedBytes: Uint8Array } | null = null;
-  let pendingState: StateBundleV3 | null = null;
+  let pendingState: StateBundle | null = null;
 
   return {
     qrPayload,
@@ -772,6 +931,9 @@ export async function prepareAnonymousJoinFlow(args: {
         account.b64,
         deviceKey,
       );
+      // G-56 — the DeviceGroup id this device joined (by name), as on the
+      // pairing join of a known account.
+      if (group !== null) await recordJoinedDeviceGroupId(account.b64, deviceKey, group.groupId());
       deviceIdentitySeed.fill(0);
       deviceIdentitySeed = null;
       if (pendingHistory !== null) {
@@ -808,7 +970,7 @@ export async function prepareAnonymousJoinFlow(args: {
         console.info(
           `state bundle: ${applied.contacts} contacts, ${applied.pins} pins, ` +
             `${extras.groupNames} group names, ${extras.profiles} profiles, ` +
-            `${extras.pendingContacts} pending contacts`,
+            `${extras.pendingContacts} pending contacts, ${extras.channelSeeds} channels with seeds`,
         );
       }
     },
@@ -910,6 +1072,7 @@ export async function runScanFlow(args: {
     args.scannedBytes,
     args.loginHandle,
   );
+  const wasm = await loadWasm();
 
   // ADR-0081 decision 2 — the add goes through the DeviceGroup commit outbox:
   // the entry beside the durable snapshot, one `POST .../commit` (the next
@@ -923,28 +1086,11 @@ export async function runScanFlow(args: {
       accountIdB64: args.accountIdB64,
       deviceKey: args.deviceKey,
     },
-    (ensured) => {
-      // ADR-0058 section 5.1 — who was a member before this add, for the
-      // growth re-send the sync runtime runs once the add is current.
-      let priorLeaves: number[] = [];
-      try {
-        priorLeaves = ensured.group
-          .devices()
-          .map((m: { leafIndex: number }) => m.leafIndex)
-          .sort((a: number, b: number) => a - b);
-      } catch {
-        priorLeaves = [];
-      }
-      const addition = ensured.group.addDeviceFromWire(ensured.identity, decoded.keyPackage);
-      // G-13 (ADR-0015): every DeviceGroup journal entry is wrapped; an
-      // add-device commit carries no attestation.
-      return {
-        kind: "add",
-        row: encodeJournalEntry(addition.commit, null),
-        welcome: { bytes: addition.welcome, rendezvous: decoded.rendezvousPseudonym },
-        priorLeaves,
-      };
-    },
+    // G-56 — the Add, or, for a device already in the DeviceGroup that pairs
+    // again with its self-removal proof, the one-commit replacement of its
+    // leaf (`pairing-commit.ts`); an uncovered proof throws before anything
+    // is built.
+    (ensured) => buildPairingCommit(wasm, ensured, decoded),
     async (ensured, outcome) => {
       if (outcome.kind === "lost") {
         // Another device of the account changed the DeviceGroup at the same
@@ -1002,27 +1148,41 @@ async function finishScan(
     let grant: Uint8Array | null = null;
     let key: Uint8Array | null = null;
     let payload: Uint8Array | null = null;
+    let predecessors: RecoveredPredecessor[] = [];
     try {
       const wasm = await loadWasm();
+      // ADR-0074 "Joining after a rotation": the account's earlier keys ride
+      // in the row, so the joining device holds the conversation key before
+      // it binds anything. A store that cannot be read is not "none": no row
+      // is published (the joining device sees the existing error).
+      predecessors = await ownPredecessorsForRow(
+        wasm,
+        args.accountIdB64,
+        args.deviceKey,
+        args.recovery.phraseEntropy,
+      );
       const grantB64 = await args.recovery.deviceAuthorizeStart();
       grant = base64UrlDecodeNoPad(grantB64);
       key = ensured.group.exportSecret(
         ensured.identity,
-        RECOVERY_EXPORTER_LABEL,
+        wasm.recoveryExporterLabel(),
         decoded.rendezvousPseudonym,
-        RECOVERY_EXPORTER_KEY_LENGTH,
+        wasm.recoveryExporterKeyLen(),
       );
-      payload = buildRecoveryPayload(grant, args.recovery.phraseEntropy);
+      payload = composeRecoveryPlaintext(wasm, grant, args.recovery.phraseEntropy, predecessors);
       const sealed = wasm.sealWithKey(key, payload);
-      await publishRecoveryPayload(decoded.rendezvousPseudonym, sealed);
+      await publishRecoveryRow(decoded.rendezvousPseudonym, wasm.wrapRecoveryRow(sealed));
       recoveryPublished = true;
+      // eslint-disable-next-line no-console
+      console.info(`recovery row published with ${predecessors.length} earlier account keys`);
     } catch (err) {
       // eslint-disable-next-line no-console
-      console.warn("recovery payload publish failed", err);
+      console.warn("recovery payload publish failed", refusalCode(err));
     } finally {
       grant?.fill(0);
       key?.fill(0);
       payload?.fill(0);
+      for (const p of predecessors) p.seed.fill(0);
       args.recovery.phraseEntropy.fill(0);
     }
   }
@@ -1090,5 +1250,41 @@ async function finishScan(
 function hexOf(bytes: Uint8Array): string {
   let out = "";
   for (const byte of bytes) out += byte.toString(16).padStart(2, "0");
+  return out;
+}
+
+/**
+ * The own predecessors the recovery row carries (oldest first, at most the
+ * row's maximum: the oldest and the newest ones, like the state bundle), read
+ * with the reader the state bundle uses. A seed equal to the current account
+ * seed (the one `phraseEntropy` derives) or to another carried seed is left
+ * out: the row would be refused. THROWS when the predecessor store cannot be
+ * read: the caller publishes no row then.
+ */
+export async function ownPredecessorsForRow(
+  wasm: Wasm,
+  accountIdB64: string,
+  deviceKey: DeviceCipher,
+  phraseEntropy: Uint8Array,
+): Promise<RecoveredPredecessor[]> {
+  const carried = boundedOwnPredecessors(
+    await collectOwnPredecessors(accountIdB64, deviceKey, (seed) => accountKeyHexOfSeed(wasm, seed)),
+  ).slice(0, wasm.recoveryPredecessorsMax());
+  const mnemonic = wasm.RecoveryMnemonic.fromEntropy(phraseEntropy.slice());
+  const current = mnemonic.toSeed();
+  mnemonic.free();
+  const out: RecoveredPredecessor[] = [];
+  try {
+    for (const p of carried) {
+      const seed = base64Decode(p.seedB64);
+      if (bytesEqual(seed, current) || out.some((o) => bytesEqual(o.seed, seed))) {
+        seed.fill(0);
+        continue;
+      }
+      out.push({ seed, adoptedAtMs: p.adoptedAtMs });
+    }
+  } finally {
+    current.fill(0);
+  }
   return out;
 }

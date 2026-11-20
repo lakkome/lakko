@@ -53,7 +53,7 @@ public final class ReachCenter: ObservableObject {
     /// The setting in effect on this device.
     @Published public private(set) var setting: FfiVisibilitySetting = defaultVisibilitySetting()
     @Published public private(set) var status: ReachApplyStatus = .applied
-    /// ADR-0089 step 5 — discovery refused publishing the Everyone record
+    /// ADR-0098 step 5 — discovery refused publishing the Everyone record
     /// (`403 hidden-from-search`): moderators removed this account from
     /// search. Who can find me says so and does not offer Everyone; the
     /// setting itself is not changed. Left when a later Everyone publish
@@ -1705,6 +1705,29 @@ public final class ReachCenter: ObservableObject {
         return (wire, covered)
     }
 
+    /// ADR-0090 section 2.2 — what a co-publisher's device request carries so
+    /// an owner device can write the added device's Welcome to THIS account's
+    /// mailbox without holding a grant: the own mailbox binding, and one
+    /// delegation per `delegates` account key signed with this account's own
+    /// `contact` reach seed for its own mailbox (at most the core's cap).
+    /// `nil` when no own mailbox or contact seed is known.
+    public func ownMailboxDelegations(delegates: [Data]) -> (binding: Data, blobs: [Data])? {
+        guard let mailbox = ownMailbox, let issuer = ownContactSeed() else { return nil }
+        let expires = clockMs() + ReachRules.delegationLifetimeMs
+        var blobs: [Data] = []
+        for delegate in delegates.prefix(Int(maxCommitterDelegations())) {
+            var nonce = Data(count: 16)
+            guard nonce.withUnsafeMutableBytes({
+                SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!)
+            }) == errSecSuccess,
+                  let blob = try? signDelegationBlob(
+                    issuerSeed: issuer, mailbox: mailbox.address, delegatePk: delegate,
+                    expiresAtMs: expires, nonce: nonce) else { continue }
+            blobs.append(blob)
+        }
+        return (mailbox.binding, blobs)
+    }
+
     /// The account keys (b64) this device holds any grant for.
     public func heldAccountKeys() -> [String] {
         heldPeople().map { $0.base64EncodedString() }
@@ -1933,13 +1956,13 @@ public final class ReachCenter: ObservableObject {
         }
     }
 
-    /// ADR-0089 step 5 — an Everyone record was published: the account is in
+    /// ADR-0098 step 5 — an Everyone record was published: the account is in
     /// search again.
     func noteEveryonePublished(wantPublic: Bool) {
         if wantPublic, hiddenFromSearch { hiddenFromSearch = false }
     }
 
-    /// ADR-0089 step 5 — whether `error` is discovery's `403
+    /// ADR-0098 step 5 — whether `error` is discovery's `403
     /// hidden-from-search` on publishing Everyone; if so the account is held
     /// hidden. Not a failure to retry by hand: the setting's screen says why
     /// and the next sync asks again.

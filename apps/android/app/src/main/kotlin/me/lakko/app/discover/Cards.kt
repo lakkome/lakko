@@ -55,7 +55,7 @@ public data class DirectoryCard(
     val serverRank: Int,
     /** Set for a card that came from groups. */
     val followers: GroupFollowers?,
-    /** ADR-0089 section 2 — the listing as served (base64), what a report of
+    /** ADR-0098 section 2 — the listing as served (base64), what a report of
      *  the card includes; `null` for a card that came from groups. */
     val listingB64: String? = null,
 )

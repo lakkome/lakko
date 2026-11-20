@@ -898,6 +898,132 @@ pub fn group_link_record_id(ledger_id: Vec<u8>) -> Result<Vec<u8>, FfiError> {
     Ok(lakko_contacts::group_invite::group_link_record_id(&ledger).to_vec())
 }
 
+/// What the account is in a channel (2026-11-13). A second device of an
+/// `Owner` or a `CoPublisher` is a reader for now: it lists the channel and
+/// reads its posts, and shows no owner or publisher control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ChannelSubscriptionRole {
+    /// A reader.
+    Subscriber,
+    /// The channel's owner.
+    Owner,
+    /// A co-publisher ("publisher" on screen).
+    CoPublisher,
+}
+
+impl From<ChannelSubscriptionRole> for core::ChannelSubscriptionRole {
+    fn from(r: ChannelSubscriptionRole) -> Self {
+        match r {
+            ChannelSubscriptionRole::Subscriber => Self::Subscriber,
+            ChannelSubscriptionRole::Owner => Self::Owner,
+            ChannelSubscriptionRole::CoPublisher => Self::CoPublisher,
+        }
+    }
+}
+
+impl From<core::ChannelSubscriptionRole> for ChannelSubscriptionRole {
+    fn from(r: core::ChannelSubscriptionRole) -> Self {
+        match r {
+            core::ChannelSubscriptionRole::Subscriber => Self::Subscriber,
+            core::ChannelSubscriptionRole::Owner => Self::Owner,
+            core::ChannelSubscriptionRole::CoPublisher => Self::CoPublisher,
+        }
+    }
+}
+
+/// One channel-subscription register (2026-11-13): a live subscription, or
+/// the leave of one (`subscribed == false`, every other field empty and
+/// `role` `Subscriber`). `subscriber_secret` and `read_key` are SECRET:
+/// keep them where the client keeps its subscriber keys, never log them.
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ChannelSubscriptionRegister {
+    /// HLC stamp the register was written at.
+    pub hlc: u64,
+    /// The 16-byte channel id.
+    pub channel_id: Vec<u8>,
+    /// `true` while the account is subscribed; `false` after a leave.
+    pub subscribed: bool,
+    /// What the account is in the channel.
+    pub role: ChannelSubscriptionRole,
+    /// The 32-byte Ed25519 seed of the account's ONE subscriber key for the
+    /// channel (`ChannelSubscriberKeypair.fromSecret`), shared by its
+    /// devices. SECRET.
+    pub subscriber_secret: Vec<u8>,
+    /// The channel's 32-byte read key, or empty. SECRET.
+    pub read_key: Vec<u8>,
+    /// A co-publisher's 32-byte PublisherGroup id; empty for every other
+    /// role.
+    pub publisher_group_id: Vec<u8>,
+    /// A co-publisher's record of the channel owner's 32-byte account key
+    /// (ADR-0090 section 2.3); empty for every other role. A co-publisher
+    /// device accepts a PublisherGroup Welcome only from a device of this
+    /// key (`publisherGroupJoinFromWelcome(..., ownerAccountKey:)`).
+    pub owner_account_key: Vec<u8>,
+    /// The channel name the list falls back to, or empty.
+    pub name: String,
+    /// The channel's `@name` without the `@`, or empty.
+    pub handle: String,
+}
+
+impl std::fmt::Debug for ChannelSubscriptionRegister {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The subscriber secret and the read key read the channel: left out.
+        f.debug_struct("ChannelSubscriptionRegister")
+            .field("hlc", &self.hlc)
+            .field("subscribed", &self.subscribed)
+            .field("role", &self.role)
+            .field("has_read_key", &!self.read_key.is_empty())
+            .field("publisher_group_id_len", &self.publisher_group_id.len())
+            .field("owner_account_key_len", &self.owner_account_key.len())
+            .finish_non_exhaustive()
+    }
+}
+
+fn channel_subscription_register(
+    s: Stamped<core::ChannelSubscriptionEntry>,
+) -> ChannelSubscriptionRegister {
+    let channel_id = s.value.channel_id.to_vec();
+    match s.value.subscribed {
+        Some(v) => ChannelSubscriptionRegister {
+            hlc: s.hlc,
+            channel_id,
+            subscribed: true,
+            role: v.role.into(),
+            subscriber_secret: v.subscriber_secret.to_vec(),
+            read_key: v.read_key.map(|k| k.to_vec()).unwrap_or_default(),
+            publisher_group_id: v.publisher_group_id.map(|g| g.to_vec()).unwrap_or_default(),
+            owner_account_key: v.owner_account_key.map(|k| k.to_vec()).unwrap_or_default(),
+            name: v.name,
+            handle: v.handle,
+        },
+        None => ChannelSubscriptionRegister {
+            hlc: s.hlc,
+            channel_id,
+            subscribed: false,
+            role: ChannelSubscriptionRole::Subscriber,
+            subscriber_secret: Vec::new(),
+            read_key: Vec::new(),
+            publisher_group_id: Vec::new(),
+            owner_account_key: Vec::new(),
+            name: String::new(),
+            handle: String::new(),
+        },
+    }
+}
+
+/// An optional 32-byte field: empty is none.
+fn optional32(bytes: &[u8], what: &str) -> Result<Option<[u8; 32]>, FfiError> {
+    if bytes.is_empty() {
+        Ok(None)
+    } else {
+        fixed::<32>(bytes, what).map(Some)
+    }
+}
+
+fn channel_subscription_refusal(e: core::ChannelSubscriptionEnvelopeError) -> FfiError {
+    FfiError::SyncedState(format!("{}: {e}", e.code()))
+}
+
 fn link_record_refusal(e: core::LinkRecordEnvelopeError) -> FfiError {
     FfiError::SyncedState(format!("{}: {e}", e.code()))
 }
@@ -1475,7 +1601,7 @@ impl SyncedState {
     }
 
     // -----------------------------------------------------------------
-    // Blocked people (ADR-0089 section 6)
+    // Blocked people (ADR-0098 section 6)
     // -----------------------------------------------------------------
 
     /// Block (`blocked`) or unblock the account whose 32-byte account
@@ -1847,6 +1973,85 @@ impl SyncedState {
         self.with(|s| u64::try_from(s.prune_channel_activity(now_ms)).unwrap_or(u64::MAX))
     }
 
+    /// ADR-0092 — record this account's choice in a poll, stamped `hlc`:
+    /// `choices` empty retracts. `set_version` is the ring version of the
+    /// account's anonymity set in the poll (the version the first vote drew,
+    /// read back with [`Self::poll_choice`]; 0 for a channel poll).
+    /// `poll_message_id` is the poll row's DS `messageId`, or the post cursor
+    /// in a channel. Returns the envelope to send to the account's other
+    /// devices, or `None` when the held register is newer or identical.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for bad choices or a full register set;
+    /// [`FfiError::LockPoisoned`].
+    pub fn set_poll_choice(
+        &self,
+        hlc: u64,
+        conversation: FolderConversationRef,
+        poll_message_id: i64,
+        choices: Vec<u8>,
+        set_version: u32,
+    ) -> Result<Option<Vec<u8>>, FfiError> {
+        let conversation: ConversationRef = conversation.into();
+        self.with(|s| {
+            s.set_poll_choice(hlc, &conversation, poll_message_id, &choices, set_version)
+        })?
+        .map_err(synced_err)
+    }
+
+    /// The held own-choice register of a poll (a retraction included).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn poll_choice(
+        &self,
+        conversation: FolderConversationRef,
+        poll_message_id: i64,
+    ) -> Result<Option<PollChoice>, FfiError> {
+        let conversation: ConversationRef = conversation.into();
+        self.with(|s| {
+            s.poll_choice(&conversation, poll_message_id)
+                .map(|p| PollChoice {
+                    hlc: p.hlc,
+                    choices: p.value.choices,
+                    set_version: p.value.set_version,
+                })
+        })
+    }
+
+    /// Every held own-choice register as envelopes (the catch-up on
+    /// DeviceGroup growth, and the re-send owed after a failed live send).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn poll_choice_envelopes(&self) -> Result<Vec<Vec<u8>>, FfiError> {
+        self.with(|s| s.poll_choice_envelopes())
+    }
+
+    /// Fold in a poll-choice envelope (route on [`is_poll_choice_envelope`]).
+    /// Fail closed. Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"<code>: <reason>"`.
+    pub fn apply_poll_choice_envelope(&self, envelope: Vec<u8>) -> Result<bool, FfiError> {
+        self.with(|s| s.apply_poll_choice_envelope(&envelope))?
+            .map_err(|e| FfiError::SyncedState(format!("{}: {e}", e.code())))
+    }
+
+    /// Drop the own-choice registers of ended conversations. Returns how many
+    /// went.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn prune_poll_choices(&self) -> Result<u64, FfiError> {
+        self.with(|s| u64::try_from(s.prune_poll_choices()).unwrap_or(u64::MAX))
+    }
+
     /// Write one of the account's invite links (ADR-0079 section 4), stamped
     /// `hlc`: at mint, and for any change. `true` when written; then send
     /// [`Self::link_record_envelope_for`] in a DeviceGroup service envelope.
@@ -1988,6 +2193,261 @@ impl SyncedState {
     pub fn apply_link_record_envelope(&self, envelope: Vec<u8>) -> Result<bool, FfiError> {
         self.with(|s| s.apply_link_record_envelope(&envelope))?
             .map_err(link_record_refusal)
+    }
+
+    /// Record that the account is subscribed to `channel_id` (2026-11-13):
+    /// at a subscribe, and whenever a field changes (a read key learned, the
+    /// channel's name or `@name` seen, a co-publisher joined). `read_key`
+    /// and `publisher_group_id` are empty for none; `publisher_group_id` is
+    /// required for a `CoPublisher` and refused for any other role, and so is
+    /// `owner_account_key` (ADR-0090 section 2.3): the 32-byte account key of
+    /// the channel's owner, which the device that joined as co-publisher
+    /// takes from the issuer of the `/g/` capability it verified; empty for an
+    /// owner (its own key derives from the account seed) and a subscriber.
+    /// Stamped
+    /// at `max(hlc, held + 1)`. `true` when written: then send
+    /// [`Self::channel_subscription_envelope_for`] in a DeviceGroup service
+    /// envelope. `false` when the identical subscription is already held.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"bounds: ..."` for a field out of bounds,
+    /// or for a new channel when [`channel_subscriptions_max_client`] are
+    /// held live.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_channel_subscription(
+        &self,
+        hlc: u64,
+        channel_id: Vec<u8>,
+        role: ChannelSubscriptionRole,
+        subscriber_secret: Vec<u8>,
+        read_key: Vec<u8>,
+        publisher_group_id: Vec<u8>,
+        owner_account_key: Vec<u8>,
+        name: String,
+        handle: String,
+    ) -> Result<bool, FfiError> {
+        let id = fixed::<16>(&channel_id, "channel id")?;
+        let subscribed = core::ChannelSubscribed {
+            role: role.into(),
+            subscriber_secret: fixed::<32>(&subscriber_secret, "subscriber secret")?,
+            read_key: optional32(&read_key, "read key")?,
+            publisher_group_id: optional32(&publisher_group_id, "publisher group id")?,
+            owner_account_key: optional32(&owner_account_key, "owner account key")?,
+            name,
+            handle,
+        };
+        self.with(|s| s.set_channel_subscription(hlc, &id, subscribed))?
+            .map_err(|e| FfiError::SyncedState(format!("bounds: {e}")))
+    }
+
+    /// Record that the account left `channel_id` (the tombstone). `true` when
+    /// written (send [`Self::channel_subscription_envelope_for`]); `false`
+    /// when no subscription is held or it was already left.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for an id that is not 16 bytes.
+    pub fn leave_channel_subscription(
+        &self,
+        hlc: u64,
+        channel_id: Vec<u8>,
+    ) -> Result<bool, FfiError> {
+        let id = fixed::<16>(&channel_id, "channel id")?;
+        self.with(|s| s.leave_channel_subscription(hlc, &id))
+    }
+
+    /// The register held for a channel (a subscription or a leave), or
+    /// `None`.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for an id that is not 16 bytes.
+    pub fn channel_subscription(
+        &self,
+        channel_id: Vec<u8>,
+    ) -> Result<Option<ChannelSubscriptionRegister>, FfiError> {
+        let id = fixed::<16>(&channel_id, "channel id")?;
+        self.with(|s| {
+            s.channel_subscription(&id)
+                .map(channel_subscription_register)
+        })
+    }
+
+    /// `true` while the account is subscribed to `channel_id`.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for an id that is not 16 bytes.
+    pub fn is_channel_subscribed(&self, channel_id: Vec<u8>) -> Result<bool, FfiError> {
+        let id = fixed::<16>(&channel_id, "channel id")?;
+        self.with(|s| s.is_channel_subscribed(&id))
+    }
+
+    /// Every channel-subscription register (leaves included), ascending by
+    /// channel id: the list a device reconciles its channels against.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn all_channel_subscriptions(&self) -> Result<Vec<ChannelSubscriptionRegister>, FfiError> {
+        self.with(|s| {
+            s.all_channel_subscriptions()
+                .into_iter()
+                .map(channel_subscription_register)
+                .collect()
+        })
+    }
+
+    /// The service envelope carrying one held channel-subscription register
+    /// with its original stamp, or `None`.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for an id that is not 16 bytes.
+    pub fn channel_subscription_envelope_for(
+        &self,
+        channel_id: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, FfiError> {
+        let id = fixed::<16>(&channel_id, "channel id")?;
+        self.with(|s| s.channel_subscription_envelope_for(&id))
+    }
+
+    /// Every held channel-subscription register with its original stamp, as
+    /// service envelopes: the catch-up re-send on DeviceGroup growth beside
+    /// [`Self::snapshot_parts`] (they are NOT in the snapshot parts).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn channel_subscription_envelopes(&self) -> Result<Vec<Vec<u8>>, FfiError> {
+        self.with(|s| s.channel_subscription_envelopes())
+    }
+
+    /// Decode a channel-subscription envelope (route on
+    /// [`is_channel_subscription_envelope`]) and fold every register in.
+    /// Fail closed. Returns whether anything changed; then read
+    /// [`Self::all_channel_subscriptions`] and reconcile.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"<code>: <reason>"` with code
+    /// `wrongDomain` / `unknownVersion` / `count` / `truncated` /
+    /// `notCanonical` / `trailing`.
+    pub fn apply_channel_subscription_envelope(&self, envelope: Vec<u8>) -> Result<bool, FfiError> {
+        self.with(|s| s.apply_channel_subscription_envelope(&envelope))?
+            .map_err(channel_subscription_refusal)
+    }
+
+    /// Record a private channel's admission seed of `admission_version`, the
+    /// owner account's own copy (ADR-0090 open question 4). Write-once per
+    /// seed: `false` when this seed is held; `true` when written, then send
+    /// [`Self::channel_admission_seed_envelope_for`] in a DeviceGroup service
+    /// envelope. Another seed of the same version (two owner devices minting
+    /// it at once) is kept beside it.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for an id not 16 bytes or a seed not 32.
+    pub fn set_channel_admission_seed(
+        &self,
+        hlc: u64,
+        channel_id: Vec<u8>,
+        admission_version: u16,
+        seed: Vec<u8>,
+    ) -> Result<bool, FfiError> {
+        let id = fixed::<16>(&channel_id, "channel id")?;
+        let seed = fixed::<32>(&seed, "admission seed")?;
+        self.with(|s| s.set_channel_admission_seed(hlc, &id, admission_version, &seed))
+    }
+
+    /// Every seed held for `channel_id` at `admission_version` (more than one
+    /// when two owner devices minted that version at once). A ticket of that
+    /// version is checked against EACH of them; the row is admitted when it
+    /// opens under any.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for an id not 16 bytes.
+    pub fn channel_admission_seeds_for(
+        &self,
+        channel_id: Vec<u8>,
+        admission_version: u16,
+    ) -> Result<Vec<Vec<u8>>, FfiError> {
+        let id = fixed::<16>(&channel_id, "channel id")?;
+        self.with(|s| {
+            s.channel_admission_seeds_for(&id, admission_version)
+                .iter()
+                .map(|seed| seed.to_vec())
+                .collect()
+        })
+    }
+
+    /// Every admission seed held for one channel, ascending by version (a
+    /// version may appear more than once): what an owner device opens
+    /// tickets with (`openAdmissionTicket`).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for an id not 16 bytes.
+    pub fn channel_admission_seeds(
+        &self,
+        channel_id: Vec<u8>,
+    ) -> Result<Vec<ChannelAdmissionSeedView>, FfiError> {
+        let id = fixed::<16>(&channel_id, "channel id")?;
+        self.with(|s| {
+            s.channel_admission_seeds(&id)
+                .into_iter()
+                .map(|(admission_version, seed)| ChannelAdmissionSeedView {
+                    admission_version,
+                    seed: seed.to_vec(),
+                })
+                .collect()
+        })
+    }
+
+    /// The service envelope carrying the held register of this seed with its
+    /// original stamp, or `None` when it is not held.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for an id not 16 bytes or a seed not 32.
+    pub fn channel_admission_seed_envelope_for(
+        &self,
+        channel_id: Vec<u8>,
+        admission_version: u16,
+        seed: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, FfiError> {
+        let id = fixed::<16>(&channel_id, "channel id")?;
+        let seed = fixed::<32>(&seed, "admission seed")?;
+        self.with(|s| s.channel_admission_seed_envelope_for(&id, admission_version, &seed))
+    }
+
+    /// Every held admission-seed register as service envelopes: the
+    /// catch-up re-send on DeviceGroup growth (NOT in the snapshot parts).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn channel_admission_seed_envelopes(&self) -> Result<Vec<Vec<u8>>, FfiError> {
+        self.with(|s| s.channel_admission_seed_envelopes())
+    }
+
+    /// Decode an admission-seed envelope (route on
+    /// [`is_channel_admission_seed_envelope`]) and fold every register in.
+    /// Fail closed. Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"<code>: <reason>"` with code
+    /// `wrongDomain` / `unknownVersion` / `count` / `truncated` /
+    /// `notCanonical` / `trailing`.
+    pub fn apply_channel_admission_seed_envelope(
+        &self,
+        envelope: Vec<u8>,
+    ) -> Result<bool, FfiError> {
+        self.with(|s| s.apply_channel_admission_seed_envelope(&envelope))?
+            .map_err(|e| FfiError::SyncedState(format!("{}: {e}", e.code())))
     }
 
     /// The account's saved messages, most recently saved first (ADR-0065
@@ -2211,6 +2671,25 @@ pub fn is_quick_reaction_envelope(bytes: Vec<u8>) -> bool {
     core::is_quick_reaction_envelope(&bytes)
 }
 
+/// ADR-0092 — this account's held choice in one poll.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct PollChoice {
+    /// The register's stamp.
+    pub hlc: u64,
+    /// The choices, strictly ascending; empty = retracted.
+    pub choices: Vec<u8>,
+    /// The ring version the anonymity set was drawn from (0 in a channel).
+    pub set_version: u32,
+}
+
+/// Whether `bytes` is an own-poll-choice envelope (route a DeviceGroup
+/// service envelope to [`SyncedState::apply_poll_choice_envelope`]).
+#[uniffi::export]
+#[must_use]
+pub fn is_poll_choice_envelope(bytes: Vec<u8>) -> bool {
+    core::is_poll_choice_envelope(&bytes)
+}
+
 /// Whether `bytes` is an own-channel-reaction envelope.
 #[uniffi::export]
 #[must_use]
@@ -2246,7 +2725,7 @@ pub fn recovery_email_envelope_max_len() -> u32 {
     u32::try_from(core::RECOVERY_EMAIL_ENVELOPE_MAX_LEN).unwrap_or(u32::MAX)
 }
 
-/// One blocked account (ADR-0089 section 6).
+/// One blocked account (ADR-0098 section 6).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct BlockedAccount {
     /// The blocked account's 32-byte account signature key.
@@ -2255,7 +2734,7 @@ pub struct BlockedAccount {
     pub blocked_at_ms: u64,
 }
 
-/// `true` when `bytes` open with the block envelope domain (ADR-0089
+/// `true` when `bytes` open with the block envelope domain (ADR-0098
 /// section 6): the routing question for a DeviceGroup service envelope.
 /// Says nothing about validity; [`SyncedState::apply_blocked_envelope`]
 /// decides that.
@@ -2265,7 +2744,7 @@ pub fn is_blocked_envelope(bytes: Vec<u8>) -> bool {
     core::is_blocked_envelope(&bytes)
 }
 
-/// Longest block envelope (ADR-0089 section 6); below
+/// Longest block envelope (ADR-0098 section 6); below
 /// `deviceGroupServiceEnvelopeMaxLen()`.
 #[uniffi::export]
 #[must_use]
@@ -2303,6 +2782,58 @@ pub fn is_own_username_envelope(bytes: Vec<u8>) -> bool {
 #[must_use]
 pub fn is_link_record_envelope(bytes: Vec<u8>) -> bool {
     core::is_link_record_envelope(&bytes)
+}
+
+/// One admission seed of a channel (ADR-0090 open question 4). SECRET: the
+/// seed opens the channel's admission tickets of that version.
+#[derive(uniffi::Record, Clone)]
+pub struct ChannelAdmissionSeedView {
+    /// The admission key's version.
+    pub admission_version: u16,
+    /// The 32-byte seed.
+    pub seed: Vec<u8>,
+}
+
+impl std::fmt::Debug for ChannelAdmissionSeedView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChannelAdmissionSeedView")
+            .field("admission_version", &self.admission_version)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `true` when `bytes` open with the channel admission-seed envelope domain
+/// (ADR-0090): route it to `applyChannelAdmissionSeedEnvelope`.
+#[uniffi::export]
+#[must_use]
+pub fn is_channel_admission_seed_envelope(bytes: Vec<u8>) -> bool {
+    core::is_channel_admission_seed_envelope(&bytes)
+}
+
+/// `true` when `bytes` open with the channel-subscription envelope domain
+/// (`lakko/sync/channel-subscription/v1`, 2026-11-13): the routing question
+/// for a DeviceGroup service envelope.
+#[uniffi::export]
+#[must_use]
+pub fn is_channel_subscription_envelope(bytes: Vec<u8>) -> bool {
+    core::is_channel_subscription_envelope(&bytes)
+}
+
+/// Longest channel-subscription envelope
+/// [`SyncedState::channel_subscription_envelopes`] produces; below
+/// `deviceGroupServiceEnvelopeMaxLen()`.
+#[uniffi::export]
+#[must_use]
+pub fn channel_subscription_envelope_max_len() -> u32 {
+    u32::try_from(core::CHANNEL_SUBSCRIPTION_ENVELOPE_MAX_LEN).unwrap_or(u32::MAX)
+}
+
+/// The most live channel subscriptions a client writes (1000; a client-side
+/// limit, never a decode bound).
+#[uniffi::export]
+#[must_use]
+pub fn channel_subscriptions_max_client() -> u32 {
+    u32::try_from(core::CHANNEL_SUBSCRIPTIONS_MAX_CLIENT).unwrap_or(u32::MAX)
 }
 
 /// Longest link-record envelope [`SyncedState::link_record_envelopes`]
@@ -2581,6 +3112,134 @@ mod tests {
             .is_err());
         assert!(a.revoke_link_record(6, channel.link_id.clone()).unwrap());
         assert!(group_link_record_id(vec![0; 5]).is_err());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // one end-to-end scenario, read top to bottom
+    fn a_channel_subscription_crosses_the_boundary_and_reaches_a_second_device() {
+        const {
+            assert!(
+                core::CHANNEL_SUBSCRIPTION_ENVELOPE_MAX_LEN <= lakko_mls::MAX_SERVICE_ENVELOPE_LEN
+            );
+        };
+        let ch = vec![0xC1; 16];
+        let a = SyncedState::new();
+        assert!(a
+            .set_channel_subscription(
+                5,
+                ch.clone(),
+                ChannelSubscriptionRole::CoPublisher,
+                vec![0x5E; 32],
+                vec![],
+                vec![0x9A; 32],
+                vec![0x0E; 32],
+                "News".into(),
+                "the_news".into(),
+            )
+            .unwrap());
+        assert!(a.is_channel_subscribed(ch.clone()).unwrap());
+        let envelope = a
+            .channel_subscription_envelope_for(ch.clone())
+            .unwrap()
+            .unwrap();
+        assert!(is_channel_subscription_envelope(envelope.clone()));
+        assert!(envelope.len() <= channel_subscription_envelope_max_len() as usize);
+        assert_eq!(
+            a.channel_subscription_envelopes().unwrap(),
+            vec![envelope.clone()]
+        );
+
+        let b = SyncedState::new();
+        assert!(b
+            .apply_channel_subscription_envelope(envelope.clone())
+            .unwrap());
+        assert!(!b.apply_channel_subscription_envelope(envelope).unwrap());
+        let got = b.channel_subscription(ch.clone()).unwrap().unwrap();
+        assert!(got.subscribed);
+        assert_eq!(got.role, ChannelSubscriptionRole::CoPublisher);
+        assert_eq!(got.subscriber_secret, vec![0x5E; 32]);
+        assert!(got.read_key.is_empty());
+        assert_eq!(got.publisher_group_id, vec![0x9A; 32]);
+        assert_eq!(got.owner_account_key, vec![0x0E; 32]);
+        assert_eq!(got.handle, "the_news");
+        assert!(!format!("{got:?}").contains("94"));
+        let back = SyncedState::from_bytes(b.to_bytes().unwrap()).unwrap();
+        assert_eq!(back.all_channel_subscriptions().unwrap(), vec![got]);
+
+        // A leave travels the same way and leaves an empty tombstone.
+        assert!(a.leave_channel_subscription(6, ch.clone()).unwrap());
+        let left = a
+            .channel_subscription_envelope_for(ch.clone())
+            .unwrap()
+            .unwrap();
+        assert!(b.apply_channel_subscription_envelope(left).unwrap());
+        let gone = b.channel_subscription(ch.clone()).unwrap().unwrap();
+        assert!(!gone.subscribed && gone.subscriber_secret.is_empty());
+        assert!(!b.is_channel_subscribed(ch.clone()).unwrap());
+
+        // Refusals: a bound, a wrong-length field, a damaged envelope.
+        assert!(a
+            .set_channel_subscription(
+                7,
+                ch.clone(),
+                ChannelSubscriptionRole::Owner,
+                vec![1; 32],
+                vec![],
+                vec![2; 32],
+                vec![],
+                String::new(),
+                String::new(),
+            )
+            .is_err());
+        // ADR-0090 2.3: a co-publisher without the owner's key, and an owner
+        // with one, are refused.
+        assert!(a
+            .set_channel_subscription(
+                7,
+                ch.clone(),
+                ChannelSubscriptionRole::CoPublisher,
+                vec![1; 32],
+                vec![],
+                vec![2; 32],
+                vec![],
+                String::new(),
+                String::new(),
+            )
+            .is_err());
+        assert!(a
+            .set_channel_subscription(
+                7,
+                ch.clone(),
+                ChannelSubscriptionRole::Owner,
+                vec![1; 32],
+                vec![],
+                vec![],
+                vec![3; 32],
+                String::new(),
+                String::new(),
+            )
+            .is_err());
+        assert!(a
+            .set_channel_subscription(
+                7,
+                ch.clone(),
+                ChannelSubscriptionRole::Owner,
+                vec![1; 31],
+                vec![],
+                vec![],
+                vec![],
+                String::new(),
+                String::new(),
+            )
+            .is_err());
+        assert!(a.channel_subscription(vec![0; 15]).is_err());
+        let err = b
+            .apply_channel_subscription_envelope(
+                b"lakko/sync/channel-subscription/v1\0\x09".to_vec(),
+            )
+            .unwrap_err();
+        assert!(format!("{err}").contains("unknownVersion"), "{err}");
+        assert_eq!(channel_subscriptions_max_client(), 1000);
     }
 
     #[test]

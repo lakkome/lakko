@@ -14,7 +14,9 @@
  * ```
  *
  * One row per account; the plaintext is the JSON of `call-log-store.ts`'s
- * {@link encodeCallLogRow}.
+ * {@link encodeCallLogRow}: the per-conversation rows and the calls with no
+ * conversation (`docs/ux/navigation.md` section 5.1.1) together, so deleting
+ * the row ({@link deleteCallLogRow}, forget device) removes both.
  */
 
 import type { DeviceCipher } from "../auth/device-cipher";
@@ -23,7 +25,7 @@ import {
   decodeCallLogRow,
   encodeCallLogRow,
   type CallLogBackend,
-  type CallLogRows,
+  type CallLogData,
 } from "./call-log-store";
 
 const DB_NAME = "lakko-call-log";
@@ -87,7 +89,7 @@ async function decryptBlob(deviceKey: DeviceCipher, blob: Uint8Array): Promise<U
 export async function loadCallLogRows(
   accountId: string,
   deviceKey: DeviceCipher | null,
-): Promise<CallLogRows | null> {
+): Promise<CallLogData | null> {
   if (deviceKey === null) return null;
   const db = await openDb();
   let row: PersistedRow | undefined;
@@ -122,14 +124,14 @@ export async function loadCallLogRows(
 export class IdbCallLogBackend implements CallLogBackend {
   constructor(private readonly deviceKeyFor: (accountId: string) => Promise<DeviceCipher | null>) {}
 
-  async load(accountId: string): Promise<CallLogRows | null> {
+  async load(accountId: string): Promise<CallLogData | null> {
     return loadCallLogRows(accountId, await this.deviceKeyFor(accountId));
   }
 
-  async save(accountId: string, rows: CallLogRows): Promise<void> {
+  async save(accountId: string, data: CallLogData): Promise<void> {
     const deviceKey = await this.deviceKeyFor(accountId);
     if (deviceKey === null) return;
-    const json = encodeCallLogRow(rows);
+    const json = encodeCallLogRow(data);
     const ciphertext = await encryptBlob(deviceKey, new TextEncoder().encode(json));
     const db = await openDb();
     try {

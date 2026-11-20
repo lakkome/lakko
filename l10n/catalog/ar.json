@@ -125,6 +125,10 @@
       "text": "هذا المتصفح لا يدعم مفاتيح المرور.",
       "status": "machine"
     },
+    "auth.passkey.error.unsupported_desktop": {
+      "text": "هذا الجهاز لا يدعم مفاتيح المرور.",
+      "status": "machine"
+    },
     "auth.passkey.error.wrong_account": {
       "text": "ينتمي مفتاح المرور هذا إلى حساب مختلف عن الحساب الموجود على هذا الجهاز. سجّل الدخول بكلمة المرور أولًا.",
       "status": "machine"
@@ -163,6 +167,70 @@
     },
     "auth.password.show": {
       "text": "إظهار كلمة المرور",
+      "status": "machine"
+    },
+    "auth.signup.closed.body": {
+      "text": "النسخة التجريبية تتسع لعدد محدود من الأشخاص، وكل الأماكن مشغولة. تتاح أماكن عندما يغادر أحد. حاول لاحقًا.",
+      "status": "machine"
+    },
+    "auth.signup.closed.checking": {
+      "text": "جارٍ التحقق...",
+      "status": "machine"
+    },
+    "auth.signup.closed.log_in": {
+      "text": "تسجيل الدخول",
+      "status": "machine"
+    },
+    "auth.signup.closed.retry": {
+      "text": "حاول مجددًا",
+      "status": "machine"
+    },
+    "auth.signup.closed.title": {
+      "text": "Lakko ممتلئ حاليًا",
+      "status": "machine"
+    },
+    "auth.signup.code.back": {
+      "text": "رجوع",
+      "status": "machine"
+    },
+    "auth.signup.code.body": {
+      "text": "أدخل الرمز الموجود في بريدك الإلكتروني.",
+      "status": "machine"
+    },
+    "auth.signup.code.checking": {
+      "text": "جارٍ التحقق...",
+      "status": "machine"
+    },
+    "auth.signup.code.continue": {
+      "text": "متابعة",
+      "status": "machine"
+    },
+    "auth.signup.code.failed": {
+      "text": "تعذّر التحقق من الرمز. حاول مرة أخرى.",
+      "status": "machine"
+    },
+    "auth.signup.code.held": {
+      "text": "مكانك كداعم محجوز لهذا التسجيل.",
+      "status": "machine"
+    },
+    "auth.signup.code.limited": {
+      "text": "محاولات كثيرة جدًا. حاول لاحقًا.",
+      "status": "machine"
+    },
+    "auth.signup.code.link": {
+      "text": "لدي رمز داعم",
+      "status": "machine"
+    },
+    "auth.signup.code.title": {
+      "text": "رمز الداعم",
+      "status": "machine"
+    },
+    "auth.signup.code.unknown": {
+      "text": "هذا الرمز لا يعمل. تحقق منه وحاول مرة أخرى.",
+      "status": "machine"
+    },
+    "auth.signup.code.used": {
+      "text": "سبق استخدام رمز الداعم هذا.",
       "status": "machine"
     },
     "auth.signup.error.enter_username": {
@@ -245,6 +313,42 @@
       "text": "اسم المستخدم",
       "status": "machine"
     },
+    "auth.username_prompt.continue": {
+      "text": "متابعة",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.network": {
+      "text": "تعذّر التحقق من اسم المستخدم. تحقق من اتصالك وحاول مرة أخرى.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.not_this": {
+      "text": "هذا ليس اسم المستخدم لهذا الحساب.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.too_many": {
+      "text": "محاولات كثيرة جدًا. حاول مرة أخرى لاحقًا.",
+      "status": "machine"
+    },
+    "auth.username_prompt.field": {
+      "text": "اسم المستخدم",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot": {
+      "text": "لا أتذكر",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot_note": {
+      "text": "يمكنك رؤيته في الإعدادات على جهازك الآخر. حتى ذلك الحين لا يُزامن هذا الجهاز معها.",
+      "status": "machine"
+    },
+    "auth.username_prompt.lede": {
+      "text": "لا يعرف هذا الجهاز اسم المستخدم لحسابك بعد. أدخله للمزامنة مع أجهزتك الأخرى.",
+      "status": "machine"
+    },
+    "auth.username_prompt.title": {
+      "text": "ما اسم المستخدم الخاص بك؟",
+      "status": "machine"
+    },
     "backup.rollback_refused.body": {
       "text": "أعاد الخادم نسخة احتياطية معدّلة أو قديمة. حسابك آمن؛ تابعنا دون استعادة البيانات الأقدم.",
       "status": "machine"
@@ -285,8 +389,92 @@
       "text": "هل تريد استعادة هذه النسخة الاحتياطية الأقدم؟",
       "status": "machine"
     },
+    "beta.notice.body": {
+      "text": "Lakko في مرحلة تجريبية، ولم يتحقق أي تدقيق مستقل من أمانه بعد. لا تعتمد عليه حيث تتوقف سلامتك على ذلك.",
+      "status": "machine"
+    },
+    "beta.notice.title": {
+      "text": "نسخة تجريبية",
+      "status": "machine"
+    },
     "call.alert.title": {
       "text": "مكالمة",
+      "status": "machine"
+    },
+    "call.background.add_photo": {
+      "text": "إضافة صورة",
+      "status": "machine"
+    },
+    "call.background.blur": {
+      "text": "تمويه",
+      "status": "machine"
+    },
+    "call.background.builtin_label": {
+      "text": "الخلفية: {name}",
+      "status": "machine"
+    },
+    "call.background.failed": {
+      "text": "توقفت الخلفية عن العمل، لذا أُوقفت كاميرتك.",
+      "status": "machine"
+    },
+    "call.background.failed_action": {
+      "text": "تشغيل الكاميرا دون خلفية",
+      "status": "machine"
+    },
+    "call.background.name.dawn": {
+      "text": "فجر",
+      "status": "machine"
+    },
+    "call.background.name.dusk": {
+      "text": "غسق",
+      "status": "machine"
+    },
+    "call.background.name.harbor": {
+      "text": "مرفأ",
+      "status": "machine"
+    },
+    "call.background.name.meadow": {
+      "text": "مرج",
+      "status": "machine"
+    },
+    "call.background.name.morning": {
+      "text": "صباح",
+      "status": "machine"
+    },
+    "call.background.name.night": {
+      "text": "ليل",
+      "status": "machine"
+    },
+    "call.background.none": {
+      "text": "بلا",
+      "status": "machine"
+    },
+    "call.background.photo_unusable": {
+      "text": "لا يمكن استخدام هذه الصورة. جرّب صورة أخرى.",
+      "status": "machine"
+    },
+    "call.background.preparing": {
+      "text": "جارٍ تجهيز الخلفية...",
+      "status": "machine"
+    },
+    "call.background.preview_camera_off": {
+      "text": "أنت وحدك ترى هذا. كاميرتك متوقفة.",
+      "status": "machine"
+    },
+    "call.background.preview_label": {
+      "text": "كاميرتك كما يراها الآخرون",
+      "status": "machine"
+    },
+    "call.background.remove": {
+      "text": "إزالة",
+      "status": "machine"
+    },
+    "call.background.strong_blur": {
+      "text": "تمويه قوي",
+      "status": "machine"
+    },
+    "call.background.your_photo": {
+      "text": "صورتك",
       "status": "machine"
     },
     "call.bar.camera_on_a11y": {
@@ -373,16 +561,40 @@
       "text": "إغلاق الدردشة",
       "status": "machine"
     },
-    "call.chat.empty": {
-      "text": "لا توجد رسائل بعد. الرسائل هنا مشفّرة تشفيرًا تامًا بين الطرفين.",
+    "call.chat.message_a11y": {
+      "text": "{name}: {text}",
       "status": "machine"
     },
-    "call.chat.joined": {
-      "text": "انضم {name} إلى المكالمة",
+    "call.chat.new_messages": {
+      "text": "رسائل جديدة",
       "status": "machine"
     },
-    "call.chat.left": {
-      "text": "غادر أحد المشاركين المكالمة",
+    "call.chat.not_sent": {
+      "text": "لم تُرسل.",
+      "status": "machine"
+    },
+    "call.chat.notice_ends": {
+      "text": "تختفي عند انتهاء المكالمة.",
+      "status": "machine"
+    },
+    "call.chat.notice_people": {
+      "text": "لا يرى الرسائل هنا إلا الموجودون في المكالمة.",
+      "status": "machine"
+    },
+    "call.chat.placeholder": {
+      "text": "رسالة إلى الجميع في المكالمة",
+      "status": "machine"
+    },
+    "call.chat.send_a11y": {
+      "text": "إرسال",
+      "status": "machine"
+    },
+    "call.chat.send_again": {
+      "text": "إرسال مرة أخرى",
+      "status": "machine"
+    },
+    "call.chat.too_long": {
+      "text": "لا يمكن أن تكون الرسالة في المكالمة أطول من ذلك.",
       "status": "machine"
     },
     "call.collapse_a11y": {
@@ -414,15 +626,15 @@
       "status": "machine"
     },
     "call.control.chat_hide_a11y": {
-      "text": "إخفاء الدردشة",
+      "text": "إغلاق الدردشة",
       "status": "machine"
     },
     "call.control.chat_show_a11y": {
-      "text": "إظهار الدردشة",
+      "text": "فتح الدردشة",
       "status": "machine"
     },
-    "call.control.chat_unread": {
-      "text": "{count, plural, zero {الدردشة (لا رسائل غير مقروءة)} one {الدردشة (رسالة واحدة غير مقروءة)} two {الدردشة (رسالتان غير مقروءتين)} few {الدردشة (# رسائل غير مقروءة)} many {الدردشة (# رسالة غير مقروءة)} other {الدردشة (# رسالة غير مقروءة)}}",
+    "call.control.chat_unread_a11y": {
+      "text": "{count, plural, zero {فتح الدردشة، # غير مقروءة} one {فتح الدردشة، # غير مقروءة} two {فتح الدردشة، # غير مقروءتين} few {فتح الدردشة، # غير مقروءة} many {فتح الدردشة، # غير مقروءة} other {فتح الدردشة، # غير مقروءة}}",
       "status": "machine"
     },
     "call.control.end": {
@@ -533,8 +745,12 @@
       "text": "هذه المكالمة مشفّرة. عرض رقم الأمان",
       "status": "machine"
     },
-    "call.encryption.compare_hint": {
-      "text": "اقرأ هذه الأرقام بصوت عالٍ. إذا تطابقت على الهاتفين، فلا أحد يستمع.",
+    "call.encryption.compare_hint_group": {
+      "text": "يرى كل من في هذه المكالمة الرقم نفسه. اقرأه بصوت عالٍ. إذا تطابق على كل جهاز، فلا أحد غيركم يستمع.",
+      "status": "machine"
+    },
+    "call.encryption.compare_hint_one_to_one": {
+      "text": "اقرأ الرقم بصوت عالٍ لبعضكما. إذا تطابق على الجهازين، فلا أحد غيركما يستمع.",
       "status": "machine"
     },
     "call.encryption.copy_a11y": {
@@ -609,6 +825,10 @@
       "text": "لا يستطيع هذا المتصفح تشفير صوت المكالمة وصورتها، لذلك لم تبدأ المكالمة.",
       "status": "machine"
     },
+    "call.error.no_media_encryption_desktop": {
+      "text": "لا يستطيع هذا الجهاز تشفير صوت المكالمة وصورتها، لذلك لم تبدأ المكالمة.",
+      "status": "machine"
+    },
     "call.error.not_accepting": {
       "text": "لا تقبل هذه المكالمة مشاركين جددًا حاليًا.",
       "status": "machine"
@@ -655,6 +875,14 @@
     },
     "call.group_banner.title": {
       "text": "مكالمة جماعية في {name}",
+      "status": "machine"
+    },
+    "call.guest.closed.body": {
+      "text": "Lakko ممتلئ حاليًا، لذا لا يمكن الاحتفاظ بحساب الضيف هذا. تتاح أماكن عندما يغادر أحد.",
+      "status": "machine"
+    },
+    "call.guest.closed.ok": {
+      "text": "حسنًا",
       "status": "machine"
     },
     "call.guest.default_name": {
@@ -1131,6 +1359,14 @@
     },
     "call.self.starting_camera": {
       "text": "جارٍ تشغيل الكاميرا...",
+      "status": "machine"
+    },
+    "call.settings.background": {
+      "text": "الخلفية",
+      "status": "machine"
+    },
+    "call.settings.background_hint": {
+      "text": "يرى الآخرون هذا خلفك. يبقى على هذا الجهاز.",
       "status": "machine"
     },
     "call.settings.devices": {
@@ -1798,7 +2034,7 @@
       "status": "machine"
     },
     "channels.new.failed": {
-      "text": "تعذر إنشاء هذه القناة. لم يُنشأ أي شيء. حاول مرة أخرى.",
+      "text": "تعذر إنشاء هذه القناة. حاول مرة أخرى.",
       "status": "machine"
     },
     "channels.new.handle_hint": {
@@ -1959,6 +2195,14 @@
     },
     "channels.reactions.anonymous_note": {
       "text": "التفاعلات في القناة مجهولة. لا يمكن لأحد أن يرى من تفاعل، ولا حتى مالك القناة.",
+      "status": "machine"
+    },
+    "channels.reader_device.owner": {
+      "text": "يمكنك النشر هنا بعد أن يُفتح Lakko على جهازك الآخر.",
+      "status": "machine"
+    },
+    "channels.reader_device.publisher": {
+      "text": "يمكنك النشر هنا بعد أن يُفتح Lakko على جهازك الآخر وعلى جهاز المالك.",
       "status": "machine"
     },
     "channels.rotation.desc": {
@@ -2195,6 +2439,10 @@
     },
     "chat.attachment.error.upload": {
       "text": "تعذّر رفع «{name}». حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.attachment.full.send": {
+      "text": "لا توجد مساحة على الخادم لملفات جديدة الآن. حاول لاحقًا.",
       "status": "machine"
     },
     "chat.attachment.hide": {
@@ -3269,12 +3517,20 @@
       "text": "يحتاج Lakko إلى الوصول إلى الكاميرا لتسجيل ملاحظات الفيديو. اسمح بالوصول إلى الكاميرا في إعدادات الموقع في متصفحك.",
       "status": "machine"
     },
+    "chat.record.denied_camera_desktop": {
+      "text": "يحتاج Lakko إلى الوصول إلى الكاميرا لتسجيل ملاحظات الفيديو. اسمح به في إعدادات الخصوصية في نظامك.",
+      "status": "machine"
+    },
     "chat.record.denied_camera_app": {
       "text": "يحتاج Lakko إلى الوصول إلى الكاميرا لتسجيل ملاحظات الفيديو",
       "status": "machine"
     },
     "chat.record.denied_microphone": {
       "text": "يحتاج Lakko إلى الوصول إلى الميكروفون لتسجيل الرسائل الصوتية. اسمح بالوصول إلى الميكروفون في إعدادات الموقع في متصفحك.",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_desktop": {
+      "text": "يحتاج Lakko إلى الوصول إلى الميكروفون لتسجيل الرسائل الصوتية. اسمح به في إعدادات الخصوصية في نظامك.",
       "status": "machine"
     },
     "chat.record.denied_microphone_app": {
@@ -3387,6 +3643,10 @@
     },
     "chat.record.unsupported_voice": {
       "text": "لا يمكن تسجيل الرسائل الصوتية في هذا المتصفح",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice_desktop": {
+      "text": "لا يمكن تسجيل الرسائل الصوتية على هذا الجهاز",
       "status": "machine"
     },
     "chat.record.video": {
@@ -3899,10 +4159,6 @@
     },
     "chats.preview.sender": {
       "text": "{name}: {text}",
-      "status": "machine"
-    },
-    "chats.restored.banner_other_devices": {
-      "text": "تضيف أجهزتك الأخرى هذا الجهاز إلى محادثاتك.",
       "status": "machine"
     },
     "chats.restored.card": {
@@ -4997,10 +5253,6 @@
       "text": "روابط الدعوة وروابط المكالمات التي أنشأتها سابقًا ستتوقف عن العمل. أنشئ روابط جديدة.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "ما زالت مفاتيح المرور تسجّل دخولك. خيار «استعادة المفاتيح بمفتاح المرور هذا» متوقف إلى أن تشغّله مجددًا.",
-      "status": "machine"
-    },
     "devices.rotate.effect_phrase": {
       "text": "تحصل على عبارة استرداد جديدة. العبارة القديمة تتوقف عن العمل.",
       "status": "machine"
@@ -5071,6 +5323,10 @@
     },
     "devices.scan.error.camera_denied_browser": {
       "text": "لا يستطيع Lakko استخدام الكاميرا. اسمح بالوصول إلى الكاميرا في إعدادات الموقع في متصفحك، ثم حاول مرة أخرى.",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied_desktop": {
+      "text": "لا يستطيع Lakko استخدام الكاميرا. اسمح بالوصول إلى الكاميرا في إعدادات الخصوصية في نظامك، ثم حاول مجددًا.",
       "status": "machine"
     },
     "devices.scan.error.camera_failed": {
@@ -5451,6 +5707,66 @@
     },
     "display_name.error.unknown": {
       "text": "لا يمكن استخدام هذا الاسم",
+      "status": "machine"
+    },
+    "donate.button": {
+      "text": "تبرّع",
+      "status": "machine"
+    },
+    "donate.copied": {
+      "text": "تم النسخ",
+      "status": "machine"
+    },
+    "donate.copy": {
+      "text": "نسخ",
+      "status": "machine"
+    },
+    "donate.crypto_copy": {
+      "text": "نسخ العنوان",
+      "status": "machine"
+    },
+    "donate.crypto_network": {
+      "text": "الشبكة: {network}",
+      "status": "machine"
+    },
+    "donate.crypto_warning": {
+      "text": "أرسل إلى هذا العنوان {coin} فقط على شبكة {network}. أي شيء آخر سيضيع.",
+      "status": "machine"
+    },
+    "donate.error": {
+      "text": "تعذّر تحميل طرق التبرع. تحقّق من اتصالك وحاول مرة أخرى.",
+      "status": "machine"
+    },
+    "donate.lede": {
+      "text": "التبرعات تغطي تكلفة الخوادم وتساعد على استمرار العمل.",
+      "status": "machine"
+    },
+    "donate.none": {
+      "text": "لا توجد حاليًا طريقة للتبرع متاحة في بلدك.",
+      "status": "machine"
+    },
+    "donate.phone_error": {
+      "text": "تعذّر إظهار الرقم. حاول مرة أخرى.",
+      "status": "machine"
+    },
+    "donate.phone_show": {
+      "text": "إظهار",
+      "status": "machine"
+    },
+    "donate.phone_hidden": {
+      "text": "رقم الهاتف مخفي",
+      "status": "machine"
+    },
+    "donate.section_crypto": {
+      "text": "العملات المشفّرة",
+      "status": "machine"
+    },
+    "donate.section_payment": {
+      "text": "الدفع البنكي والبطاقة",
+      "status": "machine"
+    },
+    "donate.title": {
+      "text": "ادعم Lakko",
       "status": "machine"
     },
     "ds.clock_skew": {
@@ -6221,10 +6537,6 @@
       "text": "طلب الانضمام",
       "status": "machine"
     },
-    "group.join.request_again": {
-      "text": "إعادة الطلب",
-      "status": "machine"
-    },
     "group.join.request_failed": {
       "text": "لم يُرسل طلبك. تحقّق من اتصالك وحاول مجددًا.",
       "status": "machine"
@@ -6246,11 +6558,7 @@
       "status": "machine"
     },
     "group.join.wait_primary": {
-      "text": "تم إرسال الطلب. يوافق عليه أحد المشرفين، ثم يُطبَّق التغيير على المجموعة.",
-      "status": "machine"
-    },
-    "group.join.wait_secondary": {
-      "text": "إذا لم يحدث شيء، يمكنك إرسال الطلب مرة أخرى.",
+      "text": "أُرسل الطلب. سيراه مشرف عندما يفتح Lakko في المرة القادمة.",
       "status": "machine"
     },
     "group_delete.action": {
@@ -6315,6 +6623,10 @@
     },
     "group_info.header.public": {
       "text": "مجموعة عامة · {count, plural, one {عضو واحد} two {عضوان} few {# أعضاء} many {# عضوًا} other {# عضو}}",
+      "status": "machine"
+    },
+    "group_photo.error.full": {
+      "text": "لا توجد مساحة على الخادم لملفات جديدة الآن. حاول لاحقًا.",
       "status": "machine"
     },
     "group_photo.error.limit": {
@@ -6726,7 +7038,7 @@
       "status": "machine"
     },
     "invite.contact.result.failed_title": {
-      "text": "لم تُقبل الدعوة",
+      "text": "تعذّر فتح الدعوة. تحقّق من اتصالك وحاول مجددًا.",
       "status": "machine"
     },
     "invite.contact.result.not_found_title": {
@@ -7153,6 +7465,26 @@
       "text": "الصينية (المبسطة)",
       "status": "machine"
     },
+    "legal.privacy": {
+      "text": "سياسة الخصوصية",
+      "status": "machine"
+    },
+    "legal.privacy_title": {
+      "text": "سياسة الخصوصية",
+      "status": "machine"
+    },
+    "legal.signup_notice": {
+      "text": "بإنشاء حساب، فإنك توافق على {terms} و{privacy}.",
+      "status": "machine"
+    },
+    "legal.terms": {
+      "text": "شروط الخدمة",
+      "status": "machine"
+    },
+    "legal.terms_title": {
+      "text": "شروط الخدمة",
+      "status": "machine"
+    },
     "nav.calls": {
       "text": "المكالمات",
       "status": "machine"
@@ -7190,7 +7522,7 @@
       "status": "machine"
     },
     "new_group.error.secure_setup": {
-      "text": "تعذّر إنشاء هذه المجموعة. لم يُنشأ شيء. حاول مرة أخرى.",
+      "text": "تعذّر إنشاء هذه المجموعة. حاول مرة أخرى.",
       "status": "machine"
     },
     "new_group.error.sign_in": {
@@ -7291,6 +7623,10 @@
     },
     "open_in_app.button": {
       "text": "فتح في التطبيق",
+      "status": "machine"
+    },
+    "profile.save.error.full": {
+      "text": "لا توجد مساحة على الخادم لملفات جديدة الآن. حاول لاحقًا.",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -7657,10 +7993,6 @@
       "text": "جهاز آخر",
       "status": "machine"
     },
-    "recovery.method.passkey.sub": {
-      "text": "يسجّل دخولك. ويعيد دردشاتك أيضًا إذا فعّلت ذلك لمفتاح المرور هذا.",
-      "status": "machine"
-    },
     "recovery.method.passkey.title": {
       "text": "مفتاح مرور",
       "status": "machine"
@@ -7735,6 +8067,10 @@
     },
     "recovery.passkey.unsupported": {
       "text": "هذا الجهاز أو المتصفح لا يدعم مفاتيح المرور. اختر طريقة أخرى.",
+      "status": "machine"
+    },
+    "recovery.passkey.unsupported_desktop": {
+      "text": "هذا الجهاز لا يدعم مفاتيح المرور. اختر طريقة أخرى.",
       "status": "machine"
     },
     "recovery.passkey.waiting": {
@@ -8077,6 +8413,14 @@
       "text": "يعرض جهاز لا يزال مسجّل الدخول رمزًا من ستة أرقام؛ اكتبه هنا. لا حاجة إلى كاميرا؛ ويتوفر رمز QR إن كنت تفضّله.",
       "status": "machine"
     },
+    "restore_identity.earlier_keys.another_device.sub": {
+      "text": "افتح Lakko على جهاز لا يزال مسجّل الدخول.",
+      "status": "machine"
+    },
+    "restore_identity.earlier_keys.lede": {
+      "text": "أنت مسجّل الدخول باسم {username}، لكن هذا الجهاز لا يحمل بعد المفاتيح التي تستخدمها محادثاتك. انقلها من جهاز آخر لا يزال مسجّل الدخول.",
+      "status": "machine"
+    },
     "restore_identity.error.bad_saved_account": {
       "text": "هناك مشكلة في الحساب المحفوظ على هذا الجهاز. سجّل الخروج ثم سجّل الدخول مجددًا، أو استخدم عبارة الاسترداد.",
       "status": "machine"
@@ -8135,10 +8479,6 @@
     },
     "restore_identity.lost.summary": {
       "text": "ليس لديّ أيٌّ من هذه",
-      "status": "machine"
-    },
-    "restore_identity.method.passkey.sub": {
-      "text": "إذا فعّلت استعادة مفاتيح الحساب لأحد مفاتيح المرور.",
       "status": "machine"
     },
     "restore_identity.not_you": {
@@ -8357,6 +8697,14 @@
       "text": "اختصارات لوحة المفاتيح",
       "status": "machine"
     },
+    "settings.about.supporters": {
+      "text": "الداعمون",
+      "status": "machine"
+    },
+    "settings.about.support": {
+      "text": "ادعم Lakko",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "تم تحديث الترجمات {date}",
       "status": "machine"
@@ -8419,6 +8767,10 @@
     },
     "settings.account.forget_device.sub": {
       "text": "يزيل بيانات حسابك من هذا المتصفح. تبقى رسائلك على أجهزتك الأخرى؛ وللعودة إلى هنا ستحتاج إلى جهاز آخر، أو مفتاح مرور يستعيد مفاتيح الحساب، أو عبارة الاسترداد.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.sub_desktop": {
+      "text": "يزيل بيانات حسابك من هذا الجهاز. تبقى رسائلك على أجهزتك الأخرى؛ وللعودة إلى هنا ستحتاج إلى جهاز آخر، أو مفتاح مرور يستعيد مفاتيح الحساب، أو عبارة الاسترداد.",
       "status": "machine"
     },
     "settings.account.forget_device.title": {
@@ -8605,6 +8957,10 @@
       "text": "هذا المتصفح غير مُعدّ لحسابك. سجّل الدخول مجددًا.",
       "status": "machine"
     },
+    "settings.devices.error.no_device_key_desktop": {
+      "text": "هذا الجهاز غير مُعدّ لحسابك. سجّل الدخول مجددًا.",
+      "status": "machine"
+    },
     "settings.devices.error.remove": {
       "text": "تعذّرت إزالة الجهاز. حاول مجددًا.",
       "status": "machine"
@@ -8725,6 +9081,10 @@
       "text": "التشغيل على هذا الجهاز.",
       "status": "machine"
     },
+    "settings.notifications.channel_posts_late": {
+      "text": "قد تصل منشورات القنوات متأخرة عندما يكون Lakko مغلقًا.",
+      "status": "machine"
+    },
     "settings.notifications.off.body": {
       "text": "الإشعارات متوقفة، لذا لا يستطيع Lakko الرنين إلا وهو مفتوح. شغّلها لتصلك المكالمات والرسائل عندما لا يكون مفتوحًا.",
       "status": "machine"
@@ -8789,56 +9149,20 @@
       "text": "لا يستطيع هذا المتصفح أو الجهاز إنشاء مفاتيح مرور الآن.",
       "status": "machine"
     },
-    "settings.passkeys.keys.turn_on": {
-      "text": "تفعيل استعادة مفاتيح الحساب",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_off": {
-      "text": "إذا تركته معطّلًا، فمفتاح المرور يسجّل دخولك فقط. وتستعيد مفاتيح الحساب بعبارة الاسترداد أو بجهاز آخر.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_on": {
-      "text": "إذا فعّلت هذا، يستطيع مفتاح المرور هذا وحده نقل مفاتيح حسابك إلى جهاز جديد. تُزامَن مفاتيح المرور عادةً عبر Apple أو Google أو مدير كلمات المرور لديك. ومن يستطيع الدخول إلى حسابك لدى Apple أو Google أو مدير كلمات المرور يستطيع عندها قراءة رسائلك المستقبلية والتصرف باسمك.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.cancelled": {
-      "text": "أُلغي. مفتاح المرور هذا ما زال يسجّل دخولك فقط.",
+    "settings.passkeys.error.unsupported_desktop": {
+      "text": "لا يستطيع هذا الجهاز إنشاء مفاتيح مرور الآن.",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.done": {
       "text": "مفتاح المرور هذا يستعيد الآن مفاتيح حسابك.",
       "status": "machine"
     },
-    "settings.passkeys.keys_choice.error.other_passkey": {
-      "text": "استجاب مفتاح مرور مختلف. حاول مجددًا واختر مفتاح المرور الذي تفعّل هذا له.",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.error.phrase_mismatch": {
       "text": "عبارة الاسترداد هذه لا تخص هذا الحساب. لم يتغيّر شيء.",
       "status": "machine"
     },
-    "settings.passkeys.keys_choice.later": {
-      "text": "يمكنك تغيير هذا لاحقًا لكل مفتاح مرور.",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.no_prf": {
       "text": "يستطيع مفتاح المرور هذا تسجيل دخولك، لكنه على هذا الجهاز ومع مزوّد مفاتيح المرور هذا لا يستطيع حمل مفاتيح حسابك. احتفظ بعبارة الاسترداد.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.phrase_needed": {
-      "text": "اكتب عبارة الاسترداد لتفعيل هذا.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.signin_only": {
-      "text": "تسجيل الدخول فقط",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.title": {
-      "text": "هل تسمح لمفتاح المرور هذا باستعادة مفاتيح حسابك؟",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.turn_on": {
-      "text": "تفعيل",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.unavailable": {
@@ -8851,14 +9175,6 @@
     },
     "settings.passkeys.label.signin_only": {
       "text": "يسجّل الدخول فقط",
-      "status": "machine"
-    },
-    "settings.passkeys.lede": {
-      "text": "سجّل الدخول باستخدام Touch ID أو Face ID أو مفتاح أمان بدلًا من كلمة المرور. ويمكن لمفتاح المرور أيضًا استعادة مفاتيح حسابك على جهاز جديد إذا فعّلت ذلك. تعمل عبارة الاسترداد دائمًا أيضًا.",
-      "status": "machine"
-    },
-    "settings.passkeys.lede_device": {
-      "text": "سجّل الدخول ببصمة إصبعك أو وجهك أو قفل الشاشة، أو بمفتاح أمان، بدلًا من كلمة المرور. ويمكن لمفتاح المرور أيضًا استعادة مفاتيح حسابك على جهاز جديد إذا فعّلت ذلك. تعمل عبارة الاسترداد دائمًا أيضًا.",
       "status": "machine"
     },
     "settings.passkeys.name.label": {
@@ -8901,22 +9217,6 @@
       "text": "حُذفت مفاتيح المرور عند إعادة تعيين مفاتيح الحساب. أضف مفتاح مرور لتسجيل الدخول مجددًا باستخدام Face ID أو Touch ID أو بصمة إصبعك.",
       "status": "machine"
     },
-    "settings.passkeys.stop_restoring.action": {
-      "text": "إيقاف استعادة مفاتيح الحساب",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.body": {
-      "text": "سيسجّل مفتاح المرور هذا دخولك فقط. مفاتيح الحساب التي استُعيدت بالفعل على أجهزة أخرى تبقى هناك.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.done": {
-      "text": "مفتاح المرور هذا يسجّل الآن دخولك فقط.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.title": {
-      "text": "إيقاف استعادة مفاتيح الحساب بمفتاح المرور هذا؟",
-      "status": "machine"
-    },
     "settings.passkeys.title": {
       "text": "مفاتيح المرور",
       "status": "machine"
@@ -8927,6 +9227,10 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "لا يستطيع هذا المتصفح إدارة مفاتيح المرور. استخدم إصدارًا حديثًا من Safari أو Chrome أو Firefox أو Edge.",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_desktop": {
+      "text": "لا يستطيع هذا الجهاز إدارة مفاتيح المرور.",
       "status": "machine"
     },
     "settings.password.change": {
@@ -9233,6 +9537,10 @@
       "text": "يديرها متصفحك",
       "status": "machine"
     },
+    "settings.translation.pack.managed.desktop": {
+      "text": "يديرها نظامك",
+      "status": "machine"
+    },
     "settings.translation.pack.remove": {
       "text": "إزالة",
       "status": "machine"
@@ -9287,6 +9595,22 @@
     },
     "settings.translation.unavailable.translation_web": {
       "text": "الترجمة غير متاحة في هذا المتصفح",
+      "status": "machine"
+    },
+    "supporters.body": {
+      "text": "يموّل Lakko الأشخاص الذين يدعمونه. شكرًا لكم.",
+      "status": "machine"
+    },
+    "supporters.failed": {
+      "text": "تعذّر تحميل القائمة. حاول مرة أخرى.",
+      "status": "machine"
+    },
+    "supporters.retry": {
+      "text": "إعادة المحاولة",
+      "status": "machine"
+    },
+    "supporters.title": {
+      "text": "الداعمون",
       "status": "machine"
     },
     "tokens.action_allowance_used": {
@@ -9401,10 +9725,6 @@
       "text": "حاول مجددًا",
       "status": "machine"
     },
-    "translate.pack.blocked_anti_censorship": {
-      "text": "لا يمكن تنزيل حزم اللغات أثناء تشغيل تجاوز الرقابة.",
-      "status": "machine"
-    },
     "translate.pack.body.transcription": {
       "text": "يتم تحويل الكلام إلى نص على هذا الجهاز. يحتاج Lakko إلى حزمة {language} لذلك. لا تُرسَل الرسائل الصوتية إلى أي مكان لتحويلها إلى نص.",
       "status": "machine"
@@ -9419,6 +9739,10 @@
     },
     "translate.pack.body.translation_sized": {
       "text": "تتم الترجمة على هذا الجهاز. يحتاج Lakko إلى حزمة {language} لذلك ({size}). لا تُرسَل الرسائل إلى أي مكان لترجمتها.",
+      "status": "machine"
+    },
+    "translate.pack.body.translation_system_settings": {
+      "text": "تتم الترجمة على هذا الجهاز. يُنزّل macOS حزمة {language} من إعدادات النظام: اللغة والمنطقة، ثم لغات الترجمة. لا تُرسَل الرسائل إلى أي مكان لترجمتها.",
       "status": "machine"
     },
     "translate.pack.cancel": {
@@ -9449,6 +9773,10 @@
       "text": "ليس الآن",
       "status": "machine"
     },
+    "translate.pack.open_system_settings": {
+      "text": "فتح إعدادات النظام",
+      "status": "machine"
+    },
     "translate.pack.source.android": {
       "text": "الحزمة مقدَّمة من Google.",
       "status": "machine"
@@ -9459,6 +9787,10 @@
     },
     "translate.pack.source.web": {
       "text": "الحزمة مقدَّمة من الشركة المطوّرة لمتصفحك.",
+      "status": "machine"
+    },
+    "translate.pack.source.desktop": {
+      "text": "الحزمة مقدَّمة من الشركة المطوّرة لنظامك.",
       "status": "machine"
     },
     "translate.pack.title.transcription": {
@@ -9707,6 +10039,14 @@
     },
     "who_can_find_me.title": {
       "text": "من يمكنه العثور عليّ",
+      "status": "machine"
+    },
+    "call.screen_share.refused_desktop": {
+      "text": "تعذّرت مشاركة شاشتك. اسمح لـ Lakko بتسجيل الشاشة في إعدادات الخصوصية في نظامك.",
+      "status": "machine"
+    },
+    "call.screen_share.refused_macos_desktop": {
+      "text": "تعذّرت مشاركة شاشتك. اسمح لـ Lakko بتسجيل الشاشة في إعدادات النظام.",
       "status": "machine"
     }
   },

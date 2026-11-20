@@ -721,7 +721,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
                     style={{ "align-self": "flex-start" }}
                     onClick={() => setAdding(null)}
                   >
-                    <Icon name="back" size={16} />
+                    <Icon name="chevron-back" size={20} />
                     {t("nav.contacts")}
                   </button>
                   <div class="lk-page-head">

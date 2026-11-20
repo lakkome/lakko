@@ -23,6 +23,11 @@ use crate::error::{AnonTokenError, Result};
 /// window renumbers the epochs and invalidates every outstanding token.
 pub const DEFAULT_WINDOW_SECS: u64 = 86_400;
 
+/// The fixed epoch window of [`TokenContext::BetaPlace`]: 30 days
+/// (ADR-0097). Independent of `LAKKO_ANON_TOKEN_WINDOW_SECS`. Chosen, not
+/// measured: the UX states that a held place lasts 30 days.
+pub const BETA_PLACE_WINDOW_SECS: u64 = 2_592_000;
+
 /// The action a token pays for.
 ///
 /// One context per rationed action group of ADR-0054 decision 2, rather than
@@ -80,15 +85,21 @@ pub enum TokenContext {
     /// `services/channels`: one comment added under a channel post
     /// (ADR-0087 section 13a). Deleting one's own comment spends none.
     ChannelComment = 15,
+    /// `services/auth`: a beta place held by a supporter code (ADR-0097).
+    /// Never issued by `POST /auth/tokens`: only the supporter-code redeem
+    /// route evaluates it, one evaluation per code, and the first username
+    /// bind spends it past the account cap. Its epoch window is fixed
+    /// ([`BETA_PLACE_WINDOW_SECS`]), not the configured one.
+    BetaPlace = 16,
     /// `services/moderation`: one report sent to Lakko's moderators
-    /// (ADR-0089 section 2). The report takes no session, so the token is
+    /// (ADR-0098 section 2). The report takes no session, so the token is
     /// what rations it.
-    Report = 16,
+    Report = 17,
 }
 
 impl TokenContext {
     /// Every context, in wire order.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::DiscoveryLookup,
         Self::DiscoveryRegister,
         Self::InviteConsume,
@@ -104,6 +115,7 @@ impl TokenContext {
         Self::CircleClaim,
         Self::ChannelReact,
         Self::ChannelComment,
+        Self::BetaPlace,
         Self::Report,
     ];
 
@@ -135,7 +147,8 @@ impl TokenContext {
             13 => Ok(Self::CircleClaim),
             14 => Ok(Self::ChannelReact),
             15 => Ok(Self::ChannelComment),
-            16 => Ok(Self::Report),
+            16 => Ok(Self::BetaPlace),
+            17 => Ok(Self::Report),
             _ => Err(AnonTokenError::UnknownContext),
         }
     }
@@ -159,8 +172,40 @@ impl TokenContext {
             Self::CircleClaim => "circle-claim",
             Self::ChannelReact => "channel-react",
             Self::ChannelComment => "channel-comment",
+            Self::BetaPlace => "beta-place",
             Self::Report => "report",
         }
+    }
+
+    /// The epoch window of this context when it has one of its own, `None`
+    /// when it follows the configured window. Only `beta-place` has one
+    /// (ADR-0097: a held place lasts one 30-day window plus the previous).
+    #[must_use]
+    pub const fn fixed_window_secs(self) -> Option<u64> {
+        match self {
+            Self::BetaPlace => Some(BETA_PLACE_WINDOW_SECS),
+            _ => None,
+        }
+    }
+
+    /// The epoch window this context uses when the service is configured
+    /// with `configured_window_secs`: its fixed window if it has one, else
+    /// the configured one. Issuance, the key route and verification all go
+    /// through this, so they cannot disagree on a context's epoch.
+    #[must_use]
+    pub const fn window_secs(self, configured_window_secs: u64) -> u64 {
+        match self.fixed_window_secs() {
+            Some(w) => w,
+            None => configured_window_secs,
+        }
+    }
+
+    /// Whether `POST /auth/tokens` issues this context to a session. Every
+    /// context but `beta-place`, which only the supporter-code redeem route
+    /// evaluates (ADR-0097).
+    #[must_use]
+    pub const fn is_session_issuable(self) -> bool {
+        !matches!(self, Self::BetaPlace)
     }
 
     /// Parse the stable name (exact, case-sensitive).
@@ -210,7 +255,7 @@ mod tests {
             Err(AnonTokenError::UnknownContext)
         );
         assert_eq!(
-            TokenContext::from_u8(17),
+            TokenContext::from_u8(18),
             Err(AnonTokenError::UnknownContext)
         );
         assert_eq!(
@@ -227,14 +272,14 @@ mod tests {
     fn all_lists_every_context_once_in_wire_order() {
         // `ALL` is what `from_name`, the issuer's quota table and both FFI
         // surfaces enumerate: a context missing from it has no name lookup
-        // and no quota. Exactly the bytes 1..=16 parse, and `ALL` is those
+        // and no quota. Exactly the bytes 1..=17 parse, and `ALL` is those
         // contexts in that order.
         let parsed: Vec<TokenContext> = (0..=u8::MAX)
             .filter_map(|b| TokenContext::from_u8(b).ok())
             .collect();
         assert_eq!(parsed, TokenContext::ALL);
         let bytes: Vec<u8> = TokenContext::ALL.iter().map(|c| c.as_u8()).collect();
-        assert_eq!(bytes, (1..=16).collect::<Vec<u8>>());
+        assert_eq!(bytes, (1..=17).collect::<Vec<u8>>());
         let mut names: Vec<&str> = TokenContext::ALL.iter().map(|c| c.name()).collect();
         names.sort_unstable();
         names.dedup();
@@ -258,7 +303,8 @@ mod tests {
         assert_eq!(TokenContext::CircleClaim.as_u8(), 13);
         assert_eq!(TokenContext::ChannelReact.as_u8(), 14);
         assert_eq!(TokenContext::ChannelComment.as_u8(), 15);
-        assert_eq!(TokenContext::Report.as_u8(), 16);
+        assert_eq!(TokenContext::BetaPlace.as_u8(), 16);
+        assert_eq!(TokenContext::Report.as_u8(), 17);
         assert_eq!(TokenContext::DiscoveryLookup.name(), "discovery-lookup");
         assert_eq!(TokenContext::DiscoveryRegister.name(), "discovery-register");
         assert_eq!(TokenContext::InviteConsume.name(), "invite-consume");
@@ -274,7 +320,23 @@ mod tests {
         assert_eq!(TokenContext::CircleClaim.name(), "circle-claim");
         assert_eq!(TokenContext::ChannelReact.name(), "channel-react");
         assert_eq!(TokenContext::ChannelComment.name(), "channel-comment");
+        assert_eq!(TokenContext::BetaPlace.name(), "beta-place");
         assert_eq!(TokenContext::Report.name(), "report");
+    }
+
+    #[test]
+    fn only_beta_place_has_a_fixed_window_and_is_not_session_issuable() {
+        for c in TokenContext::ALL {
+            if c == TokenContext::BetaPlace {
+                assert_eq!(c.fixed_window_secs(), Some(BETA_PLACE_WINDOW_SECS));
+                assert_eq!(c.window_secs(86_400), 2_592_000);
+                assert!(!c.is_session_issuable());
+            } else {
+                assert_eq!(c.fixed_window_secs(), None);
+                assert_eq!(c.window_secs(3_600), 3_600);
+                assert!(c.is_session_issuable());
+            }
+        }
     }
 
     #[test]

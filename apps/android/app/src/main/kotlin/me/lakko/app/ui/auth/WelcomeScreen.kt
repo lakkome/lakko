@@ -24,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import me.lakko.app.l10n.t
+import me.lakko.app.ui.components.BetaNoticeBanner
 
 /**
  * The first screen a signed-out user sees (docs/ux/client-redesign.md
@@ -62,6 +63,9 @@ public fun WelcomeScreen(
             )
             Spacer(Modifier.weight(1f))
             Spacer(Modifier.height(32.dp))
+            // docs/ux/beta-notice.md section 3 item 1: before Create account.
+            BetaNoticeBanner()
+            Spacer(Modifier.height(16.dp))
             Column(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 modifier = Modifier.fillMaxWidth(),

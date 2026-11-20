@@ -182,7 +182,7 @@ async fn a_listing_must_be_newer_survives_nothing_when_blocked_and_keeps_its_fir
         10 * DAY_MS
     );
 
-    // ADR-0089: a block removes the listing and refuses a new one, a delist
+    // ADR-0098: a block removes the listing and refuses a new one, a delist
     // and a removal accumulate with it, a restore clears all three. The list
     // version only grows and the database is shared, so every statement here
     // is under the highest version there is.
@@ -244,7 +244,7 @@ async fn a_listing_must_be_newer_survives_nothing_when_blocked_and_keeps_its_fir
         s.apply_moderation(&stale).await.unwrap(),
         ModerationOutcome::StaleList
     );
-    // The floor alone (ADR-0089 F1): an older list is refused, the floor
+    // The floor alone (ADR-0098 F1): an older list is refused, the floor
     // itself is kept.
     assert!(!s.raise_moderation_list_floor(u64::MAX - 1).await.unwrap());
     assert!(s.raise_moderation_list_floor(u64::MAX).await.unwrap());

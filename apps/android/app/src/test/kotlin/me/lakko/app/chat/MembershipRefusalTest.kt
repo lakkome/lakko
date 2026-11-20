@@ -98,8 +98,9 @@ class MembershipRefusalTest {
         // arrives here automatically.
         // 20 since ADR-0050 appended DEVICE_BINDING_INVALID and DEVICE_LIMIT_REACHED;
         // 23 since ADR-0062 appended the three conversation-kind reasons, 24
-        // since ADR-0045 appended the Welcome for a group still held.
-        assertEquals(24, FfiRefusalReason.entries.size)
+        // since ADR-0045 appended the Welcome for a group still held, 26 since
+        // ADR-0091 phase 2 appended the two re-entry refusals.
+        assertEquals(26, FfiRefusalReason.entries.size)
 
         for (reason in FfiRefusalReason.entries) {
             assertTrue("$reason rendered an empty sentence", say(reason).isNotEmpty())
@@ -233,6 +234,8 @@ class MembershipRefusalTest {
                 FfiRefusalReason.PROPOSALS_PENDING,
                 FfiRefusalReason.SWEEP_ALREADY_STAGED,
                 FfiRefusalReason.GROUP_STILL_ACTIVE,
+                FfiRefusalReason.REENTRY_PAIR_INVALID,
+                FfiRefusalReason.REENTRY_WELCOME_REFUSED,
             ),
             MEMBERSHIP_REFUSALS_COLLAPSED_TO_FALLBACK,
         )
@@ -355,6 +358,9 @@ class MembershipRefusalTest {
                 FfiRefusalReason.ONE_TO_ONE_HAS_NO_ROLES,
             FfiException.MembershipGroupKindChanged("x") to
                 FfiRefusalReason.GROUP_KIND_CHANGED,
+            FfiException.MembershipReentryPairInvalid("x") to FfiRefusalReason.REENTRY_PAIR_INVALID,
+            FfiException.MembershipReentryWelcomeRefused("x") to
+                FfiRefusalReason.REENTRY_WELCOME_REFUSED,
         )
         assertEquals(FfiRefusalReason.entries.size, pairs.size)
         assertEquals(FfiRefusalReason.entries.toSet(), pairs.map { it.second }.toSet())

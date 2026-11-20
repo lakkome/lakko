@@ -11,8 +11,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -39,6 +37,8 @@ import me.lakko.app.contacts.InvitePreviewResult
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 import me.lakko.app.ui.components.LakkoAvatar
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
 
 /**
  * The invite page (ADR-0079, `docs/ux/contact-invite-link.md` section 3): the
@@ -79,7 +79,7 @@ public fun InviteLandingScreen(
                 title = { Text(t("invite.contact.page_title")) },
                 navigationIcon = {
                     IconButton(onClick = onDone) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -114,7 +114,11 @@ public fun InviteLandingScreen(
                     Button(onClick = viewModel::retryOpen) { Text(t("common.try_again")) }
                 }
                 InviteLandingState.OpenFailed -> {
-                    Title(t("invite.contact.result.failed_title"))
+                    Text(
+                        text = t("invite.contact.result.failed_title"),
+                        style = MaterialTheme.typography.bodyMedium,
+                        textAlign = TextAlign.Center,
+                    )
                     Spacer(Modifier.height(24.dp))
                     Button(onClick = viewModel::retryOpen) { Text(t("common.try_again")) }
                 }
@@ -220,7 +224,11 @@ public fun SignedOutInviteScreen(
                 Button(onClick = { attempt += 1 }) { Text(t("common.try_again")) }
             }
             SignedOutInviteState.OpenFailed -> {
-                Title(t("invite.contact.result.failed_title"))
+                Text(
+                    text = t("invite.contact.result.failed_title"),
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center,
+                )
                 Spacer(Modifier.height(24.dp))
                 Button(onClick = { attempt += 1 }) { Text(t("common.try_again")) }
             }
@@ -285,13 +293,13 @@ private fun ReadyPanel(state: InviteLandingState.Ready, onAdd: () -> Unit, onNot
         )
     }
     Spacer(Modifier.height(24.dp))
-    // ADR-0089 step 4 / UX 3 — a link from an account the moderation log
+    // ADR-0098 step 4 / UX 3 — a link from an account the moderation log
     // confirms suspended has no Add.
     val inviterKeyB64 = remember(invite.ownerSignaturePubkey) {
         invite.ownerSignaturePubkey.takeIf { it.size == 32 }?.let { java.util.Base64.getEncoder().encodeToString(it) }
     }
     val inviterSuspended by me.lakko.app.ui.suspension.rememberAccountSuspended(inviterKeyB64)
-    // ADR-0089 section 4 - a suspended account adds no contacts.
+    // ADR-0098 section 4 - a suspended account adds no contacts.
     val addReadOnly by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
     if (inviterSuspended || state.inviterSuspended) {
         Text(

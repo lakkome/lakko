@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0089 step 5 - what a channel moderators removed still offers: the posts
+ * ADR-0098 step 5 - what a channel moderators removed still offers: the posts
  * held on this device, readable; no composer, reactions, comments, edit or
  * delete; in the info only the @name, the description, the find-me switch
  * and leaving.
@@ -35,7 +35,7 @@ describe("a removed channel's controls", () => {
       editDelete: false,
       reportPost: true,
     });
-    // ADR-0089 step 3 still applies on its own.
+    // ADR-0098 step 3 still applies on its own.
     expect(
       channelWriteControls({ canPublish: true, reading: true, accountSuspended: true, removed: false }).composer,
     ).toBe(false);

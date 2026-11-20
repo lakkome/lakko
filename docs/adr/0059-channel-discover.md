@@ -176,7 +176,7 @@ service envelopes.
 
 ### 7. Moderation
 
-**Superseded as authority by [ADR-0089](0089-reporting-and-moderation.md)
+**Superseded as authority by [ADR-0098](0098-reporting-and-moderation.md)
 step 5 (2026-11-20).** The operator's shared-secret route
 `POST /internal/v1/channels/{id}/moderation` is removed. The channels
 service now applies only a moderator statement signed under the pinned

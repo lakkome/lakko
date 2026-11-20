@@ -220,6 +220,9 @@ public final class StorageClient {
             return (raw.0, http)
         }
         if answer == .ok { return }
+        if case .failed(let status, let code) = answer, BlobAnswer.isStorageFull(status: status, code: code) {
+            throw StorageClientError.storageFull
+        }
         throw StorageClientError.http(
             status: http.statusCode, endpoint: endpoint,
             body: Self.truncate(String(data: data, encoding: .utf8) ?? "<binary>"))
@@ -513,6 +516,9 @@ public enum StorageClientError: Error {
     /// ADR-0065 / UX 4.2 — the sending (`.upload`) or opening (`.read`)
     /// allowance is used up for now.
     case limited(BlobPassKind)
+    /// UX storage-full — `PUT /blob` answered `507 storage-full`: the server
+    /// has no room for new files right now.
+    case storageFull
 }
 
 extension StorageClientError: LocalizedError {
@@ -522,6 +528,7 @@ extension StorageClientError: LocalizedError {
         case .http(let s, let e, let b): return "storage \(e) → \(s): \(b)"
         case .network(let e, let u): return "storage \(e) network error: \(u)"
         case .limited(let kind): return "storage \(kind.rawValue) allowance used up"
+        case .storageFull: return "storage has no room for new files"
         }
     }
 }

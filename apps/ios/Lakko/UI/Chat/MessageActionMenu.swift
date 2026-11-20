@@ -115,7 +115,17 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
     /// ``offered(canReply:canForward:canEditOrDelete:hasText:pin:canSelect:save:translate:)``.
     case ban
 
-    /// ADR-0089 / UX `reporting-and-moderation.md` 2.1 — report this message's
+    /// ADR-0092 / UX 7.3 — back to the unvoted card (a poll not closed).
+    case retractVote
+    /// UX 7.3 — the creator, or an owner / admin: close a poll (final).
+    case closePoll
+    /// UX 8.2 — the creator edits a checklist.
+    case editChecklist
+    /// UX 8.2 — the creator closes a checklist (final).
+    case closeChecklist
+    /// UX 9.3 — a location's coordinates to the clipboard.
+    case copyCoordinates
+    /// ADR-0098 / UX `reporting-and-moderation.md` 2.1 — report this message's
     /// author (a channel post: the channel). On someone else's message only;
     /// destructive group.
     case report
@@ -137,26 +147,36 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         case .edit: return Localization.text("chat.message.edit")
         case .delete: return Localization.text("common.delete")
         case .ban: return Localization.text("channels.moderation.ban")
+        case .retractVote: return Localization.text("poll.retract")
+        case .closePoll: return Localization.text("poll.close")
+        case .editChecklist: return Localization.text("checklist.edit")
+        case .closeChecklist: return Localization.text("checklist.close")
+        case .copyCoordinates: return Localization.text("location.copy")
         case .report: return Localization.text("report.action")
         }
     }
 
-    public var systemImage: String {
+    /// The row's icon (design system section 8).
+    var icon: LkIcon {
         switch self {
-        case .reply: return "arrowshape.turn.up.left"
-        case .forward: return "arrowshape.turn.up.right"
-        case .pin: return "pin"
-        case .unpin: return "pin.slash"
-        case .save: return "bookmark"
-        case .unsave: return "bookmark.slash"
-        case .copy: return "doc.on.doc"
-        case .translate: return "character.bubble"
-        case .showOriginal: return "text.bubble"
-        case .select: return "checkmark.circle"
-        case .edit: return "pencil"
-        case .delete: return "trash"
-        case .ban: return "nosign"
-        case .report: return "flag"
+        case .reply: return .reply
+        case .forward: return .forward
+        case .pin: return .pin
+        case .unpin: return .pinSlash
+        case .save: return .bookmark
+        case .unsave: return .bookmarkSlash
+        case .copy: return .copy
+        case .translate: return .translate
+        case .showOriginal: return .textBubble
+        case .select: return .checkmarkCircle
+        case .edit: return .pencil
+        case .delete: return .trash
+        case .ban: return .nosign
+        case .retractVote: return .xmark
+        case .closePoll, .closeChecklist: return .lock
+        case .editChecklist: return .pencil
+        case .copyCoordinates: return .copy
+        case .report: return .flag
         }
     }
 
@@ -183,6 +203,10 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         canSelect: Bool = false,
         save: SaveMenuState = .unavailable,
         translate: MessageTranslateMenuState = .unavailable,
+        // ADR-0087 section 14 — `false` for a message drawn as a channel
+        // invitation card: its text is the `/g/` link with its secret, so it
+        // is never edited. Delete stays.
+        canEdit: Bool = true,
         canReport: Bool = false
     ) -> [MessageMenuAction] {
         var actions: [MessageMenuAction] = []
@@ -219,21 +243,25 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         case .unavailable: break
         }
         if canEditOrDelete {
-            actions.append(.edit)
+            if canEdit { actions.append(.edit) }
             actions.append(.delete)
         }
-        // ADR-0089 — Report, in the destructive group, last; never on an own
+        // ADR-0098 — Report, in the destructive group, last; never on an own
         // message (an own message is the one `canEditOrDelete` is about).
         if canReport && !canEditOrDelete { actions.append(.report) }
         return actions
     }
 
-    /// ADR-0089 step 3 — the rows a suspended account is offered: none that
-    /// sends (Reply, Forward, Edit, Delete, Ban). A control the server or the
-    /// device would refuse afterwards is not offered at all.
+    /// ADR-0098 step 3 — the rows a suspended account is offered: none that
+    /// sends (Reply, Forward, Edit, Delete, Ban, and the ADR-0092 poll and
+    /// checklist rows). A control the server or the device would refuse
+    /// afterwards is not offered at all.
     public static func whileSuspended(_ actions: [MessageMenuAction], suspended: Bool) -> [MessageMenuAction] {
         guard suspended else { return actions }
-        let sending: Set<MessageMenuAction> = [.reply, .forward, .edit, .delete, .ban]
+        let sending: Set<MessageMenuAction> = [
+            .reply, .forward, .edit, .delete, .ban,
+            .retractVote, .closePoll, .editChecklist, .closeChecklist,
+        ]
         return actions.filter { !sending.contains($0) }
     }
 }
@@ -451,7 +479,7 @@ final class MessageMenuPresenter: ObservableObject {
     /// second request can only come from a gesture that was already in flight.
     func open(_ request: MessageMenuRequest) {
         guard self.request == nil else { return }
-        // ADR-0089 step 3 — while suspended, no sending row and no reaction
+        // ADR-0098 step 3 — while suspended, no sending row and no reaction
         // bar, whichever screen opened the menu.
         let request = request.narrowed(suspended: isSuspended())
         // The feedback `.contextMenu` used to give at the moment it opened. A
@@ -777,8 +805,7 @@ struct MessageReactionRow: View {
                 }
                 if model.showsExpand {
                     Button(action: onMore) {
-                        Image(systemName: "plus")
-                            .font(.system(size: side * 18 / Self.target, weight: .semibold))
+                        LkIconView(.plus, size: side * 21 / Self.target, relativeTo: nil)
                             .foregroundStyle(Color.lakkoTextMuted)
                             .frame(width: side, height: side)
                             .contentShape(Rectangle())
@@ -814,7 +841,7 @@ struct MessageActionCard: View {
                 Button {
                     perform(action)
                 } label: {
-                    Label(action.title, systemImage: action.systemImage)
+                    Label(action.title, icon: action.icon)
                         .font(.body)
                         .foregroundStyle(action.isDestructive ? Color.lakkoDanger : Color.lakkoText)
                         .padding(.horizontal, 14)

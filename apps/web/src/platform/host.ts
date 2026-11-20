@@ -200,6 +200,10 @@ export interface HostNotification {
   target: string | null;
   /** Accept and Decline on a ringing call, where the OS has buttons. */
   call?: HostCallButtons;
+  /** ADR-0047 section 6 — standard base64 of the message's micro thumbnail
+   *  (a JPEG of at most 4096 bytes), shown where the OS takes a picture
+   *  (macOS). Set only beside the message's own words. */
+  image?: string;
 }
 
 /** The buttons of a ringing call's notification. */
@@ -367,5 +371,113 @@ export async function requestHostAttention(): Promise<void> {
     await fetch(`${HOST_APP_PATH}/attention`, { method: "POST" });
   } catch {
     // cosmetic
+  }
+}
+
+// ---- the collapsed call's own window (`docs/ux/calls.md` section 4.5.4a) ----
+
+/** Path prefix of the call window's host routes
+ *  (`apps/desktop/src-tauri/src/call_window.rs`). */
+export const HOST_CALL_WINDOW_PATH = "/__host/call-window";
+
+/** The two images the call window draws. */
+export type CallWindowSlot = "picture" | "inset";
+
+/** What a click on the call window asks of the main page. */
+export type HostCallWindowAction = "toggle-mute" | "expand";
+
+/**
+ * Show the call window with `view`, or hide it (`null`). Main page only; does
+ * nothing outside the desktop app. Never throws: a lost post is replaced by
+ * the next change.
+ */
+export async function postCallWindowView(view: object | null): Promise<void> {
+  if (!isDesktop()) return;
+  try {
+    await fetch(`${HOST_CALL_WINDOW_PATH}/view`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(view === null ? { visible: false } : { visible: true, view }),
+    });
+  } catch {
+    // The next change posts again.
+  }
+}
+
+/**
+ * Hand the call window one image (JPEG or WebP bytes), or clear the slot with
+ * an empty one. Main page only. `false` when the host did not take it. The
+ * body is bytes, never a Blob: the host reads a Blob empty.
+ */
+export async function postCallWindowFrame(slot: CallWindowSlot, bytes: Uint8Array): Promise<boolean> {
+  if (!isDesktop()) return false;
+  try {
+    const res = await fetch(`${HOST_CALL_WINDOW_PATH}/frame/${slot}`, {
+      method: "PUT",
+      body: bytes.slice(),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Subscribe to clicks on the call window. Nothing outside the desktop app. */
+export function onHostCallWindowAction(handler: (action: HostCallWindowAction) => void): () => void {
+  if (!isDesktop()) return () => {};
+  const listener = (e: Event): void => {
+    const d = (e as CustomEvent<unknown>).detail as { kind?: unknown; action?: unknown } | null;
+    if (d === null || typeof d !== "object" || d.kind !== "call-window") return;
+    if (d.action !== "toggle-mute" && d.action !== "expand") return;
+    handler(d.action);
+  };
+  window.addEventListener(HOST_EVENT, listener);
+  return () => window.removeEventListener(HOST_EVENT, listener);
+}
+
+/** What the call window's page reads when it loads. */
+export interface CallWindowHostState {
+  readonly view: unknown;
+  readonly picture: number | null;
+  readonly inset: number | null;
+}
+
+/** The call window's page: the last view and frames the host holds. */
+export async function fetchCallWindowState(): Promise<CallWindowHostState | null> {
+  try {
+    const res = await fetch(`${HOST_CALL_WINDOW_PATH}/state`);
+    if (!res.ok) return null;
+    const v = (await res.json()) as { view?: unknown; picture?: unknown; inset?: unknown };
+    const seq = (n: unknown): number | null => (typeof n === "number" && Number.isInteger(n) ? n : null);
+    return { view: v.view ?? null, picture: seq(v.picture), inset: seq(v.inset) };
+  } catch {
+    return null;
+  }
+}
+
+/** Where the call window's page loads image `seq` of `slot` from. */
+export function callWindowFrameUrl(slot: CallWindowSlot, seq: number): string {
+  return `${HOST_CALL_WINDOW_PATH}/frame/${slot}?n=${seq}`;
+}
+
+/** The call window's page: a click, `mute` or `expand`. Never throws. */
+export async function postCallWindowAction(action: "mute" | "expand"): Promise<void> {
+  try {
+    await fetch(`${HOST_CALL_WINDOW_PATH}/action`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+  } catch {
+    // A lost click is clicked again.
+  }
+}
+
+/** The call window's page: the person is dragging the window. Never throws. */
+export async function startCallWindowDrag(): Promise<void> {
+  try {
+    await fetch(`${HOST_CALL_WINDOW_PATH}/drag`, { method: "POST" });
+  } catch {
+    // The window stays where it is.
   }
 }

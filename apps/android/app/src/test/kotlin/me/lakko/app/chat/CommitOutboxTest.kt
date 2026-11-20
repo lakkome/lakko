@@ -267,4 +267,48 @@ class CommitOutboxTest {
         java.io.File(dir, "half.json.tmp").writeText("partial")
         assertEquals(listOf("good"), CommitOutboxStore.loadAllIn(dir).map { it.id })
     }
+
+    // ADR-0091 walk 2, defect 2 — an acked entry owes no commit.
+
+    private fun entry(id: String, acked: Boolean, isSweep: Boolean) = PendingCommitEntry(
+        id = id,
+        accountId = "acct",
+        groupId = "g",
+        targetEpoch = "2",
+        commitB64 = "AA==",
+        acked = acked,
+        isSweep = isSweep,
+    )
+
+    @Test
+    fun `only an un-acked entry or a staged sweep owes a commit`() {
+        assertFalse(ownCommitOwedBy(stagedSweep = false, entries = emptyList()))
+        assertFalse(
+            "an acked sweep entry left on disk owes nothing",
+            ownCommitOwedBy(stagedSweep = false, entries = listOf(entry("a", acked = true, isSweep = true))),
+        )
+        assertFalse(ownCommitOwedBy(stagedSweep = false, entries = listOf(entry("a", acked = true, isSweep = false))))
+        assertTrue(ownCommitOwedBy(stagedSweep = false, entries = listOf(entry("a", acked = false, isSweep = true))))
+        assertTrue(ownCommitOwedBy(stagedSweep = false, entries = listOf(entry("b", acked = false, isSweep = false))))
+        assertTrue(ownCommitOwedBy(stagedSweep = true, entries = emptyList()))
+    }
+
+    @Test
+    fun `an acked sweep entry is collectable, an un-acked or direct-path one is not`() {
+        assertTrue(collectableSweepEntry(entry("a", acked = true, isSweep = true)))
+        assertFalse("its verdict or Welcomes are still owed", collectableSweepEntry(entry("a", acked = false, isSweep = true)))
+        assertFalse("collected by reconcileVerdict instead", collectableSweepEntry(entry("a", acked = true, isSweep = false)))
+    }
+
+    @Test
+    fun `collecting acked sweep entries leaves the owed ones on disk`() {
+        val dir = tmp.newFolder("outbox-gc")
+        CommitOutboxStore.putEntryIn(dir, entry("done", acked = true, isSweep = true))
+        CommitOutboxStore.putEntryIn(dir, entry("owed", acked = false, isSweep = true))
+        CommitOutboxStore.putEntryIn(dir, entry("direct", acked = false, isSweep = false))
+        for (e in CommitOutboxStore.loadAllIn(dir)) if (collectableSweepEntry(e)) CommitOutboxStore.deleteEntryIn(dir, e.id)
+        val left = CommitOutboxStore.loadAllIn(dir).map { it.id }.toSet()
+        assertEquals(setOf("owed", "direct"), left)
+        assertTrue(ownCommitOwedBy(false, CommitOutboxStore.loadAllIn(dir)))
+    }
 }

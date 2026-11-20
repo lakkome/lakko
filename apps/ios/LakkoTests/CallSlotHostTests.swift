@@ -541,6 +541,8 @@ final class GroupCallHostTests: XCTestCase {
         var publishHeld = false
         /// Publishes that have been asked for so far, finished or not.
         var publishesAsked = 0
+        /// ADR-0091 — this device is behind in the chat.
+        var behind = false
         /// The seed a given epoch derives, so a rekey is checkable.
         static func seed(_ epoch: UInt64?) -> Data {
             Data(repeating: UInt8(truncatingIfNeeded: epoch ?? 0), count: 32)
@@ -554,6 +556,7 @@ final class GroupCallHostTests: XCTestCase {
             hasGroup: { _ in h.hasGroup },
             isActive: { _ in h.isActive },
             membershipEnded: { _ in false },
+            behindHeld: { _ in h.behind },
             record: { _ in h.record },
             applySignal: { _, signal, atMs in
                 h.record = GroupCallReducer.apply(
@@ -930,6 +933,25 @@ final class GroupCallHostTests: XCTestCase {
         XCTAssertEqual(host.callNotice?.text, "That group call has ended.")
         XCTAssertEqual(h.syncs, 1, "a join brings the group current first")
         XCTAssertTrue(h.handles.isEmpty)
+        XCTAssertFalse(host.occupiesSlot)
+    }
+
+    /// ADR-0091 (2026-11-20) — a start or a join in a chat this device is
+    /// behind in fails with the ordinary text, opening, announcing and
+    /// connecting nothing.
+    func testAGroupCallInABehindChatFailsTheOrdinaryWayAndPublishesNothing() async throws {
+        let h = Harness()
+        h.nowMs = t0
+        h.behind = true
+        let host = makeHost(h)
+        host.start(groupIdHex: group, video: false, joinCallId: nil)
+        XCTAssertEqual(host.callError?.text, "Could not start the group call. Try again.")
+        host.start(groupIdHex: group, video: false, joinCallId: callA)
+        XCTAssertEqual(host.callError?.text, "Could not join the group call. Try again.")
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(h.publishesAsked, 0, "nothing is published")
+        XCTAssertEqual(h.syncs, 0)
+        XCTAssertTrue(h.handles.isEmpty, "no session is built")
         XCTAssertFalse(host.occupiesSlot)
     }
 

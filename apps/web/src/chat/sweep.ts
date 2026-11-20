@@ -97,6 +97,7 @@
 
 import type { ActingCommitter } from "./committer-beacon";
 import { DurableCursorGate } from "./durable-cursor";
+import { failedApplyKind, failedRowLine } from "./registered-commit-hold";
 
 /** The MLS artifacts a staged sweep produced. Mirrors the wasm `StagedSweep`. */
 export interface StagedSweepArtifacts {
@@ -946,12 +947,28 @@ async function adjudicate(
     // durable changed (`process_message` decrypts and ratchets before either
     // ADR-0022's role gate or ADR-0045's receipt gate can refuse).
     gate.markTouched();
+    const localEpoch = group.epoch;
     try {
       // The port applies AND surfaces — see {@link SweepGroupPort.applyIncoming}.
       // These rows are the only ones the poll will never see again, because the
       // cursor advance below moves past them.
       await group.applyIncoming(row);
-    } catch {
+    } catch (err) {
+      // ADR-0091 phase 1: logged without identifiers, never silently. Not
+      // held: a registered commit cannot sit below this device's own
+      // registered commit (one commit per epoch, ADR-0081).
+      // eslint-disable-next-line no-console
+      console.warn(
+        failedRowLine({
+          kind: failedApplyKind(err),
+          sealed: undefined,
+          after: undefined,
+          local: localEpoch,
+          latest: undefined,
+          verdict: "skip",
+          attempt: undefined,
+        }),
+      );
       // Bad frame, wrong epoch, a non-MLS Lakko envelope (rendezvous /
       // attribution), a role-refused commit, or one of our own rows. Skipped,
       // exactly as the poll loop skips it — and none of those advance the

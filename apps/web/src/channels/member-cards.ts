@@ -36,6 +36,7 @@ import {
   type ScopedGrantClass,
 } from "../reach/received-grants";
 import { visibilitySetting } from "../reach/visibility-store";
+import { ownCardShareable } from "../profile/card-share";
 import { loadWasm, type Wasm } from "../wasm";
 import {
   apiError,
@@ -151,7 +152,9 @@ async function uploadOwnCard(input: OwnCardInput): Promise<OwnCardOutcome> {
     }
     const pkHex = bytesToHex(input.keys.public);
     const key = `${input.channelIdHex}|${pkHex}`;
-    const fingerprint = cardFingerprint(content, input.updatedAtMs, grant?.version ?? null);
+    // ADR-0092 section 7 — a change of the card flag re-uploads the card.
+    const cardShareable = ownCardShareable(visibilitySetting());
+    const fingerprint = `${cardFingerprint(content, input.updatedAtMs, grant?.version ?? null)}${cardShareable ? "" : "|nocard"}`;
     if (!cardUploadDue(uploaded.get(key), input.epoch, fingerprint)) return "unchanged";
 
     const profile = wasm.composeProfileEnvelope(
@@ -164,6 +167,8 @@ async function uploadOwnCard(input: OwnCardInput): Promise<OwnCardOutcome> {
       input.avatar === undefined || input.avatar === null
         ? undefined
         : avatarToWasm<InstanceType<typeof wasm.ProfileAvatar>>(wasm, input.avatar),
+      // ADR-0092 section 7 — off exactly when "who can find me" is Nobody.
+      cardShareable,
     );
     // The card is bound to the account (ADR-0060 section 3): without a reach
     // session there is no account seed to sign with, and a reader drops an
@@ -257,6 +262,12 @@ export interface ChannelMemberRow {
   /** ADR-0084 - the key the member's photo is looked up under (the account
    *  key the card is bound to, standard base64; `self` for the viewer). */
   readonly personKeyB64?: string;
+  /** Every subscriber key a card of this member was stored under (one per
+   *  device): what `Remove` takes in a private channel (UX 7.3). */
+  readonly subscriberPksHex: readonly string[];
+  /** The card carries something to call the person by: a display name, or a
+   *  username shown here. A card without one is not a named row (UX 15.1). */
+  readonly named: boolean;
 }
 
 export interface ChannelMembersResult {
@@ -353,8 +364,9 @@ export async function loadChannelMembers(input: LoadMembersInput): Promise<Chann
   const ds = new DsClient();
   const maxPages = input.maxPages ?? 10;
 
-  const rows: ChannelMemberRow[] = [];
-  const seen = new Set<string>();
+  type MutableRow = { -readonly [K in keyof ChannelMemberRow]: ChannelMemberRow[K] } & { subscriberPksHex: string[] };
+  const rows: MutableRow[] = [];
+  const byKey = new Map<string, MutableRow>();
   let unreadable = 0;
   let after: string | null = null;
   let truncated = false;
@@ -403,13 +415,24 @@ export async function loadChannelMembers(input: LoadMembersInput): Promise<Chann
           unreadable += 1;
           continue;
         }
-        if (seen.has(row.key)) continue;
-        seen.add(row.key);
+        const earlier = byKey.get(row.key);
+        if (earlier !== undefined) {
+          // Another device of the same member: one row, every key under it.
+          if (!earlier.subscriberPksHex.includes(pkHex)) earlier.subscriberPksHex.push(pkHex);
+          if (row.named && !earlier.named) {
+            earlier.named = true;
+            earlier.name = row.name;
+            earlier.username = row.username;
+          }
+          continue;
+        }
         // ADR-0084 - the card's profile photo, filed under the account key
         // the card is bound to, so the member row's circle can show it.
         const personKeyB64 = row.isSelf ? OWN_AVATAR_KEY : bytesToB64(identityPk);
         if (!row.isSelf) rememberCardAvatar(personKeyB64, avatarFromWasm(profile.avatar));
-        rows.push({ ...row, personKeyB64 });
+        const entry = { ...row, personKeyB64, subscriberPksHex: [pkHex] };
+        byKey.set(row.key, entry);
+        rows.push(entry);
       } finally {
         profile.free();
       }
@@ -439,7 +462,7 @@ async function readCard(args: {
   /** The account key the card's binding verified under (hex). */
   readonly identityPkHex: string;
   readonly profile: Wasm["Profile"]["prototype"];
-}): Promise<ChannelMemberRow | null> {
+}): Promise<Omit<ChannelMemberRow, "subscriberPksHex"> | null> {
   const { wasm, session, profile } = args;
   const isOwnCard = args.ownSubscriberPkHex !== null && args.pkHex === args.ownSubscriberPkHex;
   // The card is filed under the account key its binding verified under, never
@@ -515,11 +538,14 @@ async function readCard(args: {
   } finally {
     channelGrant?.free();
   }
+  const displayName = profile.displayName?.trim() ?? "";
   return {
     // Every device of the viewer's own account collapses into one "You" row.
     key: isSelf ? "self" : (senderHex ?? `pk:${args.pkHex}`),
-    name: memberRowName(profile.displayName, isSelf),
+    // A card with a username but no display name is called by the username.
+    name: !isSelf && displayName.length === 0 && username !== null ? `@${username}` : memberRowName(profile.displayName, isSelf),
     username,
     isSelf,
+    named: isSelf || displayName.length > 0 || username !== null,
   };
 }

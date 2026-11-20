@@ -167,7 +167,11 @@ fn random_peer_id() -> String {
 }
 
 fn refusal(status: StatusCode, code: &'static str) -> Response {
-    (status, Json(json!({ "error": code }))).into_response()
+    let mut response = (status, Json(json!({ "error": code }))).into_response();
+    response
+        .extensions_mut()
+        .insert(lakko_metrics::ErrorCode(code));
+    response
 }
 
 /// Issue a call admission token for the requested room, paid for by one
@@ -344,6 +348,7 @@ mod tests {
             anon_tokens: Some(Arc::new(crate::anon_tokens::AnonTokenIssuer::for_test(
                 server,
             ))),
+            anon_cred: None,
             handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
             recovery_email: None,
             limits: Arc::new(crate::limits::Limits::defaults()),

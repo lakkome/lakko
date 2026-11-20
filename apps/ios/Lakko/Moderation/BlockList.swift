@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-/// The account's blocked people as this process sees them (ADR-0089
+/// The account's blocked people as this process sees them (ADR-0098
 /// section 6, UX `reporting-and-moderation.md` section 1).
 ///
 /// The register itself lives in the synced state that

@@ -210,6 +210,18 @@ pub enum SignalingBody {
         /// produced it.
         state: Vec<u8>,
     },
+    /// One-to-one call: the sender's own camera and microphone state
+    /// (2026-11-07), sent on every change and once the call connects. The
+    /// receiver sets the other person's camera picture and mute mark from
+    /// it. Group calls carry the same state on the sealed SFU relay
+    /// (`lakko_contacts::media_state`), not here.
+    MediaState {
+        call_id: CallId,
+        /// Whether the sender's camera is on.
+        camera_on: bool,
+        /// Whether the sender's microphone is on (`false` = muted).
+        microphone_on: bool,
+    },
 }
 
 impl SignalingBody {
@@ -224,7 +236,8 @@ impl SignalingBody {
             | Self::GroupStart { call_id, .. }
             | Self::GroupJoin { call_id, .. }
             | Self::GroupLeave { call_id, .. }
-            | Self::ScreenShare { call_id, .. } => call_id,
+            | Self::ScreenShare { call_id, .. }
+            | Self::MediaState { call_id, .. } => call_id,
         }
     }
 
@@ -252,7 +265,7 @@ impl SignalingBody {
 /// prost encode failure — every field is fixed-shape.
 pub fn compose_signaling_payload(body: &SignalingBody) -> Result<Vec<u8>> {
     use lakko_proto::mls_app::call_signaling::v1::{
-        call_signaling_payload::Body as ProtoBody, CallAnswer, CallEnd, CallOffer,
+        call_signaling_payload::Body as ProtoBody, CallAnswer, CallEnd, CallMediaState, CallOffer,
         CallSignalingPayload, GroupCallJoin, GroupCallLeave, GroupCallStart, IceCandidate,
         ScreenShareSignal,
     };
@@ -323,6 +336,15 @@ pub fn compose_signaling_payload(body: &SignalingBody) -> Result<Vec<u8>> {
                 state: state.clone(),
             })
         },
+        SignalingBody::MediaState {
+            call_id,
+            camera_on,
+            microphone_on,
+        } => ProtoBody::MediaState(CallMediaState {
+            call_id: call_id.to_vec(),
+            camera_on: *camera_on,
+            microphone_on: *microphone_on,
+        }),
     };
 
     let payload = CallSignalingPayload {
@@ -410,6 +432,11 @@ pub fn parse_signaling_payload(bytes: &[u8]) -> Result<SignalingBody> {
             call_id: take_call_id(x.call_id)?,
             state: x.state,
         },
+        ProtoBody::MediaState(m) => SignalingBody::MediaState {
+            call_id: take_call_id(m.call_id)?,
+            camera_on: m.camera_on,
+            microphone_on: m.microphone_on,
+        },
     })
 }
 
@@ -422,6 +449,54 @@ mod tests {
         id[0] = 0xAB;
         id[15] = 0xCD;
         id
+    }
+
+    #[test]
+    fn media_state_round_trips_and_is_not_group_control() {
+        let body = SignalingBody::MediaState {
+            call_id: fixture_call_id(),
+            camera_on: true,
+            microphone_on: false,
+        };
+        let bytes = compose_signaling_payload(&body).unwrap();
+        // Field 18, length-delimited: the tag the iOS NSE byte peek tabulates.
+        assert_eq!(&bytes[..2], &[0x92, 0x01]);
+        assert_eq!(parse_signaling_payload(&bytes).unwrap(), body);
+        assert!(!body.is_group_control());
+        assert_eq!(body.call_id(), &fixture_call_id());
+    }
+
+    proptest::proptest! {
+        /// Every camera and microphone pair round-trips under any call id.
+        #[test]
+        fn media_state_round_trips_for_every_state(
+            call_id in proptest::array::uniform16(proptest::prelude::any::<u8>()),
+            camera_on in proptest::prelude::any::<bool>(),
+            microphone_on in proptest::prelude::any::<bool>(),
+        ) {
+            let body = SignalingBody::MediaState { call_id, camera_on, microphone_on };
+            let bytes = compose_signaling_payload(&body).unwrap();
+            proptest::prop_assert_eq!(parse_signaling_payload(&bytes).unwrap(), body);
+        }
+
+        /// A media-state body whose call id is not 16 bytes is refused, never
+        /// truncated or padded (C-14).
+        #[test]
+        fn media_state_with_a_wrong_call_id_length_is_refused(len in 0usize..40) {
+            use lakko_proto::mls_app::call_signaling::v1::{
+                call_signaling_payload::Body as ProtoBody, CallMediaState, CallSignalingPayload,
+            };
+            proptest::prop_assume!(len != 16);
+            let payload = CallSignalingPayload {
+                body: Some(ProtoBody::MediaState(CallMediaState {
+                    call_id: vec![7; len],
+                    camera_on: true,
+                    microphone_on: true,
+                })),
+            };
+            let bytes = prost::Message::encode_to_vec(&payload);
+            proptest::prop_assert!(parse_signaling_payload(&bytes).is_err());
+        }
     }
 
     #[test]

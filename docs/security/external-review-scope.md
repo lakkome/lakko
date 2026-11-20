@@ -14,7 +14,9 @@ reading order, what has already been done, and the questions we most want answer
 **The gate, so a reader does not have to infer its force: no build reaches users
 while G-39 is open.** No store submission, no GA tag. Lakko has no production
 deployment and no users today, so nothing is currently at risk from the gap being
-open — but nothing ships until it closes either.
+open — but nothing ships until it closes either. **Amended 2026-11-18:** a public beta
+capped at 1000 accounts, on beta channels only and marked as unaudited, may run before
+the review (ADR-0046 amendment); lifting the cap and a production release still wait.
 
 ---
 

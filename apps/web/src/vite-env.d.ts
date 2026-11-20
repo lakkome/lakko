@@ -7,3 +7,10 @@
  *  `vite.config.ts`. Undefined outside a Vite build (the vitest `node`
  *  environment), so read it through `typeof` first. */
 declare const __LAKKO_PKG_VERSION__: string | undefined;
+
+interface ImportMetaEnv {
+  /** The donations Ed25519 public key (base64url, 32 bytes), pinned at
+   *  build time (`src/donate/client.ts`). Unset: the donations page shows no
+   *  method. */
+  readonly VITE_LAKKO_DONATIONS_KEY?: string;
+}

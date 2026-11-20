@@ -7,12 +7,12 @@ import SwiftUI
 struct LakkoMenuItem: Identifiable {
     enum Kind {
         /// A tappable action.
-        case action(systemImage: String?, destructive: Bool, enabled: Bool, perform: () -> Void)
+        case action(icon: LkIcon?, destructive: Bool, enabled: Bool, perform: () -> Void)
         /// A line of plain text (a heading, a name, a limit note).
         case text(secondary: Bool)
         /// A second level of the same sheet: tapping replaces the rows with
         /// `items` and a Back row.
-        case submenu(systemImage: String?, items: [LakkoMenuItem])
+        case submenu(icon: LkIcon?, items: [LakkoMenuItem])
         /// One value of a picker: a check mark when it is the current one.
         case choice(checked: Bool, perform: () -> Void)
     }
@@ -22,19 +22,19 @@ struct LakkoMenuItem: Identifiable {
     let kind: Kind
 
     static func action(
-        _ title: String, systemImage: String? = nil, destructive: Bool = false,
+        _ title: String, icon: LkIcon? = nil, destructive: Bool = false,
         enabled: Bool = true, perform: @escaping () -> Void
     ) -> LakkoMenuItem {
         LakkoMenuItem(title: title, kind: .action(
-            systemImage: systemImage, destructive: destructive, enabled: enabled, perform: perform))
+            icon: icon, destructive: destructive, enabled: enabled, perform: perform))
     }
 
     static func text(_ title: String, secondary: Bool = false) -> LakkoMenuItem {
         LakkoMenuItem(title: title, kind: .text(secondary: secondary))
     }
 
-    static func submenu(_ title: String, systemImage: String? = nil, items: [LakkoMenuItem]) -> LakkoMenuItem {
-        LakkoMenuItem(title: title, kind: .submenu(systemImage: systemImage, items: items))
+    static func submenu(_ title: String, icon: LkIcon? = nil, items: [LakkoMenuItem]) -> LakkoMenuItem {
+        LakkoMenuItem(title: title, kind: .submenu(icon: icon, items: items))
     }
 
     static func choice(_ title: String, checked: Bool, perform: @escaping () -> Void) -> LakkoMenuItem {
@@ -50,6 +50,12 @@ private struct LakkoLongPressMenu: ViewModifier {
 
     func body(content: Content) -> some View {
         content
+            // The press that opened the menu must not also reach the control it
+            // started on: without this, a long press on a chat row opened the
+            // menu AND the chat when the finger lifted (base scenario 29, seen
+            // 2026-11-11). The same rule as `MessageMenuHost`. Inside the
+            // gesture and the sheet, so the menu's own rows stay enabled.
+            .disabled(shown != nil)
             .simultaneousGesture(
                 LongPressGesture(minimumDuration: MessageLongPress.thresholdSeconds).onEnded { _ in
                     let list = items()
@@ -77,7 +83,7 @@ struct LakkoMenuSheet: View {
         VStack(spacing: 0) {
             if !stack.isEmpty {
                 Button { stack.removeLast() } label: {
-                    label(Localization.text("common.back"), systemImage: "chevron.backward",
+                    label(Localization.text("common.back"), icon: .chevronBack,
                           tint: Color.lakkoAccent, trailing: nil)
                 }
                 .buttonStyle(.plain)
@@ -106,20 +112,20 @@ struct LakkoMenuSheet: View {
     @ViewBuilder
     private func row(_ item: LakkoMenuItem) -> some View {
         switch item.kind {
-        case let .action(systemImage, destructive, enabled, perform):
+        case let .action(icon, destructive, enabled, perform):
             Button {
                 dismiss()
                 perform()
             } label: {
-                label(item.title, systemImage: systemImage,
+                label(item.title, icon: icon,
                       tint: destructive ? Color.lakkoDanger : Color.lakkoText, trailing: nil)
             }
             .buttonStyle(.plain)
             .disabled(!enabled)
             .opacity(enabled ? 1 : 0.4)
-        case let .submenu(systemImage, items):
+        case let .submenu(icon, items):
             Button { stack.append(items) } label: {
-                label(item.title, systemImage: systemImage, tint: Color.lakkoText, trailing: "chevron.forward")
+                label(item.title, icon: icon, tint: Color.lakkoText, trailing: .chevronForward)
             }
             .buttonStyle(.plain)
         case let .choice(checked, perform):
@@ -131,8 +137,7 @@ struct LakkoMenuSheet: View {
                     Text(item.title)
                     Spacer()
                     if checked {
-                        Image(systemName: "checkmark")
-                            .font(.body.weight(.semibold))
+                        LkIconView(.checkmark, size: 20)
                             .foregroundStyle(Color.lakkoAccent)
                     }
                 }
@@ -155,13 +160,13 @@ struct LakkoMenuSheet: View {
         }
     }
 
-    private func label(_ title: String, systemImage: String?, tint: Color, trailing: String?) -> some View {
+    private func label(_ title: String, icon: LkIcon?, tint: Color, trailing: LkIcon?) -> some View {
         HStack(spacing: 12) {
-            if let systemImage { Image(systemName: systemImage).frame(width: 24) }
+            if let icon { LkIconView(icon, size: 20).frame(width: 24) }
             Text(title)
             Spacer()
             if let trailing {
-                Image(systemName: trailing).font(.footnote).foregroundStyle(Color.lakkoTextMuted)
+                LkIconView(trailing, size: 14, relativeTo: .footnote).foregroundStyle(Color.lakkoTextMuted)
             }
         }
         .font(.body)

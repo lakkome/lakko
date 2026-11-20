@@ -2021,7 +2021,7 @@ pub(crate) async fn password_finish(
     let ticket = load_ticket(&state, &on.config, &req.ticket).await?;
     require_password_mode(&ticket)?;
     let account_id = ticket.account_id;
-    // ADR-0089 section 4: a suspended account's password is not replaced and
+    // ADR-0098 section 4: a suspended account's password is not replaced and
     // the ticket is not spent; the account lands in suspended mode.
     let generation_now = crate::session::key_generation_of(&state.db, &account_id)
         .await
@@ -2112,20 +2112,25 @@ pub(crate) async fn password_finish(
 
 /// Every five minutes: challenges and tickets past their lifetime.
 pub(crate) fn spawn_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
+    const JOB: &str = crate::metrics::jobs::RECOVERY_EMAIL_PRUNE;
+    lakko_metrics::job_registered(JOB);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(PRUNE_INTERVAL);
         interval.tick().await;
         loop {
             interval.tick().await;
             let now = now_ms();
+            let mut all_ok = true;
             for statement in [
                 "DELETE FROM email_challenges WHERE expires_at_ms <= ?",
                 "DELETE FROM email_tickets WHERE expires_at_ms <= ?",
             ] {
                 if let Err(e) = sqlx::query(statement).bind(now).execute(&pool).await {
+                    all_ok = false;
                     tracing::warn!(error = %e, "recovery email prune failed");
                 }
             }
+            crate::metrics::job_ran(JOB, all_ok);
         }
     })
 }

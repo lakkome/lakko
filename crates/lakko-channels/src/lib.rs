@@ -133,6 +133,7 @@ pub mod listing;
 pub mod member_card;
 pub mod meta;
 pub mod owner;
+pub mod poll;
 pub mod post;
 pub mod public_seed;
 pub mod reaction;
@@ -194,6 +195,12 @@ pub use owner::{
     ChannelOwnerSigner, OwnerHandoverError, OwnerProof, OwnerProofError, OwnerRequest,
     OWNER_HANDOVER_BODY_LEN, OWNER_KEY_DOMAIN, OWNER_PROOF_DOMAIN, OWNER_PROOF_HEADER_NAME,
     OWNER_PROOF_WINDOW_MS,
+};
+pub use poll::{
+    check_vote_labels, decode_poll_tally, poll_option_label, poll_option_labels, vote_message,
+    ChannelPollError, ChannelPollTally, VoteAction, MAX_CHANNEL_POLL_OPTIONS, MAX_VOTE_LABELS,
+    MAX_VOTE_MESSAGE_LEN, MIN_CHANNEL_POLL_OPTIONS, POLL_OPTION_LABEL_DOMAIN, POLL_TALLY_DOMAIN,
+    POLL_TALLY_MAX_LEN, POLL_TALLY_MIN_LEN, POLL_TALLY_VERSION_V1, VOTE_MESSAGE_DOMAIN,
 };
 pub use post::{
     compose_post, decode_post, verify_and_decrypt, ChannelPost, MAX_PLAINTEXT_LEN,
@@ -282,5 +289,16 @@ pub mod fuzz_api {
     #[must_use]
     pub fn public_seed_open(wire: &[u8]) -> Option<bool> {
         crate::public_seed::fuzz_open(wire)
+    }
+
+    /// Decode `bytes` as a channel poll's frozen tally (ADR-0092 section
+    /// 4.3). `true` when it is refused, or decodes and re-encodes to the
+    /// identical bytes with every count at most its voters.
+    #[must_use]
+    pub fn channel_poll_tally_decode(bytes: &[u8]) -> bool {
+        crate::poll::decode_poll_tally(bytes).map_or(true, |t| {
+            t.counts.iter().all(|c| *c <= t.voters)
+                && t.encode().is_ok_and(|e| e.as_slice() == bytes)
+        })
     }
 }

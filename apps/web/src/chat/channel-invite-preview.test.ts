@@ -22,7 +22,9 @@ describe("channelInviteRowPreview", () => {
   it("reads a publisher invitation as the invitation, never the link", async () => {
     const url = `${ORIGIN}/g/AbCdEfGh#0123456789abcdef`;
     results.set(url, { channelIdHex: "00", name: "Pixel Pub Walk", publisherInvite: true });
-    expect(channelInviteRowPreview(url, ORIGIN)).toBeNull();
+    // While the link is opened the row never carries its secret (a desktop
+    // notification is taken from the row at that moment).
+    expect(channelInviteRowPreview(url, ORIGIN)).toBe(`${ORIGIN}/g/AbCdEfGh`);
     await settle();
     expect(channelInviteRowPreview(url, ORIGIN)).toBe(
       t("chats.preview.publisher_invite", { channel: "Pixel Pub Walk" }),
@@ -37,13 +39,18 @@ describe("channelInviteRowPreview", () => {
     expect(channelInviteRowPreview(url, ORIGIN)).toBe(t("chats.preview.channel_invite", { channel: "News" }));
   });
 
-  it("leaves other text, other origins and group links alone", async () => {
+  it("leaves other text and other origins alone", () => {
     expect(channelInviteRowPreview("hello", ORIGIN)).toBeNull();
     expect(channelInviteRowPreview(null, ORIGIN)).toBeNull();
     expect(channelInviteRowPreview("https://evil.example/g/AbCdEfGh#0123456789abcdef", ORIGIN)).toBeNull();
+  });
+
+  it("reads a group link as the link without its secret", async () => {
+    // A row is not tapped: the secret has no use there, and a desktop
+    // notification is taken from the row.
     const group = `${ORIGIN}/g/GrOuPlNk#0123456789abcdef`;
     channelInviteRowPreview(group, ORIGIN);
     await settle();
-    expect(channelInviteRowPreview(group, ORIGIN)).toBeNull();
+    expect(channelInviteRowPreview(group, ORIGIN)).toBe(`${ORIGIN}/g/GrOuPlNk`);
   });
 });

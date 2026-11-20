@@ -16,9 +16,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -64,6 +61,9 @@ import uniffi.lakko_ffi_uniffi.FfiScopeId
 import uniffi.lakko_ffi_uniffi.FfiScopeKind
 import uniffi.lakko_ffi_uniffi.FfiVisibilityMode
 import uniffi.lakko_ffi_uniffi.FfiVisibilitySetting
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * `docs/ux/who-can-find-me.md` sections 3, 4, 8 and 9 — Settings > Privacy >
@@ -88,7 +88,7 @@ public fun WhoCanFindMeScreen(
 ) {
     val settingOrNull by reach.visibility.collectAsStateWithLifecycle()
     val status by reach.applyStatus.collectAsStateWithLifecycle()
-    // ADR-0089 step 5 — moderators removed this account from search.
+    // ADR-0098 step 5 — moderators removed this account from search.
     val hiddenFromSearch by reach.hiddenFromSearch.collectAsStateWithLifecycle()
     val coroutineScope = rememberCoroutineScope()
     var showList by rememberSaveable { mutableStateOf(false) }
@@ -153,7 +153,7 @@ public fun WhoCanFindMeScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -324,7 +324,7 @@ private fun ChosenScopesList(
                 title = { Text(t("who_can_find_me.groups.chosen")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -423,7 +423,7 @@ private fun ChosenContactsList(
                 title = { Text(t("who_can_find_me.contacts.chosen")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -513,7 +513,7 @@ private fun RadioRow(
         supportingContent = helper?.let { { Text(it) } },
         leadingContent = { RadioButton(selected = selected, onClick = null, enabled = enabled) },
         trailingContent = if (trailingDisclosure) {
-            { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null) }
+            { LkIcon(R.drawable.ic_lk_chevron_forward, contentDescription = null, size = LkIconSize.Mark) }
         } else {
             null
         },

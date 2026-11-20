@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Account suspension ([ADR-0089] section 4, UX section 4).
+//! Account suspension ([ADR-0098] section 4, UX section 4).
 //!
 //! A moderator suspends an account by signing a statement with a security
 //! key; the moderation service logs it and forwards it here, on an internal
@@ -38,7 +38,7 @@
 //! An expired row (`until_ms` in the past) is not a suspension; the hourly
 //! sweep deletes it.
 //!
-//! [ADR-0089]: ../../../docs/adr/0089-reporting-and-moderation.md
+//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -474,7 +474,7 @@ pub(crate) fn spawn_sweep(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
                 Ok(rows) => tracing::info!(rows, "expired suspensions swept"),
                 Err(e) => tracing::warn!(error = %e, "suspension sweep failed"),
             }
-            // ADR-0089 F3: identity keys of accounts deleted while suspended
+            // ADR-0098 F3: identity keys of accounts deleted while suspended
             // stay taken until the suspension's end.
             match crate::identity_target::sweep_kept(&pool, now_ms()).await {
                 Ok(0) => {},
@@ -503,7 +503,7 @@ pub(crate) async fn sweep(pool: &MySqlPool, now: i64) -> Result<u64, sqlx::Error
 // ---------------------------------------------------------------------------
 
 /// Default bind of the internal listener: loopback, not proxied by nginx.
-pub(crate) const DEFAULT_INTERNAL_BIND: &str = "127.0.0.1:8095";
+pub(crate) const DEFAULT_INTERNAL_BIND: &str = "127.0.0.1:8101";
 /// The header the shared secret is presented in.
 pub(crate) const SECRET_HEADER: &str = "x-lakko-internal-secret";
 /// Minimum decoded length of the shared secret.
@@ -613,7 +613,7 @@ struct InternalState {
 }
 
 /// The internal router, behind the secret gate: the statement route, the
-/// list push (F1) and the moderators' panel reads (ADR-0089 step 5).
+/// list push (F1) and the moderators' panel reads (ADR-0098 step 5).
 pub(crate) fn internal_router(app: AppState, config: InternalConfig) -> Router {
     let state = InternalState { app, config };
     Router::new()
@@ -1064,7 +1064,7 @@ async fn keep_suspension(
 }
 
 // ---------------------------------------------------------------------------
-// The panel reads (ADR-0089 step 5)
+// The panel reads (ADR-0098 step 5)
 // ---------------------------------------------------------------------------
 
 /// The most appeals one list returns, oldest first. Chosen, not measured.

@@ -97,7 +97,11 @@ final class ProfilePublisher {
             owed.remove(groupIdHex)
             return .sent
         } catch {
-            NSLog("ADR-0048 profile publish failed: \(error)")
+            // ADR-0091 section 2 — a refusal while behind is the stop list
+            // working: owed as before, not logged.
+            if !ConversationReentryRules.isBehindRefusal(error) {
+                NSLog("ADR-0048 profile publish failed: \(error)")
+            }
             // Owed: the next message this device sends in the group carries
             // the profile ahead of it (``publishOwedBeforeSend(groupIdHex:)``).
             owed.insert(groupIdHex)

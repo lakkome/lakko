@@ -29,7 +29,7 @@ final class ChannelPhotoModel: ObservableObject, ConversationPhotoModel {
     var photoIdHex: String { channelId }
     var photoIsGroup: Bool { false }
     /// Section 4.5.1 — the owner (who renames it).
-    /// Not while moderators hold the channel removed (ADR-0089 step 5).
+    /// Not while moderators hold the channel removed (ADR-0098 step 5).
     var canSetPhoto: Bool {
         ChannelOwnership.isOwner(channelId: channelId, state: state)
             && !ChannelRemovals.shared.isRemoved(channelId)
@@ -52,6 +52,9 @@ final class ChannelPhotoModel: ObservableObject, ConversationPhotoModel {
                 avatar = try await ProfileAvatarUpload.upload(media)
             } catch AttachmentBridgeError.uploadLimited {
                 photoStatus = .limited
+                return
+            } catch AttachmentBridgeError.storageFull {
+                photoStatus = .full
                 return
             } catch {
                 photoStatus = .failed
@@ -112,9 +115,13 @@ enum ChannelOwnership {
     /// co-published channel is recorded with its PublisherGroup id when it is
     /// joined). Holds for a channel made before ADR-0087 phase B too, which
     /// recorded no owner generation and no @name.
+    ///
+    /// A co-publisher's register role (ADR-0050 section 2.9 as amended
+    /// 2026-11-13) never reads as the owner either, whatever keys are held.
     static func isOwner(channelId: String, state: ChannelsUiState) -> Bool {
         state.keysByChannel[channelId] != nil
             && CoPublishedJournals.shared.journalIdHex(channelIdHex: channelId) == nil
+            && state.extras(channelId).accountRole != ChannelAccountRole.coPublisher
     }
 }
 

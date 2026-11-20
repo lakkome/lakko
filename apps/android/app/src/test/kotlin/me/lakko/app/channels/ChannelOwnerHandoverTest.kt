@@ -138,4 +138,51 @@ class ChannelOwnerHandoverTest {
         // handover itself) signs as itself.
         assertFalse(ownerKeySucceeds(other, conversationKey = conversation))
     }
+
+    // ---- 2026-11-20: the owner key repair after a refused owner proof ----
+
+    private val refused = ChannelsApiException(401, "owner-proof-required", "")
+
+    @Test
+    fun `the repair tries the predecessors newest first, without the current seed`() {
+        val a = ByteArray(64) { 1 }
+        val b = ByteArray(64) { 2 }
+        val c = ByteArray(64) { 3 }
+        val out = ChannelOwnerRepair.candidates(listOf(a, b, b, c), c)
+        assertEquals(2, out.size)
+        assertTrue(out[0].contentEquals(b))
+        assertTrue(out[1].contentEquals(a))
+    }
+
+    @Test
+    fun `the repair hands the channel from the predecessor that owns it to the current key`() = runTest {
+        var owner = "oldest"
+        var puts = 0
+        val outcome = ChannelOwnerRepair.repair(listOf("newer", "oldest"), "current", { x, y -> x == y }) { signing, naming ->
+            puts += 1
+            if (signing != owner) throw refused
+            owner = naming
+        }
+        assertEquals(ChannelHandoverOutcome.OWNED, outcome)
+        assertEquals("current", owner)
+        assertEquals(3, puts)
+        assertEquals(
+            ChannelHandoverOutcome.NOT_OWNER,
+            ChannelOwnerRepair.repair(listOf("oldest"), "current", { x, y -> x == y }) { _, _ -> throw refused },
+        )
+        assertEquals(
+            ChannelHandoverOutcome.RETRY,
+            ChannelOwnerRepair.repair(listOf("oldest"), "current", { x, y -> x == y }) { _, _ -> throw IOException("offline") },
+        )
+    }
+
+    @Test
+    fun `the epoch mapping is re-anchored only when the group ran more than one epoch ahead`() {
+        assertEquals(null, reanchoredOffset(5uL, 0L, 5u))
+        assertEquals(null, reanchoredOffset(6uL, 0L, 5u))
+        assertEquals(null, reanchoredOffset(2uL, 8L, 9u))
+        assertEquals(-153L, reanchoredOffset(160uL, 0L, 6u))
+        assertEquals(7u, channelEpochFor(160uL, -153L))
+    }
 }
+

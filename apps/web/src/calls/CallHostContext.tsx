@@ -83,6 +83,7 @@ import {
   createSignal,
   For,
   onCleanup,
+  onMount,
   Show,
   untrack,
   useContext,
@@ -138,7 +139,8 @@ import {
   quietCallOfferIsLive,
   type QuietCallOffer,
 } from "./quiet-call-offer";
-import { ChatClient } from "../chat/client";
+import { ChatClient, ConversationBehindError } from "../chat/client";
+import { conversationBehind } from "../chat/conversation-behind";
 import { sealedWakeForGroup } from "../push/group-routing";
 import {
   makeCallSignalingPublisher,
@@ -198,6 +200,7 @@ import {
 } from "./call-signaling-dispatch";
 import { decideInboundSignaling } from "./call-host-routing";
 import { CallSoundController } from "./CallSoundController";
+import { RemoteAudioSinkController } from "./remote-audio-output";
 import { classifyCallOutcome, type CallLogEntry } from "./call-log";
 import { useCallLog } from "./CallLogContext";
 import { useMembershipEnd } from "../chat/MembershipEndContext";
@@ -209,6 +212,7 @@ import {
   groupCallAloneAction,
   groupCallStartAbandoned,
   runGroupCallStart,
+  callStartHeldWhileBehind,
   planGroupCallLeave,
   selectGroupCallBanner,
   type GroupLeaveReason,
@@ -226,9 +230,11 @@ import {
   decideLinkCallStart,
   linkCallNotice,
   linkCallOccupiesSlot,
+  linkCallHistoryEntry,
   linkCallOverlayShown,
   reduceLinkCallPhase,
   type LinkCallEvent,
+  type LinkCallJournal,
   type LinkCallPhase,
 } from "./link-call-host";
 import { MultiJoinerCall, type MultiJoinerCallOptions } from "./multi-joiner-call";
@@ -253,9 +259,12 @@ import { groupCallTileSources } from "./group-call-tile-sources";
 import { sfuBaseUrl } from "./sfu-config";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
 import { uiRules } from "../chat/ui-rules";
-import { CallBar } from "./CallBar";
+import { CallWindow, type CallWindowSources } from "./CallWindow";
 import { callBarWouldShow } from "./call-bar-model";
 import { t } from "../l10n";
+import { onCameraBackgroundFailure } from "./background-status";
+import { BackgroundPhotoStore, bindBackgroundPhotos } from "./background-photos";
+import { getDeviceKey } from "../auth/key-store";
 import { callFailureReason, callFailureText } from "./call-errors";
 import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
 import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
@@ -394,13 +403,13 @@ export interface CallHostApi {
    *  status elsewhere meanwhile. Returns the release. */
   claimLinkCallView(): () => void;
   /**
-   * The call in the slot has been put away into the bar across the top of the
-   * app (`docs/ux/calls.md` section 4.5).
+   * The call in the slot has been put away into the small window floating
+   * over the app (`docs/ux/calls.md` section 4.5).
    *
    * A property of the CALL, not of a screen: it lives beside the session here
    * rather than in any route, so a navigation cannot touch it and the call
    * stays collapsed across every screen until the person brings it back. It
-   * says nothing about whether the bar is on screen — that is the shared rule's
+   * says nothing about whether the window is on screen — that is the shared rule's
    * answer to this plus the phase (`calls/call-bar-model.ts`).
    */
   readonly callCollapsed: Accessor<boolean>;
@@ -521,6 +530,25 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   const membershipEnd = useMembershipEnd();
   const groupNames = useGroupNames();
 
+  // ADR-0089: the signed-in account's own background photos, for the call
+  // sessions and the Settings sheet.
+  createEffect(() => {
+    const account = sessionAccountOf(auth.state());
+    untrack(() => {
+      bindBackgroundPhotos(account === null ? null : new BackgroundPhotoStore(account, () => getDeviceKey(account)));
+    });
+  });
+  // ADR-0089: a background that stopped working turns the camera off, as if
+  // the person had pressed the button, and says so on the call screen. The
+  // processed track already sends nothing at that point; this makes the
+  // camera state say what is true.
+  onCleanup(
+    onCameraBackgroundFailure(() => {
+      callActions.setCamera(false);
+      callActions.showNotice(t("call.background.failed"));
+    }),
+  );
+
   // Seals and publishes signaling through the locked, fail-closed-persisting
   // seam (`call-signaling-publish.ts`), like every other application message.
   const chat = new ChatClient(undefined, {
@@ -566,6 +594,11 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   const [localStream, setLocalStream] = createSignal<MediaStream | null>(null);
   const [videoCall, setVideoCall] = createSignal(false);
   const [remoteHasVideo, setRemoteHasVideo] = createSignal(false);
+  /** What the other person of the 1x1 call last said about its microphone
+   *  and camera (the `mediaState` call signal, 2026-11-07); unmuted and on
+   *  until the first one arrives. */
+  const [remoteMicOn, setRemoteMicOn] = createSignal(true);
+  const [remoteCameraOn, setRemoteCameraOn] = createSignal(true);
   const [remoteWantsVideo, setRemoteWantsVideo] = createSignal(false);
   const [videoPublishState, setVideoPublishState] = createSignal<VideoPublishState>("off");
   const [connStats, setConnStats] = createSignal<WebConnectionStats | null>(null);
@@ -863,8 +896,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     id: "peer",
     displayName: nameFor(callGroup()),
     isLocal: false,
-    micOn: true,
-    camOn: remoteHasVideo(),
+    micOn: remoteMicOn(),
+    camOn: remoteHasVideo() && remoteCameraOn(),
     quality: "good",
     speaking: false,
     personKeyB64: personKeyFor(callGroup()) ?? undefined,
@@ -1080,6 +1113,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
           setLocalStream(null);
           setVideoCall(false);
           setRemoteHasVideo(false);
+          setRemoteMicOn(true);
+          setRemoteCameraOn(true);
           setRemoteWantsVideo(false);
           setVideoPublishState("off");
           setConnStats(null);
@@ -1171,10 +1206,10 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       console.warn("inbound call signaling did not parse; dropped", err);
       return;
     }
-    // ADR-0089 step 3 - a suspended account makes no call and answers none:
+    // ADR-0098 step 3 - a suspended account makes no call and answers none:
     // an offer rings nothing (the other side's offer runs out on its own).
     if (parsed.kind === "offer" && accountSuspended()) return;
-    // ADR-0089 section 6 - a one-to-one call from a blocked person does not
+    // ADR-0098 section 6 - a one-to-one call from a blocked person does not
     // ring: declined silently, with no missed-call row (the shared rule).
     if (
       parsed.kind === "offer" &&
@@ -1257,6 +1292,17 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
             senderKey = null;
           }
           live.share.receive(parsed.screenShareState, senderKey);
+        }
+        return;
+      }
+
+      // The other person's camera and microphone state (2026-11-07): for the
+      // call in the slot only. It is the MLS sender's word about its own
+      // devices, so it only ever names the remote tile.
+      if (parsed.kind === "mediaState") {
+        if (decision.oneToOne === "apply" && activeCall !== null) {
+          setRemoteMicOn(parsed.microphoneOn);
+          setRemoteCameraOn(parsed.cameraOn);
         }
         return;
       }
@@ -1401,6 +1447,12 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   async function dial(askedGroupIdB64: string, askedVideo: boolean): Promise<void> {
     if (currentOccupant() !== null) return;
     if (groupEntry(askedGroupIdB64) === undefined) return;
+    // ADR-0091 — nothing is set up in a chat this device is behind in: the
+    // caller shows its ordinary could-not-start state (no copy of its own),
+    // before anything is captured or published.
+    if (callStartHeldWhileBehind(conversationBehind.stopsActing(askedGroupIdB64))) {
+      throw new ConversationBehindError();
+    }
     // The refusal screen of the desktop; the gate can sit there for as long
     // as the person takes, so the slot is read again after it.
     const permits = await captureGate({ audio: true, video: askedVideo });
@@ -1581,7 +1633,16 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   // The remote tile's camera flag once the peer's video track arrives.
   createEffect(() => {
     if (state() !== "connected") return;
-    callActions.setParticipantCamera("peer", remoteHasVideo());
+    // A picture only while the track is there AND the person has not said the
+    // camera is off: a camera turned off is `track.enabled = false`, which
+    // the track itself never reports.
+    callActions.setParticipantCamera("peer", remoteHasVideo() && remoteCameraOn());
+  });
+
+  // The other person's mute mark (group-call-grid 7.2), from what they said.
+  createEffect(() => {
+    if (state() !== "connected") return;
+    callActions.setParticipantMic("peer", remoteMicOn());
   });
 
   // ----- the group (SFU) call -----------------------------------------------
@@ -1710,6 +1771,15 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
    * (see `onGroupSessionState`); leaving is `leaveGroupCall`.
    */
   async function startGroupCall(opts: StartGroupCallOptions): Promise<GroupCallStartOutcome> {
+    // ADR-0091 — a start or a join in a chat this device is behind in fails
+    // with the ordinary could-not-start (could-not-join) outcome, before
+    // anything is captured, the slot taken or anything published.
+    if (callStartHeldWhileBehind(conversationBehind.stopsActing(opts.groupIdB64))) {
+      return {
+        kind: "failed",
+        message: () => t(opts.joinCallIdHex === null ? "call.error.start_group" : "call.error.join_group"),
+      };
+    }
     // Before the latch below: a group call goes on whatever the answer is,
     // since a person with no microphone can still listen and watch
     // (`capture-fallback.ts`).
@@ -2488,6 +2558,26 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
    *  one the user already left — never touches the slot. */
   let linkAttempt: object | null = null;
 
+  /**
+   * The current link-call attempt's record for the Calls list
+   * (`docs/ux/navigation.md` section 5.1.1): a call with no conversation
+   * still leaves one row. Replaced with the attempt; written once, when this
+   * device leaves the call or the call ends for it, whichever comes first.
+   */
+  let linkJournal: { readonly attempt: object; readonly journal: LinkCallJournal } | null = null;
+
+  /** Write the link call's row, if this device was in the call. */
+  function recordLinkCall(attempt: object): void {
+    const j = linkJournal;
+    if (j === null || j.attempt !== attempt) return;
+    const entry = linkCallHistoryEntry(j.journal, {
+      endedAtMs: Date.now(),
+      isGuest: untrack(() => auth.isGuest()),
+    });
+    j.journal.recorded = true;
+    if (entry !== null) callLog.recordStandalone(entry);
+  }
+
   function applyLinkEvent(
     attempt: object,
     event: LinkCallEvent,
@@ -2505,6 +2595,11 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     // way out.
     const over = !linkCallOccupiesSlot(phase);
     const h = over ? linkHandle() : null;
+    const j = linkJournal;
+    if (j !== null && j.attempt === attempt && phase === "live" && j.journal.liveAtMs === null) {
+      j.journal.liveAtMs = Date.now();
+    }
+    if (over) recordLinkCall(attempt);
     try {
       setLinkSlot({
         ...slot,
@@ -2547,6 +2642,16 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
 
     const attempt = {};
     linkAttempt = attempt;
+    linkJournal = {
+      attempt,
+      journal: {
+        callIdHex: hex,
+        role: opts.isOwner ? "owner" : "joiner",
+        video: opts.mediaVideo,
+        liveAtMs: null,
+        recorded: false,
+      },
+    };
     setLinkHandle(null);
     setLinkCallId(opts.callId);
     setLinkInvite(INVITE_IDLE);
@@ -2651,7 +2756,11 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const slot = untrack(linkSlot);
     const h = untrack(linkHandle);
     const held = h !== null || (slot !== null && linkCallOccupiesSlot(slot.phase));
+    // The person left: the call is over for this device. Written before the
+    // session is hung up and the attempt forgotten.
+    if (linkAttempt !== null) recordLinkCall(linkAttempt);
     linkAttempt = null;
+    linkJournal = null;
     // `finally`, as in `releaseGroupSlot`: the writes below take the call
     // screen down, and the session is closed whatever it does on its way out.
     try {
@@ -3303,16 +3412,19 @@ export function CallHostView(): JSX.Element {
     sounds.dispose();
   });
 
+  // The 1x1 sink: the same binding, retry and console line as a group
+  // call's sinks (`RemoteAudio` below).
+  let oneToOneSink: RemoteAudioSinkController | null = null;
   createEffect(() => {
     const el = audioEl();
     const stream = internals.remoteStream();
     if (el === null) return;
-    el.srcObject = stream;
-    if (stream !== null) {
-      void el.play().catch(() => {
-        // Autoplay can be blocked until a gesture; Accept counts as one.
-      });
-    }
+    if (oneToOneSink === null) oneToOneSink = new RemoteAudioSinkController(el, "one-to-one");
+    oneToOneSink.setStream(stream);
+  });
+  onCleanup(() => {
+    oneToOneSink?.dispose();
+    oneToOneSink = null;
   });
 
   // The in-call Speaker control (docs/ux/calls.md section 4.1) moves the sound
@@ -3379,6 +3491,41 @@ export function CallHostView(): JSX.Element {
   createEffect(() => {
     if (host.callCollapsed() && callScreenWanted() && !collapsible()) host.expandCall();
   });
+
+  /**
+   * The live call's pictures for the collapsed window (section 4.5.1): the
+   * same functions each kind of call hands its call screen, so the window
+   * draws a person from exactly what their tile would.
+   */
+  const oneToOneWindowSources: CallWindowSources = {
+    remoteStreamFor: (participantId) =>
+      participantId === "peer" ? (internals.remoteStream() ?? undefined) : undefined,
+    localStream: () => internals.localStream() ?? undefined,
+  };
+  const groupWindowSources: CallWindowSources = groupTiles;
+  const linkWindowSources: CallWindowSources = {
+    remoteStreamFor: (participantId) => internals.linkHandle()?.remoteStreamFor(participantId),
+    remoteLightStreamFor: (participantId) => internals.linkHandle()?.remoteLightStreamFor(participantId),
+    remoteMiddleStreamFor: (participantId) =>
+      internals.linkHandle()?.remoteMiddleStreamFor(participantId),
+    remoteVideoGivenFor: (participantId) => internals.linkHandle()?.remoteVideoGivenFor(participantId),
+    reportTileVideoQuality: (tile, participantId, quality) => {
+      internals.linkHandle()?.reportTileVideoQuality(tile, participantId.replace(/^peer-/, ""), quality);
+    },
+    localStream: () => internals.linkHandle()?.localStream() ?? undefined,
+    remoteAudioReceiverFor: (participantId) => internals.linkHandle()?.remoteAudioReceiverFor(participantId),
+  };
+  const windowSources = (): CallWindowSources => {
+    switch (host.callOccupant()) {
+      case "group":
+        return groupWindowSources;
+      case "one-to-one":
+      case null:
+        return oneToOneWindowSources;
+      default:
+        return linkWindowSources;
+    }
+  };
 
   return (
     <>
@@ -3541,16 +3688,21 @@ export function CallHostView(): JSX.Element {
         onInvite={(row) => host.sendLinkCallInvite({ keyB64: row.keyB64, name: row.name })}
       />
 
-      {/* The call, put away (`docs/ux/calls.md` section 4.5). Last in the
-          fragment so it paints over the app and under nothing that matters:
-          the call screen it replaces is not up while it is, and the ringing
-          screen and the group-call banner sit above it by z-index. It renders
-          nothing at all without a collapsed call. */}
-      <CallBar
+      {/* The call, put away (`docs/ux/calls.md` section 4.5): one small
+          window floating over the app. Last in the fragment so it paints over
+          the app and under nothing that matters: the call screen it replaces
+          is not up while it is, and the ringing screen and the group-call
+          banner sit above it by z-index. It renders nothing at all without a
+          collapsed call. */}
+      <CallWindow
         peerName={
           host.callOccupant() === "one-to-one"
             ? internals.nameFor(host.callGroupIdB64())
             : null
+        }
+        peerId={host.callOccupant() === "one-to-one" ? host.callGroupIdB64() : null}
+        peerPersonKey={
+          host.callOccupant() === "one-to-one" ? internals.personKeyFor(host.callGroupIdB64()) : null
         }
         groupCall={host.callOccupant() !== null && host.callOccupant() !== "one-to-one"}
         groupName={
@@ -3561,6 +3713,7 @@ export function CallHostView(): JSX.Element {
         ringing={host.state() === "ringing"}
         callScreenUp={callScreenUp()}
         onExpand={() => host.expandCall()}
+        sources={windowSources()}
       />
 
       <LinkCallNoticeView />
@@ -3571,7 +3724,7 @@ export function CallHostView(): JSX.Element {
         {(text) => (
           <div class="lk-call-incoming bottom" role="status">
             <span class="lk-call-incoming-icon" aria-hidden="true">
-              <Icon name="phoneEnd" size={20} />
+              <Icon name="phone-down-fill" size={20} />
             </span>
             <div class="lk-call-incoming-text">
               <span>{text()}</span>
@@ -3643,22 +3796,29 @@ function applyAudioOutput(el: HTMLAudioElement | null, deviceId: string | null):
   });
 }
 
-/** One hidden sink for one remote stream, following the Speaker control. */
+/**
+ * One hidden sink for one remote stream, following the Speaker control.
+ *
+ * Bound once it is in the document, with `play()` called and retried, and
+ * played through Web Audio where `calls/remote-audio.ts` says so (the desktop
+ * app on WebKit, where the element path was silent on 2026-11-07). Each sink
+ * writes a `[call] remote audio` line saying whether it plays.
+ */
 function RemoteAudio(props: { stream: MediaStream }): JSX.Element {
   const [el, setEl] = createSignal<HTMLAudioElement | null>(null);
   createEffect(() => {
     applyAudioOutput(el(), callUiSettings().selectedAudioOutput);
   });
-  return (
-    <audio
-      autoplay
-      style={{ display: "none" }}
-      ref={(node) => {
-        node.srcObject = props.stream;
-        setEl(node);
-      }}
-    />
-  );
+  onMount(() => {
+    const node = el();
+    if (node === null) return;
+    const sink = new RemoteAudioSinkController(node, "group");
+    createEffect(() => {
+      sink.setStream(props.stream);
+    });
+    onCleanup(() => sink.dispose());
+  });
+  return <audio autoplay style={{ display: "none" }} ref={(node) => setEl(node)} />;
 }
 
 /** The call store's device settings. A module-level reader so `RemoteAudio`
@@ -3763,7 +3923,7 @@ function GroupCallBanner(): JSX.Element {
       clock(),
       viewer,
     )
-      // ADR-0089 section 6 - a group call a blocked person started is not
+      // ADR-0098 section 6 - a group call a blocked person started is not
       // announced on other screens (it does not ring); the chat still shows
       // it, and anyone in the group can join.
       .filter(
@@ -3791,7 +3951,7 @@ function GroupCallBanner(): JSX.Element {
   const banner = createMemo(() => {
     const s = auth.state();
     if (s.kind !== "session") return null;
-    // ADR-0089 step 3: a suspended account is offered no call to join.
+    // ADR-0098 step 3: a suspended account is offered no call to join.
     if (accountSuspended()) return null;
     foregroundVersion();
     const live = liveCalls();
@@ -3833,7 +3993,7 @@ function GroupCallBanner(): JSX.Element {
       {(ref) => (
         <div class="lk-call-incoming" role="status" aria-label={t("chat.call.group_in_progress")}>
           <span class="lk-call-incoming-icon" aria-hidden="true">
-            <Icon name="groups" size={20} />
+            <Icon name="phone-connection-fill" size={20} />
           </span>
           <div class="lk-call-incoming-text">
             <strong>{t("call.group_banner.title", { name: internals.nameFor(ref().groupIdB64) })}</strong>
@@ -3864,7 +4024,7 @@ function GroupCallBanner(): JSX.Element {
               {t("call.group_banner.open_chat")}
             </A>
             <button type="button" disabled={joining()} onClick={() => void join(true)}>
-              <Icon name="video" size={18} />
+              <Icon name="video-fill" size={20} />
               {t("call.group_banner.join_video")}
             </button>
             <button
@@ -3873,7 +4033,7 @@ function GroupCallBanner(): JSX.Element {
               disabled={joining()}
               onClick={() => void join(false)}
             >
-              <Icon name="phone" size={18} />
+              <Icon name="phone-fill" size={20} />
               {t("chat.call.join_short")}
             </button>
           </div>

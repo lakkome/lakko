@@ -22,15 +22,19 @@ import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Sh
 import { useLocation, useNavigate, useParams } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
+import { useProfiles } from "../profile/ProfileContext";
 import {
+  composeContentEnvelope,
   composeDeleteEnvelope,
   composeForwardEnvelope,
+  contentPartsOfForward,
   parseBodyEnvelopeWith,
   reencryptAttachmentRef,
   type AttachmentRefBytes,
 } from "../chat/attachments";
 import { base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { ChatClient } from "../chat/client";
+import { canForwardContent } from "../chat/forward";
 import { conversationKindOf } from "../chat/conversation-kind";
 import { ForwardPicker } from "../chat/ForwardPicker";
 import type { ForwardPickerRow } from "../chat/forward-picker";
@@ -52,6 +56,7 @@ import { channelAvatarKey } from "../channels/channel-avatar";
 import {
   catchUpChannel,
   channelReadStateOf,
+  channelReaderDeviceRoleOf,
   channelRoleOf,
   channelSeedFor,
   channelVisibilityOf,
@@ -66,6 +71,7 @@ import { dayLabelOf, sameDay } from "../chat/timeline-layout";
 import { ChannelComposer } from "../channels/ChannelComposer";
 import { ChannelInfo, ChannelInfoScreenHost, type ChannelInfoScreen } from "../channels/ChannelInfo";
 import { ChannelPostItem } from "../channels/ChannelPostItem";
+import { useOwnMemberCard } from "../channels/own-member-card";
 import { fetchPosts, type ChannelPostView } from "../channels/api";
 import { openChannelReport } from "../moderation/channel-report";
 import { registerLivePosts } from "../moderation/report-runtime";
@@ -93,12 +99,20 @@ import { t } from "../l10n";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { PushedScreen } from "../ui/PushedScreen";
+import { channelsState } from "../state/channels-state";
 import { loadWasm } from "../wasm";
 import { getDeviceKey } from "../auth/key-store";
 import { loadChannelPostLog } from "../feed/channel-post-log-store";
 import { channelWriteControls, heldPostsOf } from "../channels/removed-channel";
 import { channelRemovalLine, channelRemovalLineKey } from "../moderation/channel-removal";
 import { paths } from "./paths";
+import { Portal } from "solid-js/web";
+import { ArticleReader } from "../attach/ArticleReader";
+import { composeChannelPollClose } from "../attach/ChannelContent";
+import { requestConfirm } from "../ui/confirm-dialog";
+import { displayLocale } from "../l10n/display-locale";
+import type { Article, MessageContent } from "../../wasm/lakko_ffi_wasm";
+import type { AttachEditRequest } from "../attach/AttachComposer";
 
 /** What a search card or a link page may hand the route: how to subscribe
  *  when the person has not yet. */
@@ -124,6 +138,7 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
   const id = untrack(() => props.id);
   const auth = useAuth();
   const chats = useChats();
+  const profiles = useProfiles();
   const navigate = useNavigate();
   const location = useLocation<ChannelRouteState>();
 
@@ -133,9 +148,13 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
    *  dialog over it, not a banner beside it. */
   const endedHere = (): EndNotice | null => membershipEnd.notices().find((n) => n.key === `3:${id}`) ?? null;
   const canPublish = (): boolean => role() === "owner" || role() === "publisher";
+  /** 2026-11-13 (UX second-device.md section 4a): the account owns or
+   *  publishes in this channel, but this device holds no publishing state for
+   *  it: a reader here. */
+  const readerRole = (): "owner" | "publisher" | null => channelReaderDeviceRoleOf(id);
   const reading = (): boolean => canPublish() || channelReadStateOf(id) === "reading";
   const facts = (): ReturnType<typeof channelFacts> => channelFacts(id);
-  // ADR-0089 step 5: moderators removed the channel. It stays, the posts on
+  // ADR-0098 step 5: moderators removed the channel. It stays, the posts on
   // this device stay readable, nothing that writes is offered.
   const removalLine = (): ReturnType<typeof channelRemovalLine> => channelRemovalLine(id);
   const removed = (): boolean => removalLine() !== null;
@@ -326,7 +345,35 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
     ),
   );
   createEffect(on(readState, () => void load({ redecode: true }), { defer: true }));
+  // UX 15.2.1 — earlier seeds handed to a new publisher (or kept after a
+  // rotation) open what they cover in place: the posts appear and "Earlier
+  // posts aren't available." goes once every earlier item opens.
+  const heldSeedCount = createMemo(() => channelsState.subscribedSeedsByChannel().get(id)?.size ?? 0);
+  createEffect(on(heldSeedCount, () => void load({ redecode: true }), { defer: true }));
   const timeline = createMemo(() => channelTimeline(posts(), decoded()));
+
+  // ADR-0060 section 3: a subscriber keeps its member card current while the
+  // channel is open: once it is let in and holds a seed (a private channel's
+  // subscriber holds none until the owner's device lets it in), after a
+  // rotation, a renamed profile or a changed setting. Base walk 2026-11-13:
+  // no card was ever uploaded from web since channels became conversations.
+  const newestHeldEpoch = createMemo((): number | undefined => {
+    const held = channelsState.subscribedSeedsByChannel().get(id);
+    if (held === undefined || held.size === 0) return undefined;
+    return Math.max(...held.keys());
+  });
+  useOwnMemberCard({
+    channelIdHex: () => id,
+    keys: () => channelsState.subscriberKeysByChannel().get(id),
+    epoch: newestHeldEpoch,
+    seed: () => {
+      const epoch = newestHeldEpoch();
+      return epoch === undefined ? undefined : channelsState.subscribedSeedsByChannel().get(id)?.get(epoch);
+    },
+    // A reader device of the owner or a publisher uploads no member card,
+    // as the publishing device does not (it may hold no registered key).
+    enabled: () => !canPublish() && readerRole() === null && channelReadStateOf(id) === "reading",
+  });
 
   // Reactions in view, one batched read (ADR-0087 section 13a).
   createEffect(() => {
@@ -424,15 +471,26 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
     const fresh: AttachmentRefBytes[] = [];
     for (const a of post.attachments) fresh.push(await reencryptAttachmentRef(a));
     const forward = { author: facts().name };
-    const envelope = await composeForwardEnvelope(post.text, fresh, forward);
+    // ADR-0092 / UX `attachments.md` section 11a — a location, contact card
+    // or article travels as the same content (an article's images are the
+    // post's attachments, re-encrypted above, in their order).
+    const content = post.content;
+    if (!canForwardContent(content, (k) => profiles.cardShareableOf(k))) {
+      throw new KeyedError("chat.forward.error.generic");
+    }
+    const envelope =
+      content === undefined
+        ? await composeForwardEnvelope(post.text, fresh, forward)
+        : await composeContentEnvelope(content, fresh, contentPartsOfForward(forward));
     await sendTextToConversation({
       chat: outside,
       accountId: s.account.accountId,
       entry,
-      text: post.text,
+      text: content === undefined ? post.text : "",
       envelope,
       attachments: fresh,
       forward,
+      ...(content === undefined ? {} : { content }),
     });
     setForwarding(null);
     if (here()) {
@@ -441,7 +499,7 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
     }
   }
 
-  // ----- ADR-0089 section 2: reporting the channel's posts -----
+  // ----- ADR-0098 section 2: reporting the channel's posts -----
   /** A post's menu: the channel is the target, the post is included. */
   function reportPost(cursor: number): void {
     openChannelReport({
@@ -488,6 +546,72 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
   }
 
   // Delete for everyone, as a chat's Delete is: no dialog (UX 13).
+  /** ADR-0092 — an article post open in the reader. */
+  const [articleOpen, setArticleOpen] = createSignal<{
+    article: Article;
+    attachments: readonly AttachmentRefBytes[];
+    atMs: number;
+  } | null>(null);
+
+  /** ADR-0092 — `Edit checklist` / `Edit` on an article post, handed to the
+   *  composer's editor. */
+  const [contentEdit, setContentEdit] = createSignal<AttachEditRequest | null>(null);
+  async function editContent(cursor: number, content: MessageContent, attachments: readonly AttachmentRefBytes[]): Promise<void> {
+    if (content.kind !== "article" || attachments.length === 0) {
+      setContentEdit({ messageId: cursor, content });
+      return;
+    }
+    const images: Blob[] = [];
+    for (const ref of attachments) {
+      try {
+        images.push(await (await fetch(await hub.load(ref))).blob());
+      } catch {
+        setOpError(t("chat.attachment.error.download"));
+        return;
+      }
+    }
+    setContentEdit({ messageId: cursor, content, images });
+  }
+
+  /** UX 8.2 — `Close checklist`: asked first, final. */
+  async function closeChecklist(cursor: number): Promise<void> {
+    const ok = await requestConfirm({
+      title: t("checklist.close_confirm"),
+      body: null,
+      confirmLabel: t("checklist.close"),
+      cancelLabel: t("common.cancel"),
+      tone: "danger",
+    });
+    if (!ok) return;
+    setOpError(null);
+    try {
+      const w = await loadWasm();
+      await publish(w.composePollCloseEnvelope(BigInt(cursor)));
+    } catch (err) {
+      setOpError(channelErrorText(err, () => t("channels.publish.error.generic")));
+    }
+  }
+
+  /** UX 7.7 — `Close poll`: asked first; the close freezes the results this
+   *  app reads now into the post. */
+  async function closePoll(post: TimelinePost): Promise<void> {
+    if (post.content?.kind !== "poll") return;
+    const ok = await requestConfirm({
+      title: t("poll.close_confirm"),
+      body: null,
+      confirmLabel: t("poll.close"),
+      cancelLabel: t("common.cancel"),
+      tone: "danger",
+    });
+    if (!ok) return;
+    setOpError(null);
+    try {
+      await publish(await composeChannelPollClose(id, epochs().get(post.cursor), post.cursor, post.content.poll.body));
+    } catch (err) {
+      setOpError(channelErrorText(err, () => t("channels.publish.error.generic")));
+    }
+  }
+
   async function deletePost(cursor: number): Promise<void> {
     setOpError(null);
     try {
@@ -514,7 +638,7 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
             aria-label={t("chat.header.back")}
             onClick={() => navigate(paths.home)}
           >
-            <Icon name="back" size={20} />
+            <Icon name="chevron-back" size={24} />
           </button>
           <button
             type="button"
@@ -525,7 +649,7 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
             disabled={role() === null}
             onClick={() => setInfoOpen(true)}
           >
-            <Avatar label={facts().name} id={id} size="sm" conversationKey={channelAvatarKey(id)} />
+            <Avatar label={facts().name} id={id} size="sm" conversationKey={channelAvatarKey(id)} playVideo="header" />
             <div class="lk-chat-title-text">
               <h1>{facts().name}</h1>
               <Show when={headerLine().length > 0}>
@@ -568,7 +692,6 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
           when={role() !== null}
           fallback={
             <div class="lk-empty">
-              <Icon name="channels" size={40} strokeWidth={1.4} />
               <strong>{t("channels.subscribe.prompt_title")}</strong>
               <Show when={location.state?.access !== undefined}>
                 <button type="button" class="primary" disabled={subscribing()} onClick={() => void subscribe()}>
@@ -649,6 +772,13 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
                       saved={isSaved(post.cursor)}
                       onToggleSaved={() => void toggleSaved(post)}
                       onReport={controls().reportPost ? () => reportPost(post.cursor) : undefined}
+                      onClosePoll={() => void closePoll(post)}
+                      publish={publish}
+                      onEditContent={(cursor, content, attachments) => void editContent(cursor, content, attachments)}
+                      onCloseChecklist={(cursor) => void closeChecklist(cursor)}
+                      onOpenArticle={(article, attachments) =>
+                        setArticleOpen({ article, attachments, atMs: post.serverTsMs })
+                      }
                     />
                     </>
                   )}
@@ -663,15 +793,55 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
               </div>
             )}
           </Show>
-          {/* ADR-0089 step 3: a suspended publisher posts nothing. */}
+          {/* ADR-0098 step 3: a suspended publisher posts nothing. */}
           <Show when={canPublish() && !removed()}>
             <SuspendedComposerLine />
             <Show when={controls().composer}>
-              <ChannelComposer publish={publish} editing={editing()} onCancelEdit={() => setEditing(null)} hub={hub} />
+              <ChannelComposer
+                publish={publish}
+                editing={editing()}
+                onCancelEdit={() => setEditing(null)}
+                hub={hub}
+                contentEdit={contentEdit}
+                clearContentEdit={() => setContentEdit(null)}
+                trayKey={id}
+              />
             </Show>
+          </Show>
+          {/* UX second-device.md section 4a: the account posts here from
+              another device; one line in place of the composer, no control. */}
+          <Show when={!canPublish() ? readerRole() : null}>
+            {(r) => (
+              <p class="lk-channel-reader-line">
+                {r() === "owner" ? t("channels.reader_device.owner") : t("channels.reader_device.publisher")}
+              </p>
+            )}
           </Show>
         </Show>
       </div>
+            <Show when={articleOpen()}>
+              {(a) => (
+                <Portal>
+                  <ArticleReader
+                    article={a().article}
+                    imageUrl={async (index) => {
+                      const ref = a().attachments[index];
+                      if (ref === undefined) return null;
+                      try {
+                        return await hub.load(ref);
+                      } catch {
+                        return null;
+                      }
+                    }}
+                    author={channelFacts(id)?.name ?? ""}
+                    dateText={new Date(a().atMs).toLocaleString(displayLocale())}
+                    onClose={() => setArticleOpen(null)}
+                    onMenu={() => setArticleOpen(null)}
+                    onLink={(url) => window.open(url, "_blank", "noopener,noreferrer")}
+                  />
+                </Portal>
+              )}
+            </Show>
     </article>
   );
 }

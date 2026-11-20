@@ -126,20 +126,40 @@
 //! # Identity proof
 //!
 //! The crate also hosts the identity proof (see the [`identity_proof`]
-//! module, ADR-0089 security fixes): an account identity key's signature
+//! module, ADR-0098 security fixes): an account identity key's signature
 //! over the account id and its own public key, which auth requires before it
 //! records the key for the account. Client-signed, auth-verified, like the
 //! account statement.
+//! # Donation statements
+//!
+//! The ninth and tenth formats, [`DonationMethod`] and [`DonationPhone`] (see
+//! the [`donation`] module, `docs/ux/donations.md` section 3): a payment
+//! method or its phone number, signed offline by a dedicated donations key
+//! and verified by the client against a pinned public key, so the server that
+//! serves the donations page can hide a method but not alter one. They are
+//! length-prefixed rather than fixed-length and carry their own two domain
+//! separators.
+//! # Supporters list
+//!
+//! The eleventh format, [`SupportersList`] (see the [`supporters_list`] module,
+//! [ADR-0097] section 2): the backer names shown in the app, signed offline
+//! by the ADR-0038 release publisher key under its own domain
+//! (`lakko/supporters-list/v1`). Variable length, global, client-verified
+//! only.
+//!
+//! [ADR-0097]: ../../../docs/adr/0097-supporter-codes-and-list.md
 
 #![forbid(unsafe_code)]
 
 pub mod account_statement;
 pub mod backup_head;
+pub mod donation;
 pub mod genesis;
 pub mod handle_cert;
 pub mod identity_proof;
 pub mod key_reset;
 pub mod release_manifest;
+pub mod supporters_list;
 pub mod username_cert;
 
 pub use account_statement::{
@@ -150,6 +170,11 @@ pub use account_statement::{
 };
 pub use backup_head::{
     verify_backup_head, verify_backup_head_binding, BackupHead, BackupHeadError, BACKUP_HEAD_LEN,
+};
+pub use donation::{
+    sign_donation_method, sign_donation_phone, verify_donation_method, verify_donation_phone,
+    DonationError, DonationIcon, DonationKind, DonationMethod, DonationPhone,
+    DONATION_METHOD_MAX_LEN, DONATION_PHONE_MAX_LEN,
 };
 pub use genesis::{
     verify_genesis_binding, verify_genesis_fresh, GenesisAttestError, GenesisAttestation,
@@ -170,6 +195,10 @@ pub use key_reset::{
 pub use release_manifest::{
     release_status, release_status_for, verify_release_manifest, ReleaseManifest,
     ReleaseManifestError, UpdateStatus, RELEASE_MANIFEST_LEN,
+};
+pub use supporters_list::{
+    verify_supporters_list, SupportersList, SupportersListError, MAX_SUPPORTERS,
+    MAX_SUPPORTERS_LIST_LEN, MIN_SUPPORTERS_LIST_LEN,
 };
 pub use username_cert::{
     verify_username_binding, UsernameCertError, UsernameCertificate, OPRF_HASH_LEN,
@@ -373,9 +402,39 @@ pub fn verify_bound(
 pub mod fuzz_api {
     use super::{
         verify_account_statement, AccountStatement, AccountStatementKind, ActionAttestation,
-        BackupHead, GenesisAttestation, HandleCertificate, KeyResetAttestation, ReleaseManifest,
-        SigningKey, UsernameCertificate,
+        BackupHead, DonationMethod, DonationPhone, GenesisAttestation, HandleCertificate,
+        KeyResetAttestation, ReleaseManifest, SigningKey, UsernameCertificate,
     };
+
+    /// Drive both donation statement parsers on attacker-controlled bytes
+    /// (`docs/ux/donations.md` section 3): a statement is served by discovery,
+    /// which a hostile operator controls, so the client parses it before
+    /// anything is trusted. The fuzzer cannot forge a signature under the
+    /// FIXED key, so it exercises the length prefixes, the bounds checked
+    /// before any copy, UTF-8, the character and per-kind rules and the
+    /// verify failure. Asserts that whatever decodes re-signs to a statement
+    /// of the same length that decodes to the same content. Returns `true` on
+    /// a (vanishingly rare) acceptance.
+    #[must_use]
+    pub fn open_donation(bytes: &[u8]) -> bool {
+        let sk = SigningKey::from_seed(&[0x11; 32]);
+        let vk = sk.verifying_key();
+        let mut accepted = false;
+        if let Ok(method) = DonationMethod::decode_unverified(bytes) {
+            let resigned = method.sign(&sk).ok();
+            assert_eq!(resigned.as_ref().map(Vec::len), Some(bytes.len()));
+            let back = resigned.as_deref().map(DonationMethod::decode_unverified);
+            assert_eq!(back, Some(Ok(method)));
+        }
+        accepted |= DonationMethod::open(bytes, &vk).is_ok();
+        if let Ok(phone) = DonationPhone::decode_unverified(bytes) {
+            let resigned = phone.sign(&sk).ok();
+            assert_eq!(resigned.as_ref().map(Vec::len), Some(bytes.len()));
+            accepted |= super::verify_donation_phone(bytes, &vk, &phone.id).is_ok();
+        }
+        accepted |= DonationPhone::open(bytes, &vk).is_ok();
+        accepted
+    }
 
     /// Try to [`HandleCertificate::open`] the bytes against a FIXED verifying
     /// key (ADR-0087 section 3). A handle certificate rides opaquely inside a
@@ -482,6 +541,20 @@ pub mod fuzz_api {
     pub fn open_release_manifest(bytes: &[u8]) -> bool {
         let vk = SigningKey::from_seed(&[0x11; 32]).verifying_key();
         ReleaseManifest::open(bytes, &vk).is_ok()
+    }
+
+    /// Try to [`SupportersList::open`](crate::SupportersList::open) the bytes
+    /// against a FIXED verifying key. The bytes are attacker-controlled - the
+    /// list is fetched from a static host a malicious network or operator
+    /// could tamper (ADR-0097) - and the parser must stay panic-free on any
+    /// input, with its count and length bounds checked before allocation.
+    /// The fuzzer cannot forge a signature, so it exercises the length /
+    /// version / count / signature-refusal path. Returns `true` on a
+    /// (vanishingly rare) success.
+    #[must_use]
+    pub fn open_supporters_list(bytes: &[u8]) -> bool {
+        let vk = SigningKey::from_seed(&[0x11; 32]).verifying_key();
+        crate::SupportersList::open(bytes, &vk).is_ok()
     }
 
     /// Try to [`UsernameCertificate::open`] the bytes against a FIXED verifying

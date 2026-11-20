@@ -83,6 +83,10 @@ public enum class RepairOutcome {
     /** The group's current key could not be derived. */
     NO_KEY,
 
+    /** ADR-0091 phase 1 — this device holds the registered commit for the
+     *  next epoch, or skipped one: the epochs above are real. */
+    BEHIND,
+
     /** The Replace failed for any other reason. */
     FAILED,
 }
@@ -101,6 +105,15 @@ public interface JournalRepairPorts {
 
     /** The group's current epoch and access key, or `null`. */
     public fun currentEpochKey(groupIdHex: String): EpochKey?
+
+    /**
+     * ADR-0091 phase 1 — `true` when this device holds a registered commit for
+     * [groupIdHex], or carries a behind mark at or above [epoch]. A device
+     * that fell behind polls to the head and stays at N because it cannot
+     * apply the commit above, not because the epochs above are fake; a
+     * Replace from it would drop the real chain from under every other device.
+     */
+    public fun registeredCommitKnownAbove(groupIdHex: String, epoch: ULong): Boolean = false
 
     /** The root or admin-registrar signer the Replace is signed with, or
      *  `null` (a member, or no key on this device). */
@@ -211,6 +224,16 @@ public class JournalRepair(
         if (current.epoch != epoch) {
             log("the group moved from epoch $epoch to ${current.epoch}; nothing to repair")
             return RepairOutcome.MOVED
+        }
+        val behind = try {
+            ports.registeredCommitKnownAbove(groupIdHex, epoch)
+        } catch (_: Throwable) {
+            // Unknown is treated as known: a wrong Replace drops real epochs.
+            true
+        }
+        if (behind) {
+            log("a registered commit is known above this epoch; not repaired")
+            return RepairOutcome.BEHIND
         }
         if (!mayRepair(safeRank(groupIdHex))) return RepairOutcome.NOT_PERMITTED
         val signer = try {

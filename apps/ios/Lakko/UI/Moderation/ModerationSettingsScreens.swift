@@ -25,7 +25,7 @@ struct BlockedPeopleScreen: View {
                         HStack(spacing: 12) {
                             InitialsAvatar(
                                 name: resolved.isPlaceholder ? "" : resolved.name,
-                                identity: entry.id, size: 40, placeholderSymbol: "person.fill",
+                                identity: entry.id, size: 40, placeholderIcon: .personFill,
                                 photo: .person(entry.accountKey))
                             Text(resolved.name)
                                 .foregroundStyle(Color.lakkoText)

@@ -26,13 +26,22 @@ export interface PendingPublisherRequest {
   readonly channelIdHex: string;
   /** The PublisherGroup the link named. */
   readonly groupIdHex: string;
-  /** base64 of the account key the knocked KeyPackage belongs to (the
-   *  conversation account identity at the time of the request). */
+  /** base64 of the leaf key of the knocked KeyPackage: since ADR-0090 this
+   *  DEVICE's key (the account key on an older record). */
   readonly joinerKeyB64: string;
+  /** ADR-0090: base64 of the owner's account key (the `/g/` capability's
+   *  issuer), which the Welcome's sender must be a device of. Absent on an
+   *  older record: no Welcome lands it. */
+  readonly ownerKeyB64?: string;
   /** What the link said, for the channel row once joined. */
   readonly name: string;
   readonly description: string;
+  /** When the request was last sent: the first `Accept`, or the last
+   *  `Ask again` that went out (UX 15.2.2: the day starts from it). */
   readonly requestedAtMs: number;
+  /** `Ask again` found the link no longer works (UX 15.2.2). The record
+   *  stays, so an approval of the earlier request still lands. */
+  readonly linkDead?: boolean;
 }
 
 const [version, setVersion] = createSignal(0);
@@ -87,6 +96,17 @@ function save(accountIdB64: string, list: readonly PendingPublisherRequest[]): v
 export function recordPendingPublisherRequest(accountIdB64: string, record: PendingPublisherRequest): void {
   const rest = loadPendingPublisherRequests(accountIdB64).filter((r) => r.channelIdHex !== record.channelIdHex);
   save(accountIdB64, [...rest, record]);
+}
+
+/** UX 15.2.2 — `Ask again` found the link dead: the record stays (a late
+ *  approval still lands) and the card keeps the invalid-link line. */
+export function markPendingPublisherLinkDead(accountIdB64: string, channelIdHex: string): void {
+  const list = loadPendingPublisherRequests(accountIdB64);
+  if (!list.some((r) => r.channelIdHex === channelIdHex && r.linkDead !== true)) return;
+  save(
+    accountIdB64,
+    list.map((r) => (r.channelIdHex === channelIdHex ? { ...r, linkDead: true } : r)),
+  );
 }
 
 /** Drop the request for a channel (joined, or the channel is gone). */

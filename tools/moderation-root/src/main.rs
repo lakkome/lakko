@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! `lakko-moderation-root` — the OFFLINE tool for the ADR-0089 moderator
+//! `lakko-moderation-root` — the OFFLINE tool for the ADR-0098 moderator
 //! list (section 3).
 //!
 //! - `keygen` — generate the Ed25519 root key. The 32-byte private seed goes
@@ -56,7 +56,7 @@ use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
 
 const USAGE: &str = "\
-lakko-moderation-root — offline tool for the ADR-0089 moderator list
+lakko-moderation-root — offline tool for the ADR-0098 moderator list
 
 usage:
   lakko-moderation-root keygen [--out <seedfile>]

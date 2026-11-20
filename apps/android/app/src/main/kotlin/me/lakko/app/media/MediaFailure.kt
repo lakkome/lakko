@@ -5,6 +5,7 @@ package me.lakko.app.media
 
 import me.lakko.app.chat.AttachmentBridgeException
 import me.lakko.app.storage.BlobPassKind
+import me.lakko.app.storage.StorageFullError
 import me.lakko.app.storage.StorageLimitError
 
 /**
@@ -49,6 +50,48 @@ public fun isUploadLimit(error: Throwable): Boolean {
     }
     return false
 }
+
+/** docs/ux/storage-full.md — whether an upload failed because the server
+ *  has no room for new files (`507 storage-full`). Said where the sending
+ *  limit is said; the text and the chosen file stay. */
+public fun isStorageFull(error: Throwable): Boolean {
+    var e: Throwable? = error
+    var depth = 0
+    while (e != null && depth < 8) {
+        if (e is StorageFullError) return true
+        e = e.cause
+        depth += 1
+    }
+    return false
+}
+
+/** Why an upload was refused, when it is one the person is told about. */
+public enum class UploadRefusal { LIMIT, FULL }
+
+/** The told refusal behind an upload failure, or `null` for any other. */
+public fun uploadRefusalOf(error: Throwable): UploadRefusal? = when {
+    isStorageFull(error) -> UploadRefusal.FULL
+    isUploadLimit(error) -> UploadRefusal.LIMIT
+    else -> null
+}
+
+/** The composer / bubble line for a told upload refusal. */
+public fun uploadRefusalSendKey(refusal: UploadRefusal): String = when (refusal) {
+    UploadRefusal.LIMIT -> "chat.attachment.limit.send"
+    UploadRefusal.FULL -> "chat.attachment.full.send"
+}
+
+/** The line under a group or channel photo for a failed upload, or `null`
+ *  when the refusal is not one of the told ones. */
+public fun groupPhotoRefusalKey(error: Throwable): String? = when (uploadRefusalOf(error)) {
+    UploadRefusal.FULL -> "group_photo.error.full"
+    UploadRefusal.LIMIT -> "group_photo.error.limit"
+    null -> null
+}
+
+/** The profile Save line for a failed photo upload. */
+public fun profilePhotoUploadFailureKey(error: Throwable): String =
+    if (isStorageFull(error)) "profile.save.error.full" else "profile.save.error.upload"
 
 /** The catalog keys of a failure's lines; `null` for [MediaFailure.FAILED]
  *  (each bubble keeps its own generic line). */

@@ -23,9 +23,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -71,6 +68,9 @@ import me.lakko.app.media.decodeOrientedBitmap
 import me.lakko.app.media.mediaBubbleBox
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import java.io.File
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 internal const val COULD_NOT_LOAD_PHOTO = "chat.photo.load_failed"
 internal const val COULD_NOT_LOAD_VIDEO = "chat.video.load_failed"
@@ -124,6 +124,13 @@ internal fun PhotoBubble(
     onSave: (AttachmentRef) -> Unit,
     onLongPress: (() -> Unit)?,
     overlay: (@Composable BoxScope.() -> Unit)?,
+    /** Section 11 — a mosaic tile's size, from the shared rule; `null` sizes
+     *  the bubble by section 10's box. */
+    tileSize: androidx.compose.ui.unit.DpSize? = null,
+    shape: androidx.compose.ui.graphics.Shape = MEDIA_SHAPE,
+    /** Section 11 — open the message's viewer at this item, in place of the
+     *  bubble's own single viewer. */
+    onOpen: (() -> Unit)? = null,
 ) {
     val key = remember(ref.blobId) { ChatMediaHub.mediaKey(ref.blobId) }
     val box = remember(ref.width, ref.height, ref.thumb) {
@@ -135,7 +142,11 @@ internal fun PhotoBubble(
         )
     }
     val animated = remember(ref.mime) { isAnimatedImage(ref.mime) }
-    var thumb by remember(key) { mutableStateOf<ImageBitmap?>(null) }
+    // ADR-0047 section 6 — the first photo of a message carries a micro
+    // thumbnail inside it: the placeholder until the sent thumb arrives.
+    var thumb by remember(key) {
+        mutableStateOf<ImageBitmap?>(me.lakko.app.media.decodeInlineThumb(ref.inlineThumb)?.asImageBitmap())
+    }
     var file by remember(key) { mutableStateOf<File?>(hub.fileFor(key)) }
     var full by remember(key) { mutableStateOf<ImageBitmap?>(null) }
     var failed by remember(key) { mutableStateOf(false) }
@@ -146,7 +157,7 @@ internal fun PhotoBubble(
         val t = ref.thumb ?: return@LaunchedEffect
         if (file != null) return@LaunchedEffect
         val tf = hub.loadThumb(t) ?: return@LaunchedEffect
-        thumb = withContext(Dispatchers.IO) { decodeOrientedBitmap(tf, 640)?.asImageBitmap() }
+        withContext(Dispatchers.IO) { decodeOrientedBitmap(tf, 640)?.asImageBitmap() }?.let { thumb = it }
     }
     LaunchedEffect(key, attempt) {
         val f = file ?: hub.load(ref)
@@ -175,8 +186,8 @@ internal fun PhotoBubble(
     }
     Box(
         modifier = Modifier
-            .size(box.widthDp.dp, box.heightDp.dp)
-            .clip(MEDIA_SHAPE)
+            .size(tileSize?.width ?: box.widthDp.dp, tileSize?.height ?: box.heightDp.dp)
+            .clip(shape)
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .mediaGestures(
                 label = t(if (failed) "common.retry" else "chat.photo.open"),
@@ -188,7 +199,7 @@ internal fun PhotoBubble(
                         full = null
                         attempt += 1
                     } else if (ready) {
-                        viewer = true
+                        if (onOpen != null) onOpen() else viewer = true
                     }
                 },
                 onLongPress = onLongPress,
@@ -259,6 +270,9 @@ internal fun VideoBubble(
     onSave: (AttachmentRef) -> Unit,
     onLongPress: (() -> Unit)?,
     overlay: (@Composable BoxScope.() -> Unit)?,
+    tileSize: androidx.compose.ui.unit.DpSize? = null,
+    shape: androidx.compose.ui.graphics.Shape = MEDIA_SHAPE,
+    onOpen: (() -> Unit)? = null,
 ) {
     val scope = rememberCoroutineScope()
     val key = remember(ref.blobId) { ChatMediaHub.mediaKey(ref.blobId) }
@@ -272,7 +286,10 @@ internal fun VideoBubble(
     }
     val strings = LocalStrings.current
     val sizeLabel = remember(ref.size, strings) { AttachmentBridge.formatSize(ref.size, strings) }
+    // ADR-0047 section 6 — the first video of a message carries a micro
+    // thumbnail inside it: shown blurred until the sent poster arrives.
     var poster by remember(key) { mutableStateOf<ImageBitmap?>(null) }
+    val inlinePoster = remember(key) { me.lakko.app.media.decodeInlineThumb(ref.inlineThumb)?.asImageBitmap() }
     var file by remember(key) { mutableStateOf<File?>(hub.fileFor(key)) }
     var loading by remember(key) { mutableStateOf(false) }
     var failed by remember(key) { mutableStateOf(false) }
@@ -288,6 +305,10 @@ internal fun VideoBubble(
         if (loading) return
         if (failed && !mediaRetryOffered(hub.failureFor(key))) return
         failed = false
+        if (onOpen != null) {
+            onOpen()
+            return
+        }
         if (file != null) {
             player = true
             return
@@ -317,8 +338,8 @@ internal fun VideoBubble(
     }
     Box(
         modifier = Modifier
-            .size(box.widthDp.dp, box.heightDp.dp)
-            .clip(MEDIA_SHAPE)
+            .size(tileSize?.width ?: box.widthDp.dp, tileSize?.height ?: box.heightDp.dp)
+            .clip(shape)
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .mediaGestures(
                 label = t(if (failed) "common.retry" else "chat.video.open"),
@@ -329,30 +350,39 @@ internal fun VideoBubble(
                 contentDescription = videoLabel
             },
     ) {
-        poster?.let {
+        val shownPoster = poster
+        if (shownPoster != null) {
             Image(
-                bitmap = it,
+                bitmap = shownPoster,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
             )
+        } else if (inlinePoster != null) {
+            Image(
+                bitmap = inlinePoster,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize().blur(6.dp),
+            )
         }
+        val compact = tileSize != null && minOf(tileSize.width, tileSize.height) < 140.dp
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
                 .align(Alignment.Center)
-                .size(52.dp)
+                .size(if (compact) 36.dp else 52.dp)
                 .clip(CircleShape)
                 .background(Color.Black.copy(alpha = 0.45f)),
         ) {
             if (loading) {
                 CircularProgressIndicator(Modifier.size(36.dp), strokeWidth = 3.dp, color = Color.White)
             } else {
-                Icon(
-                    imageVector = Icons.Filled.PlayArrow,
+                LkIcon(
+                    icon = R.drawable.ic_lk_play_fill,
                     contentDescription = null,
                     tint = Color.White,
-                    modifier = Modifier.size(32.dp),
+                    size = if (compact) LkIconSize.Row else LkIconSize.Call,
                 )
             }
         }
@@ -363,7 +393,7 @@ internal fun VideoBubble(
                 Modifier.align(Alignment.BottomCenter).padding(bottom = 36.dp),
             )
         }
-        Text(
+        if (!compact) Text(
             text = sizeLabel,
             style = MaterialTheme.typography.labelSmall,
             color = Color.White,
@@ -408,7 +438,7 @@ private fun ViewerTopBar(onClose: () -> Unit, onSave: () -> Unit, modifier: Modi
             .padding(horizontal = 4.dp),
     ) {
         IconButton(onClick = onClose) {
-            Icon(Icons.Filled.Close, contentDescription = t("common.close"), tint = Color.White)
+            LkIcon(R.drawable.ic_lk_xmark, contentDescription = t("common.close"), tint = Color.White)
         }
         Box(Modifier.weight(1f))
         TextButton(onClick = onSave) { Text(t("common.save"), color = Color.White) }

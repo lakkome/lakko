@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * F3 of the ADR-0089 security pass: the identity proof is made by the REAL
+ * F3 of the ADR-0098 security pass: the identity proof is made by the REAL
  * core, verifies as an Ed25519 signature by the recorded key over the
  * documented message, and rides each of the four auth calls that record the
  * account's identity key (genesis attest, key reset finish, key rotate

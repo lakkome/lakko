@@ -183,6 +183,14 @@ final class SfuCallSession {
         /// Defaulted so existing memberwise callers keep their shorter
         /// initialiser.
         var onRemoteMediaState: ((_ from: String, _ cameraOn: Bool) -> Void)? = nil
+        /// A remote peer said whether its microphone is on (`false` = muted),
+        /// in the same sealed media-state envelope as the camera
+        /// (`lakko_contacts::media_state` version 2). Fired with every opened
+        /// media state, after ``onRemoteMediaState``. `from` is the sender's
+        /// SFU peer id. Drives the mute mark on that person's tile
+        /// (`docs/ux/group-call-grid.md` 7.2). Defaulted so existing
+        /// memberwise callers keep their shorter initialiser.
+        var onRemoteMicrophoneState: ((_ from: String, _ microphoneOn: Bool) -> Void)? = nil
         /// A remote receiver's SFrame decryptor could not be armed, so nothing
         /// that receiver carries will ever decode. `streamId` is the MSID
         /// stream group (== the source peer id on an SFU-routed call, so the
@@ -227,10 +235,16 @@ final class SfuCallSession {
         /// announcement verified with, newest per peer. `nil` when the peer
         /// went back to its default naming.
         var onRemoteCallName: ((_ peerId: String, _ name: String?) -> Void)? = nil
+        /// A message in the call's chat (`docs/ux/calls.md` section 4.1.4,
+        /// ``CallChatChannel``) verified against the leaf key its sender's
+        /// announcement verified with; each `(peer, seq)` once.
+        var onCallChat: ((_ peerId: String, _ seq: UInt64, _ text: String) -> Void)? = nil
     }
 
     private let config: Config
-    private let callbacks: Callbacks
+    /// Internal (not private) so a unit test can drive the adapter's
+    /// callbacks without an SFU.
+    let callbacks: Callbacks
     /// Call-key seed of the CURRENT MLS epoch (G-18, ADR-0029). Starts
     /// at `config.seed` (or `nil` on the ADR-0032 deferred-publish path,
     /// set later by ``publish(seed:localLeaf:)``) and advances on
@@ -248,6 +262,12 @@ final class SfuCallSession {
     /// learn every change from the broadcast, since a mute (track
     /// `isEnabled` toggle) fires no track event.
     private var localCameraOn: Bool
+    /// The person's microphone choice (`false` = muted), broadcast beside
+    /// the camera state so the other tiles show the mute mark
+    /// (`docs/ux/group-call-grid.md` 7.2). Recorded by
+    /// ``setMicrophoneEnabled(_:)`` even before capture, and applied to the
+    /// captured microphone, so what is announced is what is sent.
+    private var localMicOn: Bool
     private var signaling: SfuSignalingClient?
     private var pc: WebRTCPeerConnection?
     /// Whose audio each receiving audio track carries: track id -> SFU peer
@@ -337,6 +357,28 @@ final class SfuCallSession {
         selfPeerId: { [weak self] in self?.selfPeerId },
         onName: { [weak self] peerId, name in self?.callbacks.onRemoteCallName?(peerId, name) }
     ))
+    /// The call's chat (``CallChatChannel``): this device's sequence numbers,
+    /// messages held for a peer not yet named, what was already shown. Unlike
+    /// the call name, a message is never re-sent on a re-announcement.
+    private lazy var callChats = CallChatChannel(deps: CallChatChannel.Deps(
+        compose: { [weak self] selfPeerId, seq, text in
+            self?.config.peerAnnouncer?.composeCallChat(selfPeerId, seq, text)
+        },
+        verify: { [weak self] from, signerKey, bytes in
+            self?.config.peerAnnouncer?.verifyCallChat(from, signerKey, bytes)
+        },
+        sendSealed: { [weak self] plaintext in
+            guard let self, self.isLive, self.signaling != nil,
+                  let sealed = self.relay.seal(plaintext)
+            else { return false }
+            self.sendSignalRelayToCall(payload: sealed)
+            return true
+        },
+        selfPeerId: { [weak self] in self?.selfPeerId },
+        onMessage: { [weak self] peerId, message in
+            self?.callbacks.onCallChat?(peerId, message.seq, message.text)
+        }
+    ))
 
     // ---- What this device shows of each person (ADR-0070 steps 5 and 6) ----
     /// The SFU's id for this device, from the Welcome.
@@ -366,7 +408,30 @@ final class SfuCallSession {
     /// Local camera capturer — held for the call's lifetime so it
     /// outlives `openPeerConnectionAndPublish` and is torn down in
     /// `hangUp`. `nil` for an audio-only call (or when no camera exists).
-    private var localCameraCapture: LocalCameraCapture?
+    private var localCameraCapture: LocalCameraCapture? {
+        didSet {
+            guard oldValue !== localCameraCapture else { return }
+            oldValue?.onInterruptionChanged = nil
+            localCameraCapture?.onInterruptionChanged = { [weak self] interrupted in
+                MainActor.assumeIsolated { self?.setCameraInterrupted(interrupted) }
+            }
+            if localCameraCapture == nil { setCameraInterrupted(false) }
+        }
+    }
+
+    /// iOS interrupted the camera (`docs/ux/calls.md` section 4.5.4): the app
+    /// left the screen and may not keep the camera. While it lasts every
+    /// other peer is told the camera is off, so they see the avatar rather
+    /// than a frozen frame; ``localCameraOn``, and so the camera button here,
+    /// is left alone, because the person did not turn the camera off.
+    private var cameraInterrupted = false
+
+    /// The camera was interrupted (`true`) or came back (`false`).
+    func setCameraInterrupted(_ interrupted: Bool) {
+        guard cameraInterrupted != interrupted else { return }
+        cameraInterrupted = interrupted
+        broadcastMediaState()
+    }
     private(set) var state: State = .idle
     /// The session is connecting or connected: not yet started, hung up and
     /// failed are all "no call to capture or publish for".
@@ -433,24 +498,37 @@ final class SfuCallSession {
         if let seed = config.seed { relay.setSeed(seed) }
         self.publishLeaf = config.localLeaf ?? 0
         self.localCameraOn = config.video
+        self.localMicOn = config.audio
         self.nowMs = nowMs
     }
 
-    /// Broadcast our current camera state to every other peer over the
-    /// opaque SFU `signal-relay` (camera-off-cleanup). Best-effort — a no-op
+    /// Broadcast our current camera and microphone state to every other peer
+    /// over the opaque SFU `signal-relay` (camera-off-cleanup; the microphone
+    /// since 2026-11-07, `lakko_contacts::media_state` version 2). Best-effort — a no-op
     /// if signaling is not open. `sendSignalRelayToCall` base64s the
     /// `composeMediaState` bytes into the relay payload; the SFU forwards it
     /// verbatim without inspection (invariant #2). Called on every local
     /// camera transition, once when the call connects, and again whenever a
     /// new peer joins (so a newcomer is initial-synced deterministically).
-    private func broadcastMediaState() {
-        guard signaling != nil else { return }
+    func broadcastMediaState() {
+        guard signaling != nil || mediaStateSendSeam != nil else { return }
         // Sealed under the call's relay key (ADR-0078 section 2): the SFU
         // relays ciphertext only. No key yet (a link joiner before its
         // Welcome) means nothing is said.
-        guard let sealed = relay.seal(composeMediaState(cameraOn: localCameraOn)) else { return }
+        guard let sealed = relay.seal(
+            composeMediaState(cameraOn: localCameraOn && !cameraInterrupted, microphoneOn: localMicOn))
+        else { return }
+        if let seam = mediaStateSendSeam {
+            seam(sealed)
+            return
+        }
         sendSignalRelayToCall(payload: sealed)
     }
+
+    /// Test seam: when set, a sealed media-state envelope goes here instead
+    /// of onto the signaling socket (a unit test has no SFU). `nil` in the
+    /// app.
+    var mediaStateSendSeam: ((Data) -> Void)?
 
     /// Broadcast this device's sealed peer announcement (ADR-0078 section 2).
     /// Best-effort: without an announcer, a self peer id, a relay key or an
@@ -472,6 +550,18 @@ final class SfuCallSession {
     /// every announcement, so someone who joins later sees it too.
     func setOwnCallName(_ name: String) {
         callNames.setOwnName(name)
+    }
+
+    /// Send a message to the call's chat (`docs/ux/calls.md` section 4.1.4):
+    /// `text` has passed the call-chat rule. Returns its sequence number and
+    /// whether it went out (no socket, no relay key: not sent).
+    func sendCallChat(_ text: String) -> (seq: UInt64, sent: Bool) {
+        callChats.send(text)
+    }
+
+    /// `Send again` on the chat message numbered `seq`: the same signed bytes.
+    func resendCallChat(seq: UInt64) -> Bool {
+        callChats.resend(seq: seq)
     }
 
     private func startAnnouncing() {
@@ -743,10 +833,19 @@ final class SfuCallSession {
         signaling?.sendSignalRelayToCall(payload: payload)
     }
 
-    /// Mute / unmute the local microphone (local-only track gate).
+    /// Mute / unmute the local microphone (local-only track gate). The
+    /// choice is recorded even before capture (a mute chosen in the prejoin
+    /// or before the Welcome holds for the captured microphone), and a
+    /// change is announced so the other tiles show the mute mark.
     func setMicrophoneEnabled(_ on: Bool) {
+        let changed = localMicOn != on
+        localMicOn = on
         pc?.setMicrophoneEnabled(on)
+        if changed { broadcastMediaState() }
     }
+
+    /// The microphone choice this session announces and applies (test seam).
+    var microphoneEnabled: Bool { localMicOn }
 
     // MARK: - Signaling keepalive
 
@@ -794,6 +893,8 @@ final class SfuCallSession {
         announceTask?.cancel()
         announceTask = nil
         relay.dispose()
+        // The call's chat goes with the call.
+        callChats.clear()
         stopMediaLog()
         // Stop the camera first (fire-and-forget — `LocalCameraCapture`
         // also stops in its deinit, but the explicit stop releases the
@@ -901,7 +1002,10 @@ final class SfuCallSession {
         // path). So order is: add audio -> (add video) -> arm SFrame ->
         // offer, guaranteeing the SFU never sees a plaintext frame on
         // either track (invariant #2/#4).
-        connection.addLocalAudioTrack(enabled: config.audio)
+        // A mute chosen before the capture (the person's choice reaches
+        // `setMicrophoneEnabled` as soon as the call exists) holds for the
+        // captured microphone: what is announced is what is sent.
+        connection.addLocalAudioTrack(enabled: localMicOn)
         if config.video {
             startLocalCameraCapture(on: connection)
         }
@@ -1261,6 +1365,7 @@ final class SfuCallSession {
                     self.callbacks.onScreenShareChanged?(self.screenShares.current)
                 }
                 self.callNames.peerLeft(peerId)
+                self.callChats.peerLeft(peerId)
                 self.callbacks.onPeerLeft?(peerId)
             }
         }
@@ -1308,7 +1413,7 @@ final class SfuCallSession {
     /// multi-joiner handshake dispatcher, which re-classifies it). A malformed
     /// payload is dropped, never fatal (mirror of the web `onSignalRelayFrame`,
     /// which uses the same `sfuDecodePayload`).
-    private func dispatchSignalRelay(from: String, payloadB64: String) {
+    func dispatchSignalRelay(from: String, payloadB64: String) {
         guard let payload = try? sfuDecodePayload(payloadB64: payloadB64) else { return }
         // ADR-0078 section 2: a payload sealed under the call's relay key is
         // consumed here (the camera media state, a peer announcement); an
@@ -1316,18 +1421,22 @@ final class SfuCallSession {
         // to `onSignalRelay` unchanged.
         if let opened = relay.open(payload) {
             switch opened {
-            case .mediaState(let cameraOn):
+            case .mediaState(let cameraOn, let microphoneOn):
                 callbacks.onRemoteMediaState?(from, cameraOn)
+                callbacks.onRemoteMicrophoneState?(from, microphoneOn)
             case .announcement(let announcement):
                 if let identity = config.peerAnnouncer?.verify(from, announcement) {
                     if !identity.signatureKey.isEmpty { peerSignerKeys[from] = identity.signatureKey }
                     callbacks.onPeerIdentified?(from, identity)
                     callNames.peerIdentified(from, signerKey: identity.signatureKey)
+                    callChats.peerIdentified(from, signerKey: identity.signatureKey)
                 }
             case .screenShare(let state):
                 receiveScreenShare(from: from, state: state)
             case .callName(let name):
                 callNames.received(from: from, bytes: name)
+            case .callChat(let message):
+                callChats.received(from: from, bytes: message)
             case .unknown:
                 break
             }
@@ -1654,6 +1763,16 @@ final class SfuCallSession {
                 // it on, and accusing a peer on the way out would be a lie of
                 // its own.
                 guard let self = self, let seed = self.activeSeed, let pc = self.pc else {
+                    return
+                }
+                // The receiving half of this device's own media lines carries
+                // nothing (the SFU echoes this device's stream id there). Its
+                // decryptor is armed like any receiver's, but it is no person:
+                // left out of the sound-to-tile map and the sound-and-picture
+                // rule, where it showed as an extra peer that never flowed
+                // (`sync peer=lakko-local-stream`, seen 2026-11-10).
+                if pc.receiverIsOnOwnSender(receiver) {
+                    _ = pc.armSFrameDecryptor(for: receiver, seed: seed)
                     return
                 }
                 let kind = receiver.track?.kind ?? "unknown"

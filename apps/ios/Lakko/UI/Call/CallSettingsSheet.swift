@@ -17,9 +17,16 @@ import UIKit
 ///
 /// A group or link call also carries, at the top, the name this person shows
 /// in the call (``CallNameEditor``); a one-to-one call has none.
+///
+/// Above the device lists: first `Sound`, the noise suppression switch
+/// (``CallNoiseSuppressionSection``, section 4.1.3), then the camera
+/// background (``CallBackgroundSection``, `docs/ux/call-backgrounds.md`).
 struct CallSettingsSheet: View {
     @ObservedObject var state: CallUiState
     @ObservedObject var l10n = Localization.shared
+    /// Turn the call's camera on, as the camera button does (the background
+    /// section's `Turn on camera without background`).
+    var onCameraOn: () -> Void = {}
     let onDone: () -> Void
 
     /// Whether the loudspeaker is a real alternative right now.
@@ -44,14 +51,20 @@ struct CallSettingsSheet: View {
                 CallNameEditor(state: state)
             }
 
-            if sections.isEmpty {
-                Text(l10n.t("call.settings.no_devices"))
-                    .font(.subheadline)
-                    .foregroundColor(Color.lakkoTextMuted)
-                Spacer(minLength: 0)
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    // ADR-0088 — shown whether or not a device list is.
+                    CallNoiseSuppressionSection()
+                    // ADR-0089 — above the device lists; absent on a device
+                    // that cannot run a background at all.
+                    if CameraBackground.shared.isAvailable {
+                        CallBackgroundSection(state: state, onCameraOn: onCameraOn)
+                    }
+                    if sections.isEmpty {
+                        Text(l10n.t("call.settings.no_devices"))
+                            .font(.subheadline)
+                            .foregroundColor(Color.lakkoTextMuted)
+                    } else {
                         ForEach(sections) { section in
                             sectionView(section)
                         }
@@ -102,8 +115,7 @@ struct CallSettingsSheet: View {
                                 .truncationMode(.tail)
                             Spacer(minLength: 0)
                             if option.selected {
-                                Image(systemName: "checkmark")
-                                    .font(.body.weight(.semibold))
+                                LkIconView(.checkmark, size: 20)
                                     .foregroundColor(Color.lakkoAccent)
                             }
                         }
@@ -147,6 +159,41 @@ struct CallSettingsSheet: View {
                 await CallDevices.selectCamera(id)
                 refresh()
             }
+        }
+    }
+}
+
+/// `Sound`: the noise suppression switch with its hint (`docs/ux/calls.md`
+/// section 4.1.3). The platform's switch, as on any settings page; its spoken
+/// name is the label, its state on / off. Stored on this device only and
+/// applied to a running call at once.
+struct CallNoiseSuppressionSection: View {
+    @ObservedObject var setting = NoiseSuppressionSetting.shared
+    @ObservedObject var l10n = Localization.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(l10n.t("call.settings.sound"))
+                .font(.footnote.weight(.semibold))
+                .foregroundColor(Color.lakkoTextMuted)
+                .accessibilityAddTraits(.isHeader)
+            Toggle(isOn: Binding(get: { setting.isOn }, set: { setting.set($0) })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(l10n.t("call.settings.noise_suppression"))
+                        .font(.body)
+                        .foregroundColor(Color.lakkoText)
+                    Text(l10n.t("call.settings.noise_suppression_hint"))
+                        .font(.footnote)
+                        .foregroundColor(Color.lakkoTextMuted)
+                }
+            }
+            .tint(Color.lakkoAccent)
+            .accessibilityLabel(l10n.t("call.settings.noise_suppression"))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .frame(minHeight: CallScreenPresentation.minimumTouchTarget)
+            .background(Color.lakkoSurfaceSunken)
+            .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card, style: .continuous))
         }
     }
 }

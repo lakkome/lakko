@@ -8,7 +8,7 @@ import me.lakko.app.chat.IncomingChatEvent
 import uniffi.lakko_ffi_uniffi.BlockVerdict
 
 /*
- * ADR-0089 section 6, UX section 1.2 — what a block removes from a received
+ * ADR-0098 section 6, UX section 1.2 — what a block removes from a received
  * batch before anything stores, counts, notifies or rings for it. Applied at
  * the two foreground receive paths (the poll and the swept rows) right after
  * the classifier, so every later stage sees the batch as if the dropped rows

@@ -24,6 +24,11 @@
   DeviceGroup id is derived from the lineage seed (the oldest own
   predecessor), so a rotation keeps the journal and moves its root with a
   plain `root` transfer signed by the old root.
+- **Amended 2026-11-15 (the maintainer's decision; G-56):** a device that
+  joins an account after a rotation waits for the account's earlier keys
+  instead of binding under the current key; the pairing recovery row
+  carries them (v3). See "Joining after a rotation: the device waits for
+  the earlier keys". Decided, not built.
 - **Context:** account recovery, Part 5 (after
   [ADR-0072](0072-recovery-model-simplification.md) and
   [ADR-0073](0073-account-key-reset.md))
@@ -1034,8 +1039,32 @@ the vault flag set by hand: each client as the rotated account, restored from
 the phrase, and iOS and Android as the contact who met them afterwards. The
 letter path was not walked. Left open: a group member with no pin and no
 binding stays unknown, so no link is fetched for them; a device that restores
-after it has already landed has opened its DeviceGroup under the wrong lineage;
-a pre-rotation contact has not been walked on this path.
+after it has already landed has opened its DeviceGroup under the wrong lineage
+(decided 2026-11-15, not built: the lineage guard of "Joining after a
+rotation"); a pre-rotation contact has not been walked on this path.
+
+**Envelopes sealed to a rotated member (2026-11-20).** Found on a live walk:
+an owner re-admitting a member that had rotated refused to appoint it
+(`identity bundle names another key; not appointing`), because the owner
+required the bundle's served key to equal the roster key, and the roster
+names the conversation key. The rule, on web, iOS and Android, for the
+envelopes an owner seals to one member's account (ADR-0057 registrar seeds
+and root handovers, ADR-0087 knock seeds):
+
+- Sender: the bundle is that member's when its served key is the roster key,
+  or when its conversation link verifies against the served key and names
+  exactly the roster key; anything else is refused. The envelope stays
+  addressed to the roster key (the registrar seed derives from it and the
+  registrar list is keyed on it) and is sealed to the bundle's X25519 key,
+  which after a rotation is the current identity's.
+- Receiver: the address is checked against the conversation identity, as
+  before; the envelope opens with the conversation identity's own X25519 key,
+  else with the current identity's (new core functions
+  `openRegistrarSeedEnvelopeSealedTo` / `openKnockSeedEnvelopeSealedTo` on
+  UniFFI and wasm: address checked against one identity, opened with
+  another's X25519 key, both identities the device's own).
+
+Host-tested only, not walked.
 
 Unchanged: Stage B, and everything in 3.1 about what the old seed can still
 do. A person who rotated keeps two keys; 3.7 makes that survivable, not gone.
@@ -2109,7 +2138,9 @@ Left as it is:
 
 - The bundle is best effort (a 20 s poll). A device it never reaches stays bound under the current
   key and out of the account's older chats until it is paired again while holding no conversation;
-  once it holds conversations it keeps the current-key binding for good.
+  once it holds conversations it keeps the current-key binding for good. (Superseded by the
+  amendment of 2026-11-15, "Joining after a rotation": such a device no longer binds at all until
+  the earlier keys reach it, and the recovery row carries them.)
 - Web's live re-mint starts a fresh identity object: a Welcome built on the stale KeyPackage by a
   sender without the guard cannot be opened, and pending state held only in the old provider (a
   `/g/` join request) is lost.
@@ -2142,6 +2173,216 @@ the served key to the key the devices are bound to, and a supersession proof alo
 at first sight. Closing it needs the predecessor anchored in the KT log at first sight, or the new
 key's signature over the old binding. Decided 2026-10-12: the refusal stays for now and is
 revisited after it has been tried in use.
+
+## 3.3 as built (2026-11-12): reading the journal without a session
+
+Found walking base scenario 4b: section 3.3 says a superseded device with no
+pending envelope reads its DeviceGroup journal once before deciding, but no
+client could do that without a session. Web treated a missing DeviceGroup
+handle as "offline" and retried every 20 s forever; Android waited up to
+40 s for a live sync runtime and then treated the change as a reset whether
+or not anything was read; iOS read it only through a running runtime.
+
+Now all three open the device's own persisted DeviceGroup state into a
+throwaway handle, fetch from the persisted cursor to the head with the
+DeviceGroup's own epoch-key proofs (no session token), apply the rows,
+pass every `key-rotation` envelope found to the ordinary intake, and
+persist nothing (web `devices/sync/standalone-journal*.ts` and
+`devices/superseded-adoption.ts`, Android `auth/SupersededJournalRead.kt`
+and `devices/sync/DeviceGroupStandaloneJournal.kt`, iOS the one-shot read
+beside `DeviceGroupJournalCursor`). The outcome decides the next step:
+
+- read to the head: an envelope found is adopted; none means a reset;
+- no DeviceGroup state on the device, or a 401 / 403 / 404 from the DS:
+  a reset;
+- no answer (network failure, 5xx, a clock-skewed refusal, the 40 s
+  deadline): try later, never a wipe. This narrows the original text,
+  which treated "cannot be read" as a reset.
+
+Residual (Android, from the code): if the device-attestation key can be had
+neither pinned nor from the JWKS, the read cannot open and the device keeps
+retrying instead of deciding. Tested against fakes on all three
+(`superseded-adoption.test.ts`, `SupersededJournalReadTest`, iOS
+`RecoveryFlowTests`); the read against a real DS has not been run.
+
+## Joining after a rotation: the device waits for the earlier keys (2026-11-15)
+
+**Status: the maintainer's decision of 2026-11-15; built the same day in
+the core, both FFI surfaces and web, iOS and Android, host-tested only, not
+walked on a device.** Closes G-56 in code. This section is the decision and the rules a build
+follows on the three clients.
+
+**What was found.** A device binds its device identity to the oldest own
+predecessor only if it holds that seed when it mints (the binding verdict,
+web `devices/own-conversation-key.ts:46-62`, iOS `Auth/KeyRotation.swift:
+166-199`, Android `auth/KeyRotationKept.kt:552-591`). On every join route the
+seeds arrive by a source that can be late or absent: the pairing state
+bundle is published after the Welcome, best effort, and polled for 20 s;
+the phrase routes fetch the backup before binding but land anyway when the
+fetch fails. A device that is in a conversation before the seeds arrive
+keeps the current-key binding for good (the third pass's "Left as it is"),
+is another account to every gate of its siblings, and derives another
+PublisherGroup id (G-56; on Android the core refuses it instead). The
+DeviceGroup id has the same weakness: its lineage seed falls back to the
+current seed, so such a device opens, founds or knocks another journal than
+its siblings.
+
+**Decision: prevent the state.** A device that joins an account does not
+bind its device identity, publish a KeyPackage, join a conversation or a
+channel, or open, found or knock the DeviceGroup, while the account's
+earlier keys exist and have not reached it. When they arrive it binds under
+the conversation key, like its siblings.
+
+1. **The signal is the account's own conversation link (3.7).** The
+   anonymous identity fetch serves it; a device verifies it against its OWN
+   current key and reads the conversation key `C` from it. A link that does
+   not verify (minted before a reset) is ignored. A server can strip it (the
+   device then binds as before this amendment: no worse than its power to
+   deny) and cannot add one (it needs the current key's signature). The
+   restore routes already fetch the bundle before anything is written (the
+   seed check); the answer is taken from that fetch, and recorded per
+   account under the device key.
+2. **The binding verdict gains `wait`.** The target is `C` when the link
+   names one, else the oldest held predecessor, else the current key. The
+   kept cases are unchanged (a binding under a held predecessor; a binding
+   under the current key on a device that holds conversations, now
+   unreachable). Otherwise: a target whose seed is not held, or a link that
+   could not be read when a mint is due, is `wait`; else mint under the
+   target. Signup, guest signup and the landing after a reset or recall on
+   the same device are exempt (no link can name a key they lack).
+3. **The verdict runs before the session lands.** On iOS and Android the
+   binding is minted inside the chat bootstrap, after the state flips to a
+   session; the gate moves into the auth layer, before the flip, and the
+   chat-layer mint refuses `wait` as defence in depth. A device that must
+   wait is parked in a new state beside "needs recovery phrase": signed in,
+   the app shell not started.
+4. **The DeviceGroup lineage follows the link.** When the recorded link
+   names `C` and no held seed derives it, the lineage is "none" and nothing
+   opens, founds or knocks a DeviceGroup. This also settles 3.7's open item
+   on a device that restores after it has landed.
+5. **Pairing carries the earlier keys in the recovery row, synchronously.**
+   Every pairing route that can bring a device without them carries the
+   ADR-0018 Path B recovery row, and without that row nothing lands, so the
+   seeds go inside it: recovery payload **v3** =
+   `grant(32) ‖ phrase_entropy(16) ‖ count(1, 0..=8) ‖ count × (seed(64) ‖
+   adopted_at_ms(8 BE))`, own predecessors oldest first, exporter label
+   `lakko/device-recovery/v3`, row magic `lakko/recovery-payload/v3`; strict
+   length, refused on a duplicate or a seed of the current key; v2 refused
+   (flag day, the ADR-0018 precedent). The confirming device that cannot
+   read its own predecessor store publishes no row (the joiner sees the
+   existing error). The joiner stores the seeds before the account seed and
+   the landing. The state bundle keeps carrying them as a second source.
+   The codec is written once, in Rust: `lakko-mnemonic::recovery_payload`
+   (the plaintext, the row framing and the exporter label; on both FFI
+   surfaces as `composeRecoveryPayload` / `decodeRecoveryPayload` /
+   `wrapRecoveryRow` / `unwrapRecoveryRow` / `recoveryExporterLabel` /
+   `recoveryExporterKeyLen` / `recoveryPredecessorsMax`), with the golden
+   plaintext vector (193 bytes) pinned there and in both FFI crates; the
+   clients call it and hold no codec of their own (the v2 codecs are
+   deleted). The verdict of item 2 is `lakko-contacts::own_binding`
+   (`ownBindingVerdict`, the 17 shared vectors as its test table) and the
+   link rule of item 1 is `lakko_transparency::own_conversation_key`
+   (`ownConversationKey`), on the same two surfaces.
+6. **While parked, the device fetches the backup itself** with the phrase it
+   holds (every device with keys holds it, ADR-0072) and re-reads the link:
+   at entry, at every start, and every 5 minutes while the screen is in the
+   foreground (chosen, not measured). The person can also pair from the
+   screen ("Another device").
+7. **No time bound and no fallback to the current key** (chosen; the
+   maintainer's to confirm). The device stays parked until a source
+   delivers `C`, the link stops naming a key it lacks, or the person takes
+   "I have none of these", the existing ADR-0073 reset. Any automatic
+   fallback would re-create the state this amendment forbids, and the one
+   case it would help (every device holding `C` and the backup gone) has
+   lost the conversations under `C` on that device either way.
+
+**What changes on the wire.** Only the recovery row, sealed under the
+DeviceGroup exporter. Its codec is not a client codec: it lives in Rust,
+`crates/lakko-mnemonic/src/recovery_payload.rs` (the crate that owns the
+phrase entropy and its other carriers; fuzz target
+`lakko-mnemonic/recovery_payload_decode`), beside the verdict in
+`crates/lakko-contacts/src/own_binding.rs` and the link rule
+`lakko_transparency::own_conversation_key`
+(`crates/lakko-transparency/src/conversation_link.rs`); the clients reach
+all three through UniFFI and wasm. No `lakko-mls`, proto, backup-format or
+server change, so invariant #3 is not engaged and G-39's surface does not
+grow. Invariant #2 holds (the row is
+sealed end to end; the server sees a longer opaque row). Invariant #4 has a
+corollary here: a device that cannot reach the keys it needs refuses to take
+part rather than taking part under another key.
+
+**Already-affected devices.** None deployed. A development device bound under
+the current key that holds conversations stays as it is (the kept case) and
+is repaired by Forget device and a restore.
+
+**Pairing again while parked (found while building).** A device that came
+in by pairing has already joined the account's DeviceGroup when it parks
+(the row lacked the earlier keys). Pairing it again with another device
+reuses its device identity, so the confirming device's add is refused by
+the core (a duplicate signature key). The joining device therefore records
+the DeviceGroup id at every join (it cannot derive it while it lacks the
+earlier key), and when "Another device" runs from the parked screen with its
+leaf still in that group it signs an ADR-0081 self-removal proof (the
+DeviceGroup's latest epoch from an empty knock, else its own) and carries it
+in the ordinary pairing payload (`lakko_mls::pairing::encode_with_self_removal_proof`,
+`buildPairingQrWithSelfRemovalProof` / `encodePairingQrWithSelfRemovalProof`).
+The confirming device, when the proof covers at the epoch the commit leaves,
+replaces that leaf in one commit (`replaceDeviceAt`, kind rejoin-replace,
+through the DS commit route) instead of adding; a proof that does not cover
+fails the pairing with nothing committed. No leaf is left without a holder.
+Giving the device a fresh identity instead was built on iOS and withdrawn:
+it left the old leaf in Devices as a device nobody holds.
+
+**Parked landings run one at a time.** The periodic look for the earlier
+keys and a completion the person starts ("Another device", the phrase) share
+one guard on each client, and each re-checks that the device is still
+parked once it holds it.
+
+**UX:** [`docs/ux/identity-recovery.md`](../ux/identity-recovery.md) section
+8a (the parked screen).
+
+**Amends:** the third pass's "Left as it is" first bullet (superseded), 3.7's
+open item on the DeviceGroup lineage, [ADR-0018](0018-recovery-factor-cascade.md)
+Path B (payload v3), [ADR-0050](0050-per-device-conversation-leaves.md)
+section 2.9 (the state bundle is no longer the only carrier of the own
+predecessors). The G-56 research's alternative (a device bound under the
+current key becomes a reader of the account's channels) is not taken: the
+state it handles no longer arises.
+
+## Channel proofs after a rotation (2026-11-20)
+
+Found from an iPhone whose reseals of its own channel were refused `401
+owner-proof-required` for hours. The clients signed channel proofs with
+different keys after a rotation: iOS and Android signed owner proofs with
+the CURRENT seed's key, web with the lineage key except for channels that
+same web device had handed over itself; iOS signed co-publisher proofs with
+the current seed's key, web and Android with the lineage key, while every
+client's appointed binding names the lineage key. The section 3.5 handover is
+tried once by a kept device and covers only the channels a device created or
+publishes. Built the same day on web (and the desktop app), iOS and Android,
+host-tested only, not walked; which of these broke the iPhone's channel was
+not established:
+
+- **Owner proofs use the current key on every client**, a new channel's
+  registration included. Each client has one mapping every owner-signed
+  request goes through (iOS `ChannelsClient.ownerSigner`, web `ownerSigner`
+  in `channels/api.ts`, Android `ChannelsClient.ownerSigner` with the owner
+  succession): an identity of the account, lineage or current, is signed for
+  by the current one, so no caller can pass the wrong one. Only the handover
+  signs by exact keys (iOS `ownerSignerExact`, web `putChannelOwner`, Android
+  `ownerSignerExact`).
+- **Co-publisher proofs use the lineage key on every client**, the key the
+  binding the owner appointed was composed with. A co-publisher cannot move
+  its own appointment, and the lineage key is the one a rotation never
+  changes, so no co-publisher is refused after a rotation and no repair is
+  needed. iOS also sends its in-group binding under the lineage identity (it
+  sent it under the device leaf).
+- **Owner-key repair.** An owner device whose own channel refuses an owner
+  proof (`401 owner-proof-required`) runs the section 3.5 handover from each
+  own predecessor key, newest first, to the current key; once it lands the
+  held channel work runs again. Once per channel per process; a try with no
+  answer runs again next pass. A channel no key of the account owns is left
+  alone and logged.
 
 ## Not verified
 

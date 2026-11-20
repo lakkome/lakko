@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The moderator list this service serves (ADR-0089 section 3).
+//! The moderator list this service serves (ADR-0098 section 3).
 //!
 //! The offline root signs the list; the operator places it at
 //! `LAKKO_MODERATION_LIST_PATH` and pins the root's public key in

@@ -12,7 +12,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** ADR-0089 section 2, UX section 2.2 / 2.3 — the report sheet's rules and every send state. */
+/** ADR-0098 section 2, UX section 2.2 / 2.3 — the report sheet's rules and every send state. */
 class ReportTest {
 
     private val author = "QVVUSE9SLUFDQ09VTlQtS0VZLTMyLUJZVEVTLSEhISE="

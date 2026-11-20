@@ -63,7 +63,7 @@ extension ChatRepository {
                 row.sent.append(KnockVersionStore.sentTag(admin, row.version))
                 KnockVersionStore.save(row, accountIdB64, groupIdHex)
             } catch {
-                NSLog("[knock] WARN a knock seed was not delivered; retried on the next change")
+                if !ConversationReentryRules.isBehindRefusal(error) { NSLog("[knock] WARN a knock seed was not delivered; retried on the next change") }
             }
         }
         // The owner's other devices learn every version, 0 through the current
@@ -86,9 +86,12 @@ extension ChatRepository {
                 row.sent.append(tag)
                 KnockVersionStore.save(row, accountIdB64, groupIdHex)
             } catch {
-                NSLog("[knock] WARN a knock seed for this account's devices was not sent; retried later")
+                if !ConversationReentryRules.isBehindRefusal(error) { NSLog("[knock] WARN a knock seed for this account's devices was not sent; retried later") }
             }
         }
+        // ADR-0091 phase 2 route 3 — the knock key goes to every member, once
+        // per version.
+        await publishKnockKeyIfOwed(groupIdHex: groupIdHex)
     }
 
     /// The owner's knock seed of `version`: the one another device of this
@@ -134,7 +137,7 @@ extension ChatRepository {
         let bytes = try composeGroupReactionsEnvelope(
             value: FfiGroupReactions(reactions: value, updatedAtMs: stamp))
         let bound = binding.capture()
-        try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes)
+        try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes, personAction: true)
         try await groupNameLock.run(groupIdHex: groupIdHex) { [self] in
             groupSettingsStore.setReactions(
                 accountIdB64: accountIdB64, groupIdHex: groupIdHex,
@@ -213,7 +216,7 @@ extension ChatRepository {
         guard let accountIdB64 = currentAccountIdB64 else { return }
         let bytes = try composeGroupPhotoEnvelope(photo: photo.ffi)
         let bound = binding.capture()
-        try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes)
+        try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes, personAction: true)
         try await groupNameLock.run(groupIdHex: groupIdHex) { [self] in
             let previous = groupSettingsStore.photo(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
             groupSettingsStore.setPhoto(accountIdB64: accountIdB64, groupIdHex: groupIdHex, photo)
@@ -329,16 +332,36 @@ extension ChatRepository {
     /// Section 3.1 — claim `handle` for a group being founded, BEFORE
     /// anything about it leaves the device: a held name throws and nothing is
     /// created. Returns the signed in-group value to adopt once registered.
+    ///
+    /// `earlier`: the group ids of earlier New group attempts at this name,
+    /// newest first (``PendingGroupHandleStore``); a retry moves the name from
+    /// one of them to this group instead of claiming it.
     func claimHandleBeforeFounding(
-        groupId: Data, handle: String, isPublic: Bool, name: String, avatar: ProfileAvatar?
+        groupId: Data, handle: String, isPublic: Bool, name: String, avatar: ProfileAvatar?,
+        earlier: [Data] = []
     ) async throws -> (value: FfiConversationHandle, leaseUntilMs: UInt64) {
         guard let accountIdentity else { throw ChatError.argument("no account identity") }
         let facts = isPublic ? newGroupFacts(groupId: groupId, name: name, avatar: avatar) : nil
         if isPublic && facts == nil { throw ChatError.argument("a public group needs a name") }
         let accountSeed = accountIdentity.ed25519Seed()
-        let written = try await ConversationHandles.claim(
-            discovery: DiscoveryClient(), accountSeed: accountSeed, journalId: groupId,
-            handle: handle, isPublic: isPublic, facts: facts)
+        let discovery = DiscoveryClient()
+        let written = try await ConversationHandles.claimOrTakeBack(
+            earlier: earlier,
+            claim: {
+                try await ConversationHandles.claim(
+                    discovery: discovery, accountSeed: accountSeed, journalId: groupId,
+                    handle: handle, isPublic: isPublic, facts: facts)
+            },
+            rekeyFrom: { earlierId in
+                try await ConversationHandles.move(
+                    discovery: discovery, accountSeed: accountSeed, fromJournalId: earlierId,
+                    toJournalId: groupId, handle: handle)
+            },
+            update: {
+                try await ConversationHandles.update(
+                    discovery: discovery, accountSeed: accountSeed, journalId: groupId,
+                    handle: handle, isPublic: isPublic, facts: facts)
+            })
         var seed = try ConversationHandles.seed(accountSeed: accountSeed, journalId: groupId)
         defer { RootHandover.wipe(&seed) }
         let value = try signConversationHandle(
@@ -357,8 +380,13 @@ extension ChatRepository {
             name: name, description: "", leaseUntilMs: leaseUntilMs), accountIdB64)
         groupSettingsRevision &+= 1
         if let bytes = try? composeConversationHandleEnvelope(value: value) {
-            try? await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes)
-            groupHandlePublisher.notePublished(groupIdHex: groupIdHex)
+            // Stored first by design (the name is already written at the
+            // directory); a send held while behind goes again with the
+            // back-in-step re-send (walk-3 rule W3-R5) and on growth.
+            if (try? await publishApplicationMessage(
+                groupIdHex: groupIdHex, plaintextBytes: bytes, personAction: true)) != nil {
+                groupHandlePublisher.notePublished(groupIdHex: groupIdHex)
+            }
         }
     }
 
@@ -823,6 +851,8 @@ extension ChatRepository {
         case .knockSeed(let plaintext):
             receiveKnockSeed(accountIdB64: accountIdB64, record: record, groupIdHex: groupIdHex,
                              plaintext: plaintext, senderLeaf: senderLeaf)
+        case .knockKey(let key):
+            receiveKnockKey(groupIdHex: groupIdHex, key: key, senderLeaf: senderLeaf)
         }
     }
 
@@ -840,7 +870,16 @@ extension ChatRepository {
             (try? record.group.members())?.first(where: { $0.leafIndex == leaf })?.accountKey
         }
         guard let owner, let sender, sender == owner,
-              let seed = try? openKnockSeedEnvelope(plaintext: plaintext, accountIdentity: identity)
+              // ADR-0074 section 3.7 — after a rotation the owner seals to the
+              // current identity's X25519 key (the directory's).
+              let seed = RotatedMemberSeal.openSealedToOwnAccount(
+                  conversation: identity,
+                  current: currentAccountIdentityIfRotated,
+                  openOwn: { try openKnockSeedEnvelope(plaintext: plaintext, accountIdentity: $0) },
+                  openSealedTo: {
+                      try openKnockSeedEnvelopeSealedTo(
+                          plaintext: plaintext, accountIdentity: $0, sealedToIdentity: $1)
+                  })
         else {
             NSLog("[knock] a knock seed was dropped")
             return

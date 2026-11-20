@@ -63,6 +63,31 @@ constexpr std::array<uint8_t, kSeedLen> kTestSeed = {
 
 using DecryptStatus = webrtc::FrameDecryptorInterface::Status;
 
+// A transform on call keys of its own, for the tests that need one sender or
+// one receiver: the keys go with the transform (it holds the only
+// reference). Null when the seed is refused, as `LakkoCallKeys::Create` is.
+lakko::sframe::LakkoFrameEncryptor* NewEnc(const uint8_t* seed,
+                                           std::size_t seed_len,
+                                           uint32_t leaf, uint8_t stream) {
+  auto* keys = lakko::sframe::LakkoCallKeys::Create(seed, seed_len);
+  if (keys == nullptr) return nullptr;
+  keys->AddRef();
+  auto* enc = lakko::sframe::LakkoFrameEncryptor::Create(keys, leaf, stream);
+  keys->Release();
+  return enc;
+}
+
+lakko::sframe::LakkoFrameDecryptor* NewDec(const uint8_t* seed,
+                                           std::size_t seed_len,
+                                           const char* label = nullptr) {
+  auto* keys = lakko::sframe::LakkoCallKeys::Create(seed, seed_len);
+  if (keys == nullptr) return nullptr;
+  keys->AddRef();
+  auto* dec = lakko::sframe::LakkoFrameDecryptor::Create(keys, label);
+  keys->Release();
+  return dec;
+}
+
 constexpr std::size_t kTagBytes = 16;
 constexpr std::size_t kTrailerBytes = 3;
 
@@ -172,14 +197,14 @@ void test_round_trip_single_sender() {
 
   constexpr uint32_t kAliceLeaf = 7;
   auto* enc =
-      lakko::sframe::LakkoFrameEncryptor::Create(kTestSeed.data(),
+      NewEnc(kTestSeed.data(),
                                                  kTestSeed.size(),
                                                  kAliceLeaf, /*stream_index=*/0);
   assert(enc != nullptr && "Encryptor::Create returned nullptr");
   enc->AddRef();  // refcount: 0 -> 1
 
   auto* dec =
-      lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
+      NewDec(kTestSeed.data(),
                                                  kTestSeed.size());
   assert(dec != nullptr && "Decryptor::Create returned nullptr");
   dec->AddRef();
@@ -258,11 +283,11 @@ void test_additional_data_ignored_header_is_aad() {
 
   constexpr uint32_t kAliceLeaf = 7;
   auto* enc =
-      lakko::sframe::LakkoFrameEncryptor::Create(kTestSeed.data(),
+      NewEnc(kTestSeed.data(),
                                                  kTestSeed.size(),
                                                  kAliceLeaf, /*stream_index=*/0);
   auto* dec =
-      lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
+      NewDec(kTestSeed.data(),
                                                  kTestSeed.size());
   enc->AddRef();
   dec->AddRef();
@@ -335,21 +360,21 @@ void test_multi_sender_into_one_receiver() {
   constexpr uint32_t kCarolLeaf = 3;
 
   auto* enc_alice =
-      lakko::sframe::LakkoFrameEncryptor::Create(kTestSeed.data(),
+      NewEnc(kTestSeed.data(),
                                                  kTestSeed.size(),
                                                  kAliceLeaf, /*stream_index=*/0);
   auto* enc_bob =
-      lakko::sframe::LakkoFrameEncryptor::Create(kTestSeed.data(),
+      NewEnc(kTestSeed.data(),
                                                  kTestSeed.size(),
                                                  kBobLeaf, /*stream_index=*/0);
   auto* enc_carol =
-      lakko::sframe::LakkoFrameEncryptor::Create(kTestSeed.data(),
+      NewEnc(kTestSeed.data(),
                                                  kTestSeed.size(),
                                                  kCarolLeaf, /*stream_index=*/0);
 
   // One decryptor receives forwarded frames from all three.
   auto* dec =
-      lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
+      NewDec(kTestSeed.data(),
                                                  kTestSeed.size());
 
   enc_alice->AddRef();
@@ -412,13 +437,13 @@ void test_bad_seed_length() {
   // Below CallKey::CALL_KEY_LEN.
   const std::array<uint8_t, 8> short_seed{};
   auto* enc =
-      lakko::sframe::LakkoFrameEncryptor::Create(short_seed.data(),
+      NewEnc(short_seed.data(),
                                                  short_seed.size(),
                                                  0, /*stream_index=*/0);
   assert(enc == nullptr && "Encryptor::Create should reject short seed");
 
   auto* dec =
-      lakko::sframe::LakkoFrameDecryptor::Create(short_seed.data(),
+      NewDec(short_seed.data(),
                                                  short_seed.size());
   assert(dec == nullptr && "Decryptor::Create should reject short seed");
 
@@ -432,11 +457,11 @@ void test_ciphertext_tamper() {
 
   constexpr uint32_t kAliceLeaf = 11;
   auto* enc =
-      lakko::sframe::LakkoFrameEncryptor::Create(kTestSeed.data(),
+      NewEnc(kTestSeed.data(),
                                                  kTestSeed.size(),
                                                  kAliceLeaf, /*stream_index=*/0);
   auto* dec =
-      lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
+      NewDec(kTestSeed.data(),
                                                  kTestSeed.size());
   enc->AddRef();
   dec->AddRef();
@@ -501,11 +526,11 @@ void test_counter_monotonicity_and_out_of_order() {
   constexpr std::size_t kFrameCount = 1000;
 
   auto* enc =
-      lakko::sframe::LakkoFrameEncryptor::Create(kTestSeed.data(),
+      NewEnc(kTestSeed.data(),
                                                  kTestSeed.size(),
                                                  kAliceLeaf, /*stream_index=*/0);
   auto* dec =
-      lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
+      NewDec(kTestSeed.data(),
                                                  kTestSeed.size());
   enc->AddRef();
   dec->AddRef();
@@ -590,11 +615,11 @@ void test_per_call_key_isolation() {
   seed_b[0] ^= 0xFFu;  // diverge in the first byte → distinct CallKey
 
   auto* enc_a =
-      lakko::sframe::LakkoFrameEncryptor::Create(kTestSeed.data(),
+      NewEnc(kTestSeed.data(),
                                                  kTestSeed.size(),
                                                  kAliceLeaf, /*stream_index=*/0);
   auto* dec_b =
-      lakko::sframe::LakkoFrameDecryptor::Create(seed_b.data(),
+      NewDec(seed_b.data(),
                                                  seed_b.size());
   enc_a->AddRef();
   dec_b->AddRef();
@@ -639,11 +664,11 @@ void test_payload_size_extremes() {
 
   constexpr uint32_t kAliceLeaf = 41;
   auto* enc =
-      lakko::sframe::LakkoFrameEncryptor::Create(kTestSeed.data(),
+      NewEnc(kTestSeed.data(),
                                                  kTestSeed.size(),
                                                  kAliceLeaf, /*stream_index=*/0);
   auto* dec =
-      lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
+      NewDec(kTestSeed.data(),
                                                  kTestSeed.size());
   enc->AddRef();
   dec->AddRef();
@@ -725,7 +750,7 @@ void test_media_frame_golden_vector() {
   // (1) The decryptor opens the canonical golden frame — a frame any other
   // stack seals opens on the native media path. A non-empty host
   // additional_data is passed on purpose: it is not authenticated.
-  auto* dec = lakko::sframe::LakkoFrameDecryptor::Create(
+  auto* dec = NewDec(
       golden_seed.data(), golden_seed.size(), "video");
   assert(dec != nullptr && "golden Decryptor::Create returned nullptr");
   dec->AddRef();
@@ -756,7 +781,7 @@ void test_media_frame_golden_vector() {
   assert(golden_kid == 0x0301u && golden_counter == 1);
 
   // (2) The encryptor seals two frames of the same input.
-  auto* enc = lakko::sframe::LakkoFrameEncryptor::Create(
+  auto* enc = NewEnc(
       golden_seed.data(), golden_seed.size(), kGoldenLeaf, kGoldenStream);
   assert(enc != nullptr && "golden Encryptor::Create returned nullptr");
   enc->AddRef();
@@ -805,9 +830,9 @@ void test_codec_decides_the_clear_prefix() {
   std::printf("test_codec_decides_the_clear_prefix ... ");
 
   constexpr uint32_t kLeaf = 9;
-  auto* enc = lakko::sframe::LakkoFrameEncryptor::Create(
+  auto* enc = NewEnc(
       kTestSeed.data(), kTestSeed.size(), kLeaf, /*stream_index=*/1);
-  auto* dec = lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
+  auto* dec = NewDec(kTestSeed.data(),
                                                          kTestSeed.size());
   assert(enc != nullptr && dec != nullptr);
   enc->AddRef();
@@ -889,9 +914,9 @@ void test_codec_decides_the_clear_prefix() {
 void test_audio_red_is_marked() {
   std::printf("test_audio_red_is_marked ... ");
 
-  auto* enc = lakko::sframe::LakkoFrameEncryptor::Create(
+  auto* enc = NewEnc(
       kTestSeed.data(), kTestSeed.size(), /*local_leaf=*/4, /*stream_index=*/0);
-  auto* dec = lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
+  auto* dec = NewDec(kTestSeed.data(),
                                                          kTestSeed.size());
   assert(enc != nullptr && dec != nullptr);
   enc->AddRef();
@@ -932,9 +957,9 @@ void test_every_byte_is_authenticated() {
   std::printf("test_every_byte_is_authenticated ... ");
 
   constexpr uint32_t kLeaf = 12;
-  auto* enc = lakko::sframe::LakkoFrameEncryptor::Create(
+  auto* enc = NewEnc(
       kTestSeed.data(), kTestSeed.size(), kLeaf, /*stream_index=*/1);
-  auto* dec = lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
+  auto* dec = NewDec(kTestSeed.data(),
                                                          kTestSeed.size());
   assert(enc != nullptr && dec != nullptr);
   enc->AddRef();
@@ -995,7 +1020,7 @@ void test_header_first_layout_is_refused() {
 
   std::array<uint8_t, kSeedLen> golden_seed{};
   golden_seed.fill(0x42);
-  auto* dec = lakko::sframe::LakkoFrameDecryptor::Create(golden_seed.data(),
+  auto* dec = NewDec(golden_seed.data(),
                                                          golden_seed.size());
   assert(dec != nullptr);
   dec->AddRef();
@@ -1048,9 +1073,9 @@ void test_set_codec_races_encrypt() {
 
   constexpr uint32_t kLeaf = 17;
   constexpr std::size_t kFrames = 20000;
-  auto* enc = lakko::sframe::LakkoFrameEncryptor::Create(
+  auto* enc = NewEnc(
       kTestSeed.data(), kTestSeed.size(), kLeaf, /*stream_index=*/1);
-  auto* dec = lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
+  auto* dec = NewDec(kTestSeed.data(),
                                                          kTestSeed.size());
   assert(enc != nullptr && dec != nullptr);
   enc->AddRef();
@@ -1110,8 +1135,8 @@ void test_set_codec_races_encrypt() {
   std::printf("ok\n");
 }
 
-// G-18 / ADR-0029: a mid-call rekey rotates the encryptor's seal key + the
-// decryptor's ring. A frame sealed under the OLD epoch still opens through the
+// G-18 / ADR-0029: a mid-call rekey of the call keys rotates the encryptor's
+// seal key + the decryptor's ring. A frame sealed under the OLD epoch still opens through the
 // decryptor's overlap window; a fresh frame opens under the NEW epoch; and
 // pruning the expired window closes the fall-back (seed-boundary forward
 // secrecy, C-9 / C-10).
@@ -1122,12 +1147,19 @@ void test_mid_call_rekey_overlap() {
   std::array<uint8_t, kSeedLen> seed_b = kTestSeed;
   seed_b[0] ^= 0xFF;  // a distinct epoch-B seed
 
-  auto* enc = lakko::sframe::LakkoFrameEncryptor::Create(
-      kTestSeed.data(), kTestSeed.size(), kLeaf, /*stream_index=*/0);
+  // The sending participant's call keys and the receiving participant's.
+  auto* send_keys =
+      lakko::sframe::LakkoCallKeys::Create(kTestSeed.data(), kTestSeed.size());
+  auto* recv_keys =
+      lakko::sframe::LakkoCallKeys::Create(kTestSeed.data(), kTestSeed.size());
+  assert(send_keys != nullptr && recv_keys != nullptr);
+  send_keys->AddRef();
+  recv_keys->AddRef();
+  auto* enc = lakko::sframe::LakkoFrameEncryptor::Create(send_keys, kLeaf,
+                                                         /*stream_index=*/0);
   assert(enc != nullptr);
   enc->AddRef();
-  auto* dec = lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
-                                                         kTestSeed.size());
+  auto* dec = lakko::sframe::LakkoFrameDecryptor::Create(recv_keys);
   assert(dec != nullptr);
   dec->AddRef();
 
@@ -1163,9 +1195,14 @@ void test_mid_call_rekey_overlap() {
   std::vector<uint8_t> old_wire = seal(pt_old, &old_len);
 
   // Rekey both sides to epoch B, 1 s overlap window at t=1000 (expires 2000).
-  assert(enc->Rekey(seed_b.data(), seed_b.size()) && "encryptor rekey failed");
-  assert(dec->Rekey(seed_b.data(), seed_b.size(), 1000, 1000) &&
-         "decryptor rekey failed");
+  assert(send_keys->Rekey(seed_b.data(), seed_b.size(), 1000, 1000) &&
+         "sender's call keys rekey failed");
+  assert(send_keys->Generation() == 1);
+  assert(recv_keys->Rekey(seed_b.data(), seed_b.size(), 1000, 1000) &&
+         "receiver's call keys rekey failed");
+  // A refused seed changes nothing.
+  assert(!send_keys->Rekey(seed_b.data(), 8, 1000, 1000));
+  assert(send_keys->Generation() == 1);
 
   // A fresh epoch-B frame.
   std::size_t new_len = 0;
@@ -1186,7 +1223,8 @@ void test_mid_call_rekey_overlap() {
   // The codec set before a rekey survives it: a VP8 key frame sealed under
   // the new epoch still keeps its 10 clear bytes and opens.
   enc->SetCodec(LAKKO_SFRAME_MEDIA_CODEC_VP8);
-  const bool rekeyed_again = enc->Rekey(seed_b.data(), seed_b.size());
+  const bool rekeyed_again =
+      send_keys->Rekey(seed_b.data(), seed_b.size(), 1000, 1000);
   assert(rekeyed_again);
   assert(enc->Codec() == LAKKO_SFRAME_MEDIA_CODEC_VP8);
   {
@@ -1200,7 +1238,7 @@ void test_mid_call_rekey_overlap() {
   }
 
   // Prune past the window → the old frame no longer opens.
-  dec->Prune(2000);
+  recv_keys->Prune(2000);
   auto old_after_prune = open(old_wire, old_len);
   assert(old_after_prune.first ==
              webrtc::FrameDecryptorInterface::Status::kFailedToDecrypt &&
@@ -1211,6 +1249,73 @@ void test_mid_call_rekey_overlap() {
 
   enc->Release();
   dec->Release();
+  send_keys->Release();
+  recv_keys->Release();
+  std::printf("ok\n");
+}
+
+// One rekey of the call keys reaches every encryptor on them, without the
+// platform naming any of them: the reason the keys are shared (the iOS shim
+// found its encryptors through wrapper objects that were new on every read,
+// so its per-encryptor rekey reached none, 2026-11-10). After the rekey every
+// stream seals under the new seed: a receiver that holds only the new seed
+// opens them all, and one that holds only the old seed opens none.
+void test_one_rekey_reaches_every_encryptor() {
+  std::printf("test_one_rekey_reaches_every_encryptor ... ");
+
+  constexpr uint32_t kLeaf = 2;
+  std::array<uint8_t, kSeedLen> seed_b = kTestSeed;
+  seed_b[5] ^= 0x5a;
+
+  auto* keys =
+      lakko::sframe::LakkoCallKeys::Create(kTestSeed.data(), kTestSeed.size());
+  assert(keys != nullptr);
+  keys->AddRef();
+  // Audio, the main camera, the light and the middle copy (ADR-0035 /
+  // ADR-0070 stream indices 0, 1, 3, 4).
+  const uint8_t streams[] = {0, 1, 3, 4};
+  std::vector<lakko::sframe::LakkoFrameEncryptor*> encs;
+  for (uint8_t stream : streams) {
+    auto* enc = lakko::sframe::LakkoFrameEncryptor::Create(keys, kLeaf, stream);
+    assert(enc != nullptr);
+    enc->AddRef();
+    encs.push_back(enc);
+  }
+
+  auto* only_new = NewDec(seed_b.data(), seed_b.size());
+  auto* only_old = NewDec(kTestSeed.data(), kTestSeed.size());
+  assert(only_new != nullptr && only_old != nullptr);
+  only_new->AddRef();
+  only_old->AddRef();
+
+  const std::vector<uint8_t> pt = {'f', 'r', 'a', 'm', 'e'};
+  // Before the rekey every stream opens under the old seed only.
+  for (auto* enc : encs) {
+    const std::vector<uint8_t> wire =
+        seal_frame(enc, cricket::MEDIA_TYPE_AUDIO, pt);
+    assert(open_frame(only_old, cricket::MEDIA_TYPE_AUDIO, wire).first ==
+           DecryptStatus::kOk);
+    assert(open_frame(only_new, cricket::MEDIA_TYPE_AUDIO, wire).first ==
+           DecryptStatus::kFailedToDecrypt);
+  }
+
+  assert(keys->Rekey(seed_b.data(), seed_b.size(), 1000, 1000));
+
+  for (auto* enc : encs) {
+    const std::vector<uint8_t> wire =
+        seal_frame(enc, cricket::MEDIA_TYPE_AUDIO, pt);
+    auto opened = open_frame(only_new, cricket::MEDIA_TYPE_AUDIO, wire);
+    assert(opened.first == DecryptStatus::kOk &&
+           "an encryptor kept sealing under the old seed after the rekey");
+    assert(opened.second == pt);
+    assert(open_frame(only_old, cricket::MEDIA_TYPE_AUDIO, wire).first ==
+           DecryptStatus::kFailedToDecrypt);
+  }
+
+  for (auto* enc : encs) enc->Release();
+  only_new->Release();
+  only_old->Release();
+  keys->Release();
   std::printf("ok\n");
 }
 
@@ -1227,7 +1332,7 @@ void test_mid_call_rekey_overlap() {
 void test_empty_frame_is_not_a_decrypt_failure() {
   std::printf("test_empty_frame_is_not_a_decrypt_failure ... ");
 
-  auto* dec = lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
+  auto* dec = NewDec(kTestSeed.data(),
                                                          kTestSeed.size(),
                                                          "audio");
   assert(dec != nullptr);
@@ -1272,6 +1377,7 @@ int main() {
   test_header_first_layout_is_refused();
   test_set_codec_races_encrypt();
   test_mid_call_rekey_overlap();
+  test_one_rekey_reaches_every_encryptor();
   test_empty_frame_is_not_a_decrypt_failure();
   std::printf("all sframe-bridge tests passed\n");
   return 0;

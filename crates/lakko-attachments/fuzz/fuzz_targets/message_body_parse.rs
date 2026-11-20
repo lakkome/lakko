@@ -18,16 +18,25 @@
 //! `fuzz_api::media_metadata_within_bounds`, a property oracle asserted
 //! here: every media field that survives parse is within its bound, and
 //! re-composing the parsed refs then parsing again yields the same refs.
+//! ADR-0047 section 6: the `inline_thumb` micro thumbnail is part of that
+//! oracle too: a JPEG of at most `MAX_INLINE_THUMB_BYTES` decoded bytes, on
+//! no ref but the first inline image or video of the message.
 //! ADR-0087 section 14: the `channel_invite` card is bounded the same way
 //! (`fuzz_api::channel_invite_within_bounds`). The reaction op (an explicit
 //! add / remove and an optional target-author key) is checked by
 //! `fuzz_api::reaction_within_bounds`.
+//!
+//! ADR-0092: the poll, checklist, location, contact-card and article content
+//! fields and the vote / close / tick / add-item ops are decoded strictly;
+//! `fuzz_api::content_within_bounds` asserts that every one that survives
+//! parse re-composes and parses back to the same body.
 
 #![no_main]
 
 use lakko_attachments::fuzz_api::{
-    channel_invite_within_bounds, forward_within_bounds, media_metadata_within_bounds,
-    parse_message_body, reaction_within_bounds, reply_within_bounds, resend_within_bounds,
+    channel_invite_within_bounds, content_within_bounds, forward_within_bounds,
+    media_metadata_within_bounds, parse_message_body, reaction_within_bounds, reply_within_bounds,
+    resend_within_bounds,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -37,7 +46,10 @@ fuzz_target!(|data: &[u8]| {
     // ADR-0052: a reply's snapshots survive parse only within their bounds,
     // and the bound is idempotent under compose_reply -> parse_body.
     assert!(reply_within_bounds(data));
-    assert!(forward_within_bounds(data), "ADR-0052: a forward that survives parse is within its bounds and idempotent");
+    assert!(
+        forward_within_bounds(data),
+        "ADR-0052: a forward that survives parse is within its bounds and idempotent"
+    );
     // ADR-0073: a re-send marker survives parse only whole and within its
     // bound, and the bound is idempotent under compose_chat -> parse_body.
     assert!(resend_within_bounds(data));
@@ -48,4 +60,6 @@ fuzz_target!(|data: &[u8]| {
     // a bounded emoji and an explicit add / remove op, and its target author
     // survives compose_reaction -> parse_body whole or not at all.
     assert!(reaction_within_bounds(data));
+    // ADR-0092: a new content kind or op that survives parse is canonical.
+    assert!(content_within_bounds(data));
 });

@@ -384,6 +384,20 @@ extension ChatRepository {
     private func resolveHeld(
         _ held: HeldWelcome, accountIdB64: String, bound: BindingEpoch.Captured
     ) async {
+        // ADR-0091 phase 2 section 5 — a Welcome refused because the group is
+        // still active here is first tried as this device's re-entry; while a
+        // re-entry record exists for the group it is never dropped.
+        let reentryPending = groups[held.groupIdHex] != nil
+            && !reentryRecord(groupIdHex: held.groupIdHex).recordedKeyPackages.isEmpty
+        if reentryPending {
+            if await joinReentry(welcome: held.welcome, groupIdHex: held.groupIdHex) {
+                guard bound.isCurrent else { return }
+                membershipEndStore.removeHeld(held, accountIdB64: accountIdB64)
+                onHeldWelcomeJoined?(held.groupIdHex)
+                return
+            }
+            guard bound.isCurrent else { return }
+        }
         var drained = false
         // Two rounds at most: read the journal once, judge again.
         for _ in 0..<2 {
@@ -399,6 +413,11 @@ extension ChatRepository {
                 resumeEnd(groupIdHex: held.groupIdHex)
                 return
             case .drop:
+                if reentryPending {
+                    // Kept: it may be this device's re-entry, joinable once
+                    // the record names its KeyPackage (a re-request).
+                    return
+                }
                 NSLog("membership end: a held Welcome for a live group was dropped")
                 membershipEndStore.removeHeld(held, accountIdB64: accountIdB64)
                 return

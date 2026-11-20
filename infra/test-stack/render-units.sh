@@ -46,6 +46,7 @@ for svc in "${SERVICES[@]}"; do
     -e 's#^Environment=LAKKO_BLOB_DIR=.*#Environment=LAKKO_BLOB_DIR=/var/lib/lakko-test/blobs#' \
     -e 's#^ReadWritePaths=/var/lib/lakko/blobs$#ReadWritePaths=/var/lib/lakko-test/blobs#' \
     -e 's#^ReadOnlyPaths=/etc/lakko$#ReadOnlyPaths=/etc/lakko-test#' \
+    -e 's#^LoadCredential=lakko-donations:/etc/lakko/credstore/#LoadCredential=lakko-donations:/etc/lakko-test/credstore/#' \
     "$REPO/infra/systemd/$src" | cat -s
   } > "$OUT/lakko-test-$svc.service"
 done

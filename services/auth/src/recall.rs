@@ -384,12 +384,15 @@ pub(crate) async fn open_window_until(
 
 /// Hourly pruner: expired anchors, and recall states past their lifetime.
 pub(crate) fn spawn_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
+    const JOB: &str = crate::metrics::jobs::RECALL_PRUNE;
+    lakko_metrics::job_registered(JOB);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(PRUNE_INTERVAL);
         interval.tick().await;
         loop {
             interval.tick().await;
             let now = now_ms();
+            let mut all_ok = true;
             match sqlx::query("DELETE FROM recall_anchors WHERE expires_at_ms <= ?")
                 .bind(now)
                 .execute(&pool)
@@ -399,13 +402,17 @@ pub(crate) fn spawn_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
                     tracing::debug!(rows = r.rows_affected(), "pruned expired recall anchors");
                 },
                 Ok(_) => {},
-                Err(e) => tracing::warn!(error = %e, "recall_anchors prune failed"),
+                Err(e) => {
+                    all_ok = false;
+                    tracing::warn!(error = %e, "recall_anchors prune failed");
+                },
             }
             if let Err(e) = sqlx::query("DELETE FROM recall_states WHERE created_at_ms < ?")
                 .bind(now.saturating_sub(RECALL_STATE_TTL_MS))
                 .execute(&pool)
                 .await
             {
+                all_ok = false;
                 tracing::warn!(error = %e, "recall_states prune failed");
             }
             if let Err(e) = sqlx::query("DELETE FROM recall_outcomes WHERE expires_at_ms <= ?")
@@ -413,8 +420,10 @@ pub(crate) fn spawn_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
                 .execute(&pool)
                 .await
             {
+                all_ok = false;
                 tracing::warn!(error = %e, "recall_outcomes prune failed");
             }
+            crate::metrics::job_ran(JOB, all_ok);
         }
     })
 }
@@ -731,7 +740,7 @@ pub(crate) async fn status(
             ApiError::RecallRefused
         });
     };
-    // ADR-0089 section 4: told only to a holder of an anchor's key.
+    // ADR-0098 section 4: told only to a holder of an anchor's key.
     crate::suspension::refuse_recall_if_suspended(&state.db, &account_id).await?;
     Ok(Json(StatusRes {
         anchor_seq: anchor.seq,
@@ -856,7 +865,7 @@ pub(crate) async fn start(
         return Err(refusal_of(verdict, now).into());
     }
     let anchor = anchor.ok_or(ApiError::RecallRefused)?;
-    // ADR-0089 section 4: after the statement check, before anything is
+    // ADR-0098 section 4: after the statement check, before anything is
     // counted.
     crate::suspension::refuse_recall_if_suspended(&state.db, &account_id).await?;
 
@@ -988,7 +997,7 @@ pub(crate) struct FinishReq {
     /// public key. Not the anchor's key: the old identity does not return.
     pub(crate) new_signature_pubkey_b64: String,
     /// URL-safe base64 of the 64-byte identity proof by the NEW identity key
-    /// over the account id and that key (`signIdentityProof`, ADR-0089 F3).
+    /// over the account id and that key (`signIdentityProof`, ADR-0098 F3).
     /// Absent or invalid: `400 identity-proof-invalid`, before anything else
     /// is looked at.
     #[serde(default)]
@@ -1159,7 +1168,7 @@ async fn replay_outcome(
     if current != Some(outcome.key_generation) {
         return Err(ApiError::RecallRefused);
     }
-    // ADR-0089 section 4: a recall that succeeded before a suspension is not
+    // ADR-0098 section 4: a recall that succeeded before a suspension is not
     // answered with a session after it.
     crate::suspension::refuse_recall_if_suspended(&state.db, &input.account_id).await?;
     let session = crate::session::issue_pair_at(
@@ -1279,7 +1288,7 @@ fn decode_finish(req: &FinishReq) -> Result<FinishInput, OpaqueError> {
 ///    both uploads. Any failure: `401 recall-refused`, nothing consumed
 ///    (`401 statement-stale` when the statement is right but for its time);
 ///    a suspended account is the plain `403`; a new key another account
-///    holds is `409 identity-key-taken` (ADR-0089 F3);
+///    holds is `409 identity-key-taken` (ADR-0098 F3);
 /// 3. the state is consumed (a second finish for it is `recall-refused`);
 /// 4. the OPAQUE login finish against the anchored password: `401
 ///    wrong-password` (the attempt was counted when it was opened);
@@ -1363,10 +1372,10 @@ pub(crate) async fn finish(
         // (ADR-0074 D10, invariant #6).
         return Err(ApiError::BadInput("new_signature_pubkey must be a new key").into());
     }
-    // ADR-0089 section 4: after the statement check, before the attempt is
+    // ADR-0098 section 4: after the statement check, before the attempt is
     // consumed; a suspended account is not recalled.
     crate::suspension::refuse_recall_if_suspended(&state.db, &account_id).await?;
-    // ADR-0089 F3: a key another account holds, refused before the attempt
+    // ADR-0098 F3: a key another account holds, refused before the attempt
     // is consumed (claimed again under the transaction below).
     crate::identity_target::require_free(&state.db, &account_id, &input.new_signature_pubkey)
         .await?;
@@ -1429,7 +1438,7 @@ pub(crate) async fn finish(
         .await
         .map_err(ApiError::Db)?;
 
-    //    The new key's target, claimed for this account (ADR-0089 F3); then
+    //    The new key's target, claimed for this account (ADR-0098 F3); then
     //    the generation and the identity key. No anchor is captured for the
     //    key this displaces.
     crate::identity_target::claim(&mut tx, &account_id, &input.new_signature_pubkey, now).await?;

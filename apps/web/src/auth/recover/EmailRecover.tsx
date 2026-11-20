@@ -331,7 +331,7 @@ export function EmailRecover(props: {
       // your keys" on this very state change; otherwise the app opens.
       if (auth.state().kind === "session") props.onDone();
     } catch (err) {
-      // ADR-0089: the code was right and the account is suspended; the
+      // ADR-0098: the code was right and the account is suspended; the
       // password was not changed. The suspended screen takes over.
       if (await auth.landSuspendedFrom(err, canonicalUsername).catch(() => false)) {
         props.onDone();

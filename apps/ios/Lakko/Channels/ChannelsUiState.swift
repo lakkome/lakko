@@ -305,6 +305,13 @@ public final class ChannelsUiState: ObservableObject {
     /// state (the seeds can sign nothing the server accepts any more).
     public func removeOrphanedChannel(_ channelId: String) {
         removeChannel(channelId)
+        // 2026-11-13 (follow-up decision 2) — remembered as removed: the
+        // account's channel subscription register never lists it back here
+        // and is never written for it (no leave either: the keys it was
+        // owned under are gone with the reset).
+        if let account = boundAccountIdB64 {
+            RemovedOrphanChannels.add(channelId, accountIdB64: account)
+        }
         publisherSigningSeedByChannel[channelId] = nil
         publisherContentSeedByChannel[channelId] = nil
         persistPublisherKeys()
@@ -340,11 +347,72 @@ public final class ChannelsUiState: ObservableObject {
     /// stepped down) but the account still reads the channel as a
     /// subscriber: the publisher keys go, the channel and its posts stay.
     /// The publish counter stays a floor, as in ``removeChannel(_:)``.
+    /// ADR-0090 section 2.5 — the channel's journal was reset under this
+    /// device: its publisher keys go, but the ACCOUNT still owns or
+    /// co-publishes it (no register rewrite); the device reads and waits.
+    public func dropPublisherKeysKeepingRole(_ channelId: String) {
+        keysByChannel[channelId] = nil
+        publisherContentSeedByChannel[channelId] = nil
+        persistPublisherKeys()
+    }
+
     public func dropPublisherKeys(_ channelId: String) {
         keysByChannel[channelId] = nil
         publisherSigningSeedByChannel[channelId] = nil
         publisherContentSeedByChannel[channelId] = nil
         persistPublisherKeys()
+        onPublishingEnded?(channelId)
+    }
+
+    /// ADR-0050 section 2.9 (amended 2026-11-13) — this device stopped
+    /// publishing `channelId` because the account no longer does (removed as
+    /// a publisher, stepped down) while it stays subscribed: the subscription
+    /// register is rewritten as a subscriber's. Wired by the signed-in shell.
+    public var onPublishingEnded: ((String) -> Void)?
+    /// This device started a relationship with a channel (subscribed,
+    /// created it, joined as a publisher) or ended one (unsubscribed, was
+    /// removed, deleted it): the subscription register follows. Wired by
+    /// ``ChannelSubscriptionSync``.
+    public var onRelationshipStarted: ((String) -> Void)?
+    public var onRelationshipEnded: ((String) -> Void)?
+
+    /// UX second-device 4a — the subscriber key the account's live
+    /// subscription register holds for a channel, so a subscribe on this
+    /// device reuses it rather than minting a second key for the account.
+    /// Wired by ``ChannelSubscriptionSync``.
+    public var registeredSubscriberKeys: ((String) -> ChannelSubscriberKeys?)?
+
+    /// The subscriber keys a subscribe on this device uses: this device's,
+    /// else the account's from the register, else fresh ones (each stored).
+    public func subscriberKeysForSubscribe(_ channelId: String) -> ChannelSubscriberKeys {
+        let keys: ChannelSubscriberKeys
+        if let held = subscriberKeysByChannel[channelId] {
+            keys = held
+        } else {
+            keys = registeredSubscriberKeys?(channelId) ?? ChannelsComposer.freshSubscriberKeys()
+            setSubscriberKeys(channelId: channelId, keys: keys)
+        }
+        onRelationshipStarted?(channelId)
+        return keys
+    }
+
+    /// UX second-device 4a — `channelId` is owned or co-published by the
+    /// account and this device holds no PublisherGroup for it: a reader here.
+    /// `nil` for a subscriber, and for a channel this device publishes.
+    public func readerDeviceRole(_ channelId: String) -> ChannelReaderDeviceRole? {
+        guard keysByChannel[channelId] == nil else { return nil }
+        return ChannelReaderDeviceRole(accountRole: extras(channelId).accountRole)
+    }
+
+    /// The trap rule (ADR-0087 section 12 as amended 2026-11-13): this
+    /// device lists `channelId` with publisher keys but its PublisherGroup is
+    /// not in the channel provider. It is a reader here for this session: the
+    /// keys leave memory only (the stored seeds stay, so a provider snapshot
+    /// that comes back later reopens it), and nothing is founded.
+    public func noteNoPublisherGroupHere(_ channelId: String) {
+        guard keysByChannel[channelId] != nil else { return }
+        NSLog("[channels] a published channel has no publisher group on this device; reading only")
+        keysByChannel[channelId] = nil
     }
 
     /// ADR-0087 phase B — the channel was deleted (`410 channel-deleted`,
@@ -373,6 +441,11 @@ public final class ChannelsUiState: ObservableObject {
         if extrasByChannel.removeValue(forKey: channelId) != nil {
             persistExtras()
             publishChannelPhotos()
+        }
+        // Security pass 2026-11-15 (F2/F3) — the channel's Welcome replay
+        // guard goes with it.
+        if let account = boundAccountIdB64 {
+            ChannelDeviceAdmissionStore(accountIdB64: account).forgetReplayGuard(channelId: channelId)
         }
         // Deliberately KEEP this channel's publish counter (in-memory + at
         // rest): un-publishing does NOT destroy the MLS PublisherGroup content
@@ -444,6 +517,7 @@ public final class ChannelsUiState: ObservableObject {
         persistChannelLog()
         updateExtras(channelId) {
             $0.handle = meta.handle.map(StoredConversationHandle.init)
+            $0.recordPublic = meta.listed
             $0.avatar = ProfileAvatar(meta.avatar)
             $0.reactions = meta.reactions.map(StoredAllowedReactions.init)
         }
@@ -586,6 +660,16 @@ public final class ChannelsUiState: ObservableObject {
         persistChannelLog()
     }
 
+    /// 2026-11-20 — drop every kept seed of `channelId` above `epoch`: seeds
+    /// filed under a mapping that no longer holds (``ChannelDeviceAdmission/anchor(channelId:state:mls:epoch:seed:)``).
+    /// The service never served an epoch above its next one, so none of them
+    /// is a seed a reader holds.
+    public func dropSubscribedSeeds(channelId: String, above epoch: UInt32) {
+        guard let byEpoch = subscribedSeedsByChannel[channelId], byEpoch.keys.contains(where: { $0 > epoch }) else { return }
+        subscribedSeedsByChannel[channelId] = byEpoch.filter { $0.key <= epoch }
+        persistChannelLog()
+    }
+
     /// The recovered `epoch -> seed` map for `channelId`
     /// (empty when no envelope has been opened yet).
     public func subscribedSeeds(channelId: String) -> [UInt32: Data] {
@@ -644,6 +728,19 @@ public final class ChannelsUiState: ObservableObject {
         ChannelSubscriberKeyStore.deleteLegacy()
         UserDefaults.standard.removeObject(forKey: subscriberKeysStorageKey)
         UserDefaults.standard.removeObject(forKey: ownerGenerationKey(accountIdB64))
+        RemovedOrphanChannels.clear(accountIdB64: accountIdB64)
+    }
+
+    /// 2026-11-13 (follow-up decision 2) — the channels the subscription
+    /// register reconcile leaves alone on this device: those orphaned by a key
+    /// reset (UX 16.6, the person's to remove) and those removed after it.
+    /// Lower-case hex.
+    public func channelsLeftAloneByRegister() -> Set<String> {
+        var out = Set(channels.filter { orphanedByReset(channelId: $0.id) }.map { $0.id.lowercased() })
+        if let account = boundAccountIdB64 {
+            out.formUnion(RemovedOrphanChannels.load(accountIdB64: account))
+        }
+        return out
     }
 
     // MARK: - Channel-log persistence (list + subscribed seeds)
@@ -971,6 +1068,80 @@ public struct ChannelHandle: Equatable, Sendable, Identifiable {
     /// the local one (a publisher before its first record).
     public var displayDescription: String {
         sharedMeta != nil ? sharedDescription : localDescription
+    }
+}
+
+/// UX second-device 4a — what a device that cannot post in a channel the
+/// account owns or co-publishes shows in place of the composer.
+public enum ChannelReaderDeviceRole: Equatable, Sendable {
+    case owner
+    case publisher
+
+    /// From ``ChannelExtras/accountRole``; `nil` for a subscriber.
+    public init?(accountRole: String?) {
+        switch accountRole {
+        case ChannelAccountRole.owner: self = .owner
+        case ChannelAccountRole.coPublisher: self = .publisher
+        default: return nil
+        }
+    }
+
+    /// The catalog key of the line in place of the composer.
+    public var lineKey: String {
+        switch self {
+        case .owner: return "channels.reader_device.owner"
+        case .publisher: return "channels.reader_device.publisher"
+        }
+    }
+}
+
+/// UX second-device 4a — the info screen of a channel on a reader device of
+/// its owner or a publisher: a subscriber's blocks (the device reads as one,
+/// so ``channelInfoSections(caps:)`` already hides the owner and publisher
+/// blocks) with the exit block empty: no `Unsubscribe` (the account still
+/// owns or publishes the channel), no `Delete channel`.
+public enum ChannelReaderDeviceInfo {
+    public static func sections(readerDevice: Bool, _ sections: [InfoSection]) -> [InfoSection] {
+        guard readerDevice else { return sections }
+        return sections.filter { $0 != .unsubscribe && $0 != .deleteGroup }
+    }
+}
+
+/// The orphaned channels the person removed from this device with `Remove
+/// from this device` (UX 16.6), per account in `UserDefaults` behind the
+/// account store gate. Channel ids only, nothing secret.
+public enum RemovedOrphanChannels {
+    static func key(_ accountIdB64: String) -> String { "lakko.channels.orphan-removed.v1.\(accountIdB64)" }
+
+    public static func load(accountIdB64: String, defaults: UserDefaults = .standard) -> Set<String> {
+        Set(defaults.stringArray(forKey: key(accountIdB64)) ?? [])
+    }
+
+    public static func add(_ channelId: String, accountIdB64: String, defaults: UserDefaults = .standard) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        var set = load(accountIdB64: accountIdB64, defaults: defaults)
+        guard set.insert(channelId.lowercased()).inserted else { return }
+        defaults.set(Array(set).sorted(), forKey: key(accountIdB64))
+    }
+
+    public static func clear(accountIdB64: String, defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: key(accountIdB64))
+    }
+}
+
+/// The values of ``ChannelExtras/accountRole``.
+public enum ChannelAccountRole {
+    public static let owner = "owner"
+    public static let coPublisher = "coPublisher"
+
+    /// The stored value of a register role (`nil` for a subscriber).
+    public static func stored(_ role: ChannelSubscriptionRole) -> String? {
+        switch role {
+        case .owner: return owner
+        case .coPublisher: return coPublisher
+        case .subscriber: return nil
+        }
     }
 }
 

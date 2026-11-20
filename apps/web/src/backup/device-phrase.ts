@@ -13,7 +13,7 @@
  *     recovery screen): the device compares the typed words with the phrase
  *     it holds, the server takes no part;
  *   - handing the phrase to a device added through "another device"
- *     (`devices/recovery-payload.ts` v2 carries its entropy);
+ *     (`devices/recovery-payload.ts` v3 carries its entropy);
  *   - "Show recovery phrase" in Settings and the encrypted backup.
  *
  * So every path that lands a device with keys writes the phrase store, and

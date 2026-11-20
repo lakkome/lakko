@@ -27,7 +27,7 @@ import {
 
 import { useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
-import type { CallLogEntry } from "./call-log";
+import type { CallLogEntry, StandaloneCallEntry } from "./call-log";
 import { IdbCallLogBackend } from "./call-log-idb";
 import { CallLogStore, type CallLogRows } from "./call-log-store";
 
@@ -39,8 +39,14 @@ export interface CallLogApi {
   of(groupIdB64: string): readonly CallLogEntry[];
   /** Every conversation's rows, for the Calls screen. Reactive like `of`. */
   all(): CallLogRows;
+  /** The calls with no conversation (`docs/ux/navigation.md` section
+   *  5.1.1), oldest first. Reactive like `of`. */
+  standalone(): readonly StandaloneCallEntry[];
   /** Record one finished call. Idempotent on the call id; never throws. */
   record(groupIdB64: string, entry: CallLogEntry): void;
+  /** Record one finished call that belongs to no conversation. One row per
+   *  call id; never throws. */
+  recordStandalone(entry: StandaloneCallEntry): void;
   /** Drop a conversation's rows (the chat was deleted or left). */
   forgetGroup(groupIdB64: string): void;
 }
@@ -85,10 +91,19 @@ export function CallLogProvider(props: { children: JSX.Element }): JSX.Element {
       version();
       return store.of(groupIdB64);
     },
+    standalone() {
+      version();
+      return store.standalone();
+    },
     record(groupIdB64, entry) {
       const account = untrack(accountId);
       if (account === null) return;
       store.record(account, groupIdB64, entry);
+    },
+    recordStandalone(entry) {
+      const account = untrack(accountId);
+      if (account === null) return;
+      store.recordStandalone(account, entry);
     },
     forgetGroup(groupIdB64) {
       const account = untrack(accountId);
@@ -114,7 +129,9 @@ export function useCallLog(): CallLogApi {
       version: () => 0,
       of: () => [],
       all: () => new Map(),
+      standalone: () => [],
       record: () => undefined,
+      recordStandalone: () => undefined,
       forgetGroup: () => undefined,
     }
   );

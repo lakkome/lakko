@@ -20,6 +20,7 @@ playwright-report/
 playwright/.cache/
 playwright/fixtures/*.wav
 playwright/fixtures/*.m4a
+playwright/fixtures/*.mp4
 
 # Editor / OS
 .DS_Store

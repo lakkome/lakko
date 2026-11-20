@@ -36,6 +36,8 @@ use sqlx::MySqlPool;
 use tower::ServiceExt as _;
 
 use crate::internal::{build_internal_app, SECRET_HEADER};
+use crate::metrics::tests::value_of;
+use crate::metrics::{DELIVERIES_TOTAL, WAKES_TOTAL};
 use crate::provider::{DeliverError, Provider, ProviderKind, WakePayload};
 use crate::{build_app, AppState};
 
@@ -301,11 +303,31 @@ async fn a_genuine_wake_reaches_the_subscription_and_names_it() {
         StatusCode::OK
     );
 
+    let metrics = lakko_metrics::install("push-gw", "0.0.0").unwrap();
+    let before = metrics.render();
     let wake = seal_push_wake(&gw.public(), &secret, PushWakeKind::Call, now_ms()).unwrap();
     let (status, body) = notify(&st, &wake, 42).await;
     // The same wake again is a replay.
     let (replay, _) = notify(&st, &wake, 42).await;
     cleanup(&db, &derive_push_gid(&secret)).await;
+
+    // ADR-0096: the wake, the replay and the delivery moved their counters,
+    // and the exposition carries closed-set labels only.
+    let after = metrics.render();
+    lakko_metrics::exposition::assert_clean(&after, crate::metrics::EXTRA_LABELS, &[]);
+    for (name, labels) in [
+        (WAKES_TOTAL, &[("outcome", "accepted")][..]),
+        (WAKES_TOTAL, &[("outcome", "replayed")][..]),
+        (
+            DELIVERIES_TOTAL,
+            &[("provider", "apns_voip"), ("outcome", "ok")][..],
+        ),
+    ] {
+        assert!(
+            value_of(&after, name, labels) >= value_of(&before, name, labels) + 1.0,
+            "{name} {labels:?}"
+        );
+    }
 
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["subscriptions_woken"], 1);
@@ -326,6 +348,8 @@ async fn a_wake_not_signed_by_the_wake_key_is_refused() {
     let Some(db) = pool("a_wake_not_signed").await else {
         return;
     };
+    let metrics = lakko_metrics::install("push-gw", "0.0.0").unwrap();
+    let before = metrics.render();
     let gw = PushGwKey::generate();
     let seen: Seen = Arc::default();
     let st = state(db.clone(), &gw, &seen, false);
@@ -391,8 +415,19 @@ async fn a_wake_not_signed_by_the_wake_key_is_refused() {
     )
     .unwrap();
     let (stale_status, _) = notify(&st, &stale, 1).await;
+    let after = metrics.render();
 
     cleanup(&db, &push_gid).await;
+    let stale_label = [("outcome", "stale")];
+    assert!(
+        value_of(&after, WAKES_TOTAL, &stale_label)
+            >= value_of(&before, WAKES_TOTAL, &stale_label) + 1.0
+    );
+    let not_opened = [("outcome", "not_opened")];
+    assert!(
+        value_of(&after, WAKES_TOTAL, &not_opened)
+            >= value_of(&before, WAKES_TOTAL, &not_opened) + 2.0
+    );
     assert_eq!(forged_status, StatusCode::FORBIDDEN);
     assert_eq!(own_status, StatusCode::OK);
     assert_eq!(own_body["subscriptions_woken"], 0);

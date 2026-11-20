@@ -113,12 +113,21 @@ pub mod fuzz_api {
     ///   (ADR-0079), reached the same way. Whatever decodes must re-encode to
     ///   the identical bytes, hold records within their bounds, and fold so
     ///   that every revoked record it carries is held revoked.
+    /// * `decode_channel_admission_seed_envelope` — a private channel's
+    ///   admission seeds (ADR-0090), reached the same way: canonical, folding
+    ///   to exactly its registers (two seeds of one version coexist),
+    ///   write-once per seed at the writer.
     /// * `decode_device_ack_envelope` — the device-acknowledgement registers
     ///   (identity-recovery 17.5), reached the same way: canonical, folding
     ///   to exactly its keys, not applying twice.
-    /// * `decode_blocked_envelope` — the block registers (ADR-0089 section
+    /// * `decode_blocked_envelope` — the block registers (ADR-0098 section
     ///   6), reached the same way: canonical, folding to exactly its keys and
     ///   states, not applying twice.
+    /// * `decode_poll_choice_envelope` — the account's own poll choices
+    ///   (ADR-0092 section 3.6), reached the same way: canonical, within its
+    ///   bounds, folding to exactly its registers, carried back by
+    ///   `poll_choice_envelopes`, not applying twice, and pruned once every
+    ///   conversation it names has ended.
     /// * [`SyncedState::from_bytes`] — reached from local persistence and
     ///   from the backup payload a storage tier serves. Whatever decodes
     ///   must persist to bytes that read back as the same state, its
@@ -138,7 +147,72 @@ pub mod fuzz_api {
             && blocked_envelope_holds(bytes)
             && channel_reaction_envelope_holds(bytes)
             && channel_comment_envelope_holds(bytes)
+            && channel_subscription_envelope_holds(bytes)
+            && channel_admission_seed_envelope_holds(bytes)
+            && poll_choice_envelope_holds(bytes)
             && persisted_state_holds(bytes)
+    }
+
+    /// The channel-subscription envelope (2026-11-13): canonical, within its
+    /// bounds, folds to exactly its registers, is carried back by
+    /// `channel_subscription_envelopes`, does not apply twice, a live
+    /// register it carries reads as subscribed and a leave as not, and an
+    /// owner key is carried exactly by a co-publisher (ADR-0090 2.3).
+    fn channel_subscription_envelope_holds(bytes: &[u8]) -> bool {
+        let Ok(entries) = crate::synced::decode_channel_subscription_envelope(bytes) else {
+            return true;
+        };
+        let mut state = SyncedState::new();
+        crate::synced::compose_channel_subscription_envelope(&entries).as_deref() == Ok(bytes)
+            && bytes.len() <= crate::synced::CHANNEL_SUBSCRIPTION_ENVELOPE_MAX_LEN
+            && entries.iter().all(|e| e.value.validate().is_ok())
+            && state.apply_channel_subscription_envelope(bytes) == Ok(true)
+            && state.all_channel_subscriptions() == entries
+            && state.channel_subscription_envelopes() == vec![bytes.to_vec()]
+            && state.apply_channel_subscription_envelope(bytes) == Ok(false)
+            && entries.iter().all(|e| {
+                state.is_channel_subscribed(&e.value.channel_id) == e.value.is_subscribed()
+                    && e.value.subscribed.as_ref().map_or(true, |s| {
+                        (s.role == crate::synced::ChannelSubscriptionRole::CoPublisher)
+                            == s.owner_account_key.is_some()
+                    })
+            })
+    }
+
+    /// The channel admission-seed envelope (ADR-0090 open question 4):
+    /// canonical, within its bounds, folds to exactly its registers, is
+    /// carried back by `channel_admission_seed_envelopes`, does not apply
+    /// twice, every seed reads back among the seeds of its version, and a
+    /// local write of a held seed writes nothing.
+    fn channel_admission_seed_envelope_holds(bytes: &[u8]) -> bool {
+        let Ok(entries) = crate::synced::decode_channel_admission_seed_envelope(bytes) else {
+            return true;
+        };
+        let mut state = SyncedState::new();
+        crate::synced::compose_channel_admission_seed_envelope(&entries).as_deref() == Ok(bytes)
+            && bytes.len() <= crate::synced::CHANNEL_ADMISSION_SEED_ENVELOPE_MAX_LEN
+            && state.apply_channel_admission_seed_envelope(bytes) == Ok(true)
+            && state.all_channel_admission_seeds() == entries
+            && state.channel_admission_seed_envelopes() == vec![bytes.to_vec()]
+            && state.apply_channel_admission_seed_envelope(bytes) == Ok(false)
+            && entries.iter().all(|e| {
+                state
+                    .channel_admission_seeds_for(&e.value.channel_id, e.value.admission_version)
+                    .contains(&e.value.seed)
+                    && !state.set_channel_admission_seed(
+                        u64::MAX,
+                        &e.value.channel_id,
+                        e.value.admission_version,
+                        &e.value.seed,
+                    )
+                    && state
+                        .channel_admission_seed_envelope_for(
+                            &e.value.channel_id,
+                            e.value.admission_version,
+                            &e.value.seed,
+                        )
+                        .is_some()
+            })
     }
 
     /// The own channel-reaction envelope (ADR-0087 section 13a; a reaction on
@@ -174,6 +248,55 @@ pub mod fuzz_api {
         }
     }
 
+    /// The own poll-choice envelope (ADR-0092 section 3.6): canonical,
+    /// within its bounds, folds to exactly its registers, is carried back by
+    /// `poll_choice_envelopes`, does not apply twice, survives a prune while
+    /// no conversation has ended, and is gone after every conversation it
+    /// names has ended.
+    fn poll_choice_envelope_holds(bytes: &[u8]) -> bool {
+        let Ok(entries) = crate::synced::decode_poll_choice_envelope(bytes) else {
+            return true;
+        };
+        let mut state = SyncedState::new();
+        let held = crate::synced::compose_poll_choice_envelope(&entries).as_deref() == Ok(bytes)
+            && bytes.len() <= crate::synced::POLL_CHOICE_ENVELOPE_MAX_LEN
+            && entries.iter().all(|e| e.value.validate().is_ok())
+            && state.apply_poll_choice_envelope(bytes) == Ok(true)
+            && state.poll_choice_envelopes() == vec![bytes.to_vec()]
+            && state.apply_poll_choice_envelope(bytes) == Ok(false)
+            && entries.iter().all(|e| {
+                state
+                    .poll_choice(&e.value.conversation, e.value.poll_message_id)
+                    .as_ref()
+                    == Some(e)
+            })
+            && state.prune_poll_choices() == 0;
+        held && {
+            let n = state.len();
+            for e in &entries {
+                if state
+                    .apply(
+                        u64::MAX,
+                        SyncEntry::ConversationEnd(ConversationEnd {
+                            conversation: e.value.conversation.clone(),
+                            state: crate::synced::entry::ConversationEndState::Ended,
+                            epoch: u64::MAX,
+                        }),
+                    )
+                    .is_err()
+                {
+                    return false;
+                }
+            }
+            state.prune_poll_choices() == n
+                && entries.iter().all(|e| {
+                    state
+                        .poll_choice(&e.value.conversation, e.value.poll_message_id)
+                        .is_none()
+                })
+        }
+    }
+
     /// The own-comments envelope (ADR-0087 section 13a): canonical, folds to
     /// exactly its registers, is carried back by `channel_comment_envelopes`,
     /// does not apply twice, lists exactly its live nonces, and a prune past
@@ -201,7 +324,7 @@ pub mod fuzz_api {
         }
     }
 
-    /// The block envelope (ADR-0089 section 6): canonical, folds to exactly
+    /// The block envelope (ADR-0098 section 6): canonical, folds to exactly
     /// its keys and states, carried back by `blocked_envelopes`, and does
     /// not apply twice.
     fn blocked_envelope_holds(bytes: &[u8]) -> bool {
@@ -369,13 +492,36 @@ pub mod fuzz_api {
                 return false;
             }
         }
+        for envelope in state.channel_subscription_envelopes() {
+            if rebuilt
+                .apply_channel_subscription_envelope(&envelope)
+                .is_err()
+            {
+                return false;
+            }
+        }
+        for envelope in state.channel_admission_seed_envelopes() {
+            if rebuilt
+                .apply_channel_admission_seed_envelope(&envelope)
+                .is_err()
+            {
+                return false;
+            }
+        }
+        for envelope in state.poll_choice_envelopes() {
+            if rebuilt.apply_poll_choice_envelope(&envelope).is_err() {
+                return false;
+            }
+        }
         let reactions = |s: &SyncedState| {
             s.entries()
                 .into_iter()
                 .filter(|(_, e)| {
                     matches!(
                         e,
-                        SyncEntry::ChannelReaction(_) | SyncEntry::ChannelComment(_)
+                        SyncEntry::ChannelReaction(_)
+                            | SyncEntry::ChannelComment(_)
+                            | SyncEntry::PollChoice(_)
                     )
                 })
                 .collect::<Vec<_>>()
@@ -385,6 +531,8 @@ pub mod fuzz_api {
         }
         rebuilt.all_lineage() == state.all_lineage()
             && rebuilt.all_link_records() == state.all_link_records()
+            && rebuilt.all_channel_subscriptions() == state.all_channel_subscriptions()
+            && rebuilt.all_channel_admission_seeds() == state.all_channel_admission_seeds()
             && rebuilt.recovery_email_register() == state.recovery_email_register()
             && rebuilt.own_username_register() == state.own_username_register()
             && rebuilt.quick_reaction_register() == state.quick_reaction_register()
@@ -563,6 +711,40 @@ mod fuzz_api_tests {
     use crate::fuzz_api::{decode_synced_and_check, replay_and_check};
 
     #[test]
+    fn the_synced_decode_oracle_holds_on_poll_choices() {
+        let mut state = crate::SyncedState::new();
+        let group = crate::synced::ConversationRef {
+            kind: crate::synced::entry::ConversationRefKind::Group,
+            id: vec![1; 32],
+        };
+        let channel = crate::synced::ConversationRef {
+            kind: crate::synced::entry::ConversationRefKind::Channel,
+            id: vec![2; 16],
+        };
+        let live = state
+            .set_poll_choice(3, &group, 9, &[0, 4], 7)
+            .unwrap()
+            .unwrap();
+        state
+            .set_poll_choice(4, &channel, 120, &[], 7)
+            .unwrap()
+            .unwrap();
+        assert!(decode_synced_and_check(&live));
+        for envelope in state.poll_choice_envelopes() {
+            assert!(decode_synced_and_check(&envelope));
+            let mut damaged = envelope.clone();
+            if let Some(last) = damaged.last_mut() {
+                *last ^= 0xFF;
+            }
+            assert!(decode_synced_and_check(&damaged));
+        }
+        assert!(decode_synced_and_check(&state.to_bytes()));
+    }
+
+    #[test]
+    // One wire per register kind, each damaged every way; splitting it would
+    // only move the list.
+    #[allow(clippy::too_many_lines)]
     fn the_synced_decode_oracle_holds_on_valid_and_damaged_input() {
         let mut state = crate::SyncedState::new();
         state.set_lineage(3, b"succ-a", b"root").unwrap();
@@ -622,8 +804,27 @@ mod fuzz_api_tests {
             .delete_channel_comment(13, [3; 16], 7, [9; 16], 1_000)
             .unwrap();
         let persisted_comments = removed.to_bytes();
-        let blocked = removed.set_blocked(14, [4; 32], true, 1_000).unwrap();
-        let unblocked = removed.set_blocked(15, [4; 32], false, 2_000).unwrap();
+        removed
+            .set_channel_subscription(
+                14,
+                &[5; 16],
+                crate::synced::ChannelSubscribed {
+                    role: crate::synced::ChannelSubscriptionRole::CoPublisher,
+                    subscriber_secret: [6; 32],
+                    read_key: Some([7; 32]),
+                    publisher_group_id: Some([8; 32]),
+                    owner_account_key: Some([9; 32]),
+                    name: "News".into(),
+                    handle: "news".into(),
+                },
+            )
+            .unwrap();
+        let subscription = removed.channel_subscription_envelopes().remove(0);
+        assert!(removed.leave_channel_subscription(15, &[5; 16]));
+        let left = removed.channel_subscription_envelopes().remove(0);
+        let persisted_subscriptions = removed.to_bytes();
+        let blocked = removed.set_blocked(16, [4; 32], true, 1_000).unwrap();
+        let unblocked = removed.set_blocked(17, [4; 32], false, 2_000).unwrap();
         let persisted_blocked = removed.to_bytes();
         for wire in [
             &envelope,
@@ -642,6 +843,9 @@ mod fuzz_api_tests {
             &commented,
             &uncommented,
             &persisted_comments,
+            &subscription,
+            &left,
+            &persisted_subscriptions,
             &blocked,
             &unblocked,
             &persisted_blocked,

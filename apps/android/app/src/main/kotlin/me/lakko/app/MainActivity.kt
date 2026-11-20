@@ -22,22 +22,10 @@ import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Call
-import androidx.compose.material.icons.filled.ChatBubble
-import androidx.compose.material.icons.filled.DynamicFeed
-import androidx.compose.material.icons.filled.People
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.outlined.Call
-import androidx.compose.material.icons.outlined.ChatBubbleOutline
-import androidx.compose.material.icons.outlined.DynamicFeed
-import androidx.compose.material.icons.outlined.People
-import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
@@ -177,7 +165,7 @@ class MainActivity : ComponentActivity() {
         // ADR-0061 — the interface language: stored choice, else the system
         // language, else English. Loaded before the first frame.
         me.lakko.app.l10n.Localization.init(applicationContext)
-        // ADR-0089 F2: the standing proofs refuse a moderator list older
+        // ADR-0098 F2: the standing proofs refuse a moderator list older
         // than the one this device has seen (the report sheet's floor).
         me.lakko.app.moderation.ModeratorListCache.installFloor(
             me.lakko.app.moderation.ModeratorListVersionStore(applicationContext),
@@ -197,6 +185,9 @@ class MainActivity : ComponentActivity() {
         // getMethod calls) and the result is cached for the
         // process lifetime.
         me.lakko.sframe.SFrameAvailability.bootProbe()
+        // docs/ux/calls.md section 4.5.4 — an activity recreated while in the
+        // system's picture-in-picture window starts out knowing it.
+        me.lakko.app.calls.CallPictureInPicture.setActive(isInPictureInPictureMode)
 
         // One set per process, not per Activity: a configuration change
         // recreates this Activity, and a second set built here would run
@@ -349,6 +340,11 @@ class MainActivity : ComponentActivity() {
         // pinned translation key; an accepted bundle switches the live strings.
         me.lakko.app.l10n.TranslationUpdater(applicationContext, lifecycleScope).checkOnLaunch()
 
+        // ADR-0097 — the signed supporters list, at most once a day at
+        // launch (and when Settings > About is shown). Dormant with no
+        // release key pinned.
+        me.lakko.app.updates.SupportersListController.get(applicationContext).refreshIfDue()
+
         // Read the launching Intent — a cold-start tap on
         // `https://lakko.me/i/<slug>` carries the URL in
         // `intent.data`; a cold-start tap on a Lakko push
@@ -361,6 +357,7 @@ class MainActivity : ComponentActivity() {
         handleWakeIntent(intent)
         handleCallRingIntent(intent)
         handleOpenDevicesIntent(intent)
+        handleOpenChannelIntent(intent)
 
         setContent {
             me.lakko.app.l10n.ProvideLocalization {
@@ -405,7 +402,7 @@ class MainActivity : ComponentActivity() {
                             antiCensorship = antiCensorship,
                             releaseChecker = releaseChecker,
                         )
-                        // ADR-0089 — the block dialog, the report sheet and the
+                        // ADR-0098 — the block dialog, the report sheet and the
                         // notice after a report, for every screen.
                         me.lakko.app.ui.moderation.ModerationHost(
                             contactsRepository = contactsRepository,
@@ -441,6 +438,9 @@ class MainActivity : ComponentActivity() {
         me.lakko.app.calls.IncomingCallRinger.attach(applicationContext)
         me.lakko.app.calls.IncomingCallRinger.setAppForeground(true)
         me.lakko.app.devices.DeviceCardCenter.foreground = true
+        // ADR-0081 third amendment - a device answers DeviceGroup knocks only
+        // while it shows.
+        me.lakko.app.devices.sync.DeviceGroupSyncRepository.setAppForeground(true)
         // ADR-0060 §4 — the scheduled `fof` rotation fires when the app is
         // active, never from a background job of its own.
         me.lakko.app.reach.ReachManager.peek()?.onAppActive()
@@ -453,10 +453,29 @@ class MainActivity : ComponentActivity() {
         me.lakko.app.devices.DeviceCardCenter.noteAction()
     }
 
+    /**
+     * `docs/ux/calls.md` section 4.5.4 — on Android 8 to 11 the system window
+     * is entered when the person leaves the app with home or a switch during a
+     * call; on 12 and later the platform enters it by itself.
+     */
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        me.lakko.app.calls.CallPictureInPicture.onUserLeaveHint(this)
+    }
+
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: android.content.res.Configuration,
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        me.lakko.app.calls.CallPictureInPicture.setActive(isInPictureInPictureMode)
+    }
+
     override fun onPause() {
         super.onPause()
         me.lakko.app.calls.IncomingCallRinger.setAppForeground(false)
         me.lakko.app.devices.DeviceCardCenter.foreground = false
+        me.lakko.app.devices.sync.DeviceGroupSyncRepository.setAppForeground(false)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -473,6 +492,7 @@ class MainActivity : ComponentActivity() {
         handleWakeIntent(intent)
         handleCallRingIntent(intent)
         handleOpenDevicesIntent(intent)
+        handleOpenChannelIntent(intent)
     }
 
     /**
@@ -553,6 +573,17 @@ class MainActivity : ComponentActivity() {
         if (!intent.getBooleanExtra(me.lakko.app.devices.NewDeviceNotices.EXTRA_OPEN_DEVICES, false)) return
         intent.removeExtra(me.lakko.app.devices.NewDeviceNotices.EXTRA_OPEN_DEVICES)
         me.lakko.app.devices.NewDeviceNotices.requestOpenDevices()
+    }
+
+    /** `docs/ux/channel-notifications.md` - a tap on a channel post
+     *  notification opens that channel. */
+    private fun handleOpenChannelIntent(intent: Intent) {
+        val id = intent.getStringExtra(me.lakko.app.feed.ChannelNotificationIntake.EXTRA_OPEN_CHANNEL)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: return
+        intent.removeExtra(me.lakko.app.feed.ChannelNotificationIntake.EXTRA_OPEN_CHANNEL)
+        me.lakko.app.feed.ChannelNotificationIntake.request(id)
     }
 
     private fun handleWakeIntent(intent: Intent) {
@@ -669,7 +700,7 @@ private fun AppRoot(
         return
     }
 
-    // ADR-0089 section 4 (docs/ux/reporting-and-moderation.md section 4) -
+    // ADR-0098 section 4 (docs/ux/reporting-and-moderation.md section 4) -
     // the account is suspended. The suspended screen replaces the app until
     // "Read my chats"; then the app runs read-only with a row back to it.
     // While the app is in front the refresh route is asked now and every ten
@@ -771,6 +802,7 @@ private fun AppRoot(
                             authRepository.guestAccount.value,
                         )?.claimedUsername
                     },
+                    signupOpen = { authRepository.signupOpen() },
                 )
             },
         )
@@ -910,6 +942,17 @@ private fun AppRoot(
                 account = current.account,
             )
         }
+        // G-56 (UX section 8a): signed in with the account's current keys,
+        // but not the earlier keys its chats use. The app shell does not
+        // start; the screen offers another device and the reset, and the
+        // device looks for the keys by itself.
+        is AuthState.NeedsEarlierKeys -> InsetRoot {
+            RestoreIdentityRoot(
+                repository = authRepository,
+                account = current.account,
+                earlierKeysMissing = true,
+            )
+        }
         // ADR-0017 lost-everything fallback: the user minted a brand-new
         // identity (already published, no proof); show the new recovery
         // phrase for them to save before the session lands.
@@ -950,18 +993,6 @@ private fun AppRoot(
             val updateDecision by releaseChecker.decision.collectAsState()
             val context = androidx.compose.ui.platform.LocalContext.current
             val shownUpdate = updateDecision as? UpdateBannerDecision.Shown
-            // docs/ux/calls.md section 4.5 — the live call, put away. Resolved
-            // here rather than inside `SessionRoot` so that "no bar" is a `null`
-            // slot and the top strip reserves nothing when there is no call.
-            // The name resolvers are the ones the call screens use, so the bar
-            // says exactly what the screen it came from says.
-            val callBarModel = me.lakko.app.ui.call.rememberCollapsedCallBar(
-                oneToOne = callHost,
-                group = me.lakko.app.calls.AppCallHost.group,
-                link = me.lakko.app.calls.AppCallHost.link,
-                nameForOneToOne = resolveOneToOneName,
-                groupNameFor = resolveGroupName,
-            )
             // Everything a session's screens keep (their ViewModels, the back
             // stack) belongs to ONE account's session: see [SessionViewModels].
             SessionViewModels(accountIdB64 = current.account.accountIdB64) {
@@ -990,17 +1021,6 @@ private fun AppRoot(
                                 onDismiss = { releaseChecker.dismiss() },
                             )
                         }
-                    }
-                },
-                callBar = callBarModel?.let { bar ->
-                    {
-                        me.lakko.app.ui.call.CollapsedCallBar(
-                            model = bar,
-                            onExpand = { me.lakko.app.calls.AppCallHost.expandCurrentCall() },
-                            onToggleMute = { on ->
-                                me.lakko.app.calls.AppCallHost.setCurrentCallMicrophoneEnabled(on)
-                            },
-                        )
                     }
                 },
             )
@@ -1051,6 +1071,9 @@ private fun AppRoot(
         } else {
             // UX 19.2 / 19.5 / 19.6 - what happened to the account elsewhere.
             me.lakko.app.ui.auth.AccountNoticeHost(repository = authRepository, chatRepository = chatRepository)
+            // A session that landed with no username and whose backup named
+            // none asks for it (`auth/UsernamePrompt.kt`).
+            me.lakko.app.ui.auth.UsernamePromptHost(repository = authRepository)
         }
     }
 
@@ -1137,6 +1160,36 @@ private fun AppRoot(
                 }
             },
         )
+        // docs/ux/calls.md section 4.5 — the live call, put away into one
+        // small window over every screen (it replaced the bar across the top
+        // of the app), and, when the app leaves the screen during a call, the
+        // same picture in the system's own picture-in-picture window (4.5.4).
+        // The name resolvers are the ones the call screens use, so the window
+        // says exactly what the screen it came from says. Drawn last, so it
+        // floats over every session screen; the call screens are their own
+        // windows and are never up at the same time as it.
+        val miniWindow = me.lakko.app.ui.call.rememberCallMiniWindow(
+            oneToOne = callHost,
+            group = me.lakko.app.calls.AppCallHost.group,
+            link = me.lakko.app.calls.AppCallHost.link,
+            nameForOneToOne = resolveOneToOneName,
+            keyForOneToOne = { chatRepository.oneToOnePeerKey(it) },
+            groupNameFor = resolveGroupName,
+        )
+        me.lakko.app.ui.call.CallPictureInPictureEffect(miniWindow)
+        // Section 4.5.4 — the call keeps running, with its ongoing
+        // notification, while Lakko is not on the screen.
+        me.lakko.app.ui.call.OngoingCallServiceEffect(miniWindow)
+        val inPictureInPicture by me.lakko.app.calls.CallPictureInPicture.active.collectAsStateWithLifecycle()
+        if (inPictureInPicture && miniWindow != null) {
+            me.lakko.app.ui.call.CallPictureInPictureContent(miniWindow)
+        } else {
+            me.lakko.app.ui.call.CallMiniWindowHost(
+                model = miniWindow,
+                onExpand = { me.lakko.app.calls.AppCallHost.expandCurrentCall() },
+                onToggleMute = { on -> me.lakko.app.calls.AppCallHost.setCurrentCallMicrophoneEnabled(on) },
+            )
+        }
     }
 
     // ADR-0037 (G-11) — rollback-gate overlays, shown OVER any auth state (the
@@ -1260,7 +1313,28 @@ private fun SessionViewModels(accountIdB64: String, content: @Composable () -> U
 private fun RestoreIdentityRoot(
     repository: AuthRepository,
     account: SessionAccount,
+    /** G-56: the variant of UX section 8a (the earlier keys are missing). */
+    earlierKeysMissing: Boolean = false,
 ) {
+    if (earlierKeysMissing) {
+        // UX 8a: the device looks for the earlier keys by itself at entry
+        // (every start comes back here) and every few minutes while the
+        // screen is in the foreground. A failed look is not shown.
+        val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+        LaunchedEffect(account.accountIdB64, lifecycle) {
+            lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.RESUMED) {
+                while (true) {
+                    try {
+                        repository.lookForEarlierKeysNow()
+                    } catch (cause: Throwable) {
+                        if (cause is kotlinx.coroutines.CancellationException) throw cause
+                        android.util.Log.w("lakko-auth", "G-56: look for the earlier keys failed (${cause.javaClass.simpleName})")
+                    }
+                    kotlinx.coroutines.delay(me.lakko.app.auth.EARLIER_KEYS_RETRY_MS)
+                }
+            }
+        }
+    }
     // Keyed on the account: the model holds what was typed for it, and this
     // root's store lives as long as the Activity.
     val vm: me.lakko.app.ui.auth.RestoreIdentityPromptViewModel = viewModel(
@@ -1275,7 +1349,8 @@ private fun RestoreIdentityRoot(
         username = account.username,
         accountIdB64 = account.accountIdB64,
         onSignOut = { repository.logout() },
-        restoreNotice = restoreNotice,
+        restoreNotice = if (earlierKeysMissing) null else restoreNotice,
+        earlierKeysMissing = earlierKeysMissing,
     )
 }
 
@@ -1358,16 +1433,6 @@ private fun SessionRoot(
     forgetDeviceSlot: ForgetDeviceSlot,
     /** The security / update banners, drawn above the tab content. */
     banners: (@Composable () -> Unit)?,
-    /**
-     * `docs/ux/calls.md` section 4.5 — the collapsed call bar, drawn across the
-     * top of the app above every screen and above [banners].
-     *
-     * `null` when there is no bar, which is what keeps the status-bar inset from
-     * being reserved for nothing. It sits ABOVE the notices rather than under
-     * them because it is a live control and not a notice: a person reaching for
-     * Mute must not have it move because an update notice appeared underneath.
-     */
-    callBar: (@Composable () -> Unit)?,
 ) {
     // Drive ChatRepository.bootstrap whenever a fresh
     // identity-secrets value lands. The first non-null emission
@@ -1391,7 +1456,14 @@ private fun SessionRoot(
         // then resumes from the saved cursor. Idempotent when the repository
         // already bound this account at construction.
         contactsRepository.bindAccount(secrets.accountId)
-        chatRepository.bootstrap(secrets)
+        try {
+            chatRepository.bootstrap(secrets)
+        } catch (missing: me.lakko.app.auth.EarlierKeysMissing) {
+            // G-56 defence in depth: the chat layer minted nothing for a
+            // device whose account's earlier keys are not here; park it.
+            authRepository.parkAfterChatRefusal(me.lakko.app.auth.base64Encode(secrets.accountId))
+            return@LaunchedEffect
+        }
         // ADR-0048 — make sure this account's own profile exists and states
         // its current username (normalised; `null` for a guest). Republished
         // into every group only when that actually changed.
@@ -1415,7 +1487,7 @@ private fun SessionRoot(
         // runtime alongside the chat bootstrap so the poll
         // loop starts at the same moment chat surfaces become
         // usable. Idempotent for the same account id.
-        // ADR-0089 step 4 — this account is never marked suspended by the
+        // ADR-0098 step 4 — this account is never marked suspended by the
         // marks other people get (its own standing is the suspended screen).
         // Bound at every landing; sign-out and forget device clear it with
         // the kept standings (`DeviceGroupSyncRepository.clear`).
@@ -1597,6 +1669,81 @@ private fun SessionRoot(
                 )
                 chatRepository.noteChannelEndHeard(handle.id, handle.sharedName.ifBlank { handle.localName })
             }
+        }
+    }
+    // docs/ux/second-device.md section 4a - the account's channels travel
+    // between its devices through the channel subscription register: a
+    // channel subscribed, created or co-published here is written to it, one
+    // written on another device is added here (the shared subscriber key and
+    // the read key installed), and one left there goes here too.
+    val channelSyncContext = LocalContext.current.applicationContext
+    LaunchedEffect(channelsState, deviceGroupSync) {
+        me.lakko.app.channels.ChannelSubscriptionSync.appContext = channelSyncContext
+        val port = me.lakko.app.channels.SyncChannelRegisterPort(deviceGroupSync)
+        kotlinx.coroutines.flow.combine(
+            channelsState.channels,
+            channelsState.subscriberKeysByChannel,
+            channelsState.keysByChannel,
+            channelsState.publisherKeysReady,
+            kotlinx.coroutines.flow.combine(
+                deviceGroupSync.channelSubscriptions,
+                me.lakko.app.channels.ChannelSubscriptionSync.readKeysVersion,
+            ) { registers, version -> registers to version },
+        ) { _, _, _, ready, regs -> ready to regs }
+            .let { me.lakko.app.channels.debounced(it, 300L) }
+            .collect { me.lakko.app.channels.ChannelSubscriptionSync.reconcile(channelsState, port) }
+    }
+    // docs/ux/second-device.md section 4a - the pairing state bundle (v4)
+    // carries the newest seeds of each channel the register lists as live;
+    // a received bundle adds seeds this device holds none of for that epoch.
+    DisposableEffect(channelsState, deviceGroupSync) {
+        fun sameAccount(acct: String): Boolean = channelsState.boundAccount?.let {
+            me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(it) ==
+                me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(acct)
+        } == true
+        me.lakko.app.devices.StateBundle.channelSeedSource = { acct ->
+            if (!sameAccount(acct)) {
+                emptyMap()
+            } else {
+                deviceGroupSync.channelSubscriptions.value.orEmpty()
+                    .filter { it.subscribed }
+                    .associate { r ->
+                        val id = me.lakko.app.channels.ChannelsComposer.bytesToHex(r.channelId)
+                        id to channelsState.heldEpochSeeds(id)
+                    }
+                    .filterValues { it.isNotEmpty() }
+            }
+        }
+        me.lakko.app.devices.StateBundle.channelSeedSink = { acct, seeds ->
+            if (sameAccount(acct)) channelsState.addCarriedSeeds(seeds) else null
+        }
+        // The account's reader key a rotation on this device always reseals to.
+        me.lakko.app.channels.ChannelReseal.accountReaderKeyOf = { acct, channelId ->
+            if (!sameAccount(acct)) {
+                null
+            } else {
+                channelsState.subscriberKeysByChannel.value[channelId]
+                    ?.let { me.lakko.app.channels.ChannelsComposer.bytesToHex(it.publicKey) }
+            }
+        }
+        // ADR-0090 - PublisherGroups live on this device's bound identity,
+        // in the chat repository's provider.
+        me.lakko.app.channels.ChannelPublisherIdentity.devicePort = chatRepository.channelDevicePort
+        // ADR-0090 open question 4 - the owner account's admission seeds
+        // ride the account's synced register.
+        me.lakko.app.channels.ChannelAdmissionKeys.register = { id ->
+            deviceGroupSync.channelAdmissionSeeds(me.lakko.app.channels.ChannelsComposer.channelIdFromHex(id))
+        }
+        me.lakko.app.channels.ChannelAdmissionKeys.writeRegister = { id, version, seed ->
+            deviceGroupSync.setChannelAdmissionSeed(me.lakko.app.channels.ChannelsComposer.channelIdFromHex(id), version, seed)
+        }
+        onDispose {
+            me.lakko.app.channels.ChannelPublisherIdentity.devicePort = null
+            me.lakko.app.channels.ChannelAdmissionKeys.register = null
+            me.lakko.app.channels.ChannelAdmissionKeys.writeRegister = null
+            me.lakko.app.channels.ChannelReseal.accountReaderKeyOf = null
+            me.lakko.app.devices.StateBundle.channelSeedSource = null
+            me.lakko.app.devices.StateBundle.channelSeedSink = null
         }
     }
     // Bind the channels state to the account once the identity secrets land:
@@ -1900,8 +2047,44 @@ private fun SessionRoot(
     // channel-post log the feed ranks. At once on start (and on every return
     // to the foreground), then every minute, and at once after this device
     // publishes a post.
+    // docs/ux/channel-notifications.md — every channel read the sync makes
+    // goes to the notifier: the shared rule decides which post notifies.
+    DisposableEffect(channelsState, deviceGroupSync) {
+        val notifier = me.lakko.app.feed.ChannelPostNotifier(
+            me.lakko.app.feed.ChannelNotifiedStore.on(backupContext),
+        ) { me.lakko.app.feed.ChannelNotificationPoster.show(backupContext, it) }
+        val off = me.lakko.app.feed.subscribeChannelReads { account, reads ->
+            // Only the reads of the account this state is bound to.
+            if (channelsState.boundAccount != account) return@subscribeChannelReads
+            notifier.onReads(
+                account,
+                reads,
+                me.lakko.app.feed.liveChannelFacts(channelsState) { id ->
+                    me.lakko.app.channels.ChannelFlags.of(deviceGroupSync.flags.value, id)?.muted == true
+                },
+            )
+        }
+        onDispose { off() }
+    }
     val channelPostSync = remember(channelsState, channelsClient) {
         me.lakko.app.feed.ChannelPostSync(backupContext, channelsState, channelsClient)
+    }
+    // docs/ux/channel-notifications.md section 3 — the periodic background
+    // read while Lakko is not in front (idempotent: a schedule is kept).
+    LaunchedEffect(identitySecrets) {
+        if (identitySecrets == null) return@LaunchedEffect
+        me.lakko.app.feed.ChannelPostWorker.schedule(backupContext)
+    }
+    // A tapped channel post notification opens the channel.
+    val openChannelRequested by me.lakko.app.feed.ChannelNotificationIntake.openRequested
+        .collectAsStateWithLifecycle()
+    LaunchedEffect(openChannelRequested, guestShell) {
+        if (guestShell) return@LaunchedEffect
+        val id = openChannelRequested ?: return@LaunchedEffect
+        me.lakko.app.ui.profile.ProfileLeaveGuard.run {
+            navController.navigate(Routes.channel(id)) { launchSingleTop = true }
+            me.lakko.app.feed.ChannelNotificationIntake.consume(id)
+        }
     }
     val channelsBound by channelsState.channels.collectAsStateWithLifecycle()
     LaunchedEffect(lifecycleOwner, channelPostSync, identitySecrets, channelsBound.isNotEmpty()) {
@@ -1981,20 +2164,69 @@ private fun SessionRoot(
                 if (!card.valid) return null
                 return me.lakko.app.ui.channels.ChannelInviteFacts(
                     channelIdHex = me.lakko.app.channels.ChannelsComposer.bytesToHex(id),
-                    // A nameless channel reads by the catalog word, never "?".
-                    name = preview.groupName?.takeIf { it.isNotBlank() }
-                        ?: me.lakko.app.l10n.Localization.strings.value["channels.fallback_name"],
+                    // A nameless invitation reads by the name this device
+                    // holds for the channel, else the catalog word, never "?".
+                    name = me.lakko.app.ui.channels.inviteChannelName(
+                        preview.groupName,
+                        me.lakko.app.channels.ChannelsComposer.bytesToHex(id),
+                    ),
                     preview = preview,
                 )
             }
 
+            // A bare `/g/` link with no card (`BareGroupLink.kt`): which of the
+            // four it is, exactly (a gone link is not a group's live one).
+            override suspend fun openBareLink(
+                link: me.lakko.app.contacts.LakkoLink.Group,
+            ): me.lakko.app.ui.channels.BareLinkOpening {
+                val sealed = try {
+                    chatRepository.resolveGroupInviteSlug(link.slug).first
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    return if (me.lakko.app.ui.channels.inviteLinkUnreachable(e)) {
+                        me.lakko.app.ui.channels.BareLinkOpening.Offline
+                    } else {
+                        me.lakko.app.ui.channels.BareLinkOpening.Dead
+                    }
+                }
+                val card = try {
+                    chatRepository.inspectGroupInvite(
+                        sealed,
+                        me.lakko.app.chat.parseGroupInviteFragment(link.fragment),
+                        System.currentTimeMillis().toULong(),
+                    )
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Throwable) {
+                    return me.lakko.app.ui.channels.BareLinkOpening.Dead
+                }
+                if (!card.valid) return me.lakko.app.ui.channels.BareLinkOpening.Dead
+                val preview = card.preview ?: return me.lakko.app.ui.channels.BareLinkOpening.NotChannel
+                val channelId = preview.channelId ?: return me.lakko.app.ui.channels.BareLinkOpening.NotChannel
+                val name = me.lakko.app.ui.channels.inviteChannelName(
+                    preview.groupName,
+                    me.lakko.app.channels.ChannelsComposer.bytesToHex(channelId),
+                )
+                return me.lakko.app.ui.channels.BareLinkOpening.Channel(
+                    me.lakko.app.ui.channels.ChannelInviteSummary(name, preview.coPublisher),
+                )
+            }
+
+            override fun heldChannelName(channelIdHex: String): String? =
+                channelsState.channels.value.firstOrNull { it.id.equals(channelIdHex, ignoreCase = true) }
+                    ?.let { me.lakko.app.ui.channels.channelTitle(it, me.lakko.app.l10n.Localization.strings.value) }
+
             override fun isFollowed(channelIdHex: String): Boolean =
                 channelsState.channels.value.any { it.id == channelIdHex }
 
-            override fun isPublisherRequestPending(channelIdHex: String): Boolean =
+            override fun isPublisherOf(channelIdHex: String): Boolean =
+                channelsState.keysByChannel.value.containsKey(channelIdHex)
+
+            override fun publisherRequestSentAtMs(channelIdHex: String): Long? =
                 channelsState.boundAccount?.let { acct ->
-                    me.lakko.app.channels.PendingPublisherRequests.isPending(inviteCardContext, acct, channelIdHex)
-                } == true
+                    me.lakko.app.channels.PendingPublisherRequests.sentAtMs(inviteCardContext, acct, channelIdHex)
+                }
 
             override suspend fun subscribe(facts: me.lakko.app.ui.channels.ChannelInviteFacts) {
                 val invite = facts.preview.subscriber ?: return
@@ -2085,8 +2317,15 @@ private fun SessionRoot(
     val publisherLoop = remember(channelsState, channelsClient) {
         me.lakko.app.channels.ChannelPublisherLoop.forChannels(publisherLoopContext, channelsState, channelsClient)
     }
-    LaunchedEffect(lifecycleOwner, subscriberAdmission, identitySecrets, publisherChannels.keys) {
-        if (identitySecrets == null || publisherChannels.isEmpty()) return@LaunchedEffect
+    // ADR-0090 — a device of an account that owns or co-publishes a channel
+    // runs the loop even before it holds a PublisherGroup: it adopts one an
+    // owner device admitted it to, and re-founds when it is the only device.
+    val registeredPublisherChannels by deviceGroupSync.channelSubscriptions.collectAsStateWithLifecycle()
+    val publishesSomewhere = registeredPublisherChannels.orEmpty().any {
+        it.subscribed && it.role != uniffi.lakko_ffi_uniffi.ChannelSubscriptionRole.SUBSCRIBER
+    }
+    LaunchedEffect(lifecycleOwner, subscriberAdmission, identitySecrets, publisherChannels.keys, publishesSomewhere) {
+        if (identitySecrets == null || (publisherChannels.isEmpty() && !publishesSomewhere)) return@LaunchedEffect
         lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
             var lastAdmitMs = 0L
             while (true) {
@@ -2104,7 +2343,12 @@ private fun SessionRoot(
                     }
                     publisherLoop.passAll()
                 }
-                kotlinx.coroutines.delay(me.lakko.app.channels.SubscriberAdmission.APP_INTERVAL_MS)
+                // ADR-0090 section 2.1 — the next pass comes at the interval,
+                // or at once when the account's DeviceGroup grows or shrinks.
+                val roster = me.lakko.app.devices.DeviceRosterChanges.revision.value
+                kotlinx.coroutines.withTimeoutOrNull(me.lakko.app.channels.SubscriberAdmission.APP_INTERVAL_MS) {
+                    me.lakko.app.devices.DeviceRosterChanges.revision.first { it != roster }
+                }
             }
         }
     }
@@ -2188,7 +2432,7 @@ private fun SessionRoot(
     // KeyPackage out of the directory while the session is still readable;
     // last, auth.forgetDevice() runs the one on-device wipe
     // (AccountLocalWipe: every per-account store) and ends the session.
-    val forgetDevice = {
+    val forgetDeviceNowBody = {
         // ADR-0042, amended 2026-09-30 — first, as in logout above.
         me.lakko.app.push.PushSignOut.clearFirst(appContext)
         me.lakko.app.calls.AppCallHost.reset()
@@ -2200,6 +2444,26 @@ private fun SessionRoot(
         deviceGroupSync.clear()
         chatRepository.forgetDevice()
         authRepository.forgetDevice()
+    }
+    val forgetDevice: () -> Unit = {
+        // ADR-0090 section 2.4 — before anything stops: this device asks an
+        // owner device to retire its leaf in every channel it publishes
+        // (best effort, bounded; if lost, the account's other device retires
+        // it when the DeviceGroup no longer lists this one).
+        val publisherLoop = me.lakko.app.channels.ChannelPublisherLoop.peek(channelsState)
+        channelLinkScope.launch {
+            kotlinx.coroutines.withTimeoutOrNull(RETIRE_BEFORE_FORGET_MS) {
+                try {
+                    publisherLoop?.retireOwnLeavesBestEffort()
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Throwable) {
+                    // Best effort.
+                }
+            }
+            forgetDeviceNowBody()
+        }
+        Unit
     }
 
     // `No, thanks` on the guest offer reaches the orchestration above from
@@ -2277,8 +2541,8 @@ private fun SessionRoot(
                                         contentDescription = name
                                     },
                                 ) {
-                                    Icon(
-                                        imageVector = if (selected) tab.selectedIcon else tab.icon,
+                                    me.lakko.app.ui.components.LkIcon(
+                                        icon = if (selected) tab.selectedIcon else tab.icon,
                                         contentDescription = null,
                                     )
                                 }
@@ -2296,14 +2560,14 @@ private fun SessionRoot(
                 .padding(padding)
                 .consumeWindowInsets(padding),
         ) {
-            // One strip at the top of the app: the collapsed call bar first,
-            // then the notices. It carries the status-bar inset and the NavHost
-            // consumes it, so nothing here covers the status bar and no screen
-            // pads for it twice.
-            val topStrip = callBar != null || banners != null
+            // The notices at the top of the app. The strip carries the
+            // status-bar inset and the NavHost consumes it, so nothing here
+            // covers the status bar and no screen pads for it twice. A call
+            // that was put away is not here: it floats over the app
+            // (`docs/ux/calls.md` section 4.5, `CallMiniWindowHost`).
+            val topStrip = banners != null
             if (topStrip) {
                 Column(modifier = Modifier.windowInsetsPadding(WindowInsets.statusBars)) {
-                    callBar?.invoke()
                     banners?.invoke()
                 }
             }
@@ -2514,6 +2778,7 @@ private fun SessionRoot(
                     val id = entry.arguments?.getString("channelId") ?: return@composable
                     // ADR-0087 section 12 — a channel opens where a group opens.
                     ChannelConversationScreen(
+                        contactsRepository = contactsRepository,
                         channelId = id,
                         state = channelsState,
                         client = channelsClient,
@@ -2550,6 +2815,7 @@ private fun SessionRoot(
                 ) { entry ->
                     val id = entry.arguments?.getString("channelId") ?: return@composable
                     ChannelConversationScreen(
+                        contactsRepository = contactsRepository,
                         channelId = id,
                         state = channelsState,
                         client = channelsClient,
@@ -2732,6 +2998,8 @@ private fun SessionRoot(
                         onOpenChannelsIShare = { navController.navigate(Routes.CHANNELS_I_SHARE) },
                         onOpenLanguage = { navController.navigate(Routes.LANGUAGE) },
                         onOpenTextSize = { navController.navigate(Routes.TEXT_SIZE) },
+                        onOpenSupport = { navController.navigate(Routes.DONATIONS) },
+                        onOpenSupporters = { navController.navigate(Routes.SUPPORTERS) },
                         onOpenChatFolders = { navController.navigate(Routes.FOLDERS) },
                         onLogout = logout,
                         onForgetDevice = forgetDevice,
@@ -2769,7 +3037,7 @@ private fun SessionRoot(
                     )
                 }
 
-                // ADR-0089 — Settings > Privacy > Blocked people / Your reports.
+                // ADR-0098 — Settings > Privacy > Blocked people / Your reports.
                 composable(Routes.BLOCKED_PEOPLE) {
                     me.lakko.app.ui.moderation.BlockedPeopleScreen(
                         contactsRepository = contactsRepository,
@@ -3121,11 +3389,13 @@ private fun SessionRoot(
                 }
                 for (route in listOf(Routes.PASSKEYS, Routes.DELETE_ACCOUNT)) {
                     composable(route) {
+                        val passkeysAppContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
                         val passkeysVm: me.lakko.app.webauthn.PasskeysViewModel = viewModel(
                             factory = singletonViewModelFactory {
                                 me.lakko.app.webauthn.PasskeysViewModel(
                                     repo = authRepository,
                                     onAccountDeleted = forgetDevice,
+                                    appContext = passkeysAppContext,
                                 )
                             },
                         )
@@ -3238,6 +3508,13 @@ private fun SessionRoot(
                 }
                 composable(Routes.TEXT_SIZE) {
                     me.lakko.app.ui.settings.TextSizeScreen(onBack = { navController.popBackStack() })
+                }
+                // `docs/ux/supporters.md` section 2.2.
+                composable(Routes.SUPPORTERS) {
+                    me.lakko.app.ui.settings.SupportersScreen(onBack = { navController.popBackStack() })
+                }
+                composable(Routes.DONATIONS) {
+                    me.lakko.app.ui.donate.DonationsScreen(onBack = { navController.popBackStack() })
                 }
                 composable(Routes.ANTI_CENSORSHIP) {
                     AntiCensorshipSettingsScreen(
@@ -3374,6 +3651,12 @@ private fun SessionRoot(
                             }
                             joined
                         },
+                        publisherRequestSentAtMs = { channelIdHex ->
+                            channelsState.boundAccount?.let { acct ->
+                                me.lakko.app.channels.PendingPublisherRequests.sentAtMs(inviteCardContext, acct, channelIdHex)
+                            }
+                        },
+                        isPublisherOf = { channelIdHex -> channelsState.keysByChannel.value.containsKey(channelIdHex) },
                         onOpenChat = { hex ->
                             // Replace the landing with the chat, so Back from
                             // the chat does not return to a finished join.
@@ -3460,6 +3743,9 @@ private object Routes {
     const val CHANNELS_I_SHARE = "settings/channels_i_share"
     const val LANGUAGE = "settings/language"
     const val TEXT_SIZE = "settings/text-size"
+    /** `docs/ux/supporters.md` section 2.2. */
+    const val SUPPORTERS = "settings/supporters"
+    const val DONATIONS = "settings/donations"
     /** docs/ux/chat-folders.md section 4. */
     const val FOLDERS = "settings/folders"
     const val SAVED = "chats/saved"
@@ -3507,8 +3793,9 @@ private data class TabSpec(
     val route: String,
     /** Catalog key of the tab label (ADR-0061). */
     val labelKey: String,
-    val icon: ImageVector,
-    val selectedIcon: ImageVector,
+    @androidx.annotation.DrawableRes val icon: Int,
+    /** The `-fill` variant shown while the tab is selected (design system, section "Icons"). */
+    @androidx.annotation.DrawableRes val selectedIcon: Int,
 )
 
 /**
@@ -3526,12 +3813,12 @@ private data class TabSpec(
  * argument that call history should not exist.
  */
 private val Tabs: List<TabSpec> = listOf(
-    TabSpec(Routes.CHATS, "nav.chats", Icons.Outlined.ChatBubbleOutline, Icons.Filled.ChatBubble),
+    TabSpec(Routes.CHATS, "nav.chats", R.drawable.ic_lk_chat, R.drawable.ic_lk_chat_fill),
     // `docs/ux/feed.md` section 2 — second, one tap from the home.
-    TabSpec(Routes.FEED, "nav.feed", Icons.Outlined.DynamicFeed, Icons.Filled.DynamicFeed),
-    TabSpec(Routes.CONTACTS, "nav.contacts", Icons.Outlined.People, Icons.Filled.People),
-    TabSpec(Routes.CALLS, "nav.calls", Icons.Outlined.Call, Icons.Filled.Call),
-    TabSpec(Routes.SETTINGS, "nav.settings", Icons.Outlined.Settings, Icons.Filled.Settings),
+    TabSpec(Routes.FEED, "nav.feed", R.drawable.ic_lk_feed, R.drawable.ic_lk_feed_fill),
+    TabSpec(Routes.CONTACTS, "nav.contacts", R.drawable.ic_lk_person_square, R.drawable.ic_lk_person_square_fill),
+    TabSpec(Routes.CALLS, "nav.calls", R.drawable.ic_lk_phone, R.drawable.ic_lk_phone_fill),
+    TabSpec(Routes.SETTINGS, "nav.settings", R.drawable.ic_lk_gear, R.drawable.ic_lk_gear_fill),
 )
 
 /** Standard tab switch: one back-stack per tab, state saved and restored. */
@@ -3563,19 +3850,27 @@ private fun restoredChatsHint(chatRepository: ChatRepository): me.lakko.app.back
     val state by chatRepository.state.collectAsStateWithLifecycle()
     val accountIdB64 = chatRepository.activeAccountIdB64
     val listEmpty = state.bootstrapped && state.threads.isEmpty()
-    val knew = remember(accountIdB64, state.bootstrapped, state.threads.size) {
-        accountIdB64?.let { me.lakko.app.backup.BackupRestoreStore.restoredChats(context, it) }
+    // What this device's DeviceGroup rejoin came to (another device answered
+    // its knock, or it founded): recorded by the rejoin, kept per account.
+    val rejoinFlow = remember(accountIdB64) {
+        accountIdB64?.let { me.lakko.app.backup.BackupRestoreStore.rejoinAnswerFlow(context, it) }
+            ?: kotlinx.coroutines.flow.flowOf(null)
     }
-    var otherDevice by remember(accountIdB64) { mutableStateOf<Boolean?>(null) }
-    LaunchedEffect(accountIdB64, knew != null) {
-        if (knew != null) otherDevice = chatRepository.ownOtherDeviceListed()
+    val rejoinInitial = remember(accountIdB64) {
+        accountIdB64?.let { me.lakko.app.backup.BackupRestoreStore.rejoinAnswer(context, it) }
+    }
+    val rejoin by rejoinFlow.collectAsStateWithLifecycle(initialValue = rejoinInitial)
+    // Read again when the rejoin decides: the restore may finish after the
+    // list first drew.
+    val knew = remember(accountIdB64, state.bootstrapped, state.threads.size, rejoin) {
+        accountIdB64?.let { me.lakko.app.backup.BackupRestoreStore.restoredChats(context, it) }
     }
     LaunchedEffect(accountIdB64, knew != null, state.threads.isNotEmpty()) {
         if (knew != null && state.threads.isNotEmpty() && accountIdB64 != null) {
             me.lakko.app.backup.BackupRestoreStore.clearRestoredChats(context, accountIdB64)
         }
     }
-    return me.lakko.app.backup.restoredChatsHint(knew, listEmpty, otherDevice)
+    return me.lakko.app.backup.restoredChatsHint(knew, listEmpty, rejoin)
 }
 
 @Composable
@@ -3647,12 +3942,20 @@ private fun AnonRoot(
                         saveOwnProfile = { accountId, profile ->
                             me.lakko.app.profile.OwnProfileStore.save(appContext, accountId, profile)
                         },
+                        // ADR-0097 - supporter codes on the full state.
+                        supporterPlaces = me.lakko.app.auth.SupporterPlacesOnDevice.get(appContext),
                     )
                 },
             )
             SignupScreen(
                 viewModel = signupVm,
                 onBack = { nav.popBackStack() },
+                onLogIn = {
+                    nav.navigate(AnonRoutes.LOGIN) {
+                        popUpTo(AnonRoutes.SIGNUP) { inclusive = true }
+                        launchSingleTop = true
+                    }
+                },
             )
         }
         composable(AnonRoutes.RECOVER) {
@@ -3714,3 +4017,8 @@ private fun LoadingScreen() {
         androidx.compose.material3.CircularProgressIndicator()
     }
 }
+
+/** ADR-0090 section 2.4 - how long Forget device waits for the retire
+ *  requests of this device's channel leaves before it stops everything
+ *  (chosen, not measured). */
+private const val RETIRE_BEFORE_FORGET_MS: Long = 4_000L

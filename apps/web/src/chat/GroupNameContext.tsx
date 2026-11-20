@@ -45,7 +45,7 @@ import { loadWasm } from "../wasm";
 import { useChats, type ActiveGroup } from "./ChatContext";
 import { ownsGroup } from "./group-owner";
 import { notePublicRecordChanged } from "./handle-owed";
-import { ChatClient, type IncomingChatEvent } from "./client";
+import { ChatClient, isConversationBehind, type IncomingChatEvent } from "./client";
 import { IdbGroupNameBackend } from "./group-name-idb";
 import {
   GroupSettingStore,
@@ -252,11 +252,11 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
     }
   }
 
-  async function send(entry: ActiveGroup, envelope: Uint8Array): Promise<void> {
+  async function send(entry: ActiveGroup, envelope: Uint8Array, personAction = false): Promise<void> {
     const secrets = auth.identitySecrets();
     if (secrets === null || chats.identity() === null) throw new Error("Sign in again.");
     if (readIsActive(entry.group) === false) throw new Error("You are no longer in this group.");
-    await publisher.broadcastControl(secrets, entry.group, envelope);
+    await publisher.broadcastControl(secrets, entry.group, envelope, { personAction });
   }
 
   /** Trigger 3 — re-send the held name, with its ORIGINAL stamp, when the
@@ -294,6 +294,8 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
     random: () => Math.random(),
     publish: republishInto,
     onError: (_groupIdB64, err) => {
+      // ADR-0091: a behind conversation sends nothing until it is back.
+      if (isConversationBehind(err)) return;
       // eslint-disable-next-line no-console
       console.warn("[group-name] growth re-send failed", err);
     },
@@ -506,7 +508,7 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
         const stamp = held !== undefined && held.updatedAtMs >= now ? held.updatedAtMs + 1n : now;
         const value: StoredGroupPhoto = { avatar, updatedAtMs: stamp };
         await owePublicRecord(account, entry);
-        await send(entry, composePhotoEnvelope(wasm, value));
+        await send(entry, composePhotoEnvelope(wasm, value), true);
         await photos.set(account, entry.groupIdB64, value);
         await owePublicRecordQuietly(account, entry);
         // ADR-0087 section 18.5 — the replaced photo is deleted by the
@@ -528,7 +530,7 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
         const now = BigInt(Date.now());
         const stamp = held !== undefined && held.updatedAtMs >= now ? held.updatedAtMs + 1n : now;
         const value: StoredGroupReactions = { allowed, updatedAtMs: stamp };
-        await send(entry, composeReactionsEnvelope(wasm, value));
+        await send(entry, composeReactionsEnvelope(wasm, value), true);
         await reactionSettings.set(account, entry.groupIdB64, value);
       });
     },
@@ -540,9 +542,11 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
         await handles.set(account, entry.groupIdB64, value);
       });
       try {
-        await send(entry, value.envelope);
+        await send(entry, value.envelope, true);
       } catch (err) {
-        // Kept; the growth re-send carries it.
+        // Kept; the growth re-send carries it, and so does the re-send when
+        // a conversation this device was behind in is back in step.
+        if (isConversationBehind(err)) return;
         // eslint-disable-next-line no-console
         console.warn("[group-handle] send failed", err instanceof Error ? err.name : "");
       }
@@ -614,7 +618,7 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
         await opened;
         const { envelope, value } = await compose(name, freshStamp(entry.groupIdB64));
         await owePublicRecord(account, entry);
-        await send(entry, envelope);
+        await send(entry, envelope, true);
         await store.set(account, entry.groupIdB64, value);
         await owePublicRecordQuietly(account, entry);
       });

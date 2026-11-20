@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Reporting and moderation ([ADR-0089]).
+//! Reporting and moderation ([ADR-0098]).
 //!
 //! The pure half of moderation, shared by the clients (report sheet), the
 //! moderators' panel (in the browser, through wasm) and every service that
@@ -25,7 +25,7 @@
 //!
 //! Nothing here talks to a network or holds state.
 //!
-//! [ADR-0089]: ../../../docs/adr/0089-reporting-and-moderation.md
+//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

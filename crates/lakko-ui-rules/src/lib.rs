@@ -26,11 +26,14 @@
 //! crate ever needs a key, a secret or a peer's assertion, it is in the wrong
 //! crate.
 
+pub mod attachment_menu;
 pub mod av_align;
 pub mod block;
 pub mod call_bar;
 pub mod call_group;
 pub mod capture;
+pub mod channel_notify;
+pub mod comments;
 pub mod conversation;
 pub mod emoji;
 pub mod folder;
@@ -38,11 +41,14 @@ pub mod guest_name;
 pub mod handle;
 pub mod info;
 pub mod initials;
+pub mod language_detect;
 pub mod layer_display;
 pub mod lookup;
+pub mod media_mosaic;
 pub mod message_links;
 pub mod reaction;
 pub mod ring;
 pub mod speaking;
+pub mod subscribers;
 pub mod translation;
 pub mod visibility;

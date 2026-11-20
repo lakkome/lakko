@@ -99,6 +99,23 @@ export interface CallLogEntry {
   readonly durationMs: number | null;
 }
 
+/**
+ * A call with no conversation (`docs/ux/navigation.md` section 5.1.1): one
+ * started with `New call`, or one this device joined from a call link.
+ *
+ * The same parts as {@link CallLogEntry}, so the row's words come from the
+ * same {@link callRowLabel}, narrowed where such a call cannot go: it never
+ * rings, so it is never missed or declined, and this device only writes one
+ * after it was in the call. The `id` is the call id in hex, which is what
+ * keeps it to one row per call on a device. It carries no name: a call has
+ * none of its own, so every such row reads `Group call`.
+ */
+export interface StandaloneCallEntry extends CallLogEntry {
+  /** `outgoing` when this device started the call with `New call` (or founded
+   *  it from its own link), `incoming` when it joined from a link. */
+  readonly outcome: "outgoing" | "incoming";
+}
+
 /** What the session reported when it reached its terminal state. */
 export interface CallOutcomeInput {
   /** This device was being called. */

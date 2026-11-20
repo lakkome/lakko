@@ -28,6 +28,7 @@ import { createSignal, Match, onCleanup, onMount, Show, Switch, type JSX } from 
 
 import { useAuth } from "./AuthContext";
 import { guestScreen } from "./guest-account";
+import { guestQuestionFor } from "./signup-closed";
 import { UsernameClaimScreen } from "./UsernameClaim";
 import { useCallHost } from "../calls/CallHostContext";
 import { t } from "../l10n";
@@ -44,6 +45,17 @@ export function GuestAccountOffer(): JSX.Element {
   const [deleteFailed, setDeleteFailed] = createSignal(false);
   /** This device cannot read the account's phrase, so it cannot be kept. */
   const [cannotKeep, setCannotKeep] = createSignal(false);
+  /** `docs/ux/beta-account-cap.md` section 3: the beta is full, said by
+   *  `GET /signup/open` when the question was about to show (a failed
+   *  question reads as open), or by the bind refusing `Create account`. */
+  const [signupOpen, setSignupOpen] = createSignal(true);
+  const [refusedAtBind, setRefusedAtBind] = createSignal(false);
+  const question = () =>
+    guestQuestionFor({
+      signupOpen: signupOpen(),
+      refusedAtBind: refusedAtBind(),
+      reservedUsername: auth.guestReservedUsername(),
+    });
 
   // The component can be unmounted by its own success (the guard switches to
   // the next step, or the session ends): nothing is written after that.
@@ -55,6 +67,9 @@ export function GuestAccountOffer(): JSX.Element {
   // A guest account past its lifetime is not offered anything: it is deleted,
   // and whoever drew this block lands on the signed-out screen.
   onMount(() => {
+    void auth.signupOpen().then((open) => {
+      if (alive) setSignupOpen(open);
+    });
     void auth.expireGuestIfDue().catch((err: unknown) => {
       // eslint-disable-next-line no-console
       console.warn("expiring the guest account failed", err);
@@ -79,6 +94,26 @@ export function GuestAccountOffer(): JSX.Element {
   return (
     <div class="lk-stack lk-guest-offer" style={{ gap: "12px" }}>
       <Switch>
+        <Match when={step() === "ask" && question() === "closed"}>
+          {/* The account cannot be kept; `OK` does what `No, thanks` does. */}
+          <p style={{ margin: 0 }}>{t("call.guest.closed.body")}</p>
+          <Show when={deleteFailed()}>
+            <div class="form-error" role="alert">
+              {t("guest.offer.delete_failed")}
+            </div>
+          </Show>
+          <button
+            type="button"
+            class="primary"
+            disabled={deleting()}
+            aria-busy={deleting()}
+            onClick={() => void onDecline()}
+          >
+            <Show when={deleting()} fallback={t("call.guest.closed.ok")}>
+              <span class="lakko-spinner" aria-hidden="true" /> {t("guest.offer.deleting")}
+            </Show>
+          </button>
+        </Match>
         <Match when={step() === "ask"}>
           <h2 style={{ margin: 0 }}>{t("guest.offer.title")}</h2>
           <p style={{ margin: 0 }}>{t("guest.offer.body")}</p>
@@ -127,6 +162,10 @@ export function GuestAccountOffer(): JSX.Element {
             onClose={() => setStep("ask")}
             onCannotKeep={() => {
               setCannotKeep(true);
+              setStep("ask");
+            }}
+            onRegistrationClosed={() => {
+              setRefusedAtBind(true);
               setStep("ask");
             }}
           />

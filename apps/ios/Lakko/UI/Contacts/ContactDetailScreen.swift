@@ -43,7 +43,7 @@ struct ContactDetailScreen: View {
     var onChatDeleted: () -> Void = {}
 
     @Environment(\.dismiss) private var dismiss
-    /// ADR-0089 step 3 — a suspended account calls and adds nobody.
+    /// ADR-0098 step 3 — a suspended account calls and adds nobody.
     @Environment(\.accountSuspended) private var accountSuspended
     @State private var renaming = false
     @State private var draftName = ""
@@ -55,9 +55,9 @@ struct ContactDetailScreen: View {
     @ObservedObject private var l10n = Localization.shared
     /// ADR-0060 — whether `Their contacts can find me` stands follows the setting.
     @ObservedObject private var reach = ReachCenter.shared
-    /// ADR-0089 — Block / Unblock and the "Blocked" line follow the register.
+    /// ADR-0098 — Block / Unblock and the "Blocked" line follow the register.
     @ObservedObject private var blocks = BlockList.shared
-    /// ADR-0089 step 4 — the "Account suspended" line follows the marks.
+    /// ADR-0098 step 4 — the "Account suspended" line follows the marks.
     @ObservedObject private var suspensions = SuspensionMarks.shared
     @State private var confirmingBlock = false
     @State private var reportRequest: ReportRequest?
@@ -141,7 +141,7 @@ struct ContactDetailScreen: View {
                         name: resolved.isPlaceholder ? "" : resolved.name,
                         identity: base64Encode(contact.request.fromPubkey),
                         size: 72,
-                        placeholderSymbol: "person.fill",
+                        placeholderIcon: .personFill,
                         photo: .person(contact.request.fromPubkey),
                         playsVideo: true
                     )
@@ -154,7 +154,7 @@ struct ContactDetailScreen: View {
                             .font(.subheadline)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
-                    // ADR-0089 / UX 1.4 — a muted line under a blocked
+                    // ADR-0098 / UX 1.4 — a muted line under a blocked
                     // person's name; step 4 / UX 3 — or under a suspended
                     // one's (blocked wins when both apply).
                     switch SuspensionMarkRules.cardLine(
@@ -214,7 +214,7 @@ struct ContactDetailScreen: View {
                             // this device holds, or starts a new one-to-one
                             // with the contact and opens it.
                             ContactActionButton(
-                                title: l10n.t("contacts.detail.message"), systemImage: "bubble.left.fill",
+                                title: l10n.t("contacts.detail.message"), icon: .chatFill,
                                 enabled: chat != nil || contact.request.fromAccountId != nil,
                                 busy: viewModel.startingChat.contains(contact.request.messageId)
                             ) {
@@ -231,12 +231,12 @@ struct ContactDetailScreen: View {
                         }
                         if sections.contains(.call) {
                             ContactActionButton(
-                                title: l10n.t("chat.call.voice"), systemImage: "phone.fill", enabled: callable
+                                title: l10n.t("chat.call.voice"), icon: .phoneFill, enabled: callable
                             ) {
                                 if let chat { onCall(chat, false) }
                             }
                             ContactActionButton(
-                                title: l10n.t("chat.media.video"), systemImage: "video.fill", enabled: callable
+                                title: l10n.t("chat.media.video"), icon: .videoFill, enabled: callable
                             ) {
                                 if let chat { onCall(chat, true) }
                             }
@@ -259,7 +259,7 @@ struct ContactDetailScreen: View {
             Section {
                 if sections.contains(.safetyNumber) {
                     NavigationLink(value: TabRoute.safetyNumber(messageId: messageId)) {
-                        Label(l10n.t("contacts.safety.title"), systemImage: "checkmark.shield")
+                        Label(l10n.t("contacts.safety.title"), icon: .shieldCheck)
                             .foregroundStyle(Color.lakkoText)
                     }
                 }
@@ -268,7 +268,7 @@ struct ContactDetailScreen: View {
                         draftName = contact.displayName ?? ""
                         renaming = true
                     } label: {
-                        Label(l10n.t("contacts.rename.action"), systemImage: "pencil")
+                        Label(l10n.t("contacts.rename.action"), icon: .pencil)
                             .foregroundStyle(Color.lakkoText)
                     }
                 }
@@ -292,7 +292,7 @@ struct ContactDetailScreen: View {
                         viewModel.onAddContactClicked(person: contact)
                     } label: {
                         HStack {
-                            Label(l10n.t("contacts.add_back.control"), systemImage: "person.badge.plus")
+                            Label(l10n.t("contacts.add_back.control"), icon: .personPlus)
                                 .foregroundStyle(Color.lakkoText)
                             Spacer()
                             Text(l10n.t("contacts.add_back.action"))
@@ -310,7 +310,7 @@ struct ContactDetailScreen: View {
             // different things — one forgets the PERSON, the other forgets the
             // CONVERSATION — and the rule can return both at once, so neither
             // is worded as if it did the other's job.
-            // ADR-0089 / UX 1.1, 2.1 — Report, then Block (or Unblock), in
+            // ADR-0098 / UX 1.1, 2.1 — Report, then Block (or Unblock), in
             // the danger block above Remove contact.
             if sections.contains(.report) || sections.contains(.block) || sections.contains(.unblock) {
                 Section {
@@ -318,13 +318,13 @@ struct ContactDetailScreen: View {
                         Button(role: .destructive) {
                             reportRequest = viewModel.reportRequest(for: contact, name: resolved.name)
                         } label: {
-                            Label(l10n.t("report.action"), systemImage: "flag")
+                            Label(l10n.t("report.action"), icon: .flag)
                                 .foregroundStyle(Color.lakkoDanger)
                         }
                     }
                     if sections.contains(.block) {
                         Button(role: .destructive) { confirmingBlock = true } label: {
-                            Label(l10n.t("block.action"), systemImage: "hand.raised")
+                            Label(l10n.t("block.action"), icon: .personCircleXmark)
                                 .foregroundStyle(Color.lakkoDanger)
                         }
                     }
@@ -332,7 +332,7 @@ struct ContactDetailScreen: View {
                         Button {
                             viewModel.unblock(accountKey: contact.request.fromPubkey)
                         } label: {
-                            Label(l10n.t("block.unblock"), systemImage: "hand.raised.slash")
+                            Label(l10n.t("block.unblock"), icon: .personCirclePlus)
                                 .foregroundStyle(Color.lakkoText)
                         }
                     }
@@ -343,7 +343,7 @@ struct ContactDetailScreen: View {
                 Section {
                     if sections.contains(.removeContact) {
                         Button(role: .destructive) { confirmingRemove = true } label: {
-                            Label(l10n.t("contacts.remove.control"), systemImage: "person.badge.minus")
+                            Label(l10n.t("contacts.remove.control"), icon: .personMinus)
                                 // A destructive row is red end to end; the
                                 // symbol used to keep the platform's blue tint
                                 // (seen live 2026-09-26).
@@ -361,11 +361,11 @@ struct ContactDetailScreen: View {
         .listStyle(.insetGrouped)
         .navigationTitle(resolved.name)
         .navigationBarTitleDisplayMode(.inline)
-        // ADR-0089 step 4 — ask about the person when their card opens.
+        // ADR-0098 step 4 — ask about the person when their card opens.
         .task(id: contact.request.fromPubkey) {
             _ = await suspensions.standing(contact.request.fromPubkey)
         }
-        // ADR-0089 / UX 1.2 — Block asks first; blocking also removes the
+        // ADR-0098 / UX 1.2 — Block asks first; blocking also removes the
         // contact, so the card stays and reads `Unblock`.
         .lakkoDialog(
             isPresented: $confirmingBlock,
@@ -435,7 +435,7 @@ struct ContactDetailScreen: View {
 /// One of the three actions under the header: icon over a label, on a card.
 private struct ContactActionButton: View {
     let title: String
-    let systemImage: String
+    let icon: LkIcon
     let enabled: Bool
     /// Work started by this button is running: a spinner in place of the icon.
     var busy: Bool = false
@@ -447,8 +447,7 @@ private struct ContactActionButton: View {
                 if busy {
                     ProgressView().frame(height: 22)
                 } else {
-                    Image(systemName: systemImage)
-                        .font(.title3)
+                    LkIconView(icon, size: 24, relativeTo: .title3)
                 }
                 Text(title)
                     .font(.caption.weight(.medium))
@@ -502,7 +501,7 @@ struct SafetyNumberScreen: View {
                                 copied = false
                             }
                         } label: {
-                            Label(l10n.t(copied ? "common.copied" : "common.copy"), systemImage: copied ? "checkmark" : "doc.on.doc")
+                            Label(l10n.t(copied ? "common.copied" : "common.copy"), icon: copied ? .checkmark : .copy)
                         }
                         .buttonStyle(.bordered)
                     } else {

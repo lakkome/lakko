@@ -65,6 +65,8 @@ final class JournalRepairTests: XCTestCase {
         var advanceOnPoll = false
         let ds = RepairDs()
         var scheduled: [(TimeInterval, @MainActor () -> Void)] = []
+        /// ADR-0091 phase 1 — the hold tracker the guard consults.
+        var hold = RegisteredCommitHold(nowMs: { 1_000 })
 
         func repair() -> JournalRepair {
             JournalRepair(ports: .init(
@@ -80,8 +82,51 @@ final class JournalRepairTests: XCTestCase {
                 schedule: { seconds, work in
                     self.scheduled.append((seconds, work))
                     return {}
+                },
+                registeredCommitKnown: { groupIdHex, epoch in
+                    self.hold.blocksRepair(groupIdHex: groupIdHex, notedEpoch: epoch)
                 }))
         }
+    }
+
+    /// ADR-0091 phase 1 — a held registered commit means the epoch above is
+    /// real: no Replace, and the guard's line is logged.
+    func testNoReplaceWhileARegisteredCommitIsHeld() async {
+        let w = World()
+        let root = RepairSigner()
+        w.authority = .root(root)
+        _ = w.hold.recordFailure(groupIdHex: "ab", rowId: 40, sealedEpoch: 7, localEpoch: 7)
+        let outcome = await w.repair().check(groupIdHex: "ab", epoch: 7)
+        XCTAssertEqual(outcome, .registeredCommitKnown)
+        XCTAssertTrue(root.calls.isEmpty)
+        XCTAssertTrue(w.ds.sent.isEmpty)
+    }
+
+    /// ADR-0091 phase 1 — a behind mark at or above the noted epoch blocks the
+    /// Replace; one below it does not.
+    func testABehindMarkAtOrAboveTheEpochBlocksTheReplace() async {
+        let w = World()
+        let root = RepairSigner()
+        w.authority = .root(root)
+        for _ in 0..<RegisteredCommitHold.maxAttempts {
+            _ = w.hold.recordFailure(groupIdHex: "ab", rowId: 40, sealedEpoch: 7, localEpoch: 7)
+        }
+        XCTAssertNil(w.hold.hold(groupIdHex: "ab"))
+        XCTAssertEqual(w.hold.behindMark(groupIdHex: "ab")?.epoch, 7)
+        let blocked = await w.repair().check(groupIdHex: "ab", epoch: 7)
+        XCTAssertEqual(blocked, .registeredCommitKnown)
+        XCTAssertTrue(root.calls.isEmpty)
+
+        let other = World()
+        let otherRoot = RepairSigner()
+        other.authority = .root(otherRoot)
+        other.epoch = 8
+        for _ in 0..<RegisteredCommitHold.maxAttempts {
+            _ = other.hold.recordFailure(groupIdHex: "ab", rowId: 40, sealedEpoch: 7, localEpoch: 7)
+        }
+        let replaced = await other.repair().check(groupIdHex: "ab", epoch: 8)
+        XCTAssertEqual(replaced, .replaced, "a mark below the noted epoch does not block")
+        XCTAssertEqual(otherRoot.calls, ["replace:8"])
     }
 
     func testTheCheckIsScheduledThirtySecondsLaterAndReplacesWhenTheEpochDidNotMove() async {

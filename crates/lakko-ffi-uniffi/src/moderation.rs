@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! UniFFI surface for reporting ([ADR-0089]) on iOS and Android.
+//! UniFFI surface for reporting ([ADR-0098]) on iOS and Android.
 //!
 //! Mirror of `crates/lakko-ffi-wasm/src/moderation.rs`, minus the
 //! moderators' panel (web only):
@@ -28,7 +28,7 @@
 //! Every refusal is [`FfiError::Moderation`] with the message
 //! `"<code>: <reason>"`.
 //!
-//! [ADR-0089]: ../../../docs/adr/0089-reporting-and-moderation.md
+//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
 
 use std::sync::Arc;
 
@@ -52,7 +52,7 @@ fn attest_err(e: &attested::AttestError) -> FfiError {
     FfiError::Moderation(format!("{}: {e}", e.code()))
 }
 
-/// What a message's signature showed (ADR-0089 section 1).
+/// What a message's signature showed (ADR-0098 section 1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiAttestation {
     /// The signature verified under the sender's leaf key.
@@ -143,7 +143,7 @@ pub fn report_reason_name(code: u8) -> Option<String> {
 
 /// Verify a moderator list fetched from the moderation service under the
 /// pinned `root_key` and return its version. A client keeps the highest
-/// version it has seen and refuses a lower one (ADR-0089 section 3).
+/// version it has seen and refuses a lower one (ADR-0098 section 3).
 ///
 /// # Errors
 ///

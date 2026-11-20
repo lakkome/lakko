@@ -7,9 +7,9 @@
  * (docs/ux/identity-recovery.md 9 step 3 and 10.2).
  *
  * It registers the passkey, turns on attested device removals (G-13,
- * ADR-0015), and says whether the keys choice can follow. Nothing is stored
- * for the passkey here: letting it restore keys is the person's own choice
- * (`PasskeyKeysChoice`).
+ * ADR-0015), and says whether storing the keys for it can follow. The keys
+ * are stored by the caller right after, with nothing to choose
+ * (`storeKeysForPasskey`, section 10.2 amended 2026-11-11).
  */
 import { base64UrlEncodeNoPad } from "./account-id";
 import { getDeviceKey } from "./key-store";
@@ -21,7 +21,7 @@ export interface AddedPasskey {
   readonly credentialIdB64: string;
   /** What the registration yielded for protecting keys, when it did. */
   readonly prfOutput: Uint8Array | null;
-  /** Whether the keys choice follows, or the passkey signs in only. */
+  /** Whether storing the keys follows, or the passkey signs in only. */
   readonly outcome: PasskeyAddOutcome;
 }
 

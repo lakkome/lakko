@@ -191,3 +191,20 @@ public object AutoBackupStore {
         return true
     }
 }
+
+/**
+ * The one choke point at which a change of the persisted synced state (lakko-
+ * sync `SyncedState`: folders, pins, saved messages, channel subscriptions,
+ * channel admission seeds, link records, ...) makes the backup due. The
+ * synced-state writer ([me.lakko.app.devices.sync.SyncStatePersistence])
+ * calls it after each write of a change, so no mutation site has to; the
+ * backup carries these bytes, and the 5-minute minimum interval
+ * ([AutoBackup.MIN_INTERVAL_MS]) still bounds the uploads.
+ */
+public fun markBackupDueForSyncedState(
+    context: Context,
+    accountIdB64: String,
+    nowMs: Long = System.currentTimeMillis(),
+) {
+    AutoBackupStore.markDirty(context, accountIdB64, nowMs)
+}

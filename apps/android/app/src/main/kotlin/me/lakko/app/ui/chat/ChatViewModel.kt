@@ -152,6 +152,7 @@ public class ChatViewModel(
         mutableSelection.value = me.lakko.app.chat.MessageSelection.starting(
             messageId = message.messageId,
             isOwn = message.direction == me.lakko.app.chat.Direction.Outgoing,
+            isInvitation = me.lakko.app.chat.carriesInvitationCard(message),
         )
     }
 
@@ -164,6 +165,7 @@ public class ChatViewModel(
         mutableSelection.value = current.toggle(
             messageId = message.messageId,
             isOwn = message.direction == me.lakko.app.chat.Direction.Outgoing,
+            isInvitation = me.lakko.app.chat.carriesInvitationCard(message),
         )
     }
 
@@ -356,6 +358,21 @@ public class ChatViewModel(
                 started = SharingStarted.Eagerly,
                 initialValue = me.lakko.app.chat.membershipEnded(mutableMembership.value),
             )
+
+    /** UX 2.4 — the gap lines of this chat ("Some messages are not
+     *  available."). */
+    internal val reentryGaps: StateFlow<List<me.lakko.app.chat.ReentryGap>> =
+        repo.reentryGaps
+            .map { it[groupIdHex.lowercase()].orEmpty() }
+            .distinctUntilChanged()
+            .stateIn(scope = viewModelScope, started = SharingStarted.Eagerly, initialValue = emptyList())
+
+    init {
+        runCatching { repo.loadReentryGaps(groupIdHex) }
+        // ADR-0091 phase 2 section 7 — opening the chat looks once more for
+        // the messages missed while this device was out (throttled).
+        runCatching { repo.lookForGapHistoryOnOpen(groupIdHex) }
+    }
 
     /** The hex ids of the groups this device holds. */
     public fun joinedGroupIdsHex(): Set<String> = repo.joinedGroupIdsHex()
@@ -660,6 +677,12 @@ public class ChatViewModel(
         // app-level overlay presents whichever of the two follows. Refused
         // while any other call is up — one call at a time.
         if (!host.startOutgoing(groupIdHex, kind, hasCamera = hasCamera)) {
+            // ADR-0091 — refused because this device is behind in the chat:
+            // the ordinary could-not-start notice, nothing about why.
+            if (host.isHeldWhileBehind(groupIdHex)) {
+                showCallNotice(UiText("chat.call.error.start"))
+                return
+            }
             showBusyNotice(me.lakko.app.calls.CallVerb.START)
             return
         }
@@ -2018,7 +2041,7 @@ public class ChatViewModel(
             null
         }
 
-    /** ADR-0089 — the other person's account key (base64) in a one-to-one, else `null`. */
+    /** ADR-0098 — the other person's account key (base64) in a one-to-one, else `null`. */
     public fun oneToOnePeerPersonKey(): String? = repo.oneToOnePeerPersonKey(groupIdHex)
 
     public fun nameOf(identity: me.lakko.app.chat.MemberIdentity): String {
@@ -2239,6 +2262,11 @@ public class ChatViewModel(
                         me.lakko.app.chat.RetryableRequest.Remove(targetKeyB64),
                     ) { repo.removeMemberFromGroup(groupIdHex, leafIndex) }
                 }
+                // Applied at once when this device is the committer, as web
+                // does: an owner's own removal otherwise waited for the next
+                // poll that ran a sweep (seen on an iPhone 2026-11-10; this
+                // client had the same order).
+                repo.sweepIfCommitter(groupIdHex)
                 refreshMembers()
             } catch (e: Throwable) {
                 reportMembershipFailure(e, "onRemoveMember", "chat.error.remove_member")
@@ -2394,6 +2422,8 @@ public class ChatViewModel(
                         makeAdmin = makeAdmin,
                     ),
                 ) { repo.setMemberAdmin(groupIdHex, member.signaturePublicKey, makeAdmin) }
+                // Applied at once when this device is the committer.
+                repo.sweepIfCommitter(groupIdHex)
                 refreshMembers()
             } catch (e: Throwable) {
                 reportMembershipFailure(e, "onToggleAdmin", "chat.error.change_admin")
@@ -3099,10 +3129,6 @@ public class ChatViewModel(
             draftRevision = composer.draftRevision,
             sending = composer.sending,
             sendError = composer.sendError,
-            pendingAttachments = composer.pendingAttachments,
-            uploading = composer.inFlight.isNotEmpty(),
-            inFlightUploads = composer.inFlight,
-            pendingPreviews = composer.pendingPreviews,
             // ADR-0024 — typing indicator + read-state surface.
             typingText = typingText,
             readUpToByMember = thread?.readUpToByMember ?: emptyMap(),
@@ -3172,12 +3198,12 @@ public class ChatViewModel(
         val snapshot = composer.value
         if (snapshot.sending) return
         val trimmed = snapshot.draft.trim()
-        val stagedAttachments = snapshot.pendingAttachments
-        // 1.19c4: attachment-only messages are valid (empty
-        // text + ≥1 attachment); pre-1.19 text-only messages
-        // still valid (≥1 char text + zero attachments). The
-        // only invalid input is the all-empty composer.
-        if (trimmed.isEmpty() && stagedAttachments.isEmpty()) return
+        // docs/ux/media-messages.md section 11 — ONE message: the text and
+        // every item of the tray, once every item is uploaded.
+        val key = trayKey()
+        val sentTray = ComposerTrays.tray(key)
+        if (!sentTray.canSend(trimmed)) return
+        val stagedAttachments = sentTray.refs()
 
         // ADR-0024 — sending a message clears any outstanding
         // typing signal (`typing:false` once).
@@ -3200,10 +3226,10 @@ public class ChatViewModel(
                 sendError = null,
                 draft = "",
                 draftRevision = it.draftRevision + 1,
-                pendingAttachments = emptyList(),
-                pendingPreviews = emptyMap(),
             )
         }
+        // The field and the tray clear together.
+        ComposerTrays.sent(key, sentTray.items.map { it.id })
         viewModelScope.launch {
             try {
                 repo.sendMessage(
@@ -3231,6 +3257,337 @@ public class ChatViewModel(
                 }
             }
         }
+    }
+
+    // -------------------------------------------------------------- ADR-0092
+
+    /** UX 2.4 — the conversation kind and the own role the attachment menu reads. */
+    public fun attachmentMenuRows(hasCamera: Boolean, hasLocation: Boolean, callHoldsCamera: Boolean):
+        List<uniffi.lakko_ffi_uniffi.AttachmentMenuRow> = try {
+        uniffi.lakko_ffi_uniffi.attachmentMenu(
+            when (conversationKind()) {
+                me.lakko.app.chat.ConversationKind.Group -> uniffi.lakko_ffi_uniffi.ConversationKind.GROUP
+                else -> uniffi.lakko_ffi_uniffi.ConversationKind.CHAT
+            },
+            when (ownRole()) {
+                Role.OWNER -> uniffi.lakko_ffi_uniffi.ConversationRole.OWNER
+                Role.ADMIN -> uniffi.lakko_ffi_uniffi.ConversationRole.ADMIN
+                else -> uniffi.lakko_ffi_uniffi.ConversationRole.MEMBER
+            },
+            hasCamera,
+            hasLocation,
+            callHoldsCamera,
+        )
+    } catch (_: Throwable) {
+        emptyList()
+    }
+
+    /** UX 7.1 — whether the poll editor shows the Anonymous switch. */
+    public fun pollAnonymity(): uniffi.lakko_ffi_uniffi.PollAnonymity = try {
+        uniffi.lakko_ffi_uniffi.pollAnonymity(
+            if (conversationKind() == me.lakko.app.chat.ConversationKind.Group) {
+                uniffi.lakko_ffi_uniffi.ConversationKind.GROUP
+            } else {
+                uniffi.lakko_ffi_uniffi.ConversationKind.CHAT
+            },
+            repo.rosterAccountKeys(groupIdHex).size.toUInt(),
+        )
+    } catch (_: Throwable) {
+        uniffi.lakko_ffi_uniffi.PollAnonymity.NOT_OFFERED
+    }
+
+    /** The current row of a content message, for its reader and results. */
+    public fun contentRow(messageId: Long): me.lakko.app.chat.ChatMessage? = repo.contentRow(groupIdHex, messageId)
+
+    /** The raw group id, for the content folds the bubbles draw. */
+    public fun contentGroupId(): ByteArray? = repo.groupIdOf(groupIdHex)
+
+    /** This device's account as a member key, for "your choice". */
+    public fun ownMemberKey(): me.lakko.app.chat.MemberIdentity? = repo.ownMemberKey(groupIdHex)
+
+    /** Whether this account is the owner or an admin (closes others' polls, UX 7.3). */
+    public fun isOwnerOrAdmin(): Boolean = ownRole().let { it == Role.OWNER || it == Role.ADMIN }
+
+    /**
+     * ADR-0092 — send a poll, checklist, location, contact card or article. A
+     * poll or checklist is signed here by the account key the conversation
+     * leaves are bound to (section 3.1), over this group's id.
+     */
+    public fun sendContent(
+        content: uniffi.lakko_ffi_uniffi.MessageContent,
+        attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef> = emptyList(),
+    ) {
+        val reply = takeArmedReply()
+        viewModelScope.launch {
+            try {
+                repo.sendMessage(
+                    groupIdHex = groupIdHex,
+                    plaintext = "",
+                    attachments = attachments,
+                    reply = reply,
+                    content = content,
+                )
+            } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err)
+                composer.update { it.copy(sendError = chatError(err, "chat.send.failed")) }
+            }
+        }
+    }
+
+    /** Sign a poll body for this group (`signPoll`), or `null`. */
+    public fun signPoll(body: uniffi.lakko_ffi_uniffi.PollBody): uniffi.lakko_ffi_uniffi.SignedPoll? {
+        val groupId = contentGroupId() ?: return null
+        val seed = repo.conversationSeed() ?: return null
+        return try {
+            uniffi.lakko_ffi_uniffi.signPoll(body, groupId, seed)
+        } catch (err: Throwable) {
+            android.util.Log.w("ChatViewModel", "signPoll refused (${err.javaClass.simpleName})")
+            null
+        } finally {
+            seed.fill(0)
+        }
+    }
+
+    /** Sign a checklist body for this group (`signChecklist`), or `null`. */
+    public fun signChecklist(body: uniffi.lakko_ffi_uniffi.ChecklistBody): uniffi.lakko_ffi_uniffi.SignedChecklist? {
+        val groupId = contentGroupId() ?: return null
+        val seed = repo.conversationSeed() ?: return null
+        return try {
+            uniffi.lakko_ffi_uniffi.signChecklist(body, groupId, seed)
+        } catch (err: Throwable) {
+            android.util.Log.w("ChatViewModel", "signChecklist refused (${err.javaClass.simpleName})")
+            null
+        } finally {
+            seed.fill(0)
+        }
+    }
+
+    /** ADR-0092 section 3.6 — the ring version 0 hash of a new anonymous poll. */
+    public fun currentRingHash(): ByteArray? = try {
+        uniffi.lakko_ffi_uniffi.pollRingHash(repo.rosterAccountKeys(groupIdHex))
+    } catch (_: Throwable) {
+        null
+    }
+
+    /** UX 7.2 / 7.3 — vote (or, with empty [choices], retract) in a poll. */
+    public fun onPollVote(pollMessageId: Long, choices: ByteArray) {
+        val row = repo.contentRow(groupIdHex, pollMessageId) ?: return
+        val body = (row.content as? uniffi.lakko_ffi_uniffi.MessageContent.Poll)?.poll?.body ?: return
+        if (body.anonymous != null) {
+            // A revote draws the set its first vote drew (ballot.sc.md): the
+            // version this account recorded, from any of its devices.
+            val recorded = ownPollChoice(pollMessageId)?.setVersion
+            repo.castAnonymousVote(groupIdHex, pollMessageId, choices, recorded) { setVersion ->
+                recordOwnPollChoice(pollMessageId, choices, setVersion)
+            }
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val envelope = uniffi.lakko_ffi_uniffi.composePollVoteEnvelope(pollMessageId, choices)
+                repo.sendContentOp(
+                    groupIdHex, pollMessageId, me.lakko.app.chat.ContentOpKind.PollVote, envelope,
+                    choices = choices,
+                )
+                recordOwnPollChoice(pollMessageId, choices, 0u)
+            } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err)
+                composer.update { it.copy(sendError = chatError(err, "chat.send.failed")) }
+            }
+        }
+    }
+
+    /** UX 7.5 — Try again on a vote that was not sent. */
+    public fun onRetryVote(pollMessageId: Long) {
+        val own = repo.contentRow(groupIdHex, pollMessageId)?.contentExtras?.ownBallot ?: return
+        repo.castAnonymousVote(groupIdHex, pollMessageId, own.choices, own.setVersion) { setVersion ->
+            recordOwnPollChoice(pollMessageId, own.choices, setVersion)
+        }
+    }
+
+    /** This account's recorded choice in a poll (any of its devices), or `null`. */
+    public fun ownPollChoice(pollMessageId: Long): uniffi.lakko_ffi_uniffi.PollChoice? {
+        val ref = folderRef() ?: return null
+        return me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.pollChoice(ref, pollMessageId)
+    }
+
+    private fun folderRef(): uniffi.lakko_ffi_uniffi.FolderConversationRef? {
+        val id = hexToBytes(groupIdHex) ?: return null
+        val kind = if (conversationKind() == me.lakko.app.chat.ConversationKind.Group) {
+            uniffi.lakko_ffi_uniffi.FolderConversationKind.GROUP
+        } else {
+            uniffi.lakko_ffi_uniffi.FolderConversationKind.ONE_TO_ONE
+        }
+        return uniffi.lakko_ffi_uniffi.FolderConversationRef(kind = kind, id = id)
+    }
+
+    /** UX 7.3 / 8.2 — close a poll or a checklist (final). */
+    public fun onCloseContent(targetMessageId: Long) {
+        viewModelScope.launch {
+            try {
+                val envelope = uniffi.lakko_ffi_uniffi.composePollCloseEnvelope(targetMessageId, null)
+                repo.sendContentOp(groupIdHex, targetMessageId, me.lakko.app.chat.ContentOpKind.PollClose, envelope)
+            } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err)
+                composer.update { it.copy(sendError = chatError(err, "chat.send.failed")) }
+            }
+        }
+    }
+
+    /** UX 8.2 — tick or untick a checklist item. */
+    public fun onChecklistTick(target: Long, item: uniffi.lakko_ffi_uniffi.ChecklistItemRef, done: Boolean) {
+        viewModelScope.launch {
+            try {
+                val envelope = uniffi.lakko_ffi_uniffi.composeChecklistTickEnvelope(target, item, done)
+                repo.sendContentOp(
+                    groupIdHex, target, me.lakko.app.chat.ContentOpKind.ChecklistTick, envelope,
+                    item = item, done = done,
+                )
+            } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err)
+                composer.update { it.copy(sendError = chatError(err, "chat.send.failed")) }
+            }
+        }
+    }
+
+    /** UX 8.2 — add an item to a checklist. */
+    public fun onChecklistAdd(target: Long, text: String) {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            try {
+                val envelope = uniffi.lakko_ffi_uniffi.composeChecklistAddEnvelope(target, trimmed)
+                repo.sendContentOp(
+                    groupIdHex, target, me.lakko.app.chat.ContentOpKind.ChecklistAdd, envelope, text = trimmed,
+                )
+            } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err)
+                composer.update { it.copy(sendError = chatError(err, "chat.send.failed")) }
+            }
+        }
+    }
+
+    /** UX 8.2 — the author's edit of a checklist (title, items, order, switches). */
+    public fun onEditChecklist(target: Long, body: uniffi.lakko_ffi_uniffi.ChecklistBody) {
+        val signed = signChecklist(body) ?: return
+        viewModelScope.launch {
+            try {
+                val envelope = uniffi.lakko_ffi_uniffi.composeChecklistEditEnvelope(target, signed)
+                repo.sendContentOp(
+                    groupIdHex, target, me.lakko.app.chat.ContentOpKind.EditChecklist, envelope,
+                    content = uniffi.lakko_ffi_uniffi.MessageContent.Checklist(signed),
+                )
+            } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err)
+                composer.update { it.copy(sendError = chatError(err, "chat.send.failed")) }
+            }
+        }
+    }
+
+    /** UX 11.3 — Edit on an article replaces the whole article. */
+    public fun onEditArticle(
+        target: Long,
+        article: uniffi.lakko_ffi_uniffi.Article,
+        attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef>,
+    ) {
+        viewModelScope.launch {
+            try {
+                val envelope = uniffi.lakko_ffi_uniffi.composeArticleEditEnvelope(target, article, attachments)
+                repo.sendContentOp(
+                    groupIdHex, target, me.lakko.app.chat.ContentOpKind.EditArticle, envelope,
+                    content = uniffi.lakko_ffi_uniffi.MessageContent.Article(article),
+                    attachments = attachments,
+                )
+            } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err)
+                composer.update { it.copy(sendError = chatError(err, "chat.send.failed")) }
+            }
+        }
+    }
+
+    /** ADR-0092 section 3.6 — the own choice, synced to the account's other devices. */
+    private fun recordOwnPollChoice(pollMessageId: Long, choices: ByteArray, setVersion: UInt) {
+        val ref = folderRef() ?: return
+        me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.recordPollChoice(ref, pollMessageId, choices, setVersion)
+    }
+
+    // -------------------------------------------------------------
+    // docs/ux/media-messages.md section 11 — the composer tray
+    // -------------------------------------------------------------
+
+    /** This conversation's tray in [ComposerTrays]: kept while the app runs,
+     *  so leaving the chat and coming back keeps it. */
+    private fun trayKey(): String = ComposerTrays.key(
+        runCatching { repo.currentAccountIdB64() }.getOrNull(),
+        groupIdHex,
+    )
+
+    /** What is attached to the message being written. */
+    public val tray: StateFlow<ComposerTray> = ComposerTrays.trays
+        .map { it[trayKey()] ?: ComposerTray() }
+        .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, ComposerTray())
+
+    /**
+     * Section 11 — Photo or Video, File, the camera, a paste or a keyboard
+     * insertion: into the tray, never a dialog. A photo is re-encoded with its
+     * metadata dropped; a video that is not MP4 with H.264 goes as a file.
+     */
+    public fun addToTray(uris: List<android.net.Uri>, filesOnly: Boolean, mimeHints: List<String?> = emptyList()) {
+        composer.update { it.copy(sendError = null) }
+        ComposerTrays.add(repo.context, trayKey(), uris, filesOnly, mimeHints)
+    }
+
+    /** docs/ux/attachments.md 2.5 — a photo or video pasted into the field or
+     *  inserted from the keyboard. */
+    public fun onPasteMedia(items: List<me.lakko.app.chat.PastedMedia>) {
+        addToTray(items.map { it.uri }, filesOnly = false, mimeHints = items.map { it.mime })
+    }
+
+    /** UX attachments section 6 — Audio: a file chip carrying the file's own
+     *  tags (title, artist, duration, cover art) as `kind = audio`. */
+    public fun onPickedAudio(uris: List<android.net.Uri>) {
+        composer.update { it.copy(sendError = null) }
+        ComposerTrays.add(repo.context, trayKey(), uris, filesOnly = true, audio = true)
+    }
+
+    public fun onRemoveTrayItem(id: Long) {
+        ComposerTrays.remove(trayKey(), id)
+    }
+
+    public fun onRetryTrayItem(id: Long) {
+        ComposerTrays.retry(trayKey(), id)
+    }
+
+    public fun trayLocalFile(id: Long): java.io.File? = ComposerTrays.localFile(id)
+
+    /** UX 11.1 — an article image: processed as a photo, uploaded encrypted. */
+    public suspend fun uploadArticleImage(uri: android.net.Uri): uniffi.lakko_ffi_uniffi.AttachmentRef? {
+        val maxSide = runCatching { uniffi.lakko_ffi_uniffi.photoMaxLongestSidePx().toInt() }.getOrDefault(2560)
+        val read = withContext(kotlinx.coroutines.Dispatchers.IO) {
+            me.lakko.app.media.readPickedUri(repo.context, uri, AttachmentBridge.MAX_ATTACHMENT_BYTES)
+        } as? me.lakko.app.media.PickedRead.Ok ?: return null
+        val jpeg = withContext(kotlinx.coroutines.Dispatchers.Default) {
+            me.lakko.app.media.reencodePhoto(read.payload.bytes, maxSide)
+        } ?: return null
+        return try {
+            val visual = withContext(kotlinx.coroutines.Dispatchers.Default) {
+                me.lakko.app.media.prepareVisualMedia(jpeg, "image/jpeg", repo.context.cacheDir)
+            }
+            AttachmentBridge.encryptAndUpload(
+                bytes = jpeg,
+                mime = "image/jpeg",
+                name = null,
+                media = AttachmentMediaMeta(width = visual?.size?.width?.toUInt(), height = visual?.size?.height?.toUInt()),
+            )
+        } catch (e: Throwable) {
+            me.lakko.app.rethrowIfCancelled(e)
+            null
+        }
+    }
+
+    /** UX 7.5 — re-send own anonymous votes left unsent, at open. */
+    public fun retryFailedBallots() {
+        repo.retryFailedBallots(groupIdHex)
     }
 
     /** Send a message that did not get there. Drives the row's Retry. */
@@ -3499,200 +3856,11 @@ public class ChatViewModel(
             ?: emptySet()
     }
 
-    /** Serializes picked-item uploads: every item shows its chip at once,
-     *  but the encrypt + PUT runs one at a time so the chips stay honest. */
-    private val attachmentUploadLock = kotlinx.coroutines.sync.Mutex()
-    private val nextPickId = java.util.concurrent.atomic.AtomicLong(1)
-
     /** Preview decoding runs here, detached from the pick coroutine, so a
      *  native decoder that never returns cannot hold the send (UX spec §10). */
     private val visualPrepScope = kotlinx.coroutines.CoroutineScope(
         kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
     )
-
-    /**
-     * UX spec §10 — attach picked items. Each item gets its upload chip
-     * IMMEDIATELY, before it is read or previewed, and leaves the tray only as
-     * a staged attachment or with a readable error; never silently.
-     */
-    public fun onPickedUris(uris: List<android.net.Uri>) {
-        for (uri in uris) onPickedUri(uri)
-    }
-
-    private fun onPickedUri(uri: android.net.Uri) {
-        val id = nextPickId.getAndIncrement()
-        val placeholder = Localization.strings.value[me.lakko.app.media.PICKED_ITEM_PLACEHOLDER_KEY]
-        addInFlight(UploadProgress(id = id, fileName = placeholder, stage = null))
-        viewModelScope.launch {
-            val read = try {
-                withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    me.lakko.app.media.readPickedUri(repo.context, uri, AttachmentBridge.MAX_ATTACHMENT_BYTES)
-                }
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                removeInFlight(id)
-                throw e
-            }
-            when (read) {
-                is me.lakko.app.media.PickedRead.Failed -> failPick(id, read.name, read.error)
-                is me.lakko.app.media.PickedRead.Ok -> {
-                    val payload = read.payload
-                    updateInFlight(id) { it.copy(fileName = payload.name ?: placeholder) }
-                    val visual = prepareVisualBounded(payload.bytes, payload.mime)
-                    updateInFlight(id) { it.copy(previewBytes = visual?.thumb) }
-                    uploadPicked(id, payload.bytes, payload.mime, payload.name, visual)
-                }
-            }
-        }
-    }
-
-    /**
-     * Drive the encrypt + upload flow for one item whose bytes are already
-     * read. Kept for callers that resolve the bytes themselves.
-     */
-    public fun onAttachmentPicked(
-        bytes: ByteArray,
-        mime: String?,
-        name: String?,
-        /** UX spec §10 — pixel size and thumb for a photo or video; `null`
-         *  for a plain file. */
-        visual: me.lakko.app.media.VisualPrep? = null,
-    ) {
-        val id = nextPickId.getAndIncrement()
-        addInFlight(
-            UploadProgress(
-                id = id,
-                fileName = name?.takeUnless { it.isEmpty() } ?: Localization.strings.value[me.lakko.app.media.PICKED_ITEM_PLACEHOLDER_KEY],
-                stage = null,
-                previewBytes = visual?.thumb,
-            ),
-        )
-        viewModelScope.launch { uploadPicked(id, bytes, mime, name, visual) }
-    }
-
-    /** The §10 size + thumb, bounded by [me.lakko.app.media.VISUAL_PREP_TIMEOUT_MS];
-     *  on timeout the item is sent without them. */
-    private suspend fun prepareVisualBounded(bytes: ByteArray, mime: String?): me.lakko.app.media.VisualPrep? {
-        if (me.lakko.app.media.inlineKindOf(mime, me.lakko.app.media.coreAllowlist) == null) return null
-        val scratch = repo.context.cacheDir
-        val prep = me.lakko.app.media.awaitBounded(visualPrepScope, me.lakko.app.media.VISUAL_PREP_TIMEOUT_MS) {
-            me.lakko.app.media.prepareVisualMedia(bytes, mime, scratch)
-        }
-        if (prep == null) {
-            android.util.Log.w("ChatViewModel", "preview preparation timed out or failed; sending without it")
-        }
-        return prep
-    }
-
-    private suspend fun uploadPicked(
-        id: Long,
-        bytes: ByteArray,
-        mime: String?,
-        name: String?,
-        visual: me.lakko.app.media.VisualPrep?,
-    ) {
-        try {
-            attachmentUploadLock.withLock {
-                // UX spec §10 — the thumb goes up first so the ref can carry
-                // it. A thumb that fails to upload is dropped; the send goes
-                // ahead without it.
-                val thumbRef = visual?.thumb?.let { thumb ->
-                    try {
-                        AttachmentBridge.encryptAndUploadThumb(
-                            bytes = thumb,
-                            mime = "image/jpeg",
-                            width = visual.thumbSize?.width?.toUInt(),
-                            height = visual.thumbSize?.height?.toUInt(),
-                        )
-                    } catch (e: kotlinx.coroutines.CancellationException) {
-                        throw e
-                    } catch (e: Throwable) {
-                        android.util.Log.w("ChatViewModel", "thumb upload failed: ${e.javaClass.simpleName}")
-                        null
-                    }
-                }
-                val meta = if (visual != null && (visual.size != null || thumbRef != null)) {
-                    AttachmentMediaMeta(
-                        width = visual.size?.width?.toUInt(),
-                        height = visual.size?.height?.toUInt(),
-                        thumb = thumbRef,
-                    )
-                } else {
-                    null
-                }
-                val ref = AttachmentBridge.encryptAndUpload(
-                    bytes = bytes,
-                    mime = mime,
-                    name = name,
-                    media = meta,
-                    onStage = { stage -> updateInFlight(id) { it.copy(stage = stage) } },
-                )
-                composer.update { state ->
-                    val thumb = visual?.thumb
-                    state.copy(
-                        inFlight = state.inFlight.filterNot { it.id == id },
-                        pendingAttachments = state.pendingAttachments + ref,
-                        pendingPreviews = if (thumb != null) {
-                            state.pendingPreviews + (AttachmentBridge.hex(ref.blobId) to thumb)
-                        } else {
-                            state.pendingPreviews
-                        },
-                    )
-                }
-            }
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            removeInFlight(id)
-            throw e
-        } catch (e: Throwable) {
-            android.util.Log.w("ChatViewModel", "attachment failed: ${e.javaClass.simpleName}")
-            failPick(id, name, e)
-        }
-    }
-
-    private fun addInFlight(item: UploadProgress) {
-        composer.update { it.copy(inFlight = it.inFlight + item, sendError = null) }
-    }
-
-    private fun updateInFlight(id: Long, change: (UploadProgress) -> UploadProgress) {
-        composer.update { state ->
-            state.copy(inFlight = state.inFlight.map { if (it.id == id) change(it) else it })
-        }
-    }
-
-    private fun removeInFlight(id: Long) {
-        composer.update { state -> state.copy(inFlight = state.inFlight.filterNot { it.id == id }) }
-    }
-
-    private fun failPick(id: Long, name: String?, error: Throwable?) {
-        composer.update { state ->
-            state.copy(
-                inFlight = state.inFlight.filterNot { it.id == id },
-                sendError = me.lakko.app.media.attachFailureMessage(name, error),
-            )
-        }
-    }
-
-    /** Drop a staged attachment from the composer's pending
-     *  tray. Index matches the order in
-     *  [ChatScreenUiState.pendingAttachments]. */
-    public fun onRemovePendingAttachment(index: Int) {
-        // ADR-0065 section 6 — an upload removed from the composer was never
-        // sent: its file and thumbnail are deleted at once.
-        composer.value.pendingAttachments.getOrNull(index)?.let { ref ->
-            me.lakko.app.storage.BlobLifetime.delete(
-                repo.context,
-                listOfNotNull(ref.blobId, ref.thumb?.blobId),
-            )
-        }
-        composer.update {
-            if (index !in it.pendingAttachments.indices) it
-            else it.copy(
-                pendingAttachments = it.pendingAttachments.toMutableList().apply {
-                    removeAt(index)
-                },
-                pendingPreviews = it.pendingPreviews - AttachmentBridge.hex(it.pendingAttachments[index].blobId),
-            )
-        }
-    }
 
     // -------------------------------------------------------------
     // ADR-0047 — voice messages, video notes, GIFs
@@ -3857,7 +4025,19 @@ public class ChatViewModel(
      *  screen's receive loop. Receiving is otherwise automatic; there is no
      *  Refresh button. */
     public fun pollNow() {
-        viewModelScope.launch { repo.pollGroup(groupIdHex) }
+        viewModelScope.launch {
+            // A refused or failed read is the receive loop's business (it
+            // backs off and retries); an uncaught one here took the whole app
+            // down each time the chat opened while the DS refused this
+            // device's reads (ADR-0091 walk 4).
+            try {
+                repo.pollGroup(groupIdHex)
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatViewModel", "first poll failed (${me.lakko.app.chat.errorLogTag(cause)})")
+            }
+        }
     }
 
     /**
@@ -3935,10 +4115,8 @@ public class ChatViewModel(
     }
 
     override fun onCleared() {
-        // ADR-0065 section 6 — uploads still in the composer when the chat
-        // closes were never sent.
-        val abandoned = composer.value.pendingAttachments.flatMap { listOfNotNull(it.blobId, it.thumb?.blobId) }
-        if (abandoned.isNotEmpty()) me.lakko.app.storage.BlobLifetime.delete(repo.context, abandoned)
+        // media-messages section 11 — the tray belongs to the conversation's
+        // draft on this device and outlives this screen (ComposerTrays).
         visualPrepScope.cancel()
         super.onCleared()
         // Every call deliberately outlives the chat it started in (it lives in
@@ -3971,37 +4149,8 @@ public class ChatViewModel(
         val draftRevision: Int = 0,
         val sending: Boolean = false,
         val sendError: UiText? = null,
-        /** Phase 1.19c4 — attachments staged in the composer.
-         *  The user picks a file / photo; each call to
-         *  [ChatViewModel.onAttachmentPicked] encrypts +
-         *  uploads to storage immediately so the ref is ready
-         *  by the time Send is tapped. Cleared on successful
-         *  Send, on per-chip remove, and on screen disposal
-         *  (ViewModel.onCleared). */
-        val pendingAttachments: List<AttachmentRef> = emptyList(),
-        /** Every picked item not yet staged: being read, previewed,
-         *  encrypted or uploaded. Send is disabled while non-empty. */
-        val inFlight: List<UploadProgress> = emptyList(),
-        /** UX spec §10 — thumbs of staged photos / videos, keyed by the
-         *  hex blob id, for the composer chips. */
-        val pendingPreviews: Map<String, ByteArray> = emptyMap(),
     )
 }
-
-/** Polish 1.x — composer-tray progress chip payload.
- *  Mirror of the iOS `ChatViewModel.UploadStage` enum and the
- *  web client's `uploadProgress` signal. */
-public data class UploadProgress(
-    /** Identifies one picked item across its stages. */
-    val id: Long = 0,
-    /** Display name of the file currently being processed. */
-    val fileName: String,
-    /** Which pipeline stage the bridge is in; `null` while the item is
-     *  still being read and previewed. */
-    val stage: UploadStage?,
-    /** UX spec §10 — the photo / video thumb shown in the upload chip. */
-    val previewBytes: ByteArray? = null,
-)
 
 /** Combined snapshot the [ChatScreen] renders. */
 public data class ChatScreenUiState(
@@ -4012,15 +4161,6 @@ public data class ChatScreenUiState(
     val draftRevision: Int = 0,
     val sending: Boolean,
     val sendError: UiText?,
-    /** 1.19c4 — staged attachments below the text composer. */
-    val pendingAttachments: List<AttachmentRef> = emptyList(),
-    /** 1.19c4 — `true` while a picked item is being encrypted
-     *  + uploaded. */
-    val uploading: Boolean = false,
-    /** Every picked item still in flight, in pick order. */
-    val inFlightUploads: List<UploadProgress> = emptyList(),
-    /** UX spec §10 — thumbs of staged attachments, by hex blob id. */
-    val pendingPreviews: Map<String, ByteArray> = emptyMap(),
     /** `false` when the repository has no thread for this
      *  groupIdHex — e.g. immediately after process restart
      *  before snapshot rehydration has rebuilt the per-group

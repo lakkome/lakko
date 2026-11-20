@@ -347,6 +347,25 @@ export class DsAccessRegistry {
     return this.mailboxes.get(journalHex(pseudonym)) ?? null;
   }
 
+  /**
+   * Forget the cached signers of one journal and its owner-claim memo
+   * (ADR-0081 third amendment): after this device rejoined a DeviceGroup
+   * that another device founded again, or founded it itself, the journal id
+   * is the same but its epoch chain is new, and its epoch numbers restart. A
+   * signer of the old chain must not stay as `previous` (or as `current`
+   * while no source answers), and the new chain's claim is asked again.
+   */
+  forgetGroup(groupId: Uint8Array): void {
+    const hex = journalHex(groupId);
+    const entry = this.groups.get(hex);
+    if (entry !== undefined) {
+      freeQuietly(entry.current);
+      freeQuietly(entry.previous);
+      this.groups.delete(hex);
+    }
+    this.ownerClaims.forget(groupId);
+  }
+
   /** Drop one mailbox signer (an identity was replaced). */
   dropMailbox(hex: string): void {
     const prior = this.mailboxes.get(hex);

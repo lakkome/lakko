@@ -2,13 +2,14 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The collapsed call bar — the web client's seam onto the shared rules.
+ * The collapsed call — the web client's seam onto the shared `call_bar` rules.
  *
- * `docs/ux/calls.md` section 4.5 puts a live call away into one bar across the
- * top of the app, so the app stays usable while the call runs. Two of the
- * decisions behind it have no platform in them and live in
- * `crates/lakko-ui-rules/src/call_bar.rs`: whether the bar is on screen, and
- * which of four things its one status line says. They are reached here over
+ * `docs/ux/calls.md` section 4.5 puts a live call away into one small window
+ * floating over the app (`CallWindow.tsx`; it replaced a bar across the top,
+ * and the rule kept its name), so the app stays usable while the call runs.
+ * Two of the decisions behind it have no platform in them and live in
+ * `crates/lakko-ui-rules/src/call_bar.rs`: whether the window is on screen,
+ * and which of four things its one status line says. They are reached here over
  * wasm; iOS and Android reach the same code over UniFFI.
  *
  * ## Why the status line goes through one function

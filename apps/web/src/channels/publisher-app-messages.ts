@@ -131,3 +131,59 @@ export function matchPublisherLink(
   const recordIndex = records.findIndex((r) => r.live && !r.revoked && isOneUse(r.maxUses) && r.capabilityB64 === cap);
   return recordIndex < 0 ? null : { localLedger: null, recordIndex };
 }
+
+/**
+ * ADR-0087 section 7 — the 16-byte account id (lower-case hex) the owner
+ * fetches a publisher's identity bundle by, to seal the read key, the
+ * earlier epoch seeds and the admission seeds to that person. A request
+ * carries it only inside a profile, and a person with no display name has
+ * none (ADR-0048), so an entry may be recorded with `""`. The fallback is
+ * the owner's own contact store: the person added through "Add publisher"
+ * is a contact, and `contactAccountIdB64Of` (standard base64 account id by
+ * account key, `accountIdB64OfKey`) names them. The id only picks the
+ * bundle; the caller still seals nothing unless the bundle's signature key
+ * IS the publisher's account key. `""` when neither source names one.
+ */
+export function resolvePublisherAccountIdHex(
+  recordedHex: string,
+  accountKeyB64: string,
+  contactAccountIdB64Of: (keyB64: string) => string | null,
+): string {
+  if (/^[0-9a-f]{32}$/i.test(recordedHex)) return recordedHex.toLowerCase();
+  const b64 = contactAccountIdB64Of(accountKeyB64);
+  if (b64 === null) return "";
+  let raw: string;
+  try {
+    raw = atob(b64);
+  } catch {
+    return "";
+  }
+  if (raw.length !== 16) return "";
+  let out = "";
+  for (let i = 0; i < raw.length; i += 1) out += raw.charCodeAt(i).toString(16).padStart(2, "0");
+  return out;
+}
+
+/** The publisher entries with every missing account id filled in by
+ *  {@link resolvePublisherAccountIdHex}. The same array when nothing
+ *  changes, so a caller writes only when a fill happened. */
+export function withResolvedAccountIds(
+  entries: readonly PublisherEntry[],
+  contactAccountIdB64Of: (keyB64: string) => string | null,
+): readonly PublisherEntry[] {
+  let changed = false;
+  const out = entries.map((p) => {
+    if (p.accountIdHex !== "") return p;
+    const id = resolvePublisherAccountIdHex("", p.accountKeyB64, contactAccountIdB64Of);
+    if (id === "") return p;
+    changed = true;
+    return { ...p, accountIdHex: id };
+  });
+  return changed ? out : entries;
+}
+
+/** The publishers still owed the channel's read key that the owner can
+ *  reach (an account id is known). */
+export function readKeyRecipients(entries: readonly PublisherEntry[]): readonly PublisherEntry[] {
+  return entries.filter((p) => p.readKeySent !== true && p.accountIdHex !== "");
+}

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The moderator's blob delete ([ADR-0089] section 4, step 5).
+//! The moderator's blob delete ([ADR-0098] section 4, step 5).
 //!
 //! A moderator deletes a blob named in a report's evidence by a signed
 //! statement. The moderation service logs it and forwards it to storage's
-//! internal listener (`LAKKO_STORAGE_INTERNAL_BIND`, default
+//! internal listener (`LAKKO_STORAGE_MODERATION_BIND`, default
 //! [`DEFAULT_INTERNAL_BIND`], loopback, never proxied by nginx). Every
 //! request presents `x-lakko-internal-secret` = `LAKKO_STORAGE_INTERNAL_SECRET`
 //! (standard base64 of at least [`MIN_SECRET_LEN`] bytes, compared in
@@ -46,7 +46,7 @@
 //! startup) raises the floor: `200 {"list_version": n}`, `400 bad-list`,
 //! `409 stale-list` (older than the floor).
 //!
-//! [ADR-0089]: ../../../docs/adr/0089-reporting-and-moderation.md
+//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -63,7 +63,7 @@ use lakko_moderation::apply::{ApplyError, ApplyingService, ListBody, StatementBo
 use lakko_moderation::ModeratorList;
 use subtle::ConstantTimeEq as _;
 
-use crate::blob::{blob_path, remove_blob_file};
+use crate::blob::remove_blob_bytes;
 use crate::index::{today, BlobId, ModerationDelete, ModerationOutcome};
 use crate::AppState;
 
@@ -77,7 +77,7 @@ pub(crate) const MIN_SECRET_LEN: usize = 16;
 /// of up to 64 entries and a few short fields, in base64.
 const MAX_INTERNAL_BODY_BYTES: usize = 256 * 1024;
 
-const BIND_VAR: &str = "LAKKO_STORAGE_INTERNAL_BIND";
+const BIND_VAR: &str = "LAKKO_STORAGE_MODERATION_BIND";
 const SECRET_VAR: &str = "LAKKO_STORAGE_INTERNAL_SECRET";
 const ROOT_KEY_VAR: &str = "LAKKO_STORAGE_MODERATION_ROOT_KEY";
 
@@ -325,14 +325,14 @@ async fn apply_statement(
     };
     let body = match outcome {
         ModerationOutcome::Removed { node } => {
-            // The file lives on the row's node; with no row, a file left on
-            // this node (an orphan) goes too.
+            // The bytes live on the row's node; with no row, bytes left on
+            // this node (an orphan) go too.
             let on_this_node = match node.as_deref() {
                 None => true,
                 Some(n) => n == &*state.app.node,
             };
             if on_this_node {
-                remove_blob_file(&blob_path(&state.app.blob_root, &id)).await;
+                remove_blob_bytes(&state.app, &id).await;
             } else {
                 tracing::warn!("moderator blob delete: the file is on another node");
             }

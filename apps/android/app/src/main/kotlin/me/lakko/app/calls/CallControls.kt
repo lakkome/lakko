@@ -43,7 +43,7 @@ import me.lakko.app.l10n.UiText
  * A group call adds one entry, **Participants**: who is in the call, and, on a
  * call that can hand out a link to itself (`docs/ux/call-links.md` section 3),
  * the two ways to invite someone; what it does is [participantsControl]. So a
- * group row is Microphone, Camera, Participants, Settings, End, always in ONE
+ * group row is Microphone, Camera, Participants, Chat, Settings, End, always in ONE
  * row, on every screen size.
  *
  * **There is no Speaker control**, on any call. Where the sound comes out is
@@ -51,9 +51,12 @@ import me.lakko.app.l10n.UiText
  * who wants something else, a choice in the **Settings** sheet, which also
  * holds the microphone and the camera (`CallSettings.kt`).
  *
- * There is no overflow menu and no chat in a call: the chat control sent
- * nothing anywhere, raise hand and share screen changed a flag nothing read,
- * and a control that does nothing is worse than none (removed 2026-10-02).
+ * A group call has its own chat (section 4.1.4, 2026-11-07): the **Chat**
+ * circle after Participants, with the unread count on it. The first chat
+ * control sent nothing anywhere and was removed on 2026-10-02.
+ *
+ * There is no overflow menu: raise hand and share screen changed a flag
+ * nothing read, and a control that does nothing is worse than none.
  * Flip camera is not in the row: it is on the self-view rectangle, "where the
  * thing it changes is visible", and every camera is in the Settings sheet.
  */
@@ -68,6 +71,9 @@ public enum class CallControlKind {
 
     /** Group calls only: who is in the call, and how to invite someone. */
     PARTICIPANTS,
+
+    /** Group calls only: the call's own chat (section 4.1.4). */
+    CHAT,
 
     /** Which microphone, camera and speaker the call uses. */
     SETTINGS,
@@ -105,7 +111,12 @@ public data class CallControl(
     val busy: Boolean,
     /** What TalkBack reads: the action and the state it will produce. */
     val spokenLabel: UiText,
+    /** A count on the circle (the chat's unread messages, `1`-`9`, `9+`). */
+    val badge: String? = null,
 )
+
+/** The `Chat` circle's state: present on a group call only. */
+public data class CallChatButton(val open: Boolean, val unread: Int)
 
 /**
  * What the Participants control does when pressed.
@@ -179,13 +190,14 @@ public fun participantsMenuItems(othersPresent: Boolean, guest: Boolean): List<P
 
 /**
  * The buttons of the row, left to right: Microphone, Camera, Settings and End
- * on every call, and [participants] before Settings on a group call. End
- * keeps the far side of the row to itself.
+ * on every call, and [participants] and [chat] before Settings on a group
+ * call. End keeps the far side of the row to itself.
  */
-public fun callControlKinds(participants: Boolean = false): List<CallControlKind> = buildList {
+public fun callControlKinds(participants: Boolean = false, chat: Boolean = false): List<CallControlKind> = buildList {
     add(CallControlKind.MICROPHONE)
     add(CallControlKind.CAMERA)
     if (participants) add(CallControlKind.PARTICIPANTS)
+    if (chat) add(CallControlKind.CHAT)
     add(CallControlKind.SETTINGS)
     add(CallControlKind.END)
 }
@@ -200,6 +212,7 @@ public fun callControlKinds(participants: Boolean = false): List<CallControlKind
  *   when [ParticipantsControl.ABSENT].
  * @param participantsOpen the participant list is open, which the control's
  *   spoken label follows when it opens the list directly.
+ * @param chat the call's chat, on a group call; `null` leaves the circle out.
  */
 @Suppress("LongParameterList")
 public fun callControlRow(
@@ -209,8 +222,10 @@ public fun callControlRow(
     ringing: Boolean = false,
     participants: ParticipantsControl = ParticipantsControl.ABSENT,
     participantsOpen: Boolean = false,
+    chat: CallChatButton? = null,
 ): List<CallControl> = callControlKinds(
     participants = participants != ParticipantsControl.ABSENT,
+    chat = chat != null,
 ).map { kind ->
     when (kind) {
         CallControlKind.MICROPHONE -> CallControl(
@@ -253,6 +268,17 @@ public fun callControlRow(
                     else -> "call.control.participants_show_a11y"
                 },
             ),
+        )
+        CallControlKind.CHAT -> CallControl(
+            kind = kind,
+            label = UiText("call.control.chat"),
+            // Not a toggle of the call: it opens the panel.
+            emphasis = CallControlEmphasis.OUTLINE,
+            // There from the first second, alone in the call too.
+            enabled = true,
+            busy = false,
+            spokenLabel = callChatSpokenLabel(open = chat?.open == true, unread = chat?.unread ?: 0),
+            badge = if (chat?.open == true) null else callChatBadgeText(chat?.unread ?: 0),
         )
         CallControlKind.SETTINGS -> CallControl(
             kind = kind,

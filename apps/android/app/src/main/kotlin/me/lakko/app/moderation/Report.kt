@@ -8,7 +8,7 @@ import me.lakko.app.anon.AnonTokenException
 import me.lakko.app.anon.AnonTokenQuotaExhausted
 
 /*
- * ADR-0089 section 2, UX `reporting-and-moderation.md` section 2 — the report
+ * ADR-0098 section 2, UX `reporting-and-moderation.md` section 2 — the report
  * sheet's rules and the send.
  *
  * Everything here is pure or runs behind seams, so the host suite can assert
@@ -137,7 +137,7 @@ public data class ReportSubject(
     public val targetKind: ReportTargetKind get() = target.kind
 }
 
-/** What the report names (ADR-0089 section 2): the bytes are derived when sending. */
+/** What the report names (ADR-0098 section 2): the bytes are derived when sending. */
 public sealed interface ReportTargetRef {
     public val kind: ReportTargetKind
 

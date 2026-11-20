@@ -15,6 +15,8 @@
 import {
   THUMB_HARD_CAP_BYTES,
   fitWithin,
+  inlineThumbDimensions,
+  pickInlineThumb,
   pickThumbQuality,
   thumbDimensions,
   type Size,
@@ -25,6 +27,12 @@ export interface VisualPreview {
   readonly size: Size | null;
   /** The JPEG thumb, or `null` when none could be produced. */
   readonly thumb: { readonly blob: Blob; readonly width: number; readonly height: number } | null;
+  /** A video's length in milliseconds, when the decoder reported one. */
+  readonly durationMs?: number;
+  /** ADR-0047 section 6 — the micro thumbnail carried inside the message:
+   *  a JPEG, longest side at most 96, at most 4096 bytes. Absent when it
+   *  could not be made to fit. */
+  readonly inline?: Uint8Array;
 }
 
 const NONE: VisualPreview = { size: null, thumb: null };
@@ -55,6 +63,35 @@ async function encodeJpeg(source: Drawable, sw: number, sh: number): Promise<Vis
   return { blob, width: dims.width, height: dims.height };
 }
 
+/** The micro thumbnail of a decoded picture (ADR-0047 section 6), or `null`
+ *  when it cannot be made to fit its bound. Never throws. */
+async function encodeInlineJpeg(source: Drawable, sw: number, sh: number): Promise<Uint8Array | null> {
+  try {
+    const dims = inlineThumbDimensions(sw, sh);
+    if (dims === null) return null;
+    const canvas = document.createElement("canvas");
+    canvas.width = dims.width;
+    canvas.height = dims.height;
+    const ctx = canvas.getContext("2d");
+    if (ctx === null) return null;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, dims.width, dims.height);
+    ctx.drawImage(source, 0, 0, dims.width, dims.height);
+    return await pickInlineThumb(async (quality) => {
+      const blob = await new Promise<Blob | null>((resolve) => {
+        canvas.toBlob((b) => resolve(b), "image/jpeg", quality);
+      });
+      return blob === null ? null : new Uint8Array(await blob.arrayBuffer());
+    });
+  } catch {
+    return null;
+  }
+}
+
+function withInline(preview: VisualPreview, inline: Uint8Array | null): VisualPreview {
+  return inline === null ? preview : { ...preview, inline };
+}
+
 /** Pixel size and thumb of a picked image. */
 export async function describeImage(file: Blob): Promise<VisualPreview> {
   if (typeof createImageBitmap !== "function") return NONE;
@@ -72,7 +109,8 @@ export async function describeImage(file: Blob): Promise<VisualPreview> {
     } catch {
       thumb = null;
     }
-    return { size, thumb };
+    const inline = await encodeInlineJpeg(bitmap, bitmap.width, bitmap.height);
+    return withInline({ size, thumb }, inline);
   } finally {
     bitmap.close();
   }
@@ -122,7 +160,9 @@ export async function describeVideo(file: Blob): Promise<VisualPreview> {
     } catch {
       thumb = null;
     }
-    return { size, thumb };
+    const inline = await encodeInlineJpeg(video, video.videoWidth, video.videoHeight);
+    const durationMs = Number.isFinite(video.duration) && video.duration > 0 ? Math.round(video.duration * 1000) : undefined;
+    return withInline(durationMs === undefined ? { size, thumb } : { size, thumb, durationMs }, inline);
   } catch {
     return NONE;
   } finally {

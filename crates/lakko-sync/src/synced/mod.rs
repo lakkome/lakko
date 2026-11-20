@@ -56,20 +56,31 @@
 //! - [`channel_comment`] — the account's own comments under channel posts
 //!   (the nonce each comment's write key is derived from, so any device can
 //!   delete it), bounded the same way, and their envelope.
+//! - [`channel_admission_seed`] — a private channel's admission seeds, the
+//!   owner account's own copy (ADR-0090 open question 4).
+//! - [`channel_subscription`] — the account's channel subscriptions (the
+//!   role, the one subscriber key per channel, the read key, a
+//!   co-publisher's PublisherGroup id; 2026-11-13) and their envelope.
 //! - [`quick_reaction`] — the account's quick reaction (UX
 //!   `reactions-and-emoji.md` D3: the emoji a double tap sends, synced) and
 //!   its envelope.
+//! - [`poll_choice`] — the account's own choice in each poll it voted in
+//!   (ADR-0092 section 3.6), kept until the conversation ends, and its
+//!   envelope.
 //! - [`state`] — the fold ([`SyncedState`]), its queries, its persistence
 //!   codec, and [`should_send_snapshot`].
 
 pub mod blocked;
+pub mod channel_admission_seed;
 pub mod channel_comment;
 pub mod channel_reaction;
+pub mod channel_subscription;
 pub mod device_ack;
 pub mod entry;
 pub mod lineage;
 pub mod link_record;
 pub mod own_username;
+pub mod poll_choice;
 pub mod quick_reaction;
 pub mod recovery_email;
 pub mod state;
@@ -79,6 +90,14 @@ pub use blocked::{
     BlockedEnvelopeError, BLOCKED_ENVELOPE_DOMAIN_V1, BLOCKED_ENVELOPE_MAX_ENTRIES,
     BLOCKED_ENVELOPE_MAX_LEN, BLOCKED_ENVELOPE_MIN_LEN, BLOCKED_ENVELOPE_VERSION_V1,
     BLOCKED_KEY_LEN,
+};
+pub use channel_admission_seed::{
+    compose_channel_admission_seed_envelope, decode_channel_admission_seed_envelope,
+    is_channel_admission_seed_envelope, ChannelAdmissionSeedEntry,
+    ChannelAdmissionSeedEnvelopeError, CHANNEL_ADMISSION_SEED_CHANNEL_ID_LEN,
+    CHANNEL_ADMISSION_SEED_ENVELOPE_DOMAIN_V1, CHANNEL_ADMISSION_SEED_ENVELOPE_MAX_ENTRIES,
+    CHANNEL_ADMISSION_SEED_ENVELOPE_MAX_LEN, CHANNEL_ADMISSION_SEED_ENVELOPE_MIN_LEN,
+    CHANNEL_ADMISSION_SEED_ENVELOPE_VERSION_V1, CHANNEL_ADMISSION_SEED_LEN,
 };
 pub use channel_comment::{
     compose_channel_comment_envelope, decode_channel_comment_envelope, is_channel_comment_envelope,
@@ -95,6 +114,17 @@ pub use channel_reaction::{
     CHANNEL_REACTION_ENVELOPE_MAX_ENTRIES, CHANNEL_REACTION_ENVELOPE_MAX_LEN,
     CHANNEL_REACTION_ENVELOPE_MIN_LEN, CHANNEL_REACTION_ENVELOPE_VERSION,
     CHANNEL_REACTION_RETENTION_MS,
+};
+pub use channel_subscription::{
+    compose_channel_subscription_envelope, decode_channel_subscription_envelope,
+    is_channel_subscription_envelope, ChannelSubscribed, ChannelSubscriptionEntry,
+    ChannelSubscriptionEnvelopeError, ChannelSubscriptionRole, CHANNEL_SUBSCRIPTIONS_MAX_CLIENT,
+    CHANNEL_SUBSCRIPTION_CHANNEL_ID_LEN, CHANNEL_SUBSCRIPTION_ENVELOPE_DOMAIN_V1,
+    CHANNEL_SUBSCRIPTION_ENVELOPE_MAX_ENTRIES, CHANNEL_SUBSCRIPTION_ENVELOPE_MAX_LEN,
+    CHANNEL_SUBSCRIPTION_ENVELOPE_MIN_LEN, CHANNEL_SUBSCRIPTION_ENVELOPE_VERSION_V1,
+    CHANNEL_SUBSCRIPTION_GROUP_ID_LEN, CHANNEL_SUBSCRIPTION_HANDLE_MAX_BYTES,
+    CHANNEL_SUBSCRIPTION_NAME_MAX_BYTES, CHANNEL_SUBSCRIPTION_READ_KEY_LEN,
+    CHANNEL_SUBSCRIPTION_SECRET_LEN,
 };
 pub use device_ack::{
     compose_device_ack_envelope, decode_device_ack_envelope, is_device_ack_envelope,
@@ -143,6 +173,12 @@ pub use own_username::{
     compose_own_username_envelope, decode_own_username_envelope, is_own_username_envelope,
     OwnUsernameEnvelopeError, OWN_USERNAME_ENVELOPE_DOMAIN_V1, OWN_USERNAME_ENVELOPE_MAX_LEN,
     OWN_USERNAME_ENVELOPE_MIN_LEN, OWN_USERNAME_ENVELOPE_VERSION_V1,
+};
+pub use poll_choice::{
+    compose_poll_choice_envelope, decode_poll_choice_envelope, is_poll_choice_envelope,
+    PollChoiceEntry, PollChoiceEnvelopeError, POLL_CHOICES_MAX_CLIENT,
+    POLL_CHOICE_ENVELOPE_DOMAIN_V1, POLL_CHOICE_ENVELOPE_MAX_ENTRIES, POLL_CHOICE_ENVELOPE_MAX_LEN,
+    POLL_CHOICE_ENVELOPE_MIN_LEN, POLL_CHOICE_ENVELOPE_VERSION, POLL_CHOICE_MAX_OPTIONS,
 };
 pub use quick_reaction::{
     compose_quick_reaction_envelope, decode_quick_reaction_envelope, is_quick_reaction_envelope,

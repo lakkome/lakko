@@ -47,6 +47,27 @@ class DeviceRestoreNameCheckTest {
     private val account = ByteArray(16) { 3 }
 
     @Test
+    fun theEarlierKeysAreStoredBeforeTheJoinStateAndTheLanding() = runTest {
+        // G-56 (contract 3.3 step 4): the restore wraps the pairing's held
+        // writes so the account's own earlier keys go to disk first.
+        val calls = mutableListOf<String>()
+        runCheckedDeviceRestore(
+            username = "alice",
+            accountIdBytes = account,
+            phraseSeed = ByteArray(64) { 7 },
+            verifySeed = { calls += "verify" },
+            lookup = { account },
+            persistJoin = predecessorsFirst(
+                storePredecessors = { calls += "predecessors" },
+                persistJoin = { calls += "persistJoin" },
+            ),
+            land = { calls += "land" },
+            log = {},
+        )
+        assertEquals(listOf("verify", "predecessors", "persistJoin", "land"), calls)
+    }
+
+    @Test
     fun aSeedThatFailsVerificationPersistsNothingAndIsNotLookedUp() {
         val run = Run(lookupResult = { account }, seedVerifies = false)
         assertThrows(PhraseMismatch::class.java) { runBlocking { run.go(account) } }

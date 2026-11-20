@@ -91,7 +91,7 @@ function base64UrlToBytes(b64: string): Uint8Array {
   return out;
 }
 
-/** ADR-0089 UX 2.1 - the Discover card's Report: the channel is the target,
+/** ADR-0098 UX 2.1 - the Discover card's Report: the channel is the target,
  *  its listing as served is included; posts are not picked from here. */
 function reportCard(card: DirectoryCard): void {
   let wire: Uint8Array | null = null;
@@ -587,7 +587,7 @@ export function DiscoverCardView(props: { readonly card: DirectoryCard; readonly
             {t("discover.card.hide_topic")}
           </button>
         </Show>
-        {/* ADR-0089 UX 2.1 - report the channel; its listing is included. */}
+        {/* ADR-0098 UX 2.1 - report the channel; its listing is included. */}
         <button type="button" class="ghost" style={{ color: "var(--danger)" }} onClick={() => reportCard(c())}>
           {t("report.action")}
         </button>

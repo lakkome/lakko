@@ -64,6 +64,7 @@ pub(crate) fn state(db: MySqlPool, enabled: bool) -> AppState {
         username_cert_key: Arc::new(lakko_crypto::signing::SigningKey::from_seed(&[3u8; 32])),
         key_reset_attest_key: None,
         city_lookup: std::sync::Arc::new(crate::locate::NoCityLookup),
+        donations: std::sync::Arc::new(crate::donate::Donations::default()),
     }
 }
 
@@ -425,7 +426,7 @@ async fn a_batch_evaluates_like_single_evaluations_for_one_register_token() {
     );
 }
 
-/// ADR-0089 step 3: a suspended account's restricted session (`s1`) erases the
+/// ADR-0098 step 3: a suspended account's restricted session (`s1`) erases the
 /// account's discovery rows and opens nothing else.
 #[tokio::test]
 async fn the_restricted_session_only_deletes_the_account() {

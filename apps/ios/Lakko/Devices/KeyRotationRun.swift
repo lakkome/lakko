@@ -585,7 +585,7 @@ public final class KeyRotationRunner: ObservableObject {
         /// a commit whose answer is lost is adopted like a kept device's.
         public var storeOwnPending: @MainActor (_ pending: PendingKeyRotation, _ accountIdB64: String) throws -> Void
         /// `POST /account/keys/rotate/{start,finish}`. `accountId` is the
-        /// account the ADR-0089 F3 identity proof names.
+        /// account the ADR-0098 F3 identity proof names.
         public var commit: (
             _ token: String, _ grant: String, _ material: KeyRotationMaterial, _ proof: Data,
             _ revokeDeviceIds: [Data], _ accountId: Data

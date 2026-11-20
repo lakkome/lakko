@@ -149,7 +149,7 @@ export function AddMembersScreen(props: {
           title={t("common.back")}
           onClick={() => props.onBack()}
         >
-          <Icon name="back" size={20} />
+          <Icon name="chevron-back" size={24} />
         </button>
         <h1 id="lk-add-members-title" class="lk-info-title">
           {t("chat.members.add.title")}
@@ -165,7 +165,7 @@ export function AddMembersScreen(props: {
       </header>
       <div class="lk-info-scroll">
         <div class="lk-search" style={{ margin: "0 0 4px" }}>
-          <Icon name="search" size={16} />
+          <Icon name="search" size={20} />
           <input
             ref={field}
             type="search"
@@ -190,7 +190,7 @@ export function AddMembersScreen(props: {
                     title={t("chat.members.remove.confirm_named", { name: p.label })}
                     onClick={() => toggle(p)}
                   >
-                    <Icon name="close" size={14} />
+                    <Icon name="xmark" size={14} />
                   </button>
                 </li>
               )}

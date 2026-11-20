@@ -514,6 +514,9 @@ final class FreshAuthBlockTests: XCTestCase {
             .proofNeeded, "the block appears, not a generic error")
         XCTAssertEqual(SignupPasskeyStep.failure(FreshAuthRequired()), .proofNeeded)
         XCTAssertEqual(
+            SignupPasskeyStep.failure(WebauthnRegistration.RegistrationError.alreadyExists), .alreadyExists,
+            "the provider already holds a passkey for this account: not a device failure")
+        XCTAssertEqual(
             SignupPasskeyStep.failure(WebauthnClientError.http(
                 status: 500, endpoint: "/webauthn/register/start", body: "")),
             .error)

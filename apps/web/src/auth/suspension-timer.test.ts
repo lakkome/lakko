@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-/** ADR-0089 step 3: suspended mode asks every ten minutes and on foreground. */
+/** ADR-0098 step 3: suspended mode asks every ten minutes and on foreground. */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SUSPENDED_REFRESH_INTERVAL_MS } from "./suspension";

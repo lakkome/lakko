@@ -465,7 +465,7 @@ public struct GenesisAttestRequest: Codable, Equatable {
     /// (Ed25519) public key. The server binds THIS key to the authenticated
     /// account inside the signed attestation.
     public let pubkeyB64: String
-    /// ADR-0089 F3 — URL-safe base64 (no pad) of `signIdentityProof` by the
+    /// ADR-0098 F3 — URL-safe base64 (no pad) of `signIdentityProof` by the
     /// key in ``pubkeyB64`` over the account id (``IdentityProof``).
     public let identityProofB64: String
 
@@ -677,6 +677,11 @@ struct LoginHandleCheckResponse: Codable, Equatable {
     let state: String
 }
 
+/// `GET /signup/open` response body (`docs/ux/beta-account-cap.md`).
+public struct SignupOpenResponse: Codable, Equatable {
+    public let open: Bool
+}
+
 /// `PUT /auth/login-handle` response body.
 public struct LoginHandleBindResponse: Codable, Equatable {
     public let bound: Bool
@@ -827,7 +832,7 @@ public struct KeyResetFinishRequest: Codable, Equatable {
     /// URL-safe base64 (no pad) of the NEW AccountIdentity Ed25519 public
     /// key the attestation binds.
     public let newSignaturePubkeyB64: String
-    /// ADR-0089 F3 — `signIdentityProof` by the NEW key over the account id.
+    /// ADR-0098 F3 — `signIdentityProof` by the NEW key over the account id.
     public let identityProofB64: String
 
     public init(
@@ -898,7 +903,7 @@ public struct KeyRotateFinishRequest: Codable, Equatable {
     /// ADR-0075 section 3 — `true` when this rotation is "Save a recovery
     /// phrase"; absent otherwise.
     public let phraseSaved: Bool?
-    /// ADR-0089 F3 — `signIdentityProof` by the NEW key over the account id.
+    /// ADR-0098 F3 — `signIdentityProof` by the NEW key over the account id.
     public let identityProofB64: String
 
     public init(

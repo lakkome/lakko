@@ -222,6 +222,12 @@ async function cacheFirst(req) {
 }
 
 async function networkFirstWithCacheFallback(req) {
+  // The Terms of Service and the Privacy Policy (docs/ux/legal-pages.md) are
+  // static pages of their own, not the app: never stored as the shell, and
+  // never answered with the shell when offline.
+  if (/^\/(?:terms|privacy)(?:\/|\/index\.html)?$/.test(new URL(req.url).pathname)) {
+    return fetch(req);
+  }
   try {
     const fresh = await fetch(req);
     // Only the HTML shell refreshes the shell entry. A navigation to
@@ -423,6 +429,11 @@ async function handlePush(wake) {
         ? { wake, tapGroupHex }
         : { wake }
       : {};
+  // ADR-0047 section 6 — the first photo's or video's micro thumbnail, a
+  // `data:` URL the decrypt core built from bytes inside the message, set
+  // only on a preview that shows the message's words. A browser that
+  // ignores `image` shows the same notification without it.
+  const image = typeof preview?.image === "string" && preview.image.startsWith("data:image/jpeg;base64,") ? preview.image : null;
   try {
     await self.registration.showNotification(title, {
       body,
@@ -433,6 +444,7 @@ async function handlePush(wake) {
       data,
       icon: "/icon-192.png",
       badge: "/badge-96.png",
+      ...(image === null ? {} : { image }),
     });
   } catch {
     // Some browsers + private modes don't allow showing notifications
@@ -823,7 +835,7 @@ function buildDecryptDeps(wasm, core) {
     // the plaintext mirror the app writes (`src/push/superseded-mirror.ts`;
     // the pin store itself is `localStorage`, which a worker cannot read).
     // READ-ONLY (C-59). Every miss is "none retired": the wake is shown.
-    // ADR-0089 section 6 - the people this account blocked, from the same
+    // ADR-0098 section 6 - the people this account blocked, from the same
     // encrypted sync row as the mute flag. READ-ONLY; every miss is "none".
     lookupBlockedKeys: async (accountId, deviceKey) => {
       const row = await idbGet("lakko-device-sync", "rows", accountId);
@@ -1078,6 +1090,31 @@ self.addEventListener("notificationclick", (event) => {
           }
         }
         await self.clients.openWindow("/devices");
+      })(),
+    );
+    return;
+  }
+
+  // docs/ux/channel-notifications.md: a channel post the page noticed and
+  // could only show from here. An open tab is told to open the channel, else
+  // a new one opens on it. Only a channel path is followed.
+  const openPath = event.notification.data?.lakkoOpenPath;
+  if (typeof openPath === "string" && /^\/channel\/[0-9a-f]{32}$/.test(openPath)) {
+    event.waitUntil(
+      (async () => {
+        const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+        for (const c of clients) {
+          if (c.url.startsWith(self.location.origin)) {
+            try {
+              c.postMessage({ type: "LAKKO_OPEN_PATH", path: openPath });
+            } catch {
+              // The client went away between `matchAll` and here.
+            }
+            await c.focus();
+            return;
+          }
+        }
+        await self.clients.openWindow(openPath);
       })(),
     );
     return;

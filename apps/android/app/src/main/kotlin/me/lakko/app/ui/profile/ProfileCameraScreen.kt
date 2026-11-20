@@ -25,9 +25,6 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Cameraswitch
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -64,6 +61,9 @@ import me.lakko.app.avatar.AvatarMedia
 import me.lakko.app.avatar.ProfileCamera
 import me.lakko.app.l10n.t
 import me.lakko.app.profile.AvatarBounds
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * docs/ux/profile-screen.md §2.3 — Lakko's own camera: the front camera in a
@@ -145,7 +145,7 @@ internal fun ProfileCameraScreen(
             ) {
                 Row(Modifier.fillMaxWidth()) {
                     IconButton(enabled = !recording, onClick = onClose) {
-                        Icon(Icons.Filled.Close, contentDescription = t("profile.camera.close"))
+                        LkIcon(R.drawable.ic_lk_xmark, contentDescription = t("profile.camera.close"))
                     }
                 }
                 if (denied || !granted) {
@@ -244,7 +244,7 @@ internal fun ProfileCameraScreen(
                         onClick = { camera.flip() },
                         modifier = Modifier.size(56.dp),
                     ) {
-                        Icon(Icons.Filled.Cameraswitch, contentDescription = t("profile.camera.switch"))
+                        LkIcon(R.drawable.ic_lk_camera_flip, contentDescription = t("profile.camera.switch"), size = LkIconSize.Toolbar)
                     }
                 }
                 Spacer(Modifier.height(24.dp))

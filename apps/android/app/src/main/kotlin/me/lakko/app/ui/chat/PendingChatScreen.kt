@@ -14,12 +14,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Call
-import androidx.compose.material.icons.filled.Schedule
-import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -44,6 +38,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.lakko.app.contacts.ContactsRepository
 import me.lakko.app.contacts.PendingContacts
 import me.lakko.app.l10n.t
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * The chat with a person added through their invite link whose app has not
@@ -84,25 +81,40 @@ public fun PendingChatScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(name) },
+                title = {
+                    // The header shows the person's avatar beside the name, as
+                    // on iOS and web; UX profile-screen section 7: the chat
+                    // header plays a profile video always on a touch device.
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        me.lakko.app.ui.components.LakkoAvatar(
+                            name = name,
+                            seed = accountIdHex,
+                            size = 32.dp,
+                            personKey = me.lakko.app.ui.components.personKeyBytes(contact?.signaturePubkeyB64),
+                            playVideo = true,
+                        )
+                        androidx.compose.foundation.layout.Spacer(Modifier.size(10.dp))
+                        Text(name, maxLines = 1)
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
                 actions = {
                     // Disabled until the inviter's app answers; a tap shows
                     // the hint (a disabled IconButton takes no tap).
                     IconButton(onClick = { callHintShown = true }) {
-                        Icon(
-                            Icons.Filled.Call,
+                        LkIcon(
+                            R.drawable.ic_lk_phone,
                             contentDescription = t("chat.pending.call_disabled", mapOf("name" to name)),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f),
                         )
                     }
                     IconButton(onClick = { callHintShown = true }) {
-                        Icon(
-                            Icons.Filled.Videocam,
+                        LkIcon(
+                            R.drawable.ic_lk_video,
                             contentDescription = t("chat.pending.call_disabled", mapOf("name" to name)),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f),
                         )
@@ -152,13 +164,12 @@ public fun PendingChatScreen(
                                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                                 )
                             }
-                            Icon(
-                                Icons.Filled.Schedule,
+                            LkIcon(
+                                R.drawable.ic_lk_clock,
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier
-                                    .padding(start = 4.dp)
-                                    .size(12.dp),
+                                modifier = Modifier.padding(start = 4.dp),
+                                size = LkIconSize.Mark,
                             )
                         }
                     }
@@ -195,7 +206,16 @@ public fun PendingChatScreen(
                         }
                     },
                 ) {
-                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = t("chat.composer.send"))
+                    LkIcon(
+                        R.drawable.ic_lk_arrow_up_circle_fill,
+                        contentDescription = t("chat.composer.send"),
+                        tint = if (draft.isNotBlank() && contact != null) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        size = 26.dp,
+                    )
                 }
             }
         }

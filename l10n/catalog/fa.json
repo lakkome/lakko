@@ -125,6 +125,10 @@
       "text": "این مرورگر از کلید عبور پشتیبانی نمی‌کند.",
       "status": "machine"
     },
+    "auth.passkey.error.unsupported_desktop": {
+      "text": "این دستگاه از کلید عبور پشتیبانی نمی‌کند.",
+      "status": "machine"
+    },
     "auth.passkey.error.wrong_account": {
       "text": "این کلید عبور متعلق به حسابی غیر از حساب ذخیره‌شده روی این دستگاه است. ابتدا با رمز عبور وارد شوید.",
       "status": "machine"
@@ -163,6 +167,70 @@
     },
     "auth.password.show": {
       "text": "نمایش رمز عبور",
+      "status": "machine"
+    },
+    "auth.signup.closed.body": {
+      "text": "نسخه آزمایشی ظرفیت محدودی دارد و همه جاها پر شده است. وقتی کسی برود جا باز می‌شود. بعداً دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "auth.signup.closed.checking": {
+      "text": "در حال بررسی...",
+      "status": "machine"
+    },
+    "auth.signup.closed.log_in": {
+      "text": "ورود",
+      "status": "machine"
+    },
+    "auth.signup.closed.retry": {
+      "text": "دوباره امتحان کنید",
+      "status": "machine"
+    },
+    "auth.signup.closed.title": {
+      "text": "Lakko فعلاً پر است",
+      "status": "machine"
+    },
+    "auth.signup.code.back": {
+      "text": "بازگشت",
+      "status": "machine"
+    },
+    "auth.signup.code.body": {
+      "text": "کدی را که در ایمیل‌تان آمده وارد کنید.",
+      "status": "machine"
+    },
+    "auth.signup.code.checking": {
+      "text": "در حال بررسی...",
+      "status": "machine"
+    },
+    "auth.signup.code.continue": {
+      "text": "ادامه",
+      "status": "machine"
+    },
+    "auth.signup.code.failed": {
+      "text": "بررسی کد ممکن نشد. دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "auth.signup.code.held": {
+      "text": "جای حامی شما برای این ثبت‌نام نگه داشته شده است.",
+      "status": "machine"
+    },
+    "auth.signup.code.limited": {
+      "text": "تلاش‌های زیادی انجام شد. بعداً دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "auth.signup.code.link": {
+      "text": "کد حامی دارم",
+      "status": "machine"
+    },
+    "auth.signup.code.title": {
+      "text": "کد حامی",
+      "status": "machine"
+    },
+    "auth.signup.code.unknown": {
+      "text": "این کد کار نمی‌کند. آن را بررسی کنید و دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "auth.signup.code.used": {
+      "text": "این کد حامی قبلاً استفاده شده است.",
       "status": "machine"
     },
     "auth.signup.error.enter_username": {
@@ -245,6 +313,42 @@
       "text": "نام کاربری",
       "status": "machine"
     },
+    "auth.username_prompt.continue": {
+      "text": "ادامه",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.network": {
+      "text": "بررسی نام کاربری ممکن نشد. اتصال خود را بررسی کنید و دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.not_this": {
+      "text": "این نام کاربری این حساب نیست.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.too_many": {
+      "text": "تلاش‌های بیش از حد. بعداً دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "auth.username_prompt.field": {
+      "text": "نام کاربری",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot": {
+      "text": "یادم نیست",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot_note": {
+      "text": "می‌توانید آن را در تنظیمات دستگاه دیگرتان ببینید. تا آن زمان این دستگاه با آن‌ها همگام نمی‌شود.",
+      "status": "machine"
+    },
+    "auth.username_prompt.lede": {
+      "text": "این دستگاه هنوز نام کاربری حساب شما را نمی‌داند. آن را وارد کنید تا با دستگاه‌های دیگرتان همگام شود.",
+      "status": "machine"
+    },
+    "auth.username_prompt.title": {
+      "text": "نام کاربری شما چیست؟",
+      "status": "machine"
+    },
     "backup.rollback_refused.body": {
       "text": "سرور یک نسخه پشتیبان تغییریافته یا قدیمی برگرداند. حساب شما امن است؛ بدون بازیابی داده‌های قدیمی‌تر ادامه دادیم.",
       "status": "machine"
@@ -285,8 +389,92 @@
       "text": "این نسخه پشتیبان قدیمی‌تر بازیابی شود؟",
       "status": "machine"
     },
+    "beta.notice.body": {
+      "text": "Lakko در نسخه آزمایشی است و امنیت آن هنوز با یک ممیزی مستقل بررسی نشده است. جایی که امنیت شما به آن بستگی دارد به آن تکیه نکنید.",
+      "status": "machine"
+    },
+    "beta.notice.title": {
+      "text": "نسخه آزمایشی",
+      "status": "machine"
+    },
     "call.alert.title": {
       "text": "تماس",
+      "status": "machine"
+    },
+    "call.background.add_photo": {
+      "text": "افزودن عکس",
+      "status": "machine"
+    },
+    "call.background.blur": {
+      "text": "محو",
+      "status": "machine"
+    },
+    "call.background.builtin_label": {
+      "text": "پس‌زمینه: {name}",
+      "status": "machine"
+    },
+    "call.background.failed": {
+      "text": "پس‌زمینه از کار افتاد، به همین دلیل دوربین شما خاموش شد.",
+      "status": "machine"
+    },
+    "call.background.failed_action": {
+      "text": "روشن کردن دوربین بدون پس‌زمینه",
+      "status": "machine"
+    },
+    "call.background.name.dawn": {
+      "text": "سپیده‌دم",
+      "status": "machine"
+    },
+    "call.background.name.dusk": {
+      "text": "غروب",
+      "status": "machine"
+    },
+    "call.background.name.harbor": {
+      "text": "بندر",
+      "status": "machine"
+    },
+    "call.background.name.meadow": {
+      "text": "چمنزار",
+      "status": "machine"
+    },
+    "call.background.name.morning": {
+      "text": "صبح",
+      "status": "machine"
+    },
+    "call.background.name.night": {
+      "text": "شب",
+      "status": "machine"
+    },
+    "call.background.none": {
+      "text": "هیچ",
+      "status": "machine"
+    },
+    "call.background.photo_unusable": {
+      "text": "از این عکس نمی‌شود استفاده کرد. عکس دیگری را امتحان کنید.",
+      "status": "machine"
+    },
+    "call.background.preparing": {
+      "text": "در حال آماده کردن پس‌زمینه...",
+      "status": "machine"
+    },
+    "call.background.preview_camera_off": {
+      "text": "فقط شما این را می‌بینید. دوربین شما خاموش است.",
+      "status": "machine"
+    },
+    "call.background.preview_label": {
+      "text": "دوربین شما همان‌طور که دیگران می‌بینند",
+      "status": "machine"
+    },
+    "call.background.remove": {
+      "text": "حذف",
+      "status": "machine"
+    },
+    "call.background.strong_blur": {
+      "text": "محو شدید",
+      "status": "machine"
+    },
+    "call.background.your_photo": {
+      "text": "عکس شما",
       "status": "machine"
     },
     "call.bar.camera_on_a11y": {
@@ -373,16 +561,40 @@
       "text": "بستن گفتگو",
       "status": "machine"
     },
-    "call.chat.empty": {
-      "text": "هنوز پیامی نیست. پیام‌های اینجا با رمزگذاری سرتاسری محافظت می‌شوند.",
+    "call.chat.message_a11y": {
+      "text": "{name}: {text}",
       "status": "machine"
     },
-    "call.chat.joined": {
-      "text": "{name} به تماس پیوست",
+    "call.chat.new_messages": {
+      "text": "پیام‌های جدید",
       "status": "machine"
     },
-    "call.chat.left": {
-      "text": "یکی از شرکت‌کنندگان تماس را ترک کرد",
+    "call.chat.not_sent": {
+      "text": "ارسال نشد.",
+      "status": "machine"
+    },
+    "call.chat.notice_ends": {
+      "text": "با پایان تماس ناپدید می‌شوند.",
+      "status": "machine"
+    },
+    "call.chat.notice_people": {
+      "text": "پیام‌های اینجا را فقط افراد حاضر در تماس می‌بینند.",
+      "status": "machine"
+    },
+    "call.chat.placeholder": {
+      "text": "پیام به همه در تماس",
+      "status": "machine"
+    },
+    "call.chat.send_a11y": {
+      "text": "ارسال",
+      "status": "machine"
+    },
+    "call.chat.send_again": {
+      "text": "ارسال دوباره",
+      "status": "machine"
+    },
+    "call.chat.too_long": {
+      "text": "پیام در تماس نمی‌تواند از این طولانی‌تر باشد.",
       "status": "machine"
     },
     "call.collapse_a11y": {
@@ -414,15 +626,15 @@
       "status": "machine"
     },
     "call.control.chat_hide_a11y": {
-      "text": "پنهان کردن گفتگو",
+      "text": "بستن گفتگو",
       "status": "machine"
     },
     "call.control.chat_show_a11y": {
-      "text": "نمایش گفتگو",
+      "text": "باز کردن گفتگو",
       "status": "machine"
     },
-    "call.control.chat_unread": {
-      "text": "{count, plural, one {گفتگو (# خوانده‌نشده)} other {گفتگو (# خوانده‌نشده)}}",
+    "call.control.chat_unread_a11y": {
+      "text": "{count, plural, one {باز کردن گفتگو، # خوانده‌نشده} other {باز کردن گفتگو، # خوانده‌نشده}}",
       "status": "machine"
     },
     "call.control.end": {
@@ -533,8 +745,12 @@
       "text": "این تماس رمزگذاری شده است. نمایش شماره امنیتی",
       "status": "machine"
     },
-    "call.encryption.compare_hint": {
-      "text": "این شماره‌ها را بلند بخوانید. اگر روی هر دو گوشی یکسان باشند، کسی گوش نمی‌دهد.",
+    "call.encryption.compare_hint_group": {
+      "text": "همه افراد این تماس همین شماره را می‌بینند. آن را بلند بخوانید. اگر روی همه دستگاه‌ها یکسان باشد، کس دیگری گوش نمی‌دهد.",
+      "status": "machine"
+    },
+    "call.encryption.compare_hint_one_to_one": {
+      "text": "این شماره را برای هم بلند بخوانید. اگر روی هر دو دستگاه یکسان باشد، کس دیگری گوش نمی‌دهد.",
       "status": "machine"
     },
     "call.encryption.copy_a11y": {
@@ -609,6 +825,10 @@
       "text": "این مرورگر نمی‌تواند صدا و تصویر تماس را رمزگذاری کند، برای همین تماس شروع نشد.",
       "status": "machine"
     },
+    "call.error.no_media_encryption_desktop": {
+      "text": "این دستگاه نمی‌تواند صدا و تصویر تماس را رمزگذاری کند، برای همین تماس شروع نشد.",
+      "status": "machine"
+    },
     "call.error.not_accepting": {
       "text": "این تماس در حال حاضر شرکت‌کننده جدید نمی‌پذیرد.",
       "status": "machine"
@@ -655,6 +875,14 @@
     },
     "call.group_banner.title": {
       "text": "تماس گروهی در {name}",
+      "status": "machine"
+    },
+    "call.guest.closed.body": {
+      "text": "Lakko فعلاً پر است، پس این حساب مهمان نگه داشته نمی‌شود. وقتی کسی برود جا باز می‌شود.",
+      "status": "machine"
+    },
+    "call.guest.closed.ok": {
+      "text": "باشه",
       "status": "machine"
     },
     "call.guest.default_name": {
@@ -1131,6 +1359,14 @@
     },
     "call.self.starting_camera": {
       "text": "در حال روشن کردن دوربین...",
+      "status": "machine"
+    },
+    "call.settings.background": {
+      "text": "پس‌زمینه",
+      "status": "machine"
+    },
+    "call.settings.background_hint": {
+      "text": "دیگران این را پشت سر شما می‌بینند. فقط روی همین دستگاه می‌ماند.",
       "status": "machine"
     },
     "call.settings.devices": {
@@ -1798,7 +2034,7 @@
       "status": "machine"
     },
     "channels.new.failed": {
-      "text": "ساخت این کانال ممکن نشد. چیزی ساخته نشد. دوباره امتحان کنید.",
+      "text": "ساخت این کانال ممکن نشد. دوباره امتحان کنید.",
       "status": "machine"
     },
     "channels.new.handle_hint": {
@@ -1959,6 +2195,14 @@
     },
     "channels.reactions.anonymous_note": {
       "text": "واکنش‌ها در کانال ناشناس هستند. هیچ‌کس نمی‌تواند ببیند چه کسی واکنش نشان داده، حتی مالک کانال.",
+      "status": "machine"
+    },
+    "channels.reader_device.owner": {
+      "text": "وقتی Lakko روی دستگاه دیگر شما باز شود، می‌توانید اینجا پست بگذارید.",
+      "status": "machine"
+    },
+    "channels.reader_device.publisher": {
+      "text": "وقتی Lakko روی دستگاه دیگر شما و دستگاه مالک باز شود، می‌توانید اینجا پست بگذارید.",
       "status": "machine"
     },
     "channels.rotation.desc": {
@@ -2195,6 +2439,10 @@
     },
     "chat.attachment.error.upload": {
       "text": "بارگذاری «{name}» ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.attachment.full.send": {
+      "text": "در حال حاضر روی سرور جایی برای فایل‌های جدید نیست. بعداً دوباره امتحان کنید.",
       "status": "machine"
     },
     "chat.attachment.hide": {
@@ -3269,12 +3517,20 @@
       "text": "Lakko برای ضبط یادداشت ویدیویی به دوربین دسترسی نیاز دارد. در تنظیمات سایت مرورگر خود اجازه دسترسی به دوربین را بدهید.",
       "status": "machine"
     },
+    "chat.record.denied_camera_desktop": {
+      "text": "Lakko برای ضبط یادداشت ویدیویی به دوربین دسترسی نیاز دارد. آن را در تنظیمات حریم خصوصی سیستم مجاز کنید.",
+      "status": "machine"
+    },
     "chat.record.denied_camera_app": {
       "text": "Lakko برای ضبط یادداشت ویدیویی به دوربین دسترسی نیاز دارد",
       "status": "machine"
     },
     "chat.record.denied_microphone": {
       "text": "Lakko برای ضبط پیام صوتی به میکروفون دسترسی نیاز دارد. در تنظیمات سایت مرورگر خود اجازه دسترسی به میکروفون را بدهید.",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_desktop": {
+      "text": "Lakko برای ضبط پیام صوتی به میکروفون دسترسی نیاز دارد. آن را در تنظیمات حریم خصوصی سیستم مجاز کنید.",
       "status": "machine"
     },
     "chat.record.denied_microphone_app": {
@@ -3387,6 +3643,10 @@
     },
     "chat.record.unsupported_voice": {
       "text": "در این مرورگر نمی‌توان پیام صوتی ضبط کرد",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice_desktop": {
+      "text": "در این دستگاه نمی‌توان پیام صوتی ضبط کرد",
       "status": "machine"
     },
     "chat.record.video": {
@@ -3899,10 +4159,6 @@
     },
     "chats.preview.sender": {
       "text": "{name}: {text}",
-      "status": "machine"
-    },
-    "chats.restored.banner_other_devices": {
-      "text": "دستگاه‌های دیگرتان این دستگاه را به گفتگوها اضافه می‌کنند.",
       "status": "machine"
     },
     "chats.restored.card": {
@@ -4997,10 +5253,6 @@
       "text": "پیوندهای دعوت و پیوندهای تماسی که قبلاً ساخته‌اید دیگر کار نمی‌کنند. پیوندهای تازه بسازید.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "کلیدهای عبورتان همچنان شما را وارد می‌کنند. «بازیابی کلیدها با این کلید عبور» خاموش می‌ماند تا دوباره روشنش کنید.",
-      "status": "machine"
-    },
     "devices.rotate.effect_phrase": {
       "text": "یک عبارت بازیابی جدید می‌گیرید. عبارت قبلی دیگر کار نمی‌کند.",
       "status": "machine"
@@ -5071,6 +5323,10 @@
     },
     "devices.scan.error.camera_denied_browser": {
       "text": "Lakko نمی‌تواند از دوربین استفاده کند. در تنظیمات سایت مرورگرتان دسترسی به دوربین را مجاز کنید و دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied_desktop": {
+      "text": "Lakko نمی‌تواند از دوربین استفاده کند. در تنظیمات حریم خصوصی سیستم اجازه دسترسی به دوربین را بدهید و دوباره تلاش کنید.",
       "status": "machine"
     },
     "devices.scan.error.camera_failed": {
@@ -5451,6 +5707,66 @@
     },
     "display_name.error.unknown": {
       "text": "این نام قابل استفاده نیست",
+      "status": "machine"
+    },
+    "donate.button": {
+      "text": "کمک مالی",
+      "status": "machine"
+    },
+    "donate.copied": {
+      "text": "کپی شد",
+      "status": "machine"
+    },
+    "donate.copy": {
+      "text": "کپی",
+      "status": "machine"
+    },
+    "donate.crypto_copy": {
+      "text": "کپی نشانی",
+      "status": "machine"
+    },
+    "donate.crypto_network": {
+      "text": "شبکه: {network}",
+      "status": "machine"
+    },
+    "donate.crypto_warning": {
+      "text": "به این نشانی فقط {coin} در شبکهٔ {network} بفرستید. هر چیز دیگری از دست می‌رود.",
+      "status": "machine"
+    },
+    "donate.error": {
+      "text": "بارگیری راه‌های کمک مالی ممکن نشد. اتصال خود را بررسی کنید و دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "donate.lede": {
+      "text": "کمک‌های مالی هزینهٔ سرورها را می‌پردازد و کار را ادامه می‌دهد.",
+      "status": "machine"
+    },
+    "donate.none": {
+      "text": "اکنون هیچ راهی برای کمک مالی در کشور شما در دسترس نیست.",
+      "status": "machine"
+    },
+    "donate.phone_error": {
+      "text": "نمایش شماره ممکن نشد. دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "donate.phone_show": {
+      "text": "نمایش",
+      "status": "machine"
+    },
+    "donate.phone_hidden": {
+      "text": "شماره تلفن پنهان است",
+      "status": "machine"
+    },
+    "donate.section_crypto": {
+      "text": "رمزارز",
+      "status": "machine"
+    },
+    "donate.section_payment": {
+      "text": "بانک و کارت",
+      "status": "machine"
+    },
+    "donate.title": {
+      "text": "از Lakko حمایت کنید",
       "status": "machine"
     },
     "ds.clock_skew": {
@@ -6221,10 +6537,6 @@
       "text": "درخواست پیوستن",
       "status": "machine"
     },
-    "group.join.request_again": {
-      "text": "درخواست دوباره",
-      "status": "machine"
-    },
     "group.join.request_failed": {
       "text": "درخواست شما ارسال نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
       "status": "machine"
@@ -6246,11 +6558,7 @@
       "status": "machine"
     },
     "group.join.wait_primary": {
-      "text": "درخواست ارسال شد. یکی از مدیران آن را تأیید می‌کند و سپس تغییر در گروه اعمال می‌شود.",
-      "status": "machine"
-    },
-    "group.join.wait_secondary": {
-      "text": "اگر اتفاقی نیفتاد، می‌توانید درخواست را دوباره بفرستید.",
+      "text": "درخواست فرستاده شد. یک مدیر دفعهٔ بعد که Lakko را باز کند آن را می‌بیند.",
       "status": "machine"
     },
     "group_delete.action": {
@@ -6315,6 +6623,10 @@
     },
     "group_info.header.public": {
       "text": "گروه عمومی · {count, plural, one {# عضو} other {# عضو}}",
+      "status": "machine"
+    },
+    "group_photo.error.full": {
+      "text": "در حال حاضر روی سرور جایی برای فایل‌های جدید نیست. بعداً دوباره امتحان کنید.",
       "status": "machine"
     },
     "group_photo.error.limit": {
@@ -6726,7 +7038,7 @@
       "status": "machine"
     },
     "invite.contact.result.failed_title": {
-      "text": "دعوت پذیرفته نشد",
+      "text": "باز کردن دعوت ممکن نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
       "status": "machine"
     },
     "invite.contact.result.not_found_title": {
@@ -7153,6 +7465,26 @@
       "text": "چینی (ساده‌شده)",
       "status": "machine"
     },
+    "legal.privacy": {
+      "text": "سیاست حریم خصوصی",
+      "status": "machine"
+    },
+    "legal.privacy_title": {
+      "text": "سیاست حریم خصوصی",
+      "status": "machine"
+    },
+    "legal.signup_notice": {
+      "text": "با ساختن حساب، {terms} و {privacy} را می‌پذیرید.",
+      "status": "machine"
+    },
+    "legal.terms": {
+      "text": "شرایط استفاده",
+      "status": "machine"
+    },
+    "legal.terms_title": {
+      "text": "شرایط استفاده",
+      "status": "machine"
+    },
     "nav.calls": {
       "text": "تماس‌ها",
       "status": "machine"
@@ -7190,7 +7522,7 @@
       "status": "machine"
     },
     "new_group.error.secure_setup": {
-      "text": "این گروه ساخته نشد. چیزی ساخته نشد. دوباره امتحان کنید.",
+      "text": "این گروه ساخته نشد. دوباره امتحان کنید.",
       "status": "machine"
     },
     "new_group.error.sign_in": {
@@ -7291,6 +7623,10 @@
     },
     "open_in_app.button": {
       "text": "باز کردن در برنامه",
+      "status": "machine"
+    },
+    "profile.save.error.full": {
+      "text": "در حال حاضر روی سرور جایی برای فایل‌های جدید نیست. بعداً دوباره امتحان کنید.",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -7657,10 +7993,6 @@
       "text": "دستگاه دیگر",
       "status": "machine"
     },
-    "recovery.method.passkey.sub": {
-      "text": "شما را وارد می‌کند. اگر این قابلیت را برای این کلید عبور روشن کرده باشید، گفتگوهایتان را هم برمی‌گرداند.",
-      "status": "machine"
-    },
     "recovery.method.passkey.title": {
       "text": "کلید عبور",
       "status": "machine"
@@ -7735,6 +8067,10 @@
     },
     "recovery.passkey.unsupported": {
       "text": "این دستگاه یا مرورگر از کلیدهای عبور پشتیبانی نمی‌کند. راه دیگری انتخاب کنید.",
+      "status": "machine"
+    },
+    "recovery.passkey.unsupported_desktop": {
+      "text": "این دستگاه از کلیدهای عبور پشتیبانی نمی‌کند. راه دیگری انتخاب کنید.",
       "status": "machine"
     },
     "recovery.passkey.waiting": {
@@ -8077,6 +8413,14 @@
       "text": "دستگاهی که هنوز وارد آن هستید یک کد شش‌رقمی نشان می‌دهد؛ آن را اینجا تایپ کنید. به دوربین نیازی نیست؛ اگر ترجیح می‌دهید، کد QR هم هست.",
       "status": "machine"
     },
+    "restore_identity.earlier_keys.another_device.sub": {
+      "text": "Lakko را در دستگاهی باز کنید که هنوز وارد آن هستید.",
+      "status": "machine"
+    },
+    "restore_identity.earlier_keys.lede": {
+      "text": "شما با {username} وارد شده‌اید، اما این دستگاه هنوز کلیدهایی را که گفتگوهایتان استفاده می‌کنند ندارد. آن‌ها را از دستگاه دیگری بیاورید که هنوز وارد آن هستید.",
+      "status": "machine"
+    },
     "restore_identity.error.bad_saved_account": {
       "text": "حساب ذخیره‌شده روی این دستگاه مشکلی دارد. خارج شوید و دوباره وارد شوید، یا از عبارت بازیابی استفاده کنید.",
       "status": "machine"
@@ -8135,10 +8479,6 @@
     },
     "restore_identity.lost.summary": {
       "text": "هیچ‌کدام از این‌ها را ندارم",
-      "status": "machine"
-    },
-    "restore_identity.method.passkey.sub": {
-      "text": "اگر بازیابی کلیدهای حساب را برای یک کلید عبور روشن کرده‌اید.",
       "status": "machine"
     },
     "restore_identity.not_you": {
@@ -8357,6 +8697,14 @@
       "text": "میان‌برهای صفحه‌کلید",
       "status": "machine"
     },
+    "settings.about.supporters": {
+      "text": "حامیان",
+      "status": "machine"
+    },
+    "settings.about.support": {
+      "text": "از Lakko حمایت کنید",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "ترجمه‌ها به‌روز شد {date}",
       "status": "machine"
@@ -8419,6 +8767,10 @@
     },
     "settings.account.forget_device.sub": {
       "text": "داده‌های حساب شما را از این مرورگر حذف می‌کند. پیام‌هایتان روی دستگاه‌های دیگرتان می‌مانند؛ برای بازگشت به اینجا به دستگاه دیگر، کلید عبوری که کلیدهای حساب را بازیابی می‌کند، یا عبارت بازیابی نیاز دارید.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.sub_desktop": {
+      "text": "داده‌های حساب شما را از این دستگاه حذف می‌کند. پیام‌هایتان روی دستگاه‌های دیگرتان می‌مانند؛ برای بازگشت به اینجا به دستگاه دیگر، کلید عبوری که کلیدهای حساب را بازیابی می‌کند، یا عبارت بازیابی نیاز دارید.",
       "status": "machine"
     },
     "settings.account.forget_device.title": {
@@ -8605,6 +8957,10 @@
       "text": "این مرورگر برای حساب شما تنظیم نشده است. دوباره وارد شوید.",
       "status": "machine"
     },
+    "settings.devices.error.no_device_key_desktop": {
+      "text": "این دستگاه برای حساب شما تنظیم نشده است. دوباره وارد شوید.",
+      "status": "machine"
+    },
     "settings.devices.error.remove": {
       "text": "حذف دستگاه ممکن نشد. دوباره تلاش کنید.",
       "status": "machine"
@@ -8725,6 +9081,10 @@
       "text": "پخش در این دستگاه.",
       "status": "machine"
     },
+    "settings.notifications.channel_posts_late": {
+      "text": "پست‌های کانال ممکن است وقتی Lakko بسته است دیرتر برسند.",
+      "status": "machine"
+    },
     "settings.notifications.off.body": {
       "text": "اعلان‌ها خاموش است، بنابراین Lakko فقط وقتی باز است می‌تواند زنگ بزند. آن‌ها را روشن کنید تا تماس‌ها و پیام‌ها وقتی برنامه باز نیست هم به شما برسند.",
       "status": "machine"
@@ -8789,56 +9149,20 @@
       "text": "این مرورگر یا دستگاه اکنون نمی‌تواند کلید عبور بسازد.",
       "status": "machine"
     },
-    "settings.passkeys.keys.turn_on": {
-      "text": "روشن کردن بازیابی کلیدهای حساب",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_off": {
-      "text": "اگر خاموش بماند، کلید عبور فقط شما را وارد می‌کند. کلیدهای حساب را با عبارت بازیابی یا دستگاه دیگر بازیابی می‌کنید.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_on": {
-      "text": "اگر این را روشن کنید، همین کلید عبور به‌تنهایی می‌تواند کلیدهای حساب شما را به دستگاه جدید بیاورد. کلیدهای عبور معمولاً توسط Apple، Google یا برنامه مدیریت رمز عبور شما همگام‌سازی می‌شوند. هر کسی که بتواند وارد حساب Apple، Google یا برنامه مدیریت رمز عبور شما شود، پس از آن می‌تواند پیام‌های آینده شما را بخواند و به جای شما عمل کند.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.cancelled": {
-      "text": "لغو شد. این کلید عبور همچنان فقط شما را وارد می‌کند.",
+    "settings.passkeys.error.unsupported_desktop": {
+      "text": "این دستگاه اکنون نمی‌تواند کلید عبور بسازد.",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.done": {
       "text": "این کلید عبور اکنون کلیدهای حساب شما را بازیابی می‌کند.",
       "status": "machine"
     },
-    "settings.passkeys.keys_choice.error.other_passkey": {
-      "text": "کلید عبور دیگری پاسخ داد. دوباره تلاش کنید و کلید عبوری را انتخاب کنید که این قابلیت را برایش روشن می‌کنید.",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.error.phrase_mismatch": {
       "text": "این عبارت بازیابی متعلق به این حساب نیست. چیزی تغییر نکرد.",
       "status": "machine"
     },
-    "settings.passkeys.keys_choice.later": {
-      "text": "می‌توانید بعداً این را برای هر کلید عبور تغییر دهید.",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.no_prf": {
       "text": "این کلید عبور می‌تواند شما را وارد کند، اما در این دستگاه و با این ارائه‌دهنده کلید عبور نمی‌تواند کلیدهای حساب شما را همراه داشته باشد. عبارت بازیابی خود را نگه دارید.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.phrase_needed": {
-      "text": "برای روشن کردن این قابلیت، عبارت بازیابی خود را وارد کنید.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.signin_only": {
-      "text": "فقط ورود",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.title": {
-      "text": "این کلید عبور بتواند کلیدهای حساب شما را بازیابی کند؟",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.turn_on": {
-      "text": "روشن کردن",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.unavailable": {
@@ -8851,14 +9175,6 @@
     },
     "settings.passkeys.label.signin_only": {
       "text": "فقط وارد می‌کند",
-      "status": "machine"
-    },
-    "settings.passkeys.lede": {
-      "text": "به‌جای رمز عبور با Touch ID، Face ID یا یک کلید امنیتی وارد شوید. اگر این قابلیت را روشن کنید، کلید عبور می‌تواند کلیدهای حساب شما را روی دستگاه جدید هم بازیابی کند. عبارت بازیابی شما هم همیشه کار می‌کند.",
-      "status": "machine"
-    },
-    "settings.passkeys.lede_device": {
-      "text": "به‌جای رمز عبور با اثر انگشت، چهره یا قفل صفحه، یا با یک کلید امنیتی وارد شوید. اگر این قابلیت را روشن کنید، کلید عبور می‌تواند کلیدهای حساب شما را روی دستگاه جدید هم بازیابی کند. عبارت بازیابی شما هم همیشه کار می‌کند.",
       "status": "machine"
     },
     "settings.passkeys.name.label": {
@@ -8901,22 +9217,6 @@
       "text": "کلیدهای عبور شما هنگام بازنشانی کلیدهای حساب حذف شدند. برای ورود دوباره با Face ID، Touch ID یا اثر انگشت، یک کلید عبور اضافه کنید.",
       "status": "machine"
     },
-    "settings.passkeys.stop_restoring.action": {
-      "text": "توقف بازیابی کلیدهای حساب",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.body": {
-      "text": "این کلید عبور فقط شما را وارد خواهد کرد. کلیدهای حسابی که قبلاً در دستگاه‌های دیگر بازیابی شده‌اند همان‌جا می‌مانند.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.done": {
-      "text": "این کلید عبور اکنون فقط شما را وارد می‌کند.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.title": {
-      "text": "بازیابی کلیدهای حساب با این کلید عبور متوقف شود؟",
-      "status": "machine"
-    },
     "settings.passkeys.title": {
       "text": "کلیدهای عبور",
       "status": "machine"
@@ -8927,6 +9227,10 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "این مرورگر نمی‌تواند کلیدهای عبور را مدیریت کند. از نسخه جدید Safari، Chrome، Firefox یا Edge استفاده کنید.",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_desktop": {
+      "text": "این دستگاه نمی‌تواند کلیدهای عبور را مدیریت کند.",
       "status": "machine"
     },
     "settings.password.change": {
@@ -9233,6 +9537,10 @@
       "text": "مدیریت‌شده توسط مرورگر شما",
       "status": "machine"
     },
+    "settings.translation.pack.managed.desktop": {
+      "text": "مدیریت‌شده توسط سیستم شما",
+      "status": "machine"
+    },
     "settings.translation.pack.remove": {
       "text": "حذف",
       "status": "machine"
@@ -9287,6 +9595,22 @@
     },
     "settings.translation.unavailable.translation_web": {
       "text": "ترجمه در این مرورگر در دسترس نیست",
+      "status": "machine"
+    },
+    "supporters.body": {
+      "text": "هزینه‌ی Lakko را کسانی می‌پردازند که از آن حمایت می‌کنند. سپاس.",
+      "status": "machine"
+    },
+    "supporters.failed": {
+      "text": "بارگیری فهرست ممکن نشد. دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "supporters.retry": {
+      "text": "دوباره امتحان کنید",
+      "status": "machine"
+    },
+    "supporters.title": {
+      "text": "حامیان",
       "status": "machine"
     },
     "tokens.action_allowance_used": {
@@ -9401,10 +9725,6 @@
       "text": "تلاش دوباره",
       "status": "machine"
     },
-    "translate.pack.blocked_anti_censorship": {
-      "text": "وقتی ضدسانسور روشن است، بسته‌های زبان بارگیری نمی‌شوند.",
-      "status": "machine"
-    },
     "translate.pack.body.transcription": {
       "text": "رونویسی در همین دستگاه انجام می‌شود. Lakko برای این کار به بسته {language} نیاز دارد. پیام‌های صوتی هرگز برای رونویسی به جایی فرستاده نمی‌شوند.",
       "status": "machine"
@@ -9419,6 +9739,10 @@
     },
     "translate.pack.body.translation_sized": {
       "text": "ترجمه در همین دستگاه انجام می‌شود. Lakko برای این کار به بسته {language} نیاز دارد ({size}). پیام‌ها هرگز برای ترجمه به جایی فرستاده نمی‌شوند.",
+      "status": "machine"
+    },
+    "translate.pack.body.translation_system_settings": {
+      "text": "ترجمه در همین دستگاه انجام می‌شود. macOS بسته {language} را در System Settings دانلود می‌کند: Language & Region، سپس Translation Languages. پیام‌ها هرگز برای ترجمه به جایی فرستاده نمی‌شوند.",
       "status": "machine"
     },
     "translate.pack.cancel": {
@@ -9449,6 +9773,10 @@
       "text": "الان نه",
       "status": "machine"
     },
+    "translate.pack.open_system_settings": {
+      "text": "باز کردن System Settings",
+      "status": "machine"
+    },
     "translate.pack.source.android": {
       "text": "این بسته از Google می‌آید.",
       "status": "machine"
@@ -9459,6 +9787,10 @@
     },
     "translate.pack.source.web": {
       "text": "این بسته از سازنده مرورگر شما می‌آید.",
+      "status": "machine"
+    },
+    "translate.pack.source.desktop": {
+      "text": "این بسته از سازنده سیستم شما می‌آید.",
       "status": "machine"
     },
     "translate.pack.title.transcription": {
@@ -9707,6 +10039,14 @@
     },
     "who_can_find_me.title": {
       "text": "چه کسی می‌تواند مرا پیدا کند",
+      "status": "machine"
+    },
+    "call.screen_share.refused_desktop": {
+      "text": "صفحه‌تان به اشتراک گذاشته نشد. در تنظیمات حریم خصوصی سیستم به Lakko اجازه ضبط صفحه بدهید.",
+      "status": "machine"
+    },
+    "call.screen_share.refused_macos_desktop": {
+      "text": "صفحه‌تان به اشتراک گذاشته نشد. در تنظیمات سیستم به Lakko اجازه ضبط صفحه بدهید.",
       "status": "machine"
     }
   },

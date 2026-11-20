@@ -179,6 +179,18 @@ pub(crate) async fn start(
     }))
 }
 
+/// `POST /device/authorize/redeem`, counted as a device-grant login
+/// (ADR-0096); the flow is [`redeem_answer`].
+pub(crate) async fn redeem(
+    state: State<AppState>,
+    req: Json<DeviceAuthorizeRedeemReq>,
+) -> axum::response::Response {
+    crate::metrics::login(
+        crate::metrics::LoginKind::DeviceGrant,
+        redeem_answer(state, req).await,
+    )
+}
+
 /// `POST /device/authorize/redeem` — consume a device grant for a session
 /// token.
 ///
@@ -190,7 +202,7 @@ pub(crate) async fn start(
 /// enumeration-safe `401` — the same generic shape an OPAQUE bad-credential
 /// login returns.
 #[axum::debug_handler]
-pub(crate) async fn redeem(
+async fn redeem_answer(
     State(state): State<AppState>,
     Json(req): Json<DeviceAuthorizeRedeemReq>,
 ) -> Result<Json<DeviceAuthorizeRedeemRes>, ApiError> {
@@ -211,7 +223,7 @@ pub(crate) async fn redeem(
         return Err(ApiError::InvalidCredential);
     };
 
-    // ADR-0089 section 4: the grant is spent (it is the proof, and single
+    // ADR-0098 section 4: the grant is spent (it is the proof, and single
     // use), and a suspended account's new device lands in suspended mode.
     crate::suspension::refuse_landing_if_suspended(
         &state,
@@ -430,6 +442,7 @@ mod device_authorize_e2e_tests {
             room_cap: std::sync::Arc::new(crate::room_cap::RoomAdmissionCap::disabled()),
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
             anon_tokens: None,
+            anon_cred: None,
             handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
             recovery_email: None,
             limits: Arc::new(crate::limits::Limits::defaults()),

@@ -29,9 +29,9 @@ struct ChannelInfoSheet: View {
 
     @ObservedObject private var l10n = Localization.shared
     @ObservedObject private var reach = ReachCenter.shared
-    /// ADR-0089 step 5 — a channel moderators removed.
+    /// ADR-0098 step 5 — a channel moderators removed.
     @ObservedObject private var removals = ChannelRemovals.shared
-    /// ADR-0089 step 3 — a suspended account invites nobody.
+    /// ADR-0098 step 3 — a suspended account invites nobody.
     @Environment(\.accountSuspended) private var accountSuspended
     @State private var confirmingUnsubscribe = false
     @State private var typeOpen = false
@@ -42,7 +42,7 @@ struct ChannelInfoSheet: View {
     @State private var confirmingDelete = false
     @State private var deleting = false
     @State private var deleteFailed = false
-    /// ADR-0089 / UX 2.1 — the report sheet for the channel.
+    /// ADR-0098 / UX 2.1 — the report sheet for the channel.
     @State private var reportRequest: ReportRequest?
     /// UX 4.5.2 — the header photo (the owner changes it).
     @StateObject private var photo: ChannelPhotoModel
@@ -95,14 +95,16 @@ struct ChannelInfoSheet: View {
     }
 
     private var baseSections: [InfoSection] {
-        SuspendedInfo.withoutSending(channelInfoSections(caps: ChannelInfoCapabilities(
+        SuspendedInfo.withoutSending(ChannelReaderDeviceInfo.sections(
+            readerDevice: state.readerDeviceRole(channelId) != nil,
+            channelInfoSections(caps: ChannelInfoCapabilities(
             role: role,
             hasHandle: !handle.isEmpty,
             // The co-publishers this account approved; a co-publisher always
             // has the owner. Delete channel itself waits for the core route.
             hasOtherPublishers: CoPublisherKeyBook.hasOtherPublishers(
                 channelIdHex: channelId, isOwner: isOwner),
-            membersOfGroupsAndChannelsOn: reach.setting.mode == .some && reach.setting.groups != nil)),
+            membersOfGroupsAndChannelsOn: reach.setting.mode == .some && reach.setting.groups != nil))),
             suspended: accountSuspended)
     }
 
@@ -150,7 +152,7 @@ struct ChannelInfoSheet: View {
             if sections.contains(.membersCanFindMe) {
                 MembersCanFindMeSection(groupIdHex: channelId, kind: .channel)
             }
-            // ADR-0089 / UX 2.1 — a subscriber reports the channel; its posts
+            // ADR-0098 / UX 2.1 — a subscriber reports the channel; its posts
             // may be picked.
             if sections.contains(.report), let id = ChannelsClient.hexToData(channelId), id.count == 16 {
                 Section {
@@ -165,7 +167,7 @@ struct ChannelInfoSheet: View {
                                 .posts ?? [],
                             loaded: state.postsByChannel[channelId] ?? [])
                     } label: {
-                        Label(l10n.t("report.action"), systemImage: "flag")
+                        Label(l10n.t("report.action"), icon: .flag)
                             .foregroundStyle(Color.lakkoDanger)
                     }
                 }
@@ -249,7 +251,7 @@ struct ChannelInfoSheet: View {
                         .font(.footnote)
                         .foregroundStyle(Color.lakkoTextMuted)
                 }
-                // ADR-0089 step 5 / UX 3 — said only once the log proved it.
+                // ADR-0098 step 5 / UX 3 — said only once the log proved it.
                 if let removal {
                     Text(l10n.t(removal.lineKey))
                         .font(.footnote)
@@ -389,6 +391,11 @@ struct ChannelInfoSheet: View {
             try await client.deleteChannel(channelIdHex: channelId, accountIdentity: identity)
             state.endDeleted(channelId)
             onUnsubscribed()
+            // ADR-0064 section 1 — the channel's vault goes with it, best
+            // effort: a failure does not undo the delete.
+            let id = channelId
+            let seed = accountIdentitySeed
+            Task { @MainActor in await ChannelVaultHead.deleteVault(channelIdHex: id, currentSeed: seed) }
         } catch {
             deleteFailed = true
         }
@@ -396,7 +403,7 @@ struct ChannelInfoSheet: View {
 
     private func unsubscribe() {
         if removal != nil, isPublisher {
-            // ADR-0089 step 5 — the owner or a publisher takes a removed
+            // ADR-0098 step 5 — the owner or a publisher takes a removed
             // channel out of the list, on every device of the account (the
             // conversation-end record); the service is not asked (it answers
             // 410 for the channel anyway).
@@ -563,11 +570,10 @@ struct ChannelPublishersScreen: View {
                             publisher: true)
                     } label: {
                         HStack {
-                            Label(l10n.t("channels.publishers.add"), systemImage: "person.badge.plus")
+                            Label(l10n.t("channels.publishers.add"), icon: .personPlus)
                                 .foregroundStyle(Color.lakkoText)
                             Spacer()
-                            Image(systemName: "chevron.forward")
-                                .font(.footnote.weight(.semibold))
+                            LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                                 .foregroundStyle(Color.lakkoTextMuted)
                         }
                         .padding(14)
@@ -629,7 +635,8 @@ struct ChannelPublishersScreen: View {
     private func load() {
         guard let (identity, group) = open(), let members = try? group.members() else { return }
         let owner = CoPublisher.ownerAccountKey(group)
-        let own = identity.signaturePublicKey()
+        // ADR-0090 — leaves are devices; "you" is this ACCOUNT.
+        let own = identity.accountPublicKey() ?? identity.signaturePublicKey()
         var seen: Set<Data> = []
         var list: [Row] = []
         for member in members.sorted(by: { $0.leafIndex < $1.leafIndex }) {

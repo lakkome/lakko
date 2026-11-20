@@ -90,6 +90,10 @@ pub(crate) const CODE_HANDLE_BIND_LIMITED: &str = "handle-bind-limited";
 /// two routes that send one.
 pub(crate) const CODE_EMAIL_RATE_LIMITED: &str = "email-rate-limited";
 
+/// Body code for a refused supporter-code redeem (ADR-0097): the per-code
+/// counter or the address bucket of `POST /auth/supporter-code/redeem`.
+pub(crate) const CODE_SUPPORTER_CODE_LIMITED: &str = "supporter-code-limited";
+
 /// Body code when the name-counter store cannot be read (`503`).
 pub(crate) const CODE_LIMITER_UNAVAILABLE: &str = "rate-limiter-unavailable";
 
@@ -228,10 +232,18 @@ pub(crate) enum Scope {
     /// every device asks at every session landing, and the bind's five a day
     /// would be spent by the question.
     HandleCheck = 22,
+    /// `PUT /auth/anon-credential/commitment` and `POST /auth/anon-credential`,
+    /// keyed on the signed-in account (ADR-0092 section 4.2). Charged after
+    /// the body decodes and before the proof is verified.
+    AnonCredential = 23,
+    /// `POST /auth/supporter-code/redeem`, keyed on the code's keyed hash
+    /// (ADR-0097). Charged only for a code that exists, after the lookup:
+    /// an unknown code has no counter to spend and answers `404` anyway.
+    SupporterCode = 24,
 }
 
 impl Scope {
-    const ALL: [Self; 18] = [
+    pub(crate) const ALL: [Self; 20] = [
         Self::LoginPassword,
         Self::LoginRecovery,
         Self::PasswordReset,
@@ -250,6 +262,8 @@ impl Scope {
         Self::EmailVaultOpen,
         Self::EmailVaultStore,
         Self::HandleCheck,
+        Self::AnonCredential,
+        Self::SupporterCode,
     ];
 
     /// Position in [`Self::ALL`] (the stored discriminants have a gap, so
@@ -274,6 +288,34 @@ impl Scope {
             Self::EmailVaultOpen => 15,
             Self::EmailVaultStore => 16,
             Self::HandleCheck => 17,
+            Self::AnonCredential => 18,
+            Self::SupporterCode => 19,
+        }
+    }
+
+    /// The `scope` label of the refusal counter (ADR-0096).
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::LoginPassword => "login_password",
+            Self::LoginRecovery => "login_recovery",
+            Self::PasswordReset => "password_reset",
+            Self::TotpRecover => "totp_recover",
+            Self::DeviceRequestTarget => "device_request_target",
+            Self::DeviceGrantMint => "device_grant_mint",
+            Self::HandleBind => "handle_bind",
+            Self::RecoveryReplace => "recovery_replace",
+            Self::KeyReset => "key_reset",
+            Self::DeviceRevoke => "device_revoke",
+            Self::Recall => "recall",
+            Self::KeyRotate => "key_rotate",
+            Self::EmailLetterHandle => "email_letter_handle",
+            Self::EmailLetterAccount => "email_letter_account",
+            Self::EmailVerify => "email_verify",
+            Self::EmailVaultOpen => "email_vault_open",
+            Self::EmailVaultStore => "email_vault_store",
+            Self::HandleCheck => "handle_check",
+            Self::AnonCredential => "anon_credential",
+            Self::SupporterCode => "supporter_code",
         }
     }
 
@@ -297,6 +339,8 @@ impl Scope {
             Self::EmailVaultOpen => "LAKKO_AUTH_LIMIT_EMAIL_VAULT_OPEN",
             Self::EmailVaultStore => "LAKKO_AUTH_LIMIT_EMAIL_VAULT_STORE",
             Self::HandleCheck => "LAKKO_AUTH_LIMIT_HANDLE_CHECK",
+            Self::AnonCredential => "LAKKO_AUTH_LIMIT_ANON_CREDENTIAL",
+            Self::SupporterCode => "LAKKO_AUTH_LIMIT_SUPPORTER_CODE",
         }
     }
 
@@ -313,7 +357,9 @@ impl Scope {
             // The email vault's five releases a day per account (ADR-0075
             // section 10) share the handle bind's figure.
             Self::HandleBind | Self::EmailVaultOpen => Window::new(5, 86_400),
-            Self::RecoveryReplace => Window::new(10, 3600),
+            // A person redeems a supporter code once and retries a lost
+            // response a few times; it shares the replace's figure.
+            Self::RecoveryReplace | Self::SupporterCode => Window::new(10, 3600),
             Self::KeyReset | Self::KeyRotate => Window::new(3, 86_400),
             Self::DeviceRevoke => Window::new(20, 3600),
             // ADR-0075 section 10. Five letters an hour per name and ten a
@@ -325,6 +371,8 @@ impl Scope {
             Self::EmailVerify => Window::new(15, 3600),
             // One question per device per landing, with room to spare.
             Self::HandleCheck => Window::new(120, 3600),
+            // A device asks once a period, a few devices and retries a day.
+            Self::AnonCredential => Window::new(30, 86_400),
         }
     }
 
@@ -343,10 +391,12 @@ impl Scope {
             | Self::EmailVerify
             | Self::EmailVaultOpen
             | Self::EmailVaultStore
-            | Self::HandleCheck => CODE_TOO_MANY_ATTEMPTS,
+            | Self::HandleCheck
+            | Self::AnonCredential => CODE_TOO_MANY_ATTEMPTS,
             Self::EmailLetterHandle | Self::EmailLetterAccount => CODE_EMAIL_RATE_LIMITED,
             Self::DeviceRequestTarget => CODE_DEVICE_REQUEST_LIMITED,
             Self::HandleBind => CODE_HANDLE_BIND_LIMITED,
+            Self::SupporterCode => CODE_SUPPORTER_CODE_LIMITED,
         }
     }
 }
@@ -368,20 +418,36 @@ pub(crate) enum Category {
     /// The two routes that send a letter of the recovery email (ADR-0075):
     /// `/recovery-email/enrol/start` and `/recovery-email/recover/start`.
     Email,
+    /// `POST /auth/supporter-code/redeem` (ADR-0097).
+    SupporterCode,
 }
 
 impl Category {
-    const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::Attempt,
         Self::DeviceRequest,
         Self::Signup,
         Self::Challenge,
         Self::HandleBind,
         Self::Email,
+        Self::SupporterCode,
     ];
 
     const fn index(self) -> usize {
         self as usize
+    }
+
+    /// The `category` label of the address-refusal counter (ADR-0096).
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Attempt => "attempt",
+            Self::DeviceRequest => "device_request",
+            Self::Signup => "signup",
+            Self::Challenge => "challenge",
+            Self::HandleBind => "handle_bind",
+            Self::Email => "email",
+            Self::SupporterCode => "supporter_code",
+        }
     }
 
     const fn env_var(self) -> &'static str {
@@ -392,6 +458,7 @@ impl Category {
             Self::Challenge => "LAKKO_AUTH_IP_LIMIT_POW_CHALLENGE",
             Self::HandleBind => "LAKKO_AUTH_IP_LIMIT_HANDLE_BIND",
             Self::Email => "LAKKO_AUTH_IP_LIMIT_EMAIL",
+            Self::SupporterCode => "LAKKO_AUTH_IP_LIMIT_SUPPORTER_CODE",
         }
     }
 
@@ -403,7 +470,7 @@ impl Category {
             Self::Attempt => Window::new(30, 60),
             Self::DeviceRequest | Self::Signup => Window::new(10, 3600),
             Self::Challenge => Window::new(30, 3600),
-            Self::HandleBind | Self::Email => Window::new(20, 3600),
+            Self::HandleBind | Self::Email | Self::SupporterCode => Window::new(20, 3600),
         }
     }
 
@@ -414,6 +481,7 @@ impl Category {
             Self::Signup | Self::Challenge => CODE_SIGNUP_RATE_LIMITED,
             Self::HandleBind => CODE_HANDLE_BIND_LIMITED,
             Self::Email => CODE_EMAIL_RATE_LIMITED,
+            Self::SupporterCode => CODE_SUPPORTER_CODE_LIMITED,
         }
     }
 }
@@ -461,6 +529,9 @@ pub(crate) struct Limits {
     /// Minimum seconds between two handle-changing binds of one account
     /// (0 = no minimum).
     handle_change_min_interval_secs: u32,
+    /// The beta account cap (`LAKKO_AUTH_MAX_ACCOUNTS`, `crate::account_cap`);
+    /// 0 = no cap.
+    max_accounts: u32,
     /// The device-link guess budget, one entry per tier.
     device_link: [DeviceLinkTier; DEVICE_LINK_TIERS.len()],
     /// How long a recall anchor lives (ADR-0074 section 0.2), milliseconds.
@@ -494,6 +565,7 @@ impl Limits {
             ips,
             name_key,
             handle_change_min_interval_secs,
+            max_accounts: 0,
             device_link: DEVICE_LINK_TIERS.map(|(_, _, tier)| tier),
             recall_window_ms: i64::from(DEFAULT_RECALL_WINDOW_DAYS) * MS_PER_DAY,
             max_buckets: MAX_ADDRESS_BUCKETS,
@@ -574,6 +646,7 @@ impl Limits {
         let mut limits = Self::with_windows(names, ips, name_key, interval);
         limits.device_link = device_link;
         limits.recall_window_ms = i64::from(recall_window_days) * MS_PER_DAY;
+        limits.max_accounts = crate::account_cap::max_from_env()?;
         Ok(limits)
     }
 
@@ -596,6 +669,11 @@ impl Limits {
     pub(crate) const fn with_handle_change_interval(mut self, secs: u32) -> Self {
         self.handle_change_min_interval_secs = secs;
         self
+    }
+
+    /// The beta account cap; 0 = no cap.
+    pub(crate) const fn max_accounts(&self) -> u32 {
+        self.max_accounts
     }
 
     /// How long a recall anchor lives, in milliseconds
@@ -668,6 +746,7 @@ impl Limits {
             secs = self.handle_change_min_interval_secs,
             "auth handle change minimum interval"
         );
+        crate::account_cap::log_startup(self.max_accounts);
         for ((window_var, suspend_var, _), tier) in DEVICE_LINK_TIERS.iter().zip(&self.device_link)
         {
             tracing::info!(
@@ -794,7 +873,8 @@ pub(crate) enum LimitError {
 
 impl IntoResponse for LimitError {
     fn into_response(self) -> Response {
-        match self {
+        let code = self.code();
+        let mut resp = match self {
             Self::Limited {
                 code,
                 retry_after_secs,
@@ -814,6 +894,18 @@ impl IntoResponse for LimitError {
                 Json(json!({ "error": CODE_LIMITER_UNAVAILABLE })),
             )
                 .into_response(),
+        };
+        resp.extensions_mut().insert(lakko_metrics::ErrorCode(code));
+        resp
+    }
+}
+
+impl LimitError {
+    /// The stable body code of the refusal.
+    pub(crate) const fn code(&self) -> &'static str {
+        match self {
+            Self::Limited { code, .. } => code,
+            Self::Unavailable => CODE_LIMITER_UNAVAILABLE,
         }
     }
 }
@@ -846,20 +938,22 @@ pub(crate) async fn charge_name(
     name: &[u8],
 ) -> Result<(), LimitError> {
     let w = limits.name_window(scope);
-    match bump(pool, scope, &limits.name_key(scope, name), w.window_secs).await {
-        Ok((hits, _)) if hits <= w.limit => Ok(()),
+    let refusal = match bump(pool, scope, &limits.name_key(scope, name), w.window_secs).await {
+        Ok((hits, _)) if hits <= w.limit => return Ok(()),
         Ok((_, retry_after_secs)) => {
             tracing::debug!(scope = ?scope, "auth name limit reached");
-            Err(LimitError::Limited {
+            LimitError::Limited {
                 code: scope.refusal_code(),
                 retry_after_secs,
-            })
+            }
         },
         Err(e) => {
             tracing::error!(error = %e, scope = ?scope, "auth name limit store failed; refusing");
-            Err(LimitError::Unavailable)
+            LimitError::Unavailable
         },
-    }
+    };
+    crate::metrics::scope_refused(scope, &refusal);
+    Err(refusal)
 }
 
 /// Atomically bump the fixed-window counter; returns `(hits in the current
@@ -932,7 +1026,18 @@ pub(crate) fn bucket_address(ip: IpAddr) -> IpAddr {
 /// The service binds loopback in production, so nobody reaches it without
 /// passing nginx.
 fn source_ip(req: &Request<Body>) -> Option<IpAddr> {
-    let header = |name: &str| req.headers().get(name).and_then(|v| v.to_str().ok());
+    source_ip_of(
+        req.headers(),
+        req.extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|c| c.0),
+    )
+}
+
+/// [`source_ip`] over the parts a handler holds: the headers and the socket
+/// peer, if any.
+fn source_ip_of(headers: &axum::http::HeaderMap, peer: Option<SocketAddr>) -> Option<IpAddr> {
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
     if let Some(ip) = header("x-real-ip").and_then(|s| s.trim().parse::<IpAddr>().ok()) {
         return Some(ip);
     }
@@ -942,9 +1047,29 @@ fn source_ip(req: &Request<Body>) -> Option<IpAddr> {
     {
         return Some(ip);
     }
-    req.extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|c| c.0.ip())
+    peer.map(|p| p.ip())
+}
+
+/// Charge the source address of a request a handler already took apart to
+/// `cat`'s bucket: for a route that validates its body before charging the
+/// address (ADR-0097's redeem), where a middleware would charge first.
+///
+/// # Errors
+///
+/// [`LimitError::Limited`] with `cat`'s code when the bucket is empty.
+pub(crate) fn charge_source(
+    limits: &Limits,
+    cat: Category,
+    headers: &axum::http::HeaderMap,
+    peer: Option<SocketAddr>,
+) -> Result<(), LimitError> {
+    let ip = source_ip_of(headers, peer).unwrap_or(UNIDENTIFIED);
+    limits
+        .charge_ip_at(cat, ip, Instant::now())
+        .map_err(|retry_after_secs| LimitError::Limited {
+            code: cat.refusal_code(),
+            retry_after_secs,
+        })
 }
 
 /// Route middleware: charge the request's source address to `cat`'s bucket,
@@ -960,6 +1085,7 @@ pub(crate) async fn ip_gate(
         Ok(()) => next.run(req).await,
         Err(retry_after_secs) => {
             tracing::debug!(category = ?cat, "auth address limit reached");
+            crate::metrics::address_refused(cat);
             LimitError::Limited {
                 code: cat.refusal_code(),
                 retry_after_secs,
@@ -977,11 +1103,14 @@ pub(crate) async fn ip_gate(
 /// buckets that have refilled, and device-link wrong codes and suspensions
 /// that no longer count.
 pub(crate) fn spawn_pruner(pool: MySqlPool, limits: Arc<Limits>) -> tokio::task::JoinHandle<()> {
+    const JOB: &str = crate::metrics::jobs::LIMITS_PRUNE;
+    lakko_metrics::job_registered(JOB);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(PRUNE_INTERVAL);
         interval.tick().await;
         loop {
             interval.tick().await;
+            let mut all_ok = true;
             let dropped = limits.prune_idle(Instant::now());
             if dropped > 0 {
                 tracing::debug!(dropped, "auth address buckets pruned");
@@ -993,6 +1122,7 @@ pub(crate) fn spawn_pruner(pool: MySqlPool, limits: Arc<Limits>) -> tokio::task:
             .execute(&pool)
             .await;
             if let Err(e) = result {
+                all_ok = false;
                 tracing::warn!(error = %e, "auth_name_limits prune failed");
             }
             let result = sqlx::query(
@@ -1002,6 +1132,7 @@ pub(crate) fn spawn_pruner(pool: MySqlPool, limits: Arc<Limits>) -> tokio::task:
             .execute(&pool)
             .await;
             if let Err(e) = result {
+                all_ok = false;
                 tracing::warn!(error = %e, "device_link_wrong_codes prune failed");
             }
             let result =
@@ -1009,8 +1140,10 @@ pub(crate) fn spawn_pruner(pool: MySqlPool, limits: Arc<Limits>) -> tokio::task:
                     .execute(&pool)
                     .await;
             if let Err(e) = result {
+                all_ok = false;
                 tracing::warn!(error = %e, "device_link_suspensions prune failed");
             }
+            crate::metrics::job_ran(JOB, all_ok);
         }
     })
 }
@@ -1044,10 +1177,11 @@ mod tests {
         // 5 was the removed server-side three-word verifier's; 6, 7 and 8
         // were the removed one-time-code factor's. None is reused. 14 is the
         // ADR-0074 recall (listed after 15: it was added later); 16 is the
-        // key rotation.
+        // key rotation; 23 the ADR-0092 anonymous credential, 24 the
+        // ADR-0097 supporter code.
         assert_eq!(
             pinned,
-            vec![1, 2, 3, 4, 9, 10, 11, 12, 13, 15, 14, 16, 17, 18, 19, 20, 21, 22]
+            vec![1, 2, 3, 4, 9, 10, 11, 12, 13, 15, 14, 16, 17, 18, 19, 20, 21, 22, 23, 24]
         );
         for (i, s) in Scope::ALL.iter().enumerate() {
             assert_eq!(s.index(), i);

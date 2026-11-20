@@ -59,6 +59,13 @@ public final class ChatClient {
     /// that rang only while its own chat was the visible screen.
     private let ownPublished = OwnEchoRegistry()
 
+    /// ADR-0091 phase 1 — the hold tracker the apply loop consults when a row
+    /// fails: process-wide by default, replaceable by tests. The repository
+    /// reads the same instance for its poll gate and journal repair guard.
+    var registeredCommitHold: RegisteredCommitHold = .shared
+    /// ADR-0091 phase 2 — the evidence a poll collects for the behind verdict.
+    var reentryObservations: ReentryObservations = .shared
+
     /// Fail-closed MLS-ratchet persister wired by ``ChatRepository``.
     ///
     /// ``sendMessage(identity:group:plaintext:)`` invokes it AFTER
@@ -96,6 +103,16 @@ public final class ChatClient {
 
     public init(ds: DsClient = DsClient()) {
         self.ds = ds
+    }
+
+    /// ADR-0092 section 3.6 — post a NON-MLS row (an anonymous poll ballot)
+    /// to `group`'s journal, proven with the current epoch's access key,
+    /// which every member holds, so the proof names nobody. No wake.
+    public func publishRawRow(identity: Identity, group: Group, row: Data) async throws {
+        let groupId = try group.groupId()
+        _ = try await ds.publishGroup(
+            groupId: groupId, payload: row,
+            auth: await dsAuth(identity: identity, group: group, groupId: groupId), wake: nil)
     }
 
     /// Encrypt `plaintext` for the current group epoch and post
@@ -400,6 +417,31 @@ public final class ChatClient {
         }
     }
 
+    /// ADR-0091 phase 1b — the rows from `from` on, read page by page until a
+    /// page reaches past `after` or the journal ends (at most
+    /// ``CursorEpoch/maxPages`` pages), as one result. The last page's
+    /// `hasMore`, `latestEpoch` and `registeredCommits` stand for the whole.
+    public func fetchRewound(
+        groupId: Data,
+        from: Int64,
+        after: Int64,
+        auth: DsAuth? = nil
+    ) async throws -> FetchResult {
+        var page = try await fetchGroupJournal(groupId: groupId, after: from, waitSecs: 0, auth: auth)
+        var messages = page.messages
+        var pages = 1
+        while pages < CursorEpoch.maxPages, page.hasMore {
+            let last = messages.last?.id ?? from
+            if last >= after { break }
+            page = try await fetchGroupJournal(groupId: groupId, after: last, waitSecs: 0, auth: auth)
+            messages.append(contentsOf: page.messages)
+            pages += 1
+        }
+        return FetchResult(
+            messages: messages, hasMore: page.hasMore, latestEpoch: page.latestEpoch,
+            registeredCommits: page.registeredCommits)
+    }
+
     /// G-38 — the MLS half of
     /// ``pollMessages(identity:group:after:waitSecs:)``: apply an
     /// already-fetched batch.
@@ -438,7 +480,7 @@ public final class ChatClient {
     /// an MLS handshake row (a commit, a proposal), which has no application
     /// sender and must be applied whoever sent it, and for a leaf that does
     /// not resolve.
-    /// ADR-0089 section 1 — what a report's evidence needs of an application
+    /// ADR-0098 section 1 — what a report's evidence needs of an application
     /// row that is a chat message: the attestation verdict, the attested
     /// plaintext as received, the sender leaf's signature key and the leaf's
     /// device binding, all read now, while the roster is the epoch's (C-68).
@@ -471,15 +513,23 @@ public final class ChatClient {
         group: Group,
         groupIdHex: String,
         raw: FetchResult,
-        after: Int64 = 0
+        after: Int64 = 0,
+        readFrom: Int64? = nil
     ) -> PollMessagesResult {
         var events: [IncomingChatEvent] = []
-        var cursor = after
+        // `readFrom` is below `after` only on an ADR-0091 phase-1b rewind
+        // (`Chat/CursorEpoch.swift`); the cursor returned is never below
+        // `after`.
+        var cursor = readFrom ?? after
         var touchedMlsState = false
         var resendOrigins: [Int64: ResendMarker.Origin] = [:]
         var eventSenders: [MemberIdentity?] = []
         var evidence: [Int64: MessageEvidence] = [:]
+        var held = false
         for message in raw.messages {
+            // ADR-0091 phase 1 — where the cursor goes back to when this row
+            // is held: the last row before it, or the fetch's `after`.
+            let cursorBeforeRow = cursor
             cursor = message.id
 
             // Drop our own echoes — the DS doesn't dedupe and
@@ -495,9 +545,21 @@ public final class ChatClient {
                 continue
             }
 
+            // ADR-0092 section 3.6 — an anonymous poll ballot is a NON-MLS
+            // row on the group journal (the `WelcomeRendezvous` pattern): it is
+            // recognised by its domain and never fed to MLS processing.
+            if isPollBallotRow(row: message.payload) {
+                events.append(.pollBallotRow(
+                    messageId: message.id, row: message.payload, createdAt: message.createdAt))
+                eventSenders.append(nil)
+                continue
+            }
             // Marked BEFORE the call, not after — see
             // ``PollMessagesResult/touchedMlsState``.
             touchedMlsState = true
+            // ADR-0091 phase 1 — the group's epoch just before this row, for
+            // the verdict on a failure.
+            let localEpoch = try? group.epoch()
             let processed: ProcessedMessage
             do {
                 // ADR-0022 — the CHAT receive loop enforces the group-admin
@@ -516,17 +578,39 @@ public final class ChatClient {
                 // Bad frame, wrong epoch, malformed wire, OR a role-unauthorized
                 // commit refused by the gate. Drop + advance the cursor —
                 // deliberately: a row that can never apply must not be able to
-                // wedge the poll, and only a PERSIST failure holds the cursor.
-                // The two are distinguishable because they are different
-                // operations at different points in the batch.
+                // wedge the poll.
+                //
+                // ADR-0091 phase 1 — except the registered commit for this
+                // device's next epoch: it is HELD (the batch stops here, the
+                // cursor stays before it) and retried with a bounded backoff,
+                // because skipping it strands the device below the group.
+                if failedRowIsHeld(
+                    groupIdHex: groupIdHex, rowId: message.id, payload: message.payload,
+                    localEpoch: localEpoch, latestEpoch: raw.latestEpoch,
+                    registeredCommits: raw.registeredCommits, error: error,
+                    createdAt: message.createdAt
+                ) {
+                    cursor = cursorBeforeRow
+                    held = true
+                    break
+                }
                 continue
+            }
+            registeredCommitHold.recordApplied(groupIdHex: groupIdHex, rowId: message.id)
+            // ADR-0091 phase 2 — evidence for the behind verdict and the
+            // re-admitter's "the leaf is writing" rule.
+            reentryObservations.noteApplied(
+                groupIdHex: groupIdHex,
+                createdAtMs: ChatRepository.parseDsTimestampMs(message.createdAt).map { UInt64(max(0, $0)) })
+            if case .application(_, let senderLeaf?, _) = processed, let localEpoch {
+                reentryObservations.noteLeafActivity(groupIdHex: groupIdHex, leaf: senderLeaf, epoch: localEpoch)
             }
             if let origin = Self.resendOrigin(of: processed) {
                 resendOrigins[message.id] = origin
             }
-            // ADR-0089 section 1 — read at receipt, like the author.
-            if let held = Self.messageEvidence(of: processed, group: group) {
-                evidence[message.id] = held
+            // ADR-0098 section 1 — read at receipt, like the author.
+            if let found = Self.messageEvidence(of: processed, group: group) {
+                evidence[message.id] = found
             }
             // Resolved on the line after the apply, like the event's own
             // author: the one moment the roster is the row's epoch.
@@ -543,17 +627,93 @@ public final class ChatClient {
                     group: group
                 )
             )
+            // ADR-0092 section 3.4 — a merged commit may add accounts to the
+            // ring of an open anonymous poll. The roster is read HERE, on the
+            // line after the apply, the one moment it is this commit's.
+            if case .commit = processed {
+                events.append(.commitRoster(
+                    messageId: message.id, accountKeys: ContentRing.accountKeys(of: group)))
+                eventSenders.append(nil)
+            }
+        }
+
+        // ADR-0091 phase 1 — an epoch that moved answers a hold framed below
+        // it and lifts a behind mark below it.
+        if let epoch = try? group.epoch() {
+            registeredCommitHold.observeEpoch(groupIdHex: groupIdHex, epoch: epoch)
         }
 
         return PollMessagesResult(
             events: events,
-            cursor: cursor,
-            hasMore: raw.hasMore,
+            cursor: max(cursor, after),
+            // A held batch stopped early: the rows after the held one are read
+            // again with it, at its next attempt, not at once.
+            hasMore: held ? false : raw.hasMore,
             touchedMlsState: touchedMlsState,
             resendOrigins: resendOrigins,
             eventSenders: eventSenders,
             evidence: evidence
         )
+    }
+
+    /// ADR-0091 phase 1 — classify a conversation row that failed to apply,
+    /// log it, and tell the loop whether to hold it (`true`: stop the batch at
+    /// this row) or skip it (`false`, as before).
+    ///
+    /// The log line names no group, row, key, account, name or text.
+    func failedRowIsHeld(
+        groupIdHex: String,
+        rowId: Int64,
+        payload: Data,
+        localEpoch: UInt64?,
+        latestEpoch: UInt64?,
+        registeredCommits: [UInt64: Int64]?,
+        error: Error,
+        createdAt: String? = nil
+    ) -> Bool {
+        let kind = FailedApplyKind.of(error)
+        // `sealed` / `after` / `latest` feed the log line (and, since ADR-0091
+        // phase 2, the behind verdict's evidence).
+        let sealed = epochOfMessage(bytes: payload)
+        let after = epochAfterMessage(bytes: payload)
+        let createdAtMs = createdAt.flatMap(ChatRepository.parseDsTimestampMs).map { UInt64(max(0, $0)) }
+        let verdict = RegisteredCommitVerdict.of(
+            isOwnEcho: kind == FailedApplyKind.ownMessage,
+            rowId: rowId, localEpoch: localEpoch, registeredCommits: registeredCommits)
+        guard verdict == .hold, let localEpoch else {
+            // Read again but no longer the registered commit (another path
+            // moved the epoch): the hold on it goes.
+            registeredCommitHold.recordSkipped(groupIdHex: groupIdHex, rowId: rowId)
+            RegisteredCommitLog.emit(.notice, RegisteredCommitLog.failedRow(
+                kind: kind, sealed: sealed, after: after, local: localEpoch,
+                latest: latestEpoch, verdict: .skip, attempt: nil))
+            // An own echo is not a row this device could not read.
+            if kind != FailedApplyKind.ownMessage {
+                reentryObservations.noteFailedRow(
+                    groupIdHex: groupIdHex, sealed: sealed, local: localEpoch, createdAtMs: createdAtMs)
+            }
+            return false
+        }
+        let outcome = registeredCommitHold.recordFailure(
+            groupIdHex: groupIdHex, rowId: rowId, sealedEpoch: localEpoch, localEpoch: localEpoch)
+        let attempt: Int
+        switch outcome {
+        case .held(let k, _): attempt = k
+        case .exhausted(let k): attempt = k
+        }
+        RegisteredCommitLog.emit(.notice, RegisteredCommitLog.failedRow(
+            kind: kind, sealed: sealed, after: after, local: localEpoch,
+            latest: latestEpoch, verdict: .hold, attempt: attempt))
+        if kind.hasPrefix(FailedApplyKind.refusedPrefix) {
+            RegisteredCommitLog.emit(.error, RegisteredCommitLog.divergence(kind: kind))
+        }
+        if case .exhausted = outcome {
+            RegisteredCommitLog.emit(.error, RegisteredCommitLog.exhausted(local: localEpoch, latest: latestEpoch))
+            reentryObservations.noteFailedRow(
+                groupIdHex: groupIdHex, sealed: sealed, local: localEpoch, createdAtMs: createdAtMs)
+            return false
+        }
+        return true
     }
 
     // MARK: - ProcessedMessage → IncomingChatEvent
@@ -580,7 +740,7 @@ public final class ChatClient {
         processed: ProcessedMessage,
         group: Group
     ) -> IncomingChatEvent {
-        toEvent(
+        let event = toEvent(
             messageId: messageId,
             createdAt: createdAt,
             processed: processed,
@@ -588,6 +748,16 @@ public final class ChatClient {
             resolveDevice: { AuthorIdentity.resolveDevice(group: group, leafIndex: $0) },
             conversationIdHex: (try? group.groupId()).map(DsClient.pseudonymHex)
         )
+        // ADR-0092 section 3.4 — ring version 0 of an anonymous poll is the
+        // roster at the epoch the poll was sealed at, which is NOW (the line
+        // after the apply). Checked against the signed `ring0_hash`.
+        if case .content(let id, let parsed, let envelope, let senderKey, let created, _) = event,
+           case .poll(let poll)? = parsed.content, poll.body.anonymous != nil {
+            return .content(
+                messageId: id, parsed: parsed, envelope: envelope, senderKey: senderKey,
+                createdAt: created, ring: ContentRing.ringAtReceipt(poll: poll, group: group))
+        }
+        return event
     }
 
     /// Internal rather than private so `LakkoTests` can drive the
@@ -616,7 +786,7 @@ public final class ChatClient {
     ) -> IncomingChatEvent {
         switch processed {
         case .application(let raw, let senderLeaf, _):
-            // ADR-0089 section 1 — a chat plaintext arrives wrapped in its
+            // ADR-0098 section 1 — a chat plaintext arrives wrapped in its
             // attestation; every arm below reads the envelope inside. A
             // plaintext with no wrapper (a signal, a service envelope) comes
             // back unchanged, and a malformed wrapper stays whole and
@@ -831,6 +1001,17 @@ public final class ChatClient {
             // Placed after the identity resolution so the receive side can
             // tell another person's request from this account's own echo
             // (another of our devices asking) without a second roster read.
+            // ADR-0092 section 3.9 — the open-items hand-over and the
+            // old-ballot rows: never bubbles; routed to the receive side,
+            // which adopts them on a device that needs them.
+            if isOpenItemsEnvelope(bytes: data) {
+                return .openItems(
+                    messageId: messageId, envelope: data, senderKey: senderKey, createdAt: createdAt)
+            }
+            if isPollBallotsEnvelope(bytes: data) {
+                return .pollBallots(
+                    messageId: messageId, envelope: data, senderKey: senderKey, createdAt: createdAt)
+            }
             if Self.looksLikeProfileRequest(data) {
                 return .profileRequest(
                     messageId: messageId,
@@ -955,6 +1136,17 @@ public final class ChatClient {
                 // pre-2026-09-29 parser it WAS a bubble of domain text and
                 // binary.
                 return .serviceEnvelope(messageId: messageId, createdAt: createdAt)
+            // ADR-0092 — a poll, checklist, location, contact card or
+            // article: a timeline row carrying its content.
+            case .poll, .checklist, .location, .contactCard, .article:
+                return .content(
+                    messageId: messageId, parsed: parsed, envelope: data, senderKey: senderKey,
+                    createdAt: createdAt, ring: nil)
+            // ADR-0092 — an op on one: folded into the target, never a row.
+            case .pollVote, .pollClose, .checklistTick, .checklistAdd, .editChecklist, .editArticle:
+                return .contentOp(
+                    messageId: messageId, parsed: parsed, envelope: data, senderKey: senderKey,
+                    createdAt: createdAt)
             case .unsupported:
                 // ADR-0061 section 6 — a chat envelope from a newer wire
                 // version. The core leaves `text` empty and carries the
@@ -1019,6 +1211,9 @@ public final class ChatClient {
     ///     `(16 << 3) | 2 = 130` no longer fits one varint byte;
     ///   * 0x8A 0x01 — `ScreenShareSignal` (17, ADR-0083), framed like a group
     ///     body (it opens with the 16-byte `call_id` too). It never rings.
+    ///   * 0x92 0x01 — `CallMediaState` (18, 2026-11-07): the other side's
+    ///     camera and microphone in a one-to-one call, framed the same way.
+    ///     It never rings.
     ///
     /// The group tags were missing, so a group-call body fell through to
     /// `parseBodyEnvelope`'s lossy-UTF-8 fallback and rendered as a garbage
@@ -1037,7 +1232,7 @@ public final class ChatClient {
             return true
         case 0x72, 0x7A:
             return isFramedGroupCallBody(bytes, tagLength: 1)
-        case 0x82, 0x8A:
+        case 0x82, 0x8A, 0x92:
             return bytes.count >= 2
                 && bytes[bytes.startIndex + 1] == 0x01
                 && isFramedGroupCallBody(bytes, tagLength: 2)
@@ -1122,7 +1317,10 @@ public final class ChatClient {
             usernameCertificate: decoded.usernameCertificate,
             grants: decoded.grants,
             // Envelope v4 (ADR-0084) — the profile photo, or none.
-            avatar: ProfileAvatar(decoded.avatar)
+            avatar: ProfileAvatar(decoded.avatar),
+            // Envelope v5 (ADR-0092 section 7) — whether the sender lets
+            // others share their contact card.
+            cardShareable: decoded.cardShareable
         )
     }
 
@@ -1175,6 +1373,10 @@ public final class ChatClient {
         if bytes.count == Int(knockSeedEnvelopeLen()),
            (try? decodeKnockSeedEnvelope(plaintext: bytes)) != nil {
             return .knockSeed(bytes)
+        }
+        if bytes.count == Int(knockKeyEnvelopeLen()),
+           let key = try? decodeKnockKeyEnvelope(plaintext: bytes) {
+            return .knockKey(key)
         }
         return nil
     }
@@ -1319,6 +1521,27 @@ public struct SendMessageResult: Equatable {
 /// documented fallback paths — existing bubbles render
 /// unchanged.
 public enum IncomingChatEvent: Equatable {
+    /// ADR-0092 — a poll, checklist, location, contact card or article.
+    /// `envelope` is the authenticated plaintext (what the row is stored
+    /// as); `ring` is set for an anonymous poll: ring version 0 read from the
+    /// roster at receipt, or ``ContentRingCheck/mismatch``.
+    case content(
+        messageId: Int64, parsed: ParsedBody, envelope: Data, senderKey: MemberIdentity?,
+        createdAt: String, ring: ContentRingCheck?)
+    /// ADR-0092 — a vote, close, tick, added item or edit on a content
+    /// message; folded into its target.
+    case contentOp(
+        messageId: Int64, parsed: ParsedBody, envelope: Data, senderKey: MemberIdentity?,
+        createdAt: String)
+    /// ADR-0092 section 3.6 — an anonymous poll ballot (a non-MLS row).
+    case pollBallotRow(messageId: Int64, row: Data, createdAt: String)
+    /// ADR-0092 section 3.4 — the account keys of the roster right after a
+    /// merged commit, for ring extension. Follows the commit's `.system`.
+    case commitRoster(messageId: Int64, accountKeys: [Data])
+    /// ADR-0092 section 3.9 — an open-items hand-over row.
+    case openItems(messageId: Int64, envelope: Data, senderKey: MemberIdentity?, createdAt: String)
+    /// ADR-0092 section 3.9 — old ballot rows handed to a newcomer.
+    case pollBallots(messageId: Int64, envelope: Data, senderKey: MemberIdentity?, createdAt: String)
     /// Application-data message (user-visible chat row).
     ///
     /// ADR-0023: carries the original author's IDENTITY — their signature
@@ -1704,7 +1927,7 @@ public struct PollMessagesResult: Equatable {
     /// application row came from, `nil` for an MLS handshake row. Empty when
     /// the producer resolved none (then nothing is dropped by sender).
     public let eventSenders: [MemberIdentity?]
-    /// ADR-0089 section 1 — what a report needs of each chat row of this
+    /// ADR-0098 section 1 — what a report needs of each chat row of this
     /// batch, by DS message id, read at receipt (the leaf may be reused
     /// later, C-68). The repository keeps it for rows from someone else.
     public let evidence: [Int64: MessageEvidence]

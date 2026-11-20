@@ -130,6 +130,88 @@ setInterval(() => {
   last = now;
 }, 1000);
 
+// The collapsed call window's frame loop (calls.md 4.5.4a) ticks every 50 ms:
+// count, per 10 s, how often a main-thread timer fires, how often a tick a
+// worker posts arrives, and how often a frame-drawing step runs, with and
+// without a Web Lock held, so the log shows what a hidden window keeps.
+const counts = { main: 0, worker: 0, worker100: 0, worker33: 0 };
+setInterval(() => { counts.main++; }, 50);
+const ticker = new Worker("/__probe/worker.js", { type: "module" });
+ticker.onmessage = (e) => { if (e.data === "tick") { counts.worker++; videoStep(); } };
+ticker.postMessage("tick-start");
+for (const ms of [100, 33]) {
+  const w = new Worker("/__probe/worker.js", { type: "module" });
+  w.onmessage = (e) => { if (e.data === "tick") counts["worker" + ms]++; };
+  w.postMessage({ tickEvery: ms });
+}
+// Does a hidden page's <video> keep giving fresh frames to a canvas, as the
+// collapsed call window's relay needs? A canvas whose colour counts frames
+// (16 levels of red) is sent through a loopback peer connection into a
+// <video>; on every worker tick the canvas is redrawn and the <video> is
+// drawn into another canvas and its red read back. "fresh" counts the reads
+// that showed a level not seen on the previous read.
+const video = { draws: 0, fresh: 0, decoded: 0, lastLevel: -1, lastDecoded: 0, ready: false };
+const src = document.createElement("canvas");
+src.width = 160; src.height = 90;
+const srcCtx = src.getContext("2d");
+const sample = document.createElement("canvas");
+sample.width = 16; sample.height = 9;
+const sampleCtx = sample.getContext("2d", { willReadFrequently: true });
+const sink = document.createElement("video");
+sink.muted = true; sink.playsInline = true; sink.autoplay = true;
+sink.style.cssText = "width:160px;height:90px";
+document.body.appendChild(sink);
+let frameNo = 0;
+function paint() {
+  frameNo++;
+  srcCtx.fillStyle = `rgb(${(frameNo % 16) * 16 + 8},128,128)`;
+  srcCtx.fillRect(0, 0, 160, 90);
+}
+paint();
+(async () => {
+  try {
+    const a = new RTCPeerConnection();
+    const b = new RTCPeerConnection();
+    a.onicecandidate = (e) => e.candidate && b.addIceCandidate(e.candidate);
+    b.onicecandidate = (e) => e.candidate && a.addIceCandidate(e.candidate);
+    b.ontrack = (e) => { sink.srcObject = e.streams[0] || new MediaStream([e.track]); sink.play().catch(() => {}); };
+    const stream = src.captureStream();
+    for (const t of stream.getTracks()) a.addTrack(t, stream);
+    await a.setLocalDescription(await a.createOffer());
+    await b.setRemoteDescription(a.localDescription);
+    await b.setLocalDescription(await b.createAnswer());
+    await a.setRemoteDescription(b.localDescription);
+    video.ready = true;
+  } catch (e) {
+    report({ kind: "video-setup-failed", error: String(e && e.message || e) });
+  }
+})();
+function videoStep() {
+  paint();
+  if (!video.ready || sink.videoWidth === 0) return;
+  try {
+    sampleCtx.drawImage(sink, 0, 0, 16, 9);
+    const red = sampleCtx.getImageData(8, 4, 1, 1).data[0];
+    const level = Math.round((red - 8) / 16);
+    video.draws++;
+    if (level !== video.lastLevel) video.fresh++;
+    video.lastLevel = level;
+  } catch (_) {}
+  const q = sink.getVideoPlaybackQuality ? sink.getVideoPlaybackQuality().totalVideoFrames : 0;
+  video.decoded += q - video.lastDecoded;
+  video.lastDecoded = q;
+}
+
+let lockHeld = false;
+if (new URLSearchParams(location.search).get("lock") === "1" && navigator.locks) {
+  navigator.locks.request("lakko-probe-lock", () => { lockHeld = true; return new Promise(() => {}); });
+}
+setInterval(() => {
+  report({ kind: "rates", per10s: { ...counts, videoDraws: video.draws, videoFresh: video.fresh, videoDecoded: video.decoded }, hidden: document.hidden, lockHeld });
+  video.draws = 0; video.fresh = 0; video.decoded = 0;
+  for (const k of Object.keys(counts)) counts[k] = 0;
+}, 10_000);
+
 let poll = 0;
 (async function loop() {
   for (;;) {

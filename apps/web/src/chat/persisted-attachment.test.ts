@@ -118,3 +118,31 @@ describe("bounds on read", () => {
     expect(attachmentRefFromPersisted({ ...base, played: "yes" as unknown as boolean }).played).toBe(false);
   });
 });
+
+describe("the micro thumbnail survives a reload (ADR-0047 section 6)", () => {
+  const photo = (inlineThumb?: Uint8Array): AttachmentRefBytes => ({
+    blobId: bytes(32, 1),
+    key: bytes(32, 2),
+    nonce: bytes(12, 3),
+    mime: "image/jpeg",
+    size: 100,
+    name: undefined,
+    ...(inlineThumb === undefined ? {} : { inlineThumb }),
+  });
+
+  it("round-trips a JPEG within the bound", () => {
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 9, 8, 7]);
+    const stored = persistedFromAttachmentRef(photo(jpeg));
+    expect(typeof stored.inlineThumbB64).toBe("string");
+    expect(attachmentRefFromPersisted(JSON.parse(JSON.stringify(stored)) as PersistedAttachment).ref.inlineThumb).toEqual(jpeg);
+  });
+
+  it("drops anything that is not a JPEG within the bound, on write and on read", () => {
+    expect(persistedFromAttachmentRef(photo(new Uint8Array([1, 2, 3]))).inlineThumbB64).toBeUndefined();
+    const big = new Uint8Array(4097);
+    big.set([0xff, 0xd8, 0xff]);
+    expect(persistedFromAttachmentRef(photo(big)).inlineThumbB64).toBeUndefined();
+    const row = { ...persistedFromAttachmentRef(photo()), inlineThumbB64: "AQID" };
+    expect(attachmentRefFromPersisted(row).ref.inlineThumb).toBeUndefined();
+  });
+});

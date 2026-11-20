@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -16,6 +17,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import me.lakko.app.auth.AuthHttpError
 import me.lakko.app.auth.AuthNetworkError
@@ -23,6 +25,7 @@ import me.lakko.app.auth.PublishOwedReason
 import me.lakko.app.auth.attemptsRetryAfterSecs
 import me.lakko.app.auth.authLimitText
 import me.lakko.app.auth.formatCountdown
+import me.lakko.app.auth.publishOwedScreenModel
 import me.lakko.app.l10n.UiText
 import me.lakko.app.l10n.t
 
@@ -38,7 +41,10 @@ import me.lakko.app.l10n.t
  * cannot find them. The screen explains that and offers "Try again", which
  * repeats only the publishing step ([onRetryPublish], never a second reset),
  * and "Log out". When the reset is older than 30 days it asks for a sign-in
- * first ([PublishOwedReason.SignInRequired]).
+ * first ([PublishOwedReason.SignInRequired]). When the directory refused the
+ * keys because they changed less than an hour ago (its cool-down), the screen
+ * says how many minutes are left, shows no "Try again", and retries by
+ * itself when the time is up ([publishOwedScreenModel]).
  */
 @Composable
 public fun SaveFreshPhraseScreen(
@@ -89,15 +95,8 @@ public fun SaveFreshPhraseScreen(
  * words are withheld); any other account is told the change is finishing,
  * with no mention of words ([wordless]).
  */
-public fun publishOwedLeadKeys(reason: PublishOwedReason, wordless: Boolean): List<String> {
-    val owed = if (wordless) "account.keys_changed.finishing" else "recovery_phrase.fresh.publish_owed"
-    return when (reason) {
-        is PublishOwedReason.SignInRequired -> listOf("recovery_phrase.fresh.sign_in_to_finish")
-        is PublishOwedReason.Refused, is PublishOwedReason.Unverified ->
-            listOf(owed, "recovery_phrase.fresh.publish_refused")
-        is PublishOwedReason.Retryable -> listOf(owed)
-    }
-}
+public fun publishOwedLeadKeys(reason: PublishOwedReason, wordless: Boolean): List<String> =
+    publishOwedScreenModel(reason, wordless, System.currentTimeMillis()).leadKeys
 
 /** The screen's title: the phrase title only where words will follow. */
 public fun publishOwedTitleKey(wordless: Boolean): String =
@@ -123,22 +122,61 @@ private fun PublishPending(
     val scope = rememberCoroutineScope()
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<UiText?>(null) }
-    // A server limit says when to try again; the button waits with it.
-    var waitUntilMs by remember {
-        mutableStateOf((reason as? PublishOwedReason.Retryable)?.retryAfterSecs?.let { System.currentTimeMillis() + it * 1000L })
+    // The directory's cool-down (UX 15.4): when the wait ends, retried here
+    // by itself; the minutes below count down while the screen is open.
+    val autoRetryAtMs = remember(reason, wordless) {
+        publishOwedScreenModel(reason, wordless, System.currentTimeMillis()).autoRetryAtMs
+    }
+    // The remaining time ticks every second, and the minutes follow it.
+    val autoRetryLeft = rememberRemainingMs(autoRetryAtMs)
+    val nowMs = autoRetryAtMs?.let { it - autoRetryLeft } ?: System.currentTimeMillis()
+    val model = publishOwedScreenModel(reason, wordless, nowMs)
+    LaunchedEffect(reason, autoRetryAtMs) {
+        val at = autoRetryAtMs ?: return@LaunchedEffect
+        delay((at - System.currentTimeMillis()).coerceAtLeast(0L))
+        busy = true
+        try {
+            onRetry()
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            // The repository records the new reason; the screen follows it.
+            android.util.Log.w("lakko-auth", "automatic publish retry did not finish: ${cause.javaClass.simpleName}")
+        } finally {
+            busy = false
+        }
+    }
+    // Another server limit (not the cool-down) says when to try again; the
+    // button waits with it.
+    var waitUntilMs by remember(reason) {
+        mutableStateOf(
+            if (autoRetryAtMs != null) {
+                null
+            } else {
+                (reason as? PublishOwedReason.Retryable)?.retryAfterSecs?.let { reason.observedAtMs + it * 1000L }
+            },
+        )
     }
     val waitLeft = rememberRemainingMs(waitUntilMs)
-    val signInRequired = reason is PublishOwedReason.SignInRequired
 
     AuthScaffold(title = t(publishOwedTitleKey(wordless)), onBack = null, modifier = modifier) {
-        Lead(publishOwedLeadKeys(reason, wordless).map { t(it) }.joinToString("\n\n"))
-        if (waitLeft > 0L) {
-            FormError(t("recovery.error.rate_limited", mapOf("time" to formatCountdown(waitLeft))))
-        } else {
-            FormError(error)
+        val lead = buildList {
+            addAll(model.leadKeys.map { t(it) })
+            val waitingKey = model.waitingKey
+            val minutes = model.waitingMinutes
+            if (waitingKey != null && minutes != null) {
+                add(t(waitingKey, emptyMap(), mapOf("minutes" to minutes.toULong())))
+            }
+        }
+        Lead(lead.joinToString("\n\n"))
+        if (model.showTryAgain) {
+            if (waitLeft > 0L) {
+                FormError(t("recovery.error.rate_limited", mapOf("time" to formatCountdown(waitLeft))))
+            } else {
+                FormError(error)
+            }
         }
         Spacer(Modifier.height(24.dp))
-        if (!signInRequired) {
+        if (model.showTryAgain) {
             BusyButton(
                 label = t("common.try_again"),
                 busy = busy,

@@ -341,7 +341,10 @@ private func refusalCopy(_ reason: FfiRefusalReason) -> RefusalCopy {
     // so that adding a reason to the core forces a decision here.
     case .notAMember, .leafUpdateRefused, .unsupportedProposal, .noRoleTable,
         .roleTableWouldVanish, .notACommitter, .proposalsPending, .sweepAlreadyStaged,
-        .groupStillActive:
+        .groupStillActive,
+        // ADR-0091 phase 2 — refusals of the automatic re-entry; no person
+        // action reaches them.
+        .reentryPairInvalid, .reentryWelcomeRefused:
         return RefusalCopy(membershipRefusalFallbackMessage)
     }
 }
@@ -434,6 +437,9 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
             case .MembershipOneToOneHasNoRoles: return .oneToOneHasNoRoles
             case .MembershipGroupKindChanged: return .groupKindChanged
             case .MembershipGroupStillActive: return .groupStillActive
+            // ADR-0091 phase 2 — the re-entry refusals.
+            case .MembershipReentryPairInvalid: return .reentryPairInvalid
+            case .MembershipReentryWelcomeRefused: return .reentryWelcomeRefused
 
             // Everything that is NOT a membership refusal. Enumerated rather
             // than defaulted, so a new `FfiError` variant has to be classified
@@ -464,11 +470,20 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
                 .EmailVaultNotOpened, .EmailVault, .RecoveryEmail,
                 // The conversation-backup vault (main's ADR-0064).
                 .Vault,
+                // ADR-0097 the signed supporters list.
+                .SupportersList,
                 // ADR-0078 sealed mailbox rows and bindings; section 2 the
                 // sealed call relay and peer announcements; section 3 sealed
                 // push wakes and subscriptions.
                 .Mailbox, .CallRelay, .PushWake,
-                // ADR-0089 message attestation and reports.
+                // G-56 the recovery row v3 and the own binding verdict.
+                .RecoveryPayload,
+                // docs/ux/donations.md section 3 — a donation statement.
+                .Donation,
+                // ADR-0092 content kinds, poll ballots, the channel-poll
+                // credential and the open-items hand-over.
+                .Content, .Ballot, .AnonCred, .OpenItems,
+                // ADR-0098 message attestation and reports.
                 .Moderation:
                 return nil
             }

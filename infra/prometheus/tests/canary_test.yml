@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# promtool unit tests for the canary rules (ADR-0096 P5).
+#   promtool test rules canary_test.yml   (from infra/prometheus/tests)
+
+rule_files:
+  - ../rules/canary.yml
+
+evaluation_interval: 1m
+
+tests:
+  # One failure does not alert; the second consecutive failure does, and a
+  # success clears it.
+  - interval: 1m
+    input_series:
+      - series: 'lakko_canary_step_consecutive_failures{job="lakko_canary",stack="prod",step="message"}'
+        values: '0x9 1x10 2x10 0x10'
+      - series: 'lakko_canary_step_consecutive_failures{job="lakko_canary",stack="prod",step="sign_in"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LakkoCanaryStepFailing
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: LakkoCanaryStepFailing
+        exp_alerts:
+          - exp_labels: {severity: critical, job: lakko_canary, stack: prod, step: message}
+            exp_annotations:
+              summary: "Canary step message on prod failed 2 times in a row"
+              description: |
+                `journalctl -u lakko-canary@<stack>` on the monitoring host names
+                the error class of each failure.
+      - eval_time: 35m
+        alertname: LakkoCanaryStepFailing
+        exp_alerts: []
+
+  # A canary whose last run finished at t=0 is stale after 30 minutes plus
+  # the 5-minute hold.
+  - interval: 1m
+    input_series:
+      - series: 'lakko_canary_last_run_timestamp_seconds{job="lakko_canary",stack="test"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: LakkoCanaryStale
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: LakkoCanaryStale
+        exp_alerts:
+          - exp_labels: {severity: warning, job: lakko_canary, stack: test}
+            exp_annotations:
+              summary: "The test canary last finished a run 40m 0s ago"

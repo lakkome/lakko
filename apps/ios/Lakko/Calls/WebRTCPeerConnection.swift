@@ -154,9 +154,16 @@ public final class WebRTCPeerConnection: NSObject {
         // no extra config required here.
         let encoderFactory = RTCDefaultVideoEncoderFactory()
         let decoderFactory = RTCDefaultVideoDecoderFactory()
+        // ADR-0088: the default audio processing module with Lakko's noise
+        // suppressor as its capture post-processing stage. Voice processing
+        // is NOT bypassed: the voice-processing I/O unit (the platform's echo
+        // canceller) still runs, ahead of the suppressor. With `false` this
+        // initialiser builds the same audio device module as the plain one.
         return RTCPeerConnectionFactory(
+            bypassVoiceProcessing: false,
             encoderFactory: encoderFactory,
-            decoderFactory: decoderFactory
+            decoderFactory: decoderFactory,
+            audioProcessingModule: CaptureNoiseSuppression.audioProcessingModule()
         )
     }()
 
@@ -318,13 +325,20 @@ public final class WebRTCPeerConnection: NSObject {
     /// once. Safe to call multiple times.
     public func close() {
         guard let p = peer else { return }
+        // ADR-0088: this call's noise suppressor goes with it (a no-op when
+        // another call has armed since).
+        CaptureNoiseSuppression.processor.disarm(forOwner: self)
         // Off the main thread for the reason `libwebrtcQueue` gives: `close`
         // blocks on the signaling thread, which tears the audio unit down.
         Self.libwebrtcQueue.async { p.close() }
         peer = nil
         localAudioTrack = nil
+        if localVideoTrack != nil { CameraBackgroundStage.shared?.setCameraSending(false) }
         localVideoTrack = nil
         cameraCopies = [:]
+        // The transforms hold their own references on the keys.
+        callKeys = nil
+        callKeysSeeds.clear()
     }
 
     // MARK: - Local tracks
@@ -357,6 +371,12 @@ public final class WebRTCPeerConnection: NSObject {
         let sender = peer.add(track, streamIds: ["lakko-local-stream"])
         self.localAudioTrack = track
         self.localAudioSender = sender
+        // ADR-0088: this call's microphone gets a fresh noise suppressor when
+        // the switch is on; the line it logs says which processing applies.
+        CaptureNoiseSuppression.processor.arm(
+            forOwner: self,
+            on: NoiseSuppressionSetting.shared.currentChoice,
+            platform: CaptureNoiseSuppression.platformEffects)
     }
 
     /// Toggle the local audio track's `isEnabled` flag.
@@ -378,6 +398,8 @@ public final class WebRTCPeerConnection: NSObject {
         // The copies of an SFU call's camera carry the same picture and are
         // switched with it.
         for copy in cameraCopies.values { copy.track.isEnabled = on }
+        // ADR-0089: the camera background runs only while the camera sends.
+        if localVideoTrack != nil { CameraBackgroundStage.shared?.setCameraSending(on) }
     }
 
     /// G3-1-conn-quality — one-shot connection-stats sample
@@ -653,6 +675,8 @@ public final class WebRTCPeerConnection: NSObject {
         let sender = peer.add(track, streamIds: ["lakko-local-stream"])
         self.localVideoTrack = track
         self.localVideoSender = sender
+        // ADR-0089: a new camera track sends; the background runs for it.
+        CameraBackgroundStage.shared?.setCameraSending(true)
     }
 
     // MARK: - The SFU call's camera: three senders (ADR-0070 steps 1 and 5)
@@ -670,6 +694,36 @@ public final class WebRTCPeerConnection: NSObject {
     /// The copies this connection sends, by kind. Never more than one of a
     /// kind; empty on the one-to-one path.
     private var cameraCopies: [CameraCopyKind: CameraCopy] = [:]
+
+    /// The call's SFrame keys, shared by every encryptor and decryptor this
+    /// connection attaches (`apps/shared/sframe-bridge`, `LakkoCallKeys`), and
+    /// the seed they are at. A rekey is one call on them. Before they were
+    /// shared, the rekey walked `peer.senders` / `peer.receivers`, which build
+    /// new wrapper objects on every read and carry none of the transforms, so
+    /// it reached none: in a call link the owner's senders kept sealing under
+    /// the seed of before a web joiner's admission and the web opened none of
+    /// its frames (seen on an iPhone, 2026-11-10).
+    private var callKeys: SFrameCallKeys?
+    private var callKeysSeeds = CallKeysSeeds()
+
+    /// The call keys an arm at `seed` builds on (``CallKeysSeeds``): made at
+    /// the first arm, rekeyed first when an arm names a new seed, the current
+    /// ones for a seed they have left behind. `nil` when the seed is refused
+    /// (the caller fails closed, invariant #4).
+    private func sframeKeys(at seed: Data) -> SFrameCallKeys? {
+        switch callKeysSeeds.decide(armAt: seed) {
+        case .use:
+            return callKeys
+        case .rekey:
+            guard rekeySFrame(seed: seed) else { return nil }
+            return callKeys
+        case .create:
+            guard let keys = SFrameCallKeys.make(seed: seed) else { return nil }
+            callKeys = keys
+            callKeysSeeds.moved(to: seed)
+            return keys
+        }
+    }
 
     /// Add the camera of an SFU call (group and link calls) as its main
     /// sender: the picture as captured, one encoding, SFrame stream index 1
@@ -696,6 +750,8 @@ public final class WebRTCPeerConnection: NSObject {
         self.localVideoTrack = track
         self.localVideoSender = sender
         if let sender { configureMainCameraSender(sender) }
+        // ADR-0089: a new camera track sends; the background runs for it.
+        CameraBackgroundStage.shared?.setCameraSending(true)
     }
 
     /// Ask the main camera sender for its temporal layers
@@ -986,6 +1042,7 @@ public final class WebRTCPeerConnection: NSObject {
             _ = peer.removeTrack(sender)
         }
         localVideoSender = nil
+        if localVideoTrack != nil { CameraBackgroundStage.shared?.setCameraSending(false) }
         localVideoTrack = nil
         // The copies of an SFU call's camera go with the camera.
         for kind in CameraCopyKind.addOrder {
@@ -1014,6 +1071,18 @@ public final class WebRTCPeerConnection: NSObject {
     ///   knows a renegotiation is owed. `false` (no video sender, no matching
     ///   transceiver, already in that direction, or the platform refused) leaves
     ///   the connection exactly as it was.
+    /// Whether `receiver` is the receiving half of a transceiver this device
+    /// sends on (a sender with a track of its own). In an SFU call such a
+    /// receiver carries nothing: the SFU forwards every other person on media
+    /// lines it opens itself, and only echoes this device's own stream id on
+    /// the receiving half of the lines this device offered.
+    public func receiverIsOnOwnSender(_ receiver: RTCRtpReceiver) -> Bool {
+        guard let peer = peer else { return false }
+        return peer.transceivers.contains { transceiver in
+            transceiver.receiver == receiver && transceiver.sender.track != nil
+        }
+    }
+
     public func setVideoSendingEnabled(_ sending: Bool) -> Bool {
         guard let peer = peer, let sender = localVideoSender else { return false }
         guard let transceiver = peer.transceivers.first(where: { $0.sender == sender })
@@ -1050,6 +1119,7 @@ public final class WebRTCPeerConnection: NSObject {
         guard SFrameAvailability.shared.isCallingAvailable else {
             return false
         }
+        guard let keys = sframeKeys(at: seed) else { return false }
         var allOk = true
         // Each sender is bound to its own per-sender stream ordinal
         // (ADR-0035): the audio sender seals under stream 0, the video
@@ -1065,7 +1135,7 @@ public final class WebRTCPeerConnection: NSObject {
             guard let sender = maybeSender else { continue }
             let status = LakkoSFrameAttach.attachEncryptor(
                 toSender: sender,
-                seed: seed,
+                keys: keys,
                 localLeaf: localLeaf,
                 streamIndex: streamIndex
             )
@@ -1073,7 +1143,7 @@ public final class WebRTCPeerConnection: NSObject {
                 allOk = false
             }
         }
-        armCameraCopyEncryptors(seed: seed, localLeaf: localLeaf)
+        armCameraCopyEncryptors(keys: keys, localLeaf: localLeaf)
         return allOk
     }
 
@@ -1082,12 +1152,12 @@ public final class WebRTCPeerConnection: NSObject {
     /// this leaf share a key. A copy that cannot be sealed is REMOVED rather
     /// than left unsealed (invariant #4) and the call goes on without it: a
     /// copy is a second picture, never the only one.
-    private func armCameraCopyEncryptors(seed: Data, localLeaf: UInt32) {
+    private func armCameraCopyEncryptors(keys: SFrameCallKeys, localLeaf: UInt32) {
         for kind in CameraCopyKind.addOrder {
             guard let copy = cameraCopies[kind] else { continue }
             let status = LakkoSFrameAttach.attachEncryptor(
                 toSender: copy.sender,
-                seed: seed,
+                keys: keys,
                 localLeaf: localLeaf,
                 streamIndex: CameraSender.streamIndex(of: kind.senderKind)
             )
@@ -1116,17 +1186,19 @@ public final class WebRTCPeerConnection: NSObject {
         guard SFrameAvailability.shared.isCallingAvailable else {
             return false
         }
-        guard let sender = localVideoSender else { return false }
+        guard let sender = localVideoSender, let keys = sframeKeys(at: seed) else {
+            return false
+        }
         // Stream 1 (ADR-0035) for the camera's main sender; the copies of an
         // SFU call's camera are sealed under 3 and 4 below, and a shared
         // screen would use 2.
         guard LakkoSFrameAttach.attachEncryptor(
             toSender: sender,
-            seed: seed,
+            keys: keys,
             localLeaf: localLeaf,
             streamIndex: CameraSender.streamIndexCamera
         ) == .OK else { return false }
-        armCameraCopyEncryptors(seed: seed, localLeaf: localLeaf)
+        armCameraCopyEncryptors(keys: keys, localLeaf: localLeaf)
         return true
     }
 
@@ -1146,9 +1218,10 @@ public final class WebRTCPeerConnection: NSObject {
         // reading the composite KID (`(senderLeaf << 8) | streamIndex`)
         // from each frame's own SFrame header, so audio and either video
         // stream are each keyed correctly with no local track-kind signal.
+        guard let keys = sframeKeys(at: seed) else { return false }
         let status = LakkoSFrameAttach.attachDecryptor(
             toReceiver: receiver,
-            seed: seed
+            keys: keys
         )
         return status == .OK
     }
@@ -1165,40 +1238,26 @@ public final class WebRTCPeerConnection: NSObject {
     /// the decryptors' retained previous key.
     ///
     /// Called by `SfuCallSession.rekey(newSeed:)` when a commit advances
-    /// the group's epoch during a live call. Enumerates the live senders
-    /// / receivers off the peer connection, so a receiver added by a
-    /// later renegotiation is covered too; a sender / receiver that was
-    /// never SFrame-armed is a benign skip.
+    /// the group's epoch during a live call. One rekey of the shared call
+    /// keys (``callKeys``) reaches every encryptor and decryptor attached
+    /// on them, including those of a later renegotiation.
     ///
     /// A rekey never downgrades to plaintext: if the rotation itself
     /// fails (bad seed), the bridge retains the current key (still
     /// E2EE, invariant #4). The `Bool` return is for observability only
-    /// — `false` means at least one present transform's rotation failed;
-    /// the caller keeps the call up.
+    /// — `false` means the call keys refused the seed (or there are none
+    /// yet); the caller keeps the call up.
     @discardableResult
     public func rekeySFrame(seed: Data) -> Bool {
         guard SFrameAvailability.shared.isCallingAvailable else {
             return false
         }
-        guard let peer = peer else { return false }
+        guard peer != nil, let keys = callKeys else { return false }
+        if callKeysSeeds.current == seed { return true }
         let now = UInt64(Date().timeIntervalSince1970 * 1000)
         let overlapMs = Self.sframeOverlapMs
-        var allOk = true
-        for sender in peer.senders {
-            if !LakkoSFrameAttach.rekeyEncryptor(onSender: sender, seed: seed) {
-                allOk = false
-            }
-        }
-        for receiver in peer.receivers {
-            if !LakkoSFrameAttach.rekeyDecryptor(
-                onReceiver: receiver,
-                seed: seed,
-                nowMs: now,
-                overlapMs: overlapMs
-            ) {
-                allOk = false
-            }
-        }
+        guard keys.rekey(seed: seed, nowMs: now, overlapMs: overlapMs) else { return false }
+        callKeysSeeds.moved(to: seed)
         // Close the overlap window: after `overlapMs`, drop the retained
         // previous key so seed-boundary forward secrecy takes full effect.
         // `Task {}` (not detached) inherits this @MainActor isolation, so
@@ -1208,18 +1267,14 @@ public final class WebRTCPeerConnection: NSObject {
             try? await Task.sleep(nanoseconds: overlapNs)
             self?.pruneSFrameDecryptors()
         }
-        return allOk
+        return true
     }
 
-    /// Drop each decryptor's retained previous key once the overlap
-    /// window has elapsed (G-18, ADR-0029). Re-enumerates the live
-    /// receivers so the set reflects any mid-window renegotiation.
+    /// Drop the call keys' retained previous key once the overlap window has
+    /// elapsed (G-18, ADR-0029).
     private func pruneSFrameDecryptors() {
-        guard let peer = peer else { return }
-        let now = UInt64(Date().timeIntervalSince1970 * 1000)
-        for receiver in peer.receivers {
-            LakkoSFrameAttach.pruneDecryptor(onReceiver: receiver, nowMs: now)
-        }
+        guard peer != nil else { return }
+        callKeys?.prune(nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
     }
 
     // MARK: - SDP exchange
@@ -1259,7 +1314,11 @@ public final class WebRTCPeerConnection: NSObject {
                     cont.resume(returning: video.count); return
                 }
                 for transceiver in video {
-                    transceiver.setCodecPreferences(preferences)
+                    // webrtc-sdk declares `codecPreferences` as a property whose
+                    // setter is `setCodecPreferences:`, so Swift sees only the
+                    // property. Only ever written: the binary implements no
+                    // getter for it.
+                    transceiver.codecPreferences = preferences
                 }
                 cont.resume(returning: 0)
             }

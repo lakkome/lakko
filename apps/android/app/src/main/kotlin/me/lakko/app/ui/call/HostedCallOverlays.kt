@@ -17,9 +17,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CallEnd
-import androidx.compose.material.icons.filled.Link
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -68,6 +65,9 @@ import me.lakko.app.l10n.UiText
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.ui.contacts.ContactRowModel
 import me.lakko.app.ui.contacts.contactRouteKey
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * The in-call screens of the calls the app-level host drives through a
@@ -95,13 +95,17 @@ public fun GroupCallOverlay(
     endedForEveryone: EndedForEveryoneNotice? = null,
 ) {
     val visible by host.overlayVisible.collectAsStateWithLifecycle()
-    // `docs/ux/calls.md` section 4.5 — the call has been put away into the bar.
-    // The same flag is handed to the bar's rule as `callScreenUp`, so the screen
-    // and the bar are never both up. It covers the ended state on purpose: a
+    // `docs/ux/calls.md` section 4.5 — the call has been put away into the
+    // floating window, which is drawn only while this flag is set, so the
+    // screen and the window are never both up. It covers the ended state on purpose: a
     // collapsed call that ends must not throw its screen across whatever the
     // person went off to read.
     val collapsed by host.collapsed.collectAsStateWithLifecycle()
-    if (!visible || collapsed) return
+    // Section 4.5.4 — while the app is in the system's picture-in-picture
+    // window the call's picture is drawn there; this screen comes back as it
+    // was left when the app returns.
+    val inPictureInPicture by me.lakko.app.calls.CallPictureInPicture.active.collectAsStateWithLifecycle()
+    if (!visible || collapsed || inPictureInPicture) return
     val slot by host.slot.collectAsStateWithLifecycle()
     // The slot empties when the call ends, and the end screen is still titled
     // by the group: the last name it had stands.
@@ -155,9 +159,9 @@ public fun LinkCallOverlay(
      * Leave the `/c/` landing this call was reached through.
      *
      * Called when the call is put away, and not only when it ends. The landing
-     * is drawn ABOVE the session screens — including the collapsed call bar's
-     * strip at the top of them — so a call put away while its landing was still
-     * up would leave the person looking at neither the call nor the bar.
+     * is drawn ABOVE the session screens, so a call put away while its landing
+     * was still up would leave the person looking at the landing rather than
+     * the app the call was put away to reach.
      * Section 4.5 collapses a call to give the app back, and the landing of a
      * link is not the app.
      */
@@ -171,9 +175,12 @@ public fun LinkCallOverlay(
     val visible by host.overlayVisible.collectAsStateWithLifecycle()
     /** See [GroupCallOverlay] — section 4.5's collapsed presentation. */
     val collapsed by host.collapsed.collectAsStateWithLifecycle()
-    if (!visible || collapsed) return
+    /** See [GroupCallOverlay] — section 4.5.4's system window. */
+    val inPictureInPicture by me.lakko.app.calls.CallPictureInPicture.active.collectAsStateWithLifecycle()
+    if (!visible || collapsed || inPictureInPicture) return
     val slot by host.slot.collectAsStateWithLifecycle()
     val invite by host.invite.collectAsStateWithLifecycle()
+    val inviteLineShown by host.inviteLineShown.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     // Only the host of a live call has a link to offer; everyone else gets the
@@ -198,6 +205,7 @@ public fun LinkCallOverlay(
         // See [GroupCallOverlay] — section 4.5's running time.
         connectedSinceMs = host.connectedSinceMs.collectAsStateWithLifecycle().value,
         invite = invite.takeIf { canInvite },
+        inviteLineShown = inviteLineShown,
         onCopyInviteLink = {
             scope.launch {
                 // The mint and the copy run on the host's scope, so they
@@ -374,7 +382,7 @@ private fun HostedCallDialog(
     onEndForEveryone: (() -> Unit)?,
     endedForEveryoneLine: String?,
     onExit: () -> Unit,
-    /** `docs/ux/calls.md` section 4.5 — put the call away into the bar. */
+    /** `docs/ux/calls.md` section 4.5 — put the call away into the window. */
     onCollapse: () -> Unit,
     /** `docs/ux/calls.md` section 4.5 — the CALL's connect moment, so the
      *  running time counts from the call and not from this screen's mount. */
@@ -383,6 +391,8 @@ private fun HostedCallDialog(
     /** `docs/ux/call-links.md` section 3; `null` for a call with no link to
      *  offer. */
     invite: InCallInvite? = null,
+    /** See [CallScreen]'s parameter of the same name. */
+    inviteLineShown: Boolean? = null,
     onCopyInviteLink: () -> Unit = {},
     onInviteContact: (() -> Unit)? = null,
 ) {
@@ -392,7 +402,8 @@ private fun HostedCallDialog(
         // inside it, because this window's back is the platform's to deliver and
         // that is the path it delivers it on. Returning here does not dismiss
         // the dialog; the caller's collapse gate is what stops drawing it.
-        onDismissRequest = onCollapse,
+        // Section 4.1.4 — an open chat panel closes first.
+        onDismissRequest = { if (!state.closeCallChatPanel()) onCollapse() },
         properties = DialogProperties(
             usePlatformDefaultWidth = false,
             dismissOnBackPress = true,
@@ -418,6 +429,7 @@ private fun HostedCallDialog(
                 groupCall = true,
                 groupName = groupName,
                 invite = invite,
+                inviteLineShown = inviteLineShown,
                 onCopyInviteLink = onCopyInviteLink,
                 onInviteContact = onInviteContact,
                 // Section 4.5 — the chevron, beside the system back.
@@ -508,10 +520,11 @@ public fun BoxScope.LinkCallNoticeBar(host: LinkCallHost, onOpen: (slug: String)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = Icons.Filled.Link,
+                LkIcon(
+                    icon = R.drawable.ic_lk_link,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.primary,
+                    size = LkIconSize.Row,
                 )
                 Spacer(Modifier.width(12.dp))
                 Column {
@@ -571,10 +584,11 @@ public fun BoxScope.EndedForEveryoneNoticeBar(notice: EndedForEveryoneNotice) {
         shadowElevation = 4.dp,
     ) {
         Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                imageVector = Icons.Filled.CallEnd,
+            LkIcon(
+                icon = R.drawable.ic_lk_phone_down_fill,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                size = LkIconSize.Row,
             )
             Spacer(Modifier.width(12.dp))
             Text(text = text, style = MaterialTheme.typography.bodyMedium)

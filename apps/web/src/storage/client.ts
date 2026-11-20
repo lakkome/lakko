@@ -43,6 +43,7 @@ import { sessionFetch } from "../auth/session-fetch";
 import {
   BLOB_DELETE_KEY_HEADER,
   BLOB_PASS_HEADER,
+  StorageFullError,
   StorageLimitError,
   base64Url,
   blobAccess,
@@ -51,7 +52,7 @@ import {
   type BlobPassKind,
 } from "./blob-access";
 
-export { StorageLimitError } from "./blob-access";
+export { StorageFullError, StorageLimitError } from "./blob-access";
 
 /** At most this many ids per `POST /blob/keep` (the server's bound). */
 export const MAX_KEEP_IDS = 256;
@@ -370,7 +371,8 @@ export class StorageClient {
 
   /**
    * Run one blob request with a pass of `kind`: a refused pass is taken
-   * again once, a budget refused twice is the limit. Resolves `true` on
+   * again once, a budget refused twice is the limit, a full disk (507
+   * `storage-full`) is {@link StorageFullError} at once. Resolves `true` on
    * success and `false` on 404 (gone); throws on everything else. With no
    * account ports installed the request goes without a pass.
    */
@@ -386,6 +388,7 @@ export class StorageClient {
       if (answer.ok) return true;
       const refusal = blobRefusalOf(answer.status, storageErrorCode(answer.body));
       if (refusal === "gone") return false;
+      if (refusal === "full") throw new StorageFullError();
       if ((refusal === "renew-pass" || refusal === "budget") && access !== null && pass !== null) {
         access.passes.invalidate(kind, pass);
         if (attempt === 0) continue;

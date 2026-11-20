@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Read-only mode of a suspended account (ADR-0089 step 3, UX
+ * Read-only mode of a suspended account (ADR-0098 step 3, UX
  * `reporting-and-moderation.md` section 4), after "Read my chats":
  *
  *   - `SuspendedComposerLine` stands in every composer's slot: one muted
@@ -36,9 +36,9 @@ export function SuspendedBanner(): JSX.Element {
   return (
     <Show when={accountSuspended() && auth.suspension()?.reading === true}>
       <button type="button" class="lk-suspended-banner" onClick={() => auth.showSuspensionScreen()}>
-        <Icon name="info" size={18} />
+        <Icon name="info-circle" size={18} />
         <span>{t("suspended.self.title")}</span>
-        <Icon name="chevron" size={16} />
+        <Icon name="chevron-forward" size={16} />
       </button>
     </Show>
   );

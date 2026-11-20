@@ -244,6 +244,22 @@ internal fun reconcileVerdict(currentEpoch: ULong, entry: PendingCommitEntry): S
 }
 
 /**
+ * ADR-0091 section 1, `own_commit_owed`: a staged sweep, or an UN-ACKED
+ * outbox entry, awaits a verdict. An acked entry is a published commit
+ * waiting only for collection and owes nothing (walk 2: counting it kept a
+ * device that once swept "owing" forever, so it was never suspected behind).
+ */
+internal fun ownCommitOwedBy(stagedSweep: Boolean, entries: List<PendingCommitEntry>): Boolean =
+    stagedSweep || entries.any { !it.acked }
+
+/**
+ * Walk 2 — an acked sweep entry may be deleted: its verdict merged and its
+ * Welcomes are out, and every reader of a sweep entry asks for an un-acked
+ * one. A direct-path entry is collected by [reconcileVerdict] instead.
+ */
+internal fun collectableSweepEntry(entry: PendingCommitEntry): Boolean = entry.isSweep && entry.acked
+
+/**
  * The crash-safe commit ordering (ADR-0040 §2): the durable writes a commit makes
  * before it may be published, as a pure function over injected steps so it is
  * unit-testable without the FFI Group / Identity.

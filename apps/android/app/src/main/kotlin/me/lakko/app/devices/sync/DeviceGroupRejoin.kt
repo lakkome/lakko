@@ -3,6 +3,7 @@
 
 package me.lakko.app.devices.sync
 
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -27,25 +28,47 @@ import kotlinx.serialization.json.Json
  *    means the device cannot apply a row it has already passed: nothing it
  *    will ever read moves it. No grace period is needed any more; the one
  *    exception is this device's own outbox entry, which is finished first.
+ *  - RESET UNDER IT (ADR-0081 third amendment, point 5): another device
+ *    founded the DeviceGroup again while this one was not running, so the
+ *    journal's chain is not the one this device holds: its signed reads are
+ *    refused [REFUSALS_BEFORE_LOST] times in a row, or a drained read names an
+ *    epoch below its own ([isJournalReset]). It is lost, and rejoins.
  *
  * The device's side: delete the local DeviceGroup state and make sure its
  * directory KeyPackage is published; build a DeviceGroup KeyPackage from the
  * same device identity (same leaf key) and post it to the DeviceGroup's knock
  * as the ADR-0056 pairing payload (login handle, KeyPackage, a fresh
- * rendezvous id), keeping the joiner's provider and the rendezvous; poll the
- * rendezvous for the Welcome and join; knock again after [REKNOCK_AFTER_MS].
+ * rendezvous id), keeping the joiner's provider and the rendezvous.
+ * ADR-0081 third amendment (2026-11-11): the rendezvous is read before the
+ * knock goes out, the knock's own round trip `rtt` is measured, and the
+ * device waits [rejoinAnswerWindowMs] for an answer. A presence note
+ * (`composeRejoinPresent`) means a device is running: the device then waits
+ * for the Welcome with no deadline, knocking again after [REKNOCK_AFTER_MS].
+ * No presence note and no Welcome in the window means every listed device is
+ * offline: the device founds the DeviceGroup itself ([RejoinPass.FOUND]).
+ * A device that knows no username for its account at all does not knock (no
+ * running device could match its knock) and does not found either: a rejoin
+ * runs only while another device of the account is listed, and a founding
+ * there splits the account into two DeviceGroups that cannot admit each other
+ * (each founding resets the journal under the other; seen 2026-11-15 on an
+ * iPhone after a passkey sign-in with no name typed whose backup did not
+ * open). It waits ([RejoinPass.NO_LOGIN_HANDLE]) and looks for the handle
+ * again after [NO_LOGIN_HANDLE_RETRY_MS].
  *
- * A sibling's side: once its journal is read to the head it reads the knocks
- * and admits one only when [admissionVerdict] says so (the payload names this
- * account's login handle; the key is listed in the account's directory with a
- * binding under the account key — a deleted device is tombstoned there and
- * not listed; the knock is newer than every addition of that key this device
- * saw and than when it started watching; this device is the designated
- * admitter — the lowest leaf other than the knocking key — or the knock has
- * waited [FALLBACK_ADMIT_AFTER_MS]). It replaces the key's previous leaf, if
- * still present, by the KeyPackage in ONE commit (`replaceDeviceAt`), or adds
- * the KeyPackage when no previous leaf is there: one ordinary DeviceGroup
- * commit through the outbox, the Welcome to the knock's rendezvous.
+ * A sibling's side: while in the foreground it keeps a long poll on the
+ * DeviceGroup's knocks; on a knock naming this account's login handle it
+ * posts the presence note to the knock's rendezvous at once, before any
+ * directory lookup, then admits it when [admissionVerdict] says so (the
+ * payload names this account's login handle; the key is listed in the
+ * account's directory with a binding under the account key — a deleted device
+ * is tombstoned there and not listed; the knock is newer than every addition
+ * of that key this device saw and than when it started watching). Every
+ * running sibling that passes the checks admits at once: the DS commit route
+ * lets one commit take the epoch, the others get `409` and drop theirs. It
+ * replaces the key's previous leaf, if still present, by the KeyPackage in ONE
+ * commit (`replaceDeviceAt`), or adds the KeyPackage when no previous leaf is
+ * there: one ordinary DeviceGroup commit through the outbox, the Welcome to
+ * the knock's rendezvous.
  *
  * Under the ADR-0015 policy a removal needs a passkey attestation OR
  * (ADR-0081 amendment) the device's own self-removal proof: the rejoining
@@ -62,13 +85,93 @@ import kotlinx.serialization.json.Json
  *  Chosen, not measured. */
 public const val REKNOCK_AFTER_MS: Long = 30L * 60_000L
 
-/** How long a knock waits for the designated admitter before any sibling
- *  admits it. Chosen, not measured. */
-public const val FALLBACK_ADMIT_AFTER_MS: Long = 10L * 60_000L
+/** How long a rejoining device that knows no login handle waits before
+ *  looking for one again (the session's name, the own-username register a
+ *  restore stored). Chosen, not measured; the same on every client. */
+public const val NO_LOGIN_HANDLE_RETRY_MS: Long = 30_000L
 
-/** How often a sibling reads the knocks while its journal is at the head.
- *  Chosen, not measured. */
-public const val KNOCK_CHECK_INTERVAL_MS: Long = 30_000L
+/**
+ * The wait of a rejoin that knew no login handle: until [revision] moves past
+ * [seen] (the account's username was learned, `auth/UsernamePrompt.kt`) or
+ * [timeoutMs] passes. `true` when it was woken. [seen] is read BEFORE the
+ * pass that found no handle, so a name learned during that pass is not missed.
+ */
+public suspend fun awaitLoginHandleOrRetry(
+    revision: kotlinx.coroutines.flow.StateFlow<Long>,
+    seen: Long,
+    timeoutMs: Long = NO_LOGIN_HANDLE_RETRY_MS,
+): Boolean =
+    kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+        revision.first { it != seen }
+        true
+    } ?: false
+
+/** The shortest answer window, whatever the knock's round trip. Chosen, not
+ *  measured (ADR-0081 third amendment). */
+public const val REJOIN_ANSWER_MIN_WINDOW_MS: Long = 1_000L
+
+/** The answer window is this many knock round trips (a DS wake, one read and
+ *  one write on the sibling, and the new device's read). Chosen, not
+ *  measured. */
+public const val REJOIN_ANSWER_RTT_FACTOR: Long = 4L
+
+/** How long a sibling's long poll on the knocks waits at the DS. */
+public const val KNOCK_LISTEN_WAIT_SECS: Int = 25
+
+/** A knock already on the DS when a sibling starts listening is answered
+ *  with a presence note only when it is at most this old: an older one's
+ *  device has stopped waiting. Chosen, not measured. */
+public const val KNOCK_BACKLOG_ANSWER_MS: Long = 30_000L
+
+/** A device whose signed DeviceGroup read is refused this many times in a row
+ *  (not for its clock) holds an epoch chain the journal no longer has: it was
+ *  reset under it, and the device rejoins. Chosen, not measured. */
+public const val REFUSALS_BEFORE_LOST: Int = 3
+
+/** How long the new device waits for a presence note or a Welcome after its
+ *  knock took [rttMs]: `max(4 x rtt, 1 s)`. */
+public fun rejoinAnswerWindowMs(rttMs: Long): Long =
+    maxOf(REJOIN_ANSWER_RTT_FACTOR * rttMs.coerceAtLeast(0L), REJOIN_ANSWER_MIN_WINDOW_MS)
+
+/** Does a sibling post a presence note for a knock it read in its first read
+ *  of a session (knocked at [knockAtMs] by the DS clock, `null` unknown)? */
+public fun shouldAnswerBacklogKnock(knockAtMs: Long?, nowMs: Long): Boolean =
+    knockAtMs != null && kotlin.math.abs(nowMs - knockAtMs) <= KNOCK_BACKLOG_ANSWER_MS
+
+/** What a rejoining device read on its rendezvous. */
+public sealed class RendezvousAnswer {
+    /** A sibling is running: wait for its Welcome. */
+    public object Present : RendezvousAnswer()
+
+    /** The Welcome itself. */
+    public class Welcome(public val bytes: ByteArray) : RendezvousAnswer()
+}
+
+/** The answer in one read of the rendezvous: a Welcome wins over a presence
+ *  note in the same rows; `null` when there is neither. */
+public fun rendezvousAnswer(rows: List<ByteArray>, isPresent: (ByteArray) -> Boolean): RendezvousAnswer? {
+    var present = false
+    for (row in rows) {
+        if (isPresent(row)) {
+            present = true
+        } else if (row.isNotEmpty()) {
+            return RendezvousAnswer.Welcome(row)
+        }
+    }
+    return if (present) RendezvousAnswer.Present else null
+}
+
+/** A drained read where the DS names an epoch below this handle's: the
+ *  journal's chain is not the one this device holds (it was reset under it). */
+public fun isJournalReset(localEpoch: ULong, drained: Boolean, latestEpoch: ULong?): Boolean =
+    drained && latestEpoch != null && latestEpoch < localEpoch
+
+/** The `error` code of a DS error body, when it is a short kebab-case code
+ *  (never an identifier); `null` otherwise. */
+public fun dsErrorCode(body: String): String? {
+    val match = Regex("\"error\"\\s*:\\s*\"([a-z0-9-]{1,64})\"").find(body) ?: return null
+    return match.groupValues[1]
+}
 
 /** At most this many handled knock ids are kept (knocks live seven days). */
 public const val MAX_HANDLED_KNOCKS: Int = 256
@@ -92,8 +195,6 @@ public enum class AdmissionVerdict {
     OWN_KEY,
     /** Not listed in the directory with a verified binding. */
     NOT_LISTED,
-    /** Waiting for the designated admitter. */
-    NOT_MINE_YET,
     /** The previous leaf is present, the policy wants its removal
      *  authorised, and the knock carries no self-removal proof that covers
      *  it: a passkey attestation this device cannot obtain. */
@@ -135,9 +236,6 @@ public fun admissionVerdict(input: AdmissionInput): AdmissionVerdict {
     val added = input.lastAddedAtMs
     if (added != null && added >= input.knockAtMs) return AdmissionVerdict.ALREADY_ADMITTED
     if (!input.listed) return AdmissionVerdict.NOT_LISTED
-    val lowest = input.roster.filter { it.keyHex != input.keyHex }.minByOrNull { it.leaf }
-    val designated = lowest?.keyHex == input.ownKeyHex
-    if (!designated && input.nowMs - input.knockAtMs < FALLBACK_ADMIT_AFTER_MS) return AdmissionVerdict.NOT_MINE_YET
     val present = input.roster.any { it.keyHex == input.keyHex }
     if (present && input.policyRequiresAttestation && !input.selfRemovalProofCovers) {
         return AdmissionVerdict.NEEDS_ATTESTATION
@@ -193,6 +291,11 @@ public data class RejoinState(
      *  KeyPackage's private keys), standard base64. */
     val joinerSnapshotB64: String,
     val knockedAtMs: Long,
+    /** A running device answered this knock with a presence note: its
+     *  Welcome is waited for with no deadline. A knock whose answer window
+     *  was never seen to its end (the app stopped during it) is `false` and
+     *  is made again. */
+    val answered: Boolean = false,
 ) {
     public fun encoded(): ByteArray = REJOIN_JSON.encodeToString(serializer(), this).toByteArray(Charsets.UTF_8)
 
@@ -205,12 +308,21 @@ public data class RejoinState(
                 null
             }
 
-        /** Whether a rejoin knocked long enough ago to knock again (or the
-         *  clock went back). */
+        /** Whether to knock (again): no knock out, no device answered the one
+         *  out, it was made long enough ago, or the clock went back. */
         public fun shouldKnockAgain(state: RejoinState?, nowMs: Long): Boolean =
-            state == null || nowMs - state.knockedAtMs >= REKNOCK_AFTER_MS || nowMs < state.knockedAtMs
+            state == null || !state.answered || nowMs - state.knockedAtMs >= REKNOCK_AFTER_MS ||
+                nowMs < state.knockedAtMs
     }
 }
+
+/** What a knock came to within its answer window. */
+public class KnockAnswer(
+    /** The rejoin state the knock was made with (saved before it went out). */
+    public val state: RejoinState,
+    /** `null`: no presence note and no Welcome in the window. */
+    public val answer: RendezvousAnswer?,
+)
 
 /** What one rejoin attempt needs. */
 public interface RejoinPorts {
@@ -224,12 +336,18 @@ public interface RejoinPorts {
 
     public fun saveState(state: RejoinState)
 
-    /** Build a fresh joiner and knock with it; returns the state to keep
-     *  (already saved before the knock went out). */
-    public suspend fun knock(nowMs: Long): RejoinState
+    /** Whether this account's login handle is known (from the session or the
+     *  own-username register). Without it no device could match a knock. */
+    public fun hasLoginHandle(): Boolean
 
-    /** Wait for the Welcome at [state]'s rendezvous until [deadlineMs];
-     *  `null` on a timeout. */
+    /** Build a fresh joiner, save its state, start reading its rendezvous,
+     *  knock with it while timing the knock's round trip, and wait
+     *  [rejoinAnswerWindowMs] of that round trip for a presence note or a
+     *  Welcome. */
+    public suspend fun knockAndListen(nowMs: Long): KnockAnswer
+
+    /** Wait for the Welcome at [state]'s rendezvous until [deadlineMs],
+     *  passing over presence notes; `null` on a timeout. */
     public suspend fun awaitWelcome(state: RejoinState, deadlineMs: Long): ByteArray?
 
     /** Join from the Welcome with the joiner kept in [state] and persist the
@@ -238,15 +356,30 @@ public interface RejoinPorts {
 
     public fun clearState()
 
+    /** Another device answered this device's knock (a presence note or a
+     *  Welcome inside the answer window): recorded for the chat list
+     *  (`docs/ux/identity-recovery.md` 7.2). */
+    public fun recordAnswered()
+
     public fun now(): Long
 }
 
 /** What one pass of the device's side came to. */
-public enum class RejoinPass { JOINED, WAITING }
+public enum class RejoinPass {
+    JOINED,
+    WAITING,
+    /** Nobody answered the knock: found the DeviceGroup on this device. */
+    FOUND,
+    /** No login handle is known: no knock was made and nothing may be
+     *  founded (another device of the account is listed). Call again after
+     *  [NO_LOGIN_HANDLE_RETRY_MS]. */
+    NO_LOGIN_HANDLE,
+}
 
 /**
  * One pass of the device side: drop the state (first pass only), make sure a
- * knock is out, wait for its Welcome until the re-knock time.
+ * knock is out and was answered, wait for its Welcome until the re-knock
+ * time. A knock nobody answered in its window is [RejoinPass.FOUND].
  */
 public suspend fun rejoinOnce(ports: RejoinPorts, firstPass: Boolean): RejoinPass {
     if (firstPass) {
@@ -255,9 +388,30 @@ public suspend fun rejoinOnce(ports: RejoinPorts, firstPass: Boolean): RejoinPas
     }
     var state = ports.loadState()
     if (RejoinState.shouldKnockAgain(state, ports.now())) {
-        val knocked = ports.knock(ports.now())
-        ports.saveState(knocked)
-        state = knocked
+        // No username anywhere: no running device could match a knock. Never
+        // found here: another device of the account is listed, and a founding
+        // would reset the journal under it while this device, knowing no
+        // handle, could not admit that device's knock back (a split account).
+        if (!ports.hasLoginHandle()) return RejoinPass.NO_LOGIN_HANDLE
+        val knocked = ports.knockAndListen(ports.now())
+        when (val answer = knocked.answer) {
+            null -> {
+                ports.clearState()
+                return RejoinPass.FOUND
+            }
+            is RendezvousAnswer.Welcome -> {
+                ports.recordAnswered()
+                ports.join(knocked.state, answer.bytes)
+                ports.clearState()
+                return RejoinPass.JOINED
+            }
+            RendezvousAnswer.Present -> {
+                ports.recordAnswered()
+                val answered = knocked.state.copy(answered = true)
+                ports.saveState(answered)
+                state = answered
+            }
+        }
     }
     val current = state ?: return RejoinPass.WAITING
     val welcome = ports.awaitWelcome(current, current.knockedAtMs + REKNOCK_AFTER_MS) ?: return RejoinPass.WAITING

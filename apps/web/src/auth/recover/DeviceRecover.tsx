@@ -5,7 +5,7 @@
  * Recovery from another device (ADR-0018 factor (a), the no-password entry):
  * the user types only the username; a device that is still logged in
  * confirms the request, and the recovery phrase (as its entropy, recovery
- * payload v2) plus a single-use access grant arrive end-to-end encrypted.
+ * payload v3) plus a single-use access grant arrive end-to-end encrypted.
  * This device then holds the keys and the phrase, like the one that
  * confirmed it. The grant redeems for a session, so neither a
  * password nor the phrase is typed here.
@@ -86,14 +86,18 @@ export function DeviceRecover(props: {
   }
 
   async function onRestored(outcome: JoinRecoveryOutcome): Promise<void> {
-    if (resolved === null) {
+    const dropKeys = (): void => {
       outcome.phraseEntropy.fill(0);
+      for (const p of outcome.predecessors) p.seed.fill(0);
+    };
+    if (resolved === null) {
+      dropKeys();
       throw new Error("internal: no resolved account for restore");
     }
     // The redeemed session token is the ONLY access on this path; there is
     // no password. Without it the restore cannot complete.
     if (outcome.session === null || outcome.accountIdBytes === null) {
-      outcome.phraseEntropy.fill(0);
+      dropKeys();
       throw new KeyedError("device_link.error.not_let_in");
     }
     const session = liveSession;
@@ -104,6 +108,9 @@ export function DeviceRecover(props: {
       accountIdB64: base64Encode(accountIdBytes),
       username: resolved.username,
       phraseEntropy: outcome.phraseEntropy,
+      // ADR-0074 "Joining after a rotation": the account's earlier keys,
+      // stored before anything is bound.
+      predecessors: outcome.predecessors,
       session: outcome.session,
       // This form is reached through "Forgot password?": offer the
       // new-password step once the session lands.

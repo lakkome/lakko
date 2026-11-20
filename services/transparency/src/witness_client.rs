@@ -26,7 +26,6 @@
 
 use std::time::Duration;
 
-use anyhow::Context as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use lakko_transparency::{SignedRoot, TreeHash};
@@ -60,7 +59,7 @@ struct SignedRootWire {
 
 #[derive(Serialize)]
 struct CosignReq {
-    /// Which log the root belongs to (witness v2, ADR-0089 section 5): always
+    /// Which log the root belongs to (witness v2, ADR-0098 section 5): always
     /// the KT log here.
     log: &'static str,
     new_root: SignedRootWire,
@@ -70,6 +69,35 @@ struct CosignReq {
 #[derive(Deserialize)]
 struct CosignRes {
     cosig_b64: String,
+}
+
+/// Why a witness co-signature request failed. The variant is what the
+/// ADR-0096 outcome counter records ([`CosignError::outcome`]).
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CosignError {
+    /// The request did not complete: connect, timeout or transport error.
+    #[error("witness cosign request: {0}")]
+    Unreachable(#[source] reqwest::Error),
+    /// The witness answered with a non-2xx status (409 when it refuses a
+    /// root that does not extend what it co-signed).
+    #[error("witness cosign returned HTTP {0}")]
+    Status(reqwest::StatusCode),
+    /// The answer could not be decoded.
+    #[error("witness cosign response: {0}")]
+    BadResponse(String),
+}
+
+impl CosignError {
+    /// The outcome label of this failure.
+    pub(crate) const fn outcome(&self) -> crate::metrics::CosignOutcome {
+        use crate::metrics::CosignOutcome;
+        match self {
+            Self::Unreachable(_) => CosignOutcome::Unreachable,
+            Self::Status(s) if s.as_u16() == 409 => CosignOutcome::NotConsistent,
+            Self::Status(_) => CosignOutcome::Refused,
+            Self::BadResponse(_) => CosignOutcome::BadResponse,
+        }
+    }
 }
 
 impl WitnessClient {
@@ -140,12 +168,12 @@ impl WitnessClient {
     /// # Errors
     ///
     /// Network failure, a non-2xx witness status (e.g. 409 if the witness
-    /// refuses a forked root), or a malformed response.
+    /// refuses a forked root), or a malformed response ([`CosignError`]).
     pub(crate) async fn cosign(
         &self,
         root: &SignedRoot,
         proof: &[TreeHash],
-    ) -> anyhow::Result<Vec<u8>> {
+    ) -> Result<Vec<u8>, CosignError> {
         let req = CosignReq {
             log: lakko_transparency::LogId::Kt.wire_name(),
             new_root: SignedRootWire {
@@ -164,17 +192,17 @@ impl WitnessClient {
             .json(&req)
             .send()
             .await
-            .context("witness cosign request")?;
+            .map_err(CosignError::Unreachable)?;
         let status = resp.status();
         if !status.is_success() {
-            anyhow::bail!("witness cosign returned HTTP {status}");
+            return Err(CosignError::Status(status));
         }
         let res: CosignRes = resp
             .json()
             .await
-            .context("decode witness cosign response")?;
+            .map_err(|e| CosignError::BadResponse(format!("decode: {e}")))?;
         B64.decode(res.cosig_b64.as_bytes())
-            .context("witness cosig is not valid base64")
+            .map_err(|_| CosignError::BadResponse("cosig is not valid base64".to_owned()))
     }
 }
 

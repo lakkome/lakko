@@ -20,7 +20,7 @@ public enum ApiService: String, CaseIterable, Sendable {
     case pushGw = "push-gw"
     case channels
     case gifs
-    /// ADR-0089 — `services/moderation` (reports and the moderator list).
+    /// ADR-0098 — `services/moderation` (reports and the moderator list).
     case moderation
 
     /// The base URL used when the build carries no API base URL: the service's
@@ -36,7 +36,7 @@ public enum ApiService: String, CaseIterable, Sendable {
         case .pushGw: return "http://localhost:8085"
         case .channels: return "http://localhost:8086"
         case .gifs: return "http://localhost:8091"
-        case .moderation: return "http://localhost:8094"
+        case .moderation: return "http://localhost:8100"
         }
     }
 }

@@ -17,21 +17,26 @@
  */
 
 import { t } from "../l10n";
-import type { CallLogEntry } from "./call-log";
+import type { CallLogEntry, StandaloneCallEntry } from "./call-log";
 import type { CallLogRows } from "./call-log-store";
 import { displayLocale } from "../l10n/display-locale";
 
-/** One row of the Calls screen: a call, and who it was with. */
-export interface CallHistoryRow {
-  readonly groupIdB64: string;
-  readonly entry: CallLogEntry;
-}
+/**
+ * One row of the Calls screen: a call, and who it was with — or, for a call
+ * that belongs to no conversation (`docs/ux/navigation.md` section 5.1.1: a
+ * `New call`, a call joined from a link), `groupIdB64: null` and the entry
+ * that carries its direction.
+ */
+export type CallHistoryRow =
+  | { readonly groupIdB64: string; readonly entry: CallLogEntry }
+  | { readonly groupIdB64: null; readonly entry: StandaloneCallEntry };
 
 /** How many rows the screen keeps. Older calls stay in their conversation. */
 export const CALL_HISTORY_MAX = 300;
 
 /**
- * Flatten the per-conversation logs into one list, newest first.
+ * Flatten the per-conversation logs and the calls with no conversation into
+ * one list, newest first.
  *
  * Ties break on the call id so the order is total: two calls that started in
  * the same millisecond - a pair placed by a script, or two rows restored
@@ -40,12 +45,14 @@ export const CALL_HISTORY_MAX = 300;
  */
 export function callHistory(
   rows: CallLogRows,
+  standalone: readonly StandaloneCallEntry[] = [],
   limit: number = CALL_HISTORY_MAX,
 ): readonly CallHistoryRow[] {
   const out: CallHistoryRow[] = [];
   for (const [groupIdB64, entries] of rows) {
     for (const entry of entries) out.push({ groupIdB64, entry });
   }
+  for (const entry of standalone) out.push({ groupIdB64: null, entry });
   out.sort((a, b) => {
     const byTime = b.entry.startedAtMs - a.entry.startedAtMs;
     if (byTime !== 0) return byTime;
@@ -113,4 +120,54 @@ export function callHistoryDayLabel(day: string, now: Date = new Date()): string
     month: "long",
     ...(sameYear ? {} : { year: "numeric" }),
   });
+}
+
+/**
+ * How a Calls row is drawn, decided here so a test can read it.
+ *
+ * A row of a conversation opens that conversation and carries a call button
+ * that calls back in the row's mode (section 5.1). A call with no
+ * conversation (section 5.1.1) has neither: an ended link call cannot be
+ * joined again and there is no conversation to open, so the row is read and
+ * never pressed — no button, no pressed state, no focus stop — and its avatar
+ * is the group-call glyph rather than initials.
+ */
+export interface CallHistoryRowPresentation {
+  /** The row is a target that opens the conversation. */
+  readonly opensConversation: boolean;
+  /** A trailing call button is drawn. */
+  readonly callButton: boolean;
+  /** `conversation`: the conversation's avatar; `group-call-glyph`: the
+   *  group-call glyph. */
+  readonly avatar: "conversation" | "group-call-glyph";
+}
+
+export function callHistoryRowPresentation(row: CallHistoryRow): CallHistoryRowPresentation {
+  if (row.groupIdB64 === null) {
+    return { opensConversation: false, callButton: false, avatar: "group-call-glyph" };
+  }
+  return { opensConversation: true, callButton: true, avatar: "conversation" };
+}
+
+/**
+ * The title of a call with no conversation: always `Group call`, the words
+ * the call screen uses for such a call. A call has no name of its own.
+ */
+export function standaloneCallTitle(): string {
+  return t("call.label.group");
+}
+
+/** The direction glyph at the row's leading edge: out, in, or missed (a
+ *  missed, declined or failed call). */
+export function callHistoryRowIcon(entry: CallLogEntry): "phone-incoming" | "phone-outgoing" | "phone-down" {
+  switch (entry.outcome) {
+    case "missed":
+    case "declined":
+    case "failed":
+      return "phone-down";
+    case "incoming":
+      return "phone-incoming";
+    case "outgoing":
+      return "phone-outgoing";
+  }
 }

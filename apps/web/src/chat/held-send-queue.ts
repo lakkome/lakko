@@ -23,7 +23,16 @@
  */
 import { registerAccountMemory } from "../auth/account-memory";
 import { getDeviceKey } from "../auth/key-store";
-import type { AttachmentRefBytes, ForwardRef, ReplyRef } from "./attachments";
+import {
+  composeContentEnvelope,
+  composeEnvelope,
+  composeForwardEnvelope,
+  composeReplyEnvelope,
+  contentPartsOfForward,
+  type AttachmentRefBytes,
+  type ForwardRef,
+  type ReplyRef,
+} from "./attachments";
 import { forwardRefFromPersisted, persistedFromForwardRef } from "./forward";
 import { HeldSendStore, type HeldSend } from "./held-send";
 import {
@@ -34,6 +43,8 @@ import {
 } from "./message-log-store";
 import { attachmentRefFromPersisted, persistedFromAttachmentRef } from "./persisted-attachment";
 import { persistedFromReplyRef, replyRefFromPersisted } from "./reply-snapshot";
+import { contentFromPersisted } from "../attach/preview";
+import type { MessageContent } from "../../wasm/lakko_ffi_wasm";
 
 /** One held message as a sender hands it over. */
 export interface HeldMessage {
@@ -46,10 +57,35 @@ export interface HeldMessage {
   readonly replyGroupIdB64?: string | undefined;
   /** ADR-0052: set for a forward INTO the held conversation. */
   readonly forward?: ForwardRef | undefined;
+  /** ADR-0092: a location, contact card, article, poll or checklist; its
+   *  `text` is empty and `attached` are an article's images. */
+  readonly content?: MessageContent | undefined;
 }
 
 /** The tab's queue, by conversation id (hex of the lineage root). */
 export const heldSends = new HeldSendStore<HeldMessage>();
+
+/**
+ * The envelope a released held message is sent as: the content message for
+ * content (with its forward line or reply), else the forward, the reply or
+ * the plain message. `reply` is the one the flush resolved
+ * (`held-send.ts` `replyForSend`).
+ */
+export async function composeHeldEnvelope(m: HeldMessage, reply: ReplyRef | undefined): Promise<Uint8Array> {
+  if (m.content !== undefined) {
+    return composeContentEnvelope(
+      m.content,
+      m.attached,
+      m.forward !== undefined
+        ? contentPartsOfForward(m.forward)
+        : reply === undefined
+          ? undefined
+          : { replyTo: reply.target, replyAuthor: reply.author ?? null, replyExcerpt: reply.excerpt ?? null },
+    );
+  }
+  if (m.forward !== undefined) return composeForwardEnvelope(m.text, m.attached, m.forward);
+  return reply === undefined ? composeEnvelope(m.text, m.attached) : composeReplyEnvelope(m.text, m.attached, reply);
+}
 
 /** The stored form of one held message. Pure. */
 export function heldToPersisted(conversationHex: string, held: HeldSend<HeldMessage>): PersistedHeldSend {
@@ -64,6 +100,7 @@ export function heldToPersisted(conversationHex: string, held: HeldSend<HeldMess
       ? {}
       : { replyGroupIdB64: m.replyGroupIdB64 }),
     ...(m.forward === undefined ? {} : { forward: persistedFromForwardRef(m.forward) }),
+    ...(m.content === undefined ? {} : { content: m.content }),
   };
 }
 
@@ -85,7 +122,8 @@ export function heldFromPersisted(
   } catch {
     return null;
   }
-  if (r.text.length === 0 && attached.length === 0) return null;
+  const content = contentFromPersisted(r.content);
+  if (r.text.length === 0 && attached.length === 0 && content === undefined) return null;
   const reply = replyRefFromPersisted(r.reply);
   const forward = forwardRefFromPersisted(r.forward);
   return {
@@ -100,6 +138,7 @@ export function heldFromPersisted(
           ? { replyGroupIdB64: r.replyGroupIdB64 }
           : {}),
         ...(forward === undefined ? {} : { forward }),
+        ...(content === undefined ? {} : { content }),
       },
     },
   };

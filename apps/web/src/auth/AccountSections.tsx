@@ -7,6 +7,7 @@
  * destructive ones last and behind the in-page confirmation (ADR-0045 UX §14).
  */
 import { revokeAllMintedLinks } from "../contacts/own-links";
+import { deleteOwnedChannelVaults } from "../channels/channel-vault-head";
 import { base64Encode } from "./account-id";
 import { createSignal, Show, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
@@ -31,7 +32,8 @@ import {
   actionHashForDeleteAccount,
 } from "./webauthn-client";
 import { DiscoveryClient } from "../discovery/client";
-import { StorageClient } from "../storage/client";
+import { runAccountDeletion } from "./account-deletion";
+import { buildDeletionCleanups, prepareDeletionTokens } from "./account-deletion-cleanups";
 import { paths } from "../routes/paths";
 import { Icon } from "../ui/icons";
 import { t, type L10nArgs } from "../l10n";
@@ -91,7 +93,7 @@ export function ExportDataCard(): JSX.Element {
       <p class="lk-card-desc">{t("settings.data.lede")}</p>
       <div class="lk-actions">
         <button type="button" disabled={busy()} onClick={() => void onExport()}>
-          <Icon name="db" size={18} />
+          <Icon name="database" size={20} />
           {busy() ? t("common.preparing") : t("settings.data.export")}
         </button>
       </div>
@@ -129,7 +131,7 @@ export function AccountCard(): JSX.Element {
       <h2>{t("settings.section.account")}</h2>
       <div class="lk-card-row">
         <span class="lk-card-row-icon">
-          <Icon name="logout" size={18} />
+          <Icon name="logout" size={20} />
         </span>
         <div class="lk-card-row-body">
           <span class="lk-card-row-title">{t("settings.account.log_out")}</span>
@@ -141,7 +143,7 @@ export function AccountCard(): JSX.Element {
       </div>
       <div class="lk-card-row">
         <span class="lk-card-row-icon">
-          <Icon name="devices" size={18} />
+          <Icon name="devices" size={20} />
         </span>
         <div class="lk-card-row-body">
           <span class="lk-card-row-title">{t("settings.account.forget_device.label")}</span>
@@ -158,7 +160,7 @@ export function AccountCard(): JSX.Element {
       </div>
       <div class="lk-card-row">
         <span class="lk-card-row-icon">
-          <Icon name="trash" size={18} />
+          <Icon name="person-circle-xmark" size={20} />
         </span>
         <div class="lk-card-row-body">
           <span class="lk-card-row-title">{t("settings.account.delete.confirm")}</span>
@@ -198,7 +200,7 @@ export function AccountCard(): JSX.Element {
 export interface DeleteAccountTarget {
   readonly accountId: Uint8Array;
   /** The bearer of every deletion request: the access token, or a suspended
-   *  account's restricted session (ADR-0089), which opens auth's
+   *  account's restricted session (ADR-0098), which opens auth's
    *  `DELETE /account`, discovery's `DELETE /discovery/account` and
    *  storage's `DELETE /backup` and nothing else. */
   readonly bearer: string;
@@ -209,7 +211,7 @@ export interface DeleteAccountTarget {
 
 export function DeleteAccountDialog(props: {
   readonly onClose: () => void;
-  /** ADR-0089: a suspended account on a device that holds none of its keys
+  /** ADR-0098: a suspended account on a device that holds none of its keys
    *  passes its own target; otherwise the signed-in session is the target. */
   readonly target?: DeleteAccountTarget;
 }): JSX.Element {
@@ -309,42 +311,44 @@ export function DeleteAccountDialog(props: {
       } catch {
         /* best-effort: the deletion does not wait on a link */
       }
-      try {
-        await c.deleteAccount(grant);
-      } catch (err) {
-        // An account whose passkey list could not be read: the server
-        // names the missing gesture with a `403` that is not the proof's.
-        if (
-          err instanceof WebauthnHttpError &&
-          err.status === 403 &&
-          proofFailureFromError(err).kind !== "required" &&
-          !steps.actionGesture
-        ) {
-          await assertDeletion(secrets.accountId);
-          await c.deleteAccount(grant);
-        } else {
-          throw err;
-        }
-      }
-      try {
-        const d = new DiscoveryClient();
-        d.setSessionToken(secrets.bearer);
-        await d.deleteAccount();
-      } catch {
-        /* best-effort */
-      }
-      // The encrypted backup goes with the account (ADR-0089: a suspended
-      // account's restricted session opens this route too).
-      try {
-        const storage = new StorageClient();
-        storage.setSessionToken(secrets.bearer);
-        await storage.deleteBackup();
-      } catch {
-        /* best-effort */
-      }
-      gate.clear();
-      // Wipes this device and lands on the sign-in screen.
-      await secrets.finish();
+      // ADR-0064 section 1: the saved copies of the channels this account
+      // owns, while the account still exists. Bounded; never throws.
+      await deleteOwnedChannelVaults();
+      // The push tokens the cleanups will spend are bought first (auth issues
+      // none once the account is gone). Then auth: it can refuse (the recall window), and then nothing else
+      // is removed. After it, what only this device can remove from the
+      // servers goes (its push subscriptions), then the backup blob and the
+      // directory entry, each with a short bounded retry, then the wipe.
+      await runAccountDeletion({
+        beforeAuth: () => prepareDeletionTokens(base64Encode(secrets.accountId)),
+        deleteAtAuth: async () => {
+          try {
+            await c.deleteAccount(grant);
+          } catch (err) {
+            // An account whose passkey list could not be read: the server
+            // names the missing gesture with a `403` that is not the proof's.
+            if (
+              err instanceof WebauthnHttpError &&
+              err.status === 403 &&
+              proofFailureFromError(err).kind !== "required" &&
+              !steps.actionGesture
+            ) {
+              await assertDeletion(secrets.accountId);
+              await c.deleteAccount(grant);
+            } else {
+              throw err;
+            }
+          }
+        },
+        cleanups: () =>
+          buildDeletionCleanups(base64Encode(secrets.accountId), secrets.bearer),
+        wipe: async () => {
+          gate.clear();
+          // Wipes this device and lands on the sign-in screen (ADR-0098: a
+          // suspended account's own target supplies its local cleanup).
+          await secrets.finish();
+        },
+      });
     } catch (err) {
       // ADR-0074 section 1.3: while the account can still be taken back
       // after a key reset, the server refuses the deletion and names the

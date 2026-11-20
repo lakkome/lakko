@@ -330,6 +330,18 @@ pub(crate) struct SignupStartResponse {
     pub(crate) recovery_response: Option<String>,
 }
 
+/// `POST /signup/start`, counted as a signup step (ADR-0096); the flow is
+/// [`signup_start_answer`].
+pub(crate) async fn signup_start(
+    state: State<crate::AppState>,
+    payload: Json<SignupStartRequest>,
+) -> axum::response::Response {
+    crate::metrics::signup(
+        crate::metrics::SignupStep::Start,
+        signup_start_answer(state, payload).await,
+    )
+}
+
 /// `POST /signup/start` — first step of registration.
 ///
 /// Runs `ServerRegistration::start` for the password flow and, if the
@@ -341,7 +353,7 @@ pub(crate) struct SignupStartResponse {
 /// After the proof verifies and both OPAQUE starts succeed, records a
 /// `signup_states` row for `account_id` (replacing an earlier pending one) —
 /// the only thing that lets `/signup/finish` create the account.
-pub(crate) async fn signup_start(
+async fn signup_start_answer(
     State(state): State<crate::AppState>,
     Json(payload): Json<SignupStartRequest>,
 ) -> Result<Json<SignupStartResponse>, OpaqueError> {
@@ -485,6 +497,18 @@ pub(crate) struct SignupFinishResponse {
     pub(crate) grant: crate::session::FreshGrant,
 }
 
+/// `POST /signup/finish`, counted as a signup step (ADR-0096); the flow is
+/// [`signup_finish_answer`].
+pub(crate) async fn signup_finish(
+    state: State<crate::AppState>,
+    payload: Json<SignupFinishRequest>,
+) -> axum::response::Response {
+    crate::metrics::signup(
+        crate::metrics::SignupStep::Finish,
+        signup_finish_answer(state, payload).await,
+    )
+}
+
 /// `POST /signup/finish` — finalize registration.
 ///
 /// In a single DB transaction:
@@ -504,7 +528,7 @@ pub(crate) struct SignupFinishResponse {
 /// account is not half-registered.
 ///
 /// If `account_id` is already registered, returns `409 Conflict`.
-pub(crate) async fn signup_finish(
+async fn signup_finish_answer(
     State(state): State<crate::AppState>,
     Json(payload): Json<SignupFinishRequest>,
 ) -> Result<Json<SignupFinishResponse>, OpaqueError> {
@@ -754,6 +778,8 @@ async fn take_login_state(
 /// Spawn a background task that runs every `LOGIN_STATE_PRUNE_INTERVAL` and
 /// deletes expired login states and pending signups from the DB.
 pub(crate) fn spawn_login_state_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
+    const JOB: &str = crate::metrics::jobs::LOGIN_STATE_PRUNE;
+    lakko_metrics::job_registered(JOB);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(LOGIN_STATE_PRUNE_INTERVAL);
         // The first tick fires immediately — skip it (the table is usually
@@ -768,6 +794,7 @@ pub(crate) fn spawn_login_state_pruner(pool: MySqlPool) -> tokio::task::JoinHand
             .bind(LOGIN_STATE_TTL_SECS)
             .execute(&pool)
             .await;
+            let mut all_ok = result.is_ok();
             match result {
                 Ok(r) if r.rows_affected() > 0 => {
                     tracing::debug!(
@@ -785,8 +812,10 @@ pub(crate) fn spawn_login_state_pruner(pool: MySqlPool) -> tokio::task::JoinHand
             .execute(&pool)
             .await
             {
+                all_ok = false;
                 tracing::warn!(error = %e, "signup_states prune failed");
             }
+            crate::metrics::job_ran(JOB, all_ok);
         }
     })
 }
@@ -1051,7 +1080,7 @@ async fn login_finish_inner(
     // At the generation read with the state row (see `take_login_state`),
     // never at one read now. No row: the account was deleted meanwhile.
     let key_generation = key_generation.ok_or(crate::webauthn::ApiError::InvalidCredential)?;
-    // ADR-0089 section 4: a suspended account lands in suspended mode, not in
+    // ADR-0098 section 4: a suspended account lands in suspended mode, not in
     // a session. The password sign-in's refusal carries the fresh-auth grant
     // it would have minted (the only use left for it is deleting the account).
     let landing_grant = if expected_kind == KIND_PASSWORD {
@@ -1090,6 +1119,18 @@ pub(crate) async fn login_start(
     login_start_inner(&state, payload, KIND_PASSWORD).await
 }
 
+/// `POST /login/finish`, counted as a password login (ADR-0096); the flow
+/// is [`login_finish_answer`].
+pub(crate) async fn login_finish(
+    state: State<crate::AppState>,
+    payload: Json<LoginFinishRequest>,
+) -> axum::response::Response {
+    crate::metrics::login(
+        crate::metrics::LoginKind::Password,
+        login_finish_answer(state, payload).await,
+    )
+}
+
 /// `POST /login/finish` — finalize login (password flow).
 ///
 /// One of the two routes whose answer carries a fresh-auth grant (the other
@@ -1098,7 +1139,7 @@ pub(crate) async fn login_start(
 /// the session pair was issued under. A handle nobody holds never gets here
 /// with a grant: its login runs OPAQUE's fake-credentials path, which no
 /// client can finish, and its stand-in account id has no row to issue at.
-pub(crate) async fn login_finish(
+async fn login_finish_answer(
     State(state): State<crate::AppState>,
     Json(payload): Json<LoginFinishRequest>,
 ) -> Result<Json<PasswordLoginFinishResponse>, OpaqueError> {
@@ -1126,8 +1167,20 @@ pub(crate) async fn recovery_login_start(
     login_start_inner(&state, payload, KIND_RECOVERY).await
 }
 
-/// `POST /recovery/login/finish` — finalize recovery login.
+/// `POST /recovery/login/finish`, counted as a recovery login (ADR-0096);
+/// the flow is [`recovery_login_finish_answer`].
 pub(crate) async fn recovery_login_finish(
+    state: State<crate::AppState>,
+    payload: Json<LoginFinishRequest>,
+) -> axum::response::Response {
+    crate::metrics::login(
+        crate::metrics::LoginKind::Recovery,
+        recovery_login_finish_answer(state, payload).await,
+    )
+}
+
+/// `POST /recovery/login/finish` — finalize recovery login.
+async fn recovery_login_finish_answer(
     State(state): State<crate::AppState>,
     Json(payload): Json<LoginFinishRequest>,
 ) -> Result<Json<LoginFinishResponse>, OpaqueError> {
@@ -1458,7 +1511,7 @@ pub(crate) async fn password_reset_finish(
     //    under, capture the recall anchor, then replace the envelope.
     let invalid = || (StatusCode::UNAUTHORIZED, "invalid credentials".to_string());
     let proven_generation = key_generation.ok_or_else(invalid)?;
-    // ADR-0089 section 4: a suspended account's password is not replaced; it
+    // ADR-0098 section 4: a suspended account's password is not replaced; it
     // lands in suspended mode.
     crate::suspension::refuse_landing_if_suspended(
         &state,
@@ -2030,6 +2083,7 @@ mod signup_login_limits_e2e_tests {
             room_cap: std::sync::Arc::new(crate::room_cap::RoomAdmissionCap::disabled()),
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
             anon_tokens: None,
+            anon_cred: None,
             handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
             recovery_email: None,
             limits: Arc::new(limits),
@@ -2110,7 +2164,7 @@ mod signup_login_limits_e2e_tests {
     /// A fresh real Ed25519 public key on every call: the key reset records
     /// the key it installs and refuses one that is not a usable point
     /// (ADR-0074), and a key belongs to one account forever in a database
-    /// the tests share across runs (ADR-0089 F3). The tag names the key in
+    /// the tests share across runs (ADR-0098 F3). The tag names the key in
     /// the test that asks for it; it does not make two calls agree.
     fn pk(_tag: u8) -> [u8; 32] {
         let mut seed = [0u8; 32];
@@ -2122,7 +2176,7 @@ mod signup_login_limits_e2e_tests {
         public
     }
 
-    /// The identity proof (ADR-0089 F3) of a key [`pk`] handed out, for the
+    /// The identity proof (ADR-0098 F3) of a key [`pk`] handed out, for the
     /// account `token` names; `None` for a key it did not hand out.
     fn proof_for(token: &str, pubkey: &[u8; 32]) -> Option<String> {
         let account: [u8; 16] = URL_SAFE_NO_PAD
@@ -2339,6 +2393,27 @@ mod signup_login_limits_e2e_tests {
         );
         let ip = "198.51.100.20";
         let pw = b"hunter2hunter2";
+        // ADR-0096: the refusals below move the limiter's counter and carry
+        // their body code into the request counter ("grew": other tests share
+        // the process recorder).
+        crate::metrics::test_support::installed();
+        let counted = || {
+            [
+                crate::metrics::test_support::value(
+                    crate::metrics::LIMIT_REFUSALS_TOTAL,
+                    &[("scope", "login_password"), ("outcome", "limited")],
+                ),
+                crate::metrics::test_support::value(
+                    lakko_metrics::names::HTTP_REQUESTS_TOTAL,
+                    &[
+                        ("route", "/login/start"),
+                        ("status", "4xx"),
+                        ("code", crate::limits::CODE_TOO_MANY_ATTEMPTS),
+                    ],
+                ),
+            ]
+        };
+        let before = counted();
 
         // A registered account.
         let (known, known_id_b64) = new_account();
@@ -2406,6 +2481,13 @@ mod signup_login_limits_e2e_tests {
             refusals.push(v["error"].clone());
         }
         assert_eq!(refusals[0], refusals[1]);
+        let after = counted();
+        for (i, (b, a)) in before.iter().zip(after.iter()).enumerate() {
+            assert!(
+                a - b >= 2.0,
+                "counter {i} did not count both refusals: {b} -> {a}"
+            );
+        }
 
         // The recovery login keeps its own counter.
         let cl = ClientLogin::<LakkoCipherSuite>::start(&mut OsRng, &[0x42u8; 64]).unwrap();
@@ -4483,6 +4565,40 @@ mod signup_login_limits_e2e_tests {
             return;
         };
         let state = build_state(pool.clone(), Limits::defaults());
+        // ADR-0096: the counters this test's requests move. Other tests run in
+        // the same process, so each is checked as "grew", never as an exact
+        // count.
+        crate::metrics::test_support::installed();
+        let counted = || {
+            [
+                crate::metrics::test_support::value(
+                    crate::metrics::SIGNUPS_TOTAL,
+                    &[("step", "finish"), ("outcome", "ok")],
+                ),
+                crate::metrics::test_support::value(
+                    crate::metrics::LOGINS_TOTAL,
+                    &[("kind", "password"), ("outcome", "ok")],
+                ),
+                crate::metrics::test_support::value(
+                    crate::metrics::LOGINS_TOTAL,
+                    &[("kind", "recovery"), ("outcome", "ok")],
+                ),
+                crate::metrics::test_support::value(
+                    crate::metrics::SESSION_REFRESHES_TOTAL,
+                    &[("outcome", "invalid")],
+                ),
+                crate::metrics::test_support::value(crate::metrics::FRESH_AUTH_REFUSALS_TOTAL, &[]),
+                crate::metrics::test_support::value(
+                    lakko_metrics::names::HTTP_REQUESTS_TOTAL,
+                    &[
+                        ("service", "auth"),
+                        ("route", "/account/keys/reset/start"),
+                        ("code", "fresh-auth-required"),
+                    ],
+                ),
+            ]
+        };
+        let before = counted();
         let pw = b"a's password";
         let seed = [0xE1u8; 64];
         let (a, a_token, signup_grant) = signup_account_with_grant(&state, pw, &seed).await;
@@ -4532,6 +4648,11 @@ mod signup_login_limits_e2e_tests {
 
         // A wrong password finishes nowhere, so mints nothing.
         assert_eq!(password_login(&state, &ha, b"wrong").await, Err(()));
+
+        let after = counted();
+        for (i, (b, a)) in before.iter().zip(after.iter()).enumerate() {
+            assert!(a > b, "counter {i} did not grow: {b} -> {a}");
+        }
 
         drop_accounts(&pool, &[a]).await;
     }
@@ -4711,8 +4832,18 @@ mod signup_login_limits_e2e_tests {
         let (st, body) = passkey_register_start(state, token, Some(grant)).await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let ccr: webauthn_rs::prelude::CreationChallengeResponse =
+        let mut ccr: webauthn_rs::prelude::CreationChallengeResponse =
             serde_json::from_value(v["options"].clone()).expect("parse options");
+        // The route asks for a discoverable credential (`require_discoverable`),
+        // which the software authenticator cannot create (`NotSupported`). The
+        // server's registration check ignores that request, so the test
+        // withdraws it before handing the options to the soft authenticator;
+        // what the route sends is pinned by `passkey_registration_asks_for_a_
+        // discoverable_credential` in `webauthn.rs`.
+        if let Some(selection) = ccr.public_key.authenticator_selection.as_mut() {
+            selection.require_resident_key = false;
+            selection.resident_key = Some(webauthn_rs_proto::ResidentKeyRequirement::Discouraged);
+        }
         let rpkc = wa
             .do_registration(passkey_origin(), ccr)
             .expect("soft register");
@@ -4928,6 +5059,10 @@ mod signup_login_limits_e2e_tests {
         assert_password_required(st, &body, "the grant in a body, not the header");
         assert!(account_exists(&pool, &a).await);
         assert!(account_exists(&pool, &b).await);
+        assert!(
+            !crate::purge::is_queued(&pool, &a).await,
+            "a refused delete queued a purge"
+        );
         assert_eq!(export(&state, &a_token).await.0, StatusCode::OK);
 
         // Deleting does not spend a grant another way: the same live grant
@@ -4940,6 +5075,10 @@ mod signup_login_limits_e2e_tests {
             String::from_utf8_lossy(&body)
         );
         assert!(!account_exists(&pool, &a).await);
+        assert!(
+            crate::purge::is_queued(&pool, &a).await,
+            "the delete queued no purge of discovery and storage"
+        );
 
         // A grant minted before a key reset is refused for delete after it.
         let sibling = grant_by_password(&state, &hb, b"b's password").await;
@@ -4956,7 +5095,15 @@ mod signup_login_limits_e2e_tests {
         let (st, _) = delete_account(&state, &b_token2, Some(&fresh)).await;
         assert_eq!(st, StatusCode::NO_CONTENT);
         assert!(!account_exists(&pool, &b).await);
+        assert!(crate::purge::is_queued(&pool, &b).await);
 
+        for id in [a, b] {
+            sqlx::query("DELETE FROM account_purges WHERE account_id = ?")
+                .bind(id.as_slice())
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
         drop_accounts(&pool, &[a, b]).await;
     }
 

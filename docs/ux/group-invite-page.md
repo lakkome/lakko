@@ -97,10 +97,13 @@ stays, and the consume decides.
 **Not signed in** - unchanged: the preview is shown above the sign-up / log-in
 buttons when it opens, so the person knows what they are signing up to join.
 
-**After `Request to join`** - unchanged (`Request sent. An admin approves it,
-then the change is applied to the group.` and `Request again`); the preview
-stays on the card while they wait, and the page moves to the chat the moment
-the join lands.
+**After `Request to join`** (amended 2026-11-12, maintainer): `Request sent. An
+admin will see it when they next open Lakko.` and no button; `Request again` is
+gone. A device asks once per group per day: the page opened again within the day
+shows the same line, and after a day `No answer yet.` with `Ask again`
+([`group-and-channel-privacy.md`](group-and-channel-privacy.md) section 6.2). The
+preview stays on the card while they wait, and the page moves straight to the
+chat the moment the join lands, with no `Open chat` step.
 
 ## 4. What the link looks like
 

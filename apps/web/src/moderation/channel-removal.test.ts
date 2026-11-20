@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0089 step 5 - a channel moderators removed: the channels fetch gate
+ * ADR-0098 step 5 - a channel moderators removed: the channels fetch gate
  * (a `410 channel-removed` is held, not an end), the verified vs unverified
  * line, the one check per reuse period, the restore, and the channel standing
  * of the standing service (fake core for the cache, the REAL wasm for the
@@ -64,7 +64,7 @@ function holder(standing: StandingResult | (() => Promise<StandingResult>), cloc
 const VERIFIED: StandingResult = { standing: "suspended", recheckAtMs: 1_000_000 + 5 * 60_000 };
 const UNKNOWN: StandingResult = { standing: "unknown", recheckAtMs: Number.POSITIVE_INFINITY };
 
-describe("a removed channel (ADR-0089 step 5)", () => {
+describe("a removed channel (ADR-0098 step 5)", () => {
   it("is a 410 with the channel-removed code, never a deletion", () => {
     expect(isChannelRemovedError(410, CHANNEL_REMOVED)).toBe(true);
     expect(isChannelRemovedError(410, "channel-deleted")).toBe(false);
@@ -202,7 +202,7 @@ describe("a removed channel (ADR-0089 step 5)", () => {
   });
 });
 
-describe("the channel standing (ADR-0089 step 5)", () => {
+describe("the channel standing (ADR-0098 step 5)", () => {
   const LOG = new Uint8Array(32).fill(7);
   const CHANNEL = new Uint8Array(16).fill(5);
 

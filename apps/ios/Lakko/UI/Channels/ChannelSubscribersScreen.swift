@@ -20,7 +20,7 @@ struct ChannelSubscribersScreen: View {
     @State private var members: [ChannelMemberCards.Member] = []
     @State private var rows: [ChannelsClient.SubscriberRow] = []
     @State private var phase: Phase = .loading
-    @State private var removing: ChannelsClient.SubscriberRow?
+    @State private var removing: Removal?
     @State private var showBanned = false
 
     enum Phase: Equatable { case loading, loaded, failed }
@@ -29,14 +29,12 @@ struct ChannelSubscribersScreen: View {
     private var isPrivate: Bool { state.extras(channelId).isPublic == false }
     private var count: Int? { state.subscriberCountByChannel[channelId] }
 
-    /// Section 15.1 — subscribers who share no name.
-    private var othersCount: Int {
-        max(0, (count ?? rows.count) - members.count)
-    }
-
-    private var unnamedRows: [ChannelsClient.SubscriberRow] {
-        let named = Set(members.map { ChannelsComposer.bytesToHex($0.subscriberPk) })
-        return rows.filter { !named.contains($0.pubkeyHex.lowercased()) }
+    /// Section 15.1 — the list through the shared rule
+    /// (`lakko_ui_rules::subscribers`): named rows, the others and their
+    /// count, so the owner can always tell whom `Remove` takes.
+    private var list: SubscriberList {
+        SubscriberList.build(
+            members: members, rows: rows, count: count, canRemove: isPrivate && isPublisher)
     }
 
     var body: some View {
@@ -46,7 +44,7 @@ struct ChannelSubscribersScreen: View {
                     Text(l10n.t("channels.subscribers.load_failed")).foregroundStyle(Color.lakkoDanger)
                     Button(l10n.t("common.try_again")) { Task { await load() } }
                 }
-            } else if phase == .loaded, members.isEmpty, (count ?? 0) == 0, rows.isEmpty {
+            } else if phase == .loaded, list.people.isEmpty, (count ?? 0) == 0, list.others.isEmpty {
                 Section {
                     Text(l10n.t("channels.subscribers.none")).foregroundStyle(Color.lakkoTextMuted)
                     if let onInvitePeople {
@@ -54,39 +52,58 @@ struct ChannelSubscribersScreen: View {
                     }
                 }
             } else {
+                let list = self.list
                 Section {
-                    ForEach(members, id: \.subscriberPk) { member in
+                    ForEach(list.people, id: \.member.accountKey) { person in
+                        let member = person.member
                         HStack(spacing: 12) {
                             InitialsAvatar(
-                                name: member.claim.displayName ?? "",
+                                name: member.claim.displayName ?? member.claim.username ?? "",
                                 identity: member.subscriberPk.base64EncodedString(), size: 40,
                                 photo: member.claim.avatar.map(AvatarPhoto.avatar))
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(member.claim.displayName ?? l10n.t("channels.members.unnamed"))
-                                    .foregroundStyle(Color.lakkoText)
-                                if let username = member.claim.username {
+                                if member.isSelf {
+                                    Text(l10n.t("channels.members.you")).foregroundStyle(Color.lakkoText)
+                                } else if let name = member.claim.displayName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                                   !name.isEmpty {
+                                    Text(name).foregroundStyle(Color.lakkoText)
+                                    if let username = member.claim.username {
+                                        Text("@" + username)
+                                            .font(.footnote)
+                                            .foregroundStyle(Color.lakkoTextMuted)
+                                            .environment(\.layoutDirection, .leftToRight)
+                                    }
+                                } else if let username = member.claim.username {
                                     Text("@" + username)
-                                        .font(.footnote)
-                                        .foregroundStyle(Color.lakkoTextMuted)
+                                        .foregroundStyle(Color.lakkoText)
                                         .environment(\.layoutDirection, .leftToRight)
                                 }
                             }
-                        }
-                    }
-                    if isPrivate, isPublisher {
-                        // Section 15.1 — the others, each with `Remove`.
-                        ForEach(unnamedRows, id: \.pubkeyHex) { row in
-                            HStack {
-                                Text(linkLabel(row))
-                                    .foregroundStyle(Color.lakkoText)
+                            if person.removable {
                                 Spacer()
-                                Button(l10n.t("common.remove"), role: .destructive) { removing = row }
-                                    .buttonStyle(.borderless)
+                                Button(l10n.t("common.remove"), role: .destructive) {
+                                    removing = Removal(pubkeysHex: person.pubkeysHex)
+                                }
+                                .buttonStyle(.borderless)
                             }
                         }
-                    } else if othersCount > 0 {
-                        Text(l10n.t("channels.subscribers.others", counts: ["count": UInt64(othersCount)]))
+                    }
+                    if list.othersCount > 0 {
+                        Text(l10n.t("channels.subscribers.others", counts: ["count": UInt64(list.othersCount)]))
                             .foregroundStyle(Color.lakkoTextMuted)
+                    }
+                    // Section 15.1 — in a private channel the others, each
+                    // with `Remove`.
+                    ForEach(list.others, id: \.pubkeyHex) { row in
+                        HStack {
+                            Text(linkLabel(row))
+                                .foregroundStyle(Color.lakkoText)
+                            Spacer()
+                            Button(l10n.t("common.remove"), role: .destructive) {
+                                removing = Removal(pubkeysHex: [row.pubkeyHex])
+                            }
+                            .buttonStyle(.borderless)
+                        }
                     }
                     if phase == .loading { ProgressView() }
                 }
@@ -107,11 +124,11 @@ struct ChannelSubscribersScreen: View {
             ChannelBannedScreen(
                 channelId: channelId, state: state, client: client, accountIdentitySeed: accountIdentitySeed)
         }
-        .lakkoDialog(item: $removing) { row in
+        .lakkoDialog(item: $removing) { removal in
             LakkoDialogContent(
                 title: l10n.t("channels.subscribers.remove_title"),
                 message: l10n.t("channels.subscribers.remove_body"), field: nil,
-                actions: [.danger(l10n.t("common.remove")) { Task { await remove(row) } }, .cancel()])
+                actions: [.danger(l10n.t("common.remove")) { Task { await remove(removal) } }, .cancel()])
         }
     }
 
@@ -139,7 +156,7 @@ struct ChannelSubscribersScreen: View {
             state.setSubscriberCount(channelId: channelId, count: Int(clamping: exact))
         }
         members = await ChannelMemberCards.refreshMembers(
-            state: state, channelId: channelId,
+            state: state, channelId: channelId, includeSelf: true,
             resolveKey: { accountId in
                 try? await ContactsClient().resolveVerifiedBundle(accountId: accountId).signaturePubkey
             })
@@ -165,19 +182,94 @@ struct ChannelSubscribersScreen: View {
         phase = .loaded
     }
 
+    /// What `Remove` takes: every subscriber key of the person (one per
+    /// device), or one key of an unnamed row.
+    struct Removal: Identifiable {
+        let pubkeysHex: [String]
+        var id: String { pubkeysHex.joined(separator: ",") }
+    }
+
     /// Section 7.3 — remove a subscriber of a private channel; a rotation
-    /// follows at once.
-    private func remove(_ row: ChannelsClient.SubscriberRow) async {
+    /// follows at once on the owner's device (a publisher asks it to).
+    private func remove(_ removal: Removal) async {
         guard let identity = try? Identity.fromSeed(seed: accountIdentitySeed) else { return }
-        do {
-            try await client.removeSubscriber(channelIdHex: channelId, pubkeyHex: row.pubkeyHex, accountIdentity: identity)
-            rows.removeAll { $0.pubkeyHex == row.pubkeyHex }
-            if let count { state.setSubscriberCount(channelId: channelId, count: max(0, count - 1)) }
-            try? await ChannelPublisherLoops.shared.rotateNow(
-                channelId: channelId, channels: state, client: client, seed: accountIdentitySeed)
-        } catch {
-            NSLog("[channels] a subscriber was not removed")
+        var gone = Set<String>()
+        for pubkeyHex in removal.pubkeysHex {
+            do {
+                try await client.removeSubscriber(
+                    channelIdHex: channelId, pubkeyHex: pubkeyHex, accountIdentity: identity)
+                gone.insert(pubkeyHex.lowercased())
+            } catch {
+                NSLog("[channels] a subscriber was not removed")
+                break
+            }
         }
+        guard !gone.isEmpty else { return }
+        rows.removeAll { gone.contains($0.pubkeyHex.lowercased()) }
+        members = members.compactMap { member in
+            var kept = member
+            kept.subscriberPks.removeAll { gone.contains(ChannelsComposer.bytesToHex($0).lowercased()) }
+            return kept.subscriberPks.isEmpty && !kept.isSelf ? nil : kept
+        }
+        if let count { state.setSubscriberCount(channelId: channelId, count: max(0, count - gone.count)) }
+        // Only the owner rotates; a publisher's removal asks the owner's
+        // device to (ADR-0087 section 15, the rotate request).
+        await ChannelPublisherLoops.shared.rotateAfterSubscriberRemoval(
+            channelId: channelId, channels: state, client: client, seed: accountIdentitySeed)
+    }
+}
+
+/// Section 15.1 / 7.3 — a channel's subscriber list as a person sees it, built
+/// by the shared rule (`lakko_ui_rules::subscribers`): a card that carries no
+/// name is not a named row; a person shown by name is never listed again
+/// among the others; in a private channel the owner and publishers may remove
+/// every row. Base walk 2026-11-13: a nameless card read "Member", and the
+/// owner could not tell whom `Remove` took.
+struct SubscriberList {
+    struct Person {
+        let member: ChannelMemberCards.Member
+        /// Every subscriber key of this person (hex): what `Remove` takes.
+        let pubkeysHex: [String]
+        let removable: Bool
+    }
+
+    let people: [Person]
+    /// The others listed one row each (private channel, owner, publishers).
+    let others: [ChannelsClient.SubscriberRow]
+    /// The number in "{n} others."; `0` says nothing.
+    let othersCount: Int
+
+    static func build(
+        members: [ChannelMemberCards.Member], rows: [ChannelsClient.SubscriberRow],
+        count: Int?, canRemove: Bool
+    ) -> SubscriberList {
+        var cardMembers: [ChannelMemberCards.Member] = []
+        var cardKeys: [String] = []
+        var cards: [ChannelSubscriberCard] = []
+        for member in members {
+            let pks = member.subscriberPks.isEmpty ? [member.subscriberPk] : member.subscriberPks
+            for pk in pks {
+                let hex = ChannelsComposer.bytesToHex(pk).lowercased()
+                cardMembers.append(member)
+                cardKeys.append(hex)
+                cards.append(ChannelSubscriberCard(
+                    subscriberKey: hex, personKey: member.accountKey.base64EncodedString(),
+                    named: member.named, isSelf: member.isSelf))
+            }
+        }
+        let out = channelSubscriberList(
+            cards: cards, listedKeys: rows.map { $0.pubkeyHex.lowercased() },
+            count: count.map { UInt64(max(0, $0)) }, canRemove: canRemove)
+        let people: [Person] = out.people.compactMap { person in
+            guard let first = person.cards.first, Int(first) < cardMembers.count else { return nil }
+            return Person(
+                member: cardMembers[Int(first)],
+                pubkeysHex: person.cards.compactMap { Int($0) < cardKeys.count ? cardKeys[Int($0)] : nil },
+                removable: person.removable)
+        }
+        let others = out.others.compactMap { Int($0) < rows.count ? rows[Int($0)] : nil }
+        return SubscriberList(
+            people: people, others: others, othersCount: Int(clamping: out.othersCount))
     }
 }
 

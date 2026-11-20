@@ -42,7 +42,7 @@ function Shell(props: RouteSectionProps): JSX.Element {
               Queue
             </A>
             <A class="lk-rail-item" href="/appeals">
-              <Icon name="hand" />
+              <Icon name="envelope" />
               Appeals
             </A>
             <A class="lk-rail-item" href="/log">
@@ -54,7 +54,7 @@ function Shell(props: RouteSectionProps): JSX.Element {
               Moderators
             </A>
             <A class="lk-rail-item" href="/numbers">
-              <Icon name="lines" />
+              <Icon name="chart-bar" />
               Numbers
             </A>
             <div class="lk-rail-spacer" />

@@ -126,7 +126,9 @@ internal class DiscoveryAccountDirectory(
  * order:
  *
  *   1. bind the handle at auth (`PUT /auth/login-handle`); a `409` means the
- *      name is taken and discovery is never asked; a `429 handle-bind-limited`
+ *      name is taken and discovery is never asked; a `403
+ *      registration-closed` (the beta is full) stops here as
+ *      [RegistrationClosed]; a `429 handle-bind-limited`
  *      stops here the same way, propagated as the [AuthHttpError] whose copy
  *      is [handleBindLimitedCopy] (the form keeps its contents);
  *   2. register the name at discovery; if that fails (taken or otherwise) the
@@ -148,7 +150,9 @@ internal suspend fun claimUsernameAtSignup(
     sessionToken: String,
     accountId: ByteArray,
     username: String,
-): String = claimUsername(directory, binder, handles, sessionToken, accountId, username).username
+    /** ADR-0097: a held supporter place for the first bind, or `null`. */
+    placeToken: String? = null,
+): String = claimUsername(directory, binder, handles, sessionToken, accountId, username, placeToken).username
 
 /**
  * The claim itself, in the order above, keeping the certificate the register
@@ -161,11 +165,25 @@ internal suspend fun claimUsername(
     sessionToken: String,
     accountId: ByteArray,
     username: String,
+    /** ADR-0097: a held supporter place for the first bind, or `null`. */
+    placeToken: String? = null,
 ): ClaimedUsername {
     val trimmed = username.trim()
     val named = namedHandleOrRefuse(handles, trimmed)
-    if (binder.bind(sessionToken, named.handle) == LoginHandleBinding.Taken) {
-        throw AuthClientArgError(takenCopy(trimmed), me.lakko.app.l10n.UiText("auth.signup.error.username_taken"))
+    val binding = if (placeToken != null) {
+        binder.bindHoldingPlace(sessionToken, named.handle, placeToken)
+    } else {
+        binder.bind(sessionToken, named.handle)
+    }
+    when (binding) {
+        LoginHandleBinding.Bound -> Unit
+        LoginHandleBinding.Taken ->
+            throw AuthClientArgError(takenCopy(trimmed), me.lakko.app.l10n.UiText("auth.signup.error.username_taken"))
+        // The beta is full (`docs/ux/beta-account-cap.md`): nothing was bound
+        // at auth, and discovery is never asked, so no name is left anywhere.
+        LoginHandleBinding.Closed -> throw RegistrationClosed()
+        // ADR-0097: the place this bind carried was spent by another account.
+        LoginHandleBinding.SupporterCodeUsed -> throw SupporterCodeUsed()
     }
     try {
         return directory.registerUsernameWithCertificate(sessionToken, accountId, trimmed)

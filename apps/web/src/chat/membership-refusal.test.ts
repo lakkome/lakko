@@ -235,6 +235,8 @@ describe("membership refusal copy", () => {
       "notACommitter",
       "notAMember",
       "proposalsPending",
+      "reentryPairInvalid",
+      "reentryWelcomeRefused",
       "roleTableWouldVanish",
       "sweepAlreadyStaged",
       "unsupportedProposal",

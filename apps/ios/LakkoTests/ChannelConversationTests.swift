@@ -163,6 +163,28 @@ final class ChannelConversationTests: XCTestCase {
         XCTAssertNil(ChannelInviteCardFacts.facts(card: Data([1, 2, 3])))
     }
 
+    func testAMovedCardLeavesNoLocalEntryAndAFullStoreDropsTheOldest() {
+        let account = "test-invite-cards-\(UUID().uuidString)"
+        defer { ChannelInviteCardStore.shared.delete(accountIdB64: account) }
+        let store = ChannelInviteCardStore.shared
+        store.put(card: Data([9]), conversationIdHex: "ab01", messageId: -7, accountIdB64: account)
+        store.move(conversationIdHex: "ab01", from: -7, to: 70, accountIdB64: account)
+        XCTAssertNil(store.card(conversationIdHex: "ab01", messageId: -7, accountIdB64: account))
+        XCTAssertEqual(store.card(conversationIdHex: "ab01", messageId: 70, accountIdB64: account), Data([9]))
+        // Fill past the cap: the first cards stored are the ones dropped,
+        // whatever their keys sort as.
+        for i in 0..<(ChannelInviteCardStore.cap + 3) {
+            store.put(card: Data([UInt8(i % 256)]), conversationIdHex: "cd02", messageId: Int64(i), accountIdB64: account)
+        }
+        XCTAssertNil(store.card(conversationIdHex: "ab01", messageId: 70, accountIdB64: account))
+        XCTAssertNil(store.card(conversationIdHex: "cd02", messageId: 0, accountIdB64: account))
+        XCTAssertNil(store.card(conversationIdHex: "cd02", messageId: 1, accountIdB64: account))
+        XCTAssertNil(store.card(conversationIdHex: "cd02", messageId: 2, accountIdB64: account))
+        XCTAssertNotNil(store.card(conversationIdHex: "cd02", messageId: 3, accountIdB64: account))
+        XCTAssertNotNil(
+            store.card(conversationIdHex: "cd02", messageId: Int64(ChannelInviteCardStore.cap + 2), accountIdB64: account))
+    }
+
     // MARK: - Admission seeds to a rotated co-publisher (ADR-0074 section 3.7)
 
     private func hex(_ d: Data) -> String { d.map { String(format: "%02x", $0) }.joined() }
@@ -433,6 +455,32 @@ final class ChannelConversationTests: XCTestCase {
         XCTAssertEqual(byId[without]?.preview.contains("@quiet"), true)
     }
 
+    /// The row's time is the newest real post's, never a newer raw server
+    /// row (a ban list, a metadata record). Seen live 2026-11-12: a ban at
+    /// 22:48 stood as the time of a channel whose newest post was at 22:39.
+    @MainActor
+    func testAChannelRowTimeIgnoresABanListOrRecordRow() {
+        let channels = ChannelsUiState()
+        let id = String(repeating: "5", count: 32)
+        channels.addChannel(ChannelHandle(
+            id: id, localName: "Walk 22", localDescription: "", addedAtMs: 1, handle: "walk22"))
+        // The raw rows the server holds: the post, then a newer ban list.
+        channels.setPosts(channelId: id, posts: [
+            PostView(cursor: 5, serverTsMs: 9_000, payloadB64: ""),
+            PostView(cursor: 6, serverTsMs: 18_000, payloadB64: ""),
+        ])
+        let rows = ChatListScreen.channelRows(
+            channels: channels, channelUnread: [:],
+            lastPosts: [id: PersistedChannelPost(cursor: 5, serverTsMs: 9_000, text: "Newest post")])
+        XCTAssertEqual(rows.first?.lastActivityMs, 9_000)
+    }
+
+    /// The marker the app writes into the stored invitation lines is the one
+    /// the notification extension replaces (`nseChannelNameMark`).
+    func testTheInvitationLineMarkerMatchesTheExtension() {
+        XCTAssertEqual(ChannelInviteNotificationMirror.channelMark, "\u{E002}")
+    }
+
     /// A comment's menu is the message menu: Reply and Copy, then Delete for
     /// its writer or a publisher and Ban for a publisher on someone else's.
     func testTheCommentMenuOffersTheActionsThatApply() {
@@ -456,5 +504,68 @@ final class ChannelConversationTests: XCTestCase {
         let group = ConversationListRow(id: "ef01", kind: .group, title: "G", preview: "", lastActivityMs: nil)
         XCTAssertEqual(group.tintIdentity, "ef01")
     }
-}
 
+    // MARK: - The seed a commit leaves (2026-11-08)
+
+    /// Section 13 — the seed a commit is about to leave is kept under the
+    /// server epoch its posts carry; nothing is kept twice, and a missing or
+    /// malformed seed keeps nothing.
+    func testTheOutgoingSeedIsKeptUnderItsServerEpoch() {
+        let seed = Data(repeating: 0x42, count: 32)
+        let kept = ChannelPublisherCommits.outgoingSeedToKeep(seed: seed, serverEpoch: 3, held: [:])
+        XCTAssertEqual(kept?.epoch, 3)
+        XCTAssertEqual(kept?.seed, seed)
+        XCTAssertNil(ChannelPublisherCommits.outgoingSeedToKeep(
+            seed: seed, serverEpoch: 3, held: [3: Data(repeating: 0x01, count: 32)]))
+        XCTAssertNil(ChannelPublisherCommits.outgoingSeedToKeep(seed: nil, serverEpoch: 3, held: [:]))
+        XCTAssertNil(ChannelPublisherCommits.outgoingSeedToKeep(
+            seed: Data(repeating: 0x42, count: 16), serverEpoch: 3, held: [:]))
+    }
+
+    /// The owner's own channel: after a rotation (an approve or a removal
+    /// moves the group the same way) the seed of the epoch it left still
+    /// opens that epoch's posts on this device, and the new seed is a
+    /// different one, so the channel's record at creation never reads as
+    /// "Earlier posts aren't available.".
+    @MainActor
+    func testTheOwnerStillHoldsTheSeedOfTheEpochARotationLeft() throws {
+        let accountSeed = Data(repeating: 0x5B, count: 32)
+        let identity = try Identity.fromSeedBound(
+            seed: Data(repeating: 0x5C, count: 32), accountSeed: accountSeed, issuedAtUnixSecs: 1_700_000_000)
+        let channelId = Data((0..<16).map { UInt8($0) &+ 0x30 })
+        let channelIdHex = channelId.map { String(format: "%02x", $0) }.joined()
+        let group = try PublisherGroup.create(identity: identity, ownerAccountSeed: accountSeed, channelId: channelId)
+        let before = try group.channelSeed(identity: identity)
+        let channels = ChannelsUiState()
+
+        ChannelPublisherCommits.keepOutgoingSeed(
+            state: channels, channelIdHex: channelIdHex, serverEpoch: 0, group: group, identity: identity)
+        _ = try group.stageRotate(identity: identity)
+        XCTAssertTrue(try group.mergeStagedCommit(identity: identity))
+        let after = try group.channelSeed(identity: identity)
+
+        XCTAssertNotEqual(before, after)
+        XCTAssertEqual(channels.subscribedSeeds(channelId: channelIdHex), [0: before])
+
+        // A record sealed at epoch 0 under the old seed opens with what was kept.
+        let keys = ChannelPublisherKeys(seed: before, signingKeySeed: ChannelSigningKey.generate().toSeed())
+        let wire = try ChannelsComposer.compose(
+            keys: keys, channelIdHex: channelIdHex, epochId: 0, messageCounter: 1, plaintext: Data("record".utf8))
+        let kept = try XCTUnwrap(channels.subscribedSeeds(channelId: channelIdHex)[0])
+        let opened = try ChannelsComposer.verifyAndDecrypt(
+            seed: kept, channelIdHex: channelIdHex, postWireB64Url: Self.b64url(wire))
+        XCTAssertEqual(opened, Data("record".utf8))
+
+        // A second keep at the same epoch changes nothing.
+        ChannelPublisherCommits.keepOutgoingSeed(
+            state: channels, channelIdHex: channelIdHex, serverEpoch: 0, group: group, identity: identity)
+        XCTAssertEqual(channels.subscribedSeeds(channelId: channelIdHex), [0: before])
+    }
+
+    private static func b64url(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+}

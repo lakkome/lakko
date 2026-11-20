@@ -117,7 +117,7 @@ public class InviteLandingViewModel(
         if (current.adding) return
         mutableState.value = current.copy(adding = true, failed = false)
         viewModelScope.launch {
-            // ADR-0089 step 4 / UX 3 — a link from an account the moderation
+            // ADR-0098 step 4 / UX 3 — a link from an account the moderation
             // log confirms suspended adds nothing: Add waits a few seconds for
             // the inviter's standing (nothing is spent yet) and stops on a
             // verified suspension; a slow or failed check proceeds as before.
@@ -239,7 +239,7 @@ public sealed interface InviteLandingState {
         val invite: OpenedInvite,
         val adding: Boolean,
         val failed: Boolean,
-        /** ADR-0089 step 4 — Add found the inviter's account suspended. */
+        /** ADR-0098 step 4 — Add found the inviter's account suspended. */
         val inviterSuspended: Boolean = false,
     ) : InviteLandingState
 

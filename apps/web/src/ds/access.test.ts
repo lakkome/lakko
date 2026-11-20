@@ -127,6 +127,55 @@ describe("DsAccessRegistry", () => {
     expect(freed).toEqual([1n, 1n]);
   });
 
+  it("the same epoch number under another key is a new chain: the new key signs (ADR-0081 third amendment)", () => {
+    // A DeviceGroup founded again keeps its journal id and restarts at epoch
+    // 0, so a device can sit at the same number on a different chain.
+    const reg = new DsAccessRegistry();
+    let label = "a";
+    reg.registerGroupSource(() => fakeSigner(0n, label));
+    const gid = new Uint8Array([3]);
+    expect(reg.groupSigners(gid).current?.verifyingKey()).toEqual(fakeSigner(0n, "a").verifyingKey());
+    label = "b";
+    const after = reg.groupSigners(gid);
+    expect(after.current?.verifyingKey()).toEqual(fakeSigner(0n, "b").verifyingKey());
+    expect(after.current?.sign("GET", "/p", "", new Uint8Array(0))).toContain("proof:b@0");
+  });
+
+  it("forgetting a journal drops the old chain's signers and its claim memo, so nothing of it signs again", async () => {
+    const reg = new DsAccessRegistry();
+    let source: (() => ReturnType<typeof fakeSigner> | null) = () => fakeSigner(2n, "a");
+    reg.registerGroupSource(() => source());
+    const gid = new Uint8Array([4]);
+    reg.groupSigners(gid);
+    source = () => fakeSigner(0n, "b");
+    expect(reg.groupSigners(gid).previous?.epoch).toBe(2n);
+    // While the rejoin holds no group, the cache would still answer with
+    // the old chain.
+    source = () => null;
+    expect(reg.groupSigners(gid).current).not.toBeNull();
+    reg.forgetGroup(gid);
+    expect(reg.groupSigners(gid)).toEqual({ current: null, previous: null });
+    source = () => fakeSigner(0n, "c");
+    expect(reg.groupSigners(gid).previous).toBeNull();
+
+    // The claim memo: settled for the old chain, asked again after forget.
+    let claims = 0;
+    const ports = {
+      ownsJournal: () => true,
+      currentEpochKey: () => ({ epoch: 0n, key: new Uint8Array(32) }),
+      claim: async () => {
+        claims += 1;
+      },
+      onClaimed: () => undefined,
+      now: () => 0,
+    };
+    expect(await reg.ownerClaims.run(gid, ports)).toBe("claimed");
+    expect(await reg.ownerClaims.run(gid, ports)).toBe("settled");
+    reg.forgetGroup(gid);
+    expect(await reg.ownerClaims.run(gid, ports)).toBe("claimed");
+    expect(claims).toBe(2);
+  });
+
   it("an unregistered source stops answering; a mailbox signer answers only its own pseudonym", () => {
     const reg = new DsAccessRegistry();
     const off = reg.registerGroupSource(() => fakeSigner(9n));

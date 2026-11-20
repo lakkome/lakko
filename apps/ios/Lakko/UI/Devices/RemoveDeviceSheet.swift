@@ -403,7 +403,7 @@ struct RemoveDeviceSheet: View {
             state = .idle
         } label: {
             HStack(spacing: 10) {
-                Image(systemName: reason == value ? "largecircle.fill.circle" : "circle")
+                LkIconView(reason == value ? .radioOn : .circle, size: 20)
                     .foregroundStyle(reason == value ? Color.lakkoAccent : Color.lakkoTextMuted)
                     .accessibilityHidden(true)
                 Text(l10n.t(key))
@@ -515,11 +515,11 @@ struct RemoveDeviceSheet: View {
                 HStack(spacing: 10) {
                     switch mark {
                     case .done:
-                        Image(systemName: "checkmark").foregroundStyle(Color.lakkoAccent)
+                        LkIconView(.checkmark, size: 20).foregroundStyle(Color.lakkoAccent)
                     case .active:
                         ProgressView().controlSize(.small)
                     case .waiting:
-                        Image(systemName: "circle").foregroundStyle(Color.lakkoTextMuted)
+                        LkIconView(.circle, size: 20).foregroundStyle(Color.lakkoTextMuted)
                     }
                     Text(l10n.t(step.key))
                         .font(.subheadline.weight(mark == .active ? .semibold : .regular))

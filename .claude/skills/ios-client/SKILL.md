@@ -49,7 +49,8 @@ user-invocable: false
 
 ## WebRTC pod
 
-- SPM dependency: `stasel/WebRTC` (from: 125.0.0)
+- SPM dependency: `webrtc-sdk/Specs` exactVersion 125.6422.07 (since 2026-11-09; stasel/WebRTC 125.0.0 before). Same vendor/version as Android. A bump must redo the SFrame attach ABI comparison (see the comment in `project.yml`); the playout-delay setter is observe-only on this binary
+- ADR-0088 noise suppression: `Calls/CaptureNoiseProcessor.{h,mm}` is the capture post-processing delegate of the shared factory's `RTCDefaultAudioProcessingModule`; switch in `NoiseSuppressionSetting` (`Calls/CaptureNoiseSuppression.swift`)
 - `WebRTCPeerConnection.swift` wraps `RTCPeerConnectionFactory` + `RTCPeerConnection`
 - `LocalCameraCapture.swift` wraps `RTCCameraVideoCapturer` (front camera, 720p/30fps)
 - `CallSession.swift` — 1x1 P2P call session

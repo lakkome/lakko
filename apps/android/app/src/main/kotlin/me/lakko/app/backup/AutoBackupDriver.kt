@@ -5,11 +5,14 @@ package me.lakko.app.backup
 
 import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import me.lakko.app.contacts.AcceptedContactsStore
 import uniffi.lakko_ffi_uniffi.BackupContactRecord
 import uniffi.lakko_ffi_uniffi.BackupOwnPredecessor
@@ -37,13 +40,20 @@ public class AutoBackupDriver internal constructor(
     private val scope: CoroutineScope,
     private val inputs: Inputs,
     private val uploader: Uploader,
+    /**
+     * Walk 3, W3-R4 — where a run does its work. The assembly (received
+     * profiles decoded through the FFI, the synced state, the seal) is not
+     * main-thread work: the driver is started from a Compose effect, whose
+     * scope dispatches on the UI thread. Injected so a test can see it.
+     */
+    private val workDispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) {
 
     public constructor(
         applicationContext: Context,
         scope: CoroutineScope,
         inputs: Inputs,
-    ) : this(applicationContext, scope, inputs, CachedPhraseUploader)
+    ) : this(applicationContext, scope, inputs, CachedPhraseUploader, Dispatchers.Default)
 
     /** One upload, as the driver asks for it. Production seals with the cached
      *  phrase and PUTs ([CachedPhraseUploader]); a test records the request. */
@@ -120,8 +130,12 @@ public class AutoBackupDriver internal constructor(
         loop = null
     }
 
-    /** One pass. Exposed so a test can drive it without a clock. */
-    public suspend fun runOnce(nowMs: Long = System.currentTimeMillis()): Outcome {
+    /** One pass. Exposed so a test can drive it without a clock. Runs on
+     *  [workDispatcher], never on the caller's (UI) thread. */
+    public suspend fun runOnce(nowMs: Long = System.currentTimeMillis()): Outcome =
+        withContext(workDispatcher) { runOnceHere(nowMs) }
+
+    private suspend fun runOnceHere(nowMs: Long): Outcome {
         val accountIdB64 = inputs.accountIdB64() ?: return Outcome.NOT_READY
 
         // The ids an upload would carry: what this device holds plus what a

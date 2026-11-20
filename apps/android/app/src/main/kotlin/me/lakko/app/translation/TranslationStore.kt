@@ -39,12 +39,31 @@ public data class StoredTranscript(
     val noSpeech: Boolean = false,
 )
 
+/** A language picked for a conversation (`Not X?` or the picker), and when. */
+@Serializable
+public data class StoredLanguagePick(val tag: String, val atMs: Long)
+
+/** One message's confidently detected language. */
+@Serializable
+public data class StoredMessageLanguage(val messageId: Long, val tag: String)
+
+/**
+ * What this device knows of a conversation's languages (ADR-0082 note of
+ * 2026-11-15), in the canonical bounded form of the shared rule
+ * (`ConversationLanguages`), changed only through it.
+ */
+@Serializable
+public data class StoredLanguages(
+    val picks: List<StoredLanguagePick> = emptyList(),
+    val detections: List<StoredMessageLanguage> = emptyList(),
+)
+
 @Serializable
 public data class ConversationChoices(
     /** UX 3.7 — `Translate automatically`. */
     val autoTranslate: Boolean = false,
-    /** UX 3.4 — the source language last chosen for translation here. */
-    val translationSource: String? = null,
+    /** UX 3.4 — the languages picked and confidently detected here. */
+    val languages: StoredLanguages = StoredLanguages(),
     /** UX 4.4 — the language last chosen for transcription here. */
     val transcriptLanguage: String? = null,
     /** UX 3.6 — languages whose bar was dismissed here (canonical tags). */

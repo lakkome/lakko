@@ -28,11 +28,14 @@ import { t } from "../l10n";
 import { Avatar } from "../ui/Avatar";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { Icon } from "../ui/icons";
+import { InfoRowButton } from "../ui/LabelledRows";
 import { PushedScreen } from "../ui/PushedScreen";
 import { channelAvatarKey } from "./channel-avatar";
+import { readerDeviceSections } from "./channel-subscription-plan";
 import {
   channelAvatarOf,
   channelHandleOf,
+  channelReaderDeviceRoleOf,
   channelRoleOf,
   channelSubscriberCount,
   channelVisibilityOf,
@@ -76,25 +79,31 @@ export function ChannelInfo(props: {
   const publishes = (): boolean => role() === "owner" || role() === "publisher";
   const facts = (): ReturnType<typeof channelFacts> => channelFacts(props.id);
   const handle = (): string | null => channelHandleOf(props.id);
-  // ADR-0089 step 5: a channel moderators removed.
+  // ADR-0098 step 5: a channel moderators removed.
   const removalLine = (): ReturnType<typeof channelRemovalLine> => channelRemovalLine(props.id);
   const removed = (): boolean => removalLine() !== null;
 
   const sections = createMemo((): readonly InfoSection[] => {
     const r = role();
     if (r === null) return [];
-    // ADR-0089 step 3: a suspended account invites nobody; step 5: a
-    // removed channel offers nothing that reaches the service.
+    // ADR-0098 step 3: a suspended account invites nobody; step 5: a
+    // removed channel offers nothing that reaches the service. 2026-11-13
+    // (UX second-device.md section 4a): on a device of the owner or a
+    // publisher that cannot post here, a subscriber's blocks and an empty
+    // exit block.
     return sectionsWhileRemoved(
       sectionsWhileSuspended(
-        channelInfoSections(uiRules(), {
-          role: r,
-          hasHandle: handle() !== null,
-          hasOtherPublishers: channelPublishers(props.id).some((p) => !p.isOwner),
-          // Shown for every role: the switch itself reads the setting and says
-          // when it is off (`settings/MembersCanFindMeSwitch.tsx`).
-          membersOfGroupsAndChannelsOn: true,
-        }),
+        readerDeviceSections(
+          channelInfoSections(uiRules(), {
+            role: r,
+            hasHandle: handle() !== null,
+            hasOtherPublishers: channelPublishers(props.id).some((p) => !p.isOwner),
+            // Shown for every role: the switch itself reads the setting and says
+            // when it is off (`settings/MembersCanFindMeSwitch.tsx`).
+            membersOfGroupsAndChannelsOn: true,
+          }),
+          channelReaderDeviceRoleOf(props.id),
+        ),
         accountSuspended(),
       ),
       removed(),
@@ -200,7 +209,7 @@ export function ChannelInfo(props: {
 
   const [handleCopy, setHandleCopy] = createSignal<"idle" | "copied" | "failed">("idle");
 
-  /** ADR-0089 UX 2.1 - report the channel from its info; `Unsubscribe` in
+  /** ADR-0098 UX 2.1 - report the channel from its info; `Unsubscribe` in
    *  the sheet ends the subscription as the control below does, without a
    *  second question (the checkbox is the choice). */
   function reportChannel(): void {
@@ -291,7 +300,7 @@ export function ChannelInfo(props: {
               disabled={uploading() !== null}
               onClick={() => setMenuOpen((v) => !v)}
             >
-              <Icon name="pencil" size={16} />
+              <Icon name="pencil" size={20} />
             </button>
           </Show>
           <Show when={menuOpen()}>
@@ -356,7 +365,7 @@ export function ChannelInfo(props: {
                     setEditing(true);
                   }}
                 >
-                  <Icon name="pencil" size={16} />
+                  <Icon name="pencil" size={20} />
                 </button>
               </Show>
             </div>
@@ -457,14 +466,14 @@ export function ChannelInfo(props: {
       <Show when={!removed()}>
       <section class="lk-card">
         <Show when={has("invite-people")}>
-          <InfoRow icon="userPlus" title={t("channels.info.invite_people")} onOpen={() => setScreen("invite-people")} />
+          <InfoRow icon="person-plus" title={t("channels.info.invite_people")} onOpen={() => setScreen("invite-people")} />
         </Show>
         <Show when={has("invite-link")}>
           <InfoRow icon="link" title={t("chat.invite_link.label")} onOpen={() => setScreen("invite-link")} />
         </Show>
         <Show when={has("subscribers")}>
           <InfoRow
-            icon="groups"
+            icon="person-2"
             title={t("channels.subscribers.title")}
             value={publishes() && typeof count() === "number" ? (count() ?? 0).toLocaleString() : undefined}
             onOpen={() => setScreen("subscribers")}
@@ -472,7 +481,7 @@ export function ChannelInfo(props: {
         </Show>
         <Show when={has("admins")}>
           <InfoRow
-            icon="user"
+            icon="person"
             title={t("channels.info.publishers")}
             value={String(channelPublishers(props.id).length)}
             onOpen={() => setScreen("publishers")}
@@ -480,7 +489,7 @@ export function ChannelInfo(props: {
         </Show>
         <Show when={has("reactions")}>
           <InfoRow
-            icon="heart"
+            icon="face-smiling"
             title={t("group_reactions.title")}
             value={allowedSummary(channelAllowedReactions(props.id))}
             onOpen={() => setScreen("reactions")}
@@ -488,7 +497,7 @@ export function ChannelInfo(props: {
         </Show>
         <Show when={has("group-type")}>
           <InfoRow
-            icon="eye"
+            icon="person-2"
             title={t("channel_type.who_can_subscribe")}
             value={channelVisibilityOf(props.id) === "public" ? t("group_type.public") : t("group_type.private")}
             onOpen={() => setScreen("type")}
@@ -501,7 +510,7 @@ export function ChannelInfo(props: {
         <MembersCanFindMeSwitch kind="channel" idHex={props.id} />
       </Show>
 
-      {/* ADR-0089 UX 2.1 - a subscriber reports the channel (the shared
+      {/* ADR-0098 UX 2.1 - a subscriber reports the channel (the shared
           rule), before Unsubscribe. */}
       <Show when={has("report")}>
         <section class="lk-card danger">
@@ -522,7 +531,7 @@ export function ChannelInfo(props: {
         <section class="lk-card danger">
           <div class="lk-card-row">
             <span class="lk-card-row-icon">
-              <Icon name="logout" size={18} />
+              <Icon name="logout" size={20} />
             </span>
             <div class="lk-card-row-body">
               <span class="lk-card-row-title">{t("channels.unsubscribe.action")}</span>
@@ -539,7 +548,7 @@ export function ChannelInfo(props: {
         <section class="lk-card danger">
           <div class="lk-card-row">
             <span class="lk-card-row-icon">
-              <Icon name="trash" size={18} />
+              <Icon name="trash" size={20} />
             </span>
             <div class="lk-card-row-body">
               <span class="lk-card-row-title">{t("channels.delete.control")}</span>
@@ -585,27 +594,8 @@ export function ChannelInfo(props: {
   );
 }
 
-/** One row of the info's actions: icon, title, the value at the end, opens a
- *  pushed screen. */
-function InfoRow(props: {
-  readonly icon: Parameters<typeof Icon>[0]["name"];
-  readonly title: string;
-  readonly value?: string | undefined;
-  readonly onOpen: () => void;
-}): JSX.Element {
-  return (
-    <button type="button" class="lk-card-row lk-card-row-button" onClick={() => props.onOpen()}>
-      <span class="lk-card-row-icon">
-        <Icon name={props.icon} size={18} />
-      </span>
-      <span class="lk-card-row-body">
-        <span class="lk-card-row-title">{props.title}</span>
-      </span>
-      <Show when={props.value}>{(v) => <span class="lk-card-row-sub">{v()}</span>}</Show>
-      <Icon name="chevron" size={16} />
-    </button>
-  );
-}
+/** One row of the info's actions, named by its title and value. */
+const InfoRow = InfoRowButton;
 
 /** The screen a channel's info pushed, drawn by the conversation view over
  *  the whole pane (UX 12.1). */

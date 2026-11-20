@@ -73,6 +73,47 @@ pub fn encode_pairing_qr(
     .map_err(|e| JsError::new(&e))
 }
 
+/// G-56 — the pairing payload of [`encode_pairing_qr`] carrying this
+/// device's self-removal proof (`signDeviceGroupSelfRemoval`, exactly 137
+/// bytes) for `key_package`; an empty proof is the plain payload. Used by a
+/// device already in the account's DeviceGroup that pairs again under the
+/// same device identity: the confirming device replaces its leaf in one
+/// commit (`replaceDeviceAt`) once `deviceGroupSelfRemovalCovers` holds.
+///
+/// # Errors
+///
+/// `JsError` on a wrong-length handle, rendezvous pseudonym or proof, or a
+/// `device_card_envelope` longer than 270 bytes.
+#[wasm_bindgen(js_name = encodePairingQrWithSelfRemovalProof)]
+pub fn encode_pairing_qr_with_self_removal_proof(
+    login_handle: &[u8],
+    key_package: &[u8],
+    rendezvous_pseudonym: &[u8],
+    self_removal_proof: &[u8],
+    device_card_envelope: Option<Vec<u8>>,
+) -> Result<Vec<u8>, JsError> {
+    let handle: inner::LoginHandle = login_handle.try_into().map_err(|_| {
+        JsError::new(&format!(
+            "login_handle must be {} bytes",
+            inner::LOGIN_HANDLE_LEN
+        ))
+    })?;
+    let rendezvous: inner::RendezvousPseudonym = rendezvous_pseudonym.try_into().map_err(|_| {
+        JsError::new(&format!(
+            "rendezvous_pseudonym must be {} bytes",
+            inner::RENDEZVOUS_PSEUDONYM_LEN
+        ))
+    })?;
+    inner::encode_with_self_removal_proof(
+        &handle,
+        key_package,
+        &rendezvous,
+        device_card_envelope.as_deref().unwrap_or_default(),
+        self_removal_proof,
+    )
+    .map_err(|e| JsError::new(&e.to_string()))
+}
+
 /// Confirming side: parse the wire bytes, verify the embedded login
 /// handle matches `expected_login_handle` (the handle of the local
 /// account's own username), return a structured [`DecodedPairingQr`]
@@ -180,15 +221,24 @@ fn decoded_card(envelope: &[u8]) -> Option<WasmDeviceCard> {
     decode_device_card(envelope).ok().map(Into::into)
 }
 
-/// ADR-0081 amendment — a DeviceGroup rejoin knock: the pairing payload plus
-/// the device's self-removal proof (`signDeviceGroupSelfRemoval`, exactly 137
-/// bytes) for `keyPackage`.
+/// ADR-0081 amendment — a DeviceGroup rejoin knock: the pairing payload plus,
+/// when the journal names an epoch, the device's self-removal proof
+/// (`signDeviceGroupSelfRemoval`, exactly 137 bytes) for `keyPackage`; an
+/// empty proof for none.
+///
+/// **Sealed (G-55).** `accountIdentity` is the account identity the
+/// DeviceGroup id derives from (the one `deviceGroupIdFor` takes: the oldest
+/// own predecessor after a rotation, else the current one); the row is sealed
+/// under a key derived from its seed and padded, so the Delivery Service reads
+/// neither the login handle nor the KeyPackage. Open it with
+/// [`open_rejoin_knock`].
 ///
 /// # Errors
 ///
 /// `JsError` on a wrong-length handle, rendezvous pseudonym or proof.
 #[wasm_bindgen(js_name = encodeRejoinKnock)]
 pub fn encode_rejoin_knock(
+    account_identity: &crate::mls::Identity,
     login_handle: &[u8],
     key_package: &[u8],
     rendezvous_pseudonym: &[u8],
@@ -206,13 +256,69 @@ pub fn encode_rejoin_knock(
             inner::RENDEZVOUS_PSEUDONYM_LEN
         ))
     })?;
-    inner::encode_rejoin_knock(&handle, key_package, &rendezvous, self_removal_proof)
+    let seed = account_identity.mls_identity().ed25519_seed_bytes();
+    inner::encode_rejoin_knock(&seed, &handle, key_package, &rendezvous, self_removal_proof)
+        .map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// A sibling's side of [`encode_rejoin_knock`] (G-55): open a row read from
+/// the account's DeviceGroup knock queue under `accountIdentity` (the same
+/// identity `deviceGroupIdFor` takes), then decode the pairing payload bound
+/// to `expectedLoginHandle`.
+///
+/// # Errors
+///
+/// `JsError` when the row is not a sealed knock, does not open under this
+/// account's key, or its payload does not decode or names another handle.
+#[wasm_bindgen(js_name = openRejoinKnock)]
+pub fn open_rejoin_knock(
+    account_identity: &crate::mls::Identity,
+    row: &[u8],
+    expected_login_handle: &[u8],
+) -> Result<DecodedPairingQr, JsError> {
+    let handle: inner::LoginHandle = expected_login_handle.try_into().map_err(|_| {
+        JsError::new(&format!(
+            "expected_login_handle must be {} bytes",
+            inner::LOGIN_HANDLE_LEN
+        ))
+    })?;
+    let seed = account_identity.mls_identity().ed25519_seed_bytes();
+    inner::open_rejoin_knock(&seed, row, &handle)
+        .map(|inner| DecodedPairingQr { inner })
         .map_err(|e| JsError::new(&e.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// G-56 — the plain payload with a self-removal proof decodes with it.
+    #[test]
+    fn a_payload_with_a_self_removal_proof_round_trips() {
+        let handle = [0x11u8; 32];
+        let proof = vec![0x5au8; lakko_mls::SELF_REMOVAL_PROOF_LEN];
+        let wire = encode_pairing_qr_with_self_removal_proof(
+            &handle, &[7u8; 64], &[9u8; 32], &proof, None,
+        )
+        .unwrap();
+        let got = decode_pairing_qr(&wire, &handle).unwrap();
+        assert_eq!(got.self_removal_proof(), Some(proof));
+    }
+
+    /// G-55: a knock built here opens under the same lineage identity and
+    /// carries no login handle in the clear. (A refusal builds a JS error,
+    /// which a host test cannot construct; the refusals are pinned in
+    /// lakko-mls and on the UniFFI surface.)
+    #[test]
+    fn a_rejoin_knock_round_trips_under_its_lineage_identity() {
+        let lineage = crate::mls::Identity::from_seed(&[0x21; 64]).unwrap();
+        let handle = [0x11u8; 32];
+        let row = encode_rejoin_knock(&lineage, &handle, &[7u8; 64], &[9u8; 32], &[]).unwrap();
+        assert!(!row.windows(32).any(|w| w == handle.as_slice()));
+        let got = open_rejoin_knock(&lineage, &row, &handle).unwrap();
+        assert_eq!(got.key_package(), vec![7u8; 64]);
+        assert_eq!(got.self_removal_proof(), None);
+    }
 
     #[test]
     fn encode_then_decode_round_trips_under_the_same_handle() {

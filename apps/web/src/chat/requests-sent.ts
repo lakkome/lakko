@@ -5,8 +5,11 @@
  * `docs/ux/group-and-channel-privacy.md` section 6.2 — the requests to join
  * this device sent, kept until the group appears (joined) or the person
  * dismisses it. A request cannot be withdrawn and is never said to be refused:
- * under 7 days it is "Waiting for an admin.", after that "No answer yet." with
- * `Ask again`. A device asks once per group per 7 days.
+ * under a day it is "Waiting for an admin.", after that "No answer yet." with
+ * `Ask again`. A device asks once per group per day (the rule is
+ * `./ask-again.ts`, shared with the `/g/` page and the publisher card).
+ * Recorded by a request from search (`search/ConversationCard.tsx`) and by one
+ * from a `/g/` link (`routes/JoinGroup.tsx`).
  *
  * One sealed row per account (`storage/account-kv.ts`).
  */
@@ -15,20 +18,28 @@ import { createSignal } from "solid-js";
 import { registerAccountMemory } from "../auth/account-memory";
 import type { AvatarData } from "../profile/avatar-model";
 import { loadAccountJson, saveAccountJson } from "../storage/account-kv";
+import { ASK_AGAIN_AFTER_MS, askAgainState, type AskAgainState } from "./ask-again";
 
-/** A request may be asked again after this long (UX 6.2). */
-export const ASK_AGAIN_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+/** A request may be asked again after this long (UX 6.2): a day. */
+export { ASK_AGAIN_AFTER_MS };
 
 export interface SentRequest {
   /** The group id, base64. */
   readonly idB64: string;
+  /** The group's name; empty when a link carried none. */
   readonly name: string;
+  /** The group's `@name` without the `@`; empty when unknown (a link). */
   readonly handle: string;
   readonly sentAtMs: number;
   readonly avatar: AvatarData | null;
-  /** The group's knock public key and its version, for `Ask again`. */
+  /** The group's knock public key and its version, for `Ask again`; empty
+   *  when a link carried none. */
   readonly knockKeyB64: string;
   readonly knockVersion: number;
+  /** A request from a `/g/` link: the capability the link opened to and its
+   *  ledger id, base64, so `Ask again` goes through the link again. */
+  readonly capabilityWireB64?: string | undefined;
+  readonly blobIdB64?: string | undefined;
 }
 
 const ROW = "requests-sent";
@@ -37,13 +48,13 @@ const [rows, setRows] = createSignal<readonly SentRequest[]>([]);
 let account: string | null = null;
 
 /** The line a request shows (UX 6.2). */
-export function sentRequestState(r: SentRequest, nowMs: number): "waiting" | "no-answer" {
-  return nowMs - r.sentAtMs >= ASK_AGAIN_AFTER_MS ? "no-answer" : "waiting";
+export function sentRequestState(r: SentRequest, nowMs: number): AskAgainState {
+  return askAgainState(r.sentAtMs, nowMs);
 }
 
 /** Whether this device may ask again now. */
 export function mayAskAgain(r: SentRequest | undefined, nowMs: number): boolean {
-  return r === undefined || nowMs - r.sentAtMs >= ASK_AGAIN_AFTER_MS;
+  return r === undefined || askAgainState(r.sentAtMs, nowMs) === "no-answer";
 }
 
 function decode(raw: unknown): SentRequest[] {

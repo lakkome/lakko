@@ -4,7 +4,8 @@
 // LakkoSFrameAttach — Objective-C++ shim that attaches the
 // `apps/shared/sframe-bridge` LakkoFrameEncryptor /
 // LakkoFrameDecryptor (G3-sframe-native N-3) to a libwebrtc
-// `RTCRtpSender` / `RTCRtpReceiver` from stasel/WebRTC 125.0.0
+// `RTCRtpSender` / `RTCRtpReceiver` from webrtc-sdk 125.6422.07
+// (stasel/WebRTC 125.0.0 until 2026-11-09)
 // on iOS (G3-sframe-native N-4).
 //
 // This header is the ONLY surface the Swift call layer ever
@@ -24,7 +25,7 @@
 //                              FrameEncryptorInterface>)encryptor
 //
 // (and a symmetric `-[RTCRtpReceiver setFrameDecryptor:]`).
-// stasel/WebRTC 125.0.0 is an upstream-binary repackaging of the
+// webrtc-sdk 125.6422.07, like stasel/WebRTC 125.0.0 before it, builds the
 // branch-heads/6422 milestone, so the same selector ships in the
 // .framework binary; what is NOT pinned is whether the public
 // Obj-C header re-exports it. The selector probe in
@@ -100,6 +101,41 @@ typedef NS_ENUM(uint8_t, LakkoSFrameMediaCodec) {
     LakkoSFrameMediaCodecOpus = 2,
 };
 
+/// The keying state of one call (`lakko::sframe::LakkoCallKeys`),
+/// shared by every encryptor and decryptor attached for that call. A
+/// mid-call rekey (G-18, ADR-0029) is one [-rekeyWithSeed:nowMs:overlapMs:]
+/// on it: every encryptor seals under the new key from its next frame and
+/// every decryptor opens under the new key, then the previous one until
+/// the overlap window is pruned. There is nothing per sender or receiver
+/// to find, which is the point: a rekey that walked
+/// `RTCPeerConnection.senders` reached no encryptor, because that
+/// property builds new wrapper objects on every read (seen on an iPhone,
+/// 2026-11-10).
+NS_SWIFT_NAME(SFrameCallKeys)
+@interface LakkoSFrameCallKeys : NSObject
+
+/// Keys from the call's 32-byte seed, or nil for any other length.
++ (nullable instancetype)keysWithSeed:(NSData *_Nullable)seed
+    NS_SWIFT_NAME(make(seed:));
+
+- (instancetype)init NS_UNAVAILABLE;
+
+/// Rotate the call to the new epoch's 32-byte `seed`, keeping the
+/// previous key until `nowMs + clamp(overlapMs)`. `NO` on a bad seed
+/// length, in which case nothing changes (still E2EE, invariant #4).
+- (BOOL)rekeyWithSeed:(NSData *_Nullable)seed
+                nowMs:(uint64_t)nowMs
+            overlapMs:(uint64_t)overlapMs
+    NS_SWIFT_NAME(rekey(seed:nowMs:overlapMs:));
+
+/// Drop the previous key once it has expired at `nowMs`.
+- (void)pruneAtMs:(uint64_t)nowMs NS_SWIFT_NAME(prune(nowMs:));
+
+/// How many successful rekeys these keys have had.
+@property(nonatomic, readonly) uint64_t generation;
+
+@end
+
 @interface LakkoSFrameAttach : NSObject
 
 /// One-shot capability probe — runs once at app startup
@@ -117,8 +153,8 @@ typedef NS_ENUM(uint8_t, LakkoSFrameMediaCodec) {
 /// Idempotent — repeated calls return the cached result.
 + (BOOL)bootProbe NS_SWIFT_NAME(bootProbe());
 
-/// Build a fresh `LakkoFrameEncryptor` for `seed` + `localLeaf`,
-/// then attach it to `sender` via the non-public
+/// Build a fresh `LakkoFrameEncryptor` on the call's `keys` for
+/// `localLeaf`, then attach it to `sender` via the non-public
 /// `setFrameEncryptor:` selector. Holds a strong retain on the
 /// wrapper for the lifetime of the sender; detaching is the
 /// caller's job at call-end via [-detachFromSender:].
@@ -143,12 +179,12 @@ typedef NS_ENUM(uint8_t, LakkoSFrameMediaCodec) {
 /// Returns `LakkoSFrameAttachStatusOK` on success.
 + (LakkoSFrameAttachStatus)attachEncryptorToSender:
                               (RTCRtpSender * _Nullable)sender
-                                                seed:(NSData *_Nullable)seed
+                                                keys:(LakkoSFrameCallKeys *_Nullable)keys
                                            localLeaf:(uint32_t)localLeaf
                                          streamIndex:(uint8_t)streamIndex
-    NS_SWIFT_NAME(attachEncryptor(toSender:seed:localLeaf:streamIndex:));
+    NS_SWIFT_NAME(attachEncryptor(toSender:keys:localLeaf:streamIndex:));
 
-/// Build a fresh `LakkoFrameDecryptor` for `seed`, then attach
+/// Build a fresh `LakkoFrameDecryptor` on the call's `keys`, then attach
 /// it to `receiver` via the non-public `setFrameDecryptor:`
 /// selector. Per-sender ParticipantKey derivation happens lazily
 /// inside the decryptor as frames arrive (see
@@ -165,15 +201,15 @@ typedef NS_ENUM(uint8_t, LakkoSFrameMediaCodec) {
 /// media-type or MID signal.
 + (LakkoSFrameAttachStatus)attachDecryptorToReceiver:
                               (RTCRtpReceiver * _Nullable)receiver
-                                                  seed:(NSData *_Nullable)seed
-    NS_SWIFT_NAME(attachDecryptor(toReceiver:seed:));
+                                                  keys:(LakkoSFrameCallKeys *_Nullable)keys
+    NS_SWIFT_NAME(attachDecryptor(toReceiver:keys:));
 
 /// Tell the encryptor attached to `sender` which codec the sender
 /// negotiated (ADR-0071). libwebrtc hands the encryptor a media type
 /// and no codec, so the Swift side reads it from the sender (the first
 /// entry of `sender.parameters.codecs` once the answer is applied) and
-/// calls this after every negotiation that could change it. A rekey
-/// keeps the codec; a re-attach does not.
+/// calls this after every negotiation that could change it. A rekey of
+/// the call keys keeps the codec; a re-attach does not.
 ///
 /// Until this is called a video encryptor seals with nothing in the
 /// clear: the frames still open, but a receiver that has no generic
@@ -203,54 +239,14 @@ typedef NS_ENUM(uint8_t, LakkoSFrameMediaCodec) {
 + (LakkoSFrameMediaCodec)codecForName:(NSString * _Nullable)codecName
     NS_SWIFT_NAME(codec(forName:));
 
-/// Mid-call rekey (G-18, ADR-0029) — rotate the encryptor attached to
-/// `sender` to the new MLS epoch's 32-byte `seed`, keeping the SAME
-/// local leaf. The encryptor seals only under the CURRENT epoch, so a
-/// rekey is a straight key swap (no overlap on the send side — already-
-/// sealed frames are already bytes in libwebrtc's pipeline).
-///
-/// Returns `YES` on success, and also `YES` when the sender was never
-/// SFrame-armed (a benign no-op). Returns `NO` only when the encryptor
-/// is present but the rotation failed (bad seed length / HKDF): the
-/// bridge then RETAINS the current epoch's key, so media stays E2EE —
-/// never plaintext (invariant #4). The caller keeps the call up and
-/// logs; a rekey failure is an availability event, not a downgrade.
-+ (BOOL)rekeyEncryptorOnSender:(RTCRtpSender * _Nullable)sender
-                          seed:(NSData * _Nullable)seed
-    NS_SWIFT_NAME(rekeyEncryptor(onSender:seed:));
-
-/// Mid-call rekey (G-18, ADR-0029) — rotate the decryptor attached to
-/// `receiver` to the new MLS epoch's 32-byte `seed`, retaining the
-/// PREVIOUS key until `nowMs + clamp(overlapMs)` so in-flight frames
-/// sealed under the old epoch still open. `pruneDecryptorOnReceiver:`
-/// drops the retained key once the window elapses.
-///
-/// Same return contract as [+rekeyEncryptorOnSender:seed:]: `YES` on
-/// success or a no-op (receiver never armed); `NO` only when a present
-/// decryptor's rotation failed (the ring keeps its current + previous
-/// keys — still E2EE).
-+ (BOOL)rekeyDecryptorOnReceiver:(RTCRtpReceiver * _Nullable)receiver
-                            seed:(NSData * _Nullable)seed
-                           nowMs:(uint64_t)nowMs
-                       overlapMs:(uint64_t)overlapMs
-    NS_SWIFT_NAME(rekeyDecryptor(onReceiver:seed:nowMs:overlapMs:));
-
-/// Mid-call rekey (G-18, ADR-0029) — close the overlap window: drop the
-/// decryptor's retained previous key once it has expired at `nowMs`
-/// (seed-boundary forward secrecy). No-op if the receiver was never
-/// armed or the window has not yet elapsed.
-+ (void)pruneDecryptorOnReceiver:(RTCRtpReceiver * _Nullable)receiver
-                           nowMs:(uint64_t)nowMs
-    NS_SWIFT_NAME(pruneDecryptor(onReceiver:nowMs:));
-
 /// Drop the encryptor that was attached to `sender` by
-/// [+attachEncryptorToSender:seed:localLeaf:]. No-op if the
+/// [+attachEncryptorToSender:keys:localLeaf:streamIndex:]. No-op if the
 /// sender was never attached.
 + (void)detachFromSender:(RTCRtpSender * _Nullable)sender
     NS_SWIFT_NAME(detach(fromSender:));
 
 /// Drop the decryptor that was attached to `receiver` by
-/// [+attachDecryptorToReceiver:seed:].
+/// [+attachDecryptorToReceiver:keys:].
 + (void)detachFromReceiver:(RTCRtpReceiver * _Nullable)receiver
     NS_SWIFT_NAME(detach(fromReceiver:));
 
@@ -286,13 +282,15 @@ typedef NS_ENUM(NSInteger, LakkoReceiverDelayStatus) {
 /// `nativeRtpReceiver` accessor and called by vtable slot
 /// (`apps/shared/sframe-bridge/receiver-delay.h`, where the evidence for
 /// the slot and the calling convention is written down). That evidence
-/// was read from the binary of stasel/WebRTC 125.0.0, so the setter is
-/// offered only when the loaded WebRTC image IS that binary, by its
-/// Mach-O `LC_UUID`; for any other image the answer is "not available"
-/// and Lakko measures without setting.
+/// was read from the binary of webrtc-sdk/Specs 125.6422.07 (and before
+/// 2026-11-09 from stasel/WebRTC 125.0.0, which the app linked until then),
+/// so the setter is offered only when the loaded WebRTC image IS that
+/// binary, by its Mach-O `LC_UUID`; for any other image the answer is "not
+/// available" and Lakko measures without setting.
 @interface LakkoReceiverDelay : NSObject
 
-/// The WebRTC package version the evidence was gathered for.
+/// The WebRTC package version the evidence was gathered for
+/// (webrtc-sdk/Specs).
 @property(class, nonatomic, readonly) NSString *verifiedPackageVersion;
 
 /// The `LC_UUID` of every slice of that package the evidence covers
@@ -315,7 +313,7 @@ typedef NS_ENUM(NSInteger, LakkoReceiverDelayStatus) {
 
 /// Set the minimum playout delay of `receiver` to `delayMs` milliseconds;
 /// 0 gives the delay back to the engine. The receiver must carry the
-/// decryptor [LakkoSFrameAttach attachDecryptorToReceiver:seed:]
+/// decryptor [LakkoSFrameAttach attachDecryptorToReceiver:keys:]
 /// attached, at least for the first set of the process: the probe asks
 /// the engine for it and compares.
 ///

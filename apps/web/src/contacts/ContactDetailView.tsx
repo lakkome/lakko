@@ -138,7 +138,7 @@ export interface ContactDetailViewProps {
 
 export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   const profiles = useProfiles();
-  /** ADR-0089 section 6 - the block register's answer for this person. */
+  /** ADR-0098 section 6 - the block register's answer for this person. */
   const blocked = (): boolean => isBlockedKeyB64(props.personKeyB64);
   const [blockBusy, setBlockBusy] = createSignal(false);
   const [blockError, setBlockError] = createLiveText();
@@ -189,7 +189,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   // Which blocks this screen holds - the shared rule
   // (`chat/conversation-info.ts` -> `crates/lakko-ui-rules`), not this file.
   const sections = createMemo(() =>
-    // ADR-0089 step 3: a suspended account adds no contact and calls nobody.
+    // ADR-0098 step 3: a suspended account adds no contact and calls nobody.
     sectionsWhileSuspended(
       personInfoSections(uiRules(), {
         membershipEnded: props.membershipEnded,
@@ -320,7 +320,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
                 props.busy() && messageState() === "start"
                   ? t("common.creating")
                   : t("contacts.detail.message"),
-              icon: "chat" as IconName,
+              icon: "chat-fill" as IconName,
               disabled: props.busy() || messageState() === "unavailable",
               title: unavailableLine() ?? undefined,
               run: () => props.onMessage(),
@@ -331,20 +331,20 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
     // is gated on `is_active()` and raises, so the tiles would fail closed
     // anyway; a control that always errors is the shape 6.1.1 rejects, and a
     // call control asserts a live E2EE session there is not.
-    // ADR-0089 step 3: a suspended account places no call.
+    // ADR-0098 step 3: a suspended account places no call.
     const calls = !sections().includes("call") || accountSuspended()
       ? []
       : [
           {
             label: t("chat.call.voice"),
-            icon: "phone" as IconName,
+            icon: "phone-fill" as IconName,
             disabled: props.busy() || noChat,
             title: callTitle,
             run: () => props.onCall(false),
           },
           {
             label: t("chat.media.video"),
-            icon: "video" as IconName,
+            icon: "video-fill" as IconName,
             disabled: props.busy() || noChat,
             title: callTitle,
             run: () => props.onCall(true),
@@ -365,7 +365,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
               style={{ "align-self": "flex-start" }}
               onClick={() => props.onBack()}
             >
-              <Icon name="back" size={16} />
+              <Icon name="chevron-back" size={20} />
               {t("nav.contacts")}
             </button>
           }
@@ -379,7 +379,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
               title={t("common.back")}
               onClick={() => back()()}
             >
-              <Icon name="back" size={20} />
+              <Icon name="chevron-back" size={24} />
             </button>
           )}
         </Show>
@@ -396,11 +396,11 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
           <Show when={resolved().usernameNotVerified}>
             <div class="lk-meta">{t("contacts.detail.username_not_verified")}</div>
           </Show>
-          {/* ADR-0089 UX 1.4 - a muted line under a blocked person's name. */}
+          {/* ADR-0098 UX 1.4 - a muted line under a blocked person's name. */}
           <Show when={blocked()}>
             <div class="lk-meta">{t("block.card_line")}</div>
           </Show>
-          {/* ADR-0089 step 4, UX 3 - a muted line under a suspended person's
+          {/* ADR-0098 step 4, UX 3 - a muted line under a suspended person's
               name; a block's line wins. */}
           <Show when={personMark(blocked(), isSuspendedKeyB64(props.personKeyB64)) === "suspended"}>
             <div class="lk-meta">{t("suspended.card_line")}</div>
@@ -421,7 +421,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
                   title={a.title}
                   onClick={a.run}
                 >
-                  <Icon name={a.icon} size={22} />
+                  <Icon name={a.icon} size={24} />
                   <span>{a.label}</span>
                 </button>
               )}
@@ -441,7 +441,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
         <section class="lk-card">
           <div class="lk-card-row">
             <span class="lk-card-row-icon">
-              <Icon name="shield" size={18} />
+              <Icon name="shield-check" size={20} />
             </span>
             <div class="lk-card-row-body">
               <span class="lk-card-row-title">{t("contacts.safety.title")}</span>
@@ -491,7 +491,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
           <section class="lk-card">
             <div class="lk-card-row">
               <span class="lk-card-row-icon">
-                <Icon name="pencil" size={18} />
+                <Icon name="pencil" size={20} />
               </span>
               <div class="lk-card-row-body">
                 <span class="lk-card-row-title">{t("contacts.rename.title")}</span>
@@ -544,7 +544,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
           <section class="lk-card">
             <div class="lk-card-row">
               <span class="lk-card-row-icon">
-                <Icon name="plus" size={18} />
+                <Icon name="person-plus" size={20} />
               </span>
               <div class="lk-card-row-body">
                 <span class="lk-card-row-title">{t("contacts.add_back.control")}</span>
@@ -562,7 +562,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
           </section>
         </Show>
 
-        {/* ADR-0089 UX 1.1 / 2.1 - the danger block: Report, then Block or
+        {/* ADR-0098 UX 1.1 / 2.1 - the danger block: Report, then Block or
             Unblock, then Remove contact (the shared rule's order). */}
         <Show when={sections().includes("report")}>
           <section class="lk-card danger">
@@ -583,7 +583,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
           <section class="lk-card danger">
             <div class="lk-card-row">
               <span class="lk-card-row-icon">
-                <Icon name="shieldAlert" size={18} />
+                <Icon name="shield-exclamation" size={18} />
               </span>
               <div class="lk-card-row-body">
                 <span class="lk-card-row-title">
@@ -610,7 +610,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
           <section class="lk-card danger">
             <div class="lk-card-row">
               <span class="lk-card-row-icon">
-                <Icon name="trash" size={18} />
+                <Icon name="person-minus" size={20} />
               </span>
               <div class="lk-card-row-body">
                 <span class="lk-card-row-title">{t("contacts.remove.control")}</span>
@@ -647,7 +647,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
           <section class="lk-card danger">
             <div class="lk-card-row">
               <span class="lk-card-row-icon">
-                <Icon name="trash" size={18} />
+                <Icon name="trash" size={20} />
               </span>
               <div class="lk-card-row-body">
                 <span class="lk-card-row-title">{DELETE_CHAT_CONTROL()}</span>

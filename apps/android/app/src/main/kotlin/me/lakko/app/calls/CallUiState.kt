@@ -255,6 +255,32 @@ public class CallUiState(
     }
 
     /**
+     * The call's chat (`docs/ux/calls.md` section 4.1.4, `CallChatModel.kt`),
+     * or `null` on a call that has none (a one-to-one call). Written by the
+     * SFU call adapters when the call starts; its messages go when the call
+     * ends for this device.
+     */
+    private val _callChat = MutableStateFlow<CallChatHandle?>(null)
+    public val callChat: StateFlow<CallChatHandle?> = _callChat.asStateFlow()
+
+    /** The call can carry a chat ([handle]), or no longer can (`null`): the
+     *  chat that was there is cleared. */
+    public fun setCallChat(handle: CallChatHandle?) {
+        val before = _callChat.value
+        if (before != null && before !== handle) before.model.clear()
+        _callChat.value = handle
+    }
+
+    /** System back on the call screen: closes the chat panel when it is
+     *  open (`docs/ux/calls.md` section 4.1.4), and says whether it did. */
+    public fun closeCallChatPanel(): Boolean {
+        val model = _callChat.value?.model ?: return false
+        if (!model.panelOpen.value) return false
+        model.closePanel()
+        return true
+    }
+
+    /**
      * Who holds the floor and who held it last, as the stage of the Focus
      * layout reads it. Written by [setSpeech]; [StageSpeech.None] until a level
      * has been heard, in which case the stage falls back to the roster.
@@ -271,7 +297,23 @@ public class CallUiState(
     public val speakingWatched: StateFlow<Boolean> = _speakingWatched.asStateFlow()
 
     public fun setSpeakingWatched(watched: Boolean) {
+        speakingWatchers = if (watched) 1 else 0
         _speakingWatched.value = watched
+    }
+
+    /** How many surfaces are showing this call's stage right now. */
+    private var speakingWatchers = 0
+
+    /**
+     * A surface that shows who is on the stage begins ([watching] `true`) or
+     * stops showing it. Counted, because two of them can overlap for a frame:
+     * the call screen and the collapsed call window (`docs/ux/calls.md`
+     * section 4.5.1) hand over in one recomposition whose disposal order is
+     * not this class's to rely on. Main thread only.
+     */
+    public fun watchSpeaking(watching: Boolean) {
+        speakingWatchers = (speakingWatchers + if (watching) 1 else -1).coerceAtLeast(0)
+        _speakingWatched.value = speakingWatchers > 0
     }
 
     /**
@@ -670,6 +712,16 @@ public class CallUiState(
         patch(id) { it.copy(camOn = on) }
     }
 
+    /**
+     * Flip a specific participant's microphone flag, the tile's mute mark
+     * (`docs/ux/group-call-grid.md` 7.2): set for a REMOTE peer from the media
+     * state it said (2026-11-07). Distinct from [setMic], which only ever
+     * touches the local participant. No-op if [id] is unknown.
+     */
+    public fun setParticipantMic(id: String, on: Boolean) {
+        patch(id) { it.copy(micOn = on) }
+    }
+
     /** The id of the only remote participant, when exactly one
      *  exists (the 1×1 case); `null` when alone or in an N-way
      *  call. `CallScreen` gates remote-video rendering on
@@ -740,6 +792,8 @@ public class CallUiState(
             launch { session.localVideoTrack.collect { rebuildFromSession(session) } }
             launch { session.remoteVideoTrack.collect { rebuildFromSession(session) } }
             launch { session.micEnabled.collect { rebuildFromSession(session) } }
+            launch { session.remoteMicOn.collect { rebuildFromSession(session) } }
+            launch { session.remoteCameraOn.collect { rebuildFromSession(session) } }
             launch { session.cameraEnabled.collect { rebuildFromSession(session) } }
             launch { session.e2eeActive.collect { rebuildFromSession(session) } }
             launch { session.rttMs.collect { rebuildFromSession(session) } }
@@ -792,13 +846,20 @@ public class CallUiState(
             ),
         )
         if (connected || remoteTrack != null) {
+            // The mute mark and the camera-off picture from what the other
+            // person said (the `mediaState` call signal, 2026-11-07).
+            val remoteMedia = oneToOneRemoteMedia(
+                remoteHasVideo = remoteTrack != null,
+                remoteCameraOn = session.remoteCameraOn.value,
+                remoteMicOn = session.remoteMicOn.value,
+            )
             roster.add(
                 Participant(
                     id = ONE_TO_ONE_REMOTE_ID,
                     displayName = remoteName,
                     isLocal = false,
-                    micOn = true,
-                    camOn = remoteTrack != null,
+                    micOn = remoteMedia.microphoneOn,
+                    camOn = remoteMedia.cameraOn,
                     quality = QualityTier.Good,
                     speaking = false,
                 ),
@@ -922,6 +983,8 @@ public class CallUiState(
         _callNameControl.value = null
         _ownCallName.value = ""
         _callNameDefault.value = ""
+        // The call's chat is per call: nothing is kept after it.
+        setCallChat(null)
         // A share is per call.
         _screenShare.value = null
         choiceBeforeShare = null

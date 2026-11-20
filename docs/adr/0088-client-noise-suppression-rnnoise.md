@@ -18,7 +18,9 @@
   (`src/noise.rs`), JNI `noise_jni.cc` in `libsframe_jni.so`, the switch
   in the call Settings sheet; Rust tests and Android host unit tests only
   (a fake native suppressor); never run on a device, an emulator or a
-  call, and nothing was heard. iOS is not built.
+  call, and nothing was heard. iOS is not built; on 2026-11-09 the
+  maintainer chose section 5 option 2 (the webrtc-sdk binary and its
+  capture post-processing delegate), built the same day, not yet run in a call.
 - **Date:** 2026-11-07
 - **Context:** the call test of 2026-11-07 (typing and room noise reached
   every participant), the investigation behind it (call-audio report of the
@@ -241,7 +243,10 @@ pinned AAR is built from (`sdk/android/src/jni/pc/external_audio_processor.cc`,
   48 kHz (`SuitableProcessRate`, maximum 48 kHz unless the pipeline caps it
   at 32 kHz, which the voice engine does not). A phone recording at 48 kHz
   therefore gets 48 kHz. **At any other rate, or with more than one channel,
-  the buffer is passed through untouched; there is no resampling.** The
+  the buffer is passed through untouched; there is no resampling.**
+  (Amended 2026-11-10, see the amendment below: a mono stage at 24, 16, 12
+  or 8 kHz is now resampled; other rates and more than one channel still
+  pass through.) The
   format line in the log says which (`capture post-processing format ... Hz,
   ... ch: RNNoise applies when the switch is on` or `... bypassed`).
 
@@ -327,6 +332,36 @@ The recommendation is to ship web, desktop and Android first and to decide
 iOS after the web build has been heard on real calls, since that is also
 when the model question (open question 1) is answered.
 
+**Decided 2026-11-09 (maintainer): option 2.** Checked that day in the
+webrtc-sdk sources (branch `m125_release`): the iOS build exposes the same
+stage as the Android AAR, `RTCDefaultAudioProcessingModule` with a
+`capturePostProcessingDelegate` conforming to
+`RTCAudioCustomProcessingDelegate` (`audioProcessingInitialize`,
+`audioProcessingProcess(audioBuffer:)`, `audioProcessingRelease`), passed to
+`RTCPeerConnectionFactory initWithBypassVoiceProcessing:encoderFactory:decoderFactory:audioProcessingModule:`;
+its Swift package is `webrtc-sdk/Specs`, tag `125.6422.07`, the version the
+Android AAR pins. iOS moves from stasel/WebRTC 125.0.0 to that binary and
+runs `lakko_noise_*` in the capture post-processing delegate, after Apple's
+voice processing, as Android does. The move is gated on re-checking, against
+the new binary's machine code, every assumption the native shim makes about
+the old one: the frame encryptor and decryptor attach (security invariant
+#4) and the receiver playout-delay slots of
+`apps/shared/sframe-bridge/receiver-delay.h`, which stay observe-only for an
+image they were not read from. Option 1 was rejected as the costliest and
+riskiest; option 3 as leaving iOS the one client without the switch.
+
+**Built 2026-11-09 on iOS** (`Calls/CaptureNoiseProcessor.{h,mm}`,
+`Calls/CaptureNoiseSuppression.swift`, the `Sound` section of the call
+Settings sheet). Checked against the new binary's machine code, all three
+slices: the frame encryptor and decryptor attach is instruction-identical to
+stasel 125.0.0's, and the playout-delay slots, slot encoding and argument
+convention are the same; the three new image identities are pinned in
+`receiver-delay.h` / `SFrameAttach.mm`. Run: LakkoTests on a simulator (the
+setter offered on the simulator arm64 slice); the device app installed and
+launched on an iPhone with no crash. Not yet run in a call: neither the
+encryptor on this binary, nor the setter on a real receiver, nor the
+suppressor heard.
+
 ## Alternatives
 
 1. **Keep the platform suppressors only.** Rejected by the maintainer:
@@ -361,6 +396,36 @@ when the model question (open question 1) is answered.
   no suppression, silently.
 - **Neutral:** RNNoise may also attenuate some wanted sounds (music held up
   to the microphone); the switch exists for that.
+
+## Amendment 2026-11-10: a capture stage below 48 kHz is resampled
+
+Seen on devices: the Pixel 7a's capture post-processing stage opened at
+16 kHz mono before its microphone settled at 48 kHz, and the iOS Simulator
+captures at 16 kHz for the whole call. Both were passed through untouched,
+so on such a stream RNNoise never ran. What a real iPhone's voice-processing
+I/O runs at is not measured.
+
+Decision (the maintainer's, 2026-11-10): the suppressor takes a mono stream
+at 48 kHz or at a rate 48 kHz divides by a whole factor (24, 16, 12, 8 kHz).
+A lower rate is raised to 48 kHz (zeros between samples, then a low-pass
+filter), cleaned by RNNoise, filtered again and lowered back by keeping one
+sample in each factor; `lakko_noise::NoiseSuppressor::process_s16_in_place_at`
+and the C ABI's `lakko_noise_process_s16_in_place_at_rate` /
+`lakko_noise_supports_rate` (status `UNSUPPORTED_RATE = 4`). The rate is
+passed with every block, so a stage that re-opens at another rate mid-call
+keeps working; the filters then start from silence. The filter is a
+windowed-sinc low-pass (Blackman window), 16 taps per unit of the factor
+plus one, corner at 0.45 of the lower rate: chosen, not measured. It adds its
+group delay to RNNoise's 10 ms (two filters of `16 * factor / 2` samples at
+48 kHz each, for example 1 ms at 16 kHz). Allocation-free on the audio
+thread: the filters for every factor are made when the suppressor is.
+
+Every other rate (44.1 or 32 kHz, for example) and more than one channel is
+still passed through, and the log line says so. Host tests: a tone inside
+the band survives a raise and a lower at its level within 3 percent, a tone
+above the band is stopped, low-passed noise is attenuated at each lower rate,
+and a 16 to 48 kHz change mid-stream keeps working. How RNNoise treats a
+voice that reaches it band-limited by a 16 or 8 kHz capture is not measured.
 
 ## Open questions (to be measured, not claimed)
 

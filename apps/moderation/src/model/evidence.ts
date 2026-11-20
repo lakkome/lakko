@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * How included evidence is marked and counted (UX section 5.3, ADR-0089
+ * How included evidence is marked and counted (UX section 5.3, ADR-0098
  * section 1). A message is `Written by this account` only when its signature
  * checks out against the report's target; any other message is `Not
  * verified` and shown greyed. Contact requests, channel posts and listings

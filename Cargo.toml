@@ -31,15 +31,21 @@ members = [
     "crates/lakko-pow-server",
     "crates/lakko-anon-token",
     "crates/lakko-anon-token-server",
+    "crates/lakko-anon-cred",
     "crates/lakko-mnemonic",
     "crates/lakko-ui-rules",
     "crates/lakko-feed",
     "crates/lakko-vault",
     "crates/lakko-circle",
+    "crates/lakko-ballot",
+    "crates/lakko-open-items",
     "crates/lakko-l10n",
     "crates/lakko-log-hygiene",
+    "crates/lakko-metrics",
     "crates/lakko-noise",
     "crates/lakko-noise-wasm",
+    "crates/lakko-segment",
+    "crates/lakko-segment-wasm",
     "crates/lakko-discovery-client",
     "crates/lakko-tuf",
     "crates/lakko-ffi-uniffi",
@@ -62,8 +68,10 @@ members = [
     "services/transport-rendezvous",
     "tools/release-manifest",
     "tools/moderation-root",
+    "tools/donations",
     "tools/bootstrap-config",
     "tools/l10n",
+    "tools/canary",
 ]
 # Fuzz crates require nightly + libfuzzer-sys; they opt out of this
 # workspace via their own `[workspace]` block and are listed here only so
@@ -84,7 +92,7 @@ exclude = [
     # to drop the unmaintained `instant` (RUSTSEC-2024-0384); consumed via
     # `[patch.crates-io]` below, not a workspace member.
     "crates/vendor/fluvio-wasm-timer",
-    # Vendored fork of str0m 0.19.0 carrying fifteen changes, each described
+    # Vendored fork of str0m 0.19.0 carrying seventeen changes, each described
     # above the `[patch.crates-io]` line below and pinned by
     # `services/sfu/tests/fork_delta_guard.rs`: the packetizer tells an
     # `ExtensionSerializer` which packet of the frame it is writing
@@ -158,9 +166,21 @@ unicode-segmentation = "1.13"
 # lakko-l10n already uses; Unicode-3.0. Default features keep the compiled
 # data.
 icu_properties = "2"
+# ADR-0082 note of 2026-11-15: on-device text language detection for the
+# clients that have no usable platform detector (Android always; the web when
+# the browser's LanguageDetector is absent or its model is not on the device).
+# Trigram profiles compiled into the crate: no network, no file or other I/O,
+# no unsafe in its source. MIT. Its only non-optional dependency is hashbrown
+# 0.15, already in the lock. Pinned exactly; the optional serde, enum-map and
+# arbitrary features stay off.
+whatlang = { version = "=0.18.0", default-features = false }
 # ADR-0088 noise suppression: the Rust port of xiph's RNNoise, BSD-3-Clause.
 # Pinned exactly; default features (a CLI: clap, hound, dasp) off.
 nnnoiseless = { version = "=0.5.2", default-features = false }
+# ADR-0089 camera background: the pure-Rust ONNX runtime that runs the
+# selfie segmentation model (MIT OR Apache-2.0). Pinned exactly: the spike
+# measured this version, and an operator-set change can change the output.
+tract-onnx = { version = "=0.23.10", default-features = false }
 
 # Internal crates — path + version (cargo-deny rejects wildcard-only deps).
 # The version is kept in lockstep with workspace.package.version so they
@@ -192,13 +212,18 @@ lakko-pow = { path = "crates/lakko-pow", version = "0.0.0" }
 lakko-pow-server = { path = "crates/lakko-pow-server", version = "0.0.0" }
 lakko-anon-token = { path = "crates/lakko-anon-token", version = "0.0.0" }
 lakko-anon-token-server = { path = "crates/lakko-anon-token-server", version = "0.0.0" }
+lakko-anon-cred = { path = "crates/lakko-anon-cred", version = "0.0.0" }
 lakko-log-hygiene = { path = "crates/lakko-log-hygiene", version = "0.0.0" }
+lakko-metrics = { path = "crates/lakko-metrics", version = "0.0.0" }
 lakko-mnemonic = { path = "crates/lakko-mnemonic", version = "0.0.0" }
 lakko-ui-rules = { path = "crates/lakko-ui-rules", version = "0.0.0" }
 lakko-noise = { path = "crates/lakko-noise", version = "0.0.0" }
+lakko-segment = { path = "crates/lakko-segment", version = "0.0.0", default-features = false }
 lakko-feed = { path = "crates/lakko-feed", version = "0.0.0" }
 lakko-vault = { path = "crates/lakko-vault", version = "0.0.0" }
 lakko-circle = { path = "crates/lakko-circle", version = "0.0.0" }
+lakko-ballot = { path = "crates/lakko-ballot", version = "0.0.0" }
+lakko-open-items = { path = "crates/lakko-open-items", version = "0.0.0" }
 lakko-l10n = { path = "crates/lakko-l10n", version = "0.0.0" }
 lakko-discovery-client = { path = "crates/lakko-discovery-client", version = "0.0.0" }
 
@@ -396,7 +421,16 @@ fluvio-wasm-timer = { path = "crates/vendor/fluvio-wasm-timer" }
 # loss that was not repaired, so the retransmissions of that burst do not
 # compete with the key frame. Three files.
 #
+# 16. `SrtpContext::protect_rtp` under AES-CM no longer asserts a body that
+# is a multiple of 16 bytes (2026-10-16): change 14's unpadded
+# retransmissions tripped it and the SFU aborted. One file.
+#
+# 17. A payload type str0m picks itself is never in 64-95 (2026-11-09):
+# with rtcp-mux RFC 5761 rules that range out and libwebrtc refuses a remote
+# description naming one; an iOS client refused the SFU's subscribe offer
+# over RTX payload type 80. One file.
+#
 # `services/sfu/tests/fork_delta_guard.rs` pins the touched files so an
-# accidental edit fails CI. Drop this patch if all fifteen changes land
+# accidental edit fails CI. Drop this patch if all seventeen changes land
 # upstream.
 str0m = { path = "crates/vendor/str0m" }

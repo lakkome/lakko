@@ -374,7 +374,8 @@ impl GroupCallSession {
             | SignalingBody::End { .. }
             // A one-to-one share state (ADR-0083) is the client's
             // `screen_share` fold, not the roster's.
-            | SignalingBody::ScreenShare { .. } => SignalingOutcome::Ignored,
+            | SignalingBody::ScreenShare { .. }
+            | SignalingBody::MediaState { .. } => SignalingOutcome::Ignored,
         }
     }
 

@@ -95,7 +95,7 @@ vi.mock("../chat/commit-outbox", () => ({
 }));
 
 vi.mock("../wasm", () => ({
-  // ADR-0089 - the receive path's synchronous read of the loaded core: no
+  // ADR-0098 - the receive path's synchronous read of the loaded core: no
   // core here, so no attested wrapper is unwrapped and no block rule asked.
   wasmIfLoaded: () => null,
   loadWasm: async () => ({

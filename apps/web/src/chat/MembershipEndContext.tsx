@@ -46,6 +46,7 @@ import { useCallLog } from "../calls/CallLogContext";
 import { useTranslation } from "../translation/context";
 import { forgetUploadedCard } from "../channels/member-cards";
 import { leaveChannelOnServer } from "../channels/unsubscribe";
+import { leaveChannelSubscriptionHere } from "../channels/channel-subscription-register";
 import { installChannelDeletedHandler } from "../channels/api";
 import { loadKnownGroupIds, saveKnownGroupIds } from "../devices/state-bundle";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
@@ -136,6 +137,11 @@ export interface MembershipEndApi {
   noteJoined(entry: ActiveGroup): Promise<void>;
   /** This device subscribed to a channel. */
   noteChannelJoined(channelIdHex: string): Promise<void>;
+  /** 2026-11-13: the account's channel-subscription register says another
+   *  device of the account left the channel. The channel goes here as an
+   *  unsubscribe would, without telling the channels service (the device
+   *  that left did). A channel this device publishes in is left alone. */
+  channelLeftElsewhere(channelIdHex: string): void;
   /** Run whatever ends are owed, as far as they go, those a commit just made
    *  owed included. */
   settle(): Promise<void>;
@@ -180,6 +186,7 @@ const INERT: MembershipEndApi = {
   endChannel: () => Promise.resolve(),
   noteJoined: () => Promise.resolve(),
   noteChannelJoined: () => Promise.resolve(),
+  channelLeftElsewhere: () => undefined,
   settle: () => Promise.resolve(),
   joinAlone: (join) => join(),
   startOver: () => Promise.resolve(),
@@ -336,11 +343,26 @@ export function MembershipEndProvider(props: { children: JSX.Element }): JSX.Ele
         "ended",
         BigInt(record.endedEpoch),
       );
+      // 2026-11-13: the account's subscription register says the account
+      // left; the other devices drop the channel, and this device does not
+      // add it back from a live register after the wipe. Retried (the step
+      // rejects) while the register is not loaded.
+      // A channel orphaned by a key reset is never written to the register.
+      if (record.refKind === 3 && !channelsState.orphanedByKeyReset().has(record.idHex)) {
+        const account = accountNow();
+        if (account === null) throw new Error("no session");
+        await leaveChannelSubscriptionHere(account, record.idHex);
+      }
     },
     async stopReceiving(record) {
       const account = accountNow();
       if (account === null) throw new Error("no session");
       if (record.refKind === 3) {
+        // 2026-11-13: the account's devices share one subscriber key per
+        // channel, so a device that heard of the end from another device of
+        // the account tells the service nothing: that device already left
+        // with the same key.
+        if (record.origin === "heard") return;
         const keys = channelsState.subscriberKeysByChannel().get(record.idHex);
         if (keys !== undefined) {
           const outcome = await leaveChannelOnServer(record.idHex, keys);
@@ -819,6 +841,10 @@ export function MembershipEndProvider(props: { children: JSX.Element }): JSX.Ele
         .catch((err: unknown) => logFailure("the joined register was not written yet", err));
     },
     noteChannelJoined: writeChannelJoined,
+    channelLeftElsewhere(channelIdHex) {
+      const id = hexToBytes(channelIdHex);
+      if (id !== null) reactToRegister({ kind: 3, id }, 0n);
+    },
     async settle() {
       // The commit that ended a group may have been applied a moment ago.
       for (const g of chats.groups()) {

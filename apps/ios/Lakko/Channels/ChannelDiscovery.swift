@@ -142,6 +142,18 @@ public enum PendingChannelHandleStore {
         load(accountIdB64, defaults)[normalized(handle)]
     }
 
+    /// Security pass 2026-11-15 (F5) — whether a retry of New channel may
+    /// found under the kept id: only when the create it was kept for never
+    /// finished on this device. A channel this device already lists, or that
+    /// the account's subscription register names, finished (the kept id
+    /// outlived it, a crash before ``forget(handle:accountIdB64:defaults:)``);
+    /// another owner device may hold its group by now, and founding again
+    /// would reset its live journal under the same root. Such an id is
+    /// forgotten and the retry takes a fresh one.
+    nonisolated public static func keptIdUsable(listedHere: Bool, inRegister: Bool) -> Bool {
+        !listedHere && !inRegister
+    }
+
     /// Keep `channelIdHex` for `handle`, before the claim goes out.
     public static func keep(
         handle: String, channelIdHex: String, accountIdB64: String, defaults: UserDefaults = .standard

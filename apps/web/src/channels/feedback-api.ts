@@ -153,6 +153,9 @@ export interface PostLabelCounts {
   readonly cursor: number;
   readonly labels: ReadonlyMap<string, number>;
   readonly comments: number | undefined;
+  /** ADR-0092 section 4 — a channel poll's distinct voters and votes per
+   *  opaque option label; `undefined` on a post nobody voted on. */
+  readonly votes?: { readonly voters: number; readonly labels: ReadonlyMap<string, number> };
 }
 
 /** The counts of up to 50 posts in one call. */
@@ -167,12 +170,20 @@ export async function fetchReactionCounts(
   if (!resp.ok) throw await errorOf(resp);
   if (!isJson(resp)) throw new FeedbackApiError(resp.status, "unreachable");
   const body = (await resp.json()) as {
-    posts?: { cursor: number; labels: { label_hex: string; count: number }[]; comments?: number }[];
+    posts?: {
+      cursor: number;
+      labels: { label_hex: string; count: number }[];
+      comments?: number;
+      votes?: { voters?: number; labels?: { label_hex: string; count: number }[] };
+    }[];
   };
   return (body.posts ?? []).map((p) => ({
     cursor: Number(p.cursor),
     labels: labelMap(p.labels),
     comments: typeof p.comments === "number" && Number.isFinite(p.comments) && p.comments >= 0 ? p.comments : undefined,
+    ...(p.votes === undefined || p.votes === null
+      ? {}
+      : { votes: { voters: Math.max(0, Number(p.votes.voters ?? 0)), labels: labelMap(p.votes.labels) } }),
   }));
 }
 

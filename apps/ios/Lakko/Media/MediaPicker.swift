@@ -123,9 +123,12 @@ struct EmojiTab: View {
         AcceptedContactsStore.boundAccountIdB64 == accountIdB64 ? accountIdB64 : nil
     }
 
-    private static let groupIcons = [
-        "face.smiling", "hand.raised", "leaf", "fork.knife", "car",
-        "soccerball", "lightbulb", "number", "flag",
+    /// One emoji per category for the jump strip, in dataset group order: the
+    /// same glyphs Android (`EmojiPickerSheet.GROUP_ICONS`) and web
+    /// (`EmojiPicker.GROUP_ICONS`) show.
+    private static let groupGlyphs: [String] = [
+        "\u{1F600}", "\u{1F44B}", "\u{1F43B}", "\u{1F354}", "\u{2708}\u{FE0F}",
+        "\u{26BD}", "\u{1F4A1}", "\u{2764}\u{FE0F}", "\u{1F3C1}",
     ]
 
     private let columns = [GridItem(.adaptive(minimum: 42), spacing: 4)]
@@ -173,8 +176,12 @@ struct EmojiTab: View {
                         LazyVGrid(columns: columns, spacing: 4, pinnedViews: []) {
                             if !recent.isEmpty {
                                 Section(header: header(Localization.text("chat.emoji.recent")).id("recent")) {
-                                    ForEach(recent, id: \.self) { emoji in
-                                        recentCell(emoji)
+                                    // Ids of their own: the same emoji is also a cell of
+                                    // its group below, and two cells of one grid with one
+                                    // id drew only one of them, leaving a gap in the group
+                                    // (seen on an iPhone 2026-11-10).
+                                    ForEach(recent.map { "recent:" + $0 }, id: \.self) { key in
+                                        recentCell(String(key.dropFirst("recent:".count)))
                                     }
                                 }
                             }
@@ -225,7 +232,9 @@ struct EmojiTab: View {
                     Button {
                         withAnimation { proxy.scrollTo("group-\(index)", anchor: .top) }
                     } label: {
-                        Image(systemName: index < Self.groupIcons.count ? Self.groupIcons[index] : "circle")
+                        Text(index < Self.groupGlyphs.count ? Self.groupGlyphs[index] : "\u{2022}")
+                            .font(.system(size: 20))
+                            .accessibilityHidden(true)
                     }
                     .accessibilityLabel(Self.groupTitle(name))
                 }
@@ -495,7 +504,7 @@ struct GifPreviewTile: View {
                 AnimatedImageView(source: .data(media.bytes))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
             } else if failed {
-                Image(systemName: "photo").foregroundStyle(.secondary)
+                LkIconView(.photo, size: 20).foregroundStyle(.secondary)
             }
         }
         .frame(height: height)

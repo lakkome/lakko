@@ -447,7 +447,7 @@ function AddPanel(props: {
       : { groupIdB64: g.groupIdB64, href: paths.chat(base64UrlEncodeNoPad(g.group.groupId)) };
   };
 
-  /** ADR-0089 step 4, UX 3 - the moderation log confirms the inviter's
+  /** ADR-0098 step 4, UX 3 - the moderation log confirms the inviter's
    *  account is suspended: the page says so and offers no Add. */
   const inviterSuspended = (): boolean => isSuspendedKeyB64(base64Encode(cap.ownerSignaturePubkey));
 
@@ -544,7 +544,7 @@ function AddPanel(props: {
           <p class="lk-meta">{t("suspended.cannot_add")}</p>
         </Show>
         <div class="lk-actions">
-          {/* ADR-0089 step 3: a suspended account adds no contact; step 4:
+          {/* ADR-0098 step 3: a suspended account adds no contact; step 4:
               nor is a suspended inviter added. */}
           <Show when={inviteOffersAdd(accountSuspended(), inviterSuspended())}>
             <button class="primary" type="button" disabled={busy()} onClick={() => void onAdd()}>

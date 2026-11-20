@@ -29,6 +29,7 @@ use sqlx::types::chrono::{DateTime, Utc};
 use sqlx::MySqlPool;
 use tokio::sync::Notify;
 
+use crate::metrics::{self, Pruned};
 use crate::AppState;
 
 /// Pseudonym length: 32 raw bytes = 64 lowercase hex chars.
@@ -124,7 +125,12 @@ impl Notifiers {
     /// is held only for the HashMap lookup — we clone the `Arc<Notify>`
     /// out before any awaiting.
     fn get_or_create(&self, key: NotifyKey) -> Arc<Notify> {
-        let mut guard = self.inner.lock().expect("notifiers mutex poisoned");
+        // A poisoned lock means a panic while holding it; the map holds only
+        // wake-up handles, so carry on with it.
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard
             .entry(key)
             .or_insert_with(|| Arc::new(Notify::new()))
@@ -244,6 +250,7 @@ pub(crate) async fn publish_admitted(
         )
     })?;
     let id = result.last_insert_id();
+    metrics::appended(queue);
 
     // Fetch created_at — cheap, lets the client display "delivered at".
     let sql = format!("SELECT created_at FROM {} WHERE id = ?", queue.table());
@@ -330,6 +337,7 @@ pub(crate) async fn publish_dropped(
             .await
             .map_err(db)?;
     tx.rollback().await.map_err(db)?;
+    metrics::mailbox_write_dropped();
     Ok(Json(PublishResponse {
         id,
         created_at: row.0,
@@ -368,6 +376,55 @@ pub(crate) struct FetchResponse {
     /// registered for it. Absent for an unclaimed group and a mailbox.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) latest_epoch: Option<u64>,
+    /// For a signed read of a claimed group journal (ADR-0091): every
+    /// registration above the epoch the read was signed at that carries a
+    /// commit row (ADR-0081), as `(epoch, id)`: row `id` is THE commit that
+    /// moves the journal from `epoch - 1` to `epoch`. Ascending by epoch, at
+    /// most [`crate::access::MAX_RETAINED_EPOCHS`] entries. Read after the
+    /// rows, so a commit row in `messages` always has its entry (a
+    /// registration and its row commit in one transaction). Absent where
+    /// `latest_epoch` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) commits: Option<Vec<RegisteredCommit>>,
+}
+
+/// One entry of [`FetchResponse::commits`].
+#[derive(Serialize)]
+pub(crate) struct RegisteredCommit {
+    /// The epoch the row registers (the epoch after the commit).
+    pub(crate) epoch: u64,
+    /// The journal row id of the commit.
+    pub(crate) id: u64,
+}
+
+/// The registrations of `owner_id` above `proof_epoch` that carry a commit
+/// row (ADR-0091), ascending by epoch.
+async fn registered_commits_above(
+    pool: &MySqlPool,
+    owner_id: &[u8; PSEUDONYM_LEN],
+    proof_epoch: u64,
+) -> Result<Vec<RegisteredCommit>, (StatusCode, String)> {
+    let rows: Vec<(u64, u64)> = sqlx::query_as(
+        "SELECT epoch, commit_message_id FROM ds_group_access \
+         WHERE group_id = ? AND epoch > ? AND commit_message_id IS NOT NULL \
+         ORDER BY epoch ASC LIMIT ?",
+    )
+    .bind(&owner_id[..])
+    .bind(proof_epoch)
+    .bind(crate::access::MAX_RETAINED_EPOCHS)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "fetch registered commits");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal db error".to_string(),
+        )
+    })?;
+    Ok(rows
+        .into_iter()
+        .map(|(epoch, id)| RegisteredCommit { epoch, id })
+        .collect())
 }
 
 #[derive(Serialize)]
@@ -451,6 +508,7 @@ async fn fetch(
         messages,
         has_more,
         latest_epoch: None,
+        commits: None,
     }))
 }
 
@@ -484,6 +542,9 @@ pub(crate) async fn fetch_with_wait(
     let wait_secs = wait_secs.min(MAX_WAIT_SECS);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(u64::from(wait_secs));
     let notify = notifiers.get_or_create((queue, *owner_id));
+    // Counted as open until this function returns, or the request is
+    // dropped mid-wait (ADR-0096).
+    let _open = metrics::long_poll_open(queue);
 
     loop {
         // Register on the notifier BEFORE we re-check — `notified()` is
@@ -554,6 +615,7 @@ pub(crate) async fn post_group(
         if matches!(gated, crate::access::Gated::Proven { .. }) {
             state.waker.fire(&owner, wake, resp.id);
         } else {
+            metrics::wake(metrics::WakeOutcome::Unclaimed);
             tracing::debug!(outcome = "unclaimed", "wake dropped");
         }
     }
@@ -592,8 +654,15 @@ pub(crate) async fn get_group(
         wait,
     )
     .await?;
-    if let crate::access::Gated::Proven { latest_epoch } = gated {
+    if let crate::access::Gated::Proven {
+        latest_epoch,
+        proof_epoch,
+    } = gated
+    {
         resp.latest_epoch = Some(latest_epoch);
+        // ADR-0091: after the rows, so every commit row returned has its
+        // entry.
+        resp.commits = Some(registered_commits_above(&state.db, &owner, proof_epoch).await?);
     }
     let mut response = Json(resp).into_response();
     response.headers_mut().insert(
@@ -789,51 +858,71 @@ pub(crate) async fn get_rendezvous(
 // ============================================================================
 
 /// Spawn a background task that deletes messages older than
-/// `RETENTION_SECS` from both journals, knocks older than
+/// `RETENTION_SECS` from the group, mailbox and rendezvous journals, knocks older than
 /// `KNOCK_RETENTION_SECS`, and spent proof nonces. Aborted when the service
 /// stops.
+///
+/// Each pass is one run of the job [`metrics::JOB_PRUNER`] (ADR-0096): a
+/// success when every statement in it succeeded, a failure otherwise (the
+/// statements that worked still deleted their rows).
 pub(crate) fn spawn_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
+    lakko_metrics::job_registered(metrics::JOB_PRUNER);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(PRUNE_INTERVAL);
         // Skip the immediate first tick.
         interval.tick().await;
         loop {
             interval.tick().await;
-            crate::access::prune_nonces(&pool).await;
-            crate::reach::prune_expired(&pool).await;
-            crate::access::prune_group_access(&pool, RETENTION_SECS).await;
-            for queue in [
-                Queue::Group,
-                Queue::Mailbox,
-                Queue::Knock,
-                Queue::Rendezvous,
-            ] {
-                let retention = match queue {
-                    Queue::Knock => crate::access::KNOCK_RETENTION_SECS,
-                    Queue::Group | Queue::Mailbox | Queue::Rendezvous => RETENTION_SECS,
-                };
-                let sql = format!(
-                    "DELETE FROM {} WHERE created_at < NOW(3) - INTERVAL ? SECOND",
-                    queue.table(),
-                );
-                match sqlx::query(sqlx::AssertSqlSafe(sql))
-                    .bind(retention)
-                    .execute(&pool)
-                    .await
-                {
-                    Ok(r) if r.rows_affected() > 0 => {
-                        tracing::debug!(
-                            queue = ?queue,
-                            rows = r.rows_affected(),
-                            "pruned expired messages"
-                        );
-                    },
-                    Ok(_) => {},
-                    Err(e) => tracing::warn!(queue = ?queue, error = %e, "prune failed"),
-                }
+            if prune_once(&pool).await {
+                lakko_metrics::job_succeeded(metrics::JOB_PRUNER);
+            } else {
+                lakko_metrics::job_failed(metrics::JOB_PRUNER);
             }
         }
     })
+}
+
+/// One pruner pass. `true` when every statement succeeded.
+pub(crate) async fn prune_once(pool: &MySqlPool) -> bool {
+    let mut ok = crate::access::prune_nonces(pool).await;
+    ok &= crate::reach::prune_expired(pool).await;
+    ok &= crate::access::prune_group_access(pool, RETENTION_SECS).await;
+    for queue in [
+        Queue::Group,
+        Queue::Mailbox,
+        Queue::Knock,
+        Queue::Rendezvous,
+    ] {
+        let retention = match queue {
+            Queue::Knock => crate::access::KNOCK_RETENTION_SECS,
+            Queue::Group | Queue::Mailbox | Queue::Rendezvous => RETENTION_SECS,
+        };
+        let sql = format!(
+            "DELETE FROM {} WHERE created_at < NOW(3) - INTERVAL ? SECOND",
+            queue.table(),
+        );
+        match sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(retention)
+            .execute(pool)
+            .await
+        {
+            Ok(r) => {
+                metrics::pruned(Pruned::of_queue(queue), r.rows_affected());
+                if r.rows_affected() > 0 {
+                    tracing::debug!(
+                        queue = ?queue,
+                        rows = r.rows_affected(),
+                        "pruned expired messages"
+                    );
+                }
+            },
+            Err(e) => {
+                ok = false;
+                tracing::warn!(queue = ?queue, error = %e, "prune failed");
+            },
+        }
+    }
+    ok
 }
 
 // ============================================================================

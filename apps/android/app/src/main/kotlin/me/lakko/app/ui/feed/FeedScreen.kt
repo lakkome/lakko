@@ -26,9 +26,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -155,6 +152,9 @@ import java.time.ZoneId
 import java.util.Locale
 import me.lakko.app.ui.components.LakkoDialog
 import me.lakko.app.ui.components.LakkoDialogAction
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * The Feed destination (`docs/ux/feed.md`, ADR-0063). Mirror of
@@ -392,7 +392,8 @@ public fun FeedScreen(
                 kind = FeedSourceKind.CHANNEL,
                 idHex = c.id,
                 title = channelTitle(c, strings),
-                muted = flags[c.id]?.muted == true,
+                // The channel row's Mute (`ChannelFlags`).
+                muted = me.lakko.app.channels.ChannelFlags.of(flags, c.id)?.muted == true,
                 audience = 0,
             )
         }
@@ -750,16 +751,12 @@ public fun FeedScreen(
                 authorLabel = authorOf(ref),
             )
         } else {
-            // A channel post is not a group message: it travels as its words
-            // under the channel's name, with no origin to jump to.
+            // A channel post is not a group message: it travels as its words,
+            // its files (re-encrypted by the sender) and its content under the
+            // channel's name, with no origin to jump to.
             me.lakko.app.chat.ForwardRequest(
                 sourceGroupIdHex = ref.source.idHex,
-                message = ChatMessage(
-                    messageId = 0L,
-                    direction = Direction.Incoming,
-                    text = ref.message.text,
-                    createdAt = ref.message.createdAt,
-                ),
+                message = channelPostForwardMessage(ref.message),
                 authorLabel = ref.source.title,
             )
         }
@@ -844,7 +841,7 @@ public fun FeedScreen(
                 actions = {
                     Box {
                         IconButton(onClick = { feedMenuOpen = true }) {
-                            Icon(Icons.Filled.MoreVert, contentDescription = t("feed.menu.a11y"))
+                            LkIcon(R.drawable.ic_lk_ellipsis_circle, contentDescription = t("feed.menu.a11y"))
                         }
                         DropdownMenu(expanded = feedMenuOpen, onDismissRequest = { feedMenuOpen = false }) {
                             DropdownMenuItem(
@@ -888,7 +885,7 @@ public fun FeedScreen(
                         selected = selection == p.name,
                         onClick = { choose(p.name) },
                         label = { Text(p.label.text()) },
-                        leadingIcon = { ChipIcon(p.vector()) },
+                        leadingIcon = { ChipIcon(p.drawable()) },
                     )
                 }
                 FilterChip(
@@ -902,7 +899,7 @@ public fun FeedScreen(
                         selected = selection == CUSTOM_PREFIX + v.id,
                         onClick = { choose(CUSTOM_PREFIX + v.id) },
                         label = { Text(v.rule.name) },
-                        leadingIcon = { ChipIcon(FeedIcon.of(v.rule.icon).vector()) },
+                        leadingIcon = { ChipIcon(FeedIcon.of(v.rule.icon).drawable()) },
                     )
                 }
                 TextButton(onClick = {
@@ -1153,6 +1150,17 @@ private fun fullyVisibleKeys(state: LazyListState): Set<String> {
 
 private fun parseTime(ref: FeedCandidateRef): Long? = me.lakko.app.feed.parseFeedTimeMs(ref.message.createdAt)
 
+/** A channel post from the feed as the message a forward is composed from:
+ *  its words, its files and its content (UX 11a). */
+internal fun channelPostForwardMessage(m: FeedMessage): ChatMessage = ChatMessage(
+    messageId = 0L,
+    direction = Direction.Incoming,
+    text = m.text,
+    attachments = m.attachments.mapNotNull { it.ref },
+    createdAt = m.createdAt,
+    content = m.content,
+)
+
 internal fun feedMessageOf(m: ChatMessage): FeedMessage = FeedMessage(
     messageId = m.messageId,
     direction = when (m.direction) {
@@ -1169,6 +1177,7 @@ internal fun feedMessageOf(m: ChatMessage): FeedMessage = FeedMessage(
     reactions = m.reactions.map { FeedReaction(it.reactor, it.emoji) },
     replyTarget = m.reply?.target,
     forwardAuthor = m.forward?.author,
+    content = m.content,
 )
 
 private fun hexToBytes(hex: String): ByteArray? {
@@ -1229,8 +1238,8 @@ internal class ItemMenuActions(
 )
 
 @Composable
-private fun ChipIcon(vector: androidx.compose.ui.graphics.vector.ImageVector) {
-    Icon(vector, contentDescription = null, modifier = Modifier.size(18.dp))
+private fun ChipIcon(@androidx.annotation.DrawableRes icon: Int) {
+    LkIcon(icon, contentDescription = null, size = LkIconSize.Row)
 }
 
 /** UX spec section 5 — the thin "New" divider above the first item the feed
@@ -1270,7 +1279,7 @@ private fun HiddenFromFeedsScreen(
                 title = { Text(t("feed.hidden.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -1440,10 +1449,20 @@ internal fun FeedItemCard(
                             menu.copy(ref)
                         },
                     )
-                    DropdownMenuItem(text = { Text(t("chat.message.forward")) }, onClick = {
-                        closeMenu()
-                        menu.forward(ref)
-                    })
+                    // ADR-0092 / attachments UX 11a — no Forward on a poll or
+                    // checklist, nor on a card of a person who does not let
+                    // others share it.
+                    val context = androidx.compose.ui.platform.LocalContext.current
+                    if (me.lakko.app.chat.isForwardableContent(ref.message.content) { key ->
+                            me.lakko.app.profile.ProfileDirectory.get(context)
+                                .isCardShareable(java.util.Base64.getEncoder().encodeToString(key))
+                        }
+                    ) {
+                        DropdownMenuItem(text = { Text(t("chat.message.forward")) }, onClick = {
+                            closeMenu()
+                            menu.forward(ref)
+                        })
+                    }
                     DropdownMenuItem(text = { Text(t("feed.action.hide")) }, onClick = {
                         closeMenu()
                         menu.hide(ref)

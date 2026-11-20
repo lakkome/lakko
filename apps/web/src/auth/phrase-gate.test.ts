@@ -245,8 +245,11 @@ describe("a sign-in that would park while its phrase is still owed", () => {
     // ACCESS-only route shares (a passkey, an authenticator code, three
     // words, a mailed code).
     expect(src.match(/await parkForRestore\(/g)?.length).toBe(2);
-    // No direct park is left: the restore prompt is put up in one place.
-    expect(src.match(/kind: "needs-recovery-phrase",\n/g)?.length).toBe(1);
+    // No direct park is left: the restore prompt is put up in one place,
+    // plus the ADR-0074 "Joining after a rotation" park of a device that
+    // holds the keys but not the earlier keys (no phrase is owed there).
+    expect(src.match(/kind: "needs-recovery-phrase",\n/g)?.length).toBe(2);
+    expect(src.match(/kind: "needs-recovery-phrase",\n\s*account: \{[^}]*\},\n\s*missing: "earlier-keys",/g)?.length).toBe(1);
     // The owed phrase is tried first, then the passkey route's own hook.
     expect(src).toMatch(
       /if \(await completeParkFromOwedPhrase\(parked, flow\)\) return;\s*if \(restoreKeys !== undefined\) \{/,

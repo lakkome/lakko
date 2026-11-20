@@ -272,6 +272,9 @@ internal fun routeOneToOneSignaling(
         // ADR-0083 — a share state reaches a call only verified, through
         // [OneToOneCallHost.deliverScreenShare]; the raw body applies nothing.
         is FfiCallSignalingBody.ScreenShare -> return OneToOneRoute.DROP
+        // The other person's camera and microphone state (2026-11-07): for the
+        // call in the slot only, never a ring (only an offer rings).
+        is FfiCallSignalingBody.MediaState -> callIdHexOf(body.callId)
         // C-11 — group-control bodies never advance a 1x1 call.
         is FfiCallSignalingBody.GroupStart,
         is FfiCallSignalingBody.GroupJoin,
@@ -507,6 +510,8 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         hasCamera: Boolean = true,
     ): Boolean {
         if (hasCall || otherCalls.isNotEmpty()) return false
+        // ADR-0091 — nothing is set up in a chat this device is behind in.
+        if (isHeldWhileBehind(groupIdHex)) return false
         // ADR-0073 R.12 — a call asked for in a dead one-to-one is placed in
         // the conversation's successor when this device holds one; otherwise
         // it does not start, before any signalling ([oneToOneCallTarget]).
@@ -604,6 +609,24 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
      */
     @Volatile
     public var callTarget: ((groupIdHex: String) -> OneToOneCallTarget)? = null
+
+    /**
+     * ADR-0091 (maintainer, 2026-11-20) — `true` while this device is behind in
+     * [groupIdHex]: a call there would be keyed at an epoch the other person
+     * left. The call buttons stay; [startOutgoing] refuses before anything is
+     * built or signalled and the caller shows its ordinary could-not-start
+     * notice ([isHeldWhileBehind]). Installed with the repository.
+     */
+    @Volatile
+    public var behindHeld: ((groupIdHex: String) -> Boolean)? = null
+
+    /** [behindHeld] for [groupIdHex]; `false` when not installed or it throws. */
+    public fun isHeldWhileBehind(groupIdHex: String): Boolean =
+        try {
+            behindHeld?.invoke(groupIdHex) == true
+        } catch (_: Throwable) {
+            false
+        }
 
     private fun callTargetOf(groupIdHex: String): OneToOneCallTarget =
         try {
@@ -1017,7 +1040,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
 
     private suspend fun ring(row: Event.Row, muted: Boolean) {
         val offer = row.body as? FfiCallSignalingBody.Offer ?: return
-        // ADR-0089 section 4 — a suspended account makes no calls: an offer
+        // ADR-0098 section 4 — a suspended account makes no calls: an offer
         // rings nothing and is not answered.
         if (me.lakko.app.auth.SuspensionGate.readOnly.value) return
         val p = port ?: run {
@@ -1383,6 +1406,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         is FfiCallSignalingBody.IceCandidate -> body.callId
         is FfiCallSignalingBody.End -> body.callId
         is FfiCallSignalingBody.ScreenShare -> body.callId
+        is FfiCallSignalingBody.MediaState -> body.callId
         is FfiCallSignalingBody.GroupStart -> body.callId
         is FfiCallSignalingBody.GroupJoin -> body.callId
         is FfiCallSignalingBody.GroupLeave -> body.callId

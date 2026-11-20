@@ -196,12 +196,15 @@ pub fn anon_token_header_name() -> String {
 /// `discovery-register`, `invite-consume`, `ds-knock`, `push-register`,
 /// `channel-subscribe`, `directory-search`, `vault-claim`, `blob-upload`,
 /// `blob-read`, `mailbox-write`, `call-join`, `circle-claim`, `channel-react`,
-/// `channel-comment`, `report`.
+/// `channel-comment`, `report`: the contexts a session draws from `POST /auth/tokens`.
+/// `beta-place` (ADR-0097) is not among them; only a supporter code obtains
+/// it (`SupporterCodeRequest`).
 #[wasm_bindgen(js_name = anonTokenContexts)]
 #[must_use]
 pub fn anon_token_contexts() -> Vec<String> {
     TokenContext::ALL
         .iter()
+        .filter(|c| c.is_session_issuable())
         .map(|c| c.name().to_string())
         .collect()
 }

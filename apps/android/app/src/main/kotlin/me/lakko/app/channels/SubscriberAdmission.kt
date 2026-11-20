@@ -33,6 +33,10 @@ import kotlinx.coroutines.sync.Mutex
  */
 public class SubscriberAdmission(
     private val port: Port,
+    /** 2026-11-20 — the per-channel holds after a failed list read: a
+     *  refusal (`401 owner-proof-required`) waits for [clear] (sign-out, a
+     *  new session), anything else 30 s, doubling to 10 minutes. */
+    private val retry: PublisherCommitRetry = PublisherCommitRetry(warn = {}),
     private val warn: (String, Throwable) -> Unit = { _, _ -> },
 ) {
     /** What the admission needs from the channel state and the server. */
@@ -120,6 +124,7 @@ public class SubscriberAdmission(
      */
     public suspend fun admitNewSubscribers(channelIdHex: String) {
         if (!port.canPost(channelIdHex)) return
+        if (!retry.mayAttempt(HOLD_ACCOUNT, channelIdHex)) return
         val lock = lockFor(channelIdHex)
         if (!lock.tryLock()) return
         try {
@@ -128,9 +133,15 @@ public class SubscriberAdmission(
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (e: Throwable) {
-                warn("list subscribers failed", e)
+                val hold = retry.noteFailure(HOLD_ACCOUNT, channelIdHex, e)
+                warn(
+                    "list subscribers failed (${PublisherCommitFailure.logLabel(e)}); " +
+                        if (hold.refused) "not tried again until the next start" else "tried again after a wait",
+                    e,
+                )
                 return
             }
+            retry.noteSuccess(HOLD_ACCOUNT, channelIdHex)
             update(channelIdHex) { it.copy(subscribers = list) }
             val epoch = try {
                 port.currentEpoch(channelIdHex)
@@ -156,12 +167,24 @@ public class SubscriberAdmission(
     }
 
     /** Forget everything delivered (sign-out; another account may follow). */
+    /** Whether the list read of [channelIdHex] was refused (2026-11-20). */
+    public fun isRefused(channelIdHex: String): Boolean = retry.hold(HOLD_ACCOUNT, channelIdHex)?.refused == true
+
+    /** Drop the hold of [channelIdHex] (its owner key was repaired). */
+    public fun clearHold(channelIdHex: String) {
+        retry.noteSuccess(HOLD_ACCOUNT, channelIdHex)
+    }
+
     public fun clear() {
+        retry.reset()
         _state.value = emptyMap()
     }
 
     public companion object {
         private const val TAG = "SubscriberAdmission"
+
+        /** The holds of one instance serve one bound account. */
+        private const val HOLD_ACCOUNT: String = ""
 
         /** Between passes of the app-wide loop over the owned channels (chosen). */
         public const val APP_INTERVAL_MS: Long = 60_000L
@@ -218,19 +241,30 @@ private class ChannelsPort(
     // The epoch this screen state already knows, fetched when nothing has
     // learned it yet, so a delivery is never filed at a guessed 0 (ADR-0031 —
     // never a future one either: the cache only lags the server).
-    override suspend fun currentEpoch(channelIdHex: String): UInt =
-        state.epochByChannel.value[channelIdHex]
+    // Section 15 — the epoch a delivery is sealed and filed under: the one
+    // the composer's seed can serve and the service has reached, never the
+    // composer's epoch before the owner's reseal moved the channel there.
+    override suspend fun currentEpoch(channelIdHex: String): UInt {
+        val current = state.epochByChannel.value[channelIdHex]
             ?: client.fetchEpoch(channelIdHex).also { state.setEpoch(channelIdHex, it) }
+        return state.sealingSeed(channelIdHex, current)?.epoch
+            ?: throw IllegalStateException("no seed of an epoch the channel has reached")
+    }
 
     override suspend fun sealAndDeliver(channelIdHex: String, pubkeyHex: String, epoch: UInt) {
-        val keys = state.keysByChannel.value[channelIdHex]
-            ?: throw IllegalStateException("this device cannot post to this channel")
+        if (!state.keysByChannel.value.containsKey(channelIdHex)) {
+            throw IllegalStateException("this device cannot post to this channel")
+        }
+        // The seed of exactly [epoch] (the composer's only for the epoch it
+        // serves), never a seed of another epoch under its number.
+        val seed = state.readSeed(channelIdHex, epoch)
+            ?: throw IllegalStateException("no seed of this epoch on this device")
         val parsed = hexToBytes(pubkeyHex)
         val wire = ChannelsComposer.sealSubscriberSeedEnvelope(
             subscriberPub = parsed,
             channelIdHex = channelIdHex,
             epochId = epoch,
-            seed = keys.seed,
+            seed = seed,
         )
         val pub = state.publisher ?: throw IllegalStateException("channel publisher identity not available")
         // ADR-0059 section 9: signed with this account's publisher role.

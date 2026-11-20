@@ -80,7 +80,13 @@ export {
   CALL_ACTION_MESSAGE,
 } from "./sw-call-notification.js";
 
-import { attachmentsLine, notificationStrings as readWords } from "./sw-call-notification.js";
+import {
+  PREVIEW_WORDS_SEPARATOR,
+  attachmentsLine,
+  filesOnlyLine,
+  mediaWordsLine,
+  notificationStrings as readWords,
+} from "./sw-call-notification.js";
 
 /** Max characters of decrypted text shown in the notification body. */
 const PREVIEW_MAX_CHARS = 140;
@@ -178,10 +184,13 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  * @property {{ load: (identity: any, groupId: Uint8Array) => any }} Group
  * @property {(bytes: Uint8Array) => any} parseBodyEnvelope
  * @property {(bytes: Uint8Array) => Uint8Array} [unwrapAttested]
- *   ADR-0089 section 1 - the envelope inside an attested chat plaintext, or
+ *   ADR-0098 section 1 - the envelope inside an attested chat plaintext, or
  *   the plaintext unchanged. Run before every classifier below; the
  *   signature is not checked here (a preview is not evidence). Optional so
  *   an older deps object still loads.
+ * @property {(card: Uint8Array) => any} [openChannelInviteCard]
+ *   ADR-0087 section 14 — opens a channel invitation card offline, for the
+ *   notification body ("Invitation to {channel}"). Read only.
  * @property {(bytes: Uint8Array) => any} [decodePushRoutingSecret]
  *   ADR-0042 / ADR-0044 — the fail-closed push-routing-secret envelope
  *   codec. THROWS when the bytes are not that envelope. Used only to
@@ -345,7 +354,7 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  *   "not held", so the message is previewed as any other (the marker's
  *   fail-safe direction: a notification too many, never one too few).
  * @property {(accountId: string, deviceKey: any) => Promise<readonly string[] | null>} [lookupBlockedKeys]
- *   ADR-0089 section 6 - READ-ONLY: the account keys (standard base64) this
+ *   ADR-0098 section 6 - READ-ONLY: the account keys (standard base64) this
  *   account blocked, from the encrypted sync row the app wrote. A frame from
  *   one of them neither rings nor becomes a preview. Read once per wake.
  *   Optional; absent, `null` and a throw mean "none blocked".
@@ -409,6 +418,10 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  * @property {string} title  Notification title.
  * @property {string} body   Decrypted preview body (truncated).
  * @property {string} tag    Notification tag (the group hex — collapses a burst).
+ * @property {string} [image]  ADR-0047 section 6 — the first photo's or
+ *   video's micro thumbnail as a `data:image/jpeg;base64,...` URL, present
+ *   only on a message notification that shows the message's own words; never
+ *   on a reaction, a call, an edit or the generic banner.
  * @property {CallNotice} [call]  Present ONLY when the newest relevant row was
  *   call signalling. A message preview carries no `call` key at all, so the
  *   message shape is byte-for-byte what it was before calls could ring.
@@ -760,7 +773,7 @@ export async function decryptPushWake(wake, deps) {
     const words = readWords(deps.notificationWords ?? null);
     // ADR-0073 R.8 — the retired keys, read once for the batch.
     const retired = await supersededKeySet(deps, accountId);
-    // ADR-0089 section 6 - the blocked people, read once for the batch.
+    // ADR-0098 section 6 - the blocked people, read once for the batch.
     const blocked = await blockedKeySet(deps, accountId, deviceKey);
     // The ids the app's message log holds for this group, read at most once
     // and only when a row does not decrypt.
@@ -768,6 +781,9 @@ export async function decryptPushWake(wake, deps) {
     let held = null;
     let unreadableRows = 0;
     for (const message of messages) {
+      // ADR-0092 — an anonymous ballot row is not an MLS message: never a
+      // preview, never counted as unreadable.
+      if (isPollBallotRow(deps.wasm, message.payload)) continue;
       let processed;
       try {
         processed = group.processIncomingVerifyingRoles(identity, message.payload);
@@ -785,10 +801,10 @@ export async function decryptPushWake(wake, deps) {
         if (!held.has(message.id)) unreadableRows += 1;
         continue;
       }
-      // ADR-0089 section 1 - every classifier below reads the envelope
+      // ADR-0098 section 1 - every classifier below reads the envelope
       // inside an attested plaintext.
       processed = attestedView(deps.wasm, processed);
-      // ADR-0089 section 6 - nothing from a blocked person acts: no ring, no
+      // ADR-0098 section 6 - nothing from a blocked person acts: no ring, no
       // preview, no reaction notice. Resolved to the PERSON key against the
       // roster of the epoch the frame decrypted at.
       if (blocked.size > 0) {
@@ -864,7 +880,10 @@ export async function decryptPushWake(wake, deps) {
       const preview = previewFromProcessed(deps.wasm, processed, words);
       if (preview !== null) {
         latestReaction = null;
-        latest = { title: "Lakko", body: preview, tag: groupHex };
+        latest =
+          preview.image === null
+            ? { title: "Lakko", body: preview.body, tag: groupHex }
+            : { title: "Lakko", body: preview.body, tag: groupHex, image: preview.image };
         // ADR-0048 / C-68 — resolve the sender's KEY now, against the roster
         // of the epoch this frame decrypted at; a leaf resolved later could
         // name whoever took the slot.
@@ -962,12 +981,13 @@ export async function decryptPushWake(wake, deps) {
       if (shaped === null) {
         // A sender is always a contact or a member whose name is on this
         // device; none found is a defect. Never a made-up name, never a body
-        // without its sender: the generic banner.
+        // without its sender: the generic banner, and with it no picture
+        // (ADR-0047 section 6: the picture shows exactly when the text does).
         // eslint-disable-next-line no-console
         console.error("[push] the sender of a notification has no name on this device; showing the generic banner");
         latest = genericMessageBanner(words, latest.tag);
       } else {
-        latest = { ...latest, title: shaped.title, body: shaped.body };
+        latest = notificationWithPicture({ ...latest, title: shaped.title, body: shaped.body }, latestReaction === null);
       }
     }
     return { preview: latest, readRan: true, unreadableRows };
@@ -1025,6 +1045,8 @@ const COMMITTER_BEACON_FIRST_BYTE = 0x6c;
  *   field 15 (group_join)  → 0x7A
  *   field 16 (group_leave) → 0x82 0x01 (tag 130, a two-byte varint)
  *   field 17 (screen_share) → 0x8A 0x01 (tag 138, ADR-0083)
+ *   field 18 (media_state)  → 0x92 0x01 (tag 146, a one-to-one call's
+ *                             camera and microphone state, 2026-11-07)
  *
  * Without the three group-control arms a group-call start / join /
  * leave fell through to `parseBodyEnvelope`'s lossy-UTF-8 fallback and
@@ -1048,7 +1070,9 @@ function looksLikeCallSignaling(bytes) {
   ) {
     return true;
   }
-  return (first === 0x82 || first === 0x8a) && bytes.length > 1 && bytes[1] === 0x01;
+  return (
+    (first === 0x82 || first === 0x8a || first === 0x92) && bytes.length > 1 && bytes[1] === 0x01
+  );
 }
 
 /**
@@ -1217,6 +1241,22 @@ function isServiceEnvelope(wasm, bytes) {
   //     decoded for their fields, never kept (C-59), and no photo is ever
   //     downloaded here.
   if (isDispatchKind(wasm, bytes, ["GroupPhoto", "GroupReactions", "ConversationHandle", "KnockSeed", "AdmissionSeed"])) {
+    return true;
+  }
+  // 12b. ADR-0087 sections 7 and 15 (amended 2026-11-08) — the earlier
+  //      channel seeds handed to a new publisher and a publisher's rotate
+  //      request. They belong on a PublisherGroup journal only; here they are
+  //      classified and never opened, kept or shown (C-59).
+  //      ADR-0090: a co-publisher's device request and the admission mark,
+  //      the same way.
+  if (
+    isDispatchKind(wasm, bytes, [
+      "ChannelEpochSeeds",
+      "ChannelRotateRequest",
+      "PublisherDeviceRequest",
+      "ChannelAdmissionMark",
+    ])
+  ) {
     return true;
   }
   // 13. A contact request sealed to one member of the group
@@ -1702,7 +1742,7 @@ async function supersededKeySet(deps, accountId) {
 }
 
 /**
- * ADR-0089 section 6 - the account keys this account blocked (standard
+ * ADR-0098 section 6 - the account keys this account blocked (standard
  * base64), as a set, from the encrypted sync row the app wrote. Never
  * throws; every miss is the empty set, so nothing is held back (a missed
  * block costs one notification, never a lost one).
@@ -1726,7 +1766,7 @@ async function blockedKeySet(deps, accountId, deviceKey) {
 }
 
 /**
- * ADR-0089 section 6 - the shared block rule's answer for a notification
+ * ADR-0098 section 6 - the shared block rule's answer for a notification
  * from a blocked person (`drop`). A core without the rule answers `true`: the
  * person blocked them, and a notification is never the safe side of that.
  *
@@ -1743,7 +1783,7 @@ function blockedNotificationDropped(wasm) {
 }
 
 /**
- * ADR-0089 section 1 - a view of a processed frame whose `applicationData`
+ * ADR-0098 section 1 - a view of a processed frame whose `applicationData`
  * is the envelope inside the attested wrapper. Only the three fields this
  * file reads are carried. A frame with no application data, or a core with
  * no `unwrapAttested`, is returned as it is.
@@ -1769,7 +1809,7 @@ export function attestedView(wasm, processed) {
 }
 
 /**
- * ADR-0089 section 6 - the account keys blocked in the decrypted sync row
+ * ADR-0098 section 6 - the account keys blocked in the decrypted sync row
  * (`src/devices/sync/sync-state-store.ts`), as standard base64. Anything
  * unreadable is the empty list.
  *
@@ -2512,10 +2552,14 @@ function reactionFromProcessed(wasm, processed, ownKeyB64) {
  *
  * @param {DecryptWasm} wasm
  * @param {any} processed
- * @param {{ attachments: readonly string[], unsupportedMessage: string }} words
- * @returns {string | null}
+ * @param {{ attachments: readonly string[], unsupportedMessage: string, newMessage?: string, channelInvite?: string, publisherInvite?: string, channelFallbackName?: string }} words
+ * @returns {{ body: string, image: string | null } | null}  The preview
+ *   words and, for a chat message carrying a photo or video, its micro
+ *   thumbnail (ADR-0047 section 6) as a `data:` URL.
  */
 function previewFromProcessed(wasm, processed, words) {
+  /** @param {string | null} body */
+  const plain = (body) => (body === null ? null : { body, image: null });
   if (
     processed === null ||
     processed === undefined ||
@@ -2547,19 +2591,41 @@ function previewFromProcessed(wasm, processed, words) {
     // version this build cannot read. It is a message, so it is the preview,
     // in the words the page stored; never the core's English placeholder.
     // (`notificationStrings` falls back to English word by word.)
-    if (kind === "unsupported") return words.unsupportedMessage;
+    if (kind === "unsupported") return plain(words.unsupportedMessage);
     // A normal chat message → its text (or an attachment hint).
     if (kind === "chat") {
+      // ADR-0087 section 14, UX 15.2 — a message carrying a channel
+      // invitation card reads like its card ("Invitation to {channel}"),
+      // never as its text, which is the `/g/` link with its secret.
+      const card = parsed.channelInvite;
+      if (card instanceof Uint8Array && card.length > 0) return plain(channelInvitePreview(wasm, card, words));
       const text = typeof parsed.text === "string" ? parsed.text : "";
-      if (text.length > 0) return truncate(text);
       const count = typeof parsed.attachmentCount === "number" ? parsed.attachmentCount : 0;
-      if (count > 0) return attachmentsLine(words, count);
+      // ADR-0047 section 6 — the first photo's or video's micro thumbnail,
+      // carried inside the message: nothing is downloaded for it.
+      const image = count > 0 ? inlineThumbDataUrl(parsed.inlineThumb) : null;
+      if (text.length > 0) {
+        // Section 11 — a message of files only reads `2 files · <text>`; any
+        // other message with text reads as its text.
+        const files = count > 0 ? attachmentsWords(parsed, count, words, filesOnlyLine) : null;
+        const shown = withoutGroupLinkSecret(text);
+        return { body: truncate(files === null ? shown : `${files}${PREVIEW_WORDS_SEPARATOR}${shown}`), image };
+      }
+      if (count > 0) {
+        return { body: attachmentsWords(parsed, count, words, mediaWordsLine) ?? attachmentsLine(words, count), image };
+      }
       return null;
+    }
+    // ADR-0092 — a poll, checklist, location, contact card or article: its
+    // one-line preview, never JSON. Ops on them (votes, ticks, closes, added
+    // items, edits) fall through to `null` below, like reactions.
+    if (kind === "poll" || kind === "checklist" || kind === "location" || kind === "contact-card" || kind === "article") {
+      return plain(contentPreviewLine(parsed.content, words));
     }
     // An edit rewrites a prior message → surface the new text.
     if (kind === "edit") {
       const text = typeof parsed.text === "string" ? parsed.text : "";
-      return text.length > 0 ? truncate(text) : null;
+      return text.length > 0 ? plain(truncate(text)) : null;
     }
     // delete / reaction / typing / read-receipt carry no standalone
     // preview — skip so an older real message stays the preview.
@@ -2569,10 +2635,182 @@ function previewFromProcessed(wasm, processed, words) {
   }
 }
 
+/**
+ * `docs/ux/media-messages.md` section 11 — the count words for a message's
+ * attachments as `line` gives them from their types (`Photo`, `3 photos`,
+ * `2 files`), or `null` when the attachments cannot be read here or `line`
+ * does not decide.
+ *
+ * @param {any} parsed
+ * @param {number} count
+ * @param {any} words
+ * @param {(words: any, attachments: { mime: string | null, kind: string | null }[]) => string | null} line
+ * @returns {string | null}
+ */
+function attachmentsWords(parsed, count, words, line) {
+  if (typeof parsed.attachment !== "function") return null;
+  /** @type {{ mime: string | null, kind: string | null }[]} */
+  const seen = [];
+  try {
+    for (let i = 0; i < count; i += 1) {
+      const a = parsed.attachment(i);
+      try {
+        seen.push({
+          mime: typeof a.mime === "string" ? a.mime : null,
+          kind: typeof a.kind === "string" ? a.kind : null,
+        });
+      } finally {
+        freeQuietly(a);
+      }
+    }
+  } catch {
+    return null;
+  }
+  return line(words, seen);
+}
+
+/**
+ * The body for a message carrying a channel invitation card (ADR-0087
+ * section 14; UX 15.2 for a publisher invitation): the card opened offline
+ * through the core, the channel's name in the stored words. A card that does
+ * not open reads as a new message; the link text is never shown.
+ *
+ * @param {DecryptWasm} wasm
+ * @param {Uint8Array} card
+ * @param {{ newMessage?: string, channelInvite?: string, publisherInvite?: string, channelFallbackName?: string }} words
+ * @returns {string}
+ */
+export function channelInvitePreview(wasm, card, words) {
+  const generic = typeof words.newMessage === "string" && words.newMessage.length > 0 ? words.newMessage : "New message";
+  const open = /** @type {any} */ (wasm).openChannelInviteCard;
+  if (typeof open !== "function") return generic;
+  let opened;
+  try {
+    opened = open(card);
+  } catch {
+    return generic;
+  }
+  try {
+    const preview = opened.preview;
+    const channelId = preview?.channelId;
+    if (!(channelId instanceof Uint8Array) || channelId.length !== 16) return generic;
+    const named = typeof preview.groupName === "string" ? preview.groupName.trim() : "";
+    const fallback = words.channelFallbackName ?? "Channel";
+    const name = named.length > 0 ? named : fallback;
+    const publisher = preview.subscriber === undefined || preview.subscriber === null;
+    const template = publisher
+      ? (words.publisherInvite ?? "Invitation to publish in \u0001")
+      : (words.channelInvite ?? "Invitation to \u0001");
+    return truncate(template.replace("\u0001", name));
+  } finally {
+    freeQuietly(opened);
+  }
+}
+
+/**
+ * A message that is one `/g/` link and carries no card (an older message, a
+ * link pasted as text) is notified as the link WITHOUT its secret: what
+ * follows `#` opens the invitation and never reaches a notification, as on
+ * the Chats row (`chat/channel-invite-preview.ts`). Any other text is
+ * returned unchanged.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+export function withoutGroupLinkSecret(text) {
+  const trimmed = text.trim();
+  if (trimmed === "" || /\s/.test(trimmed)) return text;
+  let url;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return text;
+  }
+  if (!url.pathname.startsWith("/g/") || url.hash === "") return text;
+  const at = trimmed.indexOf("#");
+  return at < 0 ? text : trimmed.slice(0, at);
+}
+
+/**
+ * ADR-0092 — the preview line of a content message from the stored words.
+ * @param {any} content
+ * @param {any} words
+ * @returns {string | null}
+ */
+function contentPreviewLine(content, words) {
+  if (content === null || typeof content !== "object") return null;
+  const fill = (template, value) =>
+    truncate(String(template).replace("\u0001", String(value ?? "").replace(/\s+/g, " ").trim()));
+  switch (content.kind) {
+    case "poll":
+      return fill(words.pollPreview, content.poll?.body?.question);
+    case "checklist":
+      return fill(words.checklistPreview, content.checklist?.body?.title);
+    case "location":
+      return truncate(String(words.locationPreview));
+    case "contactCard":
+      return fill(words.contactPreview, content.card?.name);
+    case "article":
+      return fill(words.articlePreview, content.article?.title);
+    default:
+      return null;
+  }
+}
+
+/**
+ * ADR-0092 — whether a journal row is an anonymous poll ballot.
+ * @param {any} wasm
+ * @param {Uint8Array} payload
+ */
+function isPollBallotRow(wasm, payload) {
+  try {
+    return typeof wasm?.isPollBallotRow === "function" && wasm.isPollBallotRow(payload) === true;
+  } catch {
+    return false;
+  }
+}
+
 /** Truncate a preview body to a sane notification length. */
 function truncate(text) {
   if (text.length <= PREVIEW_MAX_CHARS) return text;
   return `${text.slice(0, PREVIEW_MAX_CHARS - 1)}…`;
+}
+
+/** ADR-0047 section 6 — the core's bound on the micro thumbnail. */
+const INLINE_THUMB_MAX_BYTES = 4096;
+
+/**
+ * A `data:image/jpeg;base64,...` URL of a message's micro thumbnail, or
+ * `null` when `bytes` is not a JPEG (`FF D8 FF`) of 1 to 4096 bytes. The core
+ * already applies this bound; the worker checks again before anything
+ * becomes a URL. Pure; exported for the tests.
+ *
+ * @param {unknown} bytes
+ * @returns {string | null}
+ */
+export function inlineThumbDataUrl(bytes) {
+  if (!(bytes instanceof Uint8Array)) return null;
+  if (bytes.length < 3 || bytes.length > INLINE_THUMB_MAX_BYTES) return null;
+  if (bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes[2] !== 0xff) return null;
+  return `data:image/jpeg;base64,${bytesToBase64(bytes)}`;
+}
+
+/**
+ * ADR-0047 section 6 — a message notification keeps its picture exactly when
+ * it shows the message's words: `showsText` is false for a reaction ("Anna
+ * reacted to your message"), and the generic banner never reaches here.
+ * Pure; exported for the tests.
+ *
+ * @template {{ image?: string }} T
+ * @param {T} notification
+ * @param {boolean} showsText
+ * @returns {T}
+ */
+export function notificationWithPicture(notification, showsText) {
+  if (showsText && typeof notification.image === "string" && notification.image.length > 0) return notification;
+  if (notification.image === undefined) return notification;
+  const { image: _image, ...rest } = notification;
+  return /** @type {T} */ (rest);
 }
 
 /** Standard-alphabet base64 of raw bytes (matches `auth/account-id`). */

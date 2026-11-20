@@ -168,7 +168,7 @@ pub(crate) struct ResetFinishReq {
     /// recorded as the account's identity key (ADR-0074 section 0.1).
     pub(crate) new_signature_pubkey_b64: String,
     /// URL-safe base64 of the 64-byte identity proof by the NEW identity key
-    /// over the account id and that key (`signIdentityProof`, ADR-0089 F3).
+    /// over the account id and that key (`signIdentityProof`, ADR-0098 F3).
     /// Absent or invalid: `400 identity-proof-invalid`.
     #[serde(default)]
     pub(crate) identity_proof_b64: Option<String>,
@@ -218,6 +218,9 @@ fn decode_pubkey(b64: &str) -> Result<[u8; 32], ApiError> {
 /// recovery email again. Recovery tickets in flight go with it. The
 /// `recovery_emails` row (the password route) is kept by a reset and deleted
 /// by a recall.
+///
+/// ADR-0092 section 4.2: the anonymous-credential commitment and the
+/// issuance rows go too; the person's new seed registers a new commitment.
 pub(crate) async fn delete_superseded_state(
     tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
     account_id: &[u8; 16],
@@ -231,6 +234,10 @@ pub(crate) async fn delete_superseded_state(
         "DELETE FROM webauthn_action_grants WHERE account_id = ?",
         "DELETE FROM device_grants WHERE account_id = ?",
         "DELETE FROM device_requests WHERE account_id = ?",
+        // ADR-0092 section 4.2: the new seed gives a new credential secret,
+        // which registers a new commitment.
+        "DELETE FROM anon_credential_commitments WHERE account_id = ?",
+        "DELETE FROM anon_credential_issued WHERE account_id = ?",
     ] {
         sqlx::query(statement)
             .bind(account_id.as_slice())
@@ -279,6 +286,17 @@ pub(crate) async fn start(
     Ok(Json(ResetStartRes { recovery_response }))
 }
 
+/// `POST /account/keys/reset/finish`, counted as a key reset (ADR-0096); the
+/// flow is [`finish_answer`].
+pub(crate) async fn finish(
+    state: State<AppState>,
+    auth: Extension<AuthenticatedAccount>,
+    caller: Extension<AuthenticatedDevice>,
+    payload: Json<ResetFinishReq>,
+) -> axum::response::Response {
+    crate::metrics::key_reset(finish_answer(state, auth, caller, payload).await)
+}
+
 /// `POST /account/keys/reset/finish` — bearer-auth. The transaction of the
 /// module doc, then the attestation and the new pair.
 ///
@@ -293,7 +311,7 @@ pub(crate) async fn start(
 /// with no row to update and is answered with the enumeration-safe `401`.
 #[axum::debug_handler]
 #[allow(clippy::too_many_lines)] // one transaction, its steps numbered as in the module doc
-pub(crate) async fn finish(
+async fn finish_answer(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthenticatedAccount>,
     Extension(caller): Extension<AuthenticatedDevice>,
@@ -363,7 +381,7 @@ pub(crate) async fn finish(
     .await
     .map_err(ApiError::Db)?;
 
-    //    The new key's target, claimed for this account (ADR-0089 F3): a key
+    //    The new key's target, claimed for this account (ADR-0098 F3): a key
     //    another account holds is refused and the reset rolls back.
     crate::identity_target::claim(
         &mut tx,

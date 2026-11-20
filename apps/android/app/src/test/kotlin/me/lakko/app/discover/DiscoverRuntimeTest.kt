@@ -34,12 +34,19 @@ class DiscoverRuntimeTest {
         var stored: SharedChannelsRow = SharedChannelsRow()
         var live = true
         var failSend = false
+        /** ADR-0091 walk 3, W3-R2 — every send answers "held". */
+        var heldSend = false
         var shareable: List<ShareableChannel>? = emptyList()
         val repo = SharedChannelsRepository(
             account = { "acct" },
             broadcast = { g, envelope ->
                 if (failSend) throw IllegalStateException("network")
-                sent += g to decodeFake(envelope)
+                if (heldSend) {
+                    false
+                } else {
+                    sent += g to decodeFake(envelope)
+                    true
+                }
             },
             isLive = { live },
             scope = scope,
@@ -86,6 +93,21 @@ class DiscoverRuntimeTest {
         h.failSend = false
         assertTrue(runCatching { h.repo.setSharing("g", true) }.isFailure)
         assertTrue(h.sent.isEmpty())
+    }
+
+    @Test
+    fun `a held send records nothing, so the next change re-send sends the list`() = runTest {
+        // ADR-0091 walk 3, W3-R2 — the device may be behind in the group.
+        val h = Harness(this)
+        h.shareable = listOf(books)
+        h.heldSend = true
+        h.repo.setSharing("g", true)
+        assertTrue(h.sent.isEmpty())
+        assertTrue(h.stored.sent["g"] == null)
+        h.heldSend = false
+        h.repo.followedSetChanged()
+        advanceUntilIdle()
+        assertEquals(listOf(SharedChannel(id(1), "books", "Books")), h.sent.single().second.channels)
     }
 
     @Test

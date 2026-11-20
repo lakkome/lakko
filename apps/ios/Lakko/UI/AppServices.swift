@@ -121,7 +121,15 @@ extension AppServices {
         PushAccountBindingStore.live.clear()
         AuthRepository.removeAllDeliveredNotifications()
         let accountIdB64 = authRepository.identitySecrets.map { base64Encode($0.accountId) }
+        let seed = authRepository.identitySecrets?.accountIdentitySeed
         Task { @MainActor in
+            // ADR-0090 section 2.4 — best effort, before the wipe: a retire
+            // request for this device's leaf in every channel PublisherGroup
+            // it holds (an owner device of the account applies it; if lost,
+            // the roster reconcile retires the leaf).
+            if let seed, let channels = ChannelDeviceAdmission.waitingState {
+                await ChannelDeviceAdmission.sendOwnRetireRequests(state: channels, currentSeed: seed)
+            }
             if let own = chatRepository.ownDeviceLeafKey {
                 await chatRepository.deleteDirectoryKeyPackage(deviceKey: own)
             }

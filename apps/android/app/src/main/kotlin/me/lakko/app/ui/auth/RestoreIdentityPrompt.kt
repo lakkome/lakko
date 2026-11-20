@@ -7,11 +7,6 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Devices
-import androidx.compose.material.icons.filled.Key
-import androidx.compose.material.icons.automirrored.filled.Notes
-import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -31,6 +26,7 @@ import me.lakko.app.auth.base64Decode
 import me.lakko.app.webauthn.restoreOffersPasskey
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
+import me.lakko.app.R
 
 /** The ways to bring the keys onto this phone, in the order the prompt
  *  lists them. Never a route that only signs in. */
@@ -55,6 +51,11 @@ public fun RestoreIdentityPrompt(
     modifier: Modifier = Modifier,
     /** Why the prompt is up after a passkey sign-in, or `null`. */
     restoreNotice: RestoreNotice? = null,
+    /** G-56 (UX section 8a): this device holds the account's current keys
+     *  but not the earlier keys its chats use. Only "Another device" and
+     *  "I have none of these" are offered: a passkey, an email code and the
+     *  phrase bring the keys this device already has. */
+    earlierKeysMissing: Boolean = false,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var way by rememberSaveable { mutableStateOf<RestoreWay?>(null) }
@@ -123,25 +124,38 @@ public fun RestoreIdentityPrompt(
                 }
                 null -> Unit
             }
-            Lead(t("restore_identity.lede", mapOf("username" to "@$username")))
+            val rows = restoreRowsFor(
+                earlierKeysMissing = earlierKeysMissing,
+                passkeyOffered = restoreOffersPasskey(state.passkeysWithKeys),
+                emailCode = accountRows.emailCode,
+                phrase = accountRows.phrase,
+            )
+            Lead(
+                t(
+                    if (earlierKeysMissing) "restore_identity.earlier_keys.lede" else "restore_identity.lede",
+                    mapOf("username" to "@$username"),
+                ),
+            )
             Spacer(Modifier.height(16.dp))
             MethodRow(
-                icon = Icons.Filled.Devices,
+                icon = R.drawable.ic_lk_smartphone_waves,
                 title = t("recovery.method.device.title"),
-                subtitle = t("recovery.method.device.sub"),
+                subtitle = t(
+                    if (earlierKeysMissing) "restore_identity.earlier_keys.another_device.sub" else "recovery.method.device.sub",
+                ),
                 onClick = { way = RestoreWay.AnotherDevice },
             )
-            if (restoreOffersPasskey(state.passkeysWithKeys)) {
+            if (rows.passkey) {
                 MethodRow(
-                    icon = Icons.Filled.Key,
+                    icon = R.drawable.ic_lk_passkey,
                     title = t("recovery.method.passkey.title"),
                     subtitle = t("restore_identity.method.passkey.sub"),
                     onClick = { way = RestoreWay.Passkey },
                 )
             }
-            if (accountRows.emailCode) {
+            if (rows.emailCode) {
                 MethodRow(
-                    icon = Icons.Filled.Key,
+                    icon = R.drawable.ic_lk_envelope,
                     title = t("recovery.email.row.title"),
                     subtitle = t("recovery.email.row.body"),
                     onClick = {
@@ -150,9 +164,9 @@ public fun RestoreIdentityPrompt(
                     },
                 )
             }
-            if (accountRows.phrase) {
+            if (rows.phrase) {
                 MethodRow(
-                    icon = Icons.AutoMirrored.Filled.Notes,
+                    icon = R.drawable.ic_lk_key,
                     title = t("recovery.method.phrase.title"),
                     subtitle = t("recovery.method.phrase.restore_sub"),
                     onClick = { way = RestoreWay.Phrase },
@@ -160,7 +174,7 @@ public fun RestoreIdentityPrompt(
             }
             FormError(emailState.listLine)
             MethodRow(
-                icon = Icons.Outlined.ErrorOutline,
+                icon = R.drawable.ic_lk_exclamation_circle,
                 title = t("restore_identity.lost.summary"),
                 subtitle = t("restore_identity.lost.sub"),
                 onClick = { way = RestoreWay.Neither },
@@ -238,6 +252,9 @@ public fun RestoreIdentityPrompt(
                         accountIdB64 = accountIdB64,
                     ),
                     onRecovered = { outcome -> viewModel.completeFromPairing(outcome) },
+                    // G-56 — a device already in the DeviceGroup pairs again
+                    // with a self-removal proof.
+                    rejoinsHeldLeaf = earlierKeysMissing,
                 )
             }
             Spacer(Modifier.height(16.dp))
@@ -374,6 +391,27 @@ public fun RestoreIdentityPrompt(
         }
     }
 }
+
+/** Which optional rows the restore prompt lists. */
+public data class RestoreRows(val passkey: Boolean, val emailCode: Boolean, val phrase: Boolean)
+
+/**
+ * The optional rows of the restore prompt (UX sections 8 and 8a): on the
+ * "earlier keys missing" variant none of them (each brings only the keys this
+ * device already holds); otherwise what the account and this device offer.
+ * "Another device" and "I have none of these" are always listed.
+ */
+public fun restoreRowsFor(
+    earlierKeysMissing: Boolean,
+    passkeyOffered: Boolean,
+    emailCode: Boolean,
+    phrase: Boolean,
+): RestoreRows =
+    if (earlierKeysMissing) {
+        RestoreRows(passkey = false, emailCode = false, phrase = false)
+    } else {
+        RestoreRows(passkey = passkeyOffered, emailCode = emailCode, phrase = phrase)
+    }
 
 /** The word the person types to confirm a reset (UX 15.1): the same Latin
  *  letters in every language, like the slot numbers of the grid. */

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The suspension snapshots this service builds and serves (ADR-0089
+//! The suspension snapshots this service builds and serves (ADR-0098
 //! section 5, steps 4 and 5: suspended accounts and removed channels).
 //!
 //! Once per period (`LAKKO_MODERATION_SNAPSHOT_PERIOD_SECS`, a day by

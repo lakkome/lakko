@@ -60,6 +60,9 @@ pub enum FfiMailboxKind {
     WelcomeRendezvous,
     /// A signed link refusal (ADR-0079, 2026-10-19).
     LinkRefusal,
+    /// A conversation re-entry request (ADR-0091 phase 2, route 2).
+    /// Appended: a uniffi enum lowers by ordinal.
+    ConversationReentry,
 }
 
 impl From<FfiMailboxKind> for MailboxKind {
@@ -70,6 +73,7 @@ impl From<FfiMailboxKind> for MailboxKind {
             FfiMailboxKind::ContactAck => Self::ContactAck,
             FfiMailboxKind::WelcomeRendezvous => Self::WelcomeRendezvous,
             FfiMailboxKind::LinkRefusal => Self::LinkRefusal,
+            FfiMailboxKind::ConversationReentry => Self::ConversationReentry,
         }
     }
 }
@@ -82,6 +86,7 @@ impl From<MailboxKind> for FfiMailboxKind {
             MailboxKind::ContactAck => Self::ContactAck,
             MailboxKind::WelcomeRendezvous => Self::WelcomeRendezvous,
             MailboxKind::LinkRefusal => Self::LinkRefusal,
+            MailboxKind::ConversationReentry => Self::ConversationReentry,
         }
     }
 }
@@ -268,6 +273,7 @@ mod tests {
             FfiMailboxKind::ContactAck,
             FfiMailboxKind::WelcomeRendezvous,
             FfiMailboxKind::LinkRefusal,
+            FfiMailboxKind::ConversationReentry,
         ] {
             let row = seal_mailbox_row_to_binding(
                 binding.clone(),

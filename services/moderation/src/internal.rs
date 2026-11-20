@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The internal listener: moderator statements in (ADR-0089 sections 4, 5,
+//! The internal listener: moderator statements in (ADR-0098 sections 4, 5,
 //! step 5).
 //!
 //! `POST /internal/statements` is not on the public router. It is served on a

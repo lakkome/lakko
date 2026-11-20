@@ -18,7 +18,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 lakko-moderation = { path = ".." }
 
-# Every decoder of ADR-0089: the report and its clear part (posted by anyone
+# Every decoder of ADR-0098: the report and its clear part (posted by anyone
 # holding a token), the sealed content, the statement and the signed
 # statement (reaching every applying service), the moderator list. Whatever
 # decodes must re-encode to the identical bytes.

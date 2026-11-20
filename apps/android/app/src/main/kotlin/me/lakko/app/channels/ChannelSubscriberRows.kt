@@ -27,7 +27,57 @@ public object ChannelSubscriberRows {
         /** The invite key the ticket names (hex), or `null` with no valid
          *  ticket. */
         val inviteKeyHex: String?,
+        /** The service's row number (registration order). */
+        val seq: Long = 0,
     )
+
+    /** What the let-in pass does with one row (ADR-0087 section 7). */
+    public enum class LetIn { ADMIT, REMOVE, LEAVE }
+
+    /**
+     * The let-in verdict of one row, the web rule (`subscriber-admission.ts`)
+     * with this device's mark ([ChannelAdmissionMark]):
+     * - a row at or below the mark came in before the channel went private or
+     *   was let in by an earlier pass: a reader, let in (UX 4.1: "Everyone
+     *   subscribed stays");
+     * - a row whose ticket names a live invite key: let in;
+     * - this device's own key: left alone (a publisher's own card key);
+     * - any other row, on a device that set the mark itself: removed;
+     * - on a device that did not (a co-publisher, another device of the
+     *   owner), left alone: it cannot tell a reader from before from a row
+     *   with no ticket. No ticket alone never lets a row in.
+     */
+    public fun letInVerdict(
+        row: Row,
+        ticketLive: Boolean,
+        mark: Long,
+        markSet: Boolean,
+        ownKeyHex: String?,
+        /** docs/ux/second-device.md section 4a — the account's reader key this
+         *  device registered (the account's other devices read under it):
+         *  treated as this device's own key, never removed. */
+        accountKeyHex: String? = null,
+    ): LetIn = when {
+        row.seq <= mark -> LetIn.ADMIT
+        ticketLive -> LetIn.ADMIT
+        ownKeyHex != null && row.pubkeyHex.equals(ownKeyHex, ignoreCase = true) -> LetIn.LEAVE
+        accountKeyHex != null && row.pubkeyHex.equals(accountKeyHex, ignoreCase = true) -> LetIn.LEAVE
+        markSet -> LetIn.REMOVE
+        else -> LetIn.LEAVE
+    }
+
+    /** The mark after a pass judged [judged] (each row with its verdict): on
+     *  a device that set the mark, past every row judged; on any other, only
+     *  past the rows let in before the first one left alone, so a row it
+     *  left is never read as a reader nor resealed to. */
+    public fun advancedMark(mark: Long, markSet: Boolean, judged: List<Pair<Row, LetIn>>): Long {
+        var through = mark
+        for ((row, verdict) in judged.sortedBy { it.first.seq }) {
+            if (!markSet && verdict != LetIn.ADMIT) break
+            through = maxOf(through, row.seq)
+        }
+        return through
+    }
 
     /** The invite key [ticket] names, under any held admission seed version. */
     public fun inviteKeyOf(context: Context, account: String, channelId: String, subscriberHex: String, ticket: ByteArray?): String? {
@@ -50,6 +100,39 @@ public object ChannelSubscriberRows {
         return null
     }
 
+    /**
+     * Section 15.1 — the label a row came by: the owner's label of the link
+     * whose invite key the ticket names, or `null` (`From an invitation`) for
+     * a contact invitation, a link with no label, or a key no link names.
+     * [labelsByInviteKey] maps a link's invite key (lower-case hex) to its
+     * label, as [linkLabels] reads them.
+     */
+    public fun linkLabelOf(inviteKeyHex: String?, labelsByInviteKey: Map<String, String>): String? {
+        if (inviteKeyHex == null) return null
+        return labelsByInviteKey[inviteKeyHex.lowercase()]?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
+    /** The channel's links in the account's link register (every device's),
+     *  by invite key: what [linkLabelOf] reads. */
+    public fun linkLabels(channelId: String): Map<String, String> {
+        val records = me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.linkRecords?.value ?: return emptyMap()
+        val out = HashMap<String, String>()
+        for (r in records) {
+            if (r.kind != uniffi.lakko_ffi_uniffi.LinkRecordKind.CHANNEL || r.inviteSeed.size != 32) continue
+            if (ChannelsComposer.bytesToHex(r.targetId).lowercase() != channelId.lowercase()) continue
+            try {
+                uniffi.lakko_ffi_uniffi.ChannelInviteSigner.fromInviteSeed(r.inviteSeed).use { signer ->
+                    out[signer.verifyingKey().joinToString("") { "%02x".format(it) }] = r.label
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                // A seed the core refuses names no key.
+            }
+        }
+        return out
+    }
+
     /** Every row, with what its ticket names. */
     public suspend fun read(context: Context, state: ChannelsUiState, client: ChannelsClient, channelId: String): List<Row> {
         val account = state.boundAccount ?: return emptyList()
@@ -58,7 +141,8 @@ public object ChannelSubscriberRows {
         var after = 0L
         while (true) {
             val page = ChannelPublisherSigners.derive(pub, channelId).use { client.subscriberPage(channelId, it, after) }
-            for (r in page.rows) out += Row(r.pubkeyHex, inviteKeyOf(context, account, channelId, r.pubkeyHex, r.sealedTicket))
+            for (r in page.rows) out += Row(r.pubkeyHex, inviteKeyOf(context, account, channelId, r.pubkeyHex, r.sealedTicket), r.seq)
+            page.rows.maxOfOrNull { it.seq }?.let { ChannelAdmissionMark.noteSeen(context, account, channelId, it) }
             if (page.rows.isEmpty() || page.nextAfter <= after) break
             after = page.nextAfter
         }
@@ -66,36 +150,75 @@ public object ChannelSubscriberRows {
     }
 
     /**
-     * The let-in pass of a private channel: the keys whose ticket names a key
-     * the channel holds. A row with no valid ticket is removed. `null` when
-     * this device holds no admission seed (a co-publisher before the owner
-     * sealed one to it): the owner's device lets people in.
+     * The let-in pass of a private channel ([letInVerdict]): the keys let in
+     * (the readers from before the channel went private, and the rows whose
+     * ticket names a key the channel holds). On a device holding the mark a
+     * row with no valid ticket above it is removed and the mark moves past
+     * the rows judged. `null` when this device holds no admission seed (a
+     * co-publisher before the owner sealed one to it): the owner's device
+     * lets people in.
      */
     public suspend fun admissible(context: Context, state: ChannelsUiState, client: ChannelsClient, channelId: String): List<String>? {
         val account = state.boundAccount ?: return null
-        if (ChannelAdmissionKeys.all(context, account, channelId).isEmpty()) return null
+        if (ChannelAdmissionKeys.all(context, account, channelId).also { l -> l.forEach { it.second.fill(0) } }.isEmpty()) return null
         val pub = state.publisher ?: return null
         val live = ChannelPublisherSigners.derive(pub, channelId).use { client.listInviteKeys(channelId, it) }.toSet()
         val rows = read(context, state, client, channelId)
+        val ownKeyHex = state.subscriberKeysByChannel.value[channelId]?.publicKey?.let(ChannelsComposer::bytesToHex)
+        val accountKeyHex = ChannelAccountReaderKey.registeredKeyHex(context, account, channelId)
+        val mark = ChannelAdmissionMark.get(context, account, channelId)
+        val markSet = ChannelAdmissionMark.isSet(context, account, channelId)
         val keep = ArrayList<String>()
-        for (row in rows) {
-            if (row.inviteKeyHex != null && row.inviteKeyHex in live) {
-                keep += row.pubkeyHex
-            } else if (row.inviteKeyHex == null) {
-                try {
+        val judged = ArrayList<Pair<Row, LetIn>>()
+        for (row in rows.sortedBy { it.seq }) {
+            val verdict = letInVerdict(row, row.inviteKeyHex != null && row.inviteKeyHex in live, mark, markSet, ownKeyHex, accountKeyHex)
+            when (verdict) {
+                LetIn.ADMIT -> keep += row.pubkeyHex
+                LetIn.LEAVE -> Unit
+                LetIn.REMOVE -> try {
                     ChannelPublisherSigners.derive(pub, channelId).use { client.removeSubscriber(channelId, row.pubkeyHex, it) }
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
                 } catch (e: Throwable) {
+                    // The mark stops before this row: a row not removed is
+                    // judged again, never read as a reader (the web pass
+                    // stops at a failed removal too).
                     Log.i(TAG, "a row with no valid ticket was not removed yet")
+                    break
                 }
             }
+            judged += row to verdict
         }
+        val raised = advancedMark(mark, markSet, judged)
+        if (raised > mark) ChannelAdmissionMark.raise(context, account, channelId, raised)
         return keep
     }
 
-    /** Section 7.3 — `Remove`: the row goes and a rotation follows at once, so
-     *  the removed key gets no seed of the next epoch. */
+    /**
+     * Section 4.1 / ADR-0087 section 7 — the channel goes private (or its
+     * owner mints its first admission seed): the rows of today stay readers.
+     * Raise this device's mark to the newest row, the web
+     * `repairPrivateChannelAccess` and type-change step.
+     */
+    public suspend fun markCurrentRowsAsReaders(context: Context, state: ChannelsUiState, client: ChannelsClient, channelId: String) {
+        val account = state.boundAccount ?: return
+        val pub = state.publisher ?: return
+        var through = ChannelAdmissionMark.get(context, account, channelId)
+        var after = through
+        while (true) {
+            val page = ChannelPublisherSigners.derive(pub, channelId).use { client.subscriberPage(channelId, it, after) }
+            val last = page.rows.lastOrNull() ?: break
+            through = maxOf(through, last.seq)
+            ChannelAdmissionMark.noteSeen(context, account, channelId, last.seq)
+            if (page.nextAfter <= after) break
+            after = page.nextAfter
+        }
+        ChannelAdmissionMark.raise(context, account, channelId, through, markSet = true)
+    }
+
+    /** Section 7.3 — `Remove`: the row goes and a rotation follows, so the
+     *  removed key gets no seed of the next epoch: at once on the owner's
+     *  device; a publisher asks the owner's device to rotate (section 15). */
     public suspend fun remove(state: ChannelsUiState, client: ChannelsClient, channelId: String, pubkeyHex: String) {
         val pub = state.publisher ?: throw IllegalStateException("no publisher identity")
         ChannelPublisherSigners.derive(pub, channelId).use { client.removeSubscriber(channelId, pubkeyHex, it) }
@@ -166,6 +289,9 @@ public object ChannelRemovalWatch {
 
     /** End [channelId] on this device after a removal. */
     public fun ended(state: ChannelsUiState, channelId: String, name: String, onNotice: (String, String) -> Unit) {
+        // docs/ux/second-device.md section 4a — the account's key was
+        // removed: the account's other devices drop the channel too.
+        ChannelSubscriptionSync.recordLeave(channelId)
         state.clearSubscriberKeys(channelId)
         state.removeChannel(channelId)
         ChannelMemberCards.forgetUploads(channelId)
@@ -185,7 +311,7 @@ public object ChannelRemovalWatch {
         for ((channelId, keys) in state.subscriberKeysByChannel.value) {
             if (channelId in publishing) continue
             val channel = state.channels.value.firstOrNull { it.id == channelId } ?: continue
-            // ADR-0089 step 5 — a removed channel is asked once per period.
+            // ADR-0098 step 5 — a removed channel is asked once per period.
             if (!RemovedChannels.mayAsk(channelId)) continue
             try {
                 client.fetchEnvelope(channelId, ChannelsComposer.bytesToHex(keys.publicKey))

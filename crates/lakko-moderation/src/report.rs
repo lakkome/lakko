@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The anonymous report ([ADR-0089] section 2).
+//! The anonymous report ([ADR-0098] section 2).
 //!
 //! ```text
 //! report  = DOMAIN ‖ version(1) ‖ clear_len(2) ‖ clear ‖ sealed
@@ -15,7 +15,7 @@
 //! cases by. It names the target and the reason, never the reporter. The
 //! content (comment and evidence) is sealed to the moderators.
 //!
-//! [ADR-0089]: ../../../docs/adr/0089-reporting-and-moderation.md
+//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
 
 use lakko_crypto::agreement::SecretKey;
 

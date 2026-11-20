@@ -107,7 +107,7 @@ public object AccountLocalWipe {
 
         // ---- session + identity material ------------------------------------
         Step("session-token") { ctx, acct -> me.lakko.app.auth.SessionTokenStore.deleteSessionToken(ctx, acct) },
-        // ADR-0089 section 4: the restricted session of a suspended account.
+        // ADR-0098 section 4: the restricted session of a suspended account.
         Step("suspension") { ctx, acct -> me.lakko.app.auth.SuspensionStore.delete(ctx, acct) },
         Step("session-record") { ctx, acct ->
             val store = me.lakko.app.auth.SessionStore(ctx)
@@ -174,6 +174,14 @@ public object AccountLocalWipe {
         // ADR-0080: the cards of the account's devices, this device's own
         // card, its city answer and its "Show my city" switch.
         Step("device-cards") { ctx, acct -> me.lakko.app.devices.DeviceCardCenter.deleteAccountRows(ctx, acct) },
+        // ADR-0092: the channel-poll credentials, who admitted this device into
+        // each group, and the article drafts. Pending anonymous ballots live
+        // in the message log, wiped with it.
+        Step("attachment-kinds") { ctx, acct ->
+            me.lakko.app.channels.ChannelPollCredentials.deleteAccountRows(ctx, acct)
+            me.lakko.app.chat.AdmittingAccounts.deleteAccountRows(ctx, acct)
+            me.lakko.app.ui.chat.ArticleDrafts.deleteAccountRows(ctx, acct)
+        },
         Step("recovery-phrase") { ctx, acct -> me.lakko.app.backup.PhraseStore.deletePhrase(ctx, acct) },
         // A guest account's phrase is kept under a key of its own
         // (`auth/GuestAccount.kt`), so it has a step of its own.
@@ -228,12 +236,28 @@ public object AccountLocalWipe {
         // kept for a group this device still held.
         Step("membership-ends") { ctx, acct -> me.lakko.app.chat.SharedPrefsMembershipEndStore(ctx).clearForAccount(acct) },
         Step("held-welcomes") { ctx, acct -> me.lakko.app.chat.SharedPrefsHeldWelcomeStore(ctx).clearForAccount(acct) },
+        // ADR-0091 phase 2 - the behind state, the re-entry requests sent,
+        // the knock keys held and the gap lines of every conversation.
+        Step("conversation-behind") { ctx, acct ->
+            me.lakko.app.chat.SharedPrefsConversationBehindStore(ctx).clearForAccount(acct)
+        },
+        Step("reentry-records") { ctx, acct -> me.lakko.app.chat.SharedPrefsReentryRecordStore(ctx).clearForAccount(acct) },
+        Step("knock-keys") { ctx, acct -> me.lakko.app.chat.SharedPrefsKnockKeyStore(ctx).clearForAccount(acct) },
+        Step("reentry-gaps") { ctx, acct -> me.lakko.app.chat.SharedPrefsReentryGapStore(ctx).clearForAccount(acct) },
+        // The returning device's looks for its gap bundle (sealed secret) and
+        // the bundles this device owes as a re-admitter.
+        Step("reentry-gap-looks") { ctx, acct -> me.lakko.app.chat.EncryptedGapLookStore(ctx).clearForAccount(acct) },
+        Step("reentry-owed-bundles") { ctx, acct ->
+            me.lakko.app.chat.SharedPrefsOwedGapBundleStore(ctx).clearForAccount(acct)
+        },
         Step("journal-ownership") { ctx, acct ->
             me.lakko.app.ds.EncryptedJournalOwnershipStore(ctx).clearForAccount(acct)
         },
         Step("group-names") { ctx, acct -> me.lakko.app.chat.GroupNameStore.deleteAccount(ctx, acct) },
         Step("group-settings") { ctx, acct -> me.lakko.app.chat.GroupSettingsStore.deleteAccount(ctx, acct) },
         Step("requests-sent") { ctx, acct -> me.lakko.app.chat.RequestsSentStore.deleteAccount(ctx, acct) },
+        // UX 10.2 - the passkeys this device learned cannot carry keys.
+        Step("passkeys-no-prf") { ctx, acct -> me.lakko.app.webauthn.PasskeyNoPrfStore.deleteAccount(ctx, acct) },
         Step("unseen-reactions") { ctx, acct -> me.lakko.app.chat.UnseenReactions.deleteAccount(ctx, acct) },
         Step("conversation-joined") { ctx, acct -> me.lakko.app.chat.ConversationJoinedStore.deleteAccount(ctx, acct) },
         // ADR-0073 "Phase 2 revised" — what an accepted reset of a contact
@@ -263,6 +287,7 @@ public object AccountLocalWipe {
             me.lakko.app.contacts.SharedPrefsProvenLinkStore(ctx).clearForOwner(acct)
         },
         Step("orphaned-channels") { ctx, acct -> me.lakko.app.channels.OrphanedChannelsStore.onDevice(ctx).deleteAccount(acct) },
+        Step("channel-owed-marks") { ctx, acct -> me.lakko.app.channels.PrefsOwedMarks.deleteAccount(ctx, acct) },
         Step("pins") { ctx, acct -> me.lakko.app.chat.PinStore.deleteAccount(ctx, acct) },
         Step("read-watermarks") { ctx, acct ->
             me.lakko.app.chat.SharedPreferencesReadWatermarkStore(ctx).deleteAccount(acct)
@@ -276,7 +301,7 @@ public object AccountLocalWipe {
             }
         },
         Step("folder-tab") { ctx, acct -> me.lakko.app.ui.chat.FolderTabPrefs.deleteAccount(ctx, acct) },
-        // ADR-0089 section 2 — "Your reports" lives on this device only.
+        // ADR-0098 section 2 — "Your reports" lives on this device only.
         Step("sent-reports") { ctx, acct -> me.lakko.app.moderation.SharedPrefsSentReportStore(ctx).clearForAccount(acct) },
         Step("played-media-marks") { ctx, acct -> me.lakko.app.media.MediaPrefs.forgetAccountOnDevice(ctx, acct) },
         Step("recent-emoji") { ctx, acct -> me.lakko.app.media.MediaPrefs.forgetEmojiOnDevice(ctx, acct) },
@@ -286,6 +311,9 @@ public object AccountLocalWipe {
             me.lakko.app.calls.SharedPreferencesGroupCallStore(ctx).deleteAccount(acct)
         },
         Step("call-history") { ctx, acct -> me.lakko.app.calls.CallHistoryStore.clear(ctx, acct) },
+        // ADR-0089 — the person's own background photos; a stored choice that
+        // names one of them goes back to no background.
+        Step("call-background-photos") { ctx, acct -> me.lakko.app.calls.wipeBackgroundPhotos(ctx, acct) },
 
         // ---- profiles + reach -----------------------------------------------
         Step("peer-profiles") { ctx, acct ->
@@ -299,6 +327,7 @@ public object AccountLocalWipe {
         },
         Step("reach") { ctx, acct -> me.lakko.app.reach.EncryptedReachDocStore(ctx).delete(acct) },
         Step("channel-handle-claims") { ctx, acct -> me.lakko.app.channels.ChannelHandleClaims.forgetAccount(ctx, acct) },
+        Step("group-handle-claims") { ctx, acct -> me.lakko.app.chat.GroupHandleClaims.forgetAccount(ctx, acct) },
         Step("channel-read-keys") { ctx, acct -> me.lakko.app.channels.ChannelReadKeys.forgetAccount(ctx, acct) },
         Step("channel-own-feedback") { ctx, acct -> me.lakko.app.channels.OwnChannelFeedbackStore.forgetAccount(ctx, acct) },
         Step("channel-feedback-outbox") { ctx, acct -> me.lakko.app.channels.ChannelFeedbackOutbox.forgetAccount(ctx, acct) },
@@ -307,6 +336,13 @@ public object AccountLocalWipe {
             me.lakko.app.channels.PendingPublisherRequests.forgetAccount(ctx, acct)
         },
         Step("channel-copublisher-bindings") { ctx, acct -> me.lakko.app.channels.CoPublisherBindingStore.forgetAccount(ctx, acct) },
+        Step("channel-refounding") { ctx, acct -> me.lakko.app.channels.ChannelRefounding.forgetAccount(ctx, acct) },
+        Step("channel-epoch-offsets") { ctx, acct -> me.lakko.app.channels.ChannelEpochOffsets.forgetAccount(ctx, acct) },
+        Step("channel-suspensions") { ctx, acct -> me.lakko.app.channels.ChannelSuspensions.forgetAccount(ctx, acct) },
+        Step("channel-held-welcomes") { ctx, acct -> me.lakko.app.channels.HeldPublisherWelcomes.forgetAccount(ctx, acct) },
+        Step("channel-joined-welcomes") { ctx, acct -> me.lakko.app.channels.JoinedPublisherWelcomes.forgetAccount(ctx, acct) },
+        Step("channel-deleted-group-epochs") { ctx, acct -> me.lakko.app.channels.DeletedPublisherGroupEpochs.forgetAccount(ctx, acct) },
+        Step("channel-create-pending") { ctx, acct -> me.lakko.app.channels.ChannelCreatePending.forgetAccount(ctx, acct) },
 
         // ---- contacts -------------------------------------------------------
         Step("accepted-contacts") { ctx, acct -> me.lakko.app.contacts.AcceptedContactsStore.delete(ctx, acct) },
@@ -345,6 +381,9 @@ public object AccountLocalWipe {
         // topics, cached buckets, the share switches and the lists members
         // shared.
         Step("feed") { ctx, acct -> me.lakko.app.feed.FeedSealedStore.deleteAccount(ctx, acct) },
+        // docs/ux/channel-notifications.md section 5 — the last post notified
+        // per channel on this device.
+        Step("channel-notified") { ctx, acct -> me.lakko.app.feed.ChannelNotifiedStore.forgetAccount(ctx, acct) },
         // The feed tab selection and the import banner: device-wide rows of
         // the session that is ending.
         Step("feed-prefs") { ctx, _ -> me.lakko.app.feed.FeedPrefs.clear(ctx) },

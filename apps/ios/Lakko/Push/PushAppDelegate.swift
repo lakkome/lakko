@@ -29,7 +29,7 @@ import UserNotifications
 public final class PushAppDelegate: NSObject, UIApplicationDelegate,
     UNUserNotificationCenterDelegate
 {
-    /// ADR-0089 section 6 — whether a conversation's notifications are not
+    /// ADR-0098 section 6 — whether a conversation's notifications are not
     /// shown over a running app (a one-to-one with a person this account
     /// blocked, `blockVerdict(.notification)`). Wired by the composition
     /// root; `nil` shows everything.
@@ -144,7 +144,7 @@ public final class PushAppDelegate: NSObject, UIApplicationDelegate,
             completionHandler([])
             return
         }
-        // ADR-0089 section 6 — nothing of a blocked person's is shown over
+        // ADR-0098 section 6 — nothing of a blocked person's is shown over
         // a running app. (The extension cannot read the synced block
         // register, so this is the foreground half only.)
         let userInfo = content.userInfo
@@ -184,6 +184,12 @@ public final class PushAppDelegate: NSObject, UIApplicationDelegate,
         if userInfo[NewDeviceNoticeCenter.notificationRouteKey] as? String
             == NewDeviceNoticeCenter.notificationRouteDevices {
             Task { @MainActor in NewDeviceNoticeCenter.shared.openDevicesRequested = true }
+        }
+        // `docs/ux/channel-notifications.md` section 1 — a channel post
+        // notification opens its channel.
+        if let channelId = userInfo[ChannelNotificationTaps.routeKey] as? String,
+           ChannelPostLogPayload.isChannelId(channelId) {
+            Task { @MainActor in ChannelNotificationTaps.shared.openChannelRequested = channelId }
         }
         completionHandler()
     }

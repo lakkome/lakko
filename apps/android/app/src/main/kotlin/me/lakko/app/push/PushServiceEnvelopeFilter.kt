@@ -180,6 +180,38 @@ internal fun previewKindOf(kind: MessageBodyKind): ProcessedKind? = when (kind) 
     MessageBodyKind.READ_RECEIPT -> ProcessedKind.READ_RECEIPT
     MessageBodyKind.SERVICE_ENVELOPE -> null
     MessageBodyKind.UNSUPPORTED -> ProcessedKind.UNSUPPORTED
+    // ADR-0092 section 1 — a content message previews as one line
+    // (`Poll: {question}`, never JSON); see [contentPreviewText].
+    MessageBodyKind.POLL,
+    MessageBodyKind.CHECKLIST,
+    MessageBodyKind.LOCATION,
+    MessageBodyKind.CONTACT_CARD,
+    MessageBodyKind.ARTICLE,
+    -> ProcessedKind.CHAT
+    // Ops on a poll or checklist, and edits of one, are suppressed like
+    // reactions: an older real message stays the preview.
+    MessageBodyKind.POLL_VOTE,
+    MessageBodyKind.POLL_CLOSE,
+    MessageBodyKind.CHECKLIST_TICK,
+    MessageBodyKind.CHECKLIST_ADD,
+    MessageBodyKind.EDIT_CHECKLIST,
+    MessageBodyKind.EDIT_ARTICLE,
+    -> null
+}
+
+/**
+ * ADR-0092 section 1 — the one-line preview of a content message in the
+ * notification language, or [fallback] (the envelope's text) for anything
+ * else.
+ */
+internal fun contentPreviewText(content: uniffi.lakko_ffi_uniffi.MessageContent?, fallback: String): String {
+    if (content == null) return fallback
+    val (key, args) = me.lakko.app.chat.contentSummary(content)
+    return try {
+        me.lakko.app.l10n.Localization.strings.value.format(key, args)
+    } catch (_: Throwable) {
+        fallback
+    }
 }
 
 /** Classify one decrypted MLS Application plaintext. See [isServiceEnvelope]
@@ -193,8 +225,9 @@ internal fun classifyBackgroundPayload(
     registrarSeedEnvelopeLen: Int = -1,
 ): BackgroundPayloadKind {
     // Cheap unambiguous discriminator: the CallSignalingPayload oneof
-    // body tags, fields 10..16 (0x52/0x5A/0x62/0x6A, the group-control
-    // 0x72/0x7A, and the two-byte 0x82 0x01 for field 16 — see
+    // body tags, fields 10..18 (0x52/0x5A/0x62/0x6A, the group-control
+    // 0x72/0x7A, and the two-byte 0x82 0x01 / 0x8A 0x01 / 0x92 0x01 for
+    // fields 16..18, the last a 1x1 media state that never notifies — see
     // `looksLikeCallSignaling` for why the group tags also check the
     // `call_id` header). Disjoint from both the chat `{` (0x7B) and the
     // `l` (0x6C) both in-group envelope domains open with.
@@ -324,8 +357,9 @@ private fun isServiceEnvelopeOtherThanCall(
     // previewed here.
     if (me.lakko.app.devices.looksLikeKeyRotationEnvelope(payload)) return true
 
-    // Kind 12 — ADR-0087 section 7, a co-publisher's step-down and the
-    // owner's sealed channel read key. Both ride a PublisherGroup journal,
+    // Kind 12 — ADR-0087 section 7, a co-publisher's step-down, the
+    // owner's sealed channel read key and earlier channel seeds, and a
+    // co-publisher's rotate request. All ride a PublisherGroup journal,
     // which no chat path reads, but the prefix peek keeps them off every
     // preview should one ever reach a chat journal. Suppressed only (C-59).
     if (looksLikePublisherChannelEnvelope(payload)) return true
@@ -335,11 +369,22 @@ private fun isServiceEnvelopeOtherThanCall(
 
 private val PUBLISHER_STEP_DOWN_PREFIX = "lakko/publisher-step-down/v1\u0000".toByteArray(Charsets.US_ASCII)
 private val CHANNEL_READ_KEY_PREFIX = "lakko/channel-read-key/v1\u0000".toByteArray(Charsets.US_ASCII)
+private val CHANNEL_EPOCH_SEEDS_PREFIX = "lakko/channel-epoch-seeds/v1\u0000".toByteArray(Charsets.US_ASCII)
+private val CHANNEL_ROTATE_REQUEST_PREFIX = "lakko/channel-rotate-request/v1\u0000".toByteArray(Charsets.US_ASCII)
+private val PUBLISHER_DEVICE_REQUEST_PREFIX = "lakko/publisher-device-request/v1\u0000".toByteArray(Charsets.US_ASCII)
+private val CHANNEL_ADMISSION_MARK_PREFIX = "lakko/channel-admission-mark/v1\u0000".toByteArray(Charsets.US_ASCII)
 
-/** `true` for the ADR-0087 step-down and channel read-key envelopes: a
- *  NUL-terminated domain peek, no decode. */
+/** `true` for the ADR-0087 step-down, channel read-key, earlier channel
+ *  seeds and rotate-request envelopes, and the ADR-0090 publisher device
+ *  request and admission mark: a NUL-terminated domain peek, no decode. */
 internal fun looksLikePublisherChannelEnvelope(payload: ByteArray): Boolean =
-    startsWith(payload, PUBLISHER_STEP_DOWN_PREFIX) || startsWith(payload, CHANNEL_READ_KEY_PREFIX)
+    startsWith(payload, PUBLISHER_STEP_DOWN_PREFIX) ||
+        startsWith(payload, CHANNEL_READ_KEY_PREFIX) ||
+        startsWith(payload, CHANNEL_EPOCH_SEEDS_PREFIX) ||
+        startsWith(payload, CHANNEL_ROTATE_REQUEST_PREFIX) ||
+        // ADR-0090 - a publisher's device request and the admission mark.
+        startsWith(payload, PUBLISHER_DEVICE_REQUEST_PREFIX) ||
+        startsWith(payload, CHANNEL_ADMISSION_MARK_PREFIX)
 
 private fun startsWith(payload: ByteArray, prefix: ByteArray): Boolean {
     if (payload.size < prefix.size) return false

@@ -35,6 +35,7 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use crate::key_reset::RouteError;
+use crate::metrics::{IdentityOutcome, IdentityRefusal};
 use crate::AppState;
 
 /// `account_id` length in bytes (UUIDv7 raw, matches the rest of
@@ -297,12 +298,42 @@ pub(crate) struct UploadResponse {
 /// generation must not be below the row's (`401
 /// {"error":"key-generation-superseded"}`). An attested change deletes every
 /// KeyPackage row of the account in the same transaction (section 5).
+///
+/// Every answer is counted by outcome (ADR-0096,
+/// `lakko_discovery_identity_uploads_total`).
 pub(crate) async fn upload(
     State(state): State<AppState>,
     axum::Extension(authed): axum::Extension<crate::auth::AuthenticatedAccount>,
     axum::Extension(generation): axum::Extension<crate::auth::SessionKeyGeneration>,
     Json(payload): Json<UploadRequest>,
 ) -> Result<Json<UploadResponse>, RouteError> {
+    let result = upload_decided(&state, &authed, generation, payload).await;
+    crate::metrics::identity_upload(upload_outcome(&result));
+    result.map(|_| Json(UploadResponse { ok: true }))
+}
+
+/// The metrics outcome of an identity upload's answer.
+fn upload_outcome(result: &Result<LogAppendDecision, RouteError>) -> IdentityOutcome {
+    match result {
+        Ok(LogAppendDecision::Skip) => IdentityOutcome::Unchanged,
+        Ok(LogAppendDecision::Append { is_reset: false }) => IdentityOutcome::Changed,
+        Ok(LogAppendDecision::Append { is_reset: true }) => IdentityOutcome::Reset,
+        Err(RouteError::Code(_, code) | RouteError::RetryAfter(_, code, _)) => {
+            IdentityOutcome::Refused(IdentityRefusal::of_code(code))
+        },
+        Err(RouteError::Text(status, _)) if status.is_server_error() => IdentityOutcome::Error,
+        Err(RouteError::Text(..)) => IdentityOutcome::Invalid,
+    }
+}
+
+/// The body of [`upload`]: decide, store and (on a key change) append to the
+/// transparency log; returns how the change rule decided.
+async fn upload_decided(
+    state: &AppState,
+    authed: &crate::auth::AuthenticatedAccount,
+    generation: crate::auth::SessionKeyGeneration,
+    payload: UploadRequest,
+) -> Result<LogAppendDecision, RouteError> {
     let account_id = decode_fixed::<ACCOUNT_ID_LEN>(&payload.account_id, "account_id")?;
     let signature_pubkey =
         decode_fixed::<SIGNATURE_PUBKEY_LEN>(&payload.signature_pubkey, "signature_pubkey")?;
@@ -424,12 +455,13 @@ pub(crate) async fn upload(
                 genesis_attest.as_deref(),
             )
             .await;
+        crate::metrics::kt_append(crate::metrics::KtAppendKind::Upload, confirmed);
         if confirmed {
             mark_logged_pubkey(&state.db, &account_id, &signature_pubkey).await;
         }
     }
 
-    Ok(Json(UploadResponse { ok: true }))
+    Ok(decision)
 }
 
 /// KT-log S2.5 — best-effort advance of the `logged_pubkey` marker after a
@@ -694,8 +726,9 @@ async fn apply_identity_upload_gated(
     ))
 }
 
-/// `(signature_pubkey, key_generation, within_cooldown, previous_signature_pubkey)`
-/// of the row an upload meets.
+/// `(signature_pubkey, key_generation, cooldown_remaining_secs, previous_signature_pubkey)`
+/// of the row an upload meets; `cooldown_remaining_secs` is `0` outside the
+/// cool-down window.
 type ExistingRow = (Vec<u8>, u64, i64, Option<Vec<u8>>);
 
 /// A single attempt of the gated upsert. Read-compare-conditional-write under
@@ -757,19 +790,22 @@ async fn try_apply_identity_once(
     let mut tx = db.begin().await?;
 
     // Row lock + the facts we need: the current key, the stored generation,
-    // and whether the last attested change is still within the cool-down
-    // window (computed server-side to avoid any Rust/DB clock skew; a
-    // `0`-second window never matches, since the elapsed seconds are always
-    // `>= 0`).
+    // and how many whole seconds of the cool-down window are left after the
+    // last attested change (computed server-side to avoid any Rust/DB clock
+    // skew; `0` outside the window, and a `0`-second window never yields
+    // more, since the elapsed seconds are always `>= 0`).
     let existing: Option<ExistingRow> = sqlx::query_as(
         "SELECT signature_pubkey, key_generation, \
-            CAST( \
+            CAST(IF( \
                 last_unproven_key_change_at IS NOT NULL \
-                AND TIMESTAMPDIFF(SECOND, last_unproven_key_change_at, NOW(3)) < ? \
-            AS SIGNED), \
+                AND TIMESTAMPDIFF(SECOND, last_unproven_key_change_at, NOW(3)) < ?, \
+                ? - TIMESTAMPDIFF(SECOND, last_unproven_key_change_at, NOW(3)), \
+                0 \
+            ) AS SIGNED), \
             previous_signature_pubkey \
          FROM identity_bundles WHERE account_id = ? FOR UPDATE",
     )
+    .bind(cooldown_secs)
     .bind(cooldown_secs)
     .bind(account_id)
     .fetch_optional(&mut *tx)
@@ -819,7 +855,7 @@ async fn try_apply_identity_once(
             // (decision D).
             LogAppendDecision::Append { is_reset: false }
         },
-        Some((current, stored_generation, within_cooldown, previous)) => {
+        Some((current, stored_generation, cooldown_remaining, previous)) => {
             // ADR-0073: the generation floor, before any change is judged.
             if crate::key_reset::floor_decision(Some(stored_generation), token_generation) {
                 tx.rollback().await?;
@@ -854,7 +890,7 @@ async fn try_apply_identity_once(
                 signature_pubkey,
                 evidence.kind(),
                 stored_generation,
-                within_cooldown != 0,
+                cooldown_remaining > 0,
             );
 
             let (key_changed, attested_generation, proven) = match outcome {
@@ -869,9 +905,17 @@ async fn try_apply_identity_once(
                     tx.rollback().await?;
                     let (status, code) = outcome.refusal();
                     tracing::warn!(code, "identity key change refused",);
-                    return Err(AttemptError::Refused(crate::key_reset::json_error(
-                        status, code,
-                    )));
+                    let refusal = if matches!(outcome, ChangeOutcome::CoolingDown) {
+                        // `cooldown_remaining > 0` here (the outcome needs it).
+                        RouteError::RetryAfter(
+                            status,
+                            code,
+                            u64::try_from(cooldown_remaining).unwrap_or(1).max(1),
+                        )
+                    } else {
+                        crate::key_reset::json_error(status, code)
+                    };
+                    return Err(AttemptError::Refused(refusal));
                 },
             };
 
@@ -941,7 +985,7 @@ async fn try_apply_identity_once(
     Ok(decision)
 }
 
-/// The account target of a signature key (ADR-0089 step 5): what
+/// The account target of a signature key (ADR-0098 step 5): what
 /// `identity_bundles.account_target` holds and what a moderator statement
 /// names an account by. Written in the same statement as the key, by every
 /// writer of it.
@@ -1602,7 +1646,7 @@ mod tests {
             .await
             .unwrap_or_else(|_| panic!("same-key upload"));
             assert_eq!(stored_link(&pool, &acct).await.as_deref(), expected);
-            // ADR-0089 step 5: the INSERT and the UPDATE both write the
+            // ADR-0098 step 5: the INSERT and the UPDATE both write the
             // key's account target.
             assert_eq!(
                 stored_target(&pool, &acct).await.as_deref(),

@@ -6,9 +6,15 @@ import { describe, expect, it } from "vitest";
 import {
   attachmentPreviewLabel,
   attachmentsPreviewLabel,
+  emptyPreviewLine,
+  messagePreviewWords,
   previewLine,
+  previewMediaOf,
   rowMatchesQuery,
+  rowThumbSource,
+  stackEdges,
 } from "./list-preview";
+import { b64UrlEncode } from "./persisted-attachment";
 
 describe("attachmentPreviewLabel", () => {
   it("names the recording flows by their kind", () => {
@@ -29,12 +35,82 @@ describe("attachmentPreviewLabel", () => {
     expect(attachmentPreviewLabel({ mime: null })).toBe("File");
   });
 
-  it("counts the rest beyond the first attachment", () => {
+  it("counts the rest beyond a recorded attachment", () => {
     expect(attachmentsPreviewLabel([])).toBe("");
-    expect(attachmentsPreviewLabel([{ mime: "image/png" }])).toBe("Photo");
     expect(
-      attachmentsPreviewLabel([{ mime: "image/png" }, { mime: "application/zip" }, { mime: "x" }]),
-    ).toBe("Photo and 2 more");
+      attachmentsPreviewLabel([{ mime: "audio/mp4", kind: "voice" }, { mime: "application/zip" }]),
+    ).toBe("Voice message and 1 more");
+  });
+});
+
+describe("attachmentsPreviewLabel (media-messages section 11)", () => {
+  it("names photos and videos by count", () => {
+    expect(attachmentsPreviewLabel([{ mime: "image/png" }])).toBe("Photo");
+    expect(attachmentsPreviewLabel([{ mime: "image/png" }, { mime: "image/jpeg" }, { mime: "image/webp" }])).toBe(
+      "3 photos",
+    );
+    expect(attachmentsPreviewLabel([{ mime: "video/mp4" }])).toBe("Video");
+    expect(attachmentsPreviewLabel([{ mime: "video/mp4" }, { mime: "video/mp4" }])).toBe("2 videos");
+    expect(
+      attachmentsPreviewLabel([{ mime: "image/png" }, { mime: "video/mp4" }, { mime: "image/png" }, { mime: "video/mp4" }]),
+    ).toBe("4 photos and videos");
+  });
+
+  it("names the photos when files ride beside them", () => {
+    expect(attachmentsPreviewLabel([{ mime: "image/png" }, { mime: "application/zip" }, { mime: "x" }])).toBe("Photo");
+  });
+
+  it("names files only by count", () => {
+    expect(attachmentsPreviewLabel([{ mime: "application/pdf" }])).toBe("File");
+    expect(attachmentsPreviewLabel([{ mime: "application/pdf" }, { mime: null }, { mime: "text/plain" }])).toBe(
+      "3 files",
+    );
+  });
+});
+
+describe("messagePreviewWords (media-messages section 11, the three cases)", () => {
+  it("files only, with text: the count words, a middle dot, the text", () => {
+    expect(messagePreviewWords("Weekend plans", [{ mime: "application/pdf" }, { mime: "text/plain" }])).toBe(
+      "2 files \u00b7 Weekend plans",
+    );
+    expect(messagePreviewWords("Notes", [{ mime: null }])).toBe("File \u00b7 Notes");
+  });
+
+  it("photos or videos, with text: the text alone (the row draws the thumbnail)", () => {
+    expect(messagePreviewWords("The trip", [{ mime: "image/jpeg" }, { mime: "video/mp4" }])).toBe("The trip");
+    expect(messagePreviewWords("The trip", [{ mime: "image/jpeg" }, { mime: "application/pdf" }])).toBe("The trip");
+  });
+
+  it("no text: the count words alone", () => {
+    expect(messagePreviewWords("", [{ mime: "image/jpeg" }, { mime: "image/png" }, { mime: "image/webp" }])).toBe(
+      "3 photos",
+    );
+    expect(messagePreviewWords("", [{ mime: "application/pdf" }, { mime: "application/zip" }])).toBe("2 files");
+  });
+
+  it("leaves a plain text message and a recording with a caption as their text", () => {
+    expect(messagePreviewWords("hi", [])).toBe("hi");
+    expect(messagePreviewWords("listen", [{ mime: "audio/mp4", kind: "voice" }])).toBe("listen");
+  });
+});
+
+describe("previewMediaOf and the stack", () => {
+  const att = (mime: string, extra: Record<string, unknown> = {}) =>
+    ({ blobIdB64: "", keyB64: "", nonceB64: "", mime, sizeStr: "1", name: null, ...extra }) as never;
+
+  it("takes the first photo or video and counts them", () => {
+    const thumb = { blobIdB64: "t", keyB64: "k", nonceB64: "n", mime: "image/jpeg", sizeStr: "9", width: 4, height: 3 };
+    expect(previewMediaOf([att("application/pdf"), att("video/mp4", { thumb }), att("image/png")])).toEqual({
+      thumb,
+      video: true,
+      count: 2,
+    });
+    expect(previewMediaOf([att("application/pdf")])).toBeNull();
+    expect(previewMediaOf([att("audio/mp4", { kind: "voice" })])).toBeNull();
+  });
+
+  it("draws one edge for two items and two for three or more", () => {
+    expect([1, 2, 3, 10].map(stackEdges)).toEqual([0, 1, 2, 2]);
   });
 });
 
@@ -80,5 +156,65 @@ describe("rowMatchesQuery", () => {
   it("an empty or blank query matches every row", () => {
     expect(rowMatchesQuery("", "Anna", "")).toBe(true);
     expect(rowMatchesQuery("   ", "Anna", "")).toBe(true);
+  });
+});
+
+describe("emptyPreviewLine", () => {
+  it("says there are no messages only once the log was read", () => {
+    expect(emptyPreviewLine(true)).toBe("No messages yet");
+  });
+
+  it("says nothing while the log is still being read", () => {
+    expect(emptyPreviewLine(false)).toBe("");
+  });
+});
+
+describe("the row picture prefers the micro thumbnail (ADR-0047 section 6)", () => {
+  const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
+  const thumb = {
+    blobIdB64: "a",
+    keyB64: "b",
+    nonceB64: "c",
+    mime: "image/jpeg",
+    sizeStr: "10",
+    width: 10,
+    height: 10,
+  };
+
+  it("draws the inline thumbnail at once, without the sent thumb", () => {
+    expect(rowThumbSource({ thumb, inlineThumbB64: b64UrlEncode(jpeg) })).toEqual({
+      kind: "inline",
+      url: "data:image/jpeg;base64,/9j/4A==",
+    });
+  });
+
+  it("falls back to the sent thumb only when there is no inline one", () => {
+    expect(rowThumbSource({ thumb })).toEqual({ kind: "thumb" });
+    expect(rowThumbSource({ thumb: null })).toEqual({ kind: "none" });
+  });
+
+  it("ignores an inline value that is not a JPEG within the bound", () => {
+    const png = b64UrlEncode(new Uint8Array([0x89, 0x50, 0x4e, 0x47]));
+    expect(rowThumbSource({ thumb, inlineThumbB64: png })).toEqual({ kind: "thumb" });
+    const big = new Uint8Array(4097);
+    big.set([0xff, 0xd8, 0xff]);
+    expect(rowThumbSource({ thumb: null, inlineThumbB64: b64UrlEncode(big) })).toEqual({ kind: "none" });
+  });
+
+  it("is carried from the message's first photo or video", () => {
+    const media = previewMediaOf([
+      { blobIdB64: "x", keyB64: "y", nonceB64: "z", mime: "application/pdf", sizeStr: "1", name: null },
+      {
+        blobIdB64: "x",
+        keyB64: "y",
+        nonceB64: "z",
+        mime: "image/jpeg",
+        sizeStr: "1",
+        name: null,
+        inlineThumbB64: b64UrlEncode(jpeg),
+      },
+    ]);
+    expect(media?.inlineThumbB64).toBe(b64UrlEncode(jpeg));
+    expect(media === null ? null : rowThumbSource(media).kind).toBe("inline");
   });
 });

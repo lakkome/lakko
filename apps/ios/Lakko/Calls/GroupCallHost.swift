@@ -67,6 +67,10 @@ final class GroupCallHost: ObservableObject {
         /// `Group.isActive`, `nil` when it cannot be read.
         var isActive: @MainActor (_ groupIdHex: String) -> Bool?
         var membershipEnded: @MainActor (_ groupIdHex: String) -> Bool
+        /// ADR-0091 — this device is behind in the chat: a call is not set up
+        /// there (the key would be derived at an epoch the others left). The
+        /// buttons stay; a start or join fails with the ordinary text.
+        var behindHeld: @MainActor (_ groupIdHex: String) -> Bool = { _ in false }
         /// The chat's group-call record.
         var record: @MainActor (_ groupIdHex: String) -> OngoingGroupCall?
         /// Fold this device's own signal into the record (never echoed back),
@@ -269,6 +273,13 @@ final class GroupCallHost: ObservableObject {
             return
         }
         guard !ports.membershipEnded(groupIdHex) else { return }
+        // ADR-0091 (maintainer, 2026-11-20) — behind in this chat: the
+        // ordinary could-not-start (could-not-join) text, before anything is
+        // captured, announced or connected. Nothing says why.
+        if ports.behindHeld(groupIdHex) {
+            callError = .key(joinCallId == nil ? "call.error.start_group" : "call.error.join_group")
+            return
+        }
         let attempt = UUID()
         self.attempt = attempt
         startingGroupIdHex = groupIdHex
@@ -831,6 +842,20 @@ final class GroupCallHost: ObservableObject {
     /// the publisher that is notifying it.
     private func bindControls(ui: CallUiState, handle: GroupCallHandle) {
         controls.removeAll()
+        // ADR-0089: the camera background stopped working. Nothing has been
+        // sent since; the camera is turned off here, where the camera button
+        // lands, so it happens with the call collapsed into the bar too.
+        CameraBackground.shared.$failures
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak ui] _ in
+                MainActor.assumeIsolated {
+                    guard let ui, ui.participants.first(where: { $0.isLocal })?.camOn == true
+                    else { return }
+                    ui.setCamera(false)
+                }
+            }
+            .store(in: &controls)
         ui.$participants
             .compactMap { $0.first(where: { $0.isLocal })?.micOn }
             .removeDuplicates()
@@ -995,6 +1020,7 @@ extension GroupCallHost {
                 guard let repository else { return true }
                 return membershipEnded(repository.membershipStateNow(groupIdHex: groupIdHex))
             },
+            behindHeld: { [weak repository] in repository?.reentryStopsActing(groupIdHex: $0) ?? false },
             record: { [weak repository] in repository?.groupCalls[$0] },
             applySignal: { [weak repository] groupIdHex, signal, atMs in
                 repository?.applyOwnGroupCallSignal(groupIdHex: groupIdHex, signal: signal, atMs: atMs)

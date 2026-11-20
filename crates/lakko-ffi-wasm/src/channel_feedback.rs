@@ -333,7 +333,7 @@ pub fn open_channel_comment(
 /// The reaction key of one channel epoch.
 #[wasm_bindgen]
 pub struct ChannelReactionKey {
-    inner: ReactionKey,
+    pub(crate) inner: ReactionKey,
 }
 
 #[wasm_bindgen]

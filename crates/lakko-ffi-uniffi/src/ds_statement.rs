@@ -572,14 +572,43 @@ pub fn open_registrar_seed_envelope(
     plaintext: Vec<u8>,
     account_identity: &Identity,
 ) -> Result<Vec<u8>, FfiError> {
-    let env = decode_registrar_seed(&plaintext).map_err(|e| FfiError::Contacts(e.to_string()))?;
-    let own = account_identity.inner.signature_public_key();
+    open_registrar_seed(&plaintext, account_identity, account_identity)
+}
+
+/// ADR-0074 section 3.7 (2026-11-20) — open a registrar-seed envelope
+/// addressed to `account_identity` (the conversation identity: the key the
+/// roster names this person by) but sealed to the X25519 key of
+/// `sealed_to_identity` (the identity the directory serves after a rotation
+/// of the account keys, whose bundle's `x25519_pubkey` the owner sealed to).
+/// Both identities are this device's own account; the address check and the
+/// seed-to-registrar-key check are those of [`open_registrar_seed_envelope`].
+///
+/// # Errors
+///
+/// As [`open_registrar_seed_envelope`], with the X25519 key of
+/// `sealed_to_identity` in place of the addressee's.
+#[uniffi::export]
+pub fn open_registrar_seed_envelope_sealed_to(
+    plaintext: Vec<u8>,
+    account_identity: &Identity,
+    sealed_to_identity: &Identity,
+) -> Result<Vec<u8>, FfiError> {
+    open_registrar_seed(&plaintext, account_identity, sealed_to_identity)
+}
+
+fn open_registrar_seed(
+    plaintext: &[u8],
+    addressee: &Identity,
+    sealed_to: &Identity,
+) -> Result<Vec<u8>, FfiError> {
+    let env = decode_registrar_seed(plaintext).map_err(|e| FfiError::Contacts(e.to_string()))?;
+    let own = addressee.inner.signature_public_key();
     if env.member_account_key.as_slice() != own {
         return Err(FfiError::Contacts(
             "registrar seed is addressed to another account".into(),
         ));
     }
-    let secret = X25519SecretKey::from_bytes(account_identity.inner.x25519_secret_bytes());
+    let secret = X25519SecretKey::from_bytes(sealed_to.inner.x25519_secret_bytes());
     env.open(&secret)
         .map(|seed| seed.to_vec())
         .map_err(|e| FfiError::Contacts(e.to_string()))
@@ -806,6 +835,37 @@ mod tests {
             seed
         );
         assert!(open_registrar_seed_envelope(wire, &root_account).is_err());
+    }
+
+    /// ADR-0074 section 3.7 (2026-11-20): after a rotation the owner
+    /// addresses the envelope to the conversation key the roster names and
+    /// seals it to the X25519 key the directory serves (the current
+    /// identity's). The member opens it with both of its identities.
+    #[test]
+    fn a_registrar_seed_addressed_to_the_conversation_key_opens_sealed_to_the_current_one() {
+        let conversation = Identity::new("conversation".into()).unwrap();
+        let current = Identity::new("current".into()).unwrap();
+        let stranger = Identity::new("stranger".into()).unwrap();
+        let conversation_key = conversation.inner.signature_public_key().to_vec();
+        let seed = ds_journal_registrar_seed(vec![0x51; 32], conversation_key.clone()).unwrap();
+        let wire = compose_registrar_seed_envelope(
+            vec![0x45; 32],
+            conversation_key,
+            current.inner.x25519_public_key().to_vec(),
+            DsRegistrarRank::Member,
+            seed.clone(),
+        )
+        .unwrap();
+        // The conversation identity alone cannot open it: another X25519 key.
+        assert!(open_registrar_seed_envelope(wire.clone(), &conversation).is_err());
+        assert_eq!(
+            open_registrar_seed_envelope_sealed_to(wire.clone(), &conversation, &current).unwrap(),
+            seed
+        );
+        // The address is still checked: the current identity is not the
+        // addressee, and a stranger's X25519 key does not open it.
+        assert!(open_registrar_seed_envelope_sealed_to(wire.clone(), &current, &current).is_err());
+        assert!(open_registrar_seed_envelope_sealed_to(wire, &conversation, &stranger).is_err());
     }
 
     #[test]

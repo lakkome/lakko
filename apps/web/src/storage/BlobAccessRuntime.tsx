@@ -57,7 +57,7 @@ async function buyPass(kind: BlobPassKind): Promise<{ pass: string; expiresAtMs:
   let response: Response;
   try {
     response = await anonTokens.spend(context, (name, value) =>
-      // ADR-0089 step 3: while suspended only the read pass is bought.
+      // ADR-0098 step 3: while suspended only the read pass is bought.
       writeGuardedFetch(`${DEFAULT_BASE_URL}/blob/pass/${kind}`, anonymousFetchInit({ method: "POST", headers: { [name]: value } })),
     );
   } catch (err) {

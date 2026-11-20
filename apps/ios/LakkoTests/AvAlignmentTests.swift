@@ -260,12 +260,13 @@ final class AvAlignLogTests: XCTestCase {
     func testTheLoadedWebRTCIsTheBinaryTheSetterWasVerifiedFor() {
         // The drift guard (ADR-0070, note of 2026-10-12). The setter calls
         // the engine by vtable slot; the slot and the calling convention
-        // were read from the machine code of stasel/WebRTC 125.0.0. A
-        // package bump loads another binary, the shim then refuses to set
-        // (observe-only), and this test fails until the evidence in
+        // were read from the machine code of webrtc-sdk/Specs 125.6422.07
+        // (2026-11-09; stasel/WebRTC 125.0.0 before). A package bump loads
+        // another binary, the shim then refuses to set (observe-only), and
+        // this test fails until the evidence in
         // `apps/shared/sframe-bridge/receiver-delay.h` is redone for the new
         // binary and its identities are pinned in `SFrameAttach.mm`.
-        XCTAssertEqual(LakkoReceiverDelay.verifiedPackageVersion, "125.0.0")
+        XCTAssertEqual(LakkoReceiverDelay.verifiedPackageVersion, "125.6422.07")
         let loaded = LakkoReceiverDelay.loadedEngineIdentity
         XCTAssertNotNil(loaded, "the WebRTC image has no readable identity")
         XCTAssertTrue(
@@ -275,10 +276,13 @@ final class AvAlignLogTests: XCTestCase {
         XCTAssertEqual(
             Set(LakkoReceiverDelay.verifiedEngineIdentities),
             [
-                "4C4C4485-5555-3144-A186-7570B405EE6A",
-                "4C4C44CF-5555-3144-A1B7-95616B307988",
-                "4C4C44D7-5555-3144-A1AF-2ABA8DEDBD33",
+                "4C4C4476-5555-3144-A12E-D71FF8AA38BD",
+                "4C4C44CD-5555-3144-A1A9-7A0C4DFC7DD7",
+                "4C4C440C-5555-3144-A1E2-AEA9B0483609",
             ])
+        // So the setter is offered here (no receiver has failed the probe in
+        // a test process).
+        XCTAssertTrue(LakkoReceiverDelay.isAvailable())
     }
 
     func testBothKindsHaveTheShimsOneAnswer() {

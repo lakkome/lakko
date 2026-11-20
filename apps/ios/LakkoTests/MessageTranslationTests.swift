@@ -36,7 +36,6 @@ final class MessageTranslationTests: XCTestCase {
     private func makeCenter(
         translation: FakeTranslationEngine? = nil,
         transcription: FakeTranscriptionEngine? = nil,
-        antiCensorship: Bool = false,
         expensive: Bool = false
     ) -> (MessageTranslationCenter, MessageTranslationStore) {
         let store = MessageTranslationStore(directory: directory)
@@ -47,7 +46,7 @@ final class MessageTranslationTests: XCTestCase {
             translationEngine: translation ?? FakeTranslationEngine(),
             transcriptionEngine: transcription ?? FakeTranscriptionEngine(), settings: settings,
             store: store, accountProvider: { [account] in account },
-            antiCensorshipOn: { antiCensorship }, expensivePath: { expensive })
+            expensivePath: { expensive })
         return (center, store)
     }
 
@@ -174,13 +173,20 @@ final class MessageTranslationTests: XCTestCase {
         XCTAssertEqual(engine.translateCalls, 1)
     }
 
-    func testAPackIsAskedForAndNeverDownloadedWhileAntiCensorshipIsOn() async {
+    /// ADR-0082 amendment of 2026-11-19: a pack is offered and downloaded
+    /// with anti-censorship on, as with it off.
+    func testAPackIsOfferedAndDownloadedWithAntiCensorshipOn() async {
+        let previous = AntiCensorshipConfig.current
+        AntiCensorshipConfig.current = AntiCensorshipConfig(
+            armed: true, bootstrapConfigJson: Data(), trustAnchor: Data())
+        defer { AntiCensorshipConfig.current = previous }
         let engine = FakeTranslationEngine(state: .needsPack)
-        let (center, _) = makeCenter(translation: engine, antiCensorship: true)
+        let (center, _) = makeCenter(translation: engine)
         center.translate(conversation: conversation, message: message(10, spanish))
-        await eventually { center.phase(conversation: conversation, messageId: 10) == .blocked }
-        XCTAssertNil(center.packRequest)
-        XCTAssertEqual(engine.prepareCalls, 0)
+        await eventually { center.packRequest != nil }
+        XCTAssertEqual(center.packRequest?.kind, .translation)
+        center.packRequest?.download()
+        await eventually { engine.prepareCalls == 1 }
     }
 
     func testAPackOnMobileDataWaitsForWifi() async {
@@ -229,6 +235,333 @@ final class MessageTranslationTests: XCTestCase {
     }
 }
 
+// MARK: - An unsure guess that cannot end on a correctable line
+
+extension MessageTranslationTests {
+
+    private func guess(_ tag: String, _ permille: UInt16, _ alternatives: [String] = []) -> (String) -> LanguageCandidates? {
+        { _ in LanguageCandidates(detected: DetectedLanguage(tag: tag, confidencePermille: permille), alternatives: alternatives) }
+    }
+
+    func testAnUnsureGuessOfTheTargetLanguageOpensThePickerWithItMarked() async {
+        let engine = FakeTranslationEngine()
+        let (center, _) = makeCenter(translation: engine)
+        center.detect = guess("en", 100)
+        center.translate(conversation: conversation, message: message(10, "ok"), askLanguage: true)
+        await eventually { center.pickerRequest != nil }
+        XCTAssertEqual(center.pickerRequest?.marked, "en")
+        XCTAssertTrue(center.pickerRequest?.languages.contains("en") ?? false, "the guess is listed to be seen")
+        XCTAssertNil(center.phase(conversation: conversation, messageId: 10), "no 'already in' line")
+        XCTAssertEqual(engine.translateCalls, 0)
+    }
+
+    func testAnUnsureGuessTheEngineCannotTranslateFromOpensThePickerWithItMarked() async {
+        let engine = FakeTranslationEngine(state: .unavailable)
+        let (center, _) = makeCenter(translation: engine)
+        center.detect = guess("es", 100)
+        center.translate(conversation: conversation, message: message(10, "hola"))
+        await eventually { center.pickerRequest != nil }
+        XCTAssertEqual(center.pickerRequest?.marked, "es")
+        XCTAssertNil(center.phase(conversation: conversation, messageId: 10), "no 'Can't translate from' line")
+    }
+
+    func testAnUnsureGuessTheEngineCanDoTranslatesAtOnce() async {
+        let engine = FakeTranslationEngine()
+        let (center, _) = makeCenter(translation: engine)
+        center.detect = guess("es", 100)
+        center.translate(conversation: conversation, message: message(10, "hola"), askLanguage: true)
+        await eventually {
+            if case .translated(_, let source) = center.phase(conversation: conversation, messageId: 10) {
+                return source == "es"
+            }
+            return false
+        }
+        XCTAssertNil(center.pickerRequest)
+    }
+
+    func testAConfidentSourceKeepsTheExistingLines() async {
+        let sameEngine = FakeTranslationEngine()
+        let (same, _) = makeCenter(translation: sameEngine)
+        same.detect = guess("en", 990)
+        same.translate(conversation: conversation, message: message(10, "hello there"))
+        await eventually { same.phase(conversation: conversation, messageId: 10) == .sameLanguage("en") }
+        XCTAssertNil(same.pickerRequest)
+
+        let (cannot, _) = makeCenter(translation: FakeTranslationEngine(state: .unavailable))
+        cannot.detect = guess("es", 990)
+        cannot.translate(conversation: conversation, message: message(11, "hola"))
+        await eventually { cannot.phase(conversation: conversation, messageId: 11) == .unsupported("es") }
+        XCTAssertNil(cannot.pickerRequest)
+    }
+}
+
+// MARK: - The source order and the language line up front (UX 3.1 / 3.2)
+
+extension MessageTranslationTests {
+
+    private func detecting(_ table: [String: DetectedLanguage]) -> (String) -> LanguageCandidates? {
+        { text in table[text].map { LanguageCandidates(detected: $0, alternatives: []) } }
+    }
+
+    /// Found live 2026-11-15: a remembered Dutch pick read a Ukrainian
+    /// message (uk at 670, under the confident line) from Dutch.
+    func testARememberedPickDoesNotTranslateAnUnsureGuessFromItself() async {
+        let (center, _) = makeCenter()
+        let ukrainian = "Я завтра піду на ринок по овочі."
+        center.detect = detecting([
+            "goedemorgen": DetectedLanguage(tag: "nl", confidencePermille: 400),
+            ukrainian: DetectedLanguage(tag: "uk", confidencePermille: 670),
+        ])
+        center.chooseSource(conversation: conversation, message: message(10, "goedemorgen"), tag: "nl")
+        center.translate(conversation: conversation, message: message(11, ukrainian))
+        await eventually {
+            if case .translated(_, let source) = center.phase(conversation: conversation, messageId: 11) {
+                return source == "uk"
+            }
+            return false
+        }
+        // With no guess at all, the remembered pick is used.
+        center.translate(conversation: conversation, message: message(12, "???"))
+        await eventually {
+            if case .translated(_, let source) = center.phase(conversation: conversation, messageId: 12) {
+                return source == "nl"
+            }
+            return false
+        }
+        // An unusable guess (the target language) yields to the remembered pick, not the picker.
+        center.detect = detecting(["ok sure": DetectedLanguage(tag: "en", confidencePermille: 300)])
+        center.translate(conversation: conversation, message: message(13, "ok sure"))
+        await eventually {
+            if case .translated(_, let source) = center.phase(conversation: conversation, messageId: 13) {
+                return source == "nl"
+            }
+            return false
+        }
+        XCTAssertNil(center.pickerRequest)
+    }
+
+    private func settledLine(_ center: MessageTranslationCenter, _ message: ChatMessage) async -> MessageTranslationCenter.Phase? {
+        _ = center.quietLine(conversation: conversation, message: message)
+        for _ in 0..<20 {
+            if center.quietLine(conversation: conversation, message: message) != nil { break }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return center.quietLine(conversation: conversation, message: message)
+    }
+
+    func testTheLanguageLineNamesAnotherLanguageWithTranslate() async {
+        let (center, _) = makeCenter()
+        let line = await settledLine(center, message(10, spanish))
+        XCTAssertEqual(line, .detected(source: "es", canTranslate: true))
+    }
+
+    func testTheLanguageLineNamesAnUnsureGuess() async {
+        let (center, _) = makeCenter()
+        center.detect = guess("es", 300)
+        let line = await settledLine(center, message(10, "hola"))
+        XCTAssertEqual(line, .detected(source: "es", canTranslate: true))
+    }
+
+    func testNoLanguageLineOnOwnMessagesOrWithoutText() async {
+        let (center, _) = makeCenter()
+        let own = await settledLine(center, message(10, spanish, outgoing: true))
+        XCTAssertNil(own)
+        let empty = await settledLine(center, message(11, ""))
+        XCTAssertNil(empty)
+    }
+
+    func testNoLanguageLineForAReadingLanguageConfidentOrUnsure() async {
+        let (center, _) = makeCenter()
+        center.detect = guess("en", 990)
+        let confident = await settledLine(center, message(10, "hello there"))
+        XCTAssertNil(confident)
+        let (unsure, _) = makeCenter()
+        unsure.detect = guess("en", 300)
+        let unsureLine = await settledLine(unsure, message(11, "ok"))
+        XCTAssertNil(unsureLine)
+    }
+
+    private func line(_ tag: String?, _ permille: UInt16, canTranslate: Bool) -> TranslationSourceResolution {
+        TranslationSourceResolution(
+            lineTag: tag, lineConfidencePermille: permille, lineCanTranslate: canTranslate,
+            translateSource: tag, guess: nil)
+    }
+
+    func testNoLanguageLineWithTheTranslateSettingOff() {
+        let spanish = line("es", 990, canTranslate: true)
+        XCTAssertNil(MessageTranslationCenter.languageLine(
+            resolution: spanish, isOwn: false, enabled: false, readingLanguages: ["en"]))
+        XCTAssertEqual(MessageTranslationCenter.languageLine(
+            resolution: spanish, isOwn: false, enabled: true, readingLanguages: ["en"]),
+            .detected(source: "es", canTranslate: true))
+        // The rule named no language: no line.
+        XCTAssertNil(MessageTranslationCenter.languageLine(
+            resolution: line(nil, 200, canTranslate: false), isOwn: false, enabled: true, readingLanguages: ["en"]))
+    }
+
+    func testTheLanguageLineHasNoTranslateWhenTheDeviceCannotTranslateFromIt() async {
+        let (center, _) = makeCenter(translation: FakeTranslationEngine(state: .unavailable))
+        let line = await settledLine(center, message(10, spanish))
+        XCTAssertEqual(line, .detected(source: "es", canTranslate: false))
+    }
+
+    func testNoLanguageLineForAnUnsureGuessTheDeviceCannotTranslateFrom() async {
+        // Seen on a Pixel: "goedendag" named Turkmen, an unsure guess, with no
+        // close candidate the device can translate from.
+        let engine = FakeTranslationEngine()
+        engine.unavailable = ["tk", "da"]
+        let (center, _) = makeCenter(translation: engine)
+        center.detect = guess("tk", 200, ["da"])
+        let line = await settledLine(center, message(10, "goedendag"))
+        XCTAssertNil(line)
+    }
+
+    func testTheDetectorCarriesTheCloseCandidatesOfANearTie() {
+        // The recognizer's hypotheses through the shared rule; a confident
+        // sentence has none.
+        let de = MessageLanguageDetector.candidates(
+            "Ich gehe morgen auf den Markt, um Gemüse zu kaufen. Willst du mitkommen?")
+        XCTAssertEqual(de?.detected.tag, "de")
+        XCTAssertEqual(de?.alternatives, [])
+        XCTAssertNil(MessageLanguageDetector.candidates("   "))
+        // Hypotheses as the recognizer hands them: the rule, not this client.
+        let set = languageCandidatesFromHypotheses(text: "hola, qué tal?", hypotheses: [
+            LanguageHypothesis(tag: "ca", probabilityPermille: 400),
+            LanguageHypothesis(tag: "es", probabilityPermille: 350),
+        ])
+        XCTAssertEqual(set?.alternatives, ["es"])
+    }
+
+    func testAConfidentLanguageOutsideTheEngineKeepsItsNameAlone() async {
+        // A real Turkmen message: named, not mislabelled as a candidate.
+        let engine = FakeTranslationEngine()
+        engine.unavailable = ["tk"]
+        let (center, _) = makeCenter(translation: engine)
+        center.detect = guess("tk", 950)
+        let line = await settledLine(center, message(10, "Men ertir bazara gitjek."))
+        XCTAssertEqual(line, .detected(source: "tk", canTranslate: false))
+    }
+
+    func testAnUnsureGuessItCannotTranslateFromIsNamedAndTranslatedByItsFirstUsableCandidate() async {
+        // Seen on a Pixel: "hola, qué tal?" read as unsure Catalan showed no
+        // line at all. The line names what Translate uses: Spanish.
+        let engine = FakeTranslationEngine()
+        engine.unavailable = ["ca"]
+        let (center, _) = makeCenter(translation: engine)
+        center.detect = guess("ca", 180, ["es", "fr", "it"])
+        let incoming = message(10, "hola, qué tal?")
+        let line = await settledLine(center, incoming)
+        XCTAssertEqual(line, .detected(source: "es", canTranslate: true))
+        center.translate(conversation: conversation, message: incoming)
+        await eventually { engine.translateCalls == 1 }
+        XCTAssertEqual(engine.lastSource, "es")
+    }
+
+    func testWithoutAUsableCandidateTheGuessOpensThePickerWithTheCandidatesFirst() async {
+        let engine = FakeTranslationEngine()
+        engine.unavailable = ["tk", "da"]
+        let (center, _) = makeCenter(translation: engine)
+        center.detect = guess("tk", 200, ["da"])
+        center.translate(conversation: conversation, message: message(10, "goedendag"))
+        await eventually { center.pickerRequest != nil }
+        XCTAssertEqual(center.pickerRequest?.marked, "tk")
+        XCTAssertEqual(center.pickerRequest?.candidates, ["tk", "da"])
+        XCTAssertEqual(engine.translateCalls, 0)
+        // `Not X?` lists the close candidates first.
+        XCTAssertEqual(
+            TranslationLanguageChoices.ordered(["de", "en", "es", "it"], candidates: ["ca", "es", "it"]),
+            ["es", "it", "de", "en"])
+    }
+
+    func testAPickNamesANearTieButNeverAGuessItIsNotACandidateOf() async {
+        let (center, _) = makeCenter()
+        // The pick makes Italian the conversation's language.
+        center.detect = guess("es", 110, ["it", "la"])
+        center.chooseSource(conversation: conversation, message: message(10, "Ciao a tutti"), tag: "it")
+        let line = await settledLine(center, message(11, "Ciao, come stai?"))
+        XCTAssertEqual(line, .detected(source: "it", canTranslate: true))
+        // A guess Italian is not a candidate of keeps its own name.
+        center.detect = guess("uk", 400, ["ru"])
+        let other = await settledLine(center, message(12, "Можешь мне позже перезвонить?"))
+        XCTAssertEqual(other, .detected(source: "uk", canTranslate: true))
+    }
+
+    func testAConfidentDetectionBecomesTheConversationsLanguage() async {
+        let (center, store) = makeCenter()
+        center.detect = { text in
+            text == "ciao a tutti, come va oggi?"
+                ? LanguageCandidates(detected: DetectedLanguage(tag: "it", confidencePermille: 950), alternatives: [])
+                : nil
+        }
+        center.observe(conversation: conversation, messages: [message(10, "ciao a tutti, come va oggi?")])
+        XCTAssertEqual(
+            store.prefs(accountIdB64: account, conversation: conversation).languages.detections.map(\.tag), ["it"])
+    }
+
+    func testG55TwoNamesHolaSpanishWhateverOrderTheChatIsObservedIn() async {
+        // Seen on a Pixel: the remembered language was whichever confident
+        // detection ran last. One confident message each in es, it, uk, de,
+        // ru: Spanish and Italian tie, and the detector lists Spanish first.
+        let seen: [(Int64, String, String)] = [
+            (1, "Mañana voy al mercado.", "es"), (2, "Ci vediamo domani.", "it"),
+            (3, "Завтра я піду на ринок.", "uk"), (4, "Morgen gehe ich.", "de"),
+            (5, "Завтра я пойду.", "ru"),
+        ]
+        // The last order ends on Italian: the order that named it Italian before.
+        for order in [seen, Array(seen.reversed()), [seen[1], seen[4], seen[0], seen[3], seen[2]],
+                      [seen[0], seen[2], seen[3], seen[4], seen[1]]] {
+            let (center, _) = makeCenter()
+            center.detect = { text in
+                if text == "hola, qué tal?" {
+                    return LanguageCandidates(
+                        detected: DetectedLanguage(tag: "ca", confidencePermille: 180), alternatives: ["es", "fr", "it"])
+                }
+                return seen.first { $0.1 == text }.map {
+                    LanguageCandidates(detected: DetectedLanguage(tag: $0.2, confidencePermille: 950), alternatives: [])
+                }
+            }
+            // Observed one message at a time, in this order.
+            for entry in order {
+                center.observe(conversation: conversation, messages: [message(entry.0, entry.1)])
+            }
+            let line = await settledLine(center, message(9, "hola, qué tal?"))
+            XCTAssertEqual(line, .detected(source: "es", canTranslate: true))
+        }
+    }
+
+    func testAShownTranslationReplacesTheLanguageLine() async {
+        let (center, _) = makeCenter()
+        let incoming = message(10, spanish)
+        center.translate(conversation: conversation, message: incoming)
+        await eventually {
+            if case .translated = center.quietLine(conversation: conversation, message: incoming) { return true }
+            return false
+        }
+        // An automatic translation too.
+        let (auto, _) = makeCenter()
+        let other = message(11, spanish)
+        auto.setAutoTranslate(conversation: conversation, on: true, messages: [other])
+        await eventually {
+            if case .translated = auto.quietLine(conversation: conversation, message: other) { return true }
+            return false
+        }
+    }
+
+    func testTheLanguageLineReadsTheMenuRowsDetection() async {
+        let (center, _) = makeCenter()
+        var calls = 0
+        center.detect = { _ in
+            calls += 1
+            return LanguageCandidates(detected: DetectedLanguage(tag: "es", confidencePermille: 990), alternatives: [])
+        }
+        let incoming = message(10, spanish)
+        _ = center.menuState(conversation: conversation, message: incoming)
+        _ = await settledLine(center, incoming)
+        _ = center.menuState(conversation: conversation, message: incoming)
+        XCTAssertEqual(calls, 1)
+    }
+}
+
 // MARK: - Fakes
 
 @MainActor
@@ -236,17 +569,21 @@ final class FakeTranslationEngine: MessageTranslationEngine {
     var state: TranslationEngineState
     var translateCalls = 0
     var prepareCalls = 0
+    var lastSource: String?
+    /// Sources this engine cannot translate from, whatever `state` says.
+    var unavailable: Set<String> = []
 
     init(state: TranslationEngineState = .ready) { self.state = state }
 
     var isSupported: Bool { true }
     func state(source: String, target: String) async -> TranslationEngineState {
-        sameLanguage(a: source, b: target) ? .unavailable : state
+        sameLanguage(a: source, b: target) || unavailable.contains(source) ? .unavailable : state
     }
     func sourceLanguages() async -> [String] { ["es", "de", "en"] }
     func installedLanguages(target: String) async -> [String] { state == .ready ? ["es"] : [] }
     func translate(_ text: String, source: String, target: String) async throws -> String {
         translateCalls += 1
+        lastSource = source
         return "EN:" + text
     }
     func preparePack(source: String, target: String) async throws {

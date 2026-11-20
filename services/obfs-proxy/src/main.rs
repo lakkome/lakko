@@ -25,10 +25,15 @@ use std::sync::Arc;
 
 use axum::routing::get;
 use axum::Router;
+use lakko_svc_obfs_proxy::metrics::{self, ActiveTunnel, Transport};
 use lakko_svc_obfs_proxy::{config, relay};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
+
+/// How long one client's obfs handshake may take before its socket is
+/// dropped. Chosen, not measured: a real client finishes in a few round trips.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -42,6 +47,13 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // /metrics on its own localhost port, off when unset (ADR-0096).
+    lakko_metrics::start_from_env(
+        "obfs-proxy",
+        env!("CARGO_PKG_VERSION"),
+        "LAKKO_OBFS_PROXY_METRICS_BIND",
+    )
+    .await?;
     let cfg = config::ProxyConfig::from_env()?;
     info!(internal_target = %cfg.internal_target, "obfs-proxy starting");
 
@@ -66,7 +78,9 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/ready", get(|| async { "ready" }))
-        .route("/version", get(|| async { env!("CARGO_PKG_VERSION") }));
+        .route("/version", get(|| async { env!("CARGO_PKG_VERSION") }))
+        // Requests by route template, method and status class (ADR-0096).
+        .layer(lakko_metrics::red_layer("obfs-proxy"));
     let control = TcpListener::bind(cfg.control_bind).await?;
     info!(bind = %cfg.control_bind, "control plane up");
     axum::serve(control, app).await?;
@@ -87,24 +101,47 @@ async fn spawn_reality_listener(
         .map_err(|e| anyhow::anyhow!("build cover cert: {e}"))?;
     let tls = lakko_transport::build_reality_server_config(cert_chain, key)
         .map_err(|e| anyhow::anyhow!("build REALITY server config: {e}"))?;
-    let mut listener = lakko_transport::reality::listener::RealityListener::new(
+    let listener = lakko_transport::reality::listener::RealityListener::new(
         tcp,
         std::sync::Arc::new(tls),
         reality.allowed_pairs,
         reality.tolerance_secs,
     );
+    let handshaker = listener.handshaker();
     tokio::spawn(async move {
         loop {
-            match listener.accept().await {
-                Ok((tunnel, _accepted)) => {
-                    info!("accepted REALITY tunnel; relaying to internal target");
+            match listener.accept_tcp().await {
+                // Each handshake runs in its own task, bounded: a client that
+                // connects and sends nothing must not stop the loop accepting
+                // everyone else (it did: the accept queue filled and REALITY
+                // stopped answering anyone).
+                Ok(tcp) => {
+                    let handshaker = handshaker.clone();
                     tokio::spawn(async move {
-                        if let Err(error) = relay::relay(tunnel, internal_target).await {
-                            warn!(%error, "relay ended with error");
+                        match tokio::time::timeout(HANDSHAKE_TIMEOUT, handshaker.handshake(tcp))
+                            .await
+                        {
+                            Ok(Ok((tunnel, _accepted))) => {
+                                metrics::tunnel_accepted(Transport::Reality);
+                                info!("accepted REALITY tunnel; relaying to internal target");
+                                let _active = ActiveTunnel::start(Transport::Reality);
+                                if let Err(error) = relay::relay(tunnel, internal_target).await {
+                                    warn!(%error, "relay ended with error");
+                                }
+                            },
+                            Ok(Err(error)) => {
+                                metrics::tunnel_refused(Transport::Reality);
+                                warn!(%error, "REALITY handshake failed");
+                            },
+                            Err(_) => {
+                                metrics::tunnel_refused(Transport::Reality);
+                                warn!("REALITY handshake timed out");
+                            },
                         }
                     });
                 },
                 Err(error) => {
+                    metrics::tunnel_refused(Transport::Reality);
                     warn!(%error, "REALITY accept failed");
                 },
             }
@@ -130,22 +167,36 @@ async fn spawn_shadowsocks_listener(
                 Ok((stream, _peer)) => {
                     let window = window.clone();
                     tokio::spawn(async move {
-                        let tunnel = {
+                        // The replay window is held for the whole handshake,
+                        // so it is bounded: a client that connects and stalls
+                        // must not hold every other handshake behind it.
+                        let tunnel = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
                             let mut w = window.lock().await;
                             lakko_transport::shadowsocks_accept_inbound(stream, &psk, &mut w).await
+                        })
+                        .await;
+                        let Ok(tunnel) = tunnel else {
+                            warn!("SS-2022 handshake timed out");
+                            return;
                         };
                         match tunnel {
                             Ok(conn) => {
+                                metrics::tunnel_accepted(Transport::Shadowsocks);
+                                let _active = ActiveTunnel::start(Transport::Shadowsocks);
                                 info!("accepted SS-2022 tunnel; relaying to internal target");
                                 if let Err(error) = relay::relay(conn, internal_target).await {
                                     warn!(%error, "relay ended with error");
                                 }
                             },
-                            Err(error) => warn!(%error, "SS-2022 handshake failed"),
+                            Err(error) => {
+                                metrics::tunnel_refused(Transport::Shadowsocks);
+                                warn!(%error, "SS-2022 handshake failed");
+                            },
                         }
                     });
                 },
                 Err(error) => {
+                    metrics::tunnel_refused(Transport::Shadowsocks);
                     warn!(%error, "SS-2022 accept failed");
                 },
             }
@@ -170,14 +221,17 @@ fn spawn_webtransport_listener(
         loop {
             match listener.accept().await {
                 Ok(tunnel) => {
+                    metrics::tunnel_accepted(Transport::WebTransport);
                     info!("accepted WebTransport tunnel; relaying to internal target");
                     tokio::spawn(async move {
+                        let _active = ActiveTunnel::start(Transport::WebTransport);
                         if let Err(error) = relay::relay(tunnel, internal_target).await {
                             warn!(%error, "relay ended with error");
                         }
                     });
                 },
                 Err(error) => {
+                    metrics::tunnel_refused(Transport::WebTransport);
                     warn!(%error, "WebTransport accept failed");
                 },
             }

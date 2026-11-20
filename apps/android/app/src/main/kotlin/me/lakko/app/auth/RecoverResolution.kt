@@ -97,6 +97,14 @@ public interface LoginHandleBinder {
     /** `PUT /auth/login-handle`. */
     public suspend fun bind(sessionToken: String, handle: ByteArray): LoginHandleBinding
 
+    /**
+     * `PUT /auth/login-handle` carrying a held supporter place (ADR-0097) in
+     * `x-lakko-anon-token`. The default ignores the place, so a binder that
+     * never meets a sign-up keeps its plain [bind].
+     */
+    public suspend fun bindHoldingPlace(sessionToken: String, handle: ByteArray, placeToken: String): LoginHandleBinding =
+        bind(sessionToken, handle)
+
     /** `DELETE /auth/login-handle`. */
     public suspend fun unbind(sessionToken: String): Boolean
 
@@ -114,6 +122,9 @@ public class AuthClientLoginHandleBinder(
 ) : LoginHandleBinder {
     override suspend fun bind(sessionToken: String, handle: ByteArray): LoginHandleBinding =
         clientFactory().use { it.bindLoginHandle(sessionToken, handle) }
+
+    override suspend fun bindHoldingPlace(sessionToken: String, handle: ByteArray, placeToken: String): LoginHandleBinding =
+        clientFactory().use { it.bindLoginHandle(sessionToken, handle, placeToken = placeToken) }
 
     override suspend fun unbind(sessionToken: String): Boolean =
         clientFactory().use { it.unbindLoginHandle(sessionToken) }

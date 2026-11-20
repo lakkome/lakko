@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 
--- Witness v2 (ADR-0089 section 5): one witness key co-signs several logs, so
+-- Witness v2 (ADR-0098 section 5): one witness key co-signs several logs, so
 -- the high-water is kept per log. `log_id` is `lakko_transparency::LogId`'s
 -- byte (1 = KT, 2 = moderation). No production data exists: the old single-row
 -- table is dropped without a copy (flag day).

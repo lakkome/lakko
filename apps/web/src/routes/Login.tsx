@@ -28,6 +28,7 @@ import { WebauthnClient } from "../auth/webauthn-client";
 import { UsernameHint } from "../profile/UsernameHint";
 import { requireValidUsername } from "../profile/username-field";
 import { AuthLayout } from "../ui/AuthLayout";
+import { BetaNoticeBanner } from "../ui/BetaNotice";
 import { PasswordField } from "../ui/PasswordField";
 import { Icon } from "../ui/icons";
 
@@ -106,6 +107,8 @@ export default function Login(): JSX.Element {
 
   return (
     <AuthLayout>
+      {/* docs/ux/beta-notice.md: first thing a signed-out person reads. */}
+      <BetaNoticeBanner />
       <h1>{t("auth.login.title")}</h1>
       <p class="lk-auth-lede">{t("auth.login.lede")}</p>
       {/* ADR-0073 section 3.3: the refresh credential expired or was
@@ -153,7 +156,7 @@ export default function Login(): JSX.Element {
           onClick={() => void onPasskeyLogin()}
           style={{ "margin-top": "-8px" }}
         >
-          <Icon name="key" size={18} />
+          <Icon name="passkey" size={20} />
           {t("auth.login.passkey")}
         </button>
       </Show>

@@ -22,8 +22,6 @@ import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -81,7 +79,7 @@ import me.lakko.app.ui.components.LakkoDialogAction
 import me.lakko.app.ui.components.LakkoDialogTone
 
 /*
- * ADR-0089, UX `reporting-and-moderation.md` sections 1 and 2 — the block
+ * ADR-0098, UX `reporting-and-moderation.md` sections 1 and 2 — the block
  * dialog, the report sheet and the notice after a report, presented once for
  * the whole app ([ModerationHost] sits beside the app root). Every entry
  * point asks [ModerationRequests]; none draws its own copy of the sheet.
@@ -585,7 +583,7 @@ public fun BlockedPeopleScreen(contactsRepository: ContactsRepository, onBack: (
                 title = { Text(t("block.list.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        me.lakko.app.ui.components.LkIcon(me.lakko.app.R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -644,7 +642,7 @@ public fun YourReportsScreen(onBack: () -> Unit) {
                 title = { Text(t("report.list.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        me.lakko.app.ui.components.LkIcon(me.lakko.app.R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )

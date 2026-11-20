@@ -90,6 +90,13 @@ public object DeviceGroupSnapshotStore {
         COMMIT("commit"),
         REJOIN("rejoin"),
         ADMISSIONS("admissions"),
+
+        /** Where the receive loop resumes, bound to the journal's group id
+         *  ([me.lakko.app.devices.sync.DeviceGroupJournalCursor]). Kept by a
+         *  rejoin: the position it names is before the commit that admits
+         *  this device again, so nothing the new membership can read is
+         *  skipped. */
+        JOURNAL_CURSOR("cursor"),
     }
 
     /** Refused: another handle wrote the snapshot since the generation a

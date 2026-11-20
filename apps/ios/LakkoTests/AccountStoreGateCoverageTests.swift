@@ -328,9 +328,11 @@ final class AccountStoreGateCoverageTests: XCTestCase {
     }
 
     func testAFoundingMarkFromAnotherAccountsWorkIsNotFiled() throws {
-        let identity = try Identity.fromSeed(seed: Data(repeating: 0x5A, count: 32))
-        let group = try publisherGroupOpenOrCreate(
-            identity: identity, channelId: Data((0..<16).map { UInt8($0) &+ 0x10 }))
+        let accountSeed = Data(repeating: 0x5A, count: 32)
+        let identity = try Identity.fromSeedBound(
+            seed: Data(repeating: 0x5D, count: 32), accountSeed: accountSeed, issuedAtUnixSecs: 1_700_000_000)
+        let group = try PublisherGroup.create(
+            identity: identity, ownerAccountSeed: accountSeed, channelId: Data((0..<16).map { UInt8($0) &+ 0x10 }))
         let marks = JournalFoundingMarks(defaults: defaults)
         CoPublisher.markFounded(
             group, accountIdB64: account, boundAccountIdB64: "other-account", marks: marks)

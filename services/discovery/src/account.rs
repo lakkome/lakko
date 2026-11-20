@@ -26,13 +26,32 @@ use crate::AppState;
 /// verified session token (not the request body), so a caller can only erase
 /// their OWN discovery footprint. Idempotent — each `DELETE` is a no-op when the
 /// row is already absent, so a retry after a partial failure completes cleanly.
+///
+/// `services/auth` also purges these rows itself after it deleted an account,
+/// through the internal listener (`crate::internal`), which runs the same
+/// [`purge_account`].
 pub(crate) async fn delete_account(
     State(state): State<AppState>,
     axum::Extension(authed): axum::Extension<AuthenticatedAccount>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let account_id = authed.0;
-    let db_err = |e: sqlx::Error| (StatusCode::INTERNAL_SERVER_ERROR, format!("db error: {e}"));
+    purge_account(&state.db, &authed.0)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db error: {e}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
 
+/// Delete every account-keyed discovery row of `account_id`: its names (and
+/// their one-namespace claims), its identity bundle, and everything
+/// [`purge_owned_rows`] removes. Idempotent.
+///
+/// # Errors
+///
+/// A database error; the deletes already run stay done, and running it again
+/// finishes the rest.
+pub(crate) async fn purge_account(
+    pool: &sqlx::MySqlPool,
+    account_id: &[u8; 16],
+) -> Result<(), sqlx::Error> {
     // The username binding and the published identity bundle are keyed on
     // `account_id`; so is everything `purge_owned_rows` removes.
     for sql in [
@@ -46,20 +65,14 @@ pub(crate) async fn delete_account(
         "DELETE FROM usernames WHERE account_id = ?",
         "DELETE FROM identity_bundles WHERE account_id = ?",
     ] {
-        delete_keyed(&state.db, sql, &account_id)
-            .await
-            .map_err(db_err)?;
+        delete_keyed(pool, sql, account_id).await?;
     }
-    purge_owned_rows(&state.db, &account_id)
-        .await
-        .map_err(db_err)?;
-
-    Ok(StatusCode::NO_CONTENT)
+    purge_owned_rows(pool, account_id).await
 }
 
 /// Everything an account owns here besides its username binding and its
 /// identity bundle: the MLS KeyPackages, the ADR-0060 search terms and public
-/// record, a moderator's hide (ADR-0089). Invite ledger rows are not among them (ADR-0078 section 10: no row
+/// record, a moderator's hide (ADR-0098). Invite ledger rows are not among them (ADR-0078 section 10: no row
 /// names its owner).
 async fn purge_owned_rows(
     pool: &sqlx::MySqlPool,
@@ -71,7 +84,7 @@ async fn purge_owned_rows(
         "DELETE FROM keypackage_tombstones WHERE account_id = ?",
         "DELETE FROM search_terms WHERE kind = 1 AND target = ?",
         "DELETE FROM public_records WHERE kind = 1 AND target = ?",
-        // ADR-0089 step 5 - a moderator's hide of this account.
+        // ADR-0098 step 5 - a moderator's hide of this account.
         "DELETE FROM moderation_hidden WHERE account_id = ?",
     ] {
         delete_keyed(pool, sql, account_id).await?;
@@ -218,13 +231,16 @@ pub(crate) fn spawn_unclaimed_pruner(
         return None;
     }
     tracing::info!(ttl_secs, "unclaimed-account pruner is on");
+    lakko_metrics::job_registered(crate::metrics::jobs::UNCLAIMED_ACCOUNT_PRUNE);
     Some(tokio::spawn(async move {
         let mut interval = tokio::time::interval(UNCLAIMED_PRUNE_INTERVAL);
         // The first tick fires at once; skip it so a restart is not a prune.
         interval.tick().await;
         loop {
             interval.tick().await;
-            match prune_unclaimed(&pool, ttl_secs).await {
+            let result = prune_unclaimed(&pool, ttl_secs).await;
+            crate::metrics::job_run(crate::metrics::jobs::UNCLAIMED_ACCOUNT_PRUNE, &result);
+            match result {
                 Ok(0) => {},
                 Ok(removed) => tracing::info!(removed, "pruned unclaimed accounts"),
                 Err(e) => tracing::warn!(error = %e, "unclaimed-account prune failed"),

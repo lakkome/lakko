@@ -44,7 +44,7 @@ describe("ChannelComposer keys", () => {
   it("Enter publishes what the field holds", async () => {
     const published: string[] = [];
     renderUi(() => (
-      <ChannelComposer
+      <ChannelComposer trayKey="test"
         hub={hub}
         editing={null}
         onCancelEdit={() => undefined}
@@ -61,7 +61,7 @@ describe("ChannelComposer keys", () => {
 
   it("Shift+Enter does not publish", async () => {
     const publish = vi.fn(async () => undefined);
-    renderUi(() => <ChannelComposer hub={hub} editing={null} onCancelEdit={() => undefined} publish={publish} />);
+    renderUi(() => <ChannelComposer trayKey="test" hub={hub} editing={null} onCancelEdit={() => undefined} publish={publish} />);
     const field = one<HTMLTextAreaElement>("textarea");
     type(field, "hello");
     key(field, { key: "Enter", shiftKey: true });
@@ -72,7 +72,7 @@ describe("ChannelComposer keys", () => {
   it("Enter on an edited post publishes the edit", async () => {
     const published: string[] = [];
     renderUi(() => (
-      <ChannelComposer
+      <ChannelComposer trayKey="test"
         hub={hub}
         editing={{ cursor: 7, text: "old" }}
         onCancelEdit={() => undefined}

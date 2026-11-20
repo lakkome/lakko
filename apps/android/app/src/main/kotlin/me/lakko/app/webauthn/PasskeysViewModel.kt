@@ -33,13 +33,12 @@ import me.lakko.app.l10n.UiText
  *
  *   * [refresh]            — `GET /webauthn/credentials` and, for the
  *     per-passkey label, `GET /vault/passkeys`
- *   * [addPasskey]         — create a passkey; nothing is stored for it
- *     beyond the credential. When the provider can protect keys with it the
- *     opt-in choice opens ([PasskeysUiState.choice]); otherwise the result
- *     line says it signs in only.
- *   * [openChoice] / [onChoiceDone] — "Let this passkey restore your keys?"
- *   * [stopRestoring]      — `DELETE /vault/passkey`
- *   * [deleteCredential]   — `DELETE /webauthn/credentials/:id`
+ *   * [addPasskey]         — create a passkey and store the keys for it,
+ *     with nothing to choose (UX 10.2, amended 2026-11-11)
+ *   * [restoreKeys] / [cancelRepair] — a row's "Restore keys with this
+ *     passkey", with the phrase input when this device holds no phrase
+ *   * [deleteCredential]   — `DELETE /webauthn/credentials/:id` (the server
+ *     also deletes what the passkey stored for restoring keys)
  */
 public class PasskeysViewModel(
     private val repo: AuthRepository,
@@ -49,9 +48,12 @@ public class PasskeysViewModel(
     private val onAccountDeleted: () -> Unit,
     private val client: WebauthnClient = WebauthnClient(),
     private val registration: WebauthnRegistration = WebauthnRegistration(),
+    /** For the passkeys this device learned cannot carry keys
+     *  ([PasskeyNoPrfStore]); without it none is known. */
+    private val appContext: Context? = null,
 ) : ViewModel() {
 
-    /** The repository, for the keys choice the screen hosts. */
+    /** The repository, for the proof blocks the screen hosts. */
     public val repository: AuthRepository get() = repo
 
     private val mutableState: MutableStateFlow<PasskeysUiState> =
@@ -94,8 +96,14 @@ public class PasskeysViewModel(
                 // when the server cannot say, and every passkey then reads
                 // "Signs in only", which is what it can do.
                 val withKeys = repo.identitySecrets.value?.let { repo.passkeysWithKeys(it.sessionToken) }
+                val knownNoPrf = knownNoPrf(res.credentials.map { it.credentialIdB64 }.toSet())
                 mutableState.update {
-                    it.copy(loading = false, credentials = res.credentials, withKeys = withKeys)
+                    it.copy(
+                        loading = false,
+                        credentials = res.credentials,
+                        withKeys = withKeys,
+                        knownNoPrf = knownNoPrf,
+                    )
                 }
             } catch (e: WebauthnHttpError) {
                 if (e.status == 401) {
@@ -148,36 +156,21 @@ public class PasskeysViewModel(
         mutableState.update { it.copy(busy = true, message = null) }
         viewModelScope.launch {
             try {
-                val added = addPasskeyForSession(
+                // UX 10.2: the keys are stored for the new passkey with
+                // nothing to choose; the line says how that ended.
+                val added = addPasskeyWithKeys(
                     context = context,
                     repo = repo,
                     nickname = trimmed,
                     client = client,
                     registration = registration,
                 )
-                // Nothing is stored for the new passkey here. When the
-                // provider can protect keys with it, the person is asked;
-                // otherwise the line says it signs in only.
-                val offer = passkeyAddOutcome(
-                    prfOutput = added.prfOutput != null,
-                    prfEnabled = added.prfEnabled,
-                ) == PasskeyAddOutcome.OfferKeysChoice
+                val text = addedPasskeyText(added.keys, trimmed)
                 mutableState.update {
                     it.copy(
                         busy = false,
                         nickname = "",
-                        message = Message.Ok(
-                            if (offer) {
-                                UiText("settings.passkeys.added", texts = mapOf("name" to trimmed))
-                            } else {
-                                UiText("settings.passkeys.added_no_keys")
-                            },
-                        ),
-                        choice = if (offer) {
-                            PasskeyChoice(added.credentialIdB64, trimmed, added.prfOutput)
-                        } else {
-                            null
-                        },
+                        message = if (addedPasskeyIsError(added.keys)) Message.Error(text) else Message.Ok(text),
                     )
                 }
                 refresh()
@@ -189,6 +182,14 @@ public class PasskeysViewModel(
                     it.copy(
                         busy = false,
                         message = Message.Error(UiText("settings.passkeys.error.cancelled")),
+                    )
+                }
+            } catch (_: PasskeyAlreadyExistsError) {
+                // UX 10.2: this device has one already; nothing changed.
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        message = Message.Error(UiText("settings.passkeys.error.already_exists")),
                     )
                 }
             } catch (e: WebauthnHttpError) {
@@ -209,59 +210,72 @@ public class PasskeysViewModel(
         }
     }
 
-    /** Open "Let this passkey restore your keys?" for an existing passkey
-     *  (its row's "Turn on restoring keys"). The passkey's secret then comes
-     *  from one more prompt limited to that passkey. */
-    public fun openChoice(credential: CredentialSummary) {
+    /**
+     * A row's "Restore keys with this passkey" (UX 10.2): one passkey prompt
+     * limited to [credential]. When this device holds no recovery phrase the
+     * phrase input opens first ([PasskeysUiState.repair]) and the person's
+     * [typedPhrase] comes back here, checked against this account.
+     */
+    public fun restoreKeys(context: Context, credential: CredentialSummary, typedPhrase: String? = null) {
+        rebindSession()
         if (mutableState.value.busy) return
-        mutableState.update {
-            it.copy(
-                message = null,
-                choice = PasskeyChoice(credential.credentialIdB64, credential.nickname, prfOutput = null),
-            )
-        }
-    }
-
-    /** The choice ended: say what happened and refresh the labels. */
-    public fun onChoiceDone(end: KeysChoiceEnd) {
-        mutableState.value.choice?.prfOutput?.fill(0)
-        val text = keysChoiceEndText(end)
-        mutableState.update {
-            it.copy(
-                choice = null,
-                message = when {
-                    text == null -> it.message
-                    end == KeysChoiceEnd.Stored -> Message.Ok(text)
-                    else -> Message.Error(text)
-                },
-            )
-        }
-        refresh()
-    }
-
-    /** "Stop restoring keys" for one passkey: it then only signs in. Keys
-     *  already restored on other devices stay there. */
-    public fun stopRestoring(credentialIdB64: String) {
-        if (mutableState.value.busy) return
-        mutableState.update { it.copy(busy = true, message = null) }
+        val credentialIdB64 = credential.credentialIdB64
+        mutableState.update { it.copy(busy = true, message = null, repairError = null) }
         viewModelScope.launch {
-            try {
-                repo.stopPasskeyKeys(credentialIdB64)
-                mutableState.update {
-                    it.copy(
-                        busy = false,
-                        message = Message.Ok(UiText("settings.passkeys.stop_restoring.done")),
-                    )
-                }
-                refresh()
-            } catch (e: Throwable) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                Log.w("PasskeysViewModel", "WARN stop restoring keys failed: ${e.javaClass.simpleName}")
-                mutableState.update {
-                    it.copy(busy = false, message = Message.Error(PASSKEYS_GENERIC))
+            val end = runPasskeyKeysStore(
+                onFailure = { cause ->
+                    Log.w("PasskeysViewModel", "WARN restoring keys with a passkey failed: ${cause.javaClass.simpleName}")
+                },
+            ) {
+                repo.turnOnPasskeyKeys(
+                    activityContext = context,
+                    credentialIdB64 = credentialIdB64,
+                    registrationPrfOutput = null,
+                    typedPhrase = typedPhrase,
+                )
+            }
+            if (end == PasskeyKeysStoreEnd.NoPrf) {
+                (repo.state.value as? AuthState.Session)?.let { session ->
+                    PasskeyNoPrfStore.record(context, session.account.accountIdB64, credentialIdB64)
                 }
             }
+            val text = restoreKeysText(end)
+            mutableState.update { s ->
+                val open = s.repair?.takeIf { it.credentialIdB64 == credentialIdB64 }
+                when (end) {
+                    PasskeyKeysStoreEnd.PhraseNeeded -> s.copy(
+                        busy = false,
+                        repair = PasskeyRepair(credentialIdB64, credential.nickname),
+                    )
+                    // The sheet was dismissed: nothing changed, nothing to say.
+                    PasskeyKeysStoreEnd.Cancelled -> s.copy(busy = false)
+                    PasskeyKeysStoreEnd.Stored -> s.copy(busy = false, repair = null, message = text?.let(Message::Ok))
+                    PasskeyKeysStoreEnd.NoPrf -> s.copy(busy = false, repair = null, message = text?.let(Message::Error))
+                    // A refusal while the phrase input is open stays inside it.
+                    else -> if (open != null) {
+                        s.copy(busy = false, repairError = text)
+                    } else {
+                        s.copy(busy = false, message = text?.let(Message::Error))
+                    }
+                }
+            }
+            if (end == PasskeyKeysStoreEnd.Stored || end == PasskeyKeysStoreEnd.NoPrf) refresh()
         }
+    }
+
+    /** The phrase input of a repair was closed: nothing changed. */
+    public fun cancelRepair() {
+        if (mutableState.value.busy) return
+        mutableState.update { it.copy(repair = null, repairError = null) }
+    }
+
+    /** The passkeys among [current] this device learned cannot carry keys;
+     *  ids of passkeys the account no longer has are dropped. */
+    private fun knownNoPrf(current: Set<String>): Set<String> {
+        val context = appContext ?: return emptySet()
+        val account = (repo.state.value as? AuthState.Session)?.account?.accountIdB64 ?: return emptySet()
+        PasskeyNoPrfStore.retain(context, account, current)
+        return PasskeyNoPrfStore.of(context, account)
     }
 
     public fun deleteCredential(
@@ -336,14 +350,16 @@ public class PasskeysViewModel(
      *     that is not an error.
      *
      * A plain `403` for an account this screen thought had no passkey runs
-     * the action ceremony once and retries, fail-closed. Then the best-effort
-     * discovery purge and [onAccountDeleted], the same local wipe + sign-out
-     * Forget device runs. Every failure is left on
+     * the action ceremony once and retries, fail-closed. Only once auth has
+     * deleted the account, the bounded best-effort cleanups only this device
+     * can do (its push subscriptions, the backup blob, the directory rows),
+     * then [onAccountDeleted], the same local wipe + sign-out Forget device
+     * runs ([me.lakko.app.account.AccountDeletion]). Every failure is left on
      * [PasskeysUiState.deleteError], inside the dialog, which stays open.
      */
     public fun deleteAccount(context: Context, hasPasskey: Boolean, onProofRequired: () -> Unit) {
         rebindSession()
-        // The live session's account, or (ADR-0089) a suspended account's on
+        // The live session's account, or (ADR-0098) a suspended account's on
         // a device without its chats, with the restricted session.
         val secrets = repo.accountForDeletion() ?: run {
             mutableState.update { it.copy(deleteError = SESSION_NOT_READY) }
@@ -385,46 +401,58 @@ public class PasskeysViewModel(
                 } catch (e: Throwable) {
                     me.lakko.app.rethrowIfCancelled(e) {}
                 }
-                try {
-                    client.deleteAccount(grant)
-                } catch (e: WebauthnHttpError) {
-                    when {
-                        me.lakko.app.auth.isFreshAuthRequired(e) -> throw e
-                        e.status == 403 && !hasPasskey -> {
-                            // The account has a passkey this screen did not
-                            // know of: the action ceremony, then once more.
-                            assertDeletion()
+                // ADR-0064 section 1 — the vaults of the channels this
+                // account owns go before the account, best effort and
+                // bounded in time; keys from the lineage identity.
+                // ADR-0098: a suspended device without its chats holds no seed.
+                secrets.accountIdentitySeed?.let { seed ->
+                    me.lakko.app.channels.ChannelVaultHeads.deleteOwnedVaults(
+                        me.lakko.app.auth.conversationAccountSeedOf(
+                            context,
+                            me.lakko.app.auth.base64Encode(secrets.accountId),
+                            seed,
+                        ),
+                    )
+                }
+                // The push subscriptions name no account, so only this
+                // device can remove them, and only after auth deleted the
+                // account (a refusal must leave them). Each removal spends a
+                // push-register token, which auth issues to a session: they
+                // are taken in `prepare`, while the account still has one.
+                val accountIdB64 = me.lakko.app.auth.base64Encode(secrets.accountId)
+                val subscriptionIds = me.lakko.app.push.PushRouteStore(context).subscriptionIds(accountIdB64)
+                val pushTokens = me.lakko.app.anon.PrefetchedAnonTokens(emptyList(), me.lakko.app.anon.AnonTokens.shared)
+                me.lakko.app.account.AccountDeletion(
+                    prepare = {
+                        val needed = me.lakko.app.account.AccountDeletion.pushTokensNeeded(subscriptionIds.size)
+                        val got = me.lakko.app.anon.AnonTokens.reserve(
+                            me.lakko.app.anon.AnonTokenContext.PUSH_REGISTER, needed,
+                        )
+                        pushTokens.add(got)
+                        if (got.size < needed) Log.w("PasskeysViewModel", "WARN delete account: ${got.size} of $needed push tokens")
+                    },
+                    deleteAtAuth = {
+                        try {
                             client.deleteAccount(grant)
+                        } catch (e: WebauthnHttpError) {
+                            when {
+                                me.lakko.app.auth.isFreshAuthRequired(e) -> throw e
+                                e.status == 403 && !hasPasskey -> {
+                                    // The account has a passkey this screen did
+                                    // not know of: the action ceremony, then
+                                    // once more.
+                                    assertDeletion()
+                                    client.deleteAccount(grant)
+                                }
+                                else -> throw e
+                            }
                         }
-                        else -> throw e
-                    }
-                }
-                // Best-effort discovery purge — the auth tier is the critical
-                // erasure; the session token is about to be invalidated anyway.
-                // ADR-0089 section 4 - a suspended account sends the `s1`,
-                // which discovery's and storage's account deletions accept.
-                try {
-                    val discovery = DiscoveryClient()
-                    discovery.setSessionToken(secrets.bearer)
-                    discovery.deleteAccount()
-                } catch (e: Throwable) {
-                    me.lakko.app.rethrowIfCancelled(e) {}
-                    // best-effort
-                }
-                // The encrypted backup goes with the account (best effort,
-                // like the directory: the auth erasure above is the critical one).
-                try {
-                    me.lakko.app.storage.StorageClient().use { storage ->
-                        storage.setSessionToken(secrets.bearer)
-                        storage.deleteBackup()
-                    }
-                } catch (e: Throwable) {
-                    me.lakko.app.rethrowIfCancelled(e) {}
-                    // best-effort
-                }
-                // Local wipe + full sign-out on this device: the same path
-                // Forget device takes (every per-account store, push first).
-                onAccountDeleted()
+                    },
+                    cleanups = accountDeletionCleanups(subscriptionIds, pushTokens, secrets.bearer),
+                    // Local wipe + full sign-out on this device: the same path
+                    // Forget device takes (every per-account store, push first).
+                    wipe = onAccountDeleted,
+                ).run()
             } catch (e: Throwable) {
                 me.lakko.app.rethrowIfCancelled(e) {
                     mutableState.update { it.copy(busy = false) }
@@ -529,6 +557,43 @@ public class PasskeysViewModel(
         return if (e is java.io.IOException) UiText("settings.passkeys.error.network") else generic
     }
 
+    /**
+     * What Delete account removes on the servers after auth deleted the
+     * account, before the device is wiped ([me.lakko.app.account.AccountDeletion]).
+     * The storage and directory calls carry the session token taken before
+     * the delete: both services verify it on its own, with no account row,
+     * until it expires. A push unsubscribe carries no session, only a token
+     * from [pushTokens].
+     */
+    private fun accountDeletionCleanups(
+        subscriptionIds: List<ByteArray>,
+        pushTokens: me.lakko.app.anon.AnonTokenSource,
+        /** The access token, or (ADR-0098 section 4) a suspended account's
+         *  `s1`, which storage's and discovery's account deletions accept. */
+        sessionToken: String,
+    ): List<me.lakko.app.account.AccountDeletion.Cleanup> {
+        val push = me.lakko.app.push.PushSubscriptionsRemoval(subscriptionIds)
+        return listOf(
+            me.lakko.app.account.AccountDeletion.Cleanup("push subscriptions") {
+                me.lakko.app.push.PushClient(anonTokens = pushTokens).use { pushGw ->
+                    push.run { subId -> pushGw.unsubscribe(subId) }
+                }
+            },
+            me.lakko.app.account.AccountDeletion.Cleanup("backup") {
+                me.lakko.app.storage.StorageClient().use { storage ->
+                    storage.setSessionToken(sessionToken)
+                    storage.deleteBackup()
+                }
+            },
+            me.lakko.app.account.AccountDeletion.Cleanup("directory") {
+                DiscoveryClient().use { discovery ->
+                    discovery.setSessionToken(sessionToken)
+                    discovery.deleteAccount()
+                }
+            },
+        )
+    }
+
     private companion object {
         val PASSKEYS_GENERIC = UiText("settings.passkeys.error.generic")
         val SESSION_NOT_READY = UiText("common.error.session_not_ready")
@@ -544,8 +609,14 @@ public data class PasskeysUiState(
     /** The credential ids (base64url, no padding) whose passkeys restore
      *  keys; `null` when not known. */
     val withKeys: List<String>? = null,
-    /** The open "Let this passkey restore your keys?" choice, or `null`. */
-    val choice: PasskeyChoice? = null,
+    /** The credential ids this device learned cannot carry keys: their rows
+     *  offer no "Restore keys with this passkey". */
+    val knownNoPrf: Set<String> = emptySet(),
+    /** The open phrase input of a "Restore keys with this passkey", or
+     *  `null`. */
+    val repair: PasskeyRepair? = null,
+    /** Why the open repair did not store the keys, shown inside it. */
+    val repairError: UiText? = null,
     /** Why the account was not deleted, shown inside the delete dialog. */
     val deleteError: UiText? = null,
     /** [deleteError] says the passkey sheet was dismissed: drawn as a plain
@@ -553,12 +624,11 @@ public data class PasskeysUiState(
     val deleteCancelled: Boolean = false,
 )
 
-/** One open keys choice. [prfOutput] is what the registration yielded, when
- *  it yielded it; otherwise "Turn on" asks the passkey once more. */
-public class PasskeyChoice(
+/** A "Restore keys with this passkey" waiting for the recovery phrase,
+ *  which this device does not hold. */
+public data class PasskeyRepair(
     public val credentialIdB64: String,
     public val nickname: String,
-    public val prfOutput: ByteArray?,
 )
 
 public sealed interface Message {

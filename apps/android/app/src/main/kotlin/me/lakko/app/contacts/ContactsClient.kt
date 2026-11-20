@@ -1681,6 +1681,13 @@ public class ContactsClient(
                     events.add(IncomingMailboxEvent.LinkRefusal(env.body))
                 }
 
+                MailboxRowKind.CONVERSATION_REENTRY -> {
+                    // ADR-0091 phase 2 route 2 — the other person of a
+                    // one-to-one asks to be brought back. Unverified here:
+                    // the chat layer checks the KeyPackage it carries.
+                    events.add(IncomingMailboxEvent.ConversationReentry(env.body))
+                }
+
                 MailboxRowKind.WELCOME -> {
                     events.add(
                         IncomingMailboxEvent.Welcome(
@@ -1894,7 +1901,7 @@ public data class IncomingContactRequest(
     /** `docs/ux/who-can-find-me.md` section 6.4 — the group the request was
      *  sent inside (hex), shown as "Via {group}"; `null` for a mailbox row. */
     val viaGroupIdHex: String? = null,
-    /** ADR-0089 section 2 — the verified request's wire as received, what a
+    /** ADR-0098 section 2 — the verified request's wire as received, what a
      *  report of the request includes. Not part of equality. */
     val wire: ByteArray? = null,
 ) {
@@ -2038,6 +2045,13 @@ public sealed interface IncomingMailboxEvent {
     public data class LinkRefusal(val refusal: ByteArray) : IncomingMailboxEvent {
         override fun equals(other: Any?): Boolean = other is LinkRefusal && refusal.contentEquals(other.refusal)
         override fun hashCode(): Int = refusal.contentHashCode()
+    }
+
+    /** ADR-0091 phase 2 route 2 — a conversation re-entry request, NOT yet
+     *  verified (the chat layer checks the KeyPackage it carries). */
+    public data class ConversationReentry(val envelope: ByteArray) : IncomingMailboxEvent {
+        override fun equals(other: Any?): Boolean = other is ConversationReentry && envelope.contentEquals(other.envelope)
+        override fun hashCode(): Int = envelope.contentHashCode()
     }
 }
 

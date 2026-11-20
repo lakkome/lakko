@@ -30,6 +30,11 @@ const fn now_in(epoch: u64) -> u64 {
     epoch * W + 123
 }
 
+/// A clock inside `epoch` of `ctx`'s window (`beta-place` has its own).
+const fn now_in_ctx(ctx: TokenContext, epoch: u64) -> u64 {
+    epoch * ctx.window_secs(W) + 123
+}
+
 #[test]
 fn a_batch_round_trips_and_every_token_verifies_once_per_spend_id() {
     let m = master();
@@ -267,7 +272,7 @@ proptest! {
         let t = mint(&m, ctx, epoch, 1).remove(0);
         let mut wire = t.encode();
         wire[bit / 8] ^= 1 << (bit % 8);
-        prop_assert!(verify_token(&m, &wire, ctx, now_in(epoch), W).is_err());
+        prop_assert!(verify_token(&m, &wire, ctx, now_in_ctx(ctx, epoch), W).is_err());
     }
 
     /// A minted token verifies for its context in its epoch and the next.
@@ -277,8 +282,8 @@ proptest! {
         let m = master();
         for t in mint(&m, ctx, epoch, count) {
             let wire = t.encode();
-            prop_assert!(verify_token(&m, &wire, ctx, now_in(epoch), W).is_ok());
-            prop_assert!(verify_token(&m, &wire, ctx, now_in(epoch + 1), W).is_ok());
+            prop_assert!(verify_token(&m, &wire, ctx, now_in_ctx(ctx, epoch), W).is_ok());
+            prop_assert!(verify_token(&m, &wire, ctx, now_in_ctx(ctx, epoch + 1), W).is_ok());
         }
     }
 }

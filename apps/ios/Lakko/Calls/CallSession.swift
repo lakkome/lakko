@@ -125,7 +125,30 @@ public final class CallSession: ObservableObject {
     /// SwiftUI view recompose. Nil when the call is audio-
     /// only or before `completeDial` / `completeAccept` has
     /// fired.
-    private var localCameraCapture: LocalCameraCapture?
+    private var localCameraCapture: LocalCameraCapture? {
+        didSet {
+            guard oldValue !== localCameraCapture else { return }
+            oldValue?.onInterruptionChanged = nil
+            localCameraCapture?.onInterruptionChanged = { [weak self] interrupted in
+                MainActor.assumeIsolated { self?.setCameraInterrupted(interrupted) }
+            }
+            if localCameraCapture == nil { setCameraInterrupted(false) }
+        }
+    }
+
+    /// iOS interrupted the camera (`docs/ux/calls.md` section 4.5.4): the app
+    /// left the screen and may not keep the camera. While it lasts the other
+    /// side is told the camera is off, so they see the avatar rather than a
+    /// frozen frame; `cameraEnabled`, and so the camera button here, is left
+    /// alone, because the person did not turn the camera off.
+    private var cameraInterrupted = false
+
+    /// The camera was interrupted (`true`) or came back (`false`).
+    func setCameraInterrupted(_ interrupted: Bool) {
+        guard cameraInterrupted != interrupted else { return }
+        cameraInterrupted = interrupted
+        announceMediaStateIfChanged()
+    }
 
     /// G3-1-video-ui — observable for the SwiftUI preview
     /// overlay. The CallScreenView reads this via @ObservedObject
@@ -199,6 +222,19 @@ public final class CallSession: ObservableObject {
     /// local participant's `micOn` / `camOn`.
     @Published public private(set) var micEnabled: Bool = true
     @Published public private(set) var cameraEnabled: Bool = false
+
+    /// What the other person last said about their microphone and camera
+    /// (the `mediaState` call signal, 2026-11-07). Both `true` until the
+    /// first one arrives, and again when the call ends. A mute is a track
+    /// `isEnabled = false` on their side, which the receiving track never
+    /// reports, so this is the only way the remote tile learns of it
+    /// (`docs/ux/group-call-grid.md` 7.2). `CallUiState.driveFrom` maps them
+    /// onto the remote participant's `micOn` / `camOn`.
+    @Published public private(set) var remoteMicOn: Bool = true
+    @Published public private(set) var remoteCameraOn: Bool = true
+
+    /// The camera and microphone state last told to the other side.
+    private var mediaAnnouncement = OneToOneMediaAnnouncement()
 
     /// B2a — mid-call camera-on lifecycle. Starts `.off`;
     /// ``addLocalVideo()`` flips it `.starting` while the camera
@@ -319,7 +355,19 @@ public final class CallSession: ObservableObject {
     public init(callId: Data, onOutboundSignaling: @escaping (_ bytes: Data, _ wake: Bool) -> Void) {
         self.callId = callId
         self.onOutboundSignaling = onOutboundSignaling
+        // ADR-0089: the camera background stopped working. Nothing has been
+        // sent since; the camera goes off here, as the camera button turns it
+        // off, whether or not the call screen is showing.
+        backgroundFailure = CameraBackground.shared.$failures
+            .dropFirst()
+            .sink { [weak self] _ in
+                guard let self, self.cameraEnabled else { return }
+                self.setCameraEnabled(false)
+            }
     }
+
+    /// The camera background's failures (ADR-0089).
+    private var backgroundFailure: AnyCancellable?
 
     /// Inject the per-call SFrame keying material. Caller MUST
     /// run this AFTER the welcome-ferry / KP-forward dispatcher
@@ -366,13 +414,15 @@ public final class CallSession: ObservableObject {
         isOfferer = true
         dialAudio = audio
         dialVideo = video
+        // A call placed without audio starts muted, and says so.
+        if !audio { micEnabled = false }
         state = .outgoing
 
         // G3-1-turn — fetch TURN credential before constructing
         // the RTCPeerConnection so its initial RTCConfiguration
         // already lists the relay candidate. Doing it after
         // construction would require an `setConfiguration:` call
-        // mid-flight, which the stasel/WebRTC pod accepts but
+        // mid-flight, which the WebRTC pod accepts but
         // some libwebrtc forks have known footguns around (the
         // ICE agent may have already started gathering, in which
         // case the new TURN server is ignored).
@@ -404,7 +454,10 @@ public final class CallSession: ObservableObject {
         // device is connected.
         CallAudioSession.configureCallOutput(loudspeakerByDefault: video)
         CallAudioSession.describe("dial: before local audio track")
-        rtc.addLocalAudioTrack(enabled: audio)
+        // A mute chosen before the capture (the CallKit mute, the in-call
+        // button while dialling) holds for the captured microphone: what
+        // the other side is told is what is sent.
+        rtc.addLocalAudioTrack(enabled: micEnabled)
 
         // G3-1-video-ui — local video track + camera capture.
         // MUST land BEFORE `composeAndShipOffer` because the
@@ -565,6 +618,33 @@ public final class CallSession: ObservableObject {
     public func setMicrophoneEnabled(_ on: Bool) {
         rtc?.setMicrophoneEnabled(on)
         micEnabled = on
+        // The other side's tile shows the mute mark from this.
+        announceMediaStateIfChanged()
+    }
+
+    /// Whether this device sends a picture: a camera track that exists and
+    /// is switched on.
+    private var localCameraIsOn: Bool {
+        cameraEnabled && localVideoTrack != nil && !cameraInterrupted
+    }
+
+    /// Tell the other side this device's camera and microphone state (the
+    /// one-to-one `mediaState` call signal, 2026-11-07) when it differs from
+    /// what was last told. Only on a connected call; the transition to
+    /// `connected` sends the first one. Never a wake. Best-effort: a compose
+    /// failure is swallowed, since it is a UI hint and never on the media
+    /// path.
+    private func announceMediaStateIfChanged() {
+        // A connected call whose peer connection is gone is being torn
+        // down (the other side ended it): nothing more is said.
+        guard let next = mediaAnnouncement.next(
+            connected: state == .connected && rtc != nil,
+            camera: localCameraIsOn, microphone: micEnabled),
+            let bytes = try? composeCallSignaling(
+                body: .mediaState(callId: callId, cameraOn: next.camera, microphoneOn: next.microphone))
+        else { return }
+        onOutboundSignaling(
+            bytes, CallSignalingWake.sessionAsks(.mediaState, everConnected: everConnected))
     }
 
     /// G3-1-call-controls — start / stop the local camera track.
@@ -573,6 +653,7 @@ public final class CallSession: ObservableObject {
     public func setCameraEnabled(_ on: Bool) {
         rtc?.setCameraEnabled(on)
         cameraEnabled = on
+        announceMediaStateIfChanged()
         guard !on, let rtc else { return }
         // `docs/ux/calls.md` section 4.1 — the call returns to the portrait on
         // BOTH screens. Disabling the track is invisible to the peer (libwebrtc
@@ -746,6 +827,8 @@ public final class CallSession: ObservableObject {
     private func setVideoPublishState(_ next: VideoPublishState) {
         guard videoPublishState != next else { return }
         videoPublishState = next
+        // A camera published (or lost) mid-call is a camera state change.
+        announceMediaStateIfChanged()
     }
 
     /// Outbound side: tear down a call we initiated or
@@ -806,10 +889,10 @@ public final class CallSession: ObservableObject {
         installDelegate(on: rtc)
         CallAudioSession.configureCallOutput(loudspeakerByDefault: withVideo)
         CallAudioSession.describe("accept: before local audio track")
-        // Mic on by default for the answerer; if the call
-        // UI later supports "accept muted" we will pass the
-        // user pick through this method.
-        rtc.addLocalAudioTrack(enabled: true)
+        // Mic on by default for the answerer, unless a mute was chosen
+        // before the capture (the CallKit mute while ringing): what the
+        // other side is told is what is sent.
+        rtc.addLocalAudioTrack(enabled: micEnabled)
 
         // G3-1-video-ui — symmetric video wire-up on the
         // accept path. Same pre-SDP-build ordering rationale
@@ -1000,6 +1083,12 @@ public final class CallSession: ObservableObject {
             // row's MLS sender (``applyScreenShare(_:callId:)``); the raw body
             // carries no verdict.
             break
+        case .mediaState(let cid, let cameraOn, let microphoneOn):
+            // The other person's camera and microphone (2026-11-07): the
+            // mute mark and the camera-off picture on their tile.
+            guard cid == callId, state != .done else { return }
+            if remoteMicOn != microphoneOn { remoteMicOn = microphoneOn }
+            if remoteCameraOn != cameraOn { remoteCameraOn = cameraOn }
         case .groupStart, .groupJoin, .groupLeave:
             // Group-call signaling (Phase 3c2) folds into the
             // repository's per-chat group-call record
@@ -1181,6 +1270,10 @@ public final class CallSession: ObservableObject {
         self.setRemoteScreenTrack(nil)
         self.screenShare = nil
         self.screenShares = ScreenShareFold(ownKey: Data(count: 32))
+        // The other side's camera and microphone state is the call's.
+        self.mediaAnnouncement.reset()
+        if !self.remoteMicOn { self.remoteMicOn = true }
+        if !self.remoteCameraOn { self.remoteCameraOn = true }
         // G3-1-conn-quality — clear the stale stats so a fresh
         // call doesn't briefly show the previous RTT / bitrate.
         self.rttMs = nil
@@ -1572,6 +1665,8 @@ public final class CallSession: ObservableObject {
             if state == .connecting || state == .outgoing {
                 everConnected = true
                 state = .connected
+                // The first camera and microphone state of the call.
+                announceMediaStateIfChanged()
             }
             // G3-1-conn-quality — begin polling connection stats
             // once the transport is up. Idempotent: a flap back
@@ -1721,6 +1816,39 @@ extension CallSession {
             return cid
         case .screenShare(let cid, _):
             return cid
+        case .mediaState(let cid, _, _):
+            return cid
         }
+    }
+}
+
+/// When a one-to-one call tells the other side its camera and microphone
+/// state (the `mediaState` call signal, 2026-11-07; mirror of the web
+/// `CallSession.announceMediaStateIfChanged`): nothing before the call is
+/// connected, the first state when it connects, and after that each state
+/// that differs from the last one told. Pure, so the rule is testable without
+/// a peer connection.
+struct OneToOneMediaAnnouncement: Equatable {
+    struct Media: Equatable {
+        let camera: Bool
+        let microphone: Bool
+    }
+
+    /// The state last told to the other side; `nil` until the first one.
+    private(set) var announced: Media?
+
+    /// The state to send now, recorded as told, or `nil` when there is
+    /// nothing to say (not connected, or unchanged).
+    mutating func next(connected: Bool, camera: Bool, microphone: Bool) -> Media? {
+        guard connected else { return nil }
+        let media = Media(camera: camera, microphone: microphone)
+        if announced == media { return nil }
+        announced = media
+        return media
+    }
+
+    /// The call ended: the next call starts from nothing told.
+    mutating func reset() {
+        announced = nil
     }
 }

@@ -75,6 +75,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::mysql::{MySql, MySqlConnection, MySqlDatabaseError, MySqlPool};
 
 use crate::journal::{self, Queue, DEFAULT_LIMIT, PSEUDONYM_LEN};
+use crate::metrics::{self, ProofRefusal};
 use crate::AppState;
 
 /// A knock is a request to join, not a message: 16 KiB carries an external
@@ -131,8 +132,10 @@ pub(crate) enum Access {
 
 pub(crate) type HandlerError = (StatusCode, String);
 
-/// The one refusal every failed proof maps to.
-pub(crate) fn refused() -> HandlerError {
+/// The one refusal every failed proof maps to. `reason` is counted
+/// (ADR-0096) and never reaches the response, which stays uniform.
+pub(crate) fn refused(reason: ProofRefusal) -> HandlerError {
+    metrics::proof_refused(reason);
     (StatusCode::UNAUTHORIZED, "proof required".to_string())
 }
 
@@ -306,10 +309,11 @@ pub(crate) fn verify_header(
     let value = headers
         .get(PROOF_HEADER_NAME)
         .and_then(|v| v.to_str().ok())
-        .ok_or_else(refused)?;
-    let proof = Proof::parse(value).map_err(|_| refused())?;
-    let key = key_for_epoch(proof.epoch).ok_or_else(refused)?;
-    lakko_ds_proof::verify(&proof, parts, &key, now_ms()).map_err(|_| refused())?;
+        .ok_or_else(|| refused(ProofRefusal::Missing))?;
+    let proof = Proof::parse(value).map_err(|_| refused(ProofRefusal::Malformed))?;
+    let key = key_for_epoch(proof.epoch).ok_or_else(|| refused(ProofRefusal::WrongEpoch))?;
+    lakko_ds_proof::verify(&proof, parts, &key, now_ms())
+        .map_err(|e| refused(ProofRefusal::of_proof(&e)))?;
     Ok(proof)
 }
 
@@ -334,22 +338,23 @@ where
 }
 
 /// Parse the proof header, verify it under `key_for_epoch`, and consume the
-/// nonce. Every failure is [`refused`].
+/// nonce. Every failure is [`refused`]; success answers the epoch the proof
+/// was signed at.
 pub(crate) async fn check_proof(
     pool: &MySqlPool,
     pseudonym: &[u8; PSEUDONYM_LEN],
     headers: &HeaderMap,
     parts: &RequestParts<'_>,
     key_for_epoch: impl Fn(u64) -> Option<VerifyingKey>,
-) -> Result<(), HandlerError> {
+) -> Result<u64, HandlerError> {
     let proof = verify_header(headers, parts, key_for_epoch)?;
     if consume_nonce(pool, pseudonym, &proof.nonce)
         .await
         .map_err(db_error("record proof nonce"))?
     {
-        Ok(())
+        Ok(proof.epoch)
     } else {
-        Err(refused())
+        Err(refused(ProofRefusal::Replay))
     }
 }
 
@@ -375,6 +380,9 @@ pub(crate) enum Gated {
         /// still behind it can tell it will never catch up (its state forked
         /// from the chain) rather than wait forever.
         latest_epoch: u64,
+        /// The epoch the request's proof was signed at (ADR-0091: a read
+        /// names the registered commit rows above it).
+        proof_epoch: u64,
     },
 }
 
@@ -395,7 +403,7 @@ pub(crate) async fn gate_group(
         // No epoch keys: unclaimed - unless an owner row exists, which a
         // claim never leaves without an epoch; then nothing opens it.
         return if journal_owned(&state.db, group_id).await? {
-            Err(refused())
+            Err(refused(ProofRefusal::UnknownKey))
         } else {
             Ok(Gated::Unclaimed)
         };
@@ -404,7 +412,7 @@ pub(crate) async fn gate_group(
     let latest_epoch = keys[0].epoch;
     let floor = admin_floor(&keys);
     let req = parts(method, uri, body);
-    check_proof(&state.db, group_id, headers, &req, |epoch| {
+    let proof_epoch = check_proof(&state.db, group_id, headers, &req, |epoch| {
         keys.iter()
             .enumerate()
             .find(|(_, k)| k.epoch == epoch)
@@ -415,7 +423,10 @@ pub(crate) async fn gate_group(
             .map(|(_, k)| k.key)
     })
     .await?;
-    Ok(Gated::Proven { latest_epoch })
+    Ok(Gated::Proven {
+        latest_epoch,
+        proof_epoch,
+    })
 }
 
 /// Gate a mailbox read: a valid proof under the mailbox key at
@@ -431,13 +442,14 @@ pub(crate) async fn gate_mailbox_read(
     headers: &HeaderMap,
 ) -> Result<(), HandlerError> {
     let Some(key) = mailbox_key(&state.db, mailbox).await? else {
-        return Err(refused());
+        return Err(refused(ProofRefusal::UnknownKey));
     };
     let req = parts(method, uri, &[]);
     check_proof(&state.db, mailbox, headers, &req, |epoch| {
         (epoch == MAILBOX_EPOCH).then_some(key)
     })
     .await
+    .map(|_| ())
 }
 
 // ============================================================================
@@ -665,13 +677,17 @@ pub(crate) async fn get_knocks(
 
 /// The body of a refused knock: `429` with `{"error":"knock-queue-full"}`.
 fn knock_queue_full() -> Response {
-    (
+    let mut response = (
         StatusCode::TOO_MANY_REQUESTS,
         Json(ErrorBody {
             error: KNOCK_QUEUE_FULL,
         }),
     )
-        .into_response()
+        .into_response();
+    response
+        .extensions_mut()
+        .insert(lakko_metrics::ErrorCode(KNOCK_QUEUE_FULL));
+    response
 }
 
 #[derive(Serialize)]
@@ -745,7 +761,7 @@ pub(crate) async fn delete_knocks(
     )
     .await?;
     if gated == Gated::Unclaimed {
-        return Err(refused());
+        return Err(refused(ProofRefusal::UnknownKey));
     }
     let result = match q.through {
         Some(through) => {
@@ -777,13 +793,21 @@ pub(crate) async fn delete_knocks(
 /// that has not committed in a month must stay openable) and every epoch from
 /// `H` onward (the real epoch behind a member's bad registrations must stay
 /// writable). Runs on the journal pruner's tick.
-pub(crate) async fn prune_group_access(pool: &MySqlPool, retention_secs: i64) {
+///
+/// `true` when the statement succeeded.
+pub(crate) async fn prune_group_access(pool: &MySqlPool, retention_secs: i64) -> bool {
     match prune_group_access_rows(pool, retention_secs).await {
-        Ok(rows) if rows > 0 => {
-            tracing::debug!(rows, "pruned read-tier epoch keys");
+        Ok(rows) => {
+            metrics::pruned(metrics::Pruned::EpochKeys, rows);
+            if rows > 0 {
+                tracing::debug!(rows, "pruned read-tier epoch keys");
+            }
+            true
         },
-        Ok(_) => {},
-        Err(e) => tracing::warn!(error = %e, "epoch key prune failed"),
+        Err(e) => {
+            tracing::warn!(error = %e, "epoch key prune failed");
+            false
+        },
     }
 }
 
@@ -798,7 +822,7 @@ pub(crate) async fn prune_group_access(pool: &MySqlPool, retention_secs: i64) {
 /// registered epoch has no second-newest row and loses nothing. "Not at or
 /// after `H`" is "below the group's newest root or admin epoch", again by
 /// comparison; a group with no such row keeps only the two-newest rule.
-async fn prune_group_access_rows(
+pub(crate) async fn prune_group_access_rows(
     pool: &MySqlPool,
     retention_secs: i64,
 ) -> Result<u64, sqlx::Error> {
@@ -828,17 +852,24 @@ async fn prune_group_access_rows(
 }
 
 /// Delete nonce rows past their usefulness. Runs on the journal pruner's tick.
-pub(crate) async fn prune_nonces(pool: &MySqlPool) {
+/// `true` when the statement succeeded.
+pub(crate) async fn prune_nonces(pool: &MySqlPool) -> bool {
     match sqlx::query("DELETE FROM ds_proof_nonces WHERE seen_at < NOW(3) - INTERVAL ? SECOND")
         .bind(NONCE_RETENTION_SECS)
         .execute(pool)
         .await
     {
-        Ok(r) if r.rows_affected() > 0 => {
-            tracing::debug!(rows = r.rows_affected(), "pruned proof nonces");
+        Ok(r) => {
+            metrics::pruned(metrics::Pruned::ProofNonces, r.rows_affected());
+            if r.rows_affected() > 0 {
+                tracing::debug!(rows = r.rows_affected(), "pruned proof nonces");
+            }
+            true
         },
-        Ok(_) => {},
-        Err(e) => tracing::warn!(error = %e, "proof nonce prune failed"),
+        Err(e) => {
+            tracing::warn!(error = %e, "proof nonce prune failed");
+            false
+        },
     }
 }
 
@@ -889,6 +920,7 @@ pub(crate) mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         // An unclaimed journal has no chain to report.
         assert!(parsed.get("latest_epoch").is_none());
+        assert!(parsed.get("commits").is_none());
     }
 
     /// ADR-0054: the wake header (since ADR-0078 a sealed blob) is parsed
@@ -1137,6 +1169,8 @@ pub(crate) mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed["messages"].as_array().map(Vec::len), Some(0));
         assert_eq!(parsed["latest_epoch"], 3);
+        // ADR-0091: no registration above epoch 3 carries a row.
+        assert_eq!(parsed["commits"], serde_json::json!([]));
     }
 
     #[tokio::test]
@@ -1668,6 +1702,8 @@ pub(crate) mod tests {
         let Some((app, pool)) = app().await else {
             return;
         };
+        // ADR-0096: the 429 carries its code into the request metrics.
+        let metrics = lakko_metrics::install("ds", env!("CARGO_PKG_VERSION")).unwrap();
         let gid = fresh_name(37);
         let k = key(68);
         assert_eq!(
@@ -1724,6 +1760,20 @@ pub(crate) mod tests {
         let (status, _) = knock(&app, &knock_uri, &[b"late"], Some(&t2)).await;
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(knock_count(&pool, &gid).await, 1);
+
+        let text = metrics.render();
+        assert!(
+            text.lines()
+                .any(|l| l.starts_with("lakko_http_requests_total{")
+                    && l.contains(r#"route="/ds/group/{group_hex}/knock""#)
+                    && l.contains(r#"status="4xx""#)
+                    && l.contains(r#"code="knock-queue-full""#)),
+            "the refused knock carries its code:\n{text}"
+        );
+        assert!(
+            text.contains(r#"lakko_ds_appends_total{queue="knock",outcome="stored"}"#),
+            "{text}"
+        );
     }
 
     /// `DELETE knocks` takes a write-tier key: refused without a proof, under

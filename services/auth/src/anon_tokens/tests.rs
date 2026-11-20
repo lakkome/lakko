@@ -63,6 +63,7 @@ fn build_state(
         room_cap: std::sync::Arc::new(crate::room_cap::RoomAdmissionCap::disabled()),
         backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
         anon_tokens: anon.map(Arc::new),
+        anon_cred: None,
         handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
         recovery_email: None,
         limits: Arc::new(crate::limits::Limits::defaults()),
@@ -236,6 +237,7 @@ fn the_default_quotas_are_the_documented_ones() {
     assert_eq!(default_quota(TokenContext::CircleClaim), 10);
     assert_eq!(default_quota(TokenContext::ChannelReact), 500);
     assert_eq!(default_quota(TokenContext::ChannelComment), 200);
+    assert_eq!(default_quota(TokenContext::BetaPlace), 0);
 }
 
 #[test]
@@ -592,7 +594,7 @@ async fn a_young_account_draws_the_young_call_join_quota() {
     assert_eq!(json(&body)["remaining"], 97);
 }
 
-/// ADR-0089 step 3: a suspended account reads its chats, files included, so
+/// ADR-0098 step 3: a suspended account reads its chats, files included, so
 /// its restricted session (and a leftover access token) may draw `blob-read`
 /// passes and nothing else.
 #[tokio::test]

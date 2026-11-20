@@ -120,6 +120,42 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* The "new version" banner (`sw/SwUpdateBanner.tsx`) owns a strip at the
+   bottom of the viewport while it shows, and the page ends above it, so it
+   never sits on a form's button, a composer or a list row. The fixed
+   elements that sit near the bottom move up with it. */
+.lk-update-banner {
+  position: fixed;
+  inset-inline: 0;
+  bottom: 0;
+  z-index: 1000;
+  background: var(--surface-elevated);
+  color: var(--surface-fg);
+  border-top: 1px solid var(--surface-border);
+  box-shadow: var(--shadow-1);
+  padding: 0.6rem 1rem calc(0.6rem + env(safe-area-inset-bottom));
+}
+.lk-update-banner-inner {
+  max-width: 32rem;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+.lk-update-banner-text {
+  flex: 1;
+  font-size: 0.9rem;
+}
+html[data-update-banner] #root {
+  height: calc(100% - var(--lk-update-banner-h, 0px));
+}
+html[data-update-banner] .lk-toast {
+  bottom: calc(20px + var(--lk-update-banner-h, 0px));
+}
+html[data-update-banner] body .lk-open-in-app {
+  inset-block-end: calc(32px + var(--lk-update-banner-h, 0px));
+}
+
 /* User-supplied strings (message text, names, ids, links) never widen a
    pane: they break anywhere. Rows that ellipsise keep `nowrap` on top of it. */
 .lk-chat-scroll,
@@ -435,6 +471,12 @@ a:focus-visible {
   min-height: 0;
   overflow: hidden;
 }
+/* A pane that is the whole page (Calls): it fills the height and has no
+   divider, so the page below its content is not a different colour. */
+.lk-pane-page {
+  height: 100%;
+  border-inline-end: none;
+}
 .lk-pane-head {
   display: flex;
   align-items: center;
@@ -649,6 +691,58 @@ a.lk-row.active {
   align-items: center;
   gap: 4px;
   min-width: 0;
+}
+/* docs/ux/media-messages.md section 11 — the 20 px picture at the start of a
+   row's line: the first photo's or video's thumbnail, with one or two edges
+   behind it (2 px right and up each) for a message with several. */
+.lk-row-thumb {
+  position: relative;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  margin-top: 2px;
+  margin-inline-end: 2px;
+}
+.lk-row-thumb-edge {
+  position: absolute;
+  inset: 0;
+  transform: translate(2px, -2px);
+  border-radius: 4px;
+  background: var(--surface-faint);
+  opacity: 0.55;
+}
+.lk-row-thumb-edge.second {
+  transform: translate(4px, -4px);
+  opacity: 0.35;
+}
+[dir="rtl"] .lk-row-thumb-edge {
+  transform: translate(-2px, -2px);
+}
+[dir="rtl"] .lk-row-thumb-edge.second {
+  transform: translate(-4px, -4px);
+}
+.lk-row-thumb-face {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--surface-sunken);
+  box-shadow: 0 0 0 1px var(--surface-border);
+}
+.lk-row-thumb-face img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.lk-row-thumb-play {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.8));
 }
 .lk-row-time {
   font-size: 12px;
@@ -1088,6 +1182,12 @@ a.lk-row.active {
 .lk-card-row-action {
   flex: 0 0 auto;
 }
+/* A small line under a card, about the whole card. */
+.lk-card-note {
+  font-size: 13px;
+  color: var(--surface-muted);
+  margin: 8px 16px 0;
+}
 .lk-stack {
   display: flex;
   flex-direction: column;
@@ -1190,6 +1290,10 @@ a.lk-row.active {
 @media (max-width: 720px) {
   .lk-settings {
     grid-template-columns: 1fr;
+  }
+  /* One column: the nav fills the width, so it has no divider. */
+  .lk-settings-nav {
+    border-inline-end: none;
   }
   .lk-settings[data-open="true"] > .lk-settings-nav {
     display: none;
@@ -1893,6 +1997,33 @@ a.ghost.small.lk-wide-only {
   height: 40px;
   border-radius: 10px;
 }
+/* A compact composer's send (pending chat, comments): the bare
+   arrow-in-circle glyph, accent when sendable and muted when not, as on iOS
+   and Android. */
+.lk-send-glyph {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+}
+.lk-send-glyph:hover:not(:disabled) {
+  background: transparent;
+  color: var(--accent-strong);
+}
+.lk-send-glyph:disabled {
+  color: var(--surface-muted);
+  opacity: 1;
+  cursor: default;
+}
 .lk-composer .lk-send {
   border-radius: 10px;
   background: var(--accent);
@@ -2051,29 +2182,32 @@ a.ghost.small.lk-wide-only {
    stay in one column. */
 .lk-select-mark,
 .lk-select-mark-slot {
-  flex: 0 0 22px;
-  width: 22px;
-  height: 22px;
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
   margin-right: auto;
   align-self: center;
 }
+/* The mark is the set's `circle` / `checkmark-circle-fill`, as on iOS and
+   Android: muted when unselected, accent when selected. */
 .lk-select-mark {
   min-height: 0;
   padding: 0;
   border-radius: var(--radius-pill);
-  border: 2px solid var(--surface-faint);
+  border: none;
   background: transparent;
-  color: var(--accent-fg);
+  color: var(--surface-muted);
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
 .lk-select-mark:hover:not(:disabled) {
-  background: var(--surface-hover);
+  background: transparent;
+  color: var(--surface-fg);
 }
-.lk-select-mark[aria-checked="true"] {
-  background: var(--accent);
-  border-color: var(--accent);
+.lk-select-mark[aria-checked="true"],
+.lk-select-mark[aria-checked="true"]:hover:not(:disabled) {
+  color: var(--accent);
 }
 .lk-select-mark:focus-visible {
   outline: 2px solid var(--accent);
@@ -2524,6 +2658,12 @@ html[data-open-in-app] .lk-feed-import {
   margin: 4px 6px;
   background: var(--surface-border);
 }
+/* A separator with nothing above it (a channel row's menu opens on Add to
+   folder) draws a stray line; base scenario 29, 2026-11-11. */
+.lk-menu > .lk-menu-sep:first-child,
+.lk-menu > .lk-menu-subanchor:first-child > .lk-menu-sep:first-child {
+  display: none;
+}
 
 /* A selectable contact row (New group). */
 .lk-row.pick {
@@ -2821,9 +2961,6 @@ html[data-open-in-app] .lk-feed-import {
   border-color: transparent;
   color: var(--accent-fg);
   transform: translateX(-50%) scale(1.1);
-}
-.lakko-lock-target .lakko-lock-up {
-  transform: rotate(-90deg);
 }
 @media (prefers-reduced-motion: reduce) {
   .lakko-lock-target { transition: none; }
@@ -3918,29 +4055,6 @@ a.ghost.small:hover {
   margin-top: 6px;
 }
 /* UX spec docs/ux/media-messages.md section 10 — photo and video bubbles. */
-.lk-visual {
-  position: relative;
-  display: block;
-  max-width: 100%;
-  height: auto;
-  padding: 0;
-  border: none;
-  border-radius: calc(var(--radius-lg) - 4px);
-  overflow: hidden;
-  background: var(--surface-border);
-  color: #fff;
-  cursor: pointer;
-}
-.lk-visual img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-.lk-visual img.thumb {
-  filter: blur(6px);
-  transform: scale(1.08);
-}
 .lk-visual-corner {
   position: absolute;
   top: 8px;
@@ -4020,6 +4134,285 @@ a.ghost.small:hover {
   order: 3;
   margin: 0 4px 2px;
 }
+/* docs/ux/media-messages.md section 11 — the photos and videos of one message,
+   laid out by the shared mosaic rule (media/mosaic-layout.ts). The box keeps
+   the rule's aspect ratio and shrinks with a narrow bubble; each tile is
+   placed in percentages from the start edge. Outer corners are rounded with
+   the bubble, inner corners stay square (the box clips). */
+.lk-mosaic {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  border-radius: calc(var(--radius-lg) - 4px);
+  background: var(--surface-border);
+}
+.lk-mosaic-tile {
+  position: absolute;
+  display: block;
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  overflow: hidden;
+  min-height: 0;
+  background: var(--surface-border);
+  color: #fff;
+  cursor: pointer;
+}
+.lk-mosaic-tile img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.lk-mosaic-tile img.thumb {
+  filter: blur(6px);
+  transform: scale(1.08);
+}
+.lk-mosaic-tile:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.lk-mosaic-play {
+  width: 40px;
+  height: 40px;
+  font-size: 15px;
+}
+.lk-mosaic-tile .lk-visual-size {
+  top: 6px;
+  left: auto;
+  inset-inline-start: 6px;
+}
+.lk-mosaic-pill {
+  position: absolute;
+  bottom: 8px;
+  inset-inline-end: 8px;
+}
+/* A bubble that carries a mosaic has the mosaic flush to a thin edge; the
+   rest of its content keeps the ordinary inset. */
+.lk-bubble.has-mosaic {
+  padding: 4px 4px 5px;
+  /* As wide as the mosaic: a caption wraps under it rather than widening
+     the bubble past the pictures. */
+  width: min-content;
+  max-width: min(78%, 328px);
+}
+.lk-bubble.has-mosaic > :not(.lk-mosaic):not(.lk-bubble-meta) {
+  margin-inline: 8px;
+}
+.lk-bubble.has-mosaic:not(.media-only) > .lk-bubble-meta {
+  margin-inline: 8px;
+}
+.lk-bubble.has-mosaic > .lk-mosaic + * {
+  margin-top: 6px;
+}
+.lk-bubble.media-only > .lk-mosaic {
+  order: 1;
+}
+.lk-chips + .lk-bubble-text,
+.lk-bubble-media + .lk-bubble-text {
+  margin-top: 6px;
+}
+/* The same mosaic in a channel post. */
+.lk-post-bubble .lk-mosaic,
+.lk-channel-post .lk-mosaic {
+  margin-bottom: 6px;
+}
+
+/* docs/ux/media-messages.md section 11 — the composer tray. */
+.lk-composer.with-tray {
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+.lk-tray {
+  flex: 0 0 100%;
+  min-width: 0;
+  order: -1;
+}
+.lk-tray-strip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-top: 6px;
+  scrollbar-width: thin;
+  /* A fade at the edge where the strip is cut. */
+  mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+}
+.lk-tray-strip:not(:has(.lk-tray-item:nth-child(6))) {
+  mask-image: none;
+  -webkit-mask-image: none;
+}
+.lk-tray-item {
+  position: relative;
+  flex: 0 0 auto;
+  width: 64px;
+  height: 64px;
+  margin-inline-end: 4px;
+}
+.lk-tray-item.file {
+  width: 180px;
+}
+.lk-tray-face {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  border: 1px solid var(--surface-border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface-sunken);
+  color: var(--surface-fg);
+  cursor: pointer;
+  text-align: start;
+}
+.lk-tray-face:disabled {
+  cursor: default;
+  opacity: 1;
+}
+.lk-tray-face > img,
+.lk-tray-blank {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.lk-tray-item.file .lk-tray-face {
+  padding: 0 10px;
+}
+/* Room at the end for the ring or the retry glyph, so the name never runs
+   under it. */
+.lk-tray-item.file:is(:has(.lk-tray-ring), .failed) .lk-tray-face {
+  padding-inline-end: 44px;
+}
+.lk-tray-doc {
+  flex: 0 0 auto;
+  display: inline-flex;
+  color: var(--accent);
+}
+.lk-tray-file-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.lk-tray-file-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--text-sm, 13px);
+  font-weight: 500;
+}
+.lk-tray-file-size {
+  font-size: var(--text-xs, 12px);
+  color: var(--surface-muted);
+}
+.lk-tray-duration {
+  position: absolute;
+  bottom: 4px;
+  inset-inline-start: 4px;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 11px;
+  line-height: 16px;
+}
+.lk-tray-ring {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+}
+.lk-tray-item.file .lk-tray-ring {
+  inset: auto;
+  inset-inline-end: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+}
+.lk-tray-ring svg {
+  transform: rotate(-90deg);
+}
+.lk-tray-ring circle {
+  fill: none;
+  stroke-width: 2.5;
+}
+.lk-tray-ring .track {
+  stroke: rgba(255, 255, 255, 0.35);
+}
+.lk-tray-ring .bar {
+  stroke: #fff;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 160ms linear;
+}
+.lk-tray-item.file .lk-tray-ring .track {
+  stroke: var(--surface-border);
+}
+.lk-tray-item.file .lk-tray-ring .bar {
+  stroke: var(--accent);
+}
+.lk-tray-retry {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+}
+.lk-tray-item.file .lk-tray-retry {
+  inset: auto;
+  inset-inline-end: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-pill);
+  background: var(--danger);
+}
+.lk-tray-remove {
+  position: absolute;
+  top: -6px;
+  inset-inline-end: -6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  min-height: 0;
+  padding: 0;
+  border: 1px solid var(--surface-elevated);
+  border-radius: var(--radius-pill);
+  background: var(--surface-fg);
+  color: var(--surface-elevated);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+.lk-tray-item:hover .lk-tray-remove,
+.lk-tray-item:focus-within .lk-tray-remove,
+.lk-tray-remove:focus-visible {
+  opacity: 1;
+}
+@media (hover: none) {
+  .lk-tray-remove {
+    opacity: 1;
+  }
+}
+.lk-tray-notice {
+  margin: 6px 0 0;
+  font-size: var(--text-sm, 13px);
+  color: var(--surface-muted);
+}
+
 .lk-viewer {
   position: fixed;
   inset: 0;
@@ -4034,6 +4427,46 @@ a.ghost.small:hover {
   max-width: 100vw;
   max-height: calc(100vh - 64px);
   object-fit: contain;
+}
+.lk-viewer-position {
+  position: absolute;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 500;
+  z-index: 1;
+}
+.lk-viewer-step {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  cursor: pointer;
+  z-index: 1;
+}
+.lk-viewer-step:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+.lk-viewer-step.back {
+  inset-inline-start: 16px;
+}
+.lk-viewer-step.forward {
+  inset-inline-end: 16px;
+}
+.lk-viewer-wait {
+  color: #fff;
+  font-size: 15px;
 }
 .lk-viewer-bar {
   position: absolute;
@@ -4644,7 +5077,7 @@ button.lk-reactors-row:focus-visible {
   flex: 0 0 auto;
   margin: 12px 24px 0;
 }
-/* ADR-0089 step 5: the line of a channel moderators removed, in its info. */
+/* ADR-0098 step 5: the line of a channel moderators removed, in its info. */
 .lk-info-header .lk-channel-removed {
   margin: 8px 0 0;
 }
@@ -4661,7 +5094,8 @@ button.lk-reactors-row:focus-visible {
    inside reads the same tokens as the rest of the app and no second palette
    exists. Values are the dark column of `:root` above. */
 .lk-call,
-.lk-incoming-call {
+.lk-incoming-call,
+.lk-call-chat {
   color-scheme: dark;
   --surface-bg: #0f1220;
   --surface-elevated: #171b2e;
@@ -4922,6 +5356,11 @@ button.lk-call-chip:focus-visible {
   width: min(400px, 100%);
   gap: 12px;
   text-align: center;
+}
+.lk-encryption-sheet-lock {
+  display: inline-flex;
+  justify-content: center;
+  color: var(--success);
 }
 .lk-encryption-sheet h2 {
   margin: 0;
@@ -5744,8 +6183,8 @@ button.lk-call-chip:focus-visible {
   position: absolute;
   right: 6px;
   bottom: 6px;
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   min-height: 0;
   padding: 0;
   display: inline-flex;
@@ -6159,6 +6598,368 @@ button.lk-call-chip:focus-visible {
   white-space: nowrap;
 }
 
+/* The chat of a group call (docs/ux/calls.md section 4.1.4). Under 900 px a
+   panel over the whole call screen; from 900 px a 360 px column at the end
+   side, and the call screen (tiles, status, control row) takes the width that
+   is left, so the grid reflows by its own rule. The panel is a sibling of
+   `.lk-call` and shares its dark token block. */
+.lk-call[data-chat="column"] {
+  inset-inline-end: 360px;
+}
+.lk-call-chat {
+  display: flex;
+  flex-direction: column;
+  z-index: 1001;
+  background: var(--surface-elevated);
+}
+.lk-call-chat[data-shape="column"] {
+  inset-inline-start: auto;
+  width: 360px;
+  z-index: 1000;
+  border-inline-start: 1px solid var(--surface-border);
+}
+.lk-call-chat[data-shape="sheet"] {
+  animation: lk-call-chat-up 180ms ease-out;
+}
+@keyframes lk-call-chat-up {
+  from {
+    transform: translateY(24px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lk-call-chat[data-shape="sheet"] {
+    animation: none;
+  }
+}
+.lk-call-chat-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: calc(10px + env(safe-area-inset-top)) 12px 10px 16px;
+  border-bottom: 1px solid var(--surface-border);
+  flex: 0 0 auto;
+}
+.lk-call-chat[data-shape="column"] .lk-call-chat-head {
+  padding-top: 10px;
+}
+.lk-call-chat-head h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 24px;
+}
+.lk-call-chat-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.lk-call-chat-mute {
+  width: 40px;
+  height: 40px;
+}
+.lk-call-chat-close {
+  width: 40px;
+  height: 40px;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--surface-fg);
+  cursor: pointer;
+}
+.lk-call-chat-close:hover {
+  background: var(--surface-hover);
+}
+.lk-call-chat-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.lk-call-chat-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+}
+.lk-call-chat-empty {
+  margin: auto;
+  max-width: 280px;
+  text-align: center;
+  color: var(--surface-muted);
+  font-size: 15px;
+  line-height: 22px;
+}
+.lk-call-chat-empty p {
+  margin: 0;
+}
+.lk-call-chat-note {
+  margin: 0 auto 12px;
+  max-width: 280px;
+  display: flex;
+  flex-direction: column;
+  text-align: center;
+  color: var(--surface-muted);
+  font-size: 12px;
+  line-height: 16px;
+}
+.lk-call-chat-messages {
+  list-style: none;
+  margin: auto 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.lk-call-chat-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+.lk-call-chat-item.own {
+  align-items: flex-end;
+}
+.lk-call-chat-sender {
+  max-width: 65%;
+  margin: 8px 0 2px;
+  margin-inline-start: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
+  color: var(--surface-muted);
+}
+.lk-call-chat-bubble {
+  max-width: 65%;
+  padding: 10px 14px 6px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-sunken);
+  color: var(--surface-fg);
+  font-size: 15px;
+  line-height: 22px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  column-gap: 8px;
+}
+.lk-call-chat-bubble:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: 2px;
+}
+.lk-call-chat-item.own .lk-call-chat-bubble {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.lk-call-chat-item.own .lk-text-link {
+  color: inherit;
+  text-decoration: underline;
+}
+.lk-call-chat-bubble.not-sent {
+  opacity: 0.6;
+}
+.lk-call-chat-text {
+  min-width: 0;
+}
+.lk-call-chat-time {
+  margin-inline-start: auto;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  color: var(--surface-muted);
+}
+.lk-call-chat-item.own .lk-call-chat-time {
+  color: color-mix(in srgb, var(--accent-fg) 70%, transparent);
+}
+.lk-call-chat-failed {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--danger);
+}
+.lk-call-chat-retry {
+  min-height: 32px;
+  padding: 0 8px;
+  font-size: 13px;
+}
+.lk-call-chat-pill {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  min-height: 32px;
+  padding: 0 14px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: var(--shadow-2);
+  cursor: pointer;
+}
+.lk-call-chat-composer {
+  flex: 0 0 auto;
+  padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--surface-border);
+  background: var(--surface-elevated);
+}
+.lk-call-chat-field-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.lk-call-chat-field {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 40px;
+  box-sizing: border-box;
+  padding: 8px 14px;
+  border: 1px solid transparent;
+  border-radius: 20px;
+  background: var(--surface-sunken);
+  color: var(--surface-fg);
+  font: inherit;
+  font-size: 15px;
+  line-height: 22px;
+  resize: none;
+  overflow-y: auto;
+}
+.lk-call-chat-field::placeholder {
+  color: var(--surface-faint);
+}
+.lk-call-chat-field:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.lk-call-chat-send {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* The bare arrow-in-circle glyph is the button face, as on iOS and
+     Android: accent when sendable, muted when not. */
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+}
+.lk-call-chat-send:hover:not(:disabled) {
+  background: transparent;
+  color: var(--accent-strong);
+}
+.lk-call-chat-send:disabled {
+  color: var(--surface-muted);
+  opacity: 1;
+  cursor: default;
+}
+.lk-call-chat-too-long {
+  margin: 6px 4px 0;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--surface-muted);
+}
+.lk-call-chat-menu-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 3;
+}
+.lk-call-chat-menu {
+  position: fixed;
+  bottom: auto;
+  transform: none;
+  min-width: 160px;
+  z-index: 4;
+}
+.lk-call-chat-menu.sheet {
+  left: 8px;
+  right: 8px;
+  top: auto;
+  bottom: calc(8px + env(safe-area-inset-bottom));
+  max-width: none;
+}
+.lk-call-chat-menu.sheet .lk-call-menu-item {
+  min-height: 52px;
+}
+/* The preview above the control bar while the chat is closed. */
+.lk-call-chat-preview {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--call-bar-bottom) + var(--call-bar-h) + 10px);
+  z-index: 8;
+  max-width: min(520px, calc(100% - 32px));
+  min-height: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--call-bar-border);
+  background: var(--call-bar-bg);
+  backdrop-filter: blur(18px);
+  color: var(--surface-fg);
+  font-size: 13px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+}
+.lk-call-chat-preview-name {
+  flex: 0 0 auto;
+  font-weight: 600;
+}
+.lk-call-chat-preview-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The unread count on the Chat circle: the design system's accent badge. */
+.lk-call-ctl[data-control="chat"] .lk-call-ctl-btn {
+  position: relative;
+}
+.lk-call-ctl-badge {
+  position: absolute;
+  top: -2px;
+  inset-inline-end: -4px;
+  min-width: 20px;
+  height: 20px;
+  box-sizing: border-box;
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 20px;
+  text-align: center;
+  pointer-events: none;
+}
+
 /* Phase banner and the ended overlay. */
 .lk-call-phase {
   position: absolute;
@@ -6362,107 +7163,283 @@ a.lk-button-link:hover {
 }
 
 /* ---------------------------------------------------------------------------
-   The collapsed call — one bar across the top of the app
-   (docs/ux/calls.md section 4.5)
+   The collapsed call — one small window floating over the app
+   (docs/ux/calls.md section 4.5, calls/CallWindow.tsx)
 
-   It follows the APP theme, not the call screen's dark token block: the bar is
-   part of the screen the person is on, exactly as the incoming-call banner
-   above is, and a strip in the call's palette would read as a piece of the call
-   screen left behind on top of a chat.
+   It carries the call surface, not the app theme: the window is a piece of the
+   call (the picture of the person on it), and section 4.5.2 says its colour
+   does not follow the light theme, as the call screen does not. The dark
+   tokens are the call screen's own block, restated on this root so the
+   person's tile and the mute button inside read the same values.
 --------------------------------------------------------------------------- */
-:root {
-  /* One number, read by the bar and by the room it is given below, so the two
-     cannot disagree by a pixel. */
-  --lk-call-bar-h: 44px;
-}
+.lk-call-window {
+  color-scheme: dark;
+  --surface-bg: #0f1220;
+  --surface-elevated: #171b2e;
+  --surface-sunken: #1f2439;
+  --surface-border: #2a3145;
+  --surface-fg: #e6e9f4;
+  --surface-muted: #9aa3bd;
+  --surface-faint: #6c7590;
+  --accent: #818cf8;
+  --av-1-bg: #26295a; --av-1-fg: #a5b4fc;
+  --av-2-bg: #12313a; --av-2-fg: #6fd0e0;
+  --av-3-bg: #252a3d; --av-3-fg: #aeb6d0;
+  --av-4-bg: #3a2f17; --av-4-fg: #e5b96b;
+  --call-scrim: color-mix(in srgb, var(--surface-bg) 55%, transparent);
+  --call-ctl-on-bg: rgba(255, 255, 255, 0.12);
+  --call-ctl-on-fg: #ffffff;
+  --call-ctl-on-bg-hover: rgba(255, 255, 255, 0.2);
+  --call-ctl-off-bg: #ffffff;
+  --call-ctl-off-fg: #16192b;
+  --call-ctl-off-bg-hover: #e6e9f4;
+  --call-ctl-disabled-opacity: 0.4;
 
-/* Make room rather than cover. `calls/CallBar.tsx` marks the document while the
-   bar is up; `box-sizing: border-box` is global, so padding on `body` shortens
-   its content box and with it `#root` — the rail, the pane, the composer and
-   the mobile tab bar all move down together and nothing is overlapped. */
-html[data-call-bar] body {
-  padding-top: calc(var(--lk-call-bar-h) + env(safe-area-inset-top));
-}
-
-.lk-callbar {
   position: fixed;
   top: 0;
   left: 0;
-  right: 0;
-  /* The inset is added here and to the room above from the same one number, so
-     a notch cannot leave the bar and the space made for it a few pixels
-     apart. */
-  height: calc(var(--lk-call-bar-h) + env(safe-area-inset-top));
-  /* Above every app surface including a modal backdrop (60): a live call's mute
-     must stay reachable. Below the call screen (1000), the incoming call (1050)
-     and the group-call banner (1100) — the bar is never up at the same time as
-     the first, and the other two are calls asking to be answered. */
+  /* Above every app surface including a modal backdrop (60): a live call's
+     mute must stay reachable. Below the call screen (1000), the incoming call
+     (1050) and the group-call banner (1100): the window is never up at the
+     same time as the first, and the other two are calls asking to be
+     answered. */
   z-index: 900;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  background: var(--surface-bg);
+  color: var(--surface-fg);
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  /* Snaps to its corner; follows the pointer with no lag while dragged. */
+  transition: transform 180ms ease-out;
+}
+.lk-call-window.dragging {
+  transition: none;
+  cursor: grabbing;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lk-call-window {
+    transition: none;
+  }
+}
+/* Firefox in-page surfaces: the same identity filter the call screen's
+   pictures carry (calls/video-surface.ts). */
+:root[data-video-surfaces="in-page"] .lk-call-window video {
+  filter: contrast(1.0001);
+}
+
+/* The picture: the stage person's tile, without the tile's frame. */
+.lk-call-window-picture {
+  position: absolute;
+  inset: 0;
+  border: none;
+  border-radius: 0;
+  container-type: size;
+}
+.lk-call-window-share {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+}
+
+/* Your own camera, while it sends: a small mirrored inset in the bottom
+   corner away from the edge the window rests against. */
+.lk-call-window-inset {
+  position: absolute;
+  bottom: 30px;
+  width: 30%;
+  aspect-ratio: 3 / 4;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--surface-elevated);
+  box-shadow: var(--shadow-1);
+  z-index: 2;
+  pointer-events: none;
+}
+.lk-call-window[data-shape="landscape"] .lk-call-window-inset {
+  width: 22%;
+  aspect-ratio: 4 / 3;
+}
+.lk-call-window-inset[data-corner="bottom-left"] {
+  left: 8px;
+}
+.lk-call-window-inset[data-corner="bottom-right"] {
+  right: 8px;
+}
+
+/* The state or the running time, top left, and the lock beside it. A scrim
+   behind the text so it reads over any picture. Tabular figures so a ticking
+   time does not shift the line every second. */
+.lk-call-window-top,
+.lk-call-window-bottom {
+  position: absolute;
+  left: 0;
+  right: 0;
   display: flex;
   align-items: center;
   gap: 4px;
-  /* The shorthand first and the inset after it: the other way round the
-     shorthand resets the top to zero and the bar's contents sit under a
-     notch. */
-  padding: 0 6px 0 4px;
-  padding-top: env(safe-area-inset-top);
-  background: var(--surface-elevated);
-  border-bottom: 1px solid var(--surface-border);
-  box-shadow: var(--shadow-1);
+  padding: 6px 8px;
+  z-index: 2;
+  pointer-events: none;
+  font-size: 12px;
+  font-weight: 600;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  color: #ffffff;
 }
-
-/* Everything except the mute circle: the whole strip is the way back in. */
-.lk-callbar-open {
-  flex: 1;
-  min-width: 0;
-  height: calc(var(--lk-call-bar-h) - 8px);
-  min-height: 0;
-  display: flex;
+.lk-call-window-top {
+  top: 0;
+  /* Room for the mute circle at the top right. */
+  padding-right: 44px;
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.45), transparent);
+}
+.lk-call-window-bottom {
+  bottom: 0;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.5), transparent);
+}
+.lk-call-window-state {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.lk-call-window-mark {
+  display: inline-flex;
   align-items: center;
-  justify-content: flex-start;
-  gap: 10px;
-  padding: 0 10px;
-  border: none;
-  background: transparent;
-  color: var(--surface-fg);
-  border-radius: var(--radius-sm);
-  text-align: left;
 }
-.lk-callbar-open:hover {
-  background: var(--surface-hover);
-}
-
 /* The name gives way first: a long one truncates rather than pushing the
-   running time or the mute button off the strip. */
-.lk-callbar-who {
+   `+N` off the window. */
+.lk-call-window-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 14px;
-  font-weight: 600;
 }
-
-/* The state or the running time — one of them, decided by the shared rule.
-   Tabular figures so a ticking timer does not shift the line every second. */
-.lk-callbar-state {
+.lk-call-window-more {
   flex: 0 0 auto;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--surface-muted);
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
 }
 
-/* The lock and the camera glyph. Marks, not words. */
-.lk-callbar-mark {
-  flex: 0 0 auto;
+/* The whole window is the way back in: a transparent button over it. */
+.lk-call-window-open {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+/* The app's own button hover paints a fill; this one must stay see-through,
+   or hovering the window hides the picture under it. */
+.lk-call-window-open:hover:not(:disabled),
+.lk-call-window-open:active {
+  background: transparent;
+}
+.lk-call-window.dragging .lk-call-window-open {
+  cursor: grabbing;
+}
+.lk-call-window-open:focus-visible {
+  outline: 2px solid var(--call-ctl-on-fg);
+  outline-offset: -3px;
+}
+
+/* One round mute button, top right, drawn on and off exactly as the call
+   screen draws it (section 4.1.1): ON the quiet translucent circle, OFF the
+   loud solid one with the slashed glyph. */
+.lk-call-window-mute {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 4;
+  width: 32px;
+  height: 32px;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
   display: inline-flex;
   align-items: center;
-  color: var(--surface-muted);
+  justify-content: center;
+  background: var(--call-ctl-on-bg);
+  color: var(--call-ctl-on-fg);
+  backdrop-filter: blur(6px);
+}
+.lk-call-window-mute:hover:not(:disabled) {
+  background: var(--call-ctl-on-bg-hover);
+}
+.lk-call-window-mute[data-tone="solid"] {
+  background: var(--call-ctl-off-bg);
+  color: var(--call-ctl-off-fg);
+}
+.lk-call-window-mute[data-tone="solid"]:hover:not(:disabled) {
+  background: var(--call-ctl-off-bg-hover);
+}
+.lk-call-window-mute:disabled {
+  opacity: var(--call-ctl-disabled-opacity);
+  cursor: default;
+}
+.lk-call-window-mute:focus-visible {
+  outline: 2px solid var(--call-ctl-on-fg);
+  outline-offset: 2px;
 }
 
-/* One round mute button, drawn on and off as the call screen draws it
+/* The desktop app (section 4.5.4a): the collapsed call is a window of the
+   operating system, and the page only feeds it. The picture is still built in
+   the page so its videos play, under every app surface where nothing sees it
+   and nothing can click it (calls/desktop-call-window-relay.ts). */
+.lk-call-window.lk-call-window-relay {
+  z-index: -1;
+  pointer-events: none;
+  box-shadow: none;
+  transition: none;
+}
+
+/* The OS window's own page (call-window.html, DesktopCallWindowPage.tsx): the
+   window fills it. The OS window is transparent, so the page draws the
+   window's rounded corners (section 4.5.2) and leaves the corners clear; the
+   shadow is the OS's own (apps/desktop/src-tauri/src/call_window.rs), since a
+   CSS shadow would need room outside the window. */
+html.lk-call-window-doc,
+html.lk-call-window-doc body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+}
+.lk-call-window.lk-call-window-os {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius-md);
+  box-shadow: none;
+  transition: none;
+}
+.lk-call-window-os .lk-call-window-frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  pointer-events: none;
+}
+.lk-call-window-os .lk-call-window-press {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  cursor: pointer;
+}
+
+/* The round mute button the call chat panel's header uses
+   (calls/CallChatPanel.tsx), drawn on and off as the call screen draws it
    (section 4.1.1), translated onto the app palette: ON is the quiet state — a
    subtle fill and a plain icon; OFF is the loud one — a solid circle with the
    slashed glyph knocked out of it. */
@@ -6527,8 +7504,11 @@ html[data-call-bar] body {
   outline: 2px solid var(--call-ctl-on-fg);
   outline-offset: 2px;
 }
-.lk-call-collapse > svg {
-  transform: rotate(90deg);
+/* The page arrows sit at the physical left and right edges and follow the
+   screen edge, not the reading direction (design system section 8): undo
+   the right-to-left mirroring the set applies to chevrons. */
+[dir="rtl"] .lk-call-page-arrow .lk-icon-flip-rtl {
+  transform: none;
 }
 
 /* Feed (docs/ux/feed.md): one centred column of items, a chip switcher,
@@ -7191,6 +8171,15 @@ html[data-call-bar] body {
   flex-wrap: wrap;
   gap: 8px;
 }
+/* A Discover card is a feed item for its frame, not for its layout: the feed
+   item's 40px avatar column took the whole body and the actions sat beside
+   it, over the channel's name (base scenario 32, 2026-11-11). The body and
+   the actions carry their own padding. */
+.lk-feed-item.lk-discover-card {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
 .lk-discover-card-body {
   display: flex;
   flex-direction: column;
@@ -7261,8 +8250,10 @@ html[data-call-bar] body {
 
 /* ------------------------------------------------ language (ADR-0061) */
 
-/* A back arrow points the way back, which is the other way in a
-   right-to-left layout (`docs/ux/localization.md` section 6). */
+/* An icon that points in the reading direction (back, forward, send, reply,
+   ...) points the other way in a right-to-left layout
+   (`docs/ux/localization.md` section 6); `ui/icons.tsx` adds the class to
+   the icons the set lists as mirrored. */
 [dir="rtl"] .lk-icon-flip-rtl {
   transform: scaleX(-1);
 }
@@ -7422,7 +8413,9 @@ html[data-call-bar] body {
 .lk-menu-subanchor > button {
   justify-content: flex-start;
 }
-.lk-menu-subanchor > button > svg:last-child {
+/* Only the submenu's chevron: with no folders yet the folder icon is the
+   button's last svg, and pushing it right moved the whole row. */
+.lk-menu-subanchor > button > .lk-menu-sub-chevron {
   margin-left: auto;
 }
 .lk-menu.lk-menu-sub {
@@ -7607,7 +8600,7 @@ button.lk-folder-new {
   cursor: pointer;
   align-items: flex-start;
 }
-/* ADR-0089 step 5: Everyone while moderators hid the account from search. */
+/* ADR-0098 step 5: Everyone while moderators hid the account from search. */
 .lk-privacy-choice.disabled {
   cursor: default;
   opacity: 0.55;
@@ -7863,7 +8856,17 @@ button.lk-folder-new {
   align-items: center;
   color: var(--surface-muted);
 }
-/* The Saved screen (section 3). */
+/* The Saved screen (section 3). A route of its own with no pane around it:
+   the screen's own margins, as the feed import has (it sat against the
+   window's edge; base scenario 30, 2026-11-11). */
+.lk-saved {
+  margin: 0 auto;
+  padding: 18px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-sizing: border-box;
+}
 .lk-saved-list {
   list-style: none;
   margin: 0;
@@ -7923,11 +8926,6 @@ button.lk-folder-new {
 .lk-picker-chevron {
   display: inline-flex;
   color: var(--surface-muted);
-  transform: rotate(90deg);
-  transition: transform 120ms ease;
-}
-.lk-picker-btn[aria-expanded="true"] .lk-picker-chevron {
-  transform: rotate(-90deg);
 }
 .lk-picker-scrim {
   display: none;
@@ -8293,6 +9291,15 @@ button.lk-folder-new {
     outline-color: var(--accent-soft);
   }
 }
+/* A Settings row that opens a page outside the app (docs/ux/legal-pages.md). */
+a.lk-card-row-link {
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+a.lk-card-row-link:hover .lk-card-row-title {
+  text-decoration: underline;
+}
 button.lk-card-row-button {
   display: flex;
   align-items: center;
@@ -8573,6 +9580,16 @@ button.lk-card-row-button {
 .lk-channel-compose .lk-channel-files {
   margin: 0 16px 8px;
 }
+/* UX second-device.md section 4a: in place of the composer on a device of
+   the owner or a publisher that cannot post. Plain secondary text. */
+.lk-channel-reader-line {
+  margin: 0;
+  padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--surface-border);
+  font-size: 13px;
+  color: var(--surface-muted);
+  text-align: center;
+}
 .lk-channel-earlier {
   margin: 12px auto 0;
   font-size: 13px;
@@ -8673,7 +9690,7 @@ button.lk-card-row-button {
   opacity: 0.85;
 }
 
-/* ADR-0089 (docs/ux/reporting-and-moderation.md). The report sheet: the
+/* ADR-0098 (docs/ux/reporting-and-moderation.md). The report sheet: the
    layer's card on wide web, a bottom sheet on a phone width. */
 .lk-report-form {
   gap: var(--space-3);
@@ -8718,7 +9735,7 @@ button.lk-card-row-button {
     border-radius: var(--radius-md) var(--radius-md) 0 0;
   }
 }
-/* ADR-0089 step 3: the suspended screen's actions and the appeal sheet's
+/* ADR-0098 step 3: the suspended screen's actions and the appeal sheet's
    counter (docs/ux/reporting-and-moderation.md section 4). */
 .lk-suspended-actions {
   gap: var(--space-2);
@@ -8771,7 +9788,7 @@ button.lk-card-row-button {
   width: auto;
 }
 /* The one-to-one banner under the header when the other person's account is
-   suspended (ADR-0089 step 4, reporting UX 3): nothing it replaces, no
+   suspended (ADR-0098 step 4, reporting UX 3): nothing it replaces, no
    action. */
 .lk-suspended-banner {
   margin: 8px 12px 0;
@@ -8779,7 +9796,7 @@ button.lk-card-row-button {
   color: var(--surface-muted);
   font-size: 0.85rem;
 }
-/* "Suspended" after a member's name in a group's member list (ADR-0089
+/* "Suspended" after a member's name in a group's member list (ADR-0098
    step 4, reporting UX 3). */
 .lk-member-suspended {
   font-weight: normal;
@@ -8810,5 +9827,396 @@ button.lk-card-row-button {
   }
   .lk-request-more {
     display: inline-flex;
+  }
+}
+/* The camera background section of the call settings (ADR-0089,
+   docs/ux/call-backgrounds.md section 2.1). */
+.lk-call-bg {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  position: relative;
+}
+.lk-call-bg-preview {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--surface-sunken);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* Not mirrored: the picture the others receive. */
+.lk-call-bg-preview-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.lk-call-bg-preview-line {
+  font-size: 13px;
+  color: var(--surface-muted);
+}
+.lk-call-bg-preview-note {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  background: rgba(15, 18, 32, 0.6);
+  color: #ffffff;
+  font-size: 12px;
+  text-align: center;
+}
+.lk-call-bg-preview-failed {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--surface-fg);
+}
+.lk-call-bg-strip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 4px 2px 6px;
+  scrollbar-width: thin;
+}
+.lk-call-bg-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.lk-call-bg-thumb {
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  overflow: hidden;
+  cursor: pointer;
+  color: var(--surface-muted);
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+.lk-call-bg-thumb.selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-color: var(--accent);
+}
+.lk-call-bg-thumb:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  outline-offset: 2px;
+}
+.lk-call-bg-thumb.selected:focus-visible {
+  outline-color: var(--accent);
+}
+.lk-call-bg-thumb-face {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+.lk-call-bg-thumb-face img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+.lk-call-bg-thumb-blur {
+  background: color-mix(in srgb, var(--accent-soft) 70%, var(--surface-sunken));
+}
+.lk-call-bg-thumb-blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(3px);
+}
+.lk-call-bg-thumb-blur.strong .lk-call-bg-thumb-blob {
+  filter: blur(7px);
+}
+.lk-call-bg-thumb-blob.a {
+  width: 26px;
+  height: 26px;
+  left: 8px;
+  top: 10px;
+  background: var(--accent);
+  opacity: 0.55;
+}
+.lk-call-bg-thumb-blob.b {
+  width: 22px;
+  height: 22px;
+  right: 8px;
+  bottom: 8px;
+  background: #0f6f80;
+  opacity: 0.5;
+}
+.lk-call-bg-thumb-name {
+  max-width: 64px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--surface-muted);
+  text-align: center;
+  font-weight: 400;
+}
+.lk-call-bg-error {
+  font-size: 13px;
+  color: var(--danger);
+}
+.lk-call-bg-menu-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+.lk-call-menu.lk-call-bg-menu {
+  position: fixed;
+  bottom: auto;
+  transform: translateX(-50%);
+  z-index: 41;
+  min-width: 160px;
+}
+.lk-call-tile-overlay-quiet {
+  background: transparent;
+}
+/* The full-screen own camera while the background starts (ADR-0089): the
+   avatar and a small spinner, nothing sent yet. */
+.lk-call-fill.lk-call-fill-preparing {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--surface-muted);
+}
+
+/* An informing banner (design-system Banner without an action; the beta
+   notice, docs/ux/beta-notice.md): sunken surface, the info icon, a title
+   and a body. Nothing in it is focusable; it wraps and never truncates. */
+.lk-info-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  color: var(--surface-fg);
+}
+.lk-info-banner-icon {
+  color: var(--surface-muted);
+  padding-top: 1px;
+}
+.lk-info-banner-text {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.4;
+  overflow-wrap: break-word;
+}
+.lk-info-banner-title {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.lk-info-banner-body {
+  display: block;
+}
+/* docs/ux/donations.md: the donations page (section 2.0). A public page laid
+   out like a page of the app: the page ground, the app's wide page width and
+   type scale, two groups of cards in a grid. */
+.public-wide {
+  min-height: 100%;
+  background: var(--surface-bg);
+  padding: 32px 24px 48px;
+}
+.public-wide-page {
+  max-width: 1040px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.lk-donate {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 24px;
+}
+.lk-donate-back {
+  align-self: flex-start;
+  margin-inline-start: -12px;
+}
+.lk-donate-intro {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.lk-donate-intro h1 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 28px;
+  font-weight: 600;
+}
+.lk-donate-lede {
+  margin: 0;
+  max-width: 640px;
+  font-size: 15px;
+  line-height: 22px;
+  color: var(--surface-muted);
+  text-wrap: pretty;
+}
+.lk-donate-none {
+  margin: 0;
+  font-size: 15px;
+  line-height: 22px;
+}
+.lk-donate-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.lk-donate-group-title {
+  margin: 0;
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--surface-muted);
+}
+/* One column on a phone, two from 640 px of content width, three from
+   960 px (the page pads 24 px a side, so 688 and 1008 px of viewport). */
+.lk-donate-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
+}
+@media (min-width: 688px) {
+  .lk-donate-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (min-width: 1008px) {
+  .lk-donate-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+.lk-donate-card {
+  height: 100%;
+  min-width: 0;
+  gap: 16px;
+}
+.lk-donate-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.lk-donate-head h3 {
+  margin: 0;
+  font-size: 17px;
+  line-height: 24px;
+  font-weight: 600;
+}
+.lk-donate-sub {
+  margin: 0;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--surface-muted);
+  overflow-wrap: anywhere;
+}
+.lk-donate-qr-slot {
+  display: flex;
+  justify-content: center;
+  min-height: 200px;
+}
+/* Every QR is 200 px square: the operator's image as served (in colour,
+   scaled to fit), or the address code drawn in `src/donate/donate-qr.ts`. */
+.lk-donate-qr {
+  display: block;
+  width: 200px;
+  height: 200px;
+  max-width: 100%;
+  border-radius: 12px;
+  object-fit: contain;
+}
+.lk-donate-qr-drawn svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.lk-donate-actions {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.lk-donate-wide {
+  width: 100%;
+  min-height: 44px;
+}
+.lk-donate-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 14px;
+  line-height: 20px;
+  user-select: all;
+}
+.lk-donate-address {
+  overflow-wrap: anywhere;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+}
+.lk-donate-phone {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.lk-donate-phone-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 6px 6px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+}
+.lk-donate-warning,
+.lk-donate-error {
+  margin: 0;
+  font-size: 13px;
+  line-height: 18px;
+}
+.lk-donate-warning {
+  color: var(--surface-muted);
+}
+.lk-donate-error {
+  color: var(--danger);
+}
+.lk-donate-retry {
+  align-self: flex-start;
+}
+.lk-donate-placeholder {
+  height: 360px;
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+}
+@media (max-width: 480px) {
+  .public-wide {
+    padding: 20px 16px 40px;
   }
 }

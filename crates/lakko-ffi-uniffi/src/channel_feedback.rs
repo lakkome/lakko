@@ -321,7 +321,7 @@ pub struct FfiReactionLabelCount {
 /// reading them.
 #[derive(uniffi::Object)]
 pub struct ChannelReactionKey {
-    inner: ReactionKey,
+    pub(crate) inner: ReactionKey,
 }
 
 #[uniffi::export]

@@ -39,6 +39,10 @@
 //!   authenticator UI (`Lakko`).
 //! - `LAKKO_WEBAUTHN_RP_ORIGIN` — full origin (`https://lakko.me`,
 //!   `http://localhost:5173` in dev).
+//! - `LAKKO_WEBAUTHN_EXTRA_ORIGINS` — optional, comma-separated further
+//!   origins accepted by exact match. A native Android app signs as
+//!   `android:apk-key-hash:<base64url SHA-256 of its signing certificate>`,
+//!   not as the web origin, so the Android client's passkeys need it.
 //!
 //! ## State persistence
 //!
@@ -155,7 +159,7 @@ pub(crate) async fn register_start(
     .collect();
 
     let account_uuid = Uuid::from_bytes(auth.0);
-    let (ccr, reg_state): (CreationChallengeResponse, PasskeyRegistration) = webauthn
+    let (mut ccr, reg_state): (CreationChallengeResponse, PasskeyRegistration) = webauthn
         .start_passkey_registration(
             account_uuid,
             trimmed,
@@ -167,6 +171,7 @@ pub(crate) async fn register_start(
             },
         )
         .map_err(ApiError::Webauthn)?;
+    require_discoverable(&mut ccr);
 
     let state_bytes = serde_json::to_vec(&reg_state).map_err(ApiError::SerdeJson)?;
     let state_id = random_state_id();
@@ -188,6 +193,33 @@ pub(crate) async fn register_start(
         nickname: req.nickname.clone(),
         options: ccr,
     }))
+}
+
+/// Ask the authenticator for a discoverable credential (a "resident key").
+///
+/// `start_passkey_registration` asks for the opposite (`require_resident_key
+/// (false)`, sent as `residentKey: "discouraged"`), and an authenticator that
+/// honours it (a hardware key, some password managers) stores a passkey only
+/// the server can name. A device that holds no account yet signs in through
+/// the discoverable start (`POST /webauthn/auth/start {}`), which offers only
+/// discoverable credentials, so such a passkey could neither sign in nor
+/// restore keys on a new device (base scenario 4, 2026-11-11). Verification
+/// is unchanged: the registration state ignores this flag.
+pub(crate) fn require_discoverable(ccr: &mut CreationChallengeResponse) {
+    use webauthn_rs_proto::{
+        AuthenticatorSelectionCriteria, ResidentKeyRequirement, UserVerificationPolicy,
+    };
+    let selection =
+        ccr.public_key
+            .authenticator_selection
+            .get_or_insert(AuthenticatorSelectionCriteria {
+                authenticator_attachment: None,
+                resident_key: None,
+                require_resident_key: false,
+                user_verification: UserVerificationPolicy::Required,
+            });
+    selection.resident_key = Some(ResidentKeyRequirement::Required);
+    selection.require_resident_key = true;
 }
 
 /// Finalise the registration: verify the attestation, persist the
@@ -418,8 +450,10 @@ pub(crate) async fn delete_credential(
 /// only means the stricter branch was taken.
 ///
 /// The discovery + storage tiers (username binding, identity bundle, KeyPackage,
-/// owned invites, backup blob) are account-keyed in their own DBs; the client
-/// purges them via their bearer-auth'd delete endpoints. The DS / push /
+/// search terms, public record, backup blob) are account-keyed in their own
+/// DBs. The transaction that deletes the account also queues its purge there
+/// (`account_purges`, worked by `crate::purge`), so it is owed exactly when
+/// the account is gone and never for a refused delete. The DS / push /
 /// channels / transparency tiers are account-opaque (invariant #5) and hold
 /// nothing to delete.
 pub(crate) async fn delete_account(
@@ -505,7 +539,7 @@ pub(crate) async fn delete_account(
         .execute(&mut *tx)
         .await
         .map_err(ApiError::Db)?;
-    // ADR-0089 F3: the account's identity-key history goes with it, unless
+    // ADR-0098 F3: the account's identity-key history goes with it, unless
     // the account is suspended now (then it stays taken until the end).
     crate::identity_target::on_account_deleted(&mut tx, &auth.0, crate::session::now_ms())
         .await
@@ -513,6 +547,12 @@ pub(crate) async fn delete_account(
     sqlx::query("DELETE FROM accounts WHERE id = ?")
         .bind(auth.0.as_slice())
         .execute(&mut *tx)
+        .await
+        .map_err(ApiError::Db)?;
+    // In the transaction that deletes the account: committed together, or
+    // not at all. A second delete racing this one finds no row and queues
+    // the same purge again, which changes nothing.
+    crate::purge::enqueue(&mut tx, &auth.0)
         .await
         .map_err(ApiError::Db)?;
     tx.commit().await.map_err(ApiError::Db)?;
@@ -662,6 +702,18 @@ pub(crate) async fn auth_start(
     }
 }
 
+/// `POST /webauthn/auth/finish`, counted as a passkey login (ADR-0096); the
+/// flow is [`auth_finish_answer`].
+pub(crate) async fn auth_finish(
+    state: State<AppState>,
+    req: Json<AuthFinishReq>,
+) -> axum::response::Response {
+    crate::metrics::login(
+        crate::metrics::LoginKind::Passkey,
+        auth_finish_answer(state, req).await,
+    )
+}
+
 /// Verify the authenticator's signature, identify the account,
 /// bump the credential's signature counter, mint a session token.
 ///
@@ -670,7 +722,7 @@ pub(crate) async fn auth_start(
 /// downstream clients hold a single shape regardless of which auth
 /// path produced the token.
 #[axum::debug_handler]
-pub(crate) async fn auth_finish(
+async fn auth_finish_answer(
     State(state): State<AppState>,
     Json(req): Json<AuthFinishReq>,
 ) -> Result<Json<AuthFinishRes>, ApiError> {
@@ -784,7 +836,7 @@ pub(crate) async fn auth_finish(
         .map_err(ApiError::Db)?;
     }
 
-    // ADR-0089 section 4: a suspended account lands in suspended mode. Checked
+    // ADR-0098 section 4: a suspended account lands in suspended mode. Checked
     // after the signature counter above, which is part of authenticating
     // (clone detection), and before anything is issued.
     crate::suspension::refuse_landing_if_suspended(
@@ -829,12 +881,34 @@ pub(crate) fn load_webauthn() -> anyhow::Result<Option<Arc<Webauthn>>> {
 
     let origin_url = Url::parse(&rp_origin)
         .map_err(|e| anyhow::anyhow!("LAKKO_WEBAUTHN_RP_ORIGIN parse: {e}"))?;
-    let webauthn = WebauthnBuilder::new(&rp_id, &origin_url)
+    let extra =
+        parse_extra_origins(&std::env::var("LAKKO_WEBAUTHN_EXTRA_ORIGINS").unwrap_or_default())?;
+    let mut builder = WebauthnBuilder::new(&rp_id, &origin_url)
         .map_err(|e| anyhow::anyhow!("WebauthnBuilder::new: {e}"))?
-        .rp_name(&rp_name)
+        .rp_name(&rp_name);
+    for origin in &extra {
+        builder = builder.append_allowed_origin(origin);
+    }
+    let webauthn = builder
         .build()
         .map_err(|e| anyhow::anyhow!("WebauthnBuilder::build: {e}"))?;
+    tracing::info!(extra_origins = extra.len(), "webauthn configured");
     Ok(Some(Arc::new(webauthn)))
+}
+
+/// The further origins of `LAKKO_WEBAUTHN_EXTRA_ORIGINS`: comma-separated,
+/// blanks ignored, each a URL (an `android:apk-key-hash:...` origin parses
+/// as one with the `android` scheme). An entry that does not parse refuses
+/// the start, rather than leaving a client unable to sign in unexplained.
+pub(crate) fn parse_extra_origins(raw: &str) -> anyhow::Result<Vec<Url>> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            Url::parse(s)
+                .map_err(|e| anyhow::anyhow!("LAKKO_WEBAUTHN_EXTRA_ORIGINS entry parse: {e}"))
+        })
+        .collect()
 }
 
 /// Authenticated principal injected by the session-token
@@ -982,6 +1056,8 @@ pub(crate) fn hex_lower(bytes: &[u8]) -> String {
 /// Background pruner. Sweep expired rows every minute. Aborted via
 /// the `JoinHandle` returned to `main`.
 pub(crate) fn spawn_state_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
+    const JOB: &str = crate::metrics::jobs::WEBAUTHN_STATE_PRUNE;
+    lakko_metrics::job_registered(JOB);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(PRUNE_INTERVAL);
         interval.tick().await;
@@ -990,6 +1066,7 @@ pub(crate) fn spawn_state_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()>
             let result = sqlx::query("DELETE FROM webauthn_states WHERE expires_at < NOW(3)")
                 .execute(&pool)
                 .await;
+            let mut all_ok = result.is_ok();
             match result {
                 Ok(r) if r.rows_affected() > 0 => {
                     tracing::debug!(rows = r.rows_affected(), "pruned expired webauthn_states");
@@ -1004,6 +1081,7 @@ pub(crate) fn spawn_state_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()>
                 sqlx::query("DELETE FROM webauthn_action_grants WHERE expires_at < NOW(3)")
                     .execute(&pool)
                     .await;
+            all_ok &= grants.is_ok();
             match grants {
                 Ok(r) if r.rows_affected() > 0 => {
                     tracing::debug!(
@@ -1020,6 +1098,7 @@ pub(crate) fn spawn_state_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()>
             let device_grants = sqlx::query("DELETE FROM device_grants WHERE expires_at < NOW(3)")
                 .execute(&pool)
                 .await;
+            all_ok &= device_grants.is_ok();
             match device_grants {
                 Ok(r) if r.rows_affected() > 0 => {
                     tracing::debug!(rows = r.rows_affected(), "pruned expired device_grants");
@@ -1027,6 +1106,7 @@ pub(crate) fn spawn_state_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()>
                 Ok(_) => {},
                 Err(e) => tracing::warn!(error = %e, "device_grants prune failed"),
             }
+            crate::metrics::job_ran(JOB, all_ok);
         }
     })
 }
@@ -1127,7 +1207,7 @@ pub(crate) struct AuthenticatedDevice {
 /// it always was. Stamps an [`AuthenticatedAccount`] and an
 /// [`AuthenticatedDevice`] into the request extensions on success.
 ///
-/// ADR-0089 section 4: an account that is suspended is refused with `403
+/// ADR-0098 section 4: an account that is suspended is refused with `403
 /// {"error":"account-suspended"}` after those checks; the suspension is read
 /// in the same query as the generation.
 pub(crate) async fn require_session(
@@ -1139,7 +1219,7 @@ pub(crate) async fn require_session(
         .ok_or_else(|| StatusCode::UNAUTHORIZED.into_response())?;
     let suspended = admit_credential(&state, &verified).await?;
     if suspended {
-        // ADR-0089 section 4: a suspended account's access token opens no
+        // ADR-0098 section 4: a suspended account's access token opens no
         // bearer route. No credentials in this body; the client calls the
         // refresh route, whose `403` carries the restricted session.
         tracing::debug!("webauthn auth: bearer of a suspended account refused");
@@ -1150,7 +1230,7 @@ pub(crate) async fn require_session(
 }
 
 /// Bearer middleware of the four routes a suspended account may call
-/// ([ADR-0089] section 4): read the suspension, send an appeal, delete the
+/// ([ADR-0098] section 4): read the suspension, send an appeal, delete the
 /// account, sign out (plus the passkey action ceremony, which is how an
 /// account with a passkey deletes itself; `webauthn_action::action_start`
 /// accepts only the delete-account action while the account is suspended).
@@ -1159,7 +1239,7 @@ pub(crate) async fn require_session(
 /// same generation and device-floor checks as [`require_session`], and
 /// stamps the same extensions plus a [`SessionStanding`].
 ///
-/// [ADR-0089]: ../../../docs/adr/0089-reporting-and-moderation.md
+/// [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
 pub(crate) async fn require_session_or_restricted(
     State(state): State<AppState>,
     mut request: axum::extract::Request,
@@ -1181,7 +1261,7 @@ enum BearerKinds {
     AccessOrRestricted,
 }
 
-/// What a bearer route knows about the account's standing (ADR-0089).
+/// What a bearer route knows about the account's standing (ADR-0098).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SessionStanding {
     /// The account is suspended now.
@@ -1225,7 +1305,7 @@ fn bearer_credential(
 
 /// The generation check (ADR-0073) and the device floor (ADR-0074) of a
 /// verified credential, in that order (see [`require_session`] for why), and
-/// whether the account is suspended (ADR-0089), read with the generation in
+/// whether the account is suspended (ADR-0098), read with the generation in
 /// one query.
 async fn admit_credential(
     state: &AppState,
@@ -1526,7 +1606,7 @@ pub(crate) enum ApiError {
         /// Unix milliseconds at which the last open anchor expires.
         until_ms: i64,
     },
-    /// ADR-0089 section 4: the account is suspended. `403` with the body
+    /// ADR-0098 section 4: the account is suspended. `403` with the body
     /// `{"error":"account-suspended"}`, plus, when the route authenticated
     /// the person (a landing route, the refresh route), the restricted
     /// session and a refresh credential ([`crate::suspension::SuspendedBody`]).
@@ -1549,8 +1629,59 @@ pub(crate) enum ApiError {
 }
 
 impl IntoResponse for ApiError {
-    #[allow(clippy::too_many_lines)] // a flat variant-to-answer table
     fn into_response(self) -> axum::response::Response {
+        if matches!(self, Self::FreshAuthRequired) {
+            crate::metrics::fresh_auth_refused();
+        }
+        let code = self.body_code();
+        let mut response = self.render();
+        if let Some(code) = code {
+            response
+                .extensions_mut()
+                .insert(lakko_metrics::ErrorCode(code));
+        }
+        response
+    }
+}
+
+impl ApiError {
+    /// The stable `{"error": <code>}` body code of the answer, for the
+    /// metrics `code` label (ADR-0096); `None` for the plain-text answers.
+    const fn body_code(&self) -> Option<&'static str> {
+        match self {
+            Self::Limit(e) => Some(e.code()),
+            Self::LoginByNameDisabled => Some("login-by-name-disabled"),
+            Self::HandleTaken => Some("handle-taken"),
+            Self::KeyGenerationSuperseded => Some(CODE_KEY_GENERATION_SUPERSEDED),
+            Self::RefreshInvalid => Some(CODE_REFRESH_INVALID),
+            Self::FreshAuthRequired => Some(CODE_FRESH_AUTH_REQUIRED),
+            Self::DeviceRevoked => Some(CODE_DEVICE_REVOKED),
+            Self::AccountKeyRequired => Some(CODE_ACCOUNT_KEY_REQUIRED),
+            Self::IdentityKeyMismatch => Some(CODE_IDENTITY_KEY_MISMATCH),
+            Self::DeviceAlreadyBound => Some(CODE_DEVICE_ALREADY_BOUND),
+            Self::RecallRefused => Some(CODE_RECALL_REFUSED),
+            Self::WrongPassword => Some(CODE_WRONG_PASSWORD),
+            Self::StatementStale { .. } => Some(CODE_STATEMENT_STALE),
+            Self::RecallWindowOpen { .. } => Some(CODE_RECALL_WINDOW_OPEN),
+            Self::AccountSuspended(_) => Some("account-suspended"),
+            Self::Coded(_, code) => Some(*code),
+            Self::Disabled
+            | Self::BadInput(_)
+            | Self::StateMissing
+            | Self::NoCredentials
+            | Self::ActionRequired
+            | Self::InvalidCredential
+            | Self::RateLimited
+            | Self::TotpAlreadyEnabled
+            | Self::Internal
+            | Self::Db(_)
+            | Self::Webauthn(_)
+            | Self::SerdeJson(_) => None,
+        }
+    }
+
+    #[allow(clippy::too_many_lines)] // a flat variant-to-answer table
+    fn render(self) -> axum::response::Response {
         let (code, msg) = match self {
             Self::Disabled => (StatusCode::SERVICE_UNAVAILABLE, "webauthn-disabled"),
             Self::BadInput(m) => (StatusCode::BAD_REQUEST, m),
@@ -1691,5 +1822,101 @@ impl IntoResponse for ApiError {
 impl From<crate::limits::LimitError> for ApiError {
     fn from(e: crate::limits::LimitError) -> Self {
         Self::Limit(e)
+    }
+}
+
+#[cfg(test)]
+mod extra_origin_tests {
+    use super::parse_extra_origins;
+    use url::Url;
+    use webauthn_rs::prelude::WebauthnBuilder;
+
+    const ANDROID: &str = "android:apk-key-hash:LzZYH_1lt2CydanB0V530qXBoc8jdpYFJyS0YaibshI";
+
+    #[test]
+    fn empty_and_blank_entries_give_no_origin() {
+        assert!(parse_extra_origins("").unwrap().is_empty());
+        assert!(parse_extra_origins(" , ,").unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_android_app_origin_parses_and_matches_only_itself() {
+        let extra = parse_extra_origins(&format!(" {ANDROID} ")).unwrap();
+        assert_eq!(extra.len(), 1);
+        let own = Url::parse(ANDROID).unwrap();
+        let other = Url::parse("android:apk-key-hash:AAAA").unwrap();
+        assert!(webauthn_rs_core::WebauthnCore::origins_match(
+            false, false, &own, &extra[0]
+        ));
+        assert!(!webauthn_rs_core::WebauthnCore::origins_match(
+            false, false, &other, &extra[0]
+        ));
+        let web = Url::parse("https://test.lakko.example").unwrap();
+        let webauthn = WebauthnBuilder::new("test.lakko.example", &web)
+            .unwrap()
+            .append_allowed_origin(&extra[0])
+            .build();
+        assert!(webauthn.is_ok());
+    }
+
+    #[test]
+    fn an_entry_that_is_not_a_url_refuses_the_start() {
+        assert!(parse_extra_origins("not a url").is_err());
+    }
+}
+
+#[cfg(test)]
+mod discoverable_tests {
+    use super::*;
+
+    fn origin() -> Url {
+        Url::parse("https://test.lakko.example").expect("origin")
+    }
+
+    fn webauthn() -> Webauthn {
+        WebauthnBuilder::new("test.lakko.example", &origin())
+            .expect("builder")
+            .rp_name("Lakko test")
+            .build()
+            .expect("build")
+    }
+
+    #[test]
+    fn passkey_registration_asks_for_a_discoverable_credential() {
+        let wa = webauthn();
+        let (mut ccr, _state) = wa
+            .start_passkey_registration(Uuid::new_v4(), "tester", "Tester", None)
+            .expect("start");
+        require_discoverable(&mut ccr);
+        let json = serde_json::to_value(&ccr).expect("json");
+        let sel = &json["publicKey"]["authenticatorSelection"];
+        assert_eq!(sel["residentKey"], "required");
+        assert_eq!(sel["requireResidentKey"], true);
+        assert_eq!(sel["userVerification"], "required");
+    }
+
+    #[test]
+    fn only_the_authenticator_request_changes() {
+        // The registration state is not touched (its verification ignores
+        // the resident-key request); in the options sent to the client only
+        // the authenticator selection moves: challenge, user, relying party,
+        // algorithms and extensions stay as webauthn-rs built them.
+        let wa = webauthn();
+        let (ccr, _state) = wa
+            .start_passkey_registration(Uuid::new_v4(), "tester", "Tester", None)
+            .expect("start");
+        let mut changed = ccr.clone();
+        require_discoverable(&mut changed);
+        let mut before = serde_json::to_value(&ccr).expect("json");
+        let mut after = serde_json::to_value(&changed).expect("json");
+        before["publicKey"]
+            .as_object_mut()
+            .expect("object")
+            .remove("authenticatorSelection");
+        after["publicKey"]
+            .as_object_mut()
+            .expect("object")
+            .remove("authenticatorSelection");
+        assert_eq!(before, after);
     }
 }

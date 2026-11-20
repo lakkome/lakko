@@ -142,6 +142,75 @@ public fun mediaPreviewKey(attachment: PreviewAttachment): String = when {
     else -> "chat.media.file"
 }
 
+/** What a message's attachments count as for its preview words
+ *  (docs/ux/media-messages.md section 11). */
+public data class MediaCounts(val photos: Int, val videos: Int, val files: Int) {
+    val media: Int get() = photos + videos
+}
+
+/**
+ * Section 11 — the counts of a message's photos, videos and files, or `null`
+ * when it carries something with words of its own (a voice message, a video
+ * note, a GIF, an audio file), which keeps the single-kind label.
+ */
+public fun mediaCounts(attachments: List<PreviewAttachment>): MediaCounts? {
+    var photos = 0
+    var videos = 0
+    var files = 0
+    for (a in attachments) {
+        if (a.kind != null) return null
+        val mime = a.mime?.lowercase(Locale.ROOT)
+        when {
+            mime?.startsWith("image/") == true -> photos += 1
+            mime?.startsWith("video/") == true -> videos += 1
+            else -> files += 1
+        }
+    }
+    return MediaCounts(photos, videos, files)
+}
+
+/**
+ * Section 11 — the words for a message's attachments when it has no text:
+ * `Photo`, `3 photos`, `Video`, `2 videos`, `4 photos and videos`; with no
+ * photo or video, `File` / `3 files`. `null` for nothing, or for a kind with
+ * words of its own.
+ */
+public fun mediaCountWords(attachments: List<PreviewAttachment>, strings: Strings = Localization.strings.value): String? {
+    val c = mediaCounts(attachments) ?: return null
+    return when {
+        c.media > 0 && c.videos == 0 -> strings.format("chat.media.photos", counts = mapOf("count" to c.photos.toULong()))
+        c.media > 0 && c.photos == 0 -> strings.format("chat.media.videos", counts = mapOf("count" to c.videos.toULong()))
+        c.media > 0 -> strings.format("chat.media.photos_and_videos", counts = mapOf("count" to c.media.toULong()))
+        c.files > 0 -> strings.format("chat.media.files", counts = mapOf("count" to c.files.toULong()))
+        else -> null
+    }
+}
+
+/**
+ * Section 11 — the body of a row or notification line before any sender
+ * prefix: the text (a photo or video's thumbnail is drawn beside it); with
+ * files only, their words and then the text; without text, the words.
+ */
+public fun messagePreviewBody(text: String, attachments: List<PreviewAttachment>, strings: Strings = Localization.strings.value): String {
+    val flat = text.trim().replace(Regex("\\s+"), " ")
+    if (attachments.isEmpty()) return flat
+    val counts = mediaCounts(attachments)
+    if (flat.isNotEmpty()) {
+        return if (counts != null && counts.media == 0 && counts.files > 0) {
+            mediaCountWords(attachments, strings) + " · " + flat
+        } else {
+            flat
+        }
+    }
+    mediaCountWords(attachments, strings)?.let { return it }
+    val first = mediaPreviewLabel(attachments.first(), strings)
+    return if (attachments.size > 1) {
+        strings.format("chat.media.and_more", mapOf("label" to first), mapOf("count" to (attachments.size - 1).toULong()))
+    } else {
+        first
+    }
+}
+
 /**
  * The second line of a conversation row: the text, else the media word, else
  * nothing; a deleted message reads "Message deleted". [prefix] is the
@@ -160,19 +229,7 @@ public fun previewLine(
         deleted -> strings["chat.message.deleted"]
         // ADR-0061 section 6 — a message from a newer wire version.
         unsupported -> strings[UNSUPPORTED_MESSAGE_KEY]
-        text.isNotBlank() -> text.trim().replace(Regex("\\s+"), " ")
-        attachments.isNotEmpty() -> {
-            val first = mediaPreviewLabel(attachments.first(), strings)
-            if (attachments.size > 1) {
-                strings.format(
-                    "chat.media.and_more",
-                    mapOf("label" to first),
-                    mapOf("count" to (attachments.size - 1).toULong()),
-                )
-            } else {
-                first
-            }
-        }
+        text.isNotBlank() || attachments.isNotEmpty() -> messagePreviewBody(text, attachments, strings)
         else -> ""
     }
     if (body.isEmpty()) return body
@@ -347,3 +404,64 @@ public fun buildTimeline(
     }
     return out
 }
+
+/**
+ * ADR-0091 phase 2 / `docs/ux/conversation-rejoin.md` 2.4 — [items] with one
+ * line per gap, styled as a date separator. Walk 2, R2: a line sits after the
+ * last message whose time is at or before the gap's START ([ReentryGap.fromMs],
+ * the value the request carried), that is before the first message after it;
+ * at the start when every message is later, at the end when none is. Placed
+ * by its start, not its end, so a message sent after the replacement but
+ * before this device joined does not land above the line. Local to this
+ * device: never a message, never unread.
+ */
+internal fun withReentryGapLines(
+    items: List<TimelineItem>,
+    gaps: List<me.lakko.app.chat.ReentryGap>,
+    label: (me.lakko.app.chat.ReentryGap) -> String,
+): List<TimelineItem> {
+    if (gaps.isEmpty()) return items
+    val out = items.toMutableList()
+    for (gap in gaps.sortedBy { it.fromMs }) {
+        val line = TimelineItem.DateSeparator(key = "gap-${gap.fromMs}-${gap.toMs}", label = label(gap))
+        val lastAtOrBefore = out.indexOfLast {
+            it is TimelineItem.Row && (parseMessageTimeMs(it.message.createdAt)?.let { t -> t <= gap.fromMs } ?: false)
+        }
+        val at = if (lastAtOrBefore >= 0) {
+            lastAtOrBefore + 1
+        } else {
+            // Every message is later than the gap's start (or none has a time):
+            // before the first message, else at the end.
+            out.indexOfFirst { it is TimelineItem.Row }.takeIf { it >= 0 }?.let { firstRowAt ->
+                // Keep the first message's date separator below the line.
+                if (firstRowAt > 0 && out[firstRowAt - 1] is TimelineItem.DateSeparator &&
+                    !(out[firstRowAt - 1] as TimelineItem.DateSeparator).key.startsWith("gap-")
+                ) {
+                    firstRowAt - 1
+                } else {
+                    firstRowAt
+                }
+            } ?: out.size
+        }
+        // An earlier gap's line at the same place stays above this one.
+        var place = at
+        while (place < out.size && (out[place] as? TimelineItem.DateSeparator)?.key?.startsWith("gap-") == true) place++
+        out.add(place, line)
+    }
+    return out
+}
+
+/**
+ * Whether the chat shows its empty-timeline content instead of the list:
+ * nothing held, nothing being sent, and nothing in the built [timeline]. A
+ * chat whose every message was missed while the device was out still draws
+ * its gap line (`docs/ux/conversation-rejoin.md` 2.4).
+ */
+internal fun showsEmptyTimeline(
+    timeline: List<TimelineItem>,
+    messagesEmpty: Boolean,
+    pendingMediaEmpty: Boolean,
+): Boolean = messagesEmpty && pendingMediaEmpty && timeline.isEmpty()
+
+/** The gap line's text in [strings] (UX 2.4). */
+internal fun reentryGapLabel(strings: Strings): String = me.lakko.app.chat.gapLineText().renderWith(strings)

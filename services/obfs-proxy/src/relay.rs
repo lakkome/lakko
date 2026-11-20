@@ -27,6 +27,8 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+use crate::metrics::{relay_ended, RelayEnd};
+
 /// Read-chunk size for the internal-socket → tunnel direction. Bounded well
 /// under `lakko_transport::MAX_FRAME_BYTES` so each chunk maps to one frame.
 const RELAY_READ_CHUNK: usize = 16 * 1024;
@@ -43,7 +45,13 @@ const RELAY_CHANNEL_DEPTH: usize = 32;
 /// the relay loop is running, a peer/socket close is a normal `Ok(())`
 /// termination (the caller does not distinguish which side hung up).
 pub async fn relay(mut tunnel: Box<dyn Connection>, target: SocketAddr) -> anyhow::Result<()> {
-    let tcp = TcpStream::connect(target).await?;
+    let tcp = match TcpStream::connect(target).await {
+        Ok(tcp) => tcp,
+        Err(e) => {
+            relay_ended(RelayEnd::ConnectFailed);
+            return Err(e.into());
+        },
+    };
     let (mut tcp_read, mut tcp_write) = tcp.into_split();
     // Internal-socket → tunnel frames flow through this channel so the single
     // task that owns `tunnel` can `select!` between an inbound frame and an
@@ -65,18 +73,18 @@ pub async fn relay(mut tunnel: Box<dyn Connection>, target: SocketAddr) -> anyho
         }
     });
 
-    loop {
+    let end = loop {
         tokio::select! {
             inbound = tunnel.recv() => {
                 match inbound {
                     // Client → internal socket.
                     Ok(frame) => {
                         if tcp_write.write_all(&frame).await.is_err() {
-                            break;
+                            break RelayEnd::InternalWriteFailed;
                         }
                     },
                     // Tunnel closed (clean or error) — tear down.
-                    Err(_) => break,
+                    Err(_) => break RelayEnd::Closed,
                 }
             }
             outbound = rx.recv() => {
@@ -84,15 +92,16 @@ pub async fn relay(mut tunnel: Box<dyn Connection>, target: SocketAddr) -> anyho
                     // Internal socket → client.
                     Some(frame) => {
                         if tunnel.send(frame).await.is_err() {
-                            break;
+                            break RelayEnd::TunnelSendFailed;
                         }
                     },
                     // Internal socket closed — tear down.
-                    None => break,
+                    None => break RelayEnd::Closed,
                 }
             }
         }
-    }
+    };
+    relay_ended(end);
 
     pump.abort();
     let _ = tcp_write.shutdown().await;
@@ -171,5 +180,30 @@ mod tests {
         let (_, server) = in_memory::pair();
         let bad: SocketAddr = "127.0.0.1:1".parse().unwrap();
         assert!(relay(server, bad).await.is_err());
+    }
+
+    /// ADR-0096: a relay counts how it ended, and the exposition carries no
+    /// address.
+    #[tokio::test]
+    async fn relay_counts_how_it_ended() {
+        let metrics = lakko_metrics::install("obfs-proxy", "0.0.0").unwrap();
+        let (_, server) = in_memory::pair();
+        let bad: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        assert!(relay(server, bad).await.is_err());
+
+        let echo = spawn_echo().await;
+        let (client, server) = in_memory::pair();
+        drop(client);
+        relay(server, echo).await.unwrap();
+
+        let text = metrics.render();
+        lakko_metrics::exposition::assert_clean(&text, &["transport"], &[]);
+        assert!(!text.contains("127.0.0.1"), "{text}");
+        for line in [
+            "lakko_obfs_proxy_relays_total{outcome=\"connect_failed\"}",
+            "lakko_obfs_proxy_relays_total{outcome=\"closed\"}",
+        ] {
+            assert!(text.contains(line), "{line}\n{text}");
+        }
     }
 }

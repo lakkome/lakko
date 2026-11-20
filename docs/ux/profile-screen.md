@@ -160,9 +160,19 @@ the system one:
 Every circle that today shows a person's initials (chat list, chat header, contacts list,
 contact detail, members lists, people search, request cards, message authors in groups,
 call tiles without video, incoming-call screen) shows the person's photo when this device
-holds it, else the initials. A profile video plays muted and looped only in the large
-views (contact detail, a person's info sheet, Settings > Profile); everywhere else its
-still is shown. Group and channel avatars are not part of this spec.
+holds it, else the initials. A profile video never has sound. It plays looped:
+
+| Where | Mouse or trackpad (can hover) | Touch only |
+|---|---|---|
+| Large views (contact detail, a person's info sheet, Settings > Profile) | always | always |
+| Chat header | while the pointer is over the header's avatar and name | always |
+| Chat list row, contacts list row | while the pointer is over the row | never, the still |
+| Everywhere else | never, the still | never, the still |
+
+A touch on a hover-capable screen does not count as hovering. The video is downloaded the
+first time it is to play; until it is ready the still stays, no spinner. When the pointer
+leaves, the still comes back at once. The same rule applies to group and channel photos
+where they appear in these places.
 
 | State | UI |
 |---|---|

@@ -16,6 +16,8 @@ import { HANDLE_CHECK_DEBOUNCE_MS, handleTaken as askHandleTaken, isRateLimited 
 import {
   claimGroupHandle,
   handleRandom,
+  moveGroupHandle,
+  updateGroupHandle,
   handleWellFormed,
   suggestedHandle,
   type PublicGroupFacts,
@@ -27,12 +29,19 @@ import { LakkoPicker } from "../ui/LakkoPicker";
 import { AvatarCamera, AvatarCrop, AvatarMenu, type CropSource } from "../profile/AvatarEditor";
 import { releaseLocalAvatar, type LocalAvatar } from "../profile/avatar-media";
 import { uploadLocalAvatar } from "../profile/avatar-upload";
+import { groupPhotoUploadErrorText } from "../chat/attachment-failure";
 import type { AvatarData } from "../profile/avatar-model";
 import { loadWasm } from "../wasm";
 import { useLocation, useNavigate } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
-import { base64UrlEncodeNoPad } from "../auth/account-id";
+import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
+import {
+  claimOrTakeBackGroupHandle,
+  forgetGroupAttempts,
+  isClaimedGroupHandle,
+  keepGroupAttempt,
+} from "../chat/claimed-group-handles";
 import { useChats } from "../chat/ChatContext";
 import { useGroupNames } from "../chat/GroupNameContext";
 import { setPendingGroupSetup } from "../chat/pending-group-setup";
@@ -104,6 +113,10 @@ export default function NewGroup(): JSX.Element {
     setHandleTaken(false);
     if (takenTimer !== null) clearTimeout(takenTimer);
     if (!pub || h.length < 3 || !handleWell()) return;
+    // A name a failed create of this account claimed is this account's (a
+    // retry takes it back): the lookup answering it is not "taken".
+    const acct = sessionAccountOf(auth.state());
+    if (acct !== null && isClaimedGroupHandle(acct, h)) return;
     // Asked as seldom as search asks (who-can-find-me 6.1): once typing
     // stops, never twice for one name within 60 s; Create reuses the name's
     // OPRF answer (`discovery/handle-check.ts`).
@@ -137,6 +150,10 @@ export default function NewGroup(): JSX.Element {
     setPicked(next);
   };
   const labelOf = (c: AcceptedContact): string => profiles.resolve(c.signaturePubkeyB64).name;
+  const usernameLineOf = (c: AcceptedContact): string | null => {
+    const username = profiles.resolve(c.signaturePubkeyB64).username;
+    return username !== null && username !== labelOf(c) ? username : null;
+  };
 
   /** UX 3.1 — Create is enabled when the @name is well formed and, if Public,
    *  there is a name. Nobody has to be picked. */
@@ -147,7 +164,10 @@ export default function NewGroup(): JSX.Element {
     e.preventDefault();
     setError(null);
     const secrets = auth.identitySecrets();
-    if (secrets === null) {
+    // The bound account keeps the ids of earlier attempts at this @name, so
+    // a retry takes the name back; no create without it.
+    const accountIdB64 = sessionAccountOf(auth.state());
+    if (secrets === null || accountIdB64 === null) {
       setError(() => t("new_group.error.sign_in"));
       return;
     }
@@ -168,8 +188,7 @@ export default function NewGroup(): JSX.Element {
         try {
           avatar = await uploadLocalAvatar(local);
         } catch (err) {
-          const text = err instanceof Error ? err.message : "";
-          setPhotoError(/limit|429/i.test(text) ? t("group_photo.error.limit") : t("group_photo.error.upload"));
+          setPhotoError(groupPhotoUploadErrorText(err));
           setBusy(false);
           return;
         }
@@ -194,15 +213,31 @@ export default function NewGroup(): JSX.Element {
             avatar,
           };
         }
-        claimed = await claimGroupHandle({
+        const args = {
           wasm,
           accountIdentity: account,
           groupId: group.groupId,
           handle: handle(),
           isPublic: isPublic(),
           facts,
+        };
+        // Kept before any request about the name, so a lost answer is
+        // covered too; a retry moves the name from an earlier attempt.
+        const earlier = keepGroupAttempt(accountIdB64, handle(), base64UrlEncodeNoPad(group.groupId));
+        claimed = await claimOrTakeBackGroupHandle(earlier, {
+          claim: () => claimGroupHandle(args),
+          rekeyFrom: (earlierId) =>
+            moveGroupHandle({
+              wasm,
+              accountIdentity: account,
+              fromGroupId: base64UrlDecodeNoPad(earlierId),
+              toGroupId: group.groupId,
+              handle: handle(),
+            }),
+          update: () => updateGroupHandle(args),
         });
       });
+      forgetGroupAttempts(accountIdB64, handle());
       const active = chats.add({
         label: name().trim().length > 0 ? name().trim() : DEFAULT_GROUP_LABEL,
         group: result.group,
@@ -260,7 +295,10 @@ export default function NewGroup(): JSX.Element {
         setError(() => handleWriteErrorText(err));
       } else if (err instanceof HandleWriteError || err instanceof DiscoveryNetworkError) {
         const text = handleWriteErrorText(err);
-        if (err instanceof HandleWriteError && err.code === "name-taken") setHandleError(text);
+        if (err instanceof HandleWriteError && err.code === "name-taken") {
+          forgetGroupAttempts(accountIdB64, handle());
+          setHandleError(text);
+        }
         else setError(() => text);
       } else {
         setError(() => t("new_group.error.secure_setup"));
@@ -276,10 +314,12 @@ export default function NewGroup(): JSX.Element {
           type="button"
           class="ghost small lk-narrow-only"
           style={{ "align-self": "flex-start" }}
-          onClick={() => navigate(paths.groups)}
+          // Back to the one Chats list, as New channel does (base scenario 30:
+          // it read "Groups", a section the app no longer has).
+          onClick={() => navigate(paths.home)}
         >
-          <Icon name="back" size={16} />
-          {t("new_group.back")}
+          <Icon name="chevron-back" size={20} />
+          {t("nav.chats")}
         </button>
         <div class="lk-page-head">
           <h1>{t("chats.new_group.title")}</h1>
@@ -304,7 +344,7 @@ export default function NewGroup(): JSX.Element {
               disabled={busy()}
               onClick={() => setPhotoMenu((v) => !v)}
             >
-              <Icon name="pencil" size={16} />
+              <Icon name="pencil" size={20} />
             </button>
             <Show when={photoMenu()}>
               <AvatarMenu
@@ -441,8 +481,13 @@ export default function NewGroup(): JSX.Element {
                   <Avatar label={labelOf(c)} id={c.signaturePubkeyB64} personKey={c.signaturePubkeyB64} />
                   <div class="lk-row-body">
                     <span class="lk-row-title">{labelOf(c)}</span>
-                    <Show when={!addable(c)}>
-                      <span class="lk-row-sub">{t("chats.new_group.accept_again")}</span>
+                    <Show
+                      when={addable(c)}
+                      fallback={<span class="lk-row-sub">{t("chats.new_group.accept_again")}</span>}
+                    >
+                      {/* The username as Add members, iOS and Android show it; not
+                          when the title already is the username. */}
+                      <Show when={usernameLineOf(c)}>{(u) => <span class="lk-row-sub">{u()}</span>}</Show>
                     </Show>
                   </div>
                 </label>
@@ -455,7 +500,7 @@ export default function NewGroup(): JSX.Element {
           <button type="submit" class="primary" disabled={!mayCreate()}>
             {busy() ? t("chats.new_group.creating") : t("chats.create.group")}
           </button>
-          <button type="button" class="ghost" disabled={busy()} onClick={() => navigate(paths.groups)}>
+          <button type="button" class="ghost" disabled={busy()} onClick={() => navigate(paths.home)}>
             {t("common.cancel")}
           </button>
         </div>

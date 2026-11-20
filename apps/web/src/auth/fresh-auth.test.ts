@@ -544,7 +544,7 @@ describe("the grant stays in memory and reaches every gated route", () => {
     expect(ctx.match(/freshGrants\.put\(/g)?.length).toBe(8);
     // login, signup, passkey sign-in, the two proof routes, and the recall
     // (ADR-0074: `recall/finish` answers a grant; the old password proved
-    // it). The guest sign-up keeps none. ADR-0089: a suspended account's
+    // it). The guest sign-up keeps none. ADR-0098: a suspended account's
     // refusal carries the grant only on the password and passkey sign-ins
     // (the server decides), kept by `landSuspended` and by the password
     // proof.

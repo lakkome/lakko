@@ -145,7 +145,11 @@ public final class ContactsRepository: ObservableObject {
     /// publisher Welcome by kind), else reads as `false` (a plain Welcome
     /// row goes on to the chat join).
     func landPublisherWelcome(_ welcome: Data, accountIdB64: String, holdWhenNotReady: Bool) throws -> Bool {
-        guard !PendingPublisherRequests.load(accountIdB64: accountIdB64).isEmpty else { return false }
+        // ADR-0090 — a device of an account that owns or co-publishes a
+        // channel takes a PublisherGroup Welcome here too, whether it waits
+        // for its first admission or holds an old group the Welcome replaces.
+        guard !PendingPublisherRequests.load(accountIdB64: accountIdB64).isEmpty
+                || ChannelDeviceAdmission.hasWelcomeTargets else { return false }
         do {
             guard let lander = publisherWelcomeLander else { throw PublisherWelcomeNotReady() }
             return try lander(welcome, accountIdB64)
@@ -595,6 +599,36 @@ public final class ContactsRepository: ObservableObject {
     /// The catalog key (ADR-0061) for a Welcome this device could not join.
     static let welcomeJoinFailureMessage = "contacts.mailbox.join_failed"
 
+    /// Why an account-mailbox Welcome did not open as a chat.
+    enum MailboxWelcomeRefusal: Equatable {
+        /// The core refused it as not a conversation (`NoRoleTable`, C-86): a
+        /// PublisherGroup or DeviceGroup Welcome, which the channel and
+        /// device paths take; never a failed chat join.
+        case notAConversation
+        /// A Welcome for a group this device still holds as active
+        /// (ADR-0087 section 9): kept and joined once the end lands.
+        case groupStillActive(String)
+        /// Anything else: most are Welcomes sealed to another of this
+        /// account's devices (ADR-0060 section 6), which this one cannot open.
+        case notOpenedHere
+
+        /// Whether the poll raises ``welcomeJoinFailureMessage`` for it. None
+        /// does: every Welcome of the account lands in one mailbox, so a
+        /// refusal here is the ordinary case, not a lost invitation (walk of
+        /// 2026-11-14: a PublisherGroup Welcome raised the banner on web).
+        var raisesJoinFailureBanner: Bool { false }
+    }
+
+    /// The typed reading of a failed `joinGroupFromWelcome`.
+    nonisolated static func mailboxWelcomeRefusal(_ error: Error) -> MailboxWelcomeRefusal {
+        if case ChatError.wrapped(_, let underlying) = error {
+            return mailboxWelcomeRefusal(underlying)
+        }
+        if case FfiError.MembershipNoRoleTable = error { return .notAConversation }
+        if let held = MembershipEndRules.stillActiveGroupIdHex(error) { return .groupStillActive(held) }
+        return .notOpenedHere
+    }
+
     /// Poll the stranger inbox for new ContactRequest / Welcome
     /// envelopes. Updates ``ContactsState/pending`` with any new
     /// requests + bumps the cursor.
@@ -640,7 +674,7 @@ public final class ContactsRepository: ObservableObject {
         // already moved past it, so it is never retried and the chat simply
         // never appears. Remember the failure so this poll's final state can
         // say so.
-        let welcomeJoinFailure: String? = nil
+        var welcomeJoinFailure: String?
         // ADR-0060 section 6 — one inbound mailbox per person: every Welcome,
         // for any of this account's devices, lands in the ACCOUNT mailbox.
         // ADR-0078 — device mailboxes are gone (none is claimed or read).
@@ -662,7 +696,7 @@ public final class ContactsRepository: ObservableObject {
             // ADR-0060 section 1 (2026-11-06) — the contacts who wrote with a
             // retired `contact` key and get the current grant, invisibly.
             var regrant: [Data] = []
-            // ADR-0089 step 4 / UX `reporting-and-moderation.md` section 3 —
+            // ADR-0098 step 4 / UX `reporting-and-moderation.md` section 3 —
             // the senders of this batch's requests whose accounts the
             // moderation log shows suspended, asked about all at once under
             // one bound of a few seconds. Only a verified `suspended` counts;
@@ -674,7 +708,7 @@ public final class ContactsRepository: ObservableObject {
                 // the rest belongs to the old account. Its grants, profiles
                 // and Welcomes are not filed under whoever is bound now.
                 guard boundAccountIdB64 == pollAccountIdB64 else { break }
-                // ADR-0089 step 4 — dropped unseen before anything else
+                // ADR-0098 step 4 — dropped unseen before anything else
                 // decides about it: no grant, profile, regrant, link-answer
                 // acceptance or card.
                 if Self.droppedAsSuspended(event, suspendedSenders: suspendedSenders) { continue }
@@ -691,7 +725,7 @@ public final class ContactsRepository: ObservableObject {
                 }
                 switch event {
                 case .contactRequest(let req, let replyGrant, let linkAnswer):
-                    // ADR-0089 section 6 — a request from a blocked account is
+                    // ADR-0098 section 6 — a request from a blocked account is
                     // dropped unseen, whichever route it took (the inbox or an
                     // invite link): nothing of it is kept, not its grant, not
                     // its profile.
@@ -727,7 +761,8 @@ public final class ContactsRepository: ObservableObject {
                     // answered, or a card with the dead-link note.
                     if let linkAnswer {
                         LinkRequestInbox(accountIdB64: pollAccountIdB64).add(LinkRequestInbox.Row(
-                            request: req, linkId: linkAnswer.linkId, linkSecret: linkAnswer.linkSecret))
+                            request: req, linkId: linkAnswer.linkId, linkSecret: linkAnswer.linkSecret,
+                            replyGrantWire: replyGrant.flatMap { try? encodeReachGrant(grant: $0) }))
                         undecidedArrived = true
                         continue
                     }
@@ -774,18 +809,25 @@ public final class ContactsRepository: ObservableObject {
                             // them goes out now, in order.
                             handOverJoinedPendingContacts()
                         } catch {
-                            // ADR-0087 section 9 — a Welcome for a group this
-                            // device still holds as active: the removal it
-                            // answers may still be in that group's journal.
-                            // The cursor moves past this row, so it is kept.
-                            if let held = MembershipEndRules.stillActiveGroupIdHex(error) {
+                            let refusal = Self.mailboxWelcomeRefusal(error)
+                            if refusal.raisesJoinFailureBanner {
+                                welcomeJoinFailure = Self.welcomeJoinFailureMessage
+                            }
+                            switch refusal {
+                            case .groupStillActive(let held):
+                                // ADR-0087 section 9 — a Welcome for a group this
+                                // device still holds as active: the removal it
+                                // answers may still be in that group's journal.
+                                // The cursor moves past this row, so it is kept.
                                 chatRepository.holdWelcomeForActiveGroup(
                                     groupIdHex: held, welcome: welcomeBytes)
                                 Task { @MainActor [weak chatRepository] in
                                     await chatRepository?.resolveHeldWelcomes()
                                 }
-                            } else {
-                                NSLog("contacts inbox: an account-mailbox Welcome did not open as a chat (expected for a co-publisher Welcome): \(error)")
+                            case .notAConversation:
+                                NSLog("contacts inbox: an account-mailbox Welcome is not a conversation (a publisher or device group); not a chat")
+                            case .notOpenedHere:
+                                NSLog("contacts inbox: an account-mailbox Welcome did not open as a chat (expected for another device's Welcome): \(error)")
                             }
                         }
                     }
@@ -793,6 +835,17 @@ public final class ContactsRepository: ObservableObject {
                 case .linkRefusal(let refusal):
                     guard boundAccountIdB64 == pollAccountIdB64 else { continue }
                     applyLinkRefusal(refusal)
+                    continue
+                case .conversationReentry(_, let envelope):
+                    // ADR-0091 phase 2 route 2 — judged by the repository
+                    // (the core checks the KeyPackage, the admission rule
+                    // the rest); a row that fails any check is dropped.
+                    guard boundAccountIdB64 == pollAccountIdB64 else { continue }
+                    if let chatRepository {
+                        Task { @MainActor [weak chatRepository] in
+                            await chatRepository?.receiveConversationReentry(envelope: envelope, route: .mailbox)
+                        }
+                    }
                     continue
                 case .contactAck(let ack):
                     // The session ended (or changed account) while this
@@ -931,7 +984,7 @@ public final class ContactsRepository: ObservableObject {
                         } catch {
                             NSLog("contacts inbox: a predecessor-mailbox Welcome did not open as a chat: \(error)")
                         }
-                    case .contactRequest, .contactAck, .linkRefusal, .publisherWelcome:
+                    case .contactRequest, .contactAck, .linkRefusal, .publisherWelcome, .conversationReentry:
                         // Rule 5 — a predecessor mailbox carries Welcomes
                         // only. A request sent here was sealed to the old
                         // key and its sender still addresses the old
@@ -981,7 +1034,7 @@ public final class ContactsRepository: ObservableObject {
             guard let proving = reachKeys[messageId] else { return (.process, nil) }
             let founder = welcomeFounder(welcomeBytes)
             return (verdict(proving, founder.map(isContact) ?? false), founder)
-        case .linkRefusal, .publisherWelcome:
+        case .linkRefusal, .publisherWelcome, .conversationReentry:
             return (.process, nil)
         }
     }
@@ -1125,7 +1178,7 @@ public final class ContactsRepository: ObservableObject {
             recipientX25519Pub: bundle.x25519Pubkey, request: wire)
         do {
             try await chatRepository.publishApplicationMessage(
-                groupIdHex: groupIdHex, plaintextBytes: envelope)
+                groupIdHex: groupIdHex, plaintextBytes: envelope, personAction: true)
         } catch {
             // Never delivered: its reply grant goes with it.
             ReachCenter.shared.retireReplies(purpose: ReplyPurpose.contact(recipientAccountId))
@@ -1242,7 +1295,7 @@ public final class ContactsRepository: ObservableObject {
     func fileGroupContactRequest(
         groupIdHex: String, envelope: Data, senderKey: Data, ownX25519Secret: Data, createdAt: String
     ) -> Bool {
-        // ADR-0089 step 4 — a sender the moderation log already showed
+        // ADR-0098 step 4 — a sender the moderation log already showed
         // suspended is dropped unseen before anything else decides. This
         // route files synchronously inside the group's event fold, so it
         // cannot wait for a standing; one not yet known is asked about below
@@ -1500,10 +1553,25 @@ public final class ContactsRepository: ObservableObject {
             // A held link that is not their one-to-one (a group, or a
             // one-to-one with someone else) gives way to this one, which is.
             let held = old.groupIdHex.flatMap { keepsLink($0) ? $0 : nil }
-            guard held == nil || newAlias else { return nil }
+            // A row adopted before the person's profile (or the invite link)
+            // told this device their account id takes it now: without it they
+            // cannot be added to a group (seen on an iPhone 2026-11-10: a
+            // contact added through their link read "Accept this contact
+            // again").
+            let fillsAccountId = old.request.fromAccountId == nil && accountId != nil
+            guard held == nil || newAlias || fillsAccountId else { return nil }
             var rows = accepted
+            let request = fillsAccountId ? IncomingContactRequest(
+                messageId: old.request.messageId,
+                fromPubkey: old.request.fromPubkey,
+                fromAccountId: accountId,
+                fromPseudonym: old.request.fromPseudonym,
+                validAfterMs: old.request.validAfterMs,
+                intro: old.request.intro,
+                profile: old.request.profile,
+                createdAt: old.request.createdAt) : old.request
             rows[idx] = AcceptedContact(
-                request: old.request, groupIdHex: held ?? groupIdHex,
+                request: request, groupIdHex: held ?? groupIdHex,
                 displayName: old.displayName, previousKeysB64: previous.isEmpty ? nil : previous)
             return rows
         }
@@ -1753,20 +1821,20 @@ public final class ContactsRepository: ObservableObject {
     ///
     /// The mutation flows through `state`'s `didSet`, so the persisted
     /// accepted list and the name directory's renames follow.
-    /// ADR-0089 section 6 — whether a contact request from `key` is dropped
+    /// ADR-0098 section 6 — whether a contact request from `key` is dropped
     /// unseen (`blockVerdict(.contactRequest)`).
     static func requestBlocked(_ key: Data) -> Bool {
         BlockList.shared.verdict(.contactRequest, accountKey: key) == .drop
     }
 
-    /// ADR-0089 step 4 — of the given request senders, the ones verified
+    /// ADR-0098 step 4 — of the given request senders, the ones verified
     /// suspended, all asked about at once under one bound. Injectable for
     /// tests; the default asks ``SuspensionMarks``.
     var suspendedRequestSenders: @MainActor ([Data]) async -> Set<Data> = { keys in
         await SuspensionMarks.shared.verifiedSuspended(keys)
     }
 
-    /// ADR-0089 step 4 — whether a group-carried request's sender is known
+    /// ADR-0098 step 4 — whether a group-carried request's sender is known
     /// suspended now, and the background ask for one not yet known.
     /// Injectable for tests.
     var groupRequestSenderSuspended: @MainActor (Data) -> Bool = { SuspensionMarks.shared.isSuspended($0) }
@@ -1787,7 +1855,7 @@ public final class ContactsRepository: ObservableObject {
         return suspendedSenders.contains(req.fromPubkey)
     }
 
-    /// ADR-0089 section 6 / UX 1.2 — block a person: the register is written
+    /// ADR-0098 section 6 / UX 1.2 — block a person: the register is written
     /// (this device at once, the account's other devices at their next sync),
     /// their pending requests go unseen, and they are removed from the
     /// contact list exactly as `Remove contact` does (the contact key
@@ -2953,6 +3021,16 @@ public final class ContactsRepository: ObservableObject {
             else { continue }
             guard chatRepository.handOverPendingInvitedMessages(
                 queueKey: contact.queueKey, toGroupIdHex: thread.groupIdHex) else { continue }
+            // The account id the link gave is the one fact the contact row
+            // cannot learn from the conversation: kept on the row before the
+            // pending record goes.
+            if let accountId = StateBundle.hexDecode(contact.accountIdHex) {
+                let now = UInt64(Date().timeIntervalSince1970 * 1000)
+                adoptOneToOnePeer(
+                    signatureKey: contact.signaturePubkey, accountId: accountId,
+                    groupIdHex: thread.groupIdHex, nowMs: now,
+                    createdAt: ISO8601DateFormatter().string(from: Date()))
+            }
             remaining.removeAll { $0.accountIdHex == contact.accountIdHex }
             handedOver[contact.accountIdHex] = thread.groupIdHex
         }
@@ -3069,7 +3147,7 @@ public final class ContactsRepository: ObservableObject {
             return (try? linkClaimAnsweredElsewhere(
                 claims: Self.ffiClaims(seen), rosterKeys: roster.roster)) ?? false
         }
-        // ADR-0089 step 4 — before a held request is decided (it would be
+        // ADR-0098 step 4 — before a held request is decided (it would be
         // accepted with no card), its sender's standing is asked, all rows at
         // once under one bound: a verified suspension drops it unseen; a late
         // or failed answer decides it as before.
@@ -3216,6 +3294,13 @@ public final class ContactsRepository: ObservableObject {
                 continue
             }
             if step == .build {
+                // The Welcome below is addressed from the requester's reply
+                // grant: filed again here, where the reach center is active.
+                if let grant = row.replyGrant {
+                    ReachCenter.shared.keep(
+                        grant, carrier: .request,
+                        fromAccountKeyB64: base64Encode(req.fromPubkey), scopeHex: nil)
+                }
                 let answer = FfiLinkAnswer(linkId: row.linkId, linkSecret: row.linkSecret)
                 if await acceptThroughLink(req, linkAnswer: answer, key: key, claims: claims), bound.isCurrent {
                     inbox.remove(messageId: req.messageId)

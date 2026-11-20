@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0089 step 5, `docs/ux/reporting-and-moderation.md` section 3 - an
+ * ADR-0098 step 5, `docs/ux/reporting-and-moderation.md` section 3 - an
  * account Lakko's moderators hid from search.
  *
  * Discovery refuses publishing the Everyone record with `403

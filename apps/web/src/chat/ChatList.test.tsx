@@ -129,7 +129,7 @@ let rules: UiRules;
 
 beforeAll(async () => {
   // Before `./ChatList` is imported, and the order is load-bearing for the same
-  // reason it is in `CallBar.test.tsx`: `ui-rules` primes the shared rules at
+  // reason it is in `CallWindow.test.tsx`: `ui-rules` primes the shared rules at
   // import with `loadWasm()`, whose `init()` fetches a URL jsdom cannot fetch.
   // Initialising the same module from bytes first makes that a resolved no-op.
   await initWasm();

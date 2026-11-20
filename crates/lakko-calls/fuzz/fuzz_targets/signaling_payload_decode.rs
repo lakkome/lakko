@@ -10,7 +10,9 @@
 //! any field is trusted. The reachable surface is fully attacker-controlled:
 //! the prost decode, the oneof-presence check, the fixed 16-byte `call_id`
 //! length gate + array copy, `MediaFlags::from_bits`, and
-//! `EndReason::from_proto` (which folds unknown discriminators, C-13). Any
+//! `EndReason::from_proto` (which folds unknown discriminators, C-13), and
+//! every body variant including the one-to-one `MediaState` (field 18,
+//! 2026-11-07: camera and microphone, the mute mark's carrier). Any
 //! panic / overflow / runaway allocation here is a DoS on the call-control
 //! receive path.
 //!

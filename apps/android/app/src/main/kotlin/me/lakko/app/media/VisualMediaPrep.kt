@@ -24,6 +24,9 @@ public class VisualPrep(
     public val size: PixelSize?,
     public val thumb: ByteArray?,
     public val thumbSize: PixelSize?,
+    /** ADR-0047 section 6 — the micro thumbnail carried inside the message
+     *  (at most 96 px, at most 4096 bytes); `null` when it never fit. */
+    public val inlineThumb: ByteArray? = null,
 )
 
 private const val TAG = "LakkoVisualMedia"
@@ -70,8 +73,9 @@ private fun prepareImage(bytes: ByteArray): VisualPrep {
             },
         )
     }
-    val (thumb, thumbSize) = bitmap?.let { encodeThumb(rotate(it, rotation)) } ?: (null to null)
-    return VisualPrep(size, thumb, thumbSize)
+    val oriented = bitmap?.let { rotate(it, rotation) }
+    val (thumb, thumbSize) = oriented?.let { encodeThumb(it) } ?: (null to null)
+    return VisualPrep(size, thumb, thumbSize, oriented?.let(::encodeInlineThumb))
 }
 
 private fun prepareVideo(bytes: ByteArray, scratchDir: File): VisualPrep {
@@ -95,7 +99,7 @@ private fun prepareVideo(bytes: ByteArray, scratchDir: File): VisualPrep {
             retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
         }.getOrNull()
         val (thumb, thumbSize) = frame?.let { encodeThumb(it) } ?: (null to null)
-        return VisualPrep(size, thumb, thumbSize)
+        return VisualPrep(size, thumb, thumbSize, frame?.let(::encodeInlineThumb))
     } finally {
         runCatching { retriever.release() }
         scratch.delete()
@@ -120,6 +124,39 @@ private fun encodeThumb(source: Bitmap): Pair<ByteArray?, PixelSize?> {
         }.toByteArray()
     }
     return if (bytes == null) null to null else bytes to target
+}
+
+/**
+ * ADR-0047 section 6 — the micro thumbnail of [source]: longest side at most
+ * [INLINE_THUMB_LONGEST_SIDE] px, JPEG, quality lowered until it fits
+ * [INLINE_THUMB_MAX_BYTES]; `null` when it never fits (the message goes
+ * without one). Never throws.
+ */
+internal fun encodeInlineThumb(source: Bitmap): ByteArray? = runCatching {
+    val target = fitWithin(source.width, source.height, INLINE_THUMB_LONGEST_SIDE) ?: return@runCatching null
+    val scaled = if (target.width == source.width && target.height == source.height) {
+        source
+    } else {
+        Bitmap.createScaledBitmap(source, target.width, target.height, true)
+    }
+    inlineThumbUnderBound { quality ->
+        ByteArrayOutputStream().also { out -> scaled.compress(Bitmap.CompressFormat.JPEG, quality, out) }.toByteArray()
+    }
+}.getOrNull()
+
+/**
+ * ADR-0047 section 6 — decode a received micro thumbnail in memory. `null`
+ * for anything over the bound, not a JPEG, or that does not decode. Never
+ * throws; cheap enough (at most 4096 bytes, 96 px) for the main thread.
+ */
+public fun decodeInlineThumb(bytes: ByteArray?): Bitmap? {
+    val jpeg = inlineThumbOrNull(bytes) ?: return null
+    return try {
+        BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)
+    } catch (e: Throwable) {
+        Log.w(TAG, "micro thumbnail did not decode: ${e.javaClass.simpleName}")
+        null
+    }
 }
 
 private fun exifRotation(open: () -> ExifInterface): Int = runCatching {
@@ -170,4 +207,92 @@ public fun decodeOrientedBitmap(file: File, maxSide: Int): Bitmap? = try {
     // OutOfMemoryError included: a hostile size must not crash the chat.
     Log.w(TAG, "image did not decode: ${e.javaClass.simpleName}")
     null
+}
+
+/**
+ * ADR-0092 / UX attachments section 3 — a photo picked through Photo or Video
+ * is decoded and re-encoded as JPEG with its longest side at most
+ * [maxLongestSide], its orientation applied and every piece of metadata (EXIF
+ * location, camera, time) dropped. `null` when the image cannot be decoded
+ * (UX: "Couldn't read this photo"). A GIF is left alone by the caller.
+ */
+public fun reencodePhoto(bytes: ByteArray, maxLongestSide: Int): ByteArray? = runCatching {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+    val rotation = exifRotation { ExifInterface(ByteArrayInputStream(bytes)) }
+    val decoded = BitmapFactory.decodeByteArray(
+        bytes,
+        0,
+        bytes.size,
+        BitmapFactory.Options().apply {
+            inSampleSize = sampleSizeFor(bounds.outWidth, bounds.outHeight, maxLongestSide)
+        },
+    ) ?: return@runCatching null
+    val oriented = rotate(decoded, rotation)
+    val target = fitWithin(oriented.width, oriented.height, maxLongestSide) ?: return@runCatching null
+    val scaled = if (target.width == oriented.width && target.height == oriented.height) {
+        oriented
+    } else {
+        Bitmap.createScaledBitmap(oriented, target.width, target.height, true)
+    }
+    ByteArrayOutputStream().also { out -> scaled.compress(Bitmap.CompressFormat.JPEG, 88, out) }.toByteArray()
+}.getOrNull()
+
+/** UX attachments section 6 — the tags of an audio file, read on the sender's device. */
+public data class AudioTags(
+    val title: String?,
+    val artist: String?,
+    val durationMs: UInt?,
+    val cover: CoverArt?,
+)
+
+/** An embedded cover scaled to a 320-px JPEG. */
+public class CoverArt(public val bytes: ByteArray, public val width: Int, public val height: Int)
+
+public fun readAudioTags(context: android.content.Context, uri: android.net.Uri): AudioTags {
+    val retriever = MediaMetadataRetriever()
+    return try {
+        retriever.setDataSource(context, uri)
+        val title = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)?.trim()?.takeIf { it.isNotEmpty() }
+        val artist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)?.trim()?.takeIf { it.isNotEmpty() }
+        val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+            ?.takeIf { it in 1..86_400_000 }?.toUInt()
+        val cover = retriever.embeddedPicture?.let { pic ->
+            BitmapFactory.decodeByteArray(pic, 0, pic.size)?.let { bmp ->
+                val target = fitWithin(bmp.width, bmp.height, 320)
+                if (target == null) {
+                    null
+                } else {
+                    val scaled = Bitmap.createScaledBitmap(bmp, target.width, target.height, true)
+                    val out = ByteArrayOutputStream().also { scaled.compress(Bitmap.CompressFormat.JPEG, 85, it) }.toByteArray()
+                    CoverArt(out, target.width, target.height)
+                }
+            }
+        }
+        AudioTags(title, artist, duration, cover)
+    } catch (_: Throwable) {
+        AudioTags(null, null, null, null)
+    } finally {
+        runCatching { retriever.release() }
+    }
+}
+
+/** The MIME of the first video track of an MP4 (`video/avc` for H.264), or `null`. */
+public fun videoTrackMime(context: android.content.Context, bytes: ByteArray): String? {
+    val dir = File(context.cacheDir, "visual-prep").apply { mkdirs() }
+    val scratch = File(dir, "${java.util.UUID.randomUUID()}.mp4")
+    val extractor = android.media.MediaExtractor()
+    return try {
+        scratch.writeBytes(bytes)
+        extractor.setDataSource(scratch.absolutePath)
+        (0 until extractor.trackCount)
+            .map { extractor.getTrackFormat(it).getString(android.media.MediaFormat.KEY_MIME) }
+            .firstOrNull { it?.startsWith("video/") == true }
+    } catch (_: Throwable) {
+        null
+    } finally {
+        runCatching { extractor.release() }
+        scratch.delete()
+    }
 }

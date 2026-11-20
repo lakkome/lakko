@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! `lakko-svc-moderation`: report intake and receipts (ADR-0089).
+//! `lakko-svc-moderation`: report intake and receipts (ADR-0098).
 //!
 //! ## Configuration
 //!
 //! Loaded from `/etc/lakko/lakko.env` via systemd `EnvironmentFile=` in
 //! production; from `.env` via `dotenvy` in debug builds.
 //!
-//! - `LAKKO_BIND` — `host:port` (default `127.0.0.1:8094`).
+//! - `LAKKO_BIND` — `host:port` (default `127.0.0.1:8100`).
 //! - `LAKKO_MODERATION_DATABASE_URL` (or `DATABASE_URL`) — this service's
 //!   own MariaDB. Unset: reports are kept in memory and lost on restart
 //!   (dev only; logged loudly).
@@ -28,15 +28,17 @@
 //!   listener taking moderator statements. Secret unset: not started.
 //! - `LAKKO_MODERATION_{AUTH,DISCOVERY,CHANNELS,STORAGE}_INTERNAL_URL` +
 //!   `..._INTERNAL_SECRET` — where each service's actions are applied
-//!   (ADR-0089 step 5): Suspend and Lift at auth; names, search and group
+//!   (ADR-0098 step 5): Suspend and Lift at auth; names, search and group
 //!   handles at discovery; channel actions at channels; a blob delete at
 //!   storage. Both or neither per service. Unset: such a statement is logged
 //!   and answered `{"applied": false, "forwarded": false}`. At startup the
 //!   moderator list is pushed to every configured service (its list floor),
 //!   retried in the background until each answers.
 //! - `LAKKO_MODERATION_PANEL_BIND` (default `127.0.0.1:8099`) — the
-//!   moderators' panel (ADR-0089 step 5): sign-in with a security key and
+//!   moderators' panel (ADR-0098 step 5): sign-in with a security key and
 //!   the panel API at `/panel/api/*`. Started only with a moderator list.
+//! - `LAKKO_MODERATION_METRICS_BIND` — `/metrics` on its own localhost port
+//!   (ADR-0096; e.g. `127.0.0.1:9663`). Unset: no metrics listener.
 //! - `LAKKO_MODERATION_PANEL_DIR` — LOCAL DEVELOPMENT ONLY: the built panel
 //!   app (`apps/moderation` `dist`), served at `/` beside the API. In
 //!   production nginx serves the app from its own static root
@@ -44,7 +46,7 @@
 //!   this process never serves the code that drives a moderator's security
 //!   key; a production unit leaves it unset.
 //! - `LAKKO_MODERATION_SNAPSHOT_PERIOD_SECS` (default 86400, at least 60) —
-//!   how often a suspension snapshot is built (ADR-0089 step 4).
+//!   how often a suspension snapshot is built (ADR-0098 step 4).
 //! - `RUST_LOG`.
 
 #![forbid(unsafe_code)]
@@ -70,9 +72,20 @@ use lakko_svc_moderation::witness_client::WitnessClient;
 use lakko_svc_moderation::{build_app, ip_limit, list, AppState};
 use sqlx::mysql::MySqlPoolOptions;
 
-const DEFAULT_BIND: &str = "127.0.0.1:8094";
+const DEFAULT_BIND: &str = "127.0.0.1:8100";
 
 const MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+/// `/metrics` on its own localhost port, off when unset (ADR-0096).
+async fn start_metrics() -> Result<()> {
+    lakko_metrics::start_from_env(
+        "moderation",
+        env!("CARGO_PKG_VERSION"),
+        "LAKKO_MODERATION_METRICS_BIND",
+    )
+    .await?;
+    Ok(())
+}
 
 #[tokio::main]
 #[allow(clippy::single_match_else)]
@@ -84,6 +97,7 @@ async fn main() -> Result<()> {
         }
     }
     init_tracing();
+    start_metrics().await?;
 
     let bind: SocketAddr = std::env::var("LAKKO_BIND")
         .unwrap_or_else(|_| DEFAULT_BIND.to_string())

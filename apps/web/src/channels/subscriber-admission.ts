@@ -29,10 +29,11 @@ import {
   listSubscribers,
   removeSubscriberAsPublisher,
 } from "./api";
-import { rowsToAdmit, ticketKeyAdmits } from "./channel-access-record";
+import { letInVerdict, rowsToAdmit, ticketKeyAdmits, withRowsRead } from "./channel-access-record";
 import { loadWasm } from "../wasm";
 import { sealSubscriberSeedEnvelope, type WasmIdentity } from "./composer";
 import { rememberSubscriberCount } from "./ui-cache";
+import { composerSeedFor } from "./publisher-seed";
 import { channelsActions, channelsState } from "../state/channels-state";
 
 /** How one subscriber's envelope stands on this device. */
@@ -87,9 +88,15 @@ export async function admitSubscriber(
 ): Promise<void> {
   const keys = channelsState.keysByChannel().get(channelIdHex);
   if (keys === undefined) throw new Error("This device cannot post to this channel.");
-  const epoch = await currentEpoch(channelIdHex);
+  const current = await currentEpoch(channelIdHex);
+  // The seed of an epoch the channel has reached, never the composer's seed
+  // under an epoch it does not serve (a co-publisher that applied the
+  // owner's commit before the owner's reseal landed).
+  const sealing = composerSeedFor(keys, current, (e) => channelsActions.currentSeed(channelIdHex, e));
+  if (sealing === null) throw new Error("This device cannot post to this channel.");
+  const epoch = sealing.epoch;
   try {
-    const wire = await sealSubscriberSeedEnvelope(hexToBytes(pubkeyHex), channelIdHex, epoch, keys.seed);
+    const wire = await sealSubscriberSeedEnvelope(hexToBytes(pubkeyHex), channelIdHex, epoch, sealing.seed);
     // ADR-0031: filed under the epoch it was sealed for.
     await deliverEnvelope(channelIdHex, pubkeyHex, wire, identity, undefined, epoch);
     update(channelIdHex, (a) => ({
@@ -205,26 +212,55 @@ async function admitTicketedRows(channelIdHex: string, identity: WasmIdentity): 
   for (;;) {
     const mark = channelsActions.accessOf(channelIdHex).admittedThroughSeq;
     const page = await listSubscriberPage(channelIdHex, identity, mark, ADMISSION_PAGE);
-    const rows = rowsToAdmit(page.entries, mark);
+    // ADR-0090 (security pass): the rows this device read itself bound how
+    // far an owner's admission mark counts here.
+    const readTo = page.entries.reduce((m, e) => Math.max(m, e.seq), 0);
+    if (readTo > (channelsActions.accessOf(channelIdHex).rowsReadThroughSeq ?? 0)) {
+      await channelsActions.updateAccessDurable(channelIdHex, (r) => withRowsRead(r, readTo));
+    }
+    const rows = rowsToAdmit(page.entries, channelsActions.accessOf(channelIdHex).admittedThroughSeq);
     if (rows.length === 0) return;
     live ??= new Set((await listInviteKeys(channelIdHex, identity)).map((k) => k.invitePkHex.toLowerCase()));
+    const markSet = channelsActions.accessOf(channelIdHex).admissionMarkSet === true;
+    const own = ownSubscriberKeyHex(channelIdHex);
+    // 2026-11-13: the account's reader key this device registered is its own
+    // too (its other devices read with it): never removed here.
+    const accountReader = channelsActions.accessOf(channelIdHex).readerKeyRegisteredHex ?? null;
     let through = mark;
+    let blocked = false;
     for (const row of rows) {
       const invitePk = await ticketInviteKeyHex(channelIdHex, row.subscriberId, row.sealedTicket);
-      if (ticketKeyAdmits(invitePk, live)) {
+      const verdict = letInVerdict(
+        ticketKeyAdmits(invitePk, live),
+        markSet,
+        (own !== null && row.subscriberId.toLowerCase() === own) ||
+          (accountReader !== null && row.subscriberId.toLowerCase() === accountReader),
+      );
+      if (verdict === "admit") {
         await admitSubscriber(channelIdHex, row.subscriberId, identity);
-      } else {
+      } else if (verdict === "remove") {
         // ADR-0087 section 7: a row with no valid ticket is removed.
         await removeSubscriberAsPublisher(channelIdHex, row.subscriberId, identity);
+      } else if (!markSet) {
+        // A row left alone on a device without its own mark is judged again
+        // (by the device holding the mark): the mark never passes it, so it
+        // is never read as a reader.
+        blocked = true;
       }
-      through = row.seq;
+      if (!blocked) through = row.seq;
     }
     await channelsActions.updateAccessDurable(channelIdHex, (r) => ({
       ...r,
       admittedThroughSeq: Math.max(r.admittedThroughSeq, through),
     }));
-    if (page.entries.length < ADMISSION_PAGE) return;
+    if (blocked || page.entries.length < ADMISSION_PAGE) return;
   }
+}
+
+/** This device's own registered subscriber key for the channel, or `null`. */
+function ownSubscriberKeyHex(channelIdHex: string): string | null {
+  const keys = channelsState.subscriberKeysByChannel().get(channelIdHex);
+  return keys === undefined ? null : bytesToHexLower(keys.public);
 }
 
 function b64ToBytes(b64: string): Uint8Array {

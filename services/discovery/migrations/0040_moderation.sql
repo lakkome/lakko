@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 
--- ADR-0089 step 5: the moderator actions discovery applies, each one a
+-- ADR-0098 step 5: the moderator actions discovery applies, each one a
 -- moderator's signed statement forwarded by the moderation service to
 -- discovery's internal listener and checked here against the moderator list
 -- under the pinned moderation root (src/moderation.rs).
@@ -40,7 +40,7 @@ CREATE INDEX idx_identity_bundles_account_target ON identity_bundles (account_ta
 
 ALTER TABLE handles
     ADD COLUMN moderation TINYINT UNSIGNED NOT NULL DEFAULT 0
-        COMMENT '0 none, 1 delisted, 2 blocked (ADR-0089)';
+        COMMENT '0 none, 1 delisted, 2 blocked (ADR-0098)';
 
 CREATE TABLE IF NOT EXISTS moderation_name_holds (
     lookup_key    BINARY(64)       NOT NULL,

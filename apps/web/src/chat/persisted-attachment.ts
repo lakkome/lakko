@@ -15,6 +15,7 @@
  */
 
 import type { AttachmentRefBytes, ThumbRefBytes } from "./attachments";
+import { isInlineThumbJpeg } from "../media/visual-media";
 import type { PersistedAttachment, PersistedThumb } from "./message-log-store";
 
 /** Mirrors `lakko-attachments` — see ADR-0047 §1. */
@@ -67,6 +68,8 @@ export function boundedDuration(kind: string | undefined, v: unknown): number | 
   if (typeof v !== "number" || !Number.isInteger(v) || v < 0) return undefined;
   if (kind === "voice") return v <= MAX_VOICE_DURATION_MS ? v : undefined;
   if (kind === "video_note") return v <= MAX_VIDEO_NOTE_DURATION_MS ? v : undefined;
+  // ADR-0092 section 2 — an audio file, `1..=86_400_000`.
+  if (kind === "audio") return v >= 1 && v <= 86_400_000 ? v : undefined;
   return undefined;
 }
 
@@ -127,6 +130,9 @@ export function persistedFromAttachmentRef(
     ...(a.width === undefined ? {} : { width: a.width }),
     ...(a.height === undefined ? {} : { height: a.height }),
     ...(a.thumb === undefined ? {} : { thumb: persistedThumb(a.thumb) }),
+    ...(a.title === undefined ? {} : { title: a.title }),
+    ...(a.artist === undefined ? {} : { artist: a.artist }),
+    ...(isInlineThumbJpeg(a.inlineThumb) ? { inlineThumbB64: b64UrlEncode(a.inlineThumb) } : {}),
     ...(played ? { played: true } : {}),
   };
 }
@@ -136,9 +142,18 @@ export interface RestoredAttachment {
   readonly played: boolean;
 }
 
+/** ADR-0047 section 6 — a stored micro thumbnail, or `undefined` when the
+ *  row carries none or carries something that is not a JPEG within the
+ *  core's bound. */
+export function inlineThumbFromPersisted(b64: unknown): Uint8Array | undefined {
+  const bytes = tryDecode(b64);
+  return isInlineThumbJpeg(bytes) ? bytes : undefined;
+}
+
 export function attachmentRefFromPersisted(a: PersistedAttachment): RestoredAttachment {
   const kind = typeof a.kind === "string" ? a.kind : undefined;
   const waveform = tryDecode(a.waveformB64);
+  const inlineThumb = inlineThumbFromPersisted(a.inlineThumbB64);
   return {
     ref: {
       blobId: b64UrlDecode(a.blobIdB64),
@@ -156,6 +171,9 @@ export function attachmentRefFromPersisted(a: PersistedAttachment): RestoredAtta
       width: dimension(a.width),
       height: dimension(a.height),
       thumb: thumbFromPersisted(a.thumb),
+      ...(typeof a.title === "string" ? { title: a.title } : {}),
+      ...(typeof a.artist === "string" ? { artist: a.artist } : {}),
+      ...(inlineThumb === undefined ? {} : { inlineThumb }),
     },
     played: a.played === true,
   };

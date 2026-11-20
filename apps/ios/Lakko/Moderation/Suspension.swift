@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-// ADR-0089 step 3 / UX `reporting-and-moderation.md` section 4 — the owner's
+// ADR-0098 step 3 / UX `reporting-and-moderation.md` section 4 — the owner's
 // side of a suspended account: what auth's `403 account-suspended` carries,
 // which requests this device still sends while suspended, the reason text
 // and the two routes the suspended screen calls. Everything here is free of
@@ -104,7 +104,7 @@ public struct SessionSuspendedError: Error, Equatable {
 /// Which requests leave this device while its account is suspended.
 public enum SuspendedRequestRule {
 
-    /// The auth routes that take the `s1` as their bearer (ADR-0089 step 3):
+    /// The auth routes that take the `s1` as their bearer (ADR-0098 step 3):
     /// the suspension read, the appeal, account deletion and its passkey
     /// ceremony, logout, and token issuance (auth issues the `blob-read`
     /// context only, so files in chats still open; every other context

@@ -139,7 +139,7 @@ pub(crate) struct RotateFinishReq {
     /// public key.
     pub(crate) new_signature_pubkey_b64: String,
     /// URL-safe base64 of the 64-byte identity proof by the NEW identity key
-    /// over the account id and that key (`signIdentityProof`, ADR-0089 F3).
+    /// over the account id and that key (`signIdentityProof`, ADR-0098 F3).
     /// Absent or invalid: `400 identity-proof-invalid`.
     #[serde(default)]
     pub(crate) identity_proof_b64: Option<String>,
@@ -368,7 +368,7 @@ pub(crate) async fn finish(
     .await
     .map_err(ApiError::Db)?;
 
-    // 3. The new key's target, claimed for this account (ADR-0089 F3), then
+    // 3. The new key's target, claimed for this account (ADR-0098 F3), then
     //    the generation and the identity key, in one statement.
     crate::identity_target::claim(&mut tx, &account_id, &new_signature_pubkey, now).await?;
     let bumped = sqlx::query(

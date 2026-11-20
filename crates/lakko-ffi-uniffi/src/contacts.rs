@@ -709,6 +709,12 @@ pub struct FfiProfile {
     /// SECRET. Defaults to `None` so existing initialisers compile.
     #[uniffi(default = None)]
     pub avatar: Option<FfiAvatar>,
+    /// `false` when the person does not let others share their contact card
+    /// (ADR-0092 section 7, profile v5 flags bit 0). A client sends `false`
+    /// exactly when its own "who can find me" setting is `Nobody`. Defaults
+    /// to `true` so existing initialisers compile.
+    #[uniffi(default = true)]
+    pub card_shareable: bool,
 }
 
 /// A reference to one encrypted avatar blob (ADR-0084): what
@@ -829,6 +835,7 @@ impl From<RustProfile> for FfiProfile {
             username_certificate: p.username_certificate,
             grants: p.grants.into_iter().map(Into::into).collect(),
             avatar: p.avatar.map(Into::into),
+            card_shareable: p.card_shareable,
         }
     }
 }
@@ -869,6 +876,7 @@ fn prepare_profile(p: FfiProfile) -> Result<RustProfile, FfiError> {
         username_certificate: p.username_certificate,
         grants,
         avatar,
+        card_shareable: p.card_shareable,
     })
 }
 
@@ -2538,6 +2546,53 @@ pub enum FfiIncomingEnvelopeKind {
     /// `openChannelReadKeyEnvelope` after checking the MLS sender resolved
     /// to the channel's owner. Never render it. Appended last.
     ChannelReadKey,
+    /// The seeds of earlier channel epochs sealed to one new publisher
+    /// (ADR-0087 section 7, amended 2026-11-08). `payload` is the whole
+    /// envelope; open it with `openChannelEpochSeedsEnvelope` after checking
+    /// it came on this channel's PublisherGroup and the MLS sender resolved
+    /// to the channel's owner, then add only the seeds of epochs not held.
+    /// Never render it. Appended last.
+    ChannelEpochSeeds,
+    /// A publisher asks the channel's owner to rotate (ADR-0087 section 15,
+    /// amended 2026-11-08). `payload` is the 16-byte channel id. Only the
+    /// owner's device acts on it, when it came on that channel's
+    /// PublisherGroup and the MLS sender resolved at receipt to a current
+    /// publisher; requests before the next rotation collapse into it. Never
+    /// render it. Appended last.
+    ChannelRotateRequest,
+    /// A co-publisher's device asks an owner device to admit or retire one
+    /// of its account's devices (ADR-0090 section 2.2). `payload` is the
+    /// whole envelope; decode it with `decodePublisherDeviceRequestEnvelope`.
+    /// Only an owner device acts on it, under the rule in that function's
+    /// documentation. Never render it. Appended last.
+    PublisherDeviceRequest,
+    /// A publishing device's admission mark for a private channel (ADR-0090
+    /// section 6). `payload` is the whole envelope; decode it with
+    /// `decodeChannelAdmissionMarkEnvelope` and keep the largest mark from a
+    /// current publisher. Never render it. Appended last.
+    ChannelAdmissionMark,
+    /// ADR-0092 section 3.9 — the open polls and checklists a committer
+    /// hands to a newcomer. `payload` is the whole envelope: keep it with the
+    /// sender's account key (resolved at receipt, C-68) when
+    /// `openItemsSenderTrusted` says so, then `assembleOpenItems` and
+    /// `adoptOpenItem`. Never render it. Appended last.
+    OpenItems,
+    /// ADR-0092 section 3.9 — old ballot rows of one anonymous poll handed
+    /// to a newcomer. `payload` is the whole envelope; read it with
+    /// `decodePollBallotsEnvelope` and treat each row like a journal ballot
+    /// row. Never render it. Appended last.
+    PollBallots,
+    /// ADR-0091 phase 2 — a device of this account that fell behind a
+    /// conversation asks to be brought back (route 1). `payload` is the
+    /// whole envelope; decode it with `decodeConversationReentryEnvelope`,
+    /// check it with `Group.reentryRequestTarget` and
+    /// `reentryAdmissionVerdict`. Never render it. Appended last.
+    ConversationReentry,
+    /// ADR-0091 phase 2 — the group's knock public key (route 3). `payload`
+    /// is the whole envelope; decode it with `decodeKnockKeyEnvelope` and
+    /// keep it only from the owner or an admin resolved at receipt, when
+    /// `knockKeyIsNewer`. Never render it. Appended last.
+    KnockKey,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -2628,6 +2683,10 @@ pub struct FfiIncomingEnvelope {
     /// initialisers compile.
     #[uniffi(default = None)]
     pub group_reactions: Option<crate::conversation_meta::FfiGroupReactions>,
+    /// Set only for `MediaState`: whether the sender's microphone is on
+    /// (`false` = muted). `None` for every other kind.
+    #[uniffi(default = None)]
+    pub microphone_on: Option<bool>,
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts.
@@ -2659,8 +2718,12 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
             payload: p.to_vec(),
             ..FfiIncomingEnvelope::of(K::CallKeyPackage)
         },
-        IncomingEnvelope::MediaState { camera_on } => FfiIncomingEnvelope {
+        IncomingEnvelope::MediaState {
+            camera_on,
+            microphone_on,
+        } => FfiIncomingEnvelope {
             camera_on: Some(camera_on),
+            microphone_on: Some(microphone_on),
             ..FfiIncomingEnvelope::of(K::MediaState)
         },
         IncomingEnvelope::PushRoutingSecret { mint_epoch, secret } => FfiIncomingEnvelope {
@@ -2752,6 +2815,14 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
             group_photo: Some(photo.into()),
             ..FfiIncomingEnvelope::of(K::GroupPhoto)
         },
+        IncomingEnvelope::OpenItems(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::OpenItems)
+        },
+        IncomingEnvelope::PollBallots(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::PollBallots)
+        },
         IncomingEnvelope::GroupReactions(value) => FfiIncomingEnvelope {
             group_reactions: Some(value.into()),
             ..FfiIncomingEnvelope::of(K::GroupReactions)
@@ -2763,6 +2834,30 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
         IncomingEnvelope::GroupContactRequest(_) => FfiIncomingEnvelope {
             payload: plaintext.clone(),
             ..FfiIncomingEnvelope::of(K::GroupContactRequest)
+        },
+        IncomingEnvelope::ChannelEpochSeeds(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::ChannelEpochSeeds)
+        },
+        IncomingEnvelope::ChannelRotateRequest(channel) => FfiIncomingEnvelope {
+            payload: channel.to_vec(),
+            ..FfiIncomingEnvelope::of(K::ChannelRotateRequest)
+        },
+        IncomingEnvelope::PublisherDeviceRequest(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::PublisherDeviceRequest)
+        },
+        IncomingEnvelope::ChannelAdmissionMark(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::ChannelAdmissionMark)
+        },
+        IncomingEnvelope::ConversationReentry(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::ConversationReentry)
+        },
+        IncomingEnvelope::KnockKey(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::KnockKey)
         },
         IncomingEnvelope::IntroMessage(p) => FfiIncomingEnvelope {
             payload: p.to_vec(),
@@ -2796,54 +2891,59 @@ impl FfiIncomingEnvelope {
             link_founded: None,
             group_photo: None,
             group_reactions: None,
+            microphone_on: None,
         }
     }
 }
 
 // ===========================================================================
-// Media-state envelope — camera-off-cleanup (Phase 1)
-// (camera on/off signal over the opaque relay transport)
+// Media-state envelope — camera-off-cleanup, microphone since 2026-11-07
+// (camera and microphone signal over the sealed relay transport)
 // ===========================================================================
 
-/// Compose a camera on/off media-state envelope
-/// (camera-off-cleanup). The sender broadcasts the returned
-/// bytes over the opaque SFU `signal-relay` payload; receivers
-/// classify them (via [`dispatch_incoming_envelope`] or
-/// [`decode_media_state`]) and reset the sender's tile `camOn`
-/// state.
+/// Compose a media-state envelope: whether this device's camera is on and
+/// whether its microphone is on (`false` = muted). Sent on every change, on
+/// connect and when a peer joins; seal it under the call's relay key
+/// (`CallRelayKey::seal`) before relaying it.
 ///
-/// See [`lakko_contacts::media_state`] for the wire format and
-/// threat-model rationale (reuse the opaque relay-payload
-/// pattern; the SFU never parses the payload — invariant #2).
-///
-/// # Errors
-///
-/// Infallible — returns `Ok` unconditionally for shape
-/// symmetry with [`decode_media_state`].
+/// See [`lakko_contacts::media_state`] for the wire format (version `0x02`
+/// only since 2026-11-07).
 #[uniffi::export]
 #[must_use]
-pub fn compose_media_state(camera_on: bool) -> Vec<u8> {
-    rust_compose_media_state(camera_on)
+pub fn compose_media_state(camera_on: bool, microphone_on: bool) -> Vec<u8> {
+    rust_compose_media_state(camera_on, microphone_on)
 }
 
-/// Strictly decode a media-state envelope, returning the
-/// camera flag (camera-off-cleanup). Fail-closed: rejects a
-/// plaintext that does not carry the media-state domain
-/// separator or whose payload is malformed.
+/// A decoded media state.
+#[derive(uniffi::Record, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FfiCallMediaState {
+    /// Whether the sender's camera is on.
+    pub camera_on: bool,
+    /// Whether the sender's microphone is on (`false` = muted).
+    pub microphone_on: bool,
+}
+
+/// Strictly decode a media-state envelope, returning the camera and the
+/// microphone. Fail-closed: rejects a plaintext that does not carry the
+/// media-state domain separator or whose payload is malformed (the
+/// camera-only version `0x01` included).
 ///
-/// Use [`dispatch_incoming_envelope`] instead when the
-/// plaintext might be any relay-payload kind (it falls through
-/// to the other kinds rather than erroring).
+/// Use [`dispatch_incoming_envelope`] instead when the plaintext might be
+/// any relay-payload kind (it falls through to the other kinds rather than
+/// erroring).
 ///
 /// # Errors
 ///
-/// * [`FfiError::Contacts`] when `plaintext` is not a valid
-///   media-state envelope (wrong domain / bad length / unknown
-///   version / out-of-range flag byte).
+/// [`FfiError::Contacts`] when `plaintext` is not a valid media-state
+/// envelope (wrong domain / bad length / unknown version / unknown flag
+/// bit).
 #[uniffi::export]
-pub fn decode_media_state(plaintext: Vec<u8>) -> Result<bool, FfiError> {
+pub fn decode_call_media_state(plaintext: Vec<u8>) -> Result<FfiCallMediaState, FfiError> {
     rust_decode_media_state(&plaintext)
-        .map(|state| state.camera_on)
+        .map(|state| FfiCallMediaState {
+            camera_on: state.camera_on,
+            microphone_on: state.microphone_on,
+        })
         .map_err(|err| FfiError::Contacts(err.to_string()))
 }
 
@@ -4824,29 +4924,48 @@ mod tests {
     #[test]
     fn media_state_compose_then_decode_round_trips() {
         for camera_on in [true, false] {
-            let wrapped = compose_media_state(camera_on);
-            let decoded = decode_media_state(wrapped).expect("decode should succeed");
-            assert_eq!(decoded, camera_on);
+            for microphone_on in [true, false] {
+                let wrapped = compose_media_state(camera_on, microphone_on);
+                let state = decode_call_media_state(wrapped).expect("decode should succeed");
+                assert_eq!(
+                    state,
+                    FfiCallMediaState {
+                        camera_on,
+                        microphone_on
+                    }
+                );
+            }
         }
     }
 
     #[test]
     fn decode_media_state_rejects_non_media_state_plaintext() {
         let intro = b"hello alice".to_vec();
-        match decode_media_state(intro) {
+        match decode_call_media_state(intro) {
             Err(FfiError::Contacts(_)) => {},
             other => panic!("expected Contacts error, got {other:?}"),
         }
     }
 
     #[test]
+    fn decode_media_state_refuses_the_camera_only_version_1() {
+        let mut v1 = lakko_contacts::media_state::MEDIA_STATE_ENVELOPE_DOMAIN_V1.to_vec();
+        v1.extend_from_slice(&[0x01, 0x01]);
+        assert!(decode_call_media_state(v1.clone()).is_err());
+        assert!(dispatch_incoming_envelope(v1).is_err());
+    }
+
+    #[test]
     fn dispatch_routes_media_state_envelope() {
         for camera_on in [true, false] {
-            let wrapped = compose_media_state(camera_on);
-            let result = dispatch_incoming_envelope(wrapped).expect("dispatch should succeed");
-            assert_eq!(result.kind, FfiIncomingEnvelopeKind::MediaState);
-            assert_eq!(result.camera_on, Some(camera_on));
-            assert!(result.payload.is_empty());
+            for microphone_on in [true, false] {
+                let wrapped = compose_media_state(camera_on, microphone_on);
+                let result = dispatch_incoming_envelope(wrapped).expect("dispatch should succeed");
+                assert_eq!(result.kind, FfiIncomingEnvelopeKind::MediaState);
+                assert_eq!(result.camera_on, Some(camera_on));
+                assert_eq!(result.microphone_on, Some(microphone_on));
+                assert!(result.payload.is_empty());
+            }
         }
     }
 
@@ -4938,7 +5057,7 @@ mod tests {
         assert_eq!(result.kind, FfiIncomingEnvelopeKind::CallWelcome);
         assert_eq!(result.mint_epoch, None);
 
-        let media = compose_media_state(true);
+        let media = compose_media_state(true, true);
         let result = dispatch_incoming_envelope(media).expect("dispatch should succeed");
         assert_eq!(result.kind, FfiIncomingEnvelopeKind::MediaState);
         assert_eq!(result.mint_epoch, None);
@@ -5337,6 +5456,7 @@ mod tests {
             username_certificate: None,
             grants: Vec::new(),
             avatar: None,
+            card_shareable: true,
         }
     }
 
@@ -5349,6 +5469,17 @@ mod tests {
             username_certificate: None,
             grants: Vec::new(),
             avatar: None,
+            card_shareable: true,
+        }
+    }
+
+    #[test]
+    fn profile_card_flag_round_trips() {
+        for shareable in [true, false] {
+            let mut p = canonical_profile();
+            p.card_shareable = shareable;
+            let wire = compose_profile_envelope(p.clone()).expect("compose");
+            assert_eq!(decode_profile_envelope(wire).expect("decode"), p);
         }
     }
 
@@ -5419,6 +5550,7 @@ mod tests {
             username_certificate: None,
             grants: Vec::new(),
             avatar: None,
+            card_shareable: true,
         })
         .expect("compose blank");
         let decoded = decode_profile_envelope(blank).expect("decode blank");
@@ -5975,4 +6107,20 @@ pub fn call_invite_expiry_ms(now_ms: u64) -> u64 {
 #[must_use]
 pub fn call_invite_max_uses() -> u32 {
     RUST_CALL_INVITE_MAX_USES
+}
+
+/// ADR-0081 (third amendment): the note a running device posts to a rejoin
+/// knock's rendezvous at once, meaning "a device of this account is online".
+#[uniffi::export]
+#[must_use]
+pub fn compose_rejoin_present() -> Vec<u8> {
+    lakko_contacts::rejoin_present::compose_rejoin_present()
+}
+
+/// Is this rendezvous row exactly a rejoin presence note (and so not a
+/// Welcome)?
+#[uniffi::export]
+#[must_use]
+pub fn is_rejoin_present(row: Vec<u8>) -> bool {
+    lakko_contacts::rejoin_present::is_rejoin_present(&row)
 }

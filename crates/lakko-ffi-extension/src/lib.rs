@@ -107,6 +107,7 @@ use std::sync::{Arc, Mutex};
 
 use lakko_mls::{Group as MlsGroup, Identity as MlsIdentity, Incoming as MlsIncoming};
 
+pub mod attachment_kinds;
 pub mod attachments;
 pub mod call_signaling;
 pub mod committer_beacon;

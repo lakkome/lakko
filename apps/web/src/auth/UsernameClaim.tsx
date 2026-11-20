@@ -32,7 +32,7 @@ import { createSignal, Match, onCleanup, Show, Switch, type JSX } from "solid-js
 import { useAuth } from "./AuthContext";
 import { handleBindLimitedMessage, isHandleBindLimited, isOffline } from "./auth-error-copy";
 import { AuthHttpError, AuthNetworkError } from "./client";
-import { UsernameTakenError } from "./login-handle";
+import { isRegistrationClosed, UsernameTakenError } from "./login-handle";
 import { newPasswordErrorMessage } from "./NewPasswordForm";
 import { MIN_PASSWORD_LENGTH, newPasswordProblem } from "./password-rules";
 import {
@@ -45,9 +45,11 @@ import {
   type ClaimState,
 } from "./username-claim";
 import { t } from "../l10n";
+import { SignupLegalNotice } from "../legal/LegalLink";
 import { useProfiles } from "../profile/ProfileContext";
 import { mayLookUp, usernameReason } from "../profile/rules";
 import { createUsernameCheck } from "../profile/username-field";
+import { BetaNoticeBanner } from "../ui/BetaNotice";
 import { PasswordField } from "../ui/PasswordField";
 
 function failureText(failure: ClaimFailure): string {
@@ -68,6 +70,10 @@ export function UsernameClaimScreen(props: {
   /** This device cannot read the guest account's recovery phrase, so the
    *  account cannot be kept (`GuestPhraseUnavailableError`). */
   readonly onCannotKeep?: () => void;
+  /** The beta is full (`docs/ux/beta-account-cap.md` section 3 item 4):
+   *  auth refused the name's bind. The guest account is kept as it is; the
+   *  question it came from shows its closed form. */
+  readonly onRegistrationClosed?: () => void;
 }): JSX.Element {
   const auth = useAuth();
   const profiles = useProfiles();
@@ -172,6 +178,11 @@ export function UsernameClaimScreen(props: {
       dispatch({ type: "name-saved", username: claimed.username });
     } catch (err) {
       if (guestRefusal(err) || !alive) return;
+      if (isRegistrationClosed(err) && props.onRegistrationClosed !== undefined) {
+        dispatch({ type: "failed", failure: { kind: "error" } });
+        props.onRegistrationClosed();
+        return;
+      }
       dispatch({
         type: "failed",
         failure: claimFailure({
@@ -219,6 +230,8 @@ export function UsernameClaimScreen(props: {
         )}
       </Match>
       <Match when={true}>
+        {/* docs/ux/beta-notice.md: a guest creating an account is signing up. */}
+        <BetaNoticeBanner />
         <form onSubmit={(e) => void onSubmit(e)}>
           <p class="lk-muted">{t("username.claim.body")}</p>
           <Show
@@ -292,6 +305,8 @@ export function UsernameClaimScreen(props: {
               {t("common.cancel")}
             </button>
           </div>
+          {/* docs/ux/legal-pages.md section 2: the same line as on sign-up. */}
+          <SignupLegalNotice />
         </form>
       </Match>
     </Switch>

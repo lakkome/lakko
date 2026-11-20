@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Tests of ADR-0089 step 5 at storage: the moderator's BlobDelete through
+//! Tests of ADR-0098 step 5 at storage: the moderator's BlobDelete through
 //! the internal route, over the file index (no database; the SQL index meets
 //! the same contract in `index::sql`), and what the public routes answer
 //! afterwards.
@@ -65,7 +65,7 @@ fn body(action: Action, target: &[u8], statement_id: u8, version: u64) -> Value 
         target: Target::new(action.target_kind(), target).unwrap(),
         reason_commitment: reason_commitment(Reason::ChildSafety, &salt),
         until_ms: 0,
-        // Within the 24 h a statement stays fresh (ADR-0089 F1).
+        // Within the 24 h a statement stays fresh (ADR-0098 F1).
         issued_at_ms: now_ms(),
         moderator_id: [1; 16],
         list_version: version,

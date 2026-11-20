@@ -3,7 +3,7 @@
 
 //! Fuzz target — the byte decoders of the synced state (`lakko-sync`).
 //!
-//! Nine decoders run on bytes this device did not write:
+//! Ten decoders run on bytes this device did not write:
 //!
 //! * `decode_lineage_envelope` (ADR-0073 R.5): a conversation-lineage
 //!   envelope another device of the same account sent over the DeviceGroup's
@@ -36,7 +36,7 @@
 //!   whose added-device warning was seen, sent the same way. Domain,
 //!   version, a bounded count, fixed-size entries, strictly ascending keys,
 //!   no trailing bytes; an accepted envelope folds to exactly its keys.
-//! * `decode_blocked_envelope` (ADR-0089 section 6): the people the account
+//! * `decode_blocked_envelope` (ADR-0098 section 6): the people the account
 //!   blocked or unblocked, sent the same way. Domain, version, a bounded
 //!   count, fixed-size entries with a state byte, strictly ascending keys,
 //!   no trailing bytes; an accepted envelope folds to exactly its keys and
@@ -53,6 +53,15 @@
 //!   write): the nonces of the account's own comments, sent the same way.
 //!   Domain, version, a bounded count, fixed-size entries, a state byte,
 //!   strictly ascending keys, no trailing bytes.
+//! * `decode_channel_subscription_envelope` (maintainer decision of
+//!   2026-11-13): the account's channel subscriptions (role, the one
+//!   subscriber key per channel, read key, a co-publisher's PublisherGroup
+//!   id, name, handle), sent the same way. Domain, version, a bounded count,
+//!   a state and a role byte, every length checked against its bound before
+//!   any copy, UTF-8, the display-name and canonical-name rules, a
+//!   PublisherGroup id for a co-publisher alone, strictly ascending channel
+//!   ids, no trailing bytes; an accepted envelope folds to exactly its
+//!   registers and does not apply twice. The persisted state is version 13.
 //! * `SyncedState::from_bytes` (ADR-0058): the persisted fold, which is also
 //!   what the backup payload carries, so a hostile storage tier chooses it.
 //!   Version 10 since the quick-reaction register; version 9 added the own

@@ -416,7 +416,7 @@ recovery area (`docs/l10n/batch-1-auth.md`).
   llamada" as its accessible name; `call.encryption.sentence_named` is
   "Nadie más que tú y {name} puede oír esta llamada" to avoid
   vosotros/ustedes. `call.participant.muted` / `pinned` are masculine.
-- **fa**: `call.encryption.compare_hint` uses "گوشی" for phone.
+- **fa**: `call.encryption.compare_hint` used "گوشی" for phone (key replaced 2026-11-07 by `compare_hint_one_to_one` / `compare_hint_group`, which say "دستگاه", device).
 - **he**: `call.chat.joined` is "הצטרפות לשיחה: {name}" to avoid a gendered
   verb. `call.participant.you` is "את/ה" (slash form). "מושתק", "מוצמד" and
   "משתתף" are masculine.

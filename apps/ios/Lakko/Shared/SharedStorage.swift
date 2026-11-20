@@ -123,6 +123,22 @@ public enum SharedStorage {
         "chat.media.video_message",
         "chat.message.unsupported",
         "notification.message.new",
+        "channels.fallback_name",
+        // ADR-0092 — the bare kind words of a content message's preview.
+        "attach.menu.poll",
+        "attach.menu.checklist",
+        "attach.menu.location",
+        "attach.menu.contact",
+        "attach.menu.article",
+    ]
+
+    /// ADR-0092 section 1 — the content preview lines, rendered by the app
+    /// with the marker `{text}` in place of the item's own text.
+    public static let notificationContentLineKeys: [String] = [
+        "chat.content.preview.poll",
+        "chat.content.preview.checklist",
+        "chat.content.preview.contact",
+        "chat.content.preview.article",
     ]
 
     /// The one plural the extension shows ("Sent 3 attachments"). The
@@ -132,6 +148,12 @@ public enum SharedStorage {
     /// English.
     public static let notificationCountedWordKeys: [String] = [
         "notification.message.attachments",
+        // `docs/ux/media-messages.md` section 11 — the words of a message of
+        // photos, videos or files.
+        "chat.media.photos",
+        "chat.media.videos",
+        "chat.media.photos_and_videos",
+        "chat.media.files",
     ]
 
     /// The largest count the app renders a counted word for.

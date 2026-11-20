@@ -36,11 +36,13 @@ import {
   parsePairingQrPayloadWith,
   type PairingCore,
 } from "./pairing";
-import {
-  RECOVERY_EXPORTER_KEY_LENGTH,
-  RECOVERY_EXPORTER_LABEL,
-  buildRecoveryPayload,
-} from "./recovery-payload";
+// Recovery payload v3 (ADR-0074 "Joining after a rotation"): the codec and
+// the row framing are the core's, reached through wasm.
+const RECOVERY_EXPORTER_KEY_LENGTH = 32;
+const RECOVERY_EXPORTER_LABEL = "lakko/device-recovery/v3";
+function buildRecoveryPayload(grant: Uint8Array, entropy: Uint8Array, seeds?: Uint8Array, adopted?: BigUint64Array): Uint8Array {
+  return wasm.composeRecoveryPayload(grant, entropy, seeds ?? new Uint8Array(0), adopted ?? new BigUint64Array(0));
+}
 
 // The DS polls are the only network the join touches besides the redeem;
 // they are replaced so the test drives exactly one recovery row.
@@ -52,7 +54,7 @@ vi.mock("./recovery-payload", async (importOriginal) => {
     pollForRecoveryPayload: vi.fn(async () =>
       recoveryRow.sealed === null
         ? { kind: "timeout" as const }
-        : { kind: "received" as const, sealedBlob: recoveryRow.sealed },
+        : { kind: "received" as const, row: recoveryRow.sealed },
     ),
   };
 });
@@ -83,9 +85,10 @@ import {
   STATE_EXPORTER_LABEL,
   encodeStateBundle,
   loadKnownGroupIds,
-  type StateBundleV3,
+  type StateBundle,
 } from "./state-bundle";
 import { loadAccepted } from "../contacts/local-store";
+import { readJoinedDeviceGroupId } from "./joined-device-group-id";
 import { FakeIndexedDb, MemoryStorage } from "../test/fake-storage";
 
 beforeAll(async () => {
@@ -238,6 +241,11 @@ const PAIR: SessionPair = {
   keyGeneration: 1n,
 };
 
+/** Seal a plaintext and wrap it as the v3 mailbox row. */
+function sealRow(key: Uint8Array, plaintext: Uint8Array): Uint8Array {
+  return wasm.wrapRecoveryRow(wasm.sealWithKey(key, plaintext));
+}
+
 describe("the joiner's recovery", () => {
   const KEY = new Uint8Array(RECOVERY_EXPORTER_KEY_LENGTH).fill(3);
   const exporter = {
@@ -250,7 +258,7 @@ describe("the joiner's recovery", () => {
   const seed = new Uint8Array(16).fill(0x22);
 
   it("learns the account id from the redeem, which carries only the grant", async () => {
-    recoveryRow.sealed = wasm.sealWithKey(KEY, buildRecoveryPayload(grant, seed));
+    recoveryRow.sealed = sealRow(KEY, buildRecoveryPayload(grant, seed));
     const account = new Uint8Array(16).fill(0x42);
     const redeem = vi.fn(async (_g: string) => ({
       accountId: account,
@@ -270,8 +278,48 @@ describe("the joiner's recovery", () => {
     expect(outcome?.phraseEntropy).toEqual(seed);
   });
 
+  it("hands over the earlier keys the row carries, oldest first", async () => {
+    const seeds = new Uint8Array(128);
+    seeds.fill(0x31, 0, 64);
+    seeds.fill(0x32, 64, 128);
+    recoveryRow.sealed = sealRow(
+      KEY,
+      buildRecoveryPayload(grant, seed, seeds, BigUint64Array.from([1_700_000_000_000n, 1_700_000_100_000n])),
+    );
+    const outcome = await runJoinerRecovery({
+      exporter,
+      identity: {} as WasmIdentity,
+      rendezvous: rendezvous(),
+      welcomeCursor: 0,
+      expectedAccountIdBytes: null,
+      redeem: async () => ({ accountId: new Uint8Array(16).fill(0x42), session: PAIR }),
+    });
+    expect(outcome?.predecessors.map((p) => p.seed[0])).toEqual([0x31, 0x32]);
+    expect(outcome?.predecessors.map((p) => p.adoptedAtMs)).toEqual([1_700_000_000_000, 1_700_000_100_000]);
+  });
+
+  it("hands over nothing from a v2 row (flag day)", async () => {
+    const magic = new TextEncoder().encode("lakko/recovery-payload/v2");
+    const sealed = wasm.sealWithKey(KEY, new Uint8Array(48).fill(0x01));
+    const row = new Uint8Array(magic.length + sealed.length);
+    row.set(magic, 0);
+    row.set(sealed, magic.length);
+    recoveryRow.sealed = row;
+    const redeem = vi.fn(async () => ({ accountId: new Uint8Array(16), session: PAIR }));
+    const outcome = await runJoinerRecovery({
+      exporter,
+      identity: {} as WasmIdentity,
+      rendezvous: rendezvous(),
+      welcomeCursor: 0,
+      expectedAccountIdBytes: null,
+      redeem,
+    });
+    expect(outcome).toBeNull();
+    expect(redeem).not.toHaveBeenCalled();
+  });
+
   it("drops a redeemed session that answers for another account than the known one", async () => {
-    recoveryRow.sealed = wasm.sealWithKey(KEY, buildRecoveryPayload(grant, seed));
+    recoveryRow.sealed = sealRow(KEY, buildRecoveryPayload(grant, seed));
     const known = new Uint8Array(16).fill(0x01);
     const outcome = await runJoinerRecovery({
       exporter,
@@ -309,7 +357,7 @@ describe("the anonymous join (the no-password restore)", () => {
       RECOVERY_EXPORTER_KEY_LENGTH,
     );
     const seed = new Uint8Array(16).fill(0x22);
-    recoveryRow.sealed = wasm.sealWithKey(key, buildRecoveryPayload(new Uint8Array(32).fill(0x11), seed));
+    recoveryRow.sealed = sealRow(key, buildRecoveryPayload(new Uint8Array(32).fill(0x11), seed));
     const welcome = added.welcome;
     founder.free();
     founderIdentity.free();
@@ -407,8 +455,8 @@ describe("the anonymous join applies the pairing state bundle", () => {
   const ACCOUNT = new Uint8Array(16).fill(0x42);
   const ACCOUNT_B64 = btoa(String.fromCharCode(...ACCOUNT));
   const GROUP = "Z3JvdXAtb25lLWlkLWJ5dGVzLTMyLWxvbmctIQ==";
-  const BUNDLE: StateBundleV3 = {
-    v: 3,
+  const BUNDLE: StateBundle = {
+    v: 4,
     contacts: [{ signaturePubkeyB64: "cGVlci1rZXk=", displayName: "Peer", acceptedAtMs: 5 }],
     pins: [],
     knownGroupIdsB64: [GROUP],
@@ -416,6 +464,7 @@ describe("the anonymous join applies the pairing state bundle", () => {
     groupNames: [],
     profiles: [],
     pendingContacts: [],
+    channelSeeds: [],
   };
 
   /** The confirming device, as in the suite above, publishing a state row. */
@@ -432,7 +481,7 @@ describe("the anonymous join applies the pairing state bundle", () => {
       decoded.rendezvousPseudonym,
       RECOVERY_EXPORTER_KEY_LENGTH,
     );
-    recoveryRow.sealed = wasm.sealWithKey(
+    recoveryRow.sealed = sealRow(
       recoveryKey,
       buildRecoveryPayload(new Uint8Array(32).fill(0x11), new Uint8Array(16).fill(0x22)),
     );
@@ -484,6 +533,42 @@ describe("the anonymous join applies the pairing state bundle", () => {
     }
     expect(loadAccepted(ACCOUNT_B64).map((c) => c.signaturePubkeyB64)).toEqual(["cGVlci1rZXk="]);
     expect(loadKnownGroupIds(ACCOUNT_B64)).toEqual([GROUP]);
+    session.dispose();
+  });
+
+  it("G-56: persistTo records the id of the DeviceGroup the join by name joined", async () => {
+    vi.stubGlobal("localStorage", new MemoryStorage());
+    vi.stubGlobal("indexedDB", new FakeIndexedDb());
+    stubFetch(() => ({
+      status: 200,
+      json: {
+        account_id_b64: b64url(ACCOUNT),
+        session_token: "v2.tok",
+        session_expires_at_ms: 9,
+        refresh_token: "r1.tok",
+        refresh_expires_at_ms: 99,
+        key_generation: 1,
+      },
+    }));
+    const session = await prepareAnonymousJoinFlow({ loginHandle: alice() });
+    await session.accept(confirmWithState(session.qrPayload), { welcomeCursor: 1 });
+    const deviceKey = new WebDeviceCipher(await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
+      "encrypt",
+      "decrypt",
+    ]));
+    expect(await readJoinedDeviceGroupId(ACCOUNT_B64, deviceKey)).toBeNull();
+    const info = console.info;
+    console.info = (): void => {};
+    try {
+      await session.persistTo(deviceKey);
+    } finally {
+      console.info = info;
+    }
+    // The founder above derives its DeviceGroup id from its own identity.
+    const founderIdentity = wasm.Identity.fromSeed(new Uint8Array(32).fill(7));
+    const expected = wasm.deviceGroupIdFor(founderIdentity);
+    founderIdentity.free();
+    expect(await readJoinedDeviceGroupId(ACCOUNT_B64, deviceKey)).toEqual(expected);
     session.dispose();
   });
 
@@ -542,11 +627,17 @@ describe("the anonymous join applies the pairing state bundle", () => {
       const start = auth.indexOf(`    async ${name}(`);
       const body = auth.slice(start, auth.indexOf(`    async ${next}(`, start));
       const key = body.indexOf("await putDeviceKey(");
-      const persist = body.indexOf("await persistJoinState(deviceKey)");
+      const persist = body.search(/await persistJoinState\((deviceKey|keyStore)\)/);
       const land = body.indexOf("await finishCanonicalSession(");
       expect(key, name).toBeGreaterThan(-1);
       expect(persist, name).toBeGreaterThan(key);
       expect(land, name).toBeGreaterThan(persist);
+      // ADR-0074 "Joining after a rotation": the earlier keys the recovery
+      // row carried are stored before the account seed.
+      const predecessors = body.indexOf("storeRecoveredPredecessors(");
+      const seed = body.indexOf("await putAccountIdentitySeed(");
+      expect(predecessors, name).toBeGreaterThan(key);
+      expect(seed, name).toBeGreaterThan(predecessors);
     }
   });
 
@@ -567,5 +658,34 @@ describe("no lookup before the session in the restore screens", () => {
     expect(src).not.toMatch(/DiscoveryClient|\.lookup\(/);
     expect(src).toMatch(/nameTargetFor\(/);
     expect(src).toMatch(/requestHandle=/);
+  });
+});
+
+describe("G-55: the DeviceGroup rejoin knock is sealed under the lineage seed", () => {
+  it("opens only under the same lineage identity and carries no login handle in the clear", () => {
+    const lineage = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x21));
+    const other = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x22));
+    const handle = new Uint8Array(32).fill(0x11);
+    try {
+      const row = wasm.encodeRejoinKnock(
+        lineage,
+        handle,
+        new Uint8Array(64).fill(7),
+        new Uint8Array(32).fill(9),
+        new Uint8Array(0),
+      );
+      const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+      expect(hex(row).includes(hex(handle))).toBe(false);
+      const opened = wasm.openRejoinKnock(lineage, row, handle);
+      expect(Array.from(opened.keyPackage)).toEqual(Array.from(new Uint8Array(64).fill(7)));
+      expect(opened.selfRemovalProof).toBeUndefined();
+      opened.free();
+      expect(() => wasm.openRejoinKnock(other, row, handle)).toThrow();
+      // No plain read: the pairing decoder does not take a sealed knock.
+      expect(() => wasm.decodePairingQr(row, handle)).toThrow();
+    } finally {
+      lineage.free();
+      other.free();
+    }
   });
 });

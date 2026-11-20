@@ -67,7 +67,50 @@ Concretely:
    own copy of the debt.
 4. **The gate is a release gate.** No build reaches users — no store submission, no
    GA tag — while G-39 is open. That is where "after Phase 2" bites, and it is the
-   sentence that keeps this from being a way to avoid the audit.
+   sentence that keeps this from being a way to avoid the audit. **Amended 2026-11-18:
+   a capped public beta may run before the review; see the amendment below.**
+
+## Amendment (2026-11-18): a capped public beta before the review
+
+**Decided by the maintainer.** The review is not funded, and the funders who pay for one
+(OTF Security Lab among them) want a project that people already use. A project that may
+not reach users until it is audited cannot show users to the people who would pay for the
+audit. Decision 4 is therefore narrowed: G-39 gates **leaving the beta**, not **any**
+contact with users.
+
+What is allowed while G-39 is open:
+
+1. **A public beta capped at 1000 accounts**, the cap enforced by the server, not by a
+   promise. Guest accounts from call links (ADR-0032) that are swept within a day do not
+   take a place. **Built 2026-11-19** (`services/auth/src/account_cap.rs`, migration
+   `0038`): an account takes a place when it binds its first username (a row in
+   `login_handles`, counted under a one-row lock); past `LAKKO_AUTH_MAX_ACCOUNTS` that
+   bind is `403 registration-closed`, `GET /signup/open` answers before the proof of
+   work, a rename is never refused, and a deleted account frees its place. UX spec
+   [`docs/ux/beta-account-cap.md`](../ux/beta-account-cap.md); the three clients built the
+   same day, unit-tested, not walked.
+2. **Beta distribution channels only:** the web client, TestFlight external testing,
+   Google Play closed or open testing, and the desktop build downloaded from lakko.me.
+   No production store listing.
+3. **Said plainly where a person decides to use it:** the sign-up screen, the website and
+   the store beta descriptions state that Lakko is a beta, that its cryptography has not
+   been independently audited, and that it is not yet meant for people whose safety
+   depends on it. UX spec [`docs/ux/beta-notice.md`](../ux/beta-notice.md) (2026-11-19):
+   a banner on the first signed-out screen, the sign-up screen and the guest's create-account
+   form, and the first row of Settings > About, built on the three clients the same day
+   (unit-tested, not walked); store text drafted in
+   [`docs/beta-store-text.md`](../beta-store-text.md).
+4. **Not promoted to people at risk** (activists, journalists, people in countries that
+   block messengers) until the review is done. The censorship-resistant transports stay
+   in the build; the beta is simply not advertised for that use.
+5. **A way to report a vulnerability exists before the first user signs up**
+   (`SECURITY.md`, a published address and key).
+
+What still waits for G-39, unchanged: lifting the cap, a production store listing, a GA
+tag, and dropping the word "beta". The risk this amendment accepts is real: up to 1000
+people use cryptography that only its author and an internal review have examined. It is
+accepted because the alternative is that the review is never funded; it is bounded by the
+cap and by saying so.
 
 ## What this explicitly does NOT do
 

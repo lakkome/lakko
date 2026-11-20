@@ -16,12 +16,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.CallMade
-import androidx.compose.material.icons.automirrored.filled.CallMissed
-import androidx.compose.material.icons.automirrored.filled.CallReceived
-import androidx.compose.material.icons.filled.Call
-import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
@@ -39,6 +33,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -49,6 +44,7 @@ import me.lakko.app.calls.CallHistoryStore
 import me.lakko.app.calls.callDirectionGlyph
 import me.lakko.app.calls.callHistoryByDay
 import me.lakko.app.calls.callHistoryIsUnanswered
+import me.lakko.app.calls.callHistoryRowShape
 import me.lakko.app.calls.callRowText
 import me.lakko.app.calls.toTranscriptEntry
 import me.lakko.app.chat.ChatRepository
@@ -59,6 +55,9 @@ import me.lakko.app.ui.chat.formatClockTime
 import me.lakko.app.ui.components.LakkoAvatar
 import java.time.ZoneId
 import java.util.Locale
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * Calls: recent calls across every conversation, newest first.
@@ -78,6 +77,10 @@ import java.util.Locale
  * Two targets per row, and their hit areas must not overlap: the row opens the
  * conversation, the trailing button places the call — back in the same mode the
  * row records, so a video call re-dials video.
+ *
+ * A call with no conversation (`New call`, or a call joined from a link;
+ * section 5.1.1) has neither: its row carries the group-call glyph, the title
+ * `Group call`, no call button, and is not a tap target.
  *
  * ## One action
  *
@@ -140,7 +143,7 @@ public fun CallsScreen(
         floatingActionButton = {
             ExtendedFloatingActionButton(
                 onClick = onNewCall,
-                icon = { Icon(Icons.Filled.Videocam, contentDescription = null) },
+                icon = { LkIcon(R.drawable.ic_lk_video, contentDescription = null) },
                 text = { Text(me.lakko.app.l10n.t("call.history.new_call")) },
             )
         },
@@ -158,11 +161,20 @@ public fun CallsScreen(
                         .padding(24.dp),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(
-                        text = me.lakko.app.l10n.t("call.history.empty"),
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        LkIcon(
+                            R.drawable.ic_lk_phone,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            size = LkIconSize.Empty,
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            text = me.lakko.app.l10n.t("call.history.empty"),
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             } else {
                 LazyColumn(
@@ -192,22 +204,37 @@ public fun CallsScreen(
                             count = day.rows.size,
                             key = { i ->
                                 val row = day.rows[i]
-                                "${row.conversationIdHex}-${row.startedAtMs}-$i"
+                                "${row.conversationIdHex ?: "call:" + row.callIdHex}-${row.startedAtMs}-$i"
                             },
                         ) { i ->
                             val row = day.rows[i]
-                            CallHistoryRow(
-                                entry = row,
-                                title = titleOf(context, repository, directory, row, strings),
-                                personKey = if (row.kind == me.lakko.app.chat.ConversationKind.Chat) {
-                                    runCatching { repository.oneToOnePeerKey(row.conversationIdHex) }.getOrNull()
-                                } else {
-                                    null
-                                },
-                                time = formatClockTime(row.startedAtMs, zone, use24h, locale),
-                                onOpen = { onOpenConversation(row.conversationIdHex) },
-                                onCallBack = { onCallBack(row.conversationIdHex, row.video) },
-                            )
+                            val conversation = row.conversationIdHex
+                            val time = formatClockTime(row.startedAtMs, zone, use24h, locale)
+                            if (conversation == null) {
+                                // docs/ux/navigation.md section 5.1.1: nothing
+                                // to open and nothing to call back.
+                                CallHistoryRow(
+                                    entry = row,
+                                    // A call has no name of its own.
+                                    title = strings["call.label.group"],
+                                    time = time,
+                                    onOpen = null,
+                                    onCallBack = null,
+                                )
+                            } else {
+                                CallHistoryRow(
+                                    entry = row,
+                                    title = titleOf(context, repository, directory, conversation, strings),
+                                    personKey = if (row.kind == me.lakko.app.chat.ConversationKind.Chat) {
+                                        runCatching { repository.oneToOnePeerKey(conversation) }.getOrNull()
+                                    } else {
+                                        null
+                                    },
+                                    time = time,
+                                    onOpen = { onOpenConversation(conversation) },
+                                    onCallBack = { onCallBack(conversation, row.video) },
+                                )
+                            }
                         }
                     }
                 }
@@ -228,13 +255,13 @@ private fun titleOf(
     context: android.content.Context,
     repository: ChatRepository,
     directory: ProfileDirectory,
-    row: CallHistoryEntry,
+    conversationIdHex: String,
     strings: me.lakko.app.l10n.Strings,
 ): String = try {
-    if (repository.memberCount(row.conversationIdHex) == null) {
+    if (repository.memberCount(conversationIdHex) == null) {
         strings["call.history.unknown_conversation"]
     } else {
-        conversationTitle(context, repository, directory, row.conversationIdHex)
+        conversationTitle(context, repository, directory, conversationIdHex)
     }
 } catch (cause: Throwable) {
     android.util.Log.w("CallsScreen", "resolving the call row title failed", cause)
@@ -246,10 +273,14 @@ private fun CallHistoryRow(
     entry: CallHistoryEntry,
     title: String,
     time: String,
-    onOpen: () -> Unit,
-    onCallBack: () -> Unit,
+    /** Opens the conversation; `null` when the row is not a tap target
+     *  (a call with no conversation, section 5.1.1). */
+    onOpen: (() -> Unit)?,
+    /** Calls back; `null` when the row carries no call button. */
+    onCallBack: (() -> Unit)?,
     personKey: ByteArray? = null,
 ) {
+    val shape = callHistoryRowShape(entry)
     val unanswered = callHistoryIsUnanswered(entry.outcome)
     val lineColor = if (unanswered) {
         MaterialTheme.colorScheme.error
@@ -264,16 +295,30 @@ private fun CallHistoryRow(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .weight(1f)
-                .clickable(onClick = onOpen)
-                .padding(start = 16.dp, top = 10.dp, bottom = 10.dp, end = 8.dp),
+                .then(
+                    if (onOpen != null && shape.opensConversation) {
+                        Modifier.clickable(onClick = onOpen)
+                    } else {
+                        // Read as one item by TalkBack, with no click action
+                        // and no pressed state (section 5.1.1).
+                        Modifier.semantics(mergeDescendants = true) {}
+                    },
+                )
+                .padding(
+                    start = 16.dp,
+                    top = 10.dp,
+                    bottom = 10.dp,
+                    end = if (shape.callBack) 8.dp else 16.dp,
+                ),
         ) {
             LakkoAvatar(
                 name = title,
-                seed = entry.conversationIdHex,
+                seed = entry.conversationIdHex ?: entry.callIdHex.orEmpty(),
                 size = 40.dp,
-                group = entry.kind == me.lakko.app.chat.ConversationKind.Group,
+                group = shape.groupCallGlyph || entry.kind == me.lakko.app.chat.ConversationKind.Group,
                 personKey = personKey,
                 groupIdHex = entry.conversationIdHex.takeIf { entry.kind == me.lakko.app.chat.ConversationKind.Group },
+                groupGlyph = shape.groupCallGlyph,
             )
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
@@ -288,15 +333,15 @@ private fun CallHistoryRow(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     // Section 8 of docs/ux/calls.md — the glyph is never the
                     // only signal; the words next to it say the same thing.
-                    Icon(
-                        imageVector = when (callDirectionGlyph(entry.outcome)) {
-                            CallDirectionGlyph.OUTGOING -> Icons.AutoMirrored.Filled.CallMade
-                            CallDirectionGlyph.INCOMING -> Icons.AutoMirrored.Filled.CallReceived
-                            CallDirectionGlyph.MISSED -> Icons.AutoMirrored.Filled.CallMissed
+                    LkIcon(
+                        icon = when (callDirectionGlyph(entry.outcome)) {
+                            CallDirectionGlyph.OUTGOING -> R.drawable.ic_lk_phone_outgoing
+                            CallDirectionGlyph.INCOMING -> R.drawable.ic_lk_phone_incoming
+                            CallDirectionGlyph.MISSED -> R.drawable.ic_lk_phone_down
                         },
                         contentDescription = null,
                         tint = lineColor,
-                        modifier = Modifier.size(14.dp),
+                        size = LkIconSize.Mark,
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
@@ -317,14 +362,16 @@ private fun CallHistoryRow(
                 }
             }
         }
-        IconButton(
-            onClick = onCallBack,
-            modifier = Modifier.padding(end = 8.dp),
-        ) {
-            Icon(
-                imageVector = if (entry.video) Icons.Filled.Videocam else Icons.Filled.Call,
-                contentDescription = me.lakko.app.l10n.t(if (entry.video) "chat.call.video" else "chat.call.voice"),
-            )
+        if (onCallBack != null && shape.callBack) {
+            IconButton(
+                onClick = onCallBack,
+                modifier = Modifier.padding(end = 8.dp),
+            ) {
+                LkIcon(
+                    icon = if (entry.video) R.drawable.ic_lk_video else R.drawable.ic_lk_phone,
+                    contentDescription = me.lakko.app.l10n.t(if (entry.video) "chat.call.video" else "chat.call.voice"),
+                )
+            }
         }
     }
 }

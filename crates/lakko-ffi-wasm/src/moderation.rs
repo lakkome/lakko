@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! wasm surface for reporting and moderation ([ADR-0089]).
+//! wasm surface for reporting and moderation ([ADR-0098]).
 //!
 //! The client half mirrors `crates/lakko-ffi-uniffi/src/moderation.rs`
 //! (attest, unwrap, attestation, the report builder, the appeal seal). The moderators' panel
@@ -24,7 +24,7 @@
 //! `lakko_moderation::snapshot::SnapshotError` or
 //! `lakko_attachments::AttestError`.
 //!
-//! [ADR-0089]: ../../../docs/adr/0089-reporting-and-moderation.md
+//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
 
 use lakko_attachments::attested;
 use lakko_moderation::evidence::{verify_message_evidence, EvidenceVerdict};
@@ -252,7 +252,7 @@ impl ReportBuilder {
     }
 }
 
-/// Seal a suspended person's appeal (ADR-0089 section 4): the moderator list
+/// Seal a suspended person's appeal (ADR-0098 section 4): the moderator list
 /// is verified under the pinned `rootKey`, and the trimmed `text` (1 to 1,000
 /// characters) is sealed to its current moderators. The result is the
 /// `sealed_b64` of `POST /account/suspension/appeal`.

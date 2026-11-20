@@ -6,7 +6,7 @@ package me.lakko.app.auth
 import uniffi.lakko_ffi_uniffi.Identity
 
 /**
- * ADR-0089 F3 — the identity proof auth requires wherever it records the
+ * ADR-0098 F3 — the identity proof auth requires wherever it records the
  * account's identity key (`POST /auth/genesis/attest`,
  * `/account/keys/reset/finish`, `/account/keys/rotate/finish`,
  * `/account/recall/finish`): the key being recorded signs the account id and

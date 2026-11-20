@@ -30,12 +30,12 @@ export function PrivacyModerationRows(): JSX.Element {
     <section class="lk-card">
       <A href={paths.settingsSection("privacy-blocked")} class="lk-card-row lk-card-row-link">
         <span class="lk-card-row-icon">
-          <Icon name="shieldAlert" size={18} />
+          <Icon name="shield-exclamation" size={18} />
         </span>
         <span class="lk-card-row-body">
           <span class="lk-card-row-title">{t("block.list.title")}</span>
         </span>
-        <Icon name="chevron" size={18} />
+        <Icon name="chevron-forward" size={18} />
       </A>
       <A href={paths.settingsSection("privacy-reports")} class="lk-card-row lk-card-row-link">
         <span class="lk-card-row-icon">
@@ -44,7 +44,7 @@ export function PrivacyModerationRows(): JSX.Element {
         <span class="lk-card-row-body">
           <span class="lk-card-row-title">{t("report.list.title")}</span>
         </span>
-        <Icon name="chevron" size={18} />
+        <Icon name="chevron-forward" size={18} />
       </A>
     </section>
   );

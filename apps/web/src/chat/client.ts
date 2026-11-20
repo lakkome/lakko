@@ -74,7 +74,7 @@
  *     than aborting) is the right shape on the receive side.
  */
 import { runBeforeSend } from "./before-send";
-import { DsClient } from "../ds/client";
+import { DsClient, DsHttpError } from "../ds/client";
 import type { FetchResult } from "../ds/client";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { withGroupMlsLock } from "../mls/group-lock";
@@ -84,17 +84,23 @@ import { boundContactsAccount } from "../contacts/local-store";
 import { DS_WAKE_HEADER_LEN, type DsWake } from "../ds/wake";
 import { loadWasm, wasmIfLoaded } from "../wasm";
 import {
+  epochAfterMessage as wasmEpochAfterMessage,
+  epochOfMessage as wasmEpochOfMessage,
   isKnockRowLen as wasmIsKnockRowLen,
   knockRowVersion as wasmKnockRowVersion,
   Role,
   type Group as WasmGroup,
   type Identity as WasmIdentity,
+  type ContentState,
+  type MessageContent,
 } from "../../wasm/lakko_ffi_wasm";
+import { attachReceiveHook } from "../attach/receive-hook";
 import type { IdentitySecrets } from "../auth/AuthContext";
 import type { MembershipChange } from "./membership-rows";
 import {
   parseBodyEnvelope,
   type AttachmentRefBytes,
+  type ContentOp,
   type ForwardOrigin,
   type ForwardRef,
   type ReplyRef,
@@ -110,6 +116,14 @@ import {
   unwrapReceived,
   type MessageEvidence,
 } from "../moderation/attestation";
+import { loadUnacked } from "./commit-outbox";
+import { registeredCommitHolds } from "./registered-commit-hold";
+import { conversationBehind, rowTimeMs } from "./conversation-behind";
+import { clearReentryReadFrom, reentryReadFrom } from "./reentry-store";
+import { deliverReentryRequest, noteLeafWrote } from "./reentry-admit";
+import { consumeKnockKeyRow } from "./knock-key";
+import { readCursorEpoch, recordCursorEpoch, rewindLine, snapshotRewindFrom } from "./cursor-epoch";
+import { errorLogTag } from "./log-tag";
 import {
   consumeOwnPublished,
   isOwnPublished,
@@ -218,12 +232,42 @@ export type IncomingChatEvent =
        *  version. `text` is empty and there are no attachments; every screen
        *  draws `chat.message.unsupported` in its place. */
       unsupportedVersion?: number;
-      /** ADR-0089 section 1 - what a report needs of this message, captured
+      /** ADR-0098 section 1 - what a report needs of this message, captured
        *  at receipt: the attestation verdict, the raw attested bytes, the
        *  sender leaf key and its device binding. Absent on an own message,
        *  on a frame with no resolvable sender leaf, and on a row restored
        *  from a log written before the field existed. */
       evidence?: MessageEvidence;
+      /** ADR-0087 section 14 — the channel invitation card the envelope
+       *  carried beside its `/g/` link text. Kept with the message so the
+       *  bubble and the Chats row open it offline. */
+      channelInvite?: Uint8Array;
+      /** ADR-0092 — a poll, checklist, location, contact card or article;
+       *  `text` is empty and `attachments` are an article's images. */
+      content?: MessageContent;
+      /** ADR-0092 section 3.11 — a restored poll's or checklist's state. */
+      contentState?: ContentState;
+    }
+  | {
+      /** ADR-0092 — an op on a poll or checklist (a vote, a close, a tick, an
+       *  added item, an edit). Filed by the receive loop in the attachment
+       *  store (`attach/receive.ts`); never a row. */
+      kind: "contentOp";
+      messageId: number;
+      op: ContentOp;
+      senderLeaf: number | undefined;
+      senderKey: MemberIdentity | undefined;
+      createdAt: string;
+    }
+  | {
+      /** ADR-0092 section 3.9 — an open-items hand-over or old-ballot rows;
+       *  consumed by the receive loop, never a row. */
+      kind: "openItems";
+      messageId: number;
+      envelope: Uint8Array;
+      ballots: boolean;
+      senderKey: MemberIdentity | undefined;
+      createdAt: string;
     }
   | {
       /** ADR-0023 / ADR-0024 — an edit / delete / reaction op OR a
@@ -689,6 +733,81 @@ export class HeldForSuccessor extends Error {
   }
 }
 
+/**
+ * ADR-0091 phase 2 section 2 (C-93) - nothing is sealed into a conversation
+ * this device is behind in: whatever it sealed would be at an epoch nobody
+ * else holds. Thrown BEFORE anything is sealed by
+ * {@link ChatClient.broadcastControl} while the device is suspected or
+ * confirmed behind, and by {@link ChatClient.sendMessage} once confirmed
+ * (while only suspected a send is attempted: its refusal is evidence).
+ */
+export class ConversationBehindError extends Error {
+  override name = "ConversationBehindError";
+  constructor() {
+    super("this device is behind in this conversation; nothing is sent until it is back");
+  }
+}
+
+/**
+ * Whether `err` is (or wraps, through `cause` or a `ContactsError`'s
+ * `variant.cause`) a {@link ConversationBehindError}. Such a refusal is the
+ * ADR-0091 stop list working, not a failure: callers that log failures stay
+ * quiet on it (live walk 2026-11-19).
+ */
+export function isConversationBehind(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 8 && current !== undefined && current !== null; depth += 1) {
+    if (current instanceof ConversationBehindError) return true;
+    if (typeof current !== "object") return false;
+    const next =
+      (current as { cause?: unknown }).cause ??
+      ((current as { variant?: { cause?: unknown } }).variant?.cause);
+    current = next;
+  }
+  return false;
+}
+
+/** Told after every applied poll batch of a group (ADR-0091: the re-entry
+ *  runtime sends what it owes once the group reaches an epoch). */
+export type PollObserver = (group: WasmGroup) => void;
+
+let pollObserver: PollObserver | null = null;
+
+/** Install (or, with `null`, remove) the one poll observer. */
+export function installPollObserver(observer: PollObserver | null): void {
+  pollObserver = observer;
+}
+
+function notifyPollObserver(group: WasmGroup): void {
+  const observer = pollObserver;
+  if (observer === null) return;
+  try {
+    observer(group);
+  } catch {
+    /* an observer never fails a poll */
+  }
+}
+
+/** The group's id in standard base64, or `null` when it cannot be read. */
+function groupKeyOf(group: WasmGroup): string | null {
+  try {
+    return base64Encode(group.groupId);
+  } catch {
+    return null;
+  }
+}
+
+/** A `401` that is not this device's clock: evidence (ADR-0091 section 1). */
+function refusedNotSkewed(err: unknown): DsHttpError | null {
+  let current: unknown = err;
+  for (let depth = 0; depth < 8 && current !== undefined && current !== null; depth += 1) {
+    if (current instanceof DsHttpError) return current.status === 401 && !current.clockSkewed ? current : null;
+    if (typeof current !== "object") return null;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
 /** Whether a publish into `group` is refused as into a dead session. */
 export type DeadSessionGuard = (group: WasmGroup) => boolean;
 
@@ -781,12 +900,22 @@ export interface BroadcastControlOptions {
    */
   readonly intoSupersededSession?: boolean;
   /**
-   * ADR-0089 section 1 - the frame is an edit, a delete or a reaction (a
+   * ADR-0098 section 1 - the frame is an edit, a delete or a reaction (a
    * chat envelope sent without a wake), so it is attested like a message.
    * Never set for a typing signal, a read receipt or a service envelope; a
    * service envelope is not wrapped even when it is.
    */
   readonly attest?: boolean;
+  /**
+   * ADR-0091 live walk 3 — an action the person took (an edit, a deletion, a
+   * reaction, a poll or checklist op, a shared pin, a rename, a group photo or
+   * reactions setting, a handle, a contact request inside a group). Held
+   * only while the device is suspected or confirmed behind, never for a
+   * refused read alone: then it is attempted, and its refusal is evidence
+   * the person sees. Omitted: an automatic send, held also after a refused
+   * read until a read is answered.
+   */
+  readonly personAction?: boolean;
 }
 
 export class ChatClient {
@@ -938,6 +1067,11 @@ export class ChatClient {
     }
     // ADR-0073 R.7 case 1 — before anything is sealed.
     refuseDeadSession(group);
+    // ADR-0091 section 2 — once confirmed behind, nothing is sent.
+    {
+      const key = groupKeyOf(group);
+      if (key !== null && conversationBehind.isConfirmed(key)) throw new ConversationBehindError();
+    }
     const myIdentity = await this.resolveIdentity(identity);
 
     // Read BEFORE the lock is keyed and before anything is sealed — a
@@ -954,7 +1088,7 @@ export class ChatClient {
     // the profile is published under the same lock.
     await runBeforeSend(base64Encode(groupId));
 
-    // ADR-0089 section 1 - every envelope sent through here is a chat
+    // ADR-0098 section 1 - every envelope sent through here is a chat
     // envelope (a message, a reply, a forward, a reaction that notifies), so
     // it is attested; a service envelope is never wrapped whatever the flag.
     return withGroupMlsLock(base64Encode(groupId), async () =>
@@ -982,7 +1116,7 @@ export class ChatClient {
     wake: OutboundWake,
     attest: boolean,
   ): Promise<SendMessageResult> {
-    // ADR-0089 section 1 - the attested wrapper, BEFORE the MLS encrypt and
+    // ADR-0098 section 1 - the attested wrapper, BEFORE the MLS encrypt and
     // before anything else in this region: a refusal of the core aborts the
     // send with nothing sealed.
     let sealedPlaintext: Uint8Array = plaintext;
@@ -1046,12 +1180,18 @@ export class ChatClient {
     try {
       publish = await this.ds.publishGroup(groupId, wireBytes, { wake: dsWake });
     } catch (err) {
+      // ADR-0091 section 1 — a publish refused 401, clock not skewed, is
+      // evidence that this device is behind.
+      if (refusedNotSkewed(err) !== null) conversationBehind.notePublishRefused(base64Encode(groupId));
       throw new ChatError("DS publish failed", err);
     }
     // Keyed by GROUP, and shared with every other `ChatClient` on this page, so
     // a service envelope published outside the chat route (a profile right
     // after a Welcome) is still recognised as an echo there.
     markOwnPublished(base64Encode(groupId), publish.id);
+    // Live walk 2 — the newest row this device knows in the conversation
+    // starts a later gap (ADR-0091 section 2), known before any request.
+    conversationBehind.noteOwnRowAccepted(base64Encode(groupId), rowTimeMs(publish.createdAt));
 
     return { messageId: publish.id, createdAt: publish.createdAt };
   }
@@ -1182,6 +1322,17 @@ export class ChatClient {
       throw new ChatClientArgError("controlBytes must be non-empty");
     }
     if (options.intoSupersededSession !== true) refuseDeadSession(group);
+    // ADR-0091 section 2 (C-93) — no repeat envelope, typing signal, read
+    // receipt or call signal while this device is behind: each would be
+    // sealed at an epoch nobody can open. Live walk 3: nor after a refused
+    // read until a read is answered again.
+    {
+      const key = groupKeyOf(group);
+      const held =
+        key !== null &&
+        (options.personAction === true ? conversationBehind.stopsActing(key) : conversationBehind.holdsAutomaticSends(key));
+      if (held) throw new ConversationBehindError();
+    }
     const myIdentity = await this.resolveIdentity(identity);
 
     let groupId: Uint8Array;
@@ -1262,6 +1413,16 @@ export class ChatClient {
     const myIdentity = await this.resolveIdentity(identity);
 
     const groupId: Uint8Array = group.groupId;
+    // ADR-0091 phase 1 - a registered commit of this group failed and waits
+    // for its next attempt: do not fetch (the read would stop at the same row
+    // at once and spin). Wait out the long poll or the attempt, whichever is
+    // first, and report nothing new.
+    const holdWaitMs = registeredCommitHolds.msUntilDue(base64Encode(groupId));
+    if (holdWaitMs > 0) {
+      await sleepUnlessAborted(Math.min(waitSecs * 1000, holdWaitMs), signal);
+      const current = cursorRef?.read() ?? after;
+      return { events: [], cursor: current, hasMore: false, outcome: "applied" };
+    }
     // The FETCH — deliberately outside the lock. `signal` aborts only this
     // half: once a batch is in hand it is applied (or dropped as stale) under
     // the lock like any other, because abandoning a fetched batch mid-apply is
@@ -1274,7 +1435,56 @@ export class ChatClient {
         ...(signal !== undefined ? { signal } : {}),
       });
     } catch (err) {
+      // ADR-0091 section 1 — consecutive refused reads (the device's key left
+      // the read tier) make it suspect it is behind; a skewed clock does not.
+      const refused = err instanceof DsHttpError && err.status === 401 ? err : null;
+      if (refused !== null) {
+        conversationBehind.noteRefusedRead(base64Encode(groupId), {
+          clockSkewed: refused.clockSkewed,
+          localEpoch: readGroupEpoch(group),
+          ownCommitOwed: readHasStagedSweep(group),
+        });
+      }
       throw new ChatError("DS fetch failed", err);
+    }
+    // ADR-0091 phase 1b - a snapshot rolled back under an advanced cursor:
+    // the group was loaded below the epoch recorded with its cursor, so the
+    // commit leaving the loaded epoch lies behind the cursor. Read again from
+    // just before it (`chat/cursor-epoch.ts`). The cursor itself never moves
+    // backward; the rows between are re-applied and re-filed by DS id.
+    let readFrom = after;
+    {
+      const loaded = readGroupEpoch(group);
+      const recorded = readCursorEpoch(base64Encode(groupId));
+      const rewind = snapshotRewindFrom({
+        after,
+        loaded,
+        recorded,
+        registeredCommits: raw.registeredCommits,
+      });
+      if (rewind !== undefined && loaded !== undefined && recorded !== undefined) {
+        // eslint-disable-next-line no-console
+        console.warn(rewindLine(loaded, recorded));
+        try {
+          raw = await this.fetchRewound(groupId, rewind, after, signal);
+        } catch (err) {
+          throw new ChatError("DS fetch failed", err);
+        }
+        readFrom = rewind;
+      }
+    }
+
+    // ADR-0091 section 5 — the first poll after a re-entry reads again from
+    // the commit that brought this device back: rows sent after it that were
+    // skipped before the Welcome arrived are applied now.
+    const reentryMark = readFrom === after ? reentryReadFrom(base64Encode(groupId)) : undefined;
+    if (reentryMark !== undefined && reentryMark < after) {
+      try {
+        raw = await this.fetchRewound(groupId, reentryMark, after, signal);
+      } catch (err) {
+        throw new ChatError("DS fetch failed", err);
+      }
+      readFrom = reentryMark;
     }
 
     // ADR-0053 contract point 7 — an owner or admin also reads the group's
@@ -1304,13 +1514,18 @@ export class ChatClient {
         };
       } catch (err) {
         // eslint-disable-next-line no-console
-        console.warn("ChatClient: knock read failed; retried next poll", err);
+        console.warn(`ChatClient: knock read failed; retried next poll: ${errorLogTag(err)}`);
       }
     }
 
     // The APPLY + the cursor advance — inside the lock, atomic together.
     return withGroupMlsLock(groupIdB64, async () => {
-      const result = await this.applyPolledBatch(myIdentity, group, after, raw, cursorRef);
+      const result = await this.applyPolledBatch(myIdentity, group, after, raw, cursorRef, readFrom);
+      if (result.outcome === "applied") {
+        if (reentryMark !== undefined) clearReentryReadFrom(groupIdB64);
+        await this.observeBehind(group, raw, result);
+        notifyPollObserver(group);
+      }
       if (knocks === null || result.outcome !== "applied") return result;
       const knockEvents = await this.applyKnocks(
         myIdentity,
@@ -1322,6 +1537,37 @@ export class ChatClient {
       return knockEvents.length === 0
         ? result
         : { ...result, events: [...result.events, ...knockEvents] };
+    });
+  }
+
+  /**
+   * ADR-0091 section 1 — fold one applied read into the conversation's
+   * behind state. Drained: the read returned no row and nothing more, and
+   * nothing was held. The ADR-0040 outbox is read only when the read could
+   * suspect (it is an IndexedDB read), and a staged sweep always counts.
+   */
+  private async observeBehind(group: WasmGroup, raw: FetchResult, result: PollMessagesResult): Promise<void> {
+    const key = groupKeyOf(group);
+    const local = readGroupEpoch(group);
+    if (key === null || local === undefined) return;
+    const drained = raw.messages.length === 0 && !raw.hasMore && !result.hasMore && registeredCommitHolds.heldRowId(key) === undefined;
+    const latest = raw.latestEpoch === undefined ? undefined : BigInt(raw.latestEpoch);
+    let ownCommitOwed = readHasStagedSweep(group);
+    const mightSuspect = (drained && latest !== undefined && latest > local) || conversationBehind.state(key).kind !== "in-step";
+    if (!ownCommitOwed && mightSuspect) {
+      try {
+        ownCommitOwed = (await loadUnacked(key)).length > 0;
+      } catch {
+        // Unknown: counted as owed, so nothing suspects on a guess.
+        ownCommitOwed = true;
+      }
+    }
+    conversationBehind.observeRead(key, {
+      ownCommitOwed,
+      drained,
+      latestEpoch: latest,
+      localEpoch: local,
+      registeredCommits: raw.registeredCommits,
     });
   }
 
@@ -1377,7 +1623,7 @@ export class ChatClient {
         // group), an attribution (not MLS), a stale-epoch proposal, garbage.
         // Dropped; the knock cursor still moves past it.
         // eslint-disable-next-line no-console
-        console.warn("ChatClient: knock row dropped", row.id, err);
+        console.warn(`ChatClient: knock row dropped: ${errorLogTag(err)}`);
         continue;
       }
       if (processed.kind !== "ExternalJoinProposal") continue;
@@ -1402,7 +1648,7 @@ export class ChatClient {
       await this.persistDurableOrThrow();
     } catch (err) {
       // eslint-disable-next-line no-console
-      console.warn("ChatClient: knock batch not persisted; cursor held", err);
+      console.warn(`ChatClient: knock batch not persisted; cursor held: ${errorLogTag(err)}`);
       return events;
     }
     writeKnockCursor(groupIdB64, last, owner);
@@ -1449,7 +1695,34 @@ export class ChatClient {
         /* another version's key */
       }
     }
-    if (request === undefined) return "dropped";
+    if (request === undefined) {
+      // ADR-0091 section 3, route 3 — a member's request to be brought back,
+      // sealed to the same knock key under its own label. Handed to the
+      // re-admitter; the knock cursor moves past it either way.
+      for (const seed of seeds) {
+        let reentry: ReturnType<typeof wasm.openReentryKnockRow> | undefined;
+        try {
+          reentry = wasm.openReentryKnockRow(seed, row.payload);
+        } catch {
+          continue;
+        }
+        try {
+          // A row in this group's queue speaks for this group only.
+          if (base64Encode(reentry.groupId) !== groupIdB64) break;
+          deliverReentryRequest({
+            route: "knock",
+            groupId: reentry.groupId,
+            epochLeft: reentry.epochLeft,
+            gapFromMs: reentry.gapFromMs,
+            keyPackage: reentry.keyPackage,
+          });
+        } finally {
+          reentry.free();
+        }
+        break;
+      }
+      return "dropped";
+    }
     try {
       // The link the request came through, when it came through one (its
       // issuer is the "Invited by" line, UX section 8). A private group takes
@@ -1528,6 +1801,7 @@ export class ChatClient {
     after: number,
     raw: FetchResult,
     cursorRef: PollCursorRef | undefined,
+    readFrom: number = after,
   ): Promise<PollMessagesResult> {
     // Re-read under the lock: did someone else consume past `after` while we
     // were parked on the network? Then this batch is stale — drop it whole.
@@ -1542,7 +1816,7 @@ export class ChatClient {
       cursorRef.beforeApply?.();
     }
 
-    return this.applyPolledRows(myIdentity, group, after, raw, cursorRef);
+    return this.applyPolledRows(myIdentity, group, after, raw, cursorRef, readFrom);
   }
 
   /** The row loop and the cursor gate of {@link applyPolledBatch}. */
@@ -1552,9 +1826,12 @@ export class ChatClient {
     after: number,
     raw: FetchResult,
     cursorRef: PollCursorRef | undefined,
+    readFrom: number = after,
   ): Promise<PollMessagesResult> {
     const events: IncomingChatEvent[] = [];
-    let cursor = after;
+    // `readFrom` is below `after` only on a phase-1b rewind; the cursor
+    // reported and advanced is never below `after` (see the end).
+    let cursor = readFrom;
     // Echo ids matched in this batch, CONSUMED only once the cursor actually
     // advances past them. Deleting on match would be wrong on the held path:
     // the batch gets re-fetched, our own row would then be handed to OpenMLS,
@@ -1568,7 +1845,12 @@ export class ChatClient {
     // row, so a commit that moves ownership away from this account is seen
     // at the apply that carried it.
     let ownerSeen = readRoleTableOwner(group);
+    // ADR-0091 phase 1 - the DS's newest registered epoch, read with this
+    // batch, judges a row that fails to apply.
+    const latestEpoch = raw.latestEpoch === undefined ? undefined : BigInt(raw.latestEpoch);
+    let holding = false;
     for (const message of raw.messages) {
+      const cursorBefore = cursor;
       cursor = message.id;
       // Drop our own echoes — the DS doesn't dedupe and
       // OpenMLS can't decrypt them on the sender side at the
@@ -1577,6 +1859,15 @@ export class ChatClient {
       // another chat's row of the same id (see `markOwnPublishedCommit`).
       if (isOwnPublished(groupIdB64, message.id)) {
         matchedEchoes.push(message.id);
+        // Live walk 2 — the gap starts no later than this device's newest
+        // row in the conversation, its own included.
+        conversationBehind.noteOwnRowAccepted(groupIdB64, rowTimeMs(message.createdAt));
+        continue;
+      }
+      // ADR-0092 section 3.6 — an anonymous ballot is NOT an MLS message: a
+      // journal row sealed under its poll's secret. Never fed to OpenMLS.
+      if (attachReceiveHook().isBallotRow(message.payload)) {
+        await attachReceiveHook().ballotRow(group, groupIdB64, message.id, message.createdAt, message.payload);
         continue;
       }
       // Marked BEFORE the call, not after. A throw is not proof that nothing
@@ -1584,6 +1875,7 @@ export class ChatClient {
       // ADR-0022 role gate can refuse a commit or the ADR-0045 receipt gate can
       // drop a proposal. See `chat/durable-cursor.ts`.
       this.cursorGate.markTouched();
+      const localEpoch = readGroupEpoch(group);
       let processed;
       try {
         // ADR-0022 — the CHAT receive loop enforces the group-admin role
@@ -1596,15 +1888,48 @@ export class ChatClient {
         processed = group.processIncomingVerifyingRoles(myIdentity, message.payload);
       } catch (err) {
         // Bad frame, wrong epoch, malformed wire, OR a role-unauthorized
-        // commit refused by the gate — log and skip. The cursor still advances
-        // past it, deliberately: a row that can never apply must not be able to
-        // wedge the poll, and only a PERSIST failure holds the cursor. The two
-        // are distinguishable because they are different operations at
-        // different points in the batch.
-        // eslint-disable-next-line no-console
-        console.warn("processIncomingVerifyingRoles failed", message.id, err);
+        // commit refused by the gate. ADR-0091 phase 1: the registered commit
+        // for the next epoch is HELD - the batch stops here, the cursor stays
+        // before it, and it is retried on a later poll - so one failure no
+        // longer strands the device. Every other row is skipped as before: a
+        // row that can never apply must not wedge the poll. The line logged
+        // carries no identifier.
+        const outcome = registeredCommitHolds.recordFailure(groupIdB64, {
+          id: message.id,
+          isOwnEcho: false,
+          sealed: framedEpoch(message.payload),
+          after: framedEpochAfter(message.payload),
+          local: localEpoch,
+          latest: latestEpoch,
+          registeredCommits: raw.registeredCommits,
+          error: err,
+        });
+        if (outcome.kind === "held") {
+          cursor = cursorBefore;
+          holding = true;
+          break;
+        }
+        // ADR-0091 section 2 — the gap bookkeeping of a skipped row.
+        conversationBehind.noteSkippedRow(groupIdB64, {
+          sealed: framedEpoch(message.payload),
+          after: framedEpochAfter(message.payload),
+          local: localEpoch,
+          atMs: rowTimeMs(message.createdAt),
+        });
         continue;
       }
+      registeredCommitHolds.recordApplied(groupIdB64, message.id);
+      conversationBehind.noteAppliedRow(groupIdB64, rowTimeMs(message.createdAt));
+      // ADR-0091 section 4 — a leaf that writes at the current epoch is not
+      // behind: a re-entry for it within the hour is refused.
+      if (processed.kind === "Application" && processed.senderLeaf !== undefined) {
+        const leafKey = resolveLeafSignatureKey(rosterOf(group), processed.senderLeaf);
+        const epochNow = readGroupEpoch(group);
+        if (leafKey !== undefined && epochNow !== undefined) noteLeafWrote(groupIdB64, leafKey, epochNow, Date.now());
+      }
+      // ADR-0091 section 3 — the group's knock key from the owner or an
+      // admin, consumed at receipt and never shown.
+      if (await consumeKnockKeyRow(group, processed, (leaf) => resolveMemberIdentity(rosterOf(group), leaf))) continue;
       {
         const ownerNow = readRoleTableOwner(group);
         noteOwnerTransition(group.groupId, ownerSeen, ownerNow);
@@ -1639,10 +1964,29 @@ export class ChatClient {
       }
       // Never shown, never persisted, never previewed.
       if (event.kind === "serviceEnvelope") continue;
-      // ADR-0089 section 6 - a blocked person's message, typing, receipt or
+      // ADR-0098 section 6 - a blocked person's message, typing, receipt or
       // profile in the one-to-one with them: consumed, never stored, never
       // shown, never notified (the shared block rule decides).
       if (blockDropsEvent(wasmIfLoaded(), group, event)) continue;
+      // ADR-0092 — polls and checklists: their ops, the hand-over and the
+      // electorate's growth are filed here, at receipt (C-68), for an open
+      // chat and a closed one alike.
+      if (event.kind === "contentOp") {
+        await attachReceiveHook().contentOp(group, groupIdB64, event);
+        continue;
+      }
+      if (event.kind === "openItems") {
+        for (const adopted of await attachReceiveHook().openItems(group, groupIdB64, event)) {
+          events.push(adopted);
+        }
+        continue;
+      }
+      if (event.kind === "application" && event.content !== undefined) {
+        await attachReceiveHook().content(group, groupIdB64, event);
+      }
+      if (processed.kind === "Commit") {
+        await attachReceiveHook().commit(group, groupIdB64);
+      }
       events.push(event);
     }
 
@@ -1652,6 +1996,9 @@ export class ChatClient {
     // it used to be — a swallowed failure here left the durable MLS state
     // behind a cursor that had already moved on, which since ADR-0045 strands
     // the device permanently. See `chat/durable-cursor.ts`.
+    // ADR-0091 phase 1 - a hold the group is already past, or a behind mark
+    // it moved above, is over.
+    registeredCommitHolds.observeEpoch(groupIdB64, readGroupEpoch(group));
     const verdict = await this.cursorGate.commit(
       async () => {
         // Who-can-find-me 6.4: an opened contact request that could not be
@@ -1661,7 +2008,11 @@ export class ChatClient {
         await this.persistDurableOrThrow();
       },
       () => {
-        cursorRef?.advance(cursor);
+        cursorRef?.advance(Math.max(cursor, after));
+        // ADR-0091 phase 1b - the epoch the snapshot just written is at, with
+        // the cursor it was written for.
+        const durableEpoch = readGroupEpoch(group);
+        if (durableEpoch !== undefined) recordCursorEpoch(groupIdB64, durableEpoch);
         // Consume the echo registry entries only now: on the held path they
         // stay armed so the re-fetched batch still suppresses our own rows.
         for (const id of matchedEchoes) consumeOwnPublished(groupIdB64, id);
@@ -1677,8 +2028,91 @@ export class ChatClient {
       // `outcome` and writes `result.cursor` back must still not lead.
       return { events, cursor: after, hasMore: false, outcome: "persist-held" };
     }
-    return { events, cursor, hasMore: raw.hasMore, outcome: "applied" };
+    return {
+      events,
+      cursor: Math.max(cursor, after),
+      hasMore: holding ? false : raw.hasMore,
+      outcome: "applied",
+    };
   }
+
+  /**
+   * ADR-0091 phase 1b - the rows from `from` on, read page by page until a
+   * page reaches past `after` or the journal ends (at most
+   * {@link REWIND_MAX_PAGES} pages), as one result. The last page's
+   * `hasMore`, `latestEpoch` and `registeredCommits` stand for the whole.
+   */
+  private async fetchRewound(
+    groupId: Uint8Array,
+    from: number,
+    after: number,
+    signal: AbortSignal | undefined,
+  ): Promise<FetchResult> {
+    const opts = signal !== undefined ? { signal } : {};
+    let page = await this.ds.fetchGroup(groupId, { after: from, waitSecs: 0, ...opts });
+    const messages = [...page.messages];
+    for (let pages = 1; pages < REWIND_MAX_PAGES && page.hasMore; pages += 1) {
+      const last = messages.at(-1)?.id ?? from;
+      if (last >= after) break;
+      page = await this.ds.fetchGroup(groupId, { after: last, waitSecs: 0, ...opts });
+      messages.push(...page.messages);
+    }
+    return { ...page, messages };
+  }
+}
+
+/** Pages a phase-1b rewind reads at most before it applies. Chosen, not
+ *  measured: a rewind normally re-reads the rows of one missed commit. */
+const REWIND_MAX_PAGES = 20;
+
+/** Whether a staged sweep awaits its verdict (an own commit owed). */
+function readHasStagedSweep(group: WasmGroup): boolean {
+  try {
+    return group.hasStagedSweep();
+  } catch {
+    return false;
+  }
+}
+
+/** The group's epoch, `undefined` when it cannot be read. */
+function readGroupEpoch(group: WasmGroup): bigint | undefined {
+  try {
+    return group.epoch;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A row's framed epoch without decrypting; `undefined` when not MLS. */
+function framedEpoch(payload: Uint8Array): bigint | undefined {
+  try {
+    return wasmEpochOfMessage(payload);
+  } catch {
+    return undefined;
+  }
+}
+
+/** The epoch after a row (one above the framed epoch for a commit). */
+function framedEpochAfter(payload: Uint8Array): bigint | undefined {
+  try {
+    return wasmEpochAfterMessage(payload);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Sleep `ms`, returning early when `signal` aborts. */
+function sleepUnlessAborted(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (ms <= 0 || signal?.aborted === true) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms);
+    function done(): void {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    }
+    signal?.addEventListener("abort", done, { once: true });
+  });
 }
 
 /**
@@ -1847,7 +2281,7 @@ export async function toEvent(
   processed: ReturnType<WasmGroup["processIncoming"]>,
   resolveSender: (leafIndex: number) => MemberIdentity | undefined,
   resolveSenderDevice?: (leafIndex: number) => string | undefined,
-  /** ADR-0089 section 1 - the group the frame decrypted in, read for the
+  /** ADR-0098 section 1 - the group the frame decrypted in, read for the
    *  report evidence at receipt (its id and the sender leaf's device
    *  binding). Absent: no evidence is kept. */
   evidenceGroup?: EvidenceGroup,
@@ -1856,7 +2290,7 @@ export async function toEvent(
   // discriminator: "Application" | "Commit" | "Proposal" |
   // "ExternalJoinProposal" (see lakko-ffi-wasm/src/mls.rs).
   if (processed.kind === "Application" && processed.applicationData !== undefined) {
-    // ADR-0089 section 1 - the raw plaintext may be an attested chat
+    // ADR-0098 section 1 - the raw plaintext may be an attested chat
     // envelope; every classifier below reads the envelope inside it, exactly
     // as before the wrapper existed. A malformed wrapper stays whole and
     // classifies as a service envelope, which is dropped.
@@ -2084,6 +2518,23 @@ export async function toEvent(
     // degrades to `chat` with the raw text) returns an
     // `application` event; an op returns the `op` event the UI
     // folds into the target message.
+    // ADR-0092 section 3.9 — the open-items hand-over and the old-ballot rows
+    // are service envelopes the receive loop consumes.
+    {
+      let items = false;
+      let ballots = false;
+      try {
+        const w = await loadWasm();
+        items = w.isOpenItemsEnvelope(bytes);
+        ballots = !items && w.isPollBallotsEnvelope(bytes);
+      } catch {
+        // A core without the recognisers: the envelope reads as a service
+        // envelope below and is dropped.
+      }
+      if (items || ballots) {
+        return { kind: "openItems", messageId, envelope: bytes, ballots, senderKey, createdAt };
+      }
+    }
     const body = await parseBodyEnvelope(bytes);
     // A service envelope the sniffers above did not recognise (a v3 profile
     // from a newer build reached every client as a chat bubble reading
@@ -2104,6 +2555,24 @@ export async function toEvent(
         senderKey,
         createdAt,
         unsupportedVersion: body.version,
+      };
+    }
+    if (body.kind === "content-op") {
+      return { kind: "contentOp", messageId, op: body.op, senderLeaf, senderKey, createdAt };
+    }
+    if (body.kind === "content") {
+      return {
+        kind: "application",
+        messageId,
+        text: "",
+        attachments: body.attachments,
+        plaintext: "",
+        senderLeaf,
+        senderKey,
+        createdAt,
+        content: body.content,
+        ...(body.reply === undefined ? {} : { reply: body.reply }),
+        ...(body.forward === undefined ? {} : { forward: body.forward }),
       };
     }
     if (body.kind === "chat") {
@@ -2128,6 +2597,8 @@ export async function toEvent(
         ...(body.forward === undefined ? {} : { forward: body.forward }),
         // ADR-0073 R.7 case 1 — the re-send marker, for the receive rule.
         ...(body.resendOrigin === undefined ? {} : { resendOrigin: body.resendOrigin }),
+        // ADR-0087 section 14 — the invitation card, kept with the message.
+        ...(body.channelInvite === undefined ? {} : { channelInvite: body.channelInvite }),
       };
     }
     return {
@@ -2183,7 +2654,7 @@ export async function toEvent(
   return { kind: "system", messageId, systemKind: sk, createdAt };
 }
 
-/** ADR-0089 section 6 - whether `event` from a blocked sender is dropped at
+/** ADR-0098 section 6 - whether `event` from a blocked sender is dropped at
  *  receipt in `group` (the one-to-one with them). Never throws. */
 export function blockDropsEvent(
   wasm: Awaited<ReturnType<typeof loadWasm>> | null,
@@ -2200,7 +2671,7 @@ export function blockDropsEvent(
   });
 }
 
-/** ADR-0089 section 1 - what {@link toEvent} reads of the group for the
+/** ADR-0098 section 1 - what {@link toEvent} reads of the group for the
  *  report evidence. Structural, so a test can hand in a plain object. */
 export interface EvidenceGroup {
   readonly groupId: Uint8Array;

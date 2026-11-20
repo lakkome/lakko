@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * "Your account is suspended" (ADR-0089 step 3, UX
+ * "Your account is suspended" (ADR-0098 step 3, UX
  * `reporting-and-moderation.md` section 4): the one screen that says why.
  *
  * Replaces every route while this device is in suspended mode and the person

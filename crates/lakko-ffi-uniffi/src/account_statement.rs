@@ -349,7 +349,7 @@ pub fn account_statement_len() -> u32 {
 }
 
 /// Sign the identity proof auth requires before it records an identity key
-/// for an account (ADR-0089 security fix F3): the identity key's signature
+/// for an account (ADR-0098 security fix F3): the identity key's signature
 /// over `"lakko/auth/identity-proof/v1\0" ‖ account_id ‖ pubkey`, where
 /// `pubkey` is `account_identity`'s own signature public key. Returns the
 /// 64-byte proof; the caller sends it as `identity_proof_b64` (base64url

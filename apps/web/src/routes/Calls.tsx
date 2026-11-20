@@ -34,9 +34,11 @@ import {
   callHistory,
   callHistoryByDay,
   callHistoryDayLabel,
-  type CallHistoryRow,
+  callHistoryRowIcon,
+  callHistoryRowPresentation,
+  standaloneCallTitle,
 } from "../calls/call-history";
-import { callRowLabel } from "../calls/call-log";
+import { callRowLabel, type CallLogEntry, type StandaloneCallEntry } from "../calls/call-log";
 import { useCallLog } from "../calls/CallLogContext";
 import { newCallId, newCallStart } from "../calls/new-call";
 import { useCallHost } from "../calls/CallHostContext";
@@ -49,7 +51,7 @@ import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
 import { useGroupNames } from "../chat/GroupNameContext";
 import { memberNameOf } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
-import { Avatar } from "../ui/Avatar";
+import { Avatar, toneOf } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { paths } from "./paths";
 import { t } from "../l10n";
@@ -65,7 +67,9 @@ export default function Calls(): JSX.Element {
   const groupNames = useGroupNames();
   const navigate = useNavigate();
 
-  const days = createMemo(() => callHistoryByDay(callHistory(callLog.all())));
+  const days = createMemo(() =>
+    callHistoryByDay(callHistory(callLog.all(), callLog.standalone())),
+  );
 
   /**
    * Who the call was with, named exactly as the conversation list names it.
@@ -145,37 +149,56 @@ export default function Calls(): JSX.Element {
     navigate(paths.chat(base64UrlOf(groupIdB64)));
   };
 
-  const callBack = (row: CallHistoryRow): void => {
+  const callBack = (groupIdB64: string, entry: CallLogEntry): void => {
     // Back in the mode the row records: a video call re-dials video.
     // A call that could not start (also: no session the person's devices
     // are in exists here yet, ADR-0073 R.12) reads as it does in the chat.
     setStartError(null);
-    callHost.dial(row.groupIdB64, row.entry.video).catch((err: unknown) => {
+    callHost.dial(groupIdB64, entry.video).catch((err: unknown) => {
       setStartError(callFailureText(err, () => t("chat.call.error.start")));
     });
   };
 
-  const iconFor = (row: CallHistoryRow): "incoming" | "outgoing" | "missed" => {
-    switch (row.entry.outcome) {
-      case "missed":
-      case "declined":
-      case "failed":
-        return "missed";
-      case "incoming":
-        return "incoming";
-      default:
-        return "outgoing";
-    }
-  };
+  /** The second line of any row: the direction glyph and the row's words. */
+  const subLine = (entry: CallLogEntry): JSX.Element => (
+    <div class="lk-row-line">
+      <span class="lk-row-sub">
+        <Icon name={callHistoryRowIcon(entry)} size={14} /> {callRowLabel(entry)}
+      </span>
+    </div>
+  );
+
+  /**
+   * A call with no conversation (`docs/ux/navigation.md` section 5.1.1): a
+   * `New call`, or a call joined from a link. Read, never pressed — no
+   * button inside it and none beside it, no hover, no focus stop — since an
+   * ended link call cannot be joined again and there is no conversation to
+   * open. The avatar is the group-call glyph, never initials.
+   */
+  const standaloneRow = (entry: StandaloneCallEntry): JSX.Element => (
+    <div class="lk-row">
+      <span class="lk-avatar" data-tone={toneOf(entry.id)} aria-hidden="true">
+        <Icon name="person-3-fill" size={20} />
+      </span>
+      <div class="lk-row-body">
+        <div class="lk-row-line">
+          <span class="lk-row-title">
+            <span class="lk-ellipsis">{standaloneCallTitle()}</span>
+          </span>
+        </div>
+        {subLine(entry)}
+      </div>
+    </div>
+  );
 
   return (
-    <aside class="lk-pane" aria-label={t("nav.calls")}>
+    <aside class="lk-pane lk-pane-page" aria-label={t("nav.calls")}>
       <div class="lk-pane-head">
         <h1>{t("nav.calls")}</h1>
-        {/* ADR-0089 step 3: a suspended account places no call. */}
+        {/* ADR-0098 step 3: a suspended account places no call. */}
         <div class="lk-actions" style={accountSuspended() ? { display: "none" } : undefined}>
           <button type="button" class="primary" onClick={() => void newCall()}>
-            <Icon name="video" size={16} />
+            <Icon name="video" size={20} />
             {t("call.history.new_call")}
           </button>
         </div>
@@ -188,7 +211,7 @@ export default function Calls(): JSX.Element {
           when={auth.state().kind === "session" && days().length > 0}
           fallback={
             <div class="lk-empty">
-              <Icon name="calls" size={40} strokeWidth={1.4} />
+              <Icon name="phone" size={48} />
               <strong>{t("call.history.empty")}</strong>
             </div>
           }
@@ -199,7 +222,10 @@ export default function Calls(): JSX.Element {
                 <div class="lk-day-sep">{callHistoryDayLabel(day.day)}</div>
                 <For each={day.rows}>
                   {(row) => {
-                    const title = (): string => titleOf(row.groupIdB64);
+                    if (row.groupIdB64 === null) return standaloneRow(row.entry);
+                    const groupIdB64 = row.groupIdB64;
+                    const look = callHistoryRowPresentation(row);
+                    const title = (): string => titleOf(groupIdB64);
                     return (
                       <div class="lk-row">
                         {/* The row opens the conversation and the trailing
@@ -208,13 +234,13 @@ export default function Calls(): JSX.Element {
                         <button
                           type="button"
                           class="lk-row-open"
-                          onClick={() => open(row.groupIdB64)}
+                          onClick={() => open(groupIdB64)}
                         >
                           <Avatar
                             label={title()}
-                            id={row.groupIdB64}
-                            personKey={avatarKeysOf(row.groupIdB64).personKey}
-                            conversationKey={avatarKeysOf(row.groupIdB64).conversationKey}
+                            id={groupIdB64}
+                            personKey={avatarKeysOf(groupIdB64).personKey}
+                            conversationKey={avatarKeysOf(groupIdB64).conversationKey}
                           />
                           <div class="lk-row-body">
                             <div class="lk-row-line">
@@ -222,24 +248,21 @@ export default function Calls(): JSX.Element {
                                 <span class="lk-ellipsis">{title()}</span>
                               </span>
                             </div>
-                            <div class="lk-row-line">
-                              <span class="lk-row-sub">
-                                <Icon name={iconFor(row)} size={13} />{" "}
-                                {callRowLabel(row.entry)}
-                              </span>
-                            </div>
+                            {subLine(row.entry)}
                           </div>
                         </button>
-                        <button
-                          type="button"
-                          class="lk-icon-button"
-                          style={accountSuspended() ? { display: "none" } : undefined}
-                          title={row.entry.video ? t("chat.call.video") : t("chat.call.voice")}
-                          aria-label={row.entry.video ? t("chat.call.video") : t("chat.call.voice")}
-                          onClick={() => callBack(row)}
-                        >
-                          <Icon name={row.entry.video ? "video" : "phone"} size={18} />
-                        </button>
+                        {/* ADR-0098 step 3: a suspended account places no call. */}
+                        <Show when={look.callButton && !accountSuspended()}>
+                          <button
+                            type="button"
+                            class="lk-icon-button"
+                            title={row.entry.video ? t("chat.call.video") : t("chat.call.voice")}
+                            aria-label={row.entry.video ? t("chat.call.video") : t("chat.call.voice")}
+                            onClick={() => callBack(groupIdB64, row.entry)}
+                          >
+                            <Icon name={row.entry.video ? "video-fill" : "phone-fill"} size={20} />
+                          </button>
+                        </Show>
                       </div>
                     );
                   }}

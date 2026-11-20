@@ -694,7 +694,7 @@ private data class StoredPendingRequest(
     /** ADR-0079 - the dead-link note, kept with the request. */
     /** `docs/ux/who-can-find-me.md` 6.4 - the group the request came in. */
     val viaGroupIdHex: String? = null,
-    /** ADR-0089 section 2 — the request's wire, the evidence of a report. */
+    /** ADR-0098 section 2 — the request's wire, the evidence of a report. */
     val wireB64: String? = null,
 )
 

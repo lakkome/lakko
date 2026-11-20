@@ -125,6 +125,10 @@
       "text": "Цей браузер не підтримує ключі доступу.",
       "status": "machine"
     },
+    "auth.passkey.error.unsupported_desktop": {
+      "text": "Цей пристрій не підтримує ключі доступу.",
+      "status": "machine"
+    },
     "auth.passkey.error.wrong_account": {
       "text": "Цей ключ доступу належить іншому обліковому запису, ніж той, що збережений на цьому пристрої. Спершу увійдіть за допомогою пароля.",
       "status": "machine"
@@ -163,6 +167,70 @@
     },
     "auth.password.show": {
       "text": "Показати пароль",
+      "status": "machine"
+    },
+    "auth.signup.closed.body": {
+      "text": "У беті обмежена кількість місць, і всі вони зайняті. Місця звільняються, коли хтось іде. Спробуйте пізніше.",
+      "status": "machine"
+    },
+    "auth.signup.closed.checking": {
+      "text": "Перевіряємо...",
+      "status": "machine"
+    },
+    "auth.signup.closed.log_in": {
+      "text": "Увійти",
+      "status": "machine"
+    },
+    "auth.signup.closed.retry": {
+      "text": "Спробувати ще",
+      "status": "machine"
+    },
+    "auth.signup.closed.title": {
+      "text": "Місць поки немає",
+      "status": "machine"
+    },
+    "auth.signup.code.back": {
+      "text": "Назад",
+      "status": "machine"
+    },
+    "auth.signup.code.body": {
+      "text": "Введіть код із листа.",
+      "status": "machine"
+    },
+    "auth.signup.code.checking": {
+      "text": "Перевіряємо...",
+      "status": "machine"
+    },
+    "auth.signup.code.continue": {
+      "text": "Продовжити",
+      "status": "machine"
+    },
+    "auth.signup.code.failed": {
+      "text": "Не вдалося перевірити код. Спробуйте знову.",
+      "status": "machine"
+    },
+    "auth.signup.code.held": {
+      "text": "Ваше місце прихильника закріплено за цією реєстрацією.",
+      "status": "machine"
+    },
+    "auth.signup.code.limited": {
+      "text": "Забагато спроб. Спробуйте пізніше.",
+      "status": "machine"
+    },
+    "auth.signup.code.link": {
+      "text": "У мене є код підтримки",
+      "status": "machine"
+    },
+    "auth.signup.code.title": {
+      "text": "Код підтримки",
+      "status": "machine"
+    },
+    "auth.signup.code.unknown": {
+      "text": "Цей код не підходить. Перевірте його і спробуйте знову.",
+      "status": "machine"
+    },
+    "auth.signup.code.used": {
+      "text": "Цей код підтримки вже використано.",
       "status": "machine"
     },
     "auth.signup.error.enter_username": {
@@ -245,6 +313,42 @@
       "text": "Ім’я користувача",
       "status": "machine"
     },
+    "auth.username_prompt.continue": {
+      "text": "Продовжити",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.network": {
+      "text": "Не вдалося перевірити ім'я користувача. Перевірте з'єднання та спробуйте ще раз.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.not_this": {
+      "text": "Це не ім'я користувача цього облікового запису.",
+      "status": "machine"
+    },
+    "auth.username_prompt.error.too_many": {
+      "text": "Забагато спроб. Спробуйте пізніше.",
+      "status": "machine"
+    },
+    "auth.username_prompt.field": {
+      "text": "Ім'я користувача",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot": {
+      "text": "Не пам'ятаю",
+      "status": "machine"
+    },
+    "auth.username_prompt.forgot_note": {
+      "text": "Його можна побачити в Налаштуваннях на іншому пристрої. Доти цей пристрій не синхронізується з ними.",
+      "status": "machine"
+    },
+    "auth.username_prompt.lede": {
+      "text": "Цей пристрій ще не знає ім'я користувача вашого облікового запису. Введіть його, щоб синхронізуватися з іншими пристроями.",
+      "status": "machine"
+    },
+    "auth.username_prompt.title": {
+      "text": "Яке у вас ім'я користувача?",
+      "status": "machine"
+    },
     "backup.rollback_refused.body": {
       "text": "Сервер повернув змінену або застарілу резервну копію. Ваш обліковий запис у безпеці: ми продовжили, не відновлюючи старих даних.",
       "status": "machine"
@@ -285,8 +389,92 @@
       "text": "Відновити цю старішу резервну копію?",
       "status": "machine"
     },
+    "beta.notice.body": {
+      "text": "Lakko перебуває в бета-версії, і його безпеку ще не перевіряв незалежний аудит. Не покладайтеся на нього там, де від цього залежить ваша безпека.",
+      "status": "machine"
+    },
+    "beta.notice.title": {
+      "text": "Бета",
+      "status": "machine"
+    },
     "call.alert.title": {
       "text": "Дзвінок",
+      "status": "machine"
+    },
+    "call.background.add_photo": {
+      "text": "Додати фото",
+      "status": "machine"
+    },
+    "call.background.blur": {
+      "text": "Розмиття",
+      "status": "machine"
+    },
+    "call.background.builtin_label": {
+      "text": "Фон: {name}",
+      "status": "machine"
+    },
+    "call.background.failed": {
+      "text": "Фон перестав працювати, тому камеру вимкнено.",
+      "status": "machine"
+    },
+    "call.background.failed_action": {
+      "text": "Увімкнути камеру без фону",
+      "status": "machine"
+    },
+    "call.background.name.dawn": {
+      "text": "Світанок",
+      "status": "machine"
+    },
+    "call.background.name.dusk": {
+      "text": "Сутінки",
+      "status": "machine"
+    },
+    "call.background.name.harbor": {
+      "text": "Гавань",
+      "status": "machine"
+    },
+    "call.background.name.meadow": {
+      "text": "Луг",
+      "status": "machine"
+    },
+    "call.background.name.morning": {
+      "text": "Ранок",
+      "status": "machine"
+    },
+    "call.background.name.night": {
+      "text": "Ніч",
+      "status": "machine"
+    },
+    "call.background.none": {
+      "text": "Немає",
+      "status": "machine"
+    },
+    "call.background.photo_unusable": {
+      "text": "Це фото не можна використати. Виберіть інше.",
+      "status": "machine"
+    },
+    "call.background.preparing": {
+      "text": "Готуємо фон...",
+      "status": "machine"
+    },
+    "call.background.preview_camera_off": {
+      "text": "Це бачите лише ви. Камеру вимкнено.",
+      "status": "machine"
+    },
+    "call.background.preview_label": {
+      "text": "Ваша камера так, як її бачать інші",
+      "status": "machine"
+    },
+    "call.background.remove": {
+      "text": "Видалити",
+      "status": "machine"
+    },
+    "call.background.strong_blur": {
+      "text": "Сильне розмиття",
+      "status": "machine"
+    },
+    "call.background.your_photo": {
+      "text": "Ваше фото",
       "status": "machine"
     },
     "call.bar.camera_on_a11y": {
@@ -373,16 +561,40 @@
       "text": "Закрити чат",
       "status": "machine"
     },
-    "call.chat.empty": {
-      "text": "Повідомлень поки немає. Повідомлення тут захищені наскрізним шифруванням.",
+    "call.chat.message_a11y": {
+      "text": "{name}: {text}",
       "status": "machine"
     },
-    "call.chat.joined": {
-      "text": "{name} приєднується до дзвінка",
+    "call.chat.new_messages": {
+      "text": "Нові повідомлення",
       "status": "machine"
     },
-    "call.chat.left": {
-      "text": "Учасник залишив дзвінок",
+    "call.chat.not_sent": {
+      "text": "Не надіслано.",
+      "status": "machine"
+    },
+    "call.chat.notice_ends": {
+      "text": "Вони зникнуть, коли дзвінок завершиться.",
+      "status": "machine"
+    },
+    "call.chat.notice_people": {
+      "text": "Повідомлення тут бачать лише учасники дзвінка.",
+      "status": "machine"
+    },
+    "call.chat.placeholder": {
+      "text": "Повідомлення всім у дзвінку",
+      "status": "machine"
+    },
+    "call.chat.send_a11y": {
+      "text": "Надіслати",
+      "status": "machine"
+    },
+    "call.chat.send_again": {
+      "text": "Надіслати ще раз",
+      "status": "machine"
+    },
+    "call.chat.too_long": {
+      "text": "Повідомлення в дзвінку не може бути довшим.",
       "status": "machine"
     },
     "call.collapse_a11y": {
@@ -414,15 +626,15 @@
       "status": "machine"
     },
     "call.control.chat_hide_a11y": {
-      "text": "Сховати чат",
+      "text": "Закрити чат",
       "status": "machine"
     },
     "call.control.chat_show_a11y": {
-      "text": "Показати чат",
+      "text": "Відкрити чат",
       "status": "machine"
     },
-    "call.control.chat_unread": {
-      "text": "{count, plural, one {Чат (# непрочитане)} few {Чат (# непрочитані)} many {Чат (# непрочитаних)} other {Чат (# непрочитаного)}}",
+    "call.control.chat_unread_a11y": {
+      "text": "{count, plural, one {Відкрити чат, # непрочитане} few {Відкрити чат, # непрочитані} many {Відкрити чат, # непрочитаних} other {Відкрити чат, # непрочитаного}}",
       "status": "machine"
     },
     "call.control.end": {
@@ -533,8 +745,12 @@
       "text": "Цей дзвінок зашифрований. Показати код безпеки",
       "status": "machine"
     },
-    "call.encryption.compare_hint": {
-      "text": "Прочитайте ці цифри вголос. Якщо на обох телефонах вони збігаються, ніхто не підслуховує.",
+    "call.encryption.compare_hint_group": {
+      "text": "Усі учасники цього дзвінка бачать той самий номер. Прочитайте його вголос. Якщо на всіх пристроях він збігається, більше ніхто не слухає.",
+      "status": "machine"
+    },
+    "call.encryption.compare_hint_one_to_one": {
+      "text": "Прочитайте номер вголос одне одному. Якщо на обох пристроях він збігається, більше ніхто не слухає.",
       "status": "machine"
     },
     "call.encryption.copy_a11y": {
@@ -609,6 +825,10 @@
       "text": "Цей браузер не може шифрувати звук і відео дзвінка, тому дзвінок не почався.",
       "status": "machine"
     },
+    "call.error.no_media_encryption_desktop": {
+      "text": "Цей пристрій не може шифрувати звук і відео дзвінка, тому дзвінок не почався.",
+      "status": "machine"
+    },
     "call.error.not_accepting": {
       "text": "Цей дзвінок зараз не приймає нових учасників.",
       "status": "machine"
@@ -655,6 +875,14 @@
     },
     "call.group_banner.title": {
       "text": "Груповий дзвінок: {name}",
+      "status": "machine"
+    },
+    "call.guest.closed.body": {
+      "text": "Місць поки немає, тому цей гостьовий акаунт не можна зберегти. Місця звільняються, коли хтось іде.",
+      "status": "machine"
+    },
+    "call.guest.closed.ok": {
+      "text": "OK",
       "status": "machine"
     },
     "call.guest.default_name": {
@@ -1131,6 +1359,14 @@
     },
     "call.self.starting_camera": {
       "text": "Увімкнення камери...",
+      "status": "machine"
+    },
+    "call.settings.background": {
+      "text": "Фон",
+      "status": "machine"
+    },
+    "call.settings.background_hint": {
+      "text": "Інші бачать це позаду вас. Зберігається лише на цьому пристрої.",
       "status": "machine"
     },
     "call.settings.devices": {
@@ -1798,7 +2034,7 @@
       "status": "machine"
     },
     "channels.new.failed": {
-      "text": "Не вдалося створити канал. Нічого не створено. Спробуйте ще раз.",
+      "text": "Не вдалося створити канал. Спробуйте ще раз.",
       "status": "machine"
     },
     "channels.new.handle_hint": {
@@ -1959,6 +2195,14 @@
     },
     "channels.reactions.anonymous_note": {
       "text": "Реакції в каналі анонімні. Ніхто не бачить, хто відреагував, навіть власник каналу.",
+      "status": "machine"
+    },
+    "channels.reader_device.owner": {
+      "text": "Ви зможете публікувати тут, коли Lakko відкриється на іншому вашому пристрої.",
+      "status": "machine"
+    },
+    "channels.reader_device.publisher": {
+      "text": "Ви зможете публікувати тут, коли Lakko відкриється на іншому вашому пристрої та на пристрої власника.",
       "status": "machine"
     },
     "channels.rotation.desc": {
@@ -2195,6 +2439,10 @@
     },
     "chat.attachment.error.upload": {
       "text": "Не вдалося вивантажити «{name}». Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.attachment.full.send": {
+      "text": "На сервері зараз немає місця для нових файлів. Спробуйте пізніше.",
       "status": "machine"
     },
     "chat.attachment.hide": {
@@ -3269,12 +3517,20 @@
       "text": "Lakko потрібен доступ до камери, щоб записувати відеоповідомлення. Дозвольте доступ до камери в налаштуваннях сайту в браузері.",
       "status": "machine"
     },
+    "chat.record.denied_camera_desktop": {
+      "text": "Lakko потрібен доступ до камери, щоб записувати відеоповідомлення. Дозвольте доступ у налаштуваннях конфіденційності системи.",
+      "status": "machine"
+    },
     "chat.record.denied_camera_app": {
       "text": "Lakko потрібен доступ до камери, щоб записувати відеоповідомлення",
       "status": "machine"
     },
     "chat.record.denied_microphone": {
       "text": "Lakko потрібен доступ до мікрофона, щоб записувати голосові повідомлення. Дозвольте доступ до мікрофона в налаштуваннях сайту в браузері.",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_desktop": {
+      "text": "Lakko потрібен доступ до мікрофона, щоб записувати голосові повідомлення. Дозвольте доступ у налаштуваннях конфіденційності системи.",
       "status": "machine"
     },
     "chat.record.denied_microphone_app": {
@@ -3387,6 +3643,10 @@
     },
     "chat.record.unsupported_voice": {
       "text": "У цьому браузері не можна записувати голосові повідомлення",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice_desktop": {
+      "text": "На цьому пристрої не можна записувати голосові повідомлення",
       "status": "machine"
     },
     "chat.record.video": {
@@ -3899,10 +4159,6 @@
     },
     "chats.preview.sender": {
       "text": "{name}: {text}",
-      "status": "machine"
-    },
-    "chats.restored.banner_other_devices": {
-      "text": "Інші ваші пристрої додають цей пристрій до чатів.",
       "status": "machine"
     },
     "chats.restored.card": {
@@ -4997,10 +5253,6 @@
       "text": "Посилання-запрошення та посилання на дзвінок, створені раніше, перестануть працювати. Створіть нові.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "Ключі доступу, як і раніше, дають змогу увійти. Функцію «Відновлювати ключі цим ключем доступу» вимкнено, доки ви не ввімкнете її знову.",
-      "status": "machine"
-    },
     "devices.rotate.effect_phrase": {
       "text": "Ви отримаєте нову фразу відновлення. Стара перестане працювати.",
       "status": "machine"
@@ -5071,6 +5323,10 @@
     },
     "devices.scan.error.camera_denied_browser": {
       "text": "Lakko не може використовувати камеру. Дозвольте доступ до камери в налаштуваннях сайту в браузері й спробуйте знову.",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied_desktop": {
+      "text": "Lakko не може використовувати камеру. Дозвольте доступ до камери в налаштуваннях конфіденційності системи й спробуйте ще раз.",
       "status": "machine"
     },
     "devices.scan.error.camera_failed": {
@@ -5451,6 +5707,66 @@
     },
     "display_name.error.unknown": {
       "text": "Це ім’я не можна використати",
+      "status": "machine"
+    },
+    "donate.button": {
+      "text": "Пожертвувати",
+      "status": "machine"
+    },
+    "donate.copied": {
+      "text": "Скопійовано",
+      "status": "machine"
+    },
+    "donate.copy": {
+      "text": "Копіювати",
+      "status": "machine"
+    },
+    "donate.crypto_copy": {
+      "text": "Копіювати адресу",
+      "status": "machine"
+    },
+    "donate.crypto_network": {
+      "text": "Мережа: {network}",
+      "status": "machine"
+    },
+    "donate.crypto_warning": {
+      "text": "Надсилайте на цю адресу лише {coin} у мережі {network}. Усе інше буде втрачено.",
+      "status": "machine"
+    },
+    "donate.error": {
+      "text": "Не вдалося завантажити способи пожертви. Перевірте з'єднання і спробуйте ще раз.",
+      "status": "machine"
+    },
+    "donate.lede": {
+      "text": "Пожертви оплачують сервери й допомагають продовжувати роботу.",
+      "status": "machine"
+    },
+    "donate.none": {
+      "text": "Зараз у вашій країні немає доступного способу зробити пожертву.",
+      "status": "machine"
+    },
+    "donate.phone_error": {
+      "text": "Не вдалося показати номер. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "donate.phone_show": {
+      "text": "Показати",
+      "status": "machine"
+    },
+    "donate.phone_hidden": {
+      "text": "Номер телефону приховано",
+      "status": "machine"
+    },
+    "donate.section_crypto": {
+      "text": "Криптовалюта",
+      "status": "machine"
+    },
+    "donate.section_payment": {
+      "text": "Банк і картка",
+      "status": "machine"
+    },
+    "donate.title": {
+      "text": "Підтримати Lakko",
       "status": "machine"
     },
     "ds.clock_skew": {
@@ -6221,10 +6537,6 @@
       "text": "Надіслати запит на приєднання",
       "status": "machine"
     },
-    "group.join.request_again": {
-      "text": "Надіслати запит знову",
-      "status": "machine"
-    },
     "group.join.request_failed": {
       "text": "Запит не надіслано. Перевірте з’єднання та спробуйте ще раз.",
       "status": "machine"
@@ -6246,11 +6558,7 @@
       "status": "machine"
     },
     "group.join.wait_primary": {
-      "text": "Запит надіслано. Адміністратор схвалить його, потім зміну буде застосовано до групи.",
-      "status": "machine"
-    },
-    "group.join.wait_secondary": {
-      "text": "Якщо нічого не відбувається, запит можна надіслати знову.",
+      "text": "Запит надіслано. Адміністратор побачить його, коли наступного разу відкриє Lakko.",
       "status": "machine"
     },
     "group_delete.action": {
@@ -6315,6 +6623,10 @@
     },
     "group_info.header.public": {
       "text": "Відкрита група · {count, plural, one {# учасник} few {# учасники} many {# учасників} other {# учасника}}",
+      "status": "machine"
+    },
+    "group_photo.error.full": {
+      "text": "На сервері зараз немає місця для нових файлів. Спробуйте пізніше.",
       "status": "machine"
     },
     "group_photo.error.limit": {
@@ -6726,7 +7038,7 @@
       "status": "machine"
     },
     "invite.contact.result.failed_title": {
-      "text": "Запрошення не прийнято",
+      "text": "Не вдалося відкрити запрошення. Перевірте з’єднання та спробуйте ще раз.",
       "status": "machine"
     },
     "invite.contact.result.not_found_title": {
@@ -7153,6 +7465,26 @@
       "text": "Китайська (спрощена)",
       "status": "machine"
     },
+    "legal.privacy": {
+      "text": "Політикою конфіденційності",
+      "status": "machine"
+    },
+    "legal.privacy_title": {
+      "text": "Політика конфіденційності",
+      "status": "machine"
+    },
+    "legal.signup_notice": {
+      "text": "Створюючи акаунт, ви погоджуєтеся з {terms} та {privacy}.",
+      "status": "machine"
+    },
+    "legal.terms": {
+      "text": "Умовами використання",
+      "status": "machine"
+    },
+    "legal.terms_title": {
+      "text": "Умови використання",
+      "status": "machine"
+    },
     "nav.calls": {
       "text": "Дзвінки",
       "status": "machine"
@@ -7190,7 +7522,7 @@
       "status": "machine"
     },
     "new_group.error.secure_setup": {
-      "text": "Не вдалося створити групу. Нічого не створено. Спробуйте ще раз.",
+      "text": "Не вдалося створити групу. Спробуйте ще раз.",
       "status": "machine"
     },
     "new_group.error.sign_in": {
@@ -7291,6 +7623,10 @@
     },
     "open_in_app.button": {
       "text": "Відкрити в застосунку",
+      "status": "machine"
+    },
+    "profile.save.error.full": {
+      "text": "На сервері зараз немає місця для нових файлів. Спробуйте пізніше.",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -7657,10 +7993,6 @@
       "text": "Інший пристрій",
       "status": "machine"
     },
-    "recovery.method.passkey.sub": {
-      "text": "Дає змогу увійти. Повертає й чати, якщо ви ввімкнули це для цього ключа доступу.",
-      "status": "machine"
-    },
     "recovery.method.passkey.title": {
       "text": "Ключ доступу",
       "status": "machine"
@@ -7735,6 +8067,10 @@
     },
     "recovery.passkey.unsupported": {
       "text": "Цей пристрій або браузер не підтримує ключі доступу. Виберіть інший спосіб.",
+      "status": "machine"
+    },
+    "recovery.passkey.unsupported_desktop": {
+      "text": "Цей пристрій не підтримує ключі доступу. Виберіть інший спосіб.",
       "status": "machine"
     },
     "recovery.passkey.waiting": {
@@ -8077,6 +8413,14 @@
       "text": "Пристрій, на якому ви ще не вийшли з облікового запису, покаже шестизначний код; введіть його тут. Камера не потрібна; за бажанням можна скористатися QR-кодом.",
       "status": "machine"
     },
+    "restore_identity.earlier_keys.another_device.sub": {
+      "text": "Відкрийте Lakko на пристрої, на якому ви ще не вийшли з облікового запису.",
+      "status": "machine"
+    },
+    "restore_identity.earlier_keys.lede": {
+      "text": "Ви ввійшли як {username}, але на цьому пристрої ще немає ключів, які використовують ваші чати. Перенесіть їх з іншого пристрою, на якому ви ще не вийшли з облікового запису.",
+      "status": "machine"
+    },
     "restore_identity.error.bad_saved_account": {
       "text": "З обліковим записом, збереженим на цьому пристрої, щось не так. Вийдіть і увійдіть знову або скористайтеся фразою відновлення.",
       "status": "machine"
@@ -8135,10 +8479,6 @@
     },
     "restore_identity.lost.summary": {
       "text": "У мене нічого з цього немає",
-      "status": "machine"
-    },
-    "restore_identity.method.passkey.sub": {
-      "text": "Якщо ви ввімкнули відновлення ключів облікового запису для ключа доступу.",
       "status": "machine"
     },
     "restore_identity.not_you": {
@@ -8357,6 +8697,14 @@
       "text": "Комбінації клавіш",
       "status": "machine"
     },
+    "settings.about.supporters": {
+      "text": "Прихильники",
+      "status": "machine"
+    },
+    "settings.about.support": {
+      "text": "Підтримати Lakko",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "Переклади оновлено {date}",
       "status": "machine"
@@ -8419,6 +8767,10 @@
     },
     "settings.account.forget_device.sub": {
       "text": "Видаляє дані облікового запису з цього браузера. Повідомлення залишаться на інших ваших пристроях; щоб повернутися сюди, знадобиться інший пристрій, ключ доступу, який відновлює ключі облікового запису, або фраза відновлення.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.sub_desktop": {
+      "text": "Видаляє дані облікового запису з цього пристрою. Повідомлення залишаться на інших ваших пристроях; щоб повернутися сюди, знадобиться інший пристрій, ключ доступу, який відновлює ключі облікового запису, або фраза відновлення.",
       "status": "machine"
     },
     "settings.account.forget_device.title": {
@@ -8605,6 +8957,10 @@
       "text": "Цей браузер не налаштовано для вашого облікового запису. Увійдіть знову.",
       "status": "machine"
     },
+    "settings.devices.error.no_device_key_desktop": {
+      "text": "Цей пристрій не налаштовано для вашого облікового запису. Увійдіть знову.",
+      "status": "machine"
+    },
     "settings.devices.error.remove": {
       "text": "Не вдалося видалити пристрій. Спробуйте ще раз.",
       "status": "machine"
@@ -8725,6 +9081,10 @@
       "text": "Відтворення на цьому пристрої.",
       "status": "machine"
     },
+    "settings.notifications.channel_posts_late": {
+      "text": "Дописи каналів можуть надходити із запізненням, поки Lakko закрито.",
+      "status": "machine"
+    },
     "settings.notifications.off.body": {
       "text": "Сповіщення вимкнено, тому Lakko може дзвонити лише тоді, коли відкритий. Увімкніть їх, щоб дзвінки й повідомлення доходили до вас і тоді, коли застосунок закритий.",
       "status": "machine"
@@ -8789,56 +9149,20 @@
       "text": "Цей браузер або пристрій зараз не може створити ключ доступу.",
       "status": "machine"
     },
-    "settings.passkeys.keys.turn_on": {
-      "text": "Увімкнути відновлення ключів облікового запису",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_off": {
-      "text": "Якщо залишити вимкненим, ключ доступу дає змогу лише увійти. Ключі облікового запису відновлюються за фразою відновлення або з іншого пристрою.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_on": {
-      "text": "Якщо ввімкнути, цей ключ доступу сам зможе перенести ключі вашого облікового запису на новий пристрій. Ключі доступу зазвичай синхронізуються через Apple, Google або менеджер паролів. Той, хто отримає доступ до вашого облікового запису Apple, Google або менеджера паролів, зможе читати ваші майбутні повідомлення й діяти від вашого імені.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.cancelled": {
-      "text": "Скасовано. Цей ключ доступу й далі дає змогу лише увійти.",
+    "settings.passkeys.error.unsupported_desktop": {
+      "text": "Цей пристрій зараз не може створити ключ доступу.",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.done": {
       "text": "Тепер цей ключ доступу відновлює ключі облікового запису.",
       "status": "machine"
     },
-    "settings.passkeys.keys_choice.error.other_passkey": {
-      "text": "Відповів інший ключ доступу. Спробуйте ще раз і виберіть той ключ доступу, для якого ви це вмикаєте.",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.error.phrase_mismatch": {
       "text": "Ця фраза відновлення не належить до цього облікового запису. Нічого не змінено.",
       "status": "machine"
     },
-    "settings.passkeys.keys_choice.later": {
-      "text": "Це можна змінити пізніше для кожного ключа доступу.",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.no_prf": {
       "text": "З цим ключем доступу можна увійти, але на цьому пристрої та з цим постачальником ключів доступу він не може зберігати ключі облікового запису. Збережіть фразу відновлення.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.phrase_needed": {
-      "text": "Введіть фразу відновлення, щоб увімкнути це.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.signin_only": {
-      "text": "Лише вхід",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.title": {
-      "text": "Дозволити цьому ключу доступу відновлювати ключі облікового запису?",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.turn_on": {
-      "text": "Увімкнути",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.unavailable": {
@@ -8851,14 +9175,6 @@
     },
     "settings.passkeys.label.signin_only": {
       "text": "Лише вхід",
-      "status": "machine"
-    },
-    "settings.passkeys.lede": {
-      "text": "Входьте за допомогою Touch ID, Face ID або апаратного ключа замість пароля. Ключ доступу також може відновлювати ключі облікового запису на новому пристрої, якщо ви це ввімкнете. Фраза відновлення теж завжди працює.",
-      "status": "machine"
-    },
-    "settings.passkeys.lede_device": {
-      "text": "Входьте за відбитком пальця, обличчям чи блокуванням екрана або з апаратним ключем замість пароля. Ключ доступу також може відновлювати ключі облікового запису на новому пристрої, якщо ви це ввімкнете. Фраза відновлення теж завжди працює.",
       "status": "machine"
     },
     "settings.passkeys.name.label": {
@@ -8901,22 +9217,6 @@
       "text": "Ваші ключі доступу було видалено під час скидання ключів облікового запису. Додайте ключ доступу, щоб знову входити за допомогою Face ID, Touch ID або відбитка пальця.",
       "status": "machine"
     },
-    "settings.passkeys.stop_restoring.action": {
-      "text": "Вимкнути відновлення ключів облікового запису",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.body": {
-      "text": "Цей ключ доступу даватиме змогу лише увійти. Ключі облікового запису, уже відновлені на інших пристроях, залишаться там.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.done": {
-      "text": "Тепер цей ключ доступу дає змогу лише увійти.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.title": {
-      "text": "Вимкнути відновлення ключів облікового запису для цього ключа доступу?",
-      "status": "machine"
-    },
     "settings.passkeys.title": {
       "text": "Ключі доступу",
       "status": "machine"
@@ -8927,6 +9227,10 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "Цей браузер не може керувати ключами доступу. Використовуйте свіжу версію Safari, Chrome, Firefox або Edge.",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_desktop": {
+      "text": "Цей пристрій не може керувати ключами доступу.",
       "status": "machine"
     },
     "settings.password.change": {
@@ -9233,6 +9537,10 @@
       "text": "Керується браузером",
       "status": "machine"
     },
+    "settings.translation.pack.managed.desktop": {
+      "text": "Керується системою",
+      "status": "machine"
+    },
     "settings.translation.pack.remove": {
       "text": "Видалити",
       "status": "machine"
@@ -9287,6 +9595,22 @@
     },
     "settings.translation.unavailable.translation_web": {
       "text": "Переклад недоступний у цьому браузері",
+      "status": "machine"
+    },
+    "supporters.body": {
+      "text": "Lakko існує завдяки тим, хто його підтримує. Дякуємо.",
+      "status": "machine"
+    },
+    "supporters.failed": {
+      "text": "Не вдалося завантажити список. Спробуйте знову.",
+      "status": "machine"
+    },
+    "supporters.retry": {
+      "text": "Спробувати знову",
+      "status": "machine"
+    },
+    "supporters.title": {
+      "text": "Прихильники",
       "status": "machine"
     },
     "tokens.action_allowance_used": {
@@ -9401,10 +9725,6 @@
       "text": "Спробувати ще раз",
       "status": "machine"
     },
-    "translate.pack.blocked_anti_censorship": {
-      "text": "Мовні пакети не можна завантажити, поки ввімкнено обхід блокувань.",
-      "status": "machine"
-    },
     "translate.pack.body.transcription": {
       "text": "Розшифровка відбувається на цьому пристрої. Для цього Lakko потрібен пакет «{language}». Голосові повідомлення нікуди не надсилаються для розшифровки.",
       "status": "machine"
@@ -9419,6 +9739,10 @@
     },
     "translate.pack.body.translation_sized": {
       "text": "Переклад відбувається на цьому пристрої. Для цього Lakko потрібен пакет «{language}» ({size}). Повідомлення нікуди не надсилаються для перекладу.",
+      "status": "machine"
+    },
+    "translate.pack.body.translation_system_settings": {
+      "text": "Переклад відбувається на цьому пристрої. macOS завантажує пакет «{language}» у Системних параметрах: «Мова і регіон», потім «Мови перекладу». Повідомлення нікуди не надсилаються для перекладу.",
       "status": "machine"
     },
     "translate.pack.cancel": {
@@ -9449,6 +9773,10 @@
       "text": "Не зараз",
       "status": "machine"
     },
+    "translate.pack.open_system_settings": {
+      "text": "Відкрити Системні параметри",
+      "status": "machine"
+    },
     "translate.pack.source.android": {
       "text": "Пакет надає Google.",
       "status": "machine"
@@ -9459,6 +9787,10 @@
     },
     "translate.pack.source.web": {
       "text": "Пакет надає розробник вашого браузера.",
+      "status": "machine"
+    },
+    "translate.pack.source.desktop": {
+      "text": "Пакет надає розробник вашої системи.",
       "status": "machine"
     },
     "translate.pack.title.transcription": {
@@ -9707,6 +10039,14 @@
     },
     "who_can_find_me.title": {
       "text": "Хто може мене знайти",
+      "status": "machine"
+    },
+    "call.screen_share.refused_desktop": {
+      "text": "Не вдалося показати екран. Дозвольте Lakko запис екрана в налаштуваннях конфіденційності системи.",
+      "status": "machine"
+    },
+    "call.screen_share.refused_macos_desktop": {
+      "text": "Не вдалося показати екран. Дозвольте Lakko запис екрана в Системних параметрах.",
       "status": "machine"
     }
   },

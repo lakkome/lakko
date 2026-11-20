@@ -73,7 +73,7 @@ public enum ChannelsFormatting {
         sharedName: String = "",
         name: String,
         handle: String,
-        isOwner: Bool = false,
+        role: ChannelRowRole = .subscriber,
         subscriberCount: Int?,
         newestPostMs: Int64?,
         nowMs: Int64,
@@ -92,7 +92,7 @@ public enum ChannelsFormatting {
         // the second line carries only the count / the role.
         let handleOnSecondLine = title == bare ? nil : handleLabel
         var parts = [handleOnSecondLine, subscribersLabel].compactMap { $0 }
-        if parts.isEmpty { parts = [roleLabel(isOwner: isOwner)] }
+        if parts.isEmpty { parts = [role.label] }
         return RowModel(
             title: title,
             handleLabel: handleLabel,
@@ -107,12 +107,7 @@ public enum ChannelsFormatting {
     public static func headerStatus(title: String, handle: String, isOwner: Bool) -> String {
         let bare = bareHandle(handle)
         if !bare.isEmpty, title != bare { return "@\(bare)" }
-        return roleLabel(isOwner: isOwner)
-    }
-
-    /// "Your channel" / "Subscribed".
-    private static func roleLabel(isOwner: Bool) -> String {
-        Localization.text(isOwner ? "channels.row.own" : "channels.subscribe.status.subscribed")
+        return (isOwner ? ChannelRowRole.owner : .subscriber).label
     }
 
     /// Short facts joined pair by pair through `common.fact_pair` ("@news ·
@@ -301,5 +296,31 @@ extension Data {
         std.append(String(repeating: "=", count: pad))
         guard let data = Data(base64Encoded: std) else { return nil }
         self = data
+    }
+}
+
+/// What this account is to a channel, for the one word a channel row shows
+/// while it has no @name, count or readable post: the owner "Your channel", a
+/// publisher who is not the owner "Publisher", a subscriber "Subscribed" (the
+/// web and Android rows say the same).
+public enum ChannelRowRole: Equatable {
+    case owner
+    case publisher
+    case subscriber
+
+    /// `publishes`: this device holds publisher keys for the channel;
+    /// `coPublished`: it joined the channel's PublisherGroup as a publisher
+    /// (``CoPublishedJournals``), so it is not the owner.
+    public static func of(publishes: Bool, coPublished: Bool) -> Self {
+        guard publishes else { return .subscriber }
+        return coPublished ? .publisher : .owner
+    }
+
+    public var label: String {
+        switch self {
+        case .owner: return Localization.text("channels.row.own")
+        case .publisher: return Localization.text("channels.publishers.role_publisher")
+        case .subscriber: return Localization.text("channels.subscribe.status.subscribed")
+        }
     }
 }

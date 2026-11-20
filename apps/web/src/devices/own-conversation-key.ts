@@ -17,58 +17,140 @@
  *   - the SENDER rule ({@link ownKeyPackageUsable}): an own device is not
  *     admitted from a KeyPackage bound to another account key than the one
  *     this device's own leaves are bound to. It waits for a re-published one.
- *   - the RECEIVER rule ({@link bindingVerdict}): the binding is minted
- *     again under the conversation key, but only while the device holds no
- *     conversation; a device that holds some keeps its binding (a re-mint
- *     would split it between two account keys).
+ *   - the RECEIVER rule ({@link bindingVerdict}, written once in Rust): the
+ *     binding is minted under the conversation key; a device that does not
+ *     hold that key yet WAITS (2026-11-15, "Joining after a rotation": it
+ *     binds nothing, publishes no KeyPackage and joins nothing until the
+ *     earlier keys reach it); a device that holds conversations keeps its
+ *     binding (a re-mint would split it between two account keys).
  *
- * Keys are compared as standard base64 strings.
+ * The sender rule compares keys as standard base64 strings; the receiver
+ * rule takes raw 32-byte keys.
  */
 
-/** What to do with a device's stored conversation binding. */
-export type BindingVerdict =
-  /** The binding is this account's and is kept. */
-  | "keep"
-  /** No usable binding, or one naming a key that is not this account's:
-   *  mint one under the conversation key. */
-  | "mint"
-  /** The binding names the CURRENT key although the account has
-   *  predecessors (it was minted before the pairing state bundle brought
-   *  them) and this device holds no conversation: mint it again under the
-   *  conversation key, before a KeyPackage naming the current key admits
-   *  this device anywhere. */
-  | "remint"
-  /** The same, but this device already holds conversations whose leaves
-   *  carry the current-key binding: kept. Such a device is not admitted to
-   *  the account's older conversations. */
-  | "keep-under-current-key";
+/**
+ * The account's own conversation link as this device read it (ADR-0074,
+ * "Joining after a rotation"): `absent` (no link, or one that does not
+ * verify against this device's current key), `key` (the conversation key
+ * `C` the link names), `unknown` (the bundle could not be read).
+ */
+export type OwnLink =
+  | { readonly kind: "absent" }
+  | { readonly kind: "key"; readonly key: Uint8Array }
+  | { readonly kind: "unknown" };
 
-export function bindingVerdict(input: {
-  /** The account key the stored binding names; `null` when there is no
-   *  binding or it did not verify. */
-  readonly boundKeyB64: string | null;
-  readonly currentKeyB64: string;
-  /** The own predecessor keys, oldest first (the current key excluded). */
-  readonly predecessorKeysB64: readonly string[];
-  /** Whether this device is in any conversation. */
-  readonly holdsConversations: boolean;
-}): BindingVerdict {
-  const bound = input.boundKeyB64;
-  if (bound === null) return "mint";
-  if (input.predecessorKeysB64.includes(bound)) return "keep";
-  if (bound !== input.currentKeyB64) return "mint";
-  if (input.predecessorKeysB64.length === 0) return "keep";
-  return input.holdsConversations ? "keep-under-current-key" : "remint";
+export const OWN_LINK_ABSENT: OwnLink = { kind: "absent" };
+export const OWN_LINK_UNKNOWN: OwnLink = { kind: "unknown" };
+
+/** What to do with a device's stored conversation binding. */
+export type BindingVerdictKind = "keep" | "keep-under-current-key" | "wait" | "mint";
+
+export interface BindingDecision {
+  readonly kind: BindingVerdictKind;
+  /** The 32-byte account key to mint under, for `mint`; `null` otherwise. */
+  readonly mintKey: Uint8Array | null;
+  /** `keep` or `keep-under-current-key`. */
+  readonly isKept: boolean;
+}
+
+/** The core calls this module needs (`lakko_contacts::own_binding` and
+ *  `lakko_transparency::own_conversation_key` through the wasm surface). */
+export interface OwnBindingCore {
+  ownBindingVerdict(
+    boundKey: Uint8Array | null | undefined,
+    currentKey: Uint8Array,
+    predecessorKeys: Uint8Array,
+    linkKind: number,
+    linkKey: Uint8Array | null | undefined,
+    holdsConversations: boolean,
+  ): { readonly kind: string; readonly mintKey: Uint8Array | undefined; readonly isKept: boolean; free(): void };
+  ownConversationKey(link: Uint8Array | null | undefined, currentKey: Uint8Array): Uint8Array | undefined;
+}
+
+/** `OwnLinkKind` of the wasm surface (`Absent 0`, `Key 1`, `Unknown 2`). */
+const LINK_KIND = { absent: 0, key: 1, unknown: 2 } as const;
+
+/**
+ * The binding verdict, written once in Rust (`lakko_contacts::own_binding`,
+ * the 17 shared vectors). Keys are raw 32-byte account keys;
+ * `predecessorKeys` are the own predecessor keys this device holds, oldest
+ * first, current excluded. Run it with the recorded link (or `absent`)
+ * first and read the bundle only when the answer is not kept.
+ */
+export function bindingVerdict(
+  core: OwnBindingCore,
+  input: {
+    /** The account key the stored binding names; `null` when there is no
+     *  binding or it did not verify. */
+    readonly boundKey: Uint8Array | null;
+    readonly currentKey: Uint8Array;
+    readonly predecessorKeys: readonly Uint8Array[];
+    readonly link: OwnLink;
+    /** Whether this device is in any conversation. */
+    readonly holdsConversations: boolean;
+  },
+): BindingDecision {
+  const flat = new Uint8Array(input.predecessorKeys.length * 32);
+  input.predecessorKeys.forEach((k, i) => flat.set(k, i * 32));
+  const verdict = core.ownBindingVerdict(
+    input.boundKey ?? undefined,
+    input.currentKey,
+    flat,
+    LINK_KIND[input.link.kind],
+    input.link.kind === "key" ? input.link.key : undefined,
+    input.holdsConversations,
+  );
+  try {
+    const kind = verdict.kind as BindingVerdictKind;
+    const mintKey = kind === "mint" ? (verdict.mintKey ?? null) : null;
+    return { kind, mintKey, isKept: verdict.isKept };
+  } finally {
+    verdict.free();
+  }
 }
 
 /**
- * Whether a binding verdict changes the key the device is bound to. The
- * live-session re-mint (a state bundle applied on a signed-in device) acts
- * only on `remint`: `mint` belongs to the session install, which runs before
- * anything is published.
+ * Whether a verdict in a RUNNING session re-mints the binding (a pairing
+ * state bundle or a restored backup just stored the account's earlier keys):
+ * only a `mint` over a stored binding under the CURRENT key (what used to be
+ * called `remint`). A `mint` with no binding or a foreign one belongs to the
+ * session install, which runs before anything is published.
  */
-export function rebindsAfterStateBundle(verdict: BindingVerdict): boolean {
-  return verdict === "remint";
+export function rebindsAfterStateBundle(
+  decision: BindingDecision,
+  boundKey: Uint8Array | null,
+  currentKey: Uint8Array,
+): boolean {
+  return decision.kind === "mint" && boundKey !== null && keysEqual(boundKey, currentKey);
+}
+
+/**
+ * The link answer of a fetched own bundle: `conversationLinkB64` is the
+ * bundle's `conversation_link` (standard base64, absent for none), verified
+ * against THIS device's current key (never the fetched one). A link that
+ * does not decode or does not verify is `absent`.
+ */
+export function ownLinkOfBundle(
+  core: Pick<OwnBindingCore, "ownConversationKey">,
+  conversationLinkB64: string | undefined,
+  currentKey: Uint8Array,
+): OwnLink {
+  if (conversationLinkB64 === undefined || conversationLinkB64.length === 0) return OWN_LINK_ABSENT;
+  let link: Uint8Array;
+  try {
+    link = Uint8Array.from(atob(conversationLinkB64), (c) => c.charCodeAt(0));
+  } catch {
+    return OWN_LINK_ABSENT;
+  }
+  const key = core.ownConversationKey(link, currentKey);
+  return key === undefined ? OWN_LINK_ABSENT : { kind: "key", key };
+}
+
+function keysEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) diff |= (a[i] ?? 0) ^ (b[i] ?? 0);
+  return diff === 0;
 }
 
 /**

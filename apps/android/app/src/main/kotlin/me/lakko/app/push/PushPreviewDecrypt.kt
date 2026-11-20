@@ -160,6 +160,13 @@ public data class ProcessedRow(
     val text: String,
     /** Number of attachment refs (chat only). */
     val attachmentCount: Int,
+    /** docs/ux/media-messages.md section 11 — what the attachments are, for
+     *  the row's words (`3 photos`, `File`); empty when not read. */
+    val previewAttachments: List<me.lakko.app.ui.chat.PreviewAttachment> = emptyList(),
+    /** Section 11, ADR-0047 section 6 — the micro thumbnail of the first
+     *  photo or video, carried inside the message, for the notification's
+     *  picture; `null` when there is none. */
+    val previewPicture: ByteArray? = null,
     /** ADR-0048 — the sender's name, when this device ALREADY knows one
      *  better than a fingerprint (read from the stored profiles; never
      *  fetched or verified here). `null` otherwise. */
@@ -199,7 +206,24 @@ public data class PushPreview(
     /** Notification tag (the group hex — collapses a burst into one
      *  OS notification). */
     val tag: String,
+    /** docs/ux/media-messages.md section 11, ADR-0047 section 6 — the micro
+     *  thumbnail of the first photo or video (JPEG, at most 4096 bytes),
+     *  decoded in memory for the notification's picture. Set only on a
+     *  preview that shows the message's text; `null` otherwise. */
+    val picture: ByteArray? = null,
 )
+
+/**
+ * Section 11 — the bytes the notification draws as its picture, or `null`.
+ * The picture is shown exactly when the message's text is: only a preview
+ * that carries real text has one (the generic "New message" and the
+ * unnamed-sender fallbacks never do), and the bytes are checked against the
+ * bound and the JPEG signature again here.
+ */
+public fun notificationPictureBytes(preview: PushPreview?): ByteArray? {
+    if (preview == null || preview.body.isBlank()) return null
+    return me.lakko.app.media.inlineThumbOrNull(preview.picture)
+}
 
 /**
  * A TEMPORARY, in-memory MLS group restored from the last-persisted
@@ -341,7 +365,7 @@ public interface PushDecryptDeps {
     public fun heldRow(accountIdB64: String, groupHex: String, messageId: Long): me.lakko.app.chat.HeldRow? = null
 
     /**
-     * ADR-0089 section 6 — whether [senderAccountB64] is blocked by the
+     * ADR-0098 section 6 — whether [senderAccountB64] is blocked by the
      * account, read from the persisted synced state (a READ, C-59).
      */
     public fun isBlocked(accountIdB64: String, senderAccountB64: String?): Boolean = false
@@ -408,7 +432,7 @@ internal fun wakeRowSuppressed(
 }
 
 /**
- * ADR-0089 section 6 — whether a row of a blocked sender posts nothing: a
+ * ADR-0098 section 6 — whether a row of a blocked sender posts nothing: a
  * call offer is declined without a ring ([me.lakko.app.moderation.declinesCallSilently]),
  * anything else notifies for nothing ([me.lakko.app.moderation.suppressesNotification]).
  * Called only for a sender the register holds.
@@ -687,7 +711,7 @@ public suspend fun decryptPushWake(
                     suppressedRows += 1
                     continue
                 }
-                // ADR-0089 section 6 — nothing of a blocked person notifies,
+                // ADR-0098 section 6 — nothing of a blocked person notifies,
                 // and their calls do not ring (declined without a ring).
                 val blocked = runCatching { deps.isBlocked(account.accountIdB64, processed.senderAccountB64) }
                     .getOrDefault(false)
@@ -725,8 +749,16 @@ public suspend fun decryptPushWake(
             // The conversation's name as the title; in a group the sender's
             // name before the text.
             val shape = notificationShape(conversationKind, groupName, processed?.senderName, body)
-            latest = shape?.let { PushPreview(title = it.first, body = it.second, tag = realGroupHex) }
-                ?: unnamedSenderPreview(realGroupHex)
+            // ADR-0047 section 6 — the picture rides only a preview that shows
+            // the text; the unnamed-sender fallback shows neither.
+            latest = shape?.let {
+                PushPreview(
+                    title = it.first,
+                    body = it.second,
+                    tag = realGroupHex,
+                    picture = me.lakko.app.media.inlineThumbOrNull(processed?.previewPicture),
+                )
+            } ?: unnamedSenderPreview(realGroupHex)
         }
         // `docs/ux/calls.md` section 2.1 — resolved only when this batch
         // actually rings for something, so an ordinary message wake never pays
@@ -782,7 +814,11 @@ private fun previewBodyOf(row: ProcessedRow?): String? {
     return when (row.kind) {
         // A normal chat message → its text (or an attachment hint).
         ProcessedKind.CHAT ->
-            if (row.text.isNotEmpty()) {
+            if (row.previewAttachments.isNotEmpty()) {
+                // Section 11 — the same words and text as the list row.
+                me.lakko.app.ui.chat.messagePreviewBody(row.text, row.previewAttachments)
+                    .takeIf { it.isNotEmpty() }?.let(::truncate)
+            } else if (row.text.isNotEmpty()) {
                 truncate(row.text)
             } else {
                 when {

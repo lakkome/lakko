@@ -10,13 +10,16 @@
  * | Call | The row, left to right |
  * |---|---|
  * | One-to-one, voice or video | Microphone · Camera · Settings · End |
- * | Group | Microphone · Camera · Participants · Settings · End |
+ * | Group | Microphone · Camera · Participants · Chat · Settings · End |
  *
  * A browser that can send a screen share gets `Share screen` after Camera in
  * a connected call (`docs/ux/screen-share.md` section 1); everywhere else the
  * circle is absent, not disabled.
  *
- * Nothing else. There is no Speaker control, no chat, no More menu. Which
+ * Nothing else. There is no Speaker control and no More menu. The group
+ * row's `Chat` (section 4.1.4, 2026-11-07) opens the call's own chat; it
+ * replaced nothing, the old Chat circle that sent nothing having gone in
+ * 2026-10. Which
  * microphone, camera and speaker the call uses is chosen in Settings, a sheet
  * of the app's own (`call-settings.ts`); the row itself stays short enough to
  * fit a phone in one line.
@@ -56,9 +59,17 @@
 
 import type { CallPhaseKind, CallSurfaceKind } from "./call-screen-model";
 import { t } from "../l10n";
+import { chatControlName, unreadBadge } from "./call-chat-panel-state";
 
 /** The controls the row can carry, in the order §4.1's table lists them. */
-export type CallControlId = "mic" | "camera" | "screen" | "participants" | "settings" | "end";
+export type CallControlId =
+  | "mic"
+  | "camera"
+  | "screen"
+  | "participants"
+  | "chat"
+  | "settings"
+  | "end";
 
 /**
  * How a control is painted (§4.1.1).
@@ -71,14 +82,15 @@ export type CallControlTone = "outline" | "solid" | "end";
 
 /** Icon names, matching `ui/icons.tsx`. */
 export type CallControlIcon =
-  | "mic"
-  | "micOff"
-  | "video"
-  | "videoOff"
-  | "monitor"
-  | "groups"
-  | "settings"
-  | "phoneEnd";
+  | "mic-fill"
+  | "mic-slash-fill"
+  | "video-fill"
+  | "video-slash-fill"
+  | "display"
+  | "person-2-fill"
+  | "bubbles-fill"
+  | "gear-fill"
+  | "phone-down-fill";
 
 /** One circle in the row. */
 export interface CallControlSpec {
@@ -96,6 +108,9 @@ export interface CallControlSpec {
   readonly pressed: boolean | null;
   /** 40 percent opacity and inert — never hidden (§4.1.1). */
   readonly disabled: boolean;
+  /** A count drawn on the circle (`Chat`'s unread messages, `1`..`9`, `9+`);
+   *  absent for none. */
+  readonly badge?: string;
 }
 
 /** What {@link callControls} needs to know. */
@@ -134,6 +149,12 @@ export interface CallControlsInput {
    * picker is open or the share is being set up.
    */
   readonly screenShare?: { readonly sharing: boolean; readonly busy: boolean } | undefined;
+  /**
+   * The call's chat (section 4.1.4): absent on a call that has none (a
+   * one-to-one call). `open` is the panel; `unread` the messages from others
+   * that arrived while it was closed.
+   */
+  readonly chat?: { readonly open: boolean; readonly unread: number } | undefined;
 }
 
 /**
@@ -153,7 +174,7 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
     id: "mic",
     label: t("call.control.mute"),
     accessibleName: input.micOn ? t("call.control.mute_a11y") : t("call.control.unmute_a11y"),
-    icon: input.micOn ? "mic" : "micOff",
+    icon: input.micOn ? "mic-fill" : "mic-slash-fill",
     tone: input.micOn ? "outline" : "solid",
     pressed: !input.micOn,
     disabled: inactive,
@@ -166,7 +187,7 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
     // into a video one. So the name is what the press does, not what the call
     // was placed as.
     accessibleName: input.cameraOn ? t("call.control.camera_stop_a11y") : t("call.control.camera_start_a11y"),
-    icon: input.cameraOn ? "video" : "videoOff",
+    icon: input.cameraOn ? "video-fill" : "video-slash-fill",
     tone: input.cameraOn ? "outline" : "solid",
     pressed: !input.cameraOn,
     disabled: inactive || input.cameraBusy,
@@ -180,7 +201,7 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
       id: "screen",
       label: t("call.screen_share.button"),
       accessibleName: share.sharing ? t("call.screen_share.button_stop") : t("call.screen_share.button"),
-      icon: "monitor",
+      icon: "display",
       tone: share.sharing ? "solid" : "outline",
       pressed: share.sharing,
       disabled: share.busy,
@@ -201,12 +222,31 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
         : input.participantsOpen === true
           ? t("call.control.participants_hide_a11y")
           : t("call.control.participants_show_a11y"),
-      icon: "groups",
+      icon: "person-2-fill",
       tone: "outline",
       // A toggle only where it opens the list directly; where it opens a menu
       // a pressed state would be a false claim.
       pressed: canInvite ? null : input.participantsOpen === true,
       disabled: dead || input.inviteBusy === true,
+    });
+  }
+
+  // The call's chat (section 4.1.4): after Participants, from the first
+  // second, alone in the call too.
+  const chat = input.chat;
+  if (input.surface === "group" && chat !== undefined) {
+    const spoken = chatControlName(chat.open, chat.unread);
+    const badge = chat.open ? null : unreadBadge(chat.unread);
+    out.push({
+      id: "chat",
+      label: t("call.control.chat"),
+      accessibleName:
+        spoken.count === undefined ? t(spoken.key) : t(spoken.key, { count: spoken.count }),
+      icon: "bubbles-fill",
+      tone: "outline",
+      pressed: chat.open,
+      disabled: dead,
+      ...(badge !== null ? { badge } : {}),
     });
   }
 
@@ -216,7 +256,7 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
     id: "settings",
     label: t("call.control.settings"),
     accessibleName: t("call.settings.title"),
-    icon: "settings",
+    icon: "gear-fill",
     tone: "outline",
     pressed: null,
     disabled: dead,
@@ -226,7 +266,7 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
     id: "end",
     label: t("call.control.end"),
     accessibleName: t("call.control.end_a11y"),
-    icon: "phoneEnd",
+    icon: "phone-down-fill",
     tone: "end",
     pressed: null,
     disabled: dead,

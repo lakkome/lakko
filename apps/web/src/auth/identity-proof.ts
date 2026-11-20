@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * F3 of the ADR-0089 security pass: every auth call that records the
+ * F3 of the ADR-0098 security pass: every auth call that records the
  * account's identity key (`POST /auth/genesis/attest`, `/account/keys/reset/
  * finish`, `/account/keys/rotate/finish`, `/account/recall/finish`) carries
  * `identity_proof_b64`: an Ed25519 signature by the key being recorded over

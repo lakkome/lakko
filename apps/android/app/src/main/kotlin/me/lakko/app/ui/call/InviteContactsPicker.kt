@@ -15,9 +15,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -45,6 +42,9 @@ import me.lakko.app.l10n.text
 import me.lakko.app.ui.chat.SearchField
 import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.contacts.ContactRowModel
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * `Invite contacts` on the call screen (`docs/ux/call-links.md` section 3):
@@ -91,7 +91,7 @@ internal fun InviteContactsPicker(
                 title = { Text(t(titleKey)) },
                 navigationIcon = {
                     IconButton(onClick = onBack, enabled = !busy) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -199,7 +199,7 @@ private fun InviteContactRow(
             }
         }
         if (invited) {
-            Icon(Icons.Filled.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            LkIcon(R.drawable.ic_lk_checkmark, contentDescription = null, tint = MaterialTheme.colorScheme.primary, size = LkIconSize.Row)
         }
     }
 }

@@ -7,9 +7,12 @@ import {
   callHistory,
   callHistoryByDay,
   callHistoryDayLabel,
+  callHistoryRowIcon,
+  callHistoryRowPresentation,
+  standaloneCallTitle,
   type CallHistoryRow,
 } from "./call-history";
-import type { CallLogEntry } from "./call-log";
+import { callRowLabel, type CallLogEntry, type StandaloneCallEntry } from "./call-log";
 import type { CallLogRows } from "./call-log-store";
 
 function entry(over: Partial<CallLogEntry> = {}): CallLogEntry {
@@ -58,7 +61,7 @@ describe("callHistory", () => {
     const many = Array.from({ length: 10 }, (_, i) =>
       entry({ id: `c${i}`, startedAtMs: i }),
     );
-    const capped = callHistory(new Map([["g", many]]), 3);
+    const capped = callHistory(new Map([["g", many]]), [], 3);
     expect(capped.map((r) => r.entry.startedAtMs)).toEqual([9, 8, 7]);
   });
 
@@ -130,5 +133,81 @@ describe("callHistoryDayLabel", () => {
 
   it("falls back to the key rather than throwing on something unparseable", () => {
     expect(callHistoryDayLabel("not-a-day", now)).toBe("not-a-day");
+  });
+});
+
+function standalone(over: Partial<StandaloneCallEntry> = {}): StandaloneCallEntry {
+  return {
+    id: "c0ffee",
+    outcome: "outgoing",
+    video: true,
+    startedAtMs: 1_000,
+    durationMs: 65_000,
+    ...over,
+  };
+}
+
+describe("callHistory with calls that have no conversation", () => {
+  it("interleaves them with conversation calls by time", () => {
+    const rows: CallLogRows = new Map([
+      ["anna", [entry({ id: "a1", startedAtMs: 10 }), entry({ id: "a2", startedAtMs: 30 })]],
+    ]);
+    const list = callHistory(rows, [standalone({ id: "n1", startedAtMs: 20 })]);
+    expect(list.map((r) => r.entry.id)).toEqual(["a2", "n1", "a1"]);
+    expect(list[1]?.groupIdB64).toBeNull();
+  });
+
+  it("lists one even when the account has no conversation calls", () => {
+    const list = callHistory(new Map(), [standalone()]);
+    expect(list).toHaveLength(1);
+    expect(list[0]?.groupIdB64).toBeNull();
+  });
+});
+
+describe("callHistoryRowPresentation", () => {
+  it("gives a call with no conversation no call button, no tap and the group-call glyph", () => {
+    const row: CallHistoryRow = { groupIdB64: null, entry: standalone() };
+    expect(callHistoryRowPresentation(row)).toEqual({
+      opensConversation: false,
+      callButton: false,
+      avatar: "group-call-glyph",
+    });
+  });
+
+  it("keeps a conversation's row tappable with its call-back button", () => {
+    const row: CallHistoryRow = { groupIdB64: "anna", entry: entry() };
+    expect(callHistoryRowPresentation(row)).toEqual({
+      opensConversation: true,
+      callButton: true,
+      avatar: "conversation",
+    });
+  });
+});
+
+describe("a call with no conversation, in words", () => {
+  it("is always titled Group call: a call has no name of its own", () => {
+    expect(standaloneCallTitle()).toBe("Group call");
+  });
+
+  it("says Outgoing call for a New call and Incoming call for a link join, with the duration", () => {
+    expect(callRowLabel(standalone({ outcome: "outgoing", durationMs: 65_000 }))).toBe(
+      "Outgoing call, 1:05",
+    );
+    expect(callRowLabel(standalone({ outcome: "incoming", durationMs: 65_000 }))).toBe(
+      "Incoming call, 1:05",
+    );
+  });
+
+  it("carries the out or in glyph, never missed", () => {
+    expect(callHistoryRowIcon(standalone({ outcome: "outgoing" }))).toBe("phone-outgoing");
+    expect(callHistoryRowIcon(standalone({ outcome: "incoming" }))).toBe("phone-incoming");
+  });
+});
+
+describe("callHistoryRowIcon", () => {
+  it("marks every unanswered outcome as missed", () => {
+    expect(callHistoryRowIcon(entry({ outcome: "missed" }))).toBe("phone-down");
+    expect(callHistoryRowIcon(entry({ outcome: "declined" }))).toBe("phone-down");
+    expect(callHistoryRowIcon(entry({ outcome: "failed" }))).toBe("phone-down");
   });
 });

@@ -144,10 +144,10 @@ export default function PendingChat(): JSX.Element {
               title={t("chat.header.back")}
               onClick={() => navigate(paths.home)}
             >
-              <Icon name="back" size={20} />
+              <Icon name="chevron-back" size={24} />
             </button>
             <div class="lk-chat-title">
-              <Avatar label={name()} id={c().signaturePubkeyB64} size="sm" personKey={c().signaturePubkeyB64} />
+              <Avatar label={name()} id={c().signaturePubkeyB64} size="sm" personKey={c().signaturePubkeyB64} playVideo="header" />
               <div class="lk-chat-title-text">
                 <h1>{name()}</h1>
                 <Show when={c().username.length > 0}>
@@ -158,10 +158,10 @@ export default function PendingChat(): JSX.Element {
             <div class="lk-chat-actions">
               {/* UX section 4: no call until the chat is open on both sides. */}
               <button type="button" class="lk-icon-button" title={callHint()} aria-label={callHint()} disabled>
-                <Icon name="phone" size={20} />
+                <Icon name="phone" size={24} />
               </button>
               <button type="button" class="lk-icon-button" title={callHint()} aria-label={callHint()} disabled>
-                <Icon name="video" size={20} />
+                <Icon name="video" size={24} />
               </button>
             </div>
           </header>
@@ -201,7 +201,7 @@ export default function PendingChat(): JSX.Element {
             </For>
           </ol>
             </div>
-          {/* ADR-0089 step 3: nothing is queued for a contact while suspended. */}
+          {/* ADR-0098 step 3: nothing is queued for a contact while suspended. */}
           <SuspendedComposerLine />
           <form
             class="lk-composer"
@@ -224,12 +224,12 @@ export default function PendingChat(): JSX.Element {
             />
             <button
               type="submit"
-              class="lk-icon-button accent"
+              class="lk-send-glyph"
               aria-label={t("chat.composer.send")}
               title={t("chat.composer.send")}
               disabled={input().trim().length === 0}
             >
-              <Icon name="send" size={20} />
+              <Icon name="arrow-up-circle-fill" size={26} />
             </button>
           </form>
           </div>

@@ -51,9 +51,10 @@
  * Inference does not work either: an epoch advancing with no rendezvous for us
  * is byte-for-byte what *no admin has approved yet* looks like, which is the
  * ordinary state of a request that by design has no deadline. So the joiner
- * gets no notice. What it gets instead is the **repair**: `routes/JoinGroup.tsx`
- * offers `Request again`, user-driven and never automatic, which re-mints a
- * fresh KeyPackage — the one thing that actually fixes the commonest cause.
+ * gets no notice. What it gets instead is the **repair**: after a day
+ * `routes/JoinGroup.tsx` (and the `Requests sent` list) offers `Ask again`,
+ * user-driven and never automatic, which re-mints a fresh KeyPackage — the one
+ * thing that actually fixes the commonest cause.
  */
 
 import { t } from "../l10n";
@@ -175,34 +176,16 @@ export function unappliedHeading(count: number): string {
 // ---------------------------------------------------------------------------
 
 /**
- * What `/g/` says while a request is outstanding.
+ * What `/g/` says while a request is outstanding (UX
+ * `docs/ux/group-invite-page.md`, "After `Request to join`", amended
+ * 2026-11-12): one line and no control for a day, then "No answer yet." with
+ * `Ask again` (`./ask-again.ts`).
  *
  * The joiner is told **nothing** about an exclusion, for the reasons in this
  * module's header — there is no honest channel. What it is told instead is the
- * truth about the wait itself, which the previous copy left out: **both** steps
- * are unbounded, and a request can quietly not happen.
+ * truth about the wait: an admin sees the request when they next open Lakko.
  */
 export const JOIN_WAIT_PRIMARY = (): string => t("group.join.wait_primary");
-
-/** The second line — the part that was missing, and the only thing that makes
- *  the `Request again` control legible. */
-export const JOIN_WAIT_SECONDARY = (): string => t("group.join.wait_secondary");
-
-/** The joiner's one repair, and the ONLY thing available to this side.
- *
- *  A fresh request mints a fresh KeyPackage, which is what fixes the commonest
- *  cause of an exclusion — but the button never says so, because this side
- *  cannot know that was the cause. It is deliberately **user-driven and never
- *  automatic**: each press is a journal row held to the DS's 30-day TTL, and a
- *  timer would spin against a group that is merely quiet.
- *
- *  Its reach is honest but partial, and the limit is real: an admin still
- *  holding an earlier request for the same signature key **keeps the older
- *  KeyPackage** (`retain_external_join` de-dups by signature key and skips the
- *  push), so a re-request refreshes the material only where the earlier entry
- *  is gone — which is exactly the case that matters here, because a successful
- *  approve consumed it. */
-export const JOIN_REQUEST_AGAIN = (): string => t("group.join.request_again");
 
 // ---------------------------------------------------------------------------
 // The store

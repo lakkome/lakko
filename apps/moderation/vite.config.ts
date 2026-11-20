@@ -6,7 +6,7 @@ import solid from "vite-plugin-solid";
 import wasm from "vite-plugin-wasm";
 
 /**
- * The moderators' panel (ADR-0089 section 7). It has no copy of the design
+ * The moderators' panel (ADR-0098 section 7). It has no copy of the design
  * system or the wasm core: it imports `apps/web/src/styles.css`, two of the
  * web client's UI components and `apps/web/wasm/lakko_ffi_wasm` (build it
  * with `npm run build:wasm` in apps/web first).

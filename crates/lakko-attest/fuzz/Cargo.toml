@@ -118,3 +118,22 @@ path = "fuzz_targets/handle_cert_open.rs"
 test = false
 doc = false
 bench = false
+
+# The donation statements (docs/ux/donations.md section 3): a payment method
+# or its phone number, signed offline and served by discovery, which a hostile
+# operator controls, so a malformed statement is fully attacker-controlled and
+# reaches the length-prefixed parsers before anything is shown. Any panic /
+# slice-out-of-bounds / oversized allocation here is a vulnerability.
+[[bin]]
+name = "donation_open"
+path = "fuzz_targets/donation_open.rs"
+# `SupportersList` is the backer-name list signed by the release publisher key
+# (ADR-0097 section 2), fetched from a static host, so a tampered file reaches
+# the bounded parser before anything is shown. Any panic / slice-out-of-bounds
+# / oversized allocation here is a vulnerability.
+[[bin]]
+name = "supporters_list_open"
+path = "fuzz_targets/supporters_list_open.rs"
+test = false
+doc = false
+bench = false

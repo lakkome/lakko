@@ -73,13 +73,13 @@ final class ChannelsFormattingTests: XCTestCase {
     /// repeat it: it carries the count, else the role.
     func testRowNeverShowsTheHandleTwice() {
         let subscribed = ChannelsFormatting.rowModel(
-            name: "", handle: "lakkonews", isOwner: false,
+            name: "", handle: "lakkonews", role: .subscriber,
             subscriberCount: nil, newestPostMs: nil,
             nowMs: now, calendar: calendar, locale: locale)
         XCTAssertEqual(subscribed.title, "lakkonews")
         XCTAssertEqual(subscribed.secondLine, "Subscribed")
         let owned = ChannelsFormatting.rowModel(
-            name: "", handle: "lakkonews", isOwner: true,
+            name: "", handle: "lakkonews", role: .owner,
             subscriberCount: 3, newestPostMs: nil,
             nowMs: now, calendar: calendar, locale: locale)
         XCTAssertEqual(owned.secondLine, "3 subscribers")
@@ -87,17 +87,55 @@ final class ChannelsFormattingTests: XCTestCase {
 
     func testRowFallsBackToTheRoleWhenNothingElseIsKnown() {
         let reader = ChannelsFormatting.rowModel(
-            name: "Weather", handle: "", isOwner: false,
+            name: "Weather", handle: "", role: .subscriber,
             subscriberCount: nil, newestPostMs: nil,
             nowMs: now, calendar: calendar, locale: locale)
         XCTAssertNil(reader.handleLabel)
         XCTAssertNil(reader.subscribersLabel)
         XCTAssertEqual(reader.secondLine, "Subscribed")
         let owner = ChannelsFormatting.rowModel(
-            name: "Weather", handle: "", isOwner: true,
+            name: "Weather", handle: "", role: .owner,
             subscriberCount: nil, newestPostMs: nil,
             nowMs: now, calendar: calendar, locale: locale)
         XCTAssertEqual(owner.secondLine, "Your channel")
+        let publisher = ChannelsFormatting.rowModel(
+            name: "Weather", handle: "", role: .publisher,
+            subscriberCount: nil, newestPostMs: nil,
+            nowMs: now, calendar: calendar, locale: locale)
+        XCTAssertEqual(publisher.secondLine, "Publisher")
+    }
+
+    /// The owner holds publisher keys and never joined the group as a
+    /// publisher; a publisher holds keys AND joined it; a subscriber holds
+    /// none (a joined mark without keys is a former publisher: subscribed).
+    func testTheRoleTellsTheOwnerFromAPublisher() {
+        XCTAssertEqual(ChannelRowRole.of(publishes: true, coPublished: false), .owner)
+        XCTAssertEqual(ChannelRowRole.of(publishes: true, coPublished: true), .publisher)
+        XCTAssertEqual(ChannelRowRole.of(publishes: false, coPublished: false), .subscriber)
+        XCTAssertEqual(ChannelRowRole.of(publishes: false, coPublished: true), .subscriber)
+    }
+
+    /// The Chats rows: an owned channel reads "Your channel", a channel this
+    /// account publishes to as a publisher reads "Publisher", a subscribed one
+    /// "Subscribed".
+    @MainActor
+    func testChatRowsNameTheOwnerThePublisherAndTheSubscriber() {
+        let channels = ChannelsUiState()
+        let owned = String(repeating: "a", count: 32)
+        let published = String(repeating: "b", count: 32)
+        let subscribed = String(repeating: "c", count: 32)
+        for (id, name) in [(owned, "Own"), (published, "Pub"), (subscribed, "Sub")] {
+            channels.addChannel(ChannelHandle(id: id, localName: name, localDescription: "", addedAtMs: 1))
+        }
+        let keys = ChannelPublisherKeys(seed: Data(repeating: 1, count: 32), signingKeySeed: Data(repeating: 2, count: 32))
+        channels.setKeys(channelId: owned, keys: keys)
+        channels.setKeys(channelId: published, keys: keys)
+        let rows = ChatListScreen.channelRows(
+            channels: channels, channelUnread: [:], coPublished: { $0 == published })
+        let byId = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0.preview) })
+        XCTAssertEqual(byId[owned], "Your channel")
+        XCTAssertEqual(byId[published], "Publisher")
+        XCTAssertEqual(byId[subscribed], "Subscribed")
     }
 
     func testRowStripsALeadingAtAndSingularisesOneSubscriber() {
@@ -200,5 +238,49 @@ final class ChannelsFormattingTests: XCTestCase {
                 lastRotationMs: UInt64(now - 3 * 86_400_000), nowMs: now,
                 calendar: calendar, locale: locale)),
             "Refreshed 3 days ago.")
+    }
+
+    // MARK: - Pin, mute and archive on a channel row (base scenario 29)
+
+    private func flags(pinned: Bool = false, muted: Bool = false, archived: Bool = false) -> FlagsState {
+        FlagsState(pinned: pinned, muted: muted, archived: archived, unreadOverride: false, updatedAtHlc: 1)
+    }
+
+    /// UX group-and-channel-privacy 12 — a channel's row reads its pin, mute
+    /// and archive from the synced flags, keyed on the channel id in
+    /// lower-case hex (2026-11-13: the row offered only "Add to folder").
+    @MainActor
+    func testChannelRowCarriesItsSyncedFlags() {
+        let channels = ChannelsUiState()
+        let id = String(repeating: "ab", count: 16)
+        channels.addChannel(ChannelHandle(id: id.uppercased(), localName: "News", localDescription: "", addedAtMs: 1))
+        let rows = ChatListScreen.channelRows(
+            channels: channels, channelUnread: [:],
+            flags: [ChannelFlags.key(channelIdHex: id): flags(pinned: true, muted: true, archived: true)],
+            coPublished: { _ in false })
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertTrue(rows[0].pinned)
+        XCTAssertTrue(rows[0].muted)
+        XCTAssertTrue(rows[0].archived)
+        let none = ChatListScreen.channelRows(channels: channels, channelUnread: [:], coPublished: { _ in false })
+        XCTAssertFalse(none[0].pinned || none[0].muted || none[0].archived)
+    }
+
+    /// The shared order puts a pinned channel first and an archived one last,
+    /// as it does a group.
+    @MainActor
+    func testPinnedChannelSortsFirstAndArchivedLast() {
+        let channels = ChannelsUiState()
+        let pinned = String(repeating: "1", count: 32)
+        let plain = String(repeating: "2", count: 32)
+        let archived = String(repeating: "3", count: 32)
+        for (id, at) in [(pinned, UInt64(1)), (plain, 2), (archived, 3)] {
+            channels.addChannel(ChannelHandle(id: id, localName: id, localDescription: "", addedAtMs: at))
+        }
+        let rows = ChatListScreen.channelRows(
+            channels: channels, channelUnread: [:],
+            flags: [pinned: flags(pinned: true), archived: flags(archived: true)],
+            coPublished: { _ in false })
+        XCTAssertEqual(ConversationList.sorted(rows).map(\.id), [pinned, plain, archived])
     }
 }

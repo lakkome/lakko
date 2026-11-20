@@ -288,7 +288,7 @@ android {
             "${(project.findProperty("lakko.release.check.dev.override") as String?)?.toBoolean() ?: false}",
         )
 
-        // ADR-0089 — the pinned root key the moderator list is verified under.
+        // ADR-0098 — the pinned root key the moderator list is verified under.
         //
         // `LAKKO_MODERATION_ROOT_KEY` — base64url (no-pad) of the 32-byte
         // Ed25519 offline moderation root key. Empty when unset → reporting
@@ -298,7 +298,7 @@ android {
             "LAKKO_MODERATION_ROOT_KEY",
             "\"${project.findProperty("lakko.moderation.root.key") as String? ?: ""}\"",
         )
-        // ADR-0089 step 4 — the moderation log's operator key.
+        // ADR-0098 step 4 — the moderation log's operator key.
         //
         // `LAKKO_MODERATION_LOG_KEY` — base64url (no-pad) of the 32-byte
         // Ed25519 key the moderation log's roots are signed with. Empty when
@@ -328,6 +328,17 @@ android {
             "String",
             "LAKKO_TRANSLATION_BUNDLE_URL",
             "\"${project.findProperty("lakko.translation.url") as String? ?: "https://lakko.me/.well-known/lakko-translations"}\"",
+        )
+
+        // docs/ux/donations.md section 4.1 — `LAKKO_DONATIONS_KEY`: base64url
+        // (no-pad) of the 32-byte Ed25519 key that signs the ways to donate
+        // (a dedicated offline key). Defaults to the public half of that key;
+        // set the property empty and the Support Lakko screen shows no method
+        // and asks the server nothing.
+        buildConfigField(
+            "String",
+            "LAKKO_DONATIONS_KEY",
+            "\"${project.findProperty("lakko.donations.key") as String? ?: "C1gdE39pXfY1UBeSX_mqLeNBhxw8ov9LlfnGAs2GHtM"}\"",
         )
 
         // G3-4-mobile — wire androidx.test runner for the
@@ -533,11 +544,6 @@ dependencies {
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.graphics)
     implementation(libs.compose.material3)
-    // Extended Compose icon set — base material3 ships only a
-    // tiny glyph table; the in-call UI (3c6-android) needs Mic /
-    // Videocam / CallEnd / ScreenShare / PanTool / PushPin /
-    // FlipCameraAndroid / Group icons.
-    implementation(libs.compose.material.icons.extended)
     // Google Material XML library — for the
     // `Theme.Material3.DayNight.NoActionBar` style the
     // Activity's manifest theme inherits. Separate from
@@ -556,6 +562,8 @@ dependencies {
     // 1.15d4 — ViewModel + StateFlow ↔ Compose glue.
     implementation(libs.lifecycle.viewmodel.compose)
     implementation(libs.lifecycle.runtime.compose)
+    // docs/ux/channel-notifications.md — the periodic background channel read.
+    implementation(libs.androidx.work.runtime.ktx)
 
     // 1.15d2 — networking + JSON for the OPAQUE auth client.
     //

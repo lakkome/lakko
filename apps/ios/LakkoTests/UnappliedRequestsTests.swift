@@ -154,8 +154,6 @@ final class UnappliedRequestsTests: XCTestCase {
             unappliedLine(UnappliedAdd(addSignatureKeyB64: contact, viaJoinRequest: false)),
             unappliedExplanation,
             joinWaitPrimary,
-            joinWaitSecondary,
-            joinRequestAgain,
         ]
         for s in strings {
             for word in banned {
@@ -170,19 +168,75 @@ final class UnappliedRequestsTests: XCTestCase {
     }
 
     /// The joiner cannot be TOLD anything, so what it gets is the truth about
-    /// the wait plus the one repair available to it.
-    ///
-    /// DISCRIMINATION (RUN, then reverted): with `joinWaitSecondary` reverted to
-    /// the pre-change copy `Waiting for an admin to approve, then for the change
-    /// to be applied…`:
-    ///
-    ///     XCTAssertTrue failed - the joiner is not told the wait is unbounded
-    func testTheJoinerIsToldTheWaitAndOfferedTheOneRepair() {
+    /// the wait; the repair (`Ask again`) waits a day.
+    func testTheJoinerIsToldTheWait() {
         XCTAssertEqual(
             joinWaitPrimary,
-            "Request sent. An admin approves it, then the change is applied to the group.")
-        XCTAssertTrue(joinWaitSecondary.contains("send the request again"))
-        XCTAssertEqual(joinRequestAgain, "Request again")
+            "Request sent. An admin will see it when they next open Lakko.")
+    }
+
+    // MARK: - The invite page after `Request to join` (a day per group)
+
+    private let day: Int64 = 86_400_000
+    private let groupHex = String(repeating: "ab", count: 32)
+
+    func testTheRuleIsOneDay() {
+        XCTAssertEqual(RequestsSentStore.askAgainAfterMs, day)
+        XCTAssertFalse(RequestsSentStore.mayAskAgain(sentAtMs: 0, nowMs: day - 1))
+        XCTAssertTrue(RequestsSentStore.mayAskAgain(sentAtMs: 0, nowMs: day))
+    }
+
+    /// Under a day: the waiting line and no control; a day or more: "No
+    /// answer yet." and `Ask again`.
+    func testUnderADayWaitsADayOrMoreOffersAskAgain() {
+        XCTAssertEqual(JoinGroupLandingViewModel.waitState(sentAtMs: 0, nowMs: 0), .waiting)
+        XCTAssertEqual(JoinGroupLandingViewModel.waitState(sentAtMs: 0, nowMs: day - 1), .waiting)
+        XCTAssertEqual(JoinGroupLandingViewModel.waitState(sentAtMs: 0, nowMs: day), .noAnswer)
+        XCTAssertEqual(JoinGroupLandingViewModel.waitState(sentAtMs: 0, nowMs: 3 * day), .noAnswer)
+        XCTAssertEqual(Localization.text("requests_sent.no_answer"), "No answer yet.")
+        XCTAssertEqual(Localization.text("requests_sent.ask_again"), "Ask again")
+    }
+
+    /// Reopened inside the day for a group this device already asked to
+    /// join: the waiting line with nothing to press, never `Request to join`.
+    func testReopeningWithinTheDayShowsTheWaitNotTheRequestButton() {
+        let now: Int64 = 10 * day
+        XCTAssertEqual(
+            JoinGroupLandingViewModel.stateOnOpen(
+                groupIdHex: groupHex, requestSentAtMs: now - 60_000, groupHeld: false, nowMs: now),
+            .waiting)
+        XCTAssertEqual(
+            JoinGroupLandingViewModel.stateOnOpen(
+                groupIdHex: groupHex, requestSentAtMs: now - day, groupHeld: false, nowMs: now),
+            .noAnswer)
+        XCTAssertEqual(
+            JoinGroupLandingViewModel.stateOnOpen(
+                groupIdHex: groupHex, requestSentAtMs: nil, groupHeld: false, nowMs: now),
+            .ready, "never asked")
+    }
+
+    /// The join landed: the page hands over to the group's chat at once.
+    func testJoinedNavigatesToTheChat() {
+        let joined = JoinGroupLandingViewModel.stateOnOpen(
+            groupIdHex: groupHex, requestSentAtMs: 0, groupHeld: true, nowMs: 1)
+        XCTAssertEqual(joined, .joined(groupIdHex: groupHex))
+        XCTAssertEqual(JoinGroupLandingViewModel.chatToOpen(joined), groupHex)
+        XCTAssertNil(JoinGroupLandingViewModel.chatToOpen(.waiting))
+        XCTAssertNil(JoinGroupLandingViewModel.chatToOpen(.noAnswer))
+        XCTAssertNil(JoinGroupLandingViewModel.chatToOpen(.ready))
+    }
+
+    /// The page reads the request this device recorded for the group.
+    func testTheStoreFindsTheRecordedRequest() {
+        let account = "joinday-\(UUID().uuidString)"
+        defer { UserDefaults.standard.removeObject(forKey: RequestsSentStore.key(account)) }
+        let groupId = Data(repeating: 0xab, count: 32)
+        RequestsSentStore.record(
+            groupId: groupId, name: "G", capabilityWire: Data([1]), blobId: Data([2]),
+            accountIdB64: account, nowMs: 42)
+        XCTAssertEqual(RequestsSentStore.entry(accountIdB64: account, groupIdHex: groupHex.uppercased())?.sentAtMs, 42)
+        XCTAssertNil(RequestsSentStore.entry(
+            accountIdB64: account, groupIdHex: String(repeating: "cd", count: 32)))
     }
 
     // MARK: - The store

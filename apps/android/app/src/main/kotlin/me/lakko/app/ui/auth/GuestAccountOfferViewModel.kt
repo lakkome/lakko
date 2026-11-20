@@ -16,7 +16,10 @@ import me.lakko.app.auth.AuthHttpError
 import me.lakko.app.auth.AuthNetworkError
 import me.lakko.app.auth.GuestAccountExpired
 import me.lakko.app.auth.GuestPhraseUnavailable
+import me.lakko.app.auth.GuestOfferMode
 import me.lakko.app.auth.authLimitText
+import me.lakko.app.auth.guestOfferMode
+import me.lakko.app.auth.isFullState
 import me.lakko.app.discovery.DiscoveryHttpError
 import me.lakko.app.discovery.DiscoveryNetworkError
 import me.lakko.app.l10n.UiText
@@ -49,6 +52,10 @@ public data class GuestOfferUiState(
     val usernameHint: UiText? = null,
     val password: String = "",
     val confirm: String = "",
+    /** The beta is full (`docs/ux/beta-account-cap.md` section 3): the
+     *  question reads the closed line and offers only `OK`, which does what
+     *  `No, thanks` does. */
+    val closed: Boolean = false,
 )
 
 /**
@@ -84,6 +91,9 @@ public class GuestAccountOfferViewModel internal constructor(
     private val log: (String, Throwable) -> Unit = { message, cause ->
         android.util.Log.w("lakko-guest", "$message: ${cause.javaClass.simpleName}")
     },
+    /** `GET /signup/open` (`docs/ux/beta-account-cap.md`); a failed question
+     *  answers `true`. */
+    private val signupOpen: suspend () -> Boolean = { true },
 ) : ViewModel() {
 
     private val mutableState = MutableStateFlow(GuestOfferUiState())
@@ -92,6 +102,10 @@ public class GuestAccountOfferViewModel internal constructor(
 
     /** The lifetime check of [onShown] is running. */
     private var checkingExpiry = false
+
+    /** A `Create account` was refused at the bind: the beta is full. Final
+     *  for this question; a later open answer does not undo it. */
+    private var refusedAtBind = false
 
     /**
      * The offer has appeared. A guest account past its lifetime is not
@@ -105,7 +119,15 @@ public class GuestAccountOfferViewModel internal constructor(
         checkingExpiry = true
         viewModelScope.launch {
             try {
-                expire()
+                if (!expire() && claimedUsername() == null) {
+                    // `docs/ux/beta-account-cap.md` section 3 item 1: asked
+                    // when the question is about to show. A guest whose
+                    // earlier attempt already took a name holds its place.
+                    val mode = guestOfferMode(open = signupOpen(), refusedAtBind = refusedAtBind)
+                    if (mode == GuestOfferMode.CLOSED && mutableState.value.busy == GuestOfferBusy.NONE) {
+                        mutableState.update { it.copy(closed = true, step = GuestOfferStep.ASK, error = null) }
+                    }
+                }
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (err: Throwable) {
@@ -118,7 +140,7 @@ public class GuestAccountOfferViewModel internal constructor(
 
     /** `Create account` on the question: open the form. */
     public fun onChooseCreate() {
-        if (mutableState.value.busy != GuestOfferBusy.NONE || mutableState.value.cannotKeep) return
+        if (mutableState.value.busy != GuestOfferBusy.NONE || mutableState.value.cannotKeep || mutableState.value.closed) return
         mutableState.update { it.copy(step = GuestOfferStep.FORM, error = null, deleteFailed = false) }
     }
 
@@ -193,8 +215,21 @@ public class GuestAccountOfferViewModel internal constructor(
                     mutableState.update { it.copy(busy = GuestOfferBusy.NONE) }
                 }
                 log("keeping the guest account failed", err)
+                if (isFullState(err)) refusedAtBind = true
                 mutableState.update {
-                    if (err is GuestPhraseUnavailable) {
+                    if (isFullState(err)) {
+                        // Refused at the bind (section 3 item 4): the closed
+                        // question. The guest is not deleted by the refusal;
+                        // `OK` deletes it.
+                        it.copy(
+                            busy = GuestOfferBusy.NONE,
+                            error = null,
+                            closed = true,
+                            step = GuestOfferStep.ASK,
+                            password = "",
+                            confirm = "",
+                        )
+                    } else if (err is GuestPhraseUnavailable) {
                         it.copy(
                             busy = GuestOfferBusy.NONE,
                             error = guestClaimErrorText(err),

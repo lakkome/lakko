@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The file-backed blob index: one append-only log file, replayed into
-//! memory at startup and rewritten compactly there and after each sweep.
+//! The file-backed blob and vault index: one append-only log file, replayed
+//! into memory at startup and rewritten compactly there and after each sweep.
 //!
 //! For development, tests and a single instance with no database. It cannot
 //! coordinate two instances (each would replay its own copy).
@@ -16,6 +16,9 @@
 //! t <id hex> <day>
 //! d <id hex>
 //! i <node> <day>
+//! V <vault id hex> <write_pk hex> <node> <created_day>
+//! O <vault id hex> <kind> <chunk_no> <version> <token hex> <size>
+//! X <vault id hex>
 //! x <id hex> <day>
 //! s <statement id hex>
 //! v <list version>
@@ -23,13 +26,16 @@
 //!
 //! `b` writes a whole row (a line without the idle-days field, written before
 //! ADR-0087, reads as no idle life), `t` raises a row's last access, `d` removes a
-//! row, `i` marks a node's import done. ADR-0089 step 5: `x` tombstones an
-//! id a moderator deleted (and removes its row; kept forever), `s` records a
-//! moderator statement applied, `v` raises the highest moderator-list
-//! version seen. Node names carry no whitespace (checked at configuration).
-//! Row, removal and moderation records are flushed to disk before the call
-//! returns; an access record is not, since losing one only makes a blob look
-//! a day or so older.
+//! row, `i` marks a node's import done. `V` claims a vault, `O` commits a
+//! version of one of its objects, `X` deletes a vault with its objects
+//! ([`vault`]); vault reservations and the write-rate window live in memory
+//! only, so a restart frees every reservation. ADR-0098 step 5: `x`
+//! tombstones an id a moderator deleted (and removes its row; kept forever),
+//! `s` records a moderator statement applied, `v` raises the highest
+//! moderator-list version seen. Node names carry no whitespace (checked at
+//! configuration). Row, removal and moderation records are flushed to disk
+//! before the call returns; an access record is not, since losing one only
+//! makes a blob look a day or so older.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -41,10 +47,12 @@ use async_trait::async_trait;
 
 use super::{
     is_expired, BlobId, BlobIndex, BlobRow, IndexError, ModerationDelete, ModerationOutcome,
-    UploadOutcome,
+    UploadOutcome, VaultId,
 };
 
-/// The moderation state of the index (ADR-0089 step 5).
+mod vault;
+
+/// The moderation state of the index (ADR-0098 step 5).
 #[derive(Default)]
 struct Moderation {
     /// Tombstoned id -> the day it was tombstoned.
@@ -59,6 +67,7 @@ struct Moderation {
 struct Inner {
     rows: HashMap<BlobId, BlobRow>,
     imported: HashMap<String, u32>,
+    vaults: HashMap<VaultId, vault::FileVault>,
     moderation: Moderation,
     log: File,
 }
@@ -89,9 +98,14 @@ fn row_line(r: &BlobRow) -> String {
     )
 }
 
-/// The rows, the per-node import days and the moderation state a replay
-/// rebuilds.
-type Replayed = (HashMap<BlobId, BlobRow>, HashMap<String, u32>, Moderation);
+/// The rows, the per-node import days, the vaults and the moderation state
+/// a replay rebuilds.
+type Replayed = (
+    HashMap<BlobId, BlobRow>,
+    HashMap<String, u32>,
+    HashMap<VaultId, vault::FileVault>,
+    Moderation,
+);
 
 fn parse_hex16(s: &str) -> Option<[u8; 16]> {
     let v = hex::decode(s).ok()?;
@@ -102,11 +116,12 @@ fn parse_hex16(s: &str) -> Option<[u8; 16]> {
 fn replay(path: &Path) -> Result<Replayed, IndexError> {
     let mut rows = HashMap::new();
     let mut imported = HashMap::new();
+    let mut vaults = HashMap::new();
     let mut moderation = Moderation::default();
     let file = match File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((rows, imported, moderation))
+            return Ok((rows, imported, vaults, moderation))
         },
         Err(e) => return Err(e.into()),
     };
@@ -157,6 +172,9 @@ fn replay(path: &Path) -> Result<Replayed, IndexError> {
             ["i", node, day] => {
                 imported.insert((*node).to_string(), day.parse().map_err(|_| bad())?);
             },
+            ["V" | "O" | "X", ..] => {
+                vault::replay_line(&mut vaults, &f).ok_or_else(bad)?;
+            },
             ["x", id, day] => {
                 let id = parse_hex32(id).ok_or_else(bad)?;
                 rows.remove(&id);
@@ -175,7 +193,7 @@ fn replay(path: &Path) -> Result<Replayed, IndexError> {
             _ => return Err(bad()),
         }
     }
-    Ok((rows, imported, moderation))
+    Ok((rows, imported, vaults, moderation))
 }
 
 /// Write the compact form of the state to `path` atomically and return the
@@ -184,6 +202,7 @@ fn compact(
     path: &Path,
     rows: &HashMap<BlobId, BlobRow>,
     imported: &HashMap<String, u32>,
+    vaults: &HashMap<VaultId, vault::FileVault>,
     moderation: &Moderation,
 ) -> Result<File, IndexError> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -197,6 +216,9 @@ fn compact(
         }
         for r in rows.values() {
             w.write_all(row_line(r).as_bytes())?;
+        }
+        for v in vaults.values() {
+            w.write_all(v.compact_lines().as_bytes())?;
         }
         for (id, day) in &moderation.tombstones {
             w.write_all(format!("x {} {day}\n", hex::encode(id)).as_bytes())?;
@@ -219,13 +241,14 @@ impl FileIndex {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let (rows, imported, moderation) = replay(&path)?;
-        let log = compact(&path, &rows, &imported, &moderation)?;
+        let (rows, imported, vaults, moderation) = replay(&path)?;
+        let log = compact(&path, &rows, &imported, &vaults, &moderation)?;
         Ok(Self {
             path,
             inner: Mutex::new(Inner {
                 rows,
                 imported,
+                vaults,
                 moderation,
                 log,
             }),
@@ -243,7 +266,7 @@ impl FileIndex {
     /// Rewrite the log compactly (after a sweep removed many rows).
     pub(crate) fn compact_now(&self) -> Result<(), IndexError> {
         let mut g = self.lock();
-        let log = compact(&self.path, &g.rows, &g.imported, &g.moderation)?;
+        let log = compact(&self.path, &g.rows, &g.imported, &g.vaults, &g.moderation)?;
         g.log = log;
         Ok(())
     }

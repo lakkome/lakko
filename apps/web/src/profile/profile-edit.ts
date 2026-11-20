@@ -17,6 +17,7 @@
  */
 
 import type { AvatarData } from "./avatar-model";
+import { isStorageFull } from "../storage/blob-access";
 
 // ---------------------------------------------------------------------------
 // Saved and pending
@@ -146,6 +147,8 @@ export interface SavePorts<M> {
 
 export type SaveError =
   | { readonly kind: "upload" }
+  /** docs/ux/storage-full.md — the server has no room for new files. */
+  | { readonly kind: "full" }
   | { readonly kind: "taken"; readonly username: string }
   | { readonly kind: "cancelled" }
   | { readonly kind: "generic"; readonly text: string | null };
@@ -178,8 +181,8 @@ export async function runProfileSave<M>(
     } else {
       try {
         avatar = await ports.uploadPhoto(photo.media);
-      } catch {
-        return fail({ kind: "upload" });
+      } catch (err) {
+        return fail(isStorageFull(err) ? { kind: "full" } : { kind: "upload" });
       }
       pending = { ...pending, photo: { kind: "uploaded", media: photo.media, avatar } };
     }

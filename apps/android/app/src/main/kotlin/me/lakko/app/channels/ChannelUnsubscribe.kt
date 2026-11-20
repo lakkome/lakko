@@ -76,14 +76,14 @@ public object ChannelUnsubscribe {
     }
 
     /**
-     * ADR-0089 step 5 — the owner or a publisher takes a channel moderators
+     * ADR-0098 step 5 — the owner or a publisher takes a channel moderators
      * removed out of the list: it ends here and the account's conversation
      * end is written, so the account's other devices drop it too, as a
      * subscriber's Unsubscribe does. Only the channels-service call is
      * skipped (every route answers `410 channel-removed`).
      */
     public fun leaveRemoved(state: ChannelsUiState, channelId: String) {
-        leave(state, channelId, baseUrl = "", tellDevices = true, callService = false)
+        leave(state, channelId, baseUrl = "", tellDevices = true, tellServer = false)
     }
 
     /**
@@ -93,23 +93,31 @@ public object ChannelUnsubscribe {
      * server's 90-day prune retires a row nobody reads).
      *
      * ADR-0087 section 9.5: the row and its posts go from every device of the
-     * person. [tellDevices] says so over the DeviceGroup; a device acting on
-     * that register passes `false`.
+     * person. [tellDevices] says so over the DeviceGroup (the conversation
+     * end and the channel subscription register's leave, written BEFORE the
+     * channel goes so no reconcile adds it back); a device acting on either
+     * register passes `false`. [tellServer] `false`: the device that left
+     * already told the service (docs/ux/second-device.md section 4a).
      */
     public fun leave(
         state: ChannelsUiState,
         channelId: String,
         baseUrl: String,
         tellDevices: Boolean = true,
-        /** `false`: no channels-service call ([leaveRemoved]). */
-        callService: Boolean = true,
+        /** `false`: no channels-service call ([leaveRemoved], or another device already told it). */
+        tellServer: Boolean = true,
     ) {
-        val keys = state.subscriberKeysByChannel.value[channelId]?.let {
-            ChannelSubscriberKeys(secret = it.secret.copyOf(), publicKey = it.publicKey.copyOf())
+        if (tellDevices) ChannelSubscriptionSync.recordLeave(channelId)
+        val keys = if (!tellServer) {
+            null
+        } else {
+            state.subscriberKeysByChannel.value[channelId]?.let {
+                ChannelSubscriberKeys(secret = it.secret.copyOf(), publicKey = it.publicKey.copyOf())
+            }
         }
         state.clearSubscriberKeys(channelId)
         state.removeChannel(channelId)
-        // ADR-0089 step 5 — a removed channel's mark goes with it.
+        // ADR-0098 step 5 — a removed channel's mark goes with it.
         RemovedChannels.noteAnswered(channelId)
         // ADR-0060 §3 — the server drops the member card with the
         // subscription, so a later subscription uploads afresh.
@@ -128,10 +136,6 @@ public object ChannelUnsubscribe {
             }
         }
         if (keys == null) return
-        if (!callService) {
-            keys.secret.fill(0)
-            return
-        }
         scope.launch {
             try {
                 serverClient(baseUrl).use { client ->

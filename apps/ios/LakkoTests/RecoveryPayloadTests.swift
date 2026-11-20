@@ -5,121 +5,12 @@ import XCTest
 import LakkoCore
 @testable import Lakko
 
-/// The another-device recovery payload, v2: `grant(32) || phrase
-/// entropy(16)`, sealed under the per-pairing exporter key and tagged
-/// `lakko/recovery-payload/v2`.
-///
-/// The simulator test target links the real `LakkoCore`, so `sealWithKey` /
-/// `openWithKey` / `RecoveryMnemonic.fromEntropy` run for real here.
-///
-/// Byte-compatibility with the web reference
-/// (`apps/web/src/devices/recovery-payload.ts`) is pinned by the magic,
-/// label and layout assertions: an iOS device hands keys to a web or
-/// Android device and receives them from one.
+/// The another-device recovery row, v3 (G-56): the codec and the row framing
+/// are the core's (`composeRecoveryPayload`, `decodeRecoveryPayload`,
+/// `wrapRecoveryRow`, `unwrapRecoveryRow`); the golden vector and every
+/// refusal are in ``EarlierKeysGateTests``. Here: the phrase rebuild and the
+/// sender-to-receiver chain through the real core.
 final class RecoveryPayloadTests: XCTestCase {
-
-    private func grant(_ fill: UInt8 = 0x41) -> Data {
-        Data(repeating: fill, count: RecoveryPayload.recoveryGrantTokenLength)
-    }
-
-    private func entropy(_ fill: UInt8 = 0x42) -> Data {
-        Data(repeating: fill, count: RecoveryPayload.recoveryPhraseEntropyLength)
-    }
-
-    // MARK: - Wire constants
-
-    func testTheWireConstantsAreTheV2Ones() {
-        XCTAssertEqual(RecoveryPayload.recoveryExporterLabel, "lakko/device-recovery/v2")
-        XCTAssertEqual(RecoveryPayload.recoveryGrantTokenLength, 32)
-        XCTAssertEqual(RecoveryPayload.recoveryPhraseEntropyLength, 16)
-        XCTAssertEqual(RecoveryPayload.recoveryPayloadLength, 48)
-    }
-
-    // MARK: - Payload layout
-
-    func testBuildAndParseRoundTrip() throws {
-        let payload = try RecoveryPayload.buildRecoveryPayload(
-            grantToken: grant(),
-            phraseEntropy: entropy()
-        )
-        XCTAssertEqual(payload.count, 48)
-        let parsed = try RecoveryPayload.parseRecoveryPayload(payload)
-        XCTAssertEqual(parsed.grantToken, grant())
-        XCTAssertEqual(parsed.phraseEntropy, entropy())
-    }
-
-    func testPayloadLayoutIsGrantThenEntropy() throws {
-        let payload = try RecoveryPayload.buildRecoveryPayload(
-            grantToken: grant(0x01),
-            phraseEntropy: entropy(0x02)
-        )
-        XCTAssertTrue(payload.prefix(32).allSatisfy { $0 == 0x01 })
-        XCTAssertTrue(payload.dropFirst(32).allSatisfy { $0 == 0x02 })
-    }
-
-    func testBuildRejectsWrongGrantLength() {
-        for count in [0, 31, 33] {
-            XCTAssertThrowsError(
-                try RecoveryPayload.buildRecoveryPayload(
-                    grantToken: Data(count: count), phraseEntropy: entropy()))
-        }
-    }
-
-    func testBuildRejectsWrongEntropyLengthIncludingTheOldSeed() {
-        // 64 is the v1 seed, 32 the entropy of a 24-word phrase.
-        for count in [0, 15, 17, 32, 64] {
-            XCTAssertThrowsError(
-                try RecoveryPayload.buildRecoveryPayload(
-                    grantToken: grant(), phraseEntropy: Data(count: count)),
-                "\(count) bytes")
-        }
-    }
-
-    func testParseRejectsEveryOtherLengthIncludingAV1Payload() {
-        // 96 = grant(32) || seed(64): the v1 plaintext.
-        for count in [0, 47, 49, 96] {
-            XCTAssertThrowsError(
-                try RecoveryPayload.parseRecoveryPayload(Data(count: count)), "\(count) bytes")
-        }
-    }
-
-    func testParseAcceptsASliceThatDoesNotStartAtZero() throws {
-        let padded = Data([0xFF, 0xFF]) + grant(0x05) + entropy(0x06)
-        let parsed = try RecoveryPayload.parseRecoveryPayload(padded.dropFirst(2))
-        XCTAssertEqual(parsed.grantToken, grant(0x05))
-        XCTAssertEqual(parsed.phraseEntropy, entropy(0x06))
-    }
-
-    // MARK: - Mailbox row wrap / unwrap
-
-    func testRowWrapUnwrapRoundTrip() {
-        let sealed = Data((0..<76).map { UInt8($0 % 251) })
-        let row = RecoveryPayload.wrapRecoveryRow(sealedBlob: sealed)
-        XCTAssertTrue(RecoveryPayload.isRecoveryPayloadRow(row))
-        XCTAssertEqual(RecoveryPayload.unwrapRecoveryRow(row), sealed)
-    }
-
-    func testRowMagicMatchesWebReference() {
-        let expectedMagic = Data("lakko/recovery-payload/v2".utf8)
-        let row = RecoveryPayload.wrapRecoveryRow(sealedBlob: Data([0x7F]))
-        XCTAssertEqual(row.prefix(expectedMagic.count), expectedMagic)
-        XCTAssertEqual(row[expectedMagic.count], 0x7F)
-    }
-
-    /// No dual accept: a row tagged v1 is not a recovery row at all.
-    func testAV1RowIsNotRecognised() {
-        let v1 = Data("lakko/recovery-payload/v1".utf8) + Data(count: 124)
-        XCTAssertFalse(RecoveryPayload.isRecoveryPayloadRow(v1))
-        XCTAssertNil(RecoveryPayload.unwrapRecoveryRow(v1))
-    }
-
-    func testNonRecoveryRowsAreNotMisclassified() {
-        XCTAssertFalse(RecoveryPayload.isRecoveryPayloadRow(Data(count: 64)))
-        XCTAssertNil(RecoveryPayload.unwrapRecoveryRow(Data(count: 64)))
-        // A bare magic with no sealed blob is refused too.
-        let bareMagic = Data("lakko/recovery-payload/v2".utf8)
-        XCTAssertFalse(RecoveryPayload.isRecoveryPayloadRow(bareMagic))
-    }
 
     // MARK: - Entropy -> phrase and seed (real core)
 
@@ -142,43 +33,47 @@ final class RecoveryPayloadTests: XCTestCase {
 
     // MARK: - Seal / open round-trip (real core)
 
-    /// The sender's chain (stored phrase -> entropy -> payload -> seal ->
-    /// row) and the receiver's (row -> open -> parse -> phrase + seed),
-    /// under a 32-byte key of the shape the exporter returns. The exporter
-    /// derivation itself needs two live DeviceGroup members and is covered
-    /// by the Rust core's tests.
+    /// The sender's chain (compose -> seal -> row) and the receiver's (row ->
+    /// unwrap -> open -> decode -> phrase + seed + predecessors), under a
+    /// 32-byte key of the shape the exporter returns.
     func testSenderToReceiverRoundTripThroughTheRealCore() throws {
-        let key = Data(repeating: 0x33, count: RecoveryPayload.recoveryExporterKeyLength)
+        let key = Data(repeating: 0x33, count: Int(recoveryExporterKeyLen()))
         let mnemonic = RecoveryMnemonic.generate()
-        let payload = try RecoveryPayload.buildRecoveryPayload(
-            grantToken: grant(0x05),
-            phraseEntropy: try RecoveryMnemonic.fromPhrase(phrase: mnemonic.phrase()).toEntropy()
-        )
+        let older = RecoveryMnemonic.generate().toSeed()
+        let grant = Data(repeating: 0x05, count: 32)
+        let payload = try composeRecoveryPayload(
+            grant: grant,
+            phraseEntropy: mnemonic.toEntropy(),
+            predecessors: [FfiRecoveryPredecessor(seed: older, adoptedAtMs: 1_700_000_000_000)])
+        XCTAssertEqual(payload.count, 49 + 72)
 
         let sealed = try sealWithKey(key: key, plaintext: payload)
         // ChaCha20-Poly1305 wire: nonce(12) || ciphertext+tag(16).
-        XCTAssertEqual(sealed.count, 12 + 48 + 16)
+        XCTAssertEqual(sealed.count, 12 + payload.count + 16)
 
-        let row = RecoveryPayload.wrapRecoveryRow(sealedBlob: sealed)
-        // The published row never carries the entropy in the clear.
+        let row = wrapRecoveryRow(sealed: sealed)
+        XCTAssertEqual(row.prefix(25), Data("lakko/recovery-payload/v3".utf8))
+        // The published row never carries the entropy or a seed in the clear.
         XCTAssertNil(row.range(of: mnemonic.toEntropy()))
-        let unwrapped = try XCTUnwrap(RecoveryPayload.unwrapRecoveryRow(row))
+        XCTAssertNil(row.range(of: older))
+        let unwrapped = try XCTUnwrap(try unwrapRecoveryRow(row: row))
 
         let opened = try openWithKey(key: key, wire: unwrapped)
-        let parsed = try RecoveryPayload.parseRecoveryPayload(opened)
-        XCTAssertEqual(parsed.grantToken, grant(0x05))
-        let rebuilt = try RecoveryPayload.phraseAndSeed(fromEntropy: parsed.phraseEntropy)
+        let decoded = try decodeRecoveryPayload(plaintext: opened)
+        XCTAssertEqual(decoded.grant, grant)
+        XCTAssertEqual(decoded.predecessors.map(\.seed), [older])
+        let rebuilt = try RecoveryPayload.phraseAndSeed(fromEntropy: decoded.phraseEntropy)
         XCTAssertEqual(rebuilt.phrase, mnemonic.phrase())
         XCTAssertEqual(rebuilt.seed, mnemonic.toSeed())
     }
 
     func testOpenRefusesWrongKey() throws {
-        let key = Data(repeating: 0x33, count: RecoveryPayload.recoveryExporterKeyLength)
-        let wrongKey = Data(repeating: 0x34, count: RecoveryPayload.recoveryExporterKeyLength)
-        let payload = try RecoveryPayload.buildRecoveryPayload(
-            grantToken: grant(),
-            phraseEntropy: entropy()
-        )
+        let key = Data(repeating: 0x33, count: 32)
+        let wrongKey = Data(repeating: 0x34, count: 32)
+        let payload = try composeRecoveryPayload(
+            grant: Data(repeating: 0x41, count: 32),
+            phraseEntropy: RecoveryMnemonic.generate().toEntropy(),
+            predecessors: [])
         let sealed = try sealWithKey(key: key, plaintext: payload)
         XCTAssertThrowsError(try openWithKey(key: wrongKey, wire: sealed))
     }

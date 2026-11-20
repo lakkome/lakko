@@ -298,15 +298,20 @@ export default function Profile(): JSX.Element {
   // The proof block, over the screen (section 5 step 2)
   // -------------------------------------------------------------------------
 
+  const [proofOpen, setProofOpen] = createSignal(false);
   const gate = createProofGate({
     auth,
     copy: PROOF_COPY.changeUsername,
-    busy,
+    // The save is busy while it waits for this proof; the gate reads busy as
+    // "checking" and disables its field, so the password could never be
+    // typed and a rename past the fresh window never finished (base
+    // scenario 3, 2026-11-11). While the block is open, only its own check
+    // counts.
+    busy: () => busy() && !proofOpen(),
     sessionToken: () => account()?.token ?? null,
     usernameKnown: () => (saved().username ?? "").length > 0,
   });
   onCleanup(() => gate.clear());
-  const [proofOpen, setProofOpen] = createSignal(false);
   let proofAnswer: ((grant: string | null) => void) | null = null;
   const [proofChecking, setProofChecking] = createSignal(false);
 
@@ -382,6 +387,8 @@ export default function Profile(): JSX.Element {
     switch (e.kind) {
       case "upload":
         return t("profile.save.error.upload");
+      case "full":
+        return t("profile.save.error.full");
       case "taken":
         return t("profile.username.taken", { username: `@${e.username}` });
       case "cancelled":
@@ -532,7 +539,7 @@ export default function Profile(): JSX.Element {
             disabled={busy()}
             onClick={() => setMenuOpen((v) => !v)}
           >
-            <Icon name="pencil" size={16} />
+            <Icon name="pencil" size={20} />
           </button>
           <Show when={menuOpen()}>
             <AvatarMenu
@@ -581,7 +588,7 @@ export default function Profile(): JSX.Element {
                   disabled={busy()}
                   onClick={openName}
                 >
-                  <Icon name="pencil" size={16} />
+                  <Icon name="pencil" size={20} />
                 </button>
               </>
             }
@@ -643,7 +650,7 @@ export default function Profile(): JSX.Element {
                       disabled={busy()}
                       onClick={openUser}
                     >
-                      <Icon name="pencil" size={16} />
+                      <Icon name="pencil" size={20} />
                     </button>
                   </>
                 )}

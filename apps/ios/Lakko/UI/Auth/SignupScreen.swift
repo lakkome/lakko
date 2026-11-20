@@ -28,87 +28,158 @@ public struct SignupScreen: View {
 
     public var body: some View {
         AuthScreen {
-            AuthTitle(title: l10n.t("auth.signup.title"), subtitle: l10n.t("auth.signup.lede"))
+            // `docs/ux/beta-notice.md` section 3: above the form, and above
+            // the "Lakko is full" state when that replaces the form.
+            BetaNoticeBanner()
+            if viewModel.mode == .form {
+                // `docs/ux/supporters.md` section 1.2 — a supporter place is
+                // held on this device for this sign-up.
+                if viewModel.placeHeld {
+                    AuthHint(text: l10n.t("auth.signup.code.held"))
+                }
+                AuthTitle(title: l10n.t("auth.signup.title"), subtitle: l10n.t("auth.signup.lede"))
 
-            VStack(alignment: .leading, spacing: 6) {
-                AuthTextField(
-                    label: l10n.t("auth.username.label"),
-                    text: $viewModel.username,
-                    contentType: .username,
+                VStack(alignment: .leading, spacing: 6) {
+                    AuthTextField(
+                        label: l10n.t("auth.username.label"),
+                        text: $viewModel.username,
+                        contentType: .username,
+                        disabled: viewModel.busy
+                    )
+                    // ADR-0048 section 4: the reason, as the user types.
+                    if let hint = viewModel.usernameHint {
+                        AuthHint(text: hint, isError: true)
+                    } else {
+                        AuthHint(text: l10n.t("auth.signup.username.hint"))
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    AuthTextField(
+                        label: l10n.t("auth.signup.name.label"),
+                        placeholder: viewModel.username,
+                        text: $viewModel.displayName,
+                        contentType: .name,
+                        capitalization: .words,
+                        autocorrect: false,
+                        disabled: viewModel.busy
+                    )
+                    if let nameError = viewModel.displayNameError {
+                        AuthHint(text: nameError, isError: true)
+                    } else {
+                        AuthHint(text: l10n.t("auth.signup.name.hint"))
+                    }
+                }
+
+                AuthSecureField(
+                    label: l10n.t("auth.password.label"),
+                    text: $viewModel.password,
+                    contentType: .newPassword,
                     disabled: viewModel.busy
                 )
-                // ADR-0048 section 4: the reason, as the user types.
-                if let hint = viewModel.usernameHint {
-                    AuthHint(text: hint, isError: true)
-                } else {
-                    AuthHint(text: l10n.t("auth.signup.username.hint"))
-                }
-            }
+                AuthHint(text: l10n.t(
+                    "auth.password.hint", counts: ["count": UInt64(SignupViewModel.minPasswordLength)]))
 
-            VStack(alignment: .leading, spacing: 6) {
-                AuthTextField(
-                    label: l10n.t("auth.signup.name.label"),
-                    placeholder: viewModel.username,
-                    text: $viewModel.displayName,
-                    contentType: .name,
-                    capitalization: .words,
-                    autocorrect: false,
-                    disabled: viewModel.busy
+                AuthSecureField(
+                    label: l10n.t("auth.password.confirm.label"),
+                    text: $viewModel.confirm,
+                    contentType: .newPassword,
+                    disabled: viewModel.busy,
+                    submitLabel: .go,
+                    onSubmit: viewModel.onSubmit
                 )
-                if let nameError = viewModel.displayNameError {
-                    AuthHint(text: nameError, isError: true)
-                } else {
-                    AuthHint(text: l10n.t("auth.signup.name.hint"))
+
+                if let error = viewModel.error {
+                    AuthHint(text: error, isError: true)
                 }
-            }
 
-            AuthSecureField(
-                label: l10n.t("auth.password.label"),
-                text: $viewModel.password,
-                contentType: .newPassword,
-                disabled: viewModel.busy
-            )
-            AuthHint(text: l10n.t(
-                "auth.password.hint", counts: ["count": UInt64(SignupViewModel.minPasswordLength)]))
-
-            AuthSecureField(
-                label: l10n.t("auth.password.confirm.label"),
-                text: $viewModel.confirm,
-                contentType: .newPassword,
-                disabled: viewModel.busy,
-                submitLabel: .go,
-                onSubmit: viewModel.onSubmit
-            )
-
-            if let error = viewModel.error {
-                AuthHint(text: error, isError: true)
-            }
-
-            // ADR-0054 S4 / `docs/ux/anti-abuse.md` section 1: the one heavy
-            // wait in the app. The button becomes a disabled working row, one
-            // line below it, and `Cancel` back to the filled-in form.
-            AuthPrimaryButton(
-                title: l10n.t(viewModel.rateLimited ? "common.try_again" : "auth.signup.submit"),
-                busy: viewModel.busy,
-                busyTitle: SignupViewModel.workingTitle,
-                action: viewModel.rateLimited ? viewModel.onTryAgain : viewModel.onSubmit
-            )
-            if viewModel.busy {
-                AuthHint(text: SignupViewModel.workingNote)
-                if viewModel.cancellable {
-                    AuthSecondaryButton(title: l10n.t("common.cancel"), action: viewModel.onCancel)
+                // ADR-0054 S4 / `docs/ux/anti-abuse.md` section 1: the one heavy
+                // wait in the app. The button becomes a disabled working row, one
+                // line below it, and `Cancel` back to the filled-in form.
+                AuthPrimaryButton(
+                    title: l10n.t(viewModel.rateLimited ? "common.try_again" : "auth.signup.submit"),
+                    busy: viewModel.busy,
+                    busyTitle: SignupViewModel.workingTitle,
+                    action: viewModel.rateLimited ? viewModel.onTryAgain : viewModel.onSubmit
+                )
+                LegalSignupNotice()
+                if viewModel.busy {
+                    AuthHint(text: SignupViewModel.workingNote)
+                    if viewModel.cancellable {
+                        AuthSecondaryButton(title: l10n.t("common.cancel"), action: viewModel.onCancel)
+                    }
                 }
-            }
 
-            AuthLinkRow(
-                message: "auth.signup.have_account",
-                title: l10n.t("auth.login.submit"),
-                disabled: viewModel.busy,
-                action: onNavigateToLogin
-            )
+                AuthLinkRow(
+                    message: "auth.signup.have_account",
+                    title: l10n.t("auth.login.submit"),
+                    disabled: viewModel.busy,
+                    action: onNavigateToLogin
+                )
+            } else if viewModel.mode == .supporterCode {
+                // `docs/ux/supporters.md` section 1.1 — the code entry, in
+                // place of the full state.
+                AuthTitle(title: l10n.t("auth.signup.code.title"))
+                VStack(alignment: .leading, spacing: 6) {
+                    // The body line labels the field.
+                    AuthTextField(
+                        label: l10n.t("auth.signup.code.body"),
+                        text: $viewModel.supporterCode,
+                        contentType: .oneTimeCode,
+                        capitalization: .characters,
+                        autocorrect: false,
+                        disabled: viewModel.codeChecking,
+                        submitLabel: .go,
+                        onSubmit: viewModel.onSubmitSupporterCode
+                    )
+                    if let line = viewModel.codeLine {
+                        AuthHint(text: l10n.t(line.key), isError: true)
+                    }
+                }
+                AuthPrimaryButton(
+                    title: l10n.t("auth.signup.code.continue"),
+                    busy: viewModel.codeChecking,
+                    busyTitle: l10n.t("auth.signup.code.checking"),
+                    disabled: !viewModel.canContinueCode,
+                    action: viewModel.onSubmitSupporterCode
+                )
+                AuthSecondaryButton(
+                    title: l10n.t("auth.signup.code.back"),
+                    disabled: viewModel.codeChecking,
+                    action: viewModel.onSupporterCodeBack
+                )
+            } else {
+                // `docs/ux/beta-account-cap.md` section 2 — the beta is full.
+                // `docs/ux/supporters.md` section 1.2 — a held place another
+                // account already spent says so above it.
+                if viewModel.codeUsed {
+                    AuthHint(text: l10n.t("auth.signup.code.used"), isError: true)
+                }
+                AuthTitle(
+                    title: l10n.t("auth.signup.closed.title"),
+                    subtitle: l10n.t("auth.signup.closed.body"))
+                AuthPrimaryButton(
+                    title: l10n.t("auth.signup.closed.retry"),
+                    busy: viewModel.mode == .checking,
+                    busyTitle: l10n.t("auth.signup.closed.checking"),
+                    action: viewModel.onRetryOpen
+                )
+                AuthSecondaryButton(
+                    title: l10n.t("auth.signup.closed.log_in"),
+                    disabled: viewModel.mode == .checking,
+                    action: onNavigateToLogin
+                )
+                AuthLinkRow(
+                    title: l10n.t("auth.signup.code.link"),
+                    disabled: viewModel.mode == .checking,
+                    action: viewModel.onOpenSupporterCode
+                )
+            }
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
+        // The beta account cap: asked when the screen opens.
+        .task { await viewModel.onAppear() }
         // Leaving the screen while working cancels the work.
         .onDisappear { viewModel.onCancel() }
     }
@@ -123,8 +194,9 @@ public struct SignupScreen: View {
 /// keys and new words. The email and the passkey return to the step with
 /// their row marked done and `Continue` under the rows; saving a phrase
 /// lands in the app directly. The passkey row runs the existing passkey
-/// creation (with its "restore keys with this passkey" choice) under
-/// sign-up's fresh grant.
+/// creation under sign-up's fresh grant; the keys are then stored for the
+/// passkey with nothing to choose, wherever the platform can carry them
+/// (UX `docs/ux/identity-recovery.md` 10.2).
 struct SignupProtectScreen: View {
     @ObservedObject var authRepository: AuthRepository
     @ObservedObject var center: AccountProtectionCenter
@@ -136,9 +208,8 @@ struct SignupProtectScreen: View {
         case email
         case phrase
         case passkey
-        case keysChoice(AddedPasskey)
         /// The result line of the passkey step, then back to the step.
-        case result(String)
+        case result(UiText)
     }
 
     @State private var step: Step = .protect
@@ -237,26 +308,10 @@ struct SignupProtectScreen: View {
             }
             .task { await proof.opened() }
             .onDisappear { proof.closed() }
-        case .keysChoice(let added):
-            AuthScreen {
-                PasskeyKeysChoiceView(
-                    credentialIdB64: added.credentialIdB64,
-                    nickname: added.nickname,
-                    prfOutput: added.prfOutput,
-                    enrollment: .live(authRepository: authRepository, client: WebauthnClient()),
-                    onDone: { result in
-                        if let key = result.messageKey {
-                            step = .result(key)
-                        } else {
-                            passkeyDone()
-                        }
-                    }
-                )
-            }
-        case .result(let messageKey):
+        case .result(let line):
             AuthScreen {
                 AuthTitle(title: l10n.t("protect.passkey.title"))
-                AuthHint(text: l10n.t(messageKey))
+                AuthHint(text: line.text)
                 AuthPrimaryButton(title: l10n.t("protect.continue"), action: passkeyDone)
             }
         }
@@ -293,10 +348,12 @@ struct SignupProtectScreen: View {
                     freshGrant: freshGrant,
                     presentationAnchor: currentPresentationAnchor()
                 )
-                switch added.outcome {
-                case .offerKeysChoice: step = .keysChoice(added)
-                case .signInOnly: step = .result("settings.passkeys.added_no_keys")
-                }
+                // The passkey is added; its keys are stored with nothing to
+                // choose (UX 10.2 steps 2 and 3).
+                let outcome = await PasskeyKeysEnrollment
+                    .live(authRepository: authRepository, client: client)
+                    .storeAfterAdd(added)
+                step = .result(outcome.message(nickname: added.nickname))
             } catch {
                 switch SignupPasskeyStep.failure(error) {
                 case .stay:
@@ -306,6 +363,8 @@ struct SignupProtectScreen: View {
                     // appears, with no error styling. Nothing was added.
                     authRepository.dropFreshAuth()
                     proof.proofExpired()
+                case .alreadyExists:
+                    self.error = .key("settings.passkeys.error.already_exists")
                 case .error:
                     NSLog("[signup] WARN adding a passkey failed")
                     self.error = .key("auth.signup.passkey.error")
@@ -323,12 +382,16 @@ enum SignupPasskeyStep {
         case stay
         /// `403 fresh-auth-required`: the proof block appears.
         case proofNeeded
+        /// The device's passkey provider already holds a passkey for this
+        /// account: nothing was created, and it is not a device failure.
+        case alreadyExists
         case error
     }
 
     /// What a failed add leaves on the step.
     static func failure(_ error: Error) -> Failure {
         if AuthErrorCopy.isPasskeyCancelled(error) { return .stay }
+        if case .alreadyExists = error as? WebauthnRegistration.RegistrationError { return .alreadyExists }
         if FreshAuthRefusal.isRequired(error) { return .proofNeeded }
         return .error
     }

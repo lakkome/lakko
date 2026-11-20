@@ -45,6 +45,10 @@ final class PeopleSearchFieldTests: XCTestCase {
         var sendError: Error?
         var candidates: [LocalCandidate] = []
         var requested: Set<Data> = []
+        /// The `createdAt` every Sent row reads.
+        var sentCreatedAt = "2026-11-10T12:00:00Z"
+        /// The wall clock a test steers.
+        var nowMs: Int64 = 0
         /// The seeds the reach check was asked about, in order.
         var checked: [Data] = []
         /// The answer of the reach check; `nil` throws.
@@ -96,7 +100,8 @@ final class PeopleSearchFieldTests: XCTestCase {
     }
 
     private func session(
-        _ rec: Recorder, uptime: @escaping @MainActor () -> TimeInterval = { 0 }
+        _ rec: Recorder, uptime: @escaping @MainActor () -> TimeInterval = { 0 },
+        nowMs: @escaping @MainActor () -> Int64 = { PeopleSearchFieldTests.sentAtMs + 86_400_000 }
     ) -> PeopleSearchSession {
         PeopleSearchSession(ports: PeopleSearchSession.Ports(
             candidates: { rec.candidates },
@@ -127,8 +132,8 @@ final class PeopleSearchFieldTests: XCTestCase {
             sentRow: { person in
                 rec.requested.contains(person.accountKey)
                     ? SentContactRequest(
-                        recipientUsername: "", recipientAccountIdB64: "", messageId: 1, createdAt: "",
-                        recipientKeyB64: base64Encode(person.accountKey))
+                        recipientUsername: "", recipientAccountIdB64: "", messageId: 1,
+                        createdAt: rec.sentCreatedAt, recipientKeyB64: base64Encode(person.accountKey))
                     : nil
             },
             dismissSent: { row in
@@ -138,8 +143,11 @@ final class PeopleSearchFieldTests: XCTestCase {
                 rec.held?[key] ?? rec.candidates.first { $0.accountKey == key }?.known.keptGrants ?? []
             },
             isContact: { rec.contacts.contains($0.accountKey) }),
-            uptime: uptime)
+            uptime: uptime, nowMs: nowMs)
     }
+
+    /// `Recorder.sentCreatedAt` in milliseconds.
+    private static let sentAtMs: Int64 = 1_794_312_000_000
 
     private func instantModel(_ session: PeopleSearchSession) -> PeopleSearchModel {
         PeopleSearchModel(session: session, sleep: { _ in })
@@ -715,8 +723,27 @@ final class PeopleSearchFieldTests: XCTestCase {
         XCTAssertTrue(shared.requestState(for: person(1)).offersAdd)
     }
 
+    /// Who can find me, section 6.1: right after Add contact the row reads
+    /// Request sent and the button goes away. Ask again comes only once the
+    /// request has stood unanswered for a day.
+    func testNoAskAgainRightAfterAddContact() async {
+        let rec = Recorder()
+        rec.nowMs = Self.sentAtMs
+        let shared = session(rec, nowMs: { rec.nowMs })
+        await shared.addContact(person(1))
+        XCTAssertEqual(shared.requestState(for: person(1)), .sent)
+        XCTAssertFalse(shared.canAskAgain(person(1)), "just sent: no Ask again")
+        rec.nowMs = Self.sentAtMs + 86_400_000 - 1
+        XCTAssertFalse(shared.canAskAgain(person(1)), "under a day")
+        rec.nowMs = Self.sentAtMs + 86_400_000
+        XCTAssertTrue(shared.canAskAgain(person(1)), "a day without an answer")
+        rec.sentCreatedAt = ""
+        XCTAssertFalse(shared.canAskAgain(person(1)), "a time that does not parse offers nothing")
+    }
+
     /// D2: a decline tells the sender nothing, so the row keeps "Request
-    /// sent" and offers Ask again: Dismiss and Add contact in one tap.
+    /// sent" and, after a day, offers Ask again: Dismiss and Add contact in
+    /// one tap.
     func testAskAgainDismissesTheRowAndSendsOnceMore() async {
         let rec = Recorder()
         let shared = session(rec)
@@ -1008,7 +1035,7 @@ final class PeopleSearchFieldTests: XCTestCase {
         XCTAssertEqual(rec.sent, [])
     }
 
-    // MARK: - ADR-0089 step 4 — suspended accounts
+    // MARK: - ADR-0098 step 4 — suspended accounts
 
     func testSearchDropsAPersonKnownSuspendedAndKeepsTheRest() async {
         let rec = Recorder()

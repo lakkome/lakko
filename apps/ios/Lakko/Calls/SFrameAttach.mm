@@ -148,6 +148,76 @@ using SetFrameDecryptorIMP = void (*)(id, SEL, void *);
 }
 @end
 
+// MARK: - Call keys
+
+@interface LakkoSFrameCallKeys ()
+- (instancetype)initWithKeys:(lakko::sframe::LakkoCallKeys *)keys;
+- (lakko::sframe::LakkoCallKeys *)cppKeys;
+@end
+
+@implementation LakkoSFrameCallKeys {
+    lakko::sframe::LakkoCallKeys *_keys;
+}
+
++ (nullable instancetype)keysWithSeed:(NSData *_Nullable)seed {
+    if (seed == nil || seed.length != 32) {
+        return nil;
+    }
+    lakko::sframe::LakkoCallKeys *keys = lakko::sframe::LakkoCallKeys::Create(
+        static_cast<const uint8_t *>(seed.bytes), static_cast<size_t>(seed.length));
+    if (keys == nullptr) {
+        return nil;
+    }
+    LakkoSFrameCallKeys *wrapper = [[LakkoSFrameCallKeys alloc] initWithKeys:keys];
+    return wrapper;
+}
+
+- (instancetype)initWithKeys:(lakko::sframe::LakkoCallKeys *)keys {
+    if ((self = [super init])) {
+        // Refcount: 0 -> 1 (this wrapper's retain). Every transform made on
+        // the keys takes its own.
+        keys->AddRef();
+        _keys = keys;
+    }
+    return self;
+}
+
+- (void)dealloc {
+    if (_keys) {
+        _keys->Release();
+        _keys = nullptr;
+    }
+}
+
+- (BOOL)rekeyWithSeed:(NSData *_Nullable)seed
+                nowMs:(uint64_t)nowMs
+            overlapMs:(uint64_t)overlapMs {
+    if (seed == nil || seed.length != 32) {
+        return NO;
+    }
+    const bool ok = _keys->Rekey(static_cast<const uint8_t *>(seed.bytes),
+                                 static_cast<size_t>(seed.length), nowMs, overlapMs);
+    if (!ok) {
+        NSLog(@"[lakko.sframe] call keys Rekey failed — retaining the "
+              @"current epoch key (media stays E2EE, invariant #4).");
+    }
+    return ok ? YES : NO;
+}
+
+- (void)pruneAtMs:(uint64_t)nowMs {
+    _keys->Prune(nowMs);
+}
+
+- (uint64_t)generation {
+    return _keys->Generation();
+}
+
+- (lakko::sframe::LakkoCallKeys *)cppKeys {
+    return _keys;
+}
+
+@end
+
 // MARK: - Public class
 
 namespace {
@@ -218,25 +288,18 @@ void LakkoBridgeLogSink(const char *line) {
 
 + (LakkoSFrameAttachStatus)attachEncryptorToSender:
                                 (RTCRtpSender * _Nullable)sender
-                                                  seed:(NSData *_Nullable)seed
+                                                  keys:(LakkoSFrameCallKeys *_Nullable)keys
                                              localLeaf:(uint32_t)localLeaf
                                            streamIndex:(uint8_t)streamIndex {
-    if (sender == nil) {
+    if (sender == nil || keys == nil) {
         return LakkoSFrameAttachStatusNullArgument;
-    }
-    if (seed == nil || seed.length != 32) {
-        return LakkoSFrameAttachStatusBadSeedLength;
     }
     if (![LakkoSFrameAttach bootProbe]) {
         return LakkoSFrameAttachStatusSelectorMissing;
     }
 
     lakko::sframe::LakkoFrameEncryptor *enc =
-        lakko::sframe::LakkoFrameEncryptor::Create(
-            static_cast<const uint8_t *>(seed.bytes),
-            static_cast<size_t>(seed.length),
-            localLeaf,
-            streamIndex);
+        lakko::sframe::LakkoFrameEncryptor::Create([keys cppKeys], localLeaf, streamIndex);
     if (enc == nullptr) {
         return LakkoSFrameAttachStatusBridgeCreateFailed;
     }
@@ -293,12 +356,9 @@ void LakkoBridgeLogSink(const char *line) {
 
 + (LakkoSFrameAttachStatus)attachDecryptorToReceiver:
                                 (RTCRtpReceiver * _Nullable)receiver
-                                                    seed:(NSData *_Nullable)seed {
-    if (receiver == nil) {
+                                                    keys:(LakkoSFrameCallKeys *_Nullable)keys {
+    if (receiver == nil || keys == nil) {
         return LakkoSFrameAttachStatusNullArgument;
-    }
-    if (seed == nil || seed.length != 32) {
-        return LakkoSFrameAttachStatusBadSeedLength;
     }
     if (![LakkoSFrameAttach bootProbe]) {
         return LakkoSFrameAttachStatusSelectorMissing;
@@ -313,10 +373,7 @@ void LakkoBridgeLogSink(const char *line) {
         label = receiver.track.kind.UTF8String;
     }
     lakko::sframe::LakkoFrameDecryptor *dec =
-        lakko::sframe::LakkoFrameDecryptor::Create(
-            static_cast<const uint8_t *>(seed.bytes),
-            static_cast<size_t>(seed.length),
-            label);
+        lakko::sframe::LakkoFrameDecryptor::Create([keys cppKeys], label);
     if (dec == nullptr) {
         return LakkoSFrameAttachStatusBridgeCreateFailed;
     }
@@ -389,79 +446,6 @@ void LakkoBridgeLogSink(const char *line) {
 }
 
 // MARK: - Mid-call rekey (G-18, ADR-0029)
-
-+ (BOOL)rekeyEncryptorOnSender:(RTCRtpSender * _Nullable)sender
-                          seed:(NSData * _Nullable)seed {
-    if (sender == nil) {
-        return NO;
-    }
-    if (seed == nil || seed.length != 32) {
-        return NO;
-    }
-    // Read the encryptor we installed on this sender at attach time. A
-    // sender that was never SFrame-armed carries no association — a
-    // benign no-op, not a failure.
-    id obj = objc_getAssociatedObject(
-        sender, (__bridge const void *)kEncryptorAssociationKey);
-    LakkoSFrameEncryptorWrapper *wrapper = (LakkoSFrameEncryptorWrapper *)obj;
-    if (wrapper == nil || wrapper->_cppEncryptor == nullptr) {
-        return YES;
-    }
-    // Rekey is thread-safe against a concurrent Encrypt on the codec
-    // thread (the bridge guards the seal key with `seal_mutex_`).
-    const bool ok = wrapper->_cppEncryptor->Rekey(
-        static_cast<const uint8_t *>(seed.bytes),
-        static_cast<std::size_t>(seed.length));
-    if (!ok) {
-        NSLog(@"[lakko.sframe] encryptor Rekey failed — retaining the "
-              @"current epoch key (media stays E2EE, invariant #4).");
-    }
-    return ok ? YES : NO;
-}
-
-+ (BOOL)rekeyDecryptorOnReceiver:(RTCRtpReceiver * _Nullable)receiver
-                            seed:(NSData * _Nullable)seed
-                           nowMs:(uint64_t)nowMs
-                       overlapMs:(uint64_t)overlapMs {
-    if (receiver == nil) {
-        return NO;
-    }
-    if (seed == nil || seed.length != 32) {
-        return NO;
-    }
-    id obj = objc_getAssociatedObject(
-        receiver, (__bridge const void *)kDecryptorAssociationKey);
-    LakkoSFrameDecryptorWrapper *wrapper = (LakkoSFrameDecryptorWrapper *)obj;
-    if (wrapper == nil || wrapper->_cppDecryptor == nullptr) {
-        return YES;
-    }
-    // The ring rotates the call key and retains the previous one for the
-    // overlap window; thread-safe (the Rust ring is `Mutex`-guarded).
-    const bool ok = wrapper->_cppDecryptor->Rekey(
-        static_cast<const uint8_t *>(seed.bytes),
-        static_cast<std::size_t>(seed.length),
-        static_cast<uint64_t>(nowMs),
-        static_cast<uint64_t>(overlapMs));
-    if (!ok) {
-        NSLog(@"[lakko.sframe] decryptor Rekey failed — retaining the "
-              @"current ring (media stays E2EE, invariant #4).");
-    }
-    return ok ? YES : NO;
-}
-
-+ (void)pruneDecryptorOnReceiver:(RTCRtpReceiver * _Nullable)receiver
-                           nowMs:(uint64_t)nowMs {
-    if (receiver == nil) {
-        return;
-    }
-    id obj = objc_getAssociatedObject(
-        receiver, (__bridge const void *)kDecryptorAssociationKey);
-    LakkoSFrameDecryptorWrapper *wrapper = (LakkoSFrameDecryptorWrapper *)obj;
-    if (wrapper == nil || wrapper->_cppDecryptor == nullptr) {
-        return;
-    }
-    wrapper->_cppDecryptor->Prune(static_cast<uint64_t>(nowMs));
-}
 
 + (void)detachFromSender:(RTCRtpSender * _Nullable)sender {
     if (sender == nil) {
@@ -549,13 +533,31 @@ const char * const kNativeRtpReceiverTypeEncoding =
 using NativeRtpReceiverIMP = lakko::receiver_delay::ReturnedRef (*)(id, SEL);
 
 // The package version and the LC_UUID of each slice whose machine code the
-// slot and the calling convention were read from (stasel/WebRTC 125.0.0,
-// WebRTC-M125.xcframework.zip, sha256
-// 4da2f9c7b7481a82249ea61dfcceae7caac6890e0a0412389684765435113ae8).
-NSString * const kVerifiedPackageVersion = @"125.0.0";
-NSString * const kVerifiedUuidDeviceArm64 = @"4C4C4485-5555-3144-A186-7570B405EE6A";
-NSString * const kVerifiedUuidSimulatorArm64 = @"4C4C44CF-5555-3144-A1B7-95616B307988";
-NSString * const kVerifiedUuidSimulatorX8664 = @"4C4C44D7-5555-3144-A1AF-2ABA8DEDBD33";
+// slot and the calling convention were read from (webrtc-sdk/Specs
+// 125.6422.07, WebRTC.xcframework.zip, sha256
+// 827cc2f508c341367c9b0e4f6def46e5f6834251082047d5d1da5bc8fd379263; read
+// 2026-11-09, see `receiver-delay.h`). Per slice, the vtable address points
+// found by type name and the functions at the slots the probe and the setter
+// use:
+//
+//   device arm64:     proxy vtable 0x96acd0 (slot 1 0xfeb5c, slot 8 0x7e58c0,
+//                     slot 13 0x7e5b14, slot 16 0x7e5d38); VideoRtpReceiver
+//                     0x96b078 (slot 8 0x7534, slot 13 0x7eae4c);
+//                     JitterBufferDelay::Set 0x38c76c
+//   simulator arm64:  proxy 0x972cd0 (slot 1 0xfc2bc, slot 8 0x7ebfc0,
+//                     slot 13 0x7ec214, slot 16 0x7ec438); VideoRtpReceiver
+//                     0x973078 (slot 8 0x47d8, slot 13 0x7f14bc); Set 0x38ee5c
+//   simulator x86_64: proxy 0xd98968 (slot 1 0x227e40, slot 8 0xbe9190,
+//                     slot 13 0xbe9420, slot 16 0xbe9760); VideoRtpReceiver
+//                     0xd98d10 (slot 8 0x4ba0, slot 13 0xbf0800); Set 0x6b1a20
+//
+// stasel/WebRTC 125.0.0, which iOS linked until 2026-11-09, had the same
+// slots and convention; its identities are no longer listed because it is no
+// longer the binary the app links.
+NSString * const kVerifiedPackageVersion = @"125.6422.07";
+NSString * const kVerifiedUuidDeviceArm64 = @"4C4C4476-5555-3144-A12E-D71FF8AA38BD";
+NSString * const kVerifiedUuidSimulatorArm64 = @"4C4C44CD-5555-3144-A1A9-7A0C4DFC7DD7";
+NSString * const kVerifiedUuidSimulatorX8664 = @"4C4C440C-5555-3144-A1E2-AEA9B0483609";
 
 // 0: not decided. 1: the static conditions hold. 2: they do not.
 std::atomic<int> g_receiver_delay_static{0};

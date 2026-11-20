@@ -588,12 +588,37 @@ pub fn open_registrar_seed_envelope(
     plaintext: &[u8],
     account_identity: &Identity,
 ) -> Result<Vec<u8>, JsError> {
+    open_registrar_seed(plaintext, account_identity, account_identity)
+}
+
+/// ADR-0074 section 3.7 (2026-11-20) — open a registrar-seed envelope
+/// addressed to `accountIdentity` (the conversation identity the roster names)
+/// but sealed to the X25519 key of `sealedToIdentity` (the identity the
+/// directory serves after a rotation of the account keys).
+///
+/// # Errors
+///
+/// As `openRegistrarSeedEnvelope`, with the X25519 key of `sealedToIdentity`
+/// in place of the addressee's.
+#[wasm_bindgen(js_name = openRegistrarSeedEnvelopeSealedTo)]
+pub fn open_registrar_seed_envelope_sealed_to(
+    plaintext: &[u8],
+    account_identity: &Identity,
+    sealed_to_identity: &Identity,
+) -> Result<Vec<u8>, JsError> {
+    open_registrar_seed(plaintext, account_identity, sealed_to_identity)
+}
+
+fn open_registrar_seed(
+    plaintext: &[u8],
+    addressee: &Identity,
+    sealed_to: &Identity,
+) -> Result<Vec<u8>, JsError> {
     let env = decode_registrar_seed(plaintext).map_err(|e| err(&e.to_string()))?;
-    let identity = account_identity.mls_identity();
-    if env.member_account_key.as_slice() != identity.signature_public_key() {
+    if env.member_account_key.as_slice() != addressee.mls_identity().signature_public_key() {
         return Err(err("registrar seed is addressed to another account"));
     }
-    let secret = X25519SecretKey::from_bytes(identity.x25519_secret_bytes());
+    let secret = X25519SecretKey::from_bytes(sealed_to.mls_identity().x25519_secret_bytes());
     env.open(&secret)
         .map(|seed| seed.to_vec())
         .map_err(|e| err(&e.to_string()))
@@ -631,6 +656,29 @@ mod tests {
             .registrars(&journal, &registrar.public_key(), &[2])
             .unwrap();
         assert!(change.path().ends_with("/registrars"));
+    }
+
+    /// ADR-0074 section 3.7 (2026-11-20): addressed to the conversation key,
+    /// sealed to the current identity's X25519 key. Only the success path is
+    /// driven here: a `JsError` cannot be built off wasm32.
+    #[test]
+    fn a_registrar_seed_opens_sealed_to_the_current_identity() {
+        let conversation = Identity::from_seed(&[0x61; 64]).unwrap();
+        let current = Identity::from_seed(&[0x62; 64]).unwrap();
+        let conversation_key = conversation.mls_identity().signature_public_key().to_vec();
+        let seed = ds_journal_registrar_seed(&[0x51; 32], &conversation_key).unwrap();
+        let wire = compose_registrar_seed_envelope(
+            &[0x45; 32],
+            &conversation_key,
+            &current.mls_identity().x25519_public_key(),
+            1,
+            &seed,
+        )
+        .unwrap();
+        assert_eq!(
+            open_registrar_seed_envelope_sealed_to(&wire, &conversation, &current).unwrap(),
+            seed
+        );
     }
 
     fn statement_of(req: &DsStatementRequest) -> lakko_ds_proof::SignedStatement {

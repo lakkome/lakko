@@ -29,6 +29,11 @@ use std::collections::VecDeque;
 
 use nnnoiseless::DenoiseState;
 
+mod resample;
+
+use resample::RateAdapter;
+pub use resample::{factor_of, MAX_FACTOR, SUPPORTED_RATES};
+
 /// The only sample rate RNNoise's model is trained for. A host whose audio
 /// runs at any other rate must not use the suppressor (it would distort the
 /// voice); it sends its microphone unprocessed instead.
@@ -57,8 +62,11 @@ const PCM_MAX_S16: f32 = 32_767.0;
 pub enum NoiseError {
     /// `input` and `output` differ in length.
     LengthMismatch,
-    /// The block is longer than [`MAX_BLOCK`].
+    /// The block is longer than [`MAX_BLOCK`] (at [`SAMPLE_RATE`]: a block
+    /// at a lower rate may hold at most `MAX_BLOCK / factor` samples).
     BlockTooLong,
+    /// The rate is not one of [`SUPPORTED_RATES`].
+    UnsupportedRate,
 }
 
 impl std::fmt::Display for NoiseError {
@@ -66,6 +74,7 @@ impl std::fmt::Display for NoiseError {
         match self {
             Self::LengthMismatch => f.write_str("input and output differ in length"),
             Self::BlockTooLong => f.write_str("block longer than MAX_BLOCK"),
+            Self::UnsupportedRate => f.write_str("sample rate not supported"),
         }
     }
 }
@@ -85,6 +94,13 @@ pub struct NoiseSuppressor {
     ready: VecDeque<f32>,
     frame_out: Vec<f32>,
     voice_probability: f32,
+    /// The filters for every factor above 1, made once so a change of rate
+    /// on the audio thread allocates nothing.
+    adapters: Vec<RateAdapter>,
+    /// The factor of the rate the last block came at (1 for 48 kHz).
+    current_factor: usize,
+    /// The raised stream of one block, at 48 kHz.
+    high: Vec<f32>,
 }
 
 impl Default for NoiseSuppressor {
@@ -96,6 +112,12 @@ impl Default for NoiseSuppressor {
 impl NoiseSuppressor {
     /// A fresh suppressor. Allocates every buffer it will ever use.
     pub fn new() -> Self {
+        // nnnoiseless builds its shared tables (a process-wide `OnceCell`) on
+        // the first frame any state processes: 54 allocations, about 32 KB,
+        // counted 2026-11-10. One frame of silence through a throwaway state
+        // builds them here, so the audio thread never does (in the web's
+        // wasm it would grow the memory under the page's buffer views).
+        DenoiseState::new().process_frame(&mut [0.0; FRAME_SIZE], &[0.0; FRAME_SIZE]);
         let mut ready = VecDeque::with_capacity(LATENCY_SAMPLES + MAX_BLOCK + FRAME_SIZE);
         ready.extend(std::iter::repeat(0.0).take(LATENCY_SAMPLES));
         Self {
@@ -104,7 +126,69 @@ impl NoiseSuppressor {
             ready,
             frame_out: vec![0.0; FRAME_SIZE],
             voice_probability: 0.0,
+            adapters: SUPPORTED_RATES
+                .iter()
+                .filter(|(_, k)| *k > 1)
+                .map(|(_, k)| RateAdapter::new(*k))
+                .collect(),
+            current_factor: 1,
+            high: Vec::with_capacity(MAX_BLOCK),
         }
+    }
+
+    /// Whether [`Self::process_s16_in_place_at`] takes `rate`.
+    #[must_use]
+    pub fn supports_rate(rate: u32) -> bool {
+        factor_of(rate).is_some()
+    }
+
+    /// Cleans `samples` in place like [`Self::process_s16_in_place`], for a
+    /// stream at `rate`, one of [`SUPPORTED_RATES`]: a rate below 48 kHz is
+    /// raised to 48 kHz, cleaned and lowered back (module `resample`). At
+    /// most `MAX_BLOCK / factor` samples. The rate may change between calls
+    /// (a capture stage that re-opens at another rate); the filters then
+    /// start from silence. Adds the filters' delay to [`LATENCY_SAMPLES`].
+    /// Allocates nothing.
+    pub fn process_s16_in_place_at(
+        &mut self,
+        rate: u32,
+        samples: &mut [f32],
+    ) -> Result<(), NoiseError> {
+        let factor = factor_of(rate).ok_or(NoiseError::UnsupportedRate)?;
+        if samples.len() * factor > MAX_BLOCK {
+            return Err(NoiseError::BlockTooLong);
+        }
+        if factor != self.current_factor {
+            self.current_factor = factor;
+            for adapter in &mut self.adapters {
+                adapter.clear();
+            }
+        }
+        if factor == 1 {
+            return self.process_s16_in_place(samples);
+        }
+        let mut high = std::mem::take(&mut self.high);
+        let result = match self.adapters.iter_mut().position(|a| a.factor() == factor) {
+            Some(index) => {
+                self.adapters[index].raise(samples, &mut high);
+                let cleaned = self.process_s16_in_place(&mut high);
+                if cleaned.is_ok() {
+                    self.adapters[index].lower(&high, samples);
+                    for sample in samples.iter_mut() {
+                        *sample = if sample.is_finite() {
+                            sample.clamp(-PCM_SCALE, PCM_MAX_S16)
+                        } else {
+                            0.0
+                        };
+                    }
+                }
+                cleaned
+            },
+            // Not reachable: every factor above 1 has an adapter.
+            None => Err(NoiseError::UnsupportedRate),
+        };
+        self.high = high;
+        result
     }
 
     /// Cleans `input` into `output` (same length, at most [`MAX_BLOCK`]).
@@ -346,5 +430,92 @@ mod tests {
         let mut out = vec![0.0; input.len()];
         ns.process(&input, &mut out).unwrap();
         assert!((0.0..=1.0).contains(&ns.voice_probability()));
+    }
+
+    /// Low-passed noise in the 16-bit range, `secs` seconds at `rate`.
+    fn hum_s16(rate: u32, secs: usize, seed: u32) -> Vec<f32> {
+        let white = noise(rate as usize * secs, 0.1, seed);
+        let mut acc = 0.0f32;
+        white
+            .iter()
+            .map(|x| {
+                acc = acc * 0.95 + x * 0.05;
+                acc * 4.0 * PCM_SCALE
+            })
+            .collect()
+    }
+
+    #[test]
+    fn stationary_noise_is_attenuated_at_a_lower_rate() {
+        for rate in [16_000_u32, 8_000, 24_000, 12_000] {
+            let input = hum_s16(rate, 2, 42);
+            let mut ns = NoiseSuppressor::new();
+            let mut out = input.clone();
+            for block in out.chunks_mut(rate as usize / 100) {
+                ns.process_s16_in_place_at(rate, block).unwrap();
+            }
+            let skip = rate as usize / 2;
+            let rin = rms(&input[skip..]);
+            let rout = rms(&out[skip..]);
+            assert!(rout < rin * 0.3, "rate {rate}: rms in {rin} out {rout}");
+            assert!(out
+                .iter()
+                .all(|x| x.is_finite() && (-PCM_SCALE..=PCM_MAX_S16).contains(x)));
+        }
+    }
+
+    #[test]
+    fn at_48k_the_rate_aware_call_is_the_plain_one() {
+        let input = hum_s16(SAMPLE_RATE, 1, 7);
+        let mut a = NoiseSuppressor::new();
+        let mut b = NoiseSuppressor::new();
+        let mut out_a = input.clone();
+        let mut out_b = input.clone();
+        for (x, y) in out_a.chunks_mut(480).zip(out_b.chunks_mut(480)) {
+            a.process_s16_in_place(x).unwrap();
+            b.process_s16_in_place_at(SAMPLE_RATE, y).unwrap();
+        }
+        assert_eq!(out_a, out_b);
+    }
+
+    #[test]
+    fn refuses_an_unsupported_rate_and_a_long_block_at_a_lower_rate() {
+        let mut ns = NoiseSuppressor::new();
+        let mut block = vec![1.0; 441];
+        let before = block.clone();
+        assert_eq!(
+            ns.process_s16_in_place_at(44_100, &mut block),
+            Err(NoiseError::UnsupportedRate)
+        );
+        assert_eq!(block, before);
+        assert!(!NoiseSuppressor::supports_rate(44_100));
+        assert!(NoiseSuppressor::supports_rate(16_000));
+        let mut long = vec![0.0; MAX_BLOCK / 3 + 1];
+        assert_eq!(
+            ns.process_s16_in_place_at(16_000, &mut long),
+            Err(NoiseError::BlockTooLong)
+        );
+        let mut fits = vec![0.0; MAX_BLOCK / 3];
+        assert_eq!(ns.process_s16_in_place_at(16_000, &mut fits), Ok(()));
+    }
+
+    #[test]
+    fn a_change_of_rate_mid_stream_keeps_working() {
+        // The Pixel 7a's capture stage opened at 16 kHz and moved to 48 kHz.
+        let mut ns = NoiseSuppressor::new();
+        let mut low = hum_s16(16_000, 1, 3);
+        for block in low.chunks_mut(160) {
+            ns.process_s16_in_place_at(16_000, block).unwrap();
+        }
+        let input = hum_s16(SAMPLE_RATE, 2, 5);
+        let mut high = input.clone();
+        for block in high.chunks_mut(480) {
+            ns.process_s16_in_place_at(SAMPLE_RATE, block).unwrap();
+        }
+        let skip = SAMPLE_RATE as usize / 2;
+        assert!(rms(&high[skip..]) < rms(&input[skip..]) * 0.1);
+        for x in low.iter().chain(high.iter()) {
+            assert!(x.is_finite() && (-PCM_SCALE..=PCM_MAX_S16).contains(x));
+        }
     }
 }

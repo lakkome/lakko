@@ -49,24 +49,42 @@ public val CALL_ENCRYPTION_CHIP_LABEL: UiText = UiText("call.encryption.chip")
 public val CALL_ENCRYPTION_SHEET_TITLE: UiText = UiText("call.encryption.title")
 
 /**
- * The line under the digits saying what they are for — the only place in the
- * call surface that explains the safety number, and it does so without naming a
- * single protocol.
+ * Whether the encryption sheet speaks to two people (`docs/ux/calls.md`
+ * section 5). A group call or a call from a link never does, whatever its size,
+ * and neither does a call with more than one other person in it, whatever it
+ * was placed as.
+ *
+ * @param groupCall `true` for a group call or a call from a link.
+ * @param othersInCall the other people in the call now.
  */
-public val CALL_ENCRYPTION_SHEET_HINT: UiText = UiText("call.encryption.compare_hint")
+public fun isOneToOneEncryptionSheet(groupCall: Boolean, othersInCall: Int): Boolean =
+    !groupCall && othersInCall <= 1
 
 /**
- * The sheet's plain sentence, naming the other person when this device knows
- * their name.
- *
- * A name is what makes the sentence worth reading, so it is used whenever there
- * is one. Where there is not — a group call, or a contact this device has never
- * been able to name — the sentence stays true rather than inventing "Someone",
- * which would read as a claim about a specific person.
+ * The line under the digits saying what they are for, without naming a single
+ * protocol: two people read the number to each other; in a group or link call
+ * everyone sees the same number. Never "phones": people join from computers too.
  */
-public fun callEncryptionSentence(otherName: String?): UiText {
+public fun callEncryptionHint(groupCall: Boolean, othersInCall: Int): UiText =
+    if (isOneToOneEncryptionSheet(groupCall, othersInCall)) {
+        UiText("call.encryption.compare_hint_one_to_one")
+    } else {
+        UiText("call.encryption.compare_hint_group")
+    }
+
+/**
+ * The sheet's plain sentence. Word for word what `encryptionSheetSentence` says
+ * on web and `CallPeerName.encryptionSentence` on iOS.
+ *
+ * A one-to-one call names the other person when this device knows their name.
+ * A group or link call never names one person: everyone in it compares the same
+ * number, and naming one participant claims a two-person call (the defect of
+ * 2026-11-07). Where there is no name the sentence stays true rather than
+ * inventing "Someone", which would read as a claim about a specific person.
+ */
+public fun callEncryptionSentence(otherName: String?, groupCall: Boolean, othersInCall: Int): UiText {
     val name = otherName?.trim()?.takeIf { it.isNotEmpty() }
-    return if (name == null) {
+    return if (name == null || !isOneToOneEncryptionSheet(groupCall, othersInCall)) {
         UiText("call.encryption.sentence_group")
     } else {
         UiText("call.encryption.sentence_named", mapOf("name" to name))

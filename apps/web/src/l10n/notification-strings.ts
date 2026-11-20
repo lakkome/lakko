@@ -32,6 +32,11 @@ export const NOTIFICATION_STRINGS_URL = "/__lakko/l10n/notification-strings.json
  */
 export const NOTIFICATION_ATTACHMENT_COUNTS = 99;
 
+/** How many counts of the section 11 words are rendered (one message carries
+ *  at most ten photos and videos, and ten files); must equal
+ *  `NOTIFICATION_MEDIA_COUNTS` in the worker. */
+export const NOTIFICATION_MEDIA_COUNTS = 10;
+
 /** The words the worker reads. The field names are the worker's. */
 export interface NotificationWords {
   voiceCall: string;
@@ -44,6 +49,12 @@ export interface NotificationWords {
   unsupportedMessage: string;
   /** Entry `i` is the attachment-only preview line for `i + 1` attachments. */
   attachments: string[];
+  /** `docs/ux/media-messages.md` section 11 — entry `i` is the line for
+   *  `i + 1` photos, videos, photos and videos together, and files. */
+  photos: string[];
+  videos: string[];
+  photosAndVideos: string[];
+  files: string[];
   /** Reactions section 12 — "{name} reacted {emoji} to your message", with
    *  U+0001 where the name goes and U+0002 where the emoji goes (the worker
    *  cannot run the formatter). */
@@ -51,8 +62,21 @@ export interface NotificationWords {
   /** A group message's body, "{name}: {text}" (the list preview's rule),
    *  U+0001 = sender name, U+0002 = text. */
   senderPrefixed: string;
+  /** ADR-0087 section 14 — a channel invitation card's body,
+   *  "Invitation to {channel}", U+0001 = the channel's name; never the link. */
+  channelInvite: string;
+  /** UX 15.2 — a publisher invitation card's body, U+0001 = the channel. */
+  publisherInvite: string;
+  /** The name of a channel whose invitation names none. */
+  channelFallbackName: string;
   /** The `Reactions` switch is off on this device. */
   reactionsOff: boolean;
+  /** ADR-0092 — content previews, U+0001 = the question, title or name. */
+  pollPreview: string;
+  checklistPreview: string;
+  locationPreview: string;
+  contactPreview: string;
+  articlePreview: string;
 }
 
 /** The words, rendered now. */
@@ -61,7 +85,19 @@ export function renderNotificationStrings(): NotificationWords {
   for (let count = 1; count <= NOTIFICATION_ATTACHMENT_COUNTS; count++) {
     attachments.push(t("notification.message.attachments", { count }));
   }
+  const counted = (key: string, from: number): string[] => {
+    const out: string[] = [];
+    for (let count = 1; count <= NOTIFICATION_MEDIA_COUNTS; count++) {
+      out.push(count < from ? "" : t(key, { count }));
+    }
+    return out;
+  };
   return {
+    photos: counted("chat.media.photos", 1),
+    videos: counted("chat.media.videos", 1),
+    // Photos and videos together are always at least two.
+    photosAndVideos: counted("chat.media.photos_and_videos", 2),
+    files: counted("chat.media.files", 1),
     voiceCall: t("call.kind.voice"),
     videoCall: t("call.kind.video"),
     accept: t("call.incoming.accept"),
@@ -72,7 +108,15 @@ export function renderNotificationStrings(): NotificationWords {
     attachments,
     reactedToYourMessage: t("notification.reaction.body", { name: "\u0001", emoji: "\u0002" }),
     senderPrefixed: t("chats.preview.sender", { name: "\u0001", text: "\u0002" }),
+    channelInvite: t("chats.preview.channel_invite", { channel: "\u0001" }),
+    publisherInvite: t("chats.preview.publisher_invite", { channel: "\u0001" }),
+    channelFallbackName: t("channels.fallback_name"),
     reactionsOff: !reactionNotificationsOn(),
+    pollPreview: t("preview.poll", { question: "\u0001" }),
+    checklistPreview: t("preview.checklist", { title: "\u0001" }),
+    locationPreview: t("preview.location"),
+    contactPreview: t("preview.contact", { name: "\u0001" }),
+    articlePreview: t("preview.article", { title: "\u0001" }),
   };
 }
 

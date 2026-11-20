@@ -18,6 +18,9 @@
  */
 
 import { t } from "../l10n";
+import { isStorageFull } from "../storage/blob-access";
+
+export { isStorageFull } from "../storage/blob-access";
 
 export type AttachmentFailure = "gone" | "limit" | "failed";
 
@@ -59,4 +62,33 @@ export function openLimitText(): string {
 /** Section 4.2 — sending is limited (the composer note). */
 export function sendLimitText(): string {
   return t("chat.attachment.limit.send");
+}
+
+/** docs/ux/storage-full.md — the server has no room for new files (the
+ *  composer note; the text and the chosen file stay). */
+export function sendFullText(): string {
+  return t("chat.attachment.full.send");
+}
+
+/**
+ * The composer note for a failed send, when it is one of the two refusals
+ * that have their own sentence: the sending limit or a full server. `null`
+ * for anything else (the caller keeps its generic error).
+ */
+export function sendRefusalText(err: unknown): string | null {
+  if (isStorageFull(err)) return sendFullText();
+  if (isSendLimit(err)) return sendLimitText();
+  return null;
+}
+
+/**
+ * The line under a group photo whose upload failed: a full server, the
+ * sending limit (also read from an error that only says so in its message,
+ * as the group screens always did), or the generic upload failure.
+ */
+export function groupPhotoUploadErrorText(err: unknown): string {
+  if (isStorageFull(err)) return t("group_photo.error.full");
+  const text = err instanceof Error ? err.message : "";
+  if (isSendLimit(err) || /limit|429/i.test(text)) return t("group_photo.error.limit");
+  return t("group_photo.error.upload");
 }

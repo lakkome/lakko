@@ -589,7 +589,7 @@ export function InviteLinksPanel(): JSX.Element {
 
       <div class="lk-actions">
         <button type="button" class="primary" disabled={createBusy()} onClick={() => void onCreate()}>
-          <Icon name="plus" size={18} />
+          <Icon name="plus" size={20} />
           {createBusy() ? t("chats.new_group.creating") : t("invite.links.create")}
         </button>
       </div>
@@ -618,7 +618,7 @@ export function InviteLinksPanel(): JSX.Element {
                             aria-label={copiedKey() === row.key ? t("common.copied") : t("chat.invite_link.copy")}
                             onClick={() => void onCopy(row)}
                           >
-                            <Icon name={copiedKey() === row.key ? "check" : "copy"} size={16} />
+                            <Icon name={copiedKey() === row.key ? "checkmark" : "copy"} size={20} />
                           </button>
                           <button
                             type="button"
@@ -627,7 +627,7 @@ export function InviteLinksPanel(): JSX.Element {
                             aria-label={t("invite.links.show_qr")}
                             onClick={() => setQrRow(row)}
                           >
-                            <Icon name="qr" size={16} />
+                            <Icon name="qrcode" size={20} />
                           </button>
                         </>
                       )}
@@ -641,7 +641,7 @@ export function InviteLinksPanel(): JSX.Element {
                         disabled={busyKey() !== null || saveBusy()}
                         onClick={() => startEdit(row)}
                       >
-                        <Icon name="pencil" size={16} />
+                        <Icon name="pencil" size={20} />
                       </button>
                     </Show>
                     <button
@@ -653,7 +653,7 @@ export function InviteLinksPanel(): JSX.Element {
                       disabled={busyKey() !== null || saveBusy()}
                       onClick={() => void onDelete(row)}
                     >
-                      <Icon name="trash" size={16} />
+                      <Icon name="trash" size={20} />
                     </button>
                   </div>
                   <Show when={editingKey() === row.key}>{termsForm(row)}</Show>

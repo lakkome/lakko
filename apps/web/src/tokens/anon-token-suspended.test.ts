@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0089 step 3: the anonymous-token pool of a suspended account. It draws
+ * ADR-0098 step 3: the anonymous-token pool of a suspended account. It draws
  * `blob-read` alone, with the restricted session (files in chats still
  * open), and reads a `403 account-suspended` from the issuer as "not now":
  * no retry before the backoff, a take refused at once.

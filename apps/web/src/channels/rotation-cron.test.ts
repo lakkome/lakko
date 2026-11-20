@@ -37,7 +37,7 @@ const ID = { tag: "account" } as unknown as Parameters<typeof stageAndCommitRota
 
 function entry(i: number) {
   return {
-    subscriber_pubkey_hex: i.toString(16).padStart(2, "0"),
+    subscriber_id: i.toString(16).padStart(2, "0"),
     envelope_b64: "ZW52",
   };
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The moderation service: report intake and receipts (ADR-0089 section 2).
+//! The moderation service: report intake and receipts (ADR-0098 section 2).
 //!
 //! ## Endpoints
 //!
@@ -16,10 +16,10 @@
 //!   "action" | "none"}`. Says neither what action nor against whom.
 //! - `GET /moderation/log/operator-key`, `/moderation/log/root`,
 //!   `/moderation/log/entry/{index}`, `/moderation/log/consistency` — the
-//!   moderation log ([`log_routes`], ADR-0089 section 5).
+//!   moderation log ([`log_routes`], ADR-0098 section 5).
 //! - `GET /moderation/snapshot/{period}/bucket/{prefix}` — one bucket of a
 //!   suspension snapshot with its proofs ([`log_routes`], [`snapshots`],
-//!   ADR-0089 step 4). The service learns the 16-bit prefix a client asks
+//!   ADR-0098 step 4). The service learns the 16-bit prefix a client asks
 //!   for, nothing more.
 //! - `GET /health`, `/ready`, `/version`.
 //!
@@ -119,6 +119,8 @@ pub fn build_app(state: AppState) -> Router {
         .route("/version", get(version))
         .merge(limited)
         .layer(DefaultBodyLimit::max(MAX_REPORT_BYTES))
+        // Requests by route template, method and status class (ADR-0096).
+        .layer(lakko_metrics::red_layer("moderation"))
         .layer(TraceLayer::new_for_http().make_span_with(lakko_log_hygiene::request_span))
         .with_state(state)
 }

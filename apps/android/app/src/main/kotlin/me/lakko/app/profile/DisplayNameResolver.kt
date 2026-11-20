@@ -69,6 +69,12 @@ public data class PeerProfile(
     val usernameCertificateHex: String? = null,
     /** ADR-0084 — the person's profile photo references, or `null`. */
     val avatar: AvatarRefs? = null,
+    /**
+     * ADR-0092 section 7 — `false` when the person does not let others share
+     * their contact card (their "who can find me" is `Nobody`). A row stored
+     * before the field, or a person who never sent a profile, is shareable.
+     */
+    val cardShareable: Boolean = true,
 ) {
     /**
      * Whether this is only what a search knew about the person
@@ -112,6 +118,7 @@ public fun peerProfileOf(profile: uniffi.lakko_ffi_uniffi.FfiProfile): PeerProfi
         accountIdHex = accountIdHexOrNull(profile.accountId),
         usernameCertificateHex = profile.usernameCertificate?.let { me.lakko.app.reach.reachHex(it) },
         avatar = avatarRefsOf(profile.avatar),
+        cardShareable = profile.cardShareable,
     )
 
 /**

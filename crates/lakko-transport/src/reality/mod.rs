@@ -97,7 +97,7 @@ pub use handshake::{
     extract_client_hello_session_id, extract_server_hello_random, patch_client_hello_session_id,
     patch_server_hello_random, TlsWireError, RANDOM_LEN,
 };
-pub use listener::RealityListener;
+pub use listener::{RealityHandshaker, RealityListener};
 pub use server_driver::{
     build_reality_server_config, drive_server_handshake, make_self_signed_cert, AcceptedClient,
     RealityServerDriverError, RealityServerDriverResult,

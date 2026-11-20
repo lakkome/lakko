@@ -159,7 +159,7 @@ class PublishBudgetTest {
         assertEquals(CeilingOutcome.APPLIED, applyEncodingCeiling(encodings, 483_000) { true })
         val e = encodings.single()
         assertEquals(483_000, e.maxBitrateBps)
-        assertEquals(CAMERA_MIDDLE_SCALE_DOWN, e.scaleResolutionDownBy)
+        assertEquals(CAMERA_COPY_ENCODING_SCALE, e.scaleResolutionDownBy)
         assertFalse(e.active)
     }
 

@@ -4,7 +4,9 @@
 package me.lakko.app.channels
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** A failed channel create does not burn the handle: a retry reuses the id
@@ -51,5 +53,16 @@ class ChannelHandleClaimsTest {
         val first = claims.idFor("acct", "trip")
         claims.forget("acct", "Trip")
         assertNotEquals(first, claims.idFor("acct", "trip"))
+    }
+
+    @Test
+    fun `a kept name is this account's, not taken, until it is forgotten`() {
+        assertFalse(claims.isClaimed("acct", "trip"))
+        claims.idFor("acct", "trip")
+        assertTrue(claims.isClaimed("acct", "Trip"))
+        assertFalse(claims.isClaimed("other", "trip"))
+        assertFalse(claims.isClaimed("acct", ""))
+        claims.forget("acct", "trip")
+        assertFalse(claims.isClaimed("acct", "trip"))
     }
 }

@@ -1,125 +1,151 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-# Prometheus scrape config for the Lakko call-side fleet
-# (Phase 3b5).
+# Prometheus scrape configuration (ADR-0096).
 #
-# Sits on the monitoring VPS (CX22 is plenty — Prometheus is
-# light, Grafana is the heavier neighbour). Scrapes:
-#   - Rust SFU's /metrics (mTLS to sfu.lakko.me; ADR-0011 —
-#     nginx fronts the lakko-svc-sfu exporter on 127.0.0.1:9641;
-#     metric names are lakko_sfu_*)
-#   - coturn's prometheus exporter (mTLS to turn.lakko.me)
-#   - node_exporter on every VPS in the fleet for system
-#     metrics (CPU, RAM, disk, network bytes).
+# Runs on the monitoring VPS, which also runs Alertmanager, Grafana and
+# blackbox_exporter. It scrapes two Lakko hosts:
 #
-# Retention: 30 days local (sized for one CX22 with the
-# default 4 GB tsdb cap). Long-term storage is out of scope
-# for V1; if you need 1y+ retention, ship to a remote-write
-# endpoint (Mimir / Thanos).
+#   - the main VPS (lakko.me, api.lakko.me, sfu.lakko.me): every service's
+#     /metrics listener and the host exporters, all bound to localhost and
+#     exposed through ONE client-certificate-only nginx server block,
+#     metrics.lakko.me:9643, one path per target
+#     (infra/nginx/sites-available/metrics.conf, set up by
+#     infra/scripts/setup-metrics.sh);
+#   - the coturn VPS (turn.lakko.me): coturn's exporter and node_exporter
+#     behind its mTLS server block on port 9642;
+#   - the test stack (test.lakko.me, ADR-0096 P4) under stack="test", through
+#     the same metrics server block on test.lakko.me:9643. Its coturn
+#     instances (edge, edge2) export no metrics and are only probed.
+#
+# Targets are not in this file: each job reads file_sd target files from
+# /etc/prometheus/targets/<job>/, one per stack (infra/prometheus/targets/
+# <job>/<stack>.yml). setup-monitoring.sh installs the files of the stacks in
+# LAKKO_MONITORING_STACKS only (default "test": prod is not deployed), so a
+# stack that does not exist is not scraped and raises no alert. Adding prod
+# later is setting LAKKO_MONITORING_STACKS="prod test" and re-running it.
+#
+# Every Lakko metric is aggregate: no label carries an account, device,
+# group, journal, room, channel or push id (ADR-0096 section 1, enforced by
+# tests in each service). Retention is 30 days (chosen, not measured):
+#   prometheus --storage.tsdb.retention.time=30d
 
 global:
-  scrape_interval:     15s
+  scrape_interval: 15s
   evaluation_interval: 30s
   external_labels:
-    cluster: lakko-prod
+    cluster: lakko
 
-# Alertmanager — runs on the same VPS, default port. Alerts
-# fire into Slack / email via webhook (see
-# /etc/alertmanager/alertmanager.yml).
 alerting:
   alertmanagers:
     - static_configs:
         - targets: ['127.0.0.1:9093']
 
-# Alert rules — keep separate so a syntax error in one
-# rules file doesn't block the rest of the scrape loop.
 rule_files:
+  - /etc/prometheus/rules/services.yml
   - /etc/prometheus/rules/calls.yml
-  - /etc/prometheus/rules/node.yml
+  - /etc/prometheus/rules/host.yml
+  - /etc/prometheus/rules/canary.yml
 
 scrape_configs:
-  # ----------------------------------------------------------
-  # LiveKit SFU — the primary signal we care about. Per-call
-  # bandwidth, packet loss, room count, dropped streams.
-  # ----------------------------------------------------------
-  - job_name: lakko_sfu
-    metrics_path: /metrics
+  # ----------------------------------------------------------------------
+  # Lakko services. `__metrics_path__` picks the path on the metrics server
+  # block; `service` is the label dashboards group by.
+  # ----------------------------------------------------------------------
+  - job_name: lakko_services
     scheme: https
-    scrape_interval: 15s
     scrape_timeout: 10s
-    tls_config:
-      # Server cert validation against Let's Encrypt's roots
-      # (default Ubuntu bundle).
+    # A Lakko metric carries its own `service` label (RED layer,
+    # lakko_build_info); without honor_labels Prometheus would rename it to
+    # `exported_service` because the target carries `service` too. The two
+    # values are the same. No Lakko metric carries `job` (the heartbeat label
+    # is `task`), so the scrape job is never overridden.
+    honor_labels: true
+    # The client certificate the monitoring VPS presents, signed by the CA
+    # in /etc/lakko/mtls/monitoring-ca.crt on the Lakko hosts. Nothing else
+    # holds it.
+    tls_config: &mtls
       ca_file: /etc/ssl/certs/ca-certificates.crt
-      # mTLS — the SFU's nginx vhost requires a client cert
-      # signed by the Lakko private CA. The monitoring VPS
-      # holds the cert + key; nothing else does.
       cert_file: /etc/prometheus/mtls/monitoring.crt
-      key_file:  /etc/prometheus/mtls/monitoring.key
-      server_name: sfu.lakko.me
-    static_configs:
-      - targets: ['sfu.lakko.me']
-        labels:
-          service: sfu
-          environment: production
+      key_file: /etc/prometheus/mtls/monitoring.key
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/lakko_services/*.yml']
 
-  # ----------------------------------------------------------
-  # coturn — TURN relay. Counts sessions, bytes relayed,
-  # allocation failures, TLS handshake errors.
-  # ----------------------------------------------------------
-  - job_name: lakko_coturn
-    metrics_path: /metrics
+  # ----------------------------------------------------------------------
+  # Host and dependency exporters on the main VPS, behind the same server
+  # block.
+  # ----------------------------------------------------------------------
+  - job_name: host
     scheme: https
     scrape_interval: 30s
     scrape_timeout: 10s
-    tls_config:
-      ca_file: /etc/ssl/certs/ca-certificates.crt
-      cert_file: /etc/prometheus/mtls/monitoring.crt
-      key_file:  /etc/prometheus/mtls/monitoring.key
-      server_name: turn.lakko.me
-    static_configs:
-      # `turn.lakko.me:9642` — coturn owns :443 (TURN-over-TLS)
-      # so the mTLS-fronted Prometheus scrape lives on the
-      # adjacent port 9642 (see
-      # `infra/nginx/sites-available/turn.conf`). Bare hostname
-      # would default to :443 and clash with the TURN listener.
-      - targets: ['turn.lakko.me:9642']
-        labels:
-          service: coturn
-          environment: production
+    tls_config: *mtls
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/host/*.yml']
 
-  # ----------------------------------------------------------
-  # node_exporter — system metrics on every VPS we run.
-  # Add a target per VPS as the fleet grows.
-  # ----------------------------------------------------------
-  - job_name: node
-    scrape_interval: 30s
-    static_configs:
-      - targets:
-          - 'sfu.lakko.me:9100'
-          - 'turn.lakko.me:9100'
-          - 'auth.lakko.me:9100'      # services/auth
-          - 'ds.lakko.me:9100'         # services/ds
-          - 'discovery.lakko.me:9100'  # services/discovery
-        labels:
-          environment: production
-    # node_exporter binds public-only on these VPSes via the
-    # mTLS-protected nginx vhost (one shared cert across the
-    # fleet). The localhost-bound exporter forwards to a
-    # localhost-bound nginx that requires the client cert.
+  # ----------------------------------------------------------------------
+  # coturn VPS: coturn's exporter on /metrics and node_exporter on
+  # /node/metrics, both behind turn.lakko.me:9642.
+  # ----------------------------------------------------------------------
+  - job_name: coturn
     scheme: https
-    tls_config:
-      ca_file: /etc/ssl/certs/ca-certificates.crt
-      cert_file: /etc/prometheus/mtls/monitoring.crt
-      key_file:  /etc/prometheus/mtls/monitoring.key
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    tls_config: *mtls
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/coturn/*.yml']
 
-  # ----------------------------------------------------------
-  # Prometheus itself — for the meta-dashboard. Useful to
-  # detect when the scraper itself is wedged.
-  # ----------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # Public probes from outside: TLS expiry and /health of every public
+  # name. blackbox_exporter listens on the monitoring VPS's localhost with
+  # the `http_2xx` module.
+  # ----------------------------------------------------------------------
+  - job_name: blackbox_http
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/blackbox_http/*.yml']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: probe
+      - target_label: __address__
+        replacement: 127.0.0.1:9115
+
+  # coturn's TURN-over-TLS: a TLS handshake and the certificate's expiry.
+  # blackbox_exporter has no STUN prober (infra/monitoring/blackbox.yml).
+  - job_name: blackbox_tls
+    metrics_path: /probe
+    params:
+      module: [tls_connect]
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/blackbox_tls/*.yml']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: probe
+      - target_label: __address__
+        replacement: 127.0.0.1:9115
+
+  # The synthetic canary (ADR-0096 P5, tools/canary): one instance per
+  # stack on the monitoring host, each serving its own /metrics on loopback
+  # (LAKKO_CANARY_METRICS_BIND in /etc/lakko-monitoring/canary-<stack>.env).
+  - job_name: lakko_canary
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/lakko_canary/*.yml']
+
+  # The monitoring host itself: Prometheus, Alertmanager and its own disk.
   - job_name: prometheus
     static_configs:
       - targets: ['127.0.0.1:9090']
-        labels:
-          environment: monitoring
+        labels: {stack: monitoring}
+  - job_name: alertmanager
+    static_configs:
+      - targets: ['127.0.0.1:9093']
+        labels: {stack: monitoring}
+  - job_name: monitoring_host
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/monitoring_host/*.yml']

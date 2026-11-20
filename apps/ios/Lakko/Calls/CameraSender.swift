@@ -73,8 +73,9 @@ struct CameraSenderSpec: Equatable {
 ///
 /// All three are fed by ONE capturer: each copy is an `RTCVideoTrack` on an
 /// `RTCVideoSource` of its own that the capturer feeds the same frames
-/// (``CapturerFan``), and its sender scales the picture down with
-/// `scaleResolutionDownBy` on its one encoding. That is the binding's form of
+/// (``CapturerFan``), and that source scales the frames down to the copy's
+/// size (``copySourceSize(_:captureWidth:captureHeight:)``; the encoding's
+/// `scaleResolutionDownBy` is 1, see ``lightScaleDown``). That is the binding's form of
 /// what the web client does with a cloned track; a further track on the
 /// camera's own source is not, since that source serves every track the
 /// smallest picture any of their encoders asks for.
@@ -103,12 +104,45 @@ enum CameraSender {
 
     /// The light sender's picture is the camera's scaled down by this, each
     /// side.
+    ///
+    /// Applied at the copy's own video source (``copySourceSize(_:captureWidth:captureHeight:)``,
+    /// set by ``CameraCopySources``), never as the encoding's
+    /// `scaleResolutionDownBy`. On the Pixel 7a call of 2026-11-10 the Android
+    /// twin's light encoding created with `scaleResolutionDownBy` 4 started
+    /// its encoder at 320x180, then received the camera's 1280x720 frames
+    /// unscaled and re-initialised at that size for the rest of the call. iOS
+    /// builds its copies the same way on the same libwebrtc release; the
+    /// iOS camera path has not been measured.
     static let lightScaleDown: Double = 4
     /// The light sender's bitrate ceiling, bits a second.
     static let lightMaxBitrateBps = 150_000
     /// The middle sender's picture is the camera's scaled down by this, each
-    /// side.
+    /// side, at its own source as for ``lightScaleDown``.
     static let middleScaleDown: Double = 2
+    /// The `scaleResolutionDownBy` of a copy's encoding: 1, since the copy's
+    /// source already hands it frames at the copy's size. Stated rather than
+    /// left out so the picture is never scaled down twice.
+    static let copyEncodingScale: Double = 1
+    /// The capture size the copies' sources are sized from: the 720p class
+    /// ``LocalCameraCapture`` asks the camera for.
+    static let captureWidth: Int32 = 1280
+    static let captureHeight: Int32 = 720
+    /// The frame rate the copies' sources are held to, the capture's ceiling.
+    static let copyFps: Int32 = 30
+
+    /// The largest picture, landscape width and height, the `kind` copy's own
+    /// source hands its encoder for a capture of the given size: each side
+    /// divided by the copy's factor, rounded down and at least 1. libwebrtc's
+    /// adapter keeps the aspect ratio within this box and turns it for a
+    /// portrait frame.
+    static func copySourceSize(
+        _ kind: CameraCopyKind, captureWidth: Int32, captureHeight: Int32
+    ) -> (width: Int32, height: Int32) {
+        let factor = kind == .light ? lightScaleDown : middleScaleDown
+        let width = max(1, Int32(Double(captureWidth) / factor))
+        let height = max(1, Int32(Double(captureHeight) / factor))
+        return (width, height)
+    }
     /// The middle sender's bitrate ceiling, bits a second.
     static let middleMaxBitrateBps = 500_000
     /// The temporal layers the main sender is asked for: the `T3` of the web
@@ -147,11 +181,11 @@ enum CameraSender {
         switch kind {
         case .light:
             return CameraEncodingSpec(
-                scaleResolutionDownBy: lightScaleDown, maxBitrateBps: lightMaxBitrateBps,
+                scaleResolutionDownBy: copyEncodingScale, maxBitrateBps: lightMaxBitrateBps,
                 active: active)
         case .middle:
             return CameraEncodingSpec(
-                scaleResolutionDownBy: middleScaleDown, maxBitrateBps: middleMaxBitrateBps,
+                scaleResolutionDownBy: copyEncodingScale, maxBitrateBps: middleMaxBitrateBps,
                 active: active)
         }
     }
@@ -210,7 +244,8 @@ enum CameraSender {
     /// sent another time at full size, or without its ceiling.
     static func copyIsSized(wanted: CameraEncodingSpec, readBack: CameraEncodingSpec?) -> Bool {
         guard let readBack else { return false }
-        return readBack.scaleResolutionDownBy == wanted.scaleResolutionDownBy
+        // A scale of 1 and no scale send the same picture.
+        return (readBack.scaleResolutionDownBy ?? 1) == (wanted.scaleResolutionDownBy ?? 1)
             && readBack.maxBitrateBps == wanted.maxBitrateBps
             && readBack.active == wanted.active
     }

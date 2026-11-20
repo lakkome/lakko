@@ -6,7 +6,8 @@
 //! - **Sweep.** A blob whose last access day is more than
 //!   `LAKKO_STORAGE_BLOB_LIFETIME_DAYS` (default 365, the maintainer's
 //!   number) back is deleted: its row first, only if it is still expired at
-//!   that moment, then its file. Runs at startup and then every
+//!   that moment, then its bytes in the [`BlobStore`] (an object left
+//!   behind is unreachable and is reported in the log). Runs at startup and then every
 //!   `LAKKO_STORAGE_SWEEP_INTERVAL_SECS` (default one day).
 //! - **Import.** On the first start with an index, every blob file already
 //!   under `LAKKO_BLOB_DIR` becomes a row dated the import day, with no
@@ -18,8 +19,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::blob::blob_path;
 use crate::index::{today, BlobId, BlobIndex, BlobRow, IndexError};
+use crate::metrics;
+use crate::store::BlobStore;
 
 /// Ids taken from the index per sweep round. Chosen.
 const SWEEP_BATCH: usize = 500;
@@ -29,7 +31,7 @@ const SWEEP_BATCH: usize = 500;
 /// Returns how many were deleted.
 pub(crate) async fn sweep_once(
     index: &dyn BlobIndex,
-    root: &Path,
+    store: &dyn BlobStore,
     node: &str,
     today: u32,
     lifetime_days: u32,
@@ -49,10 +51,8 @@ pub(crate) async fn sweep_once(
             }
             progressed = true;
             deleted += 1;
-            match tokio::fs::remove_file(blob_path(root, &id)).await {
-                Ok(()) => {},
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
-                Err(e) => tracing::warn!(error = %e, "sweep: delete expired file"),
+            if let Err(e) = store.delete(&id).await {
+                tracing::warn!(error = %e, "sweep: delete expired bytes after the row");
             }
         }
         if !progressed {
@@ -65,25 +65,40 @@ pub(crate) async fn sweep_once(
 /// Run [`sweep_once`] now and then every `interval`.
 pub(crate) fn spawn_sweeper(
     index: Arc<dyn BlobIndex>,
-    root: Arc<std::path::PathBuf>,
+    store: Arc<dyn BlobStore>,
     node: Arc<str>,
     lifetime_days: u32,
     interval: Duration,
     after_sweep: Option<Arc<dyn Fn() + Send + Sync>>,
 ) -> tokio::task::JoinHandle<()> {
+    lakko_metrics::job_registered(metrics::JOB_BLOB_SWEEP);
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(interval);
         loop {
             tick.tick().await;
-            match sweep_once(index.as_ref(), &root, &node, today(), lifetime_days).await {
-                Ok(0) => {},
+            match sweep_once(
+                index.as_ref(),
+                store.as_ref(),
+                &node,
+                today(),
+                lifetime_days,
+            )
+            .await
+            {
                 Ok(n) => {
-                    tracing::info!(deleted = n, "blob lifetime sweep");
-                    if let Some(f) = &after_sweep {
-                        f();
+                    lakko_metrics::job_succeeded(metrics::JOB_BLOB_SWEEP);
+                    metrics::sweep_removed(n);
+                    if n > 0 {
+                        tracing::info!(deleted = n, "blob lifetime sweep");
+                        if let Some(f) = &after_sweep {
+                            f();
+                        }
                     }
                 },
-                Err(e) => tracing::warn!(error = %e, "blob lifetime sweep failed"),
+                Err(e) => {
+                    lakko_metrics::job_failed(metrics::JOB_BLOB_SWEEP);
+                    tracing::warn!(error = %e, "blob lifetime sweep failed");
+                },
             }
         }
     })
@@ -94,7 +109,7 @@ fn is_hex(s: &str, len: usize) -> bool {
 }
 
 /// List the blob files under `root` that have the content-addressed layout.
-fn list_blob_files(root: &Path) -> std::io::Result<Vec<(BlobId, u64)>> {
+pub(crate) fn list_blob_files(root: &Path) -> std::io::Result<Vec<(BlobId, u64)>> {
     let mut out = Vec::new();
     for a in std::fs::read_dir(root)? {
         let a = a?;
@@ -161,6 +176,7 @@ pub(crate) async fn import_once(
 mod tests {
     use super::*;
     use crate::index::file::FileIndex;
+    use crate::store::{blob_path, FsStore};
 
     fn put_file(root: &Path, id: &BlobId, bytes: &[u8]) {
         let p = blob_path(root, id);
@@ -181,9 +197,15 @@ mod tests {
         }
         // Today 1400, lifetime 365: the cutoff is 1035. `edge` was last
         // accessed exactly 365 days back and is kept; `old` is 400 back.
-        let n = sweep_once(&index, dir.path(), "local", 1_400, 365)
-            .await
-            .unwrap();
+        let n = sweep_once(
+            &index,
+            &FsStore::new(dir.path().to_path_buf()),
+            "local",
+            1_400,
+            365,
+        )
+        .await
+        .unwrap();
         assert_eq!(n, 1);
         assert_eq!(index.get(&old.id).await.unwrap(), None);
         assert!(!blob_path(dir.path(), &old.id).exists());
@@ -205,15 +227,27 @@ mod tests {
             index.record_upload(r.clone()).await.unwrap();
         }
         assert_eq!(
-            sweep_once(&index, dir.path(), "local", 1_045, 365)
-                .await
-                .unwrap(),
+            sweep_once(
+                &index,
+                &FsStore::new(dir.path().to_path_buf()),
+                "local",
+                1_045,
+                365
+            )
+            .await
+            .unwrap(),
             0
         );
         assert_eq!(
-            sweep_once(&index, dir.path(), "local", 1_046, 365)
-                .await
-                .unwrap(),
+            sweep_once(
+                &index,
+                &FsStore::new(dir.path().to_path_buf()),
+                "local",
+                1_046,
+                365
+            )
+            .await
+            .unwrap(),
             1
         );
         assert_eq!(index.get(&channel_file.id).await.unwrap(), None);

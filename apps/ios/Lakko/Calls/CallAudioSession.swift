@@ -120,6 +120,30 @@ enum CallAudioSession {
             : base.subtracting(.defaultToSpeaker)
     }
 
+    /// The whole audio session configuration WebRTC brings a call up with.
+    ///
+    /// Stated in full rather than amended: the webrtc-sdk build (125.6422.07)
+    /// starts its WebRTC configuration as a copy of whatever the shared
+    /// session was when the class was first touched, not the record-and-play
+    /// voice-call configuration of the upstream build. In Lakko that is the
+    /// cue posture (`.ambient`, mixing with others), and `.defaultToSpeaker`
+    /// on it is refused (OSStatus -50): on an iPhone on iOS 27.2 no audio unit
+    /// came up, so a call had neither microphone nor sound and iOS suspended
+    /// the app as soon as it left the screen (2026-11-10). The values are the
+    /// upstream build's (play and record, voice chat, Bluetooth headsets)
+    /// plus the loudspeaker rule.
+    static func callConfiguration(
+        loudspeakerByDefault: Bool
+    ) -> (category: AVAudioSession.Category, mode: AVAudioSession.Mode,
+          options: AVAudioSession.CategoryOptions) {
+        (
+            .playAndRecord,
+            .voiceChat,
+            callCategoryOptions(
+                base: [.allowBluetoothHFP], loudspeakerByDefault: loudspeakerByDefault)
+        )
+    }
+
     /// Decide where the NEXT call's sound comes out when nothing else is
     /// connected (`docs/ux/calls.md` section 4.1).
     ///
@@ -134,10 +158,14 @@ enum CallAudioSession {
     static func configureCallOutput(loudspeakerByDefault: Bool) {
         #if os(iOS)
         let configuration = RTCAudioSessionConfiguration.webRTC()
-        let options = callCategoryOptions(
-            base: configuration.categoryOptions, loudspeakerByDefault: loudspeakerByDefault)
-        guard options != configuration.categoryOptions else { return }
-        configuration.categoryOptions = options
+        let wanted = callConfiguration(loudspeakerByDefault: loudspeakerByDefault)
+        guard configuration.category != wanted.category.rawValue
+            || configuration.mode != wanted.mode.rawValue
+            || configuration.categoryOptions != wanted.options
+        else { return }
+        configuration.category = wanted.category.rawValue
+        configuration.mode = wanted.mode.rawValue
+        configuration.categoryOptions = wanted.options
         RTCAudioSessionConfiguration.setWebRTC(configuration)
         NSLog(
             "CallAudioSession: call output default=%@",

@@ -570,7 +570,7 @@ public final class JoinCallLandingViewModel: ObservableObject {
 ///
 /// It never shows the live call itself: that is the root's full-screen call
 /// (`CallHostOverlay`), on this screen and every other one.
-/// ADR-0089 step 3 — what the call-link landing offers while the account
+/// ADR-0098 step 3 — what the call-link landing offers while the account
 /// is suspended: no name field and no Join, one line and Close.
 enum JoinCallSuspension {
     static func offersJoin(suspended: Bool) -> Bool { !suspended }
@@ -579,7 +579,7 @@ enum JoinCallSuspension {
 public struct JoinCallLandingScreen: View {
     @StateObject private var viewModel: JoinCallLandingViewModel
     @ObservedObject private var l10n = Localization.shared
-    /// ADR-0089 step 3 — a suspended account joins no calls.
+    /// ADR-0098 step 3 — a suspended account joins no calls.
     @Environment(\.accountSuspended) private var accountSuspended
 
     /// Suspended mode, from the environment or, where this landing is shown
@@ -672,7 +672,7 @@ public struct JoinCallLandingScreen: View {
                     // ADR-0084 — the host's photo beside their name.
                     InitialsAvatar(
                         name: host, identity: base64Encode(decoded.ownerSignatureKey), size: 56,
-                        placeholderSymbol: "person.fill", photo: .person(decoded.ownerSignatureKey))
+                        placeholderIcon: .personFill, photo: .person(decoded.ownerSignatureKey))
                     Text(l10n.t("call.link.host", texts: ["name": host]))
                         .font(.footnote)
                         .foregroundStyle(.secondary)

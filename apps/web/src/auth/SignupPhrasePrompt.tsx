@@ -16,10 +16,10 @@
  *      plus the acknowledgement, before Done;
  *   3. where passkeys are supported, an offer to add one
  *      (docs/ux/identity-recovery.md section 9, step 3): "Add a passkey" or
- *      "Not now". Adding one continues into the opt-in keys choice
- *      (`PasskeyKeysChoice`) when the browser can protect keys with it. The
- *      step never blocks: every outcome, a failure included, leaves "Not
- *      now" available.
+ *      "Not now". Adding one stores the keys for it with nothing to choose
+ *      when the browser can protect them (section 10.2 steps 2 and 3,
+ *      `storeKeysForPasskey`). The step never blocks: every outcome, a
+ *      failure included, leaves "Not now" available.
  *
  * The phrase is acknowledged when the last step ends, so a reload in the
  * middle shows the phrase again from step 1.
@@ -36,13 +36,18 @@ import { PhraseGrid } from "../ui/PhraseGrid";
 import { phraseWords } from "./phrase-confirm";
 import { PhraseCheckForm } from "./PhraseCheckForm";
 import { t } from "../l10n";
-import { addPasskey, type AddedPasskey } from "./passkey-add";
+import { addPasskey } from "./passkey-add";
 import { PROOF_COPY } from "./fresh-auth";
 import { createProofGate } from "./proof-gate";
 import { ProofBlock } from "./ProofBlock";
-import { PasskeyKeysChoice, type KeysChoiceResult } from "./PasskeyKeysChoice";
+import { addedPasskeyMessage, storeKeysForPasskey, type StoreKeysOutcome } from "./passkey-keys-store";
+import { addNoPrfPasskey } from "./passkey-no-prf";
 import { useWebauthnClient } from "./use-webauthn-client";
-import { WebauthnClient, WebauthnUserCancelledError } from "./webauthn-client";
+import {
+  WebauthnClient,
+  WebauthnCredentialExistsError,
+  WebauthnUserCancelledError,
+} from "./webauthn-client";
 
 type Step = "show" | "confirm" | "passkey";
 
@@ -114,8 +119,8 @@ export default function SignupPhrasePrompt(): JSX.Element {
  */
 export function PasskeyOffer(props: {
   readonly onDone: () => void;
-  /** A passkey now exists for the account (whatever the keys choice that
-   *  follows comes to). */
+  /** A passkey now exists for the account (whatever storing its keys
+   *  then comes to). */
   readonly onAdded?: () => void;
   /** The "Protect your account" step (ADR-0075): no "Step 3 of 3" line, and
    *  the second button reads Back. */
@@ -125,10 +130,13 @@ export function PasskeyOffer(props: {
   const { client, username } = useWebauthnClient();
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
-  // After the passkey exists: the keys choice, or the line that says it
-  // signs in only, or what the choice ended with.
-  const [added, setAdded] = createSignal<AddedPasskey | null>(null);
-  const [resultKey, setResultKey] = createSignal<string | null>(null);
+  // After the passkey exists: the line that says what storing its keys
+  // came to (UX 10.2).
+  const [result, setResult] = createSignal<{
+    readonly kind: "ok" | "error";
+    readonly key: string;
+    readonly named?: true;
+  } | null>(null);
 
   // Adding a passkey needs a fresh proof. When none is live (a key change
   // spends the one it was made with) the password field appears.
@@ -168,11 +176,39 @@ export function PasskeyOffer(props: {
             : null,
       });
       props.onAdded?.();
-      if (passkey.outcome === "offer-keys-choice") setAdded(passkey);
-      else setResultKey("settings.passkeys.added_no_keys");
+      let outcome: StoreKeysOutcome = "no-prf";
+      if (passkey.outcome === "store-keys") {
+        outcome =
+          st.kind === "session" && secrets !== null
+            ? await storeKeysForPasskey({
+                client: c,
+                accountIdB64: st.account.accountId,
+                accountSeed: secrets.accountIdentitySeed,
+                sessionToken: secrets.sessionToken,
+                credentialIdB64: passkey.credentialIdB64,
+                prfOutput: passkey.prfOutput,
+              })
+            : "failed";
+      }
+      if (outcome === "no-prf" && st.kind === "session") {
+        // Remembered on the device, so Settings does not offer the repair.
+        try {
+          addNoPrfPasskey(
+            typeof localStorage === "undefined" ? undefined : localStorage,
+            st.account.accountId,
+            passkey.credentialIdB64,
+          );
+        } catch {
+          // No storage here: Settings offers the repair, which answers the same.
+        }
+      }
+      setResult(addedPasskeyMessage(outcome));
     } catch (err) {
       const failure = gate.failed(err, grant).kind;
-      if (
+      if (err instanceof WebauthnCredentialExistsError) {
+        // The provider already holds a passkey for this account (UX 10.2).
+        setError(t("settings.passkeys.error.already_exists"));
+      } else if (
         !(err instanceof WebauthnUserCancelledError) &&
         failure !== "required" &&
         failure !== "rate-limited" &&
@@ -187,24 +223,6 @@ export function PasskeyOffer(props: {
     }
   }
 
-  function onChoice(result: KeysChoiceResult): void {
-    setAdded(null);
-    switch (result) {
-      case "stored":
-        setResultKey("settings.passkeys.keys_choice.done");
-        break;
-      case "no-prf":
-        setResultKey("settings.passkeys.keys_choice.no_prf");
-        break;
-      case "unavailable":
-        setResultKey("settings.passkeys.keys_choice.unavailable");
-        break;
-      case "signin-only":
-        props.onDone();
-        break;
-    }
-  }
-
   return (
     <>
       <h1>{t("auth.signup.passkey.title")}</h1>
@@ -212,49 +230,36 @@ export function PasskeyOffer(props: {
         <p class="lk-auth-step">{t("recovery_phrase.step", { current: 3, total: 3 })}</p>
       </Show>
       <Show
-        when={resultKey()}
+        when={result()}
         fallback={
-          <Show
-            when={added()}
-            fallback={
-              <>
-                <p class="lk-auth-lede">{t("auth.signup.passkey.lede")}</p>
-                <Show when={error() !== null}>
-                  <div class="form-error" role="alert">
-                    {error()}
-                  </div>
-                </Show>
-                <ProofBlock gate={gate} />
-                <button
-                  class="primary"
-                  type="button"
-                  disabled={busy() || !gate.view().ready}
-                  onClick={() => void onAdd()}
-                >
-                  {busy() ? t("recovery.passkey.waiting") : t("auth.signup.passkey.add")}
-                </button>
-                <button type="button" class="ghost" disabled={busy()} onClick={props.onDone}>
-                  {props.standalone === true ? t("common.back") : t("common.not_now")}
-                </button>
-              </>
-            }
-          >
-            {(passkey) => (
-              <PasskeyKeysChoice
-                credentialIdB64={passkey().credentialIdB64}
-                nickname=""
-                prfOutput={passkey().prfOutput}
-                client={client}
-                onDone={onChoice}
-              />
-            )}
-          </Show>
+          <>
+            <p class="lk-auth-lede">{t("auth.signup.passkey.lede")}</p>
+            <Show when={error() !== null}>
+              <div class="form-error" role="alert">
+                {error()}
+              </div>
+            </Show>
+            <ProofBlock gate={gate} />
+            <button
+              class="primary"
+              type="button"
+              disabled={busy() || !gate.view().ready}
+              onClick={() => void onAdd()}
+            >
+              {busy() ? t("recovery.passkey.waiting") : t("auth.signup.passkey.add")}
+            </button>
+            <button type="button" class="ghost" disabled={busy()} onClick={props.onDone}>
+              {props.standalone === true ? t("common.back") : t("common.not_now")}
+            </button>
+          </>
         }
       >
-        {(key) => (
+        {(line) => (
           <>
-            <p class="form-info" role="status">
-              {t(key())}
+            <p class={line().kind === "ok" ? "form-info" : "form-error"} role="status">
+              {line().named === true
+                ? t(line().key, { name: t("auth.signup.passkey.default_name") })
+                : t(line().key)}
             </p>
             <button class="primary" type="button" onClick={props.onDone}>
               {t("common.continue")}

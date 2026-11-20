@@ -151,6 +151,21 @@ final class CallOutputRulesTests: XCTestCase {
         XCTAssertTrue(loud.contains(.allowBluetoothHFP), "a Bluetooth device still takes over")
     }
 
+    /// A call always brings the session up to record and play, whatever the
+    /// session was before (the webrtc-sdk build copies the cue posture into
+    /// its configuration, and `.defaultToSpeaker` on `.ambient` is refused).
+    func testACallConfigurationIsAlwaysRecordAndPlay() {
+        for loud in [true, false] {
+            let c = CallAudioSession.callConfiguration(loudspeakerByDefault: loud)
+            XCTAssertEqual(c.category, .playAndRecord)
+            XCTAssertEqual(c.mode, .voiceChat)
+            XCTAssertTrue(c.options.contains(.allowBluetoothHFP))
+            XCTAssertEqual(c.options.contains(.defaultToSpeaker), loud)
+            XCTAssertFalse(c.options.contains(.mixWithOthers))
+            XCTAssertFalse(c.options.contains(.duckOthers))
+        }
+    }
+
     /// A one-to-one voice call starts on the earpiece, as it always has.
     func testAVoiceCallKeepsTheEarpiece() {
         let base: AVAudioSession.CategoryOptions = [.allowBluetoothHFP, .defaultToSpeaker]

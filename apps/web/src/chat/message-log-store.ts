@@ -109,6 +109,13 @@ export interface PersistedAttachment {
   readonly width?: number | null;
   readonly height?: number | null;
   readonly thumb?: PersistedThumb | null;
+  /** ADR-0092 section 2 — an audio file's tags. */
+  readonly title?: string | null;
+  readonly artist?: string | null;
+  /** ADR-0047 section 6 — base64url of the micro thumbnail carried inside
+   *  the message (a JPEG of at most 4096 bytes), on the first photo or video
+   *  only. What the Chats row and a notification draw without a fetch. */
+  readonly inlineThumbB64?: string | null;
   /**
    * UX spec §8 — "played" is LOCAL state: this device has started playing
    * the message. Never sent, never part of a history bundle. Absent means
@@ -208,6 +215,25 @@ export interface PersistedMessage {
    */
   readonly unsupportedVersion?: number;
   /**
+   * ADR-0087 section 14 — the channel invitation card the message's envelope
+   * carried (standard base64), as received / as sent. The bubble and the
+   * Chats row open it on this device, so a used-up, revoked or expired link
+   * still reads as the invitation it was and never as the `/g/` link with
+   * its secret. Optional without a version bump: a row without it is drawn
+   * from its text, whose secret is never shown.
+   */
+  readonly channelInviteB64?: string;
+  /**
+   * ADR-0092 — a poll, checklist, location, contact card or article, the
+   * `MessageContent` object exactly as the envelope carried it (plain JSON;
+   * for an edited checklist or article, the latest replacement). Optional
+   * without a version bump: a row without it is an ordinary message.
+   */
+  readonly content?: unknown;
+  /** ADR-0092 section 3.11 — the folded state a history bundle carried for
+   *  a poll or checklist (`ContentState`), as the sending device saw it. */
+  readonly contentState?: unknown;
+  /**
    * `docs/ux/second-device.md` section 4 — on a system (commit) row only: the
    * person keys a received batch added to and removed from a group, recorded
    * on the batch's last commit row. Names are never stored; the row resolves
@@ -216,7 +242,7 @@ export interface PersistedMessage {
    */
   readonly membership?: PersistedMembership;
   /**
-   * ADR-0089 section 1 - on an incoming row only: what a report needs of the
+   * ADR-0098 section 1 - on an incoming row only: what a report needs of the
    * message, captured at receipt (the attestation verdict, the raw attested
    * plaintext, the sender leaf key and its device binding). Optional without
    * a version bump: a row without it is a message whose evidence is gone,
@@ -225,7 +251,7 @@ export interface PersistedMessage {
   readonly evidence?: PersistedEvidence;
 }
 
-/** ADR-0089 section 1 - the report evidence of one received message. */
+/** ADR-0098 section 1 - the report evidence of one received message. */
 export interface PersistedEvidence {
   readonly attestation: "verified" | "failed" | "absent";
   readonly plaintextB64: string;
@@ -333,6 +359,9 @@ export interface PersistedHeldSend {
    *  group it was composed in. */
   readonly replyGroupIdB64?: string;
   readonly forward?: PersistedForward;
+  /** ADR-0092 — a held content message's `MessageContent`, verbatim; absent
+   *  (rows written before the field) for an ordinary message. */
+  readonly content?: unknown;
 }
 
 /**

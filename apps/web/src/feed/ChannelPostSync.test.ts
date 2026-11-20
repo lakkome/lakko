@@ -16,6 +16,7 @@ const calls = vi.hoisted(() => ({
   published: [] as string[],
   fetchGate: null as null | { promise: Promise<void>; resolve: () => void },
   fetched: [] as string[],
+  order: [] as string[],
 }));
 
 vi.mock("../auth/AuthContext", () => ({ useAuth: () => ({}) }));
@@ -50,6 +51,7 @@ vi.mock("../state/channels-state", () => ({
   },
 }));
 vi.mock("./feed-marks-store", () => ({
+  readFeedMarks: async () => ({ hidden: [], looked: {}, channelRead: {} }),
   updateFeedMarks: async (account: string) => {
     calls.marks.push(account);
   },
@@ -59,13 +61,15 @@ vi.mock("./channel-post-log-store", () => ({
   loadChannelPostLog: async () => null,
   saveChannelPostLog: async (account: string) => {
     calls.saved.push(account);
+    calls.order.push("saved");
   },
   publishChannelPostLogChanged: (account: string) => {
     calls.published.push(account);
   },
 }));
 
-import { syncAll } from "./ChannelPostSync";
+import { subscribeChannelReads, syncAll } from "./ChannelPostSync";
+import type { ChannelRead } from "./channel-notify";
 
 function gate(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void;
@@ -82,6 +86,7 @@ beforeEach(() => {
   calls.published.length = 0;
   calls.fetched.length = 0;
   calls.fetchGate = null;
+  calls.order.length = 0;
 });
 
 describe("syncAll", () => {
@@ -107,6 +112,40 @@ describe("syncAll", () => {
     expect(calls.marks).toEqual([]);
     expect(calls.saved).toEqual([]);
     expect(calls.published).toEqual([]);
+  });
+
+  it("hands each channel read to the notifier after the log is saved", async () => {
+    const heard: ChannelRead[] = [];
+    const off = subscribeChannelReads((account, reads) => {
+      expect(account).toBe("A");
+      calls.order.push("reads");
+      heard.push(...reads);
+    });
+    try {
+      await syncAll("A");
+    } finally {
+      off();
+    }
+    expect(calls.order).toEqual(["saved", "reads"]);
+    expect(heard).toHaveLength(1);
+    expect(heard[0]?.channelIdHex).toBe("aa");
+    expect(heard[0]?.slotBefore).toBeUndefined();
+    expect(heard[0]?.slotAfter.cursor).toBe(1);
+    expect(heard[0]?.readMarker).toBeUndefined();
+  });
+
+  it("hands no read over once the account changed", async () => {
+    const heard: ChannelRead[] = [];
+    const off = subscribeChannelReads((_a, reads) => heard.push(...reads));
+    let current = true;
+    calls.fetchGate = gate();
+    const run = syncAll("A", () => current);
+    await vi.waitFor(() => expect(calls.fetched).toEqual(["aa"]));
+    current = false;
+    calls.fetchGate.resolve();
+    await run;
+    off();
+    expect(heard).toEqual([]);
   });
 
   it("does not start for a session that ended before the device key was read", async () => {

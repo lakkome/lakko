@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0089 step 4, `docs/ux/reporting-and-moderation.md` section 3 - whether
+ * ADR-0098 step 4, `docs/ux/reporting-and-moderation.md` section 3 - whether
  * ANOTHER person's account is suspended, as this page shows it.
  *
  * A suspension is shown only after the moderation log confirms it: the
@@ -14,7 +14,7 @@
  * is a warning, not access control.
  *
  * A `suspended` standing is not trusted on the snapshot alone (F2 of the
- * ADR-0089 security pass): the snapshot names a log entry, and the client
+ * ADR-0098 security pass): the snapshot names a log entry, and the client
  * fetches that entry (`GET {moderation}/moderation/log/entry/{logIndex}?size=
  * {root.log_size}`), the moderator list (`GET /moderation/moderators`) and
  * proves with `moderationProveAccountStanding` /
@@ -71,10 +71,10 @@ export interface StandingWasm {
     witnessThreshold: number,
     nowMs: bigint,
   ): ModerationStandingRecord;
-  /** ADR-0089 step 5 - the bucket of a 16-byte channel id. Absent on a core
+  /** ADR-0098 step 5 - the bucket of a 16-byte channel id. Absent on a core
    *  built before step 5: every channel is then `unknown`. */
   moderationChannelBucketPrefix?(channelId: Uint8Array): string;
-  /** ADR-0089 step 5 - whether the channel is removed (`suspended`). */
+  /** ADR-0098 step 5 - whether the channel is removed (`suspended`). */
   moderationChannelStanding?(
     answerJson: string,
     channelId: Uint8Array,
@@ -233,7 +233,7 @@ export class SuspensionMarks {
   }
 
   /**
-   * ADR-0089 step 5 - whether the channel `channelId` (16 bytes) is removed
+   * ADR-0098 step 5 - whether the channel `channelId` (16 bytes) is removed
    * (`suspended`), and when to ask again. The bucket answers are the same
    * cache as the accounts': one request per prefix whatever it names. Never
    * throws.

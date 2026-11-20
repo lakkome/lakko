@@ -107,6 +107,41 @@
 //! nothing a stale register could show or take back, so a register a late
 //! envelope brings back changes nothing and goes at the next prune.
 //!
+//! ## Channel subscriptions (maintainer decision of 2026-11-13)
+//!
+//! One register per channel the account ever subscribed to, keyed by channel
+//! id: the role, the account's one subscriber key for the channel, the read
+//! key and a co-publisher's PublisherGroup id, or a leave
+//! ([`super::channel_subscription`]). Folded by the rule above with nothing
+//! added: a leave is a kept tombstone and a later re-subscribe wins; on an
+//! exact stamp tie the subscription has the larger bytes. Carried by
+//! [`SyncedState::channel_subscription_envelopes`] /
+//! [`SyncedState::apply_channel_subscription_envelope`], persisted with the
+//! rest (so the backup carries it), never in [`StateSnapshot`].
+//!
+//! ## Channel admission seeds (ADR-0090 open question 4)
+//!
+//! One register per `(channel id, admission version)`: the owner account's
+//! own copy of a private channel's admission seed
+//! ([`super::channel_admission_seed`]). Write-once at the writer, folded by
+//! the rule above, carried by
+//! [`SyncedState::channel_admission_seed_envelopes`] /
+//! [`SyncedState::apply_channel_admission_seed_envelope`], persisted with the
+//! rest (so the backup carries it), never in [`StateSnapshot`].
+//! ## Own poll choices (ADR-0092 section 3.6)
+//!
+//! One register per `(conversation, poll message id)` the account voted in,
+//! holding its choices (an empty list is a retraction, kept), folded by the
+//! rule above. One register serves group and channel polls. Carried by
+//! [`SyncedState::poll_choice_envelopes`] /
+//! [`SyncedState::apply_poll_choice_envelope`], persisted with the rest (so
+//! the backup carries it), never in [`StateSnapshot`]. **Pruned** by
+//! [`SyncedState::prune_poll_choices`]: every register of a conversation whose
+//! end register reads ended goes, for the reason the channel-activity prune is
+//! safe (a gone conversation shows nothing, and a register a late envelope
+//! brings back goes at the next prune). [`super::poll_choice::POLL_CHOICES_MAX_CLIENT`]
+//! bounds the writer, not the fold.
+//!
 //! ## Saved messages (ADR-0065 section 4)
 //!
 //! A saved message is one more register, keyed `(conversation, message
@@ -154,6 +189,12 @@ use super::blocked::{
     compose_blocked_envelope, decode_blocked_envelope, BlockedEntry, BlockedEnvelopeError,
     BLOCKED_ENVELOPE_MAX_ENTRIES, BLOCKED_KEY_LEN,
 };
+use super::channel_admission_seed::{
+    compose_channel_admission_seed_envelope, decode_channel_admission_seed_envelope,
+    ChannelAdmissionSeedEntry, ChannelAdmissionSeedEnvelopeError,
+    CHANNEL_ADMISSION_SEED_CHANNEL_ID_LEN, CHANNEL_ADMISSION_SEED_ENVELOPE_MAX_ENTRIES,
+    CHANNEL_ADMISSION_SEED_LEN,
+};
 use super::channel_comment::{
     compose_channel_comment_envelope, decode_channel_comment_envelope, ChannelCommentEntry,
     ChannelCommentEnvelopeError, CHANNEL_COMMENTS_MAX_CLIENT, CHANNEL_COMMENT_ENVELOPE_MAX_ENTRIES,
@@ -163,6 +204,11 @@ use super::channel_reaction::{
     compose_channel_reaction_envelope, decode_channel_reaction_envelope, ChannelReactionEntry,
     ChannelReactionEnvelopeError, CHANNEL_REACTIONS_MAX_CLIENT, CHANNEL_REACTIONS_PER_POST_MAX,
     CHANNEL_REACTION_CHANNEL_ID_LEN, CHANNEL_REACTION_ENVELOPE_MAX_ENTRIES,
+};
+use super::channel_subscription::{
+    compose_channel_subscription_envelope, decode_channel_subscription_envelope, ChannelSubscribed,
+    ChannelSubscriptionEntry, ChannelSubscriptionEnvelopeError, CHANNEL_SUBSCRIPTIONS_MAX_CLIENT,
+    CHANNEL_SUBSCRIPTION_CHANNEL_ID_LEN, CHANNEL_SUBSCRIPTION_ENVELOPE_MAX_ENTRIES,
 };
 use super::device_ack::{
     compose_device_ack_envelope, decode_device_ack_envelope, DeviceAckEntry,
@@ -186,6 +232,10 @@ use super::link_record::{
 };
 use super::own_username::{
     compose_own_username_envelope, decode_own_username_envelope, OwnUsernameEnvelopeError,
+};
+use super::poll_choice::{
+    compose_poll_choice_envelope, decode_poll_choice_envelope, PollChoiceEntry,
+    PollChoiceEnvelopeError, POLL_CHOICES_MAX_CLIENT, POLL_CHOICE_ENVELOPE_MAX_ENTRIES,
 };
 use super::quick_reaction::{
     compose_quick_reaction_envelope, decode_quick_reaction_envelope, QuickReactionEntry,
@@ -212,11 +262,16 @@ use super::recovery_email::{
 /// since a link record carries group and channel links (ADR-0087 phase B,
 /// 2026-11-05: target, invite seed, admission version, capability), `12`
 /// since an own reaction may name a comment (ADR-0087 phase B, 2026-11-06:
-/// target and comment cursor). Older
+/// target and comment cursor), `13` since the channel-subscription register
+/// (maintainer decision of 2026-11-13), `14` since the channel admission-seed
+/// register (ADR-0090 open question 4), `15` since a co-publisher's
+/// channel subscription records the owner's account key (ADR-0090 section
+/// 2.3), `16` since the own poll-choice register carrying the set version
+/// (ADR-0092 section 3.6, as amended 2026-11-15). Older
 /// versions are refused rather than read: nothing is deployed, and a build
 /// that silently accepted an older layout would be a second decoder nobody
 /// tests.
-const STATE_VERSION: u8 = 12;
+const STATE_VERSION: u8 = 16;
 
 /// A stored register value with its stamp.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -438,6 +493,9 @@ impl SyncedState {
                 | SyncEntry::ChannelReaction(_)
                 | SyncEntry::ChannelComment(_)
                 | SyncEntry::QuickReaction(_)
+                | SyncEntry::ChannelSubscription(_)
+                | SyncEntry::ChannelAdmissionSeed(_)
+                | SyncEntry::PollChoice(_)
                 | SyncEntry::Blocked(_) => {},
                 other => {
                     let _ = snap.folders.push(h.hlc, other.clone());
@@ -959,7 +1017,7 @@ impl SyncedState {
     }
 
     // -----------------------------------------------------------------
-    // Blocked people (ADR-0089 section 6).
+    // Blocked people (ADR-0098 section 6).
     // -----------------------------------------------------------------
 
     /// Block (`blocked`) or unblock the account `account_key`, stamped
@@ -1323,6 +1381,137 @@ impl SyncedState {
     }
 
     // -----------------------------------------------------------------
+    // Own poll choices (ADR-0092 section 3.6).
+    // -----------------------------------------------------------------
+
+    /// Record the account's choice in a poll, stamped `hlc`: `choices` empty
+    /// retracts the vote. `set_version` is the ring version of the account's
+    /// anonymity set in the poll (ADR-0092 section 3.6): the version the first
+    /// vote drew from, which the client reads back with [`Self::poll_choice`]
+    /// and passes to every later vote; 0 for a channel poll. Returns the envelope to send when the register
+    /// changed, `None` when the held register is newer or identical.
+    ///
+    /// # Errors
+    ///
+    /// [`super::entry::BoundsError::RefIdLength`],
+    /// [`super::entry::BoundsError::PollChoices`], or
+    /// [`super::entry::BoundsError::TooManyPollChoices`] when a new register would pass
+    /// [`POLL_CHOICES_MAX_CLIENT`] (an update of a held one is always written).
+    pub fn set_poll_choice(
+        &mut self,
+        hlc: u64,
+        conversation: &ConversationRef,
+        poll_message_id: i64,
+        choices: &[u8],
+        set_version: u32,
+    ) -> Result<Option<Vec<u8>>, super::entry::BoundsError> {
+        let value = PollChoiceEntry {
+            conversation: conversation.clone(),
+            poll_message_id,
+            choices: choices.to_vec(),
+            set_version,
+        };
+        value.validate()?;
+        if self.poll_choice(conversation, poll_message_id).is_none()
+            && self.poll_choice_count() >= POLL_CHOICES_MAX_CLIENT
+        {
+            return Err(super::entry::BoundsError::TooManyPollChoices);
+        }
+        if self.apply(hlc, SyncEntry::PollChoice(value.clone()))? != ApplyOutcome::Applied {
+            return Ok(None);
+        }
+        Ok(compose_poll_choice_envelope(&[Stamped { hlc, value }]).ok())
+    }
+
+    /// The held own-choice register of a poll, a retraction included.
+    #[must_use]
+    pub fn poll_choice(
+        &self,
+        conversation: &ConversationRef,
+        poll_message_id: i64,
+    ) -> Option<Stamped<PollChoiceEntry>> {
+        match self.registers.get(&RegisterKey::PollChoice(
+            conversation.clone(),
+            poll_message_id,
+        )) {
+            Some(Held {
+                hlc,
+                entry: SyncEntry::PollChoice(p),
+            }) => Some(Stamped {
+                hlc: *hlc,
+                value: p.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn poll_choice_count(&self) -> usize {
+        self.registers
+            .keys()
+            .filter(|k| matches!(k, RegisterKey::PollChoice(..)))
+            .count()
+    }
+
+    /// Every held own-choice register (retractions included) with its
+    /// original stamp, as envelopes of at most
+    /// [`POLL_CHOICE_ENVELOPE_MAX_ENTRIES`] entries: the catch-up a device
+    /// sends on DeviceGroup growth, and the re-send it owes when a live send
+    /// did not go out.
+    #[must_use]
+    pub fn poll_choice_envelopes(&self) -> Vec<Vec<u8>> {
+        let held: Vec<Stamped<PollChoiceEntry>> = self
+            .registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::PollChoice(p) => Some(Stamped {
+                    hlc: h.hlc,
+                    value: p.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+        held.chunks(POLL_CHOICE_ENVELOPE_MAX_ENTRIES)
+            .filter_map(|chunk| compose_poll_choice_envelope(chunk).ok())
+            .collect()
+    }
+
+    /// Decode a poll-choice envelope and fold every register in with its
+    /// original stamp. Fail closed. Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`PollChoiceEnvelopeError`].
+    pub fn apply_poll_choice_envelope(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<bool, PollChoiceEnvelopeError> {
+        let entries = decode_poll_choice_envelope(bytes)?;
+        Ok(self.apply_all(
+            entries
+                .into_iter()
+                .map(|s| (s.hlc, SyncEntry::PollChoice(s.value))),
+        ))
+    }
+
+    /// Drop every own-choice register of a conversation whose
+    /// conversation-end register reads ended. Returns how many went. The
+    /// client calls it when it loads the state and after applying envelopes,
+    /// as it calls [`Self::prune_channel_activity`].
+    pub fn prune_poll_choices(&mut self) -> usize {
+        let ended: std::collections::BTreeSet<ConversationRef> = self
+            .ended_conversations()
+            .into_iter()
+            .map(|e| e.value.conversation)
+            .collect();
+        let before = self.registers.len();
+        self.registers.retain(|_, h| match &h.entry {
+            SyncEntry::PollChoice(p) => !ended.contains(&p.conversation),
+            _ => true,
+        });
+        before - self.registers.len()
+    }
+
+    // -----------------------------------------------------------------
     // Own channel comments (ADR-0087 section 13a).
     // -----------------------------------------------------------------
 
@@ -1496,6 +1685,295 @@ impl SyncedState {
 
     // -----------------------------------------------------------------
     // Link records (ADR-0079 section 4).
+    // -----------------------------------------------------------------
+    // Channel subscriptions (maintainer decision of 2026-11-13).
+    // -----------------------------------------------------------------
+
+    /// Record that the account is subscribed to `channel_id` (a subscription
+    /// just made, or any change to one: a read key learned, a name or handle
+    /// seen, a co-publisher joined). Stamped at `max(hlc, held + 1)`, so a
+    /// local write always takes effect. `Ok(true)` when written and to be
+    /// sent ([`Self::channel_subscription_envelope_for`]); `Ok(false)` when
+    /// the identical subscription is already held.
+    ///
+    /// # Errors
+    ///
+    /// The [`super::entry::BoundsError`] the value breaks, or
+    /// [`super::entry::BoundsError::TooManyChannelSubscriptions`] for a new
+    /// channel when [`CHANNEL_SUBSCRIPTIONS_MAX_CLIENT`] are held live.
+    pub fn set_channel_subscription(
+        &mut self,
+        hlc: u64,
+        channel_id: &[u8; CHANNEL_SUBSCRIPTION_CHANNEL_ID_LEN],
+        subscribed: ChannelSubscribed,
+    ) -> Result<bool, super::entry::BoundsError> {
+        let entry = ChannelSubscriptionEntry {
+            channel_id: *channel_id,
+            subscribed: Some(subscribed),
+        };
+        entry.validate()?;
+        let held = self.channel_subscription(channel_id);
+        if let Some(h) = &held {
+            if h.value == entry {
+                return Ok(false);
+            }
+        }
+        let live_here = held.as_ref().is_some_and(|h| h.value.is_subscribed());
+        if !live_here && self.live_channel_subscriptions() >= CHANNEL_SUBSCRIPTIONS_MAX_CLIENT {
+            return Err(super::entry::BoundsError::TooManyChannelSubscriptions);
+        }
+        let stamp = held.map_or(hlc, |h| hlc.max(h.hlc.saturating_add(1)));
+        Ok(matches!(
+            self.apply(stamp, SyncEntry::ChannelSubscription(entry))?,
+            ApplyOutcome::Applied
+        ))
+    }
+
+    /// Record that the account left `channel_id`: the tombstone, stamped at
+    /// `max(hlc, held + 1)`. `true` when written (send it); `false` when no
+    /// subscription is held for the channel or it was already left.
+    pub fn leave_channel_subscription(
+        &mut self,
+        hlc: u64,
+        channel_id: &[u8; CHANNEL_SUBSCRIPTION_CHANNEL_ID_LEN],
+    ) -> bool {
+        let Some(held) = self.channel_subscription(channel_id) else {
+            return false;
+        };
+        if !held.value.is_subscribed() {
+            return false;
+        }
+        matches!(
+            self.apply(
+                hlc.max(held.hlc.saturating_add(1)),
+                SyncEntry::ChannelSubscription(ChannelSubscriptionEntry::left(*channel_id)),
+            ),
+            Ok(ApplyOutcome::Applied)
+        )
+    }
+
+    /// The register held for a channel (a live subscription or a leave).
+    #[must_use]
+    pub fn channel_subscription(
+        &self,
+        channel_id: &[u8; CHANNEL_SUBSCRIPTION_CHANNEL_ID_LEN],
+    ) -> Option<Stamped<ChannelSubscriptionEntry>> {
+        match self
+            .registers
+            .get(&RegisterKey::ChannelSubscription(*channel_id))
+        {
+            Some(Held {
+                hlc,
+                entry: SyncEntry::ChannelSubscription(c),
+            }) => Some(Stamped {
+                hlc: *hlc,
+                value: c.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// `true` while the account is subscribed to `channel_id`.
+    #[must_use]
+    pub fn is_channel_subscribed(
+        &self,
+        channel_id: &[u8; CHANNEL_SUBSCRIPTION_CHANNEL_ID_LEN],
+    ) -> bool {
+        self.channel_subscription(channel_id)
+            .is_some_and(|c| c.value.is_subscribed())
+    }
+
+    /// Every channel-subscription register (leaves included), ascending by
+    /// channel id.
+    #[must_use]
+    pub fn all_channel_subscriptions(&self) -> Vec<Stamped<ChannelSubscriptionEntry>> {
+        self.registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::ChannelSubscription(c) => Some(Stamped {
+                    hlc: h.hlc,
+                    value: c.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn live_channel_subscriptions(&self) -> usize {
+        self.registers
+            .values()
+            .filter(|h| matches!(&h.entry, SyncEntry::ChannelSubscription(c) if c.is_subscribed()))
+            .count()
+    }
+
+    /// The envelope carrying one held channel-subscription register with its
+    /// original stamp.
+    #[must_use]
+    pub fn channel_subscription_envelope_for(
+        &self,
+        channel_id: &[u8; CHANNEL_SUBSCRIPTION_CHANNEL_ID_LEN],
+    ) -> Option<Vec<u8>> {
+        let held = self.channel_subscription(channel_id)?;
+        compose_channel_subscription_envelope(&[held]).ok()
+    }
+
+    /// Every held channel-subscription register with its original stamp, as
+    /// envelopes of at most [`CHANNEL_SUBSCRIPTION_ENVELOPE_MAX_ENTRIES`]
+    /// entries: the catch-up re-send after the DeviceGroup grew.
+    #[must_use]
+    pub fn channel_subscription_envelopes(&self) -> Vec<Vec<u8>> {
+        self.all_channel_subscriptions()
+            .chunks(CHANNEL_SUBSCRIPTION_ENVELOPE_MAX_ENTRIES)
+            .filter_map(|chunk| compose_channel_subscription_envelope(chunk).ok())
+            .collect()
+    }
+
+    /// Decode a channel-subscription envelope and fold every register in
+    /// with its original stamp. Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`ChannelSubscriptionEnvelopeError`].
+    pub fn apply_channel_subscription_envelope(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<bool, ChannelSubscriptionEnvelopeError> {
+        let entries = decode_channel_subscription_envelope(bytes)?;
+        Ok(self.apply_all(
+            entries
+                .into_iter()
+                .map(|s| (s.hlc, SyncEntry::ChannelSubscription(s.value))),
+        ))
+    }
+
+    // -----------------------------------------------------------------
+    // Channel admission seeds (ADR-0090 open question 4).
+    // -----------------------------------------------------------------
+
+    /// Record the admission seed of `admission_version` for `channel_id`, the
+    /// owner account's own copy. **Write-once per seed**: `false` when this
+    /// seed is already held; `true` when written and to be sent
+    /// ([`Self::channel_admission_seed_envelope_for`]). Another seed of the
+    /// same version is another register and is kept beside it (two owner
+    /// devices minting one version at once both hand out links).
+    pub fn set_channel_admission_seed(
+        &mut self,
+        hlc: u64,
+        channel_id: &[u8; CHANNEL_ADMISSION_SEED_CHANNEL_ID_LEN],
+        admission_version: u16,
+        seed: &[u8; CHANNEL_ADMISSION_SEED_LEN],
+    ) -> bool {
+        let entry = ChannelAdmissionSeedEntry {
+            channel_id: *channel_id,
+            admission_version,
+            seed: *seed,
+        };
+        let (c, v, id) = entry.sort_key();
+        if self
+            .registers
+            .contains_key(&RegisterKey::ChannelAdmissionSeed(c, v, id))
+        {
+            return false;
+        }
+        matches!(
+            self.apply(hlc, SyncEntry::ChannelAdmissionSeed(entry)),
+            Ok(ApplyOutcome::Applied)
+        )
+    }
+
+    /// Every seed held for `channel_id` at `admission_version`: a ticket of
+    /// that version is checked against each of them.
+    #[must_use]
+    pub fn channel_admission_seeds_for(
+        &self,
+        channel_id: &[u8; CHANNEL_ADMISSION_SEED_CHANNEL_ID_LEN],
+        admission_version: u16,
+    ) -> Vec<[u8; CHANNEL_ADMISSION_SEED_LEN]> {
+        self.all_channel_admission_seeds()
+            .into_iter()
+            .filter(|s| {
+                &s.value.channel_id == channel_id && s.value.admission_version == admission_version
+            })
+            .map(|s| s.value.seed)
+            .collect()
+    }
+
+    /// Every admission-seed register, ascending by `(channel id, version,
+    /// seed id)`.
+    #[must_use]
+    pub fn all_channel_admission_seeds(&self) -> Vec<Stamped<ChannelAdmissionSeedEntry>> {
+        self.registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::ChannelAdmissionSeed(a) => Some(Stamped {
+                    hlc: h.hlc,
+                    value: a.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `(version, seed)` pairs held for one channel, ascending by
+    /// version; a version may appear more than once.
+    #[must_use]
+    pub fn channel_admission_seeds(
+        &self,
+        channel_id: &[u8; CHANNEL_ADMISSION_SEED_CHANNEL_ID_LEN],
+    ) -> Vec<(u16, [u8; CHANNEL_ADMISSION_SEED_LEN])> {
+        self.all_channel_admission_seeds()
+            .into_iter()
+            .filter(|s| &s.value.channel_id == channel_id)
+            .map(|s| (s.value.admission_version, s.value.seed))
+            .collect()
+    }
+
+    /// The envelope carrying the held register of this seed with its
+    /// original stamp, `None` when it is not held.
+    #[must_use]
+    pub fn channel_admission_seed_envelope_for(
+        &self,
+        channel_id: &[u8; CHANNEL_ADMISSION_SEED_CHANNEL_ID_LEN],
+        admission_version: u16,
+        seed: &[u8; CHANNEL_ADMISSION_SEED_LEN],
+    ) -> Option<Vec<u8>> {
+        let held = self.all_channel_admission_seeds().into_iter().find(|s| {
+            &s.value.channel_id == channel_id
+                && s.value.admission_version == admission_version
+                && &s.value.seed == seed
+        })?;
+        compose_channel_admission_seed_envelope(&[held]).ok()
+    }
+
+    /// Every held admission-seed register with its original stamp, as
+    /// envelopes of at most [`CHANNEL_ADMISSION_SEED_ENVELOPE_MAX_ENTRIES`]
+    /// entries: the catch-up re-send after the DeviceGroup grew.
+    #[must_use]
+    pub fn channel_admission_seed_envelopes(&self) -> Vec<Vec<u8>> {
+        self.all_channel_admission_seeds()
+            .chunks(CHANNEL_ADMISSION_SEED_ENVELOPE_MAX_ENTRIES)
+            .filter_map(|chunk| compose_channel_admission_seed_envelope(chunk).ok())
+            .collect()
+    }
+
+    /// Decode an admission-seed envelope and fold every register in with its
+    /// original stamp. Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`ChannelAdmissionSeedEnvelopeError`].
+    pub fn apply_channel_admission_seed_envelope(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<bool, ChannelAdmissionSeedEnvelopeError> {
+        let entries = decode_channel_admission_seed_envelope(bytes)?;
+        Ok(self.apply_all(
+            entries
+                .into_iter()
+                .map(|s| (s.hlc, SyncEntry::ChannelAdmissionSeed(s.value))),
+        ))
+    }
+
     // -----------------------------------------------------------------
 
     /// Write a link record (a link just minted, or any change to one).
@@ -2631,15 +3109,15 @@ mod tests {
         let mut s = SyncedState::new();
         s.apply(3, SyncEntry::FolderRemoved(fid(2))).ok();
         let mut old = s.to_bytes();
-        assert_eq!(old[0], 12);
-        for version in [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] {
+        assert_eq!(old[0], 16);
+        for version in [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] {
             old[0] = version;
             assert_eq!(
                 SyncedState::from_bytes(&old),
                 Err(CodecError::UnknownVersion)
             );
         }
-        assert_eq!(SyncedState::new().to_bytes(), vec![12, 0, 0, 0, 0]);
+        assert_eq!(SyncedState::new().to_bytes(), vec![16, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -2992,6 +3470,87 @@ mod tests {
         assert!(c.is_empty());
     }
 
+    fn poll_choice(c: u8, message: i64, choices: &[u8]) -> SyncEntry {
+        SyncEntry::PollChoice(PollChoiceEntry {
+            conversation: cref(c),
+            poll_message_id: message,
+            choices: choices.to_vec(),
+            set_version: 2,
+        })
+    }
+
+    #[test]
+    fn a_poll_choice_round_trips_retracts_and_goes_with_its_ended_conversation() {
+        let mut s = SyncedState::new();
+        let sent = s
+            .set_poll_choice(5, &cref(1), 42, &[0, 2], 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            s.poll_choice(&cref(1), 42).unwrap().value.choices,
+            vec![0, 2]
+        );
+        // An older write does not replace it; a newer retraction does.
+        assert_eq!(s.set_poll_choice(4, &cref(1), 42, &[1], 2).unwrap(), None);
+        s.set_poll_choice(6, &cref(1), 42, &[], 2).unwrap().unwrap();
+        assert!(s
+            .poll_choice(&cref(1), 42)
+            .unwrap()
+            .value
+            .choices
+            .is_empty());
+        // Another device folds the first envelope in, then the catch-up.
+        let mut other = SyncedState::new();
+        assert_eq!(other.apply_poll_choice_envelope(&sent), Ok(true));
+        assert_eq!(other.apply_poll_choice_envelope(&sent), Ok(false));
+        for envelope in s.poll_choice_envelopes() {
+            other.apply_poll_choice_envelope(&envelope).unwrap();
+        }
+        assert_eq!(other.poll_choice(&cref(1), 42), s.poll_choice(&cref(1), 42));
+        // The set version survives a retraction and is what a revote from
+        // any device reads back.
+        assert_eq!(
+            other.poll_choice(&cref(1), 42).unwrap().value.set_version,
+            2
+        );
+        // Persisted, and not in the snapshot.
+        assert_eq!(SyncedState::from_bytes(&s.to_bytes()).unwrap(), s);
+        assert!(s.snapshot().stamped_entries().is_empty());
+        // Bad choices are refused.
+        assert_eq!(
+            s.set_poll_choice(7, &cref(2), 1, &[3, 3], 2),
+            Err(super::super::entry::BoundsError::PollChoices)
+        );
+        // Kept while the conversation lives, gone once it has ended.
+        s.set_poll_choice(8, &cref(2), 1, &[1], 2).unwrap();
+        assert_eq!(s.prune_poll_choices(), 0);
+        s.apply(9, conversation_end(1, 3, true)).unwrap();
+        assert_eq!(s.prune_poll_choices(), 1);
+        assert!(s.poll_choice(&cref(1), 42).is_none());
+        assert!(s.poll_choice(&cref(2), 1).is_some());
+        // A conversation joined again keeps its choices.
+        s.set_poll_choice(10, &cref(1), 43, &[0], 2).unwrap();
+        s.apply(11, conversation_end(1, 4, false)).unwrap();
+        assert_eq!(s.prune_poll_choices(), 0);
+    }
+
+    #[test]
+    fn the_poll_choice_cap_bounds_new_registers_only() {
+        let mut s = SyncedState::new();
+        for i in 0..POLL_CHOICES_MAX_CLIENT {
+            s.apply(1, poll_choice(0, i64::try_from(i).unwrap(), &[0]))
+                .unwrap();
+        }
+        assert_eq!(
+            s.set_poll_choice(2, &cref(0), -1, &[0], 2),
+            Err(super::super::entry::BoundsError::TooManyPollChoices)
+        );
+        assert!(s
+            .set_poll_choice(2, &cref(0), 0, &[1], 2)
+            .unwrap()
+            .is_some());
+    }
+
     fn channel_comment(c: u8, cursor: u64, nonce: u8, deleted: bool) -> SyncEntry {
         SyncEntry::ChannelComment(ChannelCommentEntry {
             channel_id: [c; 16],
@@ -3056,6 +3615,111 @@ mod tests {
         assert!(x.channel_comments_on(&[1; 16], 7).is_empty());
     }
 
+    /// ADR-0090 open question 4: an admission seed is written once per seed,
+    /// reaches another owner device by its envelope, is carried in the
+    /// persisted state (so the backup), and is not in the growth snapshot.
+    #[test]
+    fn an_admission_seed_is_written_once_carried_and_persisted() {
+        let ch = [6u8; 16];
+        let mut a = SyncedState::new();
+        assert!(a.set_channel_admission_seed(1, &ch, 0, &[0x11; 32]));
+        assert!(
+            !a.set_channel_admission_seed(9, &ch, 0, &[0x11; 32]),
+            "write-once"
+        );
+        assert!(a.set_channel_admission_seed(2, &ch, 1, &[0x33; 32]));
+        assert_eq!(a.channel_admission_seeds_for(&ch, 0), vec![[0x11; 32]]);
+        assert_eq!(
+            a.channel_admission_seeds(&ch),
+            vec![(0, [0x11; 32]), (1, [0x33; 32])]
+        );
+        assert!(a.channel_admission_seeds(&[7u8; 16]).is_empty());
+
+        let mut b = SyncedState::new();
+        for envelope in a.channel_admission_seed_envelopes() {
+            assert_eq!(b.apply_channel_admission_seed_envelope(&envelope), Ok(true));
+            assert_eq!(
+                b.apply_channel_admission_seed_envelope(&envelope),
+                Ok(false)
+            );
+        }
+        assert_eq!(
+            b.all_channel_admission_seeds(),
+            a.all_channel_admission_seeds()
+        );
+        let one = a
+            .channel_admission_seed_envelope_for(&ch, 1, &[0x33; 32])
+            .expect("held");
+        assert!(a
+            .channel_admission_seed_envelope_for(&ch, 1, &[0x34; 32])
+            .is_none());
+        let mut c = SyncedState::new();
+        assert_eq!(c.apply_channel_admission_seed_envelope(&one), Ok(true));
+        assert_eq!(c.channel_admission_seeds_for(&ch, 1), vec![[0x33; 32]]);
+        assert!(c.channel_admission_seeds_for(&ch, 0).is_empty());
+
+        let restored = SyncedState::from_bytes(&a.to_bytes()).expect("persisted");
+        assert_eq!(
+            restored.all_channel_admission_seeds(),
+            a.all_channel_admission_seeds()
+        );
+        assert_eq!(
+            a.snapshot(),
+            SyncedState::new().snapshot(),
+            "not in the snapshot"
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(128))]
+
+        /// ADR-0090 open question 4: two owner devices mint the same version
+        /// at once, each with its own seed and any stamps; folded in either
+        /// order on two devices, BOTH seeds are held on BOTH devices, so the
+        /// subscribers admitted under either keep passing their ticket check.
+        #[test]
+        fn concurrent_mints_of_one_version_both_survive_in_either_order(
+            seed_x in proptest::prelude::any::<[u8; 32]>(),
+            seed_y in proptest::prelude::any::<[u8; 32]>(),
+            hlc_x in proptest::prelude::any::<u64>(),
+            hlc_y in proptest::prelude::any::<u64>(),
+            version in proptest::prelude::any::<u16>(),
+        ) {
+            proptest::prop_assume!(seed_x != seed_y);
+            let ch = [8u8; 16];
+            let mut x = SyncedState::new();
+            let mut y = SyncedState::new();
+            proptest::prop_assert!(x.set_channel_admission_seed(hlc_x, &ch, version, &seed_x));
+            proptest::prop_assert!(y.set_channel_admission_seed(hlc_y, &ch, version, &seed_y));
+            let ex = x.channel_admission_seed_envelopes();
+            let ey = y.channel_admission_seed_envelopes();
+            // x folds y's mint after its own, y folds x's after its own.
+            for e in &ey {
+                proptest::prop_assert_eq!(x.apply_channel_admission_seed_envelope(e), Ok(true));
+            }
+            for e in &ex {
+                proptest::prop_assert_eq!(y.apply_channel_admission_seed_envelope(e), Ok(true));
+            }
+            for state in [&x, &y] {
+                let held = state.channel_admission_seeds_for(&ch, version);
+                proptest::prop_assert_eq!(held.len(), 2);
+                proptest::prop_assert!(held.contains(&seed_x) && held.contains(&seed_y));
+            }
+            proptest::prop_assert_eq!(x.all_channel_admission_seeds(), y.all_channel_admission_seeds());
+            // A third device folding both, in either order, holds the same.
+            let mut z1 = SyncedState::new();
+            let mut z2 = SyncedState::new();
+            for e in ex.iter().chain(ey.iter()) {
+                let _ = z1.apply_channel_admission_seed_envelope(e);
+            }
+            for e in ey.iter().chain(ex.iter()) {
+                let _ = z2.apply_channel_admission_seed_envelope(e);
+            }
+            proptest::prop_assert_eq!(z1.all_channel_admission_seeds(), x.all_channel_admission_seeds());
+            proptest::prop_assert_eq!(z2.all_channel_admission_seeds(), x.all_channel_admission_seeds());
+        }
+    }
+
     #[test]
     fn an_own_reaction_is_set_taken_off_carried_and_persisted() {
         let ch = [4u8; 16];
@@ -3102,6 +3766,152 @@ mod tests {
         assert_eq!(
             a.set_channel_reaction(5, ch, 7, "", true, 500),
             Err(super::super::entry::BoundsError::ChannelReactionEmoji)
+        );
+    }
+
+    fn subscribed(
+        role: super::super::channel_subscription::ChannelSubscriptionRole,
+        name: &str,
+    ) -> ChannelSubscribed {
+        use super::super::channel_subscription::ChannelSubscriptionRole as R;
+        ChannelSubscribed {
+            role,
+            subscriber_secret: [0x5E; 32],
+            read_key: Some([0x4B; 32]),
+            publisher_group_id: (role == R::CoPublisher).then_some([0x9A; 32]),
+            owner_account_key: (role == R::CoPublisher).then_some([0x0E; 32]),
+            name: name.to_string(),
+            handle: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_channel_subscription_is_set_left_resubscribed_carried_and_persisted() {
+        use super::super::channel_subscription::ChannelSubscriptionRole as R;
+        let ch = [7u8; 16];
+        let mut a = SyncedState::new();
+        assert!(!a.is_channel_subscribed(&ch));
+        // Leaving a channel never subscribed writes nothing.
+        assert!(!a.leave_channel_subscription(1, &ch));
+        assert_eq!(
+            a.set_channel_subscription(2, &ch, subscribed(R::Owner, "News")),
+            Ok(true)
+        );
+        assert!(a.is_channel_subscribed(&ch));
+        // The identical value again writes nothing.
+        assert_eq!(
+            a.set_channel_subscription(3, &ch, subscribed(R::Owner, "News")),
+            Ok(false)
+        );
+        let sent = a.channel_subscription_envelope_for(&ch).unwrap_or_default();
+        // A second device folds it in, idempotently, and reads the secret.
+        let mut b = SyncedState::new();
+        assert_eq!(b.apply_channel_subscription_envelope(&sent), Ok(true));
+        assert_eq!(b.apply_channel_subscription_envelope(&sent), Ok(false));
+        let held = b.channel_subscription(&ch).unwrap();
+        assert_eq!(
+            held.value.subscribed.as_ref().map(|s| s.subscriber_secret),
+            Some([0x5E; 32])
+        );
+        // A rename on b with an older clock still takes effect locally
+        // (stamped above the held one) and reaches a.
+        assert_eq!(
+            b.set_channel_subscription(1, &ch, subscribed(R::Owner, "Daily")),
+            Ok(true)
+        );
+        let renamed = b.channel_subscription_envelope_for(&ch).unwrap_or_default();
+        assert_eq!(a.apply_channel_subscription_envelope(&renamed), Ok(true));
+        assert_eq!(
+            a.channel_subscription(&ch)
+                .and_then(|c| c.value.subscribed)
+                .map(|s| s.name),
+            Some("Daily".to_string())
+        );
+        // Left on a; the tombstone reaches b and beats every older write.
+        assert!(a.leave_channel_subscription(0, &ch));
+        assert!(!a.leave_channel_subscription(0, &ch));
+        let left = a.channel_subscription_envelope_for(&ch).unwrap_or_default();
+        assert_eq!(b.apply_channel_subscription_envelope(&left), Ok(true));
+        assert!(!b.is_channel_subscribed(&ch));
+        assert_eq!(b.apply_channel_subscription_envelope(&sent), Ok(false));
+        assert!(!b.is_channel_subscribed(&ch));
+        // A re-subscribe after the leave is a later write and wins.
+        assert_eq!(
+            b.set_channel_subscription(0, &ch, subscribed(R::Subscriber, "")),
+            Ok(true)
+        );
+        let again = b.channel_subscription_envelope_for(&ch).unwrap_or_default();
+        assert_eq!(a.apply_channel_subscription_envelope(&again), Ok(true));
+        assert!(a.is_channel_subscribed(&ch));
+        assert_eq!(a.apply_channel_subscription_envelope(&left), Ok(false));
+        // Never in the snapshot, but persisted and re-sent.
+        assert!(a.snapshot().folders.is_empty());
+        assert!(a.snapshot().entries.is_empty());
+        let back = SyncedState::from_bytes(&a.to_bytes()).unwrap_or_default();
+        assert_eq!(back.entries(), a.entries());
+        assert_eq!(a.channel_subscription_envelopes(), vec![again]);
+        // A bound broken is refused and changes nothing.
+        let mut bad = subscribed(R::Subscriber, "");
+        bad.publisher_group_id = Some([1; 32]);
+        assert_eq!(
+            a.set_channel_subscription(9, &ch, bad),
+            Err(super::super::entry::BoundsError::ChannelSubscriptionPublisherGroup)
+        );
+        assert!(a.is_channel_subscribed(&ch));
+    }
+
+    #[test]
+    fn on_an_exact_stamp_tie_the_subscription_beats_the_leave() {
+        use super::super::channel_subscription::{
+            ChannelSubscriptionEntry, ChannelSubscriptionRole as R,
+        };
+        let ch = [8u8; 16];
+        let live = SyncEntry::ChannelSubscription(ChannelSubscriptionEntry {
+            channel_id: ch,
+            subscribed: Some(subscribed(R::Subscriber, "")),
+        });
+        let gone = SyncEntry::ChannelSubscription(ChannelSubscriptionEntry::left(ch));
+        let mut x = SyncedState::new();
+        x.apply(5, gone.clone()).ok();
+        x.apply(5, live.clone()).ok();
+        let mut y = SyncedState::new();
+        y.apply(5, live).ok();
+        y.apply(5, gone).ok();
+        assert_eq!(x, y);
+        assert!(x.is_channel_subscribed(&ch));
+    }
+
+    #[test]
+    fn the_live_subscription_limit_counts_live_channels_only() {
+        use super::super::channel_subscription::{
+            ChannelSubscriptionRole as R, CHANNEL_SUBSCRIPTIONS_MAX_CLIENT,
+        };
+        let mut s = SyncedState::new();
+        let id = |i: usize| {
+            let mut a = [0u8; 16];
+            a[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            a
+        };
+        for i in 0..CHANNEL_SUBSCRIPTIONS_MAX_CLIENT {
+            assert_eq!(
+                s.set_channel_subscription(1, &id(i), subscribed(R::Subscriber, "")),
+                Ok(true)
+            );
+        }
+        let extra = id(CHANNEL_SUBSCRIPTIONS_MAX_CLIENT);
+        assert_eq!(
+            s.set_channel_subscription(1, &extra, subscribed(R::Subscriber, "")),
+            Err(super::super::entry::BoundsError::TooManyChannelSubscriptions)
+        );
+        // A change to a held one is still written; a leave makes room.
+        assert_eq!(
+            s.set_channel_subscription(2, &id(0), subscribed(R::Subscriber, "A")),
+            Ok(true)
+        );
+        assert!(s.leave_channel_subscription(3, &id(1)));
+        assert_eq!(
+            s.set_channel_subscription(4, &extra, subscribed(R::Subscriber, "")),
+            Ok(true)
         );
     }
 
@@ -3665,6 +4475,9 @@ mod tests {
     // The key property: order does not matter.
     // -----------------------------------------------------------------
 
+    // One arm per register kind; splitting it would hide that every kind is
+    // in the property.
+    #[allow(clippy::too_many_lines)]
     fn arb_entry() -> impl Strategy<Value = (u64, SyncEntry)> {
         // A small space of folders, conversations and stamps so ties,
         // tombstones and overwrites collide often.
@@ -3769,6 +4582,18 @@ mod tests {
                     h,
                     channel_reaction(c, cursor, e, reacted)
                 )),
+            // Own poll choices: two polls, choices and retractions meeting
+            // on one stamp often.
+            (
+                hlc.clone(),
+                c.clone(),
+                0i64..2,
+                prop::collection::btree_set(0u8..3, 0..3)
+            )
+                .prop_map(|(h, c, m, set)| (
+                    h,
+                    poll_choice(c, m, &set.into_iter().collect::<Vec<u8>>())
+                )),
             // Own channel comments: two posts x two nonces, a comment and its
             // deletion meeting on one stamp often.
             (hlc, c, 0u64..2, 0u8..2, any::<bool>())
@@ -3797,6 +4622,9 @@ mod tests {
         }
         for envelope in from.channel_comment_envelopes() {
             into.apply_channel_comment_envelope(&envelope).unwrap();
+        }
+        for envelope in from.poll_choice_envelopes() {
+            into.apply_poll_choice_envelope(&envelope).unwrap();
         }
     }
 

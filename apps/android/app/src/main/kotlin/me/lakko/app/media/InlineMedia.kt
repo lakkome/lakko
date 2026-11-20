@@ -34,7 +34,7 @@ public enum class InlineKind { IMAGE, AUDIO, VIDEO }
  * `kind`: an image on the allowlist is a photo, an allowlisted video is a
  * video. A present-but-unknown `kind` stays a file chip.
  */
-public enum class MediaBubble { VOICE, VIDEO_NOTE, GIF, PHOTO, VIDEO, FILE }
+public enum class MediaBubble { VOICE, VIDEO_NOTE, GIF, PHOTO, VIDEO, FILE, AUDIO }
 
 public typealias MediaAllowlist = (String) -> InlineKind?
 
@@ -70,10 +70,16 @@ public const val KIND_VOICE: String = "voice"
 public const val KIND_VIDEO_NOTE: String = "video_note"
 public const val KIND_GIF: String = "gif"
 
+/** ADR-0092 section 2 — a music or audio file (not a voice message). */
+public const val KIND_AUDIO: String = "audio"
+
 public fun renderDecision(kind: String?, mime: String?, allowlist: MediaAllowlist): RenderDecision {
     val inline = inlineKindOf(mime, allowlist)
     val bubble = when {
         kind == KIND_VOICE && inline == InlineKind.AUDIO -> MediaBubble.VOICE
+        // ADR-0092 section 2 — a music or audio file: title, artist, cover;
+        // playable in the app only when its MIME is on the inline list.
+        kind == KIND_AUDIO -> MediaBubble.AUDIO
         kind == KIND_VIDEO_NOTE && inline == InlineKind.VIDEO -> MediaBubble.VIDEO_NOTE
         kind == KIND_GIF && (inline == InlineKind.IMAGE || inline == InlineKind.VIDEO) ->
             MediaBubble.GIF
@@ -137,5 +143,5 @@ public fun bubbleMetaSlot(sole: MediaBubble?): BubbleMetaSlot = when (sole) {
     MediaBubble.VIDEO_NOTE -> BubbleMetaSlot.BELOW_BUBBLE
     // A GIF keeps the row: it is a bubble with chrome, and a pill over an
     // animation that may be 40dp tall would cover it.
-    MediaBubble.GIF, MediaBubble.FILE, null -> BubbleMetaSlot.BUBBLE_ROW
+    MediaBubble.GIF, MediaBubble.FILE, MediaBubble.AUDIO, null -> BubbleMetaSlot.BUBBLE_ROW
 }

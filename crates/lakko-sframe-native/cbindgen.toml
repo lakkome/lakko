@@ -6,6 +6,11 @@
 # under `target/<profile>/include/`).
 
 language = "C"
+# Wrap the declarations in `extern "C"` when a C++ file includes the header.
+# Without it a C++ translation unit that forgets its own wrapper looks the
+# functions up under C++ mangled names: `noise_jni.cc` did (commit fa2ba4c0),
+# and libsframe_jni.so then failed to load, so every Android call failed.
+cpp_compat = true
 
 # Single-file header consumed by the iOS Obj-C++ shim
 # (apps/shared/sframe-bridge/sframe-bridge.cc N-3) and
@@ -43,6 +48,10 @@ sys_includes = ["stddef.h", "stdint.h"]
 "LakkoSframeStatus" = "lakko_sframe_status_t"
 "LakkoNoiseSuppressor" = "lakko_noise_suppressor_t"
 "LakkoNoiseStatus" = "lakko_noise_status_t"
+"LakkoSegmenter" = "lakko_segmenter_t"
+"LakkoSegmentState" = "lakko_segment_state_t"
+"LakkoSegmentLayout" = "lakko_segment_layout_t"
+"LakkoFrameAction" = "lakko_frame_action_t"
 
 [enum]
 # `rename_variants = "ScreamingSnakeCase"` plus `prefix_with_name`

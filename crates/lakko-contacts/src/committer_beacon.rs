@@ -871,7 +871,7 @@ mod tests {
         assert!(try_unwrap_committer_beacon(&welcome).unwrap().is_none());
         let kp = wrap_call_kp_forward(&vec![0xCDu8; 512]);
         assert!(try_unwrap_committer_beacon(&kp).unwrap().is_none());
-        let media = compose_media_state(true);
+        let media = compose_media_state(true, true);
         assert!(try_unwrap_committer_beacon(&media).unwrap().is_none());
         let secret = compose_push_routing_secret(7, &[0x11u8; 32]);
         assert!(try_unwrap_committer_beacon(&secret).unwrap().is_none());

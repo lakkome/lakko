@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Attested chat messages ([ADR-0089] section 1).
+//! Attested chat messages ([ADR-0098] section 1).
 //!
 //! A chat envelope travels inside an MLS application message wrapped with a
 //! signature by the sending device's conversation leaf key, so a report can
@@ -25,7 +25,7 @@
 //! at receipt and records the result. A missing or failed signature drops
 //! nothing: it decides only whether the message can serve as evidence.
 //!
-//! [ADR-0089]: ../../../docs/adr/0089-reporting-and-moderation.md
+//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
 
 use lakko_crypto::hash::blake3;
 use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey, SIGNATURE_LEN};

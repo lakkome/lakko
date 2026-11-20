@@ -95,7 +95,7 @@ struct InviteLinksSheet: View {
                     if viewModel.generatingInvite {
                         ProgressView().controlSize(.small)
                     }
-                    Label(l10n.t("invite.links.create"), systemImage: "link.badge.plus")
+                    Label(l10n.t("invite.links.create"), icon: .linkPlus)
                         .foregroundStyle(Color.lakkoAccent)
                 }
             }
@@ -425,7 +425,7 @@ struct LinkActionsRow: View {
                     Button {
                         copy(url)
                     } label: {
-                        Label(l10n.t(copied ? "common.copied" : "common.copy"), systemImage: copied ? "checkmark" : "doc.on.doc")
+                        Label(l10n.t(copied ? "common.copied" : "common.copy"), icon: copied ? .checkmark : .copy)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -434,7 +434,7 @@ struct LinkActionsRow: View {
                     // Copy, or a QR code someone scans.
                     if let showQr {
                         Button(action: showQr) {
-                            Image(systemName: "qrcode")
+                            LkIconView(.qrcode, size: 20)
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
@@ -449,7 +449,7 @@ struct LinkActionsRow: View {
                 Spacer()
                 if let edit {
                     Button(action: edit) {
-                        Image(systemName: "pencil")
+                        LkIconView(.pencil, size: 20)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -460,7 +460,7 @@ struct LinkActionsRow: View {
                         if deleting {
                             ProgressView().controlSize(.small)
                         } else {
-                            Image(systemName: "trash")
+                            LkIconView(.trash, size: 20)
                         }
                     }
                     .buttonStyle(.bordered)

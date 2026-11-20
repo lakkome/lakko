@@ -6,6 +6,10 @@
 //! Thin shim over `src/lib.rs` (same lib/bin split as
 //! `services/sfu`). Lives behind systemd's
 //! `EnvironmentFile=/etc/lakko/lakko.env` in production.
+//!
+//! `LAKKO_ANON_CRED_MASTER_SECRET` (64 hex characters, the value auth issues
+//! the channel-poll credential under; ADR-0092 section 4.4) arms the vote
+//! routes; unset, they answer `503 anon-credential-disabled`.
 
 #![forbid(unsafe_code)]
 
@@ -20,21 +24,44 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use lakko_anon_token_server::{AnonTokenServerConfig, TokenVerifier};
 use lakko_svc_channels::api::INVITE_KEY_GRACE_MS;
 use lakko_svc_channels::internal::{internal_router, load_internal};
+use lakko_svc_channels::metrics::PRUNE_JOB;
 use lakko_svc_channels::owner_auth::OWNER_NONCE_RETENTION_MS;
 use lakko_svc_channels::{
     router, AppState, ChannelStore, Config, InMemoryChannelStore, SqlChannelStore, MIGRATIONS,
     VERSION,
 };
 
+/// ADR-0092 section 4.4 — the channel-poll credential master shared with
+/// auth. Unset: the vote routes answer 503.
+fn load_poll_vote_verifier() -> anyhow::Result<Option<lakko_anon_cred::CredentialVerifier>> {
+    match std::env::var("LAKKO_ANON_CRED_MASTER_SECRET") {
+        Ok(v) if !v.trim().is_empty() => Ok(Some(lakko_anon_cred::CredentialVerifier::new(
+            lakko_anon_cred::MasterSecret::from_hex(&v).map_err(|_| {
+                anyhow::anyhow!("LAKKO_ANON_CRED_MASTER_SECRET must be 64 hex characters")
+            })?,
+        ))),
+        _ => {
+            warn!(
+                "channel poll votes DISABLED: LAKKO_ANON_CRED_MASTER_SECRET is not set; \
+                 the vote routes answer 503"
+            );
+            Ok(None)
+        },
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
     dotenv_in_debug();
+    // /metrics on its own localhost port, off when unset (ADR-0096).
+    lakko_metrics::start_from_env("channels", VERSION, "LAKKO_CHANNELS_METRICS_BIND").await?;
 
     let cfg = Config::from_env()?;
     info!(bind = %cfg.bind, "lakko-svc-channels starting (v{})", VERSION);
     let anon_config = AnonTokenServerConfig::from_env()?;
     let internal = load_internal().map_err(anyhow::Error::msg)?;
+    let votes = load_poll_vote_verifier()?;
 
     let (store, anon_tokens): (Arc<dyn ChannelStore + Send + Sync>, TokenVerifier) =
         if let Some(url) = &cfg.database_url {
@@ -44,6 +71,9 @@ async fn main() -> anyhow::Result<()> {
                 .connect(url)
                 .await?;
             MIGRATIONS.run(&pool).await?;
+            let gauge_pool = pool.clone();
+            let _pool_gauge =
+                lakko_metrics::spawn_pool_gauge(move || (gauge_pool.size(), gauge_pool.num_idle()));
             let tokens = TokenVerifier::new(pool.clone(), anon_config);
             (
                 Arc::new(
@@ -79,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
     let subscriber_retention_secs = cfg.subscriber_retention_secs;
     if prune_interval > 0 {
         let prune_store = Arc::clone(&store);
+        lakko_metrics::job_registered(PRUNE_JOB);
         tokio::spawn(async move {
             run_prune_loop(
                 prune_store,
@@ -98,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
         info!("prune: background loop disabled (LAKKO_CHANNELS_PRUNE_INTERVAL_SECS=0)");
     }
 
-    let state = AppState::new(cfg.clone(), store, anon_tokens);
+    let state = AppState::new_with_votes(cfg.clone(), store, anon_tokens, votes);
     let app = router(Arc::clone(&state));
 
     if let Some(internal_config) = internal {
@@ -171,9 +202,12 @@ async fn run_prune_loop(
             Ok(d) => u64::try_from(d.as_millis()).unwrap_or(u64::MAX),
             Err(e) => {
                 warn!(error = %e, "prune: clock before UNIX epoch — skipping tick");
+                lakko_metrics::job_failed(PRUNE_JOB);
                 continue;
             },
         };
+        // Any failed prune of this tick marks the whole run failed.
+        let mut failed = false;
 
         // Posts retention — bulk DELETE per the cutoff.
         if posts_retention_secs == 0 {
@@ -186,14 +220,20 @@ async fn run_prune_loop(
                         info!(removed, posts_retention_secs, "prune: posts tick complete");
                     }
                 },
-                Err(e) => warn!(error = %e, "prune: posts tick failed"),
+                Err(e) => {
+                    failed = true;
+                    warn!(error = %e, "prune: posts tick failed");
+                },
             }
             // A public seed superseded before the post cutoff opens no post
             // that is left (ADR-0087 section 6).
             match store.prune_public_seeds_superseded_before(cutoff_ms).await {
                 Ok(removed) if removed > 0 => info!(removed, "prune: public seeds tick complete"),
                 Ok(_) => {},
-                Err(e) => warn!(error = %e, "prune: public seeds tick failed"),
+                Err(e) => {
+                    failed = true;
+                    warn!(error = %e, "prune: public seeds tick failed");
+                },
             }
         }
 
@@ -204,7 +244,10 @@ async fn run_prune_loop(
         {
             Ok(removed) if removed > 0 => info!(removed, "prune: invite keys tick complete"),
             Ok(_) => {},
-            Err(e) => warn!(error = %e, "prune: invite keys tick failed"),
+            Err(e) => {
+                failed = true;
+                warn!(error = %e, "prune: invite keys tick failed");
+            },
         }
 
         // Owner request-proof nonces older than twice the proof window can
@@ -215,7 +258,10 @@ async fn run_prune_loop(
         {
             Ok(removed) if removed > 0 => info!(removed, "prune: owner nonces tick complete"),
             Ok(_) => {},
-            Err(e) => warn!(error = %e, "prune: owner nonces tick failed"),
+            Err(e) => {
+                failed = true;
+                warn!(error = %e, "prune: owner nonces tick failed");
+            },
         }
 
         // Write-proof nonces (ADR-0087 section 13a), likewise.
@@ -227,7 +273,10 @@ async fn run_prune_loop(
         {
             Ok(removed) if removed > 0 => info!(removed, "prune: write nonces tick complete"),
             Ok(_) => {},
-            Err(e) => warn!(error = %e, "prune: write nonces tick failed"),
+            Err(e) => {
+                failed = true;
+                warn!(error = %e, "prune: write nonces tick failed");
+            },
         }
 
         // Stale-subscriber retention — bulk DELETE +
@@ -245,8 +294,16 @@ async fn run_prune_loop(
                         );
                     }
                 },
-                Err(e) => warn!(error = %e, "prune: subscribers tick failed"),
+                Err(e) => {
+                    failed = true;
+                    warn!(error = %e, "prune: subscribers tick failed");
+                },
             }
+        }
+        if failed {
+            lakko_metrics::job_failed(PRUNE_JOB);
+        } else {
+            lakko_metrics::job_succeeded(PRUNE_JOB);
         }
     }
 }

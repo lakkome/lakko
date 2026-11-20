@@ -265,12 +265,14 @@ public class DsClient(
         if (payload.isEmpty()) {
             throw DsClientArgError("payload must be non-empty")
         }
-        return doPublish(
+        val result = doPublish(
             endpoint = "/ds/group/${pseudonymHex(groupId)}/messages",
             payload = payload,
             journal = Journal.group(groupId, signer),
             wake = wake,
         )
+        noteGroupRowAccepted(pseudonymHex(groupId), result.createdAt)
+        return result
     }
 
     /** Shared POST plumbing for the two publish flavours.
@@ -476,6 +478,9 @@ public class DsClient(
             },
             hasMore = parsed.has_more,
             latestEpoch = parsed.latest_epoch?.takeIf { it >= 0 }?.toULong(),
+            registeredCommits = parsed.commits?.let { list ->
+                list.filter { it.epoch >= 0 && it.id >= 0 }.associate { it.epoch.toULong() to it.id }
+            },
         )
     }
 
@@ -553,6 +558,8 @@ public class DsClient(
             val status = response.status.value
             if (status == HTTP_OK || status == HTTP_CREATED) {
                 val parsed: PublishWireResponse = response.body()
+                // `/ds/group/{hex}/commit`: the journal is the path's id.
+                noteGroupRowAccepted(statement.path.removePrefix("/ds/group/").substringBefore('/'), parsed.created_at)
                 return DsCommitAnswer(id = parsed.id, createdAt = parsed.created_at, resent = status == HTTP_OK)
             }
             if (status == HTTP_CONFLICT) {
@@ -965,6 +972,26 @@ public class DsClient(
          * helper for tests + for any caller assembling DS URLs
          * directly without going through this client.
          */
+        /**
+         * ADR-0091 walk 2, R1 — told of every row this process published to a
+         * group journal and the DS accepted (the journal's hex id and the DS
+         * `created_at`). The chat repository records it as a row it knows;
+         * `null` when nothing listens. Must not throw; a throw is dropped.
+         */
+        @Volatile
+        public var groupRowAcceptedListener: ((journalHex: String, createdAt: String) -> Unit)? = null
+
+        internal fun noteGroupRowAccepted(journalHex: String, createdAt: String) {
+            val listener = groupRowAcceptedListener ?: return
+            try {
+                listener(journalHex, createdAt)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                // bookkeeping only: the publish itself succeeded
+            }
+        }
+
         public fun pseudonymHex(bytes: ByteArray): String {
             val sb = StringBuilder(bytes.size * 2)
             for (b in bytes) {
@@ -1063,6 +1090,14 @@ private data class FetchWireResponse(
     val messages: List<FetchWireMessage>,
     val has_more: Boolean,
     val latest_epoch: Long? = null,
+    /** ADR-0091 — `[{epoch, id}]`, see [FetchResult.registeredCommits]. */
+    val commits: List<RegisteredCommitWire>? = null,
+)
+
+@Serializable
+private data class RegisteredCommitWire(
+    val epoch: Long,
+    val id: Long,
 )
 
 @Serializable
@@ -1185,6 +1220,13 @@ public data class FetchResult(
      *  for mailboxes. A DeviceGroup reader compares it with its own epoch to
      *  notice a fork it can never catch up from ([me.lakko.app.devices.sync.DeviceGroupFork]). */
     val latestEpoch: ULong? = null,
+    /** ADR-0091 — a signed read of a CLAIMED group journal only: the commit
+     *  row the DS registered for each epoch above the one the read was signed
+     *  at (`commits`), keyed by the epoch the row moves the journal TO. Row
+     *  `id` of entry `n` is THE commit from `n - 1` to `n` (ADR-0081); a
+     *  commit-shaped row posted through the plain publish route is never
+     *  named. `null` where [latestEpoch] is. */
+    val registeredCommits: Map<ULong, Long>? = null,
 )
 
 // =============================================================================
@@ -1202,12 +1244,21 @@ public data class KnockResult(
     val epoch: ULong?,
 )
 
+/**
+ * The endpoint as it may appear in an error message: the route without its
+ * query and with every run of 16 or more hex digits (a journal, mailbox or
+ * rendezvous id) replaced by `:id`. Error messages reach logs, which carry no
+ * identifier (ADR-0078 section 11); [DsHttpError.endpoint] keeps the full value.
+ */
+internal fun redactedEndpoint(endpoint: String): String =
+    endpoint.substringBefore('?').replace(Regex("[0-9a-fA-F]{16,}"), ":id")
+
 /** Server returned a non-2xx. */
 public open class DsHttpError(
     public val status: Int,
     public val endpoint: String,
     public val body: String,
-    message: String = "ds $endpoint → $status: $body",
+    message: String = "ds ${redactedEndpoint(endpoint)} → $status: $body",
 ) : RuntimeException(message)
 
 /**
@@ -1224,7 +1275,7 @@ public class DsProofRefusedError(
     status = 401,
     endpoint = endpoint,
     body = body,
-    message = if (clockSkewed) DS_CLOCK_SKEW_COPY else "ds $endpoint → 401: proof refused",
+    message = if (clockSkewed) DS_CLOCK_SKEW_COPY else "ds ${redactedEndpoint(endpoint)} → 401: proof refused",
 ) {
     /** What the user reads, or `null` for the ordinary delivery error. */
     public val userMessage: String? get() = if (clockSkewed) DS_CLOCK_SKEW_COPY else null
@@ -1238,7 +1289,7 @@ public class DsProofRefusedError(
 public class DsReachRefusedError(
     endpoint: String,
     body: String,
-) : DsHttpError(status = 401, endpoint = endpoint, body = body, message = "ds $endpoint → 401: reach refused")
+) : DsHttpError(status = 401, endpoint = endpoint, body = body, message = "ds ${redactedEndpoint(endpoint)} → 401: reach refused")
 
 /**
  * ADR-0060 §2 — what authorises one write into someone else's mailbox: a
@@ -1270,10 +1321,10 @@ public data class DsCommitAnswer(
 public class DsCommitConflictError(
     endpoint: String,
     body: String,
-) : DsHttpError(status = 409, endpoint = endpoint, body = body, message = "ds $endpoint → 409: epoch taken")
+) : DsHttpError(status = 409, endpoint = endpoint, body = body, message = "ds ${redactedEndpoint(endpoint)} → 409: epoch taken")
 
 /** Network-level failure (DNS, TLS, no route, …). */
 public class DsNetworkError(
     public val endpoint: String,
     cause: Throwable,
-) : RuntimeException("ds $endpoint network error: $cause", cause)
+) : RuntimeException("ds ${redactedEndpoint(endpoint)} network error: $cause", cause)

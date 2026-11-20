@@ -97,7 +97,7 @@ function KeyStoreGate(props: { children: JSX.Element }): JSX.Element {
 }
 
 /**
- * ADR-0089 (UX `reporting-and-moderation.md` section 4): while this device is
+ * ADR-0098 (UX `reporting-and-moderation.md` section 4): while this device is
  * in suspended mode the suspended screen replaces every route, public ones
  * included, until the person chooses "Read my chats" (the app then opens
  * read-only) or signs out.

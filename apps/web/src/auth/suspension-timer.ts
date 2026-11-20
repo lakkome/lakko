@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * When suspended mode asks whether the suspension ended (ADR-0089 step 3):
+ * When suspended mode asks whether the suspension ended (ADR-0098 step 3):
  * every ten minutes, and each time the app comes back to the foreground. A
  * refresh answering a pair ends suspended mode (the provider raises `pair`);
  * answering the same refusal changes nothing. The clock and the foreground

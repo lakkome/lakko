@@ -199,4 +199,123 @@ class CallHistoryTest {
         assertFalse(callHistoryIsUnanswered(CallOutcome.OUTGOING))
         assertFalse(callHistoryIsUnanswered(CallOutcome.INCOMING))
     }
+
+    // ------------------------------------- a call with no conversation (5.1.1)
+
+    private fun standalone(
+        callId: String = "0a0b",
+        outgoing: Boolean = true,
+        video: Boolean = true,
+        at: Long = 2_000L,
+        duration: Long? = 65L,
+    ) = noConversationCallEntry(callId, outgoing, video, at, duration)
+
+    @Test
+    fun `a call with no conversation names no conversation and only its direction`() {
+        val out = standalone(callId = "0A0B", outgoing = true)
+        assertNull(out.conversationIdHex)
+        assertNull(out.kind)
+        assertTrue(out.hasNoConversation)
+        assertEquals("0a0b", out.callIdHex)
+        assertEquals(CallOutcome.OUTGOING, out.outcome)
+        assertEquals(CallOutcome.INCOMING, standalone(outgoing = false).outcome)
+    }
+
+    @Test
+    fun `a call with no conversation round trips as six fields`() {
+        for (outgoing in listOf(true, false)) {
+            for (duration in listOf(null, 0L, 3_725L)) {
+                val source = standalone(outgoing = outgoing, duration = duration, video = !outgoing)
+                val line = encodeCallHistoryEntry(source)
+                assertEquals(6, line.split('|').size)
+                assertEquals(source, decodeCallHistoryEntry(line))
+            }
+        }
+        assertEquals("n1|0a0b|OUTGOING|1|2000|65", encodeCallHistoryEntry(standalone()))
+    }
+
+    @Test
+    fun `a broken no-conversation line drops out rather than throwing`() {
+        val good = encodeCallHistoryEntry(standalone())
+        assertTrue(decodeCallHistoryEntry(good) != null)
+        // Such a call never rings, so only the two directions are a record.
+        for (outcome in listOf("MISSED", "DECLINED", "FAILED")) {
+            assertNull(decodeCallHistoryEntry(good.replace("|OUTGOING|", "|$outcome|")))
+        }
+        assertNull(decodeCallHistoryEntry(good.replace("n1|0a0b|", "n1||")))
+        assertNull(decodeCallHistoryEntry(good.replace("n1|0a0b|", "n1|zz|")))
+        assertNull(decodeCallHistoryEntry(good.substringBeforeLast('|')))
+        assertNull(decodeCallHistoryEntry("$good|extra"))
+        assertNull(decodeCallHistoryEntry(good.replace("|65", "|-65")))
+    }
+
+    @Test
+    fun `a call is filed once, the first write standing`() {
+        val first = standalone(callId = "0a0b", at = 2_000L, duration = 65L)
+        val again = standalone(callId = "0A0B", at = 9_000L, duration = 1L)
+        val held = callHistoryWith(listOf(entry()), first)
+        val next = callHistoryWith(held, again)
+        assertEquals(held, next)
+        assertEquals(1, next.count { it.callIdHex == "0a0b" })
+        // A different call is a different row.
+        assertEquals(3, callHistoryWith(next, standalone(callId = "0c0d")).size)
+    }
+
+    @Test
+    fun `conversation rows are never deduplicated by a call id they do not have`() {
+        val a = entry(id = "aa", at = 1L)
+        val b = entry(id = "aa", at = 2L)
+        assertEquals(2, callHistoryWith(listOf(a), b).size)
+    }
+
+    @Test
+    fun `calls with and without a conversation share one time order`() {
+        val rows = callHistoryOrdered(
+            listOf(
+                entry(id = "aa", at = 100L),
+                standalone(callId = "0a", at = 300L),
+                entry(id = "bb", at = 200L),
+                standalone(callId = "0b", at = 300L),
+            ),
+        )
+        assertEquals(
+            listOf("0a", "0b", "bb", "aa"),
+            rows.map { it.conversationIdHex ?: it.callIdHex },
+        )
+        // The same order whatever order the store yielded.
+        assertEquals(rows, callHistoryOrdered(rows.reversed()))
+    }
+
+    @Test
+    fun `removing a conversation's calls keeps the calls with no conversation`() {
+        val kept = standalone()
+        assertEquals(listOf(kept), callHistoryWithout(listOf(entry(id = "aa"), kept), "aa"))
+    }
+
+    @Test
+    fun `a call with no conversation is read, never opened or called back`() {
+        val shape = callHistoryRowShape(standalone())
+        assertFalse(shape.opensConversation)
+        assertFalse(shape.callBack)
+        assertTrue(shape.groupCallGlyph)
+        val conversation = callHistoryRowShape(entry())
+        assertTrue(conversation.opensConversation)
+        assertTrue(conversation.callBack)
+        assertFalse(conversation.groupCallGlyph)
+    }
+
+    @Test
+    fun `its second line says which way it went and how long this device was in it`() {
+        assertEquals(
+            "Outgoing call, 1:05",
+            callRowText(standalone(outgoing = true, duration = 65L).toTranscriptEntry()),
+        )
+        assertEquals(
+            "Incoming call, 1:05",
+            callRowText(standalone(outgoing = false, duration = 65L).toTranscriptEntry()),
+        )
+        assertEquals(CallDirectionGlyph.OUTGOING, callDirectionGlyph(standalone(outgoing = true).outcome))
+        assertEquals(CallDirectionGlyph.INCOMING, callDirectionGlyph(standalone(outgoing = false).outcome))
+        assertFalse(callHistoryIsUnanswered(standalone().outcome))
+    }
 }

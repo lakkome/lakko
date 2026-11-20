@@ -22,7 +22,7 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 /**
- * ADR-0089 F3 — every auth call that records the account's identity key
+ * ADR-0098 F3 — every auth call that records the account's identity key
  * carries `identity_proof_b64`. The genesis mint runs through a MockEngine;
  * reset / rotate / recall finish need the native OPAQUE state machines, so
  * their request bodies are pinned by serialization and their call sites by

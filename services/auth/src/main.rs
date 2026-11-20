@@ -27,6 +27,8 @@
 //!   per-name and per-address attempt limits that replaced proof of work on
 //!   every other route, each `N/SECS` (see `src/limits.rs` for the names and
 //!   the defaults, which are chosen, not measured)
+//! - `LAKKO_AUTH_MAX_ACCOUNTS` — the beta cap on accounts with a username
+//!   (ADR-0046 amendment; `0` or unset = no cap; see `src/account_cap.rs`)
 //! - `LAKKO_AUTH_HANDLE_CHANGE_MIN_INTERVAL_SECS` — minimum seconds between
 //!   two binds of one account that change its login handle (default 60;
 //!   restoring the handle held just before is exempt; 0 = no minimum)
@@ -89,8 +91,8 @@
 //!   `_EMAIL_VERIFY` / `_EMAIL_VAULT_OPEN` / `_EMAIL_VAULT_STORE` and `LAKKO_AUTH_IP_LIMIT_EMAIL` —
 //!   the recovery email's limits, each `N/SECS` (defaults chosen, not
 //!   measured; see `src/limits.rs`).
-//! - `LAKKO_AUTH_INTERNAL_BIND` — the internal moderation listener (ADR-0089
-//!   section 4; default `127.0.0.1:8095`, loopback, never proxied).
+//! - `LAKKO_AUTH_INTERNAL_BIND` — the internal moderation listener (ADR-0098
+//!   section 4; default `127.0.0.1:8101`, loopback, never proxied).
 //! - `LAKKO_AUTH_INTERNAL_SECRET` — standard base64 of at least 16 bytes, the
 //!   `x-lakko-internal-secret` the moderation service presents; compared in
 //!   constant time.
@@ -98,6 +100,12 @@
 //!   (base64url, 32 bytes) the moderator list must verify under. With this or
 //!   the secret unset the internal listener does not start (one warning) and
 //!   no account can be suspended.
+//! - `LAKKO_ANON_CRED_MASTER_SECRET` — 64 hex characters shared with
+//!   `lakko-svc-channels` only (ADR-0092 section 4.4; a master of its own,
+//!   not the anonymous-token one). Optional; unset = `/auth/anon-credential*`
+//!   return 503 `anon-credential-disabled`.
+//! - `LAKKO_AUTH_LIMIT_ANON_CREDENTIAL` — per-account window of the two
+//!   credential routes, `N/SECS` (default 30/86400; chosen, not measured).
 //! - `LAKKO_ANON_TOKEN_WINDOW_SECS` — anonymous-token epoch window (default
 //!   86400; must match every verifier).
 //! - `LAKKO_ANON_TOKEN_QUOTA_<CONTEXT>` — tokens per account per epoch for one
@@ -130,6 +138,11 @@
 //! - `GET  /.well-known/jwks.json`   — publish call-JWT public key (Phase 3b4 forward, anonymous)
 //! - `POST /auth/tokens`             — issue anonymous tokens against a quota (ADR-0054, bearer-auth)
 //! - `GET  /auth/tokens/key/{context}/{epoch}` — anonymous-token public key (ADR-0054, anonymous)
+//! - `PUT  /auth/anon-credential/commitment` — register the channel-poll credential commitment
+//!   (ADR-0092 section 4.2, bearer-auth; `409 commitment-already-registered` for another one)
+//! - `POST /auth/anon-credential`    — issue the current period's channel-poll credential
+//!   (ADR-0092 section 4.2, bearer-auth)
+//! - `GET  /auth/anon-credential/key/{period}` — that credential's public key (anonymous)
 //! - `PUT  /auth/login-handle`       — bind the caller's login handle (ADR-0054 S5, bearer-auth;
 //!   `429 handle-bind-limited` per account, per address, and within the minimum interval
 //!   between handle changes)
@@ -155,9 +168,9 @@
 //!   its access token and refresh credentials stop at auth at once (ADR-0074 section 2.1,
 //!   bearer-auth, no body)
 //! - `GET  /account/suspension`     — the account's suspension: `{suspended: false}` or reason,
-//!   end and appeal state (ADR-0089 section 4; the access token or the `s1` restricted session)
+//!   end and appeal state (ADR-0098 section 4; the access token or the `s1` restricted session)
 //! - `POST /account/suspension/appeal` — store the appeal sealed to the moderators, once
-//!   (ADR-0089 section 4; the access token or the restricted session)
+//!   (ADR-0098 section 4; the access token or the restricted session)
 //! - While an account is suspended every landing route and the refresh answer `403
 //!   account-suspended` with a restricted session and a refresh credential, every other bearer
 //!   route `403 account-suspended`; the restricted session opens `/account/suspension*`,
@@ -165,14 +178,14 @@
 //!   delete-account action only)
 //! - `POST /internal/moderation/statement` — on the INTERNAL listener only
 //!   (`LAKKO_AUTH_INTERNAL_BIND`): apply a moderator's Suspend, Lift or KeepSuspension
-//!   (ADR-0089 section 4; a statement older than a day or dated ahead is refused, F1)
+//!   (ADR-0098 section 4; a statement older than a day or dated ahead is refused, F1)
 //! - `POST /internal/moderation/list` — INTERNAL listener: raise the moderator-list floor
 //!   to a newer root-signed list (security fix F1) -> `{list_version}`
 //! - Every writer of the account's identity key (`/auth/genesis/attest`,
 //!   `/account/keys/reset/finish`, `/account/keys/rotate/finish`, `/account/recall/finish`)
 //!   requires `identity_proof_b64`, the key's own signature over the account id and the key
 //!   (`400 identity-proof-invalid`), and a key belongs to one account forever (`409
-//!   identity-key-taken`; ADR-0089 security fix F3)
+//!   identity-key-taken`; ADR-0098 security fix F3)
 //! - `POST /auth/session/bind-device` — exchange a pair that names no device for one naming
 //!   the caller's (ADR-0074 section 0.4, bearer-auth, body `device_id_b64` + `refresh_token`)
 //! - `POST /account/devices/revoke`  — remove another device: raise its session floor so its
@@ -224,7 +237,9 @@
 
 #![forbid(unsafe_code)]
 
+mod account_cap;
 mod account_notices;
+mod anon_credential;
 mod anon_tokens;
 mod backup_head;
 mod call_jwt;
@@ -240,10 +255,12 @@ mod key_rotate;
 mod limits;
 mod login_handle;
 mod mail;
+mod metrics;
 mod opaque;
 mod passkey_vault;
 mod phrase_saved;
 mod pow;
+mod purge;
 mod recall;
 #[cfg(test)]
 mod recall_tests;
@@ -252,6 +269,7 @@ mod recovery_email;
 mod recovery_email_tests;
 mod room_cap;
 mod session;
+mod supporter_codes;
 mod suspension;
 #[cfg(test)]
 mod suspension_tests;
@@ -386,6 +404,10 @@ pub(crate) struct AppState {
     /// secret + epoch window + per-context quotas). `None` when
     /// `LAKKO_ANON_TOKEN_MASTER_SECRET` is unset: `/auth/tokens*` return 503.
     pub(crate) anon_tokens: Option<Arc<anon_tokens::AnonTokenIssuer>>,
+    /// ADR-0092 section 4.2 — anonymous-credential issuance for channel
+    /// polls. `None` when `LAKKO_ANON_CRED_MASTER_SECRET` is unset:
+    /// `/auth/anon-credential*` return 503.
+    pub(crate) anon_cred: Option<Arc<anon_credential::AnonCredIssuer>>,
     /// ADR-0054 S5 — pepper keying the stored login handles
     /// (`LAKKO_AUTH_HANDLE_PEPPER`, 64 hex). `None` disables every route that
     /// names an account by login handle (503 `login-by-name-disabled`).
@@ -416,7 +438,17 @@ async fn main() -> Result<()> {
         }
     }
 
+    // ADR-0097 — the operator command `supporter-codes mint --count N`. Runs
+    // before tracing so stdout carries the codes and nothing else.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("supporter-codes") {
+        return supporter_codes::run_cli(&args[2..]).await;
+    }
+
     init_tracing();
+    // /metrics on its own localhost port, off when unset (ADR-0096).
+    lakko_metrics::start_from_env("auth", env!("CARGO_PKG_VERSION"), "LAKKO_AUTH_METRICS_BIND")
+        .await?;
 
     let bind: SocketAddr = std::env::var("LAKKO_BIND")
         .unwrap_or_else(|_| DEFAULT_BIND.to_string())
@@ -440,6 +472,10 @@ async fn main() -> Result<()> {
 
     // Apply embedded migrations on startup. Idempotent.
     MIGRATIONS.run(&pool).await.context("run sqlx migrations")?;
+    // Connections in use and idle (ADR-0096).
+    let gauge_pool = pool.clone();
+    let _pool_gauge =
+        lakko_metrics::spawn_pool_gauge(move || (gauge_pool.size(), gauge_pool.num_idle()));
 
     // Load (or initialize on first run) the server-static OPAQUE setup.
     // Runs AFTER migrations so opaque_server_setup table exists.
@@ -570,6 +606,16 @@ async fn main() -> Result<()> {
     // master secret / window / quota; dormant (with a warning) when unset.
     let anon_tokens = anon_tokens::load_anon_tokens().context("load anonymous-token config")?;
     anon_tokens::log_startup(anon_tokens.as_ref());
+    // ADR-0097 — the supporter-code pepper rides with the issuer (the redeem
+    // evaluates under the anonymous-token master). Loud-fail when malformed.
+    let supporter_pepper =
+        supporter_codes::load_pepper().context("load LAKKO_AUTH_SUPPORTER_CODE_PEPPER")?;
+    let anon_tokens = anon_tokens.map(|i| i.with_supporter_pepper(supporter_pepper));
+    supporter_codes::log_startup(anon_tokens.as_ref());
+    // ADR-0092 section 4.2 — the channel-poll credential master.
+    let anon_cred =
+        anon_credential::load_anon_credential().context("load anonymous-credential config")?;
+    anon_credential::log_startup(anon_cred.as_ref());
 
     // ADR-0054 S5 — the login-handle pepper. Loud-fail on a malformed value;
     // dormant (with a warning) when unset.
@@ -590,6 +636,11 @@ async fn main() -> Result<()> {
     // pepper is unset.
     let recovery_email = recovery_email::load().context("load the recovery-email config")?;
 
+    // Account deletion purges discovery and storage through an outbox. A
+    // partial or malformed configuration refuses startup; none at all leaves
+    // the worker off (rows still queue).
+    let purge_config = purge::PurgeConfig::from_env().context("load the account purge config")?;
+
     let state = AppState {
         db: pool.clone(),
         opaque_setup: Arc::new(opaque_setup),
@@ -607,6 +658,7 @@ async fn main() -> Result<()> {
         room_cap: Arc::new(room_cap),
         backup_head_mint_rate,
         anon_tokens: anon_tokens.clone().map(Arc::new),
+        anon_cred: anon_cred.map(Arc::new),
         handle_pepper: handle_pepper.map(Arc::new),
         recovery_email: recovery_email.map(Arc::new),
         limits: limits.clone(),
@@ -629,23 +681,27 @@ async fn main() -> Result<()> {
     // their 60 days.
     let _email_pruner = recovery_email::spawn_pruner(pool.clone());
     let _notice_pruner = account_notices::spawn_pruner(pool.clone());
-    // ADR-0089 section 4 — suspensions whose end has passed.
+    // ADR-0098 section 4 — suspensions whose end has passed.
     let _suspension_sweep = suspension::spawn_sweep(pool.clone());
     // ADR-0032 guest lifecycle — an account nobody named within a day is
     // deleted. Off where sign-in by name is not configured.
     let _unclaimed_pruner =
         unclaimed::spawn_pruner(pool.clone(), names_enabled, unclaimed_ttl_secs);
+    // Deleted accounts: purge their discovery rows and backup blob.
+    let _purge_worker = purge::spawn_worker(pool.clone(), purge_config);
     // ADR-0078 section 2 — the `call-join` spent-set `POST /call/jwt` writes.
     let _call_join_spent_pruner = anon_tokens.as_ref().map(|i| {
         lakko_anon_token_server::TokenVerifier::new(pool.clone(), Some(i.server.clone()))
             .spawn_pruner()
     });
     // ADR-0054 — drop issuance-quota rows older than the previous epoch.
+    // ADR-0092 — drop credential issuance rows older than the previous period.
+    let _anon_cred_pruner = anon_credential::spawn_pruner(pool.clone());
     let _anon_token_pruner = anon_tokens.as_ref().map(|i| {
         lakko_anon_token_server::spawn_issuance_pruner(pool.clone(), i.server.window_secs)
     });
 
-    // ADR-0089 section 4 — the internal listener the moderation service
+    // ADR-0098 section 4 — the internal listener the moderation service
     // forwards Suspend and Lift statements to. Loud-fail on a malformed
     // setting; off (one warning) when the secret or the root key is unset.
     let internal = suspension::load_internal()
@@ -719,8 +775,9 @@ fn build_app(state: AppState) -> Router {
         // auth state). Bearer-auth + ONE fresh proof (ADR-0073, amended
         // 2026-10-06): the ADR-0014 passkey action grant when the account has
         // a passkey, else a fresh-auth grant in the `x-lakko-fresh-grant`
-        // header (the discovery + storage tiers are purged by the client via
-        // their own bearer-auth'd deletes).
+        // header. The same transaction queues the purge of the discovery +
+        // storage tiers (`purge.rs`). The route itself sits in the router a
+        // suspended account's restricted session reaches (ADR-0098 step 3).
         // A3 (GDPR data-portability) — export the account's auth-tier metadata
         // + auth-factor existence (never the factor secrets, invariant #1).
         .route("/account/export", get(webauthn::export_account))
@@ -843,7 +900,7 @@ fn build_app(state: AppState) -> Router {
             webauthn::require_session,
         ));
 
-    // ADR-0089 section 4 — the routes a suspended account may call, with its
+    // ADR-0098 section 4 — the routes a suspended account may call, with its
     // restricted session (`s1`) or an access token: read the suspension, send
     // one appeal, delete the account, sign out. The passkey action ceremony
     // is here too because it is how an account with a passkey deletes
@@ -914,12 +971,29 @@ fn build_app(state: AppState) -> Router {
     // matching public-key route is anonymous (public router below).
     let anon_token_routes = Router::new()
         .route("/auth/tokens", post(anon_tokens::issue_tokens))
-        // ADR-0089 step 3: a suspended account may draw `blob-read` passes
+        // ADR-0098 step 3: a suspended account may draw `blob-read` passes
         // with its restricted session; `issue_tokens` refuses every other
         // context to it.
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             webauthn::require_session_or_restricted,
+        ));
+
+    // ADR-0092 section 4.2 — the channel-poll credential: register the
+    // account's commitment once, then one credential per period. Bearer-auth;
+    // the per-period public key is anonymous (public router below).
+    let anon_cred_routes = Router::new()
+        .route(
+            "/auth/anon-credential/commitment",
+            put(anon_credential::register_commitment),
+        )
+        .route(
+            "/auth/anon-credential",
+            post(anon_credential::issue_credential),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            webauthn::require_session,
         ));
 
     Router::new()
@@ -931,6 +1005,11 @@ fn build_app(state: AppState) -> Router {
         .route(
             "/pow/challenge",
             post(pow::issue_challenge).route_layer(ip(limits::Category::Challenge)),
+        )
+        // ADR-0046 amendment: asked before the proof of work.
+        .route(
+            "/signup/open",
+            get(account_cap::status).route_layer(ip(limits::Category::Challenge)),
         )
         .route(
             "/signup/start",
@@ -1071,6 +1150,23 @@ fn build_app(state: AppState) -> Router {
             get(anon_tokens::public_key),
         )
         .merge(anon_token_routes)
+        // ADR-0097 — redeem a supporter code for one `beta-place` token
+        // evaluation. ANONYMOUS (the person has no account yet); the address
+        // bucket and the per-code counter run inside, after the body is
+        // validated.
+        .route(
+            "/auth/supporter-code/redeem",
+            post(supporter_codes::redeem),
+        )
+        // ADR-0092 — the channel-poll credential key of a period. ANONYMOUS:
+        // a client checks the issuance proof against this key.
+        .route(
+            "/auth/anon-credential/key/{period}",
+            get(anon_credential::public_key),
+        )
+        .merge(anon_cred_routes)
+        // Requests by route template, method and status class (ADR-0096).
+        .layer(lakko_metrics::red_layer("auth"))
         .layer(TraceLayer::new_for_http().make_span_with(lakko_log_hygiene::request_span))
         .with_state(state)
 }

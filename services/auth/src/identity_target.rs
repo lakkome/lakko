@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! One account per identity key, proven, with history ([ADR-0089] security
+//! One account per identity key, proven, with history ([ADR-0098] security
 //! fix F3).
 //!
 //! Auth records an account's identity key (`accounts.identity_pubkey`) in
@@ -36,7 +36,7 @@
 //! releases them at once ([`release_kept`]). What a kept row holds is the 32-byte
 //! target, the 16-byte id of an account that no longer exists, and the end.
 //!
-//! [ADR-0089]: ../../../docs/adr/0089-reporting-and-moderation.md
+//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
 
 use axum::http::StatusCode;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};

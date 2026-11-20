@@ -547,6 +547,26 @@ not deployed, no call placed against it.
   UniFFI and wasm. Built in the core, both FFI surfaces and web; iOS and
   Android not yet. A one-to-one call (peer to peer, no relay) carries no
   call name: its carrier would be a call-signalling body and is not built.
+- **Amended 2026-11-07 (maintainer): a chat inside a group call.** People in
+  a group call (one placed in a conversation, and a link call) write text to
+  each other for as long as the call lasts; only those in the call when a
+  message is sent see it, and nothing is kept (`docs/ux/calls.md` section
+  4.1.4). The message is a fifth relay payload, `lakko_calls::call_chat`:
+  `"lakko/call/chat/v1\0" || 0x01 || call_id(16) || peer_id_len ||
+  peer_id || seq(8 BE, >= 1) || text_len(2 BE) || text(1..=800 bytes UTF-8,
+  not white space only, no control character but LF and TAB) ||
+  signer_key(32) || signature(64)`, signed by the sender's MLS leaf key over
+  its own domain (`lakko/call/chat/sig/v1\0`), sealed under the relay key.
+  `verify_call_chat` takes the relay `from` and the leaf key of that peer's
+  verified announcement, as `verify_call_name` does; a receiver shows a
+  message once per `(peer id, seq)`. The longest message (64-byte peer id,
+  800-byte text) is 1007 bytes, inside the relay's 1024. The server forwards
+  ciphertext and keeps nothing: invariants #2 and #5 are unchanged. Fuzz:
+  `lakko-calls/relay_open` also drives `decode_call_chat`. FFI:
+  `composeCallChat`, `verifyCallChat`, `checkCallChatText`,
+  `clampCallChatText`, `callChatMaxTextBytes` and the `CallChat` relay kind
+  (appended to the UniFFI `CallRelayPayload`) on UniFFI and wasm. A
+  one-to-one call has no chat.
 
 ### 3. Push without a bipartite graph (finding 8)
 
@@ -678,6 +698,18 @@ deployed or walked.
   journal row is wrapped under a group transport key the re-entering device
   holds from its vault head, so the account key in the leaf node is never in
   the clear on the DS.
+- **Built 2026-11-14 (G-55), host-tested only.** The owner-device channel
+  entry is wrapped under `BLAKE3-derive-key("lakko/ds/entry-wrap/v1",
+  ds_access_seed_N)`, the ADR-0053 access seed of the epoch the commit leaves
+  (the entering device takes it from the vault head beside the GroupInfo;
+  members derive it), with the group id and N in the AAD and N in the clear
+  (`lakko-mls` `entry_wrap`); a member opens it before the unchanged
+  PublisherGroup gate, and an unwrapped external commit is refused. The
+  DeviceGroup rejoin knock (ADR-0081 amendment), which this section did not
+  name and which also posted the pairing payload in the clear, is sealed under
+  `BLAKE3-derive-key("lakko/device-group/knock-wrap/v1", lineage_account_seed)`
+  and padded to 1024-byte steps (`pairing::encode_rejoin_knock` /
+  `open_rejoin_knock`). Details in `docs/security/known-gaps.md` G-55.
 
 ### 5. Welcome timing decoupled (finding 6)
 

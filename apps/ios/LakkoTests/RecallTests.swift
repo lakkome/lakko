@@ -576,7 +576,8 @@ final class RecallFlowTests: XCTestCase {
             recallOperations: server.operations,
             ownDeviceId: { _ in nil },
             identityKeyMarks: IdentityKeyRecordMarks(defaults: defaults("recall-marks")),
-            logoutOwed: InMemoryLogoutOwedStore()
+            logoutOwed: InMemoryLogoutOwedStore(),
+            earlierKeysInputs: skipEarlierKeysGate
         )
         return Harness(
             repository: repository, store: store, persistence: persistence, directory: directory,

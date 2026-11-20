@@ -51,7 +51,7 @@ import me.lakko.app.auth.sessionRefusalOf
  *      `403 device-revoked`, which proves nothing, refreshes at auth so
  *      auth's answer decides.
  *
- *   5. on `403 account-suspended` (ADR-0089 section 4) to an access token of
+ *   5. on `403 account-suspended` (ADR-0098 section 4) to an access token of
  *      the managed account, refreshes once at auth: the refresh route
  *      answers the restricted session, which puts the device in suspended
  *      mode. Not a sign-out, not a wipe.

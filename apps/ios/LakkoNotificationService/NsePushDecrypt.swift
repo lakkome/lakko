@@ -158,6 +158,45 @@ public enum NseProcessedKind: Equatable {
     case callOffer(video: Bool)
     /// A call ended (cancelled, declined, answered elsewhere, timed out).
     case callEnd
+    /// ADR-0092 — a poll, checklist, location, contact card or article. `text`
+    /// is the finished preview line (`Poll: {question}`, ...), built by
+    /// ``nseContentPreviewLine(kind:text:)``; never JSON.
+    case content
+    /// ADR-0092 — a vote, close, tick, added item or edit of a poll,
+    /// checklist or article. Never a notification, like a reaction.
+    case contentOp
+}
+
+/// ADR-0092 — which content kind a ``NseProcessedKind/content`` row carried.
+public enum NseContentKind: Equatable {
+    case poll, checklist, location, contactCard, article
+}
+
+/// ADR-0092 section 1 — the notification line of a content message:
+/// `Poll: {question}`, `Checklist: {title}`, `Location`, `Contact: {name}`,
+/// `Article: {title}`. The words come from the app's mirror of the catalog
+/// (English fallback per word); the item's own text is substituted, never
+/// interpreted. An empty item text falls back to the bare kind word.
+public func nseContentPreviewLine(kind: NseContentKind, text: String) -> String {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    func line(_ key: String, _ english: String, _ bareKey: String, _ bareEnglish: String) -> String {
+        if trimmed.isEmpty { return nseWord(bareKey, english: bareEnglish) }
+        return nseWord(key, english: english).replacingOccurrences(of: "{text}", with: trimmed)
+    }
+    switch kind {
+    case .poll:
+        return line("chat.content.preview.poll", "Poll: {text}", "attach.menu.poll", "Poll")
+    case .checklist:
+        return line("chat.content.preview.checklist", "Checklist: {text}", "attach.menu.checklist", "Checklist")
+    case .location:
+        // The catalog word only: a place name is the sender's text, and the
+        // spec previews a location by its kind (ADR-0092 section 1).
+        return nseWord("attach.menu.location", english: "Location")
+    case .contactCard:
+        return line("chat.content.preview.contact", "Contact: {text}", "attach.menu.contact", "Contact")
+    case .article:
+        return line("chat.content.preview.article", "Article: {text}", "attach.menu.article", "Article")
+    }
 }
 
 /// A decoded application row (post MLS-decrypt + envelope-parse).
@@ -190,6 +229,14 @@ public struct NseProcessedRow: Equatable {
     /// ADR-0048 — the display name a ``NseProcessedKind/profile`` row
     /// carried, `nil` for every other kind or a profile with no name.
     public let profileName: String?
+    /// `docs/ux/media-messages.md` section 11 — how many photos, videos and
+    /// files the message carries, for the words a notification says.
+    public let attachmentCounts: NseAttachmentCounts
+    /// ADR-0047 section 6 — the micro thumbnail of the message's first photo
+    /// or video, carried inside the envelope: the notification's picture.
+    /// Kept for a chat row only, and only within its bound
+    /// (``notificationPicture(_:)``).
+    public let inlineThumb: Data?
 
     public init(
         kind: NseProcessedKind,
@@ -200,8 +247,12 @@ public struct NseProcessedRow: Equatable {
         senderKeyB64: String? = nil,
         resendOrigin: NseResendOrigin? = nil,
         reaction: NseReaction? = nil,
-        profileName: String? = nil
+        profileName: String? = nil,
+        attachmentCounts: NseAttachmentCounts = NseAttachmentCounts(),
+        inlineThumb: Data? = nil
     ) {
+        self.attachmentCounts = attachmentCounts
+        self.inlineThumb = kind == .chat ? notificationPicture(inlineThumb) : nil
         self.reaction = kind == .reaction ? reaction : nil
         let name = profileName?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.profileName = kind == .profile && name?.isEmpty == false ? name : nil
@@ -220,7 +271,8 @@ public struct NseProcessedRow: Equatable {
         NseProcessedRow(
             kind: kind, text: text, attachmentCount: attachmentCount,
             singleAttachmentKind: singleAttachmentKind, callIdHex: callIdHex,
-            senderKeyB64: senderKeyB64, resendOrigin: resendOrigin, reaction: reaction)
+            senderKeyB64: senderKeyB64, resendOrigin: resendOrigin, reaction: reaction,
+            attachmentCounts: attachmentCounts, inlineThumb: inlineThumb)
     }
 }
 
@@ -400,15 +452,21 @@ public struct NsePushPreview: Equatable {
 
     /// Reactions-and-emoji spec section 12 — set on a reaction notification.
     public let reactionKey: String?
+    /// ADR-0047 section 6 — the picture shown with the message text: the
+    /// micro thumbnail of the message's first photo or video. Only a message
+    /// preview carries one; a reaction, a call and the generic line never do.
+    public let picture: Data?
 
     public init(
-        title: String, body: String, tag: String, movedConversation: Bool = false, reactionKey: String? = nil
+        title: String, body: String, tag: String, movedConversation: Bool = false, reactionKey: String? = nil,
+        picture: Data? = nil
     ) {
         self.title = title
         self.body = body
         self.tag = tag
         self.movedConversation = movedConversation
         self.reactionKey = reactionKey
+        self.picture = reactionKey == nil ? notificationPicture(picture) : nil
     }
 }
 
@@ -542,7 +600,7 @@ public protocol NsePushDecryptDeps {
     /// `false`: a missing mirror drops nothing.
     func isSupersededSender(accountIdB64: String, senderKeyB64: String?) -> Bool
 
-    /// ADR-0089 section 6 — is `senderKeyB64` an account this account
+    /// ADR-0098 section 6 — is `senderKeyB64` an account this account
     /// blocked? READ-ONLY, from the App Group mirror the APP writes
     /// (``BlockedSenderMirror``; the register lives in the synced state this
     /// process does not open). Defaulted `false`: a missing mirror drops
@@ -897,7 +955,8 @@ public func decryptPushOutcome(
                 text: text)
             latest = NsePushPreview(
                 title: shown.title, body: shown.body, tag: conversationTag,
-                movedConversation: conversationTag.caseInsensitiveCompare(realGroupHex) != .orderedSame)
+                movedConversation: conversationTag.caseInsensitiveCompare(realGroupHex) != .orderedSame,
+                picture: processed.inlineThumb)
         }
     }
     if let latestCall, let callIdHex = latestCall.row.callIdHex {
@@ -988,7 +1047,7 @@ func nseLogMissingSenderName() {
 /// | the row                                                              | dropped |
 /// |----------------------------------------------------------------------|---------|
 /// | any kind, from a key an accepted reset retired                       | yes     |
-/// | any kind, from an account this account blocked (ADR-0089)            | yes     |
+/// | any kind, from an account this account blocked (ADR-0098)            | yes     |
 /// | a chat row carrying a re-send marker whose original the app holds    | yes     |
 /// | a chat row carrying a marker that matches nothing the app holds      | no      |
 /// | anything else                                                        | no      |
@@ -1001,7 +1060,7 @@ public func nseDropsSilently(
     if deps.isSupersededSender(accountIdB64: accountIdB64, senderKeyB64: row.senderKeyB64) {
         return true
     }
-    // ADR-0089 section 6 — nothing of a blocked person's is notified: no
+    // ADR-0098 section 6 — nothing of a blocked person's is notified: no
     // preview, no call alert, whatever the kind.
     if deps.isBlockedSender(accountIdB64: accountIdB64, senderKeyB64: row.senderKeyB64) {
         return true
@@ -1121,6 +1180,45 @@ public func nseAttachmentsLine(count: Int) -> String {
     return count == 1 ? "Sent an attachment" : "Sent \(count) attachments"
 }
 
+/// The marker the stored channel-invitation lines carry where the channel's
+/// name goes (the app renders the template with it,
+/// ``ChannelInviteNotificationMirror/channelMark``).
+let nseChannelNameMark = "\u{E002}"
+
+/// ADR-0087 section 14, UX 15.2 — what a notification says for a message
+/// carrying a channel invitation card: the card's line ("Invitation to
+/// {channel}" / "Invitation to publish in {channel}"), never the message text,
+/// which is the `/g/` link with its secret (seen live 2026-11-12). A card that
+/// does not open says only that a message came.
+public func nseChannelInviteLine(opened: Bool, channelName: String?, publisher: Bool) -> String {
+    guard opened else { return nseWord("notification.message.new", english: "New message") }
+    let named = channelName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    let name = named.isEmpty ? nseWord("channels.fallback_name", english: "Channel") : named
+    let key = publisher ? "chats.preview.publisher_invite" : "chats.preview.channel_invite"
+    let english = publisher ? "Invitation to publish in \(nseChannelNameMark)" : "Invitation to \(nseChannelNameMark)"
+    var template = nseNotificationWordLookup(key) ?? english
+    if !template.contains(nseChannelNameMark) { template = english }
+    return template.replacingOccurrences(of: nseChannelNameMark, with: name)
+}
+
+/// A message whose whole text is one `/g/` link and that carries no card (an
+/// older message, a link pasted as text): the link WITHOUT its secret, what
+/// follows `#` (seen live 2026-11-13 on a Chats row; the app's row and the
+/// web say the same while the link is not opened). The extension opens no
+/// ledger, so it never says more. Any other text is returned unchanged. Any
+/// origin: a `/g/` link of another deployment carries a secret too.
+public func nseWithoutGroupLinkSecret(_ text: String) -> String {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty, !trimmed.contains(where: { $0.isWhitespace }),
+          let schemeEnd = trimmed.range(of: "://"),
+          let hash = trimmed.firstIndex(of: "#"), hash > schemeEnd.upperBound else { return text }
+    let afterScheme = trimmed[schemeEnd.upperBound..<hash]
+    guard !afterScheme.contains("?"), let pathStart = afterScheme.firstIndex(of: "/") else { return text }
+    let parts = afterScheme[pathStart...].split(separator: "/", omittingEmptySubsequences: false)
+    guard parts.count == 3, parts[1] == "g", !parts[2].isEmpty else { return text }
+    return String(trimmed[..<hash])
+}
+
 /// The body the server put on a wake, in the interface language when it is
 /// one of the two generic placeholders `push-gw` sends (`New message`,
 /// `Incoming call`); any other body is returned unchanged.
@@ -1232,7 +1330,9 @@ private func previewBody(of row: NseProcessedRow) -> String? {
     switch row.kind {
     // A normal chat message → its text (or an attachment hint).
     case .chat:
-        if !row.text.isEmpty { return truncate(row.text) }
+        if !row.text.isEmpty { return truncate(nseTextWithFileWords(row.text, row.attachmentCounts)) }
+        // Section 11 — `Photo`, `3 photos`, `2 videos`, `File`, ...
+        if let words = nseAttachmentWords(row.attachmentCounts) { return words }
         if row.attachmentCount == 1 {
             return nseMediaLabel(kind: row.singleAttachmentKind) ?? nseAttachmentsLine(count: 1)
         }
@@ -1256,6 +1356,12 @@ private func previewBody(of row: NseProcessedRow) -> String? {
     // A call is not a message preview — it is its own outcome, decided by the
     // caller before this function is reached.
     case .callOffer, .callEnd:
+        return nil
+    // ADR-0092 — a content message previews by its finished line; an op on
+    // one (vote, close, tick, add, edit) is never a notification.
+    case .content:
+        return row.text.isEmpty ? nil : truncate(row.text)
+    case .contentOp:
         return nil
     }
 }
@@ -1301,8 +1407,9 @@ private let committerBeaconEnvelopeFirstByte: UInt8 = 0x6C
 /// proto's first wire tag is one of `0x52` / `0x5A` / `0x62` / `0x6A`
 /// (`CallSignalingPayload.body` oneof fields 10..13, the 1x1 bodies),
 /// `0x72` / `0x7A` (`GroupCallStart` 14 / `GroupCallJoin` 15) or the two-byte
-/// `0x82 0x01` (`GroupCallLeave` 16) or `0x8A 0x01` (`ScreenShareSignal` 17,
-/// ADR-0083: call signalling that never rings), while a chat envelope starts with `{`
+/// `0x82 0x01` (`GroupCallLeave` 16), `0x8A 0x01` (`ScreenShareSignal` 17,
+/// ADR-0083) or `0x92 0x01` (`CallMediaState` 18, a one-to-one's camera and
+/// microphone; both call signalling that never rings), while a chat envelope starts with `{`
 /// (`0x7B`) — no overlap. Without the group tags a group-call body reached the
 /// chat parser's lossy fallback and became a notification preview of garbage.
 ///
@@ -1325,7 +1432,7 @@ public func nseLooksLikeCallSignaling(_ bytes: Data) -> Bool {
         return true
     case 0x72, 0x7A:
         return nseIsFramedGroupCallBody(bytes, tagLength: 1)
-    case 0x82, 0x8A:
+    case 0x82, 0x8A, 0x92:
         return bytes.count >= 2
             && bytes[bytes.startIndex + 1] == 0x01
             && nseIsFramedGroupCallBody(bytes, tagLength: 2)
@@ -1809,6 +1916,82 @@ private func hexToData(_ hex: String) -> Data? {
         index = next
     }
     return out
+}
+
+/// `docs/ux/media-messages.md` section 11 — the photos, videos and plain
+/// files of a message, as the chat list row counts them.
+public struct NseAttachmentCounts: Equatable {
+    public var photos = 0
+    public var videos = 0
+    public var files = 0
+    /// A voice message, video note, GIF or audio file: its own word.
+    public var other = 0
+
+    public init(photos: Int = 0, videos: Int = 0, files: Int = 0, other: Int = 0) {
+        self.photos = photos
+        self.videos = videos
+        self.files = files
+        self.other = other
+    }
+}
+
+/// The inline list of the core (`lakko_attachments::inline_media_type`),
+/// restated because the slim extension surface does not carry it. It only
+/// picks a word for a notification: a photo counted as a file reads `File`.
+private let nseInlineImageTypes: Set<String> = ["image/jpeg", "image/png", "image/gif", "image/webp"]
+private let nseInlineOtherTypes: Set<String> = ["audio/mp4", "audio/mpeg", "video/mp4"]
+
+/// Count `(kind, mime)` pairs the way the app's list row does: a photo is an
+/// allowlisted image with no kind, a video `video/mp4` with no kind, a file
+/// anything with no kind and no allowlisted type.
+public func nseAttachmentCounts(_ attachments: [(kind: String?, mime: String?)]) -> NseAttachmentCounts {
+    var counts = NseAttachmentCounts()
+    for attachment in attachments {
+        let essence = (attachment.mime ?? "").split(separator: ";").first
+            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
+        guard attachment.kind == nil else {
+            counts.other += 1
+            continue
+        }
+        if nseInlineImageTypes.contains(essence) {
+            counts.photos += 1
+        } else if essence == "video/mp4" {
+            counts.videos += 1
+        } else if nseInlineOtherTypes.contains(essence) {
+            counts.other += 1
+        } else {
+            counts.files += 1
+        }
+    }
+    return counts
+}
+
+/// Section 11 — the words a message of photos, videos or files says without
+/// text, in the interface language (the app stores one rendered line per
+/// count; English otherwise). `nil` when it carries anything else.
+public func nseAttachmentWords(_ counts: NseAttachmentCounts) -> String? {
+    guard counts.other == 0 else { return nil }
+    func counted(_ key: String, _ count: Int, one: String, many: String) -> String {
+        if let line = nseNotificationWordLookup("\(key)#\(count)") { return line }
+        return count == 1 ? one : "\(count) \(many)"
+    }
+    let media = counts.photos + counts.videos
+    if counts.photos > 0, counts.videos > 0 {
+        return counted("chat.media.photos_and_videos", media, one: "1 photo and video", many: "photos and videos")
+    }
+    if counts.photos > 0 { return counted("chat.media.photos", counts.photos, one: "Photo", many: "photos") }
+    if counts.videos > 0 { return counted("chat.media.videos", counts.videos, one: "Video", many: "videos") }
+    if counts.files > 0 { return counted("chat.media.files", counts.files, one: "File", many: "files") }
+    return nil
+}
+
+/// Section 11 — a files-only message with text says the words, the literal
+/// separator web and Android use, then the text ("2 files · Weekend plans");
+/// any other message keeps its text.
+public func nseTextWithFileWords(_ text: String, _ counts: NseAttachmentCounts) -> String {
+    guard !text.isEmpty, counts.files > 0, counts.photos + counts.videos == 0, counts.other == 0,
+          let words = nseAttachmentWords(counts) else { return text }
+    return words + " · " + text
 }
 
 /// ADR-0047 — the notification body for a media message whose kind the

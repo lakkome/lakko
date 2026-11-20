@@ -4,6 +4,7 @@
 import AVFoundation
 import CoreTransferable
 import Foundation
+import LakkoCore
 import ImageIO
 import os
 import UIKit
@@ -39,6 +40,10 @@ public enum PhotoVideoPrep {
         public var thumb: Data?
         public var thumbWidth: UInt32?
         public var thumbHeight: UInt32?
+        /// ADR-0047 section 6 — the micro thumbnail carried inside the
+        /// message (``InlineThumb``), made from ``thumb``; `nil` when it
+        /// does not fit.
+        public var inlineThumb: Data?
 
         public var isVideo: Bool { fileURL != nil }
     }
@@ -71,8 +76,12 @@ public enum PhotoVideoPrep {
               CGImageSourceGetCount(source) > 0 else { return nil }
         var payload = bytes
         var mime = sniffInlineImageMime(bytes)
-        if mime == nil {
-            guard let jpeg = transcodeToJPEG(source) else { return nil }
+        // ADR-0092 section 9 / UX section 3 — every photo but an animated GIF
+        // is re-encoded as JPEG with its longest side at most the core's
+        // target (2560 px), which drops its metadata (EXIF location, camera,
+        // time): the re-encode writes the pixels only.
+        if mime != "image/gif" {
+            guard let jpeg = transcodeToJPEG(source, maxSide: Int(photoMaxLongestSidePx())) else { return nil }
             payload = jpeg
             mime = "image/jpeg"
         }
@@ -95,6 +104,7 @@ public enum PhotoVideoPrep {
             prepared.thumb = thumb.data
             prepared.thumbWidth = thumb.width
             prepared.thumbHeight = thumb.height
+            prepared.inlineThumb = InlineThumb.make(fromEncoded: thumb.data)
         }
         return prepared
     }
@@ -108,12 +118,12 @@ public enum PhotoVideoPrep {
         return (5...8).contains(orientation) ? (h, w) : (w, h)
     }
 
-    private static func transcodeToJPEG(_ source: CGImageSource) -> Data? {
+    static func transcodeToJPEG(_ source: CGImageSource, maxSide: Int = .max) -> Data? {
         guard let size = orientedPixelSize(source) else { return nil }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: max(size.width, size.height),
+            kCGImageSourceThumbnailMaxPixelSize: min(max(size.width, size.height), maxSide),
         ]
         guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
         return encodeJPEG(cg, quality: 0.9)
@@ -158,9 +168,9 @@ public enum PhotoVideoPrep {
     /// from another container when needed, at 720p if the original would not
     /// fit the attachment ceiling), its pixel size and a first-frame poster.
     /// `nil` when no MP4 under the ceiling can be produced.
-    public static func prepareVideo(_ source: URL, stamp: String) async -> Prepared? {
+    public static func prepareVideo(_ source: URL, stamp: String, allowReencode: Bool = true) async -> Prepared? {
         let asset = AVURLAsset(url: source)
-        guard let mp4 = await exportMP4(asset: asset, source: source) else { return nil }
+        guard let mp4 = await exportMP4(asset: asset, source: source, allowReencode: allowReencode) else { return nil }
         var prepared = Prepared(mime: "video/mp4", name: "video-\(stamp).mp4", fileURL: mp4)
         let output = AVURLAsset(url: mp4)
         if let track = try? await output.loadTracks(withMediaType: .video).first,
@@ -181,6 +191,7 @@ public enum PhotoVideoPrep {
             prepared.thumb = thumb.data
             prepared.thumbWidth = thumb.width
             prepared.thumbHeight = thumb.height
+            prepared.inlineThumb = InlineThumb.make(from: image)
         } else {
             log.warning("video poster unavailable; sending without it")
         }
@@ -191,7 +202,7 @@ public enum PhotoVideoPrep {
         ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.intValue ?? 0
     }
 
-    private static func exportMP4(asset: AVURLAsset, source: URL) async -> URL? {
+    private static func exportMP4(asset: AVURLAsset, source: URL, allowReencode: Bool = true) async -> URL? {
         let dir = PhotoVideoPrep.pickedVideoDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -200,7 +211,14 @@ public enum PhotoVideoPrep {
             let copy = dir.appendingPathComponent("video.mp4")
             if (try? FileManager.default.copyItem(at: source, to: copy)) != nil { return copy }
         }
-        for preset in [AVAssetExportPresetPassthrough, AVAssetExportPreset1280x720, AVAssetExportPreset960x540] {
+        // ADR-0092 / attachments UX section 3 — the send preview sends a
+        // video as picked (no re-encode in v1): only the copy above.
+        // Without re-encoding only the passthrough remux (an H.264 QuickTime
+        // file into an MP4 container) is tried.
+        let presets = allowReencode
+            ? [AVAssetExportPresetPassthrough, AVAssetExportPreset1280x720, AVAssetExportPreset960x540]
+            : [AVAssetExportPresetPassthrough]
+        for preset in presets {
             let out = dir.appendingPathComponent("video-\(UUID().uuidString).mp4")
             guard let session = AVAssetExportSession(asset: asset, presetName: preset) else { continue }
             session.outputURL = out

@@ -82,11 +82,22 @@ export function oneLine(text: string): string {
  * a missing snapshot.
  */
 export function replySnapshotFor<A>(
-  message: { readonly text: string; readonly attachments: readonly A[] },
+  message: {
+    readonly text: string;
+    readonly attachments: readonly A[];
+    /** ADR-0087 section 14 — what stands for the text of a channel
+     *  invitation (`channelInviteRowPreview`: "Invitation to {channel}", or a
+     *  `/g/` link without its secret); `null` / absent for any other text.
+     *  The text itself is the link with its secret, which a quote never
+     *  carries. */
+    readonly invitationLine?: string | null;
+  },
   authorLabel: string | undefined,
   bubbleOf: (attachment: A) => MediaBubble,
 ): ReplySnapshot {
   const who = authorLabel === undefined || authorLabel.trim().length === 0 ? {} : { author: authorLabel };
+  const invitation = message.invitationLine == null ? "" : oneLine(message.invitationLine);
+  if (invitation.length > 0) return { ...who, excerpt: invitation };
   const text = oneLine(message.text);
   if (text.length > 0) return { ...who, excerpt: text };
   const first = message.attachments[0];

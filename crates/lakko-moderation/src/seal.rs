@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Sealing to the moderator list ([ADR-0089] sections 2 and 3).
+//! Sealing to the moderator list ([ADR-0098] sections 2 and 3).
 //!
 //! A report's content, and a suspended person's appeal, are sealed so that
 //! only the listed moderators open them. One random content key seals the
@@ -28,7 +28,7 @@
 //! security key's WebAuthn PRF output ([`moderator_report_secret`]); it is
 //! never stored.
 //!
-//! [ADR-0089]: ../../../docs/adr/0089-reporting-and-moderation.md
+//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
 
 use lakko_crypto::aead::{open, seal, AeadKey, Algorithm, NONCE_LEN};
 use lakko_crypto::agreement::{PublicKey, SecretKey};

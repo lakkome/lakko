@@ -72,6 +72,7 @@ import { DsClient } from "./client";
 import { wasmJournalAuthorityFactory, wasmRegistrarDerivation } from "./journal-authority";
 import { journalRepair } from "./journal-repair";
 import { probeRoot, releaseAuthority } from "./ownership";
+import { bundleServesRosterKey, openSealedToOwnAccount } from "./rotated-member-seal";
 import { bindRegistrarListAccount, noteRegistrarListArrival } from "./registrar-list";
 import { IdbPendingRootSeedBackend, IdbRegistrarSeedBackend } from "./registrar-seed-idb";
 import { clearRootHeld, isRootHeld, markRootHeld } from "./root-held";
@@ -188,6 +189,28 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
   function conversationIdentityNow(): WasmIdentity | null {
     return chats.predecessorAccountIdentity() ?? accountIdentityNow();
   }
+  /** ADR-0074 section 3.7 (2026-11-20): the identity the directory serves
+   *  when it is NOT the conversation identity (after a rotation), else
+   *  `null`. An owner seals to the X25519 key of the served bundle, so an
+   *  envelope addressed to the conversation key may open only with this. */
+  function currentIdentityIfRotated(): WasmIdentity | null {
+    return chats.predecessorAccountIdentity() === null ? null : accountIdentityNow();
+  }
+  /** Open an envelope addressed to this account's conversation key: sealed
+   *  to the conversation identity's X25519 key, else to the current one's. */
+  function openOwnSealed(
+    openOwn: (addressee: WasmIdentity) => Uint8Array,
+    openSealedTo: (addressee: WasmIdentity, sealedTo: WasmIdentity) => Uint8Array,
+  ): Uint8Array | null {
+    const conversation = conversationIdentityNow();
+    if (conversation === null) return null;
+    return openSealedToOwnAccount({
+      conversation,
+      current: currentIdentityIfRotated(),
+      openOwn,
+      openSealedTo,
+    });
+  }
   function dropDerived(): void {
     if (derived === null) return;
     try {
@@ -224,7 +247,12 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
   });
 
   /** The member's account X25519 key from its identity bundle, verified to
-   *  be that account's bundle. */
+   *  be that account's bundle. ADR-0074 section 3.7 (2026-11-20): after a
+   *  rotation the bundle serves the CURRENT key while the roster names the
+   *  conversation key; it is accepted when its two-way conversation link
+   *  verifies against the served key and names the roster key. The envelope
+   *  stays addressed to the roster key and is sealed to this X25519 key,
+   *  which the member opens with its current identity. */
   async function memberX25519(accountKeyB64: string): Promise<Uint8Array | null> {
     const hex = profiles.accountIdHexOf(accountKeyB64);
     if (hex === null) return null;
@@ -232,7 +260,20 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
     if (accountIdBytes === null || accountIdBytes.length !== 16) return null;
     const bundle = await discovery.identityFetch(accountIdBytes);
     if (bundle === null) return null;
-    if (bundle.signature_pubkey !== accountKeyB64) {
+    const wasm = wasmNow ?? (await loadWasm());
+    let serves: boolean;
+    try {
+      const link = bundle.conversation_link;
+      serves = bundleServesRosterKey({
+        servedKey: base64Decode(bundle.signature_pubkey),
+        conversationLink: link === undefined || link.length === 0 ? null : base64Decode(link),
+        rosterKey: base64Decode(accountKeyB64),
+        verifyLink: (l, current) => wasm.verifyConversationLink(l, current),
+      });
+    } catch {
+      serves = false;
+    }
+    if (!serves) {
       // The directory served a bundle for another key: never seal to it.
       // eslint-disable-next-line no-console
       console.warn("ds: an identity bundle did not match the member's account key; not appointed");
@@ -848,10 +889,15 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
           }
         };
         const open = (plaintext: Uint8Array): Uint8Array => {
-          // Sealed to the member's account key as the roster names it.
-          const identity = conversationIdentityNow();
-          if (identity === null) throw new Error("no account identity");
-          return wasm.openRegistrarSeedEnvelope(plaintext, identity);
+          // Addressed to the member's account key as the roster names it;
+          // sealed to that identity's X25519 key, or after a rotation to the
+          // current identity's (ADR-0074 section 3.7).
+          const seed = openOwnSealed(
+            (a) => wasm.openRegistrarSeedEnvelope(plaintext, a),
+            (a, c) => wasm.openRegistrarSeedEnvelopeSealedTo(plaintext, a, c),
+          );
+          if (seed === null) throw new Error("registrar seed did not open");
+          return seed;
         };
         const ownAccountKey = (): Uint8Array | null =>
           conversationIdentityNow()?.signaturePublicKey ?? null;
@@ -956,14 +1002,14 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
             ownerAccountKey: arrival.ownerAccountKey,
           });
           if (verdict !== "accept" || header === null) return verdict;
-          const identity = conversationIdentityNow();
-          if (identity === null) return "not-addressed";
-          let seed: Uint8Array;
-          try {
-            seed = wasm.openKnockSeedEnvelope(arrival.plaintext, identity);
-          } catch {
-            return "malformed";
-          }
+          if (conversationIdentityNow() === null) return "not-addressed";
+          // ADR-0074 section 3.7 - after a rotation the owner seals to the
+          // current identity's X25519 key (the directory's).
+          const seed = openOwnSealed(
+            (a) => wasm.openKnockSeedEnvelope(arrival.plaintext, a),
+            (a, c) => wasm.openKnockSeedEnvelopeSealedTo(arrival.plaintext, a, c),
+          );
+          if (seed === null) return "malformed";
           if (seed.length !== 32) return "malformed";
           await knockSeeds.keep(account, arrival.groupIdB64, header.knockVersion, seed);
           return "accept";

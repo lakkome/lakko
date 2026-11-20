@@ -39,10 +39,23 @@ final class GroupCallSendersTests: XCTestCase {
                 numTemporalLayers: 3))
         XCTAssertEqual(
             plan[1].encoding,
-            CameraEncodingSpec(scaleResolutionDownBy: 4, maxBitrateBps: 150_000, active: true))
+            CameraEncodingSpec(scaleResolutionDownBy: 1, maxBitrateBps: 150_000, active: true))
         XCTAssertEqual(
             plan[2].encoding,
-            CameraEncodingSpec(scaleResolutionDownBy: 2, maxBitrateBps: 500_000, active: true))
+            CameraEncodingSpec(scaleResolutionDownBy: 1, maxBitrateBps: 500_000, active: true))
+    }
+
+    /// The copies are sized at their own source, not by the encoding.
+    func testACopysSourceIsTheCaptureDividedByItsFactor() {
+        let light = CameraSender.copySourceSize(.light, captureWidth: 1280, captureHeight: 720)
+        XCTAssertEqual(light.width, 320)
+        XCTAssertEqual(light.height, 180)
+        let middle = CameraSender.copySourceSize(.middle, captureWidth: 1280, captureHeight: 720)
+        XCTAssertEqual(middle.width, 640)
+        XCTAssertEqual(middle.height, 360)
+        let tiny = CameraSender.copySourceSize(.light, captureWidth: 2, captureHeight: 2)
+        XCTAssertEqual(tiny.width, 1)
+        XCTAssertEqual(tiny.height, 1)
     }
 
     /// The middle sender exists from the first offer and only its encoding
@@ -84,13 +97,13 @@ final class GroupCallSendersTests: XCTestCase {
     func testTheBindingsEncodingCarriesScaleCeilingAndActivityAndNoRid() {
         let light = CameraSender.rtcEncoding(CameraSender.copyEncoding(.light))
         XCTAssertNil(light.rid)
-        XCTAssertEqual(light.scaleResolutionDownBy, NSNumber(value: 4.0))
+        XCTAssertEqual(light.scaleResolutionDownBy, NSNumber(value: 1.0))
         XCTAssertEqual(light.maxBitrateBps, NSNumber(value: 150_000))
         XCTAssertTrue(light.isActive)
 
         let middle = CameraSender.rtcEncoding(CameraSender.copyEncoding(.middle, active: false))
         XCTAssertNil(middle.rid)
-        XCTAssertEqual(middle.scaleResolutionDownBy, NSNumber(value: 2.0))
+        XCTAssertEqual(middle.scaleResolutionDownBy, NSNumber(value: 1.0))
         XCTAssertEqual(middle.maxBitrateBps, NSNumber(value: 500_000))
         XCTAssertFalse(middle.isActive)
     }
@@ -162,7 +175,8 @@ final class GroupCallSendersTests: XCTestCase {
             CameraSender.copyIsSized(
                 wanted: wanted,
                 readBack: CameraEncodingSpec(
-                    scaleResolutionDownBy: 2, maxBitrateBps: nil, active: false)))
+                    scaleResolutionDownBy: 1, maxBitrateBps: nil, active: false)))
+        // A scale the copy did not ask for would shrink it twice.
         XCTAssertFalse(
             CameraSender.copyIsSized(
                 wanted: wanted,
@@ -172,7 +186,13 @@ final class GroupCallSendersTests: XCTestCase {
             CameraSender.copyIsSized(
                 wanted: wanted,
                 readBack: CameraEncodingSpec(
-                    scaleResolutionDownBy: 2, maxBitrateBps: 500_000, active: true)))
+                    scaleResolutionDownBy: 1, maxBitrateBps: 500_000, active: true)))
+        // No scale and a scale of 1 send the same picture.
+        XCTAssertTrue(
+            CameraSender.copyIsSized(
+                wanted: wanted,
+                readBack: CameraEncodingSpec(
+                    scaleResolutionDownBy: nil, maxBitrateBps: 500_000, active: false)))
     }
 
     /// Writing a copy's encoding onto the binding's own and reading it back

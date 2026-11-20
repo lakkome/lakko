@@ -46,9 +46,14 @@ public enum CallHistoryOutcome: String, Codable, Equatable, Sendable {
 
 /// Which screen a row opens, as the index stores it. Only the two MLS kinds
 /// can hold a call; a channel is a broadcast and has none.
+///
+/// `noConversation` is a call that belongs to no conversation
+/// (`docs/ux/navigation.md` section 5.1.1): one started with `New call`, or
+/// one this device joined from a call link. Its row opens nothing.
 public enum CallHistoryKind: String, Codable, Equatable, Sendable {
     case chat
     case group
+    case noConversation = "no_conversation"
 }
 
 /// One call, reduced to its parts.
@@ -58,9 +63,13 @@ public struct CallHistoryEntry: Codable, Equatable, Identifiable, Sendable {
     /// a restore rounded them — and a list that reshuffles on a refresh reads
     /// as a bug and is impossible to report.
     public let id: String
-    /// The conversation the call belongs to: a group id hex.
-    public let conversationId: String
+    /// The conversation the call belongs to: a group id hex. `nil` for a call
+    /// with no conversation (section 5.1.1).
+    public let conversationId: String?
     public let kind: CallHistoryKind
+    /// A call with no conversation: the call's id, hex, which is what makes it
+    /// one row per call on this device. `nil` for a conversation's call.
+    public let callIdHex: String?
     public let direction: CallTranscriptRow.Direction
     public let outcome: CallHistoryOutcome
     /// Whether the call was placed or accepted with the camera on, so calling
@@ -83,11 +92,53 @@ public struct CallHistoryEntry: Codable, Equatable, Identifiable, Sendable {
         self.id = id
         self.conversationId = conversationId
         self.kind = kind
+        self.callIdHex = nil
         self.direction = direction
         self.outcome = outcome
         self.video = video
         self.startedAtMs = startedAtMs
         self.durationMs = max(0, durationMs)
+    }
+
+    private init(
+        callIdHex: String,
+        direction: CallTranscriptRow.Direction,
+        video: Bool,
+        startedAtMs: Int64,
+        durationMs: Int64
+    ) {
+        self.id = Self.noConversationId(callIdHex: callIdHex)
+        self.conversationId = nil
+        self.kind = .noConversation
+        self.callIdHex = callIdHex
+        self.direction = direction
+        // Such a call never rings, so it is never missed or declined: the
+        // device was in it, or there is no row at all.
+        self.outcome = .answered
+        self.video = video
+        self.startedAtMs = startedAtMs
+        self.durationMs = max(0, durationMs)
+    }
+
+    /// A call with no conversation (`docs/ux/navigation.md` section 5.1.1):
+    /// `outgoing` when this device started it with `New call`, `incoming` when
+    /// it joined from a link.
+    public static func noConversation(
+        callIdHex: String,
+        direction: CallTranscriptRow.Direction,
+        video: Bool,
+        startedAtMs: Int64,
+        durationMs: Int64
+    ) -> CallHistoryEntry {
+        CallHistoryEntry(
+            callIdHex: callIdHex, direction: direction,
+            video: video, startedAtMs: startedAtMs, durationMs: durationMs)
+    }
+
+    /// The index id of a call with no conversation: the call id alone, so the
+    /// same call is filed once on this device whoever writes it.
+    public static func noConversationId(callIdHex: String) -> String {
+        "call.\(callIdHex.lowercased())"
     }
 
     /// The parts assembled back into the conversation's own row, which is
@@ -278,15 +329,50 @@ public enum CallHistory {
         Localization.text(entry.video ? "call.history.call_back_video_a11y" : "call.history.call_back_a11y")
     }
 
+    /// What a Calls row is (`docs/ux/navigation.md` sections 5.1 and 5.1.1).
+    public enum RowShape: Equatable {
+        /// A conversation's call: avatar and title of the conversation, the
+        /// row opens it, and a trailing button calls back in the same mode.
+        case conversation(groupIdHex: String, kind: CallHistoryKind)
+        /// A call with no conversation: the group-call glyph, `title`, no
+        /// call-back button, and the row is not a tap target (an ended link
+        /// call cannot be joined again and there is nothing to open).
+        case noConversation(title: String)
+    }
+
+    /// The one decision the Calls screen draws a row from.
+    ///
+    /// A conversation kind with no conversation id cannot open anything, so
+    /// it is drawn as a call with no conversation rather than as a row whose
+    /// tap goes nowhere.
+    public static func rowShape(_ entry: CallHistoryEntry) -> RowShape {
+        switch entry.kind {
+        case .chat, .group:
+            if let groupIdHex = entry.conversationId {
+                return .conversation(groupIdHex: groupIdHex, kind: entry.kind)
+            }
+            return .noConversation(title: noConversationTitle)
+        case .noConversation:
+            return .noConversation(title: noConversationTitle)
+        }
+    }
+
+    /// The title of a call with no conversation: always `Group call`, the
+    /// words the call screen uses. A call has no name of its own (`Your name
+    /// in this call` names a person, not the call).
+    public static var noConversationTitle: String {
+        Localization.text("call.label.group")
+    }
+
     /// The direction glyph at the leading edge, so the direction does not rest
     /// on the wording alone. The same three the conversation's own call row
     /// uses.
-    public static func directionGlyph(_ entry: CallHistoryEntry) -> String {
+    static func directionGlyph(_ entry: CallHistoryEntry) -> LkIcon {
         switch entry.outcome {
         case .answered:
-            return entry.direction == .outgoing ? "phone.arrow.up.right" : "phone.arrow.down.left"
+            return entry.direction == .outgoing ? .phoneOutgoing : .phoneIncoming
         case .missed, .declined, .failed:
-            return "phone.down"
+            return .phoneDown
         }
     }
 

@@ -50,7 +50,11 @@ class ForwardSenderTest {
         height = 320u,
     )
 
-    private fun request(vararg attachments: AttachmentRef, forward: ForwardRef? = null) = ForwardRequest(
+    private fun request(
+        vararg attachments: AttachmentRef,
+        forward: ForwardRef? = null,
+        content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
+    ) = ForwardRequest(
         sourceGroupIdHex = origin,
         message = ChatMessage(
             messageId = 7L,
@@ -60,6 +64,7 @@ class ForwardSenderTest {
             createdAt = "1970-01-01T00:00:00Z",
             authorKey = "Ym9i",
             forward = forward,
+            content = content,
         ),
         authorLabel = "Anna",
     )
@@ -69,6 +74,7 @@ class ForwardSenderTest {
         val text: String,
         val attachments: List<AttachmentRef>,
         val forward: ForwardRef,
+        val content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
     )
 
     private class Fakes {
@@ -112,7 +118,7 @@ class ForwardSenderTest {
                     height = height,
                 )
             },
-            send = { t, text, attachments, forward -> sent = Sent(t, text, attachments, forward) },
+            send = { t, text, attachments, forward, content -> sent = Sent(t, text, attachments, forward, content) },
         )
     }
 
@@ -192,7 +198,7 @@ class ForwardSenderTest {
         val sender = ForwardSender(
             download = { error("blob gone") },
             upload = { _, _, _, _ -> fail("nothing to upload"); error("unreachable") },
-            send = { _, _, _, _ -> fail("must not send a forward missing its photo") },
+            send = { _, _, _, _, _ -> fail("must not send a forward missing its photo") },
         )
         try {
             sender.forward(request(ref(1)), target)
@@ -209,5 +215,73 @@ class ForwardSenderTest {
         val first = ForwardRef("Maria", "ee".repeat(16), 12L)
         fakes.sender().forward(request(forward = first), target)
         assertEquals(first, fakes.sent!!.forward)
+    }
+
+    // ADR-0092 / docs/ux/attachments.md section 11a — content messages.
+
+    @Test
+    fun `a forwarded location goes as the same content with the forward line`() = runTest {
+        val fakes = Fakes()
+        val loc = uniffi.lakko_ffi_uniffi.MessageContent.Location(
+            uniffi.lakko_ffi_uniffi.SharedLocation(latE7 = 1, lonE7 = 2, accuracyM = 3u, fixAtMs = 4L, name = "Here"),
+        )
+        fakes.sender().forward(request(content = loc), target)
+        assertEquals(loc, fakes.sent!!.content)
+        assertEquals(ForwardRef("Anna", origin, 7L), fakes.sent!!.forward)
+    }
+
+    @Test
+    fun `a forwarded contact card goes as the same card`() = runTest {
+        val fakes = Fakes()
+        val card = uniffi.lakko_ffi_uniffi.MessageContent.ContactCard(
+            uniffi.lakko_ffi_uniffi.SharedContactCard(name = "Bob", username = "bob", accountKey = ByteArray(32) { 3 }),
+        )
+        fakes.sender().forward(request(content = card), target)
+        assertEquals(card, fakes.sent!!.content)
+    }
+
+    @Test
+    fun `a forwarded article re-encrypts its images in order`() = runTest {
+        val fakes = Fakes()
+        val article = uniffi.lakko_ffi_uniffi.MessageContent.Article(
+            uniffi.lakko_ffi_uniffi.Article(
+                title = "T",
+                blocks = listOf(
+                    uniffi.lakko_ffi_uniffi.ArticleBlock.Image(0u, emptyList()),
+                    uniffi.lakko_ffi_uniffi.ArticleBlock.Image(1u, emptyList()),
+                ),
+            ),
+        )
+        fakes.sender().forward(request(ref(1), ref(2), content = article), target)
+        val sent = fakes.sent!!
+        assertEquals(article, sent.content)
+        assertEquals(2, sent.attachments.size)
+        assertEquals(listOf<Byte>(1, 2), fakes.downloaded.map { it.blobId[0] })
+        // Fresh blobs, never the original references.
+        assertFalse(sent.attachments.any { it.blobId.contentEquals(ByteArray(32) { 1 }) })
+        assertArrayEquals(ByteArray(32) { 101 }, sent.attachments[0].blobId)
+        assertArrayEquals(ByteArray(32) { 102 }, sent.attachments[1].blobId)
+    }
+
+    @Test
+    fun `a poll or checklist is refused even if asked`() = runTest {
+        val fakes = Fakes()
+        val checklist = uniffi.lakko_ffi_uniffi.MessageContent.Checklist(
+            uniffi.lakko_ffi_uniffi.SignedChecklist(
+                body = uniffi.lakko_ffi_uniffi.ChecklistBody(
+                    title = "x",
+                    othersAdd = false,
+                    othersMark = false,
+                    items = emptyList(),
+                ),
+                authorSig = null,
+            ),
+        )
+        try {
+            fakes.sender().forward(request(content = checklist), target)
+            fail("expected the forward to be refused")
+        } catch (_: IllegalStateException) {
+        }
+        assertNull(fakes.sent)
     }
 }

@@ -39,6 +39,7 @@
 
 import { AccountSuspendedError, DEFAULT_BASE_URL } from "./client";
 import { isSuspendedBody, suspendedLandingOf } from "./suspension";
+import { base64Encode, base64UrlEncodeNoPad } from "./account-id";
 import { sessionFetch } from "./session-fetch";
 import type { SessionPairWire } from "./session-pair";
 import { FRESH_GRANT_HEADER } from "./fresh-auth";
@@ -73,6 +74,15 @@ export class WebauthnNetworkError extends Error {
  *  different sign-in. */
 export class WebauthnUnsupportedError extends Error {
   override name = "WebauthnUnsupportedError";
+}
+
+/** Creating a passkey was refused because this device's passkey provider
+ *  already holds one for this account (`InvalidStateError` from
+ *  `navigator.credentials.create`, the excluded-credential case). Not the
+ *  browser or device being unable to create passkeys
+ *  (docs/ux/identity-recovery.md 10.2, amended 2026-11-11). */
+export class WebauthnCredentialExistsError extends Error {
+  override name = "WebauthnCredentialExistsError";
 }
 
 /** User dismissed the platform sheet, or the authenticator
@@ -231,6 +241,9 @@ export interface AuthFinishRequest {
 /** `POST /webauthn/auth/finish`: the account id plus the session pair
  *  (ADR-0073) every login route returns. */
 export interface AuthFinishResponse extends SessionPairWire {
+  /** The server sends URL-safe base64 without padding; `loginWithPasskey`
+   *  returns it in the client's own form, standard base64 with padding
+   *  (`account-id.ts` `base64Encode`), the form every account key uses. */
   readonly account_id_b64: string;
   /** The fresh-auth grant a passkey sign-in mints (`fresh-auth.ts`). */
   readonly fresh_grant?: string;
@@ -367,7 +380,7 @@ export class WebauthnClient {
     try {
       cred = await navigator.credentials.create({ publicKey });
     } catch (err) {
-      throw mapDomError(err);
+      throw mapDomError(err, "create");
     }
     if (cred === null) {
       throw new WebauthnUserCancelledError();
@@ -473,7 +486,7 @@ export class WebauthnClient {
       "/webauthn/auth/start",
       options.accountIdB64 === undefined
         ? {}
-        : { account_id_b64: options.accountIdB64 },
+        : { account_id_b64: accountIdToWire(options.accountIdB64) },
     );
     const publicKey = decodeRequestOptions(start.options.publicKey);
     if (options.prfSalt !== undefined) {
@@ -487,7 +500,7 @@ export class WebauthnClient {
       }
       cred = await navigator.credentials.get(getOptions);
     } catch (err) {
-      throw mapDomError(err);
+      throw mapDomError(err, "get");
     }
     if (cred === null) {
       throw new WebauthnUserCancelledError();
@@ -501,7 +514,11 @@ export class WebauthnClient {
         ...(options.deviceIdB64 !== undefined ? { device_id_b64: options.deviceIdB64 } : {}),
       },
     );
-    return { ...finish, ...ceremonyExtras(pk) };
+    return {
+      ...finish,
+      account_id_b64: accountIdFromWire(finish.account_id_b64),
+      ...ceremonyExtras(pk),
+    };
   }
 
   /**
@@ -552,7 +569,7 @@ export class WebauthnClient {
     try {
       cred = await navigator.credentials.get({ publicKey });
     } catch (err) {
-      throw mapDomError(err);
+      throw mapDomError(err, "get");
     }
     if (cred === null) {
       throw new WebauthnUserCancelledError();
@@ -628,7 +645,7 @@ export class WebauthnClient {
 async function parseJsonOrThrow<T>(response: Response, endpoint: string): Promise<T> {
   if (!response.ok) {
     if (response.status === 403) {
-      // ADR-0089: a passkey sign-in of a suspended account answers with the
+      // ADR-0098: a passkey sign-in of a suspended account answers with the
       // restricted session; read whole, never truncated or logged.
       const full = await response.text().catch(() => "");
       const landing = isSuspendedBody(full) ? suspendedLandingOf(full) : null;
@@ -652,10 +669,20 @@ async function safeReadBody(response: Response): Promise<string> {
 
 // ---- DOM-error mapping ------------------------------------------
 
-function mapDomError(err: unknown): Error {
+/**
+ * The typed error for a DOM exception of a WebAuthn ceremony. `ceremony` is
+ * which call threw: an `InvalidStateError` from `create` means the
+ * authenticator already holds a credential from `excludeCredentials` (WebAuthn
+ * L3, section 5.1.3), so it is {@link WebauthnCredentialExistsError}; from
+ * `get` it keeps the earlier reading, unsupported.
+ */
+export function mapDomError(err: unknown, ceremony: "create" | "get"): Error {
   if (err instanceof Error) {
     if (err.name === "NotAllowedError" || err.name === "AbortError") {
       return new WebauthnUserCancelledError();
+    }
+    if (err.name === "InvalidStateError" && ceremony === "create") {
+      return new WebauthnCredentialExistsError();
     }
     if (
       err.name === "NotSupportedError" ||
@@ -707,6 +734,20 @@ export async function actionHashForDeleteAccount(
   accountId: Uint8Array,
 ): Promise<string> {
   return deriveActionHash(ACTION_DOMAIN_DELETE_ACCOUNT, accountId);
+}
+
+/** An account id in the client's form (standard base64, padded) or
+ *  already in URL-safe form, as `services/auth` reads it: URL-safe base64
+ *  without padding. */
+export function accountIdToWire(accountIdB64: string): string {
+  return base64UrlEncodeNoPad(new Uint8Array(base64urlToBuffer(accountIdB64.replace(/=+$/, ""))));
+}
+
+/** The account id `services/auth` sends (URL-safe base64, no padding) in
+ *  the client's form, so it compares equal to the account keys the client
+ *  already holds. */
+export function accountIdFromWire(wire: string): string {
+  return base64Encode(new Uint8Array(base64urlToBuffer(wire.replace(/=+$/, ""))));
 }
 
 function base64urlToBuffer(s: string): ArrayBuffer {

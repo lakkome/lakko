@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  encryptionSheetHint,
   encryptionSheetSentence,
   safetyNumberGroups,
   safetyNumberSpokenLabel,
@@ -48,19 +49,46 @@ describe("showsEncryptionChip", () => {
   });
 });
 
+const oneToOne = (peerName: string | null | undefined, othersInCall = 1) => ({
+  groupCall: false,
+  othersInCall,
+  peerName,
+});
+const group = (othersInCall: number, peerName: string | null = null) => ({
+  groupCall: true,
+  othersInCall,
+  peerName,
+});
+
+const GROUP_SENTENCE = "Only the people on this call can hear it.";
+const ONE_TO_ONE_HINT =
+  "Read the number aloud to each other. If it matches on both devices, no one else is listening.";
+const GROUP_HINT =
+  "Everyone in this call sees the same number. Read it aloud. If it matches on every device, no one else is listening.";
+
 describe("encryptionSheetSentence", () => {
-  it("names the other person", () => {
-    expect(encryptionSheetSentence("Anna")).toBe("Only you and Anna can hear this call.");
+  it("names the other person on a one-to-one call", () => {
+    expect(encryptionSheetSentence(oneToOne("Anna"))).toBe(
+      "Only you and Anna can hear this call.",
+    );
+  });
+
+  it("names them before they have joined, too", () => {
+    expect(encryptionSheetSentence(oneToOne("Anna", 0))).toBe(
+      "Only you and Anna can hear this call.",
+    );
   });
 
   it("trims a padded name rather than embedding the padding", () => {
-    expect(encryptionSheetSentence("  Anna  ")).toBe("Only you and Anna can hear this call.");
+    expect(encryptionSheetSentence(oneToOne("  Anna  "))).toBe(
+      "Only you and Anna can hear this call.",
+    );
   });
 
   it("says the same true thing without a name when there is none", () => {
     // Word for word what `callEncryptionSentence` says on Android and iOS.
     for (const missing of [null, undefined, "", "   "]) {
-      expect(encryptionSheetSentence(missing)).toBe("Only the people on this call can hear it.");
+      expect(encryptionSheetSentence(oneToOne(missing))).toBe(GROUP_SENTENCE);
     }
   });
 
@@ -69,10 +97,40 @@ describe("encryptionSheetSentence", () => {
     // to "Participant N" when a peer cannot be resolved to a contact. Reading
     // "Only you and Peer can hear this call." as a name is exactly the kind of
     // invented fact the call surface must not state.
-    expect(encryptionSheetSentence("Peer")).toBe("Only the people on this call can hear it.");
-    expect(encryptionSheetSentence("Participant")).toBe(
-      "Only the people on this call can hear it.",
-    );
+    expect(encryptionSheetSentence(oneToOne("Peer"))).toBe(GROUP_SENTENCE);
+    expect(encryptionSheetSentence(oneToOne("Participant"))).toBe(GROUP_SENTENCE);
+  });
+
+  it("never names one person on a group or link call, whatever its size", () => {
+    // The 2026-11-07 defect: the sheet read the first roster entry's name on
+    // a group call, claiming a two-person call that had several people in it.
+    for (const others of [0, 1, 2, 7]) {
+      expect(encryptionSheetSentence(group(others, "Anna"))).toBe(GROUP_SENTENCE);
+    }
+  });
+
+  it("reads a call with more than one other person as a group call", () => {
+    expect(encryptionSheetSentence(oneToOne("Anna", 2))).toBe(GROUP_SENTENCE);
+  });
+});
+
+describe("encryptionSheetHint", () => {
+  it("asks two people to read the number to each other", () => {
+    expect(encryptionSheetHint(oneToOne("Anna"))).toBe(ONE_TO_ONE_HINT);
+    expect(encryptionSheetHint(oneToOne(null, 0))).toBe(ONE_TO_ONE_HINT);
+  });
+
+  it("tells a group or link call that everyone sees the same number", () => {
+    for (const others of [0, 1, 4]) {
+      expect(encryptionSheetHint(group(others))).toBe(GROUP_HINT);
+    }
+    expect(encryptionSheetHint(oneToOne("Anna", 3))).toBe(GROUP_HINT);
+  });
+
+  it("never speaks of phones", () => {
+    for (const call of [oneToOne("Anna"), group(3)]) {
+      expect(encryptionSheetHint(call)).not.toMatch(/phone/iu);
+    }
   });
 });
 

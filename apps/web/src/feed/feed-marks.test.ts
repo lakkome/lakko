@@ -146,10 +146,10 @@ describe("feed icons", () => {
       "feed",
       "star",
       "heart",
-      "lightning",
+      "bolt",
       "book",
       "code",
-      "music",
+      "music-note",
       "camera",
       "globe",
       "chat",
@@ -159,7 +159,7 @@ describe("feed icons", () => {
   });
 
   it("draws the default for an index it does not know", () => {
-    expect(feedIconName(3)).toBe("lightning");
+    expect(feedIconName(3)).toBe("bolt");
     expect(feedIconName(12)).toBe(FEED_ICONS[DEFAULT_FEED_ICON]?.name);
     expect(feedIconName(255)).toBe("feed");
     expect(feedIconName(-1)).toBe("feed");

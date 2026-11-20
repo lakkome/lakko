@@ -1,106 +1,98 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! PublisherGroup — persistent MLS-group wrapper for the
-//! Phase 4 channels publisher path
-//! ([ADR-0010](../../../docs/adr/0010-channels-two-tier-broadcast.md)
-//! Tier 1), closing G4-2-mls-persistence.
+//! PublisherGroup — the persistent MLS group of a channel's publishers
+//! ([ADR-0010](../../../docs/adr/0010-channels-two-tier-broadcast.md) Tier 1),
+//! a group of **devices** since
+//! [ADR-0090](../../../docs/adr/0090-publisher-group-device-leaves.md).
 //!
-//! ## What this module is
+//! ## What it is
 //!
-//! Phase 4 channels use a two-tier broadcast architecture:
+//! Channels use a two-tier broadcast: the PublisherGroup is an MLS group whose
+//! exporter is the authority for the channel's content seed, and subscribers
+//! receive that seed through sealed envelopes (`lakko_channels::subscribe`).
+//! The group's MLS state survives restarts in the device identity's provider,
+//! so the exporter output survives with it (C-44).
 //!
-//! 1. **PublisherGroup** — a vanilla MLS group of ≤ 500 owners
-//!    / moderators / verified authors. Membership changes happen
-//!    here, and the group's MLS exporter is the authority for
-//!    the `content_key_seed` the rest of the channel rides on.
-//! 2. **Subscriber tier** — receives the seed via HPKE-sealed
-//!    envelopes (see [`lakko_channels::subscribe`]).
+//! ## Leaves are bound devices (ADR-0090 section 1)
 //!
-//! For Tier 1 to function as the rotation authority the
-//! publisher's MLS state MUST survive process restarts. Before
-//! this module, client composers (iOS / Android / web) built a
-//! throwaway group on every publish — that gave correct
-//! crypto on a single publish but reset the group's epoch back
-//! to 0 every time the app reopened, so the exporter output
-//! also reset and subscribers who had already received a
-//! sealed seed via the previous epoch's rotation could no
-//! longer decrypt new posts.
+//! Every leaf is a device identity carrying the ADR-0050 device binding as its
+//! credential, so every device of the owner and of every co-publisher holds its
+//! own leaf and one person may hold several (at most
+//! [`MAX_LEAVES_PER_ACCOUNT`]). A device identity without a binding is refused
+//! at every entry point, and so is a leaf whose binding does not verify; the
+//! ADR-0050 resolver's legacy arm (an empty credential is an account-key leaf)
+//! is not relied on here.
 //!
-//! ## What this module does
+//! The group id is still the owner's derivation ([`publisher_group_id_for`],
+//! ADR-0078 section 6), computed from the owner's ACCOUNT seed, which every
+//! owner device holds. A co-publisher cannot compute it; it learns the id from
+//! its `/g/` capability and keeps it.
 //!
-//! [`PublisherGroup`] is a thin wrapper around [`Group`] that:
+//! ## The owner's account key and the commit gate (ADR-0090 section 1)
 //!
-//! * Derives a **deterministic** MLS group id from a secret of the
-//!   channel owner and the 16-byte channel id
-//!   ([`publisher_group_id_for`], ADR-0078 section 6):
-//!   `BLAKE3-derive-key("lakko/pubgrp/id/v3", owner_account_seed ||
-//!   channel_id)`. The owner's account seed is the Ed25519 seed of the
-//!   identity whose provider holds the group, so the owner recomputes the id
-//!   from what it already holds and [`Group::load`] has something stable to
-//!   look up. Until ADR-0078 the id was `b"lakko/pubgrp/v2/" || channel_id`:
-//!   `services/channels` knows every channel id, so the PublisherGroup
-//!   journal on the Delivery Service was attributable to its channel. No
-//!   server can compute the id now, and nothing inverts it: a co-publisher
-//!   learns the channel id from the sealed preview of its `/g/` link and the
-//!   group id from the capability, keeps both, and opens the group it joined
-//!   with [`PublisherGroup::load_joined`].
-//! * Exposes [`PublisherGroup::open_or_create`] — the
-//!   load-or-create dance every composer needs. Reuses the
-//!   already-persisted state when it exists; otherwise
-//!   minted-and-persisted at first publish.
-//! * Pins the exporter label + length conventions in one place
-//!   so iOS / Android / web composers don't drift on the
-//!   `"lakko/channel/v1"` / 32-byte boundary.
+//! Every holder of the group records the owner's account key next to the
+//! group (a provider row, [`PUBLISHER_GROUP_OWNER_ROW_DOMAIN`]): an owner
+//! device derives it from the owner account seed, a co-publisher device takes
+//! it at [`PublisherGroup::join_from_welcome`] and checks it against the
+//! device that sent the Welcome. Every commit this group merges passes the
+//! one rule [`check_publisher_commit`], run by the committer before it stages
+//! and by every peer before it merges ([`PublisherGroup::process_incoming`]):
 //!
-//! Persistence is delegated entirely to
-//! [`Identity::provider.storage()`] — the same SQLCipher
-//! backing store the rest of [`Group::load`] uses. No new
-//! schema; OpenMLS's serialised `MlsGroup` blob lands in the
-//! `openmls_kv` table OpenMLS itself manages.
+//! 1. the committer's leaf resolves to the owner's account;
+//! 2. the commit carries only `Add` and `Remove` proposals (and an update
+//!    path);
+//! 3. every added leaf carries a device binding that verifies for it;
+//! 4. after the commit no account holds more than [`MAX_LEAVES_PER_ACCOUNT`]
+//!    leaves;
+//! 5. the commit changes no GroupContext extension.
 //!
-//! ## What this module does NOT do
+//! ## An owner device enters from a saved GroupInfo (ADR-0064 section 7)
 //!
-//! * **Add / remove members.** PublisherGroup membership
-//!   churn (promote a new moderator, demote an editor, etc.)
-//!   goes through the standard [`Group::add_member`] /
-//!   [`Group::remove_member`] surface. This module is the
-//!   creation + exporter-seed shape; the membership ops sit
-//!   on top.
-//! * **Distribute the rotated seed.** That's
-//!   [`lakko_channels::subscribe::seal_seed`] plus the
-//!   `services/channels` batch fanout. PublisherGroup
-//!   produces the bytes; subscribers receive them via the
-//!   already-shipped path.
-//! * **The 24 h / N-message scheduled rotation.** The cadence
-//!   decision lives in the pure `RotationPolicy::should_rotate`
-//!   in `lakko-channels` (24 h / 1 000 posts by default), driven
-//!   by the per-platform rotation crons (web / iOS / Android).
-//!   This module exposes a fresh seed on demand; that scheduling
-//!   logic sits above it and calls "commit + rotate" when the
-//!   policy fires.
+//! One arm of the rule admits a committer that is not a member: an **external
+//! commit** carrying exactly its `ExternalInit`, whose new leaf carries a
+//! device binding to the owner's account, while that account holds fewer than
+//! [`MAX_LEAVES_PER_ACCOUNT`] leaves. Every other external commit is refused.
+//! It is how an owner device that holds no group enters, from the GroupInfo
+//! another owner device saved ([`PublisherGroup::group_info`],
+//! [`PublisherGroup::staged_group_info`]): [`PublisherGroup::enter`] builds
+//! the commit and holds it like a staged one, so it merges only on the
+//! Delivery Service's word. A co-publisher never enters this way; an owner
+//! device admits its devices.
+//!
+//! ## Every commit is staged (ADR-0090 section 3)
+//!
+//! There is no eager commit: [`PublisherGroup::stage_rotate`],
+//! [`PublisherGroup::stage_remove_publisher`],
+//! [`PublisherGroup::stage_approve_external_join`],
+//! [`PublisherGroup::stage_admit_devices`],
+//! [`PublisherGroup::stage_retire_devices`] and their combination
+//! [`PublisherGroup::stage_commit`] leave the group at epoch N holding the
+//! commit; [`PublisherGroup::merge_staged_commit`] on the Delivery Service's
+//! `201` (or the identical re-send's `200`), [`PublisherGroup::abandon_staged_commit`]
+//! on its `409`. Any owner device may commit; the journal takes one commit per
+//! epoch, and the loser abandons and applies the winner. A channel seed reaches
+//! subscribers only from a merged commit (C-90, proposed).
 //!
 //! ## Threading
 //!
-//! Same posture as [`Group`]: not `Sync`. Wrap in a
-//! `Mutex<PublisherGroup>` at the FFI boundary if multi-
-//! threaded access is needed (matches the
-//! `Mutex<ParticipantKey>` pattern from G3-sframe).
-//!
-//! ## Audit anchor
-//!
-//! `C-44` in [`docs/security/calls.md`](../../../docs/security/calls.md)
-//! already pinned the MLS-exporter-as-channel-seed
-//! invariant for the throwaway-group path. With this
-//! module, the same invariant holds across process
-//! restarts: the group's MLS state survives → the
-//! exporter output for `(label, channel_id, 32)` survives
-//! → the channel seed survives.
+//! Same posture as [`Group`]: not `Sync`. The FFI wraps it in a `Mutex`.
 
+use lakko_crypto::signing::SigningKey;
+use openmls::extensions::Extensions;
+use openmls::group::{GroupContext, StagedCommit};
+use openmls::messages::proposals::Proposal;
+use openmls::prelude::{KeyPackage, LeafNodeIndex};
+use openmls_traits::OpenMlsProvider as _;
+
+use crate::device_binding::DeviceBinding;
 use crate::error::{Error, Result};
-use crate::group::{Group, JoinRequest, MemberAddition, MemberRecord, GROUP_ID_LEN};
+use crate::group::{
+    encode_message, ExternalEntryView, Group, Incoming, JoinRequest, MemberRecord, GROUP_ID_LEN,
+};
+use crate::group_proposals::{classify, ProposalKind, MAX_LEAVES_PER_ACCOUNT};
 use crate::identity::Identity;
-use openmls::prelude::LeafNodeIndex;
+use crate::refusal::RefusalReason;
 
 /// Domain separator of the step-down plaintext a publisher sends on the
 /// PublisherGroup journal ([ADR-0087] section 15, note of 2026-11-05).
@@ -156,10 +148,11 @@ pub fn is_publisher_step_down_envelope(plaintext: &[u8]) -> bool {
 pub const CHANNEL_EXPORTER_LABEL: &str = "lakko/channel/v1";
 
 /// Length of a `channel_id`. ADR-0010 §"Identifiers" pins
-/// channels at 16 bytes (same shape as `call_id` / `group_id`
-/// pseudonyms — opaque server-side, deterministic prefix-
-/// derivation for client-side persistence here).
+/// channels at 16 bytes.
 pub const CHANNEL_ID_LEN: usize = 16;
+
+/// Length of an account key (Ed25519 public key).
+pub const ACCOUNT_KEY_LEN: usize = 32;
 
 /// 16-byte channel identifier. Newtype so the deterministic-
 /// group-id derivation has a single source-of-truth shape.
@@ -198,12 +191,10 @@ const PUBLISHER_GROUP_ID_DOMAIN: &str = "lakko/pubgrp/id/v3";
 // exactly 32 bytes; the derivation's output width is that.
 const _: () = assert!(GROUP_ID_LEN == 32);
 
-/// The retired v1 prefix. Kept for exactly one purpose: letting
-/// [`PublisherGroup::load`] *recognise* state persisted under the old
-/// derivation so the caller gets a loud error instead of a silent fresh mint.
-/// Nothing else may use it — it is not a fallback lookup path (see
-/// [`PublisherGroup::load`] for why re-keying is impossible).
-const PUBLISHER_GROUP_ID_PREFIX_V1: &[u8] = b"lakko/publisher-group/v1/";
+/// Provider row prefix under which a device records the owner's account key
+/// of a PublisherGroup it holds (`domain ‖ group_id` -> 32 bytes). Frozen; it
+/// rides the identity's storage snapshot like the retained join requests.
+pub const PUBLISHER_GROUP_OWNER_ROW_DOMAIN: &[u8] = b"lakko/publisher-group-owner/v1\0";
 
 /// The PublisherGroup id of the channel `channel_id` owned by the account
 /// whose Ed25519 seed is `owner_account_seed`:
@@ -221,112 +212,472 @@ pub fn publisher_group_id_for(
     lakko_crypto::hash::blake3_derive_key_from_material(PUBLISHER_GROUP_ID_DOMAIN, &material)
 }
 
-/// The id of the PublisherGroup `identity` owns for `channel_id`.
-fn publisher_group_id_bytes(identity: &Identity, channel_id: &ChannelId) -> [u8; GROUP_ID_LEN] {
-    publisher_group_id_for(&identity.ed25519_seed_bytes(), channel_id)
+/// The owner's account key (the Ed25519 public key of `owner_account_seed`):
+/// what every owner device's binding names and what the commit gate compares
+/// a committer with.
+#[must_use]
+pub fn publisher_owner_account_key(owner_account_seed: &[u8; 32]) -> [u8; ACCOUNT_KEY_LEN] {
+    SigningKey::from_seed(owner_account_seed)
+        .verifying_key()
+        .to_bytes()
 }
 
-/// The v1 id `channel_id` *would* have been persisted under. Used only by
-/// [`refuse_if_legacy_v1_present`].
-fn publisher_group_id_bytes_v1(channel_id: &ChannelId) -> Vec<u8> {
-    let mut id = Vec::with_capacity(PUBLISHER_GROUP_ID_PREFIX_V1.len() + CHANNEL_ID_LEN);
-    id.extend_from_slice(PUBLISHER_GROUP_ID_PREFIX_V1);
-    id.extend_from_slice(channel_id.as_bytes());
-    id
+fn owner_row_key(group_id: &[u8]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(PUBLISHER_GROUP_OWNER_ROW_DOMAIN.len() + group_id.len());
+    key.extend_from_slice(PUBLISHER_GROUP_OWNER_ROW_DOMAIN);
+    key.extend_from_slice(group_id);
+    key
 }
 
-/// Refuse to proceed when this channel has MLS state persisted under the
-/// retired v1 derivation. See [`PublisherGroup::load`] for why the state cannot
-/// be migrated in place and why a silent fresh mint is the worse outcome.
+fn write_owner_row(
+    identity: &Identity,
+    group_id: &[u8],
+    owner: &[u8; ACCOUNT_KEY_LEN],
+) -> Result<()> {
+    identity
+        .provider
+        .storage()
+        .values
+        .write()
+        .map_err(|_| Error::Identity("storage RwLock poisoned".to_string()))?
+        .insert(owner_row_key(group_id), owner.to_vec());
+    Ok(())
+}
+
+fn read_owner_row(identity: &Identity, group_id: &[u8]) -> Result<Option<[u8; ACCOUNT_KEY_LEN]>> {
+    let map = identity
+        .provider
+        .storage()
+        .values
+        .read()
+        .map_err(|_| Error::Identity("storage RwLock poisoned".to_string()))?;
+    match map.get(&owner_row_key(group_id)) {
+        None => Ok(None),
+        Some(row) => row
+            .as_slice()
+            .try_into()
+            .map(Some)
+            .map_err(|_| Error::Group("publisher group owner row is malformed".into())),
+    }
+}
+
+fn drop_owner_row(identity: &Identity, group_id: &[u8]) -> Result<()> {
+    identity
+        .provider
+        .storage()
+        .values
+        .write()
+        .map_err(|_| Error::Identity("storage RwLock poisoned".to_string()))?
+        .remove(&owner_row_key(group_id));
+    Ok(())
+}
+
+/// The account a device identity is bound to (ADR-0050). A PublisherGroup
+/// leaf is a bound device; an unbound identity is refused.
+fn device_account(identity: &Identity) -> Result<[u8; ACCOUNT_KEY_LEN]> {
+    let Some(binding) = identity.device_binding() else {
+        return Err(Error::refused(
+            RefusalReason::DeviceBindingInvalid,
+            "publisher group: the device identity carries no device binding",
+        ));
+    };
+    DeviceBinding::verify_for_leaf(binding, identity.signature_public_key())
+        .map(|b| b.account_pubkey)
+        .map_err(|_| {
+            Error::refused(
+                RefusalReason::DeviceBindingInvalid,
+                "publisher group: the device binding does not verify",
+            )
+        })
+}
+
+/// The account a leaf's credential binds it to, refusing the legacy arm: an
+/// empty credential (an account-key leaf) resolves to nothing here.
+fn bound_account(credential: &[u8], signature_key: &[u8]) -> Option<[u8; ACCOUNT_KEY_LEN]> {
+    if credential.is_empty() {
+        return None;
+    }
+    DeviceBinding::verify_for_leaf(credential, signature_key)
+        .ok()
+        .map(|b| b.account_pubkey)
+}
+
+/// What one PublisherGroup commit does, as [`check_publisher_commit`] judges
+/// it: the same view whether the committer is planning it or a peer is about
+/// to merge it.
+#[derive(Clone, Debug, Default)]
+pub struct PublisherCommitEffects {
+    /// The account the committer's leaf resolves to; `None` for a sender that
+    /// is not a member or whose leaf resolves to nothing.
+    pub committer_account: Option<[u8; ACCOUNT_KEY_LEN]>,
+    /// `true` when the commit carries a proposal other than `Add` / `Remove`.
+    pub carries_other_proposals: bool,
+    /// The leaf indices the commit removes.
+    pub removed: Vec<u32>,
+    /// For each added leaf, the account its device binding names, or `None`
+    /// when it carries no binding that verifies for it.
+    pub added: Vec<Option<[u8; ACCOUNT_KEY_LEN]>>,
+    /// `true` for an external commit: a sender that is not a member,
+    /// carrying an `ExternalInit`. `committer_account` is then the account
+    /// the new leaf's device binding names, and `carries_other_proposals` is
+    /// `true` when it carries anything besides exactly one `ExternalInit`.
+    pub external: bool,
+    /// `true` when the commit changes the GroupContext extensions.
+    pub changes_context_extensions: bool,
+}
+
+/// The PublisherGroup commit rule ([ADR-0090] section 1), run by the committer
+/// before it stages and by every peer before it merges: the committer is a
+/// leaf of the owner's account, the commit adds and removes only, every added
+/// leaf is a bound device, and no account ends with more than
+/// [`MAX_LEAVES_PER_ACCOUNT`] leaves. `pre` is the roster before the commit.
+/// A commit that changes the GroupContext extensions is refused.
 ///
-/// One extra storage read, only on a v2 miss — i.e. once per channel, on the
-/// path that is about to mint. `open_or_create` pays for it twice on a genuine
-/// first mint (once via `load`'s miss, once via `create`); that is a single
-/// additional key lookup against an empty result and is not worth threading a
-/// "already checked" flag through the two public constructors to avoid.
+/// The one arm for a committer that is not a member ([ADR-0064] section 7,
+/// amendment of 2026-11-14): an external commit carrying exactly its
+/// `ExternalInit`, whose new leaf carries a device binding to the owner's
+/// account, while that account holds fewer than [`MAX_LEAVES_PER_ACCOUNT`]
+/// leaves. Every other external commit is refused.
+///
+/// [ADR-0064]: ../../../docs/adr/0064-conversation-backup-and-device-re-entry.md
+///
+/// [ADR-0090]: ../../../docs/adr/0090-publisher-group-device-leaves.md
 ///
 /// # Errors
 ///
-/// [`Error::Group`] when v1 state is present; propagates [`Group::load`]
-/// failures otherwise.
-fn refuse_if_legacy_v1_present(identity: &Identity, channel_id: &ChannelId) -> Result<()> {
-    let v1 = publisher_group_id_bytes_v1(channel_id);
-    if Group::load(identity, &v1)?.is_some() {
+/// A typed refusal: [`RefusalReason::NotOwner`] for a committer not of the
+/// owner's account, [`RefusalReason::UnsupportedProposal`] for another
+/// proposal kind, [`RefusalReason::DeviceBindingInvalid`] for an added leaf
+/// without a verifying binding, [`RefusalReason::DeviceLimitReached`] past the
+/// cap.
+pub fn check_publisher_commit(
+    owner_account_key: &[u8; ACCOUNT_KEY_LEN],
+    pre: &[MemberRecord],
+    effects: &PublisherCommitEffects,
+) -> Result<()> {
+    if effects.changes_context_extensions {
+        return Err(Error::refused(
+            RefusalReason::UnsupportedProposal,
+            "publisher group commit refused: it changes the group context extensions",
+        ));
+    }
+    if effects.external {
+        return check_external_entry(owner_account_key, pre, effects);
+    }
+    if effects.committer_account.as_ref() != Some(owner_account_key) {
+        return Err(Error::refused(
+            RefusalReason::NotOwner,
+            "publisher group commit refused: the committer is not a device of the owner",
+        ));
+    }
+    if effects.carries_other_proposals {
+        return Err(Error::refused(
+            RefusalReason::UnsupportedProposal,
+            "publisher group commit refused: it carries a proposal other than add or remove",
+        ));
+    }
+    let mut accounts: Vec<Vec<u8>> = pre
+        .iter()
+        .filter(|m| !effects.removed.contains(&m.leaf_index))
+        .map(|m| m.account_key.clone())
+        .collect();
+    for added in &effects.added {
+        let Some(account) = added else {
+            return Err(Error::refused(
+                RefusalReason::DeviceBindingInvalid,
+                "publisher group commit refused: an added leaf is not a bound device",
+            ));
+        };
+        accounts.push(account.to_vec());
+    }
+    for account in &accounts {
+        if accounts.iter().filter(|a| *a == account).count() > MAX_LEAVES_PER_ACCOUNT {
+            return Err(Error::refused(
+                RefusalReason::DeviceLimitReached,
+                format!(
+                    "publisher group commit refused: an account would hold more than \
+                     {MAX_LEAVES_PER_ACCOUNT} devices"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The external-commit arm of [`check_publisher_commit`].
+fn check_external_entry(
+    owner_account_key: &[u8; ACCOUNT_KEY_LEN],
+    pre: &[MemberRecord],
+    effects: &PublisherCommitEffects,
+) -> Result<()> {
+    if effects.carries_other_proposals || !effects.removed.is_empty() || !effects.added.is_empty() {
+        return Err(Error::refused(
+            RefusalReason::UnsupportedProposal,
+            "publisher group entry refused: an external commit carries its ExternalInit alone",
+        ));
+    }
+    match effects.committer_account {
+        None => Err(Error::refused(
+            RefusalReason::DeviceBindingInvalid,
+            "publisher group entry refused: the entering leaf is not a bound device",
+        )),
+        Some(account) if &account != owner_account_key => Err(Error::refused(
+            RefusalReason::NotOwner,
+            "publisher group entry refused: only a device of the owner enters",
+        )),
+        Some(_) => {
+            let held = pre
+                .iter()
+                .filter(|m| m.account_key.as_slice() == owner_account_key.as_slice())
+                .count();
+            if held >= MAX_LEAVES_PER_ACCOUNT {
+                return Err(Error::refused(
+                    RefusalReason::DeviceLimitReached,
+                    format!(
+                        "publisher group entry refused: the owner already holds \
+                         {MAX_LEAVES_PER_ACCOUNT} devices"
+                    ),
+                ));
+            }
+            Ok(())
+        },
+    }
+}
+
+/// The view [`check_publisher_commit`] takes of a received, staged commit.
+/// `pre_extensions` are the GroupContext extensions before it.
+fn effects_of_staged(
+    pre: &[MemberRecord],
+    committer_leaf: Option<u32>,
+    staged: &StagedCommit,
+    pre_extensions: &Extensions<GroupContext>,
+) -> PublisherCommitEffects {
+    let changes_context_extensions = staged.group_context().extensions() != pre_extensions;
+    let external_inits = staged
+        .queued_proposals()
+        .filter(|qp| matches!(qp.proposal(), Proposal::ExternalInit(_)))
+        .count();
+    if committer_leaf.is_none() && external_inits > 0 {
+        let committer_account = staged.update_path_leaf_node().and_then(|leaf| {
+            bound_account(
+                leaf.credential().serialized_content(),
+                leaf.signature_key().as_slice(),
+            )
+        });
+        let carries_other_proposals = external_inits != 1
+            || staged
+                .queued_proposals()
+                .any(|qp| !matches!(qp.proposal(), Proposal::ExternalInit(_)));
+        return PublisherCommitEffects {
+            committer_account,
+            carries_other_proposals,
+            removed: Vec::new(),
+            added: Vec::new(),
+            external: true,
+            changes_context_extensions,
+        };
+    }
+    let committer_account = committer_leaf.and_then(|leaf| {
+        pre.iter()
+            .find(|m| m.leaf_index == leaf)
+            .and_then(|m| <[u8; ACCOUNT_KEY_LEN]>::try_from(m.account_key.as_slice()).ok())
+    });
+    let carries_other_proposals = staged.queued_proposals().any(|qp| {
+        !matches!(
+            classify(qp.proposal()),
+            ProposalKind::Add { .. } | ProposalKind::Remove { .. }
+        )
+    });
+    let removed = staged
+        .remove_proposals()
+        .map(|qrp| qrp.remove_proposal().removed().u32())
+        .collect();
+    let added = staged
+        .add_proposals()
+        .map(|qap| {
+            let leaf = qap.add_proposal().key_package().leaf_node();
+            bound_account(
+                leaf.credential().serialized_content(),
+                leaf.signature_key().as_slice(),
+            )
+        })
+        .collect();
+    PublisherCommitEffects {
+        committer_account,
+        carries_other_proposals,
+        removed,
+        added,
+        external: false,
+        changes_context_extensions,
+    }
+}
+
+/// A staged PublisherGroup commit: the commit to send through the Delivery
+/// Service commit route and, when it adds leaves, the Welcome to deliver once
+/// it merged.
+pub struct PublisherCommit {
+    /// The commit, wire-encoded.
+    pub commit: Vec<u8>,
+    /// The Welcome for the added leaves, wire-encoded; `None` when the commit
+    /// adds nobody.
+    pub welcome: Option<Vec<u8>>,
+}
+
+/// What [`PublisherGroup::enter`] returns: the group, holding its entry until
+/// the Delivery Service answers, and the external commit to send.
+pub struct PublisherEntry {
+    /// The entered group. It reports a staged commit
+    /// ([`PublisherGroup::has_staged_commit`]) until
+    /// [`PublisherGroup::merge_staged_commit`] or
+    /// [`PublisherGroup::abandon_staged_commit`].
+    pub group: PublisherGroup,
+    /// The external commit, wire-encoded.
+    pub commit: Vec<u8>,
+}
+
+/// The owner's devices' rule on what they enter ([ADR-0064] section 7): a
+/// group with no role table, every leaf a bound device, the GroupInfo signed
+/// by a device of the owner (only owner devices commit, so only they save a
+/// GroupInfo), and room for one more owner device.
+///
+/// [ADR-0064]: ../../../docs/adr/0064-conversation-backup-and-device-re-entry.md
+fn admit_entry(owner: &[u8; ACCOUNT_KEY_LEN], view: &ExternalEntryView) -> Result<()> {
+    if view.has_role_table {
         return Err(Error::Group(
-            "legacy v1 PublisherGroup state present for this channel: the v1 \
-             group id was 41 bytes, which the Delivery Service rejects, and an \
-             MLS group id is bound into the GroupContext so it cannot be \
-             re-keyed to the 32-byte v2 id. The v1 state is left intact; this \
-             channel needs a migration or a fresh channel."
-                .into(),
+            "publisher group entry refused: the GroupInfo is a conversation's".into(),
+        ));
+    }
+    if view.members.iter().any(|m| m.bound_account.is_none()) {
+        return Err(Error::refused(
+            RefusalReason::DeviceBindingInvalid,
+            "publisher group entry refused: a leaf of the group is not a bound device",
+        ));
+    }
+    let signer_is_owner = view
+        .members
+        .iter()
+        .any(|m| m.leaf_index == view.signer_leaf && m.bound_account.as_ref() == Some(owner));
+    if !signer_is_owner {
+        return Err(Error::refused(
+            RefusalReason::NotOwner,
+            "publisher group entry refused: the GroupInfo was not signed by a device of the owner",
+        ));
+    }
+    let held = view
+        .members
+        .iter()
+        .filter(|m| m.bound_account.as_ref() == Some(owner))
+        .count();
+    if held >= MAX_LEAVES_PER_ACCOUNT {
+        return Err(Error::refused(
+            RefusalReason::DeviceLimitReached,
+            format!(
+                "publisher group entry refused: the owner already holds \
+                 {MAX_LEAVES_PER_ACCOUNT} devices"
+            ),
         ));
     }
     Ok(())
 }
 
-/// Persistent MLS-group wrapper for one Lakko channel's
-/// publisher tier (G4-2-mls-persistence).
+/// Persistent MLS-group wrapper for one Lakko channel's publisher tier.
 pub struct PublisherGroup {
     inner: Group,
     channel_id: ChannelId,
+    owner_account_key: [u8; ACCOUNT_KEY_LEN],
 }
 
 impl PublisherGroup {
-    /// Load the persisted PublisherGroup for `channel_id` from
-    /// `identity`'s storage. Returns `Ok(None)` when no group
-    /// has been minted yet for this channel; the caller should
-    /// then call [`PublisherGroup::create`] (or use the
-    /// load-or-create convenience [`PublisherGroup::open_or_create`]).
+    /// Found the PublisherGroup of `channel_id` with `device` as its only
+    /// leaf ([ADR-0090] section 1). Called only by the create-channel flow and
+    /// by the re-founding of section 2.5; every other open is
+    /// [`Self::load`], so a device without state never founds by accident.
     ///
-    /// ## Legacy v1 state
+    /// `owner_account_seed` is the owner's account seed: it derives the group
+    /// id and the owner's account key, and `device` must be bound to that
+    /// account.
     ///
-    /// A group persisted under the retired 41-byte v1 derivation is **not**
-    /// migrated, and cannot be: an MLS `group_id` is a field of the
-    /// `GroupContext` (openmls-0.8.1 `group/group_context.rs:46`), which is
-    /// serialised into the key schedule (`schedule/mod.rs` `add_context`) and
-    /// bound by every commit's confirmation tag. There is no `set_group_id` and
-    /// there could not be one — renaming a group would change every epoch
-    /// secret it has ever derived. A v1 PublisherGroup's identity *is* its
-    /// 41-byte id; a 32-byte id is a different MLS group.
-    ///
-    /// So this method refuses rather than pretending. Returning `Ok(None)`
-    /// would send [`PublisherGroup::open_or_create`] on to mint a fresh group
-    /// at epoch 0 under the v2 id — silently swapping the channel's content-key
-    /// seed while every subscriber still holds an envelope carrying the old
-    /// one, so posts published before the next rotation fan-out would fail AEAD
-    /// on arrival. Failing loudly leaves the v1 state untouched in storage for
-    /// any future migration tool, and leaves the channel readable.
+    /// [ADR-0090]: ../../../docs/adr/0090-publisher-group-device-leaves.md
     ///
     /// # Errors
     ///
-    /// Propagates [`Group::load`] errors, and returns [`Error::Group`] when no
-    /// v2 group exists but v1 state for this channel does.
-    pub fn load(identity: &Identity, channel_id: &ChannelId) -> Result<Option<Self>> {
-        let id = publisher_group_id_bytes(identity, channel_id);
-        if let Some(inner) = Group::load(identity, &id)? {
-            return Ok(Some(Self {
-                inner,
-                channel_id: *channel_id,
-            }));
+    /// [`RefusalReason::DeviceBindingInvalid`] for an unbound device or one
+    /// bound to another account; [`Error::Group`] when this device already
+    /// holds a group under that id, or on an OpenMLS failure.
+    pub fn create(
+        device: &Identity,
+        owner_account_seed: &[u8; 32],
+        channel_id: &ChannelId,
+    ) -> Result<Self> {
+        let owner = publisher_owner_account_key(owner_account_seed);
+        if device_account(device)? != owner {
+            return Err(Error::refused(
+                RefusalReason::DeviceBindingInvalid,
+                "publisher group: the device is not bound to the owner's account",
+            ));
         }
-        refuse_if_legacy_v1_present(identity, channel_id)?;
-        Ok(None)
+        let id = publisher_group_id_for(owner_account_seed, channel_id);
+        if Group::load(device, &id)?.is_some() {
+            return Err(Error::Group(
+                "publisher group: this device already holds a group under that id; delete it \
+                 before founding again"
+                    .into(),
+            ));
+        }
+        let inner = Group::create_with_id(device, &id)?;
+        write_owner_row(device, &id, &owner)?;
+        Ok(Self {
+            inner,
+            channel_id: *channel_id,
+            owner_account_key: owner,
+        })
     }
 
-    /// Load a PublisherGroup this identity JOINED as a co-publisher (ADR-0028
-    /// OQ3): its id is the owner's derivation, which a co-publisher cannot
-    /// compute, so the caller passes the `group_id` it learned from the `/g/`
-    /// capability and the `channel_id` from that link's sealed preview.
-    /// Returns `Ok(None)` when nothing is stored under `group_id`. Never
-    /// creates: minting under an id the owner derived would fork the
-    /// channel.
+    /// Open the PublisherGroup this OWNER device holds for `channel_id`, or
+    /// `Ok(None)` when it holds none (it then waits to be admitted, ADR-0090
+    /// section 2.1, and never founds).
+    ///
+    /// # Errors
+    ///
+    /// [`RefusalReason::DeviceBindingInvalid`] for an unbound device or one
+    /// bound to another account; propagates [`Group::load`] failures.
+    pub fn load(
+        device: &Identity,
+        owner_account_seed: &[u8; 32],
+        channel_id: &ChannelId,
+    ) -> Result<Option<Self>> {
+        let owner = publisher_owner_account_key(owner_account_seed);
+        if device_account(device)? != owner {
+            return Err(Error::refused(
+                RefusalReason::DeviceBindingInvalid,
+                "publisher group: the device is not bound to the owner's account",
+            ));
+        }
+        let id = publisher_group_id_for(owner_account_seed, channel_id);
+        let Some(inner) = Group::load(device, &id)? else {
+            return Ok(None);
+        };
+        write_owner_row(device, &id, &owner)?;
+        Ok(Some(Self {
+            inner,
+            channel_id: *channel_id,
+            owner_account_key: owner,
+        }))
+    }
+
+    /// Open a PublisherGroup this device JOINED, by the id it kept: a
+    /// co-publisher's device (the id came from its `/g/` link) or an owner
+    /// device that knows the id. Returns `Ok(None)` when nothing is stored
+    /// under `group_id`. Never creates.
     ///
     /// # Errors
     ///
     /// [`Error::Codec`] when `group_id` is not [`GROUP_ID_LEN`] bytes;
-    /// propagates [`Group::load`] errors.
+    /// [`Error::Group`] when a group is stored but the owner's account key was
+    /// never recorded beside it (it cannot judge a commit, so it is not
+    /// opened); propagates [`Group::load`] errors.
     pub fn load_joined(
-        identity: &Identity,
+        device: &Identity,
         group_id: &[u8],
         channel_id: &ChannelId,
     ) -> Result<Option<Self>> {
@@ -336,35 +687,42 @@ impl PublisherGroup {
                 group_id.len()
             )));
         }
-        Ok(Group::load(identity, group_id)?.map(|inner| Self {
+        let Some(inner) = Group::load(device, group_id)? else {
+            return Ok(None);
+        };
+        let owner = read_owner_row(device, group_id)?.ok_or_else(|| {
+            Error::Group("publisher group: no owner account key is recorded for it".into())
+        })?;
+        Ok(Some(Self {
             inner,
             channel_id: *channel_id,
+            owner_account_key: owner,
         }))
     }
 
-    /// Join a PublisherGroup as a co-publisher from the owner's Welcome
-    /// (ADR-0028 OQ3; [ADR-0081] amendment of 2026-10-19). A PublisherGroup
-    /// carries no role table, so [`Group::join_from_welcome`] refuses its
-    /// Welcome; this is its entry point. `group_id` is the id the `/g/`
-    /// capability conveyed and `channel_id` the one its sealed preview
-    /// carried: a Welcome for any other group is refused before anything is
-    /// written, and so is a conversation's Welcome. The joined state is
-    /// persisted in `identity`'s provider; [`PublisherGroup::load_joined`]
-    /// reopens it.
+    /// Join a PublisherGroup from a Welcome ([ADR-0090] section 2.3): an owner
+    /// device or a co-publisher device admitted by an owner device. `group_id`
+    /// is the id the device computes (owner) or kept from its `/g/` link
+    /// (co-publisher), `owner_account_key` the owner's account key (the
+    /// issuer of the `/g/` capability, for a co-publisher). The Welcome must
+    /// come from a device of that account; a Welcome for another group, a
+    /// conversation's Welcome, or one from anyone else is refused before
+    /// anything is written.
+    ///
+    /// [ADR-0090]: ../../../docs/adr/0090-publisher-group-device-leaves.md
     ///
     /// # Errors
     ///
-    /// [`Error::Codec`] when `group_id` is not [`GROUP_ID_LEN`] bytes or the
-    /// Welcome does not decode; [`Error::Group`] for a Welcome of another
-    /// group, a conversation's Welcome, or an OpenMLS failure (no KeyPackage
-    /// of this identity matches, for one).
-    ///
-    /// [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
+    /// [`RefusalReason::DeviceBindingInvalid`] for an unbound device;
+    /// [`RefusalReason::NotOwner`] when the Welcome's sender is not a device of
+    /// `owner_account_key`; [`Error::Codec`] for a malformed id or Welcome;
+    /// [`Error::Group`] for the refusals of the table-less join.
     pub fn join_from_welcome(
-        identity: &Identity,
+        device: &Identity,
         welcome_bytes: &[u8],
         group_id: &[u8],
         channel_id: &ChannelId,
+        owner_account_key: &[u8; ACCOUNT_KEY_LEN],
     ) -> Result<Self> {
         if group_id.len() != GROUP_ID_LEN {
             return Err(Error::Codec(format!(
@@ -372,68 +730,150 @@ impl PublisherGroup {
                 group_id.len()
             )));
         }
-        let inner = Group::join_table_less_from_welcome(welcome_bytes, identity, Some(group_id))?;
-        Ok(Self {
-            inner,
-            channel_id: *channel_id,
-        })
-    }
-
-    /// Create a fresh PublisherGroup for `channel_id` with
-    /// `identity` as the sole founding member. The MLS state
-    /// is persisted to `identity.provider.storage()` as a
-    /// side effect of [`Group::create_with_id`]. Subsequent
-    /// [`PublisherGroup::load`] calls find it.
-    ///
-    /// Refuses if legacy v1 state exists for this channel, for the reason given
-    /// on [`PublisherGroup::load`]. `create` carries the check independently
-    /// because it is reachable directly from both FFI surfaces, not only
-    /// through [`PublisherGroup::open_or_create`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Group`] on any OpenMLS-side failure
-    /// (e.g. ciphersuite mismatch), or when v1 state for this channel exists.
-    pub fn create(identity: &Identity, channel_id: &ChannelId) -> Result<Self> {
-        refuse_if_legacy_v1_present(identity, channel_id)?;
-        let id = publisher_group_id_bytes(identity, channel_id);
-        let inner = Group::create_with_id(identity, &id)?;
-        Ok(Self {
-            inner,
-            channel_id: *channel_id,
-        })
-    }
-
-    /// Load-or-create convenience. Tries [`PublisherGroup::load`]
-    /// first; falls back to [`PublisherGroup::create`] on
-    /// `Ok(None)`. This is the path every composer wants —
-    /// the throwaway-group pattern collapses to a single
-    /// call.
-    ///
-    /// # Errors
-    ///
-    /// Propagates failures from both inner calls.
-    pub fn open_or_create(identity: &Identity, channel_id: &ChannelId) -> Result<Self> {
-        if let Some(existing) = Self::load(identity, channel_id)? {
-            return Ok(existing);
+        device_account(device)?;
+        let founder = Group::peek_welcome_founder(welcome_bytes, device)?;
+        if &founder.founder_account_key != owner_account_key {
+            return Err(Error::refused(
+                RefusalReason::NotOwner,
+                "publisher group welcome refused: it was not sent by a device of the owner",
+            ));
         }
-        Self::create(identity, channel_id)
+        let inner = Group::join_table_less_from_welcome(welcome_bytes, device, Some(group_id))?;
+        write_owner_row(device, group_id, owner_account_key)?;
+        Ok(Self {
+            inner,
+            channel_id: *channel_id,
+            owner_account_key: *owner_account_key,
+        })
     }
 
-    /// 32-byte channel content-key seed derived from the
-    /// MLS exporter at the current group epoch. Mirror of
-    /// the throwaway-group flow the composer-side
-    /// `freshPublisherKeys` shipped in G-27, but reading
-    /// from the persistent group's exporter so subscribers
-    /// who received a sealed seed in a prior epoch continue
-    /// to decrypt.
+    /// Enter the PublisherGroup of `channel_id` from a GroupInfo another owner
+    /// device saved ([ADR-0064] section 7, amendment of 2026-11-14), by an
+    /// external commit carrying its `ExternalInit` alone and this device's
+    /// bound leaf. Nothing is final: the returned group HOLDS the entry
+    /// ([`Self::has_staged_commit`] is `true`, [`Self::staged_channel_seed`]
+    /// is the seed the entry moves to, [`Self::epoch`] the epoch it leaves);
+    /// send the commit through the Delivery Service commit route, then
+    /// [`Self::merge_staged_commit`] on its `201` / `200` or
+    /// [`Self::abandon_staged_commit`] on its `409`. An abandoned entry
+    /// deletes everything it wrote and the handle holds nothing; enter again
+    /// from an older GroupInfo, or wait. The entry is durable: it rides the
+    /// identity's storage snapshot and [`Self::load`] opens it still held.
     ///
-    /// The exporter is keyed on `(label, context, length)`
-    /// per RFC 9420 §8.5; we pin all three at the call site:
+    /// Owner devices only. Refused before anything is written: a device not
+    /// bound to the owner's account, a GroupInfo that is not one, is for
+    /// another group (the id `owner_account_seed` and `channel_id` derive),
+    /// is a conversation's, carries a leaf that is not a bound device, was not
+    /// signed by a device of the owner, or names an owner already at
+    /// [`MAX_LEAVES_PER_ACCOUNT`] devices; a device that already holds a group
+    /// under that id (delete it first) or whose leaf is still in the tree. A
+    /// GroupInfo of an epoch the group has left builds a commit every member
+    /// refuses; the Delivery Service answers it `409`.
     ///
-    /// * `label` — [`CHANNEL_EXPORTER_LABEL`] (`"lakko/channel/v1"`)
-    /// * `context` — the 16-byte channel id
-    /// * `length` — 32 bytes
+    /// Leaf lifetimes in the GroupInfo's tree are not checked (ADR-0064
+    /// residual 9): a co-publisher leaf never commits, so it keeps its
+    /// KeyPackage's lifetime forever.
+    ///
+    /// **The returned commit is wrapped (G-55, [ADR-0078] section 4).** An
+    /// external commit is a `PublicMessage`, so its new leaf's device binding
+    /// would show the owner's account key to the Delivery Service next to a
+    /// journal id derived to hide it. `ds_access_seed` is the Delivery
+    /// Service access seed of the epoch the GroupInfo describes (the one
+    /// saved beside it in the vault head); the commit leaves that epoch and
+    /// is sealed under [`crate::entry_wrap`]'s key derived from it. Every
+    /// member derives the same seed from its exporter and opens it in
+    /// [`Self::process_incoming`]. A wrong seed is not detected here: the
+    /// Delivery Service refuses the proof signed with it, and no member could
+    /// open the row.
+    ///
+    /// [ADR-0064]: ../../../docs/adr/0064-conversation-backup-and-device-re-entry.md
+    /// [ADR-0078]: ../../../docs/adr/0078-servers-cannot-link-accounts.md
+    ///
+    /// # Errors
+    ///
+    /// [`RefusalReason::DeviceBindingInvalid`], [`RefusalReason::NotOwner`],
+    /// [`RefusalReason::DeviceLimitReached`] as above; [`Error::Codec`] /
+    /// [`Error::Unsupported`] for bytes that are not a GroupInfo;
+    /// [`Error::Group`] for the other refusals and OpenMLS failures.
+    pub fn enter(
+        device: &Identity,
+        group_info: &[u8],
+        owner_account_seed: &[u8; 32],
+        channel_id: &ChannelId,
+        ds_access_seed: &[u8; 32],
+    ) -> Result<PublisherEntry> {
+        let owner = publisher_owner_account_key(owner_account_seed);
+        if device_account(device)? != owner {
+            return Err(Error::refused(
+                RefusalReason::DeviceBindingInvalid,
+                "publisher group entry refused: the device is not bound to the owner's account",
+            ));
+        }
+        let id = publisher_group_id_for(owner_account_seed, channel_id);
+        let (inner, raw_commit) =
+            Group::stage_external_entry(device, group_info, &id, |view| admit_entry(&owner, view))?;
+        // The held entry reports the epoch its commit leaves.
+        let commit =
+            crate::entry_wrap::wrap_entry_commit(ds_access_seed, &id, inner.epoch(), &raw_commit)?;
+        write_owner_row(device, &id, &owner)?;
+        Ok(PublisherEntry {
+            group: Self {
+                inner,
+                channel_id: *channel_id,
+                owner_account_key: owner,
+            },
+            commit,
+        })
+    }
+
+    /// The GroupInfo of the current epoch, wire-encoded, with the ratchet tree
+    /// and the external public key, signed by this device's leaf: what an
+    /// owner device saves so another owner device can [`Self::enter`]
+    /// ([ADR-0064] section 7).
+    ///
+    /// [ADR-0064]: ../../../docs/adr/0064-conversation-backup-and-device-re-entry.md
+    ///
+    /// # Errors
+    ///
+    /// [`RefusalReason::SweepAlreadyStaged`] while an entry awaits its
+    /// verdict; [`Error::Group`] on an abandoned entry or an OpenMLS failure.
+    pub fn group_info(&self, device: &Identity) -> Result<Vec<u8>> {
+        self.inner.export_group_info(device)
+    }
+
+    /// The GroupInfo of the epoch the staged commit moves to, wire-encoded,
+    /// `None` when nothing is staged: what an owner device saves BEFORE it
+    /// sends the commit ([ADR-0064] section 7). For an entry, the GroupInfo of
+    /// the epoch the entry moves to.
+    ///
+    /// [ADR-0064]: ../../../docs/adr/0064-conversation-backup-and-device-re-entry.md
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] on an OpenMLS failure.
+    pub fn staged_group_info(&self, device: &Identity) -> Result<Option<Vec<u8>>> {
+        self.inner.staged_group_info(device)
+    }
+
+    /// Delete this device's state for the group, active or not ([ADR-0090]
+    /// section 2.5: the journal was reset under it, or the account is
+    /// founding the group again). The owner row and the retained join
+    /// requests go with it. The device is then a reader until admitted again.
+    ///
+    /// [ADR-0090]: ../../../docs/adr/0090-publisher-group-device-leaves.md
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] on a storage failure.
+    pub fn delete(&mut self, device: &Identity) -> Result<()> {
+        let group_id = self.group_id();
+        self.inner.delete_regardless(device)?;
+        drop_owner_row(device, &group_id)
+    }
+
+    /// 32-byte channel content-key seed derived from the MLS exporter at the
+    /// current epoch: `(label, context, length)` = ([`CHANNEL_EXPORTER_LABEL`],
+    /// the channel id, 32).
     ///
     /// # Errors
     ///
@@ -445,116 +885,158 @@ impl PublisherGroup {
             self.channel_id.as_bytes(),
             32,
         )?;
+        let mut out = [0u8; 32];
         if bytes.len() != 32 {
             return Err(Error::Group(format!(
                 "exporter output length {} != 32",
                 bytes.len()
             )));
         }
-        let mut out = [0u8; 32];
         out.copy_from_slice(&bytes);
         Ok(out)
     }
 
-    /// The channel id this group was minted for. Stable
-    /// across `load` / `create` paths.
+    /// The channel id this group was opened for.
     #[must_use]
     pub fn channel_id(&self) -> &ChannelId {
         &self.channel_id
     }
 
-    /// The underlying MLS `group_id` — derived from the owner's account seed
-    /// and the channel id ([`publisher_group_id_for`]). ADR-0028 OQ3: a co-publisher
-    /// invite-link is minted over this, and the joiner targets it when crafting
-    /// an external-join proposal (ADR-0027) — the channel join-ticket works for
-    /// a PublisherGroup verbatim because it is a vanilla MLS group. Stable
-    /// across `load` / `create`.
+    /// The underlying MLS `group_id` ([`publisher_group_id_for`]).
     #[must_use]
     pub fn group_id(&self) -> Vec<u8> {
         self.inner.group_id()
     }
 
-    /// The current MLS epoch of the underlying group. A prospective co-publisher
-    /// reads this from the journal's public framing (it is not yet a member);
-    /// this accessor is for a member that already holds the group.
+    /// The current MLS epoch.
     #[must_use]
     pub fn epoch(&self) -> u64 {
         self.inner.epoch()
     }
 
-    /// Rotate the channel content-key seed by advancing the
-    /// MLS group epoch via a self-update commit
-    /// (G4-2-mls-persistence step 4).
-    ///
-    /// Returns the wire-encoded commit; the publisher SHOULD
-    /// broadcast it to every other PublisherGroup member so
-    /// they advance to the same epoch in lock-step. The
-    /// committed state is persisted as a side effect — the
-    /// next [`PublisherGroup::channel_seed`] call against
-    /// THIS handle, or any future
-    /// [`PublisherGroup::load`] under the same channel_id,
-    /// returns the new-epoch seed.
-    ///
-    /// ## Why "rotate"
-    ///
-    /// The MLS exporter is keyed on group epoch (RFC 9420
-    /// §8.5). Advancing the epoch produces a fresh
-    /// 32-byte exporter output for the same `(label,
-    /// context, length)` triple — that is exactly what
-    /// ADR-0010's "rotation on every PublisherGroup commit
-    /// and on scheduled rotations" requires. The publisher-
-    /// side timer (24 h / N posts) calls this method, then
-    /// reads the new seed via [`PublisherGroup::channel_seed`],
-    /// then runs the subscriber-batch reseal path
-    /// (`lakko-channels::subscribe::seal_seed` + the
-    /// services/channels batch fanout).
-    ///
-    /// # Errors
-    ///
-    /// Propagates [`Group::self_update`] failures.
-    pub fn rotate(&mut self, identity: &Identity) -> Result<Vec<u8>> {
-        self.inner.self_update(identity)
+    /// The owner's account key this device recorded for the group.
+    #[must_use]
+    pub fn owner_account_key(&self) -> &[u8; ACCOUNT_KEY_LEN] {
+        &self.owner_account_key
     }
 
-    /// Approve a retained co-publisher external-join request (ADR-0028 OQ3),
-    /// returning the Commit to broadcast + the joiner's Welcome.
+    /// `true` when `owner_account_seed` derives this group's id: the caller's
+    /// account owns the channel. True on every owner device, false on a
+    /// co-publisher's (it passes its own account seed).
+    #[must_use]
+    pub fn is_owned_by(&self, owner_account_seed: &[u8; 32]) -> bool {
+        publisher_group_id_for(owner_account_seed, &self.channel_id).as_slice()
+            == self.group_id().as_slice()
+    }
+
+    /// `true` when `device` is bound to the owner's account: a device that may
+    /// commit in this group.
+    #[must_use]
+    pub fn is_owner_device(&self, device: &Identity) -> bool {
+        device_account(device).is_ok_and(|a| a == self.owner_account_key)
+    }
+
+    /// Every leaf at the current epoch with its account key (ADR-0050). One
+    /// person may hold several leaves; the caller groups by `account_key`.
+    #[must_use]
+    pub fn members(&self) -> Vec<MemberRecord> {
+        self.inner.members()
+    }
+
+    /// `false` once this device applied a commit that removed its own leaf.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.inner.is_active()
+    }
+
+    /// Process one message read from the PublisherGroup journal, every commit
+    /// through [`check_publisher_commit`] before it merges ([ADR-0090]
+    /// section 1). A refused commit is not merged and the error says why.
     ///
-    /// **This is the direct-commit approve, and this type is the only place it
-    /// survives ADR-0045 S7.** A PublisherGroup is built by
-    /// [`Group::create_with_id`], which deliberately seeds no ADR-0022 role
-    /// table — so it has no owner, no admin set and therefore no committer to
-    /// sweep a proposal. ADR-0045 leaves such a group on direct commits rather
-    /// than inventing a committer for it, and the fork S7 closes is not
-    /// reachable here for the same reason it is not closable: there is no
-    /// designated committer to elect. The publisher fan-out already serialises
-    /// on the channel owner.
+    /// An external entry reaches the journal wrapped (G-55,
+    /// [`crate::entry_wrap`]): a row starting with
+    /// [`crate::WRAPPED_ENTRY_MAGIC`] is opened under the key derived from
+    /// this epoch's Delivery Service access seed, and its content must be a
+    /// commit framed for this group and epoch whose committer is not a
+    /// member; it then goes through the same gate as any commit. A wrapped row
+    /// that does not open is an error and is never processed raw; an external
+    /// commit that arrives unwrapped is refused.
     ///
-    /// The **type** is the difference, and it is deliberate: this returns a
-    /// [`MemberAddition`] — a commit that has already merged, with a Welcome to
-    /// hand the joiner now — where [`Group::approve_external_join`] returns
-    /// proposal bytes and no Welcome at all. A caller cannot confuse the two,
-    /// because neither result can be used where the other is expected.
+    /// [ADR-0090]: ../../../docs/adr/0090-publisher-group-device-leaves.md
     ///
     /// # Errors
     ///
-    /// [`crate::Error::Group`] when the underlying group unexpectedly carries a
-    /// role table (fail-closed: the direct route must never be available where
-    /// a committer exists), when no retained request matches `proposal_ref`,
-    /// when that joiner is already a member, or on any OpenMLS-side failure.
-    pub fn approve_external_join(
-        &mut self,
-        identity: &Identity,
-        proposal_ref: &[u8],
-    ) -> Result<MemberAddition> {
+    /// What [`Group::process_incoming`] returns, and the typed refusals of
+    /// [`check_publisher_commit`]; [`Error::Message`] for a wrapped row that
+    /// does not open or does not hold an external commit, and
+    /// [`RefusalReason::UnsupportedProposal`] for an unwrapped external
+    /// commit.
+    pub fn process_incoming(&mut self, identity: &Identity, bytes: &[u8]) -> Result<Incoming> {
+        let owner = self.owner_account_key;
+        let pre_extensions = self.inner.context_extensions();
+        let unwrapped;
+        let (row, wrapped): (&[u8], bool) = if crate::entry_wrap::is_wrapped_entry(bytes) {
+            let seed = self.inner.ds_access_seed(identity)?;
+            let group_id = self.group_id();
+            unwrapped = crate::entry_wrap::unwrap_entry_commit(
+                &seed,
+                &group_id,
+                self.inner.epoch(),
+                bytes,
+            )?;
+            if !crate::group::is_external_commit_framed_for(
+                &unwrapped,
+                &group_id,
+                self.inner.epoch(),
+            ) {
+                return Err(Error::Message(
+                    "wrapped entry: the row does not hold an external commit for this group \
+                     and epoch"
+                        .into(),
+                ));
+            }
+            (unwrapped.as_slice(), true)
+        } else {
+            (bytes, false)
+        };
         self.inner
-            .approve_external_join_directly(identity, proposal_ref)
+            .process_incoming_checked(identity, row, |pre, committer, staged| {
+                let effects = effects_of_staged(pre, committer, staged, &pre_extensions);
+                if effects.external != wrapped {
+                    return Err(if wrapped {
+                        Error::Message("wrapped entry: the row holds a commit from a member".into())
+                    } else {
+                        Error::refused(
+                            RefusalReason::UnsupportedProposal,
+                            "publisher group entry refused: an external commit reaches the \
+                             journal wrapped",
+                        )
+                    });
+                }
+                check_publisher_commit(&owner, pre, &effects)
+            })
+    }
+
+    /// Process one row read from this journal's **knock** queue (ADR-0053):
+    /// anything that is not a stranger's external-join proposal for this group
+    /// is refused before it is processed.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Message`] for any other row, plus what
+    /// [`Self::process_incoming`] returns.
+    pub fn process_knock(&mut self, identity: &Identity, bytes: &[u8]) -> Result<Incoming> {
+        if !crate::group::is_external_join_proposal_for(bytes, &self.group_id()) {
+            return Err(Error::Message(
+                "knock row is not an external-join proposal for this group".to_string(),
+            ));
+        }
+        self.process_incoming(identity, bytes)
     }
 
     /// Retain a co-publisher's request to join carried as a bare KeyPackage
-    /// (ADR-0087 section 5: the co-publisher join moves to the same sealed
-    /// knock row as a group's). The same checks and the same quarantine as
-    /// [`Group::retain_join_request`]; [`Self::approve_external_join`] then
-    /// approves it as a direct commit.
+    /// (ADR-0087 section 5); approve it with
+    /// [`Self::stage_approve_external_join`].
     ///
     /// # Errors
     ///
@@ -567,213 +1049,417 @@ impl PublisherGroup {
         self.inner.retain_join_request(identity, key_package)
     }
 
-    /// `true` when `identity` is the channel's owner: the account whose seed
-    /// derives this group's id ([`publisher_group_id_for`]). A co-publisher
-    /// cannot derive it, so this is a local fact a device can check about
-    /// itself and no one else can claim (a PublisherGroup carries no role
-    /// table, ADR-0087 section 15).
+    /// The signature key of every retained request to join.
     #[must_use]
-    pub fn is_owned_by(&self, identity: &Identity) -> bool {
-        publisher_group_id_bytes(identity, &self.channel_id).as_slice()
-            == self.group_id().as_slice()
+    pub fn pending_external_joins(&self) -> Vec<Vec<u8>> {
+        self.inner.pending_external_joins()
     }
 
-    /// Every leaf at the current epoch with its account key (ADR-0050): the
-    /// publishers list (ADR-0087 section 15). One person may hold several
-    /// leaves; the caller groups by `account_key`.
-    #[must_use]
-    pub fn members(&self) -> Vec<MemberRecord> {
-        self.inner.members()
-    }
-
-    /// `false` once this device applied a commit that removed its own leaf
-    /// (a publisher removed by the owner, or one whose step-down the owner
-    /// applied). Nothing can be derived or decrypted after that.
-    #[must_use]
-    pub fn is_active(&self) -> bool {
-        self.inner.is_active()
-    }
-
-    /// Remove the publisher whose account key is `account_key` (ADR-0087
-    /// section 15, note of 2026-11-05): every leaf of that account in ONE
-    /// commit, merged before returning. Returns the commit to publish on the
-    /// PublisherGroup journal (through the ADR-0081 commit route) and to
-    /// follow with the subscriber reseal at the new epoch.
-    ///
-    /// The commit advances the epoch, and the removed leaves are not in the
-    /// new one, so the removed person cannot derive the next channel seed
-    /// (RFC 9420 section 12.4). Owner only, and the owner is never removed:
-    /// both are checked here, locally. A PublisherGroup has no role table, so
-    /// peers do not enforce either rule (ADR-0087 section 15's stated limit).
+    /// Drop a retained request to join (local, no commit).
     ///
     /// # Errors
     ///
-    /// [`Error::Group`] when `identity` is not the owner
-    /// ([`Self::is_owned_by`]), when `account_key` is the owner's, when no
-    /// leaf of the group belongs to it, or on any failure of the commit.
-    pub fn remove_publisher(&mut self, identity: &Identity, account_key: &[u8]) -> Result<Vec<u8>> {
-        if !self.is_owned_by(identity) {
+    /// What [`Group::reject_external_join`] returns.
+    pub fn reject_external_join(&mut self, identity: &Identity, proposal_ref: &[u8]) -> Result<()> {
+        self.inner.reject_external_join(identity, proposal_ref)
+    }
+
+    /// Encrypt an application message for the publishers at the current
+    /// epoch (the hand-over envelopes of ADR-0087 section 7, the requests of
+    /// ADR-0090 section 2.2). Allowed while a commit is staged.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] when MLS refuses to encrypt.
+    pub fn create_application_message(
+        &mut self,
+        identity: &Identity,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>> {
+        let msg = self.inner.create_application_message(identity, plaintext)?;
+        encode_message(&msg)
+    }
+
+    /// Step down as a publisher (ADR-0087 section 15): the application message
+    /// to publish, which an owner device applies as
+    /// [`Self::stage_remove_publisher`] of the sender's account.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] when `identity` is a device of the owner (an owner
+    /// deletes the channel instead), or when MLS refuses to encrypt.
+    pub fn step_down(&mut self, identity: &Identity) -> Result<Vec<u8>> {
+        if self.is_owner_device(identity) {
             return Err(Error::Group(
-                "remove_publisher: only the channel owner removes a publisher".into(),
+                "step_down: the owner does not step down".into(),
             ));
         }
-        let members = self.inner.members();
-        let own_key = identity.signature_public_key();
-        let owner_accounts: Vec<&[u8]> = members
-            .iter()
-            .filter(|m| m.signature_public_key == own_key)
-            .map(|m| m.account_key.as_slice())
-            .collect();
-        if account_key == own_key || owner_accounts.contains(&account_key) {
+        let plaintext = compose_publisher_step_down(&self.channel_id);
+        self.create_application_message(identity, &plaintext)
+    }
+
+    /// Stage ONE commit that admits `admit`, removes the leaves whose
+    /// signature keys are `retire`, and, when `rotate`, carries an update path
+    /// ([ADR-0090] section 3: one admission set, one retirement set and the
+    /// rotation in one commit). Nothing merges: see
+    /// [`Self::merge_staged_commit`] and [`Self::abandon_staged_commit`].
+    ///
+    /// Local rules, before anything is built: this device is an owner device;
+    /// every admitted leaf is a bound device of an account that already holds
+    /// a leaf here (the owner's or a current publisher's); every retired key is
+    /// a leaf of this group other than this device's own; and the result
+    /// passes [`check_publisher_commit`], as every peer will check it.
+    ///
+    /// [ADR-0090]: ../../../docs/adr/0090-publisher-group-device-leaves.md
+    ///
+    /// # Errors
+    ///
+    /// [`RefusalReason::NotOwner`] on a device not of the owner's account;
+    /// [`RefusalReason::DeviceBindingInvalid`] for an unbound admitted leaf;
+    /// [`RefusalReason::DeviceLimitReached`] past the cap; [`Error::KeyPackage`]
+    /// for a KeyPackage that does not validate; [`Error::Group`] for an
+    /// admitted account that does not publish here, a retired key that is not
+    /// a leaf or is this device's own, an empty commit, or an OpenMLS failure;
+    /// [`RefusalReason::SweepAlreadyStaged`] while a commit is staged.
+    pub fn stage_commit(
+        &mut self,
+        identity: &Identity,
+        admit: &[&[u8]],
+        retire: &[&[u8]],
+        rotate: bool,
+    ) -> Result<PublisherCommit> {
+        let key_packages = Group::validate_key_packages(identity, admit)?;
+        self.stage_with(
+            identity,
+            key_packages,
+            retire,
+            rotate,
+            AdmitRule::PublishingAccount,
+        )
+    }
+
+    /// Stage a rotation: a commit with an update path and nothing else
+    /// ([ADR-0090] section 4). Returns the commit.
+    ///
+    /// [ADR-0090]: ../../../docs/adr/0090-publisher-group-device-leaves.md
+    ///
+    /// # Errors
+    ///
+    /// What [`Self::stage_commit`] returns.
+    pub fn stage_rotate(&mut self, identity: &Identity) -> Result<Vec<u8>> {
+        Ok(self.stage_commit(identity, &[], &[], true)?.commit)
+    }
+
+    /// Stage the admission of devices of accounts that already publish here
+    /// ([ADR-0090] section 2.1, 2.2). Returns the commit and the Welcome.
+    ///
+    /// [ADR-0090]: ../../../docs/adr/0090-publisher-group-device-leaves.md
+    ///
+    /// # Errors
+    ///
+    /// What [`Self::stage_commit`] returns; [`Error::Group`] for an empty
+    /// list.
+    pub fn stage_admit_devices(
+        &mut self,
+        identity: &Identity,
+        key_packages: &[&[u8]],
+    ) -> Result<MemberAdditionBytes> {
+        if key_packages.is_empty() {
             return Err(Error::Group(
-                "remove_publisher: the owner is never removed".into(),
+                "stage_admit_devices: no KeyPackage given".into(),
             ));
         }
-        let leaves: Vec<LeafNodeIndex> = members
-            .iter()
+        let staged = self.stage_commit(identity, key_packages, &[], false)?;
+        let welcome = staged
+            .welcome
+            .ok_or_else(|| Error::Group("stage_admit_devices: no Welcome built".into()))?;
+        Ok(MemberAdditionBytes {
+            commit: staged.commit,
+            welcome,
+        })
+    }
+
+    /// Stage the retirement of the leaves whose signature keys are
+    /// `device_keys` ([ADR-0090] section 2.1, 2.4). Returns the commit.
+    ///
+    /// [ADR-0090]: ../../../docs/adr/0090-publisher-group-device-leaves.md
+    ///
+    /// # Errors
+    ///
+    /// What [`Self::stage_commit`] returns; [`Error::Group`] for an empty
+    /// list.
+    pub fn stage_retire_devices(
+        &mut self,
+        identity: &Identity,
+        device_keys: &[&[u8]],
+    ) -> Result<Vec<u8>> {
+        if device_keys.is_empty() {
+            return Err(Error::Group("stage_retire_devices: no device named".into()));
+        }
+        Ok(self.stage_commit(identity, &[], device_keys, false)?.commit)
+    }
+
+    /// Stage the removal of the publisher whose account key is `account_key`:
+    /// every leaf of that account in one commit (ADR-0087 section 15). Never
+    /// the owner's account.
+    ///
+    /// # Errors
+    ///
+    /// [`RefusalReason::OwnerUnremovable`] for the owner's account;
+    /// [`Error::Group`] when no leaf belongs to it; what [`Self::stage_commit`]
+    /// returns.
+    pub fn stage_remove_publisher(
+        &mut self,
+        identity: &Identity,
+        account_key: &[u8],
+    ) -> Result<Vec<u8>> {
+        if account_key == self.owner_account_key.as_slice() {
+            return Err(Error::refused(
+                RefusalReason::OwnerUnremovable,
+                "remove_publisher: the owner is never removed",
+            ));
+        }
+        let leaves: Vec<Vec<u8>> = self
+            .members()
+            .into_iter()
             .filter(|m| !m.account_key.is_empty() && m.account_key == account_key)
-            .filter(|m| m.signature_public_key != own_key)
-            .map(|m| LeafNodeIndex::new(m.leaf_index))
+            .map(|m| m.signature_public_key)
             .collect();
         if leaves.is_empty() {
             return Err(Error::Group(
                 "remove_publisher: no publisher with this account key".into(),
             ));
         }
-        self.inner.remove_leaves_directly(identity, &leaves)
+        let refs: Vec<&[u8]> = leaves.iter().map(Vec::as_slice).collect();
+        Ok(self.stage_commit(identity, &[], &refs, false)?.commit)
     }
 
-    /// Step down as a publisher (ADR-0087 section 15, note of 2026-11-05):
-    /// the MLS application message to publish on the PublisherGroup journal,
-    /// carrying [`compose_publisher_step_down`]. A member cannot commit its
-    /// own removal (OpenMLS `CannotRemoveSelf`), and a group with no role
-    /// table keeps no proposal, so the owner's device applies the step-down
-    /// as a [`Self::remove_publisher`] of the sender's account. Nothing in
-    /// this group changes until then; the owner can still rotate.
+    /// Stage the approval of a retained co-publisher request to join
+    /// (ADR-0028 OQ3). The request stays retained until the commit merges.
+    /// Returns the commit and the joiner's Welcome.
     ///
     /// # Errors
     ///
-    /// [`Error::Group`] when `identity` is the owner (an owner deletes the
-    /// channel instead), or when MLS refuses to encrypt.
-    pub fn step_down(&mut self, identity: &Identity) -> Result<Vec<u8>> {
-        if self.is_owned_by(identity) {
-            return Err(Error::Group(
-                "step_down: the owner does not step down".into(),
-            ));
-        }
-        let plaintext = compose_publisher_step_down(&self.channel_id);
-        let msg = self
-            .inner
-            .create_application_message(identity, &plaintext)?;
-        crate::group::encode_message(&msg)
+    /// [`Error::Group`] when no retained request matches, or the joiner is a
+    /// member already; what [`Self::stage_commit`] returns.
+    pub fn stage_approve_external_join(
+        &mut self,
+        identity: &Identity,
+        proposal_ref: &[u8],
+    ) -> Result<MemberAdditionBytes> {
+        let key_package = self.inner.retained_join_for_direct_commit(proposal_ref)?;
+        let staged = self.stage_with(
+            identity,
+            vec![key_package],
+            &[],
+            false,
+            AdmitRule::AnyAccount,
+        )?;
+        let welcome = staged
+            .welcome
+            .ok_or_else(|| Error::Group("approve: no Welcome built".into()))?;
+        Ok(MemberAdditionBytes {
+            commit: staged.commit,
+            welcome,
+        })
     }
 
-    /// Borrow the underlying [`Group`] for the rare caller
-    /// who needs the full MLS surface (membership ops,
-    /// application messages between publishers, etc.).
-    /// The PublisherGroup wrapper deliberately exposes only
-    /// the seed-derivation shape on its own surface; the
-    /// rest of MLS is reachable through this accessor when
-    /// needed.
+    fn stage_with(
+        &mut self,
+        identity: &Identity,
+        key_packages: Vec<KeyPackage>,
+        retire: &[&[u8]],
+        rotate: bool,
+        rule: AdmitRule,
+    ) -> Result<PublisherCommit> {
+        let own_account = device_account(identity)?;
+        if own_account != self.owner_account_key {
+            return Err(Error::refused(
+                RefusalReason::NotOwner,
+                "publisher group: only a device of the owner commits",
+            ));
+        }
+        let pre = self.members();
+        let own_key = identity.signature_public_key();
+        let mut removals = Vec::with_capacity(retire.len());
+        for key in retire {
+            if *key == own_key {
+                return Err(Error::Group(
+                    "publisher group: a device cannot retire its own leaf; another owner device \
+                     does"
+                        .into(),
+                ));
+            }
+            let Some(m) = pre
+                .iter()
+                .find(|m| m.signature_public_key.as_slice() == *key)
+            else {
+                return Err(Error::Group(
+                    "publisher group: no leaf with that device key".into(),
+                ));
+            };
+            let leaf = LeafNodeIndex::new(m.leaf_index);
+            if !removals.contains(&leaf) {
+                removals.push(leaf);
+            }
+        }
+        let mut added = Vec::with_capacity(key_packages.len());
+        for kp in &key_packages {
+            let leaf = kp.leaf_node();
+            let account = bound_account(
+                leaf.credential().serialized_content(),
+                leaf.signature_key().as_slice(),
+            );
+            if let (Some(account), AdmitRule::PublishingAccount) = (account, rule) {
+                let publishes = pre.iter().any(|m| {
+                    !removals.iter().any(|r| r.u32() == m.leaf_index)
+                        && m.account_key.as_slice() == account.as_slice()
+                });
+                if !publishes {
+                    return Err(Error::Group(
+                        "publisher group: a device is admitted only for an account that already \
+                         publishes here"
+                            .into(),
+                    ));
+                }
+            }
+            added.push(account);
+        }
+        check_publisher_commit(
+            &self.owner_account_key,
+            &pre,
+            &PublisherCommitEffects {
+                committer_account: Some(own_account),
+                carries_other_proposals: false,
+                removed: removals.iter().map(LeafNodeIndex::u32).collect(),
+                added,
+                external: false,
+                changes_context_extensions: false,
+            },
+        )?;
+        let (commit, welcome) =
+            self.inner
+                .stage_table_less_commit(identity, key_packages, removals, rotate)?;
+        Ok(PublisherCommit {
+            commit: encode_message(&commit)?,
+            welcome: welcome.as_ref().map(encode_message).transpose()?,
+        })
+    }
+
+    /// `true` while a commit of this device is staged and awaiting the
+    /// Delivery Service's answer.
+    #[must_use]
+    pub fn has_staged_commit(&self) -> bool {
+        self.inner.has_staged_sweep()
+    }
+
+    /// The channel seed of the epoch the staged commit moves to, `None` when
+    /// nothing is staged. Never sealed to a subscriber before the merge (C-90);
+    /// a caller may only record it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Exporter`] on an exporter failure.
+    pub fn staged_channel_seed(&self, identity: &Identity) -> Result<Option<[u8; 32]>> {
+        let Some(bytes) = self.inner.staged_export_secret(
+            identity,
+            CHANNEL_EXPORTER_LABEL,
+            self.channel_id.as_bytes(),
+            32,
+        )?
+        else {
+            return Ok(None);
+        };
+        let mut out = [0u8; 32];
+        if bytes.len() != 32 {
+            return Err(Error::Group("staged exporter output length != 32".into()));
+        }
+        out.copy_from_slice(&bytes);
+        Ok(Some(out))
+    }
+
+    /// **The journal took it** (`201`, or the identical re-send's `200`):
+    /// merge the staged commit. `false` when nothing was staged.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] on an OpenMLS merge failure.
+    pub fn merge_staged_commit(&mut self, identity: &Identity) -> Result<bool> {
+        self.inner.merge_staged_sweep(identity)
+    }
+
+    /// **The journal took another** (`409`): discard the staged commit; the
+    /// group stays at N to apply the winner. Touches this group only. `false`
+    /// when nothing was staged.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] when the discard did not take effect.
+    pub fn abandon_staged_commit(&mut self, identity: &Identity) -> Result<bool> {
+        let entry = self.inner.holds_unconfirmed_entry();
+        let abandoned = self.inner.abandon_staged_sweep(identity)?;
+        if entry {
+            // The entry wrote the owner row too; the group it described is gone.
+            drop_owner_row(identity, &self.group_id())?;
+        }
+        Ok(abandoned)
+    }
+
+    /// Borrow the underlying [`Group`] for read-only use (the Delivery Service
+    /// access signers).
     #[must_use]
     pub fn inner(&self) -> &Group {
         &self.inner
     }
+}
 
-    /// Mutable borrow of the underlying [`Group`]. Same
-    /// rationale as [`PublisherGroup::inner`] but for
-    /// commit-producing operations (add_member,
-    /// remove_member, …).
-    pub fn inner_mut(&mut self) -> &mut Group {
-        &mut self.inner
+/// A staged commit that adds leaves: the commit and the Welcome, wire-encoded.
+pub struct MemberAdditionBytes {
+    /// The commit.
+    pub commit: Vec<u8>,
+    /// The Welcome for the added leaves.
+    pub welcome: Vec<u8>,
+}
+
+impl From<MemberAdditionBytes> for PublisherCommit {
+    fn from(m: MemberAdditionBytes) -> Self {
+        Self {
+            commit: m.commit,
+            welcome: Some(m.welcome),
+        }
     }
+}
+
+/// Who a staged admission may add: a device of an account that already
+/// publishes (an admission), or any bound device (an approve, which adds a
+/// new publisher).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AdmitRule {
+    PublishingAccount,
+    AnyAccount,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// ADR-0081 amendment — a co-publisher's Welcome joins through
-    /// `PublisherGroup::join_from_welcome` only: the conversation rule of
-    /// `Group::join_from_welcome` refuses it (no role table), and the
-    /// refusal leaves nothing, so the dedicated entry point still opens it.
-    #[test]
-    fn a_publisher_group_welcome_joins_only_through_its_own_entry_point() {
-        let alice = Identity::generate("alice-pg-entry").unwrap();
-        let bob = Identity::generate("bob-pg-entry").unwrap();
-        let cid = ChannelId([0x5a; CHANNEL_ID_LEN]);
-        let mut alice_pg = PublisherGroup::create(&alice, &cid).expect("create");
-        let gid = alice_pg.group_id();
-        let addition = alice_pg
-            .inner_mut()
-            .add_member(&alice, bob.create_key_package().unwrap())
-            .expect("add");
-        let welcome = crate::group::encode_message(&addition.welcome).expect("encode");
-
-        let err = Group::join_from_welcome(&welcome, &bob)
-            .err()
-            .expect("refused as a chat");
-        assert!(
-            matches!(
-                err,
-                Error::MembershipRefused {
-                    reason: crate::RefusalReason::NoRoleTable,
-                    ..
-                }
-            ),
-            "typed refusal, got {err}"
-        );
-        assert!(
-            PublisherGroup::load_joined(&bob, &gid, &cid)
-                .unwrap()
-                .is_none(),
-            "nothing written"
-        );
-
-        // Another id than the link conveyed: refused, nothing written.
-        let wrong = vec![0x01; GROUP_ID_LEN];
-        assert!(PublisherGroup::join_from_welcome(&bob, &welcome, &wrong, &cid).is_err());
-        assert!(PublisherGroup::load_joined(&bob, &gid, &cid)
-            .unwrap()
-            .is_none());
-
-        let bob_pg = PublisherGroup::join_from_welcome(&bob, &welcome, &gid, &cid).expect("joins");
-        assert_eq!(bob_pg.group_id(), gid);
-        assert_eq!(
-            bob_pg.channel_seed(&bob).expect("seed"),
-            alice_pg.channel_seed(&alice).expect("seed"),
-        );
-        assert!(PublisherGroup::load_joined(&bob, &gid, &cid)
-            .unwrap()
-            .is_some());
+    fn owner_seed(tag: u8) -> [u8; 32] {
+        [tag; 32]
     }
 
-    fn test_identity() -> Identity {
-        Identity::generate("publisher-group-test").expect("Identity::generate")
+    fn device(seed_tag: u8, account: &[u8; 32]) -> Identity {
+        Identity::from_seed_bound(&[seed_tag; 64], account, 1_700_000_000).expect("device")
     }
 
-    fn test_channel_id() -> ChannelId {
-        ChannelId([0xAB; CHANNEL_ID_LEN])
-    }
-
-    /// `PublisherGroup` is not `Debug`, so `expect_err` is unavailable.
-    /// Renders the error of a call that MUST have failed.
-    fn refusal_text<T>(res: Result<T>) -> String {
-        match res {
-            Ok(_) => panic!("expected a refusal, got Ok"),
-            Err(e) => e.to_string(),
-        }
+    fn cid(tag: u8) -> ChannelId {
+        ChannelId([tag; CHANNEL_ID_LEN])
     }
 
     #[test]
     fn channel_id_round_trip() {
         let bytes = [0x42u8; CHANNEL_ID_LEN];
-        let cid = ChannelId::try_from_slice(&bytes).unwrap();
-        assert_eq!(cid.as_bytes(), &bytes);
-    }
-
-    #[test]
-    fn channel_id_rejects_wrong_length() {
+        let id = ChannelId::try_from_slice(&bytes).unwrap();
+        assert_eq!(id.as_bytes(), &bytes);
         assert!(ChannelId::try_from_slice(&[0u8; 8]).is_err());
         assert!(ChannelId::try_from_slice(&[0u8; 17]).is_err());
     }
@@ -789,29 +1475,26 @@ mod tests {
 
     #[test]
     fn group_id_is_deterministic_and_golden() {
-        let cid = ChannelId([0x01; CHANNEL_ID_LEN]);
+        let c = cid(0x01);
         let seed = [0x42u8; 32];
-        assert_eq!(
-            publisher_group_id_for(&seed, &cid),
-            publisher_group_id_for(&seed, &cid)
-        );
         let mut material = [0u8; 48];
         material[..32].copy_from_slice(&seed);
-        material[32..].copy_from_slice(cid.as_bytes());
+        material[32..].copy_from_slice(c.as_bytes());
         assert_eq!(
-            publisher_group_id_for(&seed, &cid),
+            publisher_group_id_for(&seed, &c),
             lakko_crypto::hash::blake3_derive_key_from_material("lakko/pubgrp/id/v3", &material)
+        );
+        assert_ne!(
+            publisher_group_id_for(&seed, &cid(0x01)),
+            publisher_group_id_for(&seed, &cid(0x02))
         );
     }
 
     #[test]
-    fn distinct_channels_get_distinct_group_ids() {
-        let seed = [0x42u8; 32];
-        let cid_a = ChannelId([0x01; CHANNEL_ID_LEN]);
-        let cid_b = ChannelId([0x02; CHANNEL_ID_LEN]);
-        assert_ne!(
-            publisher_group_id_for(&seed, &cid_a),
-            publisher_group_id_for(&seed, &cid_b)
+    fn the_owner_row_domain_is_pinned() {
+        assert_eq!(
+            PUBLISHER_GROUP_OWNER_ROW_DOMAIN,
+            b"lakko/publisher-group-owner/v1\0"
         );
     }
 
@@ -819,457 +1502,357 @@ mod tests {
         #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
 
         /// ADR-0078 phase 6: the id is not computable from the channel id
-        /// alone. One channel id under two owner seeds gives two ids (so no
-        /// function of the channel id yields it), the retired
-        /// `prefix || channel_id` id is never produced, and the channel id is
-        /// not readable from the id.
+        /// alone, never the retired id, and the channel id is not readable
+        /// from it.
         #[test]
         fn group_id_is_not_computable_from_the_channel_id(
             channel in proptest::prelude::any::<[u8; CHANNEL_ID_LEN]>(),
             seed_a in proptest::prelude::any::<[u8; 32]>(),
             seed_b in proptest::prelude::any::<[u8; 32]>(),
         ) {
-            let cid = ChannelId(channel);
-            let id_a = publisher_group_id_for(&seed_a, &cid);
-            let id_b = publisher_group_id_for(&seed_b, &cid);
+            let c = ChannelId(channel);
+            let id_a = publisher_group_id_for(&seed_a, &c);
+            let id_b = publisher_group_id_for(&seed_b, &c);
             if seed_a == seed_b {
                 proptest::prop_assert_eq!(id_a, id_b);
             } else {
                 proptest::prop_assert_ne!(id_a, id_b);
             }
-            proptest::prop_assert_ne!(id_a, retired_v2_group_id(&cid));
+            proptest::prop_assert_ne!(id_a, retired_v2_group_id(&c));
             proptest::prop_assert!(!id_a.windows(CHANNEL_ID_LEN).any(|w| w == channel));
         }
+    }
 
-        /// The owner's identity recomputes the same id on every open.
+    #[test]
+    fn create_needs_a_device_bound_to_the_owner() {
+        let seed = owner_seed(0x11);
+        let unbound = Identity::from_seed(&[0x21; 64]).expect("unbound");
+        let err = PublisherGroup::create(&unbound, &seed, &cid(1))
+            .err()
+            .expect("refused");
+        assert_eq!(
+            err.refusal_reason(),
+            Some(RefusalReason::DeviceBindingInvalid)
+        );
+        let other = device(0x22, &owner_seed(0x12));
+        let err = PublisherGroup::create(&other, &seed, &cid(1))
+            .err()
+            .expect("refused");
+        assert_eq!(
+            err.refusal_reason(),
+            Some(RefusalReason::DeviceBindingInvalid)
+        );
+        let dev = device(0x23, &seed);
+        let pg = PublisherGroup::create(&dev, &seed, &cid(1)).expect("created");
+        assert_eq!(
+            pg.group_id(),
+            publisher_group_id_for(&seed, &cid(1)).to_vec()
+        );
+        assert_eq!(pg.owner_account_key(), &publisher_owner_account_key(&seed));
+        // A second founding on the same device is refused: delete first.
+        assert!(PublisherGroup::create(&dev, &seed, &cid(1)).is_err());
+    }
+
+    #[test]
+    fn create_then_load_round_trips_and_a_rotation_persists() {
+        let seed = owner_seed(0x13);
+        let dev = device(0x24, &seed);
+        assert!(PublisherGroup::load(&dev, &seed, &cid(2))
+            .unwrap()
+            .is_none());
+        let mut pg = PublisherGroup::create(&dev, &seed, &cid(2)).expect("create");
+        let before = pg.channel_seed(&dev).expect("seed");
+        pg.stage_rotate(&dev).expect("stage");
+        assert!(pg.has_staged_commit());
+        assert_eq!(
+            pg.channel_seed(&dev).expect("seed"),
+            before,
+            "a staged commit changes nothing"
+        );
+        let next = pg.staged_channel_seed(&dev).expect("staged").expect("some");
+        assert!(pg.merge_staged_commit(&dev).expect("merge"));
+        assert_eq!(pg.channel_seed(&dev).expect("seed"), next);
+        let loaded = PublisherGroup::load(&dev, &seed, &cid(2))
+            .unwrap()
+            .expect("some");
+        assert_eq!(loaded.channel_seed(&dev).expect("seed"), next);
+        assert!(loaded.is_owned_by(&seed));
+        assert!(!loaded.is_owned_by(&owner_seed(0x14)));
+    }
+
+    #[test]
+    fn delete_removes_the_group_and_the_owner_row() {
+        let seed = owner_seed(0x15);
+        let dev = device(0x25, &seed);
+        let mut pg = PublisherGroup::create(&dev, &seed, &cid(3)).expect("create");
+        let gid = pg.group_id();
+        pg.delete(&dev).expect("delete");
+        assert!(PublisherGroup::load(&dev, &seed, &cid(3))
+            .unwrap()
+            .is_none());
+        assert!(read_owner_row(&dev, &gid).unwrap().is_none());
+        // Founding again is now allowed.
+        assert!(PublisherGroup::create(&dev, &seed, &cid(3)).is_ok());
+    }
+
+    /// A peer holding the group (the founder) and the GroupInfo it saved.
+    fn founded(tag: u8, seed: &[u8; 32]) -> (Identity, PublisherGroup, Vec<u8>) {
+        let founder = device(tag, seed);
+        let pg = PublisherGroup::create(&founder, seed, &cid(tag)).expect("create");
+        let info = pg.group_info(&founder).expect("group info");
+        (founder, pg, info)
+    }
+
+    fn refused_by_peer(
+        pg: &mut PublisherGroup,
+        peer: &Identity,
+        commit: &[u8],
+    ) -> Option<RefusalReason> {
+        let epoch = pg.epoch();
+        let members = pg.members().len();
+        let err = pg.process_incoming(peer, commit).expect_err("refused");
+        assert_eq!(pg.epoch(), epoch, "not merged");
+        assert_eq!(pg.members().len(), members, "not merged");
+        err.refusal_reason()
+    }
+
+    /// `commit` wrapped as an entering device holding the right epoch's access
+    /// seed would send it (G-55): the key `peer` derives at its epoch.
+    fn wrapped_for(pg: &PublisherGroup, peer: &Identity, commit: &[u8]) -> Vec<u8> {
+        let seed = pg.inner.ds_access_seed(peer).expect("access seed");
+        crate::entry_wrap::wrap_entry_commit(&seed, &pg.group_id(), pg.epoch(), commit)
+            .expect("wrap")
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Forger {
+        OtherAccount,
+        Unbound,
+        ResyncOfAMember,
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(9))]
+
+        /// The gate's external arm (ADR-0064 section 7): an external commit
+        /// built with none of `enter`'s local checks is refused by a peer
+        /// unless it is an owner device's ExternalInit-only entry; the owner
+        /// entry built the same way is accepted.
         #[test]
-        fn group_id_is_a_pure_function_of_seed_and_channel(
-            channel in proptest::prelude::any::<[u8; CHANNEL_ID_LEN]>(),
-            seed in proptest::prelude::any::<[u8; 32]>(),
+        fn peers_refuse_every_external_commit_but_an_owner_entry(
+            forger in proptest::prop_oneof![
+                proptest::strategy::Just(Forger::OtherAccount),
+                proptest::strategy::Just(Forger::Unbound),
+                proptest::strategy::Just(Forger::ResyncOfAMember),
+            ],
+            tag in 0x30u8..0x60,
         ) {
-            let cid = ChannelId(channel);
+            let seed = owner_seed(tag);
+            let (founder, mut pg, info) = founded(tag, &seed);
+            let (id, expected) = match forger {
+                Forger::OtherAccount => (device(tag ^ 0x80, &owner_seed(tag ^ 0x40)), RefusalReason::NotOwner),
+                Forger::Unbound => (
+                    Identity::from_seed(&[tag ^ 0x81; 64]).expect("unbound"),
+                    RefusalReason::DeviceBindingInvalid,
+                ),
+                // The founder's own key: OpenMLS adds a Remove of its leaf.
+                Forger::ResyncOfAMember => (device(tag, &seed), RefusalReason::UnsupportedProposal),
+            };
+            let commit = crate::group::forge_external_commit(&id, &info).expect("forged");
+            // Raw, it is refused for arriving unwrapped; wrapped, by the gate.
             proptest::prop_assert_eq!(
-                publisher_group_id_for(&seed, &cid),
-                publisher_group_id_for(&seed, &cid)
+                refused_by_peer(&mut pg, &founder, &commit),
+                Some(RefusalReason::UnsupportedProposal)
             );
+            let wrapped = wrapped_for(&pg, &founder, &commit);
+            proptest::prop_assert_eq!(refused_by_peer(&mut pg, &founder, &wrapped), Some(expected));
+
+            let owner_device = device(tag ^ 0x82, &seed);
+            let honest = crate::group::forge_external_commit(&owner_device, &info).expect("built");
+            // G-55: an owner entry sent raw is refused, so the account key in
+            // its leaf never has a reason to reach the journal in the clear.
+            proptest::prop_assert_eq!(
+                refused_by_peer(&mut pg, &founder, &honest),
+                Some(RefusalReason::UnsupportedProposal)
+            );
+            let honest = wrapped_for(&pg, &founder, &honest);
+            let out = pg.process_incoming(&founder, &honest).expect("an owner entry applies");
+            proptest::prop_assert!(matches!(out, Incoming::Commit));
+            proptest::prop_assert_eq!(pg.members().len(), 2);
         }
     }
 
+    /// G-55: a wrapped row must hold an external entry. A member's own commit
+    /// sealed under the right key is refused, never merged.
     #[test]
-    fn create_uses_the_owner_seed_derived_id() {
-        let identity = test_identity();
-        let cid = test_channel_id();
-        let pg = PublisherGroup::create(&identity, &cid).expect("create");
+    fn a_wrapped_member_commit_is_refused() {
+        let seed = owner_seed(0x66);
+        let (founder, mut pg, _) = founded(0x66, &seed);
+        let second = device(0x67, &seed);
+        let kp =
+            crate::key_package::serialize(&second.create_key_package().expect("kp")).expect("wire");
+        let add = pg.stage_admit_devices(&founder, &[&kp]).expect("admit");
+        assert!(pg.merge_staged_commit(&founder).expect("merge"));
+        let gid = pg.group_id();
+        let mut pg2 = PublisherGroup::join_from_welcome(
+            &second,
+            &add.welcome,
+            &gid,
+            &cid(0x66),
+            &publisher_owner_account_key(&seed),
+        )
+        .expect("join");
+        let rotation = pg2.stage_rotate(&second).expect("rotate");
+        let wrapped = wrapped_for(&pg, &founder, &rotation);
+        let epoch = pg.epoch();
+        assert!(pg.process_incoming(&founder, &wrapped).is_err());
+        assert_eq!(pg.epoch(), epoch, "not merged");
+        // Refused before decryption: the same commit raw is still an
+        // ordinary owner commit.
+        assert!(matches!(
+            pg.process_incoming(&founder, &rotation).expect("applies"),
+            Incoming::Commit
+        ));
+    }
+
+    /// A ninth owner leaf is refused by a peer even when the entering device
+    /// skipped its own check, and refused locally by `enter`.
+    #[test]
+    fn a_ninth_owner_device_is_refused_by_the_peer_and_locally() {
+        let seed = owner_seed(0x61);
+        let (founder, mut pg, _) = founded(0x61, &seed);
+        let kps: Vec<Vec<u8>> = (1..MAX_LEAVES_PER_ACCOUNT)
+            .map(|i| {
+                let d = device(0x61 + u8::try_from(i).expect("small"), &seed);
+                crate::key_package::serialize(&d.create_key_package().expect("kp")).expect("wire")
+            })
+            .collect();
+        let refs: Vec<&[u8]> = kps.iter().map(Vec::as_slice).collect();
+        pg.stage_admit_devices(&founder, &refs)
+            .expect("admit seven");
+        assert!(pg.merge_staged_commit(&founder).expect("merge"));
+        assert_eq!(pg.members().len(), MAX_LEAVES_PER_ACCOUNT);
+        let info = pg.group_info(&founder).expect("info");
+        let ninth = device(0x7F, &seed);
+        let commit = crate::group::forge_external_commit(&ninth, &info).expect("forged");
+        let commit = wrapped_for(&pg, &founder, &commit);
         assert_eq!(
-            pg.group_id(),
-            publisher_group_id_for(&identity.ed25519_seed_bytes(), &cid).to_vec()
+            refused_by_peer(&mut pg, &founder, &commit),
+            Some(RefusalReason::DeviceLimitReached)
         );
-        assert_ne!(pg.group_id(), retired_v2_group_id(&cid).to_vec());
-    }
-
-    #[test]
-    fn create_then_load_round_trips() {
-        let identity = test_identity();
-        let cid = test_channel_id();
-
-        // Initially nothing under this id.
-        assert!(PublisherGroup::load(&identity, &cid).unwrap().is_none());
-
-        // Create persists the group.
-        let _created = PublisherGroup::create(&identity, &cid).expect("create");
-
-        // Load now finds it.
-        let loaded = PublisherGroup::load(&identity, &cid)
-            .expect("load")
-            .expect("Some");
-        assert_eq!(loaded.channel_id(), &cid);
-    }
-
-    #[test]
-    fn open_or_create_is_idempotent() {
-        let identity = test_identity();
-        let cid = test_channel_id();
-
-        // First call mints. Capture the exporter output.
-        let seed_first = {
-            let pg = PublisherGroup::open_or_create(&identity, &cid).expect("first open_or_create");
-            pg.channel_seed(&identity).expect("seed first")
-        };
-
-        // Second call MUST resolve to the same persisted
-        // group, NOT mint a fresh one — otherwise we are
-        // back to the throwaway-group bug G4-2-mls-
-        // persistence closes. The exporter output proves it:
-        // a freshly-minted MLS group has different ratchet
-        // state and would emit a different seed.
-        let seed_second = {
-            let pg =
-                PublisherGroup::open_or_create(&identity, &cid).expect("second open_or_create");
-            pg.channel_seed(&identity).expect("seed second")
-        };
-        assert_eq!(seed_first, seed_second);
-    }
-
-    #[test]
-    fn distinct_channels_get_distinct_seeds() {
-        let identity = test_identity();
-        let cid_a = ChannelId([0xAA; CHANNEL_ID_LEN]);
-        let cid_b = ChannelId([0xBB; CHANNEL_ID_LEN]);
-
-        let pg_a = PublisherGroup::open_or_create(&identity, &cid_a).expect("create A");
-        let pg_b = PublisherGroup::open_or_create(&identity, &cid_b).expect("create B");
-
-        let seed_a = pg_a.channel_seed(&identity).expect("seed A");
-        let seed_b = pg_b.channel_seed(&identity).expect("seed B");
-
-        // Two channels under the same identity — different
-        // PublisherGroups, different ratchet state, different
-        // exporter outputs. Cross-channel-decrypt confusion
-        // is forbidden by ADR-0010's two-tier isolation.
-        assert_ne!(seed_a, seed_b);
-    }
-
-    #[test]
-    fn rotate_advances_epoch_and_changes_seed() {
-        // G4-2-mls-persistence step 4 — load-bearing test.
-        // Before rotation, two consecutive `channel_seed`
-        // calls return the same bytes (step 1's idempotence
-        // invariant). After `rotate()` the MLS epoch advances
-        // by one and the exporter output MUST differ, otherwise
-        // the scheduled-rotation primitive ADR-0010 §"Rotation"
-        // requires has no semantic meaning.
-        let identity = test_identity();
-        let cid = test_channel_id();
-
-        let mut pg = PublisherGroup::open_or_create(&identity, &cid).expect("create");
-        let seed_pre = pg.channel_seed(&identity).expect("seed pre");
-
-        let epoch_pre = pg.inner().epoch();
-        let _commit_bytes = pg.rotate(&identity).expect("rotate");
-        let epoch_post = pg.inner().epoch();
-        assert_eq!(epoch_post, epoch_pre + 1, "epoch must advance by one");
-
-        let seed_post = pg.channel_seed(&identity).expect("seed post");
-        assert_ne!(seed_pre, seed_post, "rotation must change the seed");
-    }
-
-    #[test]
-    fn rotated_seed_persists_across_reload() {
-        // After `rotate()` + drop, a fresh `load` must surface
-        // the post-rotation epoch's exporter output — i.e. the
-        // rotation is durable, not just held in the live
-        // handle's memory. Without this invariant the
-        // scheduled-rotation timer would reset to epoch 0 on
-        // every app restart and rotation would be meaningless.
-        let identity = test_identity();
-        let cid = test_channel_id();
-
-        let post_rotation_seed = {
-            let mut pg = PublisherGroup::open_or_create(&identity, &cid).expect("create");
-            let _commit = pg.rotate(&identity).expect("rotate");
-            pg.channel_seed(&identity).expect("seed post")
-        };
-
-        let reloaded = PublisherGroup::load(&identity, &cid)
-            .expect("load")
-            .expect("Some");
-        let reloaded_seed = reloaded.channel_seed(&identity).expect("seed reload");
-        assert_eq!(post_rotation_seed, reloaded_seed);
-    }
-
-    /// C-88 at this entry point, which is narrower than a conversation's: an
-    /// active PublisherGroup is refused, typed, and so is an ENDED one, which a
-    /// Welcome does not replace here. A co-publisher's re-invitation has no
-    /// path through this provider, and this change does not add one.
-    #[test]
-    fn a_welcome_replaces_no_publisher_group() {
-        let alice = Identity::generate("alice").unwrap();
-        let bob = Identity::generate("bob").unwrap();
-        let cid = ChannelId([0x5b; CHANNEL_ID_LEN]);
-        let mut alice_pg = PublisherGroup::create(&alice, &cid).expect("create");
-        let gid = alice_pg.group_id();
-        let addition = alice_pg
-            .inner_mut()
-            .add_member(&alice, bob.create_key_package().unwrap())
-            .expect("add");
-        let welcome = crate::group::encode_message(&addition.welcome).expect("encode");
-        let mut bob_pg =
-            PublisherGroup::join_from_welcome(&bob, &welcome, &gid, &cid).expect("joins");
-
-        let err = PublisherGroup::join_from_welcome(&bob, &welcome, &gid, &cid)
+        let access = pg.inner.ds_access_seed(&founder).expect("seed");
+        let err = PublisherGroup::enter(&ninth, &info, &seed, &cid(0x61), &access)
             .err()
-            .expect("an active group is not replaced");
+            .expect("refused locally");
         assert_eq!(
             err.refusal_reason(),
-            Some(crate::RefusalReason::GroupStillActive)
+            Some(RefusalReason::DeviceLimitReached)
         );
-
-        let bob_leaf = alice_pg
-            .inner_mut()
-            .members()
-            .iter()
-            .find(|m| m.signature_public_key == bob.signature_public_key())
-            .expect("bob is in")
-            .leaf_index;
-        let removal = alice_pg
-            .inner_mut()
-            .remove_member(&alice, crate::LeafNodeIndex::new(bob_leaf))
-            .expect("remove");
-        let removal = crate::group::encode_message(&removal).expect("encode");
-        bob_pg
-            .inner_mut()
-            .process_incoming(&bob, &removal)
-            .expect("bob applies");
-        assert!(!bob_pg.inner_mut().is_active());
-
-        let addition = alice_pg
-            .inner_mut()
-            .add_member(&alice, bob.create_key_package().unwrap())
-            .expect("add again");
-        let welcome = crate::group::encode_message(&addition.welcome).expect("encode");
-        let err = PublisherGroup::join_from_welcome(&bob, &welcome, &gid, &cid)
-            .err()
-            .expect("an ended group is not replaced here");
-        assert_eq!(err.refusal_reason(), None, "the plain refusal, got {err}");
-        assert!(!PublisherGroup::load_joined(&bob, &gid, &cid)
-            .unwrap()
-            .expect("the ended group is still stored")
-            .inner_mut()
-            .is_active());
+        assert!(Group::load(&ninth, &pg.group_id()).expect("load").is_none());
     }
 
+    /// ADR-0064 residual 9: a co-publisher leaf keeps its KeyPackage's
+    /// lifetime forever (it never commits). Once that ran out OpenMLS's own
+    /// lifetime check refuses the GroupInfo; `enter` skips it, and the member
+    /// still applies the entry.
     #[test]
-    fn rotate_emits_commit_bytes_processable_by_co_publisher() {
-        // G4-2-mls-persistence step 6 — cross-publisher
-        // membership propagation. Alice mints the
-        // PublisherGroup, adds Bob via the underlying Group's
-        // standard membership ops (the wrapper exposes
-        // inner_mut() for this), Bob joins from the welcome,
-        // then Alice rotates and Bob processes the commit.
-        // Both end up at the same epoch with the same seed —
-        // the load-bearing invariant for a multi-publisher
-        // channel where any member can issue rotations and
-        // the others stay in sync via MLS commit propagation.
-        use crate::group::Incoming;
-        use openmls_traits::OpenMlsProvider;
-
-        let alice = Identity::generate("alice-channel").unwrap();
-        let bob = Identity::generate("bob-channel").unwrap();
-        let cid = ChannelId([0x77; CHANNEL_ID_LEN]);
-
-        // Alice mints the PublisherGroup, then adds Bob via a
-        // standard MLS Add.
-        let mut alice_pg = PublisherGroup::create(&alice, &cid).expect("alice create");
-        let bob_kp = bob.create_key_package().expect("bob kp");
-        let addition = alice_pg
-            .inner_mut()
-            .add_member(&alice, bob_kp)
-            .expect("alice adds bob");
-
-        // Bob joins through the PublisherGroup entry point (ADR-0081
-        // amendment): the conversation rule of `Group::join_from_welcome`
-        // refuses a Welcome with no role table.
-        let welcome_bytes =
-            crate::group::encode_message(&addition.welcome).expect("welcome encode");
-        let alice_gid = alice_pg.group_id();
-        let bob_group = PublisherGroup::join_from_welcome(&bob, &welcome_bytes, &alice_gid, &cid)
-            .expect("bob join")
-            .inner;
-
-        // Alice rotates AFTER adding Bob. Both sides advance.
-        // (Note: Alice's `add_member` already merged a commit
-        // and advanced her epoch from 0 -> 1; the rotation
-        // bumps to 2.)
-        let alice_epoch_pre_rotate = alice_pg.inner().epoch();
-        let commit_bytes = alice_pg.rotate(&alice).expect("rotate");
-        assert_eq!(alice_pg.inner().epoch(), alice_epoch_pre_rotate + 1);
-
-        // Bob processes the rotation commit.
-        let mut bob_group_mut = bob_group;
-        let processed = bob_group_mut
-            .process_incoming(&bob, &commit_bytes)
-            .expect("bob processes rotate");
-        assert!(matches!(processed, Incoming::Commit));
-
-        // Both ends now at the same epoch. Exporter outputs
-        // computed against (label, channel_id, 32) must
-        // match — that is the cross-publisher seed-sync
-        // invariant ADR-0010 §"PublisherGroup" requires.
-        assert_eq!(alice_pg.inner().epoch(), bob_group_mut.epoch());
-
-        let alice_seed = alice_pg.channel_seed(&alice).expect("alice seed");
-        let bob_seed = bob_group_mut
-            .export_secret(&bob, CHANNEL_EXPORTER_LABEL, cid.as_bytes(), 32)
-            .expect("bob exporter");
-        assert_eq!(alice_seed, bob_seed.as_slice());
-
-        // Silence the unused-import warning the
-        // `openmls_traits::OpenMlsProvider` brings in via
-        // identity creation transitively — we keep it for
-        // documentation of which trait the providers
-        // implement, but don't reference it directly.
-        #[allow(clippy::items_after_statements)]
-        fn _silence(_: &impl OpenMlsProvider) {}
-    }
-
-    #[test]
-    fn distinct_identities_get_distinct_seeds_for_same_channel() {
-        // Two different publishers minting their own
-        // PublisherGroup for "the same" channel id end up
-        // with distinct ratchet state. (In production they
-        // would commit-merge through MLS membership ops;
-        // this test just pins that the per-identity
-        // exporter outputs are not coincidentally identical.)
-        let identity_a = test_identity();
-        let identity_b = test_identity();
-        let cid = test_channel_id();
-
-        let pg_a = PublisherGroup::open_or_create(&identity_a, &cid).expect("a");
-        let pg_b = PublisherGroup::open_or_create(&identity_b, &cid).expect("b");
-
-        let seed_a = pg_a.channel_seed(&identity_a).expect("seed a");
-        let seed_b = pg_b.channel_seed(&identity_b).expect("seed b");
-        assert_ne!(seed_a, seed_b);
-    }
-
-    #[test]
-    fn co_publisher_joins_via_external_join_ticket_and_shares_channel_seed() {
-        // ADR-0028 OQ3 — adding a *publisher* to a channel reuses the group
-        // join-ticket + external-join machinery (ADR-0027/0028) VERBATIM,
-        // because a PublisherGroup is a vanilla MLS group. Owner Alice mints the
-        // channel; non-member Bob crafts an external-join proposal over the
-        // PublisherGroup's `group_id` (all the ticket conveys); Alice approves;
-        // Bob joins from the Welcome and reconstructs the PublisherGroup under
-        // the deterministic id — and BOTH derive the same channel content-key
-        // seed at the shared post-add epoch, so Bob can now publish.
-        use crate::group::{encode_message, Incoming};
-
-        let alice = Identity::from_seed(&[0xA7u8; 64]).expect("alice");
-        let bob = Identity::from_seed(&[0xB7u8; 64]).expect("bob");
-        let cid = ChannelId([0x5C; CHANNEL_ID_LEN]);
-
-        let mut alice_pg = PublisherGroup::create(&alice, &cid).expect("alice publisher group");
-        let group_id = alice_pg.group_id();
-        let epoch = alice_pg.epoch();
-
-        // Bob (a non-member) crafts the external-join proposal for the
-        // PublisherGroup's id + epoch — exactly what the `/g/` ticket conveys.
-        let proposal = bob
-            .create_external_join_proposal(&group_id, epoch)
-            .expect("bob external-join proposal");
-
-        // Alice processes it through the inner Group surface; the proposal is
-        // retained, and Alice (a member of the open group) approves it.
-        let incoming = alice_pg
-            .inner_mut()
-            .process_incoming(&alice, &proposal)
-            .expect("process proposal");
-        let bob_joiner_key = match incoming {
-            Incoming::ExternalJoinProposal {
-                joiner_signature_key,
-                ..
-            } => joiner_signature_key,
-            other => panic!("expected ExternalJoinProposal, got {other:?}"),
-        };
-        let addition = alice_pg
-            .approve_external_join(&alice, &bob_joiner_key)
+    fn an_entry_is_not_stopped_by_an_expired_co_publisher_leaf() {
+        let seed = owner_seed(0x62);
+        let (founder, mut pg, _) = founded(0x62, &seed);
+        let copub = device(0x63, &owner_seed(0x64));
+        let kp = crate::key_package::serialize(&copub.short_lived_key_package(2).expect("kp"))
+            .expect("wire");
+        pg.retain_join_request(&founder, &kp).expect("retain");
+        pg.stage_approve_external_join(&founder, copub.signature_public_key())
             .expect("approve");
-        let welcome_bytes = encode_message(&addition.welcome).expect("encode welcome");
-
-        // Bob joins from the Welcome. He cannot derive the owner's id (it
-        // needs Alice's seed); he opens the group under the id the ticket
-        // conveyed, with the channel id the link's sealed preview carried.
-        let _bob_group = PublisherGroup::join_from_welcome(&bob, &welcome_bytes, &group_id, &cid)
-            .expect("bob joins");
+        assert!(pg.merge_staged_commit(&founder).expect("merge"));
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let info = pg.group_info(&founder).expect("info");
         assert!(
-            PublisherGroup::load(&bob, &cid)
-                .expect("own load")
-                .is_none(),
-            "a co-publisher's own derivation names another group"
+            !crate::group::builds_with_lifetime_check(&info).expect("built or not"),
+            "OpenMLS's lifetime check refuses the expired co-publisher leaf"
         );
-        let bob_pg = PublisherGroup::load_joined(&bob, &group_id, &cid)
-            .expect("bob publisher load")
-            .expect("bob publisher group present");
-
-        // The payoff: both publishers derive the identical channel content-key
-        // seed at the shared post-add epoch — Bob can now post to the channel.
-        let alice_seed = alice_pg.channel_seed(&alice).expect("alice seed");
-        let bob_seed = bob_pg.channel_seed(&bob).expect("bob seed");
+        let entering = device(0x65, &seed);
+        let access = pg.inner.ds_access_seed(&founder).expect("seed");
+        let entry =
+            PublisherGroup::enter(&entering, &info, &seed, &cid(0x62), &access).expect("entered");
+        let out = pg
+            .process_incoming(&founder, &entry.commit)
+            .expect("the member applies it");
+        assert!(matches!(out, Incoming::Commit));
         assert_eq!(
-            alice_seed, bob_seed,
-            "a ticket-joined co-publisher must share the channel seed"
+            entry.group.staged_channel_seed(&entering).expect("seed"),
+            Some(pg.channel_seed(&founder).expect("seed"))
         );
     }
 
     #[test]
-    fn load_joined_refuses_a_wrong_width_id_and_finds_nothing_unknown() {
-        let identity = test_identity();
-        let cid = test_channel_id();
-        assert!(PublisherGroup::load_joined(&identity, &[0u8; 31], &cid).is_err());
-        assert!(PublisherGroup::load_joined(&identity, &[0u8; 32], &cid)
-            .expect("load")
-            .is_none());
-    }
-
-    /// Legacy v1 state must produce a loud refusal, never a silent fresh mint.
-    ///
-    /// Constructed the only way it can be: mint a group directly under the v1
-    /// id via the generic `Group::create_with_id`, which is exactly what the
-    /// retired `PublisherGroup::create` did.
-    #[test]
-    fn legacy_v1_state_refuses_instead_of_minting_a_fresh_group() {
-        let identity = test_identity();
-        let cid = ChannelId([0x3Cu8; CHANNEL_ID_LEN]);
-
-        // Nothing persisted yet: both constructors are clear to run.
-        assert!(PublisherGroup::load(&identity, &cid)
-            .expect("clean load")
-            .is_none());
-
-        // Simulate a channel that was minted before the v2 width fix.
-        let _legacy =
-            Group::create_with_id(&identity, &publisher_group_id_bytes_v1(&cid)).expect("v1 group");
-
-        let load_err = refusal_text(PublisherGroup::load(&identity, &cid));
-        assert!(
-            load_err.contains("legacy v1 PublisherGroup state"),
-            "unexpected error: {load_err}"
+    fn the_gate_refuses_what_it_must() {
+        let owner = [0xAA; 32];
+        let other = [0xBB; 32];
+        let pre: Vec<MemberRecord> = (0..8)
+            .map(|i| MemberRecord {
+                leaf_index: i,
+                signature_public_key: vec![u8::try_from(i).unwrap_or(0); 32],
+                account_key: owner.to_vec(),
+            })
+            .collect();
+        let ok = PublisherCommitEffects {
+            committer_account: Some(owner),
+            ..Default::default()
+        };
+        assert!(check_publisher_commit(&owner, &pre, &ok).is_ok());
+        let not_owner = PublisherCommitEffects {
+            committer_account: Some(other),
+            ..Default::default()
+        };
+        assert_eq!(
+            check_publisher_commit(&owner, &pre, &not_owner)
+                .unwrap_err()
+                .refusal_reason(),
+            Some(RefusalReason::NotOwner)
         );
-
-        // open_or_create must NOT fall through to a fresh mint. Silently
-        // minting would swap the channel's content-key seed under every
-        // subscriber that still holds an envelope for the old one.
-        assert!(
-            refusal_text(PublisherGroup::open_or_create(&identity, &cid))
-                .contains("legacy v1 PublisherGroup state")
+        let none = PublisherCommitEffects::default();
+        assert!(check_publisher_commit(&owner, &pre, &none).is_err());
+        let other_kind = PublisherCommitEffects {
+            committer_account: Some(owner),
+            carries_other_proposals: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            check_publisher_commit(&owner, &pre, &other_kind)
+                .unwrap_err()
+                .refusal_reason(),
+            Some(RefusalReason::UnsupportedProposal)
         );
-
-        // And the direct constructor, reachable from both FFI surfaces.
-        assert!(refusal_text(PublisherGroup::create(&identity, &cid))
-            .contains("legacy v1 PublisherGroup state"));
-
-        // The v1 state is left intact for a future migration tool.
-        assert!(
-            Group::load(&identity, &publisher_group_id_bytes_v1(&cid))
-                .expect("v1 load")
-                .is_some(),
-            "the refusal must not destroy the legacy state"
+        let unbound = PublisherCommitEffects {
+            committer_account: Some(owner),
+            added: vec![None],
+            ..Default::default()
+        };
+        assert_eq!(
+            check_publisher_commit(&owner, &pre, &unbound)
+                .unwrap_err()
+                .refusal_reason(),
+            Some(RefusalReason::DeviceBindingInvalid)
         );
-    }
-
-    /// The legacy probe must be scoped to the SAME channel — an unrelated
-    /// channel's v1 state must not block a fresh v2 mint.
-    #[test]
-    fn legacy_probe_is_per_channel() {
-        let identity = test_identity();
-        let legacy_cid = ChannelId([0x11u8; CHANNEL_ID_LEN]);
-        let fresh_cid = ChannelId([0x22u8; CHANNEL_ID_LEN]);
-
-        let _legacy = Group::create_with_id(&identity, &publisher_group_id_bytes_v1(&legacy_cid))
-            .expect("v1 group");
-
-        let pg = PublisherGroup::open_or_create(&identity, &fresh_cid).expect("unrelated channel");
-        assert_eq!(pg.group_id().len(), GROUP_ID_LEN);
-        assert!(PublisherGroup::create(&identity, &legacy_cid).is_err());
+        let ninth = PublisherCommitEffects {
+            committer_account: Some(owner),
+            added: vec![Some(owner)],
+            ..Default::default()
+        };
+        assert_eq!(
+            check_publisher_commit(&owner, &pre, &ninth)
+                .unwrap_err()
+                .refusal_reason(),
+            Some(RefusalReason::DeviceLimitReached)
+        );
+        let swap = PublisherCommitEffects {
+            committer_account: Some(owner),
+            removed: vec![7],
+            added: vec![Some(owner)],
+            ..Default::default()
+        };
+        assert!(check_publisher_commit(&owner, &pre, &swap).is_ok());
     }
 }

@@ -7,7 +7,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 import uniffi.lakko_ffi_uniffi.InfoSection
 
-/** ADR-0089 section 4 - a suspended account is offered no calls and no way
+/** ADR-0098 section 4 - a suspended account is offered no calls and no way
  *  to add people; the rest of the info keeps its order. */
 class ReadOnlySectionsTest {
 

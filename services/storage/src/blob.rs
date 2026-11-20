@@ -3,10 +3,10 @@
 
 //! Content-addressed blob routes (ADR-0065).
 //!
-//! Blobs are stored at `<root>/<hex[0:2]>/<hex[2:4]>/<hex>`; the two 256-way
-//! fan-out levels keep the per-directory file count bounded. Every request
-//! is answered from the index ([`crate::index`]): a file with no row does not
-//! exist for a client.
+//! Blob bytes rest in a [`crate::store::BlobStore`]: files under
+//! `<root>/<hex[0:2]>/<hex[2:4]>/<hex>`, or objects in an S3-compatible
+//! bucket (ADR-0065 amendment of 2026-11-19). Every request is answered from
+//! the index ([`crate::index`]): bytes with no row do not exist for a client.
 //!
 //! # Routes
 //!
@@ -36,7 +36,6 @@
 //! or more than its own idle life back when its first upload named one in
 //! `x-lakko-blob-idle-days` (ADR-0087 section 13: a channel file sends 45).
 
-use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, Bytes};
@@ -53,7 +52,9 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt as _;
 
 use crate::index::{today, BlobId, BlobRow, IndexError, UploadOutcome};
+use crate::metrics::{self as m, Outcome};
 use crate::pass::{Pass, PassError, PassKind, PASS_HEADER};
+use crate::store::StoreError;
 use crate::AppState;
 
 /// SHA-256 hex length: 32 bytes x 2 hex chars.
@@ -94,10 +95,11 @@ pub(crate) const MAX_KEEP_BODY: usize = 32 * 1024;
 /// | 400 | `blob-length-mismatch` | the body is not `Content-Length` bytes |
 /// | 400 | `keep-malformed` | the keep body is not `{"ids": [hex, ...]}` with 1..=256 ids |
 /// | 404 | `blob-not-found` | no such blob (never stored, deleted, expired, or deleted by a moderator) |
-/// | 410 | `blob-removed` | an upload of an id a moderator deleted (ADR-0089) |
+/// | 410 | `blob-removed` | an upload of an id a moderator deleted (ADR-0098) |
 /// | 403 | `blob-delete-refused` | any delete refusal (no row, no key, bad or stale proof) |
+/// | 507 | `storage-full` | the upload would leave less free disk than `LAKKO_STORAGE_MIN_FREE_BYTES` (checked before the pass is charged) |
 /// | 503 | `blob-node-unavailable` | the row names another storage node (forwarding is not built) |
-/// | 500 | `internal` | index or file failure |
+/// | 500 | `internal` | index, file or object-store failure (a failed bucket write leaves no row) |
 ///
 /// Token refusals on the pass routes are the shared gate's codes
 /// (`anon-token-*`, `anon-tokens-disabled`).
@@ -122,6 +124,7 @@ pub(crate) enum ApiError {
     Removed,
     DeleteRefused,
     NodeUnavailable,
+    StorageFull,
     Internal,
 }
 
@@ -143,6 +146,7 @@ impl ApiError {
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Removed => StatusCode::GONE,
             Self::DeleteRefused => StatusCode::FORBIDDEN,
+            Self::StorageFull => StatusCode::INSUFFICIENT_STORAGE,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -168,6 +172,7 @@ impl ApiError {
             Self::Removed => "blob-removed",
             Self::DeleteRefused => "blob-delete-refused",
             Self::NodeUnavailable => "blob-node-unavailable",
+            Self::StorageFull => "storage-full",
             Self::Internal => "internal",
         }
     }
@@ -175,12 +180,24 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
+        let mut response = (
             self.status(),
             Json(serde_json::json!({ "error": self.code() })),
         )
-            .into_response()
+            .into_response();
+        // The `code` label of the request counter (ADR-0096).
+        response
+            .extensions_mut()
+            .insert(lakko_metrics::ErrorCode(self.code()));
+        response
     }
+}
+
+/// The outcome `result` is counted under, `ok` when it succeeded.
+fn outcome_of<T>(result: &Result<T, ApiError>, ok: Outcome) -> Outcome {
+    result
+        .as_ref()
+        .map_or_else(|e| Outcome::of_error(*e), |_| ok)
 }
 
 impl From<IndexError> for ApiError {
@@ -201,26 +218,8 @@ pub(crate) fn parse_id(hex: &str) -> Result<BlobId, ApiError> {
     BlobId::try_from(v.as_slice()).map_err(|_| ApiError::IdMalformed)
 }
 
-/// Resolve `<root>/<hex[0:2]>/<hex[2:4]>/<hex>`.
-pub(crate) fn blob_path(root: &Path, id: &BlobId) -> PathBuf {
-    let hex = hex::encode(id);
-    let mut p = root.to_path_buf();
-    p.push(&hex[0..2]);
-    p.push(&hex[2..4]);
-    p.push(&hex);
-    p
-}
-
-/// Probe that the blob root is writable by creating and deleting a
-/// uniquely-named temp file. Used by `/ready` and at startup.
-pub(crate) async fn probe_writable(root: &Path) -> std::io::Result<()> {
-    tokio::fs::create_dir_all(root).await?;
-    let probe = tempfile::Builder::new()
-        .prefix(".lakko-storage-probe-")
-        .tempfile_in(root)?;
-    drop(probe);
-    Ok(())
-}
+#[cfg(test)]
+pub(crate) use crate::store::blob_path;
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -280,6 +279,7 @@ async fn issue_pass(state: &AppState, headers: &HeaderMap, kind: PassKind) -> Re
     }
     let expires_at = now_unix_secs().saturating_add(state.limits.ttl_secs);
     let (_, value) = secret.issue(kind, expires_at);
+    m::pass_issued(kind);
     let budget = match kind {
         PassKind::Upload => serde_json::json!({
             "files": state.limits.upload_files,
@@ -364,6 +364,11 @@ fn internal_io(ctx: &'static str, e: &std::io::Error) -> ApiError {
     ApiError::Internal
 }
 
+fn internal_store(ctx: &'static str, e: &StoreError) -> ApiError {
+    tracing::error!(error = %e, "{ctx}");
+    ApiError::Internal
+}
+
 /// Stream `body` through SHA-256 into `temp`, stopping at more than
 /// `declared` bytes. Returns the digest and the byte count.
 async fn stream_into(
@@ -408,7 +413,7 @@ async fn stream_into(
 /// be exactly `Content-Length` bytes. A first upload writes the row with the
 /// delete key and the optional idle life; a repeated upload is an access and
 /// keeps the first key and idle life. An id a moderator deleted is refused
-/// with `410 blob-removed` before the body is read (ADR-0089), and again if
+/// with `410 blob-removed` before the body is read (ADR-0098), and again if
 /// the delete lands while the body streams (the stored file is then removed).
 pub(crate) async fn put_blob(
     State(state): State<AppState>,
@@ -416,26 +421,48 @@ pub(crate) async fn put_blob(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
+    let result = store_blob(&state, &hex, &headers, body).await;
+    let counted = match result {
+        Ok(UploadOutcome::Created) => Outcome::Created,
+        Ok(UploadOutcome::Existed) => Outcome::Existed,
+        Ok(UploadOutcome::Removed) => Outcome::Refused,
+        Err(e) => Outcome::of_error(e),
+    };
+    m::upload(counted);
+    let status = match result? {
+        UploadOutcome::Created => StatusCode::CREATED,
+        UploadOutcome::Existed => StatusCode::OK,
+        UploadOutcome::Removed => return Err(ApiError::Removed),
+    };
+    Ok(status.into_response())
+}
+
+async fn store_blob(
+    state: &AppState,
+    hex: &str,
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<UploadOutcome, ApiError> {
     // Pass shape and expiry first, so nothing below is reachable without one;
     // the charge follows the request checks, which cost the client nothing.
-    take_pass(&state, &headers, PassKind::Upload, 0, 0)?;
-    let id = parse_id(&hex)?;
+    take_pass(state, headers, PassKind::Upload, 0, 0)?;
+    let id = parse_id(hex)?;
     if state.index.is_tombstoned(&id).await? {
         return Err(ApiError::Removed);
     }
-    let key = delete_key(&headers)?;
-    let idle = idle_days(&headers)?;
-    let declared = content_length(&headers)?;
+    let key = delete_key(headers)?;
+    let idle = idle_days(headers)?;
+    let declared = content_length(headers)?;
     if declared > crate::MAX_BLOB_BYTES as u64 {
         return Err(ApiError::TooLarge);
     }
-    take_pass(&state, &headers, PassKind::Upload, 1, declared)?;
+    // Before the charge: a full disk costs the uploader no budget.
+    if !crate::disk::check(&state.blob_root, declared, state.limits.min_free_bytes).await {
+        return Err(ApiError::StorageFull);
+    }
+    take_pass(state, headers, PassKind::Upload, 1, declared)?;
 
-    let target = blob_path(&state.blob_root, &id);
-    let parent = target
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or(ApiError::Internal)?;
+    let parent = state.store.temp_dir(&id);
     tokio::fs::create_dir_all(&parent)
         .await
         .map_err(|e| internal_io("create blob parent", &e))?;
@@ -456,11 +483,13 @@ pub(crate) async fn put_blob(
         // `temp` drops here, removing the partial file.
         return Err(ApiError::HashMismatch);
     }
-    let stored = target.clone();
-    tokio::task::spawn_blocking(move || temp.persist(&target))
+    // The bytes are in the store before the row is written: a failed store
+    // write leaves no row (and the temporary is gone either way).
+    state
+        .store
+        .put_file(&id, temp, written)
         .await
-        .map_err(|_| ApiError::Internal)?
-        .map_err(|e| internal_io("persist blob", &e.error))?;
+        .map_err(|e| internal_store("store blob", &e))?;
 
     let day = today();
     let outcome = state
@@ -475,17 +504,16 @@ pub(crate) async fn put_blob(
             idle_days: idle,
         })
         .await?;
-    let status = match outcome {
-        UploadOutcome::Created => StatusCode::CREATED,
-        UploadOutcome::Existed => StatusCode::OK,
-        UploadOutcome::Removed => {
-            // A moderator deleted the id while the body streamed: the file
-            // just written must not stay.
-            remove_blob_file(&stored).await;
-            return Err(ApiError::Removed);
-        },
-    };
-    Ok(status.into_response())
+    if outcome == UploadOutcome::Removed {
+        // A moderator deleted the id while the body streamed: the bytes just
+        // stored must not stay.
+        remove_blob_bytes(state, &id).await;
+        return Err(ApiError::Removed);
+    }
+    if outcome == UploadOutcome::Created {
+        m::bytes_added(written);
+    }
+    Ok(outcome)
 }
 
 // ============================================================================
@@ -501,12 +529,17 @@ async fn local_row(state: &AppState, id: &BlobId) -> Result<BlobRow, ApiError> {
     Ok(row)
 }
 
-/// A row whose file is gone is removed, so the blob reads as not found from
+/// A row whose bytes are gone is removed, so the blob reads as not found from
 /// then on rather than failing every time.
-async fn file_missing(state: &AppState, id: &BlobId) -> ApiError {
-    tracing::warn!("blob row without a file; removing the row");
+async fn file_missing(state: &AppState, id: &BlobId, size: u64) -> ApiError {
+    tracing::warn!("blob row without its bytes; removing the row");
     match state.index.remove(id).await {
-        Ok(_) => ApiError::NotFound,
+        Ok(removed) => {
+            if removed {
+                m::bytes_removed(size);
+            }
+            ApiError::NotFound
+        },
         Err(e) => ApiError::from(e),
     }
 }
@@ -518,30 +551,35 @@ pub(crate) async fn get_blob(
     AxumPath(hex): AxumPath<String>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    take_pass(&state, &headers, PassKind::Read, 0, 0)?;
-    let id = parse_id(&hex)?;
-    take_pass(&state, &headers, PassKind::Read, 1, 0)?;
-    let row = local_row(&state, &id).await?;
+    let result = download_blob(&state, &hex, &headers).await;
+    m::download(outcome_of(&result, Outcome::Ok));
+    result
+}
 
-    let path = blob_path(&state.blob_root, &id);
-    let file = match tokio::fs::File::open(&path).await {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(file_missing(&state, &id).await);
-        },
-        Err(e) => return Err(internal_io("open blob", &e)),
-    };
-    let len = file
-        .metadata()
+async fn download_blob(
+    state: &AppState,
+    hex: &str,
+    headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    take_pass(state, headers, PassKind::Read, 0, 0)?;
+    let id = parse_id(hex)?;
+    take_pass(state, headers, PassKind::Read, 1, 0)?;
+    let row = local_row(state, &id).await?;
+
+    let Some((len, stream)) = state
+        .store
+        .open(&id)
         .await
-        .map_err(|e| internal_io("stat blob", &e))?
-        .len();
+        .map_err(|e| internal_store("open blob", &e))?
+    else {
+        return Err(file_missing(state, &id, row.size).await);
+    };
     let day = today();
     if row.last_access_day < day {
         state.index.touch(&[id], day).await?;
     }
 
-    let mut response = Response::new(Body::from_stream(crate::stream::ReaderStream::new(file)));
+    let mut response = Response::new(Body::from_stream(stream));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         header::HeaderValue::from_static("application/octet-stream"),
@@ -552,28 +590,23 @@ pub(crate) async fn get_blob(
     Ok(response)
 }
 
-/// A blob's ciphertext for the moderators' panel (ADR-0089 step 5), served
+/// A blob's ciphertext for the moderators' panel (ADR-0098 step 5), served
 /// on storage's internal listener behind its shared secret: no pass, and not
 /// an access, so a moderator looking at evidence does not extend the blob's
 /// life. Refusals as `GET /blob/{hex}`: `400 blob-id-malformed`, `404
 /// blob-not-found`, `503 blob-node-unavailable`.
 pub(crate) async fn read_for_moderator(state: &AppState, hex: &str) -> Result<Response, ApiError> {
     let id = parse_id(hex)?;
-    local_row(state, &id).await?;
-    let path = blob_path(&state.blob_root, &id);
-    let file = match tokio::fs::File::open(&path).await {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(file_missing(state, &id).await);
-        },
-        Err(e) => return Err(internal_io("open blob", &e)),
-    };
-    let len = file
-        .metadata()
+    let row = local_row(state, &id).await?;
+    let Some((len, stream)) = state
+        .store
+        .open(&id)
         .await
-        .map_err(|e| internal_io("stat blob", &e))?
-        .len();
-    let mut response = Response::new(Body::from_stream(crate::stream::ReaderStream::new(file)));
+        .map_err(|e| internal_store("open blob", &e))?
+    else {
+        return Err(file_missing(state, &id, row.size).await);
+    };
+    let mut response = Response::new(Body::from_stream(stream));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         header::HeaderValue::from_static("application/octet-stream"),
@@ -620,8 +653,14 @@ pub(crate) async fn keep_blobs(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    take_pass(&state, &headers, PassKind::Read, 0, 0)?;
-    let parsed: KeepBody = serde_json::from_slice(&body).map_err(|_| ApiError::KeepMalformed)?;
+    let result = keep(&state, &headers, &body).await;
+    m::keep(outcome_of(&result, Outcome::Ok));
+    result
+}
+
+async fn keep(state: &AppState, headers: &HeaderMap, body: &[u8]) -> Result<Response, ApiError> {
+    take_pass(state, headers, PassKind::Read, 0, 0)?;
+    let parsed: KeepBody = serde_json::from_slice(body).map_err(|_| ApiError::KeepMalformed)?;
     if parsed.ids.is_empty() || parsed.ids.len() > MAX_KEEP_IDS {
         return Err(ApiError::KeepMalformed);
     }
@@ -631,7 +670,7 @@ pub(crate) async fn keep_blobs(
         .map(|h| parse_id(h).map_err(|_| ApiError::KeepMalformed))
         .collect::<Result<Vec<_>, _>>()?;
     let count = u64::try_from(ids.len()).unwrap_or(u64::MAX);
-    take_pass(&state, &headers, PassKind::Read, 0, count)?;
+    take_pass(state, headers, PassKind::Read, 0, count)?;
     state.index.touch(&ids, today()).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -640,7 +679,7 @@ pub(crate) async fn keep_blobs(
 // DELETE /blob/{hex}
 // ============================================================================
 
-/// `DELETE /blob/{hex}` - delete a blob, row then file. Requires an
+/// `DELETE /blob/{hex}` - delete a blob, row then bytes. Requires an
 /// `x-lakko-storage-proof` over `("DELETE", "/blob/<hex>", empty body)`
 /// under the delete key the first upload carried; no pass. Every refusal is
 /// the same 403 `blob-delete-refused`: no row, a row with no key, a missing,
@@ -650,7 +689,17 @@ pub(crate) async fn delete_blob(
     AxumPath(hex): AxumPath<String>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let id = parse_id(&hex).map_err(|_| ApiError::DeleteRefused)?;
+    let result = remove_blob(&state, &hex, &headers).await;
+    m::delete(outcome_of(&result, Outcome::Deleted));
+    result
+}
+
+async fn remove_blob(
+    state: &AppState,
+    hex: &str,
+    headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    let id = parse_id(hex).map_err(|_| ApiError::DeleteRefused)?;
     let proof = headers
         .get(lakko_vault::proof::PROOF_HEADER_NAME)
         .and_then(|v| v.to_str().ok())
@@ -663,19 +712,19 @@ pub(crate) async fn delete_blob(
     if row.node != *state.node {
         return Err(ApiError::NodeUnavailable);
     }
-    state.index.remove(&id).await?;
-    remove_blob_file(&blob_path(&state.blob_root, &id)).await;
+    if state.index.remove(&id).await? {
+        m::bytes_removed(row.size);
+    }
+    remove_blob_bytes(state, &id).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// Remove a blob's file after its row: a missing file is fine, another
-/// failure is logged (the row is gone, so the blob is already unreachable
-/// and the file is an orphan on disk).
-pub(crate) async fn remove_blob_file(path: &Path) {
-    match tokio::fs::remove_file(path).await {
-        Ok(()) => {},
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
-        Err(e) => tracing::warn!(error = %e, "delete blob file after its row"),
+/// Remove a blob's bytes after its row: a failure is logged (the row is
+/// gone, so the blob is already unreachable and the bytes are an orphan in
+/// the store).
+pub(crate) async fn remove_blob_bytes(state: &AppState, id: &BlobId) {
+    if let Err(e) = state.store.delete(id).await {
+        tracing::warn!(error = %e, "delete blob bytes after its row");
     }
 }
 

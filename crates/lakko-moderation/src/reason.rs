@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The report reasons ([ADR-0089] section 2.1, UX section 2.2): one closed
+//! The report reasons ([ADR-0098] section 2.1, UX section 2.2): one closed
 //! list, frozen bytes, shared by the report sheet, the report, the panel and
 //! the suspended person's screen. The order of [`Reason::ALL`] is the order
 //! the sheet shows.
 //!
-//! [ADR-0089]: ../../../docs/adr/0089-reporting-and-moderation.md
+//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
 
 use crate::ModerationError;
 

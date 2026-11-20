@@ -552,7 +552,8 @@ final class KeysSignOutTests: XCTestCase {
             tokenProvider: tokens,
             wipeAfterKeyReset: { account in wiped.note(account) },
             recallRecords: recalls,
-            recallOperations: .unreachable
+            recallOperations: .unreachable,
+            earlierKeysInputs: skipEarlierKeysGate
         )
         if let refresh {
             tokens.refresher = { _ in try refresh.get() }
@@ -680,5 +681,288 @@ final class KeysSignOutTests: XCTestCase {
         XCTAssertEqual(h.persistence.token?.sessionToken, "tok-new")
         XCTAssertTrue(h.tokens.isKnownAccessToken("tok-old"))
         XCTAssertNil(h.repository.keysSignOut)
+    }
+}
+
+// MARK: - Waiting for the directory (UX 15.4, amended 2026-11-12)
+
+final class PublishOwedDisplayTests: XCTestCase {
+
+    private let owed = "recovery_phrase.fresh.publish_owed"
+    private let signIn = "recovery_phrase.fresh.sign_in_to_finish"
+    private let words = "recovery_phrase.fresh.publish_waiting"
+    private let wordless = "account.keys_changed.waiting"
+
+    private func refusal(_ body: String, status: Int = 429) -> Error {
+        KeyResetPublishFailed(
+            step: "discovery",
+            underlying: DiscoveryClientError.http(status: status, endpoint: "/discovery/identity", body: body))
+    }
+
+    func testRetryAfterIsReadWhateverNumberTypeTheJsonGave() {
+        XCTAssertEqual(IdentityUploadRefusal.retryAfterSecs(NSNumber(value: 90)), 90)
+        XCTAssertEqual(IdentityUploadRefusal.retryAfterSecs(NSNumber(value: Int64(3600))), 3600)
+        XCTAssertEqual(IdentityUploadRefusal.retryAfterSecs(NSNumber(value: 90.0)), 90)
+        XCTAssertEqual(IdentityUploadRefusal.retryAfterSecs(NSNumber(value: 89.2)), 90, "rounded up")
+        XCTAssertNil(IdentityUploadRefusal.retryAfterSecs(NSNumber(value: 0)))
+        XCTAssertNil(IdentityUploadRefusal.retryAfterSecs(NSNumber(value: -5)))
+        XCTAssertNil(IdentityUploadRefusal.retryAfterSecs(NSNumber(value: true)), "a boolean is not a time")
+        XCTAssertNil(IdentityUploadRefusal.retryAfterSecs("90"))
+        XCTAssertNil(IdentityUploadRefusal.retryAfterSecs(nil))
+        // Through the real JSON parser.
+        XCTAssertEqual(
+            IdentityUploadRefusal.classify(
+                status: 429, body: #"{"error":"identity-changed-too-recently","retry_after_secs":2400}"#),
+            .changedTooRecently(retryAfterSecs: 2400))
+        XCTAssertEqual(
+            IdentityUploadRefusal.classify(
+                status: 429, body: #"{"error":"identity-changed-too-recently","retry_after_secs":2400.0}"#),
+            .changedTooRecently(retryAfterSecs: 2400))
+        XCTAssertEqual(
+            IdentityUploadRefusal.classify(status: 429, body: #"{"error":"identity-changed-too-recently"}"#),
+            .changedTooRecently(retryAfterSecs: nil))
+    }
+
+    func testOnlyTheCoolDownWithATimeStartsAWait() {
+        let now: Int64 = 5_000_000
+        let wait = KeyResetPublishWait.after(
+            refusal(#"{"error":"identity-changed-too-recently","retry_after_secs":2400}"#),
+            accountIdB64: "acc", nowMs: now)
+        XCTAssertEqual(wait, KeyResetPublishWait(accountIdB64: "acc", untilMs: now + 2_400_000))
+        // The bare error too (not wrapped by the publish run).
+        XCTAssertNotNil(KeyResetPublishWait.after(
+            DiscoveryClientError.http(
+                status: 429, endpoint: "/discovery/identity",
+                body: #"{"error":"identity-changed-too-recently","retry_after_secs":5}"#),
+            accountIdB64: "acc", nowMs: now))
+        // No readable time: "could not finish" and Try again.
+        XCTAssertNil(KeyResetPublishWait.after(
+            refusal(#"{"error":"identity-changed-too-recently"}"#), accountIdB64: "acc", nowMs: now))
+        XCTAssertNil(KeyResetPublishWait.after(
+            refusal(#"{"error":"identity-changed-too-recently","retry_after_secs":"soon"}"#),
+            accountIdB64: "acc", nowMs: now))
+        // Any other refusal, or a network failure.
+        XCTAssertNil(KeyResetPublishWait.after(
+            refusal(#"{"error":"key-reset-disabled"}"#, status: 503), accountIdB64: "acc", nowMs: now))
+        XCTAssertNil(KeyResetPublishWait.after(
+            refusal(#"{"error":"too-many-attempts","retry_after_secs":60}"#), accountIdB64: "acc", nowMs: now))
+        XCTAssertNil(KeyResetPublishWait.after(
+            KeyResetPublishFailed(step: "discovery", underlying: URLError(.notConnectedToInternet)),
+            accountIdB64: "acc", nowMs: now))
+        // An absurd time is bounded.
+        XCTAssertEqual(
+            KeyResetPublishWait.after(
+                refusal(#"{"error":"identity-changed-too-recently","retry_after_secs":99999999}"#),
+                accountIdB64: "acc", nowMs: 0)?.untilMs,
+            Int64(KeyResetPublishWait.maxWaitSecs) * 1000)
+    }
+
+    func testMinutesAreRoundedUpAndAtLeastOne() {
+        XCTAssertEqual(PublishOwedDisplay.minutes(remainingMs: 2_400_000), 40)
+        XCTAssertEqual(PublishOwedDisplay.minutes(remainingMs: 2_399_001), 40)
+        XCTAssertEqual(PublishOwedDisplay.minutes(remainingMs: 2_340_001), 40)
+        XCTAssertEqual(PublishOwedDisplay.minutes(remainingMs: 2_340_000), 39)
+        XCTAssertEqual(PublishOwedDisplay.minutes(remainingMs: 60_001), 2)
+        XCTAssertEqual(PublishOwedDisplay.minutes(remainingMs: 60_000), 1)
+        XCTAssertEqual(PublishOwedDisplay.minutes(remainingMs: 1), 1)
+        XCTAssertEqual(PublishOwedDisplay.minutes(remainingMs: 0), 1)
+        XCTAssertEqual(PublishOwedDisplay.minutes(remainingMs: -30_000), 1)
+    }
+
+    func testWithoutAWaitTheScreenSaysCouldNotFinishWithTryAgain() {
+        let display = PublishOwedDisplay.decide(copyKey: owed, showsWords: true, waitUntilMs: nil, needsSignIn: false, nowMs: 1)
+        XCTAssertEqual(display, PublishOwedDisplay(message: .copy(key: owed), showsTryAgain: true, retryDue: false))
+    }
+
+    func testDuringTheWaitTheMinutesCountDownWithNoTryAgain() {
+        let until: Int64 = 10_000_000
+        let early = PublishOwedDisplay.decide(
+            copyKey: owed, showsWords: true, waitUntilMs: until, needsSignIn: false, nowMs: until - 2_400_000)
+        XCTAssertEqual(early.message, .waiting(key: words, minutes: 40))
+        XCTAssertFalse(early.showsTryAgain)
+        XCTAssertFalse(early.retryDue)
+        let later = PublishOwedDisplay.decide(
+            copyKey: owed, showsWords: true, waitUntilMs: until, needsSignIn: false, nowMs: until - 61_000)
+        XCTAssertEqual(later.message, .waiting(key: words, minutes: 2))
+        let last = PublishOwedDisplay.decide(
+            copyKey: owed, showsWords: true, waitUntilMs: until, needsSignIn: false, nowMs: until - 30_000)
+        XCTAssertEqual(last.message, .waiting(key: words, minutes: 1))
+        XCTAssertFalse(last.retryDue)
+    }
+
+    func testTheRetryIsDueOnceTheTimeAndTheMarginArePast() {
+        let until: Int64 = 10_000_000
+        let atTime = PublishOwedDisplay.decide(copyKey: owed, showsWords: true, waitUntilMs: until, needsSignIn: false, nowMs: until)
+        XCTAssertFalse(atTime.retryDue, "the server's time may be rounded down")
+        XCTAssertEqual(atTime.message, .waiting(key: words, minutes: 1))
+        XCTAssertFalse(atTime.showsTryAgain)
+        let due = PublishOwedDisplay.decide(
+            copyKey: owed, showsWords: true, waitUntilMs: until, needsSignIn: false, nowMs: until + PublishOwedDisplay.retryMarginMs)
+        XCTAssertTrue(due.retryDue)
+        XCTAssertFalse(due.showsTryAgain, "the app retries by itself, not the person")
+    }
+
+    func testAnAccountWithNoSavedPhraseWaitsWithTheWordlessCopy() {
+        let finishing = KeysChangedCopy.publishOwedKey(showsWords: false, needsSignIn: false)
+        XCTAssertEqual(finishing, "account.keys_changed.finishing")
+        let until: Int64 = 10_000_000
+        let waiting = PublishOwedDisplay.decide(
+            copyKey: finishing, showsWords: false, waitUntilMs: until, needsSignIn: false, nowMs: until - 2_400_000)
+        XCTAssertEqual(waiting.message, .waiting(key: wordless, minutes: 40))
+        XCTAssertFalse(waiting.showsTryAgain)
+        XCTAssertFalse(waiting.retryDue)
+        let due = PublishOwedDisplay.decide(
+            copyKey: finishing, showsWords: false, waitUntilMs: until, needsSignIn: false,
+            nowMs: until + PublishOwedDisplay.retryMarginMs)
+        XCTAssertEqual(due.message, .waiting(key: wordless, minutes: 1))
+        XCTAssertTrue(due.retryDue)
+        XCTAssertFalse(due.showsTryAgain)
+        // No wait: the finishing copy and Try again, as before.
+        XCTAssertEqual(
+            PublishOwedDisplay.decide(copyKey: finishing, showsWords: false, waitUntilMs: nil, needsSignIn: false, nowMs: 1),
+            PublishOwedDisplay(message: .copy(key: finishing), showsTryAgain: true, retryDue: false))
+        XCTAssertEqual(PublishOwedDisplay.waitingKey(showsWords: true), words)
+        XCTAssertEqual(PublishOwedDisplay.waitingKey(showsWords: false), wordless)
+    }
+
+    func testASignInRequiredOutranksTheWait() {
+        let display = PublishOwedDisplay.decide(
+            copyKey: signIn, showsWords: true, waitUntilMs: 10_000_000, needsSignIn: true, nowMs: 1)
+        XCTAssertEqual(display.message, .copy(key: signIn))
+        XCTAssertFalse(display.retryDue)
+    }
+}
+
+// MARK: - The return key on the reset warning (UX 15.1)
+
+final class KeyResetReturnKeyTests: XCTestCase {
+
+    func testTheButtonIsEnabledOnlyWhenNotBusyReadyAndNotWaiting() {
+        XCTAssertTrue(KeyResetReturnKey.buttonEnabled(busy: false, canReset: true, waiting: false))
+        XCTAssertFalse(KeyResetReturnKey.buttonEnabled(busy: true, canReset: true, waiting: false))
+        XCTAssertFalse(KeyResetReturnKey.buttonEnabled(busy: false, canReset: false, waiting: false))
+        XCTAssertFalse(KeyResetReturnKey.buttonEnabled(busy: false, canReset: true, waiting: true))
+    }
+
+    func testReturnInTheWordFieldDoesWhatTheButtonDoes() {
+        XCTAssertEqual(KeyResetReturnKey.action(from: .word, buttonEnabled: true, wordTyped: true), .submit)
+        XCTAssertEqual(KeyResetReturnKey.action(from: .word, buttonEnabled: false, wordTyped: true), .nothing)
+        XCTAssertEqual(KeyResetReturnKey.action(from: .word, buttonEnabled: false, wordTyped: false), .nothing)
+    }
+
+    func testReturnInThePasswordFieldMovesToTheWordUntilItIsTyped() {
+        XCTAssertEqual(KeyResetReturnKey.action(from: .password, buttonEnabled: false, wordTyped: false), .focusWord)
+        XCTAssertEqual(KeyResetReturnKey.action(from: .password, buttonEnabled: true, wordTyped: true), .submit)
+        // The word is typed but the button is not enabled (the password is
+        // missing, a wait runs): nothing, as the disabled button.
+        XCTAssertEqual(KeyResetReturnKey.action(from: .password, buttonEnabled: false, wordTyped: true), .nothing)
+    }
+}
+
+// MARK: - The baseline backup of a parked pair (base scenario 4b)
+
+final class BaselineBackupGateTests: XCTestCase {
+
+    func testOnlyARefreshedPairUploadsAndASignOutAnswerSendsNothing() {
+        XCTAssertEqual(BaselineBackupGate.decide(.refreshed(.fixture())), .upload)
+        XCTAssertEqual(BaselineBackupGate.decide(.failed("offline")), .cacheOnly)
+        XCTAssertEqual(BaselineBackupGate.decide(.noCredential), .cacheOnly)
+        XCTAssertEqual(BaselineBackupGate.decide(.superseded), .skip)
+        XCTAssertEqual(BaselineBackupGate.decide(.revoked), .skip)
+        XCTAssertEqual(BaselineBackupGate.decide(.invalid), .skip)
+    }
+
+    func testAMintRefusalThatSignsTheDeviceOutIsNotSoft() {
+        let body = { (code: String) in Data(#"{"error":"\#(code)"}"#.utf8) }
+        XCTAssertEqual(backupHeadMintRefusal(status: 401, body: body("key-generation-superseded")), .signedOut)
+        XCTAssertEqual(backupHeadMintRefusal(status: 401, body: body("device-revoked")), .signedOut)
+        XCTAssertEqual(backupHeadMintRefusal(status: 401, body: body("refresh-invalid")), .http(401))
+        XCTAssertEqual(backupHeadMintRefusal(status: 401, body: Data()), .http(401))
+        XCTAssertEqual(backupHeadMintRefusal(status: 503, body: body("key-generation-superseded")), .http(503))
+    }
+}
+
+// MARK: - The one read of a superseded device (ADR-0074 section 3.3)
+
+final class DeviceGroupJournalOneShotTests: XCTestCase {
+
+    private typealias OneShot = DeviceGroupJournalOneShot
+
+    /// A journal of pages; each row's payload is its own "service envelope"
+    /// when it starts with 0x01.
+    private final class Journal {
+        var pages: [Result<OneShot.Page, OneShot.FetchFailure>]
+        private(set) var asked: [Int64] = []
+        init(_ pages: [Result<OneShot.Page, OneShot.FetchFailure>]) { self.pages = pages }
+
+        func reader(start: Int64 = 7) -> OneShot.Reader {
+            OneShot.Reader(
+                startCursor: start,
+                fetch: { [self] after in
+                    asked.append(after)
+                    return try pages.removeFirst().get()
+                },
+                serviceEnvelope: { $0.first == 0x01 ? $0 : nil })
+        }
+    }
+
+    private func row(_ id: Int64, envelope: Bool) -> OneShot.Row {
+        OneShot.Row(id: id, payload: Data([envelope ? 0x01 : 0x02, UInt8(id)]))
+    }
+
+    func testTheReadGoesFromThePersistedCursorToTheHeadAndHandsEveryEnvelopeOver() async {
+        let journal = Journal([
+            .success(OneShot.Page(rows: [row(8, envelope: false), row(9, envelope: true)], hasMore: true)),
+            .success(OneShot.Page(rows: [row(12, envelope: true)], hasMore: false)),
+        ])
+        var delivered: [Data] = []
+        let outcome = await OneShot.drain(reader: journal.reader()) { delivered.append($0) }
+        XCTAssertEqual(outcome, .reached, "adopt: the envelope reached the intake")
+        XCTAssertEqual(journal.asked, [7, 9], "from the persisted cursor, page by page")
+        XCTAssertEqual(delivered, [Data([0x01, 9]), Data([0x01, 12])])
+    }
+
+    func testADrainedJournalWithNoEnvelopeReachesTheHeadAndDeliversNothing() async {
+        let journal = Journal([.success(OneShot.Page(rows: [row(8, envelope: false)], hasMore: false))])
+        var delivered: [Data] = []
+        let outcome = await OneShot.drain(reader: journal.reader()) { delivered.append($0) }
+        XCTAssertEqual(outcome, .reached, "reset: nothing was held")
+        XCTAssertTrue(delivered.isEmpty)
+    }
+
+    func testNoStateAndARefusalAreTheirOwnAnswers() async {
+        let none = await OneShot.drain(reader: nil) { _ in XCTFail("nothing to deliver") }
+        XCTAssertEqual(none, .noState)
+        let refused = await OneShot.drain(reader: Journal([.failure(.refused)]).reader()) { _ in }
+        XCTAssertEqual(refused, .refused)
+    }
+
+    func testNoAnswerIsLaterAndAnEnvelopeAlreadyReadIsStillHandedOver() async {
+        let journal = Journal([
+            .success(OneShot.Page(rows: [row(8, envelope: true)], hasMore: true)),
+            .failure(.noAnswer),
+        ])
+        var delivered: [Data] = []
+        let outcome = await OneShot.drain(reader: journal.reader()) { delivered.append($0) }
+        XCTAssertEqual(outcome, .noAnswer)
+        XCTAssertEqual(delivered, [Data([0x01, 8])])
+    }
+
+    func testAFetchThatHangsPastTheBoundIsNoAnswer() async {
+        let reader = OneShot.Reader(
+            startCursor: 0,
+            fetch: { _ in
+                try await Task.sleep(nanoseconds: 5_000_000_000)
+                return OneShot.Page(rows: [], hasMore: false)
+            },
+            serviceEnvelope: { _ in nil })
+        let started = Date()
+        let outcome = await OneShot.drain(reader: reader, deliver: { _ in }, deadlineMs: 200)
+        XCTAssertEqual(outcome, .noAnswer)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2, "the bound ended the read")
+    }
+
+    func testThePublishedBoundIsFortySeconds() {
+        XCTAssertEqual(OneShot.deadlineMs, 40_000)
     }
 }

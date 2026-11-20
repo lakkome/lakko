@@ -12,8 +12,8 @@ use lakko_vault::keys::{ConversationRef, VaultRef, VaultRoot};
 use lakko_vault::record::{
     ChunkEntry, ConversationHead, ConversationKind, DevicesHead, Direction, HistoryChunk,
     IndexEntry, Membership, PersonalPin, ReentryEpoch, RegistrarSeed, Role, SharedPin,
-    VaultAttachment, VaultCall, VaultForward, VaultForwardOrigin, VaultIndex, VaultMessage,
-    VaultPerson, VaultReaction, VaultReply, VaultThumb,
+    VaultAttachment, VaultCall, VaultContent, VaultForward, VaultForwardOrigin, VaultIndex,
+    VaultMessage, VaultPerson, VaultReaction, VaultReply, VaultThumb,
 };
 use lakko_vault::seal::{open_object, seal_object, ObjectKind};
 use lakko_vault::{fuzz_api, proof, SecretBytes};
@@ -55,6 +55,8 @@ fn attachment() -> impl Strategy<Value = VaultAttachment> {
         prop::collection::vec(any::<u8>(), 0..8),
         (any::<Option<u16>>(), any::<Option<u16>>()),
         prop::option::of(thumb()),
+        (text(8), text(8)),
+        prop::collection::vec(any::<u8>(), 0..64),
     )
         .prop_map(
             |(
@@ -65,6 +67,8 @@ fn attachment() -> impl Strategy<Value = VaultAttachment> {
                 waveform,
                 (width, height),
                 thumb,
+                (title, artist),
+                inline_thumb,
             )| {
                 VaultAttachment {
                     blob_id,
@@ -79,6 +83,9 @@ fn attachment() -> impl Strategy<Value = VaultAttachment> {
                     width,
                     height,
                     thumb,
+                    title,
+                    artist,
+                    inline_thumb,
                 }
             },
         )
@@ -138,7 +145,7 @@ fn message() -> impl Strategy<Value = VaultMessage> {
         (prop::option::of(reply()), prop::option::of(forward())),
         prop::collection::vec(reaction(), 0..4),
         prop::option::of((any::<u8>(), any::<bool>(), any::<u32>())),
-        any::<Option<u32>>(),
+        (any::<Option<u32>>(), prop::option::of(content())),
     )
         .prop_map(
             |(
@@ -149,7 +156,7 @@ fn message() -> impl Strategy<Value = VaultMessage> {
                 (reply, forward),
                 reactions,
                 call,
-                unsupported_version,
+                (unsupported_version, content),
             )| VaultMessage {
                 message_id,
                 direction,
@@ -169,8 +176,22 @@ fn message() -> impl Strategy<Value = VaultMessage> {
                     duration_secs,
                 }),
                 unsupported_version,
+                content,
             },
         )
+}
+
+fn content() -> impl Strategy<Value = VaultContent> {
+    (
+        1u8..=5,
+        prop::collection::vec(any::<u8>(), 1..40),
+        prop::collection::vec(any::<u8>(), 0..20),
+    )
+        .prop_map(|(kind, payload, state)| VaultContent {
+            kind,
+            payload,
+            state,
+        })
 }
 
 fn conversation() -> impl Strategy<Value = ConversationRef> {
@@ -182,8 +203,16 @@ fn conversation() -> impl Strategy<Value = ConversationRef> {
 
 fn reentry() -> impl Strategy<Value = Vec<ReentryEpoch>> {
     prop::collection::vec(
-        (any::<u64>(), prop::collection::vec(any::<u8>(), 1..40))
-            .prop_map(|(epoch, group_info)| ReentryEpoch { epoch, group_info }),
+        (
+            any::<u64>(),
+            any::<[u8; 32]>(),
+            prop::collection::vec(any::<u8>(), 1..40),
+        )
+            .prop_map(|(epoch, seed, group_info)| ReentryEpoch {
+                epoch,
+                ds_access_seed: SecretBytes::new(seed),
+                group_info,
+            }),
         0..=2,
     )
 }

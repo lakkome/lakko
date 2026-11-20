@@ -5,7 +5,7 @@
  * The signed-in moderator, in memory only.
  *
  * The bearer token and the report secret (the security key's PRF output,
- * ADR-0089 section 3) live in this module's signal and nowhere else: no
+ * ADR-0098 section 3) live in this module's signal and nowhere else: no
  * storage, no cookie, no URL. Reloading the page signs out; that is the
  * intended cost of never writing the secret down.
  */

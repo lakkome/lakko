@@ -365,7 +365,7 @@ pub(crate) async fn action_start(
         .ok_or(ApiError::Disabled)?
         .clone();
     let action_hash = decode_action_hash(&req.action_hash_b64)?;
-    // ADR-0089 section 4: a suspended account reaches this route (it is how
+    // ADR-0098 section 4: a suspended account reaches this route (it is how
     // an account with a passkey deletes itself) and nothing else through it.
     if standing.suspended && action_hash != delete_account_action_hash(&auth.0) {
         return Err(ApiError::AccountSuspended(None));
@@ -1100,6 +1100,7 @@ mod action_grant_e2e_tests {
             room_cap: std::sync::Arc::new(crate::room_cap::RoomAdmissionCap::disabled()),
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
             anon_tokens: None,
+            anon_cred: None,
             handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
             recovery_email: None,
             limits: Arc::new(crate::limits::Limits::defaults()),

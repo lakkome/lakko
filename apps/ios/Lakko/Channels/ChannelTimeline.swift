@@ -11,6 +11,15 @@ public enum ChannelPostBody: Equatable {
     case chat(text: String, attachments: [AttachmentRef], forward: ForwardRef?)
     case edit(target: UInt64, text: String)
     case delete(target: UInt64)
+    /// ADR-0092 — a poll, checklist, location, contact card or article post:
+    /// the envelope bytes (standard base64) it is stored as.
+    case content(envelopeB64: String, attachments: [AttachmentRef])
+    /// ADR-0092 section 4.3 — a publisher closed the poll `target`, with the
+    /// tally it read then (frozen for every reader).
+    case pollClose(target: UInt64, tally: ChannelPollTally?)
+    /// ADR-0092 section 5 — a publisher's tick, added item or edit on the
+    /// checklist (or an article edit) `target`, as a signed post op.
+    case contentOp(target: UInt64, envelopeB64: String)
     /// Anything else a post may carry that a channel does not show (a
     /// reaction or a typing op from a hostile publisher, a service envelope).
     case ignored
@@ -33,6 +42,14 @@ public enum ChannelPostBody: Equatable {
         case .delete:
             guard let target = parsed.target, target > 0 else { return .ignored }
             return .delete(target: UInt64(target))
+        case .poll, .checklist, .location, .contactCard, .article:
+            return .content(envelopeB64: Data(envelope.utf8).base64EncodedString(), attachments: parsed.attachments)
+        case .pollClose:
+            guard let target = parsed.target, target > 0 else { return .ignored }
+            return .pollClose(target: UInt64(target), tally: ContentFFI.pollTally(parsed))
+        case .checklistTick, .checklistAdd, .editChecklist, .editArticle:
+            guard let target = parsed.target, target > 0 else { return .ignored }
+            return .contentOp(target: UInt64(target), envelopeB64: Data(envelope.utf8).base64EncodedString())
         default:
             return .ignored
         }
@@ -46,6 +63,8 @@ public enum ChannelPostBody: Equatable {
             if !text.isEmpty { return text }
             guard let first = attachments.first else { return nil }
             return ChannelTimeline.attachmentWord(first)
+        case .content(let envelopeB64, _):
+            return ContentPreview.line(content: ContentModel.content(PersistedContent(envelopeB64: envelopeB64)))
         default:
             return nil
         }
@@ -92,6 +111,14 @@ public struct ChannelTimelineItem: Equatable, Identifiable {
     /// The ADR-0023 op that changed it last (its cursor), for the `edited`
     /// mark's ordering.
     public var lastOpCursor: UInt64?
+    /// ADR-0092 — a content post's envelope (standard base64).
+    public var contentEnvelopeB64: String?
+    /// ADR-0092 section 4.3 — closed by a publisher's close op, with the
+    /// tally it froze.
+    public var closedByOp = false
+    public var frozenTally: ChannelPollTally?
+    /// ADR-0092 section 5 — the publishers' ticks, added items and edits.
+    public var contentOps = PersistedContentOps()
 
     public var id: UInt64 { cursor }
 }
@@ -141,6 +168,54 @@ public enum ChannelTimeline {
                 case .delete(let target):
                     guard target < post.cursor else { continue }
                     deleted.insert(target)
+                case .content(let envelopeB64, let attachments):
+                    var item = ChannelTimelineItem(
+                        cursor: post.cursor, serverTsMs: post.serverTsMs, epoch: post.epoch,
+                        text: "", attachments: attachments, forward: nil,
+                        edited: false, lastOpCursor: nil)
+                    item.contentEnvelopeB64 = envelopeB64
+                    items[post.cursor] = item
+                    order.append(post.cursor)
+                case .contentOp(let target, let envelopeB64):
+                    guard target < post.cursor, var item = items[target], !deleted.contains(target),
+                          !item.closedByOp, let base = item.contentEnvelopeB64,
+                          let bytes = Data(base64Encoded: envelopeB64) else { continue }
+                    let parsed = parseBodyEnvelope(bytes: bytes)
+                    let channel = ChannelTimeline.channelKeyB64
+                    let opId = Int64(clamping: post.cursor)
+                    switch parsed.kind {
+                    case .checklistTick:
+                        guard let ref = parsed.checklistItem, let done = parsed.checklistDone else { continue }
+                        item.contentOps.ticks.append(.init(
+                            messageId: opId, tickerB64: channel, privileged: true,
+                            item: ContentModel.persisted(ref), done: done))
+                    case .checklistAdd:
+                        item.contentOps.adds.append(.init(
+                            messageId: opId, adderB64: channel, privileged: true, text: parsed.text))
+                    case .editChecklist:
+                        item.contentOps.edits.append(.init(messageId: opId, editorB64: channel, envelopeB64: envelopeB64))
+                    case .editArticle:
+                        guard case .article(let article)? = parsed.content,
+                              let replaced = ContentModel.store(content: .article(article: article), attachments: parsed.attachments)
+                        else { continue }
+                        _ = base
+                        item.contentEnvelopeB64 = replaced.envelopeB64
+                        item.edited = true
+                    default:
+                        continue
+                    }
+                    items[target] = item
+                case .pollClose(let target, let tally):
+                    // The first close stands (closing is final).
+                    guard target < post.cursor, var item = items[target], !item.closedByOp,
+                          item.contentEnvelopeB64 != nil else { continue }
+                    item.closedByOp = true
+                    item.frozenTally = tally
+                    // A checklist closes by the same op.
+                    item.contentOps.closes.append(.init(
+                        messageId: Int64(clamping: post.cursor), closerB64: ChannelTimeline.channelKeyB64,
+                        closerIsAdmin: true))
+                    items[target] = item
                 case .ignored:
                     continue
                 }
@@ -172,9 +247,16 @@ public enum ChannelTimeline {
             text: item.text,
             attachments: item.attachments,
             createdAt: ChatRepository.isoTimestamp(ms: Int64(clamping: item.serverTsMs)),
-            authorKeyB64: nil,
+            authorKeyB64: item.contentEnvelopeB64 == nil ? nil : channelKeyB64,
             edited: item.edited,
             deleted: false,
-            forward: item.forward)
+            forward: item.forward,
+            content: item.contentEnvelopeB64.map { PersistedContent(envelopeB64: $0, ops: item.contentOps) })
     }
+
+    /// ADR-0092 section 5 — in a channel every post is the channel's: the
+    /// author and every publisher's op are filed under one stand-in key, so
+    /// the checklist fold treats publishers as the author (only publishers
+    /// write to a post).
+    static let channelKeyB64 = Data(repeating: 0x01, count: 32).base64EncodedString()
 }

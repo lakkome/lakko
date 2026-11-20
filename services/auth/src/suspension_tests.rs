@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Route tests for ADR-0089 section 4: account suspension.
+//! Route tests for ADR-0098 section 4: account suspension.
 //!
 //! The internal statement route is driven through its own router
 //! ([`crate::suspension::internal_router`]) with a real moderator list
@@ -201,7 +201,7 @@ fn sign_at(
     }
 }
 
-/// The statement body; it names no account key (ADR-0089 step 5), the
+/// The statement body; it names no account key (ADR-0098 step 5), the
 /// last argument only documents which account the caller means.
 fn body(signed: &Signed, list: &ModeratorList, reason: Reason, _account_key: &[u8; 32]) -> Value {
     json!({

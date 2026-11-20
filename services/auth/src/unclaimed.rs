@@ -14,7 +14,9 @@
 //! This module is for the third case: the person closed the tab and decided
 //! nothing. An account that still has **no login handle and no passkey** a
 //! day after it was created cannot be signed into by anyone, so it is
-//! removed. The foreign keys cascade over every account-keyed auth table.
+//! removed. The foreign keys cascade over every account-keyed auth table,
+//! and the purge of what the account left in discovery and storage is
+//! queued in the same transaction (`crate::purge`).
 //!
 //! Two guards keep the rule from deleting accounts it does not describe:
 //!
@@ -117,17 +119,25 @@ pub(crate) async fn is_past_unclaimed_lifetime(
 }
 
 /// Delete up to [`PRUNE_BATCH`] accounts older than `ttl_secs` that have no
-/// login handle and no passkey. Returns how many were deleted.
+/// login handle and no passkey, and queue the purge of each one's discovery
+/// rows and backup blob (`crate::purge`) in the same transaction. Returns how
+/// many were deleted.
+///
+/// The candidates are locked first; each delete re-checks the rule, so an
+/// account that gained a handle or a passkey before its lock was taken is
+/// left alone (both tables reference `accounts`, so a bind after the lock
+/// waits for this transaction).
 ///
 /// # Errors
 ///
-/// A database error; nothing is deleted then.
+/// A database error; nothing is deleted or queued then.
 pub(crate) async fn prune_unclaimed(pool: &MySqlPool, ttl_secs: u64) -> Result<u64, sqlx::Error> {
     // One transaction: the batch is chosen and locked, each account's
-    // identity-key history is deleted or kept (ADR-0089 F3: kept while the
-    // account is suspended), then the accounts go.
-    let mut tx = pool.begin().await?;
-    let ids: Vec<Vec<u8>> = sqlx::query_scalar(
+    // identity-key history is deleted or kept (ADR-0098 F3: kept while the
+    // account is suspended), then the accounts go and their purge is queued.
+    let mut conn = crate::session::read_committed_conn(pool).await?;
+    let mut tx = sqlx::Acquire::begin(&mut conn).await?;
+    let candidates: Vec<Vec<u8>> = sqlx::query_scalar(
         "SELECT id FROM accounts \
          WHERE created_at < NOW() - INTERVAL ? SECOND \
            AND NOT EXISTS (SELECT 1 FROM login_handles h WHERE h.account_id = accounts.id) \
@@ -138,15 +148,41 @@ pub(crate) async fn prune_unclaimed(pool: &MySqlPool, ttl_secs: u64) -> Result<u
     .bind(PRUNE_BATCH)
     .fetch_all(&mut *tx)
     .await?;
+
     let now = crate::session::now_ms();
-    let mut deleted = 0;
-    for id in &ids {
-        crate::identity_target::on_account_deleted(&mut tx, id, now).await?;
-        deleted += sqlx::query("DELETE FROM accounts WHERE id = ?")
-            .bind(id.as_slice())
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
+    let mut deleted = 0u64;
+    for raw in candidates {
+        let Ok(id) = <[u8; 16]>::try_from(raw.as_slice()) else {
+            continue;
+        };
+        // Re-check the rule before the history is touched, so an account
+        // that is not deleted keeps its history as it was.
+        let still: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM accounts WHERE id = ? \
+               AND NOT EXISTS (SELECT 1 FROM login_handles h WHERE h.account_id = accounts.id) \
+               AND NOT EXISTS (SELECT 1 FROM webauthn_credentials w WHERE w.account_id = accounts.id)",
+        )
+        .bind(id.as_slice())
+        .fetch_optional(&mut *tx)
+        .await?;
+        if still.is_none() {
+            continue;
+        }
+        crate::identity_target::on_account_deleted(&mut tx, &id, now).await?;
+        let gone = sqlx::query(
+            "DELETE FROM accounts WHERE id = ? \
+               AND NOT EXISTS (SELECT 1 FROM login_handles h WHERE h.account_id = accounts.id) \
+               AND NOT EXISTS (SELECT 1 FROM webauthn_credentials w WHERE w.account_id = accounts.id)",
+        )
+        .bind(id.as_slice())
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if gone == 0 {
+            continue;
+        }
+        crate::purge::enqueue(&mut tx, &id).await?;
+        deleted += 1;
     }
     tx.commit().await?;
     Ok(deleted)
@@ -164,13 +200,17 @@ pub(crate) fn spawn_pruner(
         return None;
     }
     tracing::info!(ttl_secs, "unclaimed-account pruner is on");
+    let job = crate::metrics::jobs::UNCLAIMED_ACCOUNT_PRUNE;
+    lakko_metrics::job_registered(job);
     Some(tokio::spawn(async move {
         let mut interval = tokio::time::interval(PRUNE_INTERVAL);
         // The first tick fires at once; skip it so a restart is not a prune.
         interval.tick().await;
         loop {
             interval.tick().await;
-            match prune_unclaimed(&pool, ttl_secs).await {
+            let result = prune_unclaimed(&pool, ttl_secs).await;
+            crate::metrics::job_ran(job, result.is_ok());
+            match result {
                 Ok(0) => {},
                 Ok(rows) => tracing::info!(rows, "pruned unclaimed accounts"),
                 Err(e) => tracing::warn!(error = %e, "unclaimed-account prune failed"),
@@ -268,6 +308,21 @@ mod tests {
             !exists(&pool, &abandoned).await,
             "an abandoned account stays"
         );
+        assert!(
+            crate::purge::is_queued(&pool, &abandoned).await,
+            "the deleted account's purge is not queued"
+        );
+        for kept in [&fresh_guest, &named, &with_passkey] {
+            assert!(
+                !crate::purge::is_queued(&pool, kept).await,
+                "a kept account was queued for purge"
+            );
+        }
+        sqlx::query("DELETE FROM account_purges WHERE account_id = ?")
+            .bind(abandoned.as_slice())
+            .execute(&pool)
+            .await
+            .expect("cleanup purge row");
         assert!(
             exists(&pool, &fresh_guest).await,
             "a guest of a minute ago was deleted"

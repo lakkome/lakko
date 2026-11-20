@@ -594,6 +594,8 @@ const PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 
 /// carry-on shape. Aborted when the service stops; the `_group_invite_pruner`
 /// handle in `main.rs` owns the abort.
 pub(crate) fn spawn_pruner(pool: sqlx::MySqlPool) -> tokio::task::JoinHandle<()> {
+    use crate::metrics::{job_run, jobs};
+    lakko_metrics::job_registered(jobs::GROUP_INVITE_PRUNE);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(PRUNE_INTERVAL);
         // The first tick fires immediately — skip it so a startup-time prune
@@ -609,6 +611,7 @@ pub(crate) fn spawn_pruner(pool: sqlx::MySqlPool) -> tokio::task::JoinHandle<()>
                     .bind(now_ms)
                     .execute(&pool)
                     .await;
+            job_run(jobs::GROUP_INVITE_PRUNE, &result);
             match result {
                 Ok(r) if r.rows_affected() > 0 => {
                     tracing::debug!(rows = r.rows_affected(), "pruned expired group-invites");

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0089 step 5 - what a channel moderators removed still shows on this
+ * ADR-0098 step 5 - what a channel moderators removed still shows on this
  * device (`docs/ux/reporting-and-moderation.md` section 3): the posts already
  * here, nothing that writes. Pure, so the conversation and the info decide
  * from tested rules rather than in the views.
@@ -22,7 +22,7 @@ export interface ChannelWriteControls {
 }
 
 /** The controls offered, from the role and the two states that withhold
- *  them: the account is suspended (ADR-0089 step 3), or the channel was
+ *  them: the account is suspended (ADR-0098 step 3), or the channel was
  *  removed (step 5). */
 export function channelWriteControls(input: {
   readonly canPublish: boolean;

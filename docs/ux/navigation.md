@@ -66,7 +66,9 @@ user is on lives in the browser's session history instead, so back and
 forward move between screens and a reload keeps the screen. A link opened
 from outside (`/i/`, `/c/`, `/g/`, a notification) is read once on entry and
 cleared from the address bar before anything renders
-(`apps/web/src/routes/origin-history.ts`).
+(`apps/web/src/routes/origin-history.ts`). One exception: a public page made
+to be shared, which carries nothing private, shows its own address exactly
+(`/donations`; never with a query or fragment).
 
 ## 2. The conversation list
 
@@ -271,6 +273,32 @@ A missed or declined row is tinted with the danger token, as
 conversation; tapping the call button calls. Those are two different targets
 and the hit areas must not overlap.
 
+#### 5.1.1 A call with no conversation
+
+Added 2026-11-10 (maintainer's decision). A call started with `New call`, and
+a call this device joined from a call link, belong to no conversation. Each
+still gets ONE row, so the list shows every call the person was in:
+
+- avatar: the group-call glyph (the one the call bar and the call screen use
+  for a group call), never initials;
+- title: `Group call`, the words the call screen already uses (a call has no
+  name of its own: `Your name in this call`, [`calls.md`](calls.md) section
+  4.1, names a person and is forgotten when the call ends);
+- second line: `Outgoing call` when this device started the call with `New
+  call`, `Incoming call` when it joined from a link, then the time; with the
+  duration this device was in the call, as for any other row;
+- a direction glyph as any other row (out, in); never missed or declined,
+  since such a call never rings;
+- **no trailing call button, and the row is not a tap target** (no pressed
+  state, no focus stop for VoiceOver / TalkBack beyond reading it): an ended
+  link call cannot be joined again and there is no conversation to open.
+
+One row per call per device, written when this device leaves the call or the
+call ends for it, whichever comes first, and only if this device was in the
+call (reached the call screen past the join step). If the device joins the
+same call again, the first row stays as it is. A guest account writes none: a
+guest never lands in the app.
+
 ### 5.2 States
 
 - **Default** - the list.
@@ -308,15 +336,25 @@ a filter. Channels do not, and the mapping that costs something is the same
 everywhere: a channel's "last post time" has to become the same field as a
 chat's "last message time", or the one ordering has nothing to order by.
 
-Pinned, muted, archived and unread are keyed on a conversation id a channel
-does not carry. Until that is resolved a channel row shows none of them,
-which is honest; inventing a badge that can never be non-zero is not.
+A channel row carries all four (updated 2026-11-13). Its unread count is the
+channel's count of new posts, kept on the device ([`feed.md`](feed.md)
+section 5). Pinned, muted and archived are the account's synced flags, the
+same register a chat or a group uses, keyed on the channel id: so a long
+press (or a right-click on the web) on a channel row offers Pin, Mute,
+Archive and the folder items, as a group row does
+([`group-and-channel-privacy.md`](group-and-channel-privacy.md) section 12),
+and the choice reaches the account's other devices. Channel posts raise no
+notification on any client yet, so Mute on a channel today drops it from the
+feeds that leave muted conversations out and greys its badge; nothing else
+is there to silence.
 
 ### 6.2 The calls list
 
 A **flat, cross-conversation, time-ordered** sequence, holding per row:
 conversation id, kind, outcome, whether it was a video call, start time,
-duration.
+duration. A row for a call with no conversation (section 5.1.1) holds no
+conversation id; it holds the call's id instead (so a call is recorded once)
+and outgoing or incoming.
 
 Two requirements follow from the shape rather than from any platform.
 

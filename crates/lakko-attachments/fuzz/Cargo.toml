@@ -29,12 +29,31 @@ test = false
 doc = false
 bench = false
 
-# The attested-message wrapper (ADR-0089 section 1): any group member can
+# The attested-message wrapper (ADR-0098 section 1): any group member can
 # craft the plaintext, and every receiver splits and verifies it before the
 # chat parser runs. Nothing unsigned by the fixed key may verify.
 [[bin]]
 name = "attested_message_open"
 path = "fuzz_targets/attested_message_open.rs"
+test = false
+doc = false
+bench = false
+
+# ADR-0092 section 8: the article block format. An article rides in a chat
+# envelope any member or publisher writes; the decoder must never panic and
+# must accept only canonical bytes.
+[[bin]]
+name = "article_decode"
+path = "fuzz_targets/article_decode.rs"
+test = false
+doc = false
+bench = false
+
+# ADR-0092: the content payload and state snapshot carried by history bundles
+# and vault records.
+[[bin]]
+name = "content_bundle_decode"
+path = "fuzz_targets/content_bundle_decode.rs"
 test = false
 doc = false
 bench = false

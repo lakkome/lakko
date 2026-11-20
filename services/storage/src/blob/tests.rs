@@ -3,6 +3,8 @@
 
 //! Route tests of the blob surface over the file index (no database).
 
+use std::path::{Path, PathBuf};
+
 use super::*;
 use crate::build_app;
 use crate::pass::PassSecret;
@@ -311,12 +313,41 @@ async fn an_upload_needs_a_usable_delete_key_and_a_length() {
     );
 }
 
+/// `docs/ux/storage-full.md`: an upload that would leave less free disk than
+/// the floor is `507 storage-full`, and the refusal charges nothing, so the
+/// same pass uploads once space is back.
+#[tokio::test]
+async fn a_full_disk_refuses_the_upload_and_charges_nothing() {
+    let limits = crate::pass::PassLimits {
+        upload_files: 1,
+        min_free_bytes: u64::MAX,
+        ..crate::pass::PassLimits::default()
+    };
+    let (mut state, _tmp) = state_with(limits, true);
+    let app = build_app(state.clone());
+    let up = take(&app, "upload", TokenContext::BlobUpload).await;
+    let (_, a) = sha256(b"a");
+    let (s, b, _) = send(&app, put_req(&a, Some(&up), b"a")).await;
+    assert_eq!(
+        (s, code(&b).as_str()),
+        (StatusCode::INSUFFICIENT_STORAGE, "storage-full")
+    );
+    // Space is back: the same pass still has its one file.
+    state.limits.min_free_bytes = 0;
+    let app = build_app(state);
+    assert_eq!(
+        send(&app, put_req(&a, Some(&up), b"a")).await.0,
+        StatusCode::CREATED
+    );
+}
+
 #[tokio::test]
 async fn a_pass_stops_at_its_budget() {
     let limits = crate::pass::PassLimits {
         upload_files: 1,
         read_downloads: 2,
         read_keeps: 3,
+        min_free_bytes: 0,
         ..crate::pass::PassLimits::default()
     };
     let (state, _tmp) = state_with(limits, true);
@@ -676,4 +707,275 @@ async fn an_upload_names_its_idle_life() {
         StatusCode::CREATED
     );
     assert_eq!(index.get(&other).await.unwrap().unwrap().idle_days, None);
+}
+
+// ============================================================================
+// The same routes over an S3 bucket (ADR-0065 amendment of 2026-11-19),
+// gated on the test object store (see `crate::store::s3::tests`).
+// ============================================================================
+
+/// [`state`] with its bytes in a fresh test bucket, or `None` without one.
+async fn s3_state() -> Option<(
+    AppState,
+    tempfile::TempDir,
+    std::sync::Arc<crate::store::s3::S3Store>,
+)> {
+    let (mut state, tmp) = state();
+    let store = std::sync::Arc::new(
+        crate::store::s3::tests::test_store(tmp.path().join(".lakko-upload")).await?,
+    );
+    state.store = store.clone();
+    Some((state, tmp, store))
+}
+
+#[tokio::test]
+async fn over_s3_upload_download_head_and_delete() {
+    let Some((state, tmp, store)) = s3_state().await else {
+        return;
+    };
+    let index = state.index.clone();
+    let app = build_app(state);
+    let up = take(&app, "upload", TokenContext::BlobUpload).await;
+    let read = take(&app, "read", TokenContext::BlobRead).await;
+    let payload = b"hello lakko ciphertext in a bucket";
+    let (id, hex) = sha256(payload);
+    assert_eq!(
+        send(&app, put_req(&hex, Some(&up), payload)).await.0,
+        StatusCode::CREATED
+    );
+    // Nothing of the blob stays on the local disk.
+    assert!(!blob_path(tmp.path(), &id).exists());
+    let leftovers = std::fs::read_dir(tmp.path().join(".lakko-upload"))
+        .unwrap()
+        .count();
+    assert_eq!(leftovers, 0);
+    assert_eq!(
+        crate::store::BlobStore::head(store.as_ref(), &id)
+            .await
+            .unwrap(),
+        Some(payload.len() as u64)
+    );
+    assert_eq!(
+        send(&app, put_req(&hex, Some(&up), payload)).await.0,
+        StatusCode::OK
+    );
+    let (s, body, h) = send(&app, get_req("GET", &hex, &read)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(&body[..], payload);
+    assert_eq!(
+        h.get(header::CONTENT_LENGTH).unwrap().to_str().unwrap(),
+        payload.len().to_string()
+    );
+    assert_eq!(
+        send(&app, get_req("HEAD", &hex, &read)).await.0,
+        StatusCode::OK
+    );
+    // A body that does not hash to the path leaves no object and no row.
+    let (bad_id, bad_hex) = sha256(b"other");
+    let (s, b, _) = send(&app, put_req(&bad_hex, Some(&up), b"wrong")).await;
+    assert_eq!(
+        (s, code(&b).as_str()),
+        (StatusCode::BAD_REQUEST, "blob-hash-mismatch")
+    );
+    assert_eq!(
+        crate::store::BlobStore::head(store.as_ref(), &bad_id)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(index.get(&bad_id).await.unwrap(), None);
+
+    assert_eq!(
+        send(&app, delete_req(&hex, Some(&DELETE_SEED))).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(index.get(&id).await.unwrap(), None);
+    assert_eq!(
+        crate::store::BlobStore::head(store.as_ref(), &id)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        send(&app, get_req("GET", &hex, &read)).await.0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn over_s3_a_row_without_its_object_heals() {
+    let Some((state, _tmp, store)) = s3_state().await else {
+        return;
+    };
+    let index = state.index.clone();
+    let app = build_app(state);
+    let up = take(&app, "upload", TokenContext::BlobUpload).await;
+    let read = take(&app, "read", TokenContext::BlobRead).await;
+    let (id, hex) = sha256(b"vanishing object");
+    assert_eq!(
+        send(&app, put_req(&hex, Some(&up), b"vanishing object"))
+            .await
+            .0,
+        StatusCode::CREATED
+    );
+    crate::store::BlobStore::delete(store.as_ref(), &id)
+        .await
+        .unwrap();
+    let (s, b, _) = send(&app, get_req("GET", &hex, &read)).await;
+    assert_eq!(
+        (s, code(&b).as_str()),
+        (StatusCode::NOT_FOUND, "blob-not-found")
+    );
+    assert_eq!(index.get(&id).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn over_s3_a_50_mib_upload_streams_through() {
+    let Some((state, tmp, _store)) = s3_state().await else {
+        return;
+    };
+    let app = build_app(state);
+    let up = take(&app, "upload", TokenContext::BlobUpload).await;
+    let read = take(&app, "read", TokenContext::BlobRead).await;
+    let payload: Vec<u8> = (0..crate::MAX_BLOB_BYTES)
+        .map(|i| u8::try_from(i % 251).unwrap())
+        .collect();
+    let (_, hex) = sha256(&payload);
+    // Sent in 1 MiB chunks so the route sees a stream, not one buffer.
+    let chunks: Vec<Result<Bytes, std::io::Error>> = payload
+        .chunks(1024 * 1024)
+        .map(|c| Ok(Bytes::copy_from_slice(c)))
+        .collect();
+    let req = Request::put(format!("/blob/{hex}"))
+        .header(header::CONTENT_LENGTH, payload.len())
+        .header(DELETE_KEY_HEADER, delete_key_header())
+        .header(PASS_HEADER, &up)
+        .body(Body::from_stream(futures::stream::iter(chunks)))
+        .unwrap();
+    assert_eq!(send(&app, req).await.0, StatusCode::CREATED);
+    assert_eq!(
+        std::fs::read_dir(tmp.path().join(".lakko-upload"))
+            .unwrap()
+            .count(),
+        0
+    );
+    let (s, body, _) = send(&app, get_req("GET", &hex, &read)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body.len(), payload.len());
+    assert!(body == payload);
+}
+
+#[tokio::test]
+async fn over_s3_the_sweep_deletes_the_object() {
+    let Some((state, _tmp, store)) = s3_state().await else {
+        return;
+    };
+    let index = state.index.clone();
+    let app = build_app(state);
+    let up = take(&app, "upload", TokenContext::BlobUpload).await;
+    let (id, hex) = sha256(b"expiring object");
+    assert_eq!(
+        send(&app, put_req(&hex, Some(&up), b"expiring object"))
+            .await
+            .0,
+        StatusCode::CREATED
+    );
+    let far = crate::index::today() + 400;
+    let n = crate::sweep::sweep_once(index.as_ref(), store.as_ref(), "local", far, 365)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    assert_eq!(index.get(&id).await.unwrap(), None);
+    assert_eq!(
+        crate::store::BlobStore::head(store.as_ref(), &id)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+/// ADR-0096: the blob routes move their counters, and a coded refusal
+/// carries its code as the request counter's `code` label.
+#[tokio::test]
+async fn the_routes_count_their_answers_and_label_refusals_with_their_code() {
+    use crate::metrics::tests::value_of;
+    use crate::metrics::{
+        DELETES_TOTAL, DOWNLOADS_TOTAL, EXTRA_LABELS, KEEPS_TOTAL, PASSES_ISSUED_TOTAL,
+        UPLOADS_TOTAL,
+    };
+    let metrics = lakko_metrics::install("storage", "0.0.0").unwrap();
+    let before = metrics.render();
+
+    let (state, _tmp) = state();
+    let app = build_app(state);
+    let up = take(&app, "upload", TokenContext::BlobUpload).await;
+    let read = take(&app, "read", TokenContext::BlobRead).await;
+    let payload = b"counted ciphertext";
+    let (_, hex) = sha256(payload);
+    assert_eq!(
+        send(&app, put_req(&hex, None, payload)).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        send(&app, put_req(&hex, Some(&up), payload)).await.0,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        send(&app, put_req(&hex, Some(&up), payload)).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(&app, get_req("GET", &hex, &read)).await.0,
+        StatusCode::OK
+    );
+    let keep = Request::post("/blob/keep")
+        .header(PASS_HEADER, &read)
+        .body(Body::from(format!(r#"{{"ids":["{hex}"]}}"#)))
+        .unwrap();
+    assert_eq!(send(&app, keep).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(
+        send(&app, delete_req(&hex, Some(&[0x55; 32]))).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        send(&app, delete_req(&hex, Some(&DELETE_SEED))).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        send(&app, get_req("GET", &hex, &read)).await.0,
+        StatusCode::NOT_FOUND
+    );
+
+    let after = metrics.render();
+    lakko_metrics::exposition::assert_clean(&after, EXTRA_LABELS, &[]);
+    for (name, labels) in [
+        (UPLOADS_TOTAL, [("outcome", "refused")]),
+        (UPLOADS_TOTAL, [("outcome", "created")]),
+        (UPLOADS_TOTAL, [("outcome", "existed")]),
+        (DOWNLOADS_TOTAL, [("outcome", "ok")]),
+        (DOWNLOADS_TOTAL, [("outcome", "not_found")]),
+        (KEEPS_TOTAL, [("outcome", "ok")]),
+        (DELETES_TOTAL, [("outcome", "refused")]),
+        (DELETES_TOTAL, [("outcome", "deleted")]),
+        (PASSES_ISSUED_TOTAL, [("kind", "upload")]),
+        (PASSES_ISSUED_TOTAL, [("kind", "read")]),
+    ] {
+        assert!(
+            value_of(&after, name, &labels) >= value_of(&before, name, &labels) + 1.0,
+            "{name} {labels:?}"
+        );
+    }
+    for code in [
+        "blob-pass-required",
+        "blob-delete-refused",
+        "blob-not-found",
+    ] {
+        assert!(
+            after
+                .lines()
+                .any(|l| l.starts_with("lakko_http_requests_total{")
+                    && l.contains(&format!("code=\"{code}\""))),
+            "no request counted with code {code}"
+        );
+    }
 }

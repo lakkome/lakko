@@ -20,9 +20,13 @@ import org.webrtc.FrameEncryptor
  *
  * Construct via [LakkoFrameEncryptor.create] — the constructor
  * is private so the only path into the class goes through the
- * boot-probe gate inside [create]. Returns `null` on bad seed
- * length, HKDF failure, or if [SFrameAvailability] reports
+ * boot-probe gate inside [create]. Returns `null` on released
+ * call keys, HKDF failure, or if [SFrameAvailability] reports
  * calling is unavailable on this build.
+ *
+ * The encryptor is built on the call's shared [LakkoCallKeys]
+ * and has no rekey of its own: a mid-call rekey on the call keys
+ * (G-18, ADR-0029) reaches it on its next frame.
  *
  * The native pointer is freed by [release]; the caller MUST
  * call it once after detaching the encryptor from the sender.
@@ -100,25 +104,6 @@ public class LakkoFrameEncryptor private constructor(
     }
 
     /**
-     * Mid-call rekey (G-18, ADR-0029): swap the seal key to the new MLS
-     * epoch's [seed], keeping the same local leaf. The encryptor seals
-     * only under the current epoch, so this is a straight key swap —
-     * already-sealed frames are already bytes in libwebrtc's pipeline and
-     * need no overlap.
-     *
-     * Returns `false` on a bad seed length (must be 32), an HKDF failure,
-     * or if [release] already ran — in which case the encryptor keeps
-     * sealing under the current key (never plaintext, security invariant
-     * #4). Thread-safe against a concurrent seal on the codec thread.
-     */
-    public fun rekey(seed: ByteArray): Boolean {
-        val ptr = nativePtr
-        if (ptr == 0L) return false
-        if (seed.size != 32) return false
-        return nativeRekey(ptr, seed)
-    }
-
-    /**
      * The codec last given to [setCodec] ([SFrameMediaCodec.OTHER] until
      * the first call). Kept on the Kotlin side for logs and tests; the
      * native encryptor holds its own copy.
@@ -132,8 +117,8 @@ public class LakkoFrameEncryptor private constructor(
      * libwebrtc hands the native encryptor a media type and no codec, so
      * the caller reads it from the sender (the first entry of
      * `sender.parameters.codecs` once the answer is applied) and calls
-     * this after every negotiation that could change it. A [rekey] keeps
-     * the codec; a fresh encryptor starts at [SFrameMediaCodec.OTHER].
+     * this after every negotiation that could change it. A rekey of the
+     * call keys keeps the codec; a fresh encryptor starts at [SFrameMediaCodec.OTHER].
      *
      * It decides how many leading bytes of each encoded frame stay in the
      * clear, so that a receiver without the generic frame descriptor
@@ -182,28 +167,31 @@ public class LakkoFrameEncryptor private constructor(
         }
 
         /**
-         * Build a fresh encryptor for the per-call MLS exporter
-         * seed (32 bytes — `Group.export_secret("lakko/call/v1",
-         * call_id, 32)`) + this device's leaf index + the local
-         * send track's [streamIndex] (ADR-0035 — the per-sender
+         * Build a fresh encryptor on the call's shared [keys]
+         * (built from the per-call MLS exporter seed,
+         * `Group.export_secret("lakko/call/v1", call_id, 32)`) +
+         * this device's leaf index + the local send track's
+         * [streamIndex] (ADR-0035 — the per-sender
          * stream ordinal: 0 = audio, 1 = first video, 2 = screen-
          * share …). The seal KID is composed `(localLeaf << 8) |
          * streamIndex`, so every one of a participant's concurrent
          * streams keys into a disjoint `(key, nonce_salt)` space; the
          * encryptor is bound to one stream for its lifetime. Every
          * `0..=255` value is a valid stream index, so there is no
-         * fail-closed rejection on it. Returns `null` on any failure
-         * (bad seed length, HKDF failure, boot-probe negative).
+         * fail-closed rejection on it. The encryptor holds its own
+         * native reference on [keys]. Returns `null` on any failure
+         * (released keys, HKDF failure, boot-probe negative).
          */
         @JvmStatic
         public fun create(
-            seed: ByteArray,
+            keys: LakkoCallKeys,
             localLeaf: Int,
             streamIndex: Int,
         ): LakkoFrameEncryptor? {
             if (!SFrameAvailability.isCallingAvailable) return null
-            if (seed.size != 32) return null
-            val ptr = nativeCreate(seed, localLeaf, streamIndex)
+            val keysPtr = keys.pointer
+            if (keysPtr == 0L) return null
+            val ptr = nativeCreate(keysPtr, localLeaf, streamIndex)
             return if (ptr == 0L) {
                 null
             } else {
@@ -213,7 +201,7 @@ public class LakkoFrameEncryptor private constructor(
 
         @JvmStatic
         private external fun nativeCreate(
-            seed: ByteArray,
+            keysPtr: Long,
             localLeaf: Int,
             streamIndex: Int,
         ): Long
@@ -229,9 +217,6 @@ public class LakkoFrameEncryptor private constructor(
         @JvmStatic
         public fun codecForName(name: String?): SFrameMediaCodec =
             SFrameMediaCodec.fromWire(nativeCodecFromName(name))
-
-        @JvmStatic
-        private external fun nativeRekey(nativePtr: Long, seed: ByteArray): Boolean
 
         @JvmStatic
         private external fun nativeSetCodec(nativePtr: Long, codec: Int)

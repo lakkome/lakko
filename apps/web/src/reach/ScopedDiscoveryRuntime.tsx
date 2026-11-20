@@ -253,7 +253,7 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
               try {
                 await scoped.putVisibility({ public: true, nameTermLookupKeys: nameLookupKeys, publicRecord });
               } catch (err) {
-                // ADR-0089 step 5: moderators hid this account from search.
+                // ADR-0098 step 5: moderators hid this account from search.
                 // Who can find me says so; nothing else is wrong, so the step
                 // does not fail (no retry line under the setting).
                 if (isHiddenFromSearchError(err)) {

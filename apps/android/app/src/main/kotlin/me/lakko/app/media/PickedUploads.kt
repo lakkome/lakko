@@ -43,8 +43,9 @@ public suspend fun <T : Any> awaitBounded(
  * shown).
  */
 public fun attachFailureMessage(name: String?, error: Throwable?): UiText {
-    // UX 4.2 — the sending limit, whatever the file.
-    if (error != null && isUploadLimit(error)) return UiText("chat.attachment.limit.send")
+    // UX 4.2 — the sending limit, whatever the file; docs/ux/storage-full.md
+    // — the server has no room, in the same place.
+    error?.let(::uploadRefusalOf)?.let { return UiText(uploadRefusalSendKey(it)) }
     val named = name?.takeUnless { it.isBlank() } ?: return UiText("chat.attachment.error.attach")
     return when (error) {
         is AttachmentBridgeException.TooLarge -> UiText(

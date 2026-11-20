@@ -20,8 +20,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
@@ -50,6 +48,8 @@ import me.lakko.app.l10n.text
 import me.lakko.app.ui.components.LakkoDialog
 import me.lakko.app.ui.components.LakkoDialogAction
 import me.lakko.app.ui.components.LakkoDialogTone
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
 
 /**
  * `PasskeysScreen` — manage the user's stored passkeys
@@ -63,12 +63,13 @@ import me.lakko.app.ui.components.LakkoDialogTone
  * Surfaces:
  *
  *   1. The registered passkeys. Each row says what the passkey does
- *      ("Signs in and restores keys" / "Signs in only") and offers the
- *      matching action ("Stop restoring keys" / "Turn on restoring keys")
- *      beside Remove.
- *   2. Nickname input + "Add passkey". Adding stores nothing for the
- *      passkey beyond the credential; when the provider can protect keys
- *      with it, the opt-in choice ([PasskeyKeysChoice]) opens.
+ *      ("Logs in and restores keys" / "Logs in only"), a state and not a
+ *      setting. A passkey that holds no keys and is not known to lack PRF
+ *      offers "Restore keys with this passkey" beside Remove (UX 10.2,
+ *      amended 2026-11-11); with no phrase on this device the twelve-slot
+ *      phrase input opens first.
+ *   2. Nickname input + "Add passkey". The keys are stored for the new
+ *      passkey with nothing to choose ([addPasskeyWithKeys]).
  *   3. A single-line status banner that flips between success
  *      and error.
  *
@@ -92,8 +93,6 @@ public fun PasskeysScreen(
     var confirmingDelete by rememberSaveable { mutableStateOf(deleteAccountOnly) }
     // A removal names its target on the button (docs/l10n/batch-2-settings.md).
     var removing by remember { mutableStateOf<CredentialSummary?>(null) }
-    // "Stop restoring keys" asks first.
-    var stopping by remember { mutableStateOf<CredentialSummary?>(null) }
 
     LaunchedEffect(Unit) { viewModel.refresh() }
     val scope = rememberCoroutineScope()
@@ -111,7 +110,7 @@ public fun PasskeysScreen(
                 title = { Text(t("settings.passkeys.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -168,9 +167,13 @@ public fun PasskeysScreen(
                                 summary = cred,
                                 restoresKeys = passkeyKeysLabel(cred.credentialIdB64, state.withKeys) ==
                                     PasskeyKeysLabel.RestoresKeys,
-                                disabled = state.busy || state.choice != null,
-                                onTurnOn = { viewModel.openChoice(cred) },
-                                onStop = { stopping = cred },
+                                offersRestore = passkeyOffersRestoreKeys(
+                                    cred.credentialIdB64,
+                                    state.withKeys,
+                                    state.knownNoPrf,
+                                ),
+                                disabled = state.busy || state.repair != null,
+                                onRestore = { viewModel.restoreKeys(context, cred) },
                                 onDelete = { removing = cred },
                             )
                         }
@@ -178,13 +181,17 @@ public fun PasskeysScreen(
                 }
             }
 
-            state.choice?.let { choice ->
-                PasskeyKeysChoice(
-                    repo = viewModel.repository,
-                    credentialIdB64 = choice.credentialIdB64,
-                    nickname = choice.nickname,
-                    prfOutput = choice.prfOutput,
-                    onDone = viewModel::onChoiceDone,
+            state.repair?.let { repair ->
+                RestoreKeysPhrasePanel(
+                    repair = repair,
+                    busy = state.busy,
+                    error = state.repairError,
+                    onSubmit = { phrase ->
+                        state.credentials.firstOrNull { it.credentialIdB64 == repair.credentialIdB64 }?.let { cred ->
+                            viewModel.restoreKeys(context, cred, typedPhrase = phrase)
+                        }
+                    },
+                    onCancel = viewModel::cancelRepair,
                 )
             }
 
@@ -281,17 +288,6 @@ public fun PasskeysScreen(
             },
         )
     }
-    stopping?.let { cred ->
-        LakkoDialog(
-            onDismissRequest = { stopping = null },
-            title = t("settings.passkeys.stop_restoring.title"),
-            body = t("settings.passkeys.stop_restoring.body"),
-            confirm = LakkoDialogAction(t("settings.passkeys.stop_restoring.action")) {
-                stopping = null
-                viewModel.stopRestoring(cred.credentialIdB64)
-            },
-        )
-    }
     removing?.let { cred ->
         LakkoDialog(
             onDismissRequest = { removing = null },
@@ -316,9 +312,9 @@ public fun PasskeysScreen(
 private fun CredentialRow(
     summary: CredentialSummary,
     restoresKeys: Boolean,
+    offersRestore: Boolean,
     disabled: Boolean,
-    onTurnOn: () -> Unit,
-    onStop: () -> Unit,
+    onRestore: () -> Unit,
     onDelete: () -> Unit,
 ) {
     Column(
@@ -350,18 +346,70 @@ private fun CredentialRow(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            if (restoresKeys) {
-                TextButton(onClick = onStop, enabled = !disabled) {
-                    Text(t("settings.passkeys.stop_restoring.action"))
-                }
-            } else {
-                TextButton(onClick = onTurnOn, enabled = !disabled) {
+            // A repair, not a setting: nothing to turn off (UX 10.2).
+            if (offersRestore) {
+                TextButton(onClick = onRestore, enabled = !disabled) {
                     Text(t("settings.passkeys.keys.turn_on"))
                 }
             }
             Spacer(Modifier.weight(1f))
             TextButton(onClick = onDelete, enabled = !disabled) {
                 Text(t("common.remove"), color = MaterialTheme.colorScheme.error)
+            }
+        }
+    }
+}
+
+/**
+ * The phrase input of "Restore keys with this passkey" on a device that
+ * does not hold the recovery phrase (UX 10.2): the twelve slots, checked
+ * against this account before the one passkey prompt.
+ */
+@Composable
+private fun RestoreKeysPhrasePanel(
+    repair: PasskeyRepair,
+    busy: Boolean,
+    error: me.lakko.app.l10n.UiText?,
+    onSubmit: (String) -> Unit,
+    onCancel: () -> Unit,
+) {
+    var phrase by remember(repair.credentialIdB64) { mutableStateOf("") }
+    androidx.compose.material3.Surface(
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (repair.nickname.isNotBlank()) {
+                Text(
+                    repair.nickname,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            Text(t("settings.passkeys.keys_choice.phrase_needed"), style = MaterialTheme.typography.bodyMedium)
+            me.lakko.app.ui.auth.RecoveryPhraseEntryGrid(
+                phrase = phrase,
+                onPhraseChange = { phrase = it },
+                enabled = !busy,
+            )
+            error?.let {
+                Text(it.text(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = { onSubmit(phrase) },
+                    enabled = !busy && phrase.isNotBlank(),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(if (busy) t("common.checking") else t("settings.passkeys.keys.turn_on"))
+                }
+                TextButton(onClick = onCancel, enabled = !busy) {
+                    Text(t("common.cancel"))
+                }
             }
         }
     }
@@ -417,7 +465,7 @@ private fun format(ms: Long?, language: String): String? {
  * passed.
  */
 /**
- * ADR-0089 section 4 - the usual Delete account confirmation, opened from
+ * ADR-0098 section 4 - the usual Delete account confirmation, opened from
  * the suspended screen of a device that holds no chats of the account
  * (Settings cannot be reached there). [viewModel] deletes with the
  * restricted session ([AuthRepository.accountForDeletion]).

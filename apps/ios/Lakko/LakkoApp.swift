@@ -113,6 +113,9 @@ struct LakkoApp: App {
         // frame-decryptor attachment gates at info level, which iOS suppresses.
         WebRTCDiagnosticLogging.installOnce()
         NewDeviceAttentionTabBadge.installAppearance()
+        // The back chevron and the search magnifier UIKit draws, from the
+        // Lakko icon set (design system section 8).
+        SystemGlyphAppearance.install()
         // G3-sframe-native N-4 — runtime probe for the non-public
         // `setFrameEncryptor:` / `setFrameDecryptor:` selectors
         // libwebrtc M125's RTCRtpSender / RTCRtpReceiver carry.
@@ -191,7 +194,7 @@ struct LakkoApp: App {
         // A group call never rings a closed device, so a call wake for a
         // GROUP conversation, or for one whose group call this device is in or
         // just left, rings nothing either (older senders woke for group ends).
-        // ADR-0089 section 6 — no notification of a blocked person's over a
+        // ADR-0098 section 6 — no notification of a blocked person's over a
         // running app.
         PushAppDelegate.conversationSuppressed = { [weak chat] groupIdHex in
             guard let peer = chat?.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) else { return false }
@@ -199,7 +202,7 @@ struct LakkoApp: App {
         }
         VoipPushRegistrar.shared.callWakeSuppressed = {
             [weak host, weak groupHost, weak chat] groupIdHex in
-            // ADR-0089 section 6 — a call from a person this account blocked
+            // ADR-0098 section 6 — a call from a person this account blocked
             // is declined without a ring (`blockVerdict(.incomingCall)`); the
             // row itself is dropped by the receive filter, so no missed-call
             // row is written either.
@@ -207,7 +210,7 @@ struct LakkoApp: App {
                BlockList.shared.verdict(.incomingCall, accountKey: peer) == .declineSilently {
                 return true
             }
-            // ADR-0089 step 3 — a suspended account takes no calls.
+            // ADR-0098 step 3 — a suspended account takes no calls.
             if SessionTokenProvider.shared.isSuspended { return true }
             return CallWakeSuppression.anySource(
                 oneToOne: host?.suppressesCallWake(groupIdHex: groupIdHex) ?? false,
@@ -386,6 +389,12 @@ struct LakkoApp: App {
         BlobLifecycle.shared.chat = chat
         BlobLifecycle.shared.sync = sync
         SavedMessagesCenter.shared.bind(sync: sync, chat: chat)
+        // ADR-0092 section 3.6 — the own poll choices and the ballot queue,
+        // which resumes every queued ballot (posted once the session landed).
+        PollChoiceCenter.shared.bind(sync: sync, chat: chat)
+        if let secrets = auth.identitySecrets {
+            BallotQueue.shared.bind(chat: chat, accountIdB64: base64Encode(secrets.accountId))
+        }
         // ADR-0075 — at every landing of a session with keys: what protects
         // the account (the recovery email, a saved phrase) and what its
         // devices are to be told.
@@ -395,6 +404,11 @@ struct LakkoApp: App {
         }
         auth.onProtectionChanged = {
             Task { await accountProtection.refresh() }
+        }
+        // G-56 — the chat layer refused to bind a device whose account's
+        // earlier keys have not reached it: the session parks.
+        chat.onEarlierKeysMissing = { [weak auth] accountIdB64 in
+            auth?.parkForEarlierKeys(accountIdB64: accountIdB64)
         }
         // A guest chose a username: the profile directory learns it, the
         // username certificate is fetched, and the profile (username +
@@ -445,12 +459,15 @@ struct LakkoApp: App {
             Task { await auth?.ownUsernameRegisterChanged(sync?.ownUsername) }
         }
         auth.storeOwnUsername = { [weak sync] name in await sync?.setOwnUsername(name) ?? false }
+        // A session that landed with no username learned it (the backup, or
+        // the username prompt): a rejoin waiting for a login handle knocks now.
+        auth.onUsernameLearned = { [weak sync] _ in sync?.loginHandleArrived() }
         // Reactions-and-emoji spec section 6 (D3) — the quick reaction is the
         // account's, written through its synced state.
         QuickReactionSetting.shared.onChoose = { [weak sync] emoji in
             Task { _ = await sync?.setQuickReaction(emoji) }
         }
-        // ADR-0089 section 6 — a block is the account's, written through its
+        // ADR-0098 section 6 — a block is the account's, written through its
         // synced state.
         BlockList.shared.setter = { [weak sync] key, blocked in
             sync?.setBlocked(accountKey: key, blocked: blocked) ?? false
@@ -474,6 +491,7 @@ struct LakkoApp: App {
         // the member cards (the reach sync's inputs changed).
         auth.onUsernameRenamed = { [weak auth, weak chat] account, certificate in
             ProfileDirectory.shared.activate(accountIdB64: account.accountIdB64, username: account.username)
+            ProfileDirectory.shared.restampOwnProfile()
             ReachCenter.shared.setOwnUsernameCertificate(certificate)
             let token = auth?.identitySecrets?.sessionToken
             Task { @MainActor in
@@ -502,6 +520,14 @@ struct LakkoApp: App {
         sync.onKeyRotationEnvelope = { [weak auth] envelope in
             auth?.receiveKeyRotationEnvelope(envelope, arrival: .ownDeviceGroup)
         }
+        // ADR-0091 phase 2 route 1 — a re-entry request between this
+        // account's own devices rides the DeviceGroup both ways.
+        sync.onConversationReentry = { [weak chat] envelope in
+            Task { @MainActor in await chat?.receiveConversationReentry(envelope: envelope, route: .ownDevice) }
+        }
+        chat.reentryOwnDeviceSender = { [weak sync] envelope in
+            await sync?.sendServiceEnvelope(envelope)
+        }
         // ADR-0081 decision 4 — a device that lost or fell behind its
         // DeviceGroup knocks under this account's login handle, after its own
         // directory KeyPackage (the signed device binding a sibling checks)
@@ -515,8 +541,19 @@ struct LakkoApp: App {
         }
         // A superseded device with no pending envelope reads its DeviceGroup
         // journal to the head once before it treats the change as a reset.
-        auth.readDeviceGroupJournalToHead = { [weak sync] _ in
-            await sync?.waitForJournalHead() ?? false
+        // When the sync runtime is not running (a launch whose refresh was
+        // refused before any session landed), or did not reach the head, the
+        // journal is read once on a handle of its own and every service
+        // envelope goes to the key-rotation intake (ADR-0074 section 3.3).
+        auth.readDeviceGroupJournalToHead = { [weak sync, weak auth] accountIdB64 in
+            if await sync?.waitForJournalHead() == true { return .reached }
+            guard let accountIdBytes = base64Decode(accountIdB64) else { return .noState }
+            let reader = await DeviceGroupJournalOneShot.live(
+                accountIdBytes: accountIdBytes, accountIdB64: accountIdB64)
+            return await DeviceGroupJournalOneShot.drain(reader: reader) { envelope in
+                guard DeviceGroupSyncRepository.isKeyRotation(envelope) else { return }
+                auth?.receiveKeyRotationEnvelope(envelope, arrival: .ownDeviceGroup)
+            }
         }
         // ADR-0074 sections 3.2 step 6, 3.3 — the account's keys were
         // rotated and this device holds the new ones: what derives from the
@@ -620,6 +657,21 @@ struct LakkoApp: App {
         chat.lineageReadyWatch = sync.$ready
             .receive(on: RunLoop.main)
             .sink { [weak chat] ready in if ready { chat?.foldDuplicateOneToOnes() } }
+        // ADR-0090 — a channel's PublisherGroup leaf is this device: the
+        // channel paths open, found and join it in the chat provider (the one
+        // holding the KeyPackage a sibling admits) and persist through it.
+        ChannelPublisherIdentity.shared.deviceIdentityProvider = { [weak chat] in chat?.canonicalIdentity }
+        ChannelPublisherIdentity.shared.devicePersister = { [weak chat] in
+            guard let chat else { throw ChannelPublisherIdentity.NotBound() }
+            try chat.persistDeviceProviderOrThrow()
+        }
+        // ADR-0090 — the account's DeviceGroup roster decides which devices an
+        // owner device admits to a channel's PublisherGroup; a device that
+        // founded the DeviceGroup alone re-founds owned channels (decision A);
+        // the owner account's admission seeds ride the synced state.
+        ChannelDeviceAdmission.deviceGroupRoster = { [weak chat] in chat?.ownDeviceGroupRosterProvider() }
+        ChannelDeviceAdmission.foundedDeviceGroupAlone = { [weak sync] in sync?.rejoinAnswer == .founded }
+        ChannelDeviceAdmission.seedRegister = sync
         chat.ownDeviceGroupRosterProvider = { [weak sync, weak auth] in
             if let live = sync?.rosterDeviceKeys() { return live }
             guard let secrets = auth?.identitySecrets else { return nil }
@@ -652,6 +704,14 @@ struct LakkoApp: App {
         .backgroundTask(.appRefresh(ContactBackgroundRefresh.taskIdentifier)) {
             await contactsRepository.refreshInbox()
             ContactBackgroundRefresh.schedule()
+        }
+        // `docs/ux/channel-notifications.md` section 3 — channel posts read
+        // while Lakko is in the background: one channel post sync within the
+        // task's budget, then the next request. No session: nothing runs.
+        .backgroundTask(.appRefresh(ChannelPostBackgroundRefresh.taskIdentifier)) {
+            ChannelPostBackgroundRefresh.schedule()
+            await ChannelPostBackgroundRefresh.runLive(
+                authRepository: authRepository, deviceGroupSync: deviceGroupSync)
         }
     }
 
@@ -742,11 +802,15 @@ struct LakkoApp: App {
             .onChange(of: scenePhase) { _, phase in
                 if phase == .background {
                     ContactBackgroundRefresh.schedule()
+                    ChannelPostBackgroundRefresh.schedule()
                 }
                 // The foreground receive runs only while the app is active;
                 // becoming active again sweeps at once, so an offer that
                 // arrived while backgrounded rings if it is still fresh.
                 foregroundReceive.scheduler.setForeground(phase == .active)
+                // ADR-0081 third amendment — only a device in the foreground
+                // listens for, and answers, a rejoining device's knock.
+                services.deviceGroupSync.setForeground(phase == .active)
                 if phase == .background {
                     // What the extension may need while the app is not
                     // running, written as it leaves.
@@ -771,7 +835,7 @@ struct LakkoApp: App {
                     // ADR-0060 section 4 — a `fof` rotation that came due
                     // while the app was closed.
                     ReachCenter.shared.noteForeground()
-                    // ADR-0089 step 3 — a suspended account asks auth again
+                    // ADR-0098 step 3 — a suspended account asks auth again
                     // on every return to the foreground.
                     Task { await SuspensionCenter.shared.noteForeground() }
                 }
@@ -797,6 +861,7 @@ struct LakkoApp: App {
             .task {
                 foregroundReceive.scheduler.start()
                 foregroundReceive.scheduler.setForeground(scenePhase == .active)
+                services.deviceGroupSync.setForeground(scenePhase == .active)
                 // ADR-0080 — `onChange(of: scenePhase)` does not run for the
                 // initial value, so a cold launch installed no recogniser and
                 // took no foreground. Both are idempotent.
@@ -839,7 +904,7 @@ struct AppRoot: View, Equatable {
     let services: AppServices
     @ObservedObject private var authRepository: AuthRepository
     @ObservedObject private var inviteIntake: InviteIntake
-    /// ADR-0089 step 3 — suspended mode: the suspended screen in place of
+    /// ADR-0098 step 3 — suspended mode: the suspended screen in place of
     /// the app, or the read-only app. Publishes rarely.
     @ObservedObject private var suspension = SuspensionCenter.shared
     /// ADR-0061 — the two backup alarms below read the catalog, so they
@@ -911,8 +976,10 @@ struct AppRoot: View, Equatable {
             // AppRoot appear (view identity is stable across auth-state flips).
             .task {
                 await releaseChecker.checkOnLaunch()
+                // ADR-0097 — the supporters list, at most once a day.
+                await SupportersListCenter.shared.refreshIfDue()
             }
-            // ADR-0089 step 3 — while suspended, ask auth again every 10
+            // ADR-0098 step 3 — while suspended, ask auth again every 10
             // minutes; a normal pair ends suspended mode silently.
             .task(id: suspension.account) {
                 await suspension.runChecks()
@@ -992,7 +1059,7 @@ struct AppRoot: View, Equatable {
                     services.linkCallHost.reset()
                 }
         } else if suspension.active, !(suspension.reading && sessionWithKeys) {
-            // ADR-0089 step 3 / UX `reporting-and-moderation.md` section 4 —
+            // ADR-0098 step 3 / UX `reporting-and-moderation.md` section 4 —
             // the one screen that says why. A device without the account's
             // keys has no chats to read and shows it alone.
             SuspendedScreen(
@@ -1176,6 +1243,17 @@ struct AppRoot: View, Equatable {
                 link: services.linkCallHost,
                 inviteIntake: inviteIntake
             )
+            // A sign-in that named no username (a passkey on a new device),
+            // and the backup gave none of this account's: ask for it. A sheet
+            // over the app, never a blocking step; closing it asks again at
+            // the next app start.
+            .sheet(isPresented: Binding(
+                get: { authRepository.usernamePromptAccountIdB64 == account.accountIdB64 },
+                set: { if !$0 { authRepository.dismissUsernamePrompt() } }
+            )) {
+                UsernamePromptSheet(authRepository: authRepository)
+                    .presentationDetents([.medium, .large])
+            }
 
         case .needsRecoveryPhrase(let account):
             // Signed in, keys not here: the canonical identity cannot be
@@ -1197,6 +1275,27 @@ struct AppRoot: View, Equatable {
             .onAppear {
                 // Same defensive teardown as the anon branch — no live
                 // session runtime should linger while the keys are missing.
+                services.deviceGroupSync.clear()
+            }
+        case .needsEarlierKeys(let account):
+            // G-56 (UX identity-recovery section 8a) — signed in, keys here,
+            // but not the account's earlier keys: the variant of the restore
+            // prompt (another device, or a reset). The device looks for the
+            // keys itself and the state flips to `.session` when they come.
+            RestoreIdentityPromptScreen(
+                authRepository: authRepository,
+                viewModel: RestoreIdentityPromptViewModel(
+                    repository: authRepository,
+                    username: account.username,
+                    accountIdB64: account.accountIdB64,
+                    earlierKeys: true,
+                    noteOwnAction: { [center = services.accountProtection] in center.noteOwnAction($0) },
+                    keepAddress: { [center = services.accountProtection] in center.keepAddress($0) }
+                )
+            )
+            .id("earlier-keys-" + account.accountIdB64)
+            .onAppear {
+                // No session runtime runs while parked.
                 services.deviceGroupSync.clear()
             }
         case .saveFreshPhrase(let account):
@@ -1240,6 +1339,9 @@ enum TabRoute: Hashable {
     case groupInfo(groupIdHex: String)
     /// The Add members screen, pushed over a group's info (section 2.4).
     case addMembers(groupIdHex: String)
+    /// A screen pushed over a group's info (invite links, reactions, group
+    /// type, ownership transfer); same view model as the info.
+    case groupInfoSubscreen(groupIdHex: String, screen: GroupInfoSubscreen)
     /// The contact picker behind the create menu's New chat.
     case newChat
     /// The create menu's Create group (see ``NewGroupScreen``).
@@ -1284,6 +1386,8 @@ enum TabRoute: Hashable {
     /// that holds the account's keys.
     case password
     case antiCensorship
+    /// Settings > About > Support Lakko (`docs/ux/donations.md` section 4).
+    case donations
     /// ADR-0059 section 6 — Settings -> Security -> Channels I share.
     case channelsIShare
     /// Settings > Language (ADR-0061).
@@ -1293,10 +1397,12 @@ enum TabRoute: Hashable {
     case chatFolders(reorder: Bool)
     /// Settings > Privacy > Who can find me (ADR-0060).
     case whoCanFindMe
-    /// Settings > Privacy > Blocked people (ADR-0089, UX 1.1).
+    /// Settings > Privacy > Blocked people (ADR-0098, UX 1.1).
     case blockedPeople
-    /// Settings > Privacy > Your reports (ADR-0089, UX 2.3).
+    /// Settings > Privacy > Your reports (ADR-0098, UX 2.3).
     case yourReports
+    /// Settings > About > Supporters (ADR-0097 section 2).
+    case supporters
     /// Deep links (`/i/`, `/g/`, `/c/`), pushed over the current tab rather
     /// than replacing the app (UX spec section 3).
     case inviteLanding(slug: String)
@@ -1382,6 +1488,12 @@ private final class SessionModels: ObservableObject {
         // Bound at construction, so the persisted channel list and publisher
         // keys are loaded before the first body evaluation.
         channelsState = ChannelsUiState(accountIdB64: accountIdB64)
+        // 2026-11-20 (ADR-0074) — the channel proof mapping holds from the
+        // first request of the session: owner proofs by the current key,
+        // co-publisher proofs by the lineage key.
+        if let seed = services.authRepository.identitySecrets?.accountIdentitySeed {
+            ChannelPublisherIdentity.installSession(accountIdB64: accountIdB64, currentSeed: seed)
+        }
         // ADR-0073 phase 2 (UX 16.6) — the session's key generation, so a
         // channel created under earlier keys reads as orphaned on the device
         // that reset them.
@@ -1414,6 +1526,15 @@ private final class SessionModels: ObservableObject {
             reading?.update { $0.seedingChannelReads([channelId: slot]) }
         }
         reading.bind(postSync: channelPostSync, channels: channelsState)
+        // `docs/ux/channel-notifications.md` — every channel read the sync
+        // makes may show a notification (``ChannelPostNotifier``).
+        let deviceGroupSync = services.deviceGroupSync
+        ChannelPostNotifier.attach(
+            to: channelPostSync, channels: channelsState, reading: reading,
+            flags: { [weak deviceGroupSync] in
+                guard let deviceGroupSync, deviceGroupSync.ready else { return nil }
+                return deviceGroupSync.flags
+            })
         let chatRepository = services.chatRepository
         let channels = channelsState
         let chatList = chatListVM
@@ -1431,12 +1552,24 @@ private final class SessionModels: ObservableObject {
                 MainActor.assumeIsolated { searchSession?.noteContactsChanged() }
             }
         // ADR-0087 section 9 — a channel's end, in both directions.
-        channels.onUnsubscribedHere = { [weak chatRepository] channelId in
+        channels.onUnsubscribedHere = { [weak chatRepository, weak channels] channelId in
             chatRepository?.noteChannelUnsubscribed(channelIdHex: channelId.lowercased())
+            channels?.onRelationshipEnded?(channelId)
         }
-        channels.onRemovedHere = { [weak chatRepository] channelId, name in
+        channels.onRemovedHere = { [weak chatRepository, weak channels] channelId, name in
             chatRepository?.noteChannelRemoved(channelIdHex: channelId.lowercased(), name: name)
+            channels?.onRelationshipEnded?(channelId)
         }
+        // ADR-0050 section 2.9 (amended 2026-11-13) — the channel subscription
+        // register: this device's channels reach the account's other devices,
+        // and theirs reach this one (`docs/ux/second-device.md` section 4a).
+        ChannelSubscriptionSync.shared.bind(
+            accountIdB64: accountIdB64, channels: channels, port: deviceGroupSync,
+            changes: Publishers.MergeMany(
+                deviceGroupSync.$channelSubscriptions.map { _ in () }.eraseToAnyPublisher(),
+                deviceGroupSync.$ready.map { _ in () }.eraseToAnyPublisher(),
+                deviceGroupSync.$endedConversations.map { _ in () }.eraseToAnyPublisher())
+            .eraseToAnyPublisher())
         channels.onSubscribedHere = { [weak chatRepository] channelId in
             chatRepository?.noteChannelSubscribed(channelIdHex: channelId.lowercased())
         }
@@ -1728,7 +1861,7 @@ private struct SessionRoot: View, Equatable {
                 )
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .chats) }
             }
-            .tabItem { Label(l10n.t("nav.chats"), systemImage: "bubble.left") }
+            .tabItem { Label { Text(l10n.t("nav.chats")) } icon: { (selectedTab == .chats ? LkIcon.chatFill : LkIcon.chat).fixedImage } }
             .tag(SessionTab.chats)
 
             NavigationStack(path: $feedPath) {
@@ -1747,13 +1880,13 @@ private struct SessionRoot: View, Equatable {
                     onOpenConversation: { push(.chat(groupIdHex: $0), on: .feed) },
                     onOpenChannel: { push(.channel(channelId: $0), on: .feed) },
                     onGoToChats: { selectedTab = .chats },
-                    onOpenFoundChannel: { channelId, handle in
-                        push(.channelFound(channelId: channelId, handle: handle), on: .feed)
+                    onSubscribeFoundChannel: { channelId, handle, name in
+                        push(.channelSubscribe(channelId: channelId, handle: handle, name: name), on: .feed)
                     }
                 )
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .feed) }
             }
-            .tabItem { Label(l10n.t("nav.feed"), systemImage: "newspaper") }
+            .tabItem { Label { Text(l10n.t("nav.feed")) } icon: { (selectedTab == .feed ? LkIcon.feedFill : LkIcon.feed).fixedImage } }
             .tag(SessionTab.feed)
 
             NavigationStack(path: $contactsPath) {
@@ -1764,7 +1897,7 @@ private struct SessionRoot: View, Equatable {
                     onOpenLink: { inviteIntake.handle($0) })
                     .navigationDestination(for: TabRoute.self) { routeView($0, tab: .contacts) }
             }
-            .tabItem { Label(l10n.t("nav.contacts"), systemImage: "person.crop.circle") }
+            .tabItem { Label { Text(l10n.t("nav.contacts")) } icon: { (selectedTab == .contacts ? LkIcon.personSquareFill : LkIcon.personSquare).fixedImage } }
             .badge(ContactsViewModel.requestsBadge(waiting: contactRequestsWaiting).map { Text($0) })
             .tag(SessionTab.contacts)
 
@@ -1787,10 +1920,10 @@ private struct SessionRoot: View, Equatable {
                 .task { services.chatRepository.backfillCallHistory() }
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .calls) }
             }
-            .tabItem { Label(l10n.t("nav.calls"), systemImage: "phone") }
+            .tabItem { Label { Text(l10n.t("nav.calls")) } icon: { (selectedTab == .calls ? LkIcon.phoneFill : LkIcon.phone).fixedImage } }
             .tag(SessionTab.calls)
 
-            SettingsTabAttention {
+            SettingsTabAttention(selected: selectedTab == .settings) {
                 NavigationStack(path: guardedSettingsPath) {
                     SettingsScreen(
                         account: account,
@@ -1812,7 +1945,7 @@ private struct SessionRoot: View, Equatable {
             MembershipEndToast(center: chatRepository.membershipEndNotices)
                 .animation(.easeOut(duration: 0.2), value: chatRepository.membershipEndNotices.shown)
         }
-        // ADR-0089 / UX 2.3 — "Report sent. Moderators will review it."
+        // ADR-0098 / UX 2.3 — "Report sent. Moderators will review it."
         .overlay(alignment: .bottom) {
             ReportSentToast()
                 .animation(.easeOut(duration: 0.2), value: ReportNoticeCenter.shared.shown)
@@ -1863,6 +1996,15 @@ private struct SessionRoot: View, Equatable {
             guard requested else { return }
             NewDeviceNoticeCenter.shared.openDevicesRequested = false
             openDevices()
+        }
+        // `docs/ux/channel-notifications.md` section 1 — a tap on a channel
+        // post notification opens the channel, at its newest end, where the
+        // newest notified post is. Also the tap that launched the app: the
+        // request waits in the shared center until this root reads it.
+        .onReceive(ChannelNotificationTaps.shared.$openChannelRequested) { requested in
+            guard let channelId = requested else { return }
+            ChannelNotificationTaps.shared.openChannelRequested = nil
+            openNotifiedChannel(channelId)
         }
         // ADR-0074 section 3.5 — after a rotation of the account keys the
         // channels this device created follow the new owner key; the
@@ -1999,6 +2141,9 @@ private struct SessionRoot: View, Equatable {
                     channelsState.channels.contains { $0.id == id }
                         && (channelsState.subscriberKeysByChannel[id] != nil || channelsState.keysByChannel[id] != nil)
                 }
+                // An invitation that carries no channel name reads by the
+                // name this device holds for it (``HeldChannelNames``).
+                HeldChannelNames.shared.follow(channelsState.$channels.eraseToAnyPublisher())
                 ChannelInviteActions.shared.subscribe = { channel in
                     openChannelInvitation(channel, on: selectedTab)
                 }
@@ -2012,8 +2157,17 @@ private struct SessionRoot: View, Equatable {
                 // ADR-0045 decision 2 — a publisher request's Welcome lands
                 // through the mailbox loop whenever the owner approves.
                 contactsRepository.publisherWelcomeLander = { welcome, accountIdB64 in
-                    try CoPublisherAcceptance.shared.landPendingWelcome(welcome, accountIdB64: accountIdB64)
+                    // ADR-0090 section 2.3 — an owner device admitted this one
+                    // (or a co-publisher's other device) to a channel's
+                    // PublisherGroup: joined into the waiting channel.
+                    if AcceptedContactsStore.boundAccountIdB64 == accountIdB64,
+                       ChannelDeviceAdmission.landWelcome(welcome) != nil {
+                        return true
+                    }
+                    return try CoPublisherAcceptance.shared.landPendingWelcome(welcome, accountIdB64: accountIdB64)
                 }
+                ChannelDeviceAdmission.waitingState = channelsState
+                ChannelDeviceAdmission.currentSeed = { accountIdentitySeed }
                 ReachCenter.shared.contactsProvider = { [contactsRepository] in
                     contactsRepository.state.accepted.compactMap { contact in
                         guard let id = contact.request.fromAccountId else { return nil }
@@ -2065,6 +2219,10 @@ private struct SessionRoot: View, Equatable {
                 // filing before the first one ends.
                 CallHistoryStore.shared.bind(accountIdB64: account.accountIdB64)
                 chatRepository.bootstrap(secrets: secrets)
+                // G-56 — the bootstrap refused (the account's earlier keys
+                // are missing here) and the session parked: nothing below
+                // runs (no mailbox claim, no KeyPackage).
+                guard chatRepository.currentAccountIdB64 == account.accountIdB64 else { return }
                 // A backup keeps received names in recent-use order after
                 // contacts (`OwnBackupEnvelopes.receivedProfileRecords`).
                 BackupPeopleOrder.source = { [weak chatRepository] in
@@ -2163,6 +2321,10 @@ private struct SessionRoot: View, Equatable {
         case .chat:
             services.callHost.startOutgoingCall(
                 groupIdHex: groupIdHex, button: CallMediaChoice.button(video: video))
+        case .noConversation:
+            // Section 5.1.1: such a row has no call-back button; an ended
+            // link call cannot be joined again.
+            break
         }
     }
 
@@ -2230,6 +2392,10 @@ private struct SessionRoot: View, Equatable {
                 if tab != .chats { selectedTab = .chats }
             })
         .toolbar(.hidden, for: .tabBar)
+        // `docs/ux/channel-notifications.md` section 2 — no notification for
+        // the channel open in front of the person.
+        .onAppear { VisibleChannel.appeared(channelId) }
+        .onDisappear { VisibleChannel.disappeared(channelId) }
     }
 
     @ViewBuilder
@@ -2292,6 +2458,16 @@ private struct SessionRoot: View, Equatable {
                 // Section 2.2 — a member who is a contact opens their contact
                 // screen, whose back returns here.
                 onOpenContact: { messageId in push(.contactDetail(messageId: messageId), on: tab) },
+                onOpenSubscreen: { screen in
+                    let binding = path(for: tab)
+                    binding.wrappedValue = GroupInfoNavigation.openSubscreen(
+                        binding.wrappedValue, groupIdHex: groupIdHex, screen)
+                },
+                onCloseSubscreen: { screen in
+                    let binding = path(for: tab)
+                    binding.wrappedValue = GroupInfoNavigation.closeSubscreen(
+                        binding.wrappedValue, groupIdHex: groupIdHex, screen)
+                },
                 // ADR-0045 UX 6.2.4 — the chat is gone: the info and the
                 // conversation under it both go.
                 onDeleted: {
@@ -2300,6 +2476,34 @@ private struct SessionRoot: View, Equatable {
                         binding.wrappedValue, groupIdHex: groupIdHex)
                 }
             )
+            .toolbar(.hidden, for: .tabBar)
+        case .groupInfoSubscreen(let groupIdHex, let screen):
+            let vm = chatViewModel(for: groupIdHex)
+            let close = {
+                let binding = path(for: tab)
+                binding.wrappedValue = GroupInfoNavigation.closeSubscreen(
+                    binding.wrappedValue, groupIdHex: groupIdHex, screen)
+            }
+            Group {
+                switch screen {
+                case .inviteLinks:
+                    GroupInviteLinksScreen(viewModel: vm)
+                case .reactions:
+                    AllowedReactionsScreen(viewModel: vm) { close() }
+                case .groupType:
+                    GroupTypeScreen(viewModel: vm) { close() }
+                case .transferOwnership:
+                    TransferOwnershipStep(viewModel: vm)
+                        // The view model ends the step (a transfer that landed,
+                        // Cancel); the screen it covers is not on screen to see
+                        // that, so the step closes itself.
+                        .onChange(of: vm.transferStepOpen) { _, open in
+                            if !open { close() }
+                        }
+                        // A back from the step ends it as Cancel would.
+                        .onDisappear { vm.transferStepOpen = false }
+                }
+            }
             .toolbar(.hidden, for: .tabBar)
         case .addMembers(let groupIdHex):
             AddMembersScreen(
@@ -2544,6 +2748,8 @@ private struct SessionRoot: View, Equatable {
             PasswordSettingsScreen(authRepository: authRepository)
         case .antiCensorship:
             AntiCensorshipSettingsView(manager: AntiCensorshipManager.shared)
+        case .donations:
+            DonationsScreen()
         case .channelsIShare:
             ChannelsIShareScreen(
                 hub: chatRepository.sharedChannels,
@@ -2553,6 +2759,8 @@ private struct SessionRoot: View, Equatable {
                 })
         case .language:
             LanguageScreen(showsTranslationSettings: true)
+        case .supporters:
+            SupportersScreen(center: SupportersListCenter.shared)
         case .chatFolders(let reorder):
             ChatFoldersSettingsScreen(
                 startInReorder: reorder, viewModel: chatListVM, channels: channelsState,
@@ -2767,6 +2975,17 @@ private struct SessionRoot: View, Equatable {
         path(for: tab).wrappedValue.append(route)
     }
 
+    /// A tap on a channel post notification: the channel on the Chats
+    /// stack, unless it is already the screen on top. A channel this device
+    /// no longer holds opens nothing.
+    private func openNotifiedChannel(_ channelId: String) {
+        guard models.channelsState.channels.contains(where: { $0.id == channelId }) else { return }
+        selectedTab = .chats
+        if chatsPath.last != .channel(channelId: channelId) {
+            push(.channel(channelId: channelId), on: .chats)
+        }
+    }
+
     /// UX 17.5 — a tap on the new-device notification: Settings > Devices.
     private func openDevices() {
         selectedTab = .settings
@@ -2943,13 +3162,18 @@ enum AnonRoute: Hashable {
 private struct SettingsTabAttention<Content: View>: View {
     @ObservedObject private var notice = NewDeviceNoticeCenter.shared
     @ObservedObject private var l10n = Localization.shared
+    /// Whether the Settings tab is the selected one: a selected tab shows
+    /// the filled icon (design system section 8).
+    let selected: Bool
     @ViewBuilder var content: Content
 
     var body: some View {
         let attention = notice.badgeVisible
         content
             .tabItem {
-                Label(l10n.t("nav.settings"), systemImage: "gearshape")
+                Label { Text(l10n.t("nav.settings")) } icon: {
+                    (selected ? LkIcon.gearFill : LkIcon.gear).fixedImage
+                }
                     .accessibilityLabel(
                         attention ? l10n.t("nav.settings.attention_a11y") : l10n.t("nav.settings"))
             }

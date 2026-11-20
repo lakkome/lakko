@@ -16,10 +16,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -61,6 +57,9 @@ import me.lakko.app.chat.suggestionsNotHeld
 import me.lakko.app.devices.sync.DeviceGroupSyncRepository
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * Settings > Chat folders, `docs/ux/chat-folders.md` section 4: the folders
@@ -97,7 +96,7 @@ public fun ChatFoldersSettingsScreen(
                 title = { Text(t("settings.section.folders")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -146,7 +145,7 @@ public fun ChatFoldersSettingsScreen(
                 } else {
                     MaterialTheme.colorScheme.primary
                 }
-                Icon(Icons.Filled.Add, contentDescription = null, tint = tint)
+                LkIcon(R.drawable.ic_lk_folder_plus, contentDescription = null, tint = tint, size = LkIconSize.Row)
                 Spacer(Modifier.width(16.dp))
                 Text(t("folders.new"), color = tint, style = MaterialTheme.typography.bodyLarge)
             }
@@ -305,10 +304,11 @@ private fun ReorderableFolders(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Icon(
-                    Icons.Filled.DragHandle,
+                LkIcon(
+                    R.drawable.ic_lk_drag_handle,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    size = LkIconSize.Row,
                 )
             }
             }

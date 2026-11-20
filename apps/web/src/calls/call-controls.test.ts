@@ -65,10 +65,10 @@ describe("callControls — which controls exist (section 4.1)", () => {
     }
   });
 
-  it("gives a group call one entry beyond the devices, Participants, and no chat", () => {
+  it("gives a group call Participants, and Chat only where the call carries one", () => {
     // A chat control that sent nothing anywhere was found live on 2026-10-02
-    // and removed; Participants and Invite were merged the same day, so the
-    // row is five circles.
+    // and removed; Participants and Invite were merged the same day. The
+    // call's own chat (section 4.1.4) comes with the `chat` input only.
     const row: CallControlId[] = ["mic", "camera", "participants", "settings", "end"];
     expect(ids({ surface: "group", othersPresent: true })).toEqual(row);
     expect(ids({ surface: "group", canInvite: true })).toEqual(row);
@@ -107,10 +107,10 @@ describe("callControls — the two states read the right way round (section 4.1.
   });
 
   it("slashes the icon in the off state", () => {
-    expect(control({ micOn: true }, "mic").icon).toBe("mic");
-    expect(control({ micOn: false }, "mic").icon).toBe("micOff");
-    expect(control({ cameraOn: true }, "camera").icon).toBe("video");
-    expect(control({ cameraOn: false }, "camera").icon).toBe("videoOff");
+    expect(control({ micOn: true }, "mic").icon).toBe("mic-fill");
+    expect(control({ micOn: false }, "mic").icon).toBe("mic-slash-fill");
+    expect(control({ cameraOn: true }, "camera").icon).toBe("video-fill");
+    expect(control({ cameraOn: false }, "camera").icon).toBe("video-slash-fill");
   });
 
   it("draws a sending camera as the outline and a stopped one as the solid", () => {
@@ -222,7 +222,7 @@ describe("callControls — Participants on a call that can invite (docs/ux/call-
     expect(entry.label).toBe("Participants");
     expect(entry.pressed).toBeNull();
     expect(entry.tone).toBe("outline");
-    expect(entry.icon).toBe("groups");
+    expect(entry.icon).toBe("person-2-fill");
     // Even with the list open: the pressed state belongs to the direct mode.
     expect(control({ ...group, participantsOpen: true }, "participants").pressed).toBeNull();
   });
@@ -280,5 +280,48 @@ describe("callControls — Share screen (docs/ux/screen-share.md section 1)", ()
 
   it("refuses a second press while the picker is open", () => {
     expect(control({ screenShare: { sharing: false, busy: true } }, "screen").disabled).toBe(true);
+  });
+});
+
+describe("callControls — Chat (section 4.1.4)", () => {
+  const group: Partial<CallControlsInput> = {
+    surface: "group",
+    othersPresent: true,
+    chat: { open: false, unread: 0 },
+  };
+
+  it("sits after Participants and before Settings", () => {
+    expect(ids(group)).toEqual(["mic", "camera", "participants", "chat", "settings", "end"]);
+  });
+
+  it("is there from the first second, alone in the call too", () => {
+    expect(ids({ ...group, othersPresent: false })).toEqual(["mic", "camera", "chat", "settings", "end"]);
+  });
+
+  it("never appears on a one-to-one call", () => {
+    for (const surface of ["voice", "video"] as const) {
+      expect(ids({ ...group, surface })).not.toContain("chat");
+    }
+  });
+
+  it("names the action and carries the unread count while closed", () => {
+    expect(control(group, "chat").accessibleName).toBe("Open chat");
+    expect(control(group, "chat").badge).toBeUndefined();
+    const unread = control({ ...group, chat: { open: false, unread: 3 } }, "chat");
+    expect(unread.accessibleName).toBe("Open chat, 3 unread");
+    expect(unread.badge).toBe("3");
+    expect(control({ ...group, chat: { open: false, unread: 12 } }, "chat").badge).toBe("9+");
+  });
+
+  it("reads Close chat and pressed while the panel is open, with no badge", () => {
+    const open = control({ ...group, chat: { open: true, unread: 0 } }, "chat");
+    expect(open.accessibleName).toBe("Close chat");
+    expect(open.pressed).toBe(true);
+    expect(open.badge).toBeUndefined();
+  });
+
+  it("keeps its label whatever the state", () => {
+    expect(control(group, "chat").label).toBe("Chat");
+    expect(control({ ...group, chat: { open: true, unread: 0 } }, "chat").label).toBe("Chat");
   });
 });

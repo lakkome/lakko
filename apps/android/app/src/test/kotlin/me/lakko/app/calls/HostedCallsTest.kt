@@ -86,6 +86,10 @@ class HostedCallsTest {
         val rows = mutableListOf<Pair<String, CallTranscriptEntry>>()
         var synced = 0
 
+        /** ADR-0091 — this device is behind in the chat. */
+        var behind = false
+        override fun behindHeld(groupIdHex: String): Boolean = behind
+
         /** When each recorded call started, in the order of [rows]. */
         val rowStarts = mutableListOf<Long?>()
 
@@ -245,6 +249,25 @@ class HostedCallsTest {
         assertNull(h.host.slot.value)
         assertTrue(h.port.sessions.isEmpty())
         assertTrue(h.port.published.isEmpty())
+    }
+
+    @Test
+    fun `a group call in a chat this device is behind in fails the ordinary way and publishes nothing`() = runTest {
+        val h = groupHarness()
+        h.port.behind = true
+        assertEquals(
+            GroupCallStartOutcome.Failed(me.lakko.app.l10n.UiText("call.error.start_group")),
+            h.host.start(groupA, video = false, joinCallIdHex = null),
+        )
+        assertEquals(
+            GroupCallStartOutcome.Failed(me.lakko.app.l10n.UiText("call.error.join_group")),
+            h.host.start(groupA, video = false, joinCallIdHex = "00".repeat(16)),
+        )
+        runCurrent()
+        assertNull(h.host.slot.value)
+        assertTrue(h.port.sessions.isEmpty())
+        assertTrue(h.port.published.isEmpty())
+        assertEquals(0, h.port.synced)
     }
 
     @Test
@@ -682,6 +705,41 @@ class HostedCallsTest {
         val url = h.link()!!
         assertEquals(InCallInvite.Ready(url, LinkDelivery.Copied), h.host.invite.value)
         assertEquals(listOf(url), clipboard)
+    }
+
+    @Test
+    fun `the copied line is held by the call, so it does not come back on its own`() = runTest {
+        val h = linkHarness()
+        h.host.start(request(owner = true))
+        h.host.copyInviteLink(inviteIdentity(), copy)
+        runCurrent()
+        assertTrue(h.host.inviteLineShown.value)
+
+        advanceTimeBy(INVITE_STATUS_HOLD_MS - 1)
+        runCurrent()
+        assertTrue(h.host.inviteLineShown.value)
+        advanceTimeBy(1)
+        runCurrent()
+        assertFalse(h.host.inviteLineShown.value)
+
+        // The link is still the call's (a second copy re-offers it), but the
+        // line about the first copy stays down however long the call runs:
+        // a call screen opened again reads this flag, not a timer of its own.
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertFalse(h.host.inviteLineShown.value)
+        assertEquals(InCallInvite.Ready(h.link()!!, LinkDelivery.Copied), h.host.invite.value)
+    }
+
+    @Test
+    fun `a link shown to be copied by hand stays up`() = runTest {
+        val h = linkHarness()
+        h.host.start(request(owner = true))
+        h.host.copyInviteLink(inviteIdentity(), copy = null)
+        runCurrent()
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertTrue(h.host.inviteLineShown.value)
     }
 
     @Test

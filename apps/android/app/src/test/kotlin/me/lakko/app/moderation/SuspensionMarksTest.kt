@@ -20,7 +20,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0089 step 4 — the suspension standings service and the decisions each
+ * ADR-0098 step 4 — the suspension standings service and the decisions each
  * mark site takes from it. The host suite has no native core, so the bucket
  * prefix and the log check are fakes; the service's own rules (one request in
  * flight per prefix, reuse until the snapshot's reuse time, a ten-minute back
@@ -66,7 +66,7 @@ class SuspensionMarksTest {
         },
         scope = scope,
         nowMs = { f.now },
-        // ADR-0089 F2: these tests are about the service's own rules; every
+        // ADR-0098 F2: these tests are about the service's own rules; every
         // suspension here is proven (the proof rules have their own tests).
         prove = { _, _, _, _ -> true },
     )

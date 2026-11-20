@@ -153,13 +153,13 @@ pub enum InfoSection {
     /// groups and channels is on. Appended last so earlier uniffi ordinals
     /// stay put.
     MembersCanFindMe,
-    /// Block this person (ADR-0089 section 6, UX `reporting-and-moderation.md`
+    /// Block this person (ADR-0098 section 6, UX `reporting-and-moderation.md`
     /// section 1.1). A person's card only, in the danger block. Appended last
     /// so earlier uniffi ordinals stay put.
     Block,
     /// Unblock a blocked person, in place of [`Self::Block`].
     Unblock,
-    /// Report to Lakko's moderators (ADR-0089 section 2, UX section 2.1): on
+    /// Report to Lakko's moderators (ADR-0098 section 2, UX section 2.1): on
     /// a person's card, a group's info and a channel's info, never on the
     /// viewer's own group or channel.
     Report,
@@ -272,7 +272,7 @@ pub struct PersonInfoCapabilities {
     /// (`docs/ux/who-can-find-me.md` section 5.1), under either form. The
     /// client reads it from the setting, so this crate never does.
     pub contacts_of_contacts_on: bool,
-    /// The viewer blocked this person (ADR-0089 section 6). Read from the
+    /// The viewer blocked this person (ADR-0098 section 6). Read from the
     /// account's synced block register.
     pub is_blocked: bool,
 }
@@ -317,7 +317,7 @@ pub struct GroupInfoCapabilities {
     /// The group holds an `@name` (ADR-0087). A group is reported by its
     /// `@name`; one without a name is named on no server, so it is not
     /// reported as a group and its members' messages are reported instead
-    /// (ADR-0089 open question 3).
+    /// (ADR-0098 open question 3).
     pub has_handle: bool,
 }
 
@@ -839,7 +839,7 @@ mod tests {
     }
 
     /// A group is reported by anyone in it but its owner, by its `@name`: a
-    /// group with no name is not reported as a group (ADR-0089 open
+    /// group with no name is not reported as a group (ADR-0098 open
     /// question 3).
     #[test]
     fn a_group_is_reported_by_anyone_but_its_owner_by_its_name() {

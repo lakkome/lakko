@@ -32,6 +32,13 @@ install -d -m 750 -o root -g lakkotest $ENV_DIR
 install -d -m 750 -o lakkotest -g lakkotest /var/lib/lakko-test
 install -d -m 700 -o lakkotest -g lakkotest /var/lib/lakko-test/blobs
 install -d -m 755 -o root -g root /var/www/lakko-test-web
+# docs/ux/donations.md: the signed donations file discovery loads as a systemd
+# credential. The unit fails when the source is missing, so an empty list
+# stands in until a signed file is installed (README.md, "Donation methods").
+install -d -m 700 -o root -g root $ENV_DIR/credstore
+if [[ ! -f $ENV_DIR/credstore/lakko-donations.json ]]; then
+  (umask 077; printf '{"methods":[]}\n' > $ENV_DIR/credstore/lakko-donations.json)
+fi
 
 if [[ ! -f $ENV_FILE ]]; then
   umask 027
@@ -57,6 +64,7 @@ LAKKO_SESSION_TOKEN_SECRET=$(openssl rand -base64 32)
 LAKKO_TOTP_ENC_KEY=$(openssl rand -base64 32)
 LAKKO_VAULT_ENC_KEY=$(openssl rand -base64 32)
 LAKKO_ANON_TOKEN_MASTER_SECRET=$(openssl rand -hex 32)
+LAKKO_ANON_CRED_MASTER_SECRET=$(openssl rand -hex 32)
 LAKKO_AUTH_HANDLE_PEPPER=$(openssl rand -hex 32)
 
 LAKKO_WEBAUTHN_RP_ID=${DOMAIN}
@@ -127,7 +135,7 @@ if ! grep -q '^LAKKO_CHANNELS_DATABASE_URL=' $ENV_FILE; then
   echo "channels database URL added to the env file"
 fi
 
-# The moderation service (ADR-0089) arrived later: an older env file gains
+# The moderation service (ADR-0098) arrived later: an older env file gains
 # its database URL. The moderator list and root key are installed by hand
 # (see tools/moderation-root); without them reporting answers 503.
 if ! grep -q '^LAKKO_MODERATION_DATABASE_URL=' $ENV_FILE; then
@@ -135,7 +143,7 @@ if ! grep -q '^LAKKO_MODERATION_DATABASE_URL=' $ENV_FILE; then
   echo "moderation database URL added to the env file"
 fi
 
-# Account suspension (ADR-0089 section 4): auth's internal listener and the
+# Account suspension (ADR-0098 section 4): auth's internal listener and the
 # moderation service share one secret, generated once and then kept. An env
 # file that already holds either side's value gives it to the other. The root
 # key is copied from the moderation service's only when that one is set (it
@@ -155,7 +163,7 @@ if ! grep -q '^LAKKO_MODERATION_AUTH_INTERNAL_SECRET=' $ENV_FILE; then
   echo "LAKKO_MODERATION_AUTH_INTERNAL_SECRET=${SUSPENSION_SECRET}" >> $ENV_FILE
 fi
 if ! grep -q '^LAKKO_MODERATION_AUTH_INTERNAL_URL=' $ENV_FILE; then
-  echo "LAKKO_MODERATION_AUTH_INTERNAL_URL=http://127.0.0.1:8095" >> $ENV_FILE
+  echo "LAKKO_MODERATION_AUTH_INTERNAL_URL=http://127.0.0.1:8101" >> $ENV_FILE
 fi
 MODERATION_ROOT=$(grep -m1 '^LAKKO_MODERATION_ROOT_KEY=' $ENV_FILE | cut -d= -f2-)
 if [ -n "$MODERATION_ROOT" ] && ! grep -q '^LAKKO_AUTH_MODERATION_ROOT_KEY=' $ENV_FILE; then
@@ -163,7 +171,7 @@ if [ -n "$MODERATION_ROOT" ] && ! grep -q '^LAKKO_AUTH_MODERATION_ROOT_KEY=' $EN
   echo "moderation root key copied to auth"
 fi
 
-# The other services that apply moderator actions (ADR-0089 step 5):
+# The other services that apply moderator actions (ADR-0098 step 5):
 # discovery (names, search, group handles), channels, storage (blob delete).
 # Each pair shares its own secret, generated once and then kept; an env file
 # that already holds either side's value gives it to the other. The root key
@@ -210,12 +218,28 @@ if ! grep -q '^LAKKO_ANON_TOKEN_MASTER_SECRET=' $ENV_FILE; then
   echo "anonymous-token master secret added to the env file"
 fi
 
+# Channel-poll credentials (ADR-0092 section 4) arrived later: an older env
+# file gains their master secret here, generated once and then kept
+# (regenerating it invalidates every credential issued on this stack).
+if ! grep -q '^LAKKO_ANON_CRED_MASTER_SECRET=' $ENV_FILE; then
+  echo "LAKKO_ANON_CRED_MASTER_SECRET=$(openssl rand -hex 32)" >> $ENV_FILE
+  echo "anonymous-credential master secret added to the env file"
+fi
+
 # Sign-in by name (ADR-0054 S5) arrived later: an older env file gains the
 # login-handle pepper here, generated once and then kept (regenerating it
 # unbinds every login handle on this stack).
 if ! grep -q '^LAKKO_AUTH_HANDLE_PEPPER=' $ENV_FILE; then
   echo "LAKKO_AUTH_HANDLE_PEPPER=$(openssl rand -hex 32)" >> $ENV_FILE
   echo "login-handle pepper added to the env file"
+fi
+
+# Supporter codes (ADR-0097) arrived later: an older env file gains the
+# pepper keying the stored code hashes, generated once and then kept
+# (regenerating it makes every minted code unknown).
+if ! grep -q '^LAKKO_AUTH_SUPPORTER_CODE_PEPPER=' $ENV_FILE; then
+  echo "LAKKO_AUTH_SUPPORTER_CODE_PEPPER=$(openssl rand -hex 32)" >> $ENV_FILE
+  echo "supporter-code pepper added to the env file"
 fi
 
 # The recovery email (ADR-0075) arrived later: an older env file gains the
@@ -291,6 +315,27 @@ if ! grep -q '^LAKKO_PUSH_GW_INTERNAL_SECRET=' $ENV_FILE; then
   } >> $ENV_FILE
   unset WAKE_SECRET
   echo "wake forward secret added to the env file"
+fi
+
+# The account purge (auth -> discovery + storage internal listeners) arrived
+# later: an env file gains one shared secret, the two internal binds and
+# auth's two URLs here, all at once (a half-configured set stops the
+# services from starting).
+if ! grep -q '^LAKKO_INTERNAL_PURGE_SECRET=' $ENV_FILE; then
+  PURGE_SECRET=$(openssl rand -base64 32)
+  sed -i -e '/^LAKKO_DISCOVERY_INTERNAL_BIND=/d' -e '/^LAKKO_STORAGE_INTERNAL_BIND=/d' \
+    -e '/^LAKKO_AUTH_DISCOVERY_INTERNAL_URL=/d' -e '/^LAKKO_AUTH_STORAGE_INTERNAL_URL=/d' $ENV_FILE
+  {
+    echo
+    echo "# Account deletion: auth purges discovery + storage over internal listeners."
+    echo "LAKKO_INTERNAL_PURGE_SECRET=${PURGE_SECRET}"
+    echo "LAKKO_DISCOVERY_INTERNAL_BIND=127.0.0.1:8094"
+    echo "LAKKO_STORAGE_INTERNAL_BIND=127.0.0.1:8095"
+    echo "LAKKO_AUTH_DISCOVERY_INTERNAL_URL=http://127.0.0.1:8094"
+    echo "LAKKO_AUTH_STORAGE_INTERNAL_URL=http://127.0.0.1:8095"
+  } >> $ENV_FILE
+  unset PURGE_SECRET
+  echo "account purge secret and internal listeners added to the env file"
 fi
 
 # The storage blob index and pass gate (ADR-0065) arrived later: an env file

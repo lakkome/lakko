@@ -80,7 +80,13 @@
 //!     chat folders, pins, mutes, archive, read cursors, drafts,
 //!     conversation order), so a restore with no other device alive seeds
 //!     the fold from it. Validated on encode and decode through
-//!     `lakko_sync::SyncedState::from_bytes`, fail closed.
+//!     `lakko_sync::SyncedState::from_bytes`, fail closed, with one
+//!     exception on decode (2026-11-15): a state whose leading version byte
+//!     is not the one this build reads is dropped and decodes as empty
+//!     ("none held"), so a backup written before the persisted synced-state
+//!     version moved still restores everything else. Any other malformed
+//!     state refuses the whole payload. A decoded payload carrying a dropped
+//!     state therefore re-encodes to different bytes than it was read from.
 //!   - `own_profile`, `visibility` — the person's own name and photo
 //!     references, and who can find them, as the envelopes
 //!     `lakko_contacts` defines. A restored device with no other device
@@ -310,7 +316,9 @@ pub struct BackupPayload {
     /// Bytes rather than the typed state so this crate's value stays a plain
     /// codec record; [`Self::encode`] and [`Self::decode`] both run
     /// `SyncedState::from_bytes` over it, so a payload carrying a state the
-    /// fold would refuse is refused whole.
+    /// fold would refuse is refused whole. One exception on decode: a state
+    /// whose version byte this build does not read decodes as empty, so the
+    /// rest of an older backup still restores; the state itself is lost.
     pub synced_state: Vec<u8>,
     /// The account's own predecessors, oldest first, at most
     /// [`MAX_OWN_PREDECESSORS`]. Empty for an account that never rotated.
@@ -453,7 +461,9 @@ impl BackupPayload {
     ///   malformed (any version other than [`PAYLOAD_VERSION`],
     ///   truncated, length-prefix overflow, trailing bytes after the
     ///   structured tail, display-name or group-id over its cap,
-    ///   non-UTF-8 display name, a synced state the fold refuses).
+    ///   non-UTF-8 display name, a synced state of the current version
+    ///   the fold refuses). A synced state of any other version is not an
+    ///   error: it decodes as empty.
     pub fn decode(wire: &[u8]) -> Result<Self> {
         let mut cur = wire;
 
@@ -481,7 +491,10 @@ impl BackupPayload {
                 .try_into()
                 .expect("take_n(4) length pinned"),
         ) as usize;
-        let mut accepted_contacts = Vec::with_capacity(contact_count);
+        // The count is attacker-chosen: reserve no more contacts than the
+        // remaining bytes can hold (each starts with a PUBKEY_LEN key), so a
+        // short blob cannot ask for gigabytes before `decode_contact` fails.
+        let mut accepted_contacts = Vec::with_capacity(contact_count.min(cur.len() / PUBKEY_LEN));
         for _ in 0..contact_count {
             accepted_contacts.push(decode_contact(&mut cur)?);
         }
@@ -514,8 +527,9 @@ impl BackupPayload {
                 .try_into()
                 .expect("take_n(4) length pinned"),
         ) as usize;
-        let synced_state = take_n(&mut cur, state_len)?.to_vec();
-        check_synced_state(&synced_state)?;
+        // A state of a version this build cannot read is dropped, not refused
+        // (see `readable_synced_state`).
+        let synced_state = readable_synced_state(take_n(&mut cur, state_len)?)?;
 
         let predecessor_count = usize::from(take_u8(&mut cur)?);
         if predecessor_count > MAX_OWN_PREDECESSORS {
@@ -681,6 +695,9 @@ fn check_received_envelope_len(len: usize) -> Result<()> {
 }
 
 /// Refuse synced-state bytes the fold would refuse. Empty is "none held".
+///
+/// The encode side: a device only ever writes the state this build holds,
+/// so any refusal here, an unknown version byte included, is a caller bug.
 fn check_synced_state(bytes: &[u8]) -> Result<()> {
     if bytes.is_empty() {
         return Ok(());
@@ -688,6 +705,30 @@ fn check_synced_state(bytes: &[u8]) -> Result<()> {
     lakko_sync::SyncedState::from_bytes(bytes)
         .map(|_| ())
         .map_err(|e| BackupError::InvalidPayload(format!("synced_state refused: {e}")))
+}
+
+/// The decode side: the synced state a restore may use, or empty.
+///
+/// A state whose version byte is not the one this build reads
+/// (`lakko_sync::synced::CodecError::UnknownVersion`, raised only by the
+/// state's leading byte) is dropped and read as "none held": the persisted
+/// synced-state version moves with every new register, and refusing the
+/// whole payload then lost every older backup in full (seen 2026-11-15).
+/// It is never partially applied. Any other refusal (a truncated state, an
+/// unknown entry tag, an entry out of bounds, trailing bytes) still refuses
+/// the whole payload: a state that names the current version and does not
+/// parse is not a state an honest device wrote.
+fn readable_synced_state(bytes: &[u8]) -> Result<Vec<u8>> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    match lakko_sync::SyncedState::from_bytes(bytes) {
+        Ok(_) => Ok(bytes.to_vec()),
+        Err(lakko_sync::synced::CodecError::UnknownVersion) => Ok(Vec::new()),
+        Err(e) => Err(BackupError::InvalidPayload(format!(
+            "synced_state refused: {e}"
+        ))),
+    }
 }
 
 // ============================================================================
@@ -1137,19 +1178,117 @@ mod tests {
         assert_eq!(restored.recovery_email().as_deref(), Some("a@b.example"));
         assert_eq!(restored.own_username().as_deref(), Some("bob_42"));
 
-        payload.synced_state = vec![9, 9, 9];
+        // Garbage under the current version byte: refused both ways.
+        let garbage = vec![current_state_version(), 9, 9, 9];
+        payload.synced_state = garbage.clone();
         assert!(payload.encode().is_err());
         // Hand-built, because the encoder refuses to produce one.
-        let mut good = sample_payload();
-        good.synced_state = Vec::new();
-        let mut wire = good.encode().unwrap();
-        // The state's length, the predecessor count, two empty envelopes,
-        // the empty received list.
-        wire.truncate(wire.len() - 17);
-        wire.extend_from_slice(&3u32.to_be_bytes());
-        wire.extend_from_slice(&[9, 9, 9]);
-        wire.extend_from_slice(&[0; 13]);
+        let wire = wire_with_synced_state(&sample_payload(), &garbage);
         assert!(BackupPayload::decode(&wire).is_err());
+    }
+
+    /// The version byte this build's synced state carries.
+    fn current_state_version() -> u8 {
+        lakko_sync::SyncedState::new().to_bytes()[0]
+    }
+
+    /// `payload` encoded with `state` as its synced-state bytes, whatever
+    /// they are: the encoder refuses a state it cannot read, so the bytes are
+    /// spliced into the wire at the state's length field.
+    fn wire_with_synced_state(payload: &BackupPayload, state: &[u8]) -> Vec<u8> {
+        let mut without = payload.clone();
+        without.synced_state = Vec::new();
+        let wire = without.encode().unwrap();
+        let mut head = 1 + ACCOUNT_ID_LEN + 8 + SEED_LEN + 4;
+        for c in &payload.accepted_contacts {
+            let mut scratch = Vec::new();
+            encode_contact(&mut scratch, c).unwrap();
+            head += scratch.len();
+        }
+        head += 4 + payload
+            .known_group_ids
+            .iter()
+            .map(|id| 4 + id.len())
+            .sum::<usize>();
+        assert_eq!(&wire[head..head + 4], &[0u8; 4], "state length field");
+        let mut out = wire[..head].to_vec();
+        out.extend_from_slice(&u32::try_from(state.len()).unwrap().to_be_bytes());
+        out.extend_from_slice(state);
+        out.extend_from_slice(&wire[head + 4..]);
+        out
+    }
+
+    /// A payload with every field filled, so a restore that drops the
+    /// synced state can be seen to keep everything else.
+    fn full_payload() -> BackupPayload {
+        let mut payload = sample_payload();
+        payload.own_predecessors = vec![OwnPredecessor {
+            seed: [0x5A; PREDECESSOR_SEED_LEN],
+            adopted_at_ms: 1_690_000_000_000,
+        }];
+        payload.own_profile = b"own-profile-envelope".to_vec();
+        payload.visibility = b"visibility-envelope".to_vec();
+        payload.received_profiles = vec![received(1, b"first"), received(2, b"second")];
+        payload
+    }
+
+    #[test]
+    fn a_synced_state_of_another_version_is_dropped_and_the_rest_restores() {
+        let current = current_state_version();
+        let payload = full_payload();
+        let mut expected = payload.clone();
+        expected.synced_state = Vec::new();
+        let mut older = sample_synced_state().to_bytes();
+        // Older, newer, the far ends of the byte, and a version byte alone:
+        // the version byte decides, the rest of the state is never read.
+        for version in [current - 2, current - 1, current + 1, 0, u8::MAX] {
+            older[0] = version;
+            for state in [older.clone(), vec![version]] {
+                let wire = wire_with_synced_state(&payload, &state);
+                let decoded = BackupPayload::decode(&wire)
+                    .unwrap_or_else(|e| panic!("version {version} refused the payload: {e:?}"));
+                assert_eq!(decoded, expected, "version {version}");
+                // What it decoded to round-trips on its own.
+                let reencoded = decoded.encode().unwrap();
+                assert_eq!(BackupPayload::decode(&reencoded).unwrap(), expected);
+                assert_eq!(reencoded, expected.encode().unwrap());
+            }
+            // The encoder still refuses to write such a state.
+            let mut writing = payload.clone();
+            writing.synced_state = older.clone();
+            assert!(writing.encode().is_err(), "version {version} encoded");
+        }
+    }
+
+    #[test]
+    fn a_malformed_synced_state_of_the_current_version_still_refuses_the_payload() {
+        let current = current_state_version();
+        let good = sample_synced_state().to_bytes();
+        assert_eq!(good[0], current);
+        let mut trailing = good.clone();
+        trailing.push(0);
+        let mut bad_tag = good.clone();
+        // The first entry's tag: version(1) + count(4) + hlc(8) + length(4).
+        bad_tag[17] = 0xFF;
+        assert_eq!(
+            lakko_sync::SyncedState::from_bytes(&bad_tag),
+            Err(lakko_sync::synced::CodecError::UnknownTag)
+        );
+        for state in [
+            vec![current],                   // truncated before the count
+            good[..good.len() - 1].to_vec(), // truncated entry
+            trailing,                        // trailing bytes
+            bad_tag,                         // unknown entry tag
+        ] {
+            let wire = wire_with_synced_state(&full_payload(), &state);
+            assert!(
+                BackupPayload::decode(&wire).is_err(),
+                "a malformed current-version state was accepted: {state:?}"
+            );
+        }
+        // The splice itself is sound: the good state decodes intact.
+        let wire = wire_with_synced_state(&full_payload(), &good);
+        assert_eq!(BackupPayload::decode(&wire).unwrap().synced_state, good);
     }
 
     #[test]
@@ -1527,6 +1666,43 @@ mod tests {
                             && c.envelope.len() <= MAX_RECEIVED_PROFILE_LEN
                     });
                     prop_assert_eq!(first.map(|c| &c.envelope), Some(&kept.envelope));
+                }
+            }
+
+            /// Any synced-state bytes: the payload decodes with the state kept
+            /// when the fold reads it, decodes with it dropped and every other
+            /// field intact when only its version byte is foreign, and is
+            /// refused otherwise. Never a partial state, never a panic.
+            #[test]
+            fn a_synced_state_is_kept_dropped_or_refused_whole(
+                version in any::<u8>(),
+                body in prop::collection::vec(any::<u8>(), 0..64),
+                use_real_body in any::<bool>(),
+            ) {
+                let mut state = if use_real_body {
+                    sample_synced_state().to_bytes()
+                } else {
+                    let mut raw = vec![0u8];
+                    raw.extend_from_slice(&body);
+                    raw
+                };
+                state[0] = version;
+                let payload = full_payload();
+                let wire = wire_with_synced_state(&payload, &state);
+                let decoded = BackupPayload::decode(&wire);
+                match lakko_sync::SyncedState::from_bytes(&state) {
+                    Ok(_) => {
+                        let decoded = decoded.unwrap();
+                        prop_assert_eq!(&decoded.synced_state, &state);
+                        prop_assert_eq!(decoded.encode().unwrap(), wire);
+                    }
+                    Err(lakko_sync::synced::CodecError::UnknownVersion) => {
+                        prop_assert_ne!(version, current_state_version());
+                        let mut expected = payload.clone();
+                        expected.synced_state = Vec::new();
+                        prop_assert_eq!(decoded.unwrap(), expected);
+                    }
+                    Err(_) => prop_assert!(decoded.is_err()),
                 }
             }
 

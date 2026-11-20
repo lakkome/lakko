@@ -32,7 +32,14 @@ struct SavedRow: Equatable, Identifiable {
         _ entries: [SavedMessageView],
         threads: [ChatThread],
         headOf: (String) -> String = { $0 },
-        title: (String) -> String?
+        title: (String) -> String?,
+        /// What stands for a message's text (a card's line, a bare `/g/`
+        /// link's line, ``ChatMessage/snapshotInvitationLine(conversationIdHex:)``);
+        /// the default reads no ledger opening.
+        snapshotLine: (ChatMessage, String) -> String? = { message, segment in
+            message.invitationLine(conversationIdHex: segment)
+                ?? (message.deleted ? nil : BareGroupLink.rowLine(text: message.text, opening: nil))
+        }
     ) -> [SavedRow] {
         SavedMessages.ordered(entries).map { entry in
             let ref = SavedMessages.ref(of: entry)
@@ -45,7 +52,9 @@ struct SavedRow: Equatable, Identifiable {
             let message = rowId.flatMap { id in thread?.messages.first { $0.messageId == id } }
             let line: String
             if let message, !message.deleted {
-                let snap = SavedMessages.snapshot(text: message.text, attachments: message.attachments, author: "")
+                let snap = SavedMessages.snapshot(
+                    text: message.text, attachments: message.attachments, author: "",
+                    invitationLine: snapshotLine(message, ref.segmentIdHex))
                 line = SavedMessages.rowLine(excerpt: snap.excerpt, kind: snap.kind)
             } else {
                 line = SavedMessages.rowLine(excerpt: entry.excerpt, kind: entry.attachmentKind)
@@ -83,15 +92,16 @@ struct SavedScreen: View {
     @State private var error: UiText?
 
     private var rows: [SavedRow] {
-        SavedRow.rows(center.entries, threads: chat.state.threads, headOf: headOf, title: title)
+        SavedRow.rows(
+            center.entries, threads: chat.state.threads, headOf: headOf, title: title,
+            snapshotLine: { $0.snapshotInvitationLine(conversationIdHex: $1) })
     }
 
     var body: some View {
         Group {
             if rows.isEmpty {
                 VStack(spacing: 12) {
-                    Image(systemName: "bookmark")
-                        .font(.system(size: 36))
+                    LkIconView(.bookmark, size: 48, relativeTo: nil)
                         .foregroundStyle(Color.lakkoTextMuted)
                     Text(l10n.t("saved.empty"))
                         .foregroundStyle(Color.lakkoTextMuted)
@@ -112,7 +122,7 @@ struct SavedScreen: View {
                             .accessibilityAddTraits(.isButton)
                             // Lakko's own long-press menu, not the system one.
                             .lakkoLongPressMenu {
-                                [.action(l10n.t("chat.message.unsave"), systemImage: "bookmark.slash", destructive: true) {
+                                [.action(l10n.t("chat.message.unsave"), icon: .bookmarkSlash, destructive: true) {
                                     remove(row)
                                 }]
                             }

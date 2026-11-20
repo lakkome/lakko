@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0089 section 6 - the block rule applied to one live conversation: who
+ * ADR-0098 section 6 - the block rule applied to one live conversation: who
  * the other person of a one-to-one is, and whether this device withholds its
  * signals from it. The rule is `block-rules.ts`; this is the read of the
  * group it needs.

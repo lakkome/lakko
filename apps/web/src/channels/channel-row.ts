@@ -8,6 +8,7 @@
  * component.
  */
 
+import { messagePreviewWords } from "../chat/list-preview";
 import { formatListTime } from "../chat/list-time";
 import { joinFacts, t } from "../l10n";
 
@@ -21,8 +22,9 @@ export interface ChannelRowInput {
   readonly localName: string;
   /** The `@handle` the channel was created or found under, if any. */
   readonly localHandle?: string | undefined;
-  /** `true` when this device holds publisher keys for the channel. */
-  readonly isOwner: boolean;
+  /** This account's role in the channel (ADR-0087 section 15): the owner,
+   *  a publisher, or a subscriber. */
+  readonly role: "owner" | "publisher" | "subscriber";
   /** The subscriber count, when the device has fetched it. */
   readonly subscriberCount: number | null;
   /** The server stamp of the newest cached post, if any. */
@@ -71,9 +73,38 @@ export function channelRowModel(input: ChannelRowInput, now: Date = new Date()):
   if (handle.length > 0) parts.push(handle);
   if (input.subscriberCount !== null) parts.push(subscriberCountLabel(input.subscriberCount));
   if (parts.length === 0) {
-    parts.push(input.isOwner ? t("channels.row.own") : t("channels.subscribe.status.subscribed"));
+    // UX 15: a publisher is not merely subscribed; the line names the role
+    // the Publishers list names it by.
+    parts.push(
+      input.role === "owner"
+        ? t("channels.row.own")
+        : input.role === "publisher"
+          ? t("channels.publishers.role_publisher")
+          : t("channels.subscribe.status.subscribed"),
+    );
   }
   return { title, handle, subtitle: joinFacts(parts), time };
+}
+
+/** The time a channel's row in the merged list shows: its newest post's
+ *  time in the chat-list form a group's row uses for its last message, or
+ *  "" when nothing has been posted. */
+export function channelRowTime(
+  postedAtMs: number | null | undefined,
+  now: Date,
+  locale?: string,
+): string {
+  if (postedAtMs === null || postedAtMs === undefined || !Number.isFinite(postedAtMs)) return "";
+  return formatListTime(new Date(postedAtMs).toISOString(), now, locale);
+}
+
+/** The time a channel's row stands for: its newest REAL post this device
+ *  read (the channel-post log holds text posts only), never the newest row
+ *  the server holds, which may be a ban list or a metadata record (seen live
+ *  2026-11-12: a ban at 22:48 showed as the time of a channel whose newest
+ *  post was at 22:39). `null` when no post was read. */
+export function channelRowPostedAtMs(newestRead: { readonly serverTsMs: number } | null): number | null {
+  return newestRead === null || !Number.isFinite(newestRead.serverTsMs) ? null : newestRead.serverTsMs;
 }
 
 /** ADR-0051 §5 — the channel title: the shared name, else the local name,
@@ -100,10 +131,21 @@ export function channelRowMatches(model: ChannelRowModel, query: string): boolea
   );
 }
 
+/** What a channel row's preview reads of the newest post: its text and the
+ *  kind of each attachment. */
+export interface ChannelRowLastPost {
+  readonly text: string;
+  readonly media?: readonly { readonly mime: string | null; readonly kind?: string | null }[];
+}
+
 /** UX navigation 2.1 — a channel row's second line: the newest post this
- *  device can read, flattened to one line; else `fallback` (the @name or the
- *  status line). A channel post has no sender to name. */
-export function channelRowPreview(lastPostText: string | null, fallback: string): string {
-  const text = (lastPostText ?? "").replace(/\s+/g, " ").trim();
-  return text.length > 0 ? text : fallback;
+ *  device can read, flattened to one line; a post with no text names its
+ *  first attachment's kind ("Photo", "GIF", "File", ...) the way a group's
+ *  row does; else `fallback` (the @name or the status line). A channel post
+ *  has no sender to name. */
+export function channelRowPreview(lastPost: ChannelRowLastPost | null, fallback: string): string {
+  if (lastPost === null) return fallback;
+  // docs/ux/media-messages.md section 11 — the same words as a chat row.
+  const line = messagePreviewWords(lastPost.text.replace(/\s+/g, " ").trim(), lastPost.media ?? []);
+  return line.length > 0 ? line : fallback;
 }

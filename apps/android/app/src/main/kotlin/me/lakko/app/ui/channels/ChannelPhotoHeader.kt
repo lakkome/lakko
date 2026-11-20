@@ -17,11 +17,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.PhotoCamera
-import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -51,6 +46,9 @@ import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.components.LakkoDialog
 import me.lakko.app.ui.components.LakkoDialogAction
 import me.lakko.app.ui.components.LakkoDialogTone
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * ADR-0087 section 18.2 / UX 4.5.2 — a channel's 96 dp header avatar, with
@@ -93,6 +91,7 @@ internal fun ChannelPhotoHeader(
         val seen = HashSet<Throwable>()
         while (c != null && seen.add(c)) {
             if (c is me.lakko.app.storage.StorageHttpError && c.status == 429) return UiText("group_photo.error.limit")
+            me.lakko.app.media.groupPhotoRefusalKey(c)?.let { return UiText(it) }
             c = c.cause
         }
         return UiText("group_photo.error.upload")
@@ -123,7 +122,7 @@ internal fun ChannelPhotoHeader(
                         .clickable(enabled = !uploading) { menuOpen = true },
                 ) {
                     Box(contentAlignment = Alignment.Center) {
-                        Icon(Icons.Filled.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
+                        LkIcon(R.drawable.ic_lk_pencil, contentDescription = null, size = LkIconSize.Row)
                     }
                 }
             }
@@ -137,18 +136,18 @@ internal fun ChannelPhotoHeader(
         val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ModalBottomSheet(onDismissRequest = { menuOpen = false }, sheetState = sheet) {
             Column(Modifier.navigationBarsPadding().padding(bottom = 8.dp)) {
-                MenuRow(Icons.Filled.PhotoLibrary, t("profile.avatar.menu.library")) {
+                MenuRow(R.drawable.ic_lk_photo_stack, t("profile.avatar.menu.library")) {
                     menuOpen = false
                     picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
                 }
                 if (hasCamera) {
-                    MenuRow(Icons.Filled.PhotoCamera, t("profile.avatar.menu.camera")) {
+                    MenuRow(R.drawable.ic_lk_camera, t("profile.avatar.menu.camera")) {
                         menuOpen = false
                         cameraOpen = true
                     }
                 }
                 if (avatar != null) {
-                    MenuRow(Icons.Filled.Delete, t("profile.avatar.menu.remove"), destructive = true) {
+                    MenuRow(R.drawable.ic_lk_trash, t("profile.avatar.menu.remove"), destructive = true) {
                         menuOpen = false
                         confirmRemove = true
                     }
@@ -216,7 +215,7 @@ internal fun ChannelPhotoHeader(
 
 @Composable
 private fun MenuRow(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    @androidx.annotation.DrawableRes icon: Int,
     label: String,
     destructive: Boolean = false,
     onClick: () -> Unit,
@@ -226,7 +225,7 @@ private fun MenuRow(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 24.dp, vertical = 14.dp),
     ) {
-        Icon(icon, contentDescription = null, tint = color)
+        LkIcon(icon, contentDescription = null, tint = color, size = LkIconSize.Row)
         Spacer(Modifier.width(16.dp))
         Text(label, color = color, style = MaterialTheme.typography.bodyLarge)
     }

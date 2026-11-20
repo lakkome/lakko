@@ -21,6 +21,7 @@ path = "src/main.rs"
 
 [dependencies]
 tokio.workspace = true
+lakko-metrics.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
@@ -83,12 +84,16 @@ lakko-crypto.workspace = true
 # spends `directory-search`, through the shared spend gate.
 lakko-anon-token.workspace = true
 lakko-anon-token-server.workspace = true
+# ADR-0092 section 4.4 — verify the anonymous-credential presentation a
+# channel poll vote carries, under a key derived from the master shared with
+# auth.
+lakko-anon-cred.workspace = true
 
 # Constant-time comparison of the internal moderation listener's shared
 # secret (the push-gw pattern). Already in the workspace graph.
 subtle = "2"
 
-# ADR-0089 step 5 - a moderator's statement is checked here against the
+# ADR-0098 step 5 - a moderator's statement is checked here against the
 # moderator list under the pinned root before a channel is delisted, blocked,
 # removed or restored. Already in the lock file (services/auth,
 # services/moderation).
@@ -113,5 +118,5 @@ lakko-crypto.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 base64 = "0.22"
 lakko-anon-token-server = { workspace = true, features = ["testing"] }
-# ADR-0089 step 5: the statement route tests sign with a software key.
+# ADR-0098 step 5: the statement route tests sign with a software key.
 lakko-moderation = { workspace = true, features = ["software-authenticator"] }

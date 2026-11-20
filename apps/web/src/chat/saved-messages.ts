@@ -44,6 +44,10 @@ export interface SaveSource {
   readonly attachments: readonly AttachmentRefBytes[];
   /** The message's own time, unix ms; `0` when not known. */
   readonly sentAtMs: number;
+  /** ADR-0087 section 14 — what stands for the text of a channel invitation
+   *  (`channelInviteRowPreview`); the text itself is the `/g/` link with its
+   *  secret, which a saved snapshot never carries. */
+  readonly invitationLine?: string | null;
 }
 
 /** The register edit a Save becomes. A file's name stands in for the text
@@ -51,7 +55,8 @@ export interface SaveSource {
 export function saveEdit(src: SaveSource, nowMs: number): RegisterEdit {
   const kind = savedKindOf(src.attachments);
   const first = src.attachments[0];
-  const excerpt = src.text.length > 0 ? src.text : kind === "file" ? (first?.name ?? "") : "";
+  const text = src.invitationLine != null && src.invitationLine.length > 0 ? src.invitationLine : src.text;
+  const excerpt = text.length > 0 ? text : kind === "file" ? (first?.name ?? "") : "";
   return {
     t: "saved",
     ref: src.ref,

@@ -19,10 +19,21 @@ use lakko_contacts::admission_seed::{
     decode_admission_seed as rust_decode_admission_seed, AdmissionSeedError,
     ADMISSION_SEED_ENVELOPE_LEN,
 };
+use lakko_contacts::channel_epoch_seeds::{
+    compose_channel_epoch_seeds as rust_compose_channel_epoch_seeds,
+    decode_channel_epoch_seeds as rust_decode_channel_epoch_seeds, ChannelEpochSeed,
+    ChannelEpochSeedsError, CHANNEL_EPOCH_SEEDS_ENVELOPE_MAX_LEN,
+    CHANNEL_EPOCH_SEEDS_ENVELOPE_MIN_LEN, CHANNEL_EPOCH_SEEDS_MAX, CHANNEL_EPOCH_SEED_LEN,
+};
 use lakko_contacts::channel_read_key::{
     compose_channel_read_key as rust_compose_channel_read_key,
     decode_channel_read_key as rust_decode_channel_read_key, ChannelReadKeyError,
     CHANNEL_READ_KEY_ENVELOPE_LEN,
+};
+use lakko_contacts::channel_rotate_request::{
+    compose_channel_rotate_request as rust_compose_channel_rotate_request,
+    decode_channel_rotate_request as rust_decode_channel_rotate_request, ChannelRotateRequestError,
+    CHANNEL_ROTATE_REQUEST_ENVELOPE_LEN,
 };
 use lakko_contacts::knock::{
     is_knock_row_len as rust_is_knock_row_len, knock_public_key as rust_knock_public_key,
@@ -291,15 +302,46 @@ pub fn open_knock_seed_envelope(
     plaintext: &[u8],
     account_identity: &Identity,
 ) -> Result<Vec<u8>, String> {
+    open_knock_seed(plaintext, account_identity, account_identity)
+}
+
+/// ADR-0074 section 3.7 (2026-11-20) — open a knock-seed envelope addressed
+/// to `accountIdentity` (the conversation identity the roster names) but
+/// sealed to the X25519 key of `sealedToIdentity` (the identity the directory
+/// serves after a rotation of the account keys).
+///
+/// # Errors
+///
+/// As `openKnockSeedEnvelope`, with the X25519 key of `sealedToIdentity` in
+/// place of the addressee's.
+#[wasm_bindgen(js_name = openKnockSeedEnvelopeSealedTo)]
+pub fn open_knock_seed_envelope_sealed_to(
+    plaintext: &[u8],
+    account_identity: &Identity,
+    sealed_to_identity: &Identity,
+) -> Result<Vec<u8>, String> {
+    open_knock_seed(plaintext, account_identity, sealed_to_identity)
+}
+
+fn open_knock_seed(
+    plaintext: &[u8],
+    addressee: &Identity,
+    sealed_to: &Identity,
+) -> Result<Vec<u8>, String> {
     let env = rust_decode_knock_seed(plaintext).map_err(knock_seed_error)?;
-    let id = account_identity.mls_identity();
-    let own = key32("knockSeed", "own account key", id.signature_public_key())?;
+    let own = key32(
+        "knockSeed",
+        "own account key",
+        addressee.mls_identity().signature_public_key(),
+    )?;
     if !env.is_addressed_to(&own) {
         return Err("knockSeed.otherAccount: addressed to another account".to_string());
     }
-    env.open(&X25519SecretKey::from_bytes(id.x25519_secret_bytes()))
-        .map(|s| s.to_vec())
-        .map_err(knock_seed_error)
+    env.open(&X25519SecretKey::from_bytes(
+        sealed_to.mls_identity().x25519_secret_bytes(),
+    ))
+    .map(|s| s.to_vec())
+    .map_err(knock_seed_error)
 }
 
 /// The one well-formed knock-seed envelope length.
@@ -557,10 +599,298 @@ pub fn channel_read_key_envelope_len() -> u32 {
     len_u32(CHANNEL_READ_KEY_ENVELOPE_LEN)
 }
 
+// ============================================================================
+// Earlier channel seeds (channel owner -> new publisher, ADR-0087 section 7
+// as amended 2026-11-08)
+// ============================================================================
+
+/// A decoded epoch-seeds envelope; the seeds stay sealed.
+#[wasm_bindgen(js_name = ChannelEpochSeedsEnvelope)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WasmChannelEpochSeedsEnvelope {
+    channel_id: Vec<u8>,
+    member_account_key: Vec<u8>,
+    count: u32,
+}
+
+#[wasm_bindgen(js_class = ChannelEpochSeedsEnvelope)]
+impl WasmChannelEpochSeedsEnvelope {
+    /// The 16-byte channel id.
+    #[wasm_bindgen(getter, js_name = channelId)]
+    #[must_use]
+    pub fn channel_id(&self) -> Vec<u8> {
+        self.channel_id.clone()
+    }
+
+    /// The addressee's 32-byte account key.
+    #[wasm_bindgen(getter, js_name = memberAccountKey)]
+    #[must_use]
+    pub fn member_account_key(&self) -> Vec<u8> {
+        self.member_account_key.clone()
+    }
+
+    /// How many seeds the envelope carries.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+}
+
+/// Opened seeds, in ascending epoch order: `epochs[i]` is served by
+/// `seeds[32 * i .. 32 * (i + 1)]`. Secret.
+#[wasm_bindgen(js_name = ChannelEpochSeeds)]
+pub struct WasmChannelEpochSeeds {
+    epochs: Vec<u32>,
+    seeds: Vec<u8>,
+}
+
+#[wasm_bindgen(js_class = ChannelEpochSeeds)]
+impl WasmChannelEpochSeeds {
+    /// The channel epoch ids, ascending.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn epochs(&self) -> Vec<u32> {
+        self.epochs.clone()
+    }
+
+    /// The 32-byte seeds, concatenated in the order of `epochs`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn seeds(&self) -> Vec<u8> {
+        self.seeds.clone()
+    }
+}
+
+impl Drop for WasmChannelEpochSeeds {
+    fn drop(&mut self) {
+        self.seeds.fill(0);
+    }
+}
+
+fn channel_epoch_seeds_error(e: ChannelEpochSeedsError) -> String {
+    format!("channelEpochSeeds.{}: {e}", e.code())
+}
+
+/// Compose an epoch-seeds envelope for one new publisher, sealed to that
+/// publisher's account X25519 key; send it with
+/// `PublisherGroup.createApplicationMessage` beside the read key. `epochs`
+/// and `seeds` are parallel: `seeds` is `32 * epochs.length` bytes, the seed
+/// of `epochs[i]` at `32 * i`. Any order; 1 to `channelEpochSeedsMax()`
+/// entries, no epoch twice.
+///
+/// # Errors
+///
+/// Throws `channelEpochSeeds.<code>: ...` (`badCount`, `duplicateEpoch`,
+/// `badLength`).
+#[wasm_bindgen(js_name = composeChannelEpochSeedsEnvelope)]
+pub fn compose_channel_epoch_seeds_envelope(
+    channel_id: &[u8],
+    member_account_key: &[u8],
+    member_x25519_public_key: &[u8],
+    epochs: Vec<u32>,
+    seeds: &[u8],
+) -> Result<Vec<u8>, String> {
+    let channel = <[u8; 16]>::try_from(channel_id)
+        .map_err(|_| "channelEpochSeeds.badLength: channel id must be 16 bytes".to_string())?;
+    if epochs.len().checked_mul(CHANNEL_EPOCH_SEED_LEN) != Some(seeds.len()) {
+        return Err("channelEpochSeeds.badLength: seeds must be 32 bytes per epoch".to_string());
+    }
+    let list = epochs
+        .iter()
+        .zip(seeds.chunks_exact(CHANNEL_EPOCH_SEED_LEN))
+        .map(|(&epoch, chunk)| {
+            <[u8; CHANNEL_EPOCH_SEED_LEN]>::try_from(chunk)
+                .map(|seed| ChannelEpochSeed { epoch, seed })
+                .map_err(|_| "channelEpochSeeds.badLength: a seed must be 32 bytes".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    rust_compose_channel_epoch_seeds(
+        &channel,
+        &key32(
+            "channelEpochSeeds",
+            "member account key",
+            member_account_key,
+        )?,
+        &x25519("channelEpochSeeds", member_x25519_public_key)?,
+        &list,
+    )
+    .map_err(channel_epoch_seeds_error)
+}
+
+/// Strictly decode an epoch-seeds envelope.
+///
+/// # Errors
+///
+/// Throws `channelEpochSeeds.<code>: ...`.
+#[wasm_bindgen(js_name = decodeChannelEpochSeedsEnvelope)]
+pub fn decode_channel_epoch_seeds_envelope(
+    plaintext: &[u8],
+) -> Result<WasmChannelEpochSeedsEnvelope, String> {
+    let env = rust_decode_channel_epoch_seeds(plaintext).map_err(channel_epoch_seeds_error)?;
+    Ok(WasmChannelEpochSeedsEnvelope {
+        channel_id: env.channel_id.to_vec(),
+        member_account_key: env.member_account_key.to_vec(),
+        count: u32::from(env.count),
+    })
+}
+
+/// Open an epoch-seeds envelope with the ACCOUNT identity it is addressed
+/// to. The caller also checks it came on this channel's PublisherGroup and
+/// the MLS sender resolved at receipt to the channel's owner, then adds only
+/// the seeds of epochs it holds none of.
+///
+/// # Errors
+///
+/// Throws `channelEpochSeeds.<code>: ...` (`otherAccount` when addressed to
+/// another account).
+#[wasm_bindgen(js_name = openChannelEpochSeedsEnvelope)]
+pub fn open_channel_epoch_seeds_envelope(
+    plaintext: &[u8],
+    account_identity: &Identity,
+) -> Result<WasmChannelEpochSeeds, String> {
+    let env = rust_decode_channel_epoch_seeds(plaintext).map_err(channel_epoch_seeds_error)?;
+    let id = account_identity.mls_identity();
+    let own = key32(
+        "channelEpochSeeds",
+        "own account key",
+        id.signature_public_key(),
+    )?;
+    if !env.is_addressed_to(&own) {
+        return Err("channelEpochSeeds.otherAccount: addressed to another account".to_string());
+    }
+    let opened = env
+        .open(&X25519SecretKey::from_bytes(id.x25519_secret_bytes()))
+        .map_err(channel_epoch_seeds_error)?;
+    let mut seeds = Vec::with_capacity(opened.len() * CHANNEL_EPOCH_SEED_LEN);
+    for s in &opened {
+        seeds.extend_from_slice(&s.seed);
+    }
+    Ok(WasmChannelEpochSeeds {
+        epochs: opened.iter().map(|s| s.epoch).collect(),
+        seeds,
+    })
+}
+
+/// Most seeds one epoch-seeds envelope carries (64).
+#[wasm_bindgen(js_name = channelEpochSeedsMax)]
+#[must_use]
+pub fn channel_epoch_seeds_max() -> u32 {
+    len_u32(CHANNEL_EPOCH_SEEDS_MAX)
+}
+
+/// Length of an epoch-seeds envelope carrying one seed.
+#[wasm_bindgen(js_name = channelEpochSeedsEnvelopeMinLen)]
+#[must_use]
+pub fn channel_epoch_seeds_envelope_min_len() -> u32 {
+    len_u32(CHANNEL_EPOCH_SEEDS_ENVELOPE_MIN_LEN)
+}
+
+/// Length of an epoch-seeds envelope carrying the most seeds.
+#[wasm_bindgen(js_name = channelEpochSeedsEnvelopeMaxLen)]
+#[must_use]
+pub fn channel_epoch_seeds_envelope_max_len() -> u32 {
+    len_u32(CHANNEL_EPOCH_SEEDS_ENVELOPE_MAX_LEN)
+}
+
+// ============================================================================
+// A publisher asks the owner to rotate (ADR-0087 section 15 as amended
+// 2026-11-08)
+// ============================================================================
+
+fn channel_rotate_request_error(e: ChannelRotateRequestError) -> String {
+    format!("channelRotateRequest.{}: {e}", e.code())
+}
+
+/// Compose the request a publisher sends on the channel's PublisherGroup
+/// with `PublisherGroup.createApplicationMessage` after removing a
+/// subscriber: the owner's device rotates at its next publisher pass.
+///
+/// # Errors
+///
+/// Throws `channelRotateRequest.badLength: ...` when the channel id is not
+/// 16 bytes.
+#[wasm_bindgen(js_name = composeChannelRotateRequestEnvelope)]
+pub fn compose_channel_rotate_request_envelope(channel_id: &[u8]) -> Result<Vec<u8>, String> {
+    let channel = <[u8; 16]>::try_from(channel_id)
+        .map_err(|_| "channelRotateRequest.badLength: channel id must be 16 bytes".to_string())?;
+    Ok(rust_compose_channel_rotate_request(&channel))
+}
+
+/// Strictly decode a rotate request, returning the 16-byte channel id. Only
+/// the channel's owner acts on it, and only when it came on that channel's
+/// PublisherGroup and the MLS sender is a current publisher.
+///
+/// # Errors
+///
+/// Throws `channelRotateRequest.<code>: ...`.
+#[wasm_bindgen(js_name = decodeChannelRotateRequestEnvelope)]
+pub fn decode_channel_rotate_request_envelope(plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    rust_decode_channel_rotate_request(plaintext)
+        .map(|c| c.to_vec())
+        .map_err(channel_rotate_request_error)
+}
+
+/// The one well-formed rotate-request length (49).
+#[wasm_bindgen(js_name = channelRotateRequestEnvelopeLen)]
+#[must_use]
+pub fn channel_rotate_request_envelope_len() -> u32 {
+    len_u32(CHANNEL_ROTATE_REQUEST_ENVELOPE_LEN)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use lakko_contacts::reach::{ReachClass, ReachGrant as RustReachGrant};
+
+    #[test]
+    fn channel_rotate_request_round_trips() {
+        let wire = compose_channel_rotate_request_envelope(&[0x0C; 16]).unwrap();
+        assert_eq!(wire.len(), channel_rotate_request_envelope_len() as usize);
+        assert_eq!(
+            decode_channel_rotate_request_envelope(&wire).unwrap(),
+            vec![0x0C; 16]
+        );
+        assert!(compose_channel_rotate_request_envelope(&[0; 15])
+            .is_err_and(|e| e.starts_with("channelRotateRequest.badLength")));
+    }
+
+    #[test]
+    fn channel_epoch_seeds_round_trip_flat() {
+        let member = Identity::from_seed(&[0x71; 64]).unwrap();
+        let id = member.mls_identity();
+        let mut seeds = vec![7_u8; 32];
+        seeds.extend_from_slice(&[1; 32]);
+        let wire = compose_channel_epoch_seeds_envelope(
+            &[0x0C; 16],
+            id.signature_public_key(),
+            &X25519SecretKey::from_bytes(id.x25519_secret_bytes())
+                .public_key()
+                .to_bytes(),
+            vec![7, 1],
+            &seeds,
+        )
+        .unwrap();
+        assert_eq!(
+            decode_channel_epoch_seeds_envelope(&wire).unwrap().count(),
+            2
+        );
+        let opened = open_channel_epoch_seeds_envelope(&wire, &member).unwrap();
+        assert_eq!(opened.epochs(), vec![1, 7]);
+        assert_eq!(&opened.seeds()[..32], &[1; 32]);
+        assert_eq!(&opened.seeds()[32..], &[7; 32]);
+        let other = Identity::from_seed(&[0x72; 64]).unwrap();
+        assert!(open_channel_epoch_seeds_envelope(&wire, &other)
+            .is_err_and(|e| e.starts_with("channelEpochSeeds.otherAccount")));
+        assert!(compose_channel_epoch_seeds_envelope(
+            &[0x0C; 16],
+            id.signature_public_key(),
+            &[9; 32],
+            vec![1],
+            &[0; 31],
+        )
+        .is_err_and(|e| e.starts_with("channelEpochSeeds.badLength")));
+    }
 
     #[test]
     fn knock_row_and_seed_envelopes_round_trip() {
@@ -597,6 +927,24 @@ mod tests {
             public
         );
         assert_eq!(open_knock_seed_envelope(&wire, &admin).unwrap(), seed);
+
+        // ADR-0074 section 3.7 (2026-11-20): addressed to the conversation
+        // key, sealed to the current identity's X25519 key.
+        let current = Identity::from_seed(&[0x74; 64]).unwrap();
+        let rotated = compose_knock_seed_envelope(
+            &[0x4A; 32],
+            id.signature_public_key(),
+            &current.mls_identity().x25519_public_key(),
+            1,
+            &seed,
+        )
+        .unwrap();
+        assert!(open_knock_seed_envelope(&rotated, &admin).is_err());
+        assert_eq!(
+            open_knock_seed_envelope_sealed_to(&rotated, &admin, &current).unwrap(),
+            seed
+        );
+        assert!(open_knock_seed_envelope_sealed_to(&rotated, &current, &current).is_err());
 
         let admission = [0x5C_u8; 32];
         let wire = compose_admission_seed_envelope(

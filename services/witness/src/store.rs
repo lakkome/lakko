@@ -4,7 +4,7 @@
 //! Witness cosign state + the consistency-gated cosign logic (ADR-0020).
 //!
 //! The witness keeps ONE piece of state per log it co-signs (witness v2,
-//! ADR-0089 section 5) — its last-co-signed `(tree_root, log_size)` for that
+//! ADR-0098 section 5) — its last-co-signed `(tree_root, log_size)` for that
 //! log. Before co-signing a new operator root it verifies
 //! the root is operator-signed AND that a Merkle consistency proof shows the
 //! new root append-only-extends its high-water. Two divergent forks cannot both
@@ -73,6 +73,8 @@ impl WitnessStore {
     pub(crate) async fn load(pool: &MySqlPool, witness_key: SigningKey) -> anyhow::Result<Self> {
         let kt = load_high_water(pool, LogId::Kt).await?;
         let moderation = load_high_water(pool, LogId::Moderation).await?;
+        // The ADR-0096 size gauge follows the KT log.
+        crate::metrics::log_size(kt.log_size);
         Ok(Self::from_parts(witness_key, kt, moderation))
     }
 
@@ -179,6 +181,9 @@ impl WitnessStore {
             .map_err(|e| CosignError::Db(e.to_string()))?;
             hw.tree_root = new_root.tree_root;
             hw.log_size = new_root.log_size;
+            if log == LogId::Kt {
+                crate::metrics::log_size(hw.log_size);
+            }
         }
 
         Ok(cosig)

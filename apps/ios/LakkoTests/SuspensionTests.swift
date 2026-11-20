@@ -7,7 +7,7 @@ import XCTest
 
 @testable import Lakko
 
-// ADR-0089 step 3 / UX `reporting-and-moderation.md` section 4 — a suspended
+// ADR-0098 step 3 / UX `reporting-and-moderation.md` section 4 — a suspended
 // account on its own device: entering suspended mode on a landing `403` and
 // on a bearer `403` through the refresh, leaving it on a normal refresh, the
 // 10-minute check, the request gate, the one appeal and the reason text.

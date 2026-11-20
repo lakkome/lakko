@@ -546,8 +546,14 @@ fn bound_media(a: &mut rec::VaultAttachment) {
             width: t.width.map(u32::from),
             height: t.height.map(u32::from),
         }),
+        title: some_text(&a.title),
+        artist: some_text(&a.artist),
+        inline_thumb: Some(std::mem::take(&mut a.inline_thumb)).filter(|t| !t.is_empty()),
     }
     .bounded();
+    a.inline_thumb = media.inline_thumb.unwrap_or_default();
+    a.title = media.title.unwrap_or_default();
+    a.artist = media.artist.unwrap_or_default();
     a.kind = media.kind.unwrap_or_default();
     a.duration_ms = media.duration_ms;
     a.waveform = media.waveform.unwrap_or_default();
@@ -563,8 +569,24 @@ fn bound_media(a: &mut rec::VaultAttachment) {
     };
 }
 
+/// ADR-0047 section 6: only the first image or video of a message keeps its
+/// micro thumbnail, as on the envelope route (an empty `mime` is none).
+fn keep_inline_thumb_on_carrier(attachments: &mut [rec::VaultAttachment]) {
+    let carrier = lakko_attachments::inline_thumb_carrier(
+        attachments
+            .iter()
+            .map(|a| (!a.mime.is_empty()).then_some(a.mime.as_str())),
+    );
+    for (i, a) in attachments.iter_mut().enumerate() {
+        if Some(i) != carrier {
+            a.inline_thumb.clear();
+        }
+    }
+}
+
 fn bound_message(mut m: rec::VaultMessage) -> rec::VaultMessage {
     m.attachments.iter_mut().for_each(bound_media);
+    keep_inline_thumb_on_carrier(&mut m.attachments);
     m
 }
 
@@ -663,6 +685,9 @@ impl VaultAttachment {
                 width: None,
                 height: None,
                 thumb: None,
+                title: String::new(),
+                artist: String::new(),
+                inline_thumb: Vec::new(),
             },
         })
     }
@@ -736,6 +761,43 @@ impl VaultAttachment {
         self.inner.width = narrow(width);
         self.inner.height = narrow(height);
         bound_media(&mut self.inner);
+    }
+
+    /// ADR-0092 audio title and artist tags (kept on kind `"audio"` only,
+    /// within 255 bytes; anything else is dropped). Call after `setMedia`.
+    #[wasm_bindgen(js_name = setAudioTags)]
+    pub fn set_audio_tags(&mut self, title: Option<String>, artist: Option<String>) {
+        self.inner.title = title.unwrap_or_default();
+        self.inner.artist = artist.unwrap_or_default();
+        bound_media(&mut self.inner);
+    }
+
+    /// ADR-0047 section 6 micro thumbnail (raw JPEG bytes, at most 4096).
+    /// Not a JPEG or over the bound, it is dropped (`inlineThumb` then
+    /// reads `undefined`); a message keeps it on its first image or video
+    /// only.
+    #[wasm_bindgen(js_name = setInlineThumb)]
+    pub fn set_inline_thumb(&mut self, inline_thumb: Option<Vec<u8>>) {
+        self.inner.inline_thumb = inline_thumb.unwrap_or_default();
+        bound_media(&mut self.inner);
+    }
+
+    /// ADR-0047 section 6 micro thumbnail, `undefined` when none.
+    #[wasm_bindgen(getter, js_name = inlineThumb)]
+    pub fn inline_thumb(&self) -> Option<Vec<u8>> {
+        (!self.inner.inline_thumb.is_empty()).then(|| self.inner.inline_thumb.clone())
+    }
+
+    /// ADR-0092 audio title tag.
+    #[wasm_bindgen(getter)]
+    pub fn title(&self) -> Option<String> {
+        some_text(&self.inner.title)
+    }
+
+    /// ADR-0092 audio artist tag.
+    #[wasm_bindgen(getter)]
+    pub fn artist(&self) -> Option<String> {
+        some_text(&self.inner.artist)
     }
 
     /// ADR-0047 poster frame; replaces one set before. `blobId` / `key` MUST
@@ -885,12 +947,18 @@ impl VaultMessage {
                 edited: false,
                 deleted: false,
                 text: text.to_string(),
-                attachments: attachments.into_iter().map(|a| a.inner).collect(),
+                attachments: {
+                    let mut attachments: Vec<rec::VaultAttachment> =
+                        attachments.into_iter().map(|a| a.inner).collect();
+                    keep_inline_thumb_on_carrier(&mut attachments);
+                    attachments
+                },
                 reply: None,
                 forward: None,
                 reactions: Vec::new(),
                 call: None,
                 unsupported_version: None,
+                content: None,
             },
         })
     }
@@ -1024,6 +1092,49 @@ impl VaultMessage {
     #[wasm_bindgen(js_name = setUnsupportedVersion)]
     pub fn set_unsupported_version(&mut self, version: u32) {
         self.inner.unsupported_version = Some(version);
+    }
+
+    /// ADR-0092 — set the `ContentMessage` of a poll / checklist / location /
+    /// contact card / article row (`undefined` clears it). Set the
+    /// attachments first: an article's images are checked against them only
+    /// on read.
+    ///
+    /// # Errors
+    ///
+    /// Throws a content code (`state.mismatch`, `<field>.tooLong`, ...).
+    #[wasm_bindgen(js_name = setContent)]
+    pub fn set_content(
+        &mut self,
+        content: Option<crate::content::JsContentMessage>,
+    ) -> Result<(), JsError> {
+        self.inner.content = match content {
+            None => None,
+            Some(c) => {
+                crate::content::content_message_from_js(&c)?.map(|(kind, payload, state)| {
+                    rec::VaultContent {
+                        kind,
+                        payload,
+                        state,
+                    }
+                })
+            },
+        };
+        Ok(())
+    }
+
+    /// ADR-0092 — the `ContentMessage`, or `undefined` (also when its
+    /// payload does not decode; a state that does not belong is dropped).
+    #[wasm_bindgen(getter, unchecked_return_type = "ContentMessage | undefined")]
+    pub fn content(&self) -> JsValue {
+        let mimes: Vec<Option<String>> = self
+            .inner
+            .attachments
+            .iter()
+            .map(|a| some_text(&a.mime))
+            .collect();
+        self.inner.content.as_ref().map_or(JsValue::UNDEFINED, |c| {
+            crate::content::content_message_to_js(c.kind, &c.payload, &c.state, &mimes)
+        })
     }
 
     /// The Delivery Service journal id. A `bigint`.
@@ -1368,25 +1479,51 @@ impl VaultChunkEntry {
     }
 }
 
-/// Re-entry material for one epoch (ADR-0064 section 4).
+/// Re-entry material for one epoch (ADR-0064 section 4; the access seed by
+/// the section 7 amendment of 2026-11-14). `Debug` redacts the access seed.
 #[wasm_bindgen]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultReentryEpoch {
     inner: rec::ReentryEpoch,
 }
 
-#[wasm_bindgen]
 impl VaultReentryEpoch {
-    /// The epoch (a `bigint`) and the GroupInfo with its ratchet tree, as
-    /// MLS encodes it: opaque to the codec, 1 byte to 1 MiB.
-    #[wasm_bindgen(constructor)]
-    pub fn new(epoch: u64, group_info: &[u8]) -> VaultReentryEpoch {
-        Self {
+    fn try_new(epoch: u64, ds_access_seed: &[u8], group_info: &[u8]) -> Result<Self, Refusal> {
+        Ok(Self {
             inner: rec::ReentryEpoch {
                 epoch,
+                ds_access_seed: SecretBytes::new(fixed::<32>(
+                    ds_access_seed,
+                    "seedLength",
+                    "re-entry access seed",
+                )?),
                 group_info: group_info.to_vec(),
             },
-        }
+        })
+    }
+}
+
+#[wasm_bindgen]
+impl VaultReentryEpoch {
+    /// The epoch (a `bigint`), its 32-byte Delivery Service access seed
+    /// (secret: `PublisherGroup.dsAccessSeed` / `stagedDsAccessSeed`), and
+    /// the GroupInfo with its ratchet tree, as MLS encodes it: opaque to the
+    /// codec, 1 byte to 1 MiB. Throws `seedLength: ...` for a seed that is
+    /// not 32 bytes.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        epoch: u64,
+        ds_access_seed: &[u8],
+        group_info: &[u8],
+    ) -> Result<VaultReentryEpoch, JsError> {
+        Ok(Self::try_new(epoch, ds_access_seed, group_info)?)
+    }
+
+    /// The 32-byte Delivery Service access seed of the epoch. Secret: never
+    /// log it; build the epoch's signer with `dsAccessSignerFromSeed`.
+    #[wasm_bindgen(getter, js_name = dsAccessSeed)]
+    pub fn ds_access_seed(&self) -> Vec<u8> {
+        self.inner.ds_access_seed.as_bytes().to_vec()
     }
 
     /// The epoch the GroupInfo describes. A `bigint`.
@@ -1986,8 +2123,8 @@ mod tests {
             plain_message(602, 602, "tail"),
         ]);
         head.set_reentry(vec![
-            VaultReentryEpoch::new(11, &[0x11; 40]),
-            VaultReentryEpoch::new(12, &[0x12; 40]),
+            VaultReentryEpoch::try_new(11, &[0xA1; 32], &[0x11; 40]).unwrap(),
+            VaultReentryEpoch::try_new(12, &[0xA2; 32], &[0x12; 40]).unwrap(),
         ]);
         head.try_set_registrar_seed(2, &[0x5E; 32]).unwrap();
         head
@@ -2188,9 +2325,14 @@ mod tests {
         let reentry = back.reentry();
         assert_eq!(reentry.len(), 2);
         assert_eq!(
-            (reentry[1].epoch(), reentry[1].group_info()),
-            (12, vec![0x12; 40])
+            (
+                reentry[1].epoch(),
+                reentry[1].ds_access_seed(),
+                reentry[1].group_info()
+            ),
+            (12, vec![0xA2; 32], vec![0x12; 40])
         );
+        assert!(!format!("{:?}", reentry[1]).contains("162"));
         assert_eq!(back.registrar_rank(), Some(2));
         assert_eq!(back.registrar_seed(), Some(vec![0x5E; 32]));
         assert_eq!(back.tail().len(), 2);
@@ -2284,7 +2426,8 @@ mod tests {
             (3, vec![2; 16], 20, 2)
         );
 
-        let reentry = vec![VaultReentryEpoch::new(4, &[9; 12])];
+        let reentry = vec![VaultReentryEpoch::try_new(4, &[0x44; 32], &[9; 12]).unwrap()];
+        assert!(VaultReentryEpoch::try_new(4, &[0x44; 31], &[9; 12]).is_err());
         let bytes = try_encode_devices_head(reentry.clone()).unwrap();
         assert_eq!(try_decode_devices_head(&bytes).unwrap(), reentry);
     }
@@ -2298,7 +2441,12 @@ mod tests {
             "repeatedRef"
         );
         assert_eq!(
-            code(&try_encode_devices_head(vec![VaultReentryEpoch::new(1, &[])]).unwrap_err()),
+            code(
+                &try_encode_devices_head(vec![
+                    VaultReentryEpoch::try_new(1, &[0; 32], &[]).unwrap()
+                ])
+                .unwrap_err()
+            ),
             "reentry"
         );
         // Hostile bytes.
@@ -2307,7 +2455,7 @@ mod tests {
             "truncated"
         );
         assert_eq!(
-            code(&try_decode_history_chunk(&[0x02, 0, 0]).unwrap_err()),
+            code(&try_decode_history_chunk(&[0x01, 0, 0]).unwrap_err()),
             "unknownVersion"
         );
         let mut trailing = try_encode_devices_head(vec![]).unwrap();
@@ -2502,6 +2650,9 @@ mod tests {
                 width: Some(240),
                 height: Some(0),
             }),
+            title: String::new(),
+            artist: String::new(),
+            inline_thumb: vec![0xFF, 0xD8, 0xFF, 0xE1],
         };
         let mut message = plain_message(1, 1, "").inner;
         message.attachments = vec![
@@ -2537,6 +2688,10 @@ mod tests {
         assert_eq!(voice.kind().as_deref(), Some("voice"));
         assert_eq!(voice.duration_ms(), Some(7_250));
         assert_eq!(voice.waveform(), Some(vec![7; 3]));
+        // ADR-0047 section 6: only the first image or video keeps its micro
+        // thumbnail, though the core row carried one on each.
+        assert_eq!(note.inline_thumb(), Some(vec![0xFF, 0xD8, 0xFF, 0xE1]));
+        assert_eq!((gif.inline_thumb(), voice.inline_thumb()), (None, None));
     }
 
     #[test]

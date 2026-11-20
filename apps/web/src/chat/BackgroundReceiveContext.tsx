@@ -36,6 +36,7 @@
  * rotated away from (the mid-call rekey, ADR-0029, fires when the poll that
  * applies the commit drains the group's MLS lock).
  */
+import { installHandoverPublisher } from "../attach/admission-hook";
 import {
   createContext,
   createEffect,
@@ -132,6 +133,7 @@ import {
   type AccountDevices,
   type RosterLeafKeys,
 } from "./device-readmission";
+import { conversationBehind } from "./conversation-behind";
 import { markOwnPublished } from "./own-published";
 import { hexOfKey, ownDeviceAdmissible, ownDeviceRoster } from "../devices/own-device-roster";
 import { ownDeviceKeyPackageUsable } from "../devices/own-conversation-key";
@@ -171,15 +173,11 @@ import {
 } from "./continuity-runtime";
 import { NO_CLAIMS } from "./group-closed-store";
 import { messagesToResend, resendParts, resendRemaining } from "./reset-repair";
-import {
-  composeEnvelope,
-  composeForwardEnvelope,
-  composeReplyEnvelope,
-  composeResendEnvelope,
-} from "./attachments";
+import { composeResendEnvelope } from "./attachments";
 import { heldResendPredicate } from "./resend-receive";
 import { flushVerdict, isDeadSession, replyForSend, sendRoute } from "./held-send";
 import {
+  composeHeldEnvelope,
   heldSends,
   notifyHeldFlushed,
   persistHeldSends,
@@ -215,6 +213,7 @@ import { membershipRefusalRetryMaySucceed } from "../../wasm/lakko_ffi_wasm";
 import { BindingEpoch, StaleBindingError } from "../auth/binding-epoch";
 import type { SweepOutcome } from "./sweep";
 import { durableSnapshotHook, sessionAccountOf } from "./persist-hooks";
+import { errorLogTag } from "./log-tag";
 
 export interface BackgroundReceiveApi {
   /** Shared with the chat view — see `receive-coordinator.ts`. */
@@ -319,6 +318,13 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     identityProvider: () => chats.identity(),
     onPersist: durableSnapshotHook(chats, () => sessionAccountOf(auth.state())),
   });
+  // ADR-0092 section 3.9 — the quiet send the open-items hand-over uses after
+  // any commit of this device that added a leaf (`attach/admission-hook.ts`).
+  onCleanup(
+    installHandoverPublisher((group, row) =>
+      chat.broadcastControl(auth.identitySecrets(), group as Parameters<typeof chat.broadcastControl>[1], row),
+    ),
+  );
   // ADR-0045 / ADR-0050 — the membership half for chats whose view is not
   // open: the sweep at the tail of every background poll, and the device
   // fan-outs. Same persist hooks the chat view's client uses, so a commit
@@ -570,7 +576,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     // chat; see `device-readmission.ts`.
     void readmitFor(entry).catch((err: unknown) => {
       // eslint-disable-next-line no-console
-      console.warn("ADR-0050 re-admission check failed", err);
+      console.warn(`ADR-0050 re-admission check failed: ${errorLogTag(err)}`);
     });
     // ADR-0073 R.7 case 2 — an accepted reset reaches every shared group
     // here, chat open or not: where this account administers the group the
@@ -1204,12 +1210,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
           // its jump target: the id belongs to the old journal.
           const reply = replyForSend(m.reply, m.replyGroupIdB64, view.head.groupIdB64);
           try {
-            const envelope =
-              m.forward !== undefined
-                ? await composeForwardEnvelope(m.text, m.attached, m.forward)
-                : reply === undefined
-                  ? await composeEnvelope(m.text, m.attached)
-                  : await composeReplyEnvelope(m.text, m.attached, reply);
+            const envelope = await composeHeldEnvelope(m, reply);
             const result = await chat.sendMessage(secrets, view.head.group, envelope);
             sent.push({
               messageId: String(result.messageId),
@@ -1219,6 +1220,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
               createdAt: result.createdAt,
               ...(reply === undefined ? {} : { reply: persistedFromReplyRef(reply) }),
               ...(m.forward === undefined ? {} : { forward: persistedFromForwardRef(m.forward) }),
+              ...(m.content === undefined ? {} : { content: m.content }),
             });
           } catch (err) {
             // Not sent: this one and everything after it stay held, in order.
@@ -1445,6 +1447,8 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     const secrets = auth.identitySecrets();
     if (secrets === null) return;
     if (readIsActive(entry.group) === false) return;
+    // ADR-0091 section 2 (C-93) — no ADR-0050 arm while this device is behind.
+    if (conversationBehind.stopsActing(entry.groupIdB64)) return;
     if (!takeReadmissionSlot(entry.groupIdB64, Date.now())) return;
     const s = auth.state();
     if (s.kind !== "session") return;
@@ -1577,7 +1581,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         }
       } catch (err) {
         // eslint-disable-next-line no-console
-        console.warn("ADR-0050 re-admission: add not proposed", err);
+        console.warn(`ADR-0050 re-admission: add not proposed: ${errorLogTag(err)}`);
       }
     }
     for (const leafKeyB64 of plan.retire) {
@@ -1596,13 +1600,13 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         }
       } catch (err) {
         // eslint-disable-next-line no-console
-        console.warn("ADR-0050 re-admission: retire not proposed", err);
+        console.warn(`ADR-0050 re-admission: retire not proposed: ${errorLogTag(err)}`);
       }
     }
     if (proposed > 0) {
       // eslint-disable-next-line no-console
       console.info(
-        `ADR-0050 re-admission: ${plan.admit.length} to admit, ${plan.retire.length} to retire in ${entry.groupIdB64}`,
+        `ADR-0050 re-admission: ${plan.admit.length} to admit, ${plan.retire.length} to retire in a conversation`,
       );
       await sweepGroup(entry);
     }

@@ -134,7 +134,7 @@ const CHANNEL_ERROR_KEYS: Readonly<Record<string, string>> = {
   "post-too-large": "channels.error.post_too_large",
   "empty-post": "channels.error.empty_post",
   "envelope-not-ready": "channels.error.not_let_in",
-  // ADR-0089 step 5: moderators removed the channel; nothing is said about
+  // ADR-0098 step 5: moderators removed the channel; nothing is said about
   // why until the log verified it (the conversation's own line does that).
   [CHANNEL_REMOVED]: "channels.unavailable",
 };
@@ -280,29 +280,79 @@ async function fetchJson<T>(
 
 /** The channel owner signer of `channelIdHex` for the account identity
  *  (ADR-0059 section 1). Only the account that created the channel derives
- *  the key the server registered for it. */
+ *  the key the server registered for it. 2026-11-20 (ADR-0074): every owner
+ *  request goes through this ONE mapping ({@link ownerProofIdentity}), so no
+ *  caller can sign with the wrong one of the account's identities; only the
+ *  handover ({@link putChannelOwner}) signs by exact keys. */
 async function ownerSigner(
   accountIdentity: Identity,
   channelIdHex: string,
 ): Promise<ChannelOwnerSigner> {
   const wasm = await loadWasm();
-  // ADR-0074 section 3.5: once a channel's owner key was handed over to the
-  // key of the account's NEW identity, owner requests are signed by it. The
-  // identity passed in is the one whose MLS provider holds the
-  // PublisherGroup (the conversation identity), which after a rotation is
-  // the predecessor.
-  const moved = movedOwnerIdentity?.(channelIdHex.toLowerCase()) ?? null;
-  return wasm.channelOwnerSigner(moved ?? accountIdentity, hexToBytesStrict(channelIdHex));
+  return wasm.channelOwnerSigner(ownerProofIdentity(accountIdentity), hexToBytesStrict(channelIdHex));
 }
 
-/** The identity whose owner key a channel was handed over to, or `null`
- *  when it was not (installed by the session; see {@link handOverChannelOwner}). */
-let movedOwnerIdentity: ((channelIdHexLower: string) => Identity | null) | null = null;
+/** 2026-11-20 (ADR-0074) — the account's identities, for the owner and
+ *  co-publisher proof rules (installed by the session; see
+ *  `OwedKeyRotation.tsx`). */
+let accountIdentities: (() => { readonly current: Identity; readonly lineage: Identity } | null) | null = null;
 
-export function installMovedOwnerIdentity(
-  source: ((channelIdHexLower: string) => Identity | null) | null,
+/**
+ * The pair the session installs, from the chat context: the current identity,
+ * and the lineage one, which is the OLDEST own predecessor (the conversation
+ * key the device binding names; it stays the oldest across a second
+ * rotation, the later keys becoming intermediates), else the current one (a
+ * device bound under the current key), the same rule as iOS
+ * `ChannelPublisherIdentity.ownerSeed` and Android's bound identity. Pure.
+ */
+export function proofIdentitiesOf(src: {
+  readonly accountIdentity: () => Identity | null;
+  readonly conversationAccountIdentity: () => Identity | null;
+}): { readonly current: Identity; readonly lineage: Identity } | null {
+  const current = src.accountIdentity();
+  const lineage = src.conversationAccountIdentity();
+  return current === null || lineage === null ? null : { current, lineage };
+}
+
+export function installAccountIdentities(
+  source: (() => { readonly current: Identity; readonly lineage: Identity } | null) | null,
 ): void {
-  movedOwnerIdentity = source;
+  accountIdentities = source;
+}
+
+function sameIdentityKey(a: Identity, b: Identity): boolean {
+  const x = a.signaturePublicKey;
+  const y = b.signaturePublicKey;
+  return x.length === y.length && x.every((v, i) => v === y[i]);
+}
+
+/**
+ * The identity an owner proof is signed with: the account's CURRENT
+ * identity, the key the owner key moves to on a rotation (ADR-0074 section
+ * 3.5, the owner-key repair), whichever of the account's identities the
+ * caller passed, as on iOS and Android. An identity that is neither of this
+ * account's is used as passed. Exported for tests.
+ */
+export function ownerProofIdentity(passed: Identity): Identity {
+  const ids = accountIdentities?.() ?? null;
+  if (ids === null) return passed;
+  if (!sameIdentityKey(passed, ids.current) && !sameIdentityKey(passed, ids.lineage)) return passed;
+  return ids.current;
+}
+
+/**
+ * The identity a co-publisher proof is signed with: the account's lineage
+ * identity, the one the binding the channel's owner appointed was composed
+ * with (the knock and the in-group binding). A co-publisher cannot move its
+ * own appointment, so its key must be the one a rotation never changes. iOS
+ * and Android sign by the same rule. An identity that is neither of this
+ * account's is used as passed. Exported for tests.
+ */
+export function coPublisherProofIdentity(passed: Identity): Identity {
+  const ids = accountIdentities?.() ?? null;
+  if (ids === null) return passed;
+  if (!sameIdentityKey(passed, ids.current) && !sameIdentityKey(passed, ids.lineage)) return passed;
+  return ids.lineage;
 }
 
 /**
@@ -438,7 +488,7 @@ async function publisherProofHeader(
       signer.free();
     }
   }
-  const signer = wasm.channelCoPublisherSigner(accountIdentity, hexToBytesStrict(channelIdHex));
+  const signer = wasm.channelCoPublisherSigner(coPublisherProofIdentity(accountIdentity), hexToBytesStrict(channelIdHex));
   try {
     return { [wasm.channelCoPublisherProofHeaderName()]: signer.sign(method, path, query, body) };
   } finally {
@@ -785,9 +835,13 @@ export async function putChannelAccess(
 }
 
 /** `PUT /v1/channels/:id/public-seed/:epoch` — file a public channel's seed
- *  envelope (ADR-0087 section 6), publisher-signed over the 64 bytes. A
- *  `409 public-seed-exists` for the identical envelope does not happen (the
- *  server answers 204); another envelope is refused. */
+ *  envelope (ADR-0087 section 6), publisher-signed over the 64 bytes. The
+ *  record is immutable: the identical envelope again is a `204`, any other is
+ *  `409 public-seed-exists`. Every seal draws a fresh nonce, so filing the
+ *  same epoch's seed a second time (a later pass, a reload, another
+ *  publisher's device) always sends other bytes; the epoch's seed is the same
+ *  MLS-derived value for every publisher, so `public-seed-exists` means the
+ *  epoch is already filed and is a success here. */
 export async function putPublicSeed(
   channelIdHex: string,
   epoch: number,
@@ -795,19 +849,27 @@ export async function putPublicSeed(
   accountIdentity: Identity,
   base: string = DEFAULT_BASE,
 ): Promise<void> {
-  await sendAsPublisher(
-    accountIdentity,
-    channelIdHex,
-    {
-      method: "PUT",
-      path: `/v1/channels/${channelIdHex}/public-seed/${epoch}`,
-      query: "",
-      body: envelope,
-      contentType: "application/octet-stream",
-    },
-    base,
-  );
+  try {
+    await sendAsPublisher(
+      accountIdentity,
+      channelIdHex,
+      {
+        method: "PUT",
+        path: `/v1/channels/${channelIdHex}/public-seed/${epoch}`,
+        query: "",
+        body: envelope,
+        contentType: "application/octet-stream",
+      },
+      base,
+    );
+  } catch (err) {
+    if (isChannelApiError(err) && err.status === 409 && err.code === PUBLIC_SEED_EXISTS) return;
+    throw err;
+  }
 }
+
+/** The code `PUT .../public-seed/:epoch` answers when the epoch is filed. */
+export const PUBLIC_SEED_EXISTS = "public-seed-exists";
 
 /** `GET /v1/channels/:id/public-seed/:epoch` — the raw 64-byte envelope, or
  *  `null` when none is filed (a private channel, an epoch not filed yet). */
@@ -1102,7 +1164,7 @@ export async function deliverEnvelope(
  *  publisher posts to `POST /v1/channels/:id/rotate`. */
 export interface RotateBatchEntry {
   /** Hex-encoded subscriber public key. */
-  readonly subscriber_pubkey_hex: string;
+  readonly subscriber_id: string;
   /** Base64-encoded `EXPECTED_ENVELOPE_LEN`-byte sealed
    *  HPKE envelope carrying the new content seed under the
    *  subscriber's HPKE public key. */

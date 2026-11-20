@@ -690,7 +690,7 @@ extension ChatRepository {
         eventSenders incomingSenders: [MemberIdentity?],
         groupIdHex: String
     ) -> [IncomingChatEvent] {
-        // ADR-0089 section 6 — in a one-to-one with a blocked person, what
+        // ADR-0098 section 6 — in a one-to-one with a blocked person, what
         // they send is not kept: messages, signals, profile updates and calls
         // (UX `reporting-and-moderation.md` 1.2). In a group nothing is
         // dropped here; their messages collapse when drawn.
@@ -767,9 +767,20 @@ extension ChatRepository {
     /// the ordinary way).
     func holdMessage(
         groupIdHex: String, text: String, attachments: [AttachmentRef],
-        reply: ReplyRef?, forward: ForwardRef?, existingLocalId: Int64? = nil
+        reply: ReplyRef?, forward: ForwardRef?, content: MessageContent? = nil,
+        existingLocalId: Int64? = nil
     ) -> Bool {
         guard let record = groups[groupIdHex], let queue = heldQueue else { return false }
+        // ADR-0092 — a held location, card or article keeps its content: the
+        // envelope with no forward line (the forward is held beside it).
+        var heldContent: Data?
+        if let content {
+            guard HeldSend.holdsContent(content),
+                  let bytes = try? composeContentEnvelope(
+                    content: content, attachments: attachments, parts: ContentModel.emptyParts)
+            else { return false }
+            heldContent = bytes
+        }
         let encoder = JSONEncoder()
         var encodedAttachments: [Data] = []
         for attachment in attachments {
@@ -790,7 +801,7 @@ extension ChatRepository {
         let entry = HeldSendQueue.Entry(
             localId: entryId, queuedAtMs: now, text: text, attachments: encodedAttachments,
             reply: Self.heldReply(reply), replyGroupIdB64: base64Encode(record.groupId),
-            forward: encodedForward)
+            forward: encodedForward, content: heldContent)
         guard queue.enqueue(
             conversationHex: conversationIdHex(ofGroup: groupIdHex), entry: entry) else { return false }
         let localId: Int64
@@ -804,6 +815,10 @@ extension ChatRepository {
                 createdAt: Self.isoTimestamp(ms: now),
                 authorKeyB64: AuthorIdentity.own(group: record.group),
                 reply: reply, forward: forward)
+            if let content, let stored = ContentModel.store(
+                content: content, attachments: attachments, parts: ContentModel.forwardParts(forward)) {
+                record.mutateLocalRow(localId: localId) { $0.content = stored }
+            }
         }
         heldRows[entryId] = (groupIdHex, localId)
         state = state.with(threads: buildThreadList())
@@ -817,7 +832,9 @@ extension ChatRepository {
         return true
     }
 
-    private func decodeHeld(_ entry: HeldSendQueue.Entry) -> (attachments: [AttachmentRef], forward: ForwardRef?)? {
+    private func decodeHeld(
+        _ entry: HeldSendQueue.Entry
+    ) -> (attachments: [AttachmentRef], forward: ForwardRef?, content: MessageContent?)? {
         let decoder = JSONDecoder()
         var attachments: [AttachmentRef] = []
         for data in entry.attachments {
@@ -832,7 +849,26 @@ extension ChatRepository {
                 author: persisted.author, originGroupIdHex: persisted.originGroupIdHex,
                 originMessageId: persisted.originMessageId)
         }
-        return (attachments, forward)
+        var content: MessageContent?
+        if let bytes = entry.content {
+            // Held content the core no longer reads is dropped, never sent empty.
+            guard let parsed = parseBodyEnvelope(bytes: bytes).content, HeldSend.holdsContent(parsed)
+            else { return nil }
+            content = parsed
+        }
+        return (attachments, forward, content)
+    }
+
+    /// The local row a held message draws: its content, with the forward
+    /// line, when it holds one.
+    private func drawHeldContent(
+        _ decoded: (attachments: [AttachmentRef], forward: ForwardRef?, content: MessageContent?),
+        record: GroupRecord, localId: Int64
+    ) {
+        guard let content = decoded.content, let stored = ContentModel.store(
+            content: content, attachments: decoded.attachments,
+            parts: ContentModel.forwardParts(decoded.forward)) else { return }
+        record.mutateLocalRow(localId: localId) { $0.content = stored }
     }
 
     /// After a restart the queue is on disk and the pending rows are not
@@ -853,6 +889,7 @@ extension ChatRepository {
                     createdAt: Self.isoTimestamp(ms: entry.queuedAtMs),
                     authorKeyB64: AuthorIdentity.own(group: record.group),
                     reply: Self.replyRef(entry.reply), forward: decoded.forward)
+                drawHeldContent(decoded, record: record, localId: localId)
                 heldRows[entry.localId] = (headHex, localId)
                 changed = true
             }
@@ -927,13 +964,23 @@ extension ChatRepository {
                         createdAt: Self.isoTimestamp(ms: entry.queuedAtMs),
                         authorKeyB64: AuthorIdentity.own(group: head.group),
                         reply: reply, forward: decoded.forward)
+                    drawHeldContent(decoded, record: head, localId: localId)
                     heldRows[entry.localId] = (headHex, localId)
                 }
                 state = state.with(threads: buildThreadList())
                 do {
-                    let envelope = try Self.composeChatEnvelope(
-                        text: entry.text, attachments: decoded.attachments,
-                        reply: reply, forward: decoded.forward)
+                    let envelope: Data
+                    if let content = decoded.content {
+                        // ADR-0092 — the held content goes out as content,
+                        // with its forward line.
+                        envelope = try composeContentEnvelope(
+                            content: content, attachments: decoded.attachments,
+                            parts: ContentModel.forwardParts(decoded.forward))
+                    } else {
+                        envelope = try Self.composeChatEnvelope(
+                            text: entry.text, attachments: decoded.attachments,
+                            reply: reply, forward: decoded.forward)
+                    }
                     let result = try await withCommitLock(groupIdHex: headHex) { [self] in
                         try await sealAndPublishLocked(
                             groupIdHex: headHex, plaintextBytes: envelope, wake: .message,

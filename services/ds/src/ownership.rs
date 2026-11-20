@@ -94,6 +94,7 @@ use crate::access::{
     MAX_ACCESS_EPOCH, MAX_RETAINED_EPOCHS,
 };
 use crate::journal::{self, PSEUDONYM_LEN};
+use crate::metrics::ProofRefusal;
 use crate::AppState;
 
 /// A statement route's body. ADR-0078 phase 6 removed the ADR-0073 attested
@@ -129,12 +130,18 @@ pub(crate) const APPEND_NEEDS_COMMIT: &str = "append-needs-commit";
 /// `{"error":"append-needs-commit"}` - for every journal, before its
 /// signature is looked at. It is a request this route no longer takes, not a
 /// judgment about the journal, so the answer is the same whatever the journal
-/// and the signer.
-fn append_needs_commit() -> HandlerError {
-    (
+/// and the signer. The response carries the code for the request metrics
+/// (ADR-0096) too.
+fn append_needs_commit() -> Response {
+    let mut response = (
         StatusCode::BAD_REQUEST,
         format!("{{\"error\":\"{APPEND_NEEDS_COMMIT}\"}}"),
     )
+        .into_response();
+    response
+        .extensions_mut()
+        .insert(lakko_metrics::ErrorCode(APPEND_NEEDS_COMMIT));
+    response
 }
 
 /// Parse and shape-check a statement for the route `kind` on `group_id`.
@@ -206,9 +213,11 @@ async fn handle(
             ..
         }
     ) {
-        return Err(append_needs_commit());
+        return Ok(append_needs_commit());
     }
-    statement.verify(now_ms()).map_err(|_| refused())?;
+    statement
+        .verify(now_ms())
+        .map_err(|e| refused(ProofRefusal::of_statement(e)))?;
 
     let mut conn = state
         .db
@@ -282,13 +291,13 @@ async fn decide(
     // Who may be heard at all, before the nonce is spent: a stranger costs
     // the server no row and learns the uniform 401.
     if !is_heard(statement.body.kind(), standing) {
-        return Ok(Err(refused()));
+        return Ok(Err(refused(ProofRefusal::NotHeard)));
     }
     if !consume_nonce(&mut *conn, group_id, &statement.nonce)
         .await
         .map_err(registration_db_error("record statement nonce"))?
     {
-        return Ok(Err(refused()));
+        return Ok(Err(refused(ProofRefusal::Replay)));
     }
     let signer = &statement.signer;
     match &statement.body {
@@ -1958,7 +1967,16 @@ mod tests {
             register(&app, &gid, &root, MAX_ACCESS_EPOCH, &key(3), &[]).await,
             StatusCode::NO_CONTENT
         );
-        crate::access::prune_group_access(&pool, 1).await;
+        // The prune statement runs over every group's rows, this one's at
+        // the cap included, and must not fail. A day's retention keeps it
+        // from deleting the rows of tests running beside this one in the
+        // shared test database (with 1 s it pruned their older epochs).
+        assert!(
+            crate::access::prune_group_access_rows(&pool, 86_400)
+                .await
+                .is_ok(),
+            "the prune failed on a group at the cap"
+        );
     }
 
     /// ADR-0053 security pass, finding 4, carried over: concurrent first

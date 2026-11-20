@@ -21,7 +21,14 @@
  * stores call, no more), the service worker's app-shell cache (code, no
  * account data), and the server-side half of Delete account.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// The composer tray uploads what it is given at once; here an upload simply
+// stays in flight, which is also the case a wipe has to survive.
+vi.mock("../chat/attachments", async (orig) => ({
+  ...(await orig<typeof import("../chat/attachments")>()),
+  encryptAndUploadBytes: () => new Promise(() => undefined),
+}));
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
@@ -47,6 +54,7 @@ import { writeRenameOwed } from "./username-change";
 import { markThreeWordsSuspended, saveBudget } from "./recover/three-words";
 import { writeKeyResetOwed } from "./key-reset-owed";
 import { writeGenesisRecorded, writeKnownDeviceId } from "./session-device";
+import { addNoPrfPasskey } from "./passkey-no-prf";
 import { markLogoutOwed } from "./logout-owed";
 import { newRemoval, writeRemoval } from "../devices/removal";
 import { markRotatedNotice, newRotation, writeRotation } from "../devices/key-rotation";
@@ -56,13 +64,16 @@ import { guestPhraseKey, markGuestAccount } from "./guest-account";
 import { upsertAccepted } from "../contacts/local-store";
 import { rememberInviteLinkSecret } from "../contacts/invite-link-secrets";
 import { writeKnockCursor } from "../chat/knock-cursor";
+import { recordCursorEpoch } from "../chat/cursor-epoch";
+import { trayFor, trayKeysHeld, type TrayDeps } from "../chat/tray-store";
+import type { StorageClient } from "../storage/client";
 import { saveKnownGroupIds } from "../devices/state-bundle";
 import {
   addRestoredKnownGroups,
   loadRestoredKnownGroups,
 } from "../backup/restored-known-groups";
 import { isBackupRestoreOwed, markBackupRestoreOwed } from "../backup/restore-owed";
-import { markRestoreFinished } from "../backup/restored-marker";
+import { markRestoreFinished, recordRestoreAnswer } from "../backup/restored-marker";
 import { localStorageAnswerLog } from "../devices/device-link";
 import { saveAppointmentRecord } from "../ds/appointments";
 import { recordRegistrarListEntry } from "../ds/registrar-list";
@@ -165,6 +176,8 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
     { db: "lakko-reach", store: "rows", row: { key: `${acct}|grants`, ciphertext: ct } },
     byId("lakko-read-watermarks", "rows"),
     byId("lakko-call-log", "rows"),
+    // ADR-0089: the person's own background photos, sealed under the device key.
+    { db: "lakko-call-backgrounds", store: "photos", row: { id: `${acct}|p1`, addedAt: 1, ciphertext: ct } },
     byId("lakko-device-sync", "rows"),
     { db: "lakko-minted-links", store: "rows", row: { key: `${acct}|contact|slug1`, ciphertext: ct } },
     { db: "lakko-minted-links", store: "rows", row: { key: `${acct}|call|slug2`, ciphertext: ct } },
@@ -207,8 +220,21 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
 /** Seed every account-scoped store for one account, through the store's own
  *  writer where it has a plain one and in its documented key format where
  *  not. */
+/** A composer tray's dependencies that reach nothing. */
+const trayDeps = (): TrayDeps => ({
+  storage: () => ({}) as StorageClient,
+  inlineType: () => null,
+  discard: () => undefined,
+  onError: () => undefined,
+});
+const smallFile = (name: string): File => new File([new Uint8Array(4)], name, { type: "application/pdf" });
+
 function seedAccount(acct: string, acctUrl: string): void {
   for (const { db, store, row } of idbRows(acct, acctUrl)) idb.seed(db, store, row);
+  // docs/ux/media-messages.md section 11: a file staged in a composer tray
+  // (memory, not storage).
+  const tray = trayFor(`${acct}:${G}`, trayDeps());
+  if (tray.items().length === 0) tray.add([smallFile("staged.pdf")], "file");
 
   const put = (k: string, v: string): void => local.setItem(k, v);
   upsertAccepted(
@@ -245,6 +271,8 @@ function seedAccount(acct: string, acctUrl: string): void {
   // auth" mark, a logout still owed, and a device removal still finishing.
   writeKnownDeviceId(local, acct, "B".repeat(43));
   writeGenesisRecorded(local, acct, "a2V5");
+  // UX 10.2: a passkey this device found cannot carry keys.
+  addNoPrfPasskey(local, acct, "Y3JlZA");
   markLogoutOwed(local, acct);
   writeRemoval(local, acct, "C".repeat(43), newRemoval("C".repeat(43), 1));
   // ADR-0074 part 3: a key rotation this device was finishing, the "keys
@@ -267,8 +295,15 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.last-observed-owner.v1.${acct}.${G}`, "\"owner\"");
   put(`lakko.leave-requested.v1.${acct}.${G}`, "5");
   put(`lakko.lineage.unsent.v1.${acct}`, "1");
+  // docs/ux/channel-notifications.md section 5: the last post notified per channel.
+  put(`lakko.channels.notified.v1.${acct}`, JSON.stringify({ ["ab".repeat(16)]: 7 }));
   put(`lakko.quick-reaction.unsent.v1.${acct}`, "1");
   put(`lakko.channel-feedback.unsent.v1.${acct}`, "1");
+  put(`lakko.channel-subscriptions.unsent.v1.${acct}`, "1");
+  put(`lakko.channel-admission-seeds.unsent.v1.${acct}`, "1");
+  put(`lakko.channels.founded-alone.v1.${acct}`, "1");
+  put(`lakko.channels.held-welcomes.v1.${acct}`, "[]");
+  put(`lakko.poll-choice.unsent.v1.${acct}`, "1");
   put(`lakko.unseen-reactions.v1:${acct}`, "{}");
   put(`lakko.emoji.recent-reactions:${acct}`, "[]");
   put(`lakko.device-cards.v1.${acct}`, "{}");
@@ -291,7 +326,9 @@ function seedAccount(acct: string, acctUrl: string): void {
   );
   put(`lakko.reset-continuity.v1.${acct}`, JSON.stringify({ moved: { G: 1 }, resent: {} }));
   put(`lakko.channels.orphaned-by-reset.v1.${acct}`, JSON.stringify(["ch1"]));
+  put(`lakko.channels.orphan-removed.v1.${acct}`, JSON.stringify(["ch2"]));
   put(`lakko.channels.claimed-handles.v1.${acct}`, JSON.stringify({ news: "ch2" }));
+  put(`lakko.groups.claimed-handles.v1.${acct}`, JSON.stringify({ team: ["g1"] }));
   put(`lakko.conversation-kind.v1.${acct}`, JSON.stringify({ [G]: "group" }));
   selectTab(acct, "folder-1");
   writeFeedSelection(acct, "custom:feed-1");
@@ -310,10 +347,18 @@ function seedAccount(acct: string, acctUrl: string): void {
   markRootHeld(acct, G);
   put(`lakko.backup.auto.${acct}`, JSON.stringify({ lastUploadAtMs: 1, dirtySinceMs: null, groupsKey: null }));
   writeKnockCursor(G, 7, acct);
+  recordCursorEpoch(G, 7n, acct);
+  // ADR-0091 phase 2: the behind state and the re-entry rows.
+  put(`lakko.chat.behind.v1:${acct}:${G}`, JSON.stringify({ v: 1, kind: "confirmed", since: 1 }));
+  put(`lakko.chat.reentry.v1:${acct}`, JSON.stringify({ v: 1, records: [] }));
+  put(`lakko.chat.reentry-gap.v1:${acct}:${G}`, "[]");
+  put(`lakko.chat.reentry-owed.v1:${acct}`, JSON.stringify({ v: 1, owed: [] }));
+  put(`lakko.chat.reentry-gap-look.v1:${acct}:${G}`, "{}");
   saveKnownGroupIds([G], acct);
   addRestoredKnownGroups(acct, [G]);
   markBackupRestoreOwed(acct);
   markRestoreFinished(acct, 1);
+  recordRestoreAnswer(acct, "answered");
   put(`lakko.channels.rotation-state.v2.${acct}.c0ffee`, "{}");
   saveCounter("c0ffee", 42n, acct);
   put(`lakko/publisher-group-unclaimed/v2/${acct}/c0ffee`, "1");
@@ -357,6 +402,7 @@ function inventory(): { where: string; text: string }[] {
     ...local.entries().map(([k, v]) => ({ where: `localStorage/${k}`, text: `${k} ${v}` })),
     ...session.entries().map(([k, v]) => ({ where: `sessionStorage/${k}`, text: `${k} ${v}` })),
     ...idb.walk(),
+    ...trayKeysHeld().map((k) => ({ where: "memory/composer-tray", text: k })),
   ];
 }
 
@@ -554,6 +600,24 @@ describe("wipeAccountLocalData", () => {
     expect(isBackupRestoreOwed(B)).toBe(true);
   });
 
+  it("drops the composer trays of the account; another account keeps its own", async () => {
+    await createSchemas();
+    const deps = trayDeps;
+    // Whatever earlier tests left, each tray holds exactly one file here.
+    await wipeAccountLocalData(A);
+    await wipeAccountLocalData(B);
+    const own = trayFor(`${A}:${G}`, deps());
+    own.add([smallFile("a.pdf")], "file");
+    trayFor(`${B}:${G}`, deps()).add([smallFile("b.pdf")], "file");
+    expect(own.items()).toHaveLength(1);
+    await wipeAccountLocalData(A);
+    // The upload still in flight is dropped with the tray.
+    expect(own.items()).toEqual([]);
+    expect(trayFor(`${A}:${G}`, deps())).not.toBe(own);
+    expect(trayFor(`${A}:${G}`, deps()).items()).toEqual([]);
+    expect(trayFor(`${B}:${G}`, deps()).items().map((i) => i.name)).toEqual(["b.pdf"]);
+  });
+
   it("names every step once", () => {
     const names = accountWipeSteps(A).map((s) => s.name);
     expect(new Set(names).size).toBe(names.length);
@@ -600,6 +664,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko-reach": "account",
   "lakko-read-watermarks": "account",
   "lakko-call-log": "account",
+  "lakko-call-backgrounds": "account",
   "lakko-device-sync": "account",
   "lakko-minted-links": "account",
   "lakko-sent-request-intros": "account",
@@ -634,6 +699,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko:key-reset-owed:": "account",
   "lakko:device-id:": "account",
   "lakko:genesis-recorded:": "account",
+  "lakko:passkey-no-prf:": "account",
   "lakko:logout-owed:": "account",
   "lakko:device-removal-owed:": "account",
   "lakko:key-rotation-owed:": "account",
@@ -668,6 +734,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.reset-continuity.v1.": "account",
   "lakko.channels.orphaned-by-reset.v1": "account",
   "lakko.channels.claimed-handles.v1.": "account",
+  "lakko.groups.claimed-handles.v1.": "account",
   "lakko.conversation-kind.v1.": "account",
   "lakko.folderTab.": "account",
   "lakko.feed.selection.": "account",
@@ -685,16 +752,34 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.backup.restored-groups.v1.": "account",
   "lakko.backup.restore-owed.v1.": "account",
   "lakko.backup.restored-marker.v1.": "account",
+  "lakko.backup.restore-answer.v1.": "account",
   "lakko.ds.knock-cursor.v2:": "account",
+  "lakko.chat.cursor-epoch.v1:": "account",
+  // ADR-0091 phase 2 (`chat/conversation-behind.ts`, `chat/reentry-store.ts`).
+  "lakko.chat.behind.v1:": "account",
+  "lakko.chat.reentry.v1:": "account",
+  "lakko.chat.reentry-read-from.v1:": "account",
+  "lakko.chat.reentry-gap.v1:": "account",
+  "lakko.chat.knock-key.v1:": "account",
+  "lakko.chat.knock-key-sent.v1:": "account",
+  "lakko.chat.reentry-owed.v1:": "account",
+  "lakko.chat.reentry-gap-look.v1:": "account",
   "lakko.pairing.known-groups.v2.": "account",
   "lakko.channels.rotation-state.v2.": "account",
   "lakko.channels.publish-counter.v2.": "account",
+  "lakko.channels.notified.v1.": "account",
   "lakko/publisher-group-unclaimed/v2/": "account",
   "lakko:group-calls:": "account",
   "lakko.emoji.recent:": "account",
   "lakko.emoji.recent-reactions:": "account",
   "lakko.quick-reaction.unsent.v1.": "account",
   "lakko.channel-feedback.unsent.v1.": "account",
+  "lakko.channel-subscriptions.unsent.v1.": "account",
+  "lakko.channel-admission-seeds.unsent.v1.": "account",
+  "lakko.channels.founded-alone.v1.": "account",
+  "lakko.channels.held-welcomes.v1.": "account",
+  "lakko.channels.orphan-removed.v1": "account",
+  "lakko.poll-choice.unsent.v1.": "account",
   "lakko.unseen-reactions.v1:": "account",
   "lakko-account-kv": "account",
   // Reactions section 12: this device's notification filter.
@@ -714,7 +799,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.emoji.tones": "retired",
   // device settings (see the module doc of wipe-account.ts)
   "lakko.theme": "device",
-  // ADR-0089 section 2: the highest moderator-list version seen here, which
+  // ADR-0098 section 2: the highest moderator-list version seen here, which
   // names no account.
   "lakko.moderation.list-version.v1": "device",
   // docs/ux/text-size.md: the message text size is chosen per device.
@@ -727,8 +812,14 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   // The store gate's cross-tab marker: digests of the accounts wiped in the
   // last minute, never an account id; it prunes itself.
   "lakko.account-store-gate.wiped.v1": "device",
+  // docs/ux/supporters.md: a supporter place is pre-account and names no
+  // account; the signed supporters list is the same for everyone.
+  "lakko.supporter-place.v1": "device",
+  "lakko.supporters.v1": "device",
   "lakko.push.token.v1": "device",
   "lakko.composer.recordMode": "device",
+  // ADR-0089: the camera background chosen on this device, not synced.
+  "lakko.call.background": "device",
   "lakko.media.autoplayVideoNotes": "device",
   "lakko.feed.device-banner-dismissed": "device",
   // A diagnostic switch of this device (`calls/av-align.ts`): `off` makes a

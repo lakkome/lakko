@@ -188,6 +188,32 @@ class BackupRestoreTest {
         assertTrue(p.logs.none { line -> "seed" in line.lowercase() })
     }
 
+    // ---- G-56: the parked device's look at the backup ---------------------
+
+    @Test
+    fun `a parked device takes only the earlier keys from the backup`() = runTest {
+        val carried = listOf(predecessor(1))
+        val p = ports({ GatedRestoreOutcome.Restored(payload(predecessors = carried)) })
+        assertTrue(fetchOwnPredecessorsOnly(p))
+        assertEquals(listOf("store"), p.steps)
+        assertFalse(p.applied)
+        // The pending-restore flag is the landing's, not this look's.
+        assertTrue(p.retryWrites.isEmpty())
+        assertTrue(carried.all { row -> row.seed.all { it == 0.toByte() } })
+    }
+
+    @Test
+    fun `a backup without earlier keys, a failed fetch or a stale head stores nothing`() = runTest {
+        assertFalse(fetchOwnPredecessorsOnly(ports({ GatedRestoreOutcome.Restored(payload()) })))
+        assertFalse(fetchOwnPredecessorsOnly(ports({ GatedRestoreOutcome.NoBackup })))
+        assertFalse(fetchOwnPredecessorsOnly(ports({ throw java.io.IOException("offline") })))
+        val stale = ports({ GatedRestoreOutcome.Restored(payload(predecessors = listOf(predecessor(1)))) })
+        stale.staleReason = RestoreReason.values().first()
+        assertFalse(fetchOwnPredecessorsOnly(stale))
+        assertEquals(listOf(false), stale.staleAnswers)
+        assertTrue(stale.steps.isEmpty())
+    }
+
     @Test
     fun `an account that never rotated touches neither the store nor the binding`() = runTest {
         val p = ports({ GatedRestoreOutcome.Restored(payload()) })

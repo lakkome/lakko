@@ -50,18 +50,61 @@ export function recordOrphanedByReset(accountIdB64: string, ids: Iterable<string
   return next;
 }
 
-/** `Remove from this device` took one channel out. Returns the set. */
+/** `Remove from this device` took one channel out. Returns the set. The
+ *  channel is remembered as removed (2026-11-13): the account's
+ *  channel-subscription register never adds it back. */
 export function forgetOrphanedByReset(accountIdB64: string, id: string): Set<string> {
   const next = loadOrphanedByReset(accountIdB64);
   next.delete(id);
   save(accountIdB64, next);
+  const removed = loadRemovedOrphans(accountIdB64);
+  removed.add(id);
+  saveRemoved(accountIdB64, removed);
   return next;
+}
+
+// ---- channels removed with "Remove from this device" (2026-11-13) ----------
+
+const REMOVED_PREFIX = "lakko.channels.orphan-removed.v1";
+
+function removedKey(accountIdB64: string): string {
+  return `${REMOVED_PREFIX}.${accountIdB64}`;
+}
+
+/** The orphaned channels the person removed from this device: the register
+ *  reconcile never adds one back and never writes it. Empty on any failure. */
+export function loadRemovedOrphans(accountIdB64: string): Set<string> {
+  try {
+    const raw = globalThis.localStorage?.getItem(removedKey(accountIdB64));
+    if (raw === null || raw === undefined) return new Set();
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((v): v is string => typeof v === "string"));
+  } catch {
+    return new Set();
+  }
+}
+
+/** The channels the register reconcile leaves alone on this device: those
+ *  orphaned by a key reset and those removed after it. */
+export function channelsLeftAloneByRegister(accountIdB64: string, orphaned: ReadonlySet<string>): Set<string> {
+  return new Set([...orphaned, ...loadRemovedOrphans(accountIdB64)]);
+}
+
+function saveRemoved(accountIdB64: string, ids: ReadonlySet<string>): void {
+  try {
+    if (ids.size === 0) globalThis.localStorage?.removeItem(removedKey(accountIdB64));
+    else globalThis.localStorage?.setItem(removedKey(accountIdB64), JSON.stringify([...ids]));
+  } catch {
+    /* best-effort */
+  }
 }
 
 /** `forgetDevice` hygiene. */
 export function clearOrphanedByResetForAccount(accountIdB64: string): void {
   try {
     globalThis.localStorage?.removeItem(key(accountIdB64));
+    globalThis.localStorage?.removeItem(removedKey(accountIdB64));
   } catch {
     /* best-effort */
   }

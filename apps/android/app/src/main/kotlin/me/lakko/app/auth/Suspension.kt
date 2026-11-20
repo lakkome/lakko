@@ -18,7 +18,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.longOrNull
 
 /*
- * ADR-0089 section 4 (UX `docs/ux/reporting-and-moderation.md` section 4) -
+ * ADR-0098 section 4 (UX `docs/ux/reporting-and-moderation.md` section 4) -
  * a suspended account, seen by its owner.
  *
  * Auth answers a suspended account `403 account-suspended`. On a landing
@@ -211,7 +211,7 @@ public fun parseSuspensionStatus(text: String?): SuspensionStatusAnswer {
     )
 }
 
-/** The reason names auth and the report sheet share (ADR-0089 section 2.2). */
+/** The reason names auth and the report sheet share (ADR-0098 section 2.2). */
 public val SUSPENSION_REASON_NAMES: Set<String> = setOf(
     "spam", "harassment", "hate", "violence", "sexual", "child-safety", "impersonation", "other",
 )
@@ -596,7 +596,7 @@ public class SuspensionController(
 
 /**
  * The one switch the transport reads: while it is on, nothing is written to
- * the Delivery Service or the channels service from this device (ADR-0089
+ * the Delivery Service or the channels service from this device (ADR-0098
  * section 4: clients honour the suspension; the DS does not know accounts).
  * The UI reads [readOnly] to hide the composer, calls and adding contacts.
  */

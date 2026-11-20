@@ -56,6 +56,7 @@
 import type { DeviceCipher } from "../auth/device-cipher";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
+import { markProviderSettled } from "../mls/provider-settled";
 import { ensureGroupPushRouting } from "../push/group-routing";
 import { loadWasm } from "../wasm";
 import { ChatClient } from "./client";
@@ -88,6 +89,20 @@ import { durableSnapshotHook } from "./persist-hooks";
  * is a "best-effort restore", not a hard precondition.
  */
 export async function rehydrateMlsState(
+  chats: ChatApi,
+  accountIdB64: string,
+): Promise<void> {
+  const canonical = chats.identity();
+  try {
+    await rehydrateInto(chats, accountIdB64);
+  } finally {
+    // ADR-0090: the channel paths open PublisherGroups in this provider only
+    // after this point (`mls/provider-settled.ts`).
+    if (canonical !== null) markProviderSettled(canonical);
+  }
+}
+
+async function rehydrateInto(
   chats: ChatApi,
   accountIdB64: string,
 ): Promise<void> {
@@ -166,6 +181,9 @@ export async function rehydrateMlsState(
     console.warn("rehydrateMlsState: restoreStorage failed", err);
     return;
   }
+  // The provider holds what was on disk; the group loop below may take a
+  // while (it provisions push routing per group).
+  markProviderSettled(canonical);
 
   // ADR-0042 — a ChatClient dedicated to the legacy-sweep broadcast: it
   // posts a push-routing-secret distribution envelope as an E2EE MLS

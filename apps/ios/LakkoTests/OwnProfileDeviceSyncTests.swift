@@ -99,10 +99,10 @@ final class OwnProfileDeviceSyncTests: XCTestCase {
         let d = try directory(defaults: defaults)
         let before = d.revision
         XCTAssertEqual(d.adoptOwnProfileFromDevice(envelope: try envelope("Alice", stamp: 1_000)), .adopted)
-        XCTAssertEqual(d.ownProfile, OwnProfile(displayName: "Alice", updatedAtMs: 1_000))
+        XCTAssertEqual(d.ownProfile, OwnProfile(displayName: "Alice", updatedAtMs: 1_000, cardShareable: true))
         XCTAssertGreaterThan(d.revision, before, "the UI showing the own name re-renders")
         XCTAssertEqual(OwnProfileStore(defaults: defaults).load(accountIdB64: accountIdB64),
-                       OwnProfile(displayName: "Alice", updatedAtMs: 1_000),
+                       OwnProfile(displayName: "Alice", updatedAtMs: 1_000, cardShareable: true),
                        "kept on disk with the received stamp, not re-stamped")
 
         XCTAssertEqual(d.adoptOwnProfileFromDevice(envelope: try envelope("Alice B", stamp: 1_001)), .adopted)
@@ -115,7 +115,7 @@ final class OwnProfileDeviceSyncTests: XCTestCase {
         XCTAssertEqual(d.adoptOwnProfileFromDevice(envelope: try envelope("Mallory", stamp: 1_000)), .notNewer,
                        "an equal stamp is not newer")
         XCTAssertEqual(d.adoptOwnProfileFromDevice(envelope: try envelope("Mallory", stamp: 999)), .notNewer)
-        XCTAssertEqual(d.ownProfile, OwnProfile(displayName: "Alice", updatedAtMs: 1_000))
+        XCTAssertEqual(d.ownProfile, OwnProfile(displayName: "Alice", updatedAtMs: 1_000, cardShareable: true))
 
         // A name saved on this device outranks an older one from another.
         let saved = try d.setOwnDisplayName("Local")
@@ -139,7 +139,7 @@ final class OwnProfileDeviceSyncTests: XCTestCase {
         XCTAssertEqual(d.adoptOwnProfileFromDevice(envelope: try envelope("Alice", stamp: 1_000)), .adopted)
         XCTAssertEqual(d.adoptOwnProfileFromDevice(envelope: try envelope(nil, stamp: 900)), .notNewer)
         XCTAssertEqual(d.adoptOwnProfileFromDevice(envelope: try envelope(nil, stamp: 2_000)), .adopted)
-        XCTAssertEqual(d.ownProfile, OwnProfile(displayName: nil, updatedAtMs: 2_000))
+        XCTAssertEqual(d.ownProfile, OwnProfile(displayName: nil, updatedAtMs: 2_000, cardShareable: true))
     }
 
     func testNothingIsAdoptedWithoutAnActiveAccountOrFromNonProfileBytes() throws {
@@ -280,7 +280,7 @@ final class OwnProfileDeviceSyncTests: XCTestCase {
             .adopted)
         XCTAssertEqual(
             OwnProfileStore(defaults: defaults).load(accountIdB64: accountIdB64),
-            OwnProfile(displayName: "Alice", updatedAtMs: 1_000))
+            OwnProfile(displayName: "Alice", updatedAtMs: 1_000, cardShareable: true))
 
         d.activate(accountIdB64: accountIdB64, username: "valentin")
         XCTAssertEqual(d.ownProfile?.displayName, "Alice", "the session reads what the restore stored")

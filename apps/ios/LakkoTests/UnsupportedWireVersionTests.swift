@@ -109,6 +109,9 @@ final class UnsupportedWireVersionTests: XCTestCase {
             case .readReceipt: kind = .readReceipt
             case .serviceEnvelope: kind = .serviceEnvelope
             case .unsupported: kind = .unsupported
+            case .poll, .checklist, .location, .contactCard, .article: kind = .content
+            case .pollVote, .pollClose, .checklistTick, .checklistAdd, .editChecklist, .editArticle:
+                kind = .contentOp
             }
             return NseProcessedRow(kind: kind, text: body.text, attachmentCount: body.attachments.count)
         }

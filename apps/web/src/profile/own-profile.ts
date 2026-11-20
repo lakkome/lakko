@@ -103,6 +103,21 @@ export function saveOwnProfileFields(
 }
 
 /**
+ * ADR-0092 section 7 — the own "my card may be shared" flag changed (the
+ * "who can find me" setting moved to or from `Nobody`): the same name and
+ * photo under a strictly newer stamp, so the republished profile replaces
+ * what every receiver holds (receivers keep a strictly newer stamp only).
+ */
+export function restampOwnProfile(
+  accountId: string,
+  nowMs: number,
+  storage: OwnProfileStorage | null = defaultStorage(),
+): OwnProfile {
+  const previous = loadOwnProfile(accountId, storage);
+  return saveOwnProfileFields(accountId, { displayName: previous.displayName, avatar: previous.avatar }, nowMs, storage);
+}
+
+/**
  * ADR-0048 section 4a — adopt the own name (and, ADR-0084, the photo)
  * another device of this account sent over the DeviceGroup. Written only when `updatedAtMs` is strictly
  * greater than the stored stamp, and the stamp is kept exactly as received

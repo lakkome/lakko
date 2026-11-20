@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0089 section 2 - preparing and sending one report. The order is the
+ * ADR-0098 section 2 - preparing and sending one report. The order is the
  * sheet's contract (UX 2.3):
  *
  *   1. the pinned root key; none -> reporting is not available here;

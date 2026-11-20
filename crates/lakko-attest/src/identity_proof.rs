@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Identity proof ([ADR-0089] security fixes, F3).
+//! Identity proof ([ADR-0098] security fixes, F3).
 //!
 //! An *identity proof* is a 64-byte Ed25519 signature by an account
 //! identity key over the account id and that key's own public half. Auth
@@ -25,7 +25,7 @@
 //! (account statements, device bindings, supersession proofs, DS proofs);
 //! none of them signs a message that starts with it.
 //!
-//! [ADR-0089]: ../../../docs/adr/0089-reporting-and-moderation.md
+//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
 
 use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey, PUBLIC_KEY_LEN, SIGNATURE_LEN};
 use thiserror::Error;

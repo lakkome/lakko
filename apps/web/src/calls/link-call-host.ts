@@ -23,6 +23,7 @@
  */
 import { t } from "../l10n";
 import { callBusyMessage, type CallKind, type CallText } from "./call-slot";
+import type { StandaloneCallEntry } from "./call-log";
 
 /** Where a link call is, from this device's point of view. */
 export type LinkCallPhase =
@@ -178,4 +179,57 @@ export function linkCallNotice(
         actions: ["dismiss"],
       };
   }
+}
+
+/**
+ * What this device knows about one link-call attempt, for its row in the
+ * Calls list (`docs/ux/navigation.md` section 5.1.1).
+ */
+export interface LinkCallJournal {
+  /** Lowercase hex of the call id: the row's id, one row per call. */
+  readonly callIdHex: string;
+  readonly role: LinkCallRole;
+  readonly video: boolean;
+  /** When this device got past the join step (the slot went `live`), or
+   *  `null` while it has not. The row's time. */
+  liveAtMs: number | null;
+  /** The row was written for this attempt. */
+  recorded: boolean;
+}
+
+/** Inputs to {@link linkCallHistoryEntry} that are read at the moment the
+ *  call is over for this device. */
+export interface LinkCallEndFacts {
+  readonly endedAtMs: number;
+  /** The signed-in account is a guest (ADR-0032): a guest never lands in the
+   *  app, so it keeps no history. */
+  readonly isGuest: boolean;
+}
+
+/**
+ * The Calls-list row a link call leaves on this device, or `null` when it
+ * leaves none.
+ *
+ * None when this device never got past the join step (a founder that never
+ * came up, a joiner never admitted): it was not in the call. None for a guest
+ * account. None when the row was already written for this attempt — the call
+ * is over for this device once, whichever of leaving and ending came first.
+ *
+ * `outgoing` for a call this device founded (`New call`, or the link's owner
+ * opening its own link), `incoming` for one it joined from a link. The time is
+ * when this device got past the join step, the duration how long it was in
+ * the call.
+ */
+export function linkCallHistoryEntry(
+  journal: LinkCallJournal,
+  facts: LinkCallEndFacts,
+): StandaloneCallEntry | null {
+  if (journal.recorded || journal.liveAtMs === null || facts.isGuest) return null;
+  return {
+    id: journal.callIdHex,
+    outcome: journal.role === "owner" ? "outgoing" : "incoming",
+    video: journal.video,
+    startedAtMs: journal.liveAtMs,
+    durationMs: Math.max(0, facts.endedAtMs - journal.liveAtMs),
+  };
 }

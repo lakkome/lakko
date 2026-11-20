@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The block register and its envelope (ADR-0089 section 6, UX
+//! The block register and its envelope (ADR-0098 section 6, UX
 //! `reporting-and-moderation.md` section 1).
 //!
 //! Blocking someone is an account-level setting carried between the

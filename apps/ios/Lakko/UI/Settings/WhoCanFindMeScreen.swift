@@ -82,7 +82,7 @@ enum WhoCanFindMeCopy {
         (scope.kind == .group ? "g:" : "c:") + scope.id.base64EncodedString()
     }
 
-    /// ADR-0089 step 5 — moderators removed this account from search.
+    /// ADR-0098 step 5 — moderators removed this account from search.
     static var hiddenByModeration: String { t("who_can_find_me.hidden_by_moderation") }
 
     /// What the screen shows while discovery refuses the Everyone record:
@@ -216,8 +216,7 @@ struct WhoCanFindMeScreen: View {
                                 HStack {
                                     Text(l10n.t("who_can_find_me.list.choose_contacts"))
                                     Spacer()
-                                    Image(systemName: "chevron.right")
-                                        .font(.footnote.weight(.semibold))
+                                    LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                                         .foregroundStyle(Color.lakkoTextMuted)
                                 }
                             }
@@ -247,8 +246,7 @@ struct WhoCanFindMeScreen: View {
                                 HStack {
                                     Text(l10n.t("who_can_find_me.list.choose"))
                                     Spacer()
-                                    Image(systemName: "chevron.right")
-                                        .font(.footnote.weight(.semibold))
+                                    LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                                         .foregroundStyle(Color.lakkoTextMuted)
                                 }
                             }

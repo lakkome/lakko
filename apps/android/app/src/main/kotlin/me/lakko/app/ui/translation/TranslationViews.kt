@@ -6,7 +6,6 @@ package me.lakko.app.ui.translation
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -21,8 +20,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -65,6 +62,9 @@ import me.lakko.app.ui.components.LakkoDialog
 import me.lakko.app.ui.components.LakkoDialogAction
 import me.lakko.app.ui.components.LakkoDialogTone
 import java.util.Locale
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * The conversation (the hex id of the group a message is stored in) whose
@@ -154,6 +154,13 @@ public fun TranslateQuietLine(
                 Dot(quiet)
                 LineButton(t("translate.line.translate"), quiet, onTranslate)
             }
+            is TranslateLine.Detected -> {
+                label(langName(line.source))
+                if (line.canTranslate) {
+                    Dot(quiet)
+                    LineButton(t("translate.line.translate"), quiet, onTranslate)
+                }
+            }
             is TranslateLine.Failed -> {
                 label(t("translate.line.failed"))
                 Dot(quiet)
@@ -206,42 +213,30 @@ public fun TranslationDialogs(hub: me.lakko.app.media.ChatMediaHub?) {
             if (p.kind == PackKind.TRANSLATION) "translate.pack.title.translation" else "translate.pack.title.transcription",
             mapOf("language" to language),
         )
-        if (p.blocked) {
-            // UX 3.5 — while anti-censorship is on, one line and nothing to
-            // decide: a notice with a single button.
-            LakkoDialog(
-                onDismissRequest = TranslationCenter::dismissPack,
-                title = title,
-                body = t("translate.pack.blocked_anti_censorship"),
-                confirm = LakkoDialogAction(label = t("common.close"), onClick = TranslationCenter::dismissPack),
-                cancel = null,
+        val size = p.sizeBytes?.let { android.text.format.Formatter.formatShortFileSize(context, it) }
+        val bodyKey = when (p.kind) {
+            PackKind.TRANSLATION -> if (size != null) "translate.pack.body.translation_sized" else "translate.pack.body.translation"
+            PackKind.TRANSCRIPTION -> if (size != null) "translate.pack.body.transcription_sized" else "translate.pack.body.transcription"
+        }
+        LakkoDialog(
+            onDismissRequest = TranslationCenter::dismissPack,
+            title = title,
+            body = t(bodyKey, buildMap { put("language", language); size?.let { put("size", it) } }),
+            confirm = LakkoDialogAction(
+                label = t(if (p.waitForWifi) "translate.pack.download_wifi" else "translate.pack.download"),
+                onClick = TranslationCenter::acceptPack,
+            ),
+            cancel = LakkoDialogAction(
+                label = t("translate.pack.not_now"),
+                tone = LakkoDialogTone.Ghost,
+                onClick = TranslationCenter::dismissPack,
+            ),
+        ) {
+            Text(
+                t("translate.pack.source.android"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-        } else {
-            val size = p.sizeBytes?.let { android.text.format.Formatter.formatShortFileSize(context, it) }
-            val bodyKey = when (p.kind) {
-                PackKind.TRANSLATION -> if (size != null) "translate.pack.body.translation_sized" else "translate.pack.body.translation"
-                PackKind.TRANSCRIPTION -> if (size != null) "translate.pack.body.transcription_sized" else "translate.pack.body.transcription"
-            }
-            LakkoDialog(
-                onDismissRequest = TranslationCenter::dismissPack,
-                title = title,
-                body = t(bodyKey, buildMap { put("language", language); size?.let { put("size", it) } }),
-                confirm = LakkoDialogAction(
-                    label = t(if (p.waitForWifi) "translate.pack.download_wifi" else "translate.pack.download"),
-                    onClick = TranslationCenter::acceptPack,
-                ),
-                cancel = LakkoDialogAction(
-                    label = t("translate.pack.not_now"),
-                    tone = LakkoDialogTone.Ghost,
-                    onClick = TranslationCenter::dismissPack,
-                ),
-            ) {
-                Text(
-                    t("translate.pack.source.android"),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
         }
     }
     picker?.let { p ->
@@ -250,6 +245,7 @@ public fun TranslationDialogs(hub: me.lakko.app.media.ChatMediaHub?) {
             options = p.options,
             onPick = { TranslationCenter.choosePicked(it, hub) },
             onDismiss = TranslationCenter::dismissPicker,
+            selected = p.marked,
         )
     }
 }
@@ -298,11 +294,11 @@ internal fun LanguageSheet(
                 ) {
                     Text(ownLanguageName(tag), fontSize = 15.sp, modifier = Modifier.weight(1f))
                     if (isCurrent) {
-                        Icon(
-                            androidx.compose.material.icons.Icons.Filled.Check,
+                        LkIcon(
+                            R.drawable.ic_lk_checkmark,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(20.dp),
+                            size = LkIconSize.Row,
                         )
                     }
                 }
@@ -343,7 +339,7 @@ public fun ConversationTranslateBar(conversation: String, recentIncomingKeys: Li
                 Text(t("translate.bar.not_now"))
             }
             IconButton(onClick = { TranslationCenter.dismissBar(conversation, language) }) {
-                Icon(Icons.Filled.Close, contentDescription = t("translate.bar.close"))
+                LkIcon(R.drawable.ic_lk_xmark, contentDescription = t("translate.bar.close"), size = LkIconSize.Row)
             }
         }
     }

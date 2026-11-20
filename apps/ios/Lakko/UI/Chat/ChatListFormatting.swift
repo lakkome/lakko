@@ -85,6 +85,100 @@ public enum ChatListFormatting {
         }
     }
 
+    /// `docs/ux/media-messages.md` section 11 — how many photos, videos and
+    /// plain files a message carries (anything else: a voice message, a GIF,
+    /// an audio file, keeps its own word).
+    public struct AttachmentCounts: Equatable {
+        public var photos = 0
+        public var videos = 0
+        public var files = 0
+        public var other = 0
+
+        public var media: Int { photos + videos }
+    }
+
+    public static func attachmentCounts(
+        _ refs: [AttachmentRef], allowlist: InlineMedia.Allowlist = InlineMedia.coreAllowlist
+    ) -> AttachmentCounts {
+        var counts = AttachmentCounts()
+        for ref in refs {
+            let decision = InlineMedia.decision(kind: ref.kind, mime: ref.mime, allowlist: allowlist)
+            switch decision.bubble {
+            case .photo: counts.photos += 1
+            case .video: counts.videos += 1
+            case .file where ref.kind == nil && decision.inline == nil: counts.files += 1
+            default: counts.other += 1
+            }
+        }
+        return counts
+    }
+
+    /// Section 11 — the words a message of photos, videos or files says
+    /// without text: `Photo`, `3 photos`, `Video`, `2 videos`, `4 photos and
+    /// videos`, `File`, `3 files`. `nil` when the message carries anything
+    /// else (its own words apply) or nothing.
+    public static func attachmentWords(_ counts: AttachmentCounts) -> String? {
+        guard counts.other == 0 else { return nil }
+        if counts.media > 0 {
+            if counts.photos > 0, counts.videos > 0 {
+                return Localization.text("chat.media.photos_and_videos", counts: ["count": UInt64(counts.media)])
+            }
+            if counts.photos > 0 {
+                return Localization.text("chat.media.photos", counts: ["count": UInt64(counts.photos)])
+            }
+            return Localization.text("chat.media.videos", counts: ["count": UInt64(counts.videos)])
+        }
+        if counts.files > 0 {
+            return Localization.text("chat.media.files", counts: ["count": UInt64(counts.files)])
+        }
+        return nil
+    }
+
+    /// The attachment labels ``preview(text:attachmentLabels:direction:deleted:unsupported:isGroup:senderName:)``
+    /// takes: section 11's words for photos, videos and files, else one word
+    /// per attachment.
+    public static func attachmentLabels(
+        _ refs: [AttachmentRef], allowlist: InlineMedia.Allowlist = InlineMedia.coreAllowlist
+    ) -> [String] {
+        if let words = attachmentWords(attachmentCounts(refs, allowlist: allowlist)) { return [words] }
+        return refs.map { mediaLabel(kind: $0.kind, mime: $0.mime, allowlist: allowlist) }
+    }
+
+    /// Section 11 — the separator between a files-only message's words and its
+    /// text ("2 files · Weekend plans"), the literal web and Android use.
+    public static let filesTextSeparator = " · "
+
+    /// Section 11 — a message's text as the row shows it: a message whose
+    /// attachments are only plain files says the words, then the text; any
+    /// other message keeps its text as it is.
+    public static func textWithFileWords(
+        _ text: String, refs: [AttachmentRef], allowlist: InlineMedia.Allowlist = InlineMedia.coreAllowlist
+    ) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return text }
+        let counts = attachmentCounts(refs, allowlist: allowlist)
+        guard counts.files > 0, counts.media == 0, counts.other == 0,
+              let words = attachmentWords(counts) else { return text }
+        return words + filesTextSeparator + trimmed
+    }
+
+    /// Section 11 — the first photo or video of a message (the row's 20 pt
+    /// thumbnail), with how many photos and videos it carries (the stack).
+    public static func previewMedia(
+        _ refs: [AttachmentRef], allowlist: InlineMedia.Allowlist = InlineMedia.coreAllowlist
+    ) -> ConversationPreviewMedia? {
+        let media = refs.filter {
+            let bubble = InlineMedia.decision(kind: $0.kind, mime: $0.mime, allowlist: allowlist).bubble
+            return bubble == .photo || bubble == .video
+        }
+        guard let first = media.first else { return nil }
+        return ConversationPreviewMedia(
+            thumb: first.thumb,
+            isVideo: InlineMedia.decision(kind: first.kind, mime: first.mime, allowlist: allowlist).bubble == .video,
+            count: media.count,
+            inlineThumb: InlineThumb.bounded(first.inlineThumb))
+    }
+
     /// ADR-0087 sections 14 and 15.2 — what the row says for a message that
     /// carries a channel invitation card: the invitation, never the `/g/`
     /// link the message's text holds.

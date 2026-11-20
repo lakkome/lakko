@@ -9,7 +9,7 @@ import XCTest
 @testable import Lakko
 import LakkoCore
 
-/// ADR-0089 section 6 — the notification extension honours a block: the app
+/// ADR-0098 section 6 — the notification extension honours a block: the app
 /// mirrors the blocked account keys into the App Group, and the extension
 /// shows nothing for a row whose MLS-resolved sender is in that set. Also the
 /// channel info's report, which offers the posts of the local post log.

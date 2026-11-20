@@ -302,6 +302,10 @@ internal val MEMBERSHIP_REFUSALS_COLLAPSED_TO_FALLBACK: Set<FfiRefusalReason> = 
     // ADR-0045: a Welcome for a group this device still holds. It answers no
     // action of the person's.
     FfiRefusalReason.GROUP_STILL_ACTIVE,
+    // ADR-0091 phase 2: a re-entry pair or Welcome this device's own recovery
+    // produced or received; it answers no action of the person's either.
+    FfiRefusalReason.REENTRY_PAIR_INVALID,
+    FfiRefusalReason.REENTRY_WELCOME_REFUSED,
 )
 
 /**
@@ -352,6 +356,8 @@ private fun refusalCopy(reason: FfiRefusalReason): RefusalCopy = when (reason) {
     FfiRefusalReason.PROPOSALS_PENDING,
     FfiRefusalReason.SWEEP_ALREADY_STAGED,
     FfiRefusalReason.GROUP_STILL_ACTIVE,
+    FfiRefusalReason.REENTRY_PAIR_INVALID,
+    FfiRefusalReason.REENTRY_WELCOME_REFUSED,
     -> RefusalCopy(MEMBERSHIP_REFUSAL_FALLBACK)
 }
 
@@ -487,9 +493,19 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                     FfiRefusalReason.ONE_TO_ONE_HAS_NO_ROLES
                 is FfiException.MembershipGroupKindChanged -> FfiRefusalReason.GROUP_KIND_CHANGED
                 is FfiException.MembershipGroupStillActive -> FfiRefusalReason.GROUP_STILL_ACTIVE
+                // ADR-0091 phase 2 — the re-entry refusals.
+                is FfiException.MembershipReentryPairInvalid -> FfiRefusalReason.REENTRY_PAIR_INVALID
+                is FfiException.MembershipReentryWelcomeRefused ->
+                    FfiRefusalReason.REENTRY_WELCOME_REFUSED
                 // ADR-0051 — a channel metadata record out of bounds; not a
                 // membership refusal.
                 is FfiException.ChannelMeta -> null
+                // ADR-0092 — content, ballot, hand-over and credential errors
+                // are never membership refusals.
+                is FfiException.AnonCred -> null
+                is FfiException.Ballot -> null
+                is FfiException.Content -> null
+                is FfiException.OpenItems -> null
                 // ADR-0054 - an anonymous-token issuance refusal; not a
                 // membership refusal.
                 is FfiException.AnonToken,
@@ -519,7 +535,7 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 // membership refusal.
                 is FfiException.L10n,
                 is FfiException.Circle,
-                // ADR-0089 - a refused attestation or report; not a
+                // ADR-0098 - a refused attestation or report; not a
                 // membership refusal.
                 is FfiException.Moderation,
                 // The local three-word check of the recovery phrase and the
@@ -550,6 +566,12 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 // ADR-0078 section 3 - a push wake or subscription that could
                 // not be sealed; not a membership refusal.
                 is FfiException.PushWake,
+                // G-56 - a recovery payload v3 or row the core refused; not a
+                // membership refusal.
+                is FfiException.RecoveryPayload,
+                // docs/ux/donations.md section 3 - a donation statement that
+                // does not verify; not a membership refusal.
+                is FfiException.Donation,
                 -> null
 
                 // Everything that is NOT a membership refusal. Enumerated
@@ -593,6 +615,7 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 // ADR-0074 part 3 - a key-rotation envelope or a root
                 // endorsement that could not be made; never a refusal.
                 is FfiException.KeyRotation,
+                is FfiException.SupportersList,
                 -> null
             }
         }

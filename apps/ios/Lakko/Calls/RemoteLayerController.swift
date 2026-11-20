@@ -79,6 +79,16 @@ final class RemoteLayerController {
         publish(display.setLightAvailable(available: available, nowMs: clock()))
     }
 
+    /// The heavy track was replaced by another, or went away: the rule
+    /// starts again, as for a new tile. It forgets the last frame of the old
+    /// picture, so neither the picture the SFU paused nor the wait for the new
+    /// one's first key frame counts as a stall (as on web and Android). In
+    /// the background nothing is told; ``resume()`` starts the rule again.
+    func resync() {
+        guard !isSuspended else { return }
+        publish(display.resync(nowMs: clock()))
+    }
+
     /// The app went to the background: nothing is reported, so nothing is
     /// counted, until ``resume()``.
     func suspend() {

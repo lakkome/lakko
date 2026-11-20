@@ -38,11 +38,14 @@ import org.webrtc.ExternalAudioProcessingFactory
  *
  * ## Sample rate
  *
- * The model runs at 48 kHz only. A capture stage at any other rate (16 or
- * 32 kHz) is passed through untouched, not resampled, and the format line
- * says so. With the default audio module the stage runs at the capture
- * rate rounded up to 16 / 32 / 48 kHz (M125 `SuitableProcessRate`), so a
- * phone recording at 48 kHz gets 48 kHz.
+ * The model runs at 48 kHz. A stage at 24, 16, 12 or 8 kHz is raised to
+ * 48 kHz by the Rust core, cleaned and lowered back (ADR-0088 amendment of
+ * 2026-11-10: a Pixel 7a opened the stage at 16 kHz before settling at
+ * 48 kHz, and until then RNNoise sat out). Any other rate (32 or 44.1 kHz)
+ * and any stage with more than one channel is passed through untouched,
+ * and the format line says so. With the default audio module the stage
+ * runs at the capture rate rounded up to 16 / 32 / 48 kHz (M125
+ * `SuitableProcessRate`), so a phone recording at 48 kHz gets 48 kHz.
  *
  * ## Failure
  *
@@ -105,22 +108,28 @@ internal interface NoiseEngine {
     /** Frees [handle]; `0` is a no-op. Control thread. */
     fun free(handle: Long)
 
-    /** Cleans [frames] floats of [buffer] in place; `0` on success. */
-    fun process(handle: Long, buffer: ByteBuffer, frames: Int): Int
+    /** Whether [processAtRate] takes [rateHz] (48 000, 24 000, 16 000,
+     *  12 000, 8 000). */
+    fun supportsRate(rateHz: Int): Boolean
+
+    /** Cleans [frames] floats of a mono stream at [rateHz] in [buffer] in
+     *  place; `0` on success. */
+    fun processAtRate(handle: Long, rateHz: Int, buffer: ByteBuffer, frames: Int): Int
 }
 
 internal object NativeNoiseEngine : NoiseEngine {
     override val sampleRate: Int get() = NativeNoiseSuppressor.sampleRate
     override fun create(): Long = NativeNoiseSuppressor.create()
     override fun free(handle: Long) = NativeNoiseSuppressor.free(handle)
-    override fun process(handle: Long, buffer: ByteBuffer, frames: Int): Int =
-        NativeNoiseSuppressor.process(handle, buffer, frames)
+    override fun supportsRate(rateHz: Int): Boolean = NativeNoiseSuppressor.supportsRate(rateHz)
+    override fun processAtRate(handle: Long, rateHz: Int, buffer: ByteBuffer, frames: Int): Int =
+        NativeNoiseSuppressor.processAtRate(handle, rateHz, buffer, frames)
 }
 
 /**
  * The capture post-processing stage: cleans the microphone when the switch
- * is on and the stage runs at 48 kHz mono, else leaves the buffer as it
- * is.
+ * is on and the stage runs mono at a rate the native suppressor takes, in
+ * 10 ms blocks, else leaves the buffer as it is.
  *
  * Threads. [initialize] / [reset] / [process] are libwebrtc's, serialised by
  * the SDK adapter's mutex. [arm] / [disarm] / [setEnabled] are the app's,
@@ -153,6 +162,10 @@ internal class CaptureNoiseProcessor(
     @Volatile private var rateHz = 0
     @Volatile private var channels = 0
 
+    /** [rateHz] is one the native suppressor takes; decided when the
+     *  format is reported, so [process] does not ask on every block. */
+    @Volatile private var rateSupported = false
+
     private val control = Any()
     private var owner: Any? = null
     private var formatLogged: Pair<Int, Int>? = null
@@ -166,6 +179,7 @@ internal class CaptureNoiseProcessor(
         try {
             rateHz = sampleRateHz
             channels = numChannels
+            rateSupported = engine.sampleRate != 0 && engine.supportsRate(sampleRateHz)
             logFormat()
         } catch (_: Throwable) {
             // Never throw into libwebrtc.
@@ -175,6 +189,7 @@ internal class CaptureNoiseProcessor(
     override fun reset(newRate: Int) {
         try {
             rateHz = newRate
+            rateSupported = engine.sampleRate != 0 && engine.supportsRate(newRate)
             logFormat()
         } catch (_: Throwable) {
             // Never throw into libwebrtc.
@@ -183,8 +198,8 @@ internal class CaptureNoiseProcessor(
 
     override fun process(numBands: Int, numFrames: Int, buffer: ByteBuffer) {
         try {
-            val rate = engine.sampleRate
-            if (!enabled || failed || rate == 0 || channels != 1 || numFrames * 100 != rate) {
+            val rate = rateHz
+            if (!enabled || failed || !rateSupported || channels != 1 || numFrames * 100 != rate) {
                 passed.incrementAndGet()
                 return
             }
@@ -195,7 +210,7 @@ internal class CaptureNoiseProcessor(
                     passed.incrementAndGet()
                     return
                 }
-                val status = engine.process(h, buffer, numFrames)
+                val status = engine.processAtRate(h, rate, buffer, numFrames)
                 if (status == NativeNoiseSuppressor.STATUS_OK) {
                     cleaned.incrementAndGet()
                 } else {
@@ -280,10 +295,13 @@ internal class CaptureNoiseProcessor(
 
     private fun formatNote(): String {
         val rate = rateHz
+        val model = engine.sampleRate
         return when {
             rate == 0 -> " (capture format not reported yet)"
-            rate == engine.sampleRate && channels == 1 -> " (capture $rate Hz mono)"
-            else -> " but bypassed: capture runs at $rate Hz, $channels ch; RNNoise needs ${engine.sampleRate} Hz mono and is not resampled"
+            channels != 1 -> " but bypassed: capture runs at $rate Hz, $channels ch; RNNoise takes mono only"
+            !rateSupported -> " but bypassed: capture runs at $rate Hz mono; RNNoise takes $model Hz or a rate $model Hz is a whole multiple of"
+            rate == model -> " (capture $rate Hz mono)"
+            else -> " (capture $rate Hz mono, raised to $model Hz for RNNoise)"
         }
     }
 
@@ -291,10 +309,12 @@ internal class CaptureNoiseProcessor(
         val now = rateHz to channels
         if (formatLogged == now) return
         formatLogged = now
-        val note = if (now.first == engine.sampleRate && now.second == 1) {
-            "RNNoise applies when the switch is on"
-        } else {
-            "RNNoise bypassed (needs ${engine.sampleRate} Hz mono, no resampling)"
+        val model = engine.sampleRate
+        val note = when {
+            now.second != 1 -> "RNNoise bypassed (mono only)"
+            !rateSupported -> "RNNoise bypassed (takes $model Hz or a rate $model Hz is a whole multiple of)"
+            now.first == model -> "RNNoise applies when the switch is on"
+            else -> "RNNoise applies when the switch is on, raised to $model Hz"
         }
         log("capture post-processing format ${now.first} Hz, ${now.second} ch: $note")
     }

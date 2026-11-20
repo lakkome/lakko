@@ -49,7 +49,12 @@ ADR-0087. Add a scenario whenever a defect shows one was missing.
 11. Photo, file, voice message, video note, GIF, both ways, on every pair.
 12. Call and video call: ring, answer, decline, miss, hang up, app closed, screen share.
     Each right after a message was sent in that chat. A first video call with the camera
-    prompt on screen. Ending a call leaves the app responsive at once.
+    prompt on screen. Ending a call leaves the app responsive at once. Sound and picture
+    both ways on every pair of clients (web and iOS, web and Android, iOS and Android),
+    on a real iPhone and a real Android phone: a simulator accepted the call audio
+    setup an iPhone refuses, so iPhone calls had no sound and nobody saw it there
+    (2026-11-10). With the app sent to the home screen the call goes on, with the
+    system's floating window.
 13. A message sent while the other side is offline arrives; push wakes a closed app.
 
 ## Groups
@@ -69,7 +74,11 @@ ADR-0087. Add a scenario whenever a defect shows one was missing.
     (`Waiting to leave.`, then the row goes); a fast send leaves an empty composer.
 18. Everything in 10 and 11 in a group, including a member who joined late.
 19. Group call: join, leave, camera, pin, a late joiner. A picture from each client's
-    camera reaches a tile on the other two; the tile is not dark.
+    camera reaches a tile on the other two; the tile is not dark. A joiner changes the
+    call key: after each admission every participant still hears and sees every other,
+    with each client in turn as the one who started the call (an iPhone that started a
+    call kept sealing under the key of before a web joiner's admission and the web got
+    neither sound nor picture, 2026-11-10). Call links (`/c/`) the same.
 20. Invite link and approval; a request to join, approved and rejected.
 21. Public and private group: found or not found, join by request or by invitation. (design)
 

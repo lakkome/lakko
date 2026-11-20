@@ -5,7 +5,7 @@ import Foundation
 import LakkoCore
 import os
 
-/// ADR-0089 step 4 / UX `reporting-and-moderation.md` section 3 — whether
+/// ADR-0098 step 4 / UX `reporting-and-moderation.md` section 3 — whether
 /// another person's account is suspended, as the moderation log says.
 ///
 /// The service publishes a daily snapshot of active suspensions in 65,536
@@ -160,9 +160,9 @@ public final class SuspensionMarks: ObservableObject {
         /// Whether a key is this device's own account (any of its keys).
         public var isOwn: @MainActor (Data) -> Bool
         public var sleepMs: (Int64) async -> Void
-        /// ADR-0089 step 5 — the bucket prefix of a 16-byte channel id.
+        /// ADR-0098 step 5 — the bucket prefix of a 16-byte channel id.
         public var channelPrefix: (_ channelId: Data) throws -> String
-        /// ADR-0089 step 5 — check an answer for a channel (`suspended` means
+        /// ADR-0098 step 5 — check an answer for a channel (`suspended` means
         /// removed).
         public var verifyChannel: (
             _ answer: String, _ channelId: Data, _ logKey: Data,
@@ -246,7 +246,7 @@ public final class SuspensionMarks: ObservableObject {
     private var failedUntil: [String: Int64] = [:]
     private var inFlight: [String: Task<String?, Never>] = [:]
     private var results: [Data: (standing: Standing, validUntilMs: Int64)] = [:]
-    /// ADR-0089 step 5 — channel answers, by 16-byte channel id.
+    /// ADR-0098 step 5 — channel answers, by 16-byte channel id.
     private var channelResults: [Data: (standing: Standing, validUntilMs: Int64)] = [:]
     /// F2 — the moderator list admitted under the root key, held in memory.
     private var heldModeratorList: Data?
@@ -353,10 +353,10 @@ public final class SuspensionMarks: ObservableObject {
         }
     }
 
-    /// ADR-0089 step 5 — what the log says about a removed channel, and when
+    /// ADR-0098 step 5 — what the log says about a removed channel, and when
     /// to ask again: the snapshot's `reuseUntilMs` when the answer verified,
     /// else ``failureBackoffMs`` from now. `.suspended` means verified
-    /// removed; anything not verified is `.unknown` (C-92: a removal the log
+    /// removed; anything not verified is `.unknown` (C-97: a removal the log
     /// did not prove is never claimed).
     public func channelCheck(_ channelId: Data) async -> (standing: Standing, recheckAtMs: Int64) {
         let backoff = { self.ports.nowMs() + Self.failureBackoffMs }
@@ -612,7 +612,7 @@ public final class SuspensionMarks: ObservableObject {
     }
 }
 
-/// ADR-0089 step 4 — what each mark site shows, decided here so the tests
+/// ADR-0098 step 4 — what each mark site shows, decided here so the tests
 /// can run it (UX `reporting-and-moderation.md` section 3).
 public enum SuspensionMarkRules {
 

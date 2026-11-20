@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 
--- ADR-0089 section 2 - the reports Lakko's moderators review.
+-- ADR-0098 section 2 - the reports Lakko's moderators review.
 --
 -- A row is one anonymous report: the clear part (what is reported, why,
 -- where it was seen, how many pieces of evidence) and the whole report as

@@ -67,6 +67,12 @@ class SfuCallUi(
     val videoPublishState: StateFlow<SfuCallSession.VideoPublishState> =
         _videoPublishState.asStateFlow()
 
+    /** What each remote peer last said about its microphone (keyed on
+     *  "peer-<peerId>", 2026-11-07): applied to its tile now, and to the
+     *  tile when it is built if the state raced ahead of `peer-joined`.
+     *  Unmuted until a peer says otherwise. Session-scope only. */
+    private val remoteMics = RemoteMicStates()
+
     init {
         // Canonical call safety number derived from the shared seed — the
         // same string every participant derives, shown in the E2EE pill
@@ -98,6 +104,10 @@ class SfuCallUi(
         // section 4.1): one typed earlier in this app run for the same call,
         // else none. It names the own tile ahead of the profile name.
         var ownCallName = callIdHex?.let(RememberedCallNames::get).orEmpty()
+
+        // The call's chat (`docs/ux/calls.md` section 4.1.4): one per call,
+        // gone when the call ends for this device.
+        val chat = CallChatModel()
 
         // Who is speaking (`docs/ux/group-call-grid.md` section 7.3), read on
         // this device from the session's own connection. The session is
@@ -138,6 +148,8 @@ class SfuCallUi(
                     SfuCallSession.State.FAILED,
                     SfuCallSession.State.CLOSED -> {
                         monitor.stop()
+                        // The chat goes with the call.
+                        chat.clear()
                         // The call's tracks are gone with its connection.
                         ui.clearRemoteCopyVideoTracks()
                         ui.setPhase(CallUiState.CallPhase.Ended(System.currentTimeMillis()))
@@ -149,11 +161,23 @@ class SfuCallUi(
                 val local = localParticipant(ownCallTileName(ownCallName, localDisplayName), config.audio, config.video)
                 val remotes = roster
                     .filter { it.peerId != selfPeerId }
-                    .map { remoteParticipant(peerNames?.name(it.peerId).orEmpty(), it.peerId) }
+                    .map {
+                        remoteParticipant(
+                            peerNames?.name(it.peerId).orEmpty(),
+                            it.peerId,
+                            micOn = remoteMics.micOn(participantId(it.peerId)),
+                        )
+                    }
                 ui.setParticipants(listOf(local) + remotes)
             },
             onPeerJoined = { peerId ->
-                ui.participantJoined(remoteParticipant(peerNames?.name(peerId).orEmpty(), peerId))
+                ui.participantJoined(
+                    remoteParticipant(
+                        peerNames?.name(peerId).orEmpty(),
+                        peerId,
+                        micOn = remoteMics.micOn(participantId(peerId)),
+                    ),
+                )
             },
             onPeerIdentified = { peerId, identity ->
                 // The peer's sealed announcement verified against the call's
@@ -172,6 +196,7 @@ class SfuCallUi(
                 // participantLeft also drops the peer's light companion.
                 ui.participantLeft(id)
                 lastKnownCameraOn.remove(id)
+                remoteMics.forget(id)
             },
             onRemoteVideoTrack = { track, streamId ->
                 // N-way remote video. The MSID stream id is the source peer
@@ -235,6 +260,11 @@ class SfuCallUi(
                 lastKnownCameraOn[id] = cameraOn
                 ui.setParticipantCamera(id, cameraOn)
             },
+            onRemoteMicrophoneState = { peerId, microphoneOn ->
+                // The peer's mute mark (group-call-grid 7.2), from the same
+                // sealed media state.
+                remoteMics.record(ui, participantId(peerId), microphoneOn)
+            },
             onCameraFacing = { front -> ui.setCameraFrontFacing(front) },
             // What the SFU says it gives of each person (`VideoGiven.kt`):
             // a tile shows the lower of that and what it asked for.
@@ -248,6 +278,11 @@ class SfuCallUi(
                 if (peerNames?.callNamed(peerId, name) == true) {
                     ui.setParticipantName(participantId(peerId), peerNames.name(peerId))
                 }
+            },
+            // A message of the call's chat, verified: the name over it is the
+            // one its sender's tile shows.
+            onCallChat = { peerId, seq, text ->
+                chat.addReceived(peerId, seq, text, peerNames?.name(peerId).orEmpty())
             },
             onServerError = { _, _ -> },
         )
@@ -274,6 +309,7 @@ class SfuCallUi(
             own = ownCallName,
             default = localDisplayName,
         )
+        ui.setCallChat(CallChatHandle(chat, sessionChatControl(session, chat)))
     }
 
     /** Open the SFU connection + publish (delegates to the session). */
@@ -285,8 +321,11 @@ class SfuCallUi(
      *  callback). Idempotent. */
     fun hangUp() {
         speaking.stop()
+        remoteMics.clear()
         // The name field belongs to a call that can carry a call name.
         ui.setCallNameControl(null, own = "", default = "")
+        // Nothing of the call's chat is kept.
+        ui.setCallChat(null)
         session.hangUp()
     }
 
@@ -356,12 +395,13 @@ class SfuCallUi(
         fun remoteParticipant(
             name: String,
             peerId: String,
+            micOn: Boolean = true,
         ): CallUiState.Participant =
             CallUiState.Participant(
                 id = participantId(peerId),
                 displayName = name,
                 isLocal = false,
-                micOn = true,
+                micOn = micOn,
                 camOn = false,
                 quality = CallUiState.QualityTier.Good,
                 speaking = false,

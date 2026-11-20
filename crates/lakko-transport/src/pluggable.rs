@@ -44,11 +44,17 @@
 
 use std::time::Duration;
 
+use futures::stream::{FuturesUnordered, StreamExt as _};
+
 use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::endpoint::Endpoint;
 use crate::transport::{Connection, Transport};
+
+/// How long the race waits before starting the next candidate in config
+/// order (RFC 8305 section 5 recommends 250 ms). Chosen, not measured.
+pub const CONNECTION_ATTEMPT_DELAY: Duration = Duration::from_millis(250);
 
 /// Identifier used in config / logs to refer to a specific
 /// transport variant. Stable string — clients ship configs that
@@ -226,9 +232,10 @@ impl PluggableTransport for HappyEyeballs {
 /// race a one-off ad-hoc set without constructing a
 /// [`HappyEyeballs`] instance.
 ///
-/// Semantic: spawn one task per candidate, wait for the FIRST
-/// to return `Ok`, abort the rest, return the winning kind +
-/// connection. If every task returns `Err` (or `deadline`
+/// Semantic: start the candidates one [`CONNECTION_ATTEMPT_DELAY`]
+/// apart in config order, all running at once; the FIRST to return
+/// `Ok` wins and the rest are dropped (cancelled), returning the
+/// winning kind + connection. If every task returns `Err` (or `deadline`
 /// fires), return `AllFailed` with the per-candidate detail.
 ///
 /// # Errors
@@ -247,35 +254,40 @@ pub async fn race_select(
     }
     let deadline_ms = u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX);
 
-    // **Sequential** race — scaffold version. Each candidate
-    // gets its own `tokio::time::timeout` slice of the
-    // deadline; first `Ok(...)` wins, errors are collected
-    // and returned together if every candidate fails. A
-    // proper happy-eyeballs `tokio::select!` race over
-    // `Arc<dyn Transport>` clones lands in the first G5-N
-    // sprint that needs sub-RTT first-byte; the trait would
-    // need `Clone` (or an `Arc<dyn Transport>` wrapper in
-    // every candidate) to support concurrent spawn, and
-    // refactoring that surface is its own task.
-    let mut per_candidate: Vec<(PluggableKind, crate::error::Error)> =
+    // Concurrent race (RFC 8305 shape): candidate `i` starts `i` connection
+    // attempt delays after the first, in config order, and the first `Ok`
+    // wins; the others are dropped, which cancels them. A candidate that
+    // hangs (a blocked port answers nothing) therefore no longer holds the
+    // ones after it for the whole deadline, as the sequential race did.
+    let mut attempts: FuturesUnordered<_> = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, c)| async move {
+            let delay =
+                CONNECTION_ATTEMPT_DELAY.saturating_mul(u32::try_from(index).unwrap_or(u32::MAX));
+            tokio::time::sleep(delay).await;
+            (index, c.kind, c.transport.connect(endpoint).await)
+        })
+        .collect();
+    let mut failed: Vec<(usize, PluggableKind, crate::error::Error)> =
         Vec::with_capacity(candidates.len());
-    for c in candidates {
-        match tokio::time::timeout(deadline, c.transport.connect(endpoint)).await {
-            Ok(Ok(conn)) => return Ok((c.kind, conn)),
-            Ok(Err(e)) => per_candidate.push((c.kind, e)),
-            Err(_) => {
-                return Err(PluggableError::AllFailed {
-                    attempted: candidates.len(),
-                    deadline_ms,
-                    per_candidate,
-                });
+    let expiry = tokio::time::sleep(deadline);
+    tokio::pin!(expiry);
+    loop {
+        tokio::select! {
+            next = attempts.next() => match next {
+                Some((_, kind, Ok(conn))) => return Ok((kind, conn)),
+                Some((index, kind, Err(e))) => failed.push((index, kind, e)),
+                None => break,
             },
+            () = &mut expiry => break,
         }
     }
+    failed.sort_by_key(|(index, _, _)| *index);
     Err(PluggableError::AllFailed {
         attempted: candidates.len(),
         deadline_ms,
-        per_candidate,
+        per_candidate: failed.into_iter().map(|(_, kind, e)| (kind, e)).collect(),
     })
 }
 
@@ -287,6 +299,119 @@ pub async fn race_select(
 mod tests {
     use super::*;
     use crate::reality::{RealityConfig, RealityTransport};
+
+    /// A test transport: hangs forever, fails at once, or connects after a delay.
+    enum Fake {
+        Hangs,
+        Fails,
+        ConnectsAfter(Duration),
+    }
+
+    struct FakeConnection;
+
+    #[async_trait]
+    impl Connection for FakeConnection {
+        async fn send(&mut self, _frame: bytes::Bytes) -> crate::error::Result<()> {
+            Ok(())
+        }
+        async fn recv(&mut self) -> crate::error::Result<bytes::Bytes> {
+            Err(crate::error::Error::PeerClosed)
+        }
+        async fn close(&mut self) -> crate::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl Transport for Fake {
+        async fn connect(&self, _endpoint: &Endpoint) -> crate::error::Result<Box<dyn Connection>> {
+            match self {
+                Self::Hangs => std::future::pending().await,
+                Self::Fails => Err(crate::error::Error::Io("refused".into())),
+                Self::ConnectsAfter(d) => {
+                    tokio::time::sleep(*d).await;
+                    Ok(Box::new(FakeConnection))
+                },
+            }
+        }
+    }
+
+    fn endpoint() -> Endpoint {
+        Endpoint::hostname("lakko.test", 443)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hanging_first_candidate_does_not_hold_the_second() {
+        let candidates = vec![
+            PluggableCandidate::new(PluggableKind::Reality, Fake::Hangs),
+            PluggableCandidate::new(
+                PluggableKind::Shadowsocks2022,
+                Fake::ConnectsAfter(Duration::from_millis(100)),
+            ),
+        ];
+        let started = tokio::time::Instant::now();
+        let (kind, _) = race_select(&candidates, &endpoint(), Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert_eq!(kind, PluggableKind::Shadowsocks2022);
+        assert_eq!(
+            started.elapsed(),
+            CONNECTION_ATTEMPT_DELAY + Duration::from_millis(100)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_first_candidate_wins_when_it_answers_within_the_attempt_delay() {
+        let candidates = vec![
+            PluggableCandidate::new(
+                PluggableKind::Reality,
+                Fake::ConnectsAfter(Duration::from_millis(50)),
+            ),
+            PluggableCandidate::new(
+                PluggableKind::Shadowsocks2022,
+                Fake::ConnectsAfter(Duration::from_millis(1)),
+            ),
+        ];
+        let (kind, _) = race_select(&candidates, &endpoint(), Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert_eq!(kind, PluggableKind::Reality);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn every_candidate_failing_reports_them_in_config_order() {
+        let candidates = vec![
+            PluggableCandidate::new(PluggableKind::Reality, Fake::Fails),
+            PluggableCandidate::new(PluggableKind::Shadowsocks2022, Fake::Fails),
+        ];
+        let Err(err) = race_select(&candidates, &endpoint(), Duration::from_secs(30)).await else {
+            panic!("a race where every candidate fails must fail");
+        };
+        match err {
+            PluggableError::AllFailed { per_candidate, .. } => {
+                let kinds: Vec<_> = per_candidate.iter().map(|(k, _)| *k).collect();
+                assert_eq!(
+                    kinds,
+                    [PluggableKind::Reality, PluggableKind::Shadowsocks2022]
+                );
+            },
+            other => panic!("expected AllFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_deadline_ends_a_race_nobody_answers() {
+        let candidates = vec![
+            PluggableCandidate::new(PluggableKind::Reality, Fake::Hangs),
+            PluggableCandidate::new(PluggableKind::Shadowsocks2022, Fake::Hangs),
+        ];
+        let started = tokio::time::Instant::now();
+        let Err(err) = race_select(&candidates, &endpoint(), Duration::from_secs(5)).await else {
+            panic!("a race nobody answers must fail");
+        };
+        assert!(matches!(err, PluggableError::AllFailed { .. }));
+        assert_eq!(started.elapsed(), Duration::from_secs(5));
+    }
 
     #[test]
     fn pluggable_kind_string_table_pinned() {

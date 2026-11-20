@@ -1972,7 +1972,7 @@ public class ContactsRepository(
                     fun rowVerdict(reachPk: ByteArray?, sender: ByteArray): uniffi.lakko_ffi_uniffi.FfiContactKeyRowVerdict =
                         reachNow?.mailboxRowVerdict(reachPk, isCurrentContact(sender))
                             ?: uniffi.lakko_ffi_uniffi.FfiContactKeyRowVerdict.PROCESS
-                    // ADR-0089 sections 3 and 6 — a request from a blocked
+                    // ADR-0098 sections 3 and 6 — a request from a blocked
                     // account, or from one the moderation log confirms
                     // suspended, is dropped unseen, whichever route it came
                     // by (the inbox, an invite link, through a group), before
@@ -2031,6 +2031,11 @@ public class ContactsRepository(
                     // silently, when the refusal verifies.
                     for (refusal in result.events.filterIsInstance<IncomingMailboxEvent.LinkRefusal>()) {
                         applyLinkRefusal(refusal.refusal, sender.signaturePubkey)
+                    }
+                    // ADR-0091 phase 2 route 2 — a one-to-one's other person
+                    // asks to be brought back; the chat layer decides.
+                    for (row in result.events.filterIsInstance<IncomingMailboxEvent.ConversationReentry>()) {
+                        chatRepo?.receiveConversationReentry(row.envelope, me.lakko.app.chat.ReentryRouteKind.MAILBOX)
                     }
                     // ADR-0060 §6 — a request's reply key is kept for the
                     // accept and the ack (bound to the signature-verified
@@ -2141,6 +2146,12 @@ public class ContactsRepository(
                                 // to another of its devices lands here too and
                                 // fails to open: not a failure of this device.
                                 if (me.lakko.app.chat.isWelcomeForAnotherDevice(e)) continue
+                                // C-86 — the core refused it as not a
+                                // conversation: a PublisherGroup or DeviceGroup
+                                // Welcome sharing the account mailbox (the
+                                // channel side was offered it above). Not a
+                                // failed join; no banner.
+                                if (me.lakko.app.chat.isWelcomeNotAConversation(e)) continue
                                 // ADR-0087 section 9 — the core refused it for
                                 // a group this device still holds as active:
                                 // the removing commit may be behind it in the
@@ -2163,7 +2174,11 @@ public class ContactsRepository(
                                 // ADR-0053 — unless it is a co-publisher's
                                 // Welcome, which shares this mailbox and is
                                 // opened by the channel screen instead.
-                                if (!me.lakko.app.channels.CoPublisher.awaitingCoPublishWelcome()) {
+                                if (me.lakko.app.chat.welcomeFailureRaisesBanner(
+                                        e,
+                                        me.lakko.app.channels.CoPublisher.awaitingCoPublishWelcome(),
+                                    )
+                                ) {
                                     joinFailure = InboxError.WELCOME_JOIN_FAILED
                                 }
                             }
@@ -3076,15 +3091,13 @@ public class ContactsRepository(
                 continue
             }
             // ADR-0060 section 6 - the requester's reply key opens their
-            // mailbox for the winner's Welcome and ack: kept by the reach
-            // manager now, so the stored row carries nothing secret but the
-            // link answer, which is sealed.
-            req.replyGrant?.let { grant ->
-                if (grant.`class` == uniffi.lakko_ffi_uniffi.FfiReachClass.REPLY) {
-                    reach()?.keepHeld(req.fromPubkey, grant, scopeHex = "")
-                }
-            }
-            inbox.add(UndecidedLinkRequest(req.copy(linkAnswer = null, replyGrant = null), answer.linkId, answer.linkSecret))
+            // mailbox for the winner's Welcome and ack. It stays in the row
+            // (sealed under the device key, like the link secret) and is
+            // filed with the reach manager when the request is built: filed
+            // only here, a cold start that polled the mailbox before the
+            // reach manager was bound lost it, and every later pass failed
+            // with no mailbox for the requester (seen on a Pixel 2026-11-10).
+            inbox.add(UndecidedLinkRequest(req.copy(linkAnswer = null), answer.linkId, answer.linkSecret))
         }
         return out
     }
@@ -3134,7 +3147,7 @@ public class ContactsRepository(
         for (row in inbox.rows()) {
             if (boundAccountB64 != accountB64) return
             val req = row.request
-            // ADR-0089 step 4 / UX 3 — a request held from before its
+            // ADR-0098 step 4 / UX 3 — a request held from before its
             // sender's suspension (or whose check at fetch did not answer in
             // time) is dropped unseen when the log now confirms it; accepted,
             // it would make a contact with no card.
@@ -3403,9 +3416,10 @@ public class ContactsRepository(
         val fromAccountId = request.fromAccountId ?: return false
         // ADR-0060 §6 — the requester's reply key opens their mailbox for the
         // Welcome and the ack; kept before anything is written there.
+        // Filed and awaited: the Welcome below is addressed from it.
         request.replyGrant?.let { grant ->
             if (grant.`class` == uniffi.lakko_ffi_uniffi.FfiReachClass.REPLY) {
-                reach()?.keepHeld(request.fromPubkey, grant, scopeHex = "")
+                reach()?.fileHeld(request.fromPubkey, grant, scopeHex = "")
             }
         }
         val deps = object : LinkClaims.BuildDeps {
@@ -3481,7 +3495,7 @@ public class ContactsRepository(
             LinkClaims.runBuild(deps)
         } catch (e: Throwable) {
             me.lakko.app.rethrowIfCancelled(e)
-            Log.w(TAG, "ADR-0079 invite-link accept did not complete; retried at the next pass")
+            Log.w(TAG, "ADR-0079 invite-link accept did not complete; retried at the next pass (${e.javaClass.simpleName})")
             false
         }
     }

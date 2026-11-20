@@ -30,6 +30,10 @@
  * the chat envelope parser; for the MVP the opaque round-trip
  * is enough to prove the catch-up path.
  */
+import { contentFromPersisted } from "../attach/preview";
+import { contentOf } from "../attach/content-store";
+import { foldChecklistEntry, foldPollEntry } from "../attach/ContentBubble";
+import type { ContentMessage, ContentState } from "../../wasm/lakko_ffi_wasm";
 import type { DeviceCipher } from "../auth/device-cipher";
 import { loadWasm } from "../wasm";
 import type { Wasm } from "../wasm";
@@ -44,6 +48,8 @@ import type {
 } from "../../wasm/lakko_ffi_wasm";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { historyMediaFromPersisted, persistedMediaFromOpened } from "./history-media";
+import { b64UrlEncode, inlineThumbFromPersisted } from "../chat/persisted-attachment";
+import { isInlineThumbJpeg } from "../media/visual-media";
 import { fileHistoryRows } from "../chat/background-log";
 import {
   loadMessageLog,
@@ -133,7 +139,7 @@ export async function buildHistoryBundleFromLog(args: {
       // is the 8-byte big-endian u64 (the native convention),
       // replacing the old web-only UTF-8-of-decimal encoding so
       // a web-scanner -> native-joiner pairing interoperates.
-      const placeholder = encodeMessagePlaceholder(wasm, m);
+      const placeholder = encodeMessagePlaceholder(wasm, m, base64Encode(groupIdBytes));
       const createdMs = (() => {
         if (m.createdAt === undefined || m.createdAt === null) return 0;
         const v = Date.parse(m.createdAt);
@@ -186,6 +192,9 @@ export async function applyHistoryBundleToLog(args: {
   readonly deviceKey: DeviceCipher;
   readonly secret: Uint8Array;
   readonly sealedBytes: Uint8Array;
+  /** Rewrites each bundled row before it is filed (the gap bundle's
+   *  author and direction, live walk 3). */
+  readonly adapt?: (row: PersistedMessage) => PersistedMessage;
 }): Promise<number> {
   const wasm = await loadWasm();
   const opened = wasm.openHistoryBundleStructured(args.secret, args.sealedBytes);
@@ -207,7 +216,7 @@ export async function applyHistoryBundleToLog(args: {
       if (id !== null && (newest === null || id > newest)) newest = id;
       // A sender older than this rule (or another client) may carry them.
       if (isBookkeepingSystemRow(decoded)) continue;
-      rows.push(decoded);
+      rows.push(args.adapt === undefined ? decoded : args.adapt(decoded));
     }
     bundled.push({ hex: bytesToHex(group.groupId), rows, newest });
   }
@@ -224,6 +233,117 @@ export async function applyHistoryBundleToLog(args: {
     return { version: current?.version ?? MESSAGE_LOG_VERSION, groups };
   });
   return applied;
+}
+
+// ---- ADR-0091 section 7: the messages of a re-entry's gap --------
+
+/** When a row was written, unix ms; `NaN` when unknown. */
+function rowMs(m: PersistedMessage): number {
+  if (m.createdAt === undefined || m.createdAt === null) return Number.NaN;
+  const v = Date.parse(m.createdAt);
+  return Number.isFinite(v) ? v : Number.NaN;
+}
+
+/**
+ * ADR-0091 section 7 - the device that brought another one back sends the
+ * messages of ONE conversation it holds from `fromMs` on, sealed under
+ * `secret` (an exporter secret of the epoch the replacement created, which
+ * only the members after it hold). `null` when it holds none.
+ *
+ * The group's `countCapped` flag means "not everything": set when the cap
+ * trimmed the list, and when this device holds no row older than `fromMs`
+ * (it cannot vouch that it saw the start of the gap). A receiver whose
+ * bundle is not capped drops its gap line (UX 2.4).
+ */
+export async function buildGapHistoryBundle(args: {
+  readonly accountIdB64: string;
+  readonly deviceKey: DeviceCipher;
+  readonly secret: Uint8Array;
+  readonly slotHex: string;
+  readonly fromMs: number;
+  /** This account's own key in the conversation: the author of its
+   *  outgoing rows (live walk 3). */
+  readonly ownAuthorKeyB64?: string | null;
+}): Promise<Uint8Array | null> {
+  const log = await loadMessageLog(args.accountIdB64, args.deviceKey);
+  const slot = log?.groups[args.slotHex];
+  if (slot === undefined) return null;
+  const groupIdBytes = hexToBytes(args.slotHex);
+  if (groupIdBytes === null) return null;
+  const carried = slot.messages.filter((m) => !isBookkeepingSystemRow(m));
+  const inGap = carried.filter((m) => {
+    const t = rowMs(m);
+    return Number.isFinite(t) && t >= args.fromMs;
+  });
+  if (inGap.length === 0) return null;
+  const trimmed = inGap.slice(-MAX_BUNDLE_MESSAGES);
+  const heldBefore = carried.some((m) => {
+    const t = rowMs(m);
+    return Number.isFinite(t) && t < args.fromMs;
+  });
+  const capped = trimmed.length < inGap.length || !heldBefore;
+  const wasm = await loadWasm();
+  const groupIdB64 = base64Encode(groupIdBytes);
+  let maxHlc = 0n;
+  const messages: HistoryMessageInput[] = [];
+  for (const m of trimmed) {
+    const t = rowMs(m);
+    messages.push(
+      new wasm.HistoryMessageInput(
+        encodeMessagePlaceholder(wasm, m, groupIdB64, args.ownAuthorKeyB64),
+        0,
+        messageIdToBeBytes(m.messageId),
+        BigInt(Number.isFinite(t) && t > 0 ? t : 0),
+      ),
+    );
+    const cur = safeBigInt(m.messageId);
+    if (cur !== null && cur > maxHlc) maxHlc = cur;
+  }
+  return wasm.sealHistoryBundleStructured(args.secret, [new wasm.HistoryGroupInput(groupIdBytes, messages, capped)], maxHlc);
+}
+
+/**
+ * The receiving half: open a gap bundle and file its rows into this device's
+ * log (the same filing as a pairing bundle). Returns how many rows were
+ * added, whether the sender held the whole gap (`complete`), and the time of
+ * the earliest row it carried.
+ */
+export async function applyGapHistoryBundle(args: {
+  readonly accountIdB64: string;
+  readonly deviceKey: DeviceCipher;
+  readonly secret: Uint8Array;
+  readonly sealedBytes: Uint8Array;
+  /** This account's own key in the conversation (live walk 3). */
+  readonly ownAuthorKeyB64: string | null;
+  /** The route of the request the device came back by, when known. */
+  readonly route: GapBundleRoute | undefined;
+}): Promise<{
+  readonly applied: number;
+  readonly complete: boolean;
+  readonly earliestMs: number | undefined;
+  /** The rows the bundle carried (bookkeeping rows left out), for an open
+   *  chat to show at once. */
+  readonly rows: readonly PersistedMessage[];
+}> {
+  const wasm = await loadWasm();
+  const adapt = (row: PersistedMessage): PersistedMessage => gapBundleRow(row, args.ownAuthorKeyB64, args.route);
+  const opened = wasm.openHistoryBundleStructured(args.secret, args.sealedBytes);
+  let complete = true;
+  let earliestMs: number | undefined;
+  const rows: PersistedMessage[] = [];
+  for (const g of opened.groups() as unknown[]) {
+    const group = g as OpenedHistoryGroup;
+    if (group.countCapped) complete = false;
+    for (const m of group.messages() as unknown[]) {
+      const decoded = decodeMessagePlaceholder(wasm, m as OpenedHistoryMessage);
+      if (decoded === null) continue;
+      const t = rowMs(decoded);
+      if (Number.isFinite(t) && (earliestMs === undefined || t < earliestMs)) earliestMs = t;
+      if (!isBookkeepingSystemRow(decoded)) rows.push(adapt(decoded));
+    }
+  }
+  const applied = await applyHistoryBundleToLog({ ...args, adapt });
+  return { applied, complete, earliestMs, rows };
 }
 
 // ---- placeholder encode / decode (G-6 step 2) -------------------
@@ -263,11 +383,31 @@ function tagToDirection(tag: number): PersistedMessage["direction"] {
   }
 }
 
+/** Standard base64 to bytes, or `undefined` when it does not decode. */
+function decodeB64OrUndefined(b64: string | undefined): Uint8Array | undefined {
+  if (b64 === undefined || b64.length === 0) return undefined;
+  try {
+    return base64Decode(b64);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Encode the local-store message row into the canonical
- *  cross-platform placeholder bytes (version 2, which carries the ADR-0047
- *  media metadata, so a voice message, video note or GIF restores as itself
- *  on the new device). The local-only `played` marker is never transferred. */
-function encodeMessagePlaceholder(wasm: Wasm, m: PersistedMessage): Uint8Array {
+ *  cross-platform placeholder bytes (version 5 adds the ADR-0047 section 6
+ *  micro thumbnail; version 4: the ADR-0047 media metadata,
+ *  so a voice message, video note or GIF restores as itself on the new
+ *  device; the ADR-0087 channel invitation card, so an invitation restores
+ *  as its card and not as the bare `/g/` link; the ADR-0052 reply and forward
+ *  snapshots; the ADR-0092 audio tags and content). The local-only `played`
+ *  marker is never transferred. `groupIdB64` names the conversation a poll's
+ *  or checklist's state is read from. Exported for the tests. */
+export function encodeMessagePlaceholder(
+  wasm: Wasm,
+  m: PersistedMessage,
+  groupIdB64: string,
+  ownAuthorKeyB64?: string | null,
+): Uint8Array {
   const messageId = safeBigInt(m.messageId) ?? 0n;
   const attachments: HistoryAttachmentInput[] = m.attachments.map((a) => {
     const size = safeBigInt(a.sizeStr) ?? 0n;
@@ -283,6 +423,14 @@ function encodeMessagePlaceholder(wasm: Wasm, m: PersistedMessage): Uint8Array {
     if (media !== null) {
       input.setMedia(media.kind, media.durationMs, media.waveform, media.width, media.height);
     }
+    // ADR-0092 section 3.11 — an audio file's tags travel too.
+    if (typeof a.title === "string" || typeof a.artist === "string") {
+      input.setAudioTags(a.title ?? null, a.artist ?? null);
+    }
+    // ADR-0047 section 6 — the micro thumbnail travels too (placeholder
+    // version 5); the core keeps it on the first photo or video only.
+    const inline = inlineThumbFromPersisted(a.inlineThumbB64);
+    if (inline !== undefined) input.setInlineThumb(inline);
     if (thumb !== null) {
       input.setThumb(
         thumb.blobId,
@@ -296,18 +444,139 @@ function encodeMessagePlaceholder(wasm: Wasm, m: PersistedMessage): Uint8Array {
     }
     return input;
   });
+  const card = m.deleted === true ? undefined : decodeB64OrUndefined(m.channelInviteB64);
+  const replyTarget = m.reply === undefined ? null : safeBigInt(m.reply.target);
+  const forwardOriginId = m.forward?.origin === undefined ? null : safeBigInt(m.forward.origin.messageId);
+  const forwardOriginGroup =
+    forwardOriginId === null ? undefined : decodeB64OrUndefined(m.forward?.origin?.groupIdB64);
   return wasm.encodeHistoryPlaceholder(
     messageId,
     directionToTag(m.direction),
     m.createdAt,
     m.text,
     attachments,
+    card,
+    replyTarget ?? undefined,
+    replyTarget === null ? undefined : m.reply?.author,
+    replyTarget === null ? undefined : m.reply?.excerpt,
+    m.forward?.author,
+    forwardOriginGroup,
+    forwardOriginGroup === undefined ? undefined : (forwardOriginId ?? undefined),
+    // ADR-0092 section 3.11 — the content and, for a poll or checklist, its
+    // state as this device folded it.
+    contentMessageForBundle(wasm, m.content, groupIdB64, Number(messageId)),
+    // Placeholder version 6 (live walk 3): who wrote it.
+    keyBytesOrUndefined(placeholderAuthorKeyB64(m, ownAuthorKeyB64)),
   );
 }
 
+/** A standard-base64 32-byte key, else `undefined`. */
+function keyBytesOrUndefined(keyB64: string | undefined): Uint8Array | undefined {
+  if (keyB64 === undefined) return undefined;
+  try {
+    const bytes = base64Decode(keyB64);
+    return bytes.length === AUTHOR_KEY_LEN ? bytes : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const AUTHOR_KEY_LEN = 32;
+
+/**
+ * ADR-0091 live walk 3 — the author a bundled row carries: for a received
+ * row the author it was attributed to, for a row this account sent its own
+ * key in the conversation (else the key the row was stamped with), for a
+ * system row none. Only a 32-byte key travels.
+ */
+export function placeholderAuthorKeyB64(
+  m: PersistedMessage,
+  ownAuthorKeyB64: string | null | undefined,
+): string | undefined {
+  if (m.direction === "system") return undefined;
+  const stamped = typeof m.authorKeyB64 === "string" ? m.authorKeyB64 : undefined;
+  const key = m.direction === "outgoing" ? (ownAuthorKeyB64 ?? stamped) : stamped;
+  return keyBytesOrUndefined(key ?? undefined) === undefined ? undefined : (key ?? undefined);
+}
+
+/** The route of a re-entry request (section 3). */
+export type GapBundleRoute = "own-device" | "mailbox" | "knock";
+
+/**
+ * ADR-0091 live walk 3 — a row of a gap bundle as the device that came back
+ * files it. A row naming its author is this account's (outgoing) when the
+ * author is its own key in the conversation, else the author's (incoming).
+ * A row naming none takes its direction from the route (the re-admitter's
+ * outgoing row is another person's unless it is this account's own device;
+ * in a one-to-one the two sides swap). A system row stays a system row and
+ * names nobody. The same rule as iOS and Android.
+ */
+export function gapBundleRow(
+  row: PersistedMessage,
+  ownAuthorKeyB64: string | null,
+  route: GapBundleRoute | undefined,
+): PersistedMessage {
+  if (row.direction === "system") {
+    const { authorKeyB64: _dropped, ...rest } = row;
+    return rest;
+  }
+  const author = typeof row.authorKeyB64 === "string" ? row.authorKeyB64 : undefined;
+  if (author !== undefined) {
+    return { ...row, direction: ownAuthorKeyB64 !== null && author === ownAuthorKeyB64 ? "outgoing" : "incoming" };
+  }
+  let direction: PersistedMessage["direction"];
+  if (route === "own-device") direction = row.direction;
+  else if (route === "mailbox") direction = row.direction === "outgoing" ? "incoming" : "outgoing";
+  else direction = "incoming";
+  return { ...row, direction };
+}
+
+/** How a poll is closed, for the bundle's snapshot. */
+function closedStateOf(
+  closes: readonly { messageId: number; closer: string; closerIsAdmin: boolean }[],
+  authorKeyB64: string,
+  closed: boolean,
+): { kind: "open" } | { kind: "byTime" } | { kind: "byOp"; messageId: number } {
+  const ops = closes.filter((c) => c.closer === authorKeyB64 || c.closerIsAdmin).map((c) => c.messageId);
+  if (ops.length > 0) return { kind: "byOp", messageId: Math.min(...ops) };
+  return closed ? { kind: "byTime" } : { kind: "open" };
+}
+
+/** ADR-0092 section 3.11 — the bundle's content field for one message. */
+function contentMessageForBundle(
+  wasm: Wasm,
+  raw: unknown,
+  groupIdB64: string,
+  messageId: number,
+): ContentMessage | undefined {
+  const content = contentFromPersisted(raw);
+  if (content === undefined) return undefined;
+  const entry = contentOf(groupIdB64)?.entries[String(messageId)];
+  let state: ContentState | null = null;
+  try {
+    if (entry?.kind === "poll") {
+      const tally = foldPollEntry(entry, Date.now());
+      if (tally !== null) {
+        state = wasm.pollStateFromCounts(
+          Uint32Array.from(tally.counts),
+          tally.voters,
+          closedStateOf(entry.closes, entry.authorKeyB64, tally.closed),
+        );
+      }
+    } else if (entry?.kind === "checklist") {
+      const folded = foldChecklistEntry(entry);
+      if (folded !== null) state = wasm.checklistStateSnapshot(folded);
+    }
+  } catch {
+    state = null;
+  }
+  return { content, ...(state === null ? {} : { state }) };
+}
+
 /** Decode canonical placeholder bytes back into a local-store
- *  message row. Returns `null` on any malformed payload. */
-function decodeMessagePlaceholder(
+ *  message row. Returns `null` on any malformed payload. Exported for the
+ *  tests. */
+export function decodeMessagePlaceholder(
   wasm: Wasm,
   m: OpenedHistoryMessage,
 ): PersistedMessage | null {
@@ -327,13 +596,54 @@ function decodeMessagePlaceholder(
     sizeStr: a.size.toString(),
     name: a.name ?? null,
     ...persistedMediaFromOpened(a),
+    ...(a.title === undefined ? {} : { title: a.title }),
+    ...(a.artist === undefined ? {} : { artist: a.artist }),
+    ...(isInlineThumbJpeg(a.inlineThumb) ? { inlineThumbB64: b64UrlEncode(a.inlineThumb) } : {}),
   }));
+  const content = opened.content?.content;
+  const contentState = opened.content?.state ?? undefined;
+  const card = opened.channelInvite;
+  const replyTarget = opened.replyTarget;
+  const replyAuthor = opened.replyAuthor;
+  const replyExcerpt = opened.replyExcerpt;
+  const forwardedFrom = opened.forwardedFrom;
+  const originGroup = opened.forwardOriginGroup;
+  const originMessage = opened.forwardOriginMessage;
+  const direction = tagToDirection(opened.direction);
+  // Placeholder version 6 (live walk 3): the author, as a live row stores it.
+  const author = direction === "system" ? undefined : opened.authorKey;
+  const authorKeyB64 = author !== undefined && author.length === AUTHOR_KEY_LEN ? base64Encode(author) : undefined;
+  const origin =
+    originGroup !== undefined && originMessage !== undefined
+      ? { groupIdB64: base64Encode(originGroup), messageId: originMessage.toString() }
+      : undefined;
   return {
     messageId: opened.messageId.toString(),
-    direction: tagToDirection(opened.direction),
+    direction,
+    ...(authorKeyB64 === undefined ? {} : { authorKeyB64 }),
     text: opened.text,
     attachments,
     createdAt: opened.createdAt,
+    ...(card !== undefined && card.length > 0 ? { channelInviteB64: base64Encode(card) } : {}),
+    ...(replyTarget !== undefined
+      ? {
+          reply: {
+            target: replyTarget.toString(),
+            ...(replyAuthor !== undefined ? { author: replyAuthor } : {}),
+            ...(replyExcerpt !== undefined ? { excerpt: replyExcerpt } : {}),
+          },
+        }
+      : {}),
+    ...(forwardedFrom !== undefined || origin !== undefined
+      ? {
+          forward: {
+            ...(forwardedFrom !== undefined ? { author: forwardedFrom } : {}),
+            ...(origin !== undefined ? { origin } : {}),
+          },
+        }
+      : {}),
+    ...(content === undefined ? {} : { content }),
+    ...(contentState === undefined || contentState === null ? {} : { contentState }),
   };
 }
 

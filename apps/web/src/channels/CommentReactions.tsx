@@ -145,7 +145,7 @@ export function CommentReactions(props: {
               type="button"
               class="lk-reaction"
               classList={{ mine: chip.mine }}
-              // ADR-0089 step 3: the counts stay; a suspended account reacts to nothing.
+              // ADR-0098 step 3: the counts stay; a suspended account reacts to nothing.
               disabled={accountSuspended()}
               aria-label={
                 chip.mine

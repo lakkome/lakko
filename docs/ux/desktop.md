@@ -81,9 +81,24 @@ Windows computer without a TPM is an open decision of the ADR (section 11).
 
 ### 2.1 A call in the window
 
-A call takes over the main window exactly as on the web, and the call bar of
-[`calls.md`](calls.md) section 4.5 lets the person put it away and keep
-chatting. A separate call window is not in this spec (section 12).
+A call takes over the main window exactly as on the web. Putting it away
+(the chevron, `Esc`) moves it into a separate small window of its own that stays
+above every other program's windows ([`calls.md`](calls.md) section 4.5.4a,
+added 2026-11-10); the web's in-app floating window is not drawn in the desktop
+app.
+
+### 2.2 Copy never names a browser
+
+The desktop app is the web client in a system webview, but the person never
+opened a browser, so no sentence in it says "browser". Every web string that
+names the browser ("isn't available in this browser", "your browser's site
+settings", "your browser's maker") has a desktop wording that names the device
+or the system instead: "on this device", "your system's privacy settings",
+"your system's maker", and for screen recording on macOS "System Settings".
+Where the native clients already have the right sentence, the desktop app uses
+it. The web client keeps the pairs in one table
+(`apps/web/src/l10n/desktop-copy.ts`), and a test fails when a catalog string
+that says "browser" has no desktop wording.
 
 ## 3. Closing is not quitting
 
@@ -213,8 +228,11 @@ app.
   attaches it, as the attach button would. While dragging over a conversation
   the pane shows "Drop files to attach"; over any other screen the drop is
   refused (no drop target is shown).
-- Pasting an image from the clipboard into the composer attaches it. A copy
-  from a document, which holds text beside a picture of it, pastes as text.
+- Pasting files from the clipboard (`Cmd+V` / `Ctrl+V`) anywhere in an open
+  conversation attaches them, as a drop would: a screenshot, a copied picture,
+  a video, a file copied in the file manager. A paste into another field is
+  that field's text. A copy from a document, which holds text beside a
+  picture of it, pastes as text.
 - "Save" on an attachment opens the system save dialog (allowed: it is the
   file picker); the default folder is the system Downloads folder.
 - Opening an attachment with another app (the system's "open with") is not in
@@ -232,7 +250,7 @@ messenger or anywhere else, clicks it, and lands on the screen it opens.
 - **Everywhere else the click opens the page in the browser**, and the invite,
   call-link and group-invite pages offer **Open in the app** under the card. It
   opens the desktop app on the same screen, through the `lakko://` scheme, with
-  the whole link. Phones and tablets get the same button, section 7.1.
+  the whole link. Phones and tablets get no button, section 7.1.
 - On macOS in Chrome and Firefox the page also tries the app by itself, once per
   link, when it opens, as a meeting link does: the browser asks whether to open
   Lakko. Safari is left out, as is any browser not named here: with no app
@@ -249,25 +267,12 @@ messenger or anywhere else, clicks it, and lands on the screen it opens.
 
 ### 7.1 On a phone or tablet
 
-Android and iOS hand a tapped link to the installed app when the tap comes
-from another app. They do not when the person opens the link inside the
-browser itself (typed, pasted, or followed from a page of the same site):
-Chrome keeps it, Safari keeps it. So the same pages, and a shared feed
-(`/feed/import#<rule>`, [`feed.md`](feed.md)), show the same **Open in the app**
-button, at the bottom of the screen, clear of the page's own buttons.
-
-- **Android:** the button opens an `intent:` address that names the app's
-  package (`me.lakko.dev`, the one package every Android build has today; a
-  build sets another with `VITE_LAKKO_ANDROID_PACKAGE`) and carries the whole
-  `https` link, secret included. With no app installed the browser stays on
-  the same page.
-- **iOS and iPadOS:** the button opens the app's own `lakko://` scheme, the
-  same form the desktop app takes. iOS asks once whether to open Lakko. With
-  no app installed Safari shows its own "address is invalid" message, as it
-  does on a Mac; the page cannot know beforehand.
-- The page never tries the app by itself on a phone: a phone browser only
-  opens an app after a tap, and an unasked prompt would cover the page.
-- The button is hidden while a call from the link is on screen.
+No button (decided 2026-11-07, maintainer). Android and iOS hand a link tapped
+in another app to the installed app; a link opened inside the browser itself
+stays in the browser. A page cannot tell whether the app is installed (iOS has
+no way to ask; Android only through `getInstalledRelatedApps`), and a button
+that did nothing confused people who had no app. The iOS app keeps its
+`lakko://` scheme registered; nothing on the web uses it.
 
 ## 8. Updates
 
@@ -336,7 +341,6 @@ only when there is no store at all); links use `lakko://`
 
 ## 12. Not in this spec
 
-- A separate call window, picture-in-picture over other apps.
 - Several accounts in one app; several main windows.
 - Screen sharing (not built on any client).
 - An app lock (password or system authentication to open the window).

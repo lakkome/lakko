@@ -103,7 +103,8 @@ enum CallTileName {
             accountId: nil,
             usernameCertificate: nil,
             grants: profile.grants,
-            avatar: profile.avatar)
+            avatar: profile.avatar,
+            cardShareable: profile.cardShareable)
     }
 }
 

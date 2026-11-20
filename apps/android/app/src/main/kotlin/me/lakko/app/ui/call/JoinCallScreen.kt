@@ -15,8 +15,6 @@ import androidx.compose.material3.Button
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -70,6 +68,8 @@ import me.lakko.app.l10n.text
 import me.lakko.app.ui.auth.SaveFreshPhraseScreen
 import uniffi.lakko_ffi_uniffi.CallInviteCapability
 import uniffi.lakko_ffi_uniffi.Identity
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
 
 /**
  * `/c/<slug>` multi-joiner call-invite landing (ADR-0032, G-21/G-22) — the
@@ -852,7 +852,7 @@ fun JoinCallScreen(
                     // The system back of every other link page (the invite and
                     // group pages): leaves this screen, a running call goes on.
                     IconButton(onClick = onExit) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -953,7 +953,7 @@ private fun JoinCallPanel(
             }
             when (ui.phase) {
                 JoinCallPhase.Idle -> {
-                    // ADR-0089 section 4 — calls are not offered to a
+                    // ADR-0098 section 4 — calls are not offered to a
                     // suspended account: no Join, only the way out.
                     val callsSuspended by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
                     if (callsSuspended) {

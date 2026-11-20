@@ -43,12 +43,39 @@ public enum CoPublisher {
     /// the stack this build talks to (`ApiEndpoints.webOrigin`).
     public static var defaultOrigin: String { ApiEndpoints.webOrigin }
 
-    /// Open (or create) the persistent PublisherGroup handle for a channel.
+    /// Open the persistent PublisherGroup handle of a channel this device
+    /// publishes. Never creates one: a channel whose group is not in this
+    /// device's channel provider is read here, not published
+    /// (``CoPublisherError/notOnThisDevice``). The trap rule of ADR-0087
+    /// section 12 as amended 2026-11-13: founding a group at a channel's
+    /// derived id outside New channel would fork the live journal (the
+    /// claim would reset it), which is what a second device of the owner
+    /// would do. Only ``foundPublisherGroup(identity:accountIdB64:channelIdHex:)``
+    /// creates, and only New channel calls it.
+    public static func openPublisherGroup(
+        identity: Identity,
+        accountIdB64: String?,
+        channelIdHex: String
+    ) throws -> PublisherGroup {
+        do {
+            guard let existing = try loadPublisherGroup(identity: identity, channelIdHex: channelIdHex) else {
+                throw CoPublisherError.notOnThisDevice
+            }
+            return existing
+        } catch let error as CoPublisherError {
+            throw error
+        } catch {
+            throw LegacyChannelV1.mapOpenError(error)
+        }
+    }
+
+    /// New channel only: open, or found when absent, the PublisherGroup of a
+    /// channel this device is creating now.
     ///
     /// `accountIdB64` is the account whose `identity` this is, captured when
     /// the caller's work began: a group founded here is marked for it
     /// (``markFounded(_:accountIdB64:)``).
-    public static func openPublisherGroup(
+    public static func foundPublisherGroup(
         identity: Identity,
         accountIdB64: String?,
         channelIdHex: String
@@ -65,7 +92,13 @@ public enum CoPublisher {
             guard CoPublishedJournals.shared.journalIdHex(channelIdHex: channelIdHex) == nil else {
                 throw CoPublisherError.notAChannelGroup
             }
-            let created = try publisherGroupOpenOrCreate(identity: identity, channelId: channelId)
+            // ADR-0090 — founded with this DEVICE's bound identity under the
+            // owner account seed the group id derives from.
+            guard let ownerSeed = ChannelPublisherIdentity.ownerAccountEd25519Seed else {
+                throw ChannelPublisherIdentity.NotBound()
+            }
+            let created = try PublisherGroup.create(
+                identity: identity, ownerAccountSeed: ownerSeed, channelId: channelId)
             markFounded(created, accountIdB64: accountIdB64)
             return created
         } catch {
@@ -90,7 +123,12 @@ public enum CoPublisher {
            let joinedId = Self.hexToData(joinedHex) {
             return try publisherGroupLoadJoined(identity: identity, groupId: joinedId, channelId: channelId)
         }
-        return try publisherGroupLoad(identity: identity, channelId: channelId)
+        // ADR-0090 — an owned channel: `nil` is a device with no leaf yet,
+        // which reads and waits to be admitted; it never founds.
+        guard let ownerSeed = ChannelPublisherIdentity.ownerAccountEd25519Seed else {
+            throw ChannelPublisherIdentity.NotBound()
+        }
+        return try publisherGroupLoad(identity: identity, ownerAccountSeed: ownerSeed, channelId: channelId)
     }
 
     /// ADR-0057 obligation 7 — this device founded the PublisherGroup: its
@@ -150,12 +188,17 @@ public enum CoPublisher {
         // ADR-0087 section 5 — the co-publisher's request is a sealed row to
         // the PublisherGroup's knock key, which the owner derives from the
         // journal root (the owner is the only one who mints these links).
-        var root = try dsJournalRootSeed(accountIdentitySeed: identity.ed25519Seed(), journalId: groupId)
+        // ADR-0090 — `identity` is this device's leaf; the root and the
+        // capability's issuer are the OWNER ACCOUNT (contract item 13: the
+        // issuer key is the owner account key every co-publisher device
+        // records beside the group).
+        let owner = try ChannelPublisherIdentity.ownerAccountIdentity()
+        var root = try dsJournalRootSeed(accountIdentitySeed: owner.ed25519Seed(), journalId: groupId)
         defer { RootHandover.wipe(&root) }
         var knockSeed = try groupKnockSeed(journalRootSeed: root, version: ChatRepository.currentKnockVersion)
         defer { RootHandover.wipe(&knockSeed) }
         let mint = try composeCoPublisherInviteCapability(
-            issuerSigningSeed: identity.ed25519Seed(),
+            issuerSigningSeed: owner.ed25519Seed(),
             groupId: groupId,
             expiryMs: 0,
             channelId: channelId,
@@ -213,7 +256,11 @@ public enum CoPublisher {
     /// (channels run on the account identity).
     static func rootSigner(identity: Identity, publisherGroup: PublisherGroup) throws
         -> DsStatementSignerProtocol {
-        try dsJournalRootSigner(accountIdentity: identity, journalId: try publisherGroup.groupId())
+        // ADR-0090 — the root is the owner ACCOUNT's (every owner device
+        // derives the same one), never the device leaf `identity`.
+        try dsJournalRootSigner(
+            accountIdentity: try ChannelPublisherIdentity.ownerAccountIdentity(),
+            journalId: try publisherGroup.groupId())
     }
 
     /// Claim on open. A PublisherGroup this device just founded claims with
@@ -321,12 +368,17 @@ public enum CoPublisher {
         /// The requests retained by this poll: the joiner key and the account
         /// id its profile carried (for the admission seeds).
         public var requests: [JoinRequest] = []
+        /// ADR-0090 section 4 — the DS row time of the last commit this poll
+        /// applied (the start of the group's current epoch), if any.
+        public var lastCommitAtMs: Int64?
     }
 
     /// One application message read from the journal.
     public struct JournalApplication: Equatable {
         public let data: Data
         public let senderAccount: Data?
+        /// The DS row's server time (ms), when it parses.
+        public var createdAtMs: Int64? = nil
     }
 
     /// One co-publisher request retained by a poll.
@@ -373,20 +425,30 @@ public enum CoPublisher {
         // which is safe (an applied commit is skipped).
         var cursor = after
         var applications: [JournalApplication] = []
+        var lastCommitAtMs: Int64?
         for _ in 0..<maxJournalPages {
             let raw = try await ds.fetchGroup(
                 groupId: groupId, after: cursor, waitSecs: 0,
                 auth: auth(ds: ds, identity: identity, publisherGroup: publisherGroup))
             for m in raw.messages {
                 cursor = max(cursor, m.id)
+                let localEpoch = try? publisherGroup.epoch()
                 do {
                     let processed = try publisherGroup.processIncomingVerifyingRoles(
                         identity: identity, bytes: m.payload)
                     if case .application(let data, _, let sender) = processed {
-                        applications.append(JournalApplication(data: data, senderAccount: sender))
+                        applications.append(JournalApplication(
+                            data: data, senderAccount: sender,
+                            createdAtMs: DsTimestamp.parseMs(m.createdAt)))
+                    } else if case .commit = processed {
+                        lastCommitAtMs = DsTimestamp.parseMs(m.createdAt) ?? lastCommitAtMs
                     }
                 } catch {
                     // A commit we have already merged (epoch mismatch) — skip.
+                    // ADR-0091 phase 1 — logged, no identifier; not held.
+                    RegisteredCommitLog.skipped(
+                        error: error, payload: m.payload, localEpoch: localEpoch,
+                        latestEpoch: raw.latestEpoch)
                 }
             }
             if !raw.hasMore || raw.messages.isEmpty { break }
@@ -448,14 +510,16 @@ public enum CoPublisher {
             journalCursor: cursor,
             applications: applications,
             ownerAccountKey: ownerAccountKey(publisherGroup),
-            requests: requests)
+            requests: requests,
+            lastCommitAtMs: lastCommitAtMs)
     }
 
     /// The account key at the founder's leaf (the lowest leaf index): the
     /// owner, whose leaf a removal or a step-down never takes.
     static func ownerAccountKey(_ group: PublisherGroup) -> Data? {
-        guard let founder = (try? group.members())?.min(by: { $0.leafIndex < $1.leafIndex }) else { return nil }
-        return founder.accountKey.isEmpty ? founder.signaturePublicKey : founder.accountKey
+        // ADR-0090 — recorded beside the group (the owner's seed on an owner
+        // device, the Welcome sender's account on a co-publisher's).
+        try? group.ownerAccountKey()
     }
 
     /// Open one sealed co-publisher request and retain its KeyPackage.
@@ -464,8 +528,9 @@ public enum CoPublisher {
     private static func retainSealedKnock(
         identity: Identity, publisherGroup: PublisherGroup, groupId: Data, version: UInt16, row: Data
     ) async -> JoinRequest? {
-        guard var root = try? dsJournalRootSeed(
-            accountIdentitySeed: identity.ed25519Seed(), journalId: groupId) else { return nil }
+        guard let owner = try? ChannelPublisherIdentity.ownerAccountIdentity(),
+              var root = try? dsJournalRootSeed(
+            accountIdentitySeed: owner.ed25519Seed(), journalId: groupId) else { return nil }
         defer { RootHandover.wipe(&root) }
         guard var seed = try? groupKnockSeed(journalRootSeed: root, version: version) else { return nil }
         defer { RootHandover.wipe(&seed) }
@@ -498,22 +563,14 @@ public enum CoPublisher {
         try publisherGroup.pendingExternalJoins()
     }
 
-    /// Approve a pending co-publisher. Commits the Add (advances the
-    /// PublisherGroup epoch), then, in order: registers the new epoch's
-    /// access key and publishes the commit to the journal in one request
-    /// (ADR-0081),
-    /// sends the Welcome to the joiner's own mailbox (point 8: a non-member
-    /// cannot read the claimed journal), RESEALS the new-epoch channel seed
-    /// to all subscribers (the Add changed the exporter output, so existing
-    /// subscribers must get the new seed or they break), and appoints the
-    /// newcomer's co-publisher key (ADR-0059).
-    ///
-    /// G-50 — the server epoch the reseal binds to is read BEFORE the Add,
-    /// because after the eager merge nothing may fail before the commit's
-    /// record is durable. The record (``PublisherCommitEntry``) is written
-    /// with the N+1 provider snapshot, fail-closed, before any step runs; a
-    /// failed step leaves the record with what landed, and the next session
-    /// resumes it.
+    /// Approve a pending co-publisher (ADR-0090: by any owner device).
+    /// STAGES the Add (the group stays at epoch N), records it with the
+    /// epoch-N proof seed, sends it through the commit route, and only once
+    /// the DS took it merges and, in order: sends the Welcome to the joiner's
+    /// account mailbox, RESEALS the new-epoch seed to every subscriber, and
+    /// appoints the newcomer's co-publisher key (ADR-0059). A `409` (another
+    /// owner device's commit took the epoch) abandons it: no Welcome, no
+    /// reseal, and the request stays retained for the next pass.
     @MainActor
     public static func approve(
         context: ChannelPublisherCommits.Context,
@@ -523,40 +580,48 @@ public enum CoPublisher {
         let current = try await context.channelsClient.fetchEpoch(channelIdHex: context.channelIdHex)
         let serverTarget = current &+ 1
         guard serverTarget > current else { throw CoPublisherError.unexpectedServerEpoch(current) }
-        let (identity, group) = try context.open()
-        // ADR-0081 — the proof of the epoch the Add leaves, taken before the
-        // eager merge and recorded with the approve: the commit route is
-        // proven under it, live and on a replay after a restart.
-        let proofEpoch = try group.epoch()
-        let proofSeed = try group.dsAccessSeed(identity: identity)
-        let added = try group.approveExternalJoin(identity: identity, proposalRef: proposalRef)
-        let entry = PublisherCommitEntry(
-            kind: .approve,
-            channelIdHex: context.channelIdHex.lowercased(),
-            groupIdHex: DsClient.pseudonymHex(try group.groupId()),
-            targetEpoch: try group.epoch(),
-            serverTargetEpoch: serverTarget,
-            commitB64: added.commit.base64EncodedString(),
-            welcomeB64: added.welcome.base64EncodedString(),
-            joinerKeyB64: proposalRef.base64EncodedString(),
-            proofEpoch: proofEpoch,
-            proofSeedB64: proofSeed.base64EncodedString())
-        try ChannelPublisherCommits.record(entry, accountIdB64: context.accountIdB64)
-        try await PublisherCommitRunner.run(
-            entry, ports: ChannelPublisherCommits.ports(context, state: state))
-        ChannelPublisherCommits.refreshContentSeed(context, state: state)
+        let result = try await ChannelPublisherCommits.stageAndRun(
+            context, state: state, kind: .approve, joinerKey: proposalRef,
+            serverTargetEpoch: serverTarget, serverEpoch: current
+        ) { identity, group in
+            let added = try group.stageApproveExternalJoin(identity: identity, proposalRef: proposalRef)
+            return .init(commit: added.commit, welcome: added.welcome)
+        }
+        // Lost to another owner device's commit: the request stays retained
+        // (an abandoned approve keeps it) and is approved again next pass.
+        guard result.landed else { throw CoPublisherError.commitLost }
+        // ADR-0051 section 4 — the record and ban list under the new epoch,
+        // the only one the newcomer can open.
+        if let state {
+            await ChannelPublisherLoops.shared.afterRotation(
+                channelId: context.channelIdHex, epoch: serverTarget, channels: state,
+                client: context.channelsClient, seed: context.currentSeed)
+        }
         // ADR-0087 section 7 — the newcomer is a publisher the owner's pass
         // seals the admission seeds to.
         ChannelAdmissionSeedShare.notePublisher(channelId: context.channelIdHex, joinerKey: proposalRef)
-        CoPublisherKeyBook.notePublisher(channelIdHex: context.channelIdHex, joinerKey: proposalRef)
+        if let (_, group) = try? context.open() {
+            CoPublisherKeyBook.notePublisher(
+                channelIdHex: context.channelIdHex,
+                joinerKey: accountKey(ofLeaf: proposalRef, in: group) ?? proposalRef)
+        }
     }
 
-    /// ADR-0087 section 15 (phase B) — the owner removes a publisher: every
-    /// leaf of `accountKey` in one commit. The proof of the epoch the commit
-    /// leaves is taken before it merges; the record is written with the N+1
-    /// snapshot (G-50) before any step; then the commit goes through the
-    /// commit route, the appointment is revoked and every subscriber is
-    /// resealed to the new seed, which the removed person cannot derive.
+    /// The account a leaf of `group` resolves to (its ADR-0050 binding), or
+    /// `nil` when no member has that leaf key.
+    static func accountKey(ofLeaf leaf: Data, in group: PublisherGroup) -> Data? {
+        guard let member = (try? group.members())?.first(where: { $0.signaturePublicKey == leaf }) else {
+            return nil
+        }
+        return member.accountKey.isEmpty ? member.signaturePublicKey : member.accountKey
+    }
+
+    /// ADR-0087 section 15 (phase B), ADR-0090 — an owner device removes a
+    /// publisher: every leaf of `accountKey`, STAGED, recorded, sent through
+    /// the commit route; once the DS took it the commit merges, the
+    /// appointment is revoked and every subscriber resealed to the new seed,
+    /// which the removed person cannot derive. Lost to another owner
+    /// device's commit: abandoned, nothing sent; the next pass tries again.
     @MainActor
     public static func removePublisher(
         context: ChannelPublisherCommits.Context,
@@ -566,25 +631,24 @@ public enum CoPublisher {
         let current = try await context.channelsClient.fetchEpoch(channelIdHex: context.channelIdHex)
         let serverTarget = current &+ 1
         guard serverTarget > current else { throw CoPublisherError.unexpectedServerEpoch(current) }
-        let (identity, group) = try context.open()
-        let proofEpoch = try group.epoch()
-        let proofSeed = try group.dsAccessSeed(identity: identity)
-        let commit = try group.removePublisher(identity: identity, accountKey: accountKey)
-        let entry = PublisherCommitEntry(
-            kind: .removal,
-            channelIdHex: context.channelIdHex.lowercased(),
-            groupIdHex: DsClient.pseudonymHex(try group.groupId()),
-            targetEpoch: try group.epoch(),
-            serverTargetEpoch: serverTarget,
-            commitB64: commit.base64EncodedString(),
-            joinerKeyB64: accountKey.base64EncodedString(),
-            proofEpoch: proofEpoch,
-            proofSeedB64: proofSeed.base64EncodedString())
-        try ChannelPublisherCommits.record(entry, accountIdB64: context.accountIdB64)
-        try await PublisherCommitRunner.run(
-            entry, ports: ChannelPublisherCommits.ports(context, state: state))
-        ChannelPublisherCommits.refreshContentSeed(context, state: state)
-        refreshPublishers(identity: identity, group: group, channelIdHex: context.channelIdHex)
+        let result = try await ChannelPublisherCommits.stageAndRun(
+            context, state: state, kind: .removal, joinerKey: accountKey,
+            serverTargetEpoch: serverTarget, serverEpoch: current
+        ) { identity, group in
+            .init(commit: try group.stageRemovePublisher(identity: identity, accountKey: accountKey), welcome: nil)
+        }
+        guard result.landed else { throw CoPublisherError.commitLost }
+        if let state {
+            await ChannelPublisherLoops.shared.afterRotation(
+                channelId: context.channelIdHex, epoch: serverTarget, channels: state,
+                client: context.channelsClient, seed: context.currentSeed)
+        }
+        if let (identity, group) = try? context.open() {
+            refreshPublishers(identity: identity, group: group, channelIdHex: context.channelIdHex)
+        }
+        // Nothing more is sealed to them; approved again, they get a fresh
+        // hand-over.
+        ChannelAdmissionSeedShare.forgetPublisher(channelId: context.channelIdHex, accountKey: accountKey)
     }
 
     /// ADR-0087 section 15 — a co-publisher leaves as publisher: the
@@ -604,7 +668,9 @@ public enum CoPublisher {
     @MainActor
     static func refreshPublishers(identity: Identity, group: PublisherGroup, channelIdHex: String) {
         guard let members = try? group.members() else { return }
-        let own = identity.signaturePublicKey()
+        // ADR-0090 — leaves are devices: this ACCOUNT's leaves (every device
+        // of it) are not "other publishers".
+        let own = identity.accountPublicKey() ?? identity.signaturePublicKey()
         let others = Set(members.map { $0.accountKey.isEmpty ? $0.signaturePublicKey : $0.accountKey }
             .filter { $0 != own }
             .map { $0.map { String(format: "%02x", $0) }.joined() })
@@ -675,9 +741,13 @@ public enum CoPublisher {
         /// The 32-char lowercase-hex channel id the link's sealed preview
         /// carried (ADR-0078 section 6).
         public let channelIdHex: String
-        /// This device's leaf signature key — names the mailbox the owner sends
-        /// the Welcome to after approving (ADR-0053).
+        /// This device's leaf signature key (ADR-0090: the DEVICE identity the
+        /// knocked KeyPackage was made with).
         public let joinerKey: Data
+        /// ADR-0090 — the capability's issuer key: the owner's ACCOUNT key the
+        /// joined group records, and the only account whose devices may send
+        /// the Welcome.
+        public var ownerAccountKey: Data = Data()
     }
 
     /// ADR-0028 OQ3 — joiner side: request to become a co-publisher of a channel
@@ -752,8 +822,11 @@ public enum CoPublisher {
             throw CoPublisherError.notAChannelGroup
         }
         let channelIdHex = ChannelsComposer.bytesToHex(channelIdBytes)
+        // ADR-0090 — `identity` is this device's leaf; the co-publisher binding
+        // names the ACCOUNT (one appointment per account, every device of it).
+        let account = try ChannelPublisherIdentity.ownerAccountIdentity()
         let binding = try composeChannelCopublisherBinding(
-            accountIdentity: identity, channelId: channelIdBytes)
+            accountIdentity: account, channelId: channelIdBytes)
         // ADR-0057 — this device asks to CO-publish, so it is not the channel
         // owner: it must never claim the PublisherGroup journal. Recorded
         // before the knock, fail closed: an unrecorded request could later
@@ -792,7 +865,8 @@ public enum CoPublisher {
         let request = CoPublishRequest(
             groupId: groupId,
             channelIdHex: channelIdHex,
-            joinerKey: identity.signaturePublicKey()
+            joinerKey: identity.signaturePublicKey(),
+            ownerAccountKey: cap.issuerSignaturePubkey()
         )
         try await recordRequest(request)
         _ = try await ds.knock(groupId: groupId, payloads: [row, binding])
@@ -818,6 +892,7 @@ public enum CoPublisher {
         groupId: Data,
         joinerKey: Data,
         channelIdHex: String,
+        ownerAccountKey: Data,
         // G-29 — reuse the persisted per-channel signing seed if this device
         // has co-published to the channel before (nil on a first join).
         existingSigningSeed: Data? = nil
@@ -826,8 +901,10 @@ public enum CoPublisher {
         // every row is opened with that key. The owner seals the co-publisher
         // Welcome as a `welcomeRendezvous` row; a plain `welcome` row is tried
         // too (whichever opens this channel's PublisherGroup counts).
-        let mailboxKey = MailboxKey.fromAccountIdentity(accountIdentity: identity)
-        let signer = dsMailboxSigner(accountIdentity: identity)
+        // The mailbox is the ACCOUNT's (ADR-0090: `identity` is the device).
+        let account = try ChannelPublisherIdentity.ownerAccountIdentity()
+        let mailboxKey = MailboxKey.fromAccountIdentity(accountIdentity: account)
+        let signer = dsMailboxSigner(accountIdentity: account)
         let mailbox = signer.mailboxAddress()
         var candidates: [Data] = []
         var after: Int64 = 0
@@ -838,7 +915,7 @@ public enum CoPublisher {
                 guard let opened = MailboxRows.open(row.payload, key: mailboxKey) else { continue }
                 switch opened.kind {
                 case .welcomeRendezvous, .welcome: candidates.append(opened.body)
-                case .contactRequest, .contactAck, .linkRefusal: continue
+                case .contactRequest, .contactAck, .linkRefusal, .conversationReentry: continue
                 }
             }
             guard let last = page.messages.last, page.hasMore, last.id > after else { break }
@@ -864,7 +941,8 @@ public enum CoPublisher {
             // the keys of other requests.
             if let keys = try joinCoPublishWelcome(
                 identity: identity, accountIdB64: accountIdB64, welcome: welcome, groupId: groupId,
-                channelIdHex: channelIdHex, existingSigningSeed: existingSigningSeed) {
+                channelIdHex: channelIdHex, ownerAccountKey: ownerAccountKey,
+                existingSigningSeed: existingSigningSeed) {
                 return keys
             }
         }
@@ -883,14 +961,24 @@ public enum CoPublisher {
         welcome: Data,
         groupId: Data,
         channelIdHex: String,
+        ownerAccountKey: Data,
         existingSigningSeed: Data? = nil
     ) throws -> ChannelPublisherKeys? {
         guard let channelId = Self.hexToData(channelIdHex) else {
             throw CoPublisherError.badChannelId(channelIdHex)
         }
+        // Security pass 2026-11-15 (F2) — a Welcome this device already
+        // joined for the channel is an old one served again: not joined.
+        let replay = accountIdB64.map { ChannelDeviceAdmissionStore(accountIdB64: $0) }
+        let welcomeHash = ChannelDeviceAdmission.welcomeReplayHash(welcome)
+        if replay?.hasJoinedWelcome(welcomeHash, channelId: channelIdHex) == true { return nil }
+        // ADR-0090 — refused unless the Welcome's sender is a device of the
+        // owner account the capability named.
         guard (try? publisherGroupJoinFromWelcome(
-            identity: identity, welcome: welcome, groupId: groupId, channelId: channelId)) != nil
+            identity: identity, welcome: welcome, groupId: groupId, channelId: channelId,
+            ownerAccountKey: ownerAccountKey)) != nil
         else { return nil }
+        replay?.recordJoinedWelcome(welcomeHash, channelId: channelIdHex)
         // ADR-0057 — a co-publisher never claims the journal (idempotent with
         // the mark set when the request was sent).
         CoPublishedJournals.shared.mark(
@@ -903,8 +991,10 @@ public enum CoPublisher {
             joinedGroupId: groupId)
         // ADR-0059 section 9: this account publishes here as a co-publisher,
         // so its writes are signed with the co-publisher key from the first one.
-        try? ChannelsClient.rememberPublisherRole(
-            channelIdHex: channelIdHex, accountIdentity: identity, role: .copublisher)
+        if let account = try? ChannelPublisherIdentity.ownerAccountIdentity() {
+            try? ChannelsClient.rememberPublisherRole(
+                channelIdHex: channelIdHex, accountIdentity: account, role: .copublisher)
+        }
         return keys
     }
 
@@ -953,12 +1043,21 @@ public enum CoPublisherError: Error, LocalizedError {
     /// Not a `/g/` ledger link, or one whose row is gone (revoked, expired).
     case notACoPublisherLink
     case notAChannelGroup
+    /// The channel's PublisherGroup is not in this device's channel
+    /// provider: this device reads the channel and publishes nothing in it
+    /// (`docs/ux/second-device.md` section 4a).
+    case notOnThisDevice
     /// ADR-0028 amendment 2026-09-28 — the link's secret is missing or the
     /// capability does not open under it.
     case linkDamaged
+    /// ADR-0090 — another owner device's commit took the epoch first: this
+    /// one was abandoned; the next pass reads the journal and tries again.
+    case commitLost
 
     public var errorDescription: String? {
         switch self {
+        case .commitLost:
+            return "another device's commit took the epoch first"
         case .badChannelId(let hex):
             return "channel id hex is not valid: \(hex)"
         case .unexpectedServerEpoch(let epoch):
@@ -969,6 +1068,8 @@ public enum CoPublisherError: Error, LocalizedError {
             return "not a live /g/ co-publisher link"
         case .notAChannelGroup:
             return "co-publisher link does not target a channel PublisherGroup"
+        case .notOnThisDevice:
+            return "the channel's publisher group is not on this device"
         case .linkDamaged:
             return inviteLinkDamagedMessage
         }

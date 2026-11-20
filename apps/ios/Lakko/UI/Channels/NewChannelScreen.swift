@@ -78,7 +78,7 @@ struct NewChannelScreen: View {
                         .environment(\.layoutDirection, .leftToRight)
                 }
                 LakkoPicker(
-                    l10n.t("channel_type.who_can_subscribe"), systemImage: "person.2",
+                    l10n.t("channel_type.who_can_subscribe"), icon: .person2,
                     selection: $isPublic,
                     options: [
                         LakkoPickerOption(value: false, label: l10n.t("group_type.private")),
@@ -144,6 +144,9 @@ struct NewChannelScreen: View {
         handleRateLimited = false
         let typed = ConversationHandles.canonical(handle)
         guard isPublic, typed.count >= 3, ConversationHandles.wellFormed(typed) else { return }
+        // A name a failed create of this account claimed is this account's
+        // (a retry takes it back): the lookup answering it is not "taken".
+        if claimedHere(typed) { return }
         if let held = HandleTakenCheck.held(typed) {
             handleTaken = held == .taken
             return
@@ -158,6 +161,13 @@ struct NewChannelScreen: View {
         }
     }
 
+    /// Whether a failed create on this account claimed `typed` (its channel
+    /// id is kept for the retry).
+    private func claimedHere(_ typed: String) -> Bool {
+        guard let account = AcceptedContactsStore.boundAccountIdB64 else { return false }
+        return PendingChannelHandleStore.channelId(forHandle: typed, accountIdB64: account) != nil
+    }
+
     private func deleteUploaded(_ avatar: ProfileAvatar?) {
         guard let avatar else { return }
         BlobLifecycle.shared.delete([avatar.still.blobId] + (avatar.video.map { [$0.blobId] } ?? []))
@@ -166,7 +176,7 @@ struct NewChannelScreen: View {
     private func create() async {
         guard canCreate else { return }
         let wanted = ConversationHandles.canonical(handle)
-        if isPublic, HandleTakenCheck.held(wanted) == .taken {
+        if isPublic, HandleTakenCheck.held(wanted) == .taken, !claimedHere(wanted) {
             handleTaken = true
             return
         }
@@ -185,15 +195,27 @@ struct NewChannelScreen: View {
             } catch AttachmentBridgeError.uploadLimited {
                 photoError = "group_photo.error.limit"
                 return
+            } catch AttachmentBridgeError.storageFull {
+                photoError = "group_photo.error.full"
+                return
             } catch {
                 photoError = "group_photo.error.upload"
                 return
             }
         }
         // A create that failed after claiming this name: the same channel id,
-        // which the claim answers as already this channel's.
-        let id = PendingChannelHandleStore.channelId(forHandle: wanted, accountIdB64: accountIdB64)
-            ?? ChannelsComposer.freshChannelIdHex()
+        // hence the same write key, which the claim answers as the first time.
+        var pendingId = PendingChannelHandleStore.channelId(forHandle: wanted, accountIdB64: accountIdB64)
+        // Security pass 2026-11-15 (F5) — a kept id whose create finished is
+        // never founded over (another owner device may hold its group): it is
+        // forgotten and this create takes a fresh id.
+        if let kept = pendingId, !PendingChannelHandleStore.keptIdUsable(
+            listedHere: state.channels.contains { $0.id.lowercased() == kept.lowercased() },
+            inRegister: ChannelSubscriptionSync.shared.registeredKeys(channelId: kept) != nil) {
+            PendingChannelHandleStore.forget(handle: wanted, accountIdB64: accountIdB64)
+            pendingId = nil
+        }
+        let id = pendingId ?? ChannelsComposer.freshChannelIdHex()
         let channelName = trimmedName
         let channelDescription = description.trimmingCharacters(in: .whitespacesAndNewlines)
         // 1. The `@name`, before the channel exists: a held name aborts with
@@ -208,6 +230,8 @@ struct NewChannelScreen: View {
                 lineageIdentity: lineage, channelId: try ChannelsComposer.channelIdFromHex(id),
                 name: channelName, description: channelDescription, avatar: avatar?.ffi)
             PendingChannelHandleStore.keep(handle: wanted, channelIdHex: id, accountIdB64: accountIdB64)
+            // A retry under the kept id is the same key: the claim answers it
+            // as the first one did.
             written = try await ConversationHandles.claim(
                 discovery: DiscoveryClient(), accountSeed: owner.ed25519Seed(), journalId: journal,
                 handle: wanted, isPublic: isPublic, facts: isPublic ? facts : nil)
@@ -230,11 +254,17 @@ struct NewChannelScreen: View {
         do {
             let owner = try Identity.fromSeed(seed: accountIdentitySeed)
             _ = try await client.createChannel(channelIdHex: id, accountIdentity: owner, isPrivate: !isPublic)
+            // Security pass 2026-11-15 (F1) — a private channel gets its first
+            // admission seed now and marks no row: no genuine subscriber
+            // exists yet, so any row the service lists was planted there.
+            if !isPublic { ChannelInvites.mintAtCreation(channelIdHex: id) }
             let identity = try ChannelPublisherIdentity.shared.identity(currentSeed: accountIdentitySeed)
+            // New channel is the one place a PublisherGroup is founded.
             let keys = try ChannelsComposer.freshPublisherKeys(
                 identity: identity, accountIdB64: accountIdB64, channelIdHex: id,
-                existingSigningSeed: state.persistedPublisherSigningSeed(channelId: id))
-            let publisherGroup = try CoPublisher.openPublisherGroup(
+                existingSigningSeed: state.persistedPublisherSigningSeed(channelId: id),
+                mayFound: true)
+            let publisherGroup = try CoPublisher.foundPublisherGroup(
                 identity: identity, accountIdB64: accountIdB64, channelIdHex: id)
             try ChannelPublisherIdentity.shared.persistOrThrow()
             let signer = try publisherGroup.dsAccessSigner(identity: identity)
@@ -243,10 +273,16 @@ struct NewChannelScreen: View {
                 root: try CoPublisher.rootSigner(identity: identity, publisherGroup: publisherGroup),
                 journalId: groupId, epoch: signer.epoch(), epochKey: signer.verifyingKey(), ds: DsClient())
             JournalFoundingMarks.shared.clear(journalIdHex: DsClient.pseudonymHex(groupId))
+            // ADR-0064 section 7 (2026-11-14) — a new channel gets its vault
+            // head now, so an owner device added later can enter it alone.
+            await ChannelVaultHead.writeCurrent(channelIdHex: id, group: publisherGroup, identity: identity)
             state.addChannel(.init(
                 id: id, localName: channelName, localDescription: channelDescription,
                 addedAtMs: UInt64(Date().timeIntervalSince1970 * 1000), handle: written.handle))
             state.setKeys(channelId: id, keys: keys)
+            // ADR-0050 section 2.9 (amended 2026-11-13) — the account's other
+            // devices list the channel as its owner's (readers there).
+            state.onRelationshipStarted?(id)
             PendingChannelHandleStore.forget(handle: wanted, accountIdB64: accountIdB64)
             if let generation = state.currentKeyGeneration {
                 state.recordOwnerKeyGeneration(channelId: id, generation: generation)
@@ -273,11 +309,18 @@ struct NewChannelScreen: View {
                 name: channelName, description: channelDescription, updatedAtMs: now,
                 topic: isPublic ? topic : 0, language: isPublic ? language : "", listed: isPublic,
                 handle: value, avatar: avatar?.ffi, reactions: nil)
+            // Kept as this device's record and owed BEFORE it is sent: a
+            // failed post leaves the owner's device holding the record it
+            // meant to send, and every publisher pass re-issues THAT record
+            // (``ChannelPublisherLoops/reissueOwedRecord``), flag and signed
+            // name included, until it lands.
+            ChannelMetaRecord.keepFirst(state: state, channelId: id, meta: meta)
             do {
                 try await ChannelMetaRecord.post(
                     state: state, client: client, channelId: id, meta: meta, accountIdentity: owner)
+                state.updateExtras(id) { $0.recordOwed = nil }
             } catch {
-                NSLog("[channels] the first metadata record did not post")
+                NSLog("[channels] the first metadata record did not post; the publisher pass re-issues it")
             }
             if isPublic {
                 try? await ChannelListing.list(
@@ -290,7 +333,7 @@ struct NewChannelScreen: View {
             NSLog("[channels] create refused: %@", err.message)
             errorKey = "channels.new.failed"
         } catch {
-            NSLog("[channels] create failed")
+            NSLog("[channels] create failed: %@", String(describing: error))
             errorKey = "channels.new.failed"
         }
     }

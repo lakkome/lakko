@@ -40,6 +40,9 @@
  * to surface a "please re-enter your password" prompt in that
  * case.
  */
+import { attachReceiveHook } from "../attach/receive-hook";
+import { afterOwnCommit } from "../attach/admission-hook";
+import { recordAdmitter } from "../attach/admitters";
 import { loadWasm, wasmIfLoaded } from "../wasm";
 import { hexOfKey, ownDeviceAdmissible, ownDeviceRoster } from "../devices/own-device-roster";
 import { ownDeviceKeyPackageUsable } from "../devices/own-conversation-key";
@@ -103,6 +106,7 @@ import { spentFailureOutcome, type SpentOutcome } from "./rotation-spent";
 import { addressRecheckAllowed, lastAddressRecheckAtMs } from "./address-recheck-throttle";
 import {
   acceptReset,
+  boundContactsAccount,
   accountIdB64OfKey,
   accountKeysOf,
   loadSupersededKeys,
@@ -148,9 +152,12 @@ import {
   consumeKnockSeed,
   consumeRegistrarSeed,
   ChatClient,
+  ConversationBehindError,
   rosterOf,
   toEvent,
 } from "../chat/client";
+import { conversationBehind } from "../chat/conversation-behind";
+import { consumeKnockKeyRow } from "../chat/knock-key";
 import { noteOwnerTransition, readRoleTableOwner } from "../ds/root-handover";
 import { keepFoundGrant } from "../reach/found-grant";
 import {
@@ -343,7 +350,7 @@ export interface IncomingContactRequest {
    *  arrived inside (standard base64 of its id), shown as "Via {group}";
    *  absent for a request from the inbox. */
   viaGroupIdB64?: string;
-  /** ADR-0089 section 2 - the signed request wire as received, which a
+  /** ADR-0098 section 2 - the signed request wire as received, which a
    *  report on the request carries. Kept in memory with the request. */
   wire?: Uint8Array;
 }
@@ -455,7 +462,10 @@ export type IncomingMailboxEvent =
   /** ADR-0079 amendment of 2026-10-19: a link refusal, NOT yet verified.
    *  The receiver checks it against each pending contact
    *  (`verifyLinkRefusal`) before it removes anything. */
-  | { kind: "link-refusal"; refusal: Uint8Array };
+  | { kind: "link-refusal"; refusal: Uint8Array }
+  /** ADR-0091 section 3, route 2: a request to be brought back into a
+   *  one-to-one, the envelope still undecoded. The re-admitter judges it. */
+  | { kind: "conversation-reentry"; envelope: Uint8Array; reachPk?: Uint8Array };
 
 /** One account-mailbox row as the DS served it. `payload` is the envelope
  *  (kind byte + wire bytes): a signed ContactRequest whose intro and profile
@@ -846,7 +856,23 @@ export function noRoleTableRefusal(op: string): ContactsError {
 /** Refuse ({@link noRoleTableRefusal}) unless `group` carries a role table. A
  *  torn read refuses too: fail closed. */
 function requireRoleTable(group: WasmGroup, op: string): void {
+  refuseWhileBehind(group);
   if (!usesProposalPath(group)) throw noRoleTableRefusal(op);
+}
+
+/**
+ * ADR-0091 section 2 (C-93) — a device behind in a conversation proposes,
+ * commits and sweeps nothing there: what it built would be against an epoch
+ * the others left. Thrown before anything is built.
+ */
+function refuseWhileBehind(group: WasmGroup): void {
+  let key: string;
+  try {
+    key = base64Encode(group.groupId);
+  } catch {
+    return;
+  }
+  if (conversationBehind.stopsActing(key)) throw ContactsError.wrap(new ConversationBehindError());
 }
 
 /**
@@ -954,6 +980,11 @@ function sweepPortsFor(
         // The MLS apply is what the verdict reads, so it is deliberately OUTSIDE
         // the guard below: a throw here must reach `adjudicate`, which skips the
         // row exactly as the poll loop does.
+        // ADR-0092 — an anonymous ballot row is not an MLS message.
+        if (attachReceiveHook().isBallotRow(row.payload)) {
+          await attachReceiveHook().ballotRow(group, base64Encode(groupIdBytes), row.id, row.createdAt, row.payload);
+          return;
+        }
         const ownerBefore = readRoleTableOwner(group);
         const processed = group.processIncomingVerifyingRoles(identity, row.payload);
         // ADR-0057 root handover - a remote commit the verdict applies.
@@ -962,6 +993,8 @@ function sweepPortsFor(
           // The roster is read HERE, one line after the apply, because that
           // is the epoch this row decrypted at — a leaf resolved any later
           // can name whoever was added into a vacated slot since.
+          // ADR-0091 section 3 — the group's knock key, at receipt, never shown.
+          if (await consumeKnockKeyRow(group, processed, (leaf) => resolveMemberIdentity(rosterOf(group), leaf))) return;
           const event = await toEvent(
             row.id,
             row.createdAt,
@@ -980,9 +1013,20 @@ function sweepPortsFor(
           } else if (event.kind === "serviceEnvelope") {
             // An unrecognised `lakko/…` service envelope: dropped, never shown.
           } else if (blockDropsEvent(wasmIfLoaded(), group, event)) {
-            // ADR-0089 section 6 - a blocked person's row in the one-to-one
+            // ADR-0098 section 6 - a blocked person's row in the one-to-one
             // with them: consumed, never shown.
+          } else if (event.kind === "contentOp") {
+            // ADR-0092 — filed at receipt, as the poll does.
+            await attachReceiveHook().contentOp(group, base64Encode(groupIdBytes), event);
+          } else if (event.kind === "openItems") {
+            for (const adopted of await attachReceiveHook().openItems(group, base64Encode(groupIdBytes), event)) {
+              onSweptEvent(adopted);
+            }
           } else {
+            if (event.kind === "application" && event.content !== undefined) {
+              await attachReceiveHook().content(group, base64Encode(groupIdBytes), event);
+            }
+            if (processed.kind === "Commit") await attachReceiveHook().commit(group, base64Encode(groupIdBytes));
             onSweptEvent(event);
           }
         } catch (err) {
@@ -1527,6 +1571,9 @@ export class ContactsClient {
     actingCommitter: ActingCommitterPort,
     onSweptEvent: (event: IncomingChatEvent) => void,
   ): Promise<SweepOutcome> {
+    // ADR-0091 section 2 (C-93) — a device behind in this conversation does
+    // not sweep: its commit would be against an epoch the others left.
+    if (conversationBehind.stopsActing(base64Encode(group.groupId))) return { kind: "not-committer", rank: undefined };
     // A group with no role table has no committer to be, and the core refuses
     // a sweep on it outright. Short-circuit before resolving an identity or
     // loading wasm, so the poll tail costs nothing at all on a legacy group.
@@ -1534,7 +1581,7 @@ export class ContactsClient {
     await this.retryOwedAnswers(identity, base64Encode(group.groupId));
     const myIdentity = await this.resolveIdentity(identity);
     const wasm = await loadWasm();
-    return withGroupMlsLock(base64Encode(group.groupId), async () =>
+    const swept = await withGroupMlsLock(base64Encode(group.groupId), async () =>
       runCommitterSweep(
         sweepPortsFor(
           wasm,
@@ -1551,6 +1598,9 @@ export class ContactsClient {
         ),
       ),
     );
+    // ADR-0092 section 3.9 — the rings and the hand-over after our commit.
+    if (swept.kind === "committed") void afterOwnCommit(group, base64Encode(group.groupId), swept.addedCount);
+    return swept;
   }
 
   /**
@@ -1607,6 +1657,11 @@ export class ContactsClient {
         owedOutcome = await withGroupMlsLock(base64Encode(group.groupId), async () =>
           resolveOwedVerdict(ports),
         );
+        // ADR-0092 section 3.9 — an owed sweep merged at restart is our
+        // commit too.
+        if (owedOutcome?.kind === "committed") {
+          void afterOwnCommit(group, base64Encode(group.groupId), owedOutcome.addedCount);
+        }
       } catch (err) {
         // The journal was unreadable, so the verdict stays owed and the sweep
         // stays staged for the next attempt (which runs at the tail of every
@@ -2755,7 +2810,8 @@ export class ContactsClient {
       ...(this.onPersist === undefined ? {} : { onPersist: this.onPersist }),
     });
     try {
-      await chat.broadcastControl(identity, group, envelope);
+      // The person's own request (ADR-0091 live walk 3).
+      await chat.broadcastControl(identity, group, envelope, { personAction: true });
     } catch (err) {
       throw ContactsError.wrap(err);
     }
@@ -3027,6 +3083,75 @@ export class ContactsClient {
         (target, auth) =>
           this.ds.publishMailbox(target.address, sealRowFor(wasm, target, "link-refusal", wire), auth),
       );
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+  }
+
+  /**
+   * ADR-0091 section 3, route 2 — send a request to be brought back into a
+   * one-to-one to the other person's account mailbox, sealed (ADR-0078), under
+   * a grant held for them (their contact grant first).
+   */
+  async sendConversationReentry(otherAccountKey: Uint8Array, envelope: Uint8Array, groupId: Uint8Array): Promise<void> {
+    const wasm = await loadWasm();
+    try {
+      await writeToPerson(otherAccountKey, { scope: groupId, explicit: null }, (target, auth) =>
+        this.ds.publishMailbox(target.address, sealRowFor(wasm, target, "conversation-reentry", envelope), auth),
+      );
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+  }
+
+  /**
+   * ADR-0091 section 4 — propose the replacement a re-entry request asks for:
+   * `Add(K)` then `Remove(L)`, both from this device, by reference. The sweep
+   * (this device's, its account's or the acting committer's) commits them
+   * through the ADR-0081 commit route. A refused persist publishes nothing.
+   */
+  async proposeReentryReplacement(
+    identity: IdentitySecrets | null,
+    group: WasmGroup,
+    keyPackage: Uint8Array,
+    markOwnPublished: (messageId: number) => void,
+  ): Promise<void> {
+    const myIdentity = await this.resolveIdentity(identity);
+    await withGroupMlsLock(base64Encode(group.groupId), async () => {
+      let pair;
+      try {
+        pair = group.proposeReentryReplacement(myIdentity, keyPackage);
+      } catch (err) {
+        throw ContactsError.wrap(err);
+      }
+      try {
+        const add = pair.add;
+        const remove = pair.remove;
+        await this.persistProposalOrThrow();
+        try {
+          markOwnPublished((await this.ds.publishGroup(group.groupId, add)).id);
+          markOwnPublished((await this.ds.publishGroup(group.groupId, remove)).id);
+        } catch (err) {
+          throw ContactsError.wrap(err);
+        }
+      } finally {
+        pair.free();
+      }
+    });
+  }
+
+  /**
+   * ADR-0091 section 5 — join over the stale active group this device holds,
+   * from the Welcome of the commit that replaced its leaf. `recorded` are the
+   * re-entry KeyPackages this device recorded before sending its requests.
+   * Throws (a `reentryWelcomeRefused` refusal) when the Welcome is not the
+   * answer to one of them; nothing changes then. The caller persists.
+   */
+  async joinReentry(identity: IdentitySecrets | null, welcome: Uint8Array, recorded: readonly Uint8Array[]): Promise<WasmGroup> {
+    const wasm = await loadWasm();
+    const myIdentity = await this.resolveIdentity(identity);
+    try {
+      return wasm.Group.joinReentry(welcome, myIdentity, [...recorded]);
     } catch (err) {
       throw ContactsError.wrap(err);
     }
@@ -3749,12 +3874,29 @@ export class ContactsClient {
   ): Promise<WasmGroup> {
     const wasm = await loadWasm();
     const myIdentity = await this.resolveIdentity(identity);
+    // ADR-0092 section 3.9 — who sent this Welcome, resolved to its account
+    // key, read before the join consumes it: the account that admitted us.
+    let admitterKeyB64: string | undefined;
+    try {
+      const founder = wasm.peekWelcomeFounder(welcomeBytes, myIdentity);
+      try {
+        admitterKeyB64 = base64Encode(founder.founderAccountKey);
+      } finally {
+        founder.free();
+      }
+    } catch {
+      admitterKeyB64 = undefined;
+    }
     let group: WasmGroup;
     try {
       // wasm-bindgen surface: `joinFromWelcome(welcome, identity)`.
       group = wasm.Group.joinFromWelcome(welcomeBytes, myIdentity);
     } catch (err) {
       throw ContactsError.wrap(err);
+    }
+    const owner = boundContactsAccount();
+    if (admitterKeyB64 !== undefined && owner !== null) {
+      await recordAdmitter(owner, base64Encode(group.groupId), admitterKeyB64).catch(() => undefined);
     }
 
     // 1.16e6c2: joinFromWelcome bootstrapped a brand-new group
@@ -4463,6 +4605,7 @@ export class ContactsClient {
   ): Promise<MembershipOutcome> {
     const myIdentity = await this.resolveIdentity(identity);
     const wasm = await loadWasm();
+    refuseWhileBehind(group);
     return withGroupMlsLock(base64Encode(group.groupId), async () => {
       // C-65, and it collides in BOTH directions: a pending role change refuses
       // a transfer, and a pending transfer refuses a role change. It falls out
@@ -4549,6 +4692,7 @@ export class ContactsClient {
     // SERIALIZED per group, like every other path that reads group state and
     // writes a snapshot — a proposal grows the pending set, so two approves
     // taken at once are still a read-modify-write on the same MLS store.
+    refuseWhileBehind(group);
     return withGroupMlsLock(base64Encode(group.groupId), async () => {
       let proposalBytes: Uint8Array;
       try {
@@ -5273,6 +5417,10 @@ export function dispatchMailboxRows(
       events.push({ kind: "link-refusal", refusal: row.body });
       continue;
     }
+    if (row.kind === "conversation-reentry") {
+      events.push({ kind: "conversation-reentry", envelope: row.body, ...reach });
+      continue;
+    }
     if (row.kind === "contact-ack") {
       // Phase 1.9b1: signature is verified inside the WASM
       // surface; bad-signature / malformed-wire entries drop
@@ -5390,6 +5538,8 @@ export function decodeContactRequestBody(
           const avatar = avatarFromWasm(p.avatar);
           return avatar === null ? {} : { avatar };
         })(),
+        // ADR-0092 section 7 - the "my card may be shared" flag.
+        ...(p.cardShareable === false ? { cardShareable: false } : {}),
       };
       p.free();
     }
@@ -5418,7 +5568,7 @@ export function decodeContactRequestBody(
     linkAnswer,
     createdAt,
     ...(viaGroupIdB64 !== undefined ? { viaGroupIdB64 } : {}),
-    // ADR-0089 section 2 - the signed request as received, a report's
+    // ADR-0098 section 2 - the signed request as received, a report's
     // evidence.
     wire: body,
   };

@@ -41,6 +41,29 @@ public final class SignupViewModel: ObservableObject {
     /// account is being created (right before `/signup/finish`).
     @Published public private(set) var cancellable: Bool = false
 
+    /// `docs/ux/beta-account-cap.md` section 2 — the form, or "Lakko is full
+    /// for now" in its place. The form fields are kept while it shows.
+    @Published public private(set) var mode: SignupScreenMode = .form
+
+    // MARK: - Supporter code (`docs/ux/supporters.md` section 1)
+
+    /// The code field.
+    @Published public var supporterCode: String = ""
+    /// `Checking...` on `Continue`.
+    @Published public private(set) var codeChecking: Bool = false
+    /// The line under the code field, if any.
+    @Published public private(set) var codeLine: SupporterCodeLine?
+    /// A supporter place is held on this device: the form shows the held
+    /// line, and the cap does not stop the sign-up here.
+    @Published public private(set) var placeHeld: Bool = false
+    /// The full state shows "This supporter code has already been used."
+    @Published public private(set) var codeUsed: Bool = false
+
+    /// `Continue` on the code entry.
+    public var canContinueCode: Bool {
+        SupporterCodeEntry.isComplete(supporterCode) && !codeChecking
+    }
+
     /// The sign-up in flight, cancelled by ``onCancel()`` and when the screen
     /// goes away.
     private var signupTask: Task<Void, Never>?
@@ -52,6 +75,8 @@ public final class SignupViewModel: ObservableObject {
 
     private let repository: AuthRepository
     private let l10n = Localization.shared
+    private let supporterPlaces: SupporterPlaceHolder
+    private let supporterRedeemer: SupporterCodeRedeeming
 
     /// Called once right after a successful sign-up. The repository lands
     /// the session inside `signup`, which replaces the anonymous stack (and
@@ -60,9 +85,16 @@ public final class SignupViewModel: ObservableObject {
     /// over the session.
     public var onSignedUp: (() -> Void)?
 
-    public init(repository: AuthRepository, onSignedUp: (() -> Void)? = nil) {
+    public init(
+        repository: AuthRepository,
+        onSignedUp: (() -> Void)? = nil,
+        supporterPlaces: SupporterPlaceHolder = SupporterPlaceHolder(),
+        supporterRedeemer: SupporterCodeRedeeming = SupporterCodeRedeemer()
+    ) {
         self.repository = repository
         self.onSignedUp = onSignedUp
+        self.supporterPlaces = supporterPlaces
+        self.supporterRedeemer = supporterRedeemer
     }
 
     // MARK: - Submit
@@ -117,9 +149,26 @@ public final class SignupViewModel: ObservableObject {
         let thisAttempt = attempt
         signupTask = Task {
             do {
+                // The beta account cap: asked again before the proof of work,
+                // so nobody solves it only to be refused. A failed question
+                // reads as open; the bind decides.
+                let open = await repository.signupOpen()
+                guard attempt == thisAttempt, !Task.isCancelled else { return }
+                // A held supporter place passes the cap (ADR-0097): it rides
+                // the first bind, which decides.
+                let place = supporterPlaces.live()
+                placeHeld = place != nil
+                if !open && place == nil {
+                    cancellable = false
+                    busy = false
+                    codeUsed = false
+                    mode = .closed
+                    return
+                }
                 _ = try await repository.signup(
                     username: usernameSnapshot,
                     password: passwordBytes,
+                    supporterToken: place?.headerValue,
                     onCommitting: {
                         if self.attempt == thisAttempt { self.cancellable = false }
                     }
@@ -139,6 +188,25 @@ public final class SignupViewModel: ObservableObject {
                 // no message. A cancelled network call surfaces as a network
                 // error, so the task's flag decides, not the error type.
                 if Task.isCancelled || error is CancellationError { return }
+                // Refused at the bind: the repository deleted the account it
+                // made; the form gives way to the full state.
+                if SignupCap.isRegistrationClosed(error) {
+                    errorText = nil
+                    codeUsed = false
+                    mode = .closed
+                    return
+                }
+                // The held place was spent by another account: the account
+                // is gone as above, the place is dropped, and the full state
+                // says why (`docs/ux/supporters.md` section 1.2).
+                if SignupCap.isSupporterCodeUsed(error) {
+                    supporterPlaces.drop()
+                    placeHeld = false
+                    errorText = nil
+                    codeUsed = true
+                    mode = .closed
+                    return
+                }
                 if let err = error as? AuthClientError,
                    let refusal = AuthRateLimit.refusal(in: err),
                    refusal.code == AuthRateLimit.signupRateLimited {
@@ -160,6 +228,72 @@ public final class SignupViewModel: ObservableObject {
         cancellable = false
         busy = false
         errorText = nil
+    }
+
+    /// The screen opened: ask whether sign-up is open. Closed replaces the
+    /// form; open, or a failed question, leaves it.
+    public func onAppear() async {
+        guard mode == .form, !busy else { return }
+        placeHeld = supporterPlaces.live() != nil
+        let open = await repository.signupOpen()
+        guard mode == .form, !busy else { return }
+        mode = SignupScreenMode.after(open: open, placeHeld: placeHeld)
+    }
+
+    /// `Try again` in the full state: ask again. Open returns to the form
+    /// with everything typed kept; still closed stays, with no message.
+    public func onRetryOpen() {
+        guard mode == .closed else { return }
+        mode = .checking
+        Task {
+            let open = await repository.signupOpen()
+            guard mode == .checking else { return }
+            placeHeld = supporterPlaces.live() != nil
+            mode = SignupScreenMode.after(open: open, placeHeld: placeHeld)
+        }
+    }
+
+    // MARK: - Supporter code
+
+    /// `I have a supporter code` under the full state.
+    public func onOpenSupporterCode() {
+        guard mode == .closed else { return }
+        codeLine = nil
+        mode = .supporterCode
+    }
+
+    /// `Back` on the code entry: the full state again.
+    public func onSupporterCodeBack() {
+        guard mode == .supporterCode, !codeChecking else { return }
+        codeLine = nil
+        mode = .closed
+    }
+
+    /// `Continue` on the code entry: exchange the code for a held place.
+    /// The field keeps what was typed on every failure.
+    public func onSubmitSupporterCode() {
+        guard mode == .supporterCode, canContinueCode else { return }
+        Task { await submitSupporterCode() }
+    }
+
+    /// The body of ``onSubmitSupporterCode()``, awaitable by a test.
+    func submitSupporterCode() async {
+        guard mode == .supporterCode, canContinueCode else { return }
+        codeChecking = true
+        codeLine = nil
+        let outcome = await supporterRedeemer.redeem(code: supporterCode)
+        codeChecking = false
+        guard mode == .supporterCode else { return }
+        switch outcome {
+        case .held(let place):
+            supporterPlaces.hold(place)
+            placeHeld = true
+            codeUsed = false
+            supporterCode = ""
+            mode = .form
+        case .line(let line):
+            codeLine = line
+        }
     }
 
     /// `Try again` after the sign-up limit: the same form, submitted again.

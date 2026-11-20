@@ -59,6 +59,36 @@ public final class ContactsViewModel: ObservableObject {
             invited, oneToOnePeerKeys: Set(repositoryState.accepted.map(\.request.fromPubkey)))
     }
 
+    // MARK: - ADR-0092 section 7: a contact card's Add contact
+
+    /// What `Add contact` on a contact card came to (UX section 10.2).
+    public enum ContactCardAddResult: Equatable {
+        /// The request went out.
+        case sent
+        /// The username now resolves to another key: nothing was sent.
+        case otherKey
+        /// The username does not resolve under the person's setting.
+        case notFound
+        /// The lookup or the send failed.
+        case failed
+    }
+
+    /// The ordinary username lookup, accepted only when the discovered key is
+    /// the card's; then the ordinary contact request.
+    public func addFromContactCard(username: String, accountKey: Data) async -> ContactCardAddResult {
+        let ports = repository.peopleSearchPorts()
+        do {
+            let canonical = normalizeUsername(input: username)
+            let oprf = try await ports.usernameOprf(canonical)
+            guard let hit = try await ports.lookupUsername(oprf.lookupKey) else { return .notFound }
+            guard let key = try await ports.identityKey(hit.accountId), key == accountKey else { return .otherKey }
+            _ = try await repository.sendContactRequest(recipientUsername: canonical, introMessage: "")
+            return .sent
+        } catch {
+            return .failed
+        }
+    }
+
     // MARK: - Wiring
 
     private let repository: ContactsRepository
@@ -75,7 +105,7 @@ public final class ContactsViewModel: ObservableObject {
     private weak var chatRepository: ChatRepository?
     private var cancellables: Set<AnyCancellable> = []
 
-    /// ADR-0089 step 4 — the repository's state with the requests of
+    /// ADR-0098 step 4 — the repository's state with the requests of
     /// senders known suspended left out of `pending`.
     static func hidingSuspended(_ state: ContactsState, isSuspended: (Data) -> Bool) -> ContactsState {
         let visible = SuspensionMarkRules.visibleRequests(state.pending, isSuspended: isSuspended)
@@ -112,7 +142,7 @@ public final class ContactsViewModel: ObservableObject {
             chatRepository?.oneToOneConversation(
                 contactKey: contact.request.fromPubkey, linkedGroupIdHex: contact.groupIdHex)
         }
-        // ADR-0089 step 4 — a held request whose sender the moderation log
+        // ADR-0098 step 4 — a held request whose sender the moderation log
         // shows suspended is not shown (it is kept, and comes back when the
         // suspension ends); the senders are asked about as requests arrive.
         let marks = SuspensionMarks.shared
@@ -416,7 +446,7 @@ public final class ContactsViewModel: ObservableObject {
         conversation(contact)
     }
 
-    /// ADR-0089 / UX 2.1 — Report from a person's card: the person, nothing
+    /// ADR-0098 / UX 2.1 — Report from a person's card: the person, nothing
     /// included at first, their own messages in the one-to-one offered, and
     /// `Also block` checked.
     public func reportRequest(for contact: AcceptedContact, name: String) -> ReportRequest {
@@ -430,7 +460,7 @@ public final class ContactsViewModel: ObservableObject {
             followUp: .block, personName: name)
     }
 
-    /// ADR-0089 — Report a contact request: the requester, with the request
+    /// ADR-0098 — Report a contact request: the requester, with the request
     /// itself included (its wire as it was received; a row stored before
     /// the wire was kept carries none).
     public func reportRequest(forRequest request: IncomingContactRequest, name: String) -> ReportRequest {
@@ -441,7 +471,7 @@ public final class ContactsViewModel: ObservableObject {
             followUp: .block, personName: name)
     }
 
-    /// ADR-0089 / UX 1.2 — block a person from a card or a request row.
+    /// ADR-0098 / UX 1.2 — block a person from a card or a request row.
     public func block(accountKey: Data) { BlockList.shared.block(accountKey) }
 
     /// UX 1.3.

@@ -47,13 +47,13 @@ import { avatarFromWasm, avatarToWasm, b64ToBytes, bytesToB64, type AvatarData }
 import { channelsActions, channelsState } from "../state/channels-state";
 import { deleteInviteKey, listInviteKeys, putInviteKey } from "./api";
 import { bytesToHex, channelIdFromHex, type WasmIdentity } from "./composer";
-import { newestAdmissionSeed, type ChannelInviteLinkRecord } from "./channel-access-record";
+import type { ChannelInviteLinkRecord } from "./channel-access-record";
 import {
   ChannelError,
   channelAvatarOf,
   channelReadKeyHere,
   channelVisibilityOf,
-  repairPrivateChannelAccess,
+  privateChannelAdmissionSeed,
   serviceErrorCode,
   type ChannelAccessKey,
   type ChannelVisibility,
@@ -211,9 +211,9 @@ async function mint(
     if (readKey === null) throw new ChannelError("needs-owner");
     access = wasm.ChannelAccess.publicChannel(readKey);
   } else {
-    // A private channel from before phase B has no admission seed yet; the
-    // owner's device mints it now (`repairPrivateChannelAccess`).
-    const adm = newestAdmissionSeed(channelsActions.accessOf(idHex)) ?? (await repairPrivateChannelAccess(identity, idHex));
+    // A device that holds no admission seed waits for the account's register
+    // (or the owner's hand-over); it never mints one here (F1).
+    const adm = privateChannelAdmissionSeed(idHex);
     admissionVersion = adm.version;
     inviteSeed = wasm.generateChannelInviteSeed();
     const signer = wasm.ChannelInviteSigner.fromInviteSeed(inviteSeed);
@@ -251,8 +251,9 @@ async function mint(
   } catch (err) {
     throw new ChannelError("failed", { cause: err });
   } finally {
+    // `wasmAvatar` is not freed: the call took it by value (a free on the
+    // emptied wrapper throws "null pointer passed to rust").
     access.free();
-    wasmAvatar?.free();
   }
   // The invite key first: a link whose key the service does not hold admits
   // nobody, so the link is not handed out before it.
@@ -498,6 +499,64 @@ export async function channelInviteLinkFromCard(card: Uint8Array): Promise<strin
       secret: opened.linkSecret,
       widths: inviteLinkWidths(wasm),
     });
+  } finally {
+    opened.free();
+  }
+}
+
+/**
+ * Open an invitation card on this device, with no network (ADR-0087 section
+ * 14; what iOS `ChannelInviteCardFacts` and Android do): the card carries the
+ * sealed capability and its secret, so its channel, name and kind are read
+ * from it directly. Expiry and the ledger row are not checked: the card says
+ * what was sent, and Subscribe / Accept / Ask again go to the ledger. `null`
+ * for a card that does not decode, does not open, or is not a channel's.
+ * Never throws. `link` is the card's own `/g/` link (with its secret, for
+ * Accept and Ask again only: it is never drawn).
+ */
+export function openChannelInviteCardWith(
+  wasm: Pick<Wasm, "openChannelInviteCard"> & Parameters<typeof inviteLinkWidths>[0],
+  card: Uint8Array,
+  origin: string,
+): OpenedChannelInvite | null {
+  let opened: Wasm["OpenedChannelInviteCard"]["prototype"];
+  try {
+    opened = wasm.openChannelInviteCard(card);
+  } catch {
+    return null;
+  }
+  try {
+    const link = composeSealedInviteLink({
+      origin,
+      prefix: GROUP_INVITE_URL_PREFIX,
+      blobId: opened.ledgerId,
+      secret: opened.linkSecret,
+      widths: inviteLinkWidths(wasm),
+    });
+    const preview = opened.preview;
+    try {
+      const channelId = preview.channelId;
+      if (channelId === undefined || channelId.length !== 16) return null;
+      const sub = preview.subscriber;
+      const isSubscriberInvite = sub !== undefined;
+      sub?.free();
+      if (isSubscriberInvite) return fromSubscriberPreview(bytesToHex(channelId), preview, link);
+      return {
+        channelIdHex: bytesToHex(channelId),
+        name: preview.groupName ?? "",
+        description: "",
+        visibility: "private",
+        access: { kind: "public", readKey: new Uint8Array() },
+        avatar: avatarFromWasm(preview.avatar),
+        publisherInvite: true,
+        ...inviterOf(preview.inviterName),
+        link,
+      };
+    } finally {
+      preview.free();
+    }
+  } catch {
+    return null;
   } finally {
     opened.free();
   }

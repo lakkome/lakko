@@ -52,6 +52,10 @@ export interface KeyResetOwed {
   readonly signedAtMs: number;
   /** Which steps landed. */
   readonly done: { readonly directory: boolean; readonly deviceGroup: boolean };
+  /** Unix milliseconds until which the directory refuses the new keys (its
+   *  cool-down, ADR-0073 section 4.1; UX 15.4 "Waiting for the directory"),
+   *  from the last refusal. Absent when the last attempt was not refused so. */
+  readonly waitUntilMs?: number;
 }
 
 function markerKey(accountIdB64: string): string {
@@ -92,6 +96,10 @@ export function readKeyResetOwed(
     ) {
       return null;
     }
+    const waitUntilMs =
+      typeof parsed.waitUntilMs === "number" && Number.isFinite(parsed.waitUntilMs)
+        ? parsed.waitUntilMs
+        : undefined;
     return {
       v: 1,
       attestationB64Url: parsed.attestationB64Url,
@@ -102,6 +110,7 @@ export function readKeyResetOwed(
         directory: parsed.done.directory === true,
         deviceGroup: parsed.done.deviceGroup === true,
       },
+      ...(waitUntilMs !== undefined ? { waitUntilMs } : {}),
     };
   } catch {
     return null;
@@ -173,15 +182,91 @@ export function remainingKeyResetSteps(done: KeyResetOwed["done"]): KeyResetStep
   return out;
 }
 
-/** The record with `step` marked done. */
+/** The record with `step` marked done (and no directory wait left). */
 export function withKeyResetStepDone(record: KeyResetOwed, step: KeyResetStep): KeyResetOwed {
-  return {
-    ...record,
-    done: {
-      directory: record.done.directory || step === "directory",
-      deviceGroup: record.done.deviceGroup || step === "device-group",
+  return withDirectoryWait(
+    {
+      ...record,
+      done: {
+        directory: record.done.directory || step === "directory",
+        deviceGroup: record.done.deviceGroup || step === "device-group",
+      },
     },
+    null,
+  );
+}
+
+/** The record with the directory's wait set (`untilMs`) or cleared (`null`). */
+export function withDirectoryWait(record: KeyResetOwed, untilMs: number | null): KeyResetOwed {
+  const rest: KeyResetOwed = {
+    v: 1,
+    attestationB64Url: record.attestationB64Url,
+    keyGeneration: record.keyGeneration,
+    newSignaturePubkeyB64: record.newSignaturePubkeyB64,
+    signedAtMs: record.signedAtMs,
+    done: record.done,
   };
+  return untilMs === null ? rest : { ...rest, waitUntilMs: untilMs };
+}
+
+/**
+ * The seconds the directory asked the reset's identity upload to wait, or
+ * `null` when the refusal is not its cool-down or names no usable time
+ * (`429 identity-changed-too-recently` with `retry_after_secs`, or a
+ * `Retry-After` header; UX 15.4: without a readable time the "could not
+ * finish" copy and Try again stay).
+ */
+export function directoryCooldownSecs(input: {
+  readonly status: number;
+  readonly errorCode: string | null;
+  readonly retryAfterSecs: number | null;
+}): number | null {
+  if (input.status !== 429 || input.errorCode !== "identity-changed-too-recently") return null;
+  const secs = input.retryAfterSecs;
+  return secs !== null && Number.isFinite(secs) && secs > 0 ? Math.ceil(secs) : null;
+}
+
+/** What the "publish owed" screen shows (UX 15.4). */
+export interface PublishOwedView {
+  /** The catalog key of the explanation. */
+  readonly textKey: string;
+  /** `{minutes}` for the waiting copy, `null` for the others. */
+  readonly minutes: number | null;
+  /** Whether "Try again" is offered. */
+  readonly tryAgain: boolean;
+  /** Whether the directory's wait is running (the screen retries by itself
+   *  when it ends). */
+  readonly waiting: boolean;
+}
+
+/**
+ * The rule of the "publish owed" screen. While the directory's wait runs
+ * (or the retry it ends in is out), the waiting copy with the minutes left
+ * (`ceil(seconds / 60)`, at least 1) and no Try again; otherwise the
+ * existing copy and Try again. An account that was never shown words has
+ * its own wordless copies (`account.keys_changed.finishing`, and
+ * `account.keys_changed.waiting` while it waits, also without Try again).
+ * The sign-in-needed state is unchanged.
+ */
+export function publishOwedView(input: {
+  readonly waitUntilMs: number | null;
+  readonly nowMs: number;
+  /** A retry is out right now (the automatic one at the end of the wait). */
+  readonly retrying: boolean;
+  readonly wordsShown: boolean;
+  readonly signInNeeded: boolean;
+}): PublishOwedView {
+  if (input.signInNeeded) {
+    return { textKey: "recovery_phrase.fresh.sign_in_to_finish", minutes: null, tryAgain: false, waiting: false };
+  }
+  const owedKey = input.wordsShown ? "recovery_phrase.fresh.publish_owed" : "account.keys_changed.finishing";
+  const leftMs = input.waitUntilMs === null ? 0 : input.waitUntilMs - input.nowMs;
+  if (input.waitUntilMs === null || (leftMs <= 0 && !input.retrying)) {
+    return { textKey: owedKey, minutes: null, tryAgain: true, waiting: false };
+  }
+  const minutes = Math.max(1, Math.ceil(Math.max(0, leftMs) / 60_000));
+  const waitingKey = input.wordsShown ? "recovery_phrase.fresh.publish_waiting" : "account.keys_changed.waiting";
+  return { textKey: waitingKey, minutes, tryAgain: false, waiting: true };
 }
 
 /** Whether a stored attestation may still be applied, or the person must

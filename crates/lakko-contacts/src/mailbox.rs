@@ -210,16 +210,20 @@ pub enum MailboxKind {
     /// A signed link refusal ([`crate::link_refusal`], ADR-0079 amendment of
     /// 2026-10-19).
     LinkRefusal,
+    /// A conversation re-entry request ([`crate::conversation_reentry`],
+    /// ADR-0091 phase 2, route 2: a one-to-one).
+    ConversationReentry,
 }
 
 impl MailboxKind {
     /// Every kind, in wire-byte order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::ContactRequest,
         Self::Welcome,
         Self::ContactAck,
         Self::WelcomeRendezvous,
         Self::LinkRefusal,
+        Self::ConversationReentry,
     ];
 
     /// The frozen wire byte.
@@ -231,6 +235,7 @@ impl MailboxKind {
             Self::ContactAck => 0x03,
             Self::WelcomeRendezvous => 0x04,
             Self::LinkRefusal => 0x05,
+            Self::ConversationReentry => 0x06,
         }
     }
 
@@ -246,6 +251,7 @@ impl MailboxKind {
             0x03 => Ok(Self::ContactAck),
             0x04 => Ok(Self::WelcomeRendezvous),
             0x05 => Ok(Self::LinkRefusal),
+            0x06 => Ok(Self::ConversationReentry),
             other => Err(MailboxError::UnknownKind(other)),
         }
     }
@@ -706,12 +712,12 @@ mod tests {
 
     #[test]
     fn kind_bytes_are_frozen() {
-        let expected = [1u8, 2, 3, 4, 5];
+        let expected = [1u8, 2, 3, 4, 5, 6];
         for (kind, byte) in MailboxKind::ALL.iter().zip(expected) {
             assert_eq!(kind.to_byte(), byte);
             assert_eq!(MailboxKind::from_byte(byte), Ok(*kind));
         }
-        for byte in [0u8, 6, 0x7F, 0xFF] {
+        for byte in [0u8, 7, 0x7F, 0xFF] {
             assert_eq!(
                 MailboxKind::from_byte(byte),
                 Err(MailboxError::UnknownKind(byte))

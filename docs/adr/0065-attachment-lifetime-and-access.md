@@ -300,3 +300,41 @@ what Pin and Save are for.
    and for unsent uploads; the keep tick.
 4. Clients: Save, the mark, Select mode, the Saved screen.
 5. A `lakko-security` pass; documents.
+
+## Amendment (2026-11-19): blob bytes in S3-compatible object storage
+
+**Decided by the maintainer 2026-11-19.** The production server has an 80 GB disk that
+also holds MariaDB, the logs and the backup staging area; blob bytes are what grows. They
+move to an S3-compatible bucket (Hetzner Object Storage, location NBG1, the same network
+zone as the server, where traffic between the two is free).
+
+1. **The storage service stays the only door.** Clients keep talking to
+   `storage.lakko.me` exactly as before: the passes, budgets, the index, the delete key,
+   the sweep and every route and status are unchanged. Only where the bytes rest changes.
+   Clients are not given bucket URLs (presigned or otherwise): the bucket operator would
+   then see each client's address next to each blob it fetches (the linkage ADR-0078
+   removes), and a client behind the anti-censorship tunnel (ADR-0026) reaches only our
+   server.
+2. **Two backends behind one interface:** the local directory (as today; for development
+   and a single small server) and S3, chosen by configuration
+   (`LAKKO_STORAGE_S3_*`; unset = local). The node name in the index rows does not
+   change with the backend.
+3. **Upload order is unchanged in what it guarantees:** the body is streamed to a local
+   temporary file and checked against its content address, then written to the bucket,
+   then the index row is written. A failed bucket write leaves no row. The free-space
+   guard still covers the local temporary files and the account backups, which stay on
+   the local disk.
+4. **Delete and sweep** delete the row first, then the object, as with files; an object
+   left behind is unreachable and is reported in the log.
+5. **Moving existing blobs** is a one-time command that copies every local blob file into
+   the bucket (skipping objects already there, checking each copy) and deletes nothing;
+   the operator removes the local files after checking.
+6. **Backups.** Blob bytes leave the nightly restic backup; their durability is the
+   bucket's. Losing them loses attachments, not accounts or conversations. The database
+   (with the index) and the secrets are still backed up nightly.
+7. **What the bucket operator learns:** the number, sizes and timing of opaque
+   content-addressed ciphertext objects, all requested from one server address. The same
+   as the server's own disk tells the server operator; nothing about accounts.
+
+Library: `rusty-s3` (request signing only, `rustcrypto` feature) with the `reqwest` the
+workspace already uses on `ring`; no `aws-lc` (ADR-0026's build lesson).

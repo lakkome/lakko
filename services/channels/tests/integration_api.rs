@@ -1725,7 +1725,7 @@ async fn items_carry_the_band_not_the_count_and_unknown_topics_file_under_other(
     assert!(items[0].get("count").is_none());
 }
 
-/// Moderator statements for the ADR-0089 tests: a software security key on a
+/// Moderator statements for the ADR-0098 tests: a software security key on a
 /// list signed by a test root.
 mod moderation {
     use lakko_crypto::signing::SigningKey;
@@ -3159,4 +3159,62 @@ async fn a_statement_from_the_future_is_refused() {
         .unwrap();
     assert_eq!(resp.status(), 400);
     assert_eq!(error_of(resp).await, "future-statement");
+}
+
+/// ADR-0096: a driven route moves the domain counters, an error response
+/// carries its code as the `code` label, and the exposition holds no
+/// identifier (the channel id of this test is not in it).
+#[tokio::test]
+async fn routes_move_their_metrics() {
+    let metrics = lakko_metrics::install("channels", "0.0.0").unwrap();
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    client
+        .post(format!("http://{addr}/v1/channels"))
+        .json(&create_body())
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/posts"))
+        .body(vec![7, 7, 7])
+        .owner_send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let resp = client
+        .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/posts"))
+        .body(Vec::<u8>::new())
+        .owner_send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    // No proof at all.
+    let resp = client
+        .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/posts"))
+        .body(vec![1])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    let text = metrics.render();
+    lakko_metrics::exposition::assert_clean(&text, &["step", "kind", "reason"], &[]);
+    assert!(!text.contains(CHANNEL_HEX), "{text}");
+    assert!(
+        text.contains("lakko_channels_posts_total{outcome=\"ok\"}"),
+        "{text}"
+    );
+    assert!(
+        text.contains("lakko_channels_posts_total{outcome=\"rejected\"}"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "lakko_channels_proof_refusals_total{kind=\"copublisher\",reason=\"malformed\"}"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("code=\"empty-post\""), "{text}");
+    assert!(text.contains("code=\"owner-proof-required\""), "{text}");
 }

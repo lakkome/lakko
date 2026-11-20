@@ -775,6 +775,7 @@ dependencies = [
 name = "lakko-attest"
 version = "0.0.0"
 dependencies = [
+ "lakko-contacts",
  "lakko-crypto",
  "thiserror 1.0.69",
 ]
@@ -861,6 +862,7 @@ name = "lakko-sync"
 version = "0.0.0"
 dependencies = [
  "lakko-contacts",
+ "lakko-crypto",
  "serde",
  "thiserror 1.0.69",
 ]

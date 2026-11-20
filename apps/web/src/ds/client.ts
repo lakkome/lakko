@@ -216,11 +216,26 @@ export interface FetchResult {
    *  registered on the DS for it (`latest_epoch`). Absent for an unclaimed
    *  journal and for a mailbox. */
   latestEpoch?: number;
+  /** ADR-0091 - a signed read of a CLAIMED group journal only: the commit row
+   *  the DS registered for each epoch above the one the read was signed at
+   *  (`commits`), keyed by the epoch the row moves the journal TO. Row `id` of
+   *  entry `n` is THE commit from `n - 1` to `n` (ADR-0081: registered with
+   *  its row in one transaction); a commit-shaped row posted through the plain
+   *  publish route is never named. Absent where `latestEpoch` is. */
+  registeredCommits?: ReadonlyMap<bigint, number>;
 }
 
 /** Programmer error — surfaced before any network call. */
 export class DsClientArgError extends Error {
   override name = "DsClientArgError";
+}
+
+/** The endpoint as it may appear in an error message: the route without its
+ *  query and with every run of 16 or more hex digits (a journal, mailbox or
+ *  rendezvous id) replaced by `:id`. Error messages reach logs, which carry no
+ *  identifier (ADR-0078 section 11); `DsHttpError.endpoint` keeps the full value. */
+export function redactedEndpoint(endpoint: string): string {
+  return endpoint.split("?", 1)[0]!.replace(/[0-9a-fA-F]{16,}/g, ":id");
 }
 
 /** Server returned a non-2xx. */
@@ -235,7 +250,7 @@ export class DsHttpError extends Error {
      *  device's clock is wrong, and the user is told so. */
     public readonly clockSkewed: boolean = false,
   ) {
-    super(`ds ${endpoint} → ${status}: ${body}`);
+    super(`ds ${redactedEndpoint(endpoint)} → ${status}: ${body}`);
   }
 }
 
@@ -243,7 +258,7 @@ export class DsHttpError extends Error {
 export class DsNetworkError extends Error {
   override name = "DsNetworkError";
   constructor(public readonly endpoint: string, cause: unknown) {
-    super(`ds ${endpoint} network error: ${String(cause)}`);
+    super(`ds ${redactedEndpoint(endpoint)} network error: ${String(cause)}`);
   }
 }
 
@@ -442,7 +457,7 @@ export class DsClient implements StatementSender, CommitSender {
     },
     signer: ProofSigner | null,
   ): Promise<Response> {
-    // ADR-0089 step 3: a suspended account sends nothing from this device.
+    // ADR-0098 step 3: a suspended account sends nothing from this device.
     // The Delivery Service does not know accounts, so the client honours the
     // suspension: every write is refused here as a transport failure (the
     // loops back off and try again once the suspension has ended); reads go
@@ -998,7 +1013,9 @@ export class DsClient implements StatementSender, CommitSender {
       messages: { id: number; payload_b64: string; created_at: string; reach_pk_b64?: unknown }[];
       has_more: boolean;
       latest_epoch?: number;
+      commits?: unknown;
     };
+    const registeredCommits = parseRegisteredCommits(json.commits);
     return {
       messages: json.messages.map((m) => {
         let reachPk: Uint8Array | undefined;
@@ -1019,8 +1036,28 @@ export class DsClient implements StatementSender, CommitSender {
       }),
       hasMore: json.has_more,
       ...(typeof json.latest_epoch === "number" ? { latestEpoch: json.latest_epoch } : {}),
+      ...(registeredCommits === undefined ? {} : { registeredCommits }),
     };
   }
+}
+
+/**
+ * ADR-0091 - the `commits` field of a signed journal read: `[{epoch, id}]`.
+ * An entry that is not two non-negative safe integers is dropped (it names
+ * nothing this client can hold a row for); a missing or non-array field is
+ * `undefined`.
+ */
+export function parseRegisteredCommits(raw: unknown): ReadonlyMap<bigint, number> | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out = new Map<bigint, number>();
+  for (const entry of raw as unknown[]) {
+    if (entry === null || typeof entry !== "object") continue;
+    const { epoch, id } = entry as { epoch?: unknown; id?: unknown };
+    if (typeof epoch !== "number" || typeof id !== "number") continue;
+    if (!Number.isSafeInteger(epoch) || !Number.isSafeInteger(id) || epoch < 0 || id < 0) continue;
+    out.set(BigInt(epoch), id);
+  }
+  return out;
 }
 
 /**

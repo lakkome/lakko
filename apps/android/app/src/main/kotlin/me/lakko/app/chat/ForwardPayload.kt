@@ -84,6 +84,30 @@ public fun forwardPayloadOf(
 }
 
 /**
+ * ADR-0092 / `docs/ux/attachments.md` sections 10.1 and 11a — whether a
+ * message carrying [content] may be forwarded. A poll and a checklist never
+ * are: their votes and ticks belong to the conversation they were cast in. A
+ * contact card is forwarded only when [cardShareable] says the person on it
+ * lets others share their card (the newest profile this device holds from
+ * them; none held counts as yes). A location, an article and an ordinary
+ * message are.
+ */
+public fun isForwardableContent(
+    content: uniffi.lakko_ffi_uniffi.MessageContent?,
+    cardShareable: (accountKey: ByteArray) -> Boolean,
+): Boolean = when (content) {
+    is uniffi.lakko_ffi_uniffi.MessageContent.Poll,
+    is uniffi.lakko_ffi_uniffi.MessageContent.Checklist,
+    -> false
+    is uniffi.lakko_ffi_uniffi.MessageContent.ContactCard -> cardShareable(content.card.accountKey)
+    else -> true
+}
+
+/** [isForwardableContent] read off a row. */
+public fun isForwardableMessage(message: ChatMessage, cardShareable: (accountKey: ByteArray) -> Boolean): Boolean =
+    isForwardableContent(message.content, cardShareable)
+
+/**
  * The parsed envelope's three fields folded into a [ForwardRef], or `null`
  * for an ordinary message.
  *

@@ -6,7 +6,7 @@ package me.lakko.app.ui.suspension
 import uniffi.lakko_ffi_uniffi.InfoSection
 
 /**
- * ADR-0089 section 4 - the info blocks a suspended account is not offered:
+ * ADR-0098 section 4 - the info blocks a suspended account is not offered:
  * calls and adding people (a contact, a member, an invite link, invitations).
  * Everything else of the shared rule's answer stays, in its order.
  */

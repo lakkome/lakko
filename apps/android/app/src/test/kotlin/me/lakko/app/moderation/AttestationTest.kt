@@ -20,7 +20,7 @@ import uniffi.lakko_ffi_uniffi.MessageBodyKind
 import uniffi.lakko_ffi_uniffi.ParsedBody
 import uniffi.lakko_ffi_uniffi.ProcessedMessage
 
-/** ADR-0089 section 1 — attested chat messages on the receive path and in the store. */
+/** ADR-0098 section 1 — attested chat messages on the receive path and in the store. */
 class AttestationTest {
 
     private val envelope = """{"v":1,"text":"hello"}""".toByteArray()
@@ -121,7 +121,7 @@ class AttestationTest {
         assertEquals(AttestationVerdict.ABSENT, AttestationVerdict.fromWire("absent"))
     }
 
-    // ADR-0089 F10 — attesting is the default; the sends that must not attest say so.
+    // ADR-0098 F10 — attesting is the default; the sends that must not attest say so.
 
     private fun source(path: String): String = java.io.File("src/main/kotlin/me/lakko/app/$path").readText()
 

@@ -128,6 +128,13 @@ public interface GroupCallPort {
     /** `Group.isActive`, `null` when unknown or not joined. */
     public fun isGroupActive(groupIdHex: String): Boolean?
 
+    /**
+     * ADR-0091 (maintainer, 2026-11-20) — `true` while this device is behind
+     * in [groupIdHex]: a start or join fails with the ordinary text before
+     * anything is captured, announced or connected.
+     */
+    public fun behindHeld(groupIdHex: String): Boolean = false
+
     /** Bring the group up to date before joining a call in it. May throw. */
     public suspend fun syncGroup(groupIdHex: String)
 
@@ -580,6 +587,10 @@ public class GroupCallHost(
         }
         val initiator = joinCallIdHex == null
         val fallbackKey = if (initiator) "call.error.start_group" else "call.error.join_group"
+        // ADR-0091 — a chat this device is behind in: the ordinary
+        // could-not-start (could-not-join) outcome, before the slot is taken
+        // or anything is published. Nothing says why.
+        if (p.behindHeld(groupIdHex)) return GroupCallStartOutcome.Failed(UiText(fallbackKey))
         val callId = if (initiator) {
             ByteArray(CALL_ID_BYTES).also { SecureRandom().nextBytes(it) }
         } else {

@@ -18,9 +18,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -42,6 +39,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import me.lakko.app.R
 
 /** The label [LakkoPicker] shows for [selected]: its option's text, else empty. */
 internal fun <T> lakkoPickerLabel(selected: T, options: List<Pair<T, String>>): String =
@@ -86,11 +84,11 @@ public fun <T> LakkoPicker(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f, fill = false),
             )
-            Icon(
-                Icons.Filled.KeyboardArrowDown,
+            LkIcon(
+                R.drawable.ic_lk_chevron_up_down,
                 contentDescription = null,
                 tint = scheme.onSurfaceVariant,
-                modifier = Modifier.size(20.dp),
+                size = LkIconSize.Row,
             )
         }
     }
@@ -128,11 +126,11 @@ public fun <T> LakkoPicker(
                     ) {
                         Text(label, fontSize = 15.sp, modifier = Modifier.weight(1f))
                         if (isCurrent) {
-                            Icon(
-                                Icons.Filled.Check,
+                            LkIcon(
+                                R.drawable.ic_lk_checkmark,
                                 contentDescription = null,
                                 tint = scheme.primary,
-                                modifier = Modifier.size(20.dp),
+                                size = LkIconSize.Row,
                             )
                         }
                     }

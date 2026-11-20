@@ -40,6 +40,15 @@ import me.lakko.app.profile.toFfi
  * (`heldMessages`, shown on the new device as display-only copies and never
  * sent from it).
  *
+ * Version 4 (flag day, v3 refused) adds `channelSeeds`: for each channel the
+ * account's channel subscription register lists as live on the sending
+ * device, the newest content-key seeds it holds (at most
+ * [MAX_SEEDS_PER_CHANNEL], ascending by epoch), so a new device opens the
+ * posts the sending device could read and not only the newest four periods
+ * the channel service keeps per subscriber key (docs/ux/second-device.md
+ * section 4a). The channel list itself, the shared subscriber key and the
+ * read key travel in that register (lakko-sync), not here.
+ *
  * Mirror of `apps/web/src/devices/state-bundle.ts`. The JSON shape, the row
  * magic and the exporter label are byte-identical so a web scanner and an
  * Android joiner (and the reverse) interoperate: field names are the web
@@ -138,6 +147,23 @@ public object StateBundle {
         val heldMessages: List<CarriedHeldMessage> = emptyList(),
     )
 
+    /** v4 — one content-key seed of a channel epoch. [seedB64] is key
+     *  material (standard base64 of 32 bytes): it travels only inside the
+     *  sealed bundle and never prints. */
+    public data class CarriedChannelSeed(
+        val epoch: Long,
+        val seedB64: String,
+    ) {
+        override fun toString(): String = "CarriedChannelSeed($epoch, <redacted>)"
+    }
+
+    /** v4 — the seeds of one channel (16-byte id, standard base64), at most
+     *  [MAX_SEEDS_PER_CHANNEL], strictly ascending by epoch. */
+    public data class CarriedChannelSeeds(
+        val channelIdB64: String,
+        val seeds: List<CarriedChannelSeed>,
+    )
+
     /** The bundle; `v` is always [VERSION]. */
     public data class Bundle(
         val contacts: List<CarriedContact>,
@@ -153,11 +179,26 @@ public object StateBundle {
         val profiles: List<CarriedProfile> = emptyList(),
         /** v3: at most [MAX_PENDING_CONTACTS]. */
         val pendingContacts: List<CarriedPendingContact> = emptyList(),
+        /** v4: at most [MAX_CHANNEL_SEED_ENTRIES], one per channel id,
+         *  ascending by channel id bytes. */
+        val channelSeeds: List<CarriedChannelSeeds> = emptyList(),
     )
 
     /** The one bundle version this build writes and reads (flag day: a
      *  bundle of any other version is refused). */
-    public const val VERSION: Long = 3L
+    public const val VERSION: Long = 4L
+
+    /** v4 decode bounds: channels in `channelSeeds`, seeds per channel. */
+    public const val MAX_CHANNEL_SEED_ENTRIES: Int = 1000
+    public const val MAX_SEEDS_PER_CHANNEL: Int = 32
+
+    /** The per-channel seed counts the builder tries, largest first, until
+     *  the bundle fits its cap (seeds never push out another array). */
+    internal val CHANNEL_SEED_LADDER: List<Int> = listOf(32, 16, 8, 4, 0)
+
+    private const val CHANNEL_ID_LEN: Int = 16
+    private const val CHANNEL_SEED_LEN: Int = 32
+    private const val MAX_EPOCH: Long = 0xFFFFFFFFL
 
     /** Decode bounds of the v3 arrays (chosen, not measured). Over a bound
      *  the whole bundle is refused; the builder keeps the first N. */
@@ -290,6 +331,31 @@ public object StateBundle {
                     }
                 },
             )
+            put(
+                "channelSeeds",
+                buildJsonArray {
+                    for (c in bundle.channelSeeds) {
+                        add(
+                            buildJsonObject {
+                                put("channelIdB64", c.channelIdB64)
+                                put(
+                                    "seeds",
+                                    buildJsonArray {
+                                        for (seed in c.seeds) {
+                                            add(
+                                                buildJsonObject {
+                                                    put("epoch", seed.epoch)
+                                                    put("seedB64", seed.seedB64)
+                                                },
+                                            )
+                                        }
+                                    },
+                                )
+                            },
+                        )
+                    }
+                },
+            )
         }
         return obj.toString().toByteArray(Charsets.UTF_8)
     }
@@ -358,7 +424,37 @@ public object StateBundle {
         val groupNames = decodeGroupNames(root["groupNames"] as? JsonArray ?: return null) ?: return null
         val profiles = decodeProfiles(root["profiles"] as? JsonArray ?: return null) ?: return null
         val pending = decodePendingContacts(root["pendingContacts"] as? JsonArray ?: return null) ?: return null
-        return Bundle(contacts, pins, groups, own, groupNames, profiles, pending)
+        val channelSeeds = decodeChannelSeeds(root["channelSeeds"] as? JsonArray ?: return null) ?: return null
+        return Bundle(contacts, pins, groups, own, groupNames, profiles, pending, channelSeeds)
+    }
+
+    /** v4 — `channelSeeds`, fail closed: any violation refuses the bundle. */
+    private fun decodeChannelSeeds(arr: JsonArray): List<CarriedChannelSeeds>? {
+        if (arr.size > MAX_CHANNEL_SEED_ENTRIES) return null
+        val out = ArrayList<CarriedChannelSeeds>(arr.size)
+        val seen = HashSet<String>()
+        for (el in arr) {
+            val r = el as? JsonObject ?: return null
+            val id = r.string("channelIdB64") ?: return null
+            val idBytes = standardBase64OfLength(id, CHANNEL_ID_LEN) ?: return null
+            // One entry per channel id: a repeat refuses the bundle.
+            if (!seen.add(hexOf(idBytes))) return null
+            val seedsArr = r["seeds"] as? JsonArray ?: return null
+            if (seedsArr.isEmpty() || seedsArr.size > MAX_SEEDS_PER_CHANNEL) return null
+            val seeds = ArrayList<CarriedChannelSeed>(seedsArr.size)
+            var last = -1L
+            for (sEl in seedsArr) {
+                val o = sEl as? JsonObject ?: return null
+                val epoch = o.integer("epoch") ?: return null
+                if (epoch < 0L || epoch > MAX_EPOCH || epoch <= last) return null
+                last = epoch
+                val seedB64 = o.string("seedB64") ?: return null
+                standardBase64OfLength(seedB64, CHANNEL_SEED_LEN)?.fill(0) ?: return null
+                seeds += CarriedChannelSeed(epoch, seedB64)
+            }
+            out += CarriedChannelSeeds(id, seeds)
+        }
+        return out
     }
 
     private fun decodeGroupNames(arr: JsonArray): List<CarriedGroupName>? {
@@ -607,7 +703,127 @@ public object StateBundle {
             compose = codecs.composeProfile,
         )
         val pending = carriedPendingContacts(pendingContacts, heldSends, heldCopies)
-        return fitToSizeCap(Bundle(contacts, pins, groups, ownPredecessors, groupNames, profiles, pending))
+        val fitted = fitToSizeCap(Bundle(contacts, pins, groups, ownPredecessors, groupNames, profiles, pending))
+        // v4 — the channel seeds last, so they never push out another array.
+        val seeds = try {
+            channelSeedSource?.invoke(accountIdB64).orEmpty()
+        } catch (cause: Throwable) {
+            android.util.Log.w("StateBundle", "channel seeds not read: ${cause.javaClass.simpleName}")
+            emptyMap()
+        }
+        return withChannelSeeds(fitted, seeds)
+    }
+
+    /**
+     * v4 — the seeds this device sends ([build]): channel id (32 lowercase
+     * hex) -> epoch -> seed, for each channel the account's channel
+     * subscription register lists as LIVE on this device. Set by the session
+     * shell from the bound channels state; `null` sends none.
+     */
+    @Volatile
+    public var channelSeedSource: ((accountIdB64: String) -> Map<String, Map<UInt, ByteArray>>)? = null
+
+    /**
+     * v4 — where a received bundle's seeds go when a channels state is
+     * bound to that account: channel id (hex) -> epoch -> seed; the sink adds
+     * those it holds no seed of that epoch for and answers how many, or
+     * `null` when no state is bound to the account (the bundle then writes
+     * the account's stored seed map). Set by the session shell.
+     */
+    @Volatile
+    public var channelSeedSink: ((accountIdB64: String, seeds: Map<String, Map<UInt, ByteArray>>) -> Int?)? = null
+
+    /**
+     * v4 — the `channelSeeds` entries of [seedsByChannel]: per channel (one
+     * entry each, ascending by channel id bytes, channels with no seed
+     * skipped) the newest [perChannel] seeds, ascending by epoch. A key that
+     * is not a 16-byte hex id or a seed that is not 32 bytes is skipped.
+     */
+    internal fun carriedChannelSeeds(
+        seedsByChannel: Map<String, Map<UInt, ByteArray>>,
+        perChannel: Int,
+    ): List<CarriedChannelSeeds> {
+        if (perChannel <= 0) return emptyList()
+        val enc = Base64.getEncoder()
+        val out = ArrayList<CarriedChannelSeeds>()
+        val ids = seedsByChannel.keys.mapNotNull { k ->
+            val bytes = bytesOfHex(k.lowercase())?.takeIf { it.size == CHANNEL_ID_LEN } ?: return@mapNotNull null
+            Triple(hexOf(bytes), k, bytes)
+        }.sortedBy { it.first }
+        for ((_, key, bytes) in ids) {
+            if (out.size >= MAX_CHANNEL_SEED_ENTRIES) break
+            val seeds = seedsByChannel[key].orEmpty()
+                .filter { it.value.size == CHANNEL_SEED_LEN }
+                .entries
+                .sortedBy { it.key }
+                .takeLast(minOf(perChannel, MAX_SEEDS_PER_CHANNEL))
+                .map { CarriedChannelSeed(it.key.toLong(), enc.encodeToString(it.value)) }
+            if (seeds.isEmpty()) continue
+            out += CarriedChannelSeeds(enc.encodeToString(bytes), seeds)
+        }
+        return out
+    }
+
+    /**
+     * v4 — [bundle] (already within [cap]) with the channel seeds of
+     * [seedsByChannel] added: 32 per channel, and while the encoded bundle is
+     * over [cap] fewer for every channel at once ([CHANNEL_SEED_LADDER]),
+     * down to none. Nothing else in [bundle] changes.
+     */
+    internal fun withChannelSeeds(
+        bundle: Bundle,
+        seedsByChannel: Map<String, Map<UInt, ByteArray>>,
+        cap: Int = MAX_BUNDLE_BYTES,
+    ): Bundle {
+        for (perChannel in CHANNEL_SEED_LADDER) {
+            val candidate = bundle.copy(channelSeeds = carriedChannelSeeds(seedsByChannel, perChannel))
+            if (perChannel == 0 || encode(candidate).size <= cap) return candidate
+        }
+        return bundle.copy(channelSeeds = emptyList())
+    }
+
+    /** v4 — every seed [carried] names, by channel id hex (the sink keeps
+     *  only those not held, [channelSeedsToAdd]). */
+    internal fun channelSeedsCarried(carried: List<CarriedChannelSeeds>): Map<String, Map<UInt, ByteArray>> =
+        channelSeedsToAdd(carried, emptyMap())
+
+    /**
+     * v4 — the seeds of [carried] this device does not hold yet ([held]:
+     * channel id hex -> epoch -> seed): a seed held for an epoch is never
+     * overwritten. Keys of the result are lowercase hex.
+     */
+    internal fun channelSeedsToAdd(
+        carried: List<CarriedChannelSeeds>,
+        held: Map<String, Map<UInt, ByteArray>>,
+    ): Map<String, Map<UInt, ByteArray>> {
+        val dec = Base64.getDecoder()
+        val heldLower = held.mapKeys { it.key.lowercase() }
+        val out = LinkedHashMap<String, Map<UInt, ByteArray>>()
+        for (c in carried) {
+            val id = try {
+                dec.decode(c.channelIdB64)
+            } catch (_: IllegalArgumentException) {
+                continue
+            }
+            if (id.size != CHANNEL_ID_LEN) continue
+            val hex = hexOf(id)
+            val have = heldLower[hex].orEmpty()
+            val add = LinkedHashMap<UInt, ByteArray>()
+            for (seed in c.seeds) {
+                if (seed.epoch < 0L || seed.epoch > MAX_EPOCH) continue
+                val epoch = seed.epoch.toUInt()
+                if (have.containsKey(epoch)) continue
+                val bytes = try {
+                    dec.decode(seed.seedB64)
+                } catch (_: IllegalArgumentException) {
+                    continue
+                }
+                if (bytes.size != CHANNEL_SEED_LEN) continue
+                add[epoch] = bytes
+            }
+            if (add.isNotEmpty()) out[hex] = add
+        }
+        return out
     }
 
     /** The encoded bundle size the decoder accepts. Visible for tests. */
@@ -715,6 +931,7 @@ public object StateBundle {
             },
             grants = emptyList(),
             avatar = p.avatar?.toFfi(),
+            cardShareable = p.cardShareable,
         )
         return try {
             uniffi.lakko_ffi_uniffi.composeProfileEnvelope(ffi(withCertificate = true))
@@ -1167,6 +1384,8 @@ public object StateBundle {
         val profiles: Int = 0,
         /** v3: pending contacts added. */
         val pendingContacts: Int = 0,
+        /** v4: channel seeds added (none held for that epoch before). */
+        val channelSeeds: Int = 0,
     )
 
     /**
@@ -1375,6 +1594,26 @@ public object StateBundle {
             android.util.Log.w("StateBundle", "profiles not stored: ${cause.javaClass.simpleName}")
             0
         }
+        // v4 — the channel seeds, never over a seed held for that epoch; kept
+        // for a channel whose register has not arrived yet.
+        val seedsApplied = if (bundle.channelSeeds.isEmpty()) {
+            0
+        } else {
+            try {
+                val carried = channelSeedsCarried(bundle.channelSeeds)
+                channelSeedSink?.invoke(owner, carried)
+                    ?: me.lakko.app.channels.ChannelsUiState.storeCarriedSeeds(
+                        me.lakko.app.channels.SharedPreferencesChannelLogStore(
+                            me.lakko.app.channels.ChannelKeyStore.encryptedPrefs(context),
+                        ),
+                        owner,
+                        carried,
+                    )
+            } catch (cause: Throwable) {
+                android.util.Log.w("StateBundle", "channel seeds not stored: ${cause.javaClass.simpleName}")
+                0
+            }
+        }
         return Applied(
             contacts = contactsApplied,
             pins = pins,
@@ -1383,6 +1622,7 @@ public object StateBundle {
             groupNames = namesApplied,
             profiles = profilesApplied,
             pendingContacts = pendingApplied,
+            channelSeeds = seedsApplied,
         )
     }
 

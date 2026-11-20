@@ -209,6 +209,7 @@ impl LogStore {
         }
 
         tracing::info!(size = log.size(), "transparency log rebuilt from DB");
+        crate::metrics::log_size(log.size());
 
         // ADR-0020 Sprint 4: restore the last witness-co-signed root, so a
         // restart serves the same co-signed `(tree_root, log_size)` without
@@ -220,6 +221,7 @@ impl LogStore {
                 cosig_count = w.cosigs.len(),
                 "restored witnessed root co-signature bundle"
             );
+            crate::metrics::cosigned(w.log_size, false);
         }
 
         Ok(Self {
@@ -308,6 +310,7 @@ impl LogStore {
                     "transparency append is a no-op (identity already latest) — \
                      returning existing coordinates"
                 );
+                crate::metrics::append(crate::metrics::AppendOutcome::Unchanged);
                 return Ok(AppendResult {
                     idx: *latest_idx,
                     version: *latest_version,
@@ -427,6 +430,8 @@ impl LogStore {
             return Err(StoreError::Db(e));
         }
 
+        crate::metrics::append(crate::metrics::AppendOutcome::Appended);
+        crate::metrics::log_size(log.size());
         Ok(AppendResult { idx, version })
     }
 
@@ -546,6 +551,7 @@ impl LogStore {
         // stays readable.
         let cosigs = fan_out_cosigs(pool, witnesses, &head_root, head_size, &proofs).await;
 
+        crate::metrics::witnesses_answered(cosigs.len());
         if cosigs.is_empty() {
             // Every witness was down/refused — serve an empty bundle (the client
             // fails closed on the threshold). Do NOT cache: no witnessed row is
@@ -564,6 +570,7 @@ impl LogStore {
         if let Err(e) = persist_witnessed(pool, &head_root.tree_root, head_size, &cosigs).await {
             tracing::error!(error = %e, "persist witnessed bundle failed (cached in-memory)");
         }
+        crate::metrics::cosigned(head_size, true);
         *self.witnessed.lock().await = Some(Witnessed {
             tree_root: head_root.tree_root,
             log_size: head_size,
@@ -688,6 +695,7 @@ async fn fan_out_cosigs(
     for (witness_index, result) in cosign_results {
         match result {
             Ok(cosig) if cosig.len() == WITNESS_COSIG_LEN => {
+                crate::metrics::witness_cosign(crate::metrics::CosignOutcome::Ok);
                 cosigs.push(cosig);
                 // This witness co-signed the current head → advance ITS
                 // high-water so its next proof starts from here. A persist
@@ -709,6 +717,7 @@ async fn fan_out_cosigs(
                 }
             },
             Ok(cosig) => {
+                crate::metrics::witness_cosign(crate::metrics::CosignOutcome::BadResponse);
                 // A wrong-length blob would break the fixed-chunk bundle framing
                 // (and a client would reject it anyway) — drop it. Left the
                 // high-water untouched → the witness re-proves next round.
@@ -719,6 +728,7 @@ async fn fan_out_cosigs(
                 );
             },
             Err(e) => {
+                crate::metrics::witness_cosign(e.outcome());
                 // Left this witness's high-water untouched → the next growth
                 // re-sends a proof from its own (still-old) base and it
                 // auto-rejoins. No permanent stranding (ADR-0039 S3b). A reqwest

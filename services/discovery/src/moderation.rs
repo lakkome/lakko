@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The moderator actions discovery applies ([ADR-0089] section 4, step 5).
+//! The moderator actions discovery applies ([ADR-0098] section 4, step 5).
 //!
 //! A moderator signs a statement with a security key; the moderation service
 //! logs it and forwards it to discovery's internal listener
-//! (`LAKKO_DISCOVERY_INTERNAL_BIND`, default [`DEFAULT_INTERNAL_BIND`],
+//! (`LAKKO_DISCOVERY_MODERATION_BIND`, default [`DEFAULT_INTERNAL_BIND`],
 //! loopback, never proxied by nginx). Every request presents
 //! `x-lakko-internal-secret` = `LAKKO_DISCOVERY_INTERNAL_SECRET` (standard
 //! base64 of at least [`MIN_SECRET_LEN`] bytes, compared in constant time).
@@ -65,7 +65,7 @@
 //!
 //! An hourly pruner deletes holds past their end with their claims.
 //!
-//! [ADR-0089]: ../../../docs/adr/0089-reporting-and-moderation.md
+//! [ADR-0098]: ../../../docs/adr/0098-reporting-and-moderation.md
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -95,7 +95,7 @@ use crate::AppState;
 pub(crate) const CLAIM_MODERATION_HOLD: u8 = 3;
 
 /// How long a taken-back name is held: 180 days from the statement's issue
-/// time (ADR-0089 section 4). Chosen, not measured.
+/// time (ADR-0098 section 4). Chosen, not measured.
 pub(crate) const HOLD_MS: u64 = 180 * 86_400 * 1000;
 
 /// `handles.moderation`: nothing.
@@ -122,7 +122,7 @@ pub(crate) const MIN_SECRET_LEN: usize = 16;
 /// of up to 64 entries and a few short fields, in base64.
 const MAX_INTERNAL_BODY_BYTES: usize = 256 * 1024;
 
-const BIND_VAR: &str = "LAKKO_DISCOVERY_INTERNAL_BIND";
+const BIND_VAR: &str = "LAKKO_DISCOVERY_MODERATION_BIND";
 const SECRET_VAR: &str = "LAKKO_DISCOVERY_INTERNAL_SECRET";
 const ROOT_KEY_VAR: &str = "LAKKO_DISCOVERY_MODERATION_ROOT_KEY";
 

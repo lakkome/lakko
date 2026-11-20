@@ -108,7 +108,7 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
     /// yet: a take on an empty context waits for it.
     private var initialPending: Set<AnonTokenContext> = []
     private var lastFailure: [AnonTokenContext: AnonTokenUnavailable] = [:]
-    /// Whether the signed-in account is suspended (ADR-0089 step 3). The
+    /// Whether the signed-in account is suspended (ADR-0098 step 3). The
     /// process-wide token provider; a test replaces it.
     var suspended: @Sendable () -> Bool = { SessionTokenProvider.shared.isSuspended }
 
@@ -226,7 +226,7 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
     private func scheduledRefill(_ context: AnonTokenContext, generation: Int) async {
         let task: Task<Void, Never>? = lock.withLock {
             guard generation == self.generation else { return nil }
-            // ADR-0089 step 3 — a suspended account draws `blob-read` only;
+            // ADR-0098 step 3 — a suspended account draws `blob-read` only;
             // the other contexts wait, and are topped up when it ends
             // (``runScheduledRefills()``).
             guard Self.issuesWhileSuspended(context, suspended: suspended()) else { return nil }

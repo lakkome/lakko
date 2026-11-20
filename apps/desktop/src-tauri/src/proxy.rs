@@ -7,8 +7,13 @@
 //! - `/api/<service>/...` for a known service: forwarded to the one configured
 //!   Lakko origin with the same method, headers and body;
 //! - `/__probe...`: the S1 measurement page (`probe.rs`);
+//! - `/__host/engines/...`: the system's translation and transcription
+//!   (`engines.rs`);
 //! - anything else: the bundled web build, with `index.html` for a path that
 //!   names no file (the web client's routes).
+//!
+//! The collapsed call's own window (`call_window.rs`) gets less: its routes
+//! and the static files of its page, and nothing else.
 //!
 //! Nothing else is reachable: the handler never forwards to a host the page
 //! names, so it is not an open relay.
@@ -24,7 +29,7 @@ use tauri::Manager;
 
 use crate::save_file;
 use crate::tunnel::{self, Route, Tunnel};
-use crate::{app_shell, device_key, probe};
+use crate::{app_shell, call_window, device_key, engines, probe};
 
 /// The services the web client addresses as `/api/<service>/` (the dev
 /// proxy list in `apps/web/vite.config.ts`).
@@ -37,6 +42,12 @@ const SERVICES: &[&str] = &[
     "channels",
     "gifs",
 ];
+
+/// Signed static files on the Lakko origin the web client fetches from its
+/// own origin (ADR-0038 release manifest, ADR-0097 supporters list). Each is
+/// forwarded on GET alone; any other path under `/.well-known/` stays a
+/// bundled asset.
+const FORWARDED_WELL_KNOWN: &[&str] = &["/.well-known/lakko-release", "/.well-known/lakko-supporters"];
 
 /// Request headers never forwarded: the connection's own, and the ones that
 /// would name the page's origin to the server.
@@ -66,6 +77,8 @@ pub struct ProxyConfig {
     pub handles: Arc<device_key::Handles>,
     /// Anti-censorship (`tunnel.rs`).
     pub tunnel: Arc<Tunnel>,
+    /// The system's translation and transcription (`engines.rs`).
+    pub engines: Arc<engines::SystemEngines>,
 }
 
 impl ProxyConfig {
@@ -101,6 +114,7 @@ impl ProxyConfig {
             client,
             handles: Arc::new(device_key::Handles::default()),
             tunnel: Arc::new(tunnel),
+            engines: Arc::new(engines::SystemEngines::new()),
         })
     }
 }
@@ -109,11 +123,30 @@ impl ProxyConfig {
 pub async fn handle<R: Runtime>(
     app: &AppHandle<R>,
     config: &ProxyConfig,
+    label: &str,
     request: Request<Vec<u8>>,
 ) -> Response<Vec<u8>> {
     let path = request.uri().path().to_owned();
+    if path.starts_with(call_window::PATH) {
+        return match app.try_state::<call_window::CallWindow>() {
+            Some(state) => call_window::handle(app, &state, label, &request),
+            None => plain(StatusCode::SERVICE_UNAVAILABLE, "starting"),
+        };
+    }
+    if label == call_window::LABEL {
+        // The call window holds no keys and talks to no server: only its own
+        // page, never a request the main page may make.
+        if !call_window::page_may_load(&path) {
+            return plain(StatusCode::FORBIDDEN, "not for this window");
+        }
+        return asset(app, &path);
+    }
     if let Some(service) = api_service(&path) {
         debug!(service, method = %request.method(), "forward");
+        return forward(config, request).await;
+    }
+    if forwards_well_known(&path, request.method()) {
+        debug!(path = %path, "forward well-known");
         return forward(config, request).await;
     }
     if path.starts_with(probe::PROBE_PATH) {
@@ -121,6 +154,9 @@ pub async fn handle<R: Runtime>(
     }
     if path.starts_with(tunnel::PATH) {
         return tunnel::handle(&config.tunnel, request).await;
+    }
+    if path.starts_with(engines::PATH) {
+        return engines::handle(&config.engines, request).await;
     }
     if path == save_file::PATH {
         return save_file::handle(app, request).await;
@@ -149,6 +185,11 @@ fn api_service(path: &str) -> Option<&'static str> {
     let rest = path.strip_prefix("/api/")?;
     let name = rest.split('/').next()?;
     SERVICES.iter().copied().find(|s| *s == name)
+}
+
+/// Whether `path` is one of [`FORWARDED_WELL_KNOWN`], asked with GET.
+fn forwards_well_known(path: &str, method: &Method) -> bool {
+    *method == Method::GET && FORWARDED_WELL_KNOWN.contains(&path)
 }
 
 async fn forward(config: &ProxyConfig, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
@@ -285,7 +326,17 @@ pub fn plain(status: StatusCode, text: &str) -> Response<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::api_service;
+    use super::{api_service, forwards_well_known};
+    use http::Method;
+
+    #[test]
+    fn only_the_signed_well_known_files_are_forwarded() {
+        assert!(forwards_well_known("/.well-known/lakko-supporters", &Method::GET));
+        assert!(forwards_well_known("/.well-known/lakko-release", &Method::GET));
+        assert!(!forwards_well_known("/.well-known/lakko-supporters", &Method::POST));
+        assert!(!forwards_well_known("/.well-known/other", &Method::GET));
+        assert!(!forwards_well_known("/.well-known/lakko-supporters/x", &Method::GET));
+    }
 
     #[test]
     fn only_known_services_are_forwarded() {

@@ -140,23 +140,32 @@ public fun ownerKeySucceeds(passedKey: ByteArray, conversationKey: ByteArray?): 
  * [ChannelPublisherIdentity.bind] and cleared by its `unbind`.
  */
 internal object ChannelOwnerSuccession {
-    private class Entry(val conversationKey: ByteArray, val current: Identity)
+    private class Entry(val conversationKey: ByteArray, val current: Identity, val currentSeed: ByteArray?)
 
     private var entry: Entry? = null
 
     /** OWNER requests asked of the identity with [conversationKey] are
-     *  signed by [current] from now on. Takes ownership of [current]. */
+     *  signed by [current] from now on. Takes ownership of [current];
+     *  [currentSeed] (its 64-byte phrase seed) is copied, for the owner key
+     *  repair ([ChannelOwnerRepair]). */
     @Synchronized
-    fun install(conversationKey: ByteArray, current: Identity) {
+    fun install(conversationKey: ByteArray, current: Identity, currentSeed: ByteArray? = null) {
         entry?.current?.close()
-        entry = Entry(conversationKey.copyOf(), current)
+        entry?.currentSeed?.fill(0)
+        entry = Entry(conversationKey.copyOf(), current, currentSeed?.copyOf())
     }
 
     @Synchronized
     fun clear() {
         entry?.current?.close()
+        entry?.currentSeed?.fill(0)
         entry = null
     }
+
+    /** A copy of the current phrase seed while a succession is installed
+     *  (the account rotated), else `null`. The caller zeroes it. */
+    @Synchronized
+    fun currentSeedCopy(): ByteArray? = entry?.currentSeed?.copyOf()
 
     /** Run [derive] on the identity owner requests of [passed] are signed
      *  by: the installed successor, else [passed] itself. */
@@ -270,6 +279,118 @@ internal object KeyRotationChannels {
             throw e
         } catch (e: Throwable) {
             Log.w(TAG, "owed channel handle rekeys not recorded", e)
+        }
+    }
+}
+
+/**
+ * 2026-11-20 — an owner device whose own channel refuses its owner proof
+ * (`401 owner-proof-required`) moves the channel's owner key to the key its
+ * CURRENT seed derives, signed by an own predecessor's key (ADR-0074 section
+ * 3.5), instead of waiting for a handover that may never come.
+ *
+ * Seen live on an iPhone: its reseals were refused for hours. The service
+ * holds one owner key per channel, set at creation and moved only by a
+ * handover. It parts from what a device signs with when the account rotated
+ * and the handover for that channel never landed: a kept device hands over
+ * once, a device hands over only the channels it publishes, and the web
+ * client signed with the lineage key (fixed the same day). Running the
+ * handover from every own predecessor heals each case from any owner device.
+ *
+ * One try per channel per process; a try with no verdict may run again.
+ */
+internal object ChannelOwnerRepair {
+    private const val TAG = "ChannelOwnerRepair"
+    private val tried = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    fun reset() {
+        tried.clear()
+    }
+
+    /** The seeds to try, newest first, without [current] and repeats. */
+    fun candidates(predecessorsOldestFirst: List<ByteArray>, current: ByteArray): List<ByteArray> {
+        val out = ArrayList<ByteArray>()
+        for (seed in predecessorsOldestFirst.asReversed()) {
+            if (seed.contentEquals(current) || out.any { it.contentEquals(seed) }) continue
+            out += seed
+        }
+        return out
+    }
+
+    /** Hand the channel from each of [predecessors] (newest first) to
+     *  [current] through [put] (signing, naming): OWNED at the first
+     *  handover that lands, RETRY when one got no verdict and none landed,
+     *  NOT_OWNER otherwise. */
+    suspend fun <K> repair(
+        predecessors: List<K>,
+        current: K,
+        sameKey: (K, K) -> Boolean,
+        put: suspend (signing: K, naming: K) -> Unit,
+    ): ChannelHandoverOutcome {
+        var sawRetry = false
+        for (old in predecessors) {
+            if (sameKey(old, current)) continue
+            when (handOverChannelOwner { signWithNewKey -> put(if (signWithNewKey) current else old, current) }) {
+                ChannelHandoverOutcome.OWNED -> return ChannelHandoverOutcome.OWNED
+                ChannelHandoverOutcome.RETRY -> sawRetry = true
+                ChannelHandoverOutcome.NOT_OWNER -> Unit
+            }
+        }
+        return if (sawRetry) ChannelHandoverOutcome.RETRY else ChannelHandoverOutcome.NOT_OWNER
+    }
+
+    /** Repair [channelId] when [refused] and this process has not tried it
+     *  yet; [onOwned] runs when the owner key is the current one's now. */
+    suspend fun repairIfRefused(
+        context: Context,
+        accountIdB64: String,
+        channelId: String,
+        refused: Boolean,
+        client: ChannelsClient,
+        onOwned: () -> Unit,
+    ): ChannelHandoverOutcome? {
+        val key = accountIdB64 + "|" + channelId.lowercase()
+        if (!refused || !tried.add(key)) return null
+        val rows = me.lakko.app.auth.OwnPredecessorStore.onDevice(context).load(accountIdB64)
+        val currentSeed = ChannelOwnerSuccession.currentSeedCopy()
+        try {
+            if (rows.isEmpty() || currentSeed == null) {
+                Log.w(TAG, "an owner proof is refused and the account has no earlier keys here; nothing to hand over")
+                return ChannelHandoverOutcome.NOT_OWNER
+            }
+            val seeds = candidates(rows.map { it.phraseSeed }, currentSeed)
+            val olds = seeds.map { Identity.fromSeed(it) }
+            val outcome = try {
+                Identity.fromSeed(currentSeed).use { current ->
+                    repair(olds, current, { a, b -> a.signaturePublicKey().contentEquals(b.signaturePublicKey()) }) { signing, naming ->
+                        ChannelsClient.ownerSignerExact(naming, channelId).use { n ->
+                            val newKey = n.verifyingKey()
+                            ChannelsClient.ownerSignerExact(signing, channelId).use { s ->
+                                client.replaceOwner(channelId, s, newKey)
+                            }
+                        }
+                    }
+                }
+            } finally {
+                olds.forEach { it.close() }
+            }
+            when (outcome) {
+                ChannelHandoverOutcome.OWNED -> {
+                    ChannelPublisherRoles.shared.clear()
+                    onOwned()
+                    Log.i(TAG, "ADR-0074: a refused channel's owner key is now the current key's; held work runs again")
+                }
+                ChannelHandoverOutcome.RETRY -> {
+                    tried.remove(key)
+                    Log.w(TAG, "the owner key repair got no answer; tried again next pass")
+                }
+                ChannelHandoverOutcome.NOT_OWNER ->
+                    Log.w(TAG, "no key of this account owns a refused channel; nothing to hand over")
+            }
+            return outcome
+        } finally {
+            rows.forEach { it.zero() }
+            currentSeed?.fill(0)
         }
     }
 }

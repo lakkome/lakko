@@ -84,6 +84,45 @@ enum LinkCallHostRules {
         }
     }
 
+    // MARK: - The Calls list (`docs/ux/navigation.md` section 5.1.1)
+
+    /// What the host keeps about the call in its slot for the Calls list. A
+    /// call in the link slot belongs to no conversation, so it is filed under
+    /// its call id.
+    struct HistoryTrack: Equatable {
+        let callIdHex: String
+        /// This device started the call (`New call`, or founding from its own
+        /// link): the row reads `Outgoing call`. A joiner's reads `Incoming
+        /// call`.
+        let startedHere: Bool
+        /// Joined with the camera on, or turned it on during the call.
+        var video: Bool
+        /// A guest account files nothing: a guest never lands in the app.
+        let isGuest: Bool
+        /// When this device got past the join step (reached the call screen).
+        /// `nil` while it is still connecting or waiting to be admitted.
+        var joinedAtMs: Int64? = nil
+    }
+
+    /// The row to file when this device leaves the call or the call ends for
+    /// it, whichever comes first; `nil` when there is none to file.
+    ///
+    /// A call this device never got into (refused, timed out waiting for
+    /// admission, failed before the Welcome) has no row: the list shows the
+    /// calls the person was in. The time is when this device joined and the
+    /// duration how long it was in the call.
+    static func historyEntry(
+        _ track: HistoryTrack, leftAtMs: Int64
+    ) -> CallHistoryEntry? {
+        guard !track.isGuest, let joinedAtMs = track.joinedAtMs else { return nil }
+        return .noConversation(
+            callIdHex: track.callIdHex,
+            direction: track.startedHere ? .outgoing : .incoming,
+            video: track.video,
+            startedAtMs: joinedAtMs,
+            durationMs: leftAtMs - joinedAtMs)
+    }
+
     /// Whether a link call may start now.
     enum StartDecision: Equatable {
         case start

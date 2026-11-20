@@ -49,6 +49,9 @@ export interface ReceivedProfile {
   /** ADR-0084 — the profile photo references, or `null` for none. Copied out
    *  of the wasm handle (blob keys inside: SECRET). */
   readonly avatar?: AvatarData | null;
+  /** ADR-0092 section 7 — `false` when the sender does not let others share
+   *  their contact card; absent or `true` otherwise. */
+  readonly cardShareable?: boolean;
 }
 
 /** One grant from a profile, detached from the wasm handle. */
@@ -75,6 +78,7 @@ export interface ProfileDecoder {
     readonly usernameCertificate?: Uint8Array | undefined;
     readonly grants?: readonly { readonly class: number; readonly version: number; free?(): void }[];
     readonly avatar?: WasmProfileAvatarLike | undefined;
+    readonly cardShareable?: boolean;
     free?(): void;
   };
   /** Encodes a grant to its 134-byte wire (`encodeReachGrant`); absent in a
@@ -133,6 +137,7 @@ export function sniffProfile(decoder: ProfileDecoder, bytes: Uint8Array): Profil
       const avatar = avatarFromWasm(decoded.avatar);
       return avatar === null ? {} : { avatar };
     })(),
+    ...(decoded.cardShareable === false ? { cardShareable: false } : {}),
   };
   try {
     decoded.free?.();

@@ -26,19 +26,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.Link
-import androidx.compose.material.icons.filled.PersonAdd
-import androidx.compose.material.icons.filled.QrCode
-import androidx.compose.material.icons.filled.QrCodeScanner
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -86,6 +73,9 @@ import me.lakko.app.profile.ResolvedName
 import me.lakko.app.profile.requestSenderLabel
 import me.lakko.app.ui.chat.PeopleSearchSection
 import me.lakko.app.ui.components.LakkoAvatar
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * The Contacts tab — docs/ux/client-redesign.md section 5.3.
@@ -138,7 +128,7 @@ public fun ContactsScreen(
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
-    // ADR-0089 section 4 - a suspended account adds no contacts.
+    // ADR-0098 section 4 - a suspended account adds no contacts.
     val suspendedReadOnly by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
     // ADR-0048 — every name on this screen comes from the one resolver; the
     // version flow recomposes a row in place when a profile arrives or a
@@ -251,7 +241,7 @@ public fun ContactsScreen(
         listedPersonKeys(sections) { rowKey -> byKey[rowKey]?.let { base64Encode(it.request.fromPubkey) } }
     }
     val pendingAll = remember(state.pending) { sortRequestsNewestFirst(state.pending) { it.messageId } }
-    // ADR-0089 step 4 / UX 3 — a request held from before its sender's
+    // ADR-0098 step 4 / UX 3 — a request held from before its sender's
     // suspension leaves the list once the moderation log confirms it; the
     // list shows at once and an unknown standing keeps the request.
     val pendingKeys = remember(pendingAll) {
@@ -270,18 +260,18 @@ public fun ContactsScreen(
                 actions = {
                     if (!suspendedReadOnly) Box {
                         IconButton(onClick = { menuOpen = true }) {
-                            Icon(Icons.Filled.PersonAdd, contentDescription = t("contacts.list.add"))
+                            LkIcon(R.drawable.ic_lk_person_plus, contentDescription = t("contacts.list.add"))
                         }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                             DropdownMenuItem(
                                 text = { Text(t("contacts.add.share_invite")) },
-                                leadingIcon = { Icon(Icons.Filled.Link, contentDescription = null) },
+                                leadingIcon = { LkIcon(R.drawable.ic_lk_link, contentDescription = null, size = LkIconSize.Row) },
                                 onClick = { menuOpen = false; inviteSheetOpen = true },
                             )
                             if (onScannedLink != null) {
                                 DropdownMenuItem(
                                     text = { Text(t("contacts.scan_qr")) },
-                                    leadingIcon = { Icon(Icons.Filled.QrCodeScanner, contentDescription = null) },
+                                    leadingIcon = { LkIcon(R.drawable.ic_lk_qrcode_scan, contentDescription = null, size = LkIconSize.Row) },
                                     onClick = { menuOpen = false; scanSheetOpen = true },
                                 )
                             }
@@ -339,7 +329,7 @@ public fun ContactsScreen(
                             via = viaGroupLine(req.viaGroupIdHex, req.viaGroupIdHex?.let(viewModel::groupNameOf)),
                             onAccept = { viewModel.onAcceptClicked(req.messageId) },
                             onDecline = { viewModel.onDeclineClicked(req.messageId) },
-                            // ADR-0089 — Block and Report, behind the row's overflow.
+                            // ADR-0098 — Block and Report, behind the row's overflow.
                             onBlock = {
                                 val key = java.util.Base64.getEncoder().encodeToString(req.fromPubkey)
                                 val shown = nameVersion.let { directory.resolve(req.fromPubkey) }
@@ -466,10 +456,11 @@ private fun SearchField(query: String, onQueryChange: (String) -> Unit, modifier
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .padding(horizontal = 12.dp, vertical = 4.dp),
     ) {
-        Icon(
-            Icons.Filled.Search,
+        LkIcon(
+            R.drawable.ic_lk_search,
             contentDescription = null,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            size = LkIconSize.Row,
         )
         Spacer(Modifier.width(8.dp))
         androidx.compose.foundation.text.BasicTextField(
@@ -494,10 +485,11 @@ private fun SearchField(query: String, onQueryChange: (String) -> Unit, modifier
         )
         if (query.isNotEmpty()) {
             IconButton(onClick = { onQueryChange("") }, modifier = Modifier.size(32.dp)) {
-                Icon(
-                    Icons.Filled.Close,
+                LkIcon(
+                    R.drawable.ic_lk_xmark_circle_fill,
                     contentDescription = t("chats.search.clear"),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    size = LkIconSize.Row,
                 )
             }
         }
@@ -532,9 +524,13 @@ private fun LetterHeader(letter: String) {
 
 @Composable
 private fun ContactRow(row: ContactRowModel, onClick: () -> Unit) {
+    // UX profile-screen section 7: a contacts list row plays a profile video
+    // while a pointer hovers it; a finger never counts as hovering.
+    val (hover, playVideo) = me.lakko.app.ui.components.rememberRowHoverPlaysVideo()
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
+            .then(hover)
             .fillMaxWidth()
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 8.dp),
@@ -544,6 +540,7 @@ private fun ContactRow(row: ContactRowModel, onClick: () -> Unit) {
             seed = row.key,
             size = 40.dp,
             personKey = me.lakko.app.ui.components.personKeyBytes(row.personKey ?: row.key),
+            playVideo = playVideo,
         )
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
@@ -574,8 +571,12 @@ private fun RequestRow(
     var overflow by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     // The resolver's "Someone" placeholder is a data value; the screen says it in the interface language.
     val title = if (name.isPlaceholder) t("contacts.request.someone") else requestSenderLabel(name)
+    // UX profile-screen section 7: every contacts list row plays a profile
+    // video while a pointer hovers it.
+    val (hover, playVideo) = me.lakko.app.ui.components.rememberRowHoverPlaysVideo()
     Column(
         modifier = Modifier
+            .then(hover)
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 8.dp),
     ) {
@@ -585,6 +586,7 @@ private fun RequestRow(
                 seed = contactRouteKey(req.fromPubkey),
                 size = 40.dp,
                 personKey = req.fromPubkey,
+                playVideo = playVideo,
             )
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
@@ -617,14 +619,14 @@ private fun RequestRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.padding(start = 52.dp),
         ) {
-            // ADR-0089 section 4 - accepting adds a contact: not while suspended.
+            // ADR-0098 section 4 - accepting adds a contact: not while suspended.
             val acceptReadOnly by me.lakko.app.auth.SuspensionGate.readOnly.collectAsStateWithLifecycle()
             if (!acceptReadOnly) Button(onClick = onAccept, enabled = !accepting) { Text(t(acceptButtonKey(acceptFailed))) }
             OutlinedButton(onClick = onDecline, enabled = !accepting) { Text(t("contacts.request.decline")) }
             androidx.compose.foundation.layout.Box {
                 androidx.compose.material3.IconButton(onClick = { overflow = true }) {
-                    androidx.compose.material3.Icon(
-                        androidx.compose.material.icons.Icons.Filled.MoreVert,
+                    me.lakko.app.ui.components.LkIcon(
+                        me.lakko.app.R.drawable.ic_lk_ellipsis,
                         contentDescription = t("common.more_options"),
                     )
                 }
@@ -673,19 +675,22 @@ private fun SentHeader(count: Int, expanded: Boolean, onToggle: () -> Unit) {
             color = MaterialTheme.colorScheme.primary,
             modifier = Modifier.weight(1f),
         )
-        Icon(
-            imageVector = if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+        LkIcon(
+            icon = if (expanded) R.drawable.ic_lk_chevron_up else R.drawable.ic_lk_chevron_down,
             contentDescription = if (expanded) t("common.collapse") else t("common.expand"),
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            size = LkIconSize.Row,
         )
     }
 }
 
 @Composable
 private fun SentRow(s: SentContactRequest, onDismiss: () -> Unit) {
+    val (hover, playVideo) = me.lakko.app.ui.components.rememberRowHoverPlaysVideo()
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
+            .then(hover)
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 6.dp),
     ) {
@@ -695,6 +700,7 @@ private fun SentRow(s: SentContactRequest, onDismiss: () -> Unit) {
             seed = s.recipientAccountIdB64,
             size = 40.dp,
             personKey = me.lakko.app.ui.components.personKeyBytes(s.recipientKeyB64),
+            playVideo = playVideo,
         )
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
@@ -728,6 +734,13 @@ private fun EmptyState(onAdd: (() -> Unit)?) {
             .fillMaxWidth()
             .padding(horizontal = 24.dp, vertical = 48.dp),
     ) {
+        LkIcon(
+            R.drawable.ic_lk_person_circle_plus,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            size = LkIconSize.Empty,
+        )
+        Spacer(Modifier.height(12.dp))
         Text(t("contacts.list.empty.title"), style = MaterialTheme.typography.titleMedium)
         Spacer(Modifier.height(4.dp))
         Text(
@@ -945,7 +958,7 @@ private fun InviteLinksSheet(
                                     },
                                     enabled = idle,
                                 ) {
-                                    Icon(Icons.Filled.Edit, contentDescription = t("invite.links.edit"))
+                                    LkIcon(R.drawable.ic_lk_pencil, contentDescription = t("invite.links.edit"), size = LkIconSize.Row)
                                 }
                             }
                             if (state.revokingActiveInviteSlug == row.slug) {
@@ -959,10 +972,11 @@ private fun InviteLinksSheet(
                                     },
                                     enabled = idle,
                                 ) {
-                                    Icon(
-                                        Icons.Filled.Delete,
+                                    LkIcon(
+                                        R.drawable.ic_lk_trash,
                                         contentDescription = t("invite.links.delete"),
                                         tint = if (idle) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        size = LkIconSize.Row,
                                     )
                                 }
                             }
@@ -1040,12 +1054,12 @@ private fun LinkRow(
         }
         if (onShowQr != null) {
             IconButton(onClick = onShowQr) {
-                Icon(Icons.Filled.QrCode, contentDescription = t("invite.links.show_qr"))
+                LkIcon(R.drawable.ic_lk_qrcode, contentDescription = t("invite.links.show_qr"), size = LkIconSize.Row)
             }
         }
         if (onCopy != null) {
             IconButton(onClick = onCopy) {
-                Icon(Icons.Filled.ContentCopy, contentDescription = t("chat.invite_link.copy"))
+                LkIcon(R.drawable.ic_lk_copy, contentDescription = t("chat.invite_link.copy"), size = LkIconSize.Row)
             }
         }
         trailing()
