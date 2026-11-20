@@ -97,11 +97,7 @@ final class ChannelPublisherLoops {
         defer { running = false }
         // 2026-11-20 — an owned channel whose owner proof was refused moves
         // its owner key to the current key first (``ChannelOwnerRepair``).
-        for channelId in channels.keysByChannel.keys.sorted()
-        where Self.rotates(channelId: channelId, channels: channels) {
-            await ChannelOwnerRepair.repairIfRefused(
-                channelId: channelId, accountIdB64: accountIdB64, currentSeed: seed, client: client)
-        }
+        await repairRefusedOwners(channels: channels, client: client, seed: seed, accountIdB64: accountIdB64)
         // ADR-0090 — a recorded commit still staged (its DS verdict owed) is
         // sent again first; a group holding one refuses membership operations.
         await ChannelPublisherCommits.replayAll(
@@ -142,6 +138,9 @@ final class ChannelPublisherLoops {
             await deviceAdmissionPass(
                 channelId: channelId, channels: channels, client: client, seed: seed, accountIdB64: accountIdB64)
         }
+        // A refusal recorded during this pass is repaired now, not a pass
+        // later: a phone opened briefly may never see a second pass.
+        await repairRefusedOwners(channels: channels, client: client, seed: seed, accountIdB64: accountIdB64)
         // A Welcome held while its group was still active here (it came
         // before the commit that removes this device's leaf) is tried again.
         ChannelDeviceAdmission.retryHeldWelcomes()
@@ -149,6 +148,18 @@ final class ChannelPublisherLoops {
         // while the account publishes them.
         await ChannelDeviceAdmission.passWaiting(
             state: channels, client: client, seed: seed, accountIdB64: accountIdB64)
+    }
+
+    /// The owner-key repair for every channel this device rotates; each
+    /// channel is tried at most once per process (``ChannelOwnerRepair``).
+    private func repairRefusedOwners(
+        channels: ChannelsUiState, client: ChannelsClient, seed: Data, accountIdB64: String
+    ) async {
+        for channelId in channels.keysByChannel.keys.sorted()
+        where Self.rotates(channelId: channelId, channels: channels) {
+            await ChannelOwnerRepair.repairIfRefused(
+                channelId: channelId, accountIdB64: accountIdB64, currentSeed: seed, client: client)
+        }
     }
 
     /// ADR-0090 — the per-channel device work of one pass: an owner device

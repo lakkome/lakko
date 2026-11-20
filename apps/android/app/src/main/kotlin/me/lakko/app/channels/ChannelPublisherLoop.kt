@@ -548,8 +548,10 @@ public class ChannelPublisherLoop private constructor(
         // publishing device (only an owner device's mark is counted).
         if (owner) sendAdmissionMarkIfAdvanced(pub, channelId, pg, account)
         // 2026-11-20 — an owned channel whose owner proof was refused moves
-        // its owner key to the current key first ([ChannelOwnerRepair]).
-        if (owner) {
+        // its owner key to the current key first ([ChannelOwnerRepair]); each
+        // channel is tried at most once per process.
+        suspend fun repairOwnerKeyIfRefused() {
+            if (!owner) return
             val admission = SubscriberAdmission.forChannels(state, client)
             ChannelOwnerRepair.repairIfRefused(
                 context = context,
@@ -565,6 +567,7 @@ public class ChannelPublisherLoop private constructor(
                 admission.clearHold(channelId)
             }
         }
+        repairOwnerKeyIfRefused()
         // G-50 / ADR-0090 — recorded commits that still owe a step (an
         // unanswered commit route included).
         if (store != null && store.entries(account).isNotEmpty()) {
@@ -623,6 +626,8 @@ public class ChannelPublisherLoop private constructor(
                 // The info screen keeps the last count.
             }
         }
+        // A refusal recorded during this step is repaired now, not a pass later.
+        repairOwnerKeyIfRefused()
         return due
     }
 

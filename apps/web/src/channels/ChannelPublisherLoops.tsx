@@ -1353,24 +1353,28 @@ export const ChannelPublisherLoops: Component = () => {
     ensureEntryOwnerSource();
     // 2026-11-20: an owned channel whose owner proof was refused moves its
     // owner key to the current identity's first (`channel-owner-repair.ts`).
-    const predecessor = chats.predecessorAccountIdentity();
-    for (const idHex of [...channelsState.keysByChannel().keys()].sort()) {
-      if (!channelRotatesHere(idHex)) continue;
-      await repairChannelOwnerIfRefused({
-        channelIdHex: idHex,
-        refused:
-          publisherCommitRetry.hold(idHex)?.refused === true ||
-          subscriberAdmissionRetry.hold(idHex)?.refused === true ||
-          accountReaderKeyRefused(idHex),
-        predecessors: predecessor === null ? [] : [predecessor],
-        current,
-        onOwned: () => {
-          publisherCommitRetry.noteSuccess(idHex);
-          subscriberAdmissionRetry.noteSuccess(idHex);
-          clearAccountReaderKeyHold(idHex);
-        },
-      }).catch(() => undefined);
-    }
+    // Each channel is tried at most once per load.
+    const repairRefusedOwners = async (): Promise<void> => {
+      const predecessor = chats.predecessorAccountIdentity();
+      for (const idHex of [...channelsState.keysByChannel().keys()].sort()) {
+        if (!channelRotatesHere(idHex)) continue;
+        await repairChannelOwnerIfRefused({
+          channelIdHex: idHex,
+          refused:
+            publisherCommitRetry.hold(idHex)?.refused === true ||
+            subscriberAdmissionRetry.hold(idHex)?.refused === true ||
+            accountReaderKeyRefused(idHex),
+          predecessors: predecessor === null ? [] : [predecessor],
+          current,
+          onOwned: () => {
+            publisherCommitRetry.noteSuccess(idHex);
+            subscriberAdmissionRetry.noteSuccess(idHex);
+            clearAccountReaderKeyHold(idHex);
+          },
+        }).catch(() => undefined);
+      }
+    };
+    await repairRefusedOwners();
     if (channelsActions.pendingPublisherCommits().length > 0) {
       const landed = await replayPublisherCommits(lineage).catch(() => []);
       for (const l of landed) {
@@ -1633,6 +1637,8 @@ export const ChannelPublisherLoops: Component = () => {
         console.warn("[channels] publisher pass failed", err instanceof Error ? err.name : "");
       }
     }
+    // A refusal recorded during this pass is repaired now, not a pass later.
+    await repairRefusedOwners();
     for (const [idHex, record] of channelsState.accessByChannel()) {
       if (!record.waiting || channelsState.keysByChannel().has(idHex)) continue;
       await catchUpChannel(idHex).catch(() => undefined);
