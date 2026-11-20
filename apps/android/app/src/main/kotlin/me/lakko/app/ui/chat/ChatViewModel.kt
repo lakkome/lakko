@@ -359,24 +359,8 @@ public class ChatViewModel(
                 initialValue = me.lakko.app.chat.membershipEnded(mutableMembership.value),
             )
 
-    /**
-     * ADR-0091 phase 2 / `docs/ux/conversation-rejoin.md` 2.2 — this device
-     * missed an update to this chat and waits to be brought back (confirmed
-     * behind): the composer gives way to the waiting note. `null` otherwise,
-     * including while only suspected (nothing is shown yet).
-     */
-    internal val reentryWaiting: StateFlow<me.lakko.app.chat.ReentryWaitingNote?> =
-        repo.conversationBehind.state
-            .map { all ->
-                all[groupIdHex.lowercase()]
-                    ?.takeIf { it.level == me.lakko.app.chat.BehindLevel.CONFIRMED }
-                    ?.let { me.lakko.app.chat.ReentryWaitingNote(it.sinceMs, repo.reentryHelper(groupIdHex)) }
-            }
-            .distinctUntilChanged()
-            .stateIn(scope = viewModelScope, started = SharingStarted.Eagerly, initialValue = null)
-
-    /** UX 2.4 — the gap lines of this chat ("Messages sent between ... can't
-     *  be shown on this device."). */
+    /** UX 2.4 — the gap lines of this chat ("Some messages are not
+     *  available."). */
     internal val reentryGaps: StateFlow<List<me.lakko.app.chat.ReentryGap>> =
         repo.reentryGaps
             .map { it[groupIdHex.lowercase()].orEmpty() }
@@ -487,20 +471,6 @@ public class ChatViewModel(
         // check of its people and whatever an accepted reset still owes this
         // group. Fire-and-forget inside the repository; nothing is shown.
         repo.checkResetsOnOpen(groupIdHex)
-        // ADR-0091 walk 2, R5 — a chat that waits to be brought back shows no
-        // error: one already shown (from a send refused while only suspected)
-        // is cleared when the waiting starts, so it does not come back stale
-        // with the composer.
-        viewModelScope.launch {
-            reentryWaiting.collect { note ->
-                if (note != null) {
-                    composer.update {
-                        val kept = me.lakko.app.chat.composerErrorWhileWaiting(waiting = true, it.sendError)
-                        if (kept == it.sendError) it else it.copy(sendError = kept)
-                    }
-                }
-            }
-        }
         // Manually combine two StateFlows — kotlinx-coroutines
         // has no synchronous `combine` for two StateFlows;
         // two parallel collectors keep the derived flow hot
@@ -707,6 +677,12 @@ public class ChatViewModel(
         // app-level overlay presents whichever of the two follows. Refused
         // while any other call is up — one call at a time.
         if (!host.startOutgoing(groupIdHex, kind, hasCamera = hasCamera)) {
+            // ADR-0091 — refused because this device is behind in the chat:
+            // the ordinary could-not-start notice, nothing about why.
+            if (host.isHeldWhileBehind(groupIdHex)) {
+                showCallNotice(UiText("chat.call.error.start"))
+                return
+            }
             showBusyNotice(me.lakko.app.calls.CallVerb.START)
             return
         }

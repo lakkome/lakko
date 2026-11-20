@@ -142,11 +142,23 @@ pub fn conversation_behind_verdict(
 }
 
 /// `true` when the device should send (or repeat) its request to come back:
-/// as soon as it is behind, then no more often than every 30 minutes.
+/// as soon as it is behind; 2 minutes after a request that went to another
+/// own device (`lastRouteWasOwnDevice`), then no more often than every 30
+/// minutes.
 #[uniffi::export]
 #[must_use]
-pub fn reentry_request_due(state: FfiBehindState, last_sent_ms: Option<u64>, now_ms: u64) -> bool {
-    lakko_mls::reentry_request_due(state.into(), last_sent_ms, now_ms)
+pub fn reentry_request_due(
+    state: FfiBehindState,
+    last_sent_ms: Option<u64>,
+    last_route_was_own_device: bool,
+    now_ms: u64,
+) -> bool {
+    lakko_mls::reentry_request_due(
+        state.into(),
+        last_sent_ms,
+        last_route_was_own_device,
+        now_ms,
+    )
 }
 
 /// `true` when the device stops committing, sweeping, registering, proposing
@@ -171,10 +183,21 @@ pub enum FfiReentryRoute {
 
 /// Which route applies: another own device in the conversation first, then
 /// a one-to-one's mailbox, then the group's knock queue.
+/// `ownDeviceUnanswered` is `true` once a request of the current behind
+/// episode went by `OwnDevice` and the device is still behind: every later
+/// request of the episode takes the conversation's own route.
 #[uniffi::export]
 #[must_use]
-pub fn reentry_route(own_device_in_conversation: bool, kind: GroupKind) -> FfiReentryRoute {
-    match lakko_mls::reentry_route(own_device_in_conversation, kind.into()) {
+pub fn reentry_route(
+    own_device_in_conversation: bool,
+    kind: GroupKind,
+    own_device_unanswered: bool,
+) -> FfiReentryRoute {
+    match lakko_mls::reentry_route(
+        own_device_in_conversation,
+        kind.into(),
+        own_device_unanswered,
+    ) {
         lakko_mls::ReentryRoute::OwnDevice => FfiReentryRoute::OwnDevice,
         lakko_mls::ReentryRoute::Mailbox => FfiReentryRoute::Mailbox,
         lakko_mls::ReentryRoute::Knock => FfiReentryRoute::Knock,
@@ -258,6 +281,15 @@ pub const fn reentry_suspicion_confirm_after_ms() -> u64 {
 #[must_use]
 pub const fn reentry_request_interval_ms() -> u64 {
     lakko_mls::REENTRY_REQUEST_INTERVAL_MS
+}
+
+/// How long a request sent to another own device waits for an answer before
+/// the device asks by the conversation's own route (2 minutes). Chosen, not
+/// measured.
+#[uniffi::export]
+#[must_use]
+pub const fn reentry_own_device_answer_wait_ms() -> u64 {
+    lakko_mls::OWN_DEVICE_ANSWER_WAIT_MS
 }
 
 /// How many re-entry requests per conversation keep their KeyPackage
@@ -564,9 +596,29 @@ mod tests {
         let s = conversation_behind_verdict(FfiBehindState::InStep, o, 7);
         assert_eq!(s, FfiBehindState::Confirmed { since_ms: 7 });
         assert!(behind_state_stops_acting(s));
-        assert!(reentry_request_due(s, None, 7));
+        assert!(reentry_request_due(s, None, false, 7));
+        assert!(reentry_request_due(
+            s,
+            Some(7),
+            true,
+            7 + reentry_own_device_answer_wait_ms()
+        ));
+        assert!(!reentry_request_due(
+            s,
+            Some(7),
+            false,
+            7 + reentry_own_device_answer_wait_ms()
+        ));
         assert_eq!(
-            reentry_route(false, GroupKind::Group),
+            reentry_route(false, GroupKind::Group, false),
+            FfiReentryRoute::Knock
+        );
+        assert_eq!(
+            reentry_route(true, GroupKind::Group, false),
+            FfiReentryRoute::OwnDevice
+        );
+        assert_eq!(
+            reentry_route(true, GroupKind::Group, true),
             FfiReentryRoute::Knock
         );
         let facts = FfiReentryAdmissionFacts {

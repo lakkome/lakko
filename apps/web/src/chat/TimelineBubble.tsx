@@ -205,11 +205,6 @@ export interface BubbleHost {
    *  opens the restricted menu for Save (2026-10-27) and offers Unpin only
    *  when `historyRowOffersUnpin` says so. */
   pinRowShown?: boolean;
-  /** ADR-0091 / UX conversation-rejoin 2.2 — the chat is waiting (this device
-   *  is out of date in it): the menu offers Copy, Forward, Save and Pin
-   *  alone; nothing that would send is offered (no reply, edit, delete,
-   *  reaction, select, translate or content action). */
-  waiting?: boolean;
   /** ADR-0047 — the media runtime, this row's upload state and its retry. */
   hub: MediaHub;
   mediaUpload: MediaUpload;
@@ -1523,15 +1518,15 @@ function ChatBubbleBody(
             <MessageMenu
               anchor={anchor()}
               pinOnly={pinOnlyMenu()}
-              canEditDelete={props.isOwn && props.waiting !== true}
-              canReply={props.waiting !== true}
+              canEditDelete={props.isOwn}
+              canReply={true}
               /* `message-actions.md` section 3 — offered on "any message with
                  text", which is not the same predicate as Edit / Delete: Copy
                  is offered on somebody else's message too, and withheld from
                  our own lone photo. The text is the one on screen, so an
                  edited message copies what the person is reading. */
               copyText={copyableText()}
-              translateLabel={props.waiting === true ? null : translateLabel()}
+              translateLabel={translateLabel()}
               onTranslate={() => {
                 const ref = messageRef();
                 const target = translateTarget();
@@ -1545,12 +1540,12 @@ function ChatBubbleBody(
                 if (props.messageId !== undefined) props.onOpenFullReactPicker(props.messageId);
               }}
               reactionRow={
-                props.waiting !== true && props.messageId !== undefined && props.ack === "sent"
+                props.messageId !== undefined && props.ack === "sent"
                   ? props.reactionRowFor(props.messageId)
                   : []
               }
               ownReactions={ownGiven()}
-              showExpand={props.waiting !== true && rowExpandsFor()}
+              showExpand={rowExpandsFor()}
               capReached={ownGiven().length >= maxPerPerson()}
               onReply={() => {
                 if (props.messageId !== undefined) props.onReply(props.messageId);
@@ -1597,7 +1592,7 @@ function ChatBubbleBody(
                  device's memory to this device's clipboard. */
               onCopy={(text) => void copyMessageText(text)}
               /* Section 8 — the same gate as Forward, read once. */
-              canSelect={props.waiting !== true && selectable()}
+              canSelect={selectable()}
               onSelect={() => {
                 if (props.messageId !== undefined) props.onSelect(props.messageId);
               }}
@@ -1610,7 +1605,7 @@ function ChatBubbleBody(
               // an invitation card never (ADR-0087 section 14).
               canEdit={props.content === undefined && bubbleOffersEdit(storedInvite() !== null || isChannelCard())}
               extraActions={
-                props.waiting !== true && props.content !== undefined && props.contentHost !== undefined
+                props.content !== undefined && props.contentHost !== undefined
                   ? contentMenuActions({
                       host: props.contentHost,
                       content: props.content,

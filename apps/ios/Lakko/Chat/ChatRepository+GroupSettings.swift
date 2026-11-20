@@ -870,7 +870,16 @@ extension ChatRepository {
             (try? record.group.members())?.first(where: { $0.leafIndex == leaf })?.accountKey
         }
         guard let owner, let sender, sender == owner,
-              let seed = try? openKnockSeedEnvelope(plaintext: plaintext, accountIdentity: identity)
+              // ADR-0074 section 3.7 — after a rotation the owner seals to the
+              // current identity's X25519 key (the directory's).
+              let seed = RotatedMemberSeal.openSealedToOwnAccount(
+                  conversation: identity,
+                  current: currentAccountIdentityIfRotated,
+                  openOwn: { try openKnockSeedEnvelope(plaintext: plaintext, accountIdentity: $0) },
+                  openSealedTo: {
+                      try openKnockSeedEnvelopeSealedTo(
+                          plaintext: plaintext, accountIdentity: $0, sealedToIdentity: $1)
+                  })
         else {
             NSLog("[knock] a knock seed was dropped")
             return

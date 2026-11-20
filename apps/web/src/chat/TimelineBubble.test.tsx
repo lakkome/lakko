@@ -495,18 +495,6 @@ describe("the action card's width", () => {
   });
 });
 
-describe("ADR-0091 — the menu of a waiting chat", () => {
-  it("offers Forward, Copy and Pin alone: nothing that would send", () => {
-    const bubble = mount(ownMessage("hello"), { waiting: true } as Partial<BubbleHost>);
-    mouse(bubble, "contextmenu", { clientX: 40, clientY: 60 });
-    const items = document.querySelector<HTMLElement>(".lk-msg-menu-items");
-    const labels = all("[role='menuitem'] span", items as HTMLElement).map((s) => s.textContent);
-    expect(labels).toEqual(["Forward", "Copy", "Pin"]);
-    // No reaction row either.
-    expect(document.querySelectorAll(".lk-msg-menu-reactions button").length).toBe(0);
-  });
-});
-
 // ---------------------------------------------------------------------------
 // Copy — `message-actions.md` section 3. "Nothing leaves the device."
 // ---------------------------------------------------------------------------

@@ -208,6 +208,14 @@ public final class ChatRepository: ObservableObject {
         predecessorAccountIdentity ?? accountIdentity
     }
 
+    /// ADR-0074 section 3.7 (2026-11-20) — the identity the directory serves
+    /// when it is NOT the conversation identity (after a rotation), else
+    /// `nil`. An owner seals an envelope to the X25519 key of the served
+    /// bundle, so one addressed to the conversation key may open only with it.
+    var currentAccountIdentityIfRotated: Identity? {
+        predecessorAccountIdentity == nil ? nil : accountIdentity
+    }
+
     /// Account id (base64) of the session that bootstrapped this
     /// repository.
     var currentAccountIdB64: String? {
@@ -2599,9 +2607,9 @@ public final class ChatRepository: ObservableObject {
     /// decides what the sheet offers.
     public func maySetSharedPin(groupIdHex: String) -> Bool {
         guard groups[groupIdHex] != nil else { return false }
-        // ADR-0091 phase 2, UX 2.2 — a chat this device waits in offers Pin
-        // for me alone (a shared pin would be sealed at a stale epoch).
-        if reentryStopsActing(groupIdHex: groupIdHex) { return false }
+        // ADR-0091 phase 2 — offered while this device is behind too (the
+        // chat looks as always, maintainer 2026-11-20); the publish is held
+        // and the pin fails with its ordinary failure text.
         return PinGate.maySetShared(
             oneToOne: isOneToOne(groupIdHex: groupIdHex),
             ownRole: ownRole(groupIdHex: groupIdHex),
@@ -8973,9 +8981,16 @@ public final class ChatRepository: ObservableObject {
 
     /// A member's account X25519 key, from its identity bundle: the account id
     /// comes from a contact record or the member's own profile (a claim), and
-    /// the bundle is accepted only when it names the same account signature
-    /// key the roster does — so a wrong claim finds no key rather than a
-    /// stranger's. Cached per session.
+    /// the bundle is accepted only when it is the bundle of the account
+    /// signature key the roster names — so a wrong claim finds no key rather
+    /// than a stranger's. ADR-0074 section 3.7 (2026-11-20): after a rotation
+    /// the bundle serves the CURRENT key while the roster names the
+    /// conversation key; it is accepted when its two-way conversation link
+    /// verifies against the served key and names the roster key
+    /// (``RotatedMemberSeal/bundleServesRosterKey(servedKey:conversationLink:rosterKey:verifyLink:)``).
+    /// The envelope stays addressed to the roster key and is sealed to this
+    /// X25519 key, which the member opens with its current identity. Cached
+    /// per session.
     func memberX25519PublicKey(accountKey: Data) async -> Data? {
         if let cached = memberX25519Cache[accountKey] { return cached }
         let keyB64 = accountKey.base64EncodedString()
@@ -8986,9 +9001,19 @@ public final class ChatRepository: ObservableObject {
                 .first(where: { $0.request.fromPubkey == accountKey })?.request.fromAccountId
         }
         guard let accountId, accountId.count == 16,
-              let bundle = try? await discovery.identityFetch(accountId: accountId),
-              Data(base64Encoded: bundle.signaturePubkey) == accountKey,
-              let x25519 = Data(base64Encoded: bundle.x25519Pubkey), x25519.count == 32
+              let bundle = try? await discovery.identityFetch(accountId: accountId)
+        else { return nil }
+        guard let served = Data(base64Encoded: bundle.signaturePubkey),
+              RotatedMemberSeal.bundleServesRosterKey(
+                  servedKey: served,
+                  conversationLink: bundle.conversationLink.flatMap { Data(base64Encoded: $0) },
+                  rosterKey: accountKey,
+                  verifyLink: { try verifyConversationLink(link: $0, trustedCurrentKey: $1) })
+        else {
+            NSLog("ADR-0057: identity bundle names another key; not appointing")
+            return nil
+        }
+        guard let x25519 = Data(base64Encoded: bundle.x25519Pubkey), x25519.count == 32
         else { return nil }
         memberX25519Cache[accountKey] = x25519
         return x25519
@@ -9046,7 +9071,20 @@ public final class ChatRepository: ObservableObject {
             ownAccountKey: accountIdentity.signaturePublicKey(),
             senderAccountKey: senderAccountKey,
             owner: owner,
-            open: { try openRegistrarSeedEnvelope(plaintext: plaintext, accountIdentity: accountIdentity) },
+            open: { [currentAccountIdentityIfRotated] in
+                // ADR-0074 section 3.7 — sealed to the conversation identity's
+                // X25519 key, or after a rotation to the current identity's.
+                guard let seed = RotatedMemberSeal.openSealedToOwnAccount(
+                    conversation: accountIdentity,
+                    current: currentAccountIdentityIfRotated,
+                    openOwn: { try openRegistrarSeedEnvelope(plaintext: plaintext, accountIdentity: $0) },
+                    openSealedTo: {
+                        try openRegistrarSeedEnvelopeSealedTo(
+                            plaintext: plaintext, accountIdentity: $0, sealedToIdentity: $1)
+                    })
+                else { throw RotatedMemberSeal.NotOpened() }
+                return seed
+            },
             storeRegistrarSeed: { [registrarSeeds] seed, rank in
                 registrarSeeds.put(
                     accountIdB64: accountIdB64, groupIdHex: groupIdHex, seed: seed, rank: rank)

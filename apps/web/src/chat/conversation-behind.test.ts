@@ -232,7 +232,7 @@ describe("gap bookkeeping (section 2)", () => {
   });
 });
 
-describe("a waiting chat shows no error (live walk 2)", () => {
+describe("a behind chat shows no banner for a refused read (live walk 2)", () => {
   it("hidden while suspected or confirmed, shown in step", () => {
     expect(chatErrorsHidden(store.state(G))).toBe(false);
     store.noteSkippedRow(G, { sealed: 8n, after: 8n, local: 6n, atMs: 500 });

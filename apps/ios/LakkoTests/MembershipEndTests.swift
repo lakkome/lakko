@@ -752,7 +752,7 @@ final class MembershipEndTests: XCTestCase {
         XCTAssertTrue(f.repo.reentryStore.save(behind, accountIdB64: f.accountIdB64, groupIdHex: hex))
         defer { f.repo.reentryStore.remove(accountIdB64: f.accountIdB64, groupIdHex: hex) }
         XCTAssertTrue(f.repo.reentryStopsActing(groupIdHex: hex))
-        XCTAssertNotNil(f.repo.reentryWaitingNote(groupIdHex: hex))
+        XCTAssertTrue(f.repo.reentryBehind(groupIdHex: hex).isConfirmed)
         XCTAssertTrue(f.repo.reentryBlocksRepair(groupIdHex: hex) == false, "no evidence recorded")
 
         // Waiting, nothing is sent: a typing signal is refused before the network.
@@ -789,7 +789,7 @@ final class MembershipEndTests: XCTestCase {
         XCTAssertTrue(back.messages.contains { ConversationReentryRules.parseGap($0.text)?.fromMs == 1_000 },
                       "the gap line is written")
         XCTAssertEqual(f.repo.reentryBehind(groupIdHex: hex), .inStep)
-        XCTAssertNil(f.repo.reentryWaitingNote(groupIdHex: hex))
+        XCTAssertFalse(f.repo.reentryBehind(groupIdHex: hex).isConfirmed)
         XCTAssertTrue(f.endStore.heldWelcomes(accountIdB64: f.accountIdB64).isEmpty)
         let ownLeaf = try back.group.ownLeafIndex()
         XCTAssertEqual(
@@ -1198,36 +1198,46 @@ final class MembershipEndTests: XCTestCase {
         XCTAssertTrue(grown.members.contains(PushGroupRouting.hex(newcomer.signaturePublicKey())))
     }
 
-    /// R5 — a chat that starts waiting shows no error left from before.
-    func testAChatThatStartsWaitingClearsAnEarlierError() throws {
+    /// Maintainer 2026-11-20 — a chat this device is behind in looks as
+    /// always: the composer stays, a message sent meanwhile is kept in the
+    /// conversation in the ordinary "Not sent" state with the ordinary send
+    /// failure text, and nothing reaches the Delivery Service.
+    func testABehindChatKeepsItsComposerAndASendShowsNotSent() async throws {
         let f = try fixture()
         let hex = f.groupIdHex
-        let model = ChatViewModel(repository: f.repo, groupIdHex: hex)
-        XCTAssertFalse(model.onDeleteChat(), "an active chat is not deleted")
-        XCTAssertNotNil(model.membershipError)
         var behind = ConversationReentryRecord()
         behind.behind = .confirmed(sinceMs: 1)
         XCTAssertTrue(f.repo.reentryStore.save(behind, accountIdB64: f.accountIdB64, groupIdHex: hex))
         defer { f.repo.reentryStore.remove(accountIdB64: f.accountIdB64, groupIdHex: hex) }
+        let model = ChatViewModel(repository: f.repo, groupIdHex: hex)
         model.refreshMembers()
-        XCTAssertTrue(model.reentryWaiting)
-        XCTAssertNil(model.membershipError)
-        XCTAssertNil(model.sendError)
+        XCTAssertEqual(model.composerSlot, .composer, "the composer stays")
+        XCTAssertNotEqual(model.chatCallAction, .unavailable, "the call buttons stay")
+        let rowsBefore = ScriptedDsURLProtocol.rowCount(scope: f.scope)
+        var failure: Error?
+        do {
+            try await f.repo.sendMessage(groupIdHex: hex, plaintext: "while behind")
+        } catch {
+            failure = error
+        }
+        let error = try XCTUnwrap(failure, "the send is held")
+        XCTAssertEqual(ScriptedDsURLProtocol.rowCount(scope: f.scope), rowsBefore, "nothing is published")
+        let row = try XCTUnwrap(f.repo.groups[hex]?.messages.last)
+        XCTAssertEqual(row.text, "while behind")
+        XCTAssertEqual(row.ack, .failed, "the ordinary not-sent state, with Retry")
+        XCTAssertEqual(
+            ChatViewModel.errorText(for: error, fallbackKey: "chat.send.failed").text,
+            Localization.text("chat.send.failed"), "the ordinary send failure text")
     }
 
-    func testAWaitingChatOffersNoSharedPin() throws {
+    func testABehindChatStillOffersTheSharedPin() throws {
         let f = try adminFixture()
         let hex = f.groupIdHex
-        XCTAssertTrue(f.repo.maySetSharedPin(groupIdHex: hex), "an admin may pin for everyone")
         var behind = ConversationReentryRecord()
         behind.behind = .confirmed(sinceMs: 1)
         XCTAssertTrue(f.repo.reentryStore.save(behind, accountIdB64: f.accountIdB64, groupIdHex: hex))
         defer { f.repo.reentryStore.remove(accountIdB64: f.accountIdB64, groupIdHex: hex) }
-        XCTAssertFalse(f.repo.maySetSharedPin(groupIdHex: hex), "only Pin for me while waiting")
-        let options = PinSheet.options(
-            sharedPinned: false, personalPinned: false,
-            maySetShared: f.repo.maySetSharedPin(groupIdHex: hex), oneToOne: false)
-        XCTAssertEqual(options.map(\.choice), [.pinForMe])
+        XCTAssertTrue(f.repo.maySetSharedPin(groupIdHex: hex), "the chat looks as always")
     }
 
     // MARK: - The handle

@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0091 / UX `conversation-rejoin.md` 2.4 - where the "can't be shown"
- * line sits in a chat, and the two times it names. Pure.
+ * ADR-0091 / UX `conversation-rejoin.md` 2.4 - where the "not available"
+ * line sits in a chat. Pure.
  *
  * A line sits where the gap was, by time: after the last entry of the
  * timeline at or before its start, that is before the first entry that
@@ -41,22 +41,6 @@ export function placeGapLines(entryTimesMs: readonly number[], lines: readonly G
     else before.set(index, [...(before.get(index) ?? []), line]);
   }
   return { before, trailing };
-}
-
-function sameDay(a: Date, b: Date): boolean {
-  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-}
-
-/** The `{from}` and `{to}` of the line, in `locale`. */
-export function gapLineTimes(line: GapLine, locale: string | undefined): { readonly from: string; readonly to: string } {
-  const from = new Date(line.fromMs);
-  const to = new Date(line.toMs);
-  const withDate = new Intl.DateTimeFormat(locale, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
-  const timeOnly = new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit" });
-  return {
-    from: withDate.format(from),
-    to: sameDay(from, to) ? timeOnly.format(to) : withDate.format(to),
-  };
 }
 
 /**

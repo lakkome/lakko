@@ -50,6 +50,14 @@ pub const SUSPICION_CONFIRM_AFTER_MS: u64 = 10 * 60 * 1000;
 /// re-knock interval). Chosen, not measured.
 pub const REENTRY_REQUEST_INTERVAL_MS: u64 = 30 * 60 * 1000;
 
+/// How long a device waits for its own other device to answer a request
+/// sent by [`ReentryRoute::OwnDevice`] before it asks again by the
+/// conversation's own route (mailbox or knock). An own device that has a leaf
+/// in the conversation may not be running at all (seen live 2026-11-20, walk
+/// 5: the request went to a stale leaf every 30 minutes and the owner was
+/// never asked). Chosen, not measured.
+pub const OWN_DEVICE_ANSWER_WAIT_MS: u64 = 2 * 60 * 1000;
+
 /// A re-admitter refuses a re-entry for a leaf it decrypted an application
 /// message from, sealed at the current epoch, within this window (that leaf
 /// is not behind). Chosen, not measured.
@@ -163,13 +171,17 @@ pub const fn conversation_behind_verdict(
 /// `true` when the device should send (or repeat) its request to come back.
 ///
 /// A request goes out as soon as the device is suspected (section 1: a
-/// suspected device stops acting and asks to be brought back), and is
-/// repeated no more often than every [`REENTRY_REQUEST_INTERVAL_MS`] while it
-/// stays behind. Never while in step.
+/// suspected device stops acting and asks to be brought back). A request
+/// that went to another own device ([`ReentryRoute::OwnDevice`]) is followed
+/// after [`OWN_DEVICE_ANSWER_WAIT_MS`] by one through the conversation's own
+/// route, since that device may not be running; any other request is
+/// repeated no more often than every [`REENTRY_REQUEST_INTERVAL_MS`] while
+/// the device stays behind. Never while in step.
 #[must_use]
 pub const fn reentry_request_due(
     state: BehindState,
     last_sent_ms: Option<u64>,
+    last_route_was_own_device: bool,
     now_ms: u64,
 ) -> bool {
     if !state.stops_acting() {
@@ -177,7 +189,13 @@ pub const fn reentry_request_due(
     }
     match last_sent_ms {
         None => true,
-        Some(last) => now_ms.saturating_sub(last) >= REENTRY_REQUEST_INTERVAL_MS,
+        Some(last) => {
+            let elapsed = now_ms.saturating_sub(last);
+            if last_route_was_own_device && elapsed >= OWN_DEVICE_ANSWER_WAIT_MS {
+                return true;
+            }
+            elapsed >= REENTRY_REQUEST_INTERVAL_MS
+        },
     }
 }
 
@@ -195,9 +213,19 @@ pub enum ReentryRoute {
 
 /// Which route applies, in order: another own device in the conversation,
 /// else a one-to-one's mailbox, else the group's knock queue.
+///
+/// `own_device_unanswered` is `true` once a request of the current behind
+/// episode already went by [`ReentryRoute::OwnDevice`] and the device is
+/// still behind after it; from then on, until the device is back in step,
+/// every request takes the conversation's own route (the own device may not
+/// be running, and the owner or an admin must be asked).
 #[must_use]
-pub const fn reentry_route(own_device_in_conversation: bool, kind: GroupKind) -> ReentryRoute {
-    if own_device_in_conversation {
+pub const fn reentry_route(
+    own_device_in_conversation: bool,
+    kind: GroupKind,
+    own_device_unanswered: bool,
+) -> ReentryRoute {
+    if own_device_in_conversation && !own_device_unanswered {
         return ReentryRoute::OwnDevice;
     }
     match kind {
@@ -339,28 +367,65 @@ mod tests {
 
     #[test]
     fn requests_go_out_while_behind_and_repeat_every_thirty_minutes() {
-        assert!(!reentry_request_due(BehindState::InStep, None, 0));
+        assert!(!reentry_request_due(BehindState::InStep, None, false, 0));
+        assert!(!reentry_request_due(
+            BehindState::InStep,
+            Some(0),
+            true,
+            60 * MIN
+        ));
         let s = BehindState::Suspected { since_ms: 0 };
-        assert!(reentry_request_due(s, None, 0));
-        assert!(!reentry_request_due(s, Some(0), 29 * MIN));
-        assert!(reentry_request_due(s, Some(0), 30 * MIN));
+        assert!(reentry_request_due(s, None, false, 0));
+        assert!(reentry_request_due(s, None, true, 0));
+        assert!(!reentry_request_due(s, Some(0), false, 29 * MIN));
+        assert!(reentry_request_due(s, Some(0), false, 30 * MIN));
+    }
+
+    #[test]
+    fn an_unanswered_own_device_request_is_followed_after_two_minutes() {
+        let s = BehindState::Confirmed { since_ms: 0 };
+        let wait = OWN_DEVICE_ANSWER_WAIT_MS;
+        assert_eq!(wait, 2 * MIN);
+        assert!(!reentry_request_due(s, Some(10), true, 10 + wait - 1));
+        assert!(reentry_request_due(s, Some(10), true, 10 + wait));
+        // The same elapsed time after a mailbox or knock request is not due.
+        assert!(!reentry_request_due(s, Some(10), false, 10 + wait));
     }
 
     #[test]
     fn the_route_is_own_device_then_mailbox_then_knock() {
         assert_eq!(
-            reentry_route(true, GroupKind::Group),
+            reentry_route(true, GroupKind::Group, false),
             ReentryRoute::OwnDevice
         );
         assert_eq!(
-            reentry_route(true, GroupKind::OneToOne),
+            reentry_route(true, GroupKind::OneToOne, false),
             ReentryRoute::OwnDevice
         );
         assert_eq!(
-            reentry_route(false, GroupKind::OneToOne),
+            reentry_route(false, GroupKind::OneToOne, false),
             ReentryRoute::Mailbox
         );
-        assert_eq!(reentry_route(false, GroupKind::Group), ReentryRoute::Knock);
+        assert_eq!(
+            reentry_route(false, GroupKind::Group, false),
+            ReentryRoute::Knock
+        );
+    }
+
+    #[test]
+    fn an_unanswered_own_device_hands_the_request_to_the_conversation_route() {
+        assert_eq!(
+            reentry_route(true, GroupKind::Group, true),
+            ReentryRoute::Knock
+        );
+        assert_eq!(
+            reentry_route(true, GroupKind::OneToOne, true),
+            ReentryRoute::Mailbox
+        );
+        assert_eq!(
+            reentry_route(false, GroupKind::Group, true),
+            ReentryRoute::Knock
+        );
     }
 
     #[test]
@@ -480,6 +545,47 @@ mod tests {
                 },
                 _ => {},
             }
+        }
+
+        /// Walk 5 (2026-11-20): a behind episode that starts with an own
+        /// device in the conversation sends one request to it, and every
+        /// later request of the episode, the first no later than
+        /// [`OWN_DEVICE_ANSWER_WAIT_MS`] after it, goes by the
+        /// conversation's own route; the own device is never the only one
+        /// asked while the device stays behind.
+        #[test]
+        fn a_behind_episode_never_asks_only_its_own_device(
+            group in any::<bool>(),
+            own_device_in_conversation in any::<bool>(),
+            ticks in proptest::collection::vec(1u64..(40 * 60 * 1000), 1..40),
+        ) {
+            let kind = if group { GroupKind::Group } else { GroupKind::OneToOne };
+            let state = BehindState::Confirmed { since_ms: 0 };
+            let mut now = 0u64;
+            let mut last_sent: Option<u64> = None;
+            let mut last_was_own = false;
+            let mut own_unanswered = false;
+            let mut sent: Vec<(u64, ReentryRoute)> = Vec::new();
+            for tick in ticks {
+                if reentry_request_due(state, last_sent, last_was_own, now) {
+                    let route = reentry_route(own_device_in_conversation, kind, own_unanswered);
+                    sent.push((now, route));
+                    last_sent = Some(now);
+                    last_was_own = route == ReentryRoute::OwnDevice;
+                    own_unanswered = own_unanswered || last_was_own;
+                }
+                now += tick;
+            }
+            let own: Vec<_> = sent.iter().filter(|(_, r)| *r == ReentryRoute::OwnDevice).collect();
+            prop_assert!(own.len() <= 1);
+            if let Some((own_at, _)) = own.first() {
+                prop_assert_eq!(sent[0].1, ReentryRoute::OwnDevice);
+                if let Some((next_at, next_route)) = sent.get(1) {
+                    prop_assert_ne!(*next_route, ReentryRoute::OwnDevice);
+                    prop_assert!(next_at - own_at < OWN_DEVICE_ANSWER_WAIT_MS + 40 * 60 * 1000);
+                }
+            }
+            prop_assert!(!sent.is_empty());
         }
     }
 }

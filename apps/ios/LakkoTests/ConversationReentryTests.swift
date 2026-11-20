@@ -220,9 +220,83 @@ final class ConversationReentryTests: XCTestCase {
         XCTAssertEqual(ConversationReentryRules.routeName(.ownDevice), "own-device")
         XCTAssertEqual(ConversationReentryRules.routeName(.mailbox), "mailbox")
         XCTAssertEqual(ConversationReentryRules.routeName(.knock), "knock")
-        XCTAssertEqual(reentryRoute(ownDeviceInConversation: true, kind: .group), .ownDevice)
-        XCTAssertEqual(reentryRoute(ownDeviceInConversation: false, kind: .oneToOne), .mailbox)
-        XCTAssertEqual(reentryRoute(ownDeviceInConversation: false, kind: .group), .knock)
+        XCTAssertEqual(reentryRoute(ownDeviceInConversation: true, kind: .group, ownDeviceUnanswered: false), .ownDevice)
+        XCTAssertEqual(reentryRoute(ownDeviceInConversation: false, kind: .oneToOne, ownDeviceUnanswered: false), .mailbox)
+        XCTAssertEqual(reentryRoute(ownDeviceInConversation: false, kind: .group, ownDeviceUnanswered: false), .knock)
+    }
+
+    /// Live walk 5 (2026-11-20): the own device is asked once; 2 minutes
+    /// later the request goes by the conversation's own route, and keeps
+    /// going that way until the episode ends.
+    private func walkFiveEpisode(kind: GroupKind) -> [FfiReentryRoute] {
+        var record = ConversationReentryRecord()
+        record.behind = .confirmed(sinceMs: 0)
+        var routes: [FfiReentryRoute] = []
+        let wait = reentryOwnDeviceAnswerWaitMs()
+        XCTAssertEqual(wait, 120_000)
+        for now in [UInt64(0), wait - 1, wait, wait + 60_000, wait + reentryRequestIntervalMs()] {
+            guard reentryRequestDue(
+                state: record.behind.ffi, lastSentMs: record.lastSentMs,
+                lastRouteWasOwnDevice: record.lastRouteWasOwnDevice, nowMs: now) else { continue }
+            let route = reentryRoute(
+                ownDeviceInConversation: true, kind: kind, ownDeviceUnanswered: record.ownDeviceUnanswered)
+            routes.append(route)
+            record.lastSentMs = now
+            record.lastRoute = ConversationReentryRules.routeName(route)
+            // As `sendReentryRequestIfDue` does after a send went out.
+            if route == .ownDevice { record.ownDeviceAsked = true }
+        }
+        return routes
+    }
+
+    func testAnUnansweredOwnDeviceHandsTheRequestToTheKnockAfterTwoMinutes() {
+        XCTAssertEqual(walkFiveEpisode(kind: .group), [.ownDevice, .knock, .knock])
+    }
+
+    func testAnUnansweredOwnDeviceHandsTheRequestToTheMailboxInAOneToOne() {
+        XCTAssertEqual(walkFiveEpisode(kind: .oneToOne), [.ownDevice, .mailbox, .mailbox])
+    }
+
+    func testWithNoDeviceGroupSenderTheFirstRequestGoesByTheChatsOwnRoute() {
+        let reachable = ConversationReentryRules.ownDeviceReachable(inConversation: true, senderRegistered: false)
+        XCTAssertFalse(reachable)
+        XCTAssertEqual(reentryRoute(ownDeviceInConversation: reachable, kind: .group, ownDeviceUnanswered: false), .knock)
+        XCTAssertEqual(reentryRoute(ownDeviceInConversation: reachable, kind: .oneToOne, ownDeviceUnanswered: false), .mailbox)
+        XCTAssertTrue(ConversationReentryRules.ownDeviceReachable(inConversation: true, senderRegistered: true))
+        XCTAssertFalse(ConversationReentryRules.ownDeviceReachable(inConversation: false, senderRegistered: true))
+    }
+
+    func testAFailedOwnDeviceSendIsNotCountedAsAsked() {
+        var record = ConversationReentryRecord()
+        record.lastRoute = "own-device"
+        record.lastSentMs = 10
+        XCTAssertFalse(record.lastRouteWasOwnDevice)
+        XCTAssertFalse(record.ownDeviceUnanswered)
+    }
+
+    func testBackInStepEndsTheEpisodeAndTheOwnDeviceIsAskedFirstAgain() throws {
+        var behind = ConversationReentryRecord()
+        behind.behind = .confirmed(sinceMs: 5)
+        behind.ownDeviceAsked = true
+        behind.lastRoute = "knock"
+        let e = evidence()
+        let folded = ConversationReentryRules.fold(
+            behind, observation: observation(latest: 9, local: 9, evidence: e), evidence: e, nowMs: 1_000)
+        XCTAssertTrue(folded.cleared)
+        XCTAssertFalse(folded.record.ownDeviceUnanswered)
+        XCTAssertEqual(
+            reentryRoute(ownDeviceInConversation: true, kind: .group,
+                         ownDeviceUnanswered: folded.record.ownDeviceUnanswered),
+            .ownDevice)
+        // A record written before the field decodes and reads as not asked.
+        var old = ConversationReentryRecord()
+        old.lastRoute = "own-device"
+        var json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(old)) as? [String: Any])
+        json.removeValue(forKey: "ownDeviceAsked")
+        let decoded = try JSONDecoder().decode(
+            ConversationReentryRecord.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertFalse(decoded.ownDeviceUnanswered)
     }
 
     @MainActor
@@ -253,67 +327,15 @@ final class ConversationReentryTests: XCTestCase {
         args.isEmpty ? key : key + "|" + args.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",")
     }
 
-    func testTheNoteIsShownOnlyOnceConfirmed() {
-        XCTAssertNil(ConversationReentryRules.note(behind: .inStep, waiter: .ownDevice, nowMs: 0, text: text))
-        XCTAssertNil(ConversationReentryRules.note(
-            behind: .suspected(sinceMs: 0), waiter: .ownDevice, nowMs: 99_000, text: text))
-    }
-
-    func testTheSecondLineWaitsThirtySeconds() {
-        let since: UInt64 = 1_000
-        XCTAssertEqual(
-            ConversationReentryRules.note(
-                behind: .confirmed(sinceMs: since), waiter: .ownerOrAdmin, nowMs: since + 29_999, text: text),
-            ["chat.reentry.waiting"])
-        XCTAssertEqual(
-            ConversationReentryRules.note(
-                behind: .confirmed(sinceMs: since), waiter: .ownerOrAdmin, nowMs: since + 30_000, text: text),
-            ["chat.reentry.waiting", "chat.reentry.second.group"])
-        XCTAssertEqual(
-            ConversationReentryRules.note(
-                behind: .confirmed(sinceMs: since), waiter: .ownDevice, nowMs: since + 30_000, text: text),
-            ["chat.reentry.waiting", "chat.reentry.second.own_device"])
-        XCTAssertEqual(
-            ConversationReentryRules.note(
-                behind: .confirmed(sinceMs: since), waiter: .person(name: "Anna"), nowMs: since + 30_000, text: text),
-            ["chat.reentry.waiting", "chat.reentry.second.person|name=Anna"])
-        XCTAssertEqual(
-            ConversationReentryRules.note(
-                behind: .confirmed(sinceMs: since), waiter: nil, nowMs: since + 90_000, text: text),
-            ["chat.reentry.waiting"], "no second line when nobody is known")
-    }
-
-    func testTheCatalogHoldsTheNoteAndTheLine() {
-        for key in ["chat.reentry.waiting", "chat.reentry.second.own_device", "chat.reentry.second.group"] {
-            XCTAssertNotEqual(Localization.text(key), key, key)
+    /// Maintainer 2026-11-20 — no waiting note: the catalog no longer
+    /// holds one, and the gap line is a plain fact.
+    func testNoWaitingNoteAndThePlainGapLine() {
+        for key in ["chat.reentry.waiting", "chat.reentry.second.own_device", "chat.reentry.second.group",
+                    "chat.reentry.second.person"] {
+            XCTAssertEqual(Localization.text(key), key, "\(key) must be gone from the catalog")
         }
-        XCTAssertTrue(Localization.text("chat.reentry.second.person", texts: ["name": "Anna"]).contains("Anna"))
-    }
-
-    // MARK: - What a waiting chat offers (UX 2.2)
-
-    func testAWaitingChatMenuOffersCopyForwardSaveAndPinOnly() {
-        let all = MessageMenuAction.allCases
-        let waiting = ConversationReentryRules.waitingMenu(all)
-        XCTAssertEqual(Set(waiting), [.copy, .copyCoordinates, .forward, .save, .unsave, .pin, .unpin])
-        for gone in [MessageMenuAction.reply, .edit, .delete, .select, .translate, .retractVote,
-                     .closePoll, .editChecklist, .closeChecklist, .ban] {
-            XCTAssertFalse(waiting.contains(gone), gone.rawValue)
-        }
-        XCTAssertEqual(
-            ConversationReentryRules.waitingMenu([.reply, .forward, .pin, .copy, .edit, .delete]),
-            [.forward, .pin, .copy], "the order is kept")
-    }
-
-    func testAWaitingChatInfoHidesEveryChangingBlock() {
-        let sections: [InfoSection] = [
-            .groupName, .handle, .renameGroup, .memberList, .addMember, .inviteLink, .roles,
-            .transferOwnership, .groupType, .reactions, .membersCanFindMe, .leaveGroup, .deleteGroup,
-        ]
-        XCTAssertEqual(
-            ConversationReentryRules.waitingInfoSections(sections),
-            [.groupName, .handle, .memberList, .membersCanFindMe])
-        XCTAssertFalse(ConversationReentryRules.waitingInfoSections([.call, .invitePeople]).contains(.call))
+        XCTAssertNotEqual(Localization.text("chat.reentry.gap"), "chat.reentry.gap")
+        XCTAssertEqual(ConversationReentryRules.gapSentence(text: text), "chat.reentry.gap")
     }
 
     // MARK: - The gap line (UX 2.4)
@@ -339,22 +361,6 @@ final class ConversationReentryTests: XCTestCase {
         XCTAssertFalse(ChatTimeline.isListPreviewRow(line))
         let plain = ChatMessage(messageId: 4, direction: .incoming, text: "hi", createdAt: "")
         XCTAssertTrue(ChatTimeline.isListPreviewRow(plain))
-    }
-
-    func testTheSameDayShowsTheDateOnce() {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(identifier: "UTC")!
-        let locale = Locale(identifier: "en_GB")
-        var captured: [String: String] = [:]
-        _ = ConversationReentryRules.gapSentence(
-            fromMs: 1_762_866_600_000, toMs: 1_762_870_200_000, calendar: calendar, locale: locale,
-            text: { _, args in captured = args; return "" })
-        XCTAssertEqual(captured["from"], "11 Nov, 13:10")
-        XCTAssertEqual(captured["to"], "14:10")
-        _ = ConversationReentryRules.gapSentence(
-            fromMs: 1_762_866_600_000, toMs: 1_763_474_520_000, calendar: calendar, locale: locale,
-            text: { _, args in captured = args; return "" })
-        XCTAssertEqual(captured["to"], "18 Nov, 14:02")
     }
 
     // MARK: - The gap history (section 7)
@@ -766,14 +772,6 @@ final class ConversationReentryTests: XCTestCase {
         XCTAssertEqual(store.load(accountIdB64: account, groupIdHex: "aa"), mark)
         store.remove(accountIdB64: account, groupIdHex: "aa")
         XCTAssertNil(store.load(accountIdB64: account, groupIdHex: "aa"))
-    }
-
-    /// R5 — only the moment a chat starts waiting clears its errors.
-    func testAChatStartingToWaitClearsItsErrors() {
-        XCTAssertTrue(ConversationReentryRules.clearsChatErrors(wasWaiting: false, isWaiting: true))
-        XCTAssertFalse(ConversationReentryRules.clearsChatErrors(wasWaiting: true, isWaiting: true))
-        XCTAssertFalse(ConversationReentryRules.clearsChatErrors(wasWaiting: false, isWaiting: false))
-        XCTAssertFalse(ConversationReentryRules.clearsChatErrors(wasWaiting: true, isWaiting: false))
     }
 
     // MARK: - Walk 3 (2026-11-20)

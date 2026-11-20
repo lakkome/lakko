@@ -5,7 +5,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { bindContactsAccount } from "../contacts/local-store";
-import { gapLineTimes, insertByMessageId, placeGapLines } from "./gap-line";
+import { insertByMessageId, placeGapLines } from "./gap-line";
 import { addGapLine, gapLines, narrowGapLine } from "./reentry-store";
 
 describe("placement", () => {
@@ -31,14 +31,6 @@ describe("placement", () => {
   it("first when every entry is later", () => {
     const p = placeGapLines([100, 200], [{ fromMs: 50, toMs: 300 }]);
     expect([...p.before.keys()]).toEqual([0]);
-  });
-
-  it("the date is shown once on the same day", () => {
-    const day = Date.UTC(2026, 10, 18, 10, 0);
-    const same = gapLineTimes({ fromMs: day, toMs: day + 3_600_000 }, "en-GB");
-    const other = gapLineTimes({ fromMs: day, toMs: day + 3 * 86_400_000 }, "en-GB");
-    expect(same.to.length).toBeLessThan(same.from.length);
-    expect(other.to.length).toBeGreaterThanOrEqual(other.from.length - 2);
   });
 });
 

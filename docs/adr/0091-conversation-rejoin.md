@@ -489,8 +489,10 @@ In that conversation only, until cleared:
   registrar seeds, knock seeds), no typing or read receipts: each would be
   sealed at a stale epoch nobody can open;
 - sends: while only suspected, a send is attempted as today (its `401`, if
-  it comes, is evidence); once confirmed, the composer is replaced by the
-  waiting note (UX 2.2) and nothing is sent.
+  it comes, is evidence); once confirmed, nothing is sent. (Amended
+  2026-11-20: the composer stays and a message sent is shown in the ordinary
+  "Not sent" state; there is no waiting note. See "The behind chat on
+  screen" below.)
 
 It keeps reading the journal at its normal cadence (that is how it clears),
 keeps its stale group state untouched, and deletes nothing. A wrong
@@ -536,6 +538,26 @@ by the first route that applies:
 The device repeats the request every 30 minutes while confirmed (ADR-0081's
 re-knock interval, chosen there, not measured), with a fresh `K` and the
 current `latest_epoch`, and never more often.
+
+**Amended 2026-11-20 (live walk 5).** Route 1 is tried once per behind
+episode. An own device with a leaf in the conversation may not be running (a
+stale leaf, a device left offline), and route 1 sent every repeat to it: on
+the walk the iPhone asked its own other device every 30 minutes and the group
+owner was never asked. Now a request that went by route 1 is followed after
+`OWN_DEVICE_ANSWER_WAIT_MS` (2 minutes, chosen, not measured) by one through
+the conversation's own route (route 2 for a one-to-one, route 3 for a group),
+and every later request of the episode takes that route on the 30-minute
+interval. The episode ends when the device is back in step (by a read or by
+the re-entry landing); the next episode asks its own device first again. In
+the core: `reentry_route(own_device_in_conversation, kind,
+own_device_unanswered)` and `reentry_request_due(state, last_sent_ms,
+last_route_was_own_device, now_ms)`; each client keeps, with its durable
+request record, whether a request of the episode was sent by route 1 (a send
+that failed does not count) and whether the last one was, and passes them to
+the core. Asking both routes at once costs one `ds-knock` token per episode
+more when the own device does answer; the replacement the first answer
+proposes makes the other a no-op (section 4's "already handled" and cooldown
+rules).
 
 ### 4. Who brings it back, and the commit
 
@@ -1071,6 +1093,68 @@ nothing below has been walked yet).**
    received profiles' envelopes for the backup on the main actor
    (`OwnBackupEnvelopes.current`); the composing now runs in a detached task
    after the reads. What is backed up is unchanged.
+
+## Live walk 5, 2026-11-20
+
+On the test stack, an iPhone member behind in a group whose roster still held
+a leaf of another device of the same account (a device that was not
+running). The iPhone was confirmed behind and logged `[chat-reentry]
+conversation re-entry request sent by route own-device`, then nothing for
+more than 5 minutes; the owner's re-entry log stayed empty. The rule of
+section 3 picked route 1 whenever an own device held a leaf, and every
+30-minute repeat took it again, so the owner would never have been asked.
+
+**Fix (amendment to section 3).** Route 1 is tried once per behind episode;
+2 minutes later the request goes by the conversation's own route (knock for a
+group, mailbox for a one-to-one) and stays there until the device is back in
+step. Built in the core (`OWN_DEVICE_ANSWER_WAIT_MS`, the two extra arguments
+of `reentry_route` and `reentry_request_due`, a proptest that a behind episode
+never asks only its own device), on both FFI surfaces
+(`reentryOwnDeviceAnswerWaitMs`), and on web, iOS and Android, each keeping
+the episode marks with its durable request record. Host-tested only; not yet
+walked.
+
+## The behind chat on screen, 2026-11-20 (maintainer)
+
+Seen on the iPhone during walk 5: a behind chat replaced the composer with
+"This device missed an update to this chat. It is coming back up to date by
+itself; you can read earlier messages meanwhile." and, after 30 seconds, a
+second line about other devices. The maintainer's decision: Lakko is for
+ordinary people; a person does not care why a message was not sent, only that
+it was not. So, on every client:
+
+- The waiting note and its second line are removed, with their catalog keys
+  (`chat.reentry.waiting`, `chat.reentry.second.own_device`,
+  `chat.reentry.second.person`, `chat.reentry.second.group`). The composer
+  stays in a behind chat; the message menu, reactions, replies, the shared
+  pin and conversation info are no longer narrowed.
+- A message sent while confirmed behind is still not published (C-93; the
+  rule of section 2 and walk-3 rule W3-R5 are unchanged): it lands in the
+  timeline in the ordinary failed-send state with the ordinary Retry and the
+  ordinary send-failure text. Android used to refuse it before the row
+  existed, with the waiting note as the error; it now keeps the row and
+  marks it failed, and its Retry checks again (before, a Retry published at
+  the stale epoch).
+- Other person actions fail with the ordinary failure text of that action.
+  Automatic sends stay held quietly.
+- The call buttons stay (a first pass of this change hid them; the
+  maintainer rejected that the same day: hiding a control without a word is
+  the waiting note's pattern). A call started or joined while suspected or
+  confirmed behind is refused where the call is set up (web
+  `CallHostContext` `dial` / `startGroupCall`, iOS `CallHost` /
+  `GroupCallHost`, Android `OneToOneCallHost` / `GroupCallHost`), before any
+  capture, slot or publish, with the client's ordinary could-not-start text.
+- The own-device route never waits on a device it cannot reach: with no
+  DeviceGroup sync (sender) on this device the own device counts as absent,
+  and a send to it that fails marks it unavailable for the episode, so the
+  request goes by mailbox or knock (web, iOS and Android; Android used to
+  return without sending or recording, iOS and web kept retrying route 1).
+- The gap line (`chat.reentry.gap`) reads "Some messages are not
+  available." with no times and no mention of the device; it was "Messages
+  sent between {from} and {to} can't be shown on this device."
+
+UX spec [`docs/ux/conversation-rejoin.md`](../ux/conversation-rejoin.md)
+sections 1, 2.2, 2.4 to 6 rewritten. Host-tested only.
 
 ## Abuse
 

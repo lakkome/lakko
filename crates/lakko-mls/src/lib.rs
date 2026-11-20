@@ -40,8 +40,9 @@ pub mod welcome_rendezvous;
 pub use conversation_behind::{
     conversation_behind_verdict, reentry_admission_verdict, reentry_request_due, reentry_route,
     BehindObservation, BehindState, ReentryAdmission, ReentryAdmissionFacts, ReentryRoute,
-    REENTRY_LEAF_COOLDOWN_MS, REENTRY_RECENT_WRITE_WINDOW_MS, REENTRY_REQUESTS_KEPT,
-    REENTRY_REQUEST_INTERVAL_MS, REFUSED_READS_TO_SUSPECT, SUSPICION_CONFIRM_AFTER_MS,
+    OWN_DEVICE_ANSWER_WAIT_MS, REENTRY_LEAF_COOLDOWN_MS, REENTRY_RECENT_WRITE_WINDOW_MS,
+    REENTRY_REQUESTS_KEPT, REENTRY_REQUEST_INTERVAL_MS, REFUSED_READS_TO_SUSPECT,
+    SUSPICION_CONFIRM_AFTER_MS,
 };
 pub use device_binding::{account_key_of_credential, DeviceBinding, DEVICE_BINDING_LEN};
 pub use device_group::{AccountId, AccountSeed, DeviceGroup, MAX_SERVICE_ENVELOPE_LEN};

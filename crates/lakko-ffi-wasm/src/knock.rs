@@ -302,15 +302,46 @@ pub fn open_knock_seed_envelope(
     plaintext: &[u8],
     account_identity: &Identity,
 ) -> Result<Vec<u8>, String> {
+    open_knock_seed(plaintext, account_identity, account_identity)
+}
+
+/// ADR-0074 section 3.7 (2026-11-20) — open a knock-seed envelope addressed
+/// to `accountIdentity` (the conversation identity the roster names) but
+/// sealed to the X25519 key of `sealedToIdentity` (the identity the directory
+/// serves after a rotation of the account keys).
+///
+/// # Errors
+///
+/// As `openKnockSeedEnvelope`, with the X25519 key of `sealedToIdentity` in
+/// place of the addressee's.
+#[wasm_bindgen(js_name = openKnockSeedEnvelopeSealedTo)]
+pub fn open_knock_seed_envelope_sealed_to(
+    plaintext: &[u8],
+    account_identity: &Identity,
+    sealed_to_identity: &Identity,
+) -> Result<Vec<u8>, String> {
+    open_knock_seed(plaintext, account_identity, sealed_to_identity)
+}
+
+fn open_knock_seed(
+    plaintext: &[u8],
+    addressee: &Identity,
+    sealed_to: &Identity,
+) -> Result<Vec<u8>, String> {
     let env = rust_decode_knock_seed(plaintext).map_err(knock_seed_error)?;
-    let id = account_identity.mls_identity();
-    let own = key32("knockSeed", "own account key", id.signature_public_key())?;
+    let own = key32(
+        "knockSeed",
+        "own account key",
+        addressee.mls_identity().signature_public_key(),
+    )?;
     if !env.is_addressed_to(&own) {
         return Err("knockSeed.otherAccount: addressed to another account".to_string());
     }
-    env.open(&X25519SecretKey::from_bytes(id.x25519_secret_bytes()))
-        .map(|s| s.to_vec())
-        .map_err(knock_seed_error)
+    env.open(&X25519SecretKey::from_bytes(
+        sealed_to.mls_identity().x25519_secret_bytes(),
+    ))
+    .map(|s| s.to_vec())
+    .map_err(knock_seed_error)
 }
 
 /// The one well-formed knock-seed envelope length.
@@ -896,6 +927,24 @@ mod tests {
             public
         );
         assert_eq!(open_knock_seed_envelope(&wire, &admin).unwrap(), seed);
+
+        // ADR-0074 section 3.7 (2026-11-20): addressed to the conversation
+        // key, sealed to the current identity's X25519 key.
+        let current = Identity::from_seed(&[0x74; 64]).unwrap();
+        let rotated = compose_knock_seed_envelope(
+            &[0x4A; 32],
+            id.signature_public_key(),
+            &current.mls_identity().x25519_public_key(),
+            1,
+            &seed,
+        )
+        .unwrap();
+        assert!(open_knock_seed_envelope(&rotated, &admin).is_err());
+        assert_eq!(
+            open_knock_seed_envelope_sealed_to(&rotated, &admin, &current).unwrap(),
+            seed
+        );
+        assert!(open_knock_seed_envelope_sealed_to(&rotated, &current, &current).is_err());
 
         let admission = [0x5C_u8; 32];
         let wire = compose_admission_seed_envelope(

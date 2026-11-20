@@ -21,7 +21,7 @@ import {
   SEND_RETRY_MS,
   type ReentryRequestPorts,
 } from "./reentry-request";
-import { REENTRY_KEY_PACKAGES_KEPT, reentryRecordFor } from "./reentry-store";
+import { endReentryEpisode, REENTRY_KEY_PACKAGES_KEPT, reentryRecordFor } from "./reentry-store";
 import type { Group as WasmGroup, Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 
 beforeAll(async () => {
@@ -76,18 +76,19 @@ function ports(
         { leafKeyB64: PEER, personKeyB64: PEER },
       ],
     kindOf: () => groupKind ?? "chat",
-    due: (state, last, n) => {
+    due: (state, last, lastWasOwn, n) => {
       const s = toWasmBehindState(wasm as unknown as BehindVerdictWasm, state);
       try {
-        return wasm.reentryRequestDue(s, last === undefined ? undefined : BigInt(last), BigInt(n));
+        return wasm.reentryRequestDue(s, last === undefined ? undefined : BigInt(last), lastWasOwn, BigInt(n));
       } finally {
         s.free();
       }
     },
-    route: (own, kind) => {
-      const r = wasm.reentryRoute(own, kind === "chat" ? wasm.GroupKind.OneToOne : wasm.GroupKind.Group);
+    route: (own, kind, ownUnanswered) => {
+      const r = wasm.reentryRoute(own, kind === "chat" ? wasm.GroupKind.OneToOne : wasm.GroupKind.Group, ownUnanswered);
       return r === wasm.ReentryRoute.OwnDevice ? "own-device" : r === wasm.ReentryRoute.Mailbox ? "mailbox" : "knock";
     },
+    ownDeviceReachable: () => true,
     knockKey: async () => null,
     persistDurable: async () => void events.push("persist"),
     composeEnvelope: (g, e, gap, kp) => {
@@ -176,6 +177,102 @@ describe("the request (section 3)", () => {
     });
     await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p);
     expect(sent.map((s) => s.route)).toEqual(["own-device"]);
+  });
+
+  it("asks its own device once, then the group's knock after 2 minutes, and knock from then on (live walk 5)", async () => {
+    const seed = new Uint8Array(32).fill(0x34);
+    const pk = wasm.groupKnockPublicKey(seed);
+    const { p, sent } = ports({
+      roster: [
+        { leafKeyB64: btoa(String.fromCharCode(...OWN_LEAF)), personKeyB64: OWN },
+        { leafKeyB64: OTHER_LEAF_OWN_ACCOUNT, personKeyB64: OWN },
+        { leafKeyB64: PEER, personKeyB64: PEER },
+      ],
+      kind: "group",
+      knockKey: async () => ({ version: 1, publicKeyB64: btoa(String.fromCharCode(...pk)) }),
+      composeEnvelope: (g, e, gap, kp) => wasm.composeConversationReentryEnvelope(g, e, gap, kp),
+    });
+    const wait = Number(wasm.reentryOwnDeviceAnswerWaitMs());
+    expect(wait).toBe(2 * 60_000);
+    expect(await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p)).toBe("sent");
+    expect(reentryRecordFor(GID)?.ownDeviceAsked).toBe(true);
+    now += wait - 1;
+    expect(await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p)).toBe("not-due");
+    now += 1;
+    expect(await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p)).toBe("sent");
+    // A knock request repeats on the 30-minute interval, still by knock.
+    now += 2 * 60_000;
+    expect(await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p)).toBe("not-due");
+    now += 30 * 60_000;
+    expect(await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p)).toBe("sent");
+    expect(sent.map((s) => s.route)).toEqual(["own-device", "knock", "knock"]);
+    expect(reentryRecordFor(GID)?.ownDeviceAsked).toBe(true);
+  });
+
+  it("in a one-to-one, the request after an unanswered own device goes to the other person's mailbox", async () => {
+    const { p, sent } = ports({
+      roster: [
+        { leafKeyB64: btoa(String.fromCharCode(...OWN_LEAF)), personKeyB64: OWN },
+        { leafKeyB64: OTHER_LEAF_OWN_ACCOUNT, personKeyB64: OWN },
+        { leafKeyB64: PEER, personKeyB64: PEER },
+      ],
+    });
+    await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p);
+    now += 2 * 60_000;
+    await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p);
+    expect(sent.map((s) => s.route)).toEqual(["own-device", "mailbox"]);
+  });
+
+  it("back in step, the next episode asks its own device first again", async () => {
+    const { p, sent } = ports({
+      roster: [
+        { leafKeyB64: btoa(String.fromCharCode(...OWN_LEAF)), personKeyB64: OWN },
+        { leafKeyB64: OTHER_LEAF_OWN_ACCOUNT, personKeyB64: OWN },
+        { leafKeyB64: PEER, personKeyB64: PEER },
+      ],
+    });
+    await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p);
+    expect(reentryRecordFor(GID)?.ownDeviceAsked).toBe(true);
+    endReentryEpisode(GID);
+    expect(reentryRecordFor(GID)?.ownDeviceAsked).toBe(false);
+    // The KeyPackage stays: a Welcome that answers it can still land.
+    expect(reentryRecordFor(GID)?.keyPackagesB64.length).toBe(1);
+    now += 2 * 60_000;
+    await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p);
+    expect(sent.map((s) => s.route)).toEqual(["own-device", "own-device"]);
+  });
+
+  it("a failed own-device send makes the own device unavailable: the retry goes by mailbox", async () => {
+    let failing = true;
+    const { p, sent } = ports({
+      roster: [
+        { leafKeyB64: btoa(String.fromCharCode(...OWN_LEAF)), personKeyB64: OWN },
+        { leafKeyB64: OTHER_LEAF_OWN_ACCOUNT, personKeyB64: OWN },
+        { leafKeyB64: PEER, personKeyB64: PEER },
+      ],
+      sendOwnDevice: async () => {
+        if (failing) throw new Error("offline");
+      },
+    });
+    expect(await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p)).toBe("failed");
+    expect(reentryRecordFor(GID)?.ownDeviceAsked).toBe(true);
+    failing = false;
+    now += SEND_RETRY_MS;
+    expect(await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p)).toBe("sent");
+    expect(sent.map((s) => s.route)).toEqual(["mailbox"]);
+  });
+
+  it("with no DeviceGroup sync on this device, the first request goes by the chat's own route", async () => {
+    const { p, sent } = ports({
+      roster: [
+        { leafKeyB64: btoa(String.fromCharCode(...OWN_LEAF)), personKeyB64: OWN },
+        { leafKeyB64: OTHER_LEAF_OWN_ACCOUNT, personKeyB64: OWN },
+        { leafKeyB64: PEER, personKeyB64: PEER },
+      ],
+      ownDeviceReachable: () => false,
+    });
+    expect(await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1 }, p)).toBe("sent");
+    expect(sent.map((s) => s.route)).toEqual(["mailbox"]);
   });
 
   it("in a group without a held knock key, mints nothing", async () => {

@@ -601,10 +601,9 @@ import { isDesktop, publicOrigin } from "../platform";
 import { lastEditableOwnMessage, upEditsLastMessage } from "../chat/edit-last";
 import { displayLocale } from "../l10n/display-locale";
 import { chatErrorsHidden, conversationBehind } from "../chat/conversation-behind";
-import { gapLines, gapLinesVersion, reentryRecordFor, type GapLine } from "../chat/reentry-store";
-import { gapLineTimes, insertByMessageId, placeGapLines } from "../chat/gap-line";
+import { gapLines, gapLinesVersion, type GapLine } from "../chat/reentry-store";
+import { insertByMessageId, placeGapLines } from "../chat/gap-line";
 import { onGapHistoryFiled, requestGapHistoryLook } from "../chat/reentry-history";
-import { REENTRY_SECOND_LINE_MS, reentrySecondLineText } from "../chat/reentry-note";
 
 /**
  * `/chat/:id` (from the Chats list) and `/groups/:id` (from the Groups list)
@@ -1693,8 +1692,10 @@ function ChatView(props: {
    *  banner) offer — `calls/group-call-host.ts`. */
   const callAffordance = (): ChatCallAffordance =>
     chatCallAffordance({
-      // ADR-0091 UX 2.2 / 2.6 — no call buttons in a waiting chat.
-      membershipEnded: membershipEnded() || reentryWaiting(),
+      // ADR-0091 UX 2.6 — the buttons stay while this device is behind; a
+      // call pressed then fails like any call that could not start
+      // (`CallHostContext`, `callStartHeldWhileBehind`).
+      membershipEnded: membershipEnded(),
       callInProgress: callHost.anyCallInProgress(),
       liveCallInThisChat: liveGroupCall() !== null,
       isGroup: isGroupChat(),
@@ -2178,9 +2179,6 @@ function ChatView(props: {
     // A membership that ended offers nothing here: the exit block says what
     // is left (ADR-0045 UX 6.2), and the end itself wipes the group.
     if (membershipEnded()) return [];
-    // ADR-0091 / UX conversation-rejoin 2.2 — a waiting chat hides every
-    // control that would change it.
-    if (reentryWaiting()) return [];
     return conversationInfoSectionsFor(uiRules(), {
       kind: "group",
       role: ownRole() ?? "member",
@@ -2410,35 +2408,12 @@ function ChatView(props: {
    *  as the question it is asking. */
   const membershipEnded = (): boolean => membershipHasEnded(membership());
   // ADR-0091 phase 2 — where this device stands in the conversation:
-  // suspected or confirmed behind stops it acting (C-93); confirmed shows the
-  // waiting note in place of the composer (UX 2.2).
+  // suspected or confirmed behind stops it acting (C-93). The chat looks as
+  // always (maintainer, 2026-11-20): the composer stays, a message sent
+  // meanwhile is shown not sent, other actions fail with their ordinary
+  // failure text; nothing says why (UX 2.2).
   const behindState = () => conversationBehind.state(props.entry.groupIdB64);
   const behindStopsActing = (): boolean => behindState().stopsActing;
-  const reentryWaiting = (): boolean => behindState().kind === "confirmed";
-  // Live walk 2 — a chat that starts waiting drops an error shown before.
-  createEffect(
-    on(
-      () => chatErrorsHidden(behindState()),
-      (hidden, was) => {
-        if (hidden && was === false) setError(null);
-      },
-    ),
-  );
-  // UX 2.2 — the note's second line names who can bring the device back, and
-  // only after 30 seconds (most of the time the device is back before then).
-  const [reentrySecondDue, setReentrySecondDue] = createSignal(false);
-  createEffect(() => {
-    if (!reentryWaiting()) {
-      setReentrySecondDue(false);
-      return;
-    }
-    const timer = setTimeout(() => setReentrySecondDue(true), REENTRY_SECOND_LINE_MS);
-    onCleanup(() => clearTimeout(timer));
-  });
-  const reentrySecondLine = (): string | null => {
-    if (!reentrySecondDue()) return null;
-    return reentrySecondLineText(reentryRecordFor(props.entry.groupIdB64)?.route, () => resolvePeerName());
-  };
   // ADR-0091 section 7 — the gap's messages the device that brought this one
   // back sent: shown at once in an open chat (they were filed into the log
   // already; the timeline dedups by DS id and places them by it).
@@ -4583,8 +4558,8 @@ function ChatView(props: {
     try {
       await pollOnce(0, undefined, false);
     } catch (err) {
-      // Live walk 2 — a waiting chat's reads are refused by design: no
-      // banner above the waiting note (UX 2.2).
+      // Live walk 2 — a behind chat's reads are refused by design: no
+      // banner for them (UX 2.2: nothing says why).
       if (!chatErrorsHidden(behindState())) setError(errorText(err, "chat.error.refresh"));
     } finally {
       setBusy(false);
@@ -7851,7 +7826,7 @@ function ChatView(props: {
    *  the boundary, so a stale answer here costs a refused envelope, never a
    *  pin nobody agreed to. */
   const maySetSharedPin = (): boolean =>
-    !membershipEnded() && !reentryWaiting() && (pinsOneToOne() || ownRole() !== "member");
+    !membershipEnded() && (pinsOneToOne() || ownRole() !== "member");
   /** The stored pin an on-screen row id stands for: the row itself in this
    *  group, or `(older group, original id)` for a row of an older segment
    *  (ADR-0073 R.5, `pin-bar.ts` `pinTargetOfRow`). */
@@ -8440,9 +8415,7 @@ function ChatView(props: {
                   setEditingId(id);
                 }}
                 onCancelEdit={() => setEditingId(null)}
-                onReply={(id) => {
-                  if (!reentryWaiting()) onStartReply(id);
-                }}
+                onReply={(id) => onStartReply(id)}
                 onJumpTo={jumpToMessage}
                 onForward={(id) => setForwardingId(id)}
                 pinLabelOf={pinLabelOf}
@@ -8452,13 +8425,8 @@ function ChatView(props: {
                 onOpenForwardOrigin={onOpenForwardOrigin}
                 onSaveEdit={onSaveEdit}
                 onDeleteMessage={onDeleteMessage}
-                // ADR-0091 UX 2.2 — a waiting chat takes no reaction, from the
-                // menu, a chip or a double tap.
-                onReact={(id, emoji) => (reentryWaiting() ? undefined : onReact(id, emoji))}
-                onQuickReact={(id) => {
-                  if (!reentryWaiting()) onQuickReact(id);
-                }}
-                waiting={reentryWaiting()}
+                onReact={(id, emoji) => onReact(id, emoji)}
+                onQuickReact={(id) => onQuickReact(id)}
                 reactionAllowed={reactionAllowed}
                 chipConversation={isGroupChat() ? "group" : "one-to-one"}
                 reactionRowFor={reactionRowFor}
@@ -8766,16 +8734,7 @@ function ChatView(props: {
           </Show>
         </div>
       </Show>
-      {/* ADR-0091 / UX conversation-rejoin 2.2 — while this device is out of
-          date in the chat, the waiting note stands where the composer is.
-          Nothing is sent from here until it is back. */}
-      <Show when={!selecting() && reentryWaiting()}>
-        <div class="lk-waiting-note" role="status">
-          <p>{t("chat.reentry.waiting")}</p>
-          <Show when={reentrySecondLine()}>{(line) => <p class="lk-waiting-note-second">{line()}</p>}</Show>
-        </div>
-      </Show>
-      <Show when={!selecting() && !reentryWaiting()}>
+      <Show when={!selecting()}>
       {/* ADR-0047 UX §6 — the permission-denied card and the short hints. */}
       <RecorderNotices recorder={recorder} />
       <VideoNoteOverlay recorder={recorder} />
@@ -10813,13 +10772,13 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
   };
 }
 
-/** ADR-0091 / UX conversation-rejoin 2.4 — one "can't be shown" line, styled
- *  as the date separators are. Local to this device; never sent, never read. */
-function GapLineRow(props: { readonly line: GapLine }): JSX.Element {
-  const times = (): { readonly from: string; readonly to: string } => gapLineTimes(props.line, displayLocale());
+/** ADR-0091 / UX conversation-rejoin 2.4 — one "Some messages are not
+ *  available" line where messages are missing, styled as the date
+ *  separators are. Local to this device; never sent, never read. */
+function GapLineRow(_props: { readonly line: GapLine }): JSX.Element {
   return (
     <li class="lk-day-sep lk-gap-line" role="note">
-      <span>{t("chat.reentry.gap", { from: times().from, to: times().to })}</span>
+      <span>{t("chat.reentry.gap")}</span>
     </li>
   );
 }

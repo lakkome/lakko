@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
   GROUP_CALL_ALONE_END_MS,
+  callStartHeldWhileBehind,
   chatCallAffordance,
   decideGroupCallEpochChange,
   groupCallAloneAction,
@@ -639,5 +642,52 @@ describe("runGroupCallStart", () => {
     // Handed over: the host leaves the call, which is what publishes the End.
     expect(await broken.run).toEqual({ kind: "failed", error: err, handedOver: true });
     expect(h.log.filter((l) => l.startsWith("take-back"))).toEqual([]);
+  });
+});
+
+describe("a call in a chat this device is behind in (ADR-0091, 2026-11-20)", () => {
+  const source = (rel: string): string => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
+  /** The body of `async function <name>(` up to the next top-level function. */
+  const body = (text: string, name: string): string => {
+    const start = text.indexOf(`  async function ${name}(`);
+    expect(start).toBeGreaterThan(-1);
+    const end = text.indexOf("\n  async function ", start + 10);
+    return text.slice(start, end < 0 ? undefined : end);
+  };
+
+  it("is held only while behind", () => {
+    expect(callStartHeldWhileBehind(true)).toBe(true);
+    expect(callStartHeldWhileBehind(false)).toBe(false);
+  });
+
+  it("keeps the call buttons: the affordance does not read the behind state", () => {
+    const chat = source("../routes/Chat.tsx");
+    const at = chat.indexOf("chatCallAffordance({");
+    const call = chat.slice(at, chat.indexOf("});", at));
+    expect(call).toContain("membershipEnded: membershipEnded(),");
+    expect(call).not.toContain("reentryWaiting");
+    expect(call).not.toContain("behindState");
+  });
+
+  it("stops a 1x1 dial and a group start before anything is captured, taken or published", () => {
+    const host = source("./CallHostContext.tsx");
+    const dial = body(host, "dial");
+    const held = dial.indexOf("callStartHeldWhileBehind(");
+    expect(held).toBeGreaterThan(-1);
+    expect(held).toBeLessThan(dial.indexOf("captureGate("));
+    expect(held).toBeLessThan(dial.indexOf("session.dial("));
+    // An error with no copy of its own: the chat shows its ordinary
+    // could-not-start line.
+    expect(dial.slice(held, dial.indexOf("}", held))).toContain("throw new ConversationBehindError()");
+    const group = body(host, "startGroupCall");
+    const groupHeld = group.indexOf("callStartHeldWhileBehind(");
+    expect(groupHeld).toBeGreaterThan(-1);
+    expect(groupHeld).toBeLessThan(group.indexOf("captureGate("));
+    expect(groupHeld).toBeLessThan(group.indexOf("setGroupSlot("));
+    expect(groupHeld).toBeLessThan(group.indexOf("runGroupCallStart"));
+    const refusal = group.slice(groupHeld, group.indexOf("};", groupHeld));
+    expect(refusal).toContain('"call.error.start_group"');
+    expect(refusal).toContain('"call.error.join_group"');
+    expect(refusal).not.toContain("reentry");
   });
 });

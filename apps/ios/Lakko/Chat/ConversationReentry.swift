@@ -45,7 +45,7 @@ public enum ReentryBehind: Codable, Equatable, Sendable {
     /// envelope in the conversation while this holds (the core's rule).
     public var stopsActing: Bool { behindStateStopsActing(state: ffi) }
 
-    /// Shown: the composer is replaced by the waiting note (UX 2.2).
+    /// Confirmed: a message sent meanwhile is shown not sent (UX 2.2).
     public var isConfirmed: Bool {
         if case .confirmed = self { return true }
         return false
@@ -84,7 +84,7 @@ public struct ReentrySentRequest: Codable, Equatable, Sendable {
 }
 
 /// What this device keeps per conversation while it is behind there. Durable
-/// (the waiting note survives a restart, UX 4), per account, behind the store
+/// (the behind state survives a restart, UX 4), per account, behind the store
 /// gate, dropped with the group and on Forget device.
 public struct ConversationReentryRecord: Codable, Equatable, Sendable {
     public var behind: ReentryBehind = .inStep
@@ -105,8 +105,26 @@ public struct ConversationReentryRecord: Codable, Equatable, Sendable {
     public var lastSentMs: UInt64?
     /// The route the last request took (for the second line of UX 2.2).
     public var lastRoute: String?
+    /// ADR-0091 live walk 5 (2026-11-20): a request of the current behind
+    /// episode went out by route `own-device` (it was sent, not only tried)
+    /// and the device is still behind. From then on the core's `reentryRoute`
+    /// sends every request of the episode by the conversation's own route.
+    /// Cleared with the episode (back in step). Optional so a record written
+    /// before it decodes; `nil` reads as `false`.
+    public var ownDeviceAsked: Bool?
 
     public init() {}
+
+    /// `ownDeviceUnanswered` for the core's `reentryRoute`.
+    public var ownDeviceUnanswered: Bool { ownDeviceAsked == true }
+
+    /// `lastRouteWasOwnDevice` for the core's `reentryRequestDue`: the last
+    /// request went to another own device and was sent (a failed send leaves
+    /// ``ownDeviceAsked`` unset and is retried on the 30-minute rule's
+    /// one-minute offset).
+    public var lastRouteWasOwnDevice: Bool {
+        ownDeviceAsked == true && lastRoute == ConversationReentryRules.routeName(.ownDevice)
+    }
 
     /// The KeyPackages `Group.joinReentry` may accept.
     public var recordedKeyPackages: [Data] { requests.map(\.keyPackage) }
@@ -162,7 +180,7 @@ public struct ConversationReentryStore {
         defaults.set(try? JSONEncoder().encode(map), forKey: Self.key(accountIdB64))
     }
 
-    /// The groups with a record (the launch pass and the waiting notes).
+    /// The groups with a record (the launch pass).
     public func groups(accountIdB64: String) -> [String] {
         Array(all(accountIdB64: accountIdB64).keys).sorted()
     }
@@ -788,6 +806,15 @@ public enum ReentryGapNarrowing: Equatable, Sendable {
 
 public enum ConversationReentryRules {
 
+    /// The `ownDeviceInConversation` the core's `reentryRoute` is asked
+    /// with: another own device holds a leaf in the conversation AND this
+    /// device can reach it (a DeviceGroup sender is registered). Without a
+    /// sender route 1 cannot send, so the request goes by route 2 or 3 at
+    /// once instead of waiting on it for ever (live walk 5, 2026-11-20).
+    public static func ownDeviceReachable(inConversation: Bool, senderRegistered: Bool) -> Bool {
+        inConversation && senderRegistered
+    }
+
     /// The route as stored.
     public static func routeName(_ route: FfiReentryRoute) -> String {
         switch route {
@@ -847,6 +874,9 @@ public enum ConversationReentryRules {
             next.evidence = false
             next.gapFromMs = nil
             next.latestSeen = nil
+            // Live walk 5: the episode ends; the next one asks its own device
+            // first again.
+            next.ownDeviceAsked = nil
         }
         return (next, cleared)
     }
@@ -893,73 +923,10 @@ public enum ConversationReentryRules {
         }
     }
 
-    /// Walk-2 rule R5 — the moment a chat starts waiting, an error it showed
-    /// before (a send, a membership action) is cleared: nothing in a waiting
-    /// chat can be retried, and the waiting note says why.
-    public static func clearsChatErrors(wasWaiting: Bool, isWaiting: Bool) -> Bool {
-        !wasWaiting && isWaiting
-    }
-
     /// Journal repair (ADR-0057) must not Replace while there is evidence the
     /// epochs above are real (section 2).
     public static func blocksRepair(_ record: ConversationReentryRecord) -> Bool {
         record.behind != .inStep && record.evidence
-    }
-
-    // MARK: The waiting note (UX 2.2)
-
-    /// Who can bring this device back, for the second line.
-    public enum Waiter: Equatable {
-        case ownDevice
-        case person(name: String)
-        case ownerOrAdmin
-    }
-
-    /// The second line appears only after this long (UX 2.2). Chosen, not
-    /// measured.
-    public static let secondLineAfterMs: UInt64 = 30_000
-
-    /// The note's lines, or `nil` when the chat is not waiting.
-    static func note(
-        behind: ReentryBehind, waiter: Waiter?, nowMs: UInt64,
-        text: (String, [String: String]) -> String = { Localization.text($0, texts: $1) }
-    ) -> [String]? {
-        guard case .confirmed(let since) = behind else { return nil }
-        var lines = [text("chat.reentry.waiting", [:])]
-        if let waiter, nowMs >= since &+ secondLineAfterMs {
-            switch waiter {
-            case .ownDevice: lines.append(text("chat.reentry.second.own_device", [:]))
-            case .person(let name): lines.append(text("chat.reentry.second.person", ["name": name]))
-            case .ownerOrAdmin: lines.append(text("chat.reentry.second.group", [:]))
-            }
-        }
-        return lines
-    }
-
-    // MARK: What a waiting chat offers (UX 2.2)
-
-    /// The message menu of a waiting chat: Copy, Forward, Save and Pin (for
-    /// me; the sheet offers no shared pin, ``ChatRepository/maySetSharedPin(groupIdHex:)``).
-    /// Everything that would change the chat or send is absent.
-    static let waitingMenuActions: Set<MessageMenuAction> = [
-        .copy, .copyCoordinates, .forward, .save, .unsave, .pin, .unpin,
-    ]
-
-    /// `actions` with only what a waiting chat offers, in their order.
-    static func waitingMenu(_ actions: [MessageMenuAction]) -> [MessageMenuAction] {
-        actions.filter { waitingMenuActions.contains($0) }
-    }
-
-    /// The info blocks a waiting chat hides: every control that would change
-    /// the chat (UX 2.2). The chat shows what this device last knew.
-    static let waitingHiddenInfoSections: Set<InfoSection> = [
-        .call, .renameGroup, .addMember, .inviteLink, .roles, .transferOwnership, .leaveGroup,
-        .groupType, .deleteGroup, .invitePeople, .reactions,
-    ]
-
-    /// `sections` with the changing blocks left out, in their order.
-    static func waitingInfoSections(_ sections: [InfoSection]) -> [InfoSection] {
-        sections.filter { !waitingHiddenInfoSections.contains($0) }
     }
 
     // MARK: The gap line (UX 2.4)
@@ -983,31 +950,12 @@ public enum ConversationReentryRules {
         return (from, to)
     }
 
-    /// The sentence of a gap row: the date once when both times fall on the
-    /// same day.
+    /// The sentence of a gap row (UX 2.4): a plain fact, no times, no
+    /// mention of this device (maintainer, 2026-11-20).
     static func gapSentence(
-        fromMs: UInt64, toMs: UInt64, calendar: Calendar = .current, locale: Locale = .current,
         text: (String, [String: String]) -> String = { Localization.text($0, texts: $1) }
     ) -> String {
-        let from = Date(timeIntervalSince1970: TimeInterval(fromMs) / 1000)
-        let to = Date(timeIntervalSince1970: TimeInterval(toMs) / 1000)
-        func formatter(_ template: String) -> DateFormatter {
-            let f = DateFormatter()
-            f.locale = locale
-            f.calendar = calendar
-            f.timeZone = calendar.timeZone
-            f.setLocalizedDateFormatFromTemplate(template)
-            return f
-        }
-        let day = formatter("d MMM")
-        let time = formatter("HH:mm")
-        // "11 Nov, 13:10" (UX 2.4); on the same day the date is shown once.
-        func full(_ date: Date) -> String { "\(day.string(from: date)), \(time.string(from: date))" }
-        let sameDay = calendar.isDate(from, inSameDayAs: to)
-        return text("chat.reentry.gap", [
-            "from": full(from),
-            "to": sameDay ? time.string(from: to) : full(to),
-        ])
+        text("chat.reentry.gap", [:])
     }
 
     /// Walk-2 rule R1 — where the gap starts: the first row this device

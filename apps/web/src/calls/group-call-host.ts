@@ -236,6 +236,18 @@ export function chatCallAffordance(input: ChatCallAffordanceInput): ChatCallAffo
   return input.people > 1 ? "start-group" : "hidden";
 }
 
+/**
+ * ADR-0091 (maintainer, 2026-11-20) — a call is not set up in a chat this
+ * device is behind in: the call key would be derived at an epoch the others
+ * left, so the call would carry no media. The call buttons stay as in any
+ * chat; pressing one fails with the ordinary could-not-start outcome before
+ * anything is captured or published, and nothing says why. `true` when the
+ * start must stop here.
+ */
+export function callStartHeldWhileBehind(behindStopsActing: boolean): boolean {
+  return behindStopsActing;
+}
+
 export interface GroupCallStartFailureInput {
   /** The state of the SFU session the start built, or `null` when the start
    *  stopped before there was one. */

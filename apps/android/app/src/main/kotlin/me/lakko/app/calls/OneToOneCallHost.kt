@@ -510,6 +510,8 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         hasCamera: Boolean = true,
     ): Boolean {
         if (hasCall || otherCalls.isNotEmpty()) return false
+        // ADR-0091 — nothing is set up in a chat this device is behind in.
+        if (isHeldWhileBehind(groupIdHex)) return false
         // ADR-0073 R.12 — a call asked for in a dead one-to-one is placed in
         // the conversation's successor when this device holds one; otherwise
         // it does not start, before any signalling ([oneToOneCallTarget]).
@@ -607,6 +609,24 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
      */
     @Volatile
     public var callTarget: ((groupIdHex: String) -> OneToOneCallTarget)? = null
+
+    /**
+     * ADR-0091 (maintainer, 2026-11-20) — `true` while this device is behind in
+     * [groupIdHex]: a call there would be keyed at an epoch the other person
+     * left. The call buttons stay; [startOutgoing] refuses before anything is
+     * built or signalled and the caller shows its ordinary could-not-start
+     * notice ([isHeldWhileBehind]). Installed with the repository.
+     */
+    @Volatile
+    public var behindHeld: ((groupIdHex: String) -> Boolean)? = null
+
+    /** [behindHeld] for [groupIdHex]; `false` when not installed or it throws. */
+    public fun isHeldWhileBehind(groupIdHex: String): Boolean =
+        try {
+            behindHeld?.invoke(groupIdHex) == true
+        } catch (_: Throwable) {
+            false
+        }
 
     private fun callTargetOf(groupIdHex: String): OneToOneCallTarget =
         try {

@@ -117,6 +117,12 @@ export function sendServiceEnvelopeNow(envelope: Uint8Array): Promise<void> {
   return run;
 }
 
+/** Whether a DeviceGroup sender is registered (the account's DeviceGroup sync
+ *  runs on this device). Without one {@link sendServiceEnvelopeNow} throws. */
+export function hasServiceEnvelopeSender(): boolean {
+  return sender !== null;
+}
+
 /** Send every dirty kind that has a composer, serialized. Never rejects. */
 export function flushServiceEnvelopes(): Promise<void> {
   chain = chain.then(async () => {

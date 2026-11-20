@@ -326,9 +326,11 @@ function gapStartOf(r: GroupRecord): number | undefined {
 }
 
 /**
- * UX `conversation-rejoin.md` 2.2 (live walk 2, 2026-11-19): a waiting chat
- * (suspected or confirmed behind) shows no error banner. Its reads are
- * refused by design until the device is back; the waiting note says why.
+ * UX `conversation-rejoin.md` 2.2 (live walk 2, 2026-11-19): a chat this
+ * device is behind in (suspected or confirmed) shows no banner for a refused
+ * read: its reads are refused by design until the device is back, and
+ * nothing tells the person why. A message or action the person takes still
+ * shows its ordinary failure.
  */
 export function chatErrorsHidden(state: BehindStateView): boolean {
   return state.kind !== "in-step";
@@ -417,7 +419,7 @@ export class ConversationBehindStore {
     return r.state.stopsActing || r.refusedReads > 0;
   }
 
-  /** The waiting note is shown (UX 2.2). */
+  /** Confirmed behind: a message sent now is shown not sent (UX 2.2). */
   isConfirmed(group: string): boolean {
     return this.state(group).kind === "confirmed";
   }

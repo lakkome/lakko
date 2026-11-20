@@ -84,6 +84,10 @@ final class CallHost: ObservableObject {
         var callTarget: @MainActor (_ groupIdHex: String) -> CallContinuity.Target = {
             .dial(groupIdB64: $0)
         }
+        /// ADR-0091 — this device is behind in the chat: no call is placed
+        /// there (the key would be derived at an epoch the other person left).
+        /// The buttons stay; a start fails with the ordinary text.
+        var behindHeld: @MainActor (_ groupIdHex: String) -> Bool = { _ in false }
         /// `docs/ux/calls.md` sections 2.1 and 2.1.1 — does this conversation
         /// carry the mute flag? A muted conversation never rings; the call is
         /// still offered, still answerable, and still recorded.
@@ -377,6 +381,13 @@ final class CallHost: ObservableObject {
         guard !hasLiveCall, !callStarting else { return }
         if let other = otherCallOccupant() {
             callError = CallSlot.busyText(other, verb: .start)
+            return
+        }
+        // ADR-0091 (maintainer, 2026-11-20) — behind in this chat: the
+        // ordinary could-not-start text, before anything is captured or
+        // signalled. Nothing says why.
+        if ports.behindHeld(askedGroupIdHex) {
+            callError = .key("call.error.unavailable")
             return
         }
         // ADR-0073 R.7 case 1 — a call started in a one-to-one whose other
@@ -845,6 +856,7 @@ extension CallHost {
             callTarget: { [weak repository] groupIdHex in
                 repository?.oneToOneCallTarget(groupIdHex: groupIdHex) ?? .dial(groupIdB64: groupIdHex)
             },
+            behindHeld: { [weak repository] in repository?.reentryStopsActing(groupIdHex: $0) ?? false },
             turnClient: { callId in
                 guard let token = sessionTokenProvider(), !token.isEmpty else { return nil }
                 return TurnCredentialClient.forCall(callId: callId)

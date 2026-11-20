@@ -86,6 +86,10 @@ class HostedCallsTest {
         val rows = mutableListOf<Pair<String, CallTranscriptEntry>>()
         var synced = 0
 
+        /** ADR-0091 — this device is behind in the chat. */
+        var behind = false
+        override fun behindHeld(groupIdHex: String): Boolean = behind
+
         /** When each recorded call started, in the order of [rows]. */
         val rowStarts = mutableListOf<Long?>()
 
@@ -245,6 +249,25 @@ class HostedCallsTest {
         assertNull(h.host.slot.value)
         assertTrue(h.port.sessions.isEmpty())
         assertTrue(h.port.published.isEmpty())
+    }
+
+    @Test
+    fun `a group call in a chat this device is behind in fails the ordinary way and publishes nothing`() = runTest {
+        val h = groupHarness()
+        h.port.behind = true
+        assertEquals(
+            GroupCallStartOutcome.Failed(me.lakko.app.l10n.UiText("call.error.start_group")),
+            h.host.start(groupA, video = false, joinCallIdHex = null),
+        )
+        assertEquals(
+            GroupCallStartOutcome.Failed(me.lakko.app.l10n.UiText("call.error.join_group")),
+            h.host.start(groupA, video = false, joinCallIdHex = "00".repeat(16)),
+        )
+        runCurrent()
+        assertNull(h.host.slot.value)
+        assertTrue(h.port.sessions.isEmpty())
+        assertTrue(h.port.published.isEmpty())
+        assertEquals(0, h.port.synced)
     }
 
     @Test

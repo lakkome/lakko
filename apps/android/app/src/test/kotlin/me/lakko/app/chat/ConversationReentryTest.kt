@@ -120,7 +120,7 @@ class ConversationReentryTest {
         t.noteSkipped("ab", 7uL, 6uL, 10L)
         assertEquals(BehindLevel.CONFIRMED, t.observe("ab", false, true, 7uL, 6uL).level)
         val again = ConversationBehindTracker(store, sectionOneVerdict).also { it.bind("acct") }
-        assertTrue("the waiting note is a durable flag", again.isConfirmed("ab"))
+        assertTrue("confirmed is a durable flag", again.isConfirmed("ab"))
     }
 
     @Test
@@ -307,8 +307,100 @@ class ConversationReentryTest {
         assertTrue("the refused-read path asks to come back", reentryRequestAfterRefusedRead(state))
         assertTrue(
             "a confirmed device's first request is due at once",
-            ReentryRequestDue { s, last, _ -> s.level != BehindLevel.IN_STEP && last == null }.due(t.entry("ab").state, null, 0L),
+            ReentryRequestDue { s, last, _, _ -> s.level != BehindLevel.IN_STEP && last == null }
+                .due(t.entry("ab").state, null, false, 0L),
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // Live walk 5 (2026-11-20) - an own device that does not answer
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `a request sent to the own device marks the episode, a failed one does not`() {
+        val t = tracker()
+        t.observe("ab", false, true, 7uL, 6uL)
+        // Not sent: back-dated retry, no route.
+        t.noteRequestSent("ab", 5L)
+        assertFalse(t.entry("ab").ownDeviceAsked)
+        assertFalse(t.entry("ab").lastRequestOwnDevice)
+        t.noteRequestSent("ab", 10L, ReentryRouteKind.OWN_DEVICE)
+        assertTrue(t.entry("ab").ownDeviceAsked)
+        assertTrue(t.entry("ab").lastRequestOwnDevice)
+        // The next request went by knock: the episode stays marked.
+        t.noteRequestSent("ab", 20L, ReentryRouteKind.KNOCK)
+        assertTrue(t.entry("ab").ownDeviceAsked)
+        assertFalse(t.entry("ab").lastRequestOwnDevice)
+    }
+
+    @Test
+    fun `an own device that cannot be reached is not waited on`() {
+        // No DeviceGroup sync on this device: route 1 counts as absent.
+        assertFalse(reentryOwnDeviceReachable(inConversation = true, deviceGroupSyncActive = false))
+        assertTrue(reentryOwnDeviceReachable(inConversation = true, deviceGroupSyncActive = true))
+        assertFalse(reentryOwnDeviceReachable(inConversation = false, deviceGroupSyncActive = true))
+        // A send to it that did not go marks it unavailable for the episode,
+        // so the retry takes the chat's own route; back in step clears it.
+        val t = tracker()
+        t.observe("ab", false, true, 7uL, 6uL)
+        t.noteOwnDeviceUnavailable("ab")
+        t.noteRequestSent("ab", 5L)
+        assertTrue(t.entry("ab").ownDeviceAsked)
+        assertFalse(t.entry("ab").lastRequestOwnDevice)
+        t.observe("ab", false, true, 7uL, 7uL)
+        assertFalse(t.entry("ab").ownDeviceAsked)
+        val source = java.io.File("src/main/kotlin/me/lakko/app/chat/ChatRepository.kt").readText()
+        val body = source.substringAfter("    private suspend fun requestReentryIfDue(groupIdHex: String) {")
+            .substringBefore("\n    }\n")
+        assertFalse("no silent return on a missing DeviceGroup sync", "active == null" in body)
+        assertTrue("noteOwnDeviceUnavailable(groupIdHex)" in body)
+    }
+
+    @Test
+    fun `back in step ends the episode and the own device is asked first again`() {
+        val t = tracker()
+        t.observe("ab", false, true, 7uL, 6uL)
+        t.noteRequestSent("ab", 10L, ReentryRouteKind.OWN_DEVICE)
+        assertEquals(BehindLevel.IN_STEP, t.observe("ab", false, true, 7uL, 7uL).level)
+        assertFalse(t.entry("ab").ownDeviceAsked)
+        assertFalse(t.entry("ab").lastRequestOwnDevice)
+        assertEquals(null, t.entry("ab").lastRequestSentMs)
+    }
+
+    @Test
+    fun `the episode marks feed the core's route and cadence`() {
+        // A stand-in for the core's two rules (the host JVM has no native
+        // library): route = own device unless asked; due after 2 minutes for
+        // an own-device request, 30 minutes otherwise.
+        val due = ReentryRequestDue { s, last, lastOwn, now ->
+            s.level != BehindLevel.IN_STEP &&
+                (last == null || now - last >= if (lastOwn) 120_000L else 1_800_000L)
+        }
+        fun route(asked: Boolean, group: Boolean) =
+            if (!asked) ReentryRouteKind.OWN_DEVICE else if (group) ReentryRouteKind.KNOCK else ReentryRouteKind.MAILBOX
+        for (group in listOf(true, false)) {
+            val t = tracker()
+            t.observe("ab", false, true, 7uL, 6uL)
+            val sent = mutableListOf<ReentryRouteKind>()
+            for (now in listOf(0L, 119_999L, 120_000L, 180_000L, 1_920_000L)) {
+                val e = t.entry("ab")
+                if (!due.due(e.state, e.lastRequestSentMs, e.lastRequestOwnDevice, now)) continue
+                val r = route(e.ownDeviceAsked, group)
+                sent += r
+                t.noteRequestSent("ab", now, r)
+            }
+            val other = if (group) ReentryRouteKind.KNOCK else ReentryRouteKind.MAILBOX
+            assertEquals(listOf(ReentryRouteKind.OWN_DEVICE, other, other), sent)
+        }
+        // The production request passes the episode marks to the core.
+        val source = java.io.File("src/main/kotlin/me/lakko/app/chat/ChatRepository.kt").readText()
+        val body = source.substringAfter("    private suspend fun requestReentryIfDue(groupIdHex: String) {")
+            .substringBefore("\n    }\n")
+        assertTrue("entry.lastRequestOwnDevice, now)" in body)
+        assertTrue(
+            "reentryRouteLocked(record, identity, entry.ownDeviceAsked, ownDeviceReachable = deviceGroupSync != null)" in body,
+        )
+        assertTrue("noteRequestSent(groupIdHex, now, route)" in body)
     }
 
     @Test
@@ -318,14 +410,36 @@ class ConversationReentryTest {
     }
 
     // -----------------------------------------------------------------------
-    // Walk 2, R5 — the waiting chat shows no error
+    // Maintainer 2026-11-20 — a behind chat looks as always
     // -----------------------------------------------------------------------
 
     @Test
-    fun `a waiting chat clears the composer's error and keeps it otherwise`() {
-        val error = me.lakko.app.l10n.UiText("chat.error.send")
-        assertNull(composerErrorWhileWaiting(waiting = true, error))
-        assertEquals(error, composerErrorWhileWaiting(waiting = false, error))
+    fun `a message sent while confirmed behind is kept as not sent with the ordinary failure`() {
+        // The refusal carries no text of its own: the composer shows the
+        // ordinary send failure.
+        assertEquals(
+            "chat.send.failed",
+            chatErrorText(personActionHeldError(), "chat.send.failed", { false }).key,
+        )
+        val source = java.io.File("src/main/kotlin/me/lakko/app/chat/ChatRepository.kt").readText()
+        // The first send: the row is in the conversation first, the check is
+        // inside the try whose catch marks it failed, before any publish.
+        val send = source.substringAfter("    private suspend fun sendMessageOnMlsThread(")
+            .substringBefore("\n    }\n")
+        val pending = send.indexOf("record.appendPending(")
+        val check = send.indexOf("requireMessageSendAllowed(groupIdHex)")
+        val publish = send.indexOf("sendLocked(")
+        val failed = send.indexOf("record.markFailed(localId)")
+        assertTrue(pending in 0 until check)
+        assertTrue(check in 0 until publish)
+        assertTrue(publish in 0 until failed)
+        assertFalse("no waiting-note text", "chat.reentry" in send)
+        // Retry fails again the same way while still behind.
+        val retry = source.substringAfter("    private suspend fun retrySendOnMlsThread(")
+            .substringBefore("\n    }\n")
+        val retryCheck = retry.indexOf("requireMessageSendAllowed(groupIdHex)")
+        assertTrue(retryCheck in 0 until retry.indexOf("sendLocked("))
+        assertTrue(retry.indexOf("record.markFailed(localId)") > retryCheck)
     }
 
     @Test
@@ -762,37 +876,10 @@ class ConversationReentryTest {
     }
 
     @Test
-    fun `the gap line shows the date once on the same day`() {
-        val day: (Long) -> Long = { it / 1_000L }
-        val sameDay = gapLineText(ReentryGap(1_100L, 1_900L), day, { "D${it / 1_000}" }, { "T$it" })
-        assertEquals("chat.reentry.gap", sameDay.key)
-        assertEquals(mapOf("from" to "D1, T1100", "to" to "T1900"), sameDay.texts)
-        val twoDays = gapLineText(ReentryGap(1_100L, 2_200L), day, { "D${it / 1_000}" }, { "T$it" })
-        assertEquals(mapOf("from" to "D1, T1100", "to" to "D2, T2200"), twoDays.texts)
-    }
-
-    // -----------------------------------------------------------------------
-    // The waiting note
-    // -----------------------------------------------------------------------
-
-    @Test
-    fun `no second line in the first thirty seconds, then the one that names the helper`() {
-        assertNull(waitingSecondLine(ReentryHelper.OWN_DEVICE, 0L, REENTRY_SECOND_LINE_AFTER_MS - 1, null))
-        assertEquals(
-            "chat.reentry.second.own_device",
-            waitingSecondLine(ReentryHelper.OWN_DEVICE, 0L, REENTRY_SECOND_LINE_AFTER_MS, null)?.key,
-        )
-        val person = waitingSecondLine(ReentryHelper.OTHER_PERSON, 0L, REENTRY_SECOND_LINE_AFTER_MS, "Ana")
-        assertEquals("chat.reentry.second.person", person?.key)
-        assertEquals(mapOf("name" to "Ana"), person?.texts)
-        assertNull("no name, no sentence", waitingSecondLine(ReentryHelper.OTHER_PERSON, 0L, 60_000L, " "))
-        assertEquals(
-            "chat.reentry.second.group",
-            waitingSecondLine(ReentryHelper.OWNER_OR_ADMIN, 0L, 60_000L, null)?.key,
-        )
-        assertEquals(ReentryHelper.OTHER_PERSON, helperOf(ReentryRouteKind.MAILBOX))
-        assertEquals(ReentryHelper.OWN_DEVICE, helperOf(ReentryRouteKind.OWN_DEVICE))
-        assertEquals(ReentryHelper.OWNER_OR_ADMIN, helperOf(ReentryRouteKind.KNOCK))
+    fun `the gap line is a plain fact`() {
+        val line = gapLineText()
+        assertEquals("chat.reentry.gap", line.key)
+        assertTrue(line.texts.isEmpty())
     }
 
     // -----------------------------------------------------------------------

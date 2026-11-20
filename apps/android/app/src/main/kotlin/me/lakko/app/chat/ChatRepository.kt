@@ -4871,16 +4871,6 @@ public class ChatRepository(
                 "no live Group handle for $groupIdHex",
                 IllegalStateException("unknown group"),
             )
-        // ADR-0091 phase 2 section 2 — once confirmed behind, nothing is
-        // sent (the composer is replaced by the waiting note).
-        if (conversationBehind.isConfirmed(groupIdHex)) {
-            throw ChatError(
-                "this device is behind in this conversation",
-                IllegalStateException("behind"),
-                userText = me.lakko.app.l10n.UiText("chat.reentry.waiting"),
-            )
-        }
-
         // The row goes into the conversation BEFORE the publish, reading
         // "Sending...". It used to be appended only on success, so a message
         // written on a bad connection left the person looking at an error
@@ -4910,6 +4900,10 @@ public class ChatRepository(
         publishThreadList()
         onRowShown()
         try {
+            // ADR-0091 phase 2 section 2 — once confirmed behind, nothing is
+            // sent. The row stays in the conversation in the ordinary
+            // "Not sent" state with Retry (maintainer, 2026-11-20).
+            requireMessageSendAllowed(groupIdHex)
             sendLocked(
                 groupIdHex = groupIdHex,
                 record = record,
@@ -4979,6 +4973,8 @@ public class ChatRepository(
         record.markPending(localId)
         publishThreadList()
         try {
+            // A Retry while still behind fails again the same way.
+            requireMessageSendAllowed(groupIdHex)
             sendLocked(
                 groupIdHex = groupIdHex,
                 record = record,
@@ -7560,11 +7556,14 @@ public class ChatRepository(
                 val owner = roleTableOrNull(group)?.owner ?: return
                 if (senderBytes == null || !owner.contentEquals(senderBytes)) return
                 val account = accountIdentity.get() ?: return
-                val seed = try {
-                    uniffi.lakko_ffi_uniffi.openKnockSeedEnvelope(bytes, account)
-                } catch (_: Throwable) {
-                    return
-                }
+                // ADR-0074 section 3.7 — after a rotation the owner seals to
+                // the current identity's X25519 key (the directory's).
+                val seed = me.lakko.app.ds.openSealedToOwnAccount(
+                    conversation = account,
+                    current = publishedAccountIdentity.get(),
+                    openOwn = { a -> uniffi.lakko_ffi_uniffi.openKnockSeedEnvelope(bytes, a) },
+                    openSealedTo = { a, c -> uniffi.lakko_ffi_uniffi.openKnockSeedEnvelopeSealedTo(bytes, a, c) },
+                ) ?: return
                 try {
                     // The first seed given for a version is kept: a device of
                     // the owner that derived a version from the wrong root
@@ -13458,8 +13457,15 @@ public class ChatRepository(
      * ADR-0057 — a member's account X25519 key, from its identity bundle. The
      * account id comes from the profile the member published in the group
      * (ADR-0048 v2) or the accepted-contact store; the fetched bundle must
-     * name the SAME account key the MLS roster authenticated, else nothing is
-     * sealed to it. `null` when either lookup is unavailable.
+     * be the bundle of the account key the MLS roster authenticated, else
+     * nothing is sealed to it. ADR-0074 section 3.7 (2026-11-20): after a
+     * rotation the bundle serves the CURRENT key and the roster names the
+     * conversation key, so the bundle is accepted when its two-way
+     * conversation link verifies against the served key and names the roster
+     * key ([me.lakko.app.ds.bundleServesRosterKey]); the envelope stays
+     * addressed to the roster key and is sealed to the bundle's X25519 key,
+     * which the member opens with its current identity. `null` when either
+     * lookup is unavailable.
      */
     private suspend fun memberX25519KeyOrNull(accountKey: ByteArray): ByteArray? {
         val keyB64 = java.util.Base64.getEncoder().encodeToString(accountKey)
@@ -13479,7 +13485,17 @@ public class ChatRepository(
         } catch (_: Throwable) {
             return null
         }
-        if (!served.contentEquals(accountKey)) {
+        val link = bundle.conversation_link?.takeIf { it.isNotEmpty() }?.let {
+            try {
+                me.lakko.app.auth.base64Decode(it)
+            } catch (_: Throwable) {
+                null
+            }
+        }
+        val serves = me.lakko.app.ds.bundleServesRosterKey(served, link, accountKey) { l, current ->
+            uniffi.lakko_ffi_uniffi.verifyConversationLink(l, current)
+        }
+        if (!serves) {
             android.util.Log.w("ChatRepository", "ADR-0057: identity bundle names another key; not appointing")
             return null
         }
@@ -13583,8 +13599,18 @@ public class ChatRepository(
             senderAccountKey = senderBytes,
             ownerAccountKey = ownerAccountKey,
             open = {
+                // ADR-0074 section 3.7 — addressed to the conversation key;
+                // sealed to its X25519 key, or after a rotation to the
+                // current identity's (the one the directory serves).
                 val account = accountIdentity.get() ?: return@receiveSeedEnvelope null
-                uniffi.lakko_ffi_uniffi.openRegistrarSeedEnvelope(envelope, account)
+                me.lakko.app.ds.openSealedToOwnAccount(
+                    conversation = account,
+                    current = publishedAccountIdentity.get(),
+                    openOwn = { a -> uniffi.lakko_ffi_uniffi.openRegistrarSeedEnvelope(envelope, a) },
+                    openSealedTo = { a, c ->
+                        uniffi.lakko_ffi_uniffi.openRegistrarSeedEnvelopeSealedTo(envelope, a, c)
+                    },
+                )
             },
             storeRegistrarSeed = { seed ->
                 journalOwnershipStore.put(accountIdB64, groupIdHex, seed)
@@ -15475,18 +15501,6 @@ public class ChatRepository(
         mutableReentryGaps.update { if (gaps.isEmpty()) it - hex else it + (hex to gaps) }
     }
 
-    /** Who can bring this device back in [groupIdHex], for the waiting note:
-     *  the route its last request took, `null` before one was sent. Reads
-     *  no group state (safe on the main thread). */
-    internal fun reentryHelper(groupIdHex: String): ReentryHelper? {
-        val accountIdB64 = currentAccountIdB64.get() ?: return null
-        return try {
-            reentryRecords.get(accountIdB64, groupIdHex)?.requests?.lastOrNull()?.let { helperOf(it.route) }
-        } catch (_: Throwable) {
-            null
-        }
-    }
-
     /** Walk 3, W3-R2 — an automatic send was held ([broadcastControlToGroup]
      *  answered `null`): for callers that count only a thrown send as not
      *  done. Their catch blocks are silent, so a held send stays quiet. */
@@ -15503,6 +15517,21 @@ public class ChatRepository(
      */
     internal fun requirePersonActionAllowed(groupIdHex: String) {
         if (behindStopsActing(groupIdHex)) throw personActionHeldError()
+    }
+
+    /**
+     * ADR-0091 phase 2 section 2 — a message is not sent while this device
+     * is confirmed behind in [groupIdHex]. The error carries no text of its
+     * own: the row shows the ordinary "Not sent" state and the composer the
+     * ordinary send failure (maintainer, 2026-11-20).
+     */
+    internal fun requireMessageSendAllowed(groupIdHex: String) {
+        val confirmed = try {
+            conversationBehind.isConfirmed(groupIdHex)
+        } catch (_: Throwable) {
+            false
+        }
+        if (confirmed) throw personActionHeldError()
     }
 
     /** ADR-0091 section 1 — a `401` on a publish into [groupIdHex] (clock not
@@ -15529,6 +15558,14 @@ public class ChatRepository(
         } catch (_: Throwable) {
             false
         }
+
+    /**
+     * ADR-0091 (maintainer, 2026-11-20) — a call is not set up in a chat this
+     * device is behind in (suspected or confirmed): the call key would be
+     * derived at an epoch the others left. The call hosts read this; the
+     * buttons stay.
+     */
+    internal fun callHeldWhileBehind(groupIdHex: String): Boolean = behindStopsActing(groupIdHex)
 
     /** ADR-0091 — `true` while this device stops acting in [groupIdHex]. */
     private fun behindStopsActing(groupIdHex: String): Boolean =
@@ -15659,7 +15696,12 @@ public class ChatRepository(
      * group and, for a one-to-one, the other person's account key. Provider
      * lock (or a read the caller tolerates failing).
      */
-    private fun reentryRouteLocked(record: GroupRecord, identity: Identity): Pair<ReentryRouteKind, ByteArray?>? {
+    private fun reentryRouteLocked(
+        record: GroupRecord,
+        identity: Identity,
+        ownDeviceUnanswered: Boolean,
+        ownDeviceReachable: Boolean,
+    ): Pair<ReentryRouteKind, ByteArray?>? {
         val roster = rosterOf(record.group)
         if (roster.isEmpty()) return null
         val ownLeaf = identity.signaturePublicKey()
@@ -15668,7 +15710,19 @@ public class ChatRepository(
             outboxB64(personKeyOf(it)) == ownPerson && !it.signaturePublicKey.contentEquals(ownLeaf)
         }
         val kind = record.group.groupKind() ?: GroupKind.GROUP
-        val route = when (uniffi.lakko_ffi_uniffi.reentryRoute(ownDeviceInConversation, kind)) {
+        // Live walk 5 (2026-11-20): the own device is asked once per behind
+        // episode; it may not be running, so the core sends every later
+        // request of the episode by the conversation's own route.
+        // Without a DeviceGroup sync on this device route 1 cannot send, so
+        // the own device counts as absent and the request goes by route 2 or
+        // 3 at once ([reentryOwnDeviceReachable]).
+        val route = when (
+            uniffi.lakko_ffi_uniffi.reentryRoute(
+                reentryOwnDeviceReachable(ownDeviceInConversation, ownDeviceReachable),
+                kind,
+                ownDeviceUnanswered,
+            )
+        ) {
             uniffi.lakko_ffi_uniffi.FfiReentryRoute.OWN_DEVICE -> ReentryRouteKind.OWN_DEVICE
             uniffi.lakko_ffi_uniffi.FfiReentryRoute.MAILBOX -> ReentryRouteKind.MAILBOX
             uniffi.lakko_ffi_uniffi.FfiReentryRoute.KNOCK -> ReentryRouteKind.KNOCK
@@ -15708,8 +15762,11 @@ public class ChatRepository(
         val record = groups[groupIdHex] ?: return
         val entry = conversationBehind.entry(groupIdHex)
         val now = System.currentTimeMillis()
-        if (!reentryRequestDue.due(entry.state, entry.lastRequestSentMs, now)) return
-        val (route, otherAccount) = providerLock.sessionLock { reentryRouteLocked(record, identity) } ?: return
+        if (!reentryRequestDue.due(entry.state, entry.lastRequestSentMs, entry.lastRequestOwnDevice, now)) return
+        val deviceGroupSync = me.lakko.app.devices.sync.DeviceGroupSyncRepository.active
+        val (route, otherAccount) = providerLock.sessionLock {
+            reentryRouteLocked(record, identity, entry.ownDeviceAsked, ownDeviceReachable = deviceGroupSync != null)
+        } ?: return
         // What the route needs, before anything is minted.
         val knock: HeldKnockKey? = if (route == ReentryRouteKind.KNOCK) {
             knockKeys.get(accountIdB64, groupIdHex)
@@ -15724,11 +15781,6 @@ public class ChatRepository(
             null
         }
         if (route == ReentryRouteKind.MAILBOX && otherAccount == null) return
-        if (route == ReentryRouteKind.OWN_DEVICE &&
-            me.lakko.app.devices.sync.DeviceGroupSyncRepository.active == null
-        ) {
-            return
-        }
         // Walk 3, W3-R1 — every request (the first and every resend) learns
         // the journal's epoch from an empty knock made right here, after the
         // route is resolved and right before minting (one `ds-knock` token;
@@ -15807,8 +15859,13 @@ public class ChatRepository(
             android.util.Log.w(REENTRY_LOG_TAG, "re-entry request not sent: route=${route.name.lowercase()} (${errorLogTag(cause)})")
             false
         }
+        if (!sent && route == ReentryRouteKind.OWN_DEVICE) {
+            // The own device cannot be reached from here: unavailable for this
+            // episode, so the retry goes by the conversation's own route.
+            conversationBehind.noteOwnDeviceUnavailable(groupIdHex)
+        }
         if (sent) {
-            conversationBehind.noteRequestSent(groupIdHex, now)
+            conversationBehind.noteRequestSent(groupIdHex, now, route)
             android.util.Log.i(REENTRY_LOG_TAG, "re-entry request sent: route=${route.name.lowercase()} epoch_left=$epochLeft")
         } else {
             conversationBehind.noteRequestSent(groupIdHex, now - reentryIntervalMs() + reentryRetryAfterFailureMs)

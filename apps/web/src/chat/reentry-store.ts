@@ -83,6 +83,14 @@ export interface ReentryRecord {
   /** When the newest request was sent (or about to be), unix ms. */
   readonly lastSentMs: number;
   readonly route: ReentryRouteName;
+  /**
+   * ADR-0091 live walk 5 (2026-11-20): a request of the current behind
+   * episode went out by route `own-device` and the device is still behind.
+   * From then on every request of the episode takes the conversation's own
+   * route (the core's `reentryRoute`, `ownDeviceUnanswered`). Cleared with
+   * the episode ({@link endReentryEpisode}). Absent reads as `false`.
+   */
+  readonly ownDeviceAsked?: boolean;
 }
 
 /** The core's `reentryRequestsKept()` (2): the requests whose KeyPackage keys
@@ -137,7 +145,8 @@ function isRecord(raw: unknown): raw is ReentryRecord {
     /^\d{1,20}$/.test(r.epochLeft) &&
     typeof r.gapFromMs === "number" &&
     typeof r.lastSentMs === "number" &&
-    (r.route === "own-device" || r.route === "mailbox" || r.route === "knock")
+    (r.route === "own-device" || r.route === "mailbox" || r.route === "knock") &&
+    (r.ownDeviceAsked === undefined || typeof r.ownDeviceAsked === "boolean")
   );
 }
 
@@ -209,21 +218,65 @@ export function recordReentryRequest(
     gapFromMs: prior === undefined ? input.gapFromMs : Math.min(prior.gapFromMs, input.gapFromMs),
     lastSentMs: input.sentAtMs,
     route: input.route,
+    ownDeviceAsked: prior?.ownDeviceAsked === true,
   };
   saveRecords(records, owner);
   return dropped;
 }
 
-/** The newest request went out at `sentAtMs`. A no-op without a record. */
+/**
+ * The newest request went out at `sentAtMs`. A request that went by route
+ * `own-device` marks the episode's own device as asked. A no-op without a
+ * record.
+ */
 export function markReentryRequestSent(groupIdB64: string, sentAtMs: number, owner?: string): void {
   const records = loadRecords(owner);
   const prior = records[groupIdB64];
   if (prior === undefined) return;
-  records[groupIdB64] = { ...prior, lastSentMs: sentAtMs };
+  records[groupIdB64] = {
+    ...prior,
+    lastSentMs: sentAtMs,
+    ownDeviceAsked: prior.ownDeviceAsked === true || prior.route === "own-device",
+  };
   try {
     saveRecords(records, owner);
   } catch {
     /* the request is sent again sooner: harmless */
+  }
+}
+
+/**
+ * A request by route `own-device` could not be sent (ADR-0091 walk 5): the
+ * own device is unavailable for this episode, as if it had been asked and
+ * had not answered. A no-op without a record.
+ */
+export function markOwnDeviceUnavailable(groupIdB64: string, owner?: string): void {
+  const records = loadRecords(owner);
+  const prior = records[groupIdB64];
+  if (prior === undefined || prior.ownDeviceAsked === true) return;
+  records[groupIdB64] = { ...prior, ownDeviceAsked: true };
+  try {
+    saveRecords(records, owner);
+  } catch {
+    /* no account: nothing stored */
+  }
+}
+
+/**
+ * The device is back in step without a re-entry (ADR-0091 live walk 5): the
+ * behind episode ends, so the next one asks its own device first again. The
+ * KeyPackages stay (a Welcome that answers them can still land). A no-op
+ * without a record.
+ */
+export function endReentryEpisode(groupIdB64: string, owner?: string): void {
+  const records = loadRecords(owner);
+  const prior = records[groupIdB64];
+  if (prior === undefined || prior.ownDeviceAsked !== true) return;
+  records[groupIdB64] = { ...prior, ownDeviceAsked: false };
+  try {
+    saveRecords(records, owner);
+  } catch {
+    /* no account: nothing stored */
   }
 }
 

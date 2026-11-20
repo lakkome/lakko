@@ -261,17 +261,40 @@ pub fn open_knock_seed_envelope(
     plaintext: Vec<u8>,
     account_identity: &Identity,
 ) -> Result<Vec<u8>, FfiError> {
-    let env = rust_decode_knock_seed(&plaintext).map_err(knock_seed_error)?;
-    let own = key32(
-        "own account key",
-        account_identity.inner.signature_public_key(),
-    )?;
+    open_knock_seed(&plaintext, account_identity, account_identity)
+}
+
+/// ADR-0074 section 3.7 (2026-11-20) — open a knock-seed envelope addressed
+/// to `account_identity` (the conversation identity the roster names) but
+/// sealed to the X25519 key of `sealed_to_identity` (the identity the
+/// directory serves after a rotation of the account keys).
+///
+/// # Errors
+///
+/// As [`open_knock_seed_envelope`], with the X25519 key of
+/// `sealed_to_identity` in place of the addressee's.
+#[uniffi::export]
+pub fn open_knock_seed_envelope_sealed_to(
+    plaintext: Vec<u8>,
+    account_identity: &Identity,
+    sealed_to_identity: &Identity,
+) -> Result<Vec<u8>, FfiError> {
+    open_knock_seed(&plaintext, account_identity, sealed_to_identity)
+}
+
+fn open_knock_seed(
+    plaintext: &[u8],
+    addressee: &Identity,
+    sealed_to: &Identity,
+) -> Result<Vec<u8>, FfiError> {
+    let env = rust_decode_knock_seed(plaintext).map_err(knock_seed_error)?;
+    let own = key32("own account key", addressee.inner.signature_public_key())?;
     if !env.is_addressed_to(&own) {
         return Err(FfiError::Contacts(
             "knockSeed.otherAccount: addressed to another account".to_string(),
         ));
     }
-    let secret = X25519SecretKey::from_bytes(account_identity.inner.x25519_secret_bytes());
+    let secret = X25519SecretKey::from_bytes(sealed_to.inner.x25519_secret_bytes());
     env.open(&secret)
         .map(|s| s.to_vec())
         .map_err(knock_seed_error)
@@ -776,6 +799,29 @@ mod tests {
             seed
         );
         assert!(open_knock_seed_envelope(wire, &other).is_err());
+    }
+
+    /// ADR-0074 section 3.7 (2026-11-20): addressed to the conversation key,
+    /// sealed to the current identity's X25519 key.
+    #[test]
+    fn knock_seed_envelope_opens_sealed_to_the_current_identity() {
+        let conversation = account();
+        let current = Identity::from_seed(vec![0x73; 64]).unwrap();
+        let seed = group_knock_seed(vec![0x11; 32], 2).unwrap();
+        let wire = compose_knock_seed_envelope(
+            vec![0x4A; 32],
+            conversation.inner.signature_public_key().to_vec(),
+            current.inner.x25519_public_key().to_vec(),
+            2,
+            seed.clone(),
+        )
+        .unwrap();
+        assert!(open_knock_seed_envelope(wire.clone(), &conversation).is_err());
+        assert_eq!(
+            open_knock_seed_envelope_sealed_to(wire.clone(), &conversation, &current).unwrap(),
+            seed
+        );
+        assert!(open_knock_seed_envelope_sealed_to(wire, &current, &current).is_err());
     }
 
     #[test]

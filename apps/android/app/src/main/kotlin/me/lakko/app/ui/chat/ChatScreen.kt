@@ -236,7 +236,6 @@ public fun ChatScreen(
     // missed an update to this chat and waits to be brought back: the
     // composer, the call buttons and every control that would change the chat
     // are absent (not disabled); earlier messages stay readable.
-    val reentryWaiting by viewModel.reentryWaiting.collectAsStateWithLifecycle()
     val reentryGaps by viewModel.reentryGaps.collectAsStateWithLifecycle()
 
     // ADR-0087 section 9 — this account is out of the group: the dialog when
@@ -363,7 +362,7 @@ public fun ChatScreen(
         // UX second-device.md section 4 — a group draws its membership rows.
         val built = buildTimeline(state.messages, System.currentTimeMillis(), zone, use24h, locale, strings, isGroup = isGroupChat)
         // ADR-0091 phase 2 / conversation-rejoin 2.4 — the gap lines.
-        withReentryGapLines(built, reentryGaps) { gap -> reentryGapLabel(gap, zone, use24h, locale, strings) }
+        withReentryGapLines(built, reentryGaps) { _ -> reentryGapLabel(strings) }
     }
     // ADR-0052 decision 3 / UX 4.1 — the pins. The bar is DERIVED from the two
     // stores and the held messages, never stored: a pin whose message this
@@ -371,8 +370,7 @@ public fun ChatScreen(
     val sharedPins by viewModel.sharedPins.collectAsStateWithLifecycle()
     val personalPins by viewModel.personalPins.collectAsStateWithLifecycle()
     val mayPinSharedRaw by viewModel.mayPinForEveryone.collectAsStateWithLifecycle()
-    // conversation-rejoin 2.2 — a waiting chat offers "Pin for me" only.
-    val mayPinShared = mayPinSharedRaw && reentryWaiting == null
+    val mayPinShared = mayPinSharedRaw
     val pinEntries = remember(state.messages, sharedPins, personalPins) {
         me.lakko.app.chat.pinBarEntries(sharedPins, personalPins, state.messages)
     }
@@ -837,7 +835,9 @@ public fun ChatScreen(
             // not one. Folded into `callActive` because the reasons to hide
             // them are the same rendering decision; a group of one is the third
             // (docs/ux/group-and-channel-privacy.md section 10).
-            callActive = callOccupant != null || membershipEnded || !callControls || reentryWaiting != null,
+            // ADR-0091 UX 2.6 — the buttons stay while this device is behind;
+            // the call hosts fail a start then with the ordinary notice.
+            callActive = callOccupant != null || membershipEnded || !callControls,
             onNavigateBack = onNavigateBack,
             // A live group call on this chat is JOINED rather than
             // duplicated; otherwise a group chat (>2 MLS members) starts a
@@ -900,7 +900,7 @@ public fun ChatScreen(
         // device is not in. Hidden once this device's membership has ended —
         // the call key can no longer be derived, so Join could only fail.
         val joinable = joinableGroupCall
-        if (joinable != null && !membershipEnded && reentryWaiting == null) {
+        if (joinable != null && !membershipEnded) {
             GroupCallBanner(
                 call = joinable,
                 onJoin = {
@@ -1059,9 +1059,6 @@ public fun ChatScreen(
                 )
                 androidx.compose.runtime.CompositionLocalProvider(
                     LocalBubbleReactions provides reactionContext,
-                    // ADR-0091 phase 2 / conversation-rejoin 2.2 — a waiting
-                    // chat's message menu and reactions.
-                    LocalReentryWaiting provides (reentryWaiting != null),
                     LocalContentBubble provides contentBubbleContext,
                 ) {
                 LazyColumn(
@@ -1378,14 +1375,7 @@ public fun ChatScreen(
                 onDelete = { confirmBulkDelete = true },
                 onSave = { viewModel.onSaveSelected() },
             )
-                } else if (reentryWaiting != null && !membershipEnded) {
-            // ADR-0091 phase 2 / conversation-rejoin 2.2 — the waiting note
-            // where the composer would be; no spinner, no countdown.
-            ReentryWaitingNoteBar(
-                note = reentryWaiting!!,
-                otherName = if (isGroupChat) null else headerTitle,
-            )
-        } else when (val slot = me.lakko.app.chat.composerState(membership, state.draft)) {
+                } else when (val slot = me.lakko.app.chat.composerState(membership, state.draft)) {
             me.lakko.app.chat.ComposerSlot.Composer -> Composer(
                 recorder = recorder,
                 emojiInsert = pendingEmojiInsert,
@@ -2259,9 +2249,8 @@ internal fun Bubble(
         }
         // Section 6 — a double tap sends the quick reaction; nothing on a
         // message not sent, failed, deleted, ended, or while selecting.
-        val reentryWaiting = LocalReentryWaiting.current
         val quickReactable = actionsAvailable && hasId && !msg.deleted && !msg.isHistory &&
-            msg.ack == Ack.SENT && msg.unsupportedVersion == null && reactionCtx != null && !reentryWaiting
+            msg.ack == Ack.SENT && msg.unsupportedVersion == null && reactionCtx != null
         // ADR-0061 section 6 — a newer-version row has no content this build
         // can read, so nothing to copy, edit, quote or forward: no menu.
         // ADR-0073 R.5 — a row of an older segment is read-only history: its
@@ -2715,13 +2704,12 @@ internal fun Bubble(
                                 base.copy(canForward = false)
                             }
                         }
-                    }.let { base -> if (reentryWaiting) waitingChatActions(base) else base },
+                    },
                     reactions = if (msg.isHistory) emptyList() else reactionCtx?.rowFor(msg.reactions) ?: REACTION_EMOJIS,
                     ownReactions = ownEmoji,
                     capReached = ownEmoji.size >= MAX_OWN_REACTIONS,
                     showExpand = reactionCtx?.showExpand ?: true,
-                    showRow = !msg.isHistory && reactionCtx?.allowed != me.lakko.app.chat.AllowedReactions.Off &&
-                        !reentryWaiting,
+                    showRow = !msg.isHistory && reactionCtx?.allowed != me.lakko.app.chat.AllowedReactions.Off,
                     onReact = { emoji ->
                         menuOpen = false
                         onReact(emoji)
@@ -2784,8 +2772,8 @@ internal fun Bubble(
             ReactionChips(
                 reactions = msg.reactions,
                 ownIdentity = ownIdentity,
-                onToggle = { emoji -> if (actionsAvailable && hasId && !reentryWaiting) onReact(emoji) },
-                interactive = actionsAvailable && !reentryWaiting,
+                onToggle = { emoji -> if (actionsAvailable && hasId) onReact(emoji) },
+                interactive = actionsAvailable,
                 onShowReactors = { emoji -> reactionCtx?.onShowReactors?.invoke(msg.messageId, emoji) },
             )
         }
@@ -3286,11 +3274,6 @@ internal class BubbleReactionContext(
 
 /** Provided by [ChatScreen]; `null` outside a chat (no reactions offered). */
 internal val LocalBubbleReactions = androidx.compose.runtime.staticCompositionLocalOf<BubbleReactionContext?> { null }
-
-/** ADR-0091 phase 2 / `docs/ux/conversation-rejoin.md` 2.2 — this chat waits
- *  for this device to be brought back: the message menu offers Copy, Forward,
- *  Save and Pin for me only, and nothing reacts. */
-internal val LocalReentryWaiting = androidx.compose.runtime.staticCompositionLocalOf { false }
 
 /** Section 10 — reactions one person gives one message. */
 internal const val MAX_OWN_REACTIONS: Int = 3
@@ -4155,44 +4138,6 @@ private fun WithdrawnComposer(slot: me.lakko.app.chat.ComposerSlot.Withdrawn) {
     }
 }
 
-/**
- * ADR-0091 phase 2 / `docs/ux/conversation-rejoin.md` 2.2 — the note in place
- * of the composer while this device waits to be brought back. The second
- * line appears after the first 30 seconds and names who can finish it.
- */
-@Composable
-private fun ReentryWaitingNoteBar(note: me.lakko.app.chat.ReentryWaitingNote, otherName: String?) {
-    var now by remember { mutableStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(note.sinceMs) {
-        while (System.currentTimeMillis() - note.sinceMs < me.lakko.app.chat.REENTRY_SECOND_LINE_AFTER_MS) {
-            kotlinx.coroutines.delay(1_000L)
-            now = System.currentTimeMillis()
-        }
-        now = System.currentTimeMillis()
-    }
-    val second = note.helper?.let { helper ->
-        me.lakko.app.chat.waitingSecondLine(helper, note.sinceMs, now, otherName)
-    }
-    Column {
-        HorizontalDivider()
-        Column(modifier = Modifier.padding(12.dp)) {
-            Text(
-                text = t("chat.reentry.waiting"),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            if (second != null) {
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = second.text(),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-    }
-}
-
 /** Back-off delay between failed long-poll iterations. 5s
  *  matches the canonical chat-app retry cadence — see the
  *  parallel constant in `ContactsScreen`. */
@@ -4627,8 +4572,7 @@ private fun MembersSheet(
     val canManageRaw by viewModel.canManageMembers.collectAsStateWithLifecycle()
     // ADR-0091 phase 2 / conversation-rejoin 2.2 — a waiting chat hides every
     // control that would change it: no member changes, no Remove, no rename.
-    val infoReentryWaiting by viewModel.reentryWaiting.collectAsStateWithLifecycle()
-    val canManage = canManageRaw && infoReentryWaiting == null
+    val canManage = canManageRaw
     val isOwner by viewModel.isOwner.collectAsStateWithLifecycle()
     val roleTable by viewModel.roleTable.collectAsStateWithLifecycle()
     val pendingJoins by viewModel.pendingJoins.collectAsStateWithLifecycle()
@@ -4718,19 +4662,19 @@ private fun MembersSheet(
     // every editing and exit section away and leaves the name readable.
     val settingsVersionForInfo by me.lakko.app.chat.GroupSettingsStore.version.collectAsStateWithLifecycle()
     val hasHandle = remember(settingsVersionForInfo) { viewModel.groupHandle() != null }
-    val sections = remember(canManage, isOwner, canLeave, membershipEnded, transferCandidates, hasHandle, infoReentryWaiting) {
+    val sections = remember(canManage, isOwner, canLeave, membershipEnded, transferCandidates, hasHandle) {
         conversationInfoSections(
             ConversationInfoCapabilities(
                 kind = ConversationInfoKind.GROUP,
                 role = when {
-                    membershipEnded || infoReentryWaiting != null -> ConversationRole.MEMBER
+                    membershipEnded -> ConversationRole.MEMBER
                     isOwner -> ConversationRole.OWNER
                     canManage -> ConversationRole.ADMIN
                     else -> ConversationRole.MEMBER
                 },
                 alone = transferCandidates.isEmpty(),
                 canTransfer = transferCandidates.isNotEmpty(),
-                canLeave = canLeave && !membershipEnded && infoReentryWaiting == null,
+                canLeave = canLeave && !membershipEnded,
                 hasHandle = hasHandle,
             ),
         )

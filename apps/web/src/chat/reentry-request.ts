@@ -5,8 +5,9 @@
  * ADR-0091 phase 2 section 3 - a device behind in a conversation asks to be
  * brought back.
  *
- * As soon as the device is suspected, and then no more often than every 30
- * minutes (`reentryRequestDue`, the core's rule), it mints a re-entry
+ * As soon as the device is suspected, 2 minutes after a request that went to
+ * its own other device, and otherwise no more often than every 30 minutes
+ * (`reentryRequestDue`, the core's rule), it mints a re-entry
  * KeyPackage under its own device identity naming the conversation and the
  * epoch the journal is at (`Identity.createReentryKeyPackage`), makes the MLS
  * snapshot that holds its private keys durable, records the request
@@ -19,6 +20,14 @@
  * 3. a group: a sealed knock row to the group's knock key (one `ds-knock`
  *    token), the key the owner sends every member in-group.
  *
+ * Route 1 is tried once per behind episode: an own device with a leaf in the
+ * conversation may not be running (live walk 5, 2026-11-20), so once a
+ * request went to it (`ownDeviceAsked` on the record) the core's
+ * `reentryRoute` sends every later request of the episode by route 2 or 3.
+ * The same holds when route 1 cannot send at all: no DeviceGroup sync on
+ * this device, or a send to it that failed, makes the own device unavailable
+ * for the episode, so the device is never stuck on route 1.
+ *
  * The request carries the time of the first row this device could not read
  * (`gap_from_ms`), which the device that brings it back uses to send the
  * missed messages it holds (section 7).
@@ -30,7 +39,14 @@
 
 import { base64Decode, base64Encode } from "../auth/account-id";
 import type { BehindStateView } from "./conversation-behind";
-import { markReentryRequestSent, recordReentryRequest, reentryRecordFor, type HeldKnockKey, type ReentryRouteName } from "./reentry-store";
+import {
+  markOwnDeviceUnavailable,
+  markReentryRequestSent,
+  recordReentryRequest,
+  reentryRecordFor,
+  type HeldKnockKey,
+  type ReentryRouteName,
+} from "./reentry-store";
 import type { Group as WasmGroup, Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 
 /** A failed send is tried again after this long (chosen, not measured). */
@@ -52,9 +68,16 @@ export interface ReentryRequestPorts {
   roster(group: WasmGroup): RosterLeaf[] | null;
   kindOf(group: WasmGroup): "chat" | "group";
   /** `true` while the request is due (the core's `reentryRequestDue`). */
-  due(state: BehindStateView, lastSentMs: number | undefined, nowMs: number): boolean;
+  due(state: BehindStateView, lastSentMs: number | undefined, lastRouteWasOwnDevice: boolean, nowMs: number): boolean;
   /** The core's `reentryRoute`. */
-  route(ownDeviceInConversation: boolean, kind: "chat" | "group"): ReentryRouteName;
+  route(ownDeviceInConversation: boolean, kind: "chat" | "group", ownDeviceUnanswered: boolean): ReentryRouteName;
+  /**
+   * Whether this device can reach its own other devices now (the account's
+   * DeviceGroup sync runs here). When it cannot, the own device is treated as
+   * unavailable for the episode, so the request goes by the conversation's
+   * own route at once instead of waiting on a route that cannot send.
+   */
+  ownDeviceReachable(): boolean;
   /** The group's knock key as this device holds it. */
   knockKey(group: WasmGroup): Promise<HeldKnockKey | null>;
   /** Make the MLS snapshot durable (throws when it could not be). */
@@ -137,7 +160,8 @@ async function attempt(
   const record = reentryRecordFor(groupIdB64);
   // A record written before a send that did not happen has `lastSentMs` 0.
   const lastSent = record === undefined || record.lastSentMs <= 0 ? undefined : record.lastSentMs;
-  if (!ports.due(input.state, lastSent, nowMs)) return "not-due";
+  const lastRouteWasOwnDevice = lastSent !== undefined && record?.route === "own-device";
+  if (!ports.due(input.state, lastSent, lastRouteWasOwnDevice, nowMs)) return "not-due";
   const failedAt = lastFailure.get(groupIdB64);
   if (failedAt !== undefined && nowMs - failedAt < SEND_RETRY_MS) return "retry-wait";
 
@@ -146,7 +170,11 @@ async function attempt(
   const roster = ports.roster(group);
   if (identity === null || own === null || roster === null) return "no-route";
   const kind = ports.kindOf(group);
-  const route = ports.route(ownDeviceInConversation(roster, own, base64Encode(identity.signaturePublicKey)), kind);
+  const route = ports.route(
+    ownDeviceInConversation(roster, own, base64Encode(identity.signaturePublicKey)) && ports.ownDeviceReachable(),
+    kind,
+    record?.ownDeviceAsked === true,
+  );
 
   // Resolve the route's destination BEFORE minting: a request that cannot go
   // anywhere mints nothing.
@@ -194,13 +222,20 @@ async function attempt(
 
   const envelope = ports.composeEnvelope(groupId, epochLeft, BigInt(Math.max(0, Math.floor(gapFromMs))), keyPackage);
   if (route === "own-device") {
-    await ports.sendOwnDevice(envelope);
+    try {
+      await ports.sendOwnDevice(envelope);
+    } catch (err) {
+      // The own device cannot be reached by this device: unavailable for the
+      // episode, so the retry goes by the conversation's own route.
+      markOwnDeviceUnavailable(groupIdB64);
+      throw err;
+    }
   } else if (route === "mailbox" && mailboxTo !== null) {
     await ports.sendMailbox(mailboxTo, envelope, groupId);
   } else if (knock !== null) {
     await ports.sendKnock(groupId, ports.sealKnockRow(base64Decode(knock.publicKeyB64), knock.version, envelope));
   }
-  // Sent: the 30-minute clock starts now.
+  // Sent: the clock of the next request starts now.
   markReentryRequestSent(groupIdB64, nowMs);
   lastFailure.delete(groupIdB64);
   // eslint-disable-next-line no-console

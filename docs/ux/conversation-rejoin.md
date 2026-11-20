@@ -3,9 +3,11 @@
 
 # UX spec: a device that missed an update to a chat comes back
 
-Owner: [ADR-0091](../adr/0091-conversation-rejoin.md) (Proposed). Status: with
-the ADR, not built. Applies to web (and the desktop app, which runs it), iOS
-and Android identically.
+Owner: [ADR-0091](../adr/0091-conversation-rejoin.md) (Proposed). Status:
+built on web (and the desktop app, which runs it), iOS and Android; sections
+2.2 and 2.4 rewritten 2026-11-20 (maintainer, seen on an iPhone: an ordinary
+person does not care WHY a message was not sent, only THAT it was not sent).
+Applies to every client identically.
 
 ## 0. Why this exists
 
@@ -35,12 +37,15 @@ no entry point: the device notices on its own while the app is open (it reads
 the chat in the background of the app, as it does today) and asks to be
 brought back.
 
-The person meets this in three places:
+The person meets this in two places only, and neither explains anything:
 
-- the chat itself (the note where the composer is, section 2.2);
-- the chat list (nothing new, section 2.1);
+- a message sent while the device is behind is shown not sent, as any other
+  failed send is (section 2.2);
 - after the device is back, a line in the chat where messages are missing
   (section 2.4).
+
+Nothing anywhere names the machinery: no "missed update", no "coming back up
+to date", no "other devices", no "sync", no "re-entry".
 
 ## 2. What the person sees
 
@@ -52,41 +57,34 @@ is not news; the person learns it when they open the chat. (A badge on a row
 would be a second state for the same thing, and would light up for chats the
 person never opens.)
 
-### 2.2 Inside the chat: the waiting note
+### 2.2 Inside the chat: nothing changes
 
-While the device is out of date in a chat, the chat is **waiting**, the same
-state [`conversation-backup.md`](conversation-backup.md) section 2.2 defines
-for a device that has not joined yet. One state, two notes. Where the composer
-would be:
+Decided by the maintainer on 2026-11-20, replacing the waiting note this
+section first specified. While the device is behind in a chat the chat looks
+and works as always: the composer stays, the message menu, reactions,
+replies, pins and conversation info are offered as usual. There is no note,
+no banner, no badge, no second line and no explanation.
 
-> This device missed an update to this chat. It is coming back up to date by
-> itself; you can read earlier messages meanwhile.
-
-As in conversation-backup 2.2, what a waiting chat cannot do is absent rather
-than disabled: no composer, no call buttons, no "Pin for everyone", no member
-changes, no rename; the message menu offers Copy, Forward, Save and Pin for me.
-Conversation info opens with what this device last knew (name, people) and
-hides every control that would change the chat. Earlier messages stay readable
-and searchable.
-
-The note has a second line when the device knows who it is waiting for:
-
-| Who can bring the device back | Second line |
-|---|---|
-| another of the person's devices that is in this chat | "Open Lakko on one of your other devices if this takes long." |
-| a one-to-one: the other person | "This finishes when {name} next opens Lakko." |
-| a group: its owner or an admin | "This finishes when the group's owner or an admin next opens Lakko." |
-
-No second line in the first 30 seconds, since most of the time the device is
-back before anyone reads it. No spinner, no progress bar, no countdown: the
-device cannot know how long, and showing a time would be invented.
+- **A message the person sends** is not published (the device holds it, C-93)
+  and lands in the timeline in the client's ordinary failed-send state: the
+  same "Not sent" marker and Retry as any other send failure, and the same
+  ordinary send-failure line. Retry works as usual: back in step it sends,
+  still behind it fails again the same way.
+- **Any other action** (a reaction, an edit, a deletion, a shared pin, a
+  rename, a role change) fails with the ordinary failure text that action
+  already has.
+- **Automatic sends** (typing, read receipts, repeat envelopes) are held
+  quietly, as before.
+- **Calls**: the call buttons stay. Pressing one fails the way a call that
+  could not start always fails on that client (its ordinary could-not-start
+  notice); nothing is captured or published (section 2.6).
+- A refused read of the chat raises no banner (it is expected while behind).
 
 ### 2.3 No time limit
 
 Decided by the maintainer on 2026-11-18: the device waits to be brought back
-for as long as it takes. The note never changes and there is no "Remove from
-this device" offer; the person can still delete the chat on this device the
-ordinary way.
+for as long as it takes. There is no "Remove from this device" offer; the
+person can still delete the chat on this device the ordinary way.
 
 If the account left the chat, or was removed, on another of its devices,
 this device learns it from the account's own devices and shows "You left" /
@@ -94,15 +92,15 @@ this device learns it from the account's own devices and shows "You left" /
 
 ### 2.4 Back up to date
 
-The waiting note disappears and the composer comes back, with no message,
-toast or sound. Where messages were sent while the device was out, one line
-in the chat, styled as the date separators are:
+Nothing is announced: no message, toast or sound; sends simply work again.
+Where messages are missing, one line in the chat, styled as the date
+separators are, placed where the missing messages would be:
 
-> Messages sent between 11 Nov, 13:10 and 18 Nov, 14:02 can't be shown on
-> this device.
+> Some messages are not available.
 
-- The two times are the first message the device could not read and the
-  moment it came back. On the same day the date is shown once.
+- The line names no times, no device and no cause (maintainer, 2026-11-20;
+  until then it read "Messages sent between {from} and {to} can't be shown
+  on this device.").
 - The device that brings this one back sends the missed messages it holds
   (maintainer, 2026-11-18): the person's other device in the chat, or else
   the other person in a one-to-one or the owner's or admin's device in a
@@ -112,29 +110,36 @@ in the chat, styled as the date separators are:
 - The line is local to this device. It is not sent, it marks nothing as
   read, and it is not an unread message.
 
-Messages the device received while waiting but could not read never appear
+Messages the device received while behind but could not read never appear
 as "unreadable message" bubbles; they are covered by the line.
 
-### 2.5 Notifications while waiting
+### 2.5 Notifications while behind
 
-A message arriving in a waiting chat cannot be read on this device. The
+A message arriving in a chat this device is behind in cannot be read here. The
 background notification, where one is shown today, says only "New message in
-{chat}" (the existing generic wording), never a placeholder text. Waiting
-does not add notifications of its own: the device does not tell the person it
-fell behind until they open the chat.
+{chat}" (the existing generic wording), never a placeholder text. Being
+behind adds no notifications of its own, and the person is never told it
+fell behind.
 
 ### 2.6 Calls
 
-A call offer in a waiting chat cannot be read on this device, so a call does
+A call offer in a chat this device is behind in cannot be read here, so a call does
 not ring here and a group call is not offered here; the person's other
-devices ring as usual. Nothing is shown about it. Calls work again once the
-device is back.
+devices ring as usual. Nothing is shown about it. The call buttons stay
+(maintainer, 2026-11-20: hiding a control without a word is the same
+pattern as the waiting note). A call placed or joined from here fails before
+the microphone or camera opens and before anything is sent, with the
+client's ordinary could-not-start text ("Could not start the call. Try
+again.", "Could not start the group call. Try again.", "Could not join the
+group call. Try again."; iOS answers a 1x1 with its existing "Calls are not
+available right now. Try again later."). Calls work again once the device is
+back.
 
 ## 3. Controls and what each drives
 
 | Control | Effect |
 |---|---|
-| Opening a waiting chat | reads earlier messages from this device; marks nothing as read for others |
+| Opening a chat this device is behind in | as always; a message sent shows "Not sent" with Retry |
 
 Everything else is automatic: noticing, asking to be brought back, and coming
 back.
@@ -143,13 +148,9 @@ back.
 
 Per chat, from the core and the client's own records:
 
-- whether the chat is waiting on this device (a durable flag, survives a
-  restart), and since when (for the 30-second rule);
-- who can bring it back: another device of the account in the chat / the
-  other person of a one-to-one (their display name) / the group's owner or an
-  admin;
-- the first message time this device could not read, and the time it came
-  back, for the line of 2.4;
+- whether the device is behind in the chat (a durable flag, survives a
+  restart), for holding sends and call starts;
+- where the missing messages were, to place the line of 2.4;
 - whether missed messages were supplied by another device of the account, and
   the time range they cover.
 
@@ -158,19 +159,16 @@ server beyond the request to come back itself (ADR-0091).
 
 ## 5. Cross-platform shape
 
-One model: the waiting state of conversation-backup 2.2 with a second note
-text, and a date-separator-style line. Web and the desktop app use the
-existing composer-replacing note element; iOS and Android the same note view
-they use for a waiting chat. No platform-specific divergence beyond the
-usual message-menu gesture.
+One model: no state of its own on screen. Each client reuses its ordinary
+failed-send row and its ordinary action failure texts, and draws the line of
+2.4 as a date separator. No platform-specific divergence.
 
 ## 6. Copy checklist
 
-No protocol or component names ("update" stands for the missed change; no
-"epoch", "commit", "group state", "MLS", "Welcome", "knock"). "Chat" in
-user-facing text. Sentence case, no exclamation marks, no "by design". Every
-string is a catalog key (ADR-0061); the note of 2.2 and the line of 2.4 are
-marked for native review.
+One string only, the line of 2.4 (`chat.reentry.gap`, marked for native
+review). Nothing narrates the machinery: no "update", "up to date", "this
+device", "other devices", "sync", "epoch", "commit", "Welcome", "knock",
+"re-entry". Sentence case, no exclamation marks.
 
 ## 7. What the person never sees
 

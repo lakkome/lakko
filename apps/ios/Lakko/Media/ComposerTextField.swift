@@ -93,6 +93,11 @@ struct ComposerTextField: View {
             // `docs/ux/text-size.md` — the composer follows the chat text size.
             fontSize: ChatFontSize.points(style: .body, dynamicTypeSize: dynamicTypeSize, scale: scale),
             onReturn: onReturn, focus: focus, onPasteMedia: onPasteMedia)
+            // The field takes every point the row leaves it. Without this the
+            // UIKit view's answer to an unspecified width (its current bounds)
+            // became its ideal width, and a field laid out narrow once (while
+            // the row above changed) stayed narrow, centred in the bar.
+            .frame(maxWidth: .infinity)
             .composerFieldChrome()
     }
 }

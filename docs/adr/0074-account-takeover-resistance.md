@@ -1043,6 +1043,29 @@ after it has already landed has opened its DeviceGroup under the wrong lineage
 (decided 2026-11-15, not built: the lineage guard of "Joining after a
 rotation"); a pre-rotation contact has not been walked on this path.
 
+**Envelopes sealed to a rotated member (2026-11-20).** Found on a live walk:
+an owner re-admitting a member that had rotated refused to appoint it
+(`identity bundle names another key; not appointing`), because the owner
+required the bundle's served key to equal the roster key, and the roster
+names the conversation key. The rule, on web, iOS and Android, for the
+envelopes an owner seals to one member's account (ADR-0057 registrar seeds
+and root handovers, ADR-0087 knock seeds):
+
+- Sender: the bundle is that member's when its served key is the roster key,
+  or when its conversation link verifies against the served key and names
+  exactly the roster key; anything else is refused. The envelope stays
+  addressed to the roster key (the registrar seed derives from it and the
+  registrar list is keyed on it) and is sealed to the bundle's X25519 key,
+  which after a rotation is the current identity's.
+- Receiver: the address is checked against the conversation identity, as
+  before; the envelope opens with the conversation identity's own X25519 key,
+  else with the current identity's (new core functions
+  `openRegistrarSeedEnvelopeSealedTo` / `openKnockSeedEnvelopeSealedTo` on
+  UniFFI and wasm: address checked against one identity, opened with
+  another's X25519 key, both identities the device's own).
+
+Host-tested only, not walked.
+
 Unchanged: Stage B, and everything in 3.1 about what the old seed can still
 do. A person who rotated keeps two keys; 3.7 makes that survivable, not gone.
 Most accounts no longer rotate at all (ADR-0075 section 3, amended the same

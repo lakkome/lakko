@@ -342,7 +342,7 @@ public struct ChatScreen: View {
             // joinable after a minute, any call after four hours), so the
             // banner re-evaluates on a timer rather than only on a new
             // journal row.
-            if !viewModel.membershipHasEnded, !viewModel.reentryWaiting {
+            if !viewModel.membershipHasEnded {
                 GroupCallBanner(
                     affordance: viewModel.groupCallAffordance(
                         nowMs: Int64(now.timeIntervalSince1970 * 1000)
@@ -563,7 +563,7 @@ public struct ChatScreen: View {
             //
             // `docs/ux/group-and-channel-privacy.md` section 10 — and absent
             // in a group of one: there is nobody to call.
-            if !viewModel.membershipHasEnded, !viewModel.reentryWaiting, viewModel.hasSomeoneToCall {
+            if !viewModel.membershipHasEnded, viewModel.hasSomeoneToCall {
             ToolbarItem(placement: .navigationBarTrailing) {
                 // No `TimelineView` in a toolbar item, ever: one inside a bar
                 // item host re-rendered on every layout pass and dirtied the
@@ -932,8 +932,6 @@ public struct ChatScreen: View {
                                 // ADR-0045 UX §6.2.5 — the same predicate the
                                 // composer is gated on.
                                 actionsAvailable: viewModel.messageActionsAvailable,
-                                // ADR-0091 phase 2 UX 2.2.
-                                waitingForReentry: viewModel.reentryWaiting,
                                 // ADR-0024 — "Sent" / "Read" glyph on our own
                                 // messages, derived from the other members'
                                 // read watermarks.
@@ -1669,6 +1667,8 @@ public struct ChatScreen: View {
         .animation(.easeInOut(duration: 0.15), value: media.hint)
         .padding(.horizontal, 8)
         .padding(.vertical, 8)
+        // The bar spans the screen whatever its content measures.
+        .frame(maxWidth: .infinity)
         .background(Color.lakkoSurface)
     }
 
@@ -2226,10 +2226,6 @@ struct MessageRow: View {
     /// refuses Send. Passed in rather than read here so the row stays a pure
     /// renderer of what `MembershipEnded.swift` decided.
     let actionsAvailable: Bool
-    /// ADR-0091 phase 2, UX 2.2 — this device waits to be brought back into
-    /// the chat: the menu offers Copy, Forward, Save and Pin for me only, and
-    /// nothing that would change the chat or send.
-    var waitingForReentry: Bool = false
     /// ADR-0024 — read state for our OWN outgoing messages
     /// (sent / read). `nil` for incoming / system rows and
     /// pre-ack outgoing rows (no glyph rendered).
@@ -2399,7 +2395,6 @@ struct MessageRow: View {
     /// already deleted (the receive-side author gate is the real
     /// enforcement — this is just the affordance).
     private var canEditOrDelete: Bool {
-        if waitingForReentry { return false }
         if let channelPost {
             return actionsAvailable && channelPost == .publisher && message.messageId > 0 && !message.deleted
         }
@@ -2411,7 +2406,7 @@ struct MessageRow: View {
 
     /// React is offered on any non-system message with an id.
     private var canReact: Bool {
-        !waitingForReentry && readable
+        readable
     }
 
     /// Not a system row, landed, not a tombstone, readable here: the facts
@@ -2526,10 +2521,10 @@ struct MessageRow: View {
         case .system:
             if let call = ChatTimeline.callRow(message) {
                 callRow(call)
-            } else if let gap = ChatTimeline.reentryGapRow(message) {
+            } else if ChatTimeline.reentryGapRow(message) != nil {
                 // ADR-0091 phase 2, `docs/ux/conversation-rejoin.md` 2.4 —
                 // styled as the date separators, local to this device.
-                Text(ConversationReentryRules.gapSentence(fromMs: gap.fromMs, toMs: gap.toMs))
+                Text(ConversationReentryRules.gapSentence())
                     .font(.caption)
                     .foregroundStyle(Color.lakkoTextMuted)
                     .multilineTextAlignment(.center)
@@ -2708,8 +2703,7 @@ struct MessageRow: View {
         }
         let at = actions.firstIndex { $0 == .edit || $0 == .delete } ?? actions.count
         actions.insert(contentsOf: contentActions, at: at)
-        // ADR-0091 phase 2, UX 2.2 — a waiting chat offers what it lists.
-        return waitingForReentry ? ConversationReentryRules.waitingMenu(actions) : actions
+        return actions
     }
 
     /// Make a bubble the thing the menu opens on.
@@ -3690,7 +3684,7 @@ struct GroupInfoScreen: View {
         // membership that ended here (a retired leaf, ADR-0050) is outside
         // what that record expresses and keeps the older rule.
         if !viewModel.membershipHasEnded {
-            let sections = conversationInfoSections(caps: ConversationInfoCapabilities(
+            return conversationInfoSections(caps: ConversationInfoCapabilities(
                 kind: .group,
                 role: {
                     switch viewModel.ownRole {
@@ -3703,9 +3697,6 @@ struct GroupInfoScreen: View {
                 canTransfer: viewModel.isOwner && !viewModel.isAloneInGroup,
                 canLeave: viewModel.usesProposalPath && viewModel.ownLeafIndex != nil,
                 hasHandle: viewModel.groupHandle != nil))
-            // ADR-0091 phase 2, UX 2.2 — a waiting chat hides every control
-            // that would change it.
-            return viewModel.reentryWaiting ? ConversationReentryRules.waitingInfoSections(sections) : sections
         }
         return groupInfoSections(
             caps: GroupInfoCapabilities(

@@ -119,14 +119,27 @@ internal object NativeBehindVerdict : BehindVerdict {
     }
 }
 
-/** The core's request cadence (`reentryRequestDue`), injected. */
+/**
+ * The `ownDeviceInConversation` the core's `reentryRoute` is asked with:
+ * another own device holds a leaf in the conversation AND this device can
+ * reach it (its DeviceGroup sync runs). Without that route 1 cannot send, and
+ * the device would wait on it for ever (live walk 5, 2026-11-20).
+ */
+internal fun reentryOwnDeviceReachable(inConversation: Boolean, deviceGroupSyncActive: Boolean): Boolean =
+    inConversation && deviceGroupSyncActive
+
+/**
+ * The core's request cadence (`reentryRequestDue`), injected.
+ * [lastRouteWasOwnDevice]: the last request was sent to another own device
+ * (live walk 5: it is followed 2 minutes later by the conversation's route).
+ */
 internal fun interface ReentryRequestDue {
-    fun due(state: BehindState, lastSentMs: Long?, nowMs: Long): Boolean
+    fun due(state: BehindState, lastSentMs: Long?, lastRouteWasOwnDevice: Boolean, nowMs: Long): Boolean
 }
 
 /** The production [ReentryRequestDue]. */
 internal object NativeReentryRequestDue : ReentryRequestDue {
-    override fun due(state: BehindState, lastSentMs: Long?, nowMs: Long): Boolean {
+    override fun due(state: BehindState, lastSentMs: Long?, lastRouteWasOwnDevice: Boolean, nowMs: Long): Boolean {
         val s = when (state.level) {
             BehindLevel.IN_STEP -> uniffi.lakko_ffi_uniffi.FfiBehindState.InStep
             BehindLevel.SUSPECTED -> uniffi.lakko_ffi_uniffi.FfiBehindState.Suspected(state.sinceMs.toULong())
@@ -135,6 +148,7 @@ internal object NativeReentryRequestDue : ReentryRequestDue {
         return uniffi.lakko_ffi_uniffi.reentryRequestDue(
             s,
             lastSentMs?.coerceAtLeast(0L)?.toULong(),
+            lastRouteWasOwnDevice,
             nowMs.coerceAtLeast(0L).toULong(),
         )
     }
@@ -147,7 +161,11 @@ internal object NativeReentryRequestDue : ReentryRequestDue {
  * [probeReentryEpochLeft]), [gapFromMs] the
  * time of the first row this device could not read (the request's
  * `gap_from_ms` and the start of the gap line), [lastRequestSentMs] when the
- * last request went out.
+ * last request went out, [lastRequestOwnDevice] whether that request was sent
+ * to another own device, and [ownDeviceAsked] whether a request of this behind
+ * episode was (live walk 5, 2026-11-20: from then on every request takes the
+ * conversation's own route, `reentryRoute`'s `ownDeviceUnanswered`). The
+ * three go with the episode when the device is back in step.
  */
 @Serializable
 internal data class ConversationBehindEntry(
@@ -159,6 +177,8 @@ internal data class ConversationBehindEntry(
     val gapFromMs: Long? = null,
     val latestEpoch: Long? = null,
     val lastRequestSentMs: Long? = null,
+    val lastRequestOwnDevice: Boolean = false,
+    val ownDeviceAsked: Boolean = false,
     /**
      * Walk 2, R1 — the DS time of the newest row this device applied in the
      * conversation, or of its own publish the DS accepted. Not gap
@@ -175,6 +195,7 @@ internal data class ConversationBehindEntry(
     val isEmpty: Boolean
         get() = level == BehindLevel.IN_STEP && refusedReads == 0 && !failedRowAboveLocal &&
             !publishRefused && gapFromMs == null && lastRequestSentMs == null &&
+            !lastRequestOwnDevice && !ownDeviceAsked &&
             lastKnownRowMs == null && lastReadOkMs == null
 
     /** What survives the conversation coming back in step: the read progress. */
@@ -496,9 +517,28 @@ internal class ConversationBehindTracker(
         return next
     }
 
-    /** A request to come back went out at [atMs]. */
-    fun noteRequestSent(groupIdHex: String, atMs: Long) {
-        update(groupIdHex) { it.copy(lastRequestSentMs = atMs) }
+    /**
+     * A request by route own-device could not be sent (live walk 5): the own
+     * device is unavailable for this episode, as if asked and unanswered.
+     */
+    fun noteOwnDeviceUnavailable(groupIdHex: String) {
+        update(groupIdHex) { it.copy(ownDeviceAsked = true) }
+    }
+
+    /**
+     * A request to come back went out at [atMs] by [route], or (with no
+     * [route]) one was not sent and [atMs] is the back-dated time that makes
+     * it due again shortly on the 30-minute rule.
+     */
+    fun noteRequestSent(groupIdHex: String, atMs: Long, route: ReentryRouteKind? = null) {
+        val ownDevice = route == ReentryRouteKind.OWN_DEVICE
+        update(groupIdHex) {
+            it.copy(
+                lastRequestSentMs = atMs,
+                lastRequestOwnDevice = ownDevice,
+                ownDeviceAsked = it.ownDeviceAsked || ownDevice,
+            )
+        }
     }
 
     /**
@@ -980,82 +1020,11 @@ internal class SharedPrefsReentryGapStore(context: Context) : ReentryGapStore {
 }
 
 /**
- * The gap line's text (`chat.reentry.gap`): [from] is the date and time of the
- * first row this device could not read, [to] the moment it came back, with
- * the date left out when both fall on one day. [dayOf] and [dateText] /
- * [timeText] are the platform's formatters, injected.
+ * The gap line's text (`chat.reentry.gap`, UX 2.4): a plain fact, no times
+ * and no mention of this device (maintainer, 2026-11-20). The line sits in
+ * the timeline where the missing messages were.
  */
-internal fun gapLineText(
-    gap: ReentryGap,
-    dayOf: (Long) -> Long,
-    dateText: (Long) -> String,
-    timeText: (Long) -> String,
-): me.lakko.app.l10n.UiText {
-    val from = dateText(gap.fromMs) + ", " + timeText(gap.fromMs)
-    val to = if (dayOf(gap.fromMs) == dayOf(gap.toMs)) {
-        timeText(gap.toMs)
-    } else {
-        dateText(gap.toMs) + ", " + timeText(gap.toMs)
-    }
-    return me.lakko.app.l10n.UiText("chat.reentry.gap", texts = mapOf("from" to from, "to" to to))
-}
-
-// ---------------------------------------------------------------------------
-// The waiting note (`docs/ux/conversation-rejoin.md` 2.2)
-// ---------------------------------------------------------------------------
-
-/** Who can bring this device back: decides the note's second line. */
-internal enum class ReentryHelper {
-    /** Another device of the person is in this chat. */
-    OWN_DEVICE,
-
-    /** A one-to-one: the other person. */
-    OTHER_PERSON,
-
-    /** A group: its owner or an admin. */
-    OWNER_OR_ADMIN,
-}
-
-/** No second line in the first 30 seconds. Chosen, not measured (open question 5). */
-internal const val REENTRY_SECOND_LINE_AFTER_MS: Long = 30_000L
-
-/**
- * The waiting note's second line, or `null` while the first 30 seconds of
- * waiting run. [otherName] is the other person's display name (one-to-one).
- */
-internal fun waitingSecondLine(
-    helper: ReentryHelper,
-    waitingSinceMs: Long,
-    nowMs: Long,
-    otherName: String?,
-): me.lakko.app.l10n.UiText? {
-    if (nowMs - waitingSinceMs < REENTRY_SECOND_LINE_AFTER_MS) return null
-    return when (helper) {
-        ReentryHelper.OWN_DEVICE -> me.lakko.app.l10n.UiText("chat.reentry.second.own_device")
-        ReentryHelper.OTHER_PERSON -> otherName?.takeIf { it.isNotBlank() }
-            ?.let { me.lakko.app.l10n.UiText("chat.reentry.second.person", texts = mapOf("name" to it)) }
-        ReentryHelper.OWNER_OR_ADMIN -> me.lakko.app.l10n.UiText("chat.reentry.second.group")
-    }
-}
-
-/**
- * Walk 2, R5 — the composer's error line while the chat waits to be brought
- * back: none (a failed read or send while behind raises no error, and one
- * already shown is cleared when the waiting starts).
- */
-internal fun composerErrorWhileWaiting(waiting: Boolean, error: me.lakko.app.l10n.UiText?): me.lakko.app.l10n.UiText? =
-    if (waiting) null else error
-
-/** What the waiting note needs: since when this chat waits (for the
- *  30-second rule) and who can bring the device back, `null` when unknown. */
-internal data class ReentryWaitingNote(val sinceMs: Long, val helper: ReentryHelper?)
-
-/** The route a request takes and the helper the note names are one fact. */
-internal fun helperOf(route: ReentryRouteKind): ReentryHelper = when (route) {
-    ReentryRouteKind.OWN_DEVICE -> ReentryHelper.OWN_DEVICE
-    ReentryRouteKind.MAILBOX -> ReentryHelper.OTHER_PERSON
-    ReentryRouteKind.KNOCK -> ReentryHelper.OWNER_OR_ADMIN
-}
+internal fun gapLineText(): me.lakko.app.l10n.UiText = me.lakko.app.l10n.UiText("chat.reentry.gap")
 
 // ---------------------------------------------------------------------------
 // The history of the gap (section 7)

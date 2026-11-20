@@ -40,7 +40,7 @@ import { redistributeSecretToGroup } from "../push/group-routing";
 import { useGroupNames } from "./GroupNameContext";
 import { usePins } from "./PinContext";
 import { useSharedChannels } from "../discover/SharedChannelsContext";
-import { sendServiceEnvelopeNow } from "../reach/service-envelope-outbox";
+import { hasServiceEnvelopeSender, sendServiceEnvelopeNow } from "../reach/service-envelope-outbox";
 import { loadWasm, type Wasm } from "../wasm";
 import type { Group as WasmGroup } from "../../wasm/lakko_ffi_wasm";
 import { useBackgroundReceive } from "./BackgroundReceiveContext";
@@ -70,10 +70,10 @@ import { installReentryJoinPorts } from "./reentry-join";
 import { requestReentryIfDue, type ReentryRequestPorts } from "./reentry-request";
 import {
   clearKnockKeySentMark,
+  endReentryEpisode,
   gapLookGroups,
   heldKnockKey,
   narrowGapLine,
-  reentryRecordFor,
   type ReentryRouteName,
 } from "./reentry-store";
 
@@ -165,16 +165,26 @@ export function ConversationRejoinRuntime(): JSX.Element {
           personKeyB64: base64Encode(m.accountKey ?? m.signaturePublicKey),
         })),
       kindOf: (group) => conversationKindOf(group),
-      due: (state, lastSentMs, nowMs) => {
+      due: (state, lastSentMs, lastRouteWasOwnDevice, nowMs) => {
         const s = toWasmBehindState(wasm as unknown as BehindVerdictWasm, state);
         try {
-          return wasm.reentryRequestDue(s, lastSentMs === undefined ? undefined : BigInt(lastSentMs), BigInt(nowMs));
+          return wasm.reentryRequestDue(
+            s,
+            lastSentMs === undefined ? undefined : BigInt(lastSentMs),
+            lastRouteWasOwnDevice,
+            BigInt(nowMs),
+          );
         } finally {
           s.free();
         }
       },
-      route: (own, kind) =>
-        routeName(wasm, Number(wasm.reentryRoute(own, kind === "chat" ? wasm.GroupKind.OneToOne : wasm.GroupKind.Group))),
+      route: (own, kind, ownDeviceUnanswered) =>
+        routeName(
+          wasm,
+          Number(
+            wasm.reentryRoute(own, kind === "chat" ? wasm.GroupKind.OneToOne : wasm.GroupKind.Group, ownDeviceUnanswered),
+          ),
+        ),
       knockKey: async (group) => {
         const held = heldKnockKey(base64Encode(group.groupId));
         if (held !== undefined) return held;
@@ -189,6 +199,7 @@ export function ConversationRejoinRuntime(): JSX.Element {
         wasm.composeConversationReentryEnvelope(groupId, epochLeft, gapFromMs, kp),
       sealKnockRow: (pk, version, envelope) => wasm.sealReentryKnockRow(pk, version, envelope),
       sendOwnDevice: (envelope) => sendServiceEnvelopeNow(envelope),
+      ownDeviceReachable: () => hasServiceEnvelopeSender(),
       sendMailbox: (other, envelope, groupId) => contacts.sendConversationReentry(other, envelope, groupId),
       sendKnock: async (groupId, row) => {
         await ds.knock(groupId, [row]);
@@ -202,13 +213,6 @@ export function ConversationRejoinRuntime(): JSX.Element {
     };
   }
 
-  /** Whether a request could be due now (the probe costs a token: only then). */
-  function reentryRequestMayBeDue(groupIdB64: string, state: ReturnType<typeof conversationBehind.state>): boolean {
-    if (!state.stopsActing) return false;
-    const record = reentryRecordFor(groupIdB64);
-    return record === undefined || record.lastSentMs <= 0 || Date.now() - record.lastSentMs >= 30 * 60_000;
-  }
-
   /** One attempt per group at a time. */
   const requesting = new Set<string>();
 
@@ -220,7 +224,8 @@ export function ConversationRejoinRuntime(): JSX.Element {
     if (entry === undefined) return;
     requesting.add(groupIdB64);
     try {
-      if (!reentryRequestMayBeDue(groupIdB64, state)) return;
+      // `requestReentryIfDue` asks the core's `reentryRequestDue` before the
+      // epoch probe, so no token is spent on a request that is not due.
       const wasm = await loadWasm();
       await requestReentryIfDue(
         entry.group,
@@ -488,6 +493,9 @@ export function ConversationRejoinRuntime(): JSX.Element {
   // before the group next grows.
   onCleanup(
     conversationBehind.onBackInStep((groupIdB64) => {
+      // Live walk 5: the behind episode ends; the next one asks its own
+      // device first again.
+      endReentryEpisode(groupIdB64);
       const entry = chats.get(groupIdB64);
       if (entry !== undefined) resendGrowthState(entry.group);
     }),

@@ -199,6 +199,7 @@ extension ChatRepository {
             kept.requests = []
             kept.lastSentMs = nil
             kept.lastRoute = nil
+            kept.ownDeviceAsked = nil
             chatClient.reentryObservations.clear(groupIdHex: groupIdHex)
             saveReentry(kept, groupIdHex: groupIdHex)
             state = state.with(threads: buildThreadList())
@@ -242,30 +243,6 @@ extension ChatRepository {
         reentryBackInStepObserver?(groupIdHex)
     }
 
-    // MARK: - The waiting note (UX 2.2)
-
-    /// The lines of the waiting note for `groupIdHex`, or `nil` when the chat
-    /// is not waiting on this device.
-    public func reentryWaitingNote(groupIdHex: String) -> [String]? {
-        let record = reentryRecord(groupIdHex: groupIdHex)
-        guard record.behind.isConfirmed else { return nil }
-        return ConversationReentryRules.note(
-            behind: record.behind, waiter: reentryWaiter(groupIdHex: groupIdHex, record: record), nowMs: nowU64)
-    }
-
-    private func reentryWaiter(
-        groupIdHex: String, record: ConversationReentryRecord
-    ) -> ConversationReentryRules.Waiter? {
-        switch record.lastRoute {
-        case "own-device": return .ownDevice
-        case "knock": return .ownerOrAdmin
-        case "mailbox":
-            guard let other = otherPersonKey(groupIdHex: groupIdHex) else { return nil }
-            return .person(name: ProfileDirectory.shared.resolve(signatureKey: other).name)
-        default: return nil
-        }
-    }
-
     // MARK: - 3. The request
 
     /// This device's own person key in `group` (the account its leaf binds).
@@ -291,7 +268,8 @@ extension ChatRepository {
     }
 
     /// Section 3 — send the request to be brought back, when it is due
-    /// (`reentryRequestDue`: as soon as behind, then every 30 minutes). The
+    /// (`reentryRequestDue`: as soon as behind, 2 minutes after a request to
+    /// another own device, otherwise every 30 minutes). The
     /// re-entry KeyPackage's private keys (the MLS snapshot) and the record
     /// naming it are durable BEFORE anything is sent.
     func sendReentryRequestIfDue(groupIdHex: String) async {
@@ -301,7 +279,9 @@ extension ChatRepository {
         var current = reentryStore.load(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         let now = nowU64
         guard current.behind.stopsActing,
-              reentryRequestDue(state: current.behind.ffi, lastSentMs: current.lastSentMs, nowMs: now)
+              reentryRequestDue(
+                  state: current.behind.ffi, lastSentMs: current.lastSentMs,
+                  lastRouteWasOwnDevice: current.lastRouteWasOwnDevice, nowMs: now)
         else { return }
         reentrySending.insert(groupIdHex)
         defer { reentrySending.remove(groupIdHex) }
@@ -309,7 +289,17 @@ extension ChatRepository {
         // Walk-3 rule W3-R1 — the destination first: a request with nowhere
         // to go mints nothing.
         let kind = groupKind(groupIdHex: groupIdHex) ?? .group
-        let route = reentryRoute(ownDeviceInConversation: ownDeviceInConversation(group: record.group), kind: kind)
+        // Live walk 5 (2026-11-20): the own device is asked once per behind
+        // episode; it may not be running, so later requests go by the
+        // conversation's own route (the core decides). With no DeviceGroup
+        // sender on this device route 1 cannot send at all, so the own device
+        // counts as absent and the request goes by route 2 or 3 at once.
+        let route = reentryRoute(
+            ownDeviceInConversation: ConversationReentryRules.ownDeviceReachable(
+                inConversation: ownDeviceInConversation(group: record.group),
+                senderRegistered: reentryOwnDeviceSender != nil),
+            kind: kind,
+            ownDeviceUnanswered: current.ownDeviceUnanswered)
         guard let destination = reentryDestination(route: route, groupIdHex: groupIdHex) else {
             ReentryLog.emit("conversation re-entry request not sent: no destination by route "
                 + "\(ConversationReentryRules.routeName(route))")
@@ -373,6 +363,13 @@ extension ChatRepository {
         do {
             try await sendReentryEnvelope(envelope, destination: destination, record: record)
             ReentryLog.emit("conversation re-entry request sent by route \(ConversationReentryRules.routeName(route))")
+            if route == .ownDevice, bound.isCurrent {
+                var sent = reentryStore.load(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+                if sent.behind.stopsActing {
+                    sent.ownDeviceAsked = true
+                    saveReentry(sent, groupIdHex: groupIdHex)
+                }
+            }
         } catch {
             guard bound.isCurrent else { return }
             ReentryLog.emit("conversation re-entry request failed by route "

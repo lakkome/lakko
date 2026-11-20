@@ -463,19 +463,5 @@ internal fun showsEmptyTimeline(
     pendingMediaEmpty: Boolean,
 ): Boolean = messagesEmpty && pendingMediaEmpty && timeline.isEmpty()
 
-/** The gap line's text in [strings], times in the device's clock format. */
-internal fun reentryGapLabel(
-    gap: me.lakko.app.chat.ReentryGap,
-    zone: ZoneId,
-    use24h: Boolean,
-    locale: Locale,
-    strings: Strings,
-): String =
-    me.lakko.app.chat.gapLineText(
-        gap = gap,
-        dayOf = { ms -> dateOf(ms, zone).toEpochDay() },
-        dateText = { ms ->
-            java.time.format.DateTimeFormatter.ofPattern("d MMM", locale).format(dateOf(ms, zone))
-        },
-        timeText = { ms -> formatClockTime(ms, zone, use24h, locale) },
-    ).renderWith(strings)
+/** The gap line's text in [strings] (UX 2.4). */
+internal fun reentryGapLabel(strings: Strings): String = me.lakko.app.chat.gapLineText().renderWith(strings)
