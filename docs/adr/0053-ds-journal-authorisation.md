@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0053: A journal on the Delivery Service is opened by a key, not by its name
 
-- **Status:** Accepted (2026-09-27, the maintainer's call; S1-S4 built the same day and host-tested; not yet deployed or walked live; S5 open; the registration rule of section 2 superseded by [ADR-0057](0057-journal-ownership.md), 2026-09-28)
+- **Status:** Accepted (2026-09-27, the maintainer's call; S1-S4 built the same day, deployed to the test stack and walked live 2026-09-27; the S5 security pass ran 2026-09-28 (section "What the security pass found"), its open HIGH finding closed by ADR-0057, ADR-0078 phase 6 and ADR-0081; G-42 closed 2026-11-21; the registration rule of section 2 superseded by [ADR-0057](0057-journal-ownership.md), 2026-09-28)
 - **Date:** 2026-09-27
 - **Context:** Phase 3 (product hardening), closes G-42
 - **Supersedes:** the "no authentication" posture of `services/ds` (Phase 1.3), and

@@ -63,9 +63,9 @@ entry's status line, not a mechanical fact.
 | [G-37](./known-gaps.md#g-37) | Android chat repository held one repository-wide lock across the DS long poll | Closed on Android | residuals recorded in the entry |
 | [G-38](./known-gaps-closed.md#g-38) | Two membership commits in flight to the DS at once | Closed |  |
 | [G-39](./known-gaps.md#g-39) | The external cryptographic review of the MLS state machine has not happened | Open | release gate |
-| [G-40](./known-gaps.md#g-40) | A second device never joins the account's existing conversations | Open | see the entry's status paragraph |
+| [G-40](./known-gaps.md#g-40) | A second device never joins the account's existing conversations | Closed (2026-11-21) | walked live with Android confirming and web joining; iOS not walked in this flow |
 | [G-41](./known-gaps.md#g-41) | three `libcrux` advisories under the MLS crypto provider | Open | a `cargo deny` failure; analysed as not reachable |
-| [G-42](./known-gaps.md#g-42) | A journal's name is its only key | Closing | residuals named in the status line |
+| [G-42](./known-gaps.md#g-42) | A journal's name is its only key | Closed (2026-11-21) | rendezvous read by name; an evicted member reads ciphertext in the read-only tail |
 | [G-43](./known-gaps.md#g-43) | `services/channels` authorised no publisher operation | Closed, live check owed | not walked live |
 | [G-44](./known-gaps.md#g-44) | Rejoining a call in the same MLS epoch reused SFrame `(key, nonce)` pairs | Closed, live check owed | not seen on a live call |
 | [G-45](./known-gaps.md#g-45) | After a key reset the old identity's leaves stay in conversation groups until peers evict them | Partly closed | an owned group, a table-less group, a group with no admin contact |
@@ -531,7 +531,17 @@ problems are fully resolved without it.
 <a id="g-40"></a>
 ### G-40: A second device never joins the account's existing conversations
 
-**Status:** **OPEN, closing under ADR-0050 (web built and live-tested 2026-09-15; natives not started)**
+**Status:** **CLOSED 2026-11-21** under [ADR-0050](../adr/0050-per-device-conversation-leaves.md).
+Walked live on `test.lakko.me` on 2026-11-21: an account with a group and a one-to-one on an
+Android device (emulator, current build); a browser with no data of the account signed in, chose
+Another device, the Android device showed the request and a code, and after the code the browser
+listed both conversations with their newest messages and exchanged messages in the group with
+the Android device both ways. The same day the Android device added a browser through the same
+prompt (its rendezvous writes carrying the new `rendezvous-write` token), and removed a browser
+device from its Devices screen: the browser showed "This device was removed" and deleted the
+account's data. Not walked: iOS on either side of this flow; whether contact changes made after
+pairing reach the other devices (the incremental contact sync this entry listed) was not checked.
+The paragraphs below are the history of the entry.
 
 **Status 2026-09-15 (evening).** [ADR-0050](../adr/0050-per-device-conversation-leaves.md)
 S1 core, S2 FFI, S3 discovery and S4 web are built; verified live on `test.lakko.me`
@@ -2668,7 +2678,7 @@ test for.
 <a id="g-42"></a>
 ### G-42: A journal's name is its only key
 
-**Status:** A leaked `group_id` reads, writes and knocks; a mailbox is named by a public key anyone can compute. **CLOSING under [ADR-0053](../adr/0053-ds-journal-authorisation.md): S1-S4 built and deployed to the test stack 2026-09-27; a claimed journal refuses a request by name alone (walked live: unsigned read, unsigned write and a forged proof 401, a competing registration 409). Residuals: rendezvous mailboxes stay open by name by design, an evicted member keeps READ access to ciphertext until its epoch ages out of the retention window, and the S5 `lakko-security` pass is open**
+**Status:** **CLOSED 2026-11-21** under [ADR-0053](../adr/0053-ds-journal-authorisation.md), [ADR-0057](../adr/0057-journal-ownership.md), [ADR-0078](../adr/0078-servers-cannot-link-accounts.md) phase 6 and [ADR-0081](../adr/0081-devicegroup-commits-cannot-strand.md). A claimed journal refuses a request by name alone (walked live 2026-09-27: unsigned read, unsigned write and a forged proof 401). The `lakko-security` pass ran on 2026-09-28: its four fixed findings are listed in ADR-0053, and its open HIGH finding (a write-tier key holder registering epochs only it holds, re-founded deterministic ids, first-claim squatting) is closed by journal ownership (ADR-0057: only the root and its registrars register epochs), group ids no one can compute from an account or channel id (ADR-0078 phase 6) and the one-transaction commit route (ADR-0081: a new epoch exists only with its commit row). Accepted residuals: a rendezvous (pairing, recovery, state bundle, rejoin, gap history) is read by anyone holding its name, and since 2026-11-21 written only with a `rendezvous-write` token (G-59); an evicted member keeps reading ciphertext it cannot open (sizes, timing) in the read-only tail for up to the retention window and 64 epochs, which is what lets a device that was offline across commits catch up.
 
 **Symptom.** `services/ds` serves and accepts both journals to anyone who names them
 (`services/ds/src/main.rs`: *"No authentication on Phase 1.3 - anyone with the right
@@ -3567,9 +3577,11 @@ account's lineage seed, which every device of the account holds.
     The other rendezvous readers (pairing Welcome, history bundle, recovery
     payload, state bundle, DeviceGroup rejoin) used to take the first row
     and fail on one that did not open; they now pass over it and read on
-    until their own deadline. A copy of the 25-byte rejoin presence note,
-    which anyone holding the name can post, still makes a returning device
-    wait for a Welcome until its next knock instead of founding.
+    until their own deadline. The DeviceGroup rejoin rendezvous is named
+    only inside the knock sealed under the account's lineage seed (G-55), so
+    a fake presence note, which would make a returning device wait for a
+    Welcome until its next knock instead of founding, needs a device of the
+    same account.
   - An X25519 key carried inside a signed invite capability (contact,
     group, call links) is not covered by a separate binding; the
     capability's own signature by the issuer's identity key covers it, by
