@@ -41,7 +41,9 @@ import type {
   HistoryAttachmentInput,
   HistoryGroupInput,
   HistoryMessageInput,
+  Identity as WasmIdentity,
   OpenedHistoryAttachment,
+  OpenedHistoryBundle,
   OpenedHistoryGroup,
   OpenedHistoryMessage,
   OpenedHistoryPlaceholder,
@@ -198,6 +200,20 @@ export async function applyHistoryBundleToLog(args: {
 }): Promise<number> {
   const wasm = await loadWasm();
   const opened = wasm.openHistoryBundleStructured(args.secret, args.sealedBytes);
+  return fileOpenedHistoryBundle(wasm, opened, args);
+}
+
+/** File an already-opened bundle into the log (the body of
+ *  {@link applyHistoryBundleToLog}). */
+async function fileOpenedHistoryBundle(
+  wasm: Wasm,
+  opened: OpenedHistoryBundle,
+  args: {
+    readonly accountIdB64: string;
+    readonly deviceKey: DeviceCipher;
+    readonly adapt?: (row: PersistedMessage) => PersistedMessage;
+  },
+): Promise<number> {
   const openedGroups = opened.groups() as unknown[];
 
   const bundled: {
@@ -246,9 +262,10 @@ function rowMs(m: PersistedMessage): number {
 
 /**
  * ADR-0091 section 7 - the device that brought another one back sends the
- * messages of ONE conversation it holds from `fromMs` on, sealed under
- * `secret` (an exporter secret of the epoch the replacement created, which
- * only the members after it hold). `null` when it holds none.
+ * messages of ONE conversation it holds from `fromMs` on, sealed to the
+ * returning device's public gap key and signed by `readmitter`'s leaf key
+ * (`sealGapHistoryStructured`, security review 2026-11-21). `null` when it
+ * holds none.
  *
  * The group's `countCapped` flag means "not everything": set when the cap
  * trimmed the list, and when this device holds no row older than `fromMs`
@@ -258,7 +275,10 @@ function rowMs(m: PersistedMessage): number {
 export async function buildGapHistoryBundle(args: {
   readonly accountIdB64: string;
   readonly deviceKey: DeviceCipher;
-  readonly secret: Uint8Array;
+  /** This device's identity in the conversation: its leaf key signs. */
+  readonly readmitter: WasmIdentity;
+  /** The request's 32-byte public gap key. */
+  readonly gapKey: Uint8Array;
   readonly slotHex: string;
   readonly fromMs: number;
   /** This account's own key in the conversation: the author of its
@@ -299,20 +319,35 @@ export async function buildGapHistoryBundle(args: {
     const cur = safeBigInt(m.messageId);
     if (cur !== null && cur > maxHlc) maxHlc = cur;
   }
-  return wasm.sealHistoryBundleStructured(args.secret, [new wasm.HistoryGroupInput(groupIdBytes, messages, capped)], maxHlc);
+  return wasm.sealGapHistoryStructured(
+    args.readmitter,
+    args.gapKey,
+    groupIdBytes,
+    [new wasm.HistoryGroupInput(groupIdBytes, messages, capped)],
+    maxHlc,
+  );
 }
 
 /**
- * The receiving half: open a gap bundle and file its rows into this device's
- * log (the same filing as a pairing bundle). Returns how many rows were
- * added, whether the sender held the whole gap (`complete`), and the time of
- * the earliest row it carried.
+ * The receiving half: open a gap bundle with this device's gap secret and
+ * file its rows into the log (the same filing as a pairing bundle) - only
+ * when `signerAccepted` says the joined group accepts the leaf that signed
+ * it (`Group.gapHistorySignerAccepted`). Returns `null` when the signer is
+ * not accepted (the bundle is dropped, the gap line stays); otherwise how
+ * many rows were added, whether the sender held the whole gap (`complete`),
+ * and the time of the earliest row it carried. Throws when the row does not
+ * open (a `gapHistory.<code>` error).
  */
 export async function applyGapHistoryBundle(args: {
   readonly accountIdB64: string;
   readonly deviceKey: DeviceCipher;
-  readonly secret: Uint8Array;
+  /** This device's 32-byte gap secret. */
+  readonly gapSecret: Uint8Array;
+  /** The conversation the bundle must be for. */
+  readonly groupId: Uint8Array;
   readonly sealedBytes: Uint8Array;
+  /** Whether the joined group accepts this signer's leaf key. */
+  readonly signerAccepted: (signerLeafKey: Uint8Array) => boolean;
   /** This account's own key in the conversation (live walk 3). */
   readonly ownAuthorKeyB64: string | null;
   /** The route of the request the device came back by, when known. */
@@ -324,10 +359,28 @@ export async function applyGapHistoryBundle(args: {
   /** The rows the bundle carried (bookkeeping rows left out), for an open
    *  chat to show at once. */
   readonly rows: readonly PersistedMessage[];
-}> {
+} | null> {
   const wasm = await loadWasm();
   const adapt = (row: PersistedMessage): PersistedMessage => gapBundleRow(row, args.ownAuthorKeyB64, args.route);
-  const opened = wasm.openHistoryBundleStructured(args.secret, args.sealedBytes);
+  const structured = wasm.openGapHistoryStructured(args.gapSecret, args.groupId, args.sealedBytes);
+  let opened: OpenedHistoryBundle | undefined;
+  try {
+    let accepted = false;
+    try {
+      accepted = args.signerAccepted(structured.signerLeafKey);
+    } catch {
+      accepted = false;
+    }
+    if (!accepted) {
+      // eslint-disable-next-line no-console
+      console.info("chat re-entry: missed messages dropped: signer not accepted");
+      return null;
+    }
+    opened = structured.takeBundle();
+  } finally {
+    structured.free();
+  }
+  if (opened === undefined) return null;
   let complete = true;
   let earliestMs: number | undefined;
   const rows: PersistedMessage[] = [];
@@ -342,7 +395,7 @@ export async function applyGapHistoryBundle(args: {
       if (!isBookkeepingSystemRow(decoded)) rows.push(adapt(decoded));
     }
   }
-  const applied = await applyHistoryBundleToLog({ ...args, adapt });
+  const applied = await fileOpenedHistoryBundle(wasm, opened, { ...args, adapt });
   return { applied, complete, earliestMs, rows };
 }
 

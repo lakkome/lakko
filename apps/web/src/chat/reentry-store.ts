@@ -23,13 +23,19 @@
  *   newest from the owner or an admin. And the owner's mark of what it sent.
  *
  * - **The re-admitter's owed sends** (section 7): the gap's messages this
- *   device owes a device it brought back, sent once its group stands at the
- *   epoch the replacement created. Public fields only (group, leaf key,
+ *   device owes a device it brought back, sent once the replacement landed.
+ *   Public fields only (group, leaf key, the request's public gap key,
  *   epoch, times).
+ * - **The first sighting of each leaf** (section 7, security review
+ *   2026-11-21): when this device first saw a leaf's signature key in a
+ *   group's roster. The re-admitter starts the gap's rows no earlier than
+ *   that (`gapHistoryStart`). Only the first observation is kept.
  * - **The gap looks** (section 7, live walk 2026-11-19): the device that came
  *   back keeps looking for the gap's messages until they arrive or the DS
- *   retention passed. The 32-byte history secret is stored sealed under the
- *   account's device key (`DeviceCipher`), never in the clear.
+ *   retention passed. The 32-byte gap secrets of its requests are stored
+ *   sealed under the account's device key (`DeviceCipher`), never in the
+ *   clear; the re-entry record holds them the same way from the moment the
+ *   request is minted.
  *
  * Every row is `localStorage`, per account, written through the ADR-0077
  * `Storage.setItem` gate; dropped with the group (`membership-wipe.ts`) and
@@ -56,6 +62,7 @@ const KNOCK_KEY_PREFIX = "lakko.chat.knock-key.v1:";
 const KNOCK_KEY_SENT_PREFIX = "lakko.chat.knock-key-sent.v1:";
 const OWED_PREFIX = "lakko.chat.reentry-owed.v1:";
 const GAP_LOOK_PREFIX = "lakko.chat.reentry-gap-look.v1:";
+const LEAF_SEEN_PREFIX = "lakko.chat.leaf-first-seen.v1:";
 
 const ALL_PREFIXES = [
   RECORDS_PREFIX,
@@ -65,10 +72,25 @@ const ALL_PREFIXES = [
   KNOCK_KEY_SENT_PREFIX,
   OWED_PREFIX,
   GAP_LOOK_PREFIX,
+  LEAF_SEEN_PREFIX,
 ];
 
 /** The route a request took (section 3). */
 export type ReentryRouteName = "own-device" | "mailbox" | "knock";
+
+/** A 32-byte gap secret sealed under the account's device key. */
+export interface SealedGapSecret {
+  /** AES-GCM IV, standard base64. */
+  readonly ivB64: string;
+  /** The sealed secret, standard base64. */
+  readonly sealedSecretB64: string;
+}
+
+function isSealedGapSecret(raw: unknown): raw is SealedGapSecret {
+  if (typeof raw !== "object" || raw === null) return false;
+  const r = raw as Partial<SealedGapSecret>;
+  return typeof r.ivB64 === "string" && typeof r.sealedSecretB64 === "string";
+}
 
 /** One durable re-entry record. */
 export interface ReentryRecord {
@@ -76,6 +98,11 @@ export interface ReentryRecord {
   /** Standard base64 KeyPackage wires, oldest first, at most
    *  {@link REENTRY_KEY_PACKAGES_KEPT}. */
   readonly keyPackagesB64: readonly string[];
+  /** The gap secrets of the newest requests (section 7, `generateGapKey`),
+   *  oldest first, at most {@link REENTRY_KEY_PACKAGES_KEPT}, sealed under
+   *  the device key. The Welcome answers one of the requests; the device
+   *  looks with each. */
+  readonly gapKeys: readonly SealedGapSecret[];
   /** The `latest_epoch` the newest request named, decimal. */
   readonly epochLeft: string;
   /** When the device first failed to read a row, unix ms. */
@@ -141,6 +168,8 @@ function isRecord(raw: unknown): raw is ReentryRecord {
     typeof r.groupIdB64 === "string" &&
     Array.isArray(r.keyPackagesB64) &&
     r.keyPackagesB64.every((s) => typeof s === "string") &&
+    Array.isArray(r.gapKeys) &&
+    r.gapKeys.every(isSealedGapSecret) &&
     typeof r.epochLeft === "string" &&
     /^\d{1,20}$/.test(r.epochLeft) &&
     typeof r.gapFromMs === "number" &&
@@ -157,7 +186,7 @@ function loadRecords(owner?: string): Record<string, ReentryRecord> {
   if (raw === null) return {};
   try {
     const parsed = JSON.parse(raw) as { v?: unknown; records?: unknown };
-    if (parsed.v !== 1 || !Array.isArray(parsed.records)) return {};
+    if (parsed.v !== 2 || !Array.isArray(parsed.records)) return {};
     const out: Record<string, ReentryRecord> = {};
     for (const r of parsed.records) if (isRecord(r)) out[r.groupIdB64] = r;
     return out;
@@ -174,7 +203,7 @@ function saveRecords(records: Record<string, ReentryRecord>, owner?: string): vo
     remove(RECORDS_PREFIX + a);
     return;
   }
-  write(RECORDS_PREFIX + a, JSON.stringify({ v: 1, records: list }));
+  write(RECORDS_PREFIX + a, JSON.stringify({ v: 2, records: list }));
 }
 
 /** The record of `groupIdB64`, if any. */
@@ -197,6 +226,8 @@ export function recordReentryRequest(
   input: {
     readonly groupIdB64: string;
     readonly keyPackageB64: string;
+    /** This request's gap secret, sealed under the device key. */
+    readonly gapKey: SealedGapSecret;
     readonly epochLeft: bigint;
     readonly gapFromMs: number;
     readonly sentAtMs: number;
@@ -209,9 +240,12 @@ export function recordReentryRequest(
   const all = [...(prior?.keyPackagesB64 ?? []), input.keyPackageB64];
   const kept = all.slice(-REENTRY_KEY_PACKAGES_KEPT);
   const dropped = all.slice(0, all.length - kept.length);
+  // The gap secrets of the same newest requests; the look tries each.
+  const gapKeys = [...(prior?.gapKeys ?? []), input.gapKey].slice(-REENTRY_KEY_PACKAGES_KEPT);
   records[input.groupIdB64] = {
     groupIdB64: input.groupIdB64,
     keyPackagesB64: kept,
+    gapKeys,
     epochLeft: input.epochLeft.toString(),
     // The gap starts at the earliest start a request named (live walk 2: a
     // later request may know an earlier start, never a later one).
@@ -482,8 +516,12 @@ export interface StoredOwedGapSend {
   readonly groupIdB64: string;
   /** The returning leaf's signature key, standard base64. */
   readonly leafKeyB64: string;
+  /** The request's 32-byte public gap key, standard base64: the history is
+   *  sealed to it and posted to its rendezvous. */
+  readonly gapKeyB64: string;
   /** The epoch the replacement creates, decimal. */
   readonly epochAfter: string;
+  /** The request's claim of where the gap starts (clamped at send time). */
   readonly gapFromMs: number;
   readonly notedAtMs: number;
 }
@@ -494,6 +532,7 @@ function isOwed(raw: unknown): raw is StoredOwedGapSend {
   return (
     typeof r.groupIdB64 === "string" &&
     typeof r.leafKeyB64 === "string" &&
+    typeof r.gapKeyB64 === "string" &&
     typeof r.epochAfter === "string" &&
     /^\d{1,20}$/.test(r.epochAfter) &&
     typeof r.gapFromMs === "number" &&
@@ -509,7 +548,7 @@ export function loadOwedGapSends(owner?: string): StoredOwedGapSend[] {
   if (raw === null) return [];
   try {
     const parsed = JSON.parse(raw) as { v?: unknown; owed?: unknown };
-    if (parsed.v !== 1 || !Array.isArray(parsed.owed)) return [];
+    if (parsed.v !== 2 || !Array.isArray(parsed.owed)) return [];
     return parsed.owed.filter(isOwed);
   } catch {
     return [];
@@ -522,7 +561,7 @@ export function saveOwedGapSends(list: readonly StoredOwedGapSend[], owner?: str
   if (a === null) return false;
   try {
     if (list.length === 0) remove(OWED_PREFIX + a);
-    else write(OWED_PREFIX + a, JSON.stringify({ v: 1, owed: list }));
+    else write(OWED_PREFIX + a, JSON.stringify({ v: 2, owed: list }));
     return true;
   } catch {
     return false;
@@ -531,12 +570,10 @@ export function saveOwedGapSends(list: readonly StoredOwedGapSend[], owner?: str
 
 // ---------- the gap looks (section 7) --------------------------------------
 
-/** One gap look, as stored: the secret sealed under the device key. */
+/** One gap look, as stored: the gap secrets sealed under the device key. */
 export interface StoredGapLook {
-  /** AES-GCM IV, standard base64. */
-  readonly ivB64: string;
-  /** The sealed 32-byte history secret, standard base64. */
-  readonly sealedSecretB64: string;
+  /** The gap secrets of the requests the device made (one answered). */
+  readonly secrets: readonly SealedGapSecret[];
   readonly gapFromMs: number;
   /** When the device came back: the gap line's end. */
   readonly gapToMs: number;
@@ -551,8 +588,8 @@ function isGapLook(raw: unknown): raw is StoredGapLook {
   if (typeof raw !== "object" || raw === null) return false;
   const r = raw as Partial<StoredGapLook>;
   return (
-    typeof r.ivB64 === "string" &&
-    typeof r.sealedSecretB64 === "string" &&
+    Array.isArray(r.secrets) &&
+    r.secrets.every(isSealedGapSecret) &&
     typeof r.gapFromMs === "number" &&
     typeof r.gapToMs === "number" &&
     typeof r.lastLookMs === "number" &&
@@ -611,6 +648,73 @@ export function gapLookGroups(owner?: string): string[] {
   return out;
 }
 
+// ---------- the first sighting of each leaf (section 7) -------------------
+
+/** Leaves kept per group (chosen, not measured: the oldest sightings go
+ *  first; a group of more leaves loses the start of its earliest ones). */
+export const LEAF_SEEN_PER_GROUP = 512;
+
+/** `${account}:${group}:${leaf}` already written this session. */
+const leafSeenWritten = new Set<string>();
+
+/** Tests. */
+export function resetLeafSeenMemory(): void {
+  leafSeenWritten.clear();
+}
+
+function loadLeafSeen(a: string, groupIdB64: string): Record<string, number> {
+  const raw = read(`${LEAF_SEEN_PREFIX}${a}:${groupIdB64}`);
+  if (raw === null) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    const out: Record<string, number> = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v === "number" && Number.isFinite(v) && v >= 0) out[k] = v;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * The roster of `groupIdB64` was read at `nowMs` and holds `leafKeysB64`:
+ * record the first sighting of each leaf not seen before. Only the first
+ * observation is kept. Never throws.
+ */
+export function noteLeavesSeen(groupIdB64: string, leafKeysB64: readonly string[], nowMs: number, owner?: string): void {
+  const a = account(owner);
+  if (a === null || !Number.isFinite(nowMs) || nowMs < 0) return;
+  const fresh = leafKeysB64.filter((k) => !leafSeenWritten.has(`${a}:${groupIdB64}:${k}`));
+  if (fresh.length === 0) return;
+  const seen = loadLeafSeen(a, groupIdB64);
+  let changed = false;
+  for (const k of fresh) {
+    if (seen[k] === undefined) {
+      seen[k] = Math.floor(nowMs);
+      changed = true;
+    }
+  }
+  if (changed) {
+    const entries = Object.entries(seen).sort((x, y) => x[1] - y[1]);
+    const kept = Object.fromEntries(entries.slice(-LEAF_SEEN_PER_GROUP));
+    try {
+      write(`${LEAF_SEEN_PREFIX}${a}:${groupIdB64}`, JSON.stringify(kept));
+    } catch {
+      return;
+    }
+  }
+  for (const k of fresh) leafSeenWritten.add(`${a}:${groupIdB64}:${k}`);
+}
+
+/** When this device first saw `leafKeyB64` in the roster of `groupIdB64`. */
+export function leafFirstSeenMs(groupIdB64: string, leafKeyB64: string, owner?: string): number | undefined {
+  const a = account(owner);
+  if (a === null) return undefined;
+  return loadLeafSeen(a, groupIdB64)[leafKeyB64];
+}
+
 // ---------- wipes ---------------------------------------------------------
 
 /** The group left this device. */
@@ -618,7 +722,7 @@ export function clearReentryRowsForGroup(groupIdB64: string, owner?: string): vo
   const a = account(owner);
   if (a === null) return;
   deleteReentryRecord(groupIdB64, a);
-  for (const p of [READ_FROM_PREFIX, GAP_PREFIX, KNOCK_KEY_PREFIX, KNOCK_KEY_SENT_PREFIX, GAP_LOOK_PREFIX]) {
+  for (const p of [READ_FROM_PREFIX, GAP_PREFIX, KNOCK_KEY_PREFIX, KNOCK_KEY_SENT_PREFIX, GAP_LOOK_PREFIX, LEAF_SEEN_PREFIX]) {
     remove(`${p}${a}:${groupIdB64}`);
   }
   const owed = loadOwedGapSends(a);

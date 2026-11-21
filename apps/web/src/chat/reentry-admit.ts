@@ -52,6 +52,9 @@ export interface ReentryArrival {
   readonly groupId: Uint8Array;
   readonly epochLeft: bigint;
   readonly gapFromMs: bigint;
+  /** The request's 32-byte public gap key (section 7): the gap's history is
+   *  sealed to it and posted to its rendezvous. */
+  readonly gapKey: Uint8Array;
   readonly keyPackage: Uint8Array;
   /** Route 1: the leaf keys (lower-case hex) of this account's DeviceGroup
    *  roster as the row that carried it was read. */
@@ -89,12 +92,15 @@ export interface ReentryAdmitPorts {
   }): number;
   /** Propose the pair and get it swept. */
   propose(group: WasmGroup, keyPackage: Uint8Array): Promise<void>;
-  /** The replacement's gap messages are owed once the group is at
-   *  `epochAfter`. */
+  /** The replacement's gap messages are owed once it landed (the group at
+   *  or past `epochAfter`). */
   noteGapOwed(input: {
     readonly groupIdB64: string;
-    /** The returning leaf's signature key (the exporter's context). */
+    /** The returning leaf's signature key (its first sighting and last
+     *  write clamp the gap's start). */
     readonly leafKey: Uint8Array;
+    /** The request's public gap key. */
+    readonly gapKey: Uint8Array;
     readonly epochAfter: bigint;
     readonly gapFromMs: number;
     readonly route: ReentryArrival["route"];
@@ -134,6 +140,12 @@ export function noteLeafWrote(groupIdB64: string, leafKeyB64: string, epoch: big
     const oldest = leafWrites.keys().next().value;
     if (oldest !== undefined) leafWrites.delete(oldest);
   }
+}
+
+/** The last write of a leaf at any epoch, unix ms (section 7: the
+ *  re-admitter's last message from the leaf clamps the gap's start). */
+export function lastLeafWriteAnyEpoch(groupIdB64: string, leafKeyB64: string): number | undefined {
+  return leafWrites.get(`${groupIdB64}:${leafKeyB64}`)?.atMs;
 }
 
 /** The last write of a leaf at `epoch`, unix ms. */
@@ -266,6 +278,7 @@ async function judgeAndAct(arrival: ReentryArrival, ports: ReentryAdmitPorts): P
   ports.noteGapOwed({
     groupIdB64,
     leafKey: target.signatureKey,
+    gapKey: arrival.gapKey,
     epochAfter: epoch + 1n,
     gapFromMs: Number.isFinite(gapFromMs) ? gapFromMs : nowMs,
     route: arrival.route,

@@ -20,10 +20,14 @@ import java.util.concurrent.ConcurrentHashMap
  * (never re-implemented here):
  *
  *  - PUSH: an account-deleted statement the person's own device posted in a
- *    conversation, verified at receipt against the MLS sender (C-68). Final.
+ *    conversation, verified at receipt against the MLS sender (C-68). It
+ *    clears the recorded directory answer and asks the directory at once.
  *  - PULL: the directory's answer for the person's account id
- *    (`GET /discovery/identity/{id}`), asked only for a person on screen.
- *    `Absent` is reversible by a later `SamePerson`.
+ *    (`GET /discovery/identity/{id}`), asked for a person on screen and right
+ *    after a statement. A later `SamePerson` shows the person again.
+ *
+ * The display needs either input; removing the person from groups and
+ * dropping messages held for them need both (`deletionEffects`).
  *
  * Keyed on the person's account key (standard base64, [MemberIdentity] in the
  * chat code), stored per signed-in account beside the profiles, written through
@@ -55,13 +59,32 @@ public data class PersonDeletionRecord(
 )
 
 /**
+ * What a deletion does on this device (`deletionEffects`): the display, and
+ * the two destructive effects, which need a verified statement AND a later
+ * directory `404` (security review 2026-11-21).
+ */
+public data class DeletionEffects(
+    /** Show "Deleted account" in place of the person's name. */
+    val showDeleted: Boolean,
+    /** An owner's or admin's device proposes the removal of their leaves. */
+    val removeFromGroups: Boolean,
+    /** Messages held for them that were never sent may be dropped. */
+    val dropHeldSends: Boolean,
+) {
+    public companion object {
+        /** Nothing known: no effect. */
+        public val NONE: DeletionEffects = DeletionEffects(showDeleted = false, removeFromGroups = false, dropHeldSends = false)
+    }
+}
+
+/**
  * The shared rules, behind a seam so the host suite (which does not load the
  * native library) can run against a fake. [FfiAccountDeletionRules] is the
  * one production implementation.
  */
 public interface AccountDeletionRules {
-    /** `accountDeletionStatus(...) == Deleted`. */
-    public fun isDeleted(statementVerified: Boolean, lastAnswer: DirectoryAnswer?): Boolean
+    /** `deletionEffects(statementVerified, lastAnswer)`. */
+    public fun effects(statementVerified: Boolean, lastAnswer: DirectoryAnswer?): DeletionEffects
 
     /** `mayShowUsername(status, confirmedAtMs, nowMs)`. */
     public fun mayShowUsername(deleted: Boolean, confirmedAtMs: Long?, nowMs: Long): Boolean
@@ -81,9 +104,10 @@ public object FfiAccountDeletionRules : AccountDeletionRules {
 
     private fun ms(value: Long?): ULong? = value?.coerceAtLeast(0L)?.toULong()
 
-    override fun isDeleted(statementVerified: Boolean, lastAnswer: DirectoryAnswer?): Boolean =
-        uniffi.lakko_ffi_uniffi.accountDeletionStatus(statementVerified, ffi(lastAnswer)) ==
-            uniffi.lakko_ffi_uniffi.FfiAccountStatus.DELETED
+    override fun effects(statementVerified: Boolean, lastAnswer: DirectoryAnswer?): DeletionEffects {
+        val e = uniffi.lakko_ffi_uniffi.deletionEffects(statementVerified, ffi(lastAnswer))
+        return DeletionEffects(e.showDeleted, e.removeFromGroups, e.dropHeldSends)
+    }
 
     override fun mayShowUsername(deleted: Boolean, confirmedAtMs: Long?, nowMs: Long): Boolean =
         uniffi.lakko_ffi_uniffi.mayShowUsername(
@@ -129,10 +153,13 @@ public class PersonDeletionBook(
     private var records: MutableMap<String, PersonDeletionRecord> = mutableMapOf()
     private val inFlight: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
-    /** Told the first time a person becomes deleted on this device (statement
-     *  or answer), with their key: the pending-contact queue drop hangs here. */
+    /** Told when a destructive effect of a deletion first holds for a person
+     *  ([DeletionEffects.dropHeldSends] or [DeletionEffects.removeFromGroups]
+     *  became `true`), with their key and the effects: the pending-contact
+     *  queue drop and the group removals hang here. A display change alone
+     *  is never told. */
     @Volatile
-    public var onPersonDeleted: ((String) -> Unit)? = null
+    public var onDeletionEffects: ((String, DeletionEffects) -> Unit)? = null
 
     private fun loaded(): Pair<String, MutableMap<String, PersonDeletionRecord>>? {
         val account = persistence.currentAccount() ?: return null
@@ -151,77 +178,83 @@ public class PersonDeletionBook(
     public fun record(keyB64: String): PersonDeletionRecord =
         synchronized(lock) { loaded()?.second?.get(keyB64) } ?: PersonDeletionRecord()
 
-    /** Whether [keyB64] is shown as Deleted account. */
-    public fun isDeleted(keyB64: String): Boolean {
-        val r = record(keyB64)
-        if (!r.statementVerified && r.lastAnswer == null) return false
-        return rules.isDeleted(r.statementVerified, r.lastAnswer)
-    }
+    private fun effectsOf(r: PersonDeletionRecord): DeletionEffects =
+        if (!r.statementVerified && r.lastAnswer == null) DeletionEffects.NONE else rules.effects(r.statementVerified, r.lastAnswer)
+
+    /** What a deletion does for [keyB64] now. */
+    public fun effects(keyB64: String): DeletionEffects = effectsOf(record(keyB64))
+
+    /** Whether [keyB64] is shown as Deleted account. A later `SamePerson`
+     *  answer shows the person again. */
+    public fun isDeleted(keyB64: String): Boolean = effects(keyB64).showDeleted
 
     /** Whether a verified `@username` may be shown beside [keyB64] now. */
     public fun mayShowUsername(keyB64: String): Boolean {
         val r = record(keyB64)
-        val deleted = (r.statementVerified || r.lastAnswer != null) && rules.isDeleted(r.statementVerified, r.lastAnswer)
-        return rules.mayShowUsername(deleted, r.lastSamePersonAtMs, nowMs())
+        return rules.mayShowUsername(effectsOf(r).showDeleted, r.lastSamePersonAtMs, nowMs())
     }
 
-    private fun update(keyB64: String, change: (PersonDeletionRecord) -> PersonDeletionRecord): Pair<Boolean, Boolean>? {
-        var becameDeleted = false
+    private fun update(keyB64: String, change: (PersonDeletionRecord) -> PersonDeletionRecord): Boolean? {
+        var told: DeletionEffects? = null
         val changed = synchronized(lock) {
             val (account, map) = loaded() ?: return null
             val before = map[keyB64] ?: PersonDeletionRecord()
             val after = change(before)
             if (after == before) return@synchronized false
-            val wasDeleted = (before.statementVerified || before.lastAnswer != null) &&
-                rules.isDeleted(before.statementVerified, before.lastAnswer)
-            val isDeleted = (after.statementVerified || after.lastAnswer != null) &&
-                rules.isDeleted(after.statementVerified, after.lastAnswer)
-            becameDeleted = isDeleted && !wasDeleted
+            val was = effectsOf(before)
+            val now = effectsOf(after)
+            if ((now.dropHeldSends && !was.dropHeldSends) || (now.removeFromGroups && !was.removeFromGroups)) told = now
             map[keyB64] = after
             persistence.save(account, map.toMap())
             true
         }
         if (changed) onChanged()
-        if (becameDeleted) onPersonDeleted?.invoke(keyB64)
-        return changed to becameDeleted
+        told?.let { onDeletionEffects?.invoke(keyB64, it) }
+        return changed
     }
 
-    /** A verified account-deleted statement from [keyB64]: final. Returns
-     *  `true` when this is new. */
+    /**
+     * A verified account-deleted statement from [keyB64]. Not final: the
+     * recorded directory answer is cleared, so only an answer received AFTER
+     * the statement counts (a later `SamePerson` shows the person again, a
+     * later `404` confirms it). Returns `true` when this is new; a repeated
+     * statement changes nothing, so it cannot undo a later answer.
+     */
     public fun markStatementVerified(keyB64: String): Boolean =
-        update(keyB64) { if (it.statementVerified) it else it.copy(statementVerified = true) }?.first == true
+        update(keyB64) {
+            if (it.statementVerified) it else it.copy(statementVerified = true, lastAnswer = null, lastAnswerAtMs = null)
+        } == true
 
-    /** The people a verified account-deleted statement was recorded for, in
-     *  any conversation. Never a directory answer. */
-    public fun statementVerifiedKeys(): List<String> =
-        synchronized(lock) { loaded()?.second?.filterValues { it.statementVerified }?.keys?.sorted() } ?: emptyList()
+    /** The people whose removal from groups is owed now
+     *  ([DeletionEffects.removeFromGroups]): a verified statement and a later
+     *  directory `404`, in any conversation. */
+    public fun removalOwedKeys(): List<String> =
+        synchronized(lock) {
+            loaded()?.second?.filterValues { effectsOf(it).removeFromGroups }?.keys?.sorted()
+        } ?: emptyList()
 
-    /** A complete directory answer for [keyB64]. Ignored after a statement:
-     *  nothing reverses it. */
+    /** A complete directory answer for [keyB64]. Recorded after a statement
+     *  too: a `SamePerson` reverts the display. */
     public fun recordAnswer(keyB64: String, answer: DirectoryAnswer) {
         val now = nowMs()
         update(keyB64) {
-            if (it.statementVerified) {
-                it
-            } else {
-                it.copy(
-                    lastAnswer = answer,
-                    lastAnswerAtMs = now,
-                    lastSamePersonAtMs = if (answer == DirectoryAnswer.SAME_PERSON) now else it.lastSamePersonAtMs,
-                )
-            }
+            it.copy(
+                lastAnswer = answer,
+                lastAnswerAtMs = now,
+                lastSamePersonAtMs = if (answer == DirectoryAnswer.SAME_PERSON) now else it.lastSamePersonAtMs,
+            )
         }
     }
 
     /**
-     * Start a directory check of [keyB64] when one is due and none is in
-     * flight: the attempt time is recorded first. `false` = ask nothing.
-     * Every `true` must be followed by [endCheck].
+     * Start a directory check of [keyB64] when one is due (or at once when
+     * [force]) and none is in flight: the attempt time is recorded first.
+     * `false` = ask nothing. Every `true` must be followed by [endCheck].
      */
-    public fun beginCheck(keyB64: String): Boolean {
+    public fun beginCheck(keyB64: String, force: Boolean = false): Boolean {
         val r = record(keyB64)
         val now = nowMs()
-        if (!rules.checkDue(r.statementVerified, r.lastAnswerAtMs, r.lastAttemptAtMs, now)) return false
+        if (!force && !rules.checkDue(r.statementVerified, r.lastAnswerAtMs, r.lastAttemptAtMs, now)) return false
         if (!inFlight.add(keyB64)) return false
         val written = update(keyB64) { it.copy(lastAttemptAtMs = now) }
         if (written == null) {
@@ -316,6 +349,21 @@ public class AccountDeletionChecks(
      * a check is due. At most one request in flight per person.
      */
     public fun onScreen(keyB64: String) {
+        check(keyB64, force = false)
+    }
+
+    /**
+     * A verified account-deleted statement from [keyB64]: recorded (the
+     * earlier directory answer cleared), then the directory is asked at once
+     * rather than on the weekly schedule. `true` when the statement is new.
+     */
+    public fun onStatementVerified(keyB64: String): Boolean {
+        val new = book.markStatementVerified(keyB64)
+        if (new) check(keyB64, force = true)
+        return new
+    }
+
+    private fun check(keyB64: String, force: Boolean) {
         if (keyB64.isEmpty()) return
         val accountId = try {
             accountIdOf(keyB64)
@@ -325,7 +373,7 @@ public class AccountDeletionChecks(
         if (accountId.size != ACCOUNT_ID_BYTES) return
         val hex = accountId.joinToString("") { "%02x".format(it.toInt() and 0xff) }
         if (hex == ownAccountIdHex()) return
-        if (!book.beginCheck(keyB64)) return
+        if (!book.beginCheck(keyB64, force)) return
         scope.launch {
             try {
                 // The answer itself is recorded by [onDirectoryAnswer], which
@@ -578,11 +626,12 @@ public fun deletedRemovalPlan(
 
 /**
  * The (group, account key) pairs whose removal this device has proposed (or
- * found nothing to remove) after a verified statement, per signed-in account.
+ * found nothing to remove) once it was owed (a verified statement and a later
+ * directory `404`, [PersonDeletionBook.removalOwedKeys]), per signed-in account.
  * A verified statement proves the ACCOUNT is gone, so a removal is owed in
  * every group this device holds, not only the one the statement arrived in
- * (seen live 2026-11-20, walk 12). Only a signed statement ever makes a
- * removal owed, never a directory answer.
+ * (seen live 2026-11-20, walk 12). Neither a signed statement alone nor a
+ * directory answer alone makes a removal owed.
  */
 public class DeletedMemberRemovals(private val storage: Storage) {
     /** Where the ledger lives. */
@@ -607,12 +656,11 @@ public class DeletedMemberRemovals(private val storage: Storage) {
         }
     }
 
-    /** The account keys of [statementVerified] (people a verified statement
-     *  was recorded for, from any conversation) whose removal from
-     *  [groupIdHex] is still owed. */
-    public fun owed(groupIdHex: String, statementVerified: Collection<String>): List<String> = synchronized(lock) {
+    /** The account keys of [removalOwed] (people whose removal is owed,
+     *  from any conversation) whose removal from [groupIdHex] is still owed. */
+    public fun owed(groupIdHex: String, removalOwed: Collection<String>): List<String> = synchronized(lock) {
         val rows = storage.load()
-        statementVerified.filter { rows[rowKey(groupIdHex, it)] != true }
+        removalOwed.filter { rows[rowKey(groupIdHex, it)] != true }
     }
 
     public companion object {

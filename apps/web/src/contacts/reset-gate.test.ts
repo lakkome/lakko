@@ -87,9 +87,14 @@ const ACCOUNT_ID = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14
 const ACCOUNT_B64 = b64(ACCOUNT_ID);
 const ATTEST_B64 = b64(new Uint8Array(145).fill(7));
 
-function peer(seed: number): { sig: string; x: string; edSeed: Uint8Array } {
+function peer(seed: number): { sig: string; x: string; xb: string; edSeed: Uint8Array } {
   const id = realWasm.Identity.fromSeed(new Uint8Array(32).fill(seed));
-  return { sig: b64(id.signaturePublicKey), x: b64(id.x25519PublicKey), edSeed: id.ed25519Seed };
+  return {
+    sig: b64(id.signaturePublicKey),
+    x: b64(id.x25519PublicKey),
+    xb: b64(realWasm.signX25519Binding(id)),
+    edSeed: id.ed25519Seed,
+  };
 }
 
 function gate(bundle: IdentityFetchResponse, heldKeyB64?: string): Promise<void> {
@@ -133,7 +138,7 @@ afterEach(() => {
 
 async function pinOriginal(seed: number): Promise<ReturnType<typeof peer>> {
   const original = peer(seed);
-  await gate({ signature_pubkey: original.sig, x25519_pubkey: original.x, key_generation: 1 });
+  await gate({ signature_pubkey: original.sig, x25519_pubkey: original.x, x25519_binding: original.xb, key_generation: 1 });
   expect(readPin(ACCOUNT_B64)?.acceptedKeyGeneration).toBe(1);
   return original;
 }
@@ -145,7 +150,7 @@ describe("the gate accepts an attested reset silently", () => {
     await expect(
       gate({
         signature_pubkey: fresh.sig,
-        x25519_pubkey: fresh.x,
+        x25519_pubkey: fresh.x, x25519_binding: fresh.xb,
         key_generation: 2,
         key_reset_attest: ATTEST_B64,
       }),
@@ -170,12 +175,32 @@ describe("the gate accepts an attested reset silently", () => {
     expect(b64(verifyCalls[0]?.pubkey ?? new Uint8Array())).toBe(fresh.sig);
   });
 
+  it("refuses an attested reset whose X25519 key is not bound to the new account key", async () => {
+    const original = await pinOriginal(11);
+    const fresh = peer(12);
+    const intruder = peer(13);
+    for (const binding of [undefined, intruder.xb]) {
+      await expect(
+        gate({
+          signature_pubkey: fresh.sig,
+          // A directory pairing the new key with an X25519 key of its own.
+          x25519_pubkey: intruder.x,
+          ...(binding === undefined ? {} : { x25519_binding: binding }),
+          key_generation: 2,
+          key_reset_attest: ATTEST_B64,
+        }),
+      ).rejects.toBeInstanceOf(SupersessionRefused);
+    }
+    expect(readPin(ACCOUNT_B64)?.pinnedSignaturePubkeyB64).toBe(original.sig);
+    expect(accepted).toEqual([]);
+  });
+
   it("the same bundle observed again is the unchanged-key case: no second event", async () => {
     await pinOriginal(3);
     const fresh = peer(4);
     const bundle = {
       signature_pubkey: fresh.sig,
-      x25519_pubkey: fresh.x,
+      x25519_pubkey: fresh.x, x25519_binding: fresh.xb,
       key_generation: 2,
       key_reset_attest: ATTEST_B64,
     };
@@ -189,7 +214,7 @@ describe("the gate accepts an attested reset silently", () => {
     const fresh = peer(6);
     await gate({
       signature_pubkey: fresh.sig,
-      x25519_pubkey: fresh.x,
+      x25519_pubkey: fresh.x, x25519_binding: fresh.xb,
       key_generation: 2,
       key_reset_attest: ATTEST_B64,
     });
@@ -197,7 +222,7 @@ describe("the gate accepts an attested reset silently", () => {
     await expect(
       gate({
         signature_pubkey: original.sig,
-        x25519_pubkey: original.x,
+        x25519_pubkey: original.x, x25519_binding: original.xb,
         key_generation: 2,
         key_reset_attest: ATTEST_B64,
       }),
@@ -217,7 +242,7 @@ describe("a member this device never pinned (verified bindings)", () => {
       gate(
         {
           signature_pubkey: victim.sig,
-          x25519_pubkey: victim.x,
+          x25519_pubkey: victim.x, x25519_binding: victim.xb,
           key_generation: 2,
           key_reset_attest: ATTEST_B64,
         },
@@ -237,14 +262,14 @@ describe("a member this device never pinned (verified bindings)", () => {
     const mallory = peer(11);
     const fresh = peer(12);
     // The real member is verified first.
-    await gate({ signature_pubkey: victim.sig, x25519_pubkey: victim.x, key_generation: 1 }, victim.sig);
+    await gate({ signature_pubkey: victim.sig, x25519_pubkey: victim.x, x25519_binding: victim.xb, key_generation: 1 }, victim.sig);
     expect(readVerifiedBinding(ACCOUNT_B64)?.keyB64).toBe(victim.sig);
     // The account then resets; another member claims its id.
     await expect(
       gate(
         {
           signature_pubkey: fresh.sig,
-          x25519_pubkey: fresh.x,
+          x25519_pubkey: fresh.x, x25519_binding: fresh.xb,
           key_generation: 2,
           key_reset_attest: ATTEST_B64,
         },
@@ -258,7 +283,7 @@ describe("a member this device never pinned (verified bindings)", () => {
 
   it("the first observation records a binding and pins nothing", async () => {
     const original = peer(9);
-    await gate({ signature_pubkey: original.sig, x25519_pubkey: original.x, key_generation: 4 }, original.sig);
+    await gate({ signature_pubkey: original.sig, x25519_pubkey: original.x, x25519_binding: original.xb, key_generation: 4 }, original.sig);
     expect(readPin(ACCOUNT_B64)).toBeUndefined();
     expect(readVerifiedBinding(ACCOUNT_B64)).toMatchObject({ keyB64: original.sig, keyGeneration: 4 });
     expect(accepted).toEqual([]);
@@ -267,11 +292,11 @@ describe("a member this device never pinned (verified bindings)", () => {
   it("a reset is accepted from a verified binding that names the roster key", async () => {
     const original = peer(13);
     const fresh = peer(14);
-    await gate({ signature_pubkey: original.sig, x25519_pubkey: original.x, key_generation: 1 }, original.sig);
+    await gate({ signature_pubkey: original.sig, x25519_pubkey: original.x, x25519_binding: original.xb, key_generation: 1 }, original.sig);
     await gate(
       {
         signature_pubkey: fresh.sig,
-        x25519_pubkey: fresh.x,
+        x25519_pubkey: fresh.x, x25519_binding: fresh.xb,
         key_generation: 2,
         key_reset_attest: ATTEST_B64,
       },
@@ -288,12 +313,12 @@ describe("a member this device never pinned (verified bindings)", () => {
   it("a reset at the binding's own generation is refused (the baseline holds)", async () => {
     const original = peer(15);
     const fresh = peer(16);
-    await gate({ signature_pubkey: original.sig, x25519_pubkey: original.x, key_generation: 2 }, original.sig);
+    await gate({ signature_pubkey: original.sig, x25519_pubkey: original.x, x25519_binding: original.xb, key_generation: 2 }, original.sig);
     await expect(
       gate(
         {
           signature_pubkey: fresh.sig,
-          x25519_pubkey: fresh.x,
+          x25519_pubkey: fresh.x, x25519_binding: fresh.xb,
           key_generation: 2,
           key_reset_attest: ATTEST_B64,
         },
@@ -306,8 +331,8 @@ describe("a member this device never pinned (verified bindings)", () => {
 
   it("a binding met on the contact path becomes the pin with its baseline", async () => {
     const original = peer(17);
-    await gate({ signature_pubkey: original.sig, x25519_pubkey: original.x, key_generation: 3 }, original.sig);
-    await gate({ signature_pubkey: original.sig, x25519_pubkey: original.x, key_generation: 3 });
+    await gate({ signature_pubkey: original.sig, x25519_pubkey: original.x, x25519_binding: original.xb, key_generation: 3 }, original.sig);
+    await gate({ signature_pubkey: original.sig, x25519_pubkey: original.x, x25519_binding: original.xb, key_generation: 3 });
     expect(readPin(ACCOUNT_B64)).toMatchObject({ pinnedSignaturePubkeyB64: original.sig, acceptedKeyGeneration: 3 });
     expect(readVerifiedBinding(ACCOUNT_B64)).toBeUndefined();
   });
@@ -315,9 +340,9 @@ describe("a member this device never pinned (verified bindings)", () => {
   it("on the contact path a key that changed since the binding is a change, not a first pin", async () => {
     const original = peer(18);
     const other = peer(19);
-    await gate({ signature_pubkey: original.sig, x25519_pubkey: original.x, key_generation: 1 }, original.sig);
+    await gate({ signature_pubkey: original.sig, x25519_pubkey: original.x, x25519_binding: original.xb, key_generation: 1 }, original.sig);
     await expect(
-      gate({ signature_pubkey: other.sig, x25519_pubkey: other.x, key_generation: 1 }),
+      gate({ signature_pubkey: other.sig, x25519_pubkey: other.x, x25519_binding: other.xb, key_generation: 1 }),
     ).rejects.toBeInstanceOf(SupersessionRefused);
     expect(readPin(ACCOUNT_B64)).toBeUndefined();
   });
@@ -330,7 +355,7 @@ describe("the gate still fails closed", () => {
     attested = new Error("bad signature");
     const thrown = await gate({
       signature_pubkey: fresh.sig,
-      x25519_pubkey: fresh.x,
+      x25519_pubkey: fresh.x, x25519_binding: fresh.xb,
       key_generation: 2,
       key_reset_attest: ATTEST_B64,
     }).catch((e: unknown) => e);
@@ -347,7 +372,7 @@ describe("the gate still fails closed", () => {
     await expect(
       gate({
         signature_pubkey: fresh.sig,
-        x25519_pubkey: fresh.x,
+        x25519_pubkey: fresh.x, x25519_binding: fresh.xb,
         key_generation: 3,
         key_reset_attest: ATTEST_B64,
       }),
@@ -360,7 +385,7 @@ describe("the gate still fails closed", () => {
     verifyIdentityInLogMock.mockResolvedValue({ status: "confirmed", isReset: false });
     const thrown = await gate({
       signature_pubkey: fresh.sig,
-      x25519_pubkey: fresh.x,
+      x25519_pubkey: fresh.x, x25519_binding: fresh.xb,
       key_generation: 2,
       key_reset_attest: ATTEST_B64,
     }).catch((e: unknown) => e);
@@ -373,7 +398,7 @@ describe("the gate still fails closed", () => {
     const fresh = peer(18);
     const thrown = await gate({
       signature_pubkey: fresh.sig,
-      x25519_pubkey: fresh.x,
+      x25519_pubkey: fresh.x, x25519_binding: fresh.xb,
       key_generation: 2,
       key_reset_attest: ATTEST_B64,
       supersession_proof: b64(new Uint8Array(145).fill(1)),
@@ -393,7 +418,7 @@ describe("no verdict changes nothing", () => {
     await expect(
       gate({
         signature_pubkey: fresh.sig,
-        x25519_pubkey: fresh.x,
+        x25519_pubkey: fresh.x, x25519_binding: fresh.xb,
         key_generation: 2,
         key_reset_attest: ATTEST_B64,
       }),
@@ -409,7 +434,7 @@ describe("no verdict changes nothing", () => {
     await expect(
       gate({
         signature_pubkey: fresh.sig,
-        x25519_pubkey: fresh.x,
+        x25519_pubkey: fresh.x, x25519_binding: fresh.xb,
         key_generation: 2,
         key_reset_attest: ATTEST_B64,
       }),
@@ -433,7 +458,7 @@ describe("a proven rotation never enters the reset path", () => {
     });
     await gate({
       signature_pubkey: fresh.sig,
-      x25519_pubkey: fresh.x,
+      x25519_pubkey: fresh.x, x25519_binding: fresh.xb,
       key_generation: 2,
       key_reset_attest: ATTEST_B64,
       supersession_proof: b64(proof),

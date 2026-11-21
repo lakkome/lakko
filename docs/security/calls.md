@@ -6242,6 +6242,41 @@ bring back a device whose account no longer has a leaf in the group.
 Invariants **#3** (an MLS state-machine change; external review under G-39)
 and **#4** (refuse, never fall back); **#2** and **#5** untouched.
 
+**Amended 2026-11-21 (security review; closed in code on the core, both FFI
+surfaces and web / iOS / Android, unit tests only, nothing walked; G-59).**
+Three rules were added, each because a member other than the re-admitter
+could otherwise abuse a recovery:
+
+- `join_reentry` accepts a Welcome only from this device's own account, the
+  owner or an admin of the STORED role table, or in a one-to-one the other
+  person (`sender_may_readmit` in `group/reentry_join.rs`); "an account in the
+  stored roster" above is no longer enough, so a plain member cannot put the
+  returning device on a tree it chose. Pinned by
+  `a_plain_members_reentry_welcome_is_refused_and_changes_nothing`.
+- `reentry_adds_stand` (`reentry.rs`), commit-wide, at the peer commit gate
+  and on every selection the sweep builds: every valid re-entry `Add`
+  replacing `L` rides with a `Remove(L)` by the same sender, and no `Add`
+  adds a leaf of an account whose leaf the same proposals remove by a
+  `Remove` from another account that is not that remover's own re-entry pair
+  (a `Leave` does not count). `ReentryPairInvalid` otherwise. A member being
+  removed therefore cannot keep a leaf by its own re-entry `Add` or by adding
+  another of its devices in the same commit. Pinned by
+  `a_member_being_removed_cannot_survive_by_its_own_reentry_add` and
+  `a_member_being_removed_cannot_survive_by_adding_another_device`.
+- The history of the gap is sealed to a fresh X25519 gap key the returning
+  device names in its request (`conversation_reentry` version 2), signed
+  inside the encryption by the re-admitter's leaf key, posted to a
+  rendezvous derived from the gap public key, started no earlier than the
+  re-admitter's own evidence of the leaf (`gap_history_start`: first seen,
+  else last write; neither = nothing sent), and kept by the returning device
+  only when `Group::gap_history_signer_accepted` accepts the signer under the
+  same rule as the Welcome sender (`lakko-contacts::gap_history`, fuzz
+  `gap_history_open`). Before, it was sealed under an exporter secret every
+  member after the replacement held.
+
+Residual: the first time a device saw a leaf is recorded only from this
+build on, so for an older leaf the floor is the last message from it.
+
 ## A metric label never carries an identifier (C-94)
 
 ### C-94: metric labels come from closed sets fixed in the source
@@ -6329,3 +6364,91 @@ days. A renamed name is covered only while the device receives the renamed
 person's profile republish within the journal retention. The pull tells the
 directory which account ids a device views (ADR-0078 class (c), as every
 identity fetch already does). Invariants **#4**, **#5**.
+
+**Amended 2026-11-21 (security review; core, both FFI surfaces and web / iOS /
+Android, unit tests only, nothing walked; G-59).** A statement is no longer
+final, since anyone holding the account key (a lost device from before a key
+reset, a thief) can post one. `deletion_effects(statement_verified,
+directory)` is the one rule: "Deleted account" is shown on a verified
+statement or a `404`; the destructive steps (an owner's or admin's device
+proposing the person's removal from groups, dropping messages held for them
+that were never sent, dropping an unanswered contact request from them) are
+taken only on a statement AND a `404`; a `SamePerson` answer always shows the
+person. A client clears the recorded directory answer when it records a
+statement, so only an answer received after the statement counts and a check
+is due at once (`directory_check_due` no longer stops after a statement).
+Discovery refuses to start with a retired-name hold under 28 days
+(`MIN_RETIRED_HOLD_SECS`, compile-time tied to the 21-day window), which
+closes the "does not hold if the operator sets the hold at or below 21 days"
+case above. Pinned by `destructive_effects_need_a_statement_and_a_404`,
+`status_shows_a_statement_or_absent_and_same_person_reverts_it`,
+`check_due_rules` and the discovery test
+`a_hold_under_twenty_eight_days_is_refused`. Residual: a key holder can still
+show the person as deleted until the directory's next answer, asked at once.
+
+## A device seals to an account only under a key that account's identity key signed (C-99)
+
+### C-99: a sealed box to an account uses an X25519 key the account's identity key signed, refuses a non-contributory agreement, binds both public keys, and opens for one use only
+
+Every sealed-to-account envelope (contact request, mailbox row, knock row,
+push wake, group contact request, registrar seed and root handover, knock
+seed, admission seed, channel read key, channel epoch seeds, gap history) is
+the `lakko-contacts::envelope` sealed box to an X25519 key. Before the
+security review of 2026-11-21 the account X25519 key was served by the
+directory beside the identity key with nothing tying them, so a hostile
+directory could serve its own X25519 key beside a genuine, pinned identity
+key and read what was sealed "to that person"; and several uses shared the
+contact request's labels, so a box sealed for one use could be opened as
+another to the same key under the same AAD.
+
+**The rule.**
+
+- **The binding.** The account's Ed25519 identity key signs its X25519 key:
+  64 bytes over `"lakko/account/x25519-binding/v1\0" ‖ ed25519_pub ‖
+  x25519_pub` (`lakko-contacts::x25519_binding`, spec
+  `x25519_binding.sc.md`). `POST /discovery/identity` requires it and refuses
+  an absent or invalid one with `400 x25519-binding-invalid` (migration
+  `0041`), `GET /discovery/identity/{id}` serves it, and web (incl. desktop),
+  iOS and Android seal to a fetched account X25519 key only when
+  `verifyX25519Binding` accepts it under the fetched (and pin-checked)
+  identity key; otherwise nothing is sealed and the flow ends in its existing
+  failure. An X25519 key carried inside a signed invite capability is
+  covered by that capability's signature and needs no separate binding (by
+  design).
+- **The agreement.** `lakko_crypto::agreement::SecretKey::diffie_hellman`
+  returns `Err(NonContributory)` for an all-zero shared secret (a low-order
+  peer point, RFC 7748 section 6.1), and the sealed box refuses it on both
+  the seal and the open side.
+- **The KDF.** The AEAD key and nonce are HKDF-SHA-256 over the shared
+  secret with `info = label ‖ eph_pub ‖ recipient_pub`, so a key is tied to
+  the exact pair it was agreed between (the recipient key is new; a flag day
+  for every sealed box).
+- **One use, one set of labels.** Each use above has its own key and nonce
+  labels (`SealLabels`), pinned distinct.
+
+**Why it is indexed.** The identity key is what the KT log, the pins and the
+supersession gates protect; without the binding none of them reaches the key
+that actually encrypts. A low-order key or shared labels would make a sealed
+box readable by someone other than its recipient.
+
+**Where it is enforced.** `crates/lakko-crypto/src/agreement.rs`,
+`crates/lakko-contacts/src/envelope.rs` (`seal_labeled` / `open_labeled`,
+`derive_key_and_nonce`), `crates/lakko-contacts/src/x25519_binding.rs`, the
+per-use modules' `SEAL_LABELS`, `services/discovery/src/identity_bundle.rs`
+(`verified_x25519_binding`), the FFI `signX25519Binding` /
+`verifyX25519Binding` (UniFFI and wasm), web
+`apps/web/src/discovery/x25519-binding.ts`, Android
+`discovery/X25519Binding.kt`, iOS `Discovery/DiscoveryWire.swift`. Pinned by
+`a_low_order_peer_key_is_refused`, `a_low_order_key_is_refused_on_both_sides`,
+`the_recipient_key_is_bound_into_the_kdf`, `every_use_has_its_own_labels`,
+`a_box_sealed_under_one_use_never_opens_under_another`, the
+`x25519_binding` module tests and proptest, the per-client binding tests, and
+fuzz `x25519_binding_verify`. Unit-tested only, nothing walked, not deployed.
+
+**What this does NOT do.** It does not decide whether the identity key is
+the right one (the pin, the KT log and the supersession gates do); a
+directory that also controls the identity key a device first pins is the
+existing TOFU residual. Rows written before migration `0041` carry no
+binding and are unusable for sealing (there is no production deployment).
+Invariants **#2** (the binding is a public artefact) and **#4** (no sealing
+to an unbound key).

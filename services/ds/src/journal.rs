@@ -804,8 +804,12 @@ fn refuse_rendezvous_headers(headers: &HeaderMap) -> Result<(), (StatusCode, Str
 }
 
 /// `POST /ds/rendezvous/{hex}/messages` - append to a rendezvous (pairing,
-/// recovery, the welcome courier, the state bundle). Anyone who knows the
-/// random id writes; no proof, no claim.
+/// recovery, the welcome courier, the state bundle, a rejoin note, a gap
+/// history). No proof and no claim: whoever knows the random id may write,
+/// but every write spends one `rendezvous-write` anonymous token
+/// (security review 2026-11-21), so a name alone no longer writes without
+/// limit and the DS still learns no account. Checked after the id and the
+/// headers, so a malformed request costs no token.
 pub(crate) async fn post_rendezvous(
     State(state): State<AppState>,
     AxumPath(rendezvous_hex): AxumPath<String>,
@@ -814,6 +818,13 @@ pub(crate) async fn post_rendezvous(
 ) -> Result<Response, (StatusCode, String)> {
     let owner = decode_pseudonym(&rendezvous_hex)?;
     refuse_rendezvous_headers(&headers)?;
+    if let Err(refused) = state
+        .anon_tokens
+        .spend_header(&headers, lakko_anon_token::TokenContext::RendezvousWrite)
+        .await
+    {
+        return Ok(refused.into_response());
+    }
     let resp = publish(
         &state.db,
         &state.notifiers,

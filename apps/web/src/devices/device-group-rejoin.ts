@@ -461,9 +461,11 @@ export async function rejoinOnce(ports: RejoinPorts, firstPass: boolean): Promis
     // read at once; none means the knock was never answered, so knock again.
     const watch = ports.watch(kept);
     try {
-      const answer = await watch.next(ports.now() + ANSWER_WINDOW_MIN_MS);
-      if (answer?.kind === "welcome") return await joinWith(ports, kept, answer.bytes);
-      if (answer?.kind === "present") return await awaitWelcome(ports, kept, watch);
+      const read = await readAnswer(ports, kept, watch, null, ports.now() + ANSWER_WINDOW_MIN_MS);
+      if (read.kind === "joined") return await joined(ports);
+      if (read.kind === "present") return await awaitWelcome(ports, kept, watch);
+      // A Welcome this device could not join from, and nothing after it:
+      // knock afresh below, as when nothing was there.
     } finally {
       watch.close();
     }
@@ -477,11 +479,14 @@ export async function rejoinOnce(ports: RejoinPorts, firstPass: boolean): Promis
     const sentAt = ports.now();
     await ports.postKnock(knock);
     const rtt = ports.now() - sentAt;
-    const answer = await watch.next(ports.now() + answerWindowMs(rtt));
+    const deadline = ports.now() + answerWindowMs(rtt);
+    const answer = await watch.next(deadline);
     ports.noteAnswer(answer === null ? null : ports.now() - sentAt, answer?.kind ?? null);
     if (answer === null) return await foundAlone(ports);
-    if (answer.kind === "welcome") return await joinWith(ports, knock.state, answer.bytes);
-    return await awaitWelcome(ports, knock.state, watch);
+    const read = await readAnswer(ports, knock.state, watch, answer, deadline);
+    if (read.kind === "joined") return await joined(ports);
+    if (read.kind === "present") return await awaitWelcome(ports, knock.state, watch);
+    return await failedJoin(ports, read);
   } finally {
     watch.close();
   }
@@ -493,28 +498,65 @@ async function foundAlone(ports: RejoinPorts): Promise<RejoinOutcome> {
   return "founded";
 }
 
+/** What reading the rendezvous until a deadline came to. */
+type AnswerRead =
+  | { readonly kind: "joined" }
+  | { readonly kind: "present" }
+  /** No answer that could be used before the deadline; `error` is the first
+   *  failed join, when a row was taken for a Welcome and did not join. */
+  | { readonly kind: "none"; readonly error: unknown; readonly failed: boolean };
+
+/**
+ * Read answers until one can be used: a presence note, or a Welcome this
+ * device joins from. Anyone who learns the rendezvous can write to it, so a
+ * row that does not join is passed over and the next one read; `first` is
+ * an answer already taken from the watch.
+ */
+async function readAnswer(
+  ports: RejoinPorts,
+  state: RejoinState,
+  watch: AnswerWatch,
+  first: RejoinAnswer | null,
+  deadlineMs: number,
+): Promise<AnswerRead> {
+  let error: unknown = null;
+  let failed = false;
+  let answer = first ?? (await watch.next(deadlineMs));
+  while (answer !== null) {
+    if (answer.kind === "present") return { kind: "present" };
+    try {
+      await ports.join(state, answer.bytes);
+      return { kind: "joined" };
+    } catch (err) {
+      if (!failed) error = err;
+      failed = true;
+    }
+    answer = await watch.next(deadlineMs);
+  }
+  return { kind: "none", error, failed };
+}
+
 /** A device answered: wait for its Welcome until the re-knock time. */
 async function awaitWelcome(ports: RejoinPorts, state: RejoinState, watch: AnswerWatch): Promise<RejoinOutcome> {
   const deadline = state.knockedAtMs + REKNOCK_AFTER_MS;
   for (;;) {
-    const answer = await watch.next(deadline);
-    if (answer === null) return "waiting";
-    if (answer.kind === "welcome") return joinWith(ports, state, answer.bytes);
+    const read = await readAnswer(ports, state, watch, null, deadline);
+    if (read.kind === "joined") return joined(ports);
+    if (read.kind === "none") return read.failed ? failedJoin(ports, read) : "waiting";
     // Another device saw the knock too; keep waiting.
   }
 }
 
-async function joinWith(ports: RejoinPorts, state: RejoinState, welcome: Uint8Array): Promise<RejoinOutcome> {
-  try {
-    await ports.join(state, welcome);
-  } catch (err) {
-    // A Welcome this device cannot join from (or a write that failed): the
-    // next pass knocks afresh instead of reading the same Welcome again.
-    await ports.clearState().catch(() => undefined);
-    throw err;
-  }
+async function joined(ports: RejoinPorts): Promise<RejoinOutcome> {
   await ports.clearState();
   return "joined";
+}
+
+/** Only rows this device could not join from: the next pass knocks afresh
+ *  instead of reading the same rows again. */
+async function failedJoin(ports: RejoinPorts, read: { readonly error: unknown }): Promise<RejoinOutcome> {
+  await ports.clearState().catch(() => undefined);
+  throw read.error;
 }
 
 // ----------------------------------------------------------------------------

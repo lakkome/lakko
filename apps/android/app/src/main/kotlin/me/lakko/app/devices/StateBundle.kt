@@ -1808,10 +1808,20 @@ public object StateBundle {
     }
 
     /** Joiner side: the state row past the Welcome cursor, skipping the
-     *  history and recovery rows. Soft timeout; an older scanner sends none. */
-    public suspend fun poll(rendezvousPseudonym: ByteArray, afterCursor: Long): ByteArray? =
-        DsClient().use { client ->
-            val deadline = System.nanoTime() + POLL_TIMEOUT_MS * 1_000_000L
+     *  history and recovery rows. Soft timeout; an older scanner sends none.
+     *  A state row whose sealed bundle [accepts] says no to (it does not open
+     *  under the joined group's key, or does not decode) is passed over: anyone
+     *  who learned the rendezvous id can write to it. A throw from [accepts]
+     *  counts as no. */
+    public suspend fun poll(
+        rendezvousPseudonym: ByteArray,
+        afterCursor: Long,
+        ds: DsClient = DsClient(),
+        timeoutMillis: Long = POLL_TIMEOUT_MS,
+        accepts: (ByteArray) -> Boolean = { true },
+    ): ByteArray? =
+        ds.use { client ->
+            val deadline = System.nanoTime() + timeoutMillis * 1_000_000L
             var cursor = afterCursor
             while (true) {
                 if (!currentCoroutineContext().isActive) return@use null
@@ -1833,14 +1843,41 @@ public object StateBundle {
                 }
                 val first = result.messages.firstOrNull()
                 if (first != null) {
-                    unwrapRow(first.payload)?.let { return@use it }
-                    cursor = first.id
+                    val sealed = unwrapRow(first.payload)
+                    if (sealed != null && acceptsRow(sealed, accepts)) return@use sealed
+                    cursor = maxOf(cursor, first.id)
                     continue
                 }
             }
             @Suppress("UNREACHABLE_CODE")
             null
         }
+
+    private fun acceptsRow(sealed: ByteArray, accepts: (ByteArray) -> Boolean): Boolean =
+        try {
+            accepts(sealed)
+        } catch (_: Throwable) {
+            false
+        }
+
+    /** Whether [sealed] opens under [exporterKey] with [open] (`openWithKey`)
+     *  and decodes as a bundle. The opened plaintext is zeroed. */
+    public fun opensUnder(
+        exporterKey: ByteArray,
+        sealed: ByteArray,
+        open: (ByteArray, ByteArray) -> ByteArray,
+    ): Boolean {
+        val plaintext = try {
+            open(exporterKey, sealed)
+        } catch (_: Throwable) {
+            return false
+        }
+        return try {
+            decode(plaintext) != null
+        } finally {
+            plaintext.fill(0)
+        }
+    }
 
     private fun hexOf(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
 

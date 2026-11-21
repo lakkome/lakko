@@ -55,7 +55,14 @@ use core::result::Result as CoreResult;
 use lakko_crypto::agreement::{PublicKey as X25519PublicKey, SecretKey as X25519SecretKey};
 use thiserror::Error;
 
-use crate::envelope::{self, EPH_PUB_LEN, TAG_LEN};
+use crate::envelope::{self, SealLabels, EPH_PUB_LEN, TAG_LEN};
+
+/// The sealed-box labels of this envelope: its own, so the box opens as no
+/// other sealed-to-account envelope and no contact request.
+pub(crate) const SEAL_LABELS: SealLabels = SealLabels {
+    key: b"lakko/sealed/channel-read-key/v1/key",
+    nonce: b"lakko/sealed/channel-read-key/v1/nonce",
+};
 
 /// 26-byte domain separator prepended to the envelope. Frozen: the
 /// dispatcher matches on it.
@@ -159,8 +166,8 @@ pub fn compose_channel_read_key(
     read_key: &[u8; CHANNEL_READ_KEY_LEN],
 ) -> CoreResult<Vec<u8>, ChannelReadKeyError> {
     let mut out = header(channel_id, member_account_key);
-    let sealed =
-        envelope::seal(member_x25519_pub, &out, read_key).map_err(|_| ChannelReadKeyError::Seal)?;
+    let sealed = envelope::seal_labeled(&SEAL_LABELS, member_x25519_pub, &out, read_key)
+        .map_err(|_| ChannelReadKeyError::Seal)?;
     if sealed.len() != CHANNEL_READ_KEY_SEALED_LEN {
         return Err(ChannelReadKeyError::Seal);
     }
@@ -242,8 +249,9 @@ impl ChannelReadKeyEnvelope {
         account_x25519_secret: &X25519SecretKey,
     ) -> CoreResult<[u8; CHANNEL_READ_KEY_LEN], ChannelReadKeyError> {
         let aad = header(&self.channel_id, &self.member_account_key);
-        let mut plain = envelope::open(account_x25519_secret, &aad, &self.sealed)
-            .map_err(|_| ChannelReadKeyError::Open)?;
+        let mut plain =
+            envelope::open_labeled(&SEAL_LABELS, account_x25519_secret, &aad, &self.sealed)
+                .map_err(|_| ChannelReadKeyError::Open)?;
         let key: Option<[u8; CHANNEL_READ_KEY_LEN]> = plain.as_slice().try_into().ok();
         plain.fill(0);
         key.ok_or(ChannelReadKeyError::Open)

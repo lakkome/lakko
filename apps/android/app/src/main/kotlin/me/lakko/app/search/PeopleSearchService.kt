@@ -12,6 +12,7 @@ import me.lakko.app.contacts.ContactsRepository
 import me.lakko.app.contacts.PendingContact
 import me.lakko.app.contacts.grantMailboxPkOrNull
 import me.lakko.app.discovery.DiscoveryClient
+import me.lakko.app.discovery.boundX25519Key
 import me.lakko.app.l10n.UiText
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.reach.ReachManager
@@ -371,7 +372,9 @@ public class PeopleSearchService(
 
         override suspend fun identityFetch(accountId: ByteArray): IdentityKeys? =
             DiscoveryClient().use { it.identityFetch(accountId) }?.also(::noteServedProof)?.let {
-                IdentityKeys(Base64.getDecoder().decode(it.signature_pubkey), Base64.getDecoder().decode(it.x25519_pubkey))
+                // An unbound X25519 key reads as no bundle: nothing is sealed.
+                val x25519 = it.boundX25519Key() ?: return@let null
+                IdentityKeys(Base64.getDecoder().decode(it.signature_pubkey), x25519)
             }
 
         override suspend fun sendByUsername(username: String, intro: ByteArray, grantWireB64: String?, bindingB64: String?) {

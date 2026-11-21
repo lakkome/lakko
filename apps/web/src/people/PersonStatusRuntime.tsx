@@ -11,9 +11,12 @@
  *   * the receive sink of the account-deleted statement: verified against
  *     the conversation's group id and the sender's account key resolved at
  *     receipt (C-68), recorded under every key this device knows for that
- *     person, and, where this device is the group's owner or an admin, the
- *     removal of that person's leaves (section 5), recorded so it is sent
- *     once per (person, group) and retried while owed;
+ *     person (clearing the recorded directory answer), followed at once by a
+ *     directory check. Where this device is the group's owner or an admin,
+ *     the removal of that person's leaves (section 5) is proposed only when
+ *     the core's `deletionEffects` says `removeFromGroups` (a verified
+ *     statement AND an `absent` answer), recorded so it is sent once per
+ *     (person, group) and retried while owed;
  *   * the observer of every identity answer (`discovery/identity-answers.ts`):
  *     `404`, the held key, a verifying conversation link, another key;
  *   * the on-screen check: a person a view shows is asked about only when
@@ -47,12 +50,13 @@ import { loadWasm } from "../wasm";
 import { classifyIdentityAnswer } from "./account-status";
 import { IdbPersonStatusBackend } from "./account-status-idb";
 import { deletedRemovalPlan } from "./deleted-removal";
+import { peopleToRemoveFromGroups, pendingHeldToDrop } from "./deletion-actions";
 import { personAccountIdHex } from "./person-account-id";
 import {
   bindPersonStatus,
   directoryCheckDueFor,
   installPersonChecker,
-  isDeletedAccount,
+  deletionEffectsFor,
   personStatusEntries,
   personStatusOf,
   recheckVisiblePeople,
@@ -175,7 +179,11 @@ export function PersonStatusRuntime(): JSX.Element {
 
   // ---- the on-screen check -------------------------------------------------
   const inFlight = new Set<string>();
-  installPersonChecker((keyB64) => {
+  installPersonChecker((keyB64) => checkDirectory(keyB64));
+
+  /** Ask the directory about the person now, when the rule says it is due
+   *  (one request in flight per person; nothing without an account id). */
+  function checkDirectory(keyB64: string): void {
     if (accountId() === null || inFlight.has(keyB64)) return;
     if (keyB64 === ownPersonKeyB64(chats.identity())) return;
     if (!directoryCheckDueFor(keyB64)) return;
@@ -195,7 +203,7 @@ export function PersonStatusRuntime(): JSX.Element {
         inFlight.delete(keyB64);
       }
     })();
-  });
+  }
 
   // A member row drawn before this device held the member's account id (their
   // profile v2 arrived later) is asked about once the id is known, while the
@@ -223,18 +231,23 @@ export function PersonStatusRuntime(): JSX.Element {
     const idHex = accountIdHexOfKey(senderKeyB64);
     const keys = new Set<string>([senderKeyB64]);
     if (idHex !== null) for (const k of heldKeysOf(idHex)) keys.add(k);
+    // Recording clears the directory answer: only an answer received after
+    // the statement counts. The directory is asked at once.
     for (const k of keys) await recordDeletionStatement(k, idHex ?? undefined);
-    // Walk 12: a verified statement proves the ACCOUNT is gone, so every
-    // group this device holds is checked, not only the one it arrived in (a
-    // statement missed in one group otherwise left the person there).
-    // Walk 14: never awaited here. The statement is delivered from inside
-    // the group's receive, which holds that group's MLS lock; the removal
-    // takes the same lock, so awaiting it hung both for good. It starts once
-    // the receive has let go.
+    checkDirectory(senderKeyB64);
+    // Walk 12: every group this device holds is checked, not only the one it
+    // arrived in. Walk 14: never awaited here (the statement is delivered
+    // from inside the group's receive, which holds that group's MLS lock;
+    // the removal takes the same lock). The removal itself waits for the
+    // directory to confirm (`removeFromGroups`); the answer's arrival tries
+    // again below.
     setTimeout(() => void removeFromEveryGroup(senderKeyB64), 0);
   });
 
   async function removeFromEveryGroup(deletedKeyB64: string): Promise<void> {
+    // Security review 2026-11-21: only on a verified statement AND an
+    // `absent` answer; neither alone removes anyone.
+    if (!deletionEffectsFor(deletedKeyB64).removeFromGroups) return;
     for (const entry of chats.groups()) {
       if (conversationKindOf(entry.group) !== "group") continue;
       if (personStatusOf(deletedKeyB64)?.removals?.[entry.groupIdB64] === "proposed") continue;
@@ -326,31 +339,50 @@ export function PersonStatusRuntime(): JSX.Element {
   }
 
   async function retryOwedRemovals(): Promise<void> {
-    for (const [key, rec] of personStatusEntries()) {
-      if (!rec.statementVerified) continue;
-      await removeFromEveryGroup(key);
-    }
+    const keys = peopleToRemoveFromGroups(
+      personStatusEntries().map(([k]) => k),
+      deletionEffectsFor,
+    );
+    for (const key of keys) await removeFromEveryGroup(key);
   }
+
+  // A directory answer that completes the evidence (an `absent` after a
+  // verified statement) starts the owed removals without waiting for the
+  // slow timer.
+  const removalReady = new Set<string>();
+  createEffect(() => {
+    if (accountId() === null) return;
+    for (const [key] of personStatusEntries()) {
+      const ready = deletionEffectsFor(key).removeFromGroups;
+      if (ready && !removalReady.has(key)) {
+        removalReady.add(key);
+        untrack(() => setTimeout(() => void removeFromEveryGroup(key), 0));
+      } else if (!ready) {
+        removalReady.delete(key);
+      }
+    }
+  });
 
   // ADR-0098 / UX section 3: a pending contact (ADR-0079) whose account was
   // deleted keeps its record, read as "Deleted account"; the messages held
-  // for it are discarded, never sent.
+  // for it are discarded, never sent - only when `deletionEffects` says
+  // `dropHeldSends` (a verified statement AND an `absent` answer).
   const heldDropped = new Set<string>();
   createEffect(() => {
     const account = accountId();
     if (account === null) return;
-    for (const p of pendingContacts()) {
-      if (heldDropped.has(p.accountIdHex) || !isDeletedAccount(p.signaturePubkeyB64)) continue;
+    for (const p of pendingHeldToDrop(pendingContacts(), deletionEffectsFor, heldDropped)) {
       heldDropped.add(p.accountIdHex);
       void untrack(() => dropHeldForDeletedPending(account, p.accountIdHex));
     }
   });
 
-  // An unanswered contact request from a deleted account goes, silently.
+  // An unanswered contact request from a deleted account goes, silently:
+  // a destructive step too, so on the same evidence as the held sends.
   createEffect(() => {
     if (accountId() === null) return;
     for (const req of mailbox.pending()) {
-      if (isDeletedAccount(base64Encode(req.fromPubkey))) {
+      if (deletionEffectsFor(base64Encode(req.fromPubkey)).dropHeldSends) {
         untrack(() => mailbox.removePending(req.messageId));
       }
     }

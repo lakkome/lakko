@@ -171,7 +171,9 @@ pub fn seal_for_moderators(
     for recipient in recipients {
         let eph = SecretKey::generate();
         let eph_pub = eph.public_key().to_bytes();
-        let shared = eph.diffie_hellman(&PublicKey::from_array(recipient.x25519_public));
+        let shared = eph
+            .diffie_hellman(&PublicKey::from_array(recipient.x25519_public))
+            .map_err(|_| ModerationError::Invalid("moderator key"))?;
         let key = wrap_key(shared.as_bytes(), purpose, &eph_pub, recipient)?;
         let wrapped = seal(
             Algorithm::ChaCha20Poly1305,
@@ -270,7 +272,9 @@ pub fn open_for_moderator(
         moderator_id: *moderator_id,
         x25519_public: secret.public_key().to_bytes(),
     };
-    let shared = secret.diffie_hellman(&PublicKey::from_array(eph_pub));
+    let shared = secret
+        .diffie_hellman(&PublicKey::from_array(eph_pub))
+        .map_err(|_| ModerationError::CannotOpen)?;
     let key = wrap_key(shared.as_bytes(), purpose, &eph_pub, &recipient)
         .map_err(|_| ModerationError::CannotOpen)?;
     let bound = bound_aad(parts.list_version, outer_aad);

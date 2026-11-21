@@ -228,6 +228,8 @@ describe("each context keeps about a day of use on hand", () => {
     ["channel-comment", 4],
     // ADR-0099 section 2: reports to the moderators. Chosen, not measured.
     ["report", 2],
+    // One write to a rendezvous id. Chosen, not measured.
+    ["rendezvous-write", 4],
   ];
 
   it("names a target for every context", () => {

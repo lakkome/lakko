@@ -124,7 +124,9 @@ impl From<lakko_crypto::error::Error> for ChannelError {
             C::HkdfTooLong(_) => Self::KeyDerivation,
             C::Aead => Self::AeadOpen,
             C::SignatureVerification => Self::BadSignature,
-            C::InvalidLength { .. } | C::PasswordHashing => Self::Wire("crypto-layer rejection"),
+            C::InvalidLength { .. } | C::PasswordHashing | C::NonContributory => {
+                Self::Wire("crypto-layer rejection")
+            },
         }
     }
 }

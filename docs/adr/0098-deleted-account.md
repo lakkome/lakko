@@ -3,7 +3,8 @@
 
 # ADR-0098: A deleted account is shown as Deleted account, and its username is never shown on someone else
 
-- **Status:** Proposed
+- **Status:** Proposed. Amended 2026-11-21 by a security review (section "Security review,
+  2026-11-21"): a statement alone no longer removes anyone from a group or drops anything.
 - **Date:** 2026-11-20
 - **Context:** account deletion and the server purge (`services/auth/src/purge.rs`,
   `services/discovery/src/internal.rs`, commit `c81c1c9d`), profile names and usernames
@@ -126,14 +127,17 @@ actually viewed.
 
 - `account_deletion_status(statement_verified, last_answer) -> Active | Deleted`: a verified
   statement is `Deleted`; otherwise the latest recorded answer decides (`Absent` is
-  `Deleted`, `SamePerson` and `OtherKey` are `Active`, no answer is `Active`).
+  `Deleted`, `SamePerson` and `OtherKey` are `Active`, no answer is `Active`). (Amended
+  2026-11-21: it is now the display half of `deletion_effects`, and a `SamePerson` answer
+  shows the person even after a statement.)
 - `may_show_username(status, confirmed_at_ms, now_ms)`: `false` for a deleted person;
   otherwise `true` only when the latest `SamePerson` answer is younger than
   `USERNAME_CONFIRMATION_VALID_MS` (21 days, chosen) by this device's clock; a confirmation
   time in the future (the clock went back) counts as none. The client still requires the
   ADR-0060 certificate to verify; this rule is in addition.
 - `directory_check_due(statement_verified, last_answer_at_ms, last_attempt_at_ms, now_ms)`:
-  never after a statement; never within `DIRECTORY_RETRY_AFTER_MS` (1 hour, chosen) of the
+  never after a statement (amended 2026-11-21: a statement no longer stops the checks);
+  never within `DIRECTORY_RETRY_AFTER_MS` (1 hour, chosen) of the
   last attempt; otherwise due when there is no answer or the last answer is
   `DIRECTORY_RECHECK_AFTER_MS` (7 days, chosen) old, or in the future.
 
@@ -156,7 +160,10 @@ decision):** `purge_account` retires the account's current username instead of d
 `account_id` on every remaining row of that account with 16 random bytes, so the held rows
 name no account and nobody can take the name back by rename; the hourly ADR-0076 pruner
 frees them after `H`. Everything else in the purge is unchanged. The guarantee holds only if
-the operator keeps `H` (the `retired_hold_secs` setting) above `V`.
+the operator keeps `H` (the `retired_hold_secs` setting) above `V`. (Amended 2026-11-21:
+discovery refuses to start with `LAKKO_DISCOVERY_RETIRED_NAME_HOLD_SECS` below 2419200
+seconds, 28 days, so the operator can no longer set it at or below `V` by mistake; a
+compile-time assertion ties the floor to `USERNAME_CONFIRMATION_VALID_MS`.)
 
 The same rule covers a rename (ADR-0076): a renamed name is held `H` too, and the person
 republishes their profile with the new name.
@@ -166,7 +173,8 @@ republishes their profile with the new name.
 An owner's or admin's device that accepted a statement proposes the removal of every leaf
 of that account through the ADR-0045 path, so the roster stops carrying a dead member. Only
 the signed statement triggers this, never a pull answer (a directory must not be able to make
-admins remove a live member). A one-to-one cannot remove a person (ADR-0062) and is left as it
+admins remove a live member). (Amended 2026-11-21: the statement AND a directory `404`
+together, never either alone; see "Security review, 2026-11-21".) A one-to-one cannot remove a person (ADR-0062) and is left as it
 is. A group owned by the deleted account keeps a dead owner; removal of the owner is refused
 (C-63) and nobody can change roles (the ADR-0022 lost-owner follow-up, unchanged).
 
@@ -259,6 +267,46 @@ profile's account id arrives while the row is on screen (before, the check ran o
 first appeared, and Android's member list did not redraw on a directory answer); a member whose
 profile has not reached this device still shows no username.
 
+## Security review, 2026-11-21 (built, unit-tested only, nothing walked)
+
+A security review found that one source could cost a live person their place in groups and
+their pending messages. A statement can be posted by anyone who still holds the account key
+(a device the person sold or lost before a key reset, or a thief), and it was final: it
+removed the person from every group an admin's device held and dropped messages held for
+them, and nothing could undo it. Closed in code the same day in
+`lakko-contacts::account_deleted`, both FFI surfaces and web (incl. desktop), iOS and Android:
+
+- **One rule, `deletion_effects(statement_verified, directory) -> DeletionEffects
+  { show_deleted, remove_from_groups, drop_held_sends }`**, on UniFFI as `deletionEffects`
+  and on wasm as `deletionEffects` (getters `showDeleted`, `removeFromGroups`,
+  `dropHeldSends`). "Deleted account" is shown on a verified statement or a directory `404`;
+  the destructive effects (proposing the removal of the person's leaves from groups this
+  device administers, dropping messages held for them that were never sent, and dropping an
+  unanswered contact request from them) are taken only on a verified statement AND a `404`.
+  A `SamePerson` answer always shows the person, so a confirmation after a statement reverts
+  the display. `account_deletion_status` is now the display half of this rule.
+- **A statement is no longer final.** Recording a verified statement clears the recorded
+  directory answer, which makes `directory_check_due` due at once (subject to the one-hour
+  retry); a statement no longer stops the checks. So a `SamePerson` that counts is always one
+  received after the statement, and the destructive effects wait for a `404` received after
+  it.
+- **The hold floor (section 4).** Discovery refuses to start with a retired-name hold under
+  28 days (`MIN_RETIRED_HOLD_SECS`, `services/discovery/src/registry.rs`), a week above the
+  21-day display window.
+
+Web: `people/deletion-actions.ts` (pure, from the core's effects per person); iOS and Android
+take the same steps through the FFI rule. Tests: the full truth table of `deletion_effects`
+(`destructive_effects_need_a_statement_and_a_404`), the display table, the check rule, the
+discovery start-up test `a_hold_under_twenty_eight_days_is_refused`, and per-client unit
+tests.
+
+**Residuals.** A holder of the account key can still make the person read "Deleted account"
+until the next directory answer (a check runs at once, so on a working network this lasts
+seconds). A hostile directory answering `404` after a genuine statement completes the
+deletion effects, as it would for a person who did delete. Removal from groups and the
+dropping of held messages now wait for a directory answer, so they happen later than before
+for a person who did delete.
+
 ## Alternatives
 
 1. **Push only.** Smallest change, but a deleting device that is offline, killed, or out of
@@ -293,6 +341,8 @@ profile has not reached this device still shows no username.
     of every identity fetch; this makes it periodic for viewed people).
   - A thief holding the account key can post a statement and make that account read
     `Deleted account` in conversations, finally. They could already impersonate the person.
+    (Amended 2026-11-21: no longer finally; until the next directory answer, which is asked
+    at once, and with no destructive effect unless the directory also answers `404`.)
   - The directory is trusted for liveness: a malicious directory can make a live person
     look deleted until the next `SamePerson`, and can confirm a dead account as alive (it
     cannot defeat a statement). An availability attack, not a confidentiality one.

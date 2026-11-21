@@ -95,11 +95,17 @@ pub enum TokenContext {
     /// (ADR-0099 section 2). The report takes no session, so the token is
     /// what rations it.
     Report = 17,
+    /// `services/ds`: one write to a rendezvous (pairing, recovery, the
+    /// state bundle, a rejoin note, a gap history). A rendezvous is opened
+    /// by its 32-byte name alone, so before this anyone holding the name
+    /// wrote without limit; the token is what rations it. Every writer is a
+    /// signed-in device; a reader needs no token.
+    RendezvousWrite = 18,
 }
 
 impl TokenContext {
     /// Every context, in wire order.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::DiscoveryLookup,
         Self::DiscoveryRegister,
         Self::InviteConsume,
@@ -117,6 +123,7 @@ impl TokenContext {
         Self::ChannelComment,
         Self::BetaPlace,
         Self::Report,
+        Self::RendezvousWrite,
     ];
 
     /// The frozen wire byte.
@@ -149,6 +156,7 @@ impl TokenContext {
             15 => Ok(Self::ChannelComment),
             16 => Ok(Self::BetaPlace),
             17 => Ok(Self::Report),
+            18 => Ok(Self::RendezvousWrite),
             _ => Err(AnonTokenError::UnknownContext),
         }
     }
@@ -174,6 +182,7 @@ impl TokenContext {
             Self::ChannelComment => "channel-comment",
             Self::BetaPlace => "beta-place",
             Self::Report => "report",
+            Self::RendezvousWrite => "rendezvous-write",
         }
     }
 
@@ -255,7 +264,7 @@ mod tests {
             Err(AnonTokenError::UnknownContext)
         );
         assert_eq!(
-            TokenContext::from_u8(18),
+            TokenContext::from_u8(19),
             Err(AnonTokenError::UnknownContext)
         );
         assert_eq!(
@@ -272,14 +281,14 @@ mod tests {
     fn all_lists_every_context_once_in_wire_order() {
         // `ALL` is what `from_name`, the issuer's quota table and both FFI
         // surfaces enumerate: a context missing from it has no name lookup
-        // and no quota. Exactly the bytes 1..=17 parse, and `ALL` is those
+        // and no quota. Exactly the bytes 1..=18 parse, and `ALL` is those
         // contexts in that order.
         let parsed: Vec<TokenContext> = (0..=u8::MAX)
             .filter_map(|b| TokenContext::from_u8(b).ok())
             .collect();
         assert_eq!(parsed, TokenContext::ALL);
         let bytes: Vec<u8> = TokenContext::ALL.iter().map(|c| c.as_u8()).collect();
-        assert_eq!(bytes, (1..=17).collect::<Vec<u8>>());
+        assert_eq!(bytes, (1..=18).collect::<Vec<u8>>());
         let mut names: Vec<&str> = TokenContext::ALL.iter().map(|c| c.name()).collect();
         names.sort_unstable();
         names.dedup();
@@ -305,6 +314,7 @@ mod tests {
         assert_eq!(TokenContext::ChannelComment.as_u8(), 15);
         assert_eq!(TokenContext::BetaPlace.as_u8(), 16);
         assert_eq!(TokenContext::Report.as_u8(), 17);
+        assert_eq!(TokenContext::RendezvousWrite.as_u8(), 18);
         assert_eq!(TokenContext::DiscoveryLookup.name(), "discovery-lookup");
         assert_eq!(TokenContext::DiscoveryRegister.name(), "discovery-register");
         assert_eq!(TokenContext::InviteConsume.name(), "invite-consume");
@@ -322,6 +332,7 @@ mod tests {
         assert_eq!(TokenContext::ChannelComment.name(), "channel-comment");
         assert_eq!(TokenContext::BetaPlace.name(), "beta-place");
         assert_eq!(TokenContext::Report.name(), "report");
+        assert_eq!(TokenContext::RendezvousWrite.name(), "rendezvous-write");
     }
 
     #[test]

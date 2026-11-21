@@ -6180,6 +6180,7 @@ public class AuthRepository(
                         accountId = accountIdBytes,
                         signaturePubkey = signaturePubkey,
                         x25519Pubkey = identity.x25519PublicKey(),
+                        x25519Binding = uniffi.lakko_ffi_uniffi.signX25519Binding(identity),
                         supersessionProofB64 = null,
                         leafAuth = signLeafGenesis(identity.ed25519Seed(), transparencyAccountKey(accountIdBytes)),
                         genesisAttest = mintGenesisAttestBestEffort(sessionToken, identity, accountIdBytes),
@@ -6452,6 +6453,7 @@ public class AuthRepository(
                             accountId = accountId,
                             signaturePubkey = signaturePubkey,
                             x25519Pubkey = x25519Pubkey,
+                            x25519Binding = uniffi.lakko_ffi_uniffi.signX25519Binding(identity),
                             supersessionProofB64 = null,
                             leafAuth = leafAuth,
                             genesisAttest = genesisAttest,
@@ -7970,6 +7972,7 @@ public class AuthRepository(
                         accountId = secrets.accountId,
                         signaturePubkey = signaturePubkey,
                         x25519Pubkey = identity.x25519PublicKey(),
+                        x25519Binding = uniffi.lakko_ffi_uniffi.signX25519Binding(identity),
                         supersessionProofB64 = if (withProof) proofB64 else null,
                         conversationLink = link,
                         // With the proof, discovery forwards it as the log

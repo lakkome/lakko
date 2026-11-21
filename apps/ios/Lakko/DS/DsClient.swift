@@ -47,8 +47,8 @@ import LakkoCore
 /// Epoch keys are registered by ownership statements
 /// (``putStatement(_:)``), which carry their own signature. A write to
 /// another account's mailbox is a sealed row signed with a reach key, or
-/// unsigned with a `mailbox-write` anonymous token; a rendezvous stays
-/// unsigned. No session token is ever
+/// unsigned with a `mailbox-write` anonymous token; a rendezvous write is
+/// unsigned with a `rendezvous-write` anonymous token. No session token is ever
 /// sent here (invariant #5).
 ///
 /// ## Default base URL
@@ -115,35 +115,8 @@ public final class DsClient {
         }
         let endpoint = "/ds/mailbox/\(Self.pseudonymHex(pseudonym))/messages"
         guard let writeAuth else {
-            let (data, http) = try await AnonTokenRoute.send(
-                context: .mailboxWrite, tokens: tokens
-            ) { tokenHeader in
-                try await send(
-                    method: "POST",
-                    endpoint: endpoint,
-                    body: payload,
-                    contentType: "application/octet-stream",
-                    extraHeaders: [AnonTokenRoute.headerName: tokenHeader],
-                    auth: nil,
-                    over: anonymousSession,
-                    acceptAnyStatus: true
-                )
-            }
-            guard (200..<300).contains(http.statusCode) else {
-                throw DsClientError.http(
-                    status: http.statusCode,
-                    endpoint: endpoint,
-                    body: Self.truncate(String(data: data, encoding: .utf8) ?? "<binary>")
-                )
-            }
-            let parsed: PublishWireResponse
-            do {
-                parsed = try decoder.decode(PublishWireResponse.self, from: data)
-            } catch {
-                throw DsClientError.http(
-                    status: http.statusCode, endpoint: endpoint, body: "decode failed: \(error)")
-            }
-            return PublishResult(id: parsed.id, createdAt: parsed.createdAt)
+            return try await publishWithToken(
+                context: .mailboxWrite, endpoint: endpoint, payload: payload)
         }
         var headers: [String: String] = [:]
         let signer: DsProofSigner
@@ -169,8 +142,12 @@ public final class DsClient {
     // MARK: - ADR-0060 rendezvous
 
     /// `POST /ds/rendezvous/{id_hex}/messages` — pairing, recovery, the welcome
-    /// courier and the state bundle. Open, never claimable, and refusing any
-    /// proof, delegation or wake header, so nothing but the payload is sent.
+    /// courier, the state bundle, a rejoin presence note and a re-entry gap
+    /// history. Never claimable and refusing any proof, delegation or wake
+    /// header. Every write spends one `rendezvous-write` anonymous token and
+    /// travels on the anonymous session, like a mailbox write with no proof;
+    /// with no token to spend the write fails as a network failure does
+    /// (``AnonTokenUnavailable``) and the caller's own retry applies.
     public func publishRendezvous(id: Data, payload: Data) async throws -> PublishResult {
         guard id.count == Self.pseudonymLength else {
             throw DsClientError.argument("rendezvous id must be \(Self.pseudonymLength) bytes")
@@ -178,11 +155,50 @@ public final class DsClient {
         guard !payload.isEmpty else {
             throw DsClientError.argument("payload must be non-empty")
         }
-        return try await doPublish(
+        return try await publishWithToken(
+            context: .rendezvousWrite,
             endpoint: "/ds/rendezvous/\(Self.pseudonymHex(id))/messages",
-            payload: payload,
-            auth: nil
+            payload: payload
         )
+    }
+
+    /// An unsigned write that spends one anonymous token of `context`, on
+    /// the anonymous session, retried once on a spent or expired token
+    /// (``AnonTokenRoute/send(context:tokens:perform:)``).
+    private func publishWithToken(
+        context: AnonTokenContext,
+        endpoint: String,
+        payload: Data
+    ) async throws -> PublishResult {
+        let (data, http) = try await AnonTokenRoute.send(
+            context: context, tokens: tokens
+        ) { tokenHeader in
+            try await send(
+                method: "POST",
+                endpoint: endpoint,
+                body: payload,
+                contentType: "application/octet-stream",
+                extraHeaders: [AnonTokenRoute.headerName: tokenHeader],
+                auth: nil,
+                over: anonymousSession,
+                acceptAnyStatus: true
+            )
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw DsClientError.http(
+                status: http.statusCode,
+                endpoint: endpoint,
+                body: Self.truncate(String(data: data, encoding: .utf8) ?? "<binary>")
+            )
+        }
+        let parsed: PublishWireResponse
+        do {
+            parsed = try decoder.decode(PublishWireResponse.self, from: data)
+        } catch {
+            throw DsClientError.http(
+                status: http.statusCode, endpoint: endpoint, body: "decode failed: \(error)")
+        }
+        return PublishResult(id: parsed.id, createdAt: parsed.createdAt)
     }
 
     /// `GET /ds/rendezvous/{id_hex}/messages?...` — unsigned, see
@@ -1038,6 +1054,34 @@ public struct MailboxMessage: Equatable {
         self.payload = payload
         self.createdAt = createdAt
         self.reachKey = reachKey
+    }
+}
+
+/// Reading a whole rendezvous, page after page. Anyone who learned a
+/// rendezvous id can post rows to it (each costs a `rendezvous-write`
+/// token), so a reader that wants one row among many reads every page rather
+/// than the first: junk rows ahead of the real one cannot bury it.
+public enum RendezvousRead {
+    /// Rows asked for per read. The DS default page.
+    public static let pageSize = 100
+    /// Pages read at most (1000 rows). Chosen, not measured.
+    public static let pageCap = 10
+
+    public typealias FetchPage = (_ after: Int64, _ limit: Int) async throws -> FetchResult
+
+    /// Every row of the rendezvous from the start, oldest first, at most
+    /// ``pageCap`` pages of ``pageSize``: `after` is the last row id of the
+    /// previous page, and the read follows `hasMore`. A failed page throws.
+    public static func readAll(fetchPage: FetchPage) async throws -> [MailboxMessage] {
+        var rows: [MailboxMessage] = []
+        var after: Int64 = 0
+        for _ in 0..<pageCap {
+            let page = try await fetchPage(after, pageSize)
+            rows.append(contentsOf: page.messages)
+            guard page.hasMore, let last = page.messages.last, last.id > after else { break }
+            after = last.id
+        }
+        return rows
     }
 }
 

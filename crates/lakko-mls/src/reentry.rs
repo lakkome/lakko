@@ -56,6 +56,17 @@
 //!    [`crate::group_proposals::owner_survives`] and
 //!    [`crate::group_proposals::one_to_one_holds`] are unchanged and pass,
 //!    because they are keyed on accounts.
+//! 3. **A re-entry `Add` stands only with its pair** (security review
+//!    2026-11-21, [`reentry_adds_stand`], a commit-wide rule): every valid
+//!    re-entry `Add(K)` replacing `L` rides with a `Remove(L)` by the same
+//!    sender, and no commit adds a leaf of an account whose leaf the same
+//!    commit removes by a `Remove` from ANOTHER account that is not that
+//!    remover's own re-entry pair. Without it a member being removed held
+//!    on by a self-authored `Add` of its own device: the sweep kept the
+//!    removal (ordinary) and the `Add` (a device of an account present),
+//!    and the member survived its eviction on a fresh leaf. Applied at the
+//!    peer commit gate and to every selection the sweep builds; the sweep's
+//!    enumeration drops such an `Add` by name.
 //!
 //! [ADR-0091]: ../../../docs/adr/0091-conversation-rejoin.md
 
@@ -363,6 +374,102 @@ pub(crate) fn judge<'a>(
             }
         },
     }
+}
+
+/// The accounts that `proposals` remove a leaf of by a `Remove` from another
+/// account that is not that remover's own re-entry pair (rule 3): a removal
+/// the account did not make and that does not put the same device back.
+/// `Leave` (a member leaving) is the account's own act and is not counted.
+pub(crate) fn accounts_removed_by_others(
+    scope: ReentryScope<'_>,
+    proposals: &[&QueuedProposal],
+) -> Vec<[u8; 32]> {
+    use crate::group_proposals::{account_key_at_leaf, classify, ProposalKind};
+    let mut out: Vec<[u8; 32]> = Vec::new();
+    for qp in proposals {
+        let ProposalKind::Remove { target_leaf } = classify(qp.proposal()) else {
+            continue;
+        };
+        let Some(target_account) = account_key_at_leaf(scope.members, target_leaf) else {
+            continue;
+        };
+        let sender_account = match qp.sender() {
+            Sender::Member(idx) => account_key_at_leaf(scope.members, idx.u32()),
+            _ => None,
+        };
+        if sender_account == Some(target_account) {
+            continue;
+        }
+        if remove_is_paired(scope, qp.sender(), target_leaf, proposals.iter().copied()) {
+            continue;
+        }
+        if !out.contains(&target_account) {
+            out.push(target_account);
+        }
+    }
+    out
+}
+
+/// `true` when `proposals` holds a `Remove(target_leaf)` by `sender`: the
+/// pair a re-entry `Add` by `sender` replacing `target_leaf` needs.
+pub(crate) fn has_paired_remove<'a>(
+    sender: &Sender,
+    target_leaf: u32,
+    proposals: impl IntoIterator<Item = &'a QueuedProposal>,
+) -> bool {
+    use crate::group_proposals::{classify, ProposalKind};
+    proposals.into_iter().any(|p| {
+        p.sender() == sender
+            && matches!(classify(p.proposal()), ProposalKind::Remove { target_leaf: t } if t == target_leaf)
+    })
+}
+
+/// Rule 3, over a whole commit or selection: every valid re-entry `Add`
+/// rides with its paired `Remove` by the same sender, and no `Add` adds a
+/// leaf of an account [`accounts_removed_by_others`] names.
+///
+/// # Errors
+///
+/// [`RefusalReason::ReentryPairInvalid`] when either half fails.
+pub(crate) fn reentry_adds_stand(
+    scope: ReentryScope<'_>,
+    proposals: &[&QueuedProposal],
+) -> crate::Result<()> {
+    use crate::group_proposals::{classify, ProposalKind};
+    for qp in proposals {
+        if let ReentryAdd::Valid { replaced_leaf } = reentry_add(scope, qp.proposal()) {
+            if !has_paired_remove(qp.sender(), replaced_leaf, proposals.iter().copied()) {
+                return Err(crate::Error::refused(
+                    RefusalReason::ReentryPairInvalid,
+                    "commit refused: a re-entry add rides without the same sender's removal of \
+                     the leaf it replaces",
+                ));
+            }
+        }
+    }
+    let removed_by_others = accounts_removed_by_others(scope, proposals);
+    if removed_by_others.is_empty() {
+        return Ok(());
+    }
+    for qp in proposals {
+        if let ProposalKind::Add {
+            account_key: Some(account),
+            ..
+        } = classify(qp.proposal())
+        {
+            if removed_by_others
+                .iter()
+                .any(|removed| removed.as_slice() == account.as_slice())
+            {
+                return Err(crate::Error::refused(
+                    RefusalReason::ReentryPairInvalid,
+                    "commit refused: it adds a leaf of an account another member's removal in \
+                     the same commit takes out",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 impl crate::identity::Identity {

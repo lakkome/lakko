@@ -757,6 +757,7 @@ mod route_tests {
                 "account_id": B64.encode(account),
                 "signature_pubkey": B64.encode(key.verifying_key().to_bytes()),
                 "x25519_pubkey": B64.encode([0x33u8; 32]),
+                "x25519_binding": B64.encode(lakko_contacts::sign_x25519_binding(key, &[0x33u8; 32])),
             });
             if let (Some(dst), Some(src)) = (body.as_object_mut(), extra.as_object()) {
                 for (k, v) in src {

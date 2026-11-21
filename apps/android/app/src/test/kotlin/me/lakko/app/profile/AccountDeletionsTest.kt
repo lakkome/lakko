@@ -30,8 +30,18 @@ class AccountDeletionsTest {
         const val RECHECK_MS = 7L * 24 * 60 * 60 * 1000
         const val RETRY_MS = 60L * 60 * 1000
 
-        override fun isDeleted(statementVerified: Boolean, lastAnswer: DirectoryAnswer?): Boolean =
-            statementVerified || lastAnswer == DirectoryAnswer.ABSENT
+        // `deletionEffects` as the core states it: the display on either
+        // input unless the latest answer is SamePerson; the destructive
+        // effects only on a statement AND an Absent answer.
+        override fun effects(statementVerified: Boolean, lastAnswer: DirectoryAnswer?): DeletionEffects {
+            val absent = lastAnswer == DirectoryAnswer.ABSENT
+            val both = statementVerified && absent
+            return DeletionEffects(
+                showDeleted = lastAnswer != DirectoryAnswer.SAME_PERSON && (statementVerified || absent),
+                removeFromGroups = both,
+                dropHeldSends = both,
+            )
+        }
 
         override fun mayShowUsername(deleted: Boolean, confirmedAtMs: Long?, nowMs: Long): Boolean {
             if (deleted || confirmedAtMs == null || confirmedAtMs > nowMs) return false
@@ -39,7 +49,6 @@ class AccountDeletionsTest {
         }
 
         override fun checkDue(statementVerified: Boolean, lastAnswerAtMs: Long?, lastAttemptAtMs: Long?, nowMs: Long): Boolean {
-            if (statementVerified) return false
             if (lastAttemptAtMs != null && lastAttemptAtMs <= nowMs && nowMs - lastAttemptAtMs < RETRY_MS) return false
             return lastAnswerAtMs == null || lastAnswerAtMs > nowMs || nowMs - lastAnswerAtMs >= RECHECK_MS
         }
@@ -64,16 +73,83 @@ class AccountDeletionsTest {
     // ---- the record --------------------------------------------------------
 
     @Test
-    fun `a verified statement marks the person deleted for good`() {
+    fun `a verified statement shows the person deleted until a later SamePerson answer`() {
         assertFalse(book.isDeleted(alice))
         assertTrue(book.markStatementVerified(alice))
         assertTrue(book.isDeleted(alice))
-        // No later answer reverses it.
+        // A statement alone is not destructive.
+        assertEquals(DeletionEffects(showDeleted = true, removeFromGroups = false, dropHeldSends = false), book.effects(alice))
+        // A later confirmation shows the person again (the composer comes back).
         book.recordAnswer(alice, DirectoryAnswer.SAME_PERSON)
-        assertTrue(book.isDeleted(alice))
+        assertFalse(book.isDeleted(alice))
         assertFalse(book.isDeleted(bob))
-        // A second statement is not new.
+        // A second statement is not new and does not undo the later answer.
         assertFalse(book.markStatementVerified(alice))
+        assertFalse(book.isDeleted(alice))
+    }
+
+    @Test
+    fun `recording a statement clears the earlier answer, so only an answer after it counts`() {
+        book.recordAnswer(alice, DirectoryAnswer.SAME_PERSON)
+        assertFalse(book.isDeleted(alice))
+        assertTrue(book.markStatementVerified(alice))
+        assertNull(book.record(alice).lastAnswer)
+        assertNull(book.record(alice).lastAnswerAtMs)
+        assertTrue("the earlier SamePerson no longer hides it", book.isDeleted(alice))
+        // An Absent from before the statement cannot make it destructive either.
+        book.recordAnswer(bob, DirectoryAnswer.ABSENT)
+        book.markStatementVerified(bob)
+        assertFalse(book.effects(bob).removeFromGroups)
+        assertFalse(book.effects(bob).dropHeldSends)
+    }
+
+    @Test
+    fun `removal and dropping held sends need the statement AND a later 404`() {
+        val told = mutableListOf<Pair<String, DeletionEffects>>()
+        book.onDeletionEffects = { key, effects -> told += key to effects }
+        // A 404 alone: shown deleted, nothing destructive.
+        book.recordAnswer(alice, DirectoryAnswer.ABSENT)
+        assertTrue(book.isDeleted(alice))
+        assertTrue(book.removalOwedKeys().isEmpty())
+        // A statement alone: the same.
+        book.markStatementVerified(bob)
+        assertTrue(book.removalOwedKeys().isEmpty())
+        assertTrue(told.isEmpty())
+        // The statement, then a 404: both destructive effects, told once.
+        book.recordAnswer(bob, DirectoryAnswer.ABSENT)
+        assertEquals(listOf(bob), book.removalOwedKeys())
+        assertEquals(listOf(bob to DeletionEffects(showDeleted = true, removeFromGroups = true, dropHeldSends = true)), told)
+        book.recordAnswer(bob, DirectoryAnswer.ABSENT)
+        assertEquals(1, told.size)
+        // A later SamePerson takes it back: nothing more is owed.
+        book.recordAnswer(bob, DirectoryAnswer.SAME_PERSON)
+        assertTrue(book.removalOwedKeys().isEmpty())
+        assertFalse(book.isDeleted(bob))
+    }
+
+    @Test
+    fun `a statement asks the directory at once, past the weekly schedule and the retry window`() {
+        var fetches = 0
+        val checks = AccountDeletionChecks(
+            book = book,
+            accountIdOf = { ByteArray(16) { 5 } },
+            heldKeysOf = { setOf(alice) },
+            fetch = { fetches++; null },
+            verifyLink = { _, _ -> null },
+            scope = CoroutineScope(Dispatchers.Unconfined),
+        )
+        // A recent check: the schedule would not ask again now.
+        assertTrue(book.beginCheck(alice))
+        book.endCheck(alice)
+        assertFalse(book.beginCheck(alice))
+        assertTrue(checks.onStatementVerified(alice))
+        assertEquals(1, fetches)
+        // The answer (a 404) reaches the book through the feed.
+        checks.onDirectoryAnswer(ByteArray(16) { 5 }, null, null)
+        assertTrue(book.effects(alice).removeFromGroups)
+        // A repeated statement asks nothing more.
+        assertFalse(checks.onStatementVerified(alice))
+        assertEquals(1, fetches)
     }
 
     @Test
@@ -105,12 +181,16 @@ class AccountDeletionsTest {
     }
 
     @Test
-    fun `becoming deleted is told once`() {
+    fun `a display change alone is never told as a destructive effect`() {
         val told = mutableListOf<String>()
-        book.onPersonDeleted = { told += it }
+        book.onDeletionEffects = { key, _ -> told += key }
         book.recordAnswer(alice, DirectoryAnswer.ABSENT)
         book.recordAnswer(alice, DirectoryAnswer.ABSENT)
+        assertTrue(told.isEmpty())
+        // The statement clears the 404 recorded before it: still nothing.
         book.markStatementVerified(alice)
+        assertTrue(told.isEmpty())
+        book.recordAnswer(alice, DirectoryAnswer.ABSENT)
         assertEquals(listOf(alice), told)
     }
 
@@ -137,9 +217,10 @@ class AccountDeletionsTest {
         now += FakeRules.RETRY_MS
         assertTrue(book.beginCheck(alice))
         book.endCheck(alice)
-        // Never after a statement.
+        // Still checked after a statement.
         book.markStatementVerified(bob)
-        assertFalse(book.beginCheck(bob))
+        assertTrue(book.beginCheck(bob))
+        book.endCheck(bob)
     }
 
     // ---- classification ----------------------------------------------------
@@ -332,7 +413,9 @@ class AccountDeletionsTest {
     @Test
     fun `a statement in a one-to-one leads to a removal proposal in another group`() {
         assertTrue(book.markStatementVerified(alice))
-        val verified = book.statementVerifiedKeys()
+        assertTrue("not before the directory confirms", book.removalOwedKeys().isEmpty())
+        book.recordAnswer(alice, DirectoryAnswer.ABSENT)
+        val verified = book.removalOwedKeys()
         assertEquals(listOf(alice), verified)
         val ledger = DeletedMemberRemovals(MemoryLedger())
         val owned = "ab".repeat(32)
@@ -401,10 +484,9 @@ class AccountDeletionsTest {
 
     @Test
     fun `a directory Absent marks deleted but is not a verified statement`() {
-        // Section 5: only a verified statement makes a device owe a removal
-        // (the owed people are `statementVerifiedKeys`, written only by
-        // `ChatRepository.receiveAccountDeleted`). A pull answer leaves
-        // `statementVerified` false.
+        // Section 5: a pull answer alone never makes a device owe a removal
+        // (`removalOwedKeys` needs a verified statement too, written only by
+        // `ChatRepository.receiveAccountDeleted`).
         val checks = AccountDeletionChecks(
             book = book,
             accountIdOf = { null },
@@ -416,7 +498,7 @@ class AccountDeletionsTest {
         checks.onDirectoryAnswer(ByteArray(16) { 5 }, null, null)
         assertTrue(book.isDeleted(alice))
         assertFalse(book.record(alice).statementVerified)
-        assertTrue(book.statementVerifiedKeys().isEmpty())
+        assertTrue(book.removalOwedKeys().isEmpty())
     }
 
     // ---- a group member who is not a contact (ADR-0098 section 2) ----------

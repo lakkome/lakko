@@ -879,6 +879,9 @@ export class DiscoveryClient {
     accountId: Uint8Array,
     signaturePubkey: Uint8Array,
     x25519Pubkey: Uint8Array,
+    /** Security review 2026-11-21: the 64-byte `signX25519Binding` of the
+     *  account identity whose keys these are. */
+    x25519Binding: Uint8Array,
     supersessionProof?: Uint8Array | string,
     leafAuth?: Uint8Array | string,
     genesisAttest?: Uint8Array | string,
@@ -899,6 +902,9 @@ export class DiscoveryClient {
       throw new DiscoveryClientArgError(
         "x25519Pubkey must be 32 bytes (HPKE init_key)",
       );
+    }
+    if (x25519Binding.length !== 64) {
+      throw new DiscoveryClientArgError("x25519Binding must be 64 bytes");
     }
 
     // Normalise the optional proof to a base64 string for the
@@ -956,6 +962,7 @@ export class DiscoveryClient {
       account_id: base64Encode(accountId),
       signature_pubkey: base64Encode(signaturePubkey),
       x25519_pubkey: base64Encode(x25519Pubkey),
+      x25519_binding: base64Encode(x25519Binding),
       ...(proofB64 !== undefined ? { supersession_proof: proofB64 } : {}),
       ...(leafAuthB64 !== undefined ? { leaf_auth: leafAuthB64 } : {}),
       ...(genesisAttestB64 !== undefined

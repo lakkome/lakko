@@ -485,6 +485,38 @@ describe("the rejoining device's run", () => {
     expect(p.state).toBeNull();
   });
 
+  it("a row it cannot join from is passed over: the Welcome after it is joined", async () => {
+    const JUNK: RejoinAnswer = { kind: "welcome", bytes: new Uint8Array([0xee]) };
+    const p = ports([
+      { afterMs: 10, answer: JUNK },
+      { afterMs: 20, answer: WELCOME },
+    ]);
+    const tried: number[] = [];
+    p.join = async (_s, bytes) => {
+      tried.push(bytes[0] ?? 0);
+      if (bytes[0] === 0xee) throw new Error("not a welcome");
+    };
+    expect(await rejoinOnce(p, true)).toBe("joined");
+    expect(tried).toEqual([0xee, 1]);
+    expect(p.log).not.toContain("found");
+    expect(p.state).toBeNull();
+  });
+
+  it("junk before a presence note: waits for the Welcome, passing over more junk", async () => {
+    const JUNK: RejoinAnswer = { kind: "welcome", bytes: new Uint8Array([0xee]) };
+    const p = ports([
+      { afterMs: 10, answer: JUNK },
+      { afterMs: 20, answer: PRESENT },
+      { afterMs: 60_000, answer: JUNK },
+      { afterMs: 120_000, answer: WELCOME },
+    ]);
+    p.join = async (_s, bytes) => {
+      if (bytes[0] === 0xee) throw new Error("not a welcome");
+    };
+    expect(await rejoinOnce(p, true)).toBe("joined");
+    expect(p.log).not.toContain("found");
+  });
+
   it("the re-knock rule and the state codec", () => {
     const s: RejoinState = { v: 1, rendezvousB64: "r", joinerSnapshotB64: "s", knockedAtMs: 10 };
     expect(shouldKnockAgain(null, 0)).toBe(true);

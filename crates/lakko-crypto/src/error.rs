@@ -36,6 +36,11 @@ pub enum Error {
     /// Argon2id password hashing failed.
     #[error("password hashing failed")]
     PasswordHashing,
+
+    /// X25519 produced an all-zero shared secret: the peer's public key is a
+    /// low-order point, so the result does not depend on this side's secret.
+    #[error("key agreement is not contributory")]
+    NonContributory,
 }
 
 /// Convenience alias for `Result<T, lakko_crypto::Error>`.

@@ -98,6 +98,7 @@ pub mod transport;
 pub mod ui_rules;
 pub mod vault;
 pub mod ws;
+pub mod x25519_binding;
 
 uniffi::setup_scaffolding!();
 
@@ -2198,6 +2199,26 @@ impl Group {
         Ok(Self {
             inner: Mutex::new(inner),
         })
+    }
+
+    /// Whether a gap history signed by `signer_leaf_key` (from
+    /// `openGapHistory`) may be kept (ADR-0091 section 7): judged on this
+    /// group, the one the device joined by `joinReentry`, with the rule a
+    /// re-entry Welcome's sender passes. `true` when the signer is a leaf of
+    /// this group bound to `identity`'s own account, to the owner or an admin,
+    /// or in a one-to-one to the other person; otherwise drop the bundle (its
+    /// gap line stays). Whichever device committed the replacement.
+    ///
+    /// # Errors
+    ///
+    /// `FfiError::LockPoisoned`.
+    pub fn gap_history_signer_accepted(
+        &self,
+        identity: &Identity,
+        signer_leaf_key: Vec<u8>,
+    ) -> Result<bool, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.gap_history_signer_accepted(&identity.inner, &signer_leaf_key))
     }
 
     /// Check a re-entry request's KeyPackage against this group (ADR-0091
@@ -4675,7 +4696,45 @@ pub fn open_history_bundle_structured(
     key.copy_from_slice(&secret);
 
     let bundle = lakko_mls::history_bundle::open_bundle(&key, &sealed_bytes)?;
-    Ok(StructuredHistoryBundle {
+    Ok(structured_history_bundle(bundle))
+}
+
+/// Encode a `HistoryBundle` to its prost bytes, refusing one above
+/// [`lakko_mls::history_bundle::MAX_BUNDLE_MESSAGES`] messages (the cap the
+/// sealed history bundle enforces). Used by the gap history, which seals the
+/// bytes to the returning device's gap key.
+pub(crate) fn encode_history_bundle_checked(
+    bundle: lakko_proto::mls_app::history_bundle::v1::HistoryBundle,
+) -> Result<Vec<u8>, FfiError> {
+    use prost::Message as _;
+    let total: usize = bundle.groups.iter().map(|g| g.messages.len()).sum();
+    if total > lakko_mls::history_bundle::MAX_BUNDLE_MESSAGES {
+        return Err(FfiError::Codec(format!(
+            "history bundle exceeds {} messages ({total})",
+            lakko_mls::history_bundle::MAX_BUNDLE_MESSAGES
+        )));
+    }
+    let mut out = Vec::with_capacity(bundle.encoded_len());
+    bundle
+        .encode(&mut out)
+        .map_err(|e| FfiError::Codec(format!("HistoryBundle encode: {e}")))?;
+    Ok(out)
+}
+
+/// Decode prost `HistoryBundle` bytes into the structured projection.
+pub(crate) fn structured_history_bundle_from_bytes(
+    bytes: &[u8],
+) -> Result<StructuredHistoryBundle, FfiError> {
+    use prost::Message as _;
+    let bundle = lakko_proto::mls_app::history_bundle::v1::HistoryBundle::decode(bytes)
+        .map_err(|e| FfiError::Codec(format!("HistoryBundle decode: {e}")))?;
+    Ok(structured_history_bundle(bundle))
+}
+
+fn structured_history_bundle(
+    bundle: lakko_proto::mls_app::history_bundle::v1::HistoryBundle,
+) -> StructuredHistoryBundle {
+    StructuredHistoryBundle {
         max_hlc: bundle.max_hlc,
         groups: bundle
             .groups
@@ -4695,10 +4754,10 @@ pub fn open_history_bundle_structured(
                     .collect(),
             })
             .collect(),
-    })
+    }
 }
 
-fn build_history_bundle_proto(
+pub(crate) fn build_history_bundle_proto(
     groups: Vec<StructuredHistoryGroup>,
     max_hlc: u64,
 ) -> lakko_proto::mls_app::history_bundle::v1::HistoryBundle {

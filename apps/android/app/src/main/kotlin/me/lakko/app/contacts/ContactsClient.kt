@@ -11,6 +11,7 @@ import me.lakko.app.discovery.DiscoveryClientArgError
 import me.lakko.app.discovery.DiscoveryHttpError
 import me.lakko.app.discovery.DiscoveryNetworkError
 import me.lakko.app.discovery.IdentityFetchResponse
+import me.lakko.app.discovery.boundX25519Key
 import me.lakko.app.devices.DeviceAttestKey
 import me.lakko.app.ds.DsClient
 import me.lakko.app.ds.DsClientArgError
@@ -246,7 +247,10 @@ public class ContactsClient(
         gateIdentity(recipientAccountId, bundle)
 
         val recipientSignaturePub = base64Decode(bundle.signature_pubkey)
-        val recipientX25519Pub = base64Decode(bundle.x25519_pubkey)
+        // Nothing is sealed to an X25519 key the account's signature key did
+        // not sign: a directory could otherwise substitute its own.
+        val recipientX25519Pub = bundle.boundX25519Key()
+            ?: throw ContactsError.noIdentityBundle(recipientAccountId)
 
         val publish = composeAndPublishContactRequest(
             senderSigningSeed = senderSigningSeed,
@@ -535,7 +539,7 @@ public class ContactsClient(
                         accountIdB64 = accountIdB64,
                         previousKeyB64 = heldKeyB64,
                         newKeyB64 = bundle.signature_pubkey,
-                        newX25519B64 = bundle.x25519_pubkey,
+                        newX25519B64 = bundle.boundX25519Key()?.let { base64Encode(it) },
                         keyGeneration = verdict.keyGeneration,
                         signedAtMs = verdict.signedAtMs,
                         retiredKeysB64 = plan.retiredKeysB64,
@@ -768,7 +772,9 @@ public class ContactsClient(
             throw ContactsError.wrap(e)
         } ?: throw ContactsError.noIdentityBundle(accountId)
         gateIdentity(accountId, bundle)
-        return Pair(base64Decode(bundle.signature_pubkey), base64Decode(bundle.x25519_pubkey))
+        // An X25519 key the signature key did not sign is never sealed to.
+        val x25519 = bundle.boundX25519Key() ?: throw ContactsError.noIdentityBundle(accountId)
+        return Pair(base64Decode(bundle.signature_pubkey), x25519)
     }
 
     /**

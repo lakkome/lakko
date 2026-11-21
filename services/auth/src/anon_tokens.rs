@@ -29,7 +29,9 @@
 //!   variable per context (`DISCOVERY_LOOKUP`, `DISCOVERY_REGISTER`,
 //!   `INVITE_CONSUME`, `DS_KNOCK`, `PUSH_REGISTER`, `CHANNEL_SUBSCRIBE`,
 //!   `DIRECTORY_SEARCH`, `VAULT_CLAIM`, `BLOB_UPLOAD`, `BLOB_READ`,
-//!   `MAILBOX_WRITE`, `CALL_JOIN`). `0` stops issuance for that context.
+//!   `MAILBOX_WRITE`, `CALL_JOIN`, `CIRCLE_CLAIM`, `CHANNEL_REACT`,
+//!   `CHANNEL_COMMENT`, `REPORT`, `RENDEZVOUS_WRITE`). `0` stops issuance for
+//!   that context.
 //!   Malformed: startup fails.
 //! - `LAKKO_ANON_TOKEN_QUOTA_CALL_JOIN_YOUNG` - the `call-join` quota of an
 //!   account younger than `LAKKO_AUTH_YOUNG_ACCOUNT_AGE_SECS` (ADR-0078
@@ -131,6 +133,12 @@ use crate::AppState;
 ///   moderators. 10 a day is chosen, not measured: a person reports rarely,
 ///   and the limit is what keeps one account from flooding the moderation
 ///   queue without the queue learning who reported.
+/// - `rendezvous-write` (security review 2026-11-21): one token per write to
+///   a rendezvous (a pairing Welcome or history bundle, a recovery payload,
+///   a state bundle, a rejoin note, a gap history). 500 a day is chosen, not
+///   measured: a device that brings an own device back into many groups
+///   sends one gap history per group, and a rendezvous name is no longer
+///   enough to write without limit.
 const DEFAULT_QUOTAS: [(TokenContext, u32); CONTEXT_COUNT] = [
     (TokenContext::DiscoveryLookup, 300),
     (TokenContext::DiscoveryRegister, 20),
@@ -152,6 +160,7 @@ const DEFAULT_QUOTAS: [(TokenContext, u32); CONTEXT_COUNT] = [
     // refusal in `issue_tokens`.
     (TokenContext::BetaPlace, 0),
     (TokenContext::Report, 10),
+    (TokenContext::RendezvousWrite, 500),
 ];
 
 /// The `call-join` quota per epoch of a young account (ADR-0078 section 2,

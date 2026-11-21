@@ -857,3 +857,69 @@ final class DsJournalAccessTests: XCTestCase {
         XCTAssertNil(try group.dsStagedAccessSigner(identity: owner), "nothing staged")
     }
 }
+
+/// Security follow-up of 2026-11-21: every rendezvous write spends one
+/// `rendezvous-write` anonymous token, on the anonymous session, retried once
+/// on a spent or expired token, like a mailbox write with no proof.
+final class RendezvousWriteTokenTests: XCTestCase {
+
+    private let id = Data(repeating: 0x5A, count: 32)
+
+    func testARendezvousWriteSpendsOneRendezvousWriteToken() async throws {
+        let tokens = FakeAnonTokens()
+        let scope = DsAccessURLProtocol.freshScope()
+        DsAccessURLProtocol.script(scope, [.init(status: 201, body: Data(#"{"id":3,"created_at":"t"}"#.utf8))])
+        let result = try await DsAccessURLProtocol.client(scope, tokens: tokens)
+            .publishRendezvous(id: id, payload: Data([1, 2, 3]))
+        XCTAssertEqual(result.id, 3)
+        XCTAssertEqual(tokens.taken, [.rendezvousWrite])
+        let seen = try XCTUnwrap(DsAccessURLProtocol.requests(scope).first)
+        XCTAssertEqual(seen.method, "POST")
+        XCTAssertEqual(seen.url.path, "/native/ds/ds/rendezvous/\(DsClient.pseudonymHex(id))/messages")
+        XCTAssertEqual(seen.anonToken, "rendezvous-write-1")
+        XCTAssertEqual(seen.body, Data([1, 2, 3]))
+        XCTAssertNil(seen.proof)
+        XCTAssertNil(seen.authorization)
+    }
+
+    func testASpentTokenIsReplacedOnce() async throws {
+        let tokens = FakeAnonTokens()
+        let scope = DsAccessURLProtocol.freshScope()
+        DsAccessURLProtocol.script(scope, [
+            .init(status: 401, body: Data(#"{"error":"anon-token-spent"}"#.utf8)),
+            .init(status: 201, body: Data(#"{"id":4,"created_at":"t"}"#.utf8)),
+        ])
+        let result = try await DsAccessURLProtocol.client(scope, tokens: tokens)
+            .publishRendezvous(id: id, payload: Data([1]))
+        XCTAssertEqual(result.id, 4)
+        XCTAssertEqual(tokens.taken, [.rendezvousWrite, .rendezvousWrite])
+        XCTAssertEqual(DsAccessURLProtocol.requests(scope).map(\.anonToken),
+                       ["rendezvous-write-1", "rendezvous-write-2"])
+    }
+
+    func testNoTokenMeansNoWriteAndAFailure() async throws {
+        let tokens = FakeAnonTokens(failure: .noSession)
+        let scope = DsAccessURLProtocol.freshScope()
+        do {
+            _ = try await DsAccessURLProtocol.client(scope, tokens: tokens)
+                .publishRendezvous(id: id, payload: Data([1]))
+            XCTFail("the write fails")
+        } catch let error as AnonTokenUnavailable {
+            XCTAssertEqual(error, .noSession)
+        }
+        XCTAssertTrue(DsAccessURLProtocol.requests(scope).isEmpty)
+    }
+
+    func testAMissingTokenAtTheServerFailsTheWrite() async throws {
+        let scope = DsAccessURLProtocol.freshScope()
+        DsAccessURLProtocol.script(scope, [
+            .init(status: 401, body: Data(#"{"error":"anon-token-required"}"#.utf8)),
+        ])
+        do {
+            _ = try await DsAccessURLProtocol.client(scope).publishRendezvous(id: id, payload: Data([1]))
+            XCTFail("the write fails")
+        } catch let error as AnonTokenUnavailable {
+            XCTAssertEqual(error, .refused(code: "anon-token-required"))
+        }
+    }
+}

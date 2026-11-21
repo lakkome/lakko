@@ -212,7 +212,7 @@ final class KeptDeviceAdoptionTests: XCTestCase {
     private final class Directory: AccountDirectory, DeviceRestoreDirectory {
         private(set) var rotatedPublishes: [(proof: Data?, key: Data, link: Data?)] = []
         func publishRotatedIdentityBundle(
-            accountId: Data, signaturePubkey: Data, x25519Pubkey: Data,
+            accountId: Data, signaturePubkey: Data, x25519Pubkey: Data, x25519Binding: Data,
             supersessionProof: Data?, keyResetAttest: Data?, conversationLink: Data?,
             sessionToken: String
         ) async throws {
@@ -226,7 +226,7 @@ final class KeptDeviceAdoptionTests: XCTestCase {
             RegisterResult(normalisedUsername: username)
         }
         func publishIdentityBundle(
-            accountId: Data, signaturePubkey: Data, x25519Pubkey: Data,
+            accountId: Data, signaturePubkey: Data, x25519Pubkey: Data, x25519Binding: Data,
             leafAuth: Data?, genesisAttest: Data?, keyResetAttest: Data?, sessionToken: String
         ) async throws {}
     }
@@ -1197,7 +1197,8 @@ final class ProvenPredecessorTests: XCTestCase {
             from: Data(#"{"signature_pubkey":"s","x25519_pubkey":"x"}"#.utf8)).conversationLink)
 
         let upload = IdentityUploadRequest(
-            accountId: "a", signaturePubkey: "s", x25519Pubkey: "x", conversationLink: "bGluaw==")
+            accountId: "a", signaturePubkey: "s", x25519Pubkey: "x", x25519Binding: "Yg==",
+            conversationLink: "bGluaw==")
         let json = try XCTUnwrap(
             JSONSerialization.jsonObject(with: JSONEncoder().encode(upload)) as? [String: Any])
         XCTAssertEqual(json["conversation_link"] as? String, "bGluaw==")

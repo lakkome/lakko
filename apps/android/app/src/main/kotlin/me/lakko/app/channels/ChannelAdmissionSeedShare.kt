@@ -208,7 +208,15 @@ public object ChannelAdmissionSeedShare {
                     Log.i(TAG, "a publisher's key changed with no proof; nothing sealed to it")
                     null
                 } ?: continue
-                val x = Base64.decode(bundle.x25519_pubkey, Base64.DEFAULT).takeIf { it.size == 32 } ?: continue
+                // Only an X25519 key the served signature key signed is sealed to.
+                val x = me.lakko.app.discovery.X25519Bindings.boundX25519Key(
+                    bundle.signature_pubkey,
+                    bundle.x25519_pubkey,
+                    bundle.x25519_binding,
+                ) ?: run {
+                    Log.i(TAG, "a publisher's X25519 key is unbound; nothing sealed to it")
+                    null
+                } ?: continue
                 var marks = already
                 for ((version, seed) in owed) {
                     val envelope = uniffi.lakko_ffi_uniffi.composeAdmissionSeedEnvelope(

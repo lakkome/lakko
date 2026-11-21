@@ -39,6 +39,16 @@ const JOINER = "am9pbmVyLWFjY291bnQtMDA=";
 const GROUP_HEX = "ab".repeat(32);
 const SECRET = new Uint8Array(32).fill(7);
 
+function hexBytes(h: string): Uint8Array {
+  const out = new Uint8Array(h.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+function hexOf(b: Uint8Array): string {
+  return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+
 beforeAll(async () => {
   const wasmPath = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
   await init({ module_or_path: readFileSync(wasmPath) });
@@ -369,10 +379,65 @@ describe("a bundled message keeps its author (ADR-0091 live walk 3)", () => {
       { ...row(3, "incoming", "from the member, another device"), authorKeyB64: MEMBER },
     ];
     await saveMessageLog(SENDER, ownerKey, { version: 1, groups: { [GROUP_HEX]: { cursor: "3", messages: rows } } });
+    const readmitter = wasm.Identity.fromSeed(new Uint8Array(32).fill(0x31));
+    const gap = wasm.generateGapKey();
+    const gapSecret = gap.secret;
+    const gapPublic = gap.publicKey;
+    gap.free();
     const sealed = await buildGapHistoryBundle({
       accountIdB64: SENDER,
       deviceKey: ownerKey,
-      secret: SECRET,
+      readmitter,
+      gapKey: gapPublic,
+      slotHex: GROUP_HEX,
+      fromMs: 0,
+      ownAuthorKeyB64: OWNER,
+    });
+    if (sealed === null) throw new Error("no bundle");
+    const memberKey = await deviceKey();
+    const signers: string[] = [];
+    const filed = await applyGapHistoryBundle({
+      accountIdB64: JOINER,
+      deviceKey: memberKey,
+      gapSecret,
+      groupId: hexBytes(GROUP_HEX),
+      sealedBytes: sealed,
+      signerAccepted: (signer) => {
+        signers.push(hexOf(signer));
+        return true;
+      },
+      ownAuthorKeyB64: MEMBER,
+      route: "knock",
+    });
+    if (filed === null) throw new Error("not filed");
+    // The signer the group is asked about is the re-admitter's leaf key.
+    expect(signers).toEqual([hexOf(readmitter.signaturePublicKey)]);
+    const byText = new Map(filed.rows.map((m) => [m.text, m]));
+    expect(byText.get("from the owner")).toMatchObject({ direction: "incoming", authorKeyB64: OWNER });
+    expect(byText.get("from a third")).toMatchObject({ direction: "incoming", authorKeyB64: THIRD });
+    expect(byText.get("from the member, another device")).toMatchObject({ direction: "outgoing", authorKeyB64: MEMBER });
+    // The log holds the same rows as the open chat was shown.
+    const logged = (await loadMessageLog(JOINER, memberKey))?.groups[GROUP_HEX]?.messages ?? [];
+    expect(logged.find((m) => m.messageId === "1")).toMatchObject({ direction: "incoming", authorKeyB64: OWNER });
+    expect(logged.find((m) => m.messageId === "3")?.direction).toBe("outgoing");
+  });
+
+  it("a gap bundle whose signer the joined group does not accept is dropped; nothing is filed", async () => {
+    const ownerKey = await deviceKey();
+    await saveMessageLog(SENDER, ownerKey, {
+      version: 1,
+      groups: { [GROUP_HEX]: { cursor: "1", messages: [{ ...row(1, "incoming", "x"), authorKeyB64: THIRD }] } },
+    });
+    const readmitter = wasm.Identity.fromSeed(new Uint8Array(32).fill(0x32));
+    const gap = wasm.generateGapKey();
+    const gapSecret = gap.secret;
+    const gapPublic = gap.publicKey;
+    gap.free();
+    const sealed = await buildGapHistoryBundle({
+      accountIdB64: SENDER,
+      deviceKey: ownerKey,
+      readmitter,
+      gapKey: gapPublic,
       slotHex: GROUP_HEX,
       fromMs: 0,
       ownAuthorKeyB64: OWNER,
@@ -382,19 +447,31 @@ describe("a bundled message keeps its author (ADR-0091 live walk 3)", () => {
     const filed = await applyGapHistoryBundle({
       accountIdB64: JOINER,
       deviceKey: memberKey,
-      secret: SECRET,
+      gapSecret,
+      groupId: hexBytes(GROUP_HEX),
       sealedBytes: sealed,
+      signerAccepted: () => false,
       ownAuthorKeyB64: MEMBER,
       route: "knock",
     });
-    const byText = new Map(filed.rows.map((m) => [m.text, m]));
-    expect(byText.get("from the owner")).toMatchObject({ direction: "incoming", authorKeyB64: OWNER });
-    expect(byText.get("from a third")).toMatchObject({ direction: "incoming", authorKeyB64: THIRD });
-    expect(byText.get("from the member, another device")).toMatchObject({ direction: "outgoing", authorKeyB64: MEMBER });
-    // The log holds the same rows as the open chat was shown.
-    const logged = (await loadMessageLog(JOINER, memberKey))?.groups[GROUP_HEX]?.messages ?? [];
-    expect(logged.find((m) => m.messageId === "1")).toMatchObject({ direction: "incoming", authorKeyB64: OWNER });
-    expect(logged.find((m) => m.messageId === "3")?.direction).toBe("outgoing");
+    expect(filed).toBeNull();
+    expect((await loadMessageLog(JOINER, memberKey))?.groups[GROUP_HEX]).toBeUndefined();
+    // Another device's gap secret does not open it at all.
+    const other = wasm.generateGapKey();
+    const otherSecret = other.secret;
+    other.free();
+    await expect(
+      applyGapHistoryBundle({
+        accountIdB64: JOINER,
+        deviceKey: memberKey,
+        gapSecret: otherSecret,
+        groupId: hexBytes(GROUP_HEX),
+        sealedBytes: sealed,
+        signerAccepted: () => true,
+        ownAuthorKeyB64: MEMBER,
+        route: "knock",
+      }),
+    ).rejects.toBeDefined();
   });
 
   it("a row naming no author falls back to the route; a system row names nobody", () => {

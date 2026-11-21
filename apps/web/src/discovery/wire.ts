@@ -93,6 +93,11 @@ export interface IdentityUploadRequest {
   signature_pubkey: string;
   /** base64(X25519 public key)  — 32 bytes after decode. */
   x25519_pubkey: string;
+  /** Security review 2026-11-21: standard base64 of the 64-byte signature
+   *  of the account key over its X25519 key (`signX25519Binding`).
+   *  Required: discovery refuses an upload without a valid one
+   *  (`400 x25519-binding-invalid`). */
+  x25519_binding: string;
   /** G-4 (ADR-0016): base64 of an optional old-key-signed supersession
    *  proof bridging an AccountIdentity rotation. Omit for a normal upload
    *  — its absence clears any previously stored proof server-side. */
@@ -139,6 +144,11 @@ export interface IdentityUploadResponse {
 export interface IdentityFetchResponse {
   signature_pubkey: string;
   x25519_pubkey: string;
+  /** Security review 2026-11-21: standard base64 of the binding of
+   *  `x25519_pubkey` to `signature_pubkey`; absent on a row that has none.
+   *  Nothing is sealed to `x25519_pubkey` unless it verifies
+   *  (`discovery/x25519-binding.ts`). */
+  x25519_binding?: string;
   /** G-4 (ADR-0016): base64 of the stored supersession proof when the
    *  account rotated recently; absent otherwise. The peer verifies it
    *  locally — the server passes the bytes through opaquely. */

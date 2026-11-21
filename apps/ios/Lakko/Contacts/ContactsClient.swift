@@ -870,9 +870,12 @@ public final class ContactsClient {
         }
         guard let bundle else { throw ContactsError.noIdentityBundle(accountId) }
         try await verifyBundleAccountKey(accountId: accountId, bundle: bundle)
-        guard let sig = base64Decode(bundle.signaturePubkey),
-              let x = base64Decode(bundle.x25519Pubkey) else {
+        guard let sig = base64Decode(bundle.signaturePubkey) else {
             throw ContactsError.wrap(ContactsError.simple("malformed identity bundle on the wire"))
+        }
+        // Seal nothing to an X25519 key the account key did not bind.
+        guard let x = bundle.verifiedX25519Pubkey else {
+            throw ContactsError.wrap(ContactsError.simple("identity bundle carries no valid X25519 binding"))
         }
         return (sig, x)
     }
@@ -956,10 +959,15 @@ public final class ContactsClient {
         // hard-fails only on a transparency-log rollback).
         try await verifyBundleAccountKey(accountId: recipientAccountId, bundle: bundle)
 
-        guard let recipientSignaturePub = base64Decode(bundle.signaturePubkey),
-              let recipientX25519Pub = base64Decode(bundle.x25519Pubkey) else {
+        guard let recipientSignaturePub = base64Decode(bundle.signaturePubkey) else {
             throw ContactsError.wrap(
                 ContactsError.simple("malformed identity bundle on the wire")
+            )
+        }
+        // Seal nothing to an X25519 key the account key did not bind.
+        guard let recipientX25519Pub = bundle.verifiedX25519Pubkey else {
+            throw ContactsError.wrap(
+                ContactsError.simple("identity bundle carries no valid X25519 binding")
             )
         }
 

@@ -10,12 +10,15 @@ import SwiftUI
 // whether a person's account still exists.
 //
 // A person is learned to be gone two ways: a verified account-deleted
-// statement their device posted in a conversation (final), and the
-// directory's answer to `GET /discovery/identity/{account_id}` (a `404` is
-// `absent`, reversible by a later `samePerson`). The rules that combine them
-// are the core's (`accountDeletionStatus`, `mayShowUsername`,
-// `directoryCheckDue`); this file keeps the per-person facts they read, keyed
-// on the person's ACCOUNT key (base64), and decides nothing itself.
+// statement their device posted in a conversation, and the directory's answer
+// to `GET /discovery/identity/{account_id}` (a `404` is `absent`). Either one
+// shows "Deleted account"; a `samePerson` answer received after them shows
+// the person again. Only BOTH together (a statement and a `404` after it)
+// remove the person from groups or drop what was held for them (security
+// review 2026-11-21). The rules that combine them are the core's
+// (`deletionEffects`, `mayShowUsername`, `directoryCheckDue`); this file keeps
+// the per-person facts they read, keyed on the person's ACCOUNT key (base64),
+// and decides nothing itself.
 //
 // The facts are per account on this device, in `UserDefaults` behind the
 // account store gate, and go with the account (``AccountLocalDataWipe``).
@@ -24,6 +27,9 @@ import SwiftUI
 public struct PersonDeletionRecord: Codable, Equatable, Sendable {
     /// A statement from this person verified in one of our conversations.
     public var statementVerified = false
+    /// When the newest statement was recorded (this device's clock). An
+    /// answer recorded before it does not count.
+    public var statementAtMs: UInt64?
     /// The latest recorded directory answer: `absent`, `samePerson`,
     /// `otherKey`.
     public var lastAnswer: String?
@@ -65,10 +71,19 @@ public enum DeletedAccountRules {
         }
     }
 
-    /// The record after a verified statement in `groupIdHex`. Final.
-    public static func withStatement(_ r: PersonDeletionRecord, groupIdHex: String?) -> PersonDeletionRecord {
+    /// The record after a verified statement in `groupIdHex` at `nowMs`.
+    /// The recorded directory answer (and the attempt) is cleared, so only an
+    /// answer received AFTER the statement counts and a check is due at once.
+    public static func withStatement(
+        _ r: PersonDeletionRecord, groupIdHex: String?, nowMs: UInt64
+    ) -> PersonDeletionRecord {
         var next = r
         next.statementVerified = true
+        next.statementAtMs = nowMs
+        next.lastAnswer = nil
+        next.lastAnswerAtMs = nil
+        next.lastSamePersonAtMs = nil
+        next.lastAttemptAtMs = nil
         if let groupIdHex, !next.statementGroups.contains(groupIdHex) {
             next.statementGroups.append(groupIdHex)
         }
@@ -86,16 +101,21 @@ public enum DeletedAccountRules {
         return next
     }
 
-    /// The person's status over every key they are known by: a statement
-    /// under any of them is final; otherwise the newest recorded answer.
-    public static func status(_ records: [PersonDeletionRecord]) -> FfiAccountStatus {
-        if records.contains(where: { $0.statementVerified }) {
-            return accountDeletionStatus(statementVerified: true, lastDirectoryAnswer: nil)
-        }
+    /// What a deletion does over every key the person is known by: a
+    /// statement under any of them counts, and the newest directory answer
+    /// recorded at or after the newest statement (`deletionEffects`).
+    public static func effects(_ records: [PersonDeletionRecord]) -> FfiDeletionEffects {
+        let statement = records.contains { $0.statementVerified }
+        let since = records.compactMap(\.statementAtMs).max() ?? 0
         let newest = records
-            .filter { $0.directoryAnswer != nil }
+            .filter { $0.directoryAnswer != nil && ($0.lastAnswerAtMs ?? 0) >= since }
             .max { ($0.lastAnswerAtMs ?? 0) < ($1.lastAnswerAtMs ?? 0) }
-        return accountDeletionStatus(statementVerified: false, lastDirectoryAnswer: newest?.directoryAnswer)
+        return deletionEffects(statementVerified: statement, lastDirectoryAnswer: newest?.directoryAnswer)
+    }
+
+    /// The person's status over every key they are known by.
+    public static func status(_ records: [PersonDeletionRecord]) -> FfiAccountStatus {
+        effects(records).showDeleted ? .deleted : .active
     }
 
     /// Whether a username may be shown beside the person at `nowMs`.
@@ -127,13 +147,14 @@ public enum DeletedAccountRules {
         return .otherKey
     }
 
-    /// Whether this device still owes the person's removal in `groupIdHex`.
-    /// A verified statement proves the ACCOUNT is gone, so it is owed in
-    /// every group this device holds, not only the one the statement arrived
-    /// in (seen live 2026-11-20: the owner's device kept a deleted person in a
-    /// group the statement never reached). Never on a directory answer.
+    /// Whether this device still owes the person's removal in `groupIdHex`:
+    /// only when `deletionEffects` says so (a verified statement AND a
+    /// directory `404` after it; neither alone). Owed in every group this
+    /// device holds, not only the one the statement arrived in (seen live
+    /// 2026-11-20: the owner's device kept a deleted person in a group the
+    /// statement never reached).
     public static func owesRemoval(_ r: PersonDeletionRecord, groupIdHex: String) -> Bool {
-        r.statementVerified && !r.removalProposed.contains(groupIdHex)
+        effects([r]).removeFromGroups && !r.removalProposed.contains(groupIdHex)
     }
 }
 
@@ -195,9 +216,15 @@ public final class DeletedAccounts: ObservableObject {
     var heldKeysForAccountId: (Data) -> [Data] = { accountId in
         DeletedAccounts.heldKeys(accountId: accountId)
     }
-    /// A verified statement made someone deleted (the chat layer proposes the
-    /// group removals and refreshes the background name mirror).
-    var onStatementRecorded: ((_ personKeyB64: String) -> Void)?
+    /// The account id this device knows for a person key (contacts, member
+    /// profiles), for the check a statement starts. Tests set their own.
+    var accountIdForPersonKey: (Data) -> Data? = { key in
+        DeletedAccounts.accountId(personKey: key)
+    }
+    /// What a deletion does for someone changed (a statement verified, or a
+    /// directory answer that changed the effects): the chat layer proposes
+    /// the group removals now owed and refreshes the background name mirror.
+    var onDeletionChanged: ((_ personKeyB64: String) -> Void)?
 
     init(store: DeletedAccountStore = DeletedAccountStore()) {
         self.store = store
@@ -249,6 +276,11 @@ public final class DeletedAccounts: ObservableObject {
         isDeleted(keysB64: [base64Encode(personKey)])
     }
 
+    /// What a deletion does for the person over every key they are known by.
+    public func effects(keysB64: [String]) -> FfiDeletionEffects {
+        DeletedAccountRules.effects(keysB64.compactMap { records[$0] })
+    }
+
     /// Whether a `@username` may be shown beside the person now.
     public func mayShowUsername(keysB64: [String]) -> Bool {
         DeletedAccountRules.mayShowUsername(keysB64.compactMap { records[$0] }, nowMs: nowMs())
@@ -264,22 +296,43 @@ public final class DeletedAccounts: ObservableObject {
 
     // MARK: - Writing
 
-    /// A statement from `personKeyB64` verified in `groupIdHex`. Final.
+    /// A statement from `personKeyB64` verified in `groupIdHex`. The
+    /// recorded directory answer is cleared and the directory is asked at
+    /// once (not on the weekly schedule): a `404` after it removes the person
+    /// from groups, a `samePerson` after it shows the person again.
     public func noteStatement(personKeyB64: String, groupIdHex: String?) {
         guard accountIdB64 != nil else { return }
         let before = records[personKeyB64] ?? PersonDeletionRecord()
-        let after = DeletedAccountRules.withStatement(before, groupIdHex: groupIdHex)
-        guard after != before else { return }
+        // A statement already recorded is not news (the same statement is
+        // seen again on every re-read of a journal): only a new group is.
+        if before.statementVerified {
+            guard let groupIdHex, !before.statementGroups.contains(groupIdHex) else { return }
+            var next = before
+            next.statementGroups.append(groupIdHex)
+            write(personKeyB64, next)
+            return
+        }
+        let after = DeletedAccountRules.withStatement(before, groupIdHex: groupIdHex, nowMs: nowMs())
         write(personKeyB64, after)
-        onStatementRecorded?(personKeyB64)
+        onDeletionChanged?(personKeyB64)
+        if let key = Data(base64Encoded: personKeyB64) {
+            checkIfDue(
+                personKey: key,
+                accountId: after.accountIdB64.flatMap { Data(base64Encoded: $0) }
+                    ?? accountIdForPersonKey(key))
+        }
     }
 
     /// A complete directory answer about `personKeyB64`.
     public func noteAnswer(personKeyB64: String, accountIdB64 personAccountIdB64: String?, _ answer: FfiDirectoryAnswer) {
         guard accountIdB64 != nil else { return }
-        var r = DeletedAccountRules.withAnswer(records[personKeyB64] ?? PersonDeletionRecord(), answer, nowMs: nowMs())
+        let before = records[personKeyB64] ?? PersonDeletionRecord()
+        var r = DeletedAccountRules.withAnswer(before, answer, nowMs: nowMs())
         if let personAccountIdB64 { r.accountIdB64 = personAccountIdB64 }
         write(personKeyB64, r)
+        if DeletedAccountRules.effects([before]) != DeletedAccountRules.effects([r]) {
+            onDeletionChanged?(personKeyB64)
+        }
     }
 
     /// This device proposed the removal of `personKeyB64` in `groupIdHex`.

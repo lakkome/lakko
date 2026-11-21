@@ -305,9 +305,12 @@ public final class ContactsRepository: ObservableObject {
     /// ADR-0098 — drop the incoming requests of deleted accounts, and the
     /// messages held for a pending contact whose account is gone (they would
     /// never arrive). The pending contact itself stays, drawn as `Deleted
-    /// account`, until the person deletes the chat.
+    /// account`, until the person deletes the chat. Only on a verified
+    /// statement AND a directory `404` after it (`deletionEffects`
+    /// `dropHeldSends`): either alone changes the name shown, never what is
+    /// held.
     func applyDeletedAccounts(isDeleted given: ((Data) -> Bool)? = nil) {
-        let isDeleted = given ?? { ProfileDirectory.shared.isDeletedAccount(signatureKey: $0) }
+        let isDeleted = given ?? { ProfileDirectory.shared.deletionDropsHeldSends(signatureKey: $0) }
         let kept = state.pending.filter { !isDeleted($0.fromPubkey) }
         if kept.count != state.pending.count { state = state.with(pending: kept) }
         for contact in invited where isDeleted(contact.signaturePubkey) {

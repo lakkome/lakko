@@ -42,13 +42,13 @@ import { usePins } from "./PinContext";
 import { useSharedChannels } from "../discover/SharedChannelsContext";
 import { hasServiceEnvelopeSender, sendServiceEnvelopeNow } from "../reach/service-envelope-outbox";
 import { loadWasm, type Wasm } from "../wasm";
-import type { Group as WasmGroup } from "../../wasm/lakko_ffi_wasm";
+import type { Group as WasmGroup, Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 import { useBackgroundReceive } from "./BackgroundReceiveContext";
 import { ChatClient, installPollObserver, rosterOf } from "./client";
 import { useChats } from "./ChatContext";
 import { conversationBehind, toWasmBehindState, type BehindVerdictWasm } from "./conversation-behind";
 import { conversationKindOf } from "./conversation-kind";
-import { resendsPushRoutingSecret } from "./reentry-admit";
+import { lastLeafWriteAnyEpoch, resendsPushRoutingSecret } from "./reentry-admit";
 import { readmissionCandidates } from "./device-readmission";
 import { ownsGroup } from "./group-owner";
 import { sendKnockKeyIfDue } from "./knock-key";
@@ -64,7 +64,9 @@ import {
   noteGapHistoryOwed,
   owedGapHistoryGroups,
   recordGapLook,
+  sealGapSecret,
   type GapLookPorts,
+  type GapSendPorts,
 } from "./reentry-history";
 import { installReentryJoinPorts } from "./reentry-join";
 import { requestReentryIfDue, type ReentryRequestPorts } from "./reentry-request";
@@ -73,6 +75,7 @@ import {
   endReentryEpisode,
   gapLookGroups,
   heldKnockKey,
+  leafFirstSeenMs,
   narrowGapLine,
   type ReentryRouteName,
 } from "./reentry-store";
@@ -80,11 +83,6 @@ import {
 /** How often behind conversations are looked at between polls (chosen, not
  *  measured: the request interval is 30 minutes). */
 export const REJOIN_TICK_MS = 60_000;
-
-/** Rows read from the gap rendezvous per look (chosen, not measured: one
- *  bundle is expected; the pairing rows a rendezvous can also carry are
- *  passed over). */
-export const GAP_LOOK_READ_LIMIT = 16;
 
 /** The session account (standard base64), or `null`. */
 function sessionAccount(state: ReturnType<ReturnType<typeof useAuth>["state"]>): string | null {
@@ -195,8 +193,23 @@ export function ConversationRejoinRuntime(): JSX.Element {
         return knock === null ? null : { version: knock.version, publicKeyB64: base64Encode(knock.publicKey) };
       },
       persistDurable,
-      composeEnvelope: (groupId, epochLeft, gapFromMs, kp) =>
-        wasm.composeConversationReentryEnvelope(groupId, epochLeft, gapFromMs, kp),
+      generateGapKey: () => {
+        const key = wasm.generateGapKey();
+        try {
+          return { secret: key.secret, publicKey: key.publicKey };
+        } finally {
+          key.free();
+        }
+      },
+      sealGapSecret: async (secret) => {
+        const account = sessionAccount(auth.state());
+        if (account === null) throw new Error("no session");
+        const deviceKey = await getDeviceKey(account);
+        if (deviceKey === null) throw new Error("no device key");
+        return sealGapSecret(secret, deviceKey);
+      },
+      composeEnvelope: (groupId, epochLeft, gapFromMs, gapKey, kp) =>
+        wasm.composeConversationReentryEnvelope(groupId, epochLeft, gapFromMs, gapKey, kp),
       sealKnockRow: (pk, version, envelope) => wasm.sealReentryKnockRow(pk, version, envelope),
       sendOwnDevice: (envelope) => sendServiceEnvelopeNow(envelope),
       ownDeviceReachable: () => hasServiceEnvelopeSender(),
@@ -311,6 +324,7 @@ export function ConversationRejoinRuntime(): JSX.Element {
             noteGapHistoryOwed({
               groupIdB64: o.groupIdB64,
               leafKey: o.leafKey,
+              gapKey: o.gapKey,
               epochAfter: o.epochAfter,
               gapFromMs: o.gapFromMs,
               nowMs: Date.now(),
@@ -325,7 +339,12 @@ export function ConversationRejoinRuntime(): JSX.Element {
 
   // ---------- after every applied poll ------------------------------------
 
-  async function sendGapBundle(group: WasmGroup, secret: Uint8Array, fromMs: number): Promise<Uint8Array | null> {
+  async function sendGapBundle(
+    group: WasmGroup,
+    readmitter: WasmIdentity,
+    gapKey: Uint8Array,
+    fromMs: number,
+  ): Promise<Uint8Array | null> {
     const account = sessionAccount(auth.state());
     if (account === null) return null;
     const deviceKey = await getDeviceKey(account);
@@ -333,7 +352,8 @@ export function ConversationRejoinRuntime(): JSX.Element {
     return buildGapHistoryBundle({
       accountIdB64: account,
       deviceKey,
-      secret,
+      readmitter,
+      gapKey,
       slotHex: bytesToHex(group.groupId),
       fromMs,
       ownAuthorKeyB64: ownAuthorKeyIn(group),
@@ -400,12 +420,24 @@ export function ConversationRejoinRuntime(): JSX.Element {
     }
   }
 
-  function gapSendPorts() {
+  function gapSendPorts(wasm: Wasm): GapSendPorts {
     return {
       now: () => Date.now(),
+      // The leaf that signs is this device's leaf in the conversation.
       identity: () => chats.identity(),
       landed: (g: WasmGroup) => resendGrowthState(g),
+      leafFirstSeenMs: (g, leaf) => leafFirstSeenMs(g, leaf),
+      leafLastWriteMs: (g, leaf) => lastLeafWriteAnyEpoch(g, leaf),
+      gapStart: (claimed, firstSeen, lastWrite) => {
+        const start = wasm.gapHistoryStart(
+          BigInt(Math.max(0, Math.floor(claimed))),
+          firstSeen === undefined ? undefined : BigInt(Math.max(0, Math.floor(firstSeen))),
+          lastWrite === undefined ? undefined : BigInt(Math.max(0, Math.floor(lastWrite))),
+        );
+        return start === undefined ? null : Number(start);
+      },
       build: sendGapBundle,
+      rendezvous: (gapKey) => wasm.gapHistoryRendezvous(gapKey),
       publish: async (rendezvous: Uint8Array, sealed: Uint8Array) => {
         await ds.publishRendezvous(rendezvous, sealed);
       },
@@ -431,7 +463,9 @@ export function ConversationRejoinRuntime(): JSX.Element {
         continue;
       }
       if (epoch >= epochAfter) {
-        void afterGroupPollForGapHistory(entry.group, gapSendPorts()).catch(() => undefined);
+        void loadWasm()
+          .then((wasm) => afterGroupPollForGapHistory(entry.group, gapSendPorts(wasm)))
+          .catch(() => undefined);
       } else if (!receive.coordinator.isForeground(groupIdB64)) {
         void receive.syncGroupNow(groupIdB64).catch(() => undefined);
       }
@@ -440,30 +474,41 @@ export function ConversationRejoinRuntime(): JSX.Element {
 
   // ---------- the device that came back looks for the gap -----------------
 
-  function gapLookPorts(): GapLookPorts {
+  function gapLookPorts(wasm: Wasm): GapLookPorts {
     return {
       now: () => Date.now(),
       deviceKey: async () => {
         const account = sessionAccount(auth.state());
         return account === null ? null : getDeviceKey(account);
       },
-      read: async (rendezvous) => {
-        const result = await ds.fetchRendezvous(rendezvous, { after: 0, limit: GAP_LOOK_READ_LIMIT, waitSecs: 0 });
-        return result.messages.map((m) => m.payload);
+      rendezvousOf: (secret) => wasm.gapHistoryRendezvous(wasm.gapPublicKey(secret)),
+      readPage: async (rendezvous, after, limit) => {
+        const result = await ds.fetchRendezvous(rendezvous, { after, limit, waitSecs: 0 });
+        return {
+          rows: result.messages.map((m) => ({ id: m.id, payload: m.payload })),
+          hasMore: result.hasMore,
+        };
       },
       apply: async (secret, sealed, groupIdB64, route) => {
         const account = sessionAccount(auth.state());
         if (account === null) return null;
         const deviceKey = await getDeviceKey(account);
         if (deviceKey === null) return null;
+        const group = chats.get(groupIdB64)?.group;
+        const identity = chats.identity();
+        if (group === undefined || identity === null) return null;
         // Live walk 3: a bundled row names its author; it is this account's
         // own when the author is its key in the conversation.
         return applyGapHistoryBundle({
           accountIdB64: account,
           deviceKey,
-          secret,
+          gapSecret: secret,
+          groupId: group.groupId,
           sealedBytes: sealed,
-          ownAuthorKeyB64: ownAuthorKeyIn(chats.get(groupIdB64)?.group),
+          // Security review 2026-11-21: kept only from the own account, the
+          // owner or an admin, or the other person of a one-to-one.
+          signerAccepted: (signer) => group.gapHistorySignerAccepted(identity, signer),
+          ownAuthorKeyB64: ownAuthorKeyIn(group),
           route,
         });
       },
@@ -477,7 +522,9 @@ export function ConversationRejoinRuntime(): JSX.Element {
 
   function lookFor(groupIdB64: string): void {
     if (sessionAccount(auth.state()) === null) return;
-    void lookForGapHistory(groupIdB64, gapLookPorts()).catch(() => undefined);
+    void loadWasm()
+      .then((wasm) => lookForGapHistory(groupIdB64, gapLookPorts(wasm)))
+      .catch(() => undefined);
   }
 
   /** An open chat is looked for once a minute even between its polls. */
@@ -511,13 +558,15 @@ export function ConversationRejoinRuntime(): JSX.Element {
     } catch {
       return;
     }
+    // The roster read records the first sighting of each leaf (section 7).
+    rosterOf(group);
     // A look for the gap's messages is a read: it runs whatever else does.
     lookFor(groupIdB64);
     if (conversationBehind.stopsActing(groupIdB64)) {
       await requestFor(groupIdB64);
       return;
     }
-    await afterGroupPollForGapHistory(group, gapSendPorts());
+    await afterGroupPollForGapHistory(group, gapSendPorts(await loadWasm()));
     // The owner sends the knock key; nobody else does.
     const account = chats.accountIdentity();
     if (
@@ -552,22 +601,20 @@ export function ConversationRejoinRuntime(): JSX.Element {
     now: () => Date.now(),
     identity: () => chats.identity(),
     persistDurable,
-    fetchGapHistory: ({ groupIdB64, channel, gapFromMs, gapToMs, route }) => {
+    fetchGapHistory: ({ groupIdB64, secrets, gapFromMs, gapToMs, route }) => {
       void (async () => {
-        const account = sessionAccount(auth.state());
-        if (account === null) return;
-        const deviceKey = await getDeviceKey(account);
-        if (deviceKey === null) return;
+        if (sessionAccount(auth.state()) === null) return;
         // Durable: the device keeps looking until the messages arrive or the
         // DS retention passed, across restarts (live walk 2026-11-19: the
-        // re-admitter posted after a one-shot wait had closed).
-        const stored = await recordGapLook({ groupIdB64, secret: channel.secret, gapFromMs, gapToMs, route }, deviceKey);
+        // re-admitter posted after a one-shot wait had closed). The secrets
+        // are already sealed under the device key.
+        const stored = recordGapLook({ groupIdB64, secrets, gapFromMs, gapToMs, route });
         if (!stored) {
           // eslint-disable-next-line no-console
           console.warn("chat re-entry: gap look not recorded");
           return;
         }
-        await lookForGapHistory(groupIdB64, gapLookPorts());
+        await lookForGapHistory(groupIdB64, gapLookPorts(await loadWasm()));
       })().catch((err: unknown) => {
         // eslint-disable-next-line no-console
         console.warn(`chat re-entry: gap look failed: ${err instanceof Error ? err.name : "error"}`);

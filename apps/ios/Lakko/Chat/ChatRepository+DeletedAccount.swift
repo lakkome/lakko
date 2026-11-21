@@ -81,12 +81,15 @@ extension ChatRepository {
         return true
     }
 
-    /// Wire the deletion facts to the chat layer: a statement just recorded
+    /// Wire the deletion facts to the chat layer: a change (a statement
+    /// recorded, or a directory answer that changed what a deletion does)
     /// refreshes the background name mirror and proposes the group removals
-    /// it owes in EVERY group this device holds, whichever conversation the
+    /// now owed in EVERY group this device holds, whichever conversation the
     /// statement arrived in (the account is gone, not only its leaf there).
+    /// A removal is owed only on a statement AND a directory `404` after it
+    /// (``DeletedAccountRules/owesRemoval(_:groupIdHex:)``).
     func observeDeletedAccounts() {
-        DeletedAccounts.shared.onStatementRecorded = { [weak self] _ in
+        DeletedAccounts.shared.onDeletionChanged = { [weak self] _ in
             guard let self else { return }
             self.mirrorCallPeerNames()
             for groupIdHex in self.groups.keys {
@@ -141,8 +144,9 @@ extension ChatRepository {
         return .propose(leafIndex: first)
     }
 
-    /// Propose, in `groupIdHex`, the removal of every person a statement was
-    /// verified for in any conversation, once each, when this device may. A
+    /// Propose, in `groupIdHex`, the removal of every person whose deletion
+    /// both a verified statement and a directory `404` confirm, once each,
+    /// when this device may. A
     /// removal that could not be sent is tried again on a later poll; one that
     /// went, or one that is never owed here, is recorded.
     func proposeDeletedMemberRemovalsSoon(groupIdHex: String) {

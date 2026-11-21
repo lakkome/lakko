@@ -519,7 +519,7 @@ private final class NoDirectory: AccountDirectory {
     }
 
     func publishIdentityBundle(
-        accountId: Data, signaturePubkey: Data, x25519Pubkey: Data,
+        accountId: Data, signaturePubkey: Data, x25519Pubkey: Data, x25519Binding: Data,
         leafAuth: Data?, genesisAttest: Data?, keyResetAttest: Data?, sessionToken: String
     ) async throws {
         throw AuthClientError.argument("discovery must not be reached")

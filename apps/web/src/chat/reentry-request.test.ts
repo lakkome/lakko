@@ -57,6 +57,7 @@ function identity(): WasmIdentity {
 }
 
 const group = { groupId: GROUP_ID } as unknown as WasmGroup;
+const GAP_PUBLIC = new Uint8Array(32).fill(0x61);
 
 function ports(
   options: Partial<Omit<ReentryRequestPorts, "roster">> & {
@@ -91,7 +92,15 @@ function ports(
     ownDeviceReachable: () => true,
     knockKey: async () => null,
     persistDurable: async () => void events.push("persist"),
-    composeEnvelope: (g, e, gap, kp) => {
+    generateGapKey: () => {
+      events.push("gap-key");
+      return { secret: new Uint8Array(32).fill(0x5a), publicKey: GAP_PUBLIC };
+    },
+    sealGapSecret: async (secret) => {
+      events.push("seal-gap");
+      return { ivB64: "aXY=", sealedSecretB64: btoa(String.fromCharCode(...secret.map((b) => b ^ 0xff))) };
+    },
+    composeEnvelope: (g, e, gap, _gapKey, kp) => {
       events.push(`compose:${reentryRecordFor(GID) === undefined ? "unrecorded" : "recorded"}`);
       return new Uint8Array([...g.slice(0, 1), Number(e), Number(gap % 256n), ...kp]);
     },
@@ -156,14 +165,29 @@ describe("the request (section 3)", () => {
   it("mints, makes durable and records BEFORE it sends; one-to-one goes to the other person's mailbox", async () => {
     const { p, sent } = ports();
     expect(await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1234 }, p)).toBe("sent");
-    expect(events).toEqual(["mint", "persist", "compose:recorded"]);
+    expect(events).toEqual(["gap-key", "seal-gap", "mint", "persist", "compose:recorded"]);
     expect(sent.map((s) => s.route)).toEqual(["mailbox"]);
     expect(btoa(String.fromCharCode(...(sent[0]?.to ?? [])))).toBe(PEER);
     const record = reentryRecordFor(GID);
+    // The gap secret is kept with the request, sealed (never in the clear).
+    expect(record?.gapKeys.length).toBe(1);
+    expect([...data.values()].join("|").includes(btoa(String.fromCharCode(...new Uint8Array(32).fill(0x5a))))).toBe(false);
     expect(record?.epochLeft).toBe("7");
     expect(record?.gapFromMs).toBe(1234);
     expect(record?.lastSentMs).toBe(now);
     expect(record?.route).toBe("mailbox");
+  });
+
+  it("a gap secret that cannot be sealed sends nothing and mints nothing", async () => {
+    const { p, sent } = ports({
+      sealGapSecret: async () => {
+        throw new Error("no device key");
+      },
+    });
+    expect(await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 1234 }, p)).toBe("failed");
+    expect(sent).toEqual([]);
+    expect(minted).toBe(0);
+    expect(reentryRecordFor(GID)).toBeUndefined();
   });
 
   it("goes to another own device first", async () => {
@@ -190,7 +214,7 @@ describe("the request (section 3)", () => {
       ],
       kind: "group",
       knockKey: async () => ({ version: 1, publicKeyB64: btoa(String.fromCharCode(...pk)) }),
-      composeEnvelope: (g, e, gap, kp) => wasm.composeConversationReentryEnvelope(g, e, gap, kp),
+      composeEnvelope: (g, e, gap, gapKey, kp) => wasm.composeConversationReentryEnvelope(g, e, gap, gapKey, kp),
     });
     const wait = Number(wasm.reentryOwnDeviceAnswerWaitMs());
     expect(wait).toBe(2 * 60_000);
@@ -288,7 +312,7 @@ describe("the request (section 3)", () => {
     const { p, sent } = ports({
       kind: "group",
       knockKey: async () => ({ version: 1, publicKeyB64: btoa(String.fromCharCode(...pk)) }),
-      composeEnvelope: (g, e, gap, kp) => wasm.composeConversationReentryEnvelope(g, e, gap, kp),
+      composeEnvelope: (g, e, gap, gapKey, kp) => wasm.composeConversationReentryEnvelope(g, e, gap, gapKey, kp),
     });
     await requestReentryIfDue(group, { state: SUSPECTED, gapFromMs: 99 }, p);
     const row = sent[0]?.bytes ?? new Uint8Array();
@@ -296,6 +320,8 @@ describe("the request (section 3)", () => {
     const opened = wasm.openReentryKnockRow(seed, row);
     expect(opened.epochLeft).toBe(7n);
     expect(opened.gapFromMs).toBe(99n);
+    // The request carries the public half of the gap key it minted.
+    expect([...opened.gapKey]).toEqual([...GAP_PUBLIC]);
     opened.free();
   });
 

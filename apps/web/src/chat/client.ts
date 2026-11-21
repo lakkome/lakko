@@ -119,7 +119,7 @@ import {
 import { loadUnacked } from "./commit-outbox";
 import { registeredCommitHolds } from "./registered-commit-hold";
 import { conversationBehind, rowTimeMs } from "./conversation-behind";
-import { clearReentryReadFrom, reentryReadFrom } from "./reentry-store";
+import { clearReentryReadFrom, noteLeavesSeen, reentryReadFrom } from "./reentry-store";
 import { deliverReentryRequest, noteLeafWrote } from "./reentry-admit";
 import { consumeKnockKeyRow } from "./knock-key";
 import { readCursorEpoch, recordCursorEpoch, rewindLine, snapshotRewindFrom } from "./cursor-epoch";
@@ -1730,6 +1730,7 @@ export class ChatClient {
             groupId: reentry.groupId,
             epochLeft: reentry.epochLeft,
             gapFromMs: reentry.gapFromMs,
+            gapKey: reentry.gapKey,
             keyPackage: reentry.keyPackage,
           });
         } finally {
@@ -2165,11 +2166,25 @@ export function readsKnocks(group: WasmGroup, identity: WasmIdentity): boolean {
  * already meant.
  */
 export function rosterOf(group: WasmGroup): RosterMember[] {
+  let roster: RosterMember[];
   try {
-    return group.members() as unknown as RosterMember[];
+    roster = group.members() as unknown as RosterMember[];
   } catch {
     return [];
   }
+  // ADR-0091 section 7 (security review 2026-11-21): the first time this
+  // device sees each leaf in the roster clamps where a gap's history it may
+  // send for that leaf starts. Only the first observation is kept.
+  try {
+    noteLeavesSeen(
+      base64Encode(group.groupId),
+      roster.map((m) => base64Encode(m.signaturePublicKey)),
+      Date.now(),
+    );
+  } catch {
+    /* a missed sighting only narrows a later gap history */
+  }
+  return roster;
 }
 
 /**

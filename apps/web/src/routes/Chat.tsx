@@ -196,6 +196,7 @@ import {
 import { ContactsClient, ContactsError, SupersessionRefused } from "../contacts/client";
 import { supersessionRefusedMessage } from "../contacts/supersession-message";
 import { DiscoveryClient } from "../discovery/client";
+import { boundX25519 } from "../discovery/x25519-binding";
 import {
   accountIdB64OfKey,
   loadAccepted,
@@ -6133,7 +6134,10 @@ function ChatView(props: {
           lookup: async (u) => (await discovery.lookup(u)).account,
           identity: async (account) => {
             const b = await discovery.identityFetch(account);
-            return b === null ? null : { signaturePubkeyB64: b.signature_pubkey, x25519PubkeyB64: b.x25519_pubkey };
+            // Security review 2026-11-21: an X25519 key whose binding does
+            // not verify is never sealed to; the card reads as not findable.
+            if (b === null || (await boundX25519(b)) === null) return null;
+            return { signaturePubkeyB64: b.signature_pubkey, x25519PubkeyB64: b.x25519_pubkey };
           },
           send: async (account, sig, x) => {
             await contacts.sendContactRequestToBundle(auth.identitySecrets(), account, sig, x, new Uint8Array(0));

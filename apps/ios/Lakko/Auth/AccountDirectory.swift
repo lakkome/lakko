@@ -44,11 +44,12 @@ protocol AccountDirectory {
     /// session-token gated). `keyResetAttest` is the ADR-0073 key-reset
     /// attestation on the upload that installs reset keys, `nil` otherwise.
     /// See
-    /// ``DiscoveryClient/uploadIdentityBundle(accountId:signaturePubkey:x25519Pubkey:supersessionProofB64:leafAuth:genesisAttest:keyResetAttest:)``.
+    /// ``DiscoveryClient/uploadIdentityBundle(accountId:signaturePubkey:x25519Pubkey:x25519Binding:supersessionProofB64:leafAuth:genesisAttest:keyResetAttest:)``.
     func publishIdentityBundle(
         accountId: Data,
         signaturePubkey: Data,
         x25519Pubkey: Data,
+        x25519Binding: Data,
         leafAuth: Data?,
         genesisAttest: Data?,
         keyResetAttest: Data?,
@@ -68,6 +69,7 @@ protocol AccountDirectory {
         accountId: Data,
         signaturePubkey: Data,
         x25519Pubkey: Data,
+        x25519Binding: Data,
         supersessionProof: Data?,
         keyResetAttest: Data?,
         conversationLink: Data?,
@@ -81,6 +83,7 @@ extension AccountDirectory {
         accountId: Data,
         signaturePubkey: Data,
         x25519Pubkey: Data,
+        x25519Binding: Data,
         supersessionProof: Data?,
         keyResetAttest: Data?,
         conversationLink: Data?,
@@ -115,6 +118,7 @@ struct DiscoveryAccountDirectory: AccountDirectory {
         accountId: Data,
         signaturePubkey: Data,
         x25519Pubkey: Data,
+        x25519Binding: Data,
         leafAuth: Data?,
         genesisAttest: Data?,
         keyResetAttest: Data?,
@@ -124,6 +128,7 @@ struct DiscoveryAccountDirectory: AccountDirectory {
             accountId: accountId,
             signaturePubkey: signaturePubkey,
             x25519Pubkey: x25519Pubkey,
+            x25519Binding: x25519Binding,
             leafAuth: leafAuth,
             genesisAttest: genesisAttest,
             keyResetAttest: keyResetAttest
@@ -134,6 +139,7 @@ struct DiscoveryAccountDirectory: AccountDirectory {
         accountId: Data,
         signaturePubkey: Data,
         x25519Pubkey: Data,
+        x25519Binding: Data,
         supersessionProof: Data?,
         keyResetAttest: Data?,
         conversationLink: Data?,
@@ -145,6 +151,7 @@ struct DiscoveryAccountDirectory: AccountDirectory {
             accountId: accountId,
             signaturePubkey: signaturePubkey,
             x25519Pubkey: x25519Pubkey,
+            x25519Binding: x25519Binding,
             supersessionProofB64: supersessionProof.map { base64Encode($0) },
             leafAuth: nil,
             genesisAttest: nil,

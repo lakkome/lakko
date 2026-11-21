@@ -304,11 +304,12 @@ final class ConversationReentryTests: XCTestCase {
         let identity = try Identity.fromSeed(seed: Data(repeating: 0x31, count: 32))
         let group = try Group.create(identity: identity, kind: .group)
         let groupId = try group.groupId()
+        let gapKey = generateGapKey()
         let first = try composeConversationReentryEnvelope(
-            groupId: groupId, epochLeft: try group.epoch(), gapFromMs: 5,
+            groupId: groupId, epochLeft: try group.epoch(), gapFromMs: 5, gapKey: gapKey.publicKey,
             keyPackage: try identity.createReentryKeyPackage(groupId: groupId, epochLeft: try group.epoch()))
         let second = try composeConversationReentryEnvelope(
-            groupId: groupId, epochLeft: try group.epoch(), gapFromMs: 6,
+            groupId: groupId, epochLeft: try group.epoch(), gapFromMs: 6, gapKey: generateGapKey().publicKey,
             keyPackage: try identity.createReentryKeyPackage(groupId: groupId, epochLeft: try group.epoch()))
         XCTAssertTrue(DeviceGroupSyncRepository.isConversationReentry(first))
         XCTAssertFalse(DeviceGroupSyncRepository.isKeyRotation(first))
@@ -319,6 +320,8 @@ final class ConversationReentryTests: XCTestCase {
         let decoded = try decodeConversationReentryEnvelope(plaintext: first)
         XCTAssertEqual(decoded.groupId, groupId)
         XCTAssertEqual(decoded.gapFromMs, 5)
+        XCTAssertEqual(decoded.gapKey, gapKey.publicKey, "the request carries the public gap key")
+        XCTAssertNil(first.range(of: gapKey.secret), "never the secret")
     }
 
     // MARK: - The waiting note (UX 2.2)
@@ -365,24 +368,150 @@ final class ConversationReentryTests: XCTestCase {
 
     // MARK: - The gap history (section 7)
 
-    func testTheHistoryRendezvousFollowsTheSecret() {
-        let a = ConversationReentryRules.historyRendezvous(secret: Data(repeating: 1, count: 32))
-        let b = ConversationReentryRules.historyRendezvous(secret: Data(repeating: 2, count: 32))
+    /// Security review 2026-11-21 — the rendezvous follows the request's
+    /// public gap key (the core's derivation), not any group secret.
+    func testTheHistoryRendezvousFollowsTheGapKey() throws {
+        let a = try XCTUnwrap(ConversationReentryRules.gapRendezvous(gapKey: Data(repeating: 1, count: 32)))
+        let b = try XCTUnwrap(ConversationReentryRules.gapRendezvous(gapKey: Data(repeating: 2, count: 32)))
         XCTAssertEqual(a.count, 32)
         XCTAssertNotEqual(a, b)
-        XCTAssertEqual(a, ConversationReentryRules.historyRendezvous(secret: Data(repeating: 1, count: 32)))
-        let leaf = Data(repeating: 7, count: 32)
-        XCTAssertEqual(ConversationReentryRules.historyContext(leafKey: leaf), leaf)
+        XCTAssertEqual(a, try gapHistoryRendezvous(gapKey: Data(repeating: 1, count: 32)))
+        XCTAssertNil(ConversationReentryRules.gapRendezvous(gapKey: Data(repeating: 1, count: 31)))
+        let golden = try XCTUnwrap(ConversationReentryRules.gapRendezvous(gapKey: Data(repeating: 0x42, count: 32)))
+        let hex = golden.map { String(format: "%02x", $0) }.joined()
+        XCTAssertTrue(hex.hasPrefix("4060ae14") && hex.hasSuffix("1019"), "the core's golden")
     }
 
-    /// The cross-client golden: web and Android derive the same id.
-    func testTheHistoryRendezvousGolden() {
-        let id = ConversationReentryRules.historyRendezvous(secret: Data(repeating: 0x42, count: 32))
-        XCTAssertEqual(
-            id.map { String(format: "%02x", $0) }.joined(),
-            "8b4c89a03f20c038dfe71cf88eeee780a4be0af619b852cedbc63ad0dc6eb7dd")
-        XCTAssertEqual(ConversationReentryRules.historyExporterLabel, "lakko/conversation-reentry/history/v1")
-        XCTAssertEqual(ConversationReentryRules.historySecretLength, 32)
+    /// Only the holder of the gap secret opens the history, and it names the
+    /// leaf that signed it.
+    func testAGapHistoryOpensOnlyUnderItsGapKeyAndNamesItsSigner() throws {
+        let readmitter = try Identity.fromSeed(seed: Data(repeating: 0x61, count: 32))
+        let gapKey = generateGapKey()
+        let groupId = Data(repeating: 0xAB, count: 32)
+        let hex = String(repeating: "ab", count: 32)
+        let rows = [PersistedMessage(messageId: 7, direction: "incoming", text: "one", attachments: [],
+                                     createdAt: "2026-11-11T13:10:00Z")]
+        let sealed = try XCTUnwrap(HistoryBundleCodec.buildGapForGroup(
+            hex: hex, rows: rows, accountIdB64: account, readmitter: readmitter, gapKey: gapKey.publicKey,
+            groupId: groupId))
+        let opened = try openGapHistoryStructured(gapSecret: gapKey.secret, groupId: groupId, sealed: sealed)
+        XCTAssertEqual(opened.signerLeafKey, readmitter.signaturePublicKey())
+        XCTAssertEqual(opened.bundle.groups.first?.messages.count, 1)
+        XCTAssertThrowsError(
+            try openGapHistoryStructured(gapSecret: generateGapKey().secret, groupId: groupId, sealed: sealed),
+            "another gap key opens nothing")
+        XCTAssertThrowsError(
+            try openGapHistoryStructured(
+                gapSecret: gapKey.secret, groupId: Data(repeating: 0xAC, count: 32), sealed: sealed),
+            "nor for another conversation")
+        XCTAssertNil(sealed.range(of: readmitter.signaturePublicKey()), "the signer is not in the clear")
+    }
+
+    /// The returning device keeps a history only from a signer the group it
+    /// joined accepts: the owner here, never a plain member.
+    func testAGapHistoryFromAPlainMemberIsNotKept() throws {
+        let owner = try Identity.fromSeed(seed: Data(repeating: 0x71, count: 32))
+        let back = try Identity.fromSeed(seed: Data(repeating: 0x72, count: 32))
+        let member = try Identity.fromSeed(seed: Data(repeating: 0x73, count: 32))
+        let ownerGroup = try Group.create(identity: owner, kind: .group)
+        let addBack = try ownerGroup.addMemberFromWire(identity: owner, keyPackage: try back.createKeyPackage())
+        let addMember = try ownerGroup.addMemberFromWire(identity: owner, keyPackage: try member.createKeyPackage())
+        let backGroup = try Group.joinFromWelcome(welcome: addBack.welcome, identity: back)
+        _ = try backGroup.processIncomingVerifyingRoles(identity: back, bytes: addMember.commit)
+        XCTAssertTrue(try backGroup.gapHistorySignerAccepted(
+            identity: back, signerLeafKey: owner.signaturePublicKey()))
+        XCTAssertFalse(try backGroup.gapHistorySignerAccepted(
+            identity: back, signerLeafKey: member.signaturePublicKey()))
+    }
+
+    /// The re-admitter never sends rows from before its own evidence that
+    /// the leaf was in the conversation, and nothing without any.
+    func testTheGapHistoryStartIsClampedByWhatTheReadmitterSaw() {
+        XCTAssertNil(gapHistoryStart(claimedMs: 1_000, leafFirstSeenMs: nil, leafLastWriteMs: nil),
+                     "nothing seen here: nothing sent")
+        XCTAssertEqual(gapHistoryStart(claimedMs: 1_000, leafFirstSeenMs: 5_000, leafLastWriteMs: nil), 5_000)
+        XCTAssertEqual(gapHistoryStart(claimedMs: 9_000, leafFirstSeenMs: 5_000, leafLastWriteMs: nil), 9_000)
+        XCTAssertEqual(gapHistoryStart(claimedMs: 1_000, leafFirstSeenMs: nil, leafLastWriteMs: 4_000), 4_000)
+    }
+
+    func testTheFirstTimeALeafWasSeenIsKeptAndNeverMoved() {
+        let store = ReentryLeafFirstSeenStore(defaults: suite())
+        let a = Data(repeating: 1, count: 32)
+        let b = Data(repeating: 2, count: 32)
+        store.noteRoster(accountIdB64: account, groupIdHex: "g", leafKeys: [a], nowMs: 100)
+        store.noteRoster(accountIdB64: account, groupIdHex: "g", leafKeys: [a, b], nowMs: 200)
+        XCTAssertEqual(store.firstSeen(accountIdB64: account, groupIdHex: "g", leafKey: a), 100, "only the first")
+        XCTAssertEqual(store.firstSeen(accountIdB64: account, groupIdHex: "g", leafKey: b), 200)
+        XCTAssertNil(store.firstSeen(accountIdB64: account, groupIdHex: "h", leafKey: a))
+        store.remove(accountIdB64: account, groupIdHex: "g")
+        XCTAssertNil(store.firstSeen(accountIdB64: account, groupIdHex: "g", leafKey: a))
+    }
+
+    func testTheLastWriteOfALeafIsReadAtAnyEpoch() {
+        var clock: UInt64 = 10
+        let seen = ReentryObservations(nowMs: { clock })
+        XCTAssertNil(seen.lastWrite(groupIdHex: "g", leaf: 3))
+        seen.noteLeafActivity(groupIdHex: "g", leaf: 3, epoch: 4)
+        clock = 20
+        seen.noteLeafActivity(groupIdHex: "g", leaf: 3, epoch: 5)
+        XCTAssertEqual(seen.lastWrite(groupIdHex: "g", leaf: 3), 20)
+    }
+
+    /// No epoch is needed to seal: the history goes once the group moved
+    /// past the epoch the replacement was proposed at, with the leaf in it.
+    func testAnOwedHistoryGoesOnceTheReplacementLanded() {
+        let row = owedRow(owedAtMs: 100)
+        XCTAssertEqual(ConversationReentryRules.owedHistoryVerdict(row, epoch: 8, rosterHasLeaf: true, nowMs: 200),
+                       .wait, "still at the proposal's epoch")
+        XCTAssertEqual(ConversationReentryRules.owedHistoryVerdict(row, epoch: 9, rosterHasLeaf: true, nowMs: 200),
+                       .send)
+        XCTAssertEqual(ConversationReentryRules.owedHistoryVerdict(row, epoch: 12, rosterHasLeaf: true, nowMs: 200),
+                       .send, "any later epoch")
+        XCTAssertEqual(ConversationReentryRules.owedHistoryVerdict(row, epoch: 9, rosterHasLeaf: false, nowMs: 200),
+                       .drop, "the leaf left")
+        XCTAssertEqual(ConversationReentryRules.owedHistoryVerdict(
+            row, epoch: 9, rosterHasLeaf: true, nowMs: 100 + ReentryHistoryOwed.lifetimeMs), .drop)
+    }
+
+    /// The gap keys a returning device looks under: those of its requests
+    /// whose sealed secret opens.
+    func testTheGapKeysComeFromTheRequestsWhoseSecretOpens() {
+        let wrap = Data(repeating: 0x5A, count: 32)
+        let store = ReentryGapLookStore(defaults: suite(), wrapKey: { _, _ in wrap })
+        let one = generateGapKey()
+        let two = generateGapKey()
+        let requests = [
+            ReentrySentRequest(keyPackage: Data([1]), epochLeft: 1, sentAtMs: 1, route: "knock", cursorAtSend: 0),
+            ReentrySentRequest(
+                keyPackage: Data([2]), epochLeft: 1, sentAtMs: 2, route: "knock", cursorAtSend: 0,
+                gapPublicKey: one.publicKey, sealedGapSecret: store.sealSecret(one.secret, accountIdB64: account)),
+            ReentrySentRequest(
+                keyPackage: Data([3]), epochLeft: 1, sentAtMs: 3, route: "knock", cursorAtSend: 0,
+                gapPublicKey: two.publicKey, sealedGapSecret: store.sealSecret(two.secret, accountIdB64: account)),
+        ]
+        XCTAssertNotEqual(requests[1].sealedGapSecret, one.secret, "sealed at rest")
+        let pairs = ConversationReentryRules.gapKeyPairs(requests) { store.openSecret($0, accountIdB64: account) }
+        XCTAssertEqual(pairs, [ReentryGapKeyPair(publicKey: one.publicKey, secret: one.secret),
+                               ReentryGapKeyPair(publicKey: two.publicKey, secret: two.secret)])
+        let otherWrap = ReentryGapLookStore(defaults: suite(), wrapKey: { _, _ in Data(repeating: 1, count: 32) })
+        XCTAssertTrue(ConversationReentryRules.gapKeyPairs(requests) {
+            otherWrap.openSecret($0, accountIdB64: self.account)
+        }.isEmpty, "a lost wrap key opens none")
+    }
+
+    /// The old carrier (a group exporter every member holds) is gone.
+    func testTheGroupExporterCarrierIsGone() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+                .appendingPathComponent("../Lakko/Chat/ConversationReentry.swift").standardized, encoding: .utf8)
+        XCTAssertFalse(source.contains("lakko/conversation-reentry/history/v1"))
+        XCTAssertFalse(source.contains("lakko/conversation-reentry/history-rendezvous/v1"))
+    }
+
+    private func owedRow(owedAtMs: UInt64) -> ReentryOwedHistory {
+        ReentryOwedHistory(
+            groupIdHex: "g", keyPackage: Data([1]), leafKey: Data(repeating: 2, count: 32),
+            gapKey: Data(repeating: 3, count: 32), proposedAtEpoch: 8, gapFromMs: 1, owedAtMs: owedAtMs)
     }
 
     func testTheGapRowsAreTheConversationsOwnSinceTheGap() {
@@ -402,9 +531,7 @@ final class ConversationReentryTests: XCTestCase {
 
     func testAnOwedHistoryIsKeptOncePerKeyPackageAndExpires() {
         let owed = ReentryHistoryOwed(defaults: suite())
-        let row = ReentryOwedHistory(
-            groupIdHex: "g", keyPackage: Data([1]), leafKey: Data(repeating: 2, count: 32),
-            targetEpoch: 8, gapFromMs: 1, owedAtMs: 100)
+        let row = owedRow(owedAtMs: 100)
         owed.add(row, accountIdB64: account)
         owed.add(row, accountIdB64: account)
         XCTAssertEqual(owed.load(accountIdB64: account).count, 1)
@@ -465,6 +592,7 @@ final class ConversationReentryTests: XCTestCase {
     // MARK: - The 2026-11-19 walk fix
 
     private let day: UInt64 = 24 * 60 * 60 * 1000
+    private let onePair = ReentryGapKeyPair(publicKey: Data(repeating: 2, count: 32), secret: Data(repeating: 1, count: 32))
 
     /// A wrap-key provider standing in for the Keychain: one fixed key.
     private func lookStore(_ defaults: UserDefaults, key: Data = Data(repeating: 0x5A, count: 32))
@@ -476,7 +604,9 @@ final class ConversationReentryTests: XCTestCase {
         let defaults = suite()
         let store = lookStore(defaults)
         let secret = Data((0..<32).map { UInt8($0) &* 7 &+ 3 })
-        let look = ReentryGapLook(groupIdHex: "aa", secret: secret, gapFromMs: 1_000, gapToMs: 5_000)
+        let look = ReentryGapLook(
+            groupIdHex: "aa", keys: [ReentryGapKeyPair(publicKey: Data(repeating: 4, count: 32), secret: secret)],
+            gapFromMs: 1_000, gapToMs: 5_000)
         XCTAssertTrue(store.save(look, accountIdB64: account))
         XCTAssertEqual(store.load(accountIdB64: account, groupIdHex: "aa"), look)
         XCTAssertEqual(store.groupIds(accountIdB64: account), ["aa"])
@@ -500,14 +630,14 @@ final class ConversationReentryTests: XCTestCase {
     func testAGapLookWithoutAWrapKeyIsNotWritten() {
         let defaults = suite()
         let store = ReentryGapLookStore(defaults: defaults, wrapKey: { _, _ in nil })
-        let look = ReentryGapLook(groupIdHex: "aa", secret: Data(repeating: 1, count: 32), gapFromMs: 1, gapToMs: 2)
+        let look = ReentryGapLook(groupIdHex: "aa", keys: [onePair], gapFromMs: 1, gapToMs: 2)
         XCTAssertFalse(store.save(look, accountIdB64: account))
         XCTAssertNil(defaults.data(forKey: ReentryGapLookStore.key(account)))
     }
 
     func testAGapLookRunsAtMostOncePerMinute() {
         XCTAssertEqual(ConversationReentryRules.gapHistoryLookIntervalMs, 60_000)
-        var look = ReentryGapLook(groupIdHex: "aa", secret: Data(repeating: 1, count: 32), gapFromMs: 1, gapToMs: 100)
+        var look = ReentryGapLook(groupIdHex: "aa", keys: [onePair], gapFromMs: 1, gapToMs: 100)
         XCTAssertEqual(ConversationReentryRules.gapLookVerdict(look, nowMs: 100), .look, "the first look is at once")
         look.lastLookMs = 1_000
         XCTAssertEqual(ConversationReentryRules.gapLookVerdict(look, nowMs: 1_000), .wait)
@@ -518,7 +648,7 @@ final class ConversationReentryTests: XCTestCase {
     func testAGapLookIsDroppedThirtyDaysAfterTheGapsEnd() {
         XCTAssertEqual(ConversationReentryRules.gapHistoryLookRetentionMs, 30 * day)
         let look = ReentryGapLook(
-            groupIdHex: "aa", secret: Data(repeating: 1, count: 32), gapFromMs: 1, gapToMs: 10_000, lastLookMs: nil)
+            groupIdHex: "aa", keys: [onePair], gapFromMs: 1, gapToMs: 10_000, lastLookMs: nil)
         XCTAssertEqual(ConversationReentryRules.gapLookVerdict(look, nowMs: 10_000 + 30 * day - 1), .look)
         XCTAssertEqual(ConversationReentryRules.gapLookVerdict(look, nowMs: 10_000 + 30 * day), .drop)
         var recent = look
@@ -529,9 +659,7 @@ final class ConversationReentryTests: XCTestCase {
 
     func testAnOwedHistoryWaitsThirtyDays() {
         XCTAssertEqual(ReentryHistoryOwed.lifetimeMs, 30 * day)
-        let row = ReentryOwedHistory(
-            groupIdHex: "g", keyPackage: Data([1]), leafKey: Data(repeating: 2, count: 32),
-            targetEpoch: 8, gapFromMs: 1, owedAtMs: 100)
+        let row = owedRow(owedAtMs: 100)
         XCTAssertTrue(ConversationReentryRules.historyStillOwed(row, nowMs: 100 + 29 * day))
         XCTAssertFalse(ConversationReentryRules.historyStillOwed(row, nowMs: 100 + 30 * day))
     }
@@ -590,7 +718,6 @@ final class ConversationReentryTests: XCTestCase {
     }
 
     func testAGapBundleSaysWhetherItCarriesEverythingAndItsEarliestRow() throws {
-        let secret = Data(repeating: 0x42, count: 32)
         let hex = String(repeating: "ab", count: 32)
         let rows = [
             PersistedMessage(messageId: 7, direction: "incoming", text: "one", attachments: [],
@@ -605,10 +732,15 @@ final class ConversationReentryTests: XCTestCase {
                                       createdAt: "2026-11-11T12:00:00Z")] + rows
         XCTAssertTrue(ConversationReentryRules.gapHeldBefore(older, gapFromMs: gapFrom))
 
+        let readmitter = try Identity.fromSeed(seed: Data(repeating: 0x62, count: 32))
+        let gapKey = generateGapKey()
+        let groupId = Data(repeating: 0xAB, count: 32)
         for heldBefore in [true, false] {
-            let sealed = try XCTUnwrap(HistoryBundleCodec.buildForGroup(
-                hex: hex, rows: rows, accountIdB64: account, secret: secret, heldBeforeGap: heldBefore))
-            let opened = try openHistoryBundleStructured(secret: secret, sealedBytes: sealed)
+            let sealed = try XCTUnwrap(HistoryBundleCodec.buildGapForGroup(
+                hex: hex, rows: rows, accountIdB64: account, readmitter: readmitter, gapKey: gapKey.publicKey,
+                groupId: groupId, heldBeforeGap: heldBefore))
+            let opened = try openGapHistoryStructured(
+                gapSecret: gapKey.secret, groupId: groupId, sealed: sealed).bundle
             XCTAssertEqual(opened.groups.first?.countCapped, !heldBefore)
             let summary = HistoryBundleCodec.gapSummary(opened)
             XCTAssertEqual(summary.complete, heldBefore)
@@ -875,7 +1007,7 @@ final class ConversationReentryTests: XCTestCase {
     func testAGapLookKeepsTheRouteOfTheRequest() throws {
         let store = ReentryGapLookStore(defaults: suite(), wrapKey: { _, _ in Data(repeating: 9, count: 32) })
         let look = ReentryGapLook(
-            groupIdHex: "aa", secret: Data(repeating: 1, count: 32), gapFromMs: 1, gapToMs: 2, route: "mailbox")
+            groupIdHex: "aa", keys: [onePair], gapFromMs: 1, gapToMs: 2, route: "mailbox")
         XCTAssertTrue(store.save(look, accountIdB64: account))
         XCTAssertEqual(store.load(accountIdB64: account, groupIdHex: "aa")?.route, "mailbox")
     }

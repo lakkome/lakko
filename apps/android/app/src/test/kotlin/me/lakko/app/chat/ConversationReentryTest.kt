@@ -621,21 +621,69 @@ class ConversationReentryTest {
     // The gap and its history
     // -----------------------------------------------------------------------
 
+    private val gapPub = ByteArray(32) { 0x47 }
+
+    private fun owedBundle(epochLeft: ULong = 6uL, gapKey: ByteArray = gapPub) =
+        OwedGapBundle("ab", byteArrayOf(1), epochLeft = epochLeft, gapFromMs = 0L, owedSinceMs = 0L, gapKey = gapKey)
+
     @Test
-    fun `the gap bundle is sent at exactly the join epoch`() {
-        val owed = OwedGapBundle("ab", byteArrayOf(1), epochLeft = 6uL, gapFromMs = 0L, owedSinceMs = 0L)
+    fun `the gap bundle is sent once the group moved past the request's epoch, at any later epoch`() {
+        val owed = owedBundle()
         assertEquals(OwedBundleStep.WAIT, owedBundleStep(owed, 6uL, 1L))
+        assertEquals(OwedBundleStep.WAIT, owedBundleStep(owed, 5uL, 1L))
         assertEquals(OwedBundleStep.SEND, owedBundleStep(owed, 7uL, 1L))
-        assertEquals(OwedBundleStep.DROP, owedBundleStep(owed, 8uL, 1L))
+        assertEquals("no epoch secret: a later epoch still sends", OwedBundleStep.SEND, owedBundleStep(owed, 9uL, 1L))
         assertEquals(OwedBundleStep.WAIT, owedBundleStep(owed, null, 1L))
-        assertEquals(OwedBundleStep.DROP, owedBundleStep(owed, 6uL, GAP_OWED_TTL_MS + 1L))
+        assertEquals(OwedBundleStep.DROP, owedBundleStep(owed, 7uL, GAP_OWED_TTL_MS + 1L))
+        assertEquals("a gap key that is not 32 bytes is never sealed to", OwedBundleStep.DROP, owedBundleStep(owedBundle(gapKey = ByteArray(31)), 7uL, 1L))
+        assertEquals(OwedBundleStep.WAIT, owedBundleStep(owedBundle(epochLeft = ULong.MAX_VALUE), ULong.MAX_VALUE, 1L))
+    }
+
+    @Test
+    fun `an opened gap history is kept only from a signer the joined group accepts`() {
+        val signer = ByteArray(32) { 5 }
+        var asked: ByteArray? = null
+        assertEquals("bundle", acceptedGapHistory(signer, "bundle") { asked = it; true })
+        assertArrayEquals(signer, asked)
+        assertNull("a plain member's post is dropped", acceptedGapHistory(signer, "bundle") { false })
+        assertNull("a failed check drops it", acceptedGapHistory(signer, "bundle") { error("native") })
+    }
+
+    @Test
+    fun `the old exporter carrier is gone`() {
+        val main = java.io.File("src/main/kotlin/me/lakko/app")
+        for (file in main.walkTopDown().filter { it.extension == "kt" }) {
+            val text = file.readText()
+            assertFalse(file.name, text.contains("lakko/conversation-reentry/history/v1"))
+            assertFalse(file.name, text.contains("lakko/conversation-reentry/history-rendezvous/v1"))
+            assertFalse(file.name, text.contains("REENTRY_HISTORY_EXPORTER_LABEL"))
+        }
+        val repo = java.io.File("src/main/kotlin/me/lakko/app/chat/ChatRepository.kt").readText()
+        assertTrue(repo.contains("sealGapHistoryStructured("))
+        assertTrue(repo.contains("openGapHistoryStructured("))
+        assertTrue(repo.contains("gapHistorySignerAccepted("))
+        assertTrue(repo.contains("gapHistoryStart("))
+        assertTrue(repo.contains("gapHistoryRendezvous(bundle.gapKey)"))
+    }
+
+    @Test
+    fun `a request's gap key is durable before the record, and the record before the send`() {
+        val repo = java.io.File("src/main/kotlin/me/lakko/app/chat/ChatRepository.kt").readText()
+        val fn = repo.substring(repo.indexOf("private suspend fun requestReentryIfDue("))
+        val body = fn.substring(0, fn.indexOf("private fun reentryIntervalMs()"))
+        val keySaved = body.indexOf("gapKeyStore.put(")
+        val recordSaved = body.indexOf("reentryRecords.put(")
+        val composed = body.indexOf("composeConversationReentryEnvelope(")
+        assertTrue(keySaved in 0 until recordSaved)
+        assertTrue(recordSaved < composed)
+        assertTrue("the public half rides the envelope", body.contains("gapKey.publicKey,"))
     }
 
     @Test
     fun `an owed bundle is kept thirty days, as long as the returning device looks`() {
         assertEquals(30L * 24L * 60L * 60L * 1_000L, GAP_OWED_TTL_MS)
         assertEquals(GAP_HISTORY_LOOK_RETENTION_MS, GAP_OWED_TTL_MS)
-        val owed = OwedGapBundle("ab", byteArrayOf(1), epochLeft = 6uL, gapFromMs = 0L, owedSinceMs = 0L)
+        val owed = owedBundle()
         val twoDays = 2L * 24L * 60L * 60L * 1_000L
         assertEquals("past the old one-day bound it still waits", OwedBundleStep.WAIT, owedBundleStep(owed, 6uL, twoDays))
         assertEquals(OwedBundleStep.SEND, owedBundleStep(owed, 7uL, GAP_OWED_TTL_MS))
@@ -645,17 +693,20 @@ class ConversationReentryTest {
     @Test
     fun `an owed bundle survives its persisted form, the largest epoch included`() {
         for (epoch in listOf(0uL, 6uL, ULong.MAX_VALUE)) {
-            val owed = OwedGapBundle("AB", byteArrayOf(1, 2, 3), epochLeft = epoch, gapFromMs = 5L, owedSinceMs = 9L)
+            val owed = OwedGapBundle("AB", byteArrayOf(1, 2, 3), epochLeft = epoch, gapFromMs = 5L, owedSinceMs = 9L, gapKey = gapPub)
             val back = owed.toRow().toOwed()!!
+            assertArrayEquals(gapPub, back.gapKey)
             assertEquals("ab", back.groupIdHex)
             assertArrayEquals(byteArrayOf(1, 2, 3), back.leafSignatureKey)
             assertEquals(epoch, back.epochLeft)
             assertEquals(5L, back.gapFromMs)
             assertEquals(9L, back.owedSinceMs)
         }
-        val broken = OwedGapBundleRow("ab", "not base64!", "6", 0L, 0L)
+        val pubB64 = java.util.Base64.getEncoder().encodeToString(gapPub)
+        val broken = OwedGapBundleRow("ab", "not base64!", "6", 0L, 0L, pubB64)
         assertNull(broken.toOwed())
-        assertNull(OwedGapBundleRow("ab", "AQ==", "-1", 0L, 0L).toOwed())
+        assertNull(OwedGapBundleRow("ab", "AQ==", "-1", 0L, 0L, pubB64).toOwed())
+        assertNull("a gap key that is not 32 bytes", OwedGapBundleRow("ab", "AQ==", "6", 0L, 0L, "AQ==").toOwed())
         assertEquals("ab:cd", owedGapBundleKey("AB", "CD"))
     }
 
@@ -686,14 +737,20 @@ class ConversationReentryTest {
     }
 
     private val lookSecret = ByteArray(32) { 0x42 }
+    private val lookPublic = ByteArray(32) { 0x43 }
 
-    private fun lookRecord(gapTo: Long = 1_000_000L) = GapLookRecord(
+    private fun b64(bytes: ByteArray) = java.util.Base64.getEncoder().encodeToString(bytes)
+
+    private fun lookRecord(gapTo: Long = 1_000_000L, keys: List<GapKeyEntry> = listOf(GapKeyEntry(b64(lookPublic), b64(lookSecret)))) = GapLookRecord(
         groupIdHex = "AB",
-        secretB64 = java.util.Base64.getEncoder().encodeToString(lookSecret),
+        keys = keys,
         gapFromMs = 500L,
         gapToMs = gapTo,
         route = ReentryRouteKind.KNOCK,
     )
+
+    /** A stand-in for `gapHistoryRendezvous` (native): the public key tagged. */
+    private val fakeRendezvous: (ByteArray) -> ByteArray = { byteArrayOf(0x52) + it }
 
     @Test
     fun `a look is due at once, then at most once a minute, and dropped after thirty days`() {
@@ -713,7 +770,130 @@ class ConversationReentryTest {
     @Test
     fun `the record never prints its secret`() {
         val text = lookRecord().toString()
-        assertFalse(text.contains(lookRecord().secretB64))
+        assertFalse(text.contains(b64(lookSecret)))
+        assertFalse(GapKeyEntry(b64(lookPublic), b64(lookSecret)).toString().contains(b64(lookSecret)))
+    }
+
+    @Test
+    fun `every held gap key's rendezvous is read, and the bundle is opened with that key's secret`() = kotlinx.coroutines.runBlocking {
+        val store = MemoryGapLookStore()
+        val second = ByteArray(32) { 0x44 }
+        val secondSecret = ByteArray(32) { 0x45 }
+        val looker = GapHistoryLooker(store, Clock()::read)
+        looker.start("acct", lookRecord(keys = listOf(GapKeyEntry(b64(lookPublic), b64(lookSecret)), GapKeyEntry(b64(second), b64(secondSecret)))))
+        val read = ArrayList<ByteArray>()
+        var openedWith: ByteArray? = null
+        val outcome = looker.lookIfDue(
+            "acct",
+            "ab",
+            read = { r -> read += r; if (r.contentEquals(fakeRendezvous(second))) listOf(byteArrayOf(7)) else emptyList() },
+            open = { secret, _, _ -> openedWith = secret.copyOf(); "bundle" },
+            rendezvousOf = fakeRendezvous,
+        ) { _, _ -> }
+        assertEquals(GapLookOutcome.RECEIVED, outcome)
+        assertEquals(2, read.size)
+        assertArrayEquals(fakeRendezvous(lookPublic), read[0])
+        assertArrayEquals(secondSecret, openedWith)
+    }
+
+    /** A rendezvous of [rows] rows served in pages the way the DS does:
+     *  rows with an id above `after`, at most `limit`, `has_more` when more
+     *  remain. Row `i` has id `i + 1`. Records every `(after, limit)` asked. */
+    private class PagedRendezvous(val rows: List<ByteArray>) {
+        val asked = ArrayList<Pair<Long, Int>>()
+
+        fun page(after: Long, limit: Int): me.lakko.app.ds.FetchResult {
+            asked += after to limit
+            val rest = rows.withIndex().filter { (it.index + 1L) > after }
+            val page = rest.take(limit)
+            return me.lakko.app.ds.FetchResult(
+                messages = page.map { MailboxMessage(id = it.index + 1L, payload = it.value, createdAt = "t") },
+                hasMore = rest.size > limit,
+            )
+        }
+    }
+
+    @Test
+    fun `a first page of junk does not hide the bundle on a later page`() = kotlinx.coroutines.runBlocking {
+        val bundle = byteArrayOf(0x42, 0x42)
+        val junk = List(me.lakko.app.ds.RENDEZVOUS_PAGE_LIMIT) { byteArrayOf(0x11, it.toByte()) }
+        // Junk before the bundle and junk after it: newest first, the rows
+        // after it are tried first and passed over.
+        val rendezvous = PagedRendezvous(junk + listOf(bundle) + List(3) { byteArrayOf(0x22, it.toByte()) })
+        val store = MemoryGapLookStore()
+        val looker = GapHistoryLooker(store, Clock()::read)
+        looker.start("acct", lookRecord())
+        var tried = 0
+        var got: ByteArray? = null
+        val outcome = looker.lookIfDue(
+            "acct",
+            "ab",
+            read = { _ ->
+                me.lakko.app.ds.readRendezvousPages { after, limit -> rendezvous.page(after, limit) }.map { it.payload }
+            },
+            open = { _, payload, _ ->
+                tried += 1
+                if (payload.contentEquals(bundle)) payload else null
+            },
+            rendezvousOf = fakeRendezvous,
+        ) { _, applied -> got = applied }
+        assertEquals(GapLookOutcome.RECEIVED, outcome)
+        assertArrayEquals(bundle, got)
+        assertEquals("the three rows after the bundle, then the bundle", 4, tried)
+        assertEquals(
+            listOf(0L to me.lakko.app.ds.RENDEZVOUS_PAGE_LIMIT, 100L to me.lakko.app.ds.RENDEZVOUS_PAGE_LIMIT),
+            rendezvous.asked,
+        )
+        assertNull("the look is dropped once a bundle opened", store.get("acct", "ab"))
+    }
+
+    @Test
+    fun `the rendezvous read stops after the page cap`() = kotlinx.coroutines.runBlocking {
+        assertEquals(100, me.lakko.app.ds.RENDEZVOUS_PAGE_LIMIT)
+        assertEquals(10, me.lakko.app.ds.RENDEZVOUS_PAGE_CAP)
+        val rendezvous = PagedRendezvous(List(2_500) { byteArrayOf(0x11, (it % 256).toByte()) })
+        val rows = me.lakko.app.ds.readRendezvousPages { after, limit -> rendezvous.page(after, limit) }
+        assertEquals(me.lakko.app.ds.RENDEZVOUS_PAGE_CAP, rendezvous.asked.size)
+        assertEquals(1_000, rows.size)
+        assertEquals((0 until 10).map { it * 100L }, rendezvous.asked.map { it.first })
+        // A bundle past the cap is not reached: the look keeps waiting.
+        val store = MemoryGapLookStore()
+        val looker = GapHistoryLooker(store, Clock()::read)
+        looker.start("acct", lookRecord())
+        val bundle = byteArrayOf(0x42)
+        val beyond = PagedRendezvous(List(1_000) { byteArrayOf(0x11) } + listOf(bundle))
+        val outcome = looker.lookIfDue(
+            "acct",
+            "ab",
+            read = { _ -> me.lakko.app.ds.readRendezvousPages { a, l -> beyond.page(a, l) }.map { it.payload } },
+            open = { _, payload, _ -> if (payload.contentEquals(bundle)) payload else null },
+            rendezvousOf = fakeRendezvous,
+        ) { _, _ -> }
+        assertEquals(GapLookOutcome.NOTHING_YET, outcome)
+        assertEquals(10, beyond.asked.size)
+    }
+
+    @Test
+    fun `the rendezvous read ends on the first page without more`() = kotlinx.coroutines.runBlocking {
+        val rendezvous = PagedRendezvous(List(42) { byteArrayOf(it.toByte()) })
+        val rows = me.lakko.app.ds.readRendezvousPages { after, limit -> rendezvous.page(after, limit) }
+        assertEquals(42, rows.size)
+        assertEquals(listOf(0L to 100), rendezvous.asked)
+        val empty = PagedRendezvous(emptyList())
+        assertTrue(me.lakko.app.ds.readRendezvousPages { a, l -> empty.page(a, l) }.isEmpty())
+        assertEquals(1, empty.asked.size)
+    }
+
+    @Test
+    fun `a look with no gap key is dropped`() = kotlinx.coroutines.runBlocking {
+        val store = MemoryGapLookStore()
+        val looker = GapHistoryLooker(store, Clock()::read)
+        looker.start("acct", lookRecord(keys = emptyList()))
+        assertEquals(
+            GapLookOutcome.DROPPED,
+            looker.lookIfDue<Int>("acct", "ab", read = { emptyList() }, open = { _, _, _ -> 1 }, rendezvousOf = fakeRendezvous) { _, _ -> },
+        )
+        assertNull(store.get("acct", "ab"))
     }
 
     @Test
@@ -725,20 +905,20 @@ class ConversationReentryTest {
         var reads = 0
         var rendezvousSeen: ByteArray? = null
 
-        val failed = looker.lookIfDue<Int>("acct", "ab", read = { r -> reads += 1; rendezvousSeen = r; throw IllegalStateException("offline") }, open = { _, _, _ -> 1 }) { _, _ -> }
+        val failed = looker.lookIfDue<Int>("acct", "ab", read = { r -> reads += 1; rendezvousSeen = r; throw IllegalStateException("offline") }, open = { _, _, _ -> 1 }, rendezvousOf = fakeRendezvous) { _, _ -> }
         assertEquals(GapLookOutcome.NOTHING_YET, failed)
-        assertArrayEquals(reentryHistoryRendezvous(lookSecret), rendezvousSeen)
+        assertArrayEquals(fakeRendezvous(lookPublic), rendezvousSeen)
         assertEquals(clock.now, store.get("acct", "ab")!!.lastLookMs)
 
-        assertEquals("throttled within the minute", GapLookOutcome.NOT_DUE, looker.lookIfDue<Int>("acct", "ab", read = { reads += 1; emptyList() }, open = { _, _, _ -> 1 }) { _, _ -> })
+        assertEquals("throttled within the minute", GapLookOutcome.NOT_DUE, looker.lookIfDue<Int>("acct", "ab", read = { reads += 1; emptyList() }, open = { _, _, _ -> 1 }, rendezvousOf = fakeRendezvous) { _, _ -> })
         assertEquals(1, reads)
 
         clock.now += GAP_HISTORY_LOOK_INTERVAL_MS
-        assertEquals(GapLookOutcome.NOTHING_YET, looker.lookIfDue<Int>("acct", "ab", read = { reads += 1; emptyList() }, open = { _, _, _ -> 1 }) { _, _ -> })
+        assertEquals(GapLookOutcome.NOTHING_YET, looker.lookIfDue<Int>("acct", "ab", read = { reads += 1; emptyList() }, open = { _, _, _ -> 1 }, rendezvousOf = fakeRendezvous) { _, _ -> })
         clock.now += GAP_HISTORY_LOOK_INTERVAL_MS
-        assertEquals(GapLookOutcome.NOTHING_YET, looker.lookIfDue<Int>("acct", "ab", read = { reads += 1; listOf(byteArrayOf(9)) }, open = { _, _, _ -> null }) { _, _ -> })
+        assertEquals(GapLookOutcome.NOTHING_YET, looker.lookIfDue<Int>("acct", "ab", read = { reads += 1; listOf(byteArrayOf(9)) }, open = { _, _, _ -> null }, rendezvousOf = fakeRendezvous) { _, _ -> })
         clock.now += GAP_HISTORY_LOOK_INTERVAL_MS
-        assertEquals(GapLookOutcome.NOTHING_YET, looker.lookIfDue<Int>("acct", "ab", read = { reads += 1; listOf(byteArrayOf(9)) }, open = { _, _, _ -> throw IllegalArgumentException("not a bundle") }) { _, _ -> })
+        assertEquals(GapLookOutcome.NOTHING_YET, looker.lookIfDue<Int>("acct", "ab", read = { reads += 1; listOf(byteArrayOf(9)) }, open = { _, _, _ -> throw IllegalArgumentException("not a bundle") }, rendezvousOf = fakeRendezvous) { _, _ -> })
         assertEquals(4, reads)
         assertTrue("still kept", store.get("acct", "ab") != null)
     }
@@ -761,6 +941,7 @@ class ConversationReentryTest {
                 tried += payload[0].toInt()
                 if (payload[0].toInt() == 2) "bundle" else null
             },
+            rendezvousOf = fakeRendezvous,
         ) { record, value ->
             receivedRecord = record
             receivedValue = value
@@ -771,7 +952,7 @@ class ConversationReentryTest {
         assertEquals(500L, receivedRecord!!.gapFromMs)
         assertEquals(1_000_000L, receivedRecord!!.gapToMs)
         assertNull(store.get("acct", "ab"))
-        assertEquals(GapLookOutcome.NOT_HELD, looker.lookIfDue<Int>("acct", "ab", read = { emptyList() }, open = { _, _, _ -> 1 }) { _, _ -> })
+        assertEquals(GapLookOutcome.NOT_HELD, looker.lookIfDue<Int>("acct", "ab", read = { emptyList() }, open = { _, _, _ -> 1 }, rendezvousOf = fakeRendezvous) { _, _ -> })
     }
 
     @Test
@@ -782,7 +963,7 @@ class ConversationReentryTest {
         looker.start("acct", lookRecord(gapTo = clock.now))
         clock.now += GAP_HISTORY_LOOK_RETENTION_MS + 1L
         var reads = 0
-        val outcome = looker.lookIfDue<Int>("acct", "ab", read = { reads += 1; emptyList() }, open = { _, _, _ -> 1 }) { _, _ -> }
+        val outcome = looker.lookIfDue<Int>("acct", "ab", read = { reads += 1; emptyList() }, open = { _, _, _ -> 1 }, rendezvousOf = fakeRendezvous) { _, _ -> }
         assertEquals(GapLookOutcome.DROPPED, outcome)
         assertEquals(0, reads)
         assertNull(store.get("acct", "ab"))
@@ -798,10 +979,11 @@ class ConversationReentryTest {
             "acct",
             "ab",
             read = {
-                inner = looker.lookIfDue<Int>("acct", "ab", read = { emptyList() }, open = { _, _, _ -> 1 }) { _, _ -> }
+                inner = looker.lookIfDue<Int>("acct", "ab", read = { emptyList() }, open = { _, _, _ -> 1 }, rendezvousOf = fakeRendezvous) { _, _ -> }
                 emptyList()
             },
             open = { _, _, _ -> 1 },
+            rendezvousOf = fakeRendezvous,
         ) { _, _ -> }
         assertEquals(GapLookOutcome.IN_FLIGHT, inner)
         assertEquals(GapLookOutcome.NOTHING_YET, outer)
@@ -846,25 +1028,6 @@ class ConversationReentryTest {
         assertEquals("outgoing", reentryBundleDirection(ReentryRouteKind.MAILBOX, "incoming"))
         assertEquals("incoming", reentryBundleDirection(ReentryRouteKind.KNOCK, "outgoing"))
         assertEquals("system", reentryBundleDirection(ReentryRouteKind.KNOCK, "system"))
-    }
-
-    @Test
-    fun `golden - the rendezvous id is SHA-256 over the label and the secret`() {
-        // The cross-client vector (web, iOS and Android agree on it).
-        val id = reentryHistoryRendezvous(ByteArray(32) { 0x42 })
-        assertEquals(
-            "8b4c89a03f20c038dfe71cf88eeee780a4be0af619b852cedbc63ad0dc6eb7dd",
-            id.joinToString("") { "%02x".format(it) },
-        )
-        assertEquals("lakko/conversation-reentry/history/v1", REENTRY_HISTORY_EXPORTER_LABEL)
-    }
-
-    @Test
-    fun `another secret names another rendezvous`() {
-        val a = reentryHistoryRendezvous(ByteArray(32) { 1 })
-        assertEquals(32, a.size)
-        assertArrayEquals(a, reentryHistoryRendezvous(ByteArray(32) { 1 }))
-        assertFalse(a.contentEquals(reentryHistoryRendezvous(ByteArray(32) { 2 })))
     }
 
     @Test

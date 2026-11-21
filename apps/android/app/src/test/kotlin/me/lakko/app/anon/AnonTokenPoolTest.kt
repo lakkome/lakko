@@ -252,6 +252,7 @@ class AnonTokenPoolTest {
                 AnonTokenContext.CHANNEL_REACT to 16,
                 AnonTokenContext.CHANNEL_COMMENT to 8,
                 AnonTokenContext.REPORT to 2,
+                AnonTokenContext.RENDEZVOUS_WRITE to 4,
             ),
             firstBatch,
         )
@@ -360,6 +361,7 @@ class AnonTokenPoolTest {
                 "channel-react",
                 "channel-comment",
                 "report",
+                "rendezvous-write",
             ),
             AnonTokenContext.entries.map { it.wire },
         )

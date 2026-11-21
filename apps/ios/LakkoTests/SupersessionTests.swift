@@ -423,3 +423,65 @@ final class SupersessionTests: XCTestCase {
         XCTAssertEqual(parsed, expires)
     }
 }
+
+// Security review 2026-11-21 — the directory serves an account's X25519 key
+// beside a signature by the account key binding it; a client seals nothing to
+// a key that binding does not verify.
+final class X25519BindingTests: XCTestCase {
+
+    private func identity(_ byte: UInt8) throws -> Identity {
+        try Identity.fromSeed(seed: Data(repeating: byte, count: 32))
+    }
+
+    private func bundle(signature: Data, x25519: Data, binding: Data?) -> IdentityFetchResponse {
+        IdentityFetchResponse(
+            signaturePubkey: base64Encode(signature), x25519Pubkey: base64Encode(x25519),
+            x25519Binding: binding.map { base64Encode($0) })
+    }
+
+    func testABoundKeyIsTheKeyToSealTo() throws {
+        let person = try identity(0x21)
+        let binding = signX25519Binding(accountIdentity: person)
+        XCTAssertEqual(UInt32(binding.count), x25519BindingLen())
+        let served = bundle(
+            signature: person.signaturePublicKey(), x25519: person.x25519PublicKey(), binding: binding)
+        XCTAssertEqual(served.verifiedX25519Pubkey, person.x25519PublicKey())
+    }
+
+    func testAnAbsentOrForeignBindingSealsToNothing() throws {
+        let person = try identity(0x21)
+        let other = try identity(0x22)
+        XCTAssertNil(bundle(signature: person.signaturePublicKey(), x25519: person.x25519PublicKey(), binding: nil)
+            .verifiedX25519Pubkey, "no binding: refused")
+        // The directory swaps in a key of its own, with the person's binding.
+        XCTAssertNil(bundle(
+            signature: person.signaturePublicKey(), x25519: other.x25519PublicKey(),
+            binding: signX25519Binding(accountIdentity: person)).verifiedX25519Pubkey)
+        // Or a binding signed by another account key.
+        XCTAssertNil(bundle(
+            signature: person.signaturePublicKey(), x25519: other.x25519PublicKey(),
+            binding: signX25519Binding(accountIdentity: other)).verifiedX25519Pubkey)
+        XCTAssertNil(bundle(
+            signature: person.signaturePublicKey(), x25519: person.x25519PublicKey(),
+            binding: Data(repeating: 0, count: 64)).verifiedX25519Pubkey)
+        XCTAssertNil(IdentityFetchResponse(
+            signaturePubkey: base64Encode(person.signaturePublicKey()), x25519Pubkey: base64Encode(person.x25519PublicKey()),
+            x25519Binding: "not base64!").verifiedX25519Pubkey)
+    }
+
+    func testTheBindingTravelsUnderItsOwnNameBothWays() throws {
+        let upload = IdentityUploadRequest(
+            accountId: "a", signaturePubkey: "s", x25519Pubkey: "x", x25519Binding: "Yg==")
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(upload)) as? [String: Any])
+        XCTAssertEqual(json["x25519_binding"] as? String, "Yg==")
+        let fetched = try JSONDecoder().decode(
+            IdentityFetchResponse.self,
+            from: Data(#"{"signature_pubkey":"s","x25519_pubkey":"x","x25519_binding":"Yg=="}"#.utf8))
+        XCTAssertEqual(fetched.x25519Binding, "Yg==")
+        let bare = try JSONDecoder().decode(
+            IdentityFetchResponse.self, from: Data(#"{"signature_pubkey":"s","x25519_pubkey":"x"}"#.utf8))
+        XCTAssertNil(bare.x25519Binding, "a row with none decodes, and seals to nothing")
+        XCTAssertNil(bare.verifiedX25519Pubkey)
+    }
+}

@@ -919,7 +919,15 @@ export type StateBundleOutcome =
 export async function pollForStateBundle(
   rendezvousPseudonym: Uint8Array,
   afterCursor: number,
-  options: { ds?: DsClient; signal?: AbortSignal; timeoutMs?: number } = {},
+  options: {
+    ds?: DsClient;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    /** Whether a state row's sealed bytes are the bundle (they open and
+     *  decode); a row that is not is passed over and the poll reads on.
+     *  Absent: the first state row. */
+    accept?: (sealed: Uint8Array) => boolean;
+  } = {},
 ): Promise<StateBundleOutcome> {
   const ds = options.ds ?? new DsClient();
   const signal = options.signal;
@@ -946,7 +954,11 @@ export async function pollForStateBundle(
       const first = result.messages[0];
       if (first === undefined) continue;
       const sealed = unwrapStateRow(first.payload);
-      if (sealed !== null) return { kind: "received", sealed };
+      // Anyone who learned the rendezvous id can write a tagged row: one
+      // that does not open is passed over.
+      if (sealed !== null && (options.accept === undefined || options.accept(sealed))) {
+        return { kind: "received", sealed };
+      }
       cursor = first.id;
       continue;
     }

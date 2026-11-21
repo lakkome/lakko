@@ -160,7 +160,9 @@ fn seal_seed_to_x25519(
 ) -> Result<Vec<u8>> {
     let eph_priv = SecretKey::generate();
     let eph_pub = eph_priv.public_key();
-    let shared = eph_priv.diffie_hellman(subscriber_pub);
+    let shared = eph_priv
+        .diffie_hellman(subscriber_pub)
+        .map_err(|_| ChannelError::Wire("subscriber key is a low-order point"))?;
 
     let eph_pub_bytes = eph_pub.to_bytes();
     let (key, nonce) = derive_key_and_nonce(&shared, &eph_pub_bytes)?;
@@ -209,7 +211,9 @@ pub fn open_seed(
     let eph_pub = PublicKey::from_bytes(&eph_arr)
         .map_err(|_| ChannelError::Wire("seed envelope ephemeral pubkey invalid"))?;
 
-    let shared = subscriber_priv.diffie_hellman(&eph_pub);
+    let shared = subscriber_priv
+        .diffie_hellman(&eph_pub)
+        .map_err(|_| ChannelError::Wire("seed envelope ephemeral pubkey invalid"))?;
     let (key, nonce) = derive_key_and_nonce(&shared, &eph_arr)?;
     let aad = make_aad(channel_id, epoch_id);
     let plaintext =

@@ -132,6 +132,12 @@ public enum PairingOrchestrator {
         }
     }
 
+    /// The row the joining device took for its Welcome did not join (anyone
+    /// who learned the rendezvous can post to it). The session waits past
+    /// it on the next ``JoinSession/awaitWelcome(timeoutSeconds:)``; the
+    /// screen goes back to waiting.
+    public struct WelcomeNotOpened: Error, Equatable {}
+
     /// Joining-side session handle. The SwiftUI view:
     ///
     ///   1. Reads `qrPayload`, feeds it into the
@@ -164,6 +170,9 @@ public enum PairingOrchestrator {
         /// carries in its payload; empty for an ordinary join.
         fileprivate let selfRemovalProof: Data
         fileprivate let redeem: (String) async throws -> DeviceAuthorizeRedeemResult
+        /// The last rendezvous row tried as the Welcome that did not join:
+        /// the next wait reads past it.
+        private var welcomeFloor: Int64 = 0
 
         fileprivate init(
             qrPayload: Data,
@@ -212,13 +221,29 @@ public enum PairingOrchestrator {
         }
 
         /// Long-poll the rendezvous mailbox.
+        /// A row that did not join before (``WelcomeNotOpened``) is passed
+        /// over: the wait reads past it.
         public func awaitWelcome(
             timeoutSeconds: TimeInterval = WelcomeCourier.defaultTimeoutSeconds
         ) async throws -> WelcomeCourier.WelcomeOutcome {
             return try await WelcomeCourier.pollForWelcome(
                 rendezvousPseudonym: rendezvous,
+                after: welcomeFloor,
                 timeoutSeconds: timeoutSeconds
             )
+        }
+
+        /// The join of the Welcome row itself; a refusal there is the row
+        /// not being this device's Welcome: remember it and say so.
+        private func joinOrPassOver<T>(welcomeCursor: Int64?, _ join: () throws -> T) throws -> T {
+            do {
+                return try join()
+            } catch {
+                NSLog("[pairing] a rendezvous row did not join; waiting past it (%@)",
+                      String(describing: type(of: error)))
+                if let welcomeCursor { welcomeFloor = max(welcomeFloor, welcomeCursor) }
+                throw WelcomeNotOpened()
+            }
         }
 
         /// Drive the terminal joining-side step: join the
@@ -275,11 +300,13 @@ public enum PairingOrchestrator {
         ) async throws -> JoinRecoveryOutcome? {
             // ADR-0078 section 6: the join binds no group id; the recovery
             // row opened under this group's exporter binds the account.
-            let joined = try DeviceGroup.joinFromWelcome(
-                welcome: welcomeBytes,
-                identity: identity,
-                accountId: accountIdBytes
-            )
+            let joined = try joinOrPassOver(welcomeCursor: welcomeCursor) {
+                try DeviceGroup.joinFromWelcome(
+                    welcome: welcomeBytes,
+                    identity: identity,
+                    accountId: accountIdBytes
+                )
+            }
             DeviceGroupLifecycle.clearFoundingMark(joined: joined)
             // ADR-0081 decision 3 — fail-closed: a joined DeviceGroup that is
             // not on disk is not reported as joined.
@@ -348,10 +375,12 @@ public enum PairingOrchestrator {
             welcomeBytes: Data,
             welcomeCursor: Int64
         ) async throws -> JoinRecoveryOutcome {
-            let plain = try PairingOrchestrator.joinWelcomeByName(
-                welcomeBytes: welcomeBytes,
-                identity: identity
-            )
+            let plain = try joinOrPassOver(welcomeCursor: welcomeCursor) {
+                try PairingOrchestrator.joinWelcomeByName(
+                    welcomeBytes: welcomeBytes,
+                    identity: identity
+                )
+            }
             guard let outcome = await runJoinerRecovery(
                 exportSecret: { label, context, length in
                     try plain.exportSecret(
@@ -405,9 +434,11 @@ public enum PairingOrchestrator {
         /// passed its checks.
         private func fetchBundles(into pending: PendingJoinByName, welcomeCursor cursor: Int64) async {
             do {
+                let secret = try pending.joined.historyBundleSecret(identity: identity)
                 let sealed = try await WelcomeCourier.pollForHistoryBundle(
                     rendezvousPseudonym: rendezvous,
-                    welcomeCursor: cursor
+                    welcomeCursor: cursor,
+                    opens: { HistoryBundleCodec.opens(secret: secret, sealedBytes: $0) }
                 )
                 if case .received(let sealedBytes) = sealed {
                     pending.historySealed = sealedBytes
@@ -431,14 +462,13 @@ public enum PairingOrchestrator {
             welcomeCursor cursor: Int64
         ) async {
             do {
+                let secret = try joined.historyBundleSecret(identity: identity)
                 let sealed = try await WelcomeCourier.pollForHistoryBundle(
                     rendezvousPseudonym: rendezvous,
-                    welcomeCursor: cursor
+                    welcomeCursor: cursor,
+                    opens: { HistoryBundleCodec.opens(secret: secret, sealedBytes: $0) }
                 )
                 if case .received(let sealedBytes) = sealed {
-                    let secret = try joined.historyBundleSecret(
-                        identity: identity
-                    )
                     let applied = try HistoryBundleCodec.applyToMessageLog(
                         accountIdB64: accountIdB64,
                         secret: secret,
@@ -473,11 +503,34 @@ public enum PairingOrchestrator {
             exportSecret: (String, Data, UInt32) throws -> Data,
             welcomeCursor: Int64
         ) async -> JoinRecoveryOutcome? {
+            var exporterKey = Data()
+            var payload = Data()
+            defer {
+                exporterKey.resetBytes(in: 0..<exporterKey.count)
+                payload.resetBytes(in: 0..<payload.count)
+            }
+            do {
+                exporterKey = try exportSecret(
+                    recoveryExporterLabel(),
+                    rendezvous,
+                    recoveryExporterKeyLen()
+                )
+            } catch {
+                NSLog(
+                    "recovery payload key not derived (join unaffected): %@",
+                    error.localizedDescription
+                )
+                return nil
+            }
+            let key = exporterKey
             let outcome: RecoveryPayload.RecoveryPayloadOutcome
             do {
+                // A recovery row that does not open and decode under this
+                // join's key is passed over, and the poll keeps reading.
                 outcome = try await RecoveryPayload.pollForRecoveryPayload(
                     rendezvousPseudonym: rendezvous,
-                    afterCursor: welcomeCursor
+                    afterCursor: welcomeCursor,
+                    opens: { RecoveryPayload.opens(sealed: $0, key: key) }
                 )
             } catch {
                 NSLog(
@@ -489,19 +542,8 @@ public enum PairingOrchestrator {
             guard case .received(let sealedBlob) = outcome else {
                 return nil
             }
-            var exporterKey = Data()
-            var payload = Data()
-            defer {
-                exporterKey.resetBytes(in: 0..<exporterKey.count)
-                payload.resetBytes(in: 0..<payload.count)
-            }
             let decoded: FfiRecoveryPayload
             do {
-                exporterKey = try exportSecret(
-                    recoveryExporterLabel(),
-                    rendezvous,
-                    recoveryExporterKeyLen()
-                )
                 payload = try openWithKey(key: exporterKey, wire: sealedBlob)
                 decoded = try decodeRecoveryPayload(plaintext: payload)
             } catch {

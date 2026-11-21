@@ -81,6 +81,7 @@ entry's status line, not a mechanical fact.
 | [G-55](./known-gaps.md#g-55) | An owner-device channel entry and the DeviceGroup rejoin knock show the account key to the Delivery Service | Closed in code (2026-11-14), host-tested only | both rows wrapped under keys every member holds (ADR-0078 section 4); see the entry |
 | [G-56](./known-gaps.md#g-56) | A device bound under the current key after a rotation derives another PublisherGroup id than its siblings, and the clients disagree on it | Closed in code (2026-11-15; ADR-0074 amendment), host-tested only | join routes, pairing recovery row, DeviceGroup lineage on web, iOS, Android |
 | [G-58](./known-gaps.md#g-58) | A device behind a conversation: what recovery cannot reach | Open | a fake epoch from a member registrar; a removed single-device account; a group whose only owner or admin is the behind device; no push routing secret after a plain member brought the device back |
+| [G-59](./known-gaps.md#g-59) | Security review of conversation rejoin, deleted accounts and the sealed box | Closed in code (2026-11-21), unit tests only | a leaf's first-seen time only from this build on; unsigned rendezvous posts dropped, rendezvous writes cost a token (follow-up, not deployed); invite-capability X25519 keys covered by the capability, by design |
 
 ## MLS state machine
 
@@ -3466,6 +3467,10 @@ account's lineage seed, which every device of the account holds.
   2026-11-18). Phase 1 and 1b (prevention, C-92) built 2026-11-18 on
   `services/ds` and the three clients; phase 2 core and both FFI surfaces
   (recovery, C-93) built 2026-11-19; nothing walked, nothing deployed.
+  **Update 2026-11-21:** the clients' recovery (S3, S4) has since been built
+  and walked on the test stack (ADR-0091 live-walk sections), and a security
+  review closed three abuses of it in code the same day (G-59); the
+  residuals below are unchanged by that review.
 - A member registrar (ADR-0057) can append an epoch with a garbage commit
   row. Every honest device then reads a `latest_epoch` above its own and is
   suspected: it stops acting in that conversation and asks to come back, and
@@ -3490,3 +3495,90 @@ account's lineage seed, which every device of the account holds.
   ADR-0042 receive gate keeps a plain member's secret only when it is the
   bytes already held; the gate is unchanged. Until then the device receives
   no push wake for that group and reads it when it polls.
+
+<a id="g-59"></a>
+### G-59: Security review of conversation rejoin, deleted accounts and the sealed box - CLOSED in code 2026-11-21 (residuals listed)
+
+- Status: **closed in code 2026-11-21** on the core, both FFI surfaces,
+  `services/discovery` and web (incl. desktop), iOS and Android; unit tests
+  only, deployed to the test stack the same day, nothing walked. Kept in this file for its
+  residuals. Invariants: C-93 and C-95 amended, C-99 new.
+- **Found (none needs a server compromise unless it says so):**
+  1. *ADR-0091 gap history readable by every member.* It was sealed under an
+     exporter secret every member after the replacement commit holds, and
+     its start (`gap_from_ms`) came unchecked from the request, so any member
+     could read the returning device's history and a request could ask for
+     history from before the device was in the conversation.
+  2. *A plain member could re-admit.* `join_reentry` accepted a Welcome from
+     any account in the stored roster, so a plain member of a group could
+     put the returning device on a tree of its choosing; a gap history
+     carried no signer.
+  3. *A member being removed could stay.* A re-entry `Add` of its own leaf,
+     or an `Add` of another of its devices, carried in the same commit as its
+     removal by someone else, survived the removal.
+  4. *Account X25519 key unbound.* The directory served the account X25519
+     key beside the identity key with nothing binding them; a hostile
+     directory could pair a genuine identity key with its own X25519 key and
+     read every sealed-to-account envelope addressed to that person.
+  5. *Sealed box.* A low-order peer key gave an all-zero shared secret that
+     was used; the KDF did not bind the recipient key; several uses shared
+     the contact request's labels.
+  6. *ADR-0098 statement final and destructive.* Anyone holding the account
+     key could post a statement that permanently marked the person deleted,
+     removed them from groups an admin's device held and dropped messages
+     held for them; and discovery accepted a retired-name hold at or below
+     the 21-day display window.
+- **Closed by:** (1, 2) `lakko-contacts::gap_history` (sealed to a gap key
+  named in `conversation_reentry` version 2, signed inside by the
+  re-admitter's leaf, rendezvous from the gap public key, start clamped by
+  `gap_history_start`) and `lakko-mls` `sender_may_readmit` /
+  `Group::gap_history_signer_accepted` (own account, owner or admin, the
+  other person of a one-to-one), ADR-0091 section "Security review,
+  2026-11-21"; (3) `lakko-mls::reentry::reentry_adds_stand` at the peer commit
+  gate and the sweep; (4) `lakko-contacts::x25519_binding`, required by
+  `POST /discovery/identity` (migration `0041`, `400 x25519-binding-invalid`)
+  and verified by every client before sealing; (5)
+  `lakko_crypto::agreement` `NonContributory`, both public keys in the HKDF
+  `info`, per-use `SealLabels`; (6) `lakko-contacts::account_deleted::
+  deletion_effects` (destructive steps only on a statement AND a `404`, a
+  later `SamePerson` reverts the display, recording a statement clears the
+  recorded answer) and the 28-day hold floor at discovery start-up (ADR-0098
+  section "Security review, 2026-11-21").
+- **Residuals:**
+  - A re-admitter records the first time it sees a leaf only from this
+    build on; for a leaf it saw before, `gap_history_start` falls back to its
+    last message from that leaf, and with neither it sends no history (the
+    gap line stays).
+  - Anyone who learns a request's gap public key (every member who read the
+    knock) can post to its rendezvous. The returning device drops a post not
+    signed by an accepted leaf, so nothing can be forged. Junk posts could
+    bury the real bundle: until the follow-up below the web and iOS look read
+    only the first 16 rows and Android the first 100.
+  - **Follow-up the same day (unit tests only, not deployed):** a write to
+    any rendezvous (pairing, recovery, the state bundle, a rejoin note, a gap
+    history) spends one `rendezvous-write` anonymous token (wire byte 18,
+    500 a day per account, chosen, not measured); before it a rendezvous
+    name alone wrote without limit. The gap look reads page after page, up
+    to 1000 rows (chosen), and passes over rows that do not open. What
+    remains: rows are read oldest first, so junk counts only if it lands
+    between the knock and the re-admitter's post; pushing the bundle past
+    the 1000-row read in that window takes more than two accounts' daily
+    tokens. The DS keeps no per-rendezvous count.
+    The other rendezvous readers (pairing Welcome, history bundle, recovery
+    payload, state bundle, DeviceGroup rejoin) used to take the first row
+    and fail on one that did not open; they now pass over it and read on
+    until their own deadline. A copy of the 25-byte rejoin presence note,
+    which anyone holding the name can post, still makes a returning device
+    wait for a Welcome until its next knock instead of founding.
+  - An X25519 key carried inside a signed invite capability (contact,
+    group, call links) is not covered by a separate binding; the
+    capability's own signature by the issuer's identity key covers it, by
+    design.
+  - Identity bundles written before migration `0041` carry no binding and
+    are unusable for sealing until re-uploaded (no production deployment).
+  - A holder of the account key can still make the person read "Deleted
+    account" until the next directory answer, which a client asks for at
+    once; a hostile directory answering `404` after a genuine statement
+    completes the deletion effects.
+  - The binding does not make the identity key right: the pin, the KT log
+    and the supersession gates do, with the existing first-contact residual.

@@ -357,15 +357,61 @@ describe("mailboxes", () => {
     const reg = new DsAccessRegistry();
     reg.setMailboxSigner(fakeSigner(0n, "m"));
     const { fetchImpl, sent } = fakeFetch([EMPTY, { status: 201, json: { id: 2, created_at: "t" } }]);
-    const ds = new DsClient("/api/ds", { access: reg, fetchImpl });
+    const { pool } = fakeTokenPool();
+    const ds = new DsClient("/api/ds", { access: reg, fetchImpl, tokens: pool });
     await ds.fetchRendezvous(OTHER, { after: 1 });
-    await ds.publishRendezvous(OTHER, new Uint8Array([1]));
+    await expect(ds.publishRendezvous(OTHER, new Uint8Array([1]))).resolves.toEqual({
+      id: 2,
+      createdAt: "t",
+    });
     const hex = "01".repeat(32);
     expect(sent.map((s) => s.url)).toEqual([
       `/api/ds/ds/rendezvous/${hex}/messages?after=1`,
       `/api/ds/ds/rendezvous/${hex}/messages`,
     ]);
     expect(sent.map((s) => s.proof)).toEqual([undefined, undefined]);
+    // A read spends no token; the write spends one `rendezvous-write` token
+    // and goes without credentials.
+    expect(sent[0]?.token).toBeUndefined();
+    expect(sent[1]?.token).toBe("tok-1");
+    expect(sent[1]?.credentials).toBe("omit");
+    expect(sent[1]?.authorization).toBeUndefined();
+    expect(Array.from(sent[1]?.body ?? [])).toEqual([1]);
+  });
+
+  it("a rendezvous write draws from the rendezvous-write pool", async () => {
+    const { fetchImpl } = fakeFetch([{ status: 201, json: { id: 3, created_at: "t" } }]);
+    const { pool } = fakeTokenPool();
+    const take = vi.spyOn(pool, "take");
+    const ds = new DsClient("/api/ds", { access: new DsAccessRegistry(), fetchImpl, tokens: pool });
+    await ds.publishRendezvous(OTHER, new Uint8Array([4]));
+    expect(take.mock.calls.map((c) => c[0])).toEqual(["rendezvous-write"]);
+  });
+
+  it("a rendezvous write whose token is refused as spent is retried ONCE with another", async () => {
+    const { fetchImpl, sent } = fakeFetch([
+      { status: 401, json: { error: "anon-token-spent" } },
+      { status: 201, json: { id: 9, created_at: "t" } },
+    ]);
+    const { pool } = fakeTokenPool();
+    const ds = new DsClient("/api/ds", { access: new DsAccessRegistry(), fetchImpl, tokens: pool });
+    await expect(ds.publishRendezvous(OTHER, new Uint8Array([7]))).resolves.toEqual({
+      id: 9,
+      createdAt: "t",
+    });
+    expect(sent.map((s) => s.token)).toEqual(["tok-1", "tok-2"]);
+    expect(sent.every((s) => s.proof === undefined)).toBe(true);
+  });
+
+  it("a rendezvous write refused twice fails like any refused write", async () => {
+    const { fetchImpl, sent } = fakeFetch([
+      { status: 401, json: { error: "anon-token-spent" } },
+      { status: 401, json: { error: "anon-token-spent" } },
+    ]);
+    const { pool } = fakeTokenPool();
+    const ds = new DsClient("/api/ds", { access: new DsAccessRegistry(), fetchImpl, tokens: pool });
+    await expect(ds.publishRendezvous(OTHER, new Uint8Array([7]))).rejects.toBeInstanceOf(DsHttpError);
+    expect(sent).toHaveLength(2);
   });
 
   it("a mailbox write carries the reach proof, and the delegation beside it (ADR-0060)", async () => {

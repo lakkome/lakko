@@ -3500,6 +3500,11 @@ impl Group {
         // which is what makes this the right roster for the key-collision
         // clause.
         let removed_leaves = effects.removed_leaves().to_vec();
+        let authorised_set: Vec<&QueuedProposal> = pending
+            .iter()
+            .filter(|qp| in_scope(qp) && authorised(qp))
+            .collect();
+        let removed_by_others = crate::reentry::accounts_removed_by_others(scope, &authorised_set);
         // Read the group's own admission requirements out BEFORE the commit
         // builder borrows the group: everything `sweep_keeps` consults must be
         // owned by this frame, which is why `SweepContext` holds no reference
@@ -3517,6 +3522,7 @@ impl Group {
             group_id: &group_id,
             epoch,
             pending: &pending,
+            removed_by_others: &removed_by_others,
         };
 
         // The enumeration's verdict, taken ONCE and recorded as the set of
@@ -3777,12 +3783,14 @@ impl Group {
         candidates: &[ProposalRef],
     ) -> Vec<ProposalRef> {
         let mut accepted: Vec<ProposalRef> = Vec::new();
-        let mut rejected: Vec<ProposalRef> = Vec::new();
-        for candidate in candidates {
-            if self.selection_admits(identity, queued, members, &accepted, candidate) {
-                accepted.push(candidate.clone());
+        let mut rejected: Vec<Vec<ProposalRef>> = Vec::new();
+        // ADR-0091 rule 3: a re-entry Add and its paired Remove are offered
+        // as ONE unit, since neither is admissible without the other.
+        for unit in self.reentry_units(queued, members, candidates) {
+            if self.selection_admits(identity, queued, members, &accepted, &unit) {
+                accepted.extend(unit);
             } else {
-                rejected.push(candidate.clone());
+                rejected.push(unit);
             }
         }
         // Second pass. A candidate refused above may have been refused only
@@ -3791,12 +3799,65 @@ impl Group {
         // transfer ahead of the `Add` that puts its owner in the group. One
         // re-offer against the finished selection recovers those; it can never
         // lose anything, since each acceptance is verified in full.
-        for candidate in rejected {
-            if self.selection_admits(identity, queued, members, &accepted, &candidate) {
-                accepted.push(candidate);
+        for unit in rejected {
+            if self.selection_admits(identity, queued, members, &accepted, &unit) {
+                accepted.extend(unit);
             }
         }
         accepted
+    }
+
+    /// `candidates` grouped into the units the exclusion search offers: a
+    /// valid re-entry `Add` and the same sender's `Remove` of the leaf it
+    /// replaces form one unit (in whichever order they appear); every other
+    /// candidate is a unit of its own. Order follows the first member of each
+    /// unit.
+    fn reentry_units(
+        &self,
+        queued: &[QueuedProposal],
+        members: &[MemberRecord],
+        candidates: &[ProposalRef],
+    ) -> Vec<Vec<ProposalRef>> {
+        let group_id = self.group_id();
+        let scope = crate::reentry::ReentryScope {
+            group_id: &group_id,
+            epoch: self.epoch(),
+            members,
+        };
+        let find = |r: &ProposalRef| queued.iter().find(|qp| qp.proposal_reference_ref() == r);
+        let partner_of = |qp: &QueuedProposal, other: &QueuedProposal| -> bool {
+            if qp.sender() != other.sender() {
+                return false;
+            }
+            let pairs = |add: &QueuedProposal, remove: &QueuedProposal| {
+                matches!(
+                    crate::reentry::reentry_add(scope, add.proposal()),
+                    crate::reentry::ReentryAdd::Valid { replaced_leaf }
+                        if crate::reentry::has_paired_remove(add.sender(), replaced_leaf, [remove])
+                )
+            };
+            pairs(qp, other) || pairs(other, qp)
+        };
+        let mut consumed = vec![false; candidates.len()];
+        let mut units = Vec::with_capacity(candidates.len());
+        for i in 0..candidates.len() {
+            if consumed[i] {
+                continue;
+            }
+            consumed[i] = true;
+            let mut unit = vec![candidates[i].clone()];
+            if let Some(qp) = find(&candidates[i]) {
+                let partner = (i + 1..candidates.len()).find(|&j| {
+                    !consumed[j] && find(&candidates[j]).is_some_and(|o| partner_of(qp, o))
+                });
+                if let Some(j) = partner {
+                    consumed[j] = true;
+                    unit.push(candidates[j].clone());
+                }
+            }
+            units.push(unit);
+        }
+        units
     }
 
     /// `true` when `accepted` plus `candidate` is a selection this device may
@@ -3810,10 +3871,10 @@ impl Group {
         queued: &[QueuedProposal],
         members: &[MemberRecord],
         accepted: &[ProposalRef],
-        candidate: &ProposalRef,
+        candidate: &[ProposalRef],
     ) -> bool {
         let mut trial = accepted.to_vec();
-        trial.push(candidate.clone());
+        trial.extend_from_slice(candidate);
         if !self.selection_is_admissible(queued, &trial, members) {
             return false;
         }
@@ -3869,7 +3930,7 @@ impl Group {
                 chosen.iter().copied(),
             )
             .is_ok()
-        })
+        }) && crate::reentry::reentry_adds_stand(scope, chosen).is_ok()
     }
 
     /// `true` when a commit is staged and still awaiting its verdict: a sweep
@@ -5125,6 +5186,10 @@ struct SweepContext<'a> {
     epoch: u64,
     /// The whole pending set, what a re-entry `Remove` may be paired with.
     pending: &'a [QueuedProposal],
+    /// ADR-0091 rule 3: accounts the commit removes a leaf of by another
+    /// account's unpaired `Remove` (`crate::reentry::accounts_removed_by_others`
+    /// over the authorised set). No `Add` of these accounts is swept.
+    removed_by_others: &'a [[u8; 32]],
 }
 
 impl SweepContext<'_> {
@@ -5297,11 +5362,11 @@ fn sweep_keeps(ctx: &SweepContext<'_>, state: &mut SweepState, qp: &QueuedPropos
     ) else {
         return false;
     };
-    if let Some(account) = ctx.member_scope.as_ref() {
-        if !member_may_sweep_with_pairs(ctx.members, account, qp, ctx.reentry_scope(), ctx.pending)
-        {
-            return false;
-        }
+    let out_of_scope = |own: &[u8; 32]| {
+        !member_may_sweep_with_pairs(ctx.members, own, qp, ctx.reentry_scope(), ctx.pending)
+    };
+    if ctx.member_scope.as_ref().is_some_and(out_of_scope) {
+        return false;
     }
     if let crate::reentry::Standing::PairedRemove { target_leaf } = standing {
         // The pair stays together: this removal stands only on its re-entry
@@ -5320,8 +5385,11 @@ fn sweep_keeps(ctx: &SweepContext<'_>, state: &mut SweepState, qp: &QueuedPropos
             }
             // ADR-0050: an unresolvable binding never joins, and an account
             // never exceeds its leaf cap — counted over the staying roster plus
-            // the Adds this pass has already taken for the same account.
-            let Some(account) = account_key else {
+            // the Adds this pass has already taken for the same account. And
+            // ADR-0091 rule 3 (`reentry_rule_three_allows`).
+            let Some(account) =
+                account_key.filter(|a| reentry_rule_three_allows(ctx, qp, standing, a))
+            else {
                 return false;
             };
             let staying = ctx
@@ -5389,21 +5457,83 @@ fn sweep_keeps(ctx: &SweepContext<'_>, state: &mut SweepState, qp: &QueuedPropos
             }
             true
         },
-        ProposalKind::RoleChange => {
-            // ADR-0062: no rewrite that changes the kind is ever swept, and in
-            // a one-to-one no rewrite is swept at all.
-            if !ctx.role_change_survives
-                || state.role_change_taken
-                || !proposal_keeps_group_kind(qp.proposal(), ctx.kind_before)
-                || ctx.kind_before.kind() == Some(GroupKind::OneToOne)
-            {
-                return false;
-            }
-            state.role_change_taken = true;
-            true
+        ProposalKind::RoleChange => sweep_keeps_role_change(ctx, state, qp),
+        _ => true,
+    }
+}
+
+/// [`sweep_keeps`] clause 2 for a role change.
+fn sweep_keeps_role_change(
+    ctx: &SweepContext<'_>,
+    state: &mut SweepState,
+    qp: &QueuedProposal,
+) -> bool {
+    // ADR-0062: no rewrite that changes the kind is ever swept, and in a
+    // one-to-one no rewrite is swept at all.
+    if !ctx.role_change_survives
+        || state.role_change_taken
+        || !proposal_keeps_group_kind(qp.proposal(), ctx.kind_before)
+        || ctx.kind_before.kind() == Some(GroupKind::OneToOne)
+    {
+        return false;
+    }
+    state.role_change_taken = true;
+    true
+}
+
+/// ADR-0091 rule 3 in the sweep, for an `Add` of a leaf of `account`: nobody
+/// is added back while another member's removal in this commit takes them
+/// out, and a re-entry `Add` is carried only with its pair, the same sender's
+/// removal of the leaf it replaces, which must itself be carriable.
+fn reentry_rule_three_allows(
+    ctx: &SweepContext<'_>,
+    add: &QueuedProposal,
+    standing: crate::reentry::Standing,
+    account: &[u8],
+) -> bool {
+    if ctx
+        .removed_by_others
+        .iter()
+        .any(|removed| removed.as_slice() == account)
+    {
+        return false;
+    }
+    match standing {
+        crate::reentry::Standing::ReentryAdd { replaced_leaf } => {
+            reentry_pair_carriable(ctx, add, replaced_leaf)
         },
         _ => true,
     }
+}
+
+/// ADR-0091 rule 3 in the sweep: the pending set holds the same sender's
+/// `Remove(replaced_leaf)` and the sweep can carry it (authorised, in the
+/// member scope), so a re-entry `Add` is never carried without its pair.
+fn reentry_pair_carriable(
+    ctx: &SweepContext<'_>,
+    add: &QueuedProposal,
+    replaced_leaf: u32,
+) -> bool {
+    ctx.pending.iter().any(|p| {
+        let in_scope = match ctx.member_scope.as_ref() {
+            None => true,
+            Some(own) => {
+                member_may_sweep_with_pairs(ctx.members, own, p, ctx.reentry_scope(), ctx.pending)
+            },
+        };
+        crate::reentry::has_paired_remove(add.sender(), replaced_leaf, [p])
+            && in_scope
+            && crate::reentry::judge(
+                ctx.reentry_scope(),
+                ctx.table,
+                ctx.kind_before.kind(),
+                false,
+                p.sender(),
+                p.proposal(),
+                ctx.pending,
+            )
+            .is_ok()
+    })
 }
 
 /// `true` when `key_package`'s leaf can be committed into this group — the
@@ -5702,6 +5832,11 @@ fn authorise_role_commit(
     // pre-merge GroupContext, like the role table.
     group_kind_unchanged(&effects, kind_before)?;
     one_to_one_holds(&effects, members, kind_before.kind())?;
+    // ADR-0091 rule 3 (security review 2026-11-21): a re-entry Add rides
+    // with its pair, and nobody is added back while another member's removal
+    // in the same commit takes them out.
+    let carried: Vec<&QueuedProposal> = staged.queued_proposals().collect();
+    crate::reentry::reentry_adds_stand(scope, &carried)?;
     for qp in staged.queued_proposals() {
         // The proposal's own author: the sender OpenMLS recorded for it. A
         // by-value proposal carries the committer; a by-reference one carries
@@ -7092,7 +7227,12 @@ mod proposal_gate_tests {
     /// colliding with *any* current member.
     ///
     /// Since ADR-0091 M2 the re-add of a current member's key must be a
-    /// re-entry KeyPackage, so the re-add here is charlie's re-entry package.
+    /// re-entry KeyPackage, so the re-add here is charlie's re-entry package;
+    /// and since ADR-0091 rule 3 (security review 2026-11-21) it stands only
+    /// as the same sender's pair with the removal, so alice proposes both. (A
+    /// re-add by ANOTHER member beside alice's removal is the eviction a
+    /// removed member could survive by; `a_member_being_removed_cannot_*` in
+    /// `reentry_join.rs` pins its refusal.)
     #[test]
     fn a_removal_and_a_re_add_of_one_key_still_compose() {
         let mut s = scene(0x40);
@@ -7102,15 +7242,11 @@ mod proposal_gate_tests {
             .create_reentry_key_package(&s.alice_g.group_id(), s.alice_g.epoch())
             .expect("charlie mints a re-entry package");
         s.alice_g
+            .propose_add_member(&s.alice, reentry)
+            .expect("alice re-adds charlie");
+        s.alice_g
             .propose_remove_member(&s.alice, charlie_leaf)
             .expect("alice removes charlie");
-        let readd = s
-            .bob_g
-            .propose_add_member(&s.bob, reentry)
-            .expect("bob re-adds charlie");
-        s.alice_g
-            .process_incoming_verifying_roles(&s.alice, &readd)
-            .expect("alice takes the re-add");
 
         let swept = s
             .alice_g
@@ -7255,6 +7391,7 @@ mod proposal_gate_tests {
             group_id: &[],
             epoch: 0,
             pending: &[],
+            removed_by_others: &[],
         }
     }
 

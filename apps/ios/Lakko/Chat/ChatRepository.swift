@@ -603,6 +603,9 @@ public final class ChatRepository: ObservableObject {
     let reentryRowClock = ReentryRowClockStore()
     /// The knock key this device last delivered to each group (walk-2 rule R4).
     let reentryKnockKeySent = ReentryKnockKeySentStore()
+    /// When this device first saw each leaf of each group (section 7: the
+    /// floor of a gap history this device sends).
+    let reentryLeafFirstSeen = ReentryLeafFirstSeenStore()
     /// Bumped whenever a behind record changes, so the open chat re-reads its
     /// waiting note.
     @Published public internal(set) var reentryRevision: Int = 0
@@ -5788,6 +5791,9 @@ public final class ChatRepository: ObservableObject {
         // stops acting below (section 2); a re-admitter sends the gap history
         // it owes once it holds the epoch the replacement created.
         noteReentryAfterRead(groupIdHex: groupIdHex, raw: raw)
+        // Section 7 — when each leaf was first seen here (a gap history this
+        // device sends never starts before it).
+        noteReentryLeavesSeen(groupIdHex: groupIdHex)
         Task { @MainActor [weak self] in await self?.sendOwedReentryHistory(groupIdHex: groupIdHex) }
         // A device that came back keeps looking for its gap history (throttled).
         Task { @MainActor [weak self] in await self?.lookForReentryGapHistory(groupIdHex: groupIdHex) }
@@ -9117,8 +9123,11 @@ public final class ChatRepository: ObservableObject {
             NSLog("ADR-0057: identity bundle names another key; not appointing")
             return nil
         }
-        guard let x25519 = Data(base64Encoded: bundle.x25519Pubkey), x25519.count == 32
-        else { return nil }
+        // Seal nothing to an X25519 key the served account key did not bind.
+        guard let x25519 = bundle.verifiedX25519Pubkey else {
+            NSLog("ADR-0057: identity bundle carries no valid X25519 binding; not appointing")
+            return nil
+        }
         memberX25519Cache[accountKey] = x25519
         return x25519
     }

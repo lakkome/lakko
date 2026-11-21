@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 
 /// Swift-side mirror of the JSON shapes consumed and produced by
 /// `lakko-svc-discovery`.
@@ -166,6 +167,11 @@ public struct IdentityUploadRequest: Codable, Equatable {
     public let signaturePubkey: String
     /// base64(X25519 public key) — 32 bytes after decode.
     public let x25519Pubkey: String
+    /// Standard base64 of the 64-byte signature by the account's Ed25519 key
+    /// binding `x25519Pubkey` to it (`signX25519Binding`). Discovery refuses
+    /// an upload without a valid one (`400 x25519-binding-invalid`), and a
+    /// reader seals nothing to an X25519 key it does not bind.
+    public let x25519Binding: String
     /// G-4 (ADR-0016): base64 of an optional old-key-signed supersession
     /// proof bridging an AccountIdentity rotation. `nil` for a normal upload
     /// — its absence clears any stored proof server-side.
@@ -204,6 +210,7 @@ public struct IdentityUploadRequest: Codable, Equatable {
         accountId: String,
         signaturePubkey: String,
         x25519Pubkey: String,
+        x25519Binding: String,
         supersessionProof: String? = nil,
         leafAuth: String? = nil,
         genesisAttest: String? = nil,
@@ -213,6 +220,7 @@ public struct IdentityUploadRequest: Codable, Equatable {
         self.accountId = accountId
         self.signaturePubkey = signaturePubkey
         self.x25519Pubkey = x25519Pubkey
+        self.x25519Binding = x25519Binding
         self.supersessionProof = supersessionProof
         self.leafAuth = leafAuth
         self.genesisAttest = genesisAttest
@@ -224,6 +232,7 @@ public struct IdentityUploadRequest: Codable, Equatable {
         case accountId = "account_id"
         case signaturePubkey = "signature_pubkey"
         case x25519Pubkey = "x25519_pubkey"
+        case x25519Binding = "x25519_binding"
         case supersessionProof = "supersession_proof"
         case leafAuth = "leaf_auth"
         case genesisAttest = "genesis_attest"
@@ -246,6 +255,11 @@ public struct IdentityUploadResponse: Codable, Equatable {
 public struct IdentityFetchResponse: Codable, Equatable {
     public let signaturePubkey: String
     public let x25519Pubkey: String
+    /// Standard base64 of the account key's signature binding
+    /// `x25519Pubkey` to `signaturePubkey`; absent on a row that has none.
+    /// Read only through ``verifiedX25519Pubkey``: nothing is sealed to an
+    /// X25519 key this binding does not verify.
+    public let x25519Binding: String?
     /// G-4 (ADR-0016): base64 of the stored supersession proof when the
     /// account rotated recently; `nil` otherwise. Verified locally by the
     /// peer — the server passes the bytes through opaquely.
@@ -271,6 +285,7 @@ public struct IdentityFetchResponse: Codable, Equatable {
     public init(
         signaturePubkey: String,
         x25519Pubkey: String,
+        x25519Binding: String? = nil,
         supersessionProof: String? = nil,
         keyGeneration: UInt64 = 1,
         keyResetAttest: String? = nil,
@@ -278,6 +293,7 @@ public struct IdentityFetchResponse: Codable, Equatable {
     ) {
         self.signaturePubkey = signaturePubkey
         self.x25519Pubkey = x25519Pubkey
+        self.x25519Binding = x25519Binding
         self.supersessionProof = supersessionProof
         self.keyGeneration = keyGeneration
         self.keyResetAttest = keyResetAttest
@@ -288,6 +304,7 @@ public struct IdentityFetchResponse: Codable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         signaturePubkey = try c.decode(String.self, forKey: .signaturePubkey)
         x25519Pubkey = try c.decode(String.self, forKey: .x25519Pubkey)
+        x25519Binding = try c.decodeIfPresent(String.self, forKey: .x25519Binding)
         supersessionProof = try c.decodeIfPresent(String.self, forKey: .supersessionProof)
         keyGeneration = try c.decodeIfPresent(UInt64.self, forKey: .keyGeneration) ?? 1
         keyResetAttest = try c.decodeIfPresent(String.self, forKey: .keyResetAttest)
@@ -297,10 +314,28 @@ public struct IdentityFetchResponse: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case signaturePubkey = "signature_pubkey"
         case x25519Pubkey = "x25519_pubkey"
+        case x25519Binding = "x25519_binding"
         case supersessionProof = "supersession_proof"
         case keyGeneration = "key_generation"
         case keyResetAttest = "key_reset_attest"
         case conversationLink = "conversation_link"
+    }
+}
+
+extension IdentityFetchResponse {
+    /// The X25519 key to seal to, ONLY when the account's Ed25519 key signed
+    /// a binding of it (`verifyX25519Binding`). `nil` for an absent, malformed
+    /// or non-verifying binding, or a malformed key: a caller then refuses
+    /// (the ordinary failure state of its flow) and never seals to the
+    /// unbound key. `signaturePubkey` is the key in THIS answer; a caller
+    /// that holds another (pinned) key for the person checks that first.
+    public var verifiedX25519Pubkey: Data? {
+        guard let binding = x25519Binding.flatMap({ Data(base64Encoded: $0) }),
+              let ed = Data(base64Encoded: signaturePubkey), ed.count == 32,
+              let x = Data(base64Encoded: x25519Pubkey), x.count == 32,
+              verifyX25519Binding(binding: binding, ed25519PublicKey: ed, x25519PublicKey: x)
+        else { return nil }
+        return x
     }
 }
 

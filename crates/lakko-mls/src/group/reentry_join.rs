@@ -113,15 +113,46 @@ fn stage_conversation_welcome(
 }
 
 /// `true` when `account` is the account of a leaf of `stored`.
-fn account_in_roster(stored: &MlsGroup, account: Option<[u8; 32]>) -> bool {
-    account.is_some_and(|account| {
-        stored.members().any(|m| {
-            crate::device_binding::account_key_of_credential(
-                m.credential.serialized_content(),
-                &m.signature_key,
-            ) == Some(account)
-        })
+fn account_in_roster(stored: &MlsGroup, account: [u8; 32]) -> bool {
+    stored.members().any(|m| {
+        crate::device_binding::account_key_of_credential(
+            m.credential.serialized_content(),
+            &m.signature_key,
+        ) == Some(account)
     })
+}
+
+/// `true` when a re-entry Welcome from `sender` may replace `stored`
+/// (ADR-0091 section 4, security review 2026-11-21): the sender is in the
+/// stored roster AND is a device of this device's own account (route 1, or
+/// an ADR-0050 self-service sweep), or the owner or an admin of the STORED
+/// role table (route 3, the acting committer), or, in a one-to-one, the other
+/// person (route 2: a one-to-one's two people are fixed, and its other
+/// person is the only re-admitter it has). A plain member of a group cannot
+/// bring a device back, so its Welcome cannot put this device on a tree it
+/// chose.
+///
+/// `own` is this device's account; `sender` the account the sender's leaf
+/// resolves to. Also the rule for who may sign a gap history
+/// ([`Group::gap_history_signer_accepted`]), judged there on the joined group.
+fn sender_may_readmit(stored: &MlsGroup, own: Option<[u8; 32]>, sender: Option<[u8; 32]>) -> bool {
+    let Some(sender) = sender else {
+        return false;
+    };
+    if !account_in_roster(stored, sender) {
+        return false;
+    }
+    if own == Some(sender) {
+        return true;
+    }
+    let extensions = stored.extensions();
+    if KindState::of(extensions).kind() == Some(crate::group_kind::GroupKind::OneToOne) {
+        return true;
+    }
+    extensions
+        .unknown(crate::group_roles::ROLE_EXTENSION_TYPE)
+        .and_then(|body| crate::group_roles::RoleTable::decode(&body.0).ok())
+        .is_some_and(|table| table.can_administer(&sender))
 }
 
 /// What the staged Welcome says this device joined as.
@@ -272,7 +303,9 @@ impl Group {
     /// * an active group with the Welcome's id is stored, its kind equals the
     ///   Welcome's, and the Welcome's epoch is above it;
     /// * the Welcome's sender resolves (ADR-0050) to an account in the stored
-    ///   roster;
+    ///   roster that is this device's own account, the owner or an admin of
+    ///   the stored role table, or, in a one-to-one, the other person (a
+    ///   plain member of a group is refused; security review 2026-11-21);
     /// * the stored own leaf and exactly one leaf of the new tree carry this
     ///   identity's signature key;
     /// * one of `recorded_key_packages` (the wire KeyPackages this device
@@ -325,15 +358,23 @@ impl Group {
         let sender = staged
             .welcome_sender()
             .map_err(|e| Error::Group(format!("welcome sender: {e:?}")))?;
-        if !account_in_roster(
+        let own_account = stored.own_leaf_node().and_then(|leaf| {
+            crate::device_binding::account_key_of_credential(
+                leaf.credential().serialized_content(),
+                leaf.signature_key().as_slice(),
+            )
+        });
+        if !sender_may_readmit(
             &stored,
+            own_account,
             crate::device_binding::account_key_of_credential(
                 sender.credential().serialized_content(),
                 sender.signature_key().as_slice(),
             ),
         ) {
             return Err(welcome_refused(
-                "re-entry refused: the welcome's sender is not in the stored roster",
+                "re-entry refused: the welcome's sender is not this account, an owner or admin \
+                 of the stored group, or the other person of a one-to-one",
             ));
         }
 
@@ -380,6 +421,37 @@ impl Group {
             .into_group(&identity.provider)
             .map_err(|e| Error::Group(format!("welcome -> group: {e:?}")))?;
         Ok(Self::from_mls_group(inner))
+    }
+
+    /// Whether a gap history signed by `signer_leaf_key` may be kept by this
+    /// device (ADR-0091 section 7, security review 2026-11-21): the same rule
+    /// [`Group::join_reentry`] applies to a re-entry Welcome's sender, judged
+    /// on this group (the one the device just joined). `true` when the signer
+    /// is a current leaf of this group whose ADR-0050 binding resolves to this
+    /// device's own account (`identity`'s), to the owner or an admin of this
+    /// group's role table, or, in a one-to-one, to the other person. A plain
+    /// member of a group, a leaf not in the roster, or a key of another length
+    /// is `false`: drop the bundle. It does not depend on which device
+    /// committed the replacement, so the proposer or the committer may send.
+    #[must_use]
+    pub fn gap_history_signer_accepted(&self, identity: &Identity, signer_leaf_key: &[u8]) -> bool {
+        let Some(signer_account) = self.inner.members().find_map(|m| {
+            (m.signature_key == signer_leaf_key)
+                .then(|| {
+                    crate::device_binding::account_key_of_credential(
+                        m.credential.serialized_content(),
+                        &m.signature_key,
+                    )
+                })
+                .flatten()
+        }) else {
+            return false;
+        };
+        sender_may_readmit(
+            &self.inner,
+            identity.account_public_key(),
+            Some(signer_account),
+        )
     }
 }
 
@@ -624,6 +696,13 @@ mod reentry_tests {
         let mut c2 = Group::join_reentry(&welcome, &s.charlie, &[k]).expect("charlie is back");
         assert_eq!(c2.epoch(), s.a.epoch());
         assert!(c2.is_active());
+        // Who may sign charlie's gap history does not depend on who swept:
+        // the owner (alice) and the admin (bob) may, charlie's own account
+        // may, a stranger's key may not.
+        assert!(c2.gap_history_signer_accepted(&s.charlie, s.alice.signature_public_key()));
+        assert!(c2.gap_history_signer_accepted(&s.charlie, s.bob.signature_public_key()));
+        assert!(c2.gap_history_signer_accepted(&s.charlie, s.charlie.signature_public_key()));
+        assert!(!c2.gap_history_signer_accepted(&s.charlie, &[0x11; 32]));
 
         let hello = wire(
             s.a.create_application_message(&s.alice, b"hello again")
@@ -879,6 +958,8 @@ mod reentry_tests {
         assert_eq!(swept.swept.len(), 2);
         let mut a2 = Group::join_reentry(&wire(swept.welcome.expect("welcome")), &alice, &[k])
             .expect("alice is back");
+        // In a one-to-one the other person may sign the gap history.
+        assert!(a2.gap_history_signer_accepted(&alice, bob.signature_public_key()));
         assert_eq!(a2.group_kind(), Some(GroupKind::OneToOne));
         let mut people: Vec<Vec<u8>> = a2.members().into_iter().map(|m| m.account_key).collect();
         people.sort();
@@ -975,6 +1056,7 @@ mod reentry_tests {
             group_id: &gid,
             epoch: s.b.epoch(),
             pending: &queued,
+            removed_by_others: &[],
         };
         let mut fresh = SweepState::default();
         assert!(
@@ -1102,6 +1184,178 @@ mod reentry_tests {
                 "{wrong:?}",
             );
         }
+    }
+
+    /// Every pending proposal swept by reference with no filter: what a
+    /// modified committer could publish, for the peer commit gate.
+    fn sweep_everything(g: &mut Group, id: &Identity) -> Vec<u8> {
+        let bundle = g
+            .inner
+            .commit_builder()
+            .consume_proposal_store(true)
+            .load_psks(id.provider.storage())
+            .expect("psks")
+            .build(
+                id.provider.rand(),
+                id.provider.crypto(),
+                &id.signature_keys,
+                |_| true,
+            )
+            .expect("openmls builds it")
+            .stage_commit(&id.provider)
+            .expect("stage");
+        let commit = wire(bundle.into_commit());
+        g.inner
+            .clear_pending_commit(id.provider.storage())
+            .expect("the forger discards its own copy");
+        commit
+    }
+
+    /// bob (an admin) proposes charlie's removal while charlie holds on by
+    /// `on_hold`, an `Add` charlie authored of a device of its own account.
+    /// alice's sweep carries the removal and not the `Add`, so charlie is out;
+    /// and a commit carrying both is refused by a peer's commit gate.
+    fn removed_member_holds_on_by(tag: u8, on_hold: impl Fn(&Scene) -> KeyPackage) {
+        let mut s = group_scene(tag);
+        let charlie_leaf = leaf_of(&s.a, &s.charlie);
+        let held = on_hold(&s);
+        let add =
+            s.c.propose_add_member(&s.charlie, held)
+                .expect("charlie asks for its own device");
+        let remove =
+            s.b.propose_remove_member(&s.bob, LeafNodeIndex::new(charlie_leaf))
+                .expect("bob asks to remove charlie");
+        for (g, id) in [(&mut s.a, &s.alice), (&mut s.b, &s.bob)] {
+            for msg in [&add, &remove] {
+                if g.process_incoming_verifying_roles(id, msg).is_err() {
+                    // bob's own proposal echo: already in his store.
+                }
+            }
+        }
+        // A modified committer that carries both is refused by a peer.
+        let both = sweep_everything(&mut s.a, &s.alice);
+        assert_eq!(
+            gate_refuses(&mut s.b, &s.bob, &both),
+            RefusalReason::ReentryPairInvalid,
+            "a peer refuses a commit that keeps a removed member by its own add",
+        );
+        // alice's own sweep keeps the removal and drops the add.
+        let swept =
+            s.a.commit_pending_proposals(&s.alice)
+                .expect("sweep")
+                .expect("a commit");
+        s.b.process_incoming_verifying_roles(&s.bob, &wire(swept.commit))
+            .expect("bob applies alice's sweep");
+        let charlie_account = key(&s.charlie).to_vec();
+        for g in [&s.a, &s.b] {
+            assert!(
+                g.members().iter().all(|m| m.account_key != charlie_account),
+                "charlie is out on every peer",
+            );
+        }
+    }
+
+    #[test]
+    fn a_member_being_removed_cannot_survive_by_its_own_reentry_add() {
+        removed_member_holds_on_by(0x5E, |s| {
+            s.charlie
+                .create_reentry_key_package(&s.a.group_id(), s.a.epoch())
+                .expect("charlie mints a re-entry package of its own leaf")
+        });
+    }
+
+    #[test]
+    fn a_member_being_removed_cannot_survive_by_adding_another_device() {
+        removed_member_holds_on_by(0x5F, |s| {
+            let second = Identity::from_seed_bound(
+                &[0x6F; 32],
+                &s.charlie.ed25519_seed_bytes(),
+                1_700_000_000,
+            )
+            .expect("charlie's second device");
+            second.create_key_package().expect("its key package")
+        });
+    }
+
+    /// Security review 2026-11-21: a plain member of a group may propose and
+    /// sweep a re-entry, but its Welcome does not replace the stored group of
+    /// the returning device (ADR-0091 section 4 names the own account, the
+    /// owner and the admins as re-admitters); the refusal changes nothing.
+    #[test]
+    fn a_plain_members_reentry_welcome_is_refused_and_changes_nothing() {
+        let mut s = group_scene(0x5B);
+        let erin = person(0x5C);
+        let add =
+            s.a.add_members_from_wire(&s.alice, &[&kp_wire(&erin)])
+                .expect("alice adds erin");
+        let commit = wire(add.commit);
+        s.b.process_incoming_verifying_roles(&s.bob, &commit)
+            .expect("bob applies");
+        s.c.process_incoming_verifying_roles(&s.charlie, &commit)
+            .expect("charlie applies");
+        let mut e = Group::join_from_welcome(&wire(add.welcome), &erin).expect("erin joins");
+
+        // charlie misses the next commit.
+        let dave = person(0x5D);
+        let proposal =
+            s.a.propose_add_member_from_wire(&s.alice, &kp_wire(&dave))
+                .expect("alice asks for dave");
+        assert!(stored(&mut s.b, &s.bob, &proposal));
+        assert!(stored(&mut e, &erin, &proposal));
+        let swept =
+            s.a.commit_pending_proposals(&s.alice)
+                .expect("sweep")
+                .expect("a commit");
+        let commit = wire(swept.commit);
+        s.b.process_incoming_verifying_roles(&s.bob, &commit)
+            .expect("bob applies");
+        e.process_incoming_verifying_roles(&erin, &commit)
+            .expect("erin applies");
+
+        let gid = s.a.group_id();
+        let k = bytes(
+            &s.charlie
+                .create_reentry_key_package(&gid, s.a.epoch())
+                .expect("K"),
+        );
+        // erin, a plain member, proposes and sweeps the replacement.
+        let welcome = readmit(&mut e, &erin, &mut s.b, &s.bob, &k);
+
+        let before = s.charlie.snapshot_storage().expect("snapshot");
+        assert_eq!(
+            reason(Group::join_reentry(&welcome, &s.charlie, &[k])),
+            RefusalReason::ReentryWelcomeRefused,
+        );
+        assert_eq!(
+            s.charlie.snapshot_storage().expect("snapshot"),
+            before,
+            "a refused join changes nothing",
+        );
+        let kept = Group::load(&s.charlie, &gid)
+            .expect("load")
+            .expect("still stored");
+        assert!(kept.is_active(), "the stored group is still active");
+
+        // bob (an admin) brings charlie back; on the group charlie joined, the
+        // gap-history signer rule matches the Welcome rule: the owner, an
+        // admin and charlie's own account may sign, erin (a plain member) and
+        // a key outside the roster may not.
+        let k2 = bytes(
+            &s.charlie
+                .create_reentry_key_package(&gid, s.b.epoch())
+                .expect("K2"),
+        );
+        let welcome = readmit(&mut s.b, &s.bob, &mut e, &erin, &k2);
+        let c2 = Group::join_reentry(&welcome, &s.charlie, &[k2]).expect("charlie is back");
+        assert!(c2.gap_history_signer_accepted(&s.charlie, s.alice.signature_public_key()));
+        assert!(c2.gap_history_signer_accepted(&s.charlie, s.bob.signature_public_key()));
+        assert!(c2.gap_history_signer_accepted(&s.charlie, s.charlie.signature_public_key()));
+        assert!(
+            !c2.gap_history_signer_accepted(&s.charlie, erin.signature_public_key()),
+            "a plain member's gap history is dropped"
+        );
+        assert!(!c2.gap_history_signer_accepted(&s.charlie, dave.signature_public_key()));
+        assert!(!c2.gap_history_signer_accepted(&s.charlie, &[0x11; 31]));
     }
 
     proptest! {

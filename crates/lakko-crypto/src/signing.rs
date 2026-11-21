@@ -251,8 +251,8 @@ mod tests {
             // And agreement works across the conversion.
             let peer = agreement::SecretKey::generate();
             assert_eq!(
-                x_secret.diffie_hellman(&peer.public_key()),
-                peer.diffie_hellman(&x_public)
+                x_secret.diffie_hellman(&peer.public_key()).unwrap(),
+                peer.diffie_hellman(&x_public).unwrap()
             );
         }
     }

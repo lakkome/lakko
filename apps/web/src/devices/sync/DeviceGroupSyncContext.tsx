@@ -2622,6 +2622,7 @@ export function DeviceGroupSyncProvider(props: {
                         groupId: req.groupId,
                         epochLeft: req.epochLeft,
                         gapFromMs: req.gapFromMs,
+                        gapKey: req.gapKey,
                         keyPackage: req.keyPackage,
                         deviceGroupKeysHex: new Set(roster.map((m) => m.key.toLowerCase())),
                       });

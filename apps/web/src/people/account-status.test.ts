@@ -14,6 +14,7 @@ import initWasm, * as wasm from "../../wasm/lakko_ffi_wasm";
 import {
   classifyIdentityAnswer,
   decodePersonStatusRows,
+  deletionEffectsOf,
   directoryCheckIsDue,
   encodePersonStatusRows,
   isDeletedPerson,
@@ -44,10 +45,20 @@ describe("whether a person is shown as Deleted account", () => {
     expect(isDeletedPerson(rules, undefined)).toBe(false);
   });
 
-  it("a verified statement marks the person deleted, and no later answer reverses it", () => {
+  it("a verified statement marks the person deleted; a later SamePerson answer reverts it", () => {
     const rec = withStatement(undefined);
     expect(isDeletedPerson(rules, rec)).toBe(true);
-    expect(isDeletedPerson(rules, withAnswer(rec, "same-person", NOW))).toBe(true);
+    expect(isDeletedPerson(rules, withAnswer(rec, "same-person", NOW))).toBe(false);
+  });
+
+  it("recording a statement clears the earlier answer, so only a later one counts", () => {
+    const before = withAttempt(withAnswer(undefined, "same-person", NOW - DAY), NOW - 1000);
+    const rec = withStatement(before);
+    expect(rec.lastDirectoryAnswer).toBeUndefined();
+    expect(rec.lastAnswerAtMs).toBeUndefined();
+    expect(rec.lastAttemptAtMs).toBeUndefined();
+    // The earlier SamePerson no longer hides the statement.
+    expect(isDeletedPerson(rules, rec)).toBe(true);
   });
 
   it("a directory Absent marks the person deleted", () => {
@@ -56,6 +67,27 @@ describe("whether a person is shown as Deleted account", () => {
 
   it("OtherKey never marks the person deleted", () => {
     expect(isDeletedPerson(rules, withAnswer(undefined, "other-key", NOW))).toBe(false);
+  });
+
+  it("the destructive effects need a verified statement AND an Absent answer", () => {
+    const none = deletionEffectsOf(rules, undefined);
+    expect(none).toEqual({ showDeleted: false, removeFromGroups: false, dropHeldSends: false });
+    // A statement alone: shown, nothing removed or dropped.
+    const stmt = deletionEffectsOf(rules, withStatement(undefined));
+    expect(stmt).toEqual({ showDeleted: true, removeFromGroups: false, dropHeldSends: false });
+    // A directory Absent alone: shown, nothing removed or dropped.
+    const absent = deletionEffectsOf(rules, withAnswer(undefined, "absent", NOW));
+    expect(absent).toEqual({ showDeleted: true, removeFromGroups: false, dropHeldSends: false });
+    // Both: everything.
+    const both = deletionEffectsOf(rules, withAnswer(withStatement(undefined), "absent", NOW));
+    expect(both).toEqual({ showDeleted: true, removeFromGroups: true, dropHeldSends: true });
+    // An Absent recorded BEFORE the statement does not count: the statement clears it.
+    const stale = deletionEffectsOf(rules, withStatement(withAnswer(undefined, "absent", NOW - DAY)));
+    expect(stale.removeFromGroups).toBe(false);
+    expect(stale.dropHeldSends).toBe(false);
+    // SamePerson after the statement: nothing at all.
+    const back = deletionEffectsOf(rules, withAnswer(withStatement(undefined), "same-person", NOW));
+    expect(back).toEqual({ showDeleted: false, removeFromGroups: false, dropHeldSends: false });
   });
 
   it("SamePerson after Absent makes the person active again", () => {
@@ -95,8 +127,11 @@ describe("when the directory may be asked", () => {
     expect(directoryCheckIsDue(rules, withAttempt(undefined, NOW - 60_000), NOW)).toBe(false);
   });
 
-  it("not after a statement", () => {
-    expect(directoryCheckIsDue(rules, withStatement(undefined), NOW)).toBe(false);
+  it("due at once after a statement, even right after an earlier answer and attempt", () => {
+    expect(directoryCheckIsDue(rules, withStatement(undefined), NOW)).toBe(true);
+    const asked = withAttempt(withAnswer(undefined, "same-person", NOW - 60_000), NOW - 60_000);
+    expect(directoryCheckIsDue(rules, asked, NOW)).toBe(false);
+    expect(directoryCheckIsDue(rules, withStatement(asked), NOW)).toBe(true);
   });
 
   it("not within 7 days of an answer, due after", () => {

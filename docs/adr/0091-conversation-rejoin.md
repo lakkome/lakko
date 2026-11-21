@@ -17,7 +17,13 @@
   (recovery) S0 (spike), S1 (core) and S2 (both FFI surfaces and the NSE
   surface) were built on 2026-11-19, host-tested only (section "Phase 2
   S0-S2, as built"); S3 (web and desktop), S4 (iOS and Android) and S5 (live)
-  are not built, so no client drives the recovery yet.
+  are not built, so no client drives the recovery yet. **Superseded in part:**
+  S3 and S4 were built on 2026-11-19 and walked on the test stack on
+  2026-11-19 and 20 (section 7 "As built" and the live-walk sections); a
+  security review on 2026-11-21 changed the gap history, the Welcome sender
+  rule and the commit gate, built the same day on the core, both FFI surfaces
+  and the three clients, unit-tested only (section "Security review,
+  2026-11-21").
 - **Date:** 2026-11-18
 - **Context:** proposal-based membership (ADR-0045), per-device leaves
   (ADR-0050), journal authorisation and ownership (ADR-0053, ADR-0057),
@@ -610,7 +616,10 @@ doing so for every other Welcome. A new entry point, `Group::join_reentry`
 - the Welcome passes the ordinary admission (role table, kind; C-86) and its
   kind equals the stored kind;
 - the Welcome's sender resolves (ADR-0050 binding) to an account that is in
-  the stored roster;
+  the stored roster (amended 2026-11-21: and is this device's own account,
+  the owner or an admin of the stored role table, or in a one-to-one the
+  other person; a plain member of a group is refused, section "Security
+  review, 2026-11-21");
 - the device's leaf in the new tree has the stored leaf's signature key.
 
 Otherwise it refuses with a typed reason and changes nothing. The held-Welcome
@@ -708,7 +717,10 @@ sends them.
    re-adder): the gap line (UX 2.4).
 
 **As built (2026-11-19, S3 web and desktop, S4 iOS and Android): one carrier
-for all three routes.** The request names no rendezvous and the mailbox has
+for all three routes.** (Replaced on 2026-11-21: the exporter secret below let
+every member after the replacement open the bundle, and its start came
+unchecked from the request; the carrier is now the sealed, signed gap history
+of section "Security review, 2026-11-21". The list below is history.) The request names no rendezvous and the mailbox has
 no history kind, so items 1 and 2 above are replaced by one carrier, the same
 on every client:
 
@@ -1156,6 +1168,84 @@ it was not. So, on every client:
 UX spec [`docs/ux/conversation-rejoin.md`](../ux/conversation-rejoin.md)
 sections 1, 2.2, 2.4 to 6 rewritten. Host-tested only.
 
+## Security review, 2026-11-21 (built, unit-tested only, nothing walked)
+
+A security review of the S3/S4 build found three ways a member other than the
+returning device's re-admitter could abuse the recovery. All three were closed
+in code the same day in `lakko-contacts`, `lakko-mls`, both FFI surfaces
+(UniFFI and wasm; the NSE surface recognises the new envelope version) and on
+web (incl. desktop), iOS and Android. Unit tests only; not walked on the test
+stack, not deployed.
+
+1. **The gap history was readable by every member.** The carrier of
+   section 7 sealed it under an exporter secret every member after the
+   replacement holds, and `gap_from_ms` came unchecked from the request, so
+   a member could ask for and read history older than the gap. Now
+   (`crates/lakko-contacts/src/gap_history.rs`, spec `gap_history.sc.md`):
+   - the `conversation_reentry` envelope is version 2 (flag day; version 1 is
+     `UnknownVersion(1)`) and carries `gap_key`, the public half of a fresh
+     X25519 gap key the device minted for this request (envelope 114 to 4209
+     bytes);
+   - the bundle is sealed to that key alone (the sealed box under this use's
+     own labels, AAD `"lakko/conversation-reentry/gap-history/v1\0" ‖ 0x02 ‖
+     gap_pub ‖ group_id`), and inside the encryption carries the re-admitter's
+     leaf signature key and an Ed25519 signature by that key over the group
+     id, the gap key, the signer key and the bundle; the unsigned version 1 is
+     refused;
+   - the rendezvous is `BLAKE3-derive-key("lakko/conversation-reentry/
+     gap-history-rendezvous/v1", gap_pub)`, so it is computed from the
+     request alone;
+   - the re-admitter starts the rows at `gap_history_start(claimed,
+     leaf_first_seen, leaf_last_write)`: the later of the claim and its own
+     evidence that the leaf was in the conversation (when this device first
+     saw the leaf, else its last message from it); with neither, nothing is
+     sent. Each client records the first time it sees each leaf of each
+     conversation, behind the account store gate and wiped with the account;
+   - the returning device keeps an opened bundle only when
+     `Group::gap_history_signer_accepted(identity, signer_leaf_key)` on the
+     group it joined says so: a current leaf of this device's own account,
+     of the owner or an admin, or in a one-to-one of the other person.
+   On both FFI surfaces: `generateGapKey`, `gapPublicKey`,
+   `gapHistoryRendezvous`, `gapHistoryStart`, `sealGapHistory` /
+   `openGapHistory` and their structured variants, `gapHistoryMaxBundleLen`,
+   `Group.gapHistorySignerAccepted`. Fuzz target `gap_history_open`.
+2. **A plain member could put the returning device on a tree it chose.**
+   `Group::join_reentry` accepted a Welcome from any account in the stored
+   roster. It now accepts one only from this device's own account, the owner
+   or an admin of the stored role table, or in a one-to-one the other person
+   (`sender_may_readmit` in `group/reentry_join.rs`, the same rule the gap
+   history signer passes). A refused join still changes nothing. Pinned by
+   `a_plain_members_reentry_welcome_is_refused_and_changes_nothing`.
+3. **A member being removed could keep a leaf.** A re-entry `Add` of its own
+   leaf, or an `Add` of another device of its account, carried in the same
+   commit as its removal by someone else, survived the removal. A commit-wide
+   rule, `reentry_adds_stand` (`crates/lakko-mls/src/reentry.rs`): every valid
+   re-entry `Add` replacing `L` rides with a `Remove(L)` by the same sender,
+   and no `Add` adds a leaf of an account whose leaf the same proposals remove
+   by a `Remove` from another account that is not that remover's own re-entry
+   pair (a `Leave` is the account's own act and does not count). Refused as
+   `ReentryPairInvalid` by the peer commit gate and in every selection the
+   sweep builds; the sweep drops such an `Add` before building and the
+   exclusion search offers a re-entry `Add` and its `Remove` as one unit.
+   Pinned by `a_member_being_removed_cannot_survive_by_its_own_reentry_add`
+   and `a_member_being_removed_cannot_survive_by_adding_another_device`.
+
+The same review also hardened the sealed box every sealed-to-account envelope
+uses and bound the account X25519 key to the identity key (C-99, G-59).
+
+**Residuals.** A device records when it first saw a leaf only from this
+build on; for a leaf it saw before, the floor is its last message from that
+leaf, and with none it sends nothing. Anyone who learns the gap public key
+can post to the rendezvous; a post not signed by an accepted leaf is dropped
+(the gap line stays). Follow-up the same day (maintainer decision, unit tests
+only): every write to a rendezvous spends one `rendezvous-write` anonymous
+token (500 a day per account, chosen), and the returning device reads the
+rendezvous page after page up to 1000 rows (chosen) instead of the first page
+only, so junk posted between the knock and the re-admitter's post buries the
+bundle only past more than two accounts' daily tokens (G-59). A device brought back by an owner or admin of a group,
+and the history it receives, are only as trustworthy as that admin, as for
+every other membership change.
+
 ## Abuse
 
 - **A stranger cannot cause a replacement.** A valid `K` needs the private
@@ -1252,6 +1342,12 @@ like the group name. Nothing grows with contacts times contacts.
   durable re-entry record that names the KeyPackage it adds (section 5).
 - **C-64:** a suspected device emits no beacon.
 - **C-68:** authorship survives a re-entry (same signature key).
+- **C-93 amended (2026-11-21):** a re-entry Welcome only from the own
+  account, an owner or admin, or the other person of a one-to-one; the
+  commit-wide `reentry_adds_stand` rule; the gap history sealed to the
+  returning device and signed by an accepted leaf.
+- **C-99 (2026-11-21):** the sealed box and the signed account X25519 key the
+  gap history, the knock and the seed envelopes rely on.
 - **New C-93 (proposed, phase 2):** a device behind in a conversation never commits,
   sweeps, registers or repairs there, and is replaced only by a commit adding
   a KeyPackage it minted for that conversation and epoch.

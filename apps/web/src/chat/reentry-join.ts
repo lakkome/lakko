@@ -8,9 +8,9 @@
  *
  * In order:
  *
- * 1. The gap channel (`reentry-history.ts`) is derived NOW, at the epoch the
- *    replacement created (`epoch_left + 1`): a later commit changes the
- *    exporter.
+ * 1. The gap secrets the request record holds (`reentry-history.ts`, sealed
+ *    under the device key when the requests were minted) are taken for the
+ *    look; nothing depends on the epoch.
  * 2. The suspicion is cleared and a hold or behind mark the group is past is
  *    dropped.
  * 3. The next poll reads again from the commit that brought this device
@@ -19,7 +19,7 @@
  *    not read to now (UX 2.4).
  * 5. The record goes, and the private keys of every recorded KeyPackage are
  *    forgotten.
- * 6. The missed messages are looked for on the gap channel, durably: once
+ * 6. The missed messages are looked for at the gap keys' rendezvous, durably: once
  *    now, then after every poll of the group and on opening the chat, at
  *    most once a minute, until they arrive or 30 days passed (live walk
  *    2026-11-19; the line is narrowed or removed when they arrive).
@@ -29,8 +29,14 @@ import { base64Decode } from "../auth/account-id";
 import type { Group as WasmGroup, Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 import { conversationBehind } from "./conversation-behind";
 import { registeredCommitHolds } from "./registered-commit-hold";
-import { gapChannelOf, type GapChannel } from "./reentry-history";
-import { addGapLine, deleteReentryRecord, setReentryReadFrom, type ReentryRecord, type ReentryRouteName } from "./reentry-store";
+import {
+  addGapLine,
+  deleteReentryRecord,
+  setReentryReadFrom,
+  type ReentryRecord,
+  type ReentryRouteName,
+  type SealedGapSecret,
+} from "./reentry-store";
 
 /** What the bookkeeping needs from the app. */
 export interface ReentryJoinPorts {
@@ -40,7 +46,8 @@ export interface ReentryJoinPorts {
   /** Fetch the gap's messages in the background (never awaited). */
   fetchGapHistory(input: {
     readonly groupIdB64: string;
-    readonly channel: GapChannel;
+    /** The gap secrets of the requests, sealed under the device key. */
+    readonly secrets: readonly SealedGapSecret[];
     readonly gapFromMs: number;
     readonly gapToMs: number;
     /** The route the answered request took (decides the direction of a
@@ -71,15 +78,7 @@ export async function noteReentryJoined(input: {
   } catch {
     epoch = undefined;
   }
-  let channel: GapChannel | null = null;
-  if (identity !== null) {
-    try {
-      // This device's own leaf key is the exporter's context (section 7).
-      channel = await gapChannelOf(input.group, identity, identity.signaturePublicKey);
-    } catch {
-      channel = null;
-    }
-  }
+  const secrets = input.record.gapKeys;
   // The commit that reached the new epoch, as the reads signed at the old
   // epoch named it.
   const commitId = epoch === undefined ? undefined : conversationBehind.registeredCommits(input.groupIdB64).get(epoch);
@@ -100,5 +99,7 @@ export async function noteReentryJoined(input: {
   }
   // eslint-disable-next-line no-console
   console.info(`chat re-entry joined: epoch=${epoch ?? "-"}`);
-  if (channel !== null && p !== null) p.fetchGapHistory({ groupIdB64: input.groupIdB64, channel, gapFromMs: input.record.gapFromMs, gapToMs: nowMs, route: input.record.route });
+  if (secrets.length > 0 && p !== null) {
+    p.fetchGapHistory({ groupIdB64: input.groupIdB64, secrets, gapFromMs: input.record.gapFromMs, gapToMs: nowMs, route: input.record.route });
+  }
 }

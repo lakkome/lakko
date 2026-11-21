@@ -250,6 +250,12 @@ public object AccountLocalWipe {
         Step("reentry-owed-bundles") { ctx, acct ->
             me.lakko.app.chat.SharedPrefsOwedGapBundleStore(ctx).clearForAccount(acct)
         },
+        // The secrets of the gap keys of requests still out, and when this
+        // device first saw each leaf (the re-admitter's floor).
+        Step("reentry-gap-keys") { ctx, acct -> me.lakko.app.chat.EncryptedGapKeyStore(ctx).clearForAccount(acct) },
+        Step("reentry-leaf-first-seen") { ctx, acct ->
+            me.lakko.app.chat.SharedPrefsLeafFirstSeenStore(ctx).clearForAccount(acct)
+        },
         Step("journal-ownership") { ctx, acct ->
             me.lakko.app.ds.EncryptedJournalOwnershipStore(ctx).clearForAccount(acct)
         },

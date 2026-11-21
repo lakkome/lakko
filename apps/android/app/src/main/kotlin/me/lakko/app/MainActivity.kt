@@ -223,21 +223,26 @@ class MainActivity : ComponentActivity() {
         }
         chatRepository.visibilityListener = { chatRepository.runIntroductionsBestEffort() }
         // ADR-0098 / UX section 3 — a pending contact (ADR-0079) whose account
-        // turns out deleted: the messages held for them are discarded, never
-        // sent. Re-attached on every activity recreate.
-        me.lakko.app.profile.ProfileDirectory.get(applicationContext).deletions?.book?.onPersonDeleted = { keyB64 ->
-            val account = me.lakko.app.contacts.AcceptedContactsStore.boundAccountB64
-            if (account != null) {
-                val pending = try {
-                    me.lakko.app.contacts.PendingContactsFiles.onDevice(applicationContext).load(account)
-                } catch (_: Throwable) {
-                    emptyList()
+        // turns out deleted (a verified statement AND a later directory 404,
+        // `deletionEffects`): the messages held for them are discarded, never
+        // sent, and their removal from groups is owed. Re-attached on every
+        // activity recreate.
+        me.lakko.app.profile.ProfileDirectory.get(applicationContext).deletions?.book?.onDeletionEffects = { keyB64, effects ->
+            if (effects.removeFromGroups) chatRepository.proposeOwedDeletedRemovalsEverywhere()
+            if (effects.dropHeldSends) {
+                val account = me.lakko.app.contacts.AcceptedContactsStore.boundAccountB64
+                if (account != null) {
+                    val pending = try {
+                        me.lakko.app.contacts.PendingContactsFiles.onDevice(applicationContext).load(account)
+                    } catch (_: Throwable) {
+                        emptyList()
+                    }
+                    pending.filter { it.signaturePubkeyB64 == keyB64 }
+                        .forEach { chatRepository.clearPendingInvitedMessages(it.queueKey) }
                 }
-                pending.filter { it.signaturePubkeyB64 == keyB64 }
-                    .forEach { chatRepository.clearPendingInvitedMessages(it.queueKey) }
+                // An unanswered request from them is removed silently.
+                contactsRepository.dropRequestsFrom(keyB64)
             }
-            // An unanswered request from them is removed silently.
-            contactsRepository.dropRequestsFrom(keyB64)
         }
         // Phase 2a3e2b-Android — process-scoped cross-device
         // sync runtime. Bootstrapped from `SessionRoot` once

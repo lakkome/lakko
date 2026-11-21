@@ -763,6 +763,17 @@ public final class ProfileDirectory: ObservableObject {
         return deletions?.isDeleted(keysB64: personKeys(keyB64)) ?? false
     }
 
+    /// ADR-0098 — whether what was held for the person holding `signatureKey`
+    /// (unsent messages, an unanswered request) may be dropped: only on a
+    /// verified statement AND a directory `404` after it (`deletionEffects`).
+    public func deletionDropsHeldSends(signatureKey: Data) -> Bool {
+        let keyB64 = base64Encode(signatureKey)
+        if let current = aliases[keyB64], current != keyB64, let currentKey = Data(base64Encoded: current) {
+            return deletionDropsHeldSends(signatureKey: currentKey)
+        }
+        return deletions?.effects(keysB64: personKeys(keyB64)).dropHeldSends ?? false
+    }
+
     /// ADR-0084 — the profile photo the person holding `signatureKey` set,
     /// through the same aliases a name resolves through, or `nil`.
     public func avatar(signatureKey: Data) -> ProfileAvatar? {

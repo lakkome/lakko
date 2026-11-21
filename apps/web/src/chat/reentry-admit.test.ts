@@ -50,12 +50,20 @@ function group(opts: { epoch?: bigint; accountKey?: Uint8Array; valid?: boolean 
 }
 
 function arrival(route: ReentryArrival["route"], extra: Partial<ReentryArrival> = {}): ReentryArrival {
-  return { route, groupId: GROUP_ID, epochLeft: 7n, gapFromMs: 1_234n, keyPackage: new Uint8Array([9]), ...extra };
+  return {
+    route,
+    groupId: GROUP_ID,
+    epochLeft: 7n,
+    gapFromMs: 1_234n,
+    gapKey: new Uint8Array(32).fill(0x61),
+    keyPackage: new Uint8Array([9]),
+    ...extra,
+  };
 }
 
 function ports(g: WasmGroup, over: Partial<ReentryAdmitPorts> = {}) {
   const proposed: Uint8Array[] = [];
-  const owed: { epochAfter: bigint; gapFromMs: number; leafKey: Uint8Array }[] = [];
+  const owed: { epochAfter: bigint; gapFromMs: number; leafKey: Uint8Array; gapKey: Uint8Array }[] = [];
   const p: ReentryAdmitPorts = {
     now: () => now,
     identity: () => ({}) as WasmIdentity,
@@ -98,7 +106,9 @@ describe("who acts (section 4)", () => {
     const t = ports(group());
     expect(await handleReentryRequest(arrival("mailbox"), t.p)).toBe("admitted");
     expect(t.proposed.length).toBe(1);
-    expect(t.owed).toEqual([{ groupIdB64: GID, leafKey: LEAF_KEY, epochAfter: 8n, gapFromMs: 1_234, route: "mailbox" }]);
+    expect(t.owed).toEqual([
+      { groupIdB64: GID, leafKey: LEAF_KEY, gapKey: new Uint8Array(32).fill(0x61), epochAfter: 8n, gapFromMs: 1_234, route: "mailbox" },
+    ]);
   });
 
   it("route 2 in a group, or for this device's own account, is not ours", async () => {

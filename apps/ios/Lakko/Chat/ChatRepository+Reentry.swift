@@ -95,7 +95,19 @@ extension ChatRepository {
         reentryGapLooks.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         reentryRowClock.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         reentryKnockKeySent.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        reentryLeafFirstSeen.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         chatClient.reentryObservations.clear(groupIdHex: groupIdHex)
+    }
+
+    /// Section 7 — record the first time this device saw each leaf of the
+    /// group's roster (only the first observation is kept). Called after
+    /// every applied poll.
+    func noteReentryLeavesSeen(groupIdHex: String) {
+        guard let accountIdB64 = currentAccountIdB64, let record = groups[groupIdHex],
+              let members = try? record.group.members() else { return }
+        reentryLeafFirstSeen.noteRoster(
+            accountIdB64: accountIdB64, groupIdHex: groupIdHex,
+            leafKeys: members.map(\.signaturePublicKey), nowMs: nowU64)
     }
 
     // MARK: - 1. Detection
@@ -330,13 +342,23 @@ extension ChatRepository {
         let gapFromMs = ConversationReentryRules.gapStart(
             firstSkippedMs: current.gapFromMs, lastKnownRowMs: clock.lastKnownRowMs,
             lastReadOkMs: clock.lastReadOkMs, suspicionSinceMs: current.behind.sinceMs, nowMs: now)
+        // Section 7 — a fresh gap key per request: the gap's history is
+        // sealed to its public half, which the request carries; its secret is
+        // kept, sealed, with the request record, so only this device opens
+        // the history.
+        let gapKey = generateGapKey()
+        guard let sealedGapSecret = reentryGapLooks.sealSecret(gapKey.secret, accountIdB64: accountIdB64) else {
+            ReentryLog.emit("conversation re-entry request not sent: the gap key could not be kept")
+            retrySoon(groupIdHex: groupIdHex)
+            return
+        }
         let keyPackage: Data
         let envelope: Data
         do {
             keyPackage = try identity.createReentryKeyPackage(groupId: record.groupId, epochLeft: epochLeft)
             envelope = try composeConversationReentryEnvelope(
                 groupId: record.groupId, epochLeft: epochLeft,
-                gapFromMs: gapFromMs, keyPackage: keyPackage)
+                gapFromMs: gapFromMs, gapKey: gapKey.publicKey, keyPackage: keyPackage)
         } catch {
             ReentryLog.emit("conversation re-entry request not built: \(ErrorLogTag.of(error))")
             retrySoon(groupIdHex: groupIdHex)
@@ -347,7 +369,8 @@ extension ChatRepository {
             current.requests,
             adding: ReentrySentRequest(
                 keyPackage: keyPackage, epochLeft: epochLeft, sentAtMs: now,
-                route: ConversationReentryRules.routeName(route), cursorAtSend: record.cursor))
+                route: ConversationReentryRules.routeName(route), cursorAtSend: record.cursor,
+                gapPublicKey: gapKey.publicKey, sealedGapSecret: sealedGapSecret))
         for old in dropped { try? identity.forgetKeyPackage(keyPackage: old) }
         do {
             try persistSnapshotDurableOrThrow()
@@ -585,11 +608,24 @@ extension ChatRepository {
         guard bound.isCurrent else { return }
         reentryAdmissions.markAccepted(
             accountIdB64: accountIdB64, groupIdHex: groupIdHex, leafKey: target.signatureKey, atMs: nowU64)
-        reentryHistoryOwed.add(
-            ReentryOwedHistory(
-                groupIdHex: groupIdHex, keyPackage: request.keyPackage, leafKey: target.signatureKey,
-                targetEpoch: epoch &+ 1, gapFromMs: request.gapFromMs, owedAtMs: nowU64),
-            accountIdB64: accountIdB64)
+        // Section 7 — the rows sent start no earlier than this device's own
+        // evidence that the leaf was in the conversation (the first time it
+        // saw the leaf's key in the roster, else the last message from it);
+        // with neither, nothing is sent.
+        if let start = gapHistoryStart(
+            claimedMs: request.gapFromMs,
+            leafFirstSeenMs: reentryLeafFirstSeen.firstSeen(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex, leafKey: target.signatureKey),
+            leafLastWriteMs: chatClient.reentryObservations.lastWrite(
+                groupIdHex: groupIdHex, leaf: target.replacedLeaf)) {
+            reentryHistoryOwed.add(
+                ReentryOwedHistory(
+                    groupIdHex: groupIdHex, keyPackage: request.keyPackage, leafKey: target.signatureKey,
+                    gapKey: request.gapKey, proposedAtEpoch: epoch, gapFromMs: start, owedAtMs: nowU64),
+                accountIdB64: accountIdB64)
+        } else {
+            ReentryLog.emit("conversation re-entry: no gap history owed: the leaf was never seen here")
+        }
         ReentryLog.emit("conversation re-entry replacement proposed by route \(ConversationReentryRules.routeName(route))")
         await sweepIfCommitter(groupIdHex: groupIdHex)
         // A sweep of this device's own merged the replacement: the history
@@ -665,15 +701,11 @@ extension ChatRepository {
         guard let groupId = try? joined.groupId(), DsClient.pseudonymHex(groupId) == groupIdHex else {
             return false
         }
-        // The history secret is exported at the epoch the replacement created,
-        // before anything moves the group on.
-        let historySecret = (try? joined.ownLeafIndex()).flatMap { own in
-            (try? joined.members())?.first(where: { $0.leafIndex == own })?.signaturePublicKey
-        }.flatMap { leafKey in
-            try? joined.exportSecret(
-                identity: identity, label: ConversationReentryRules.historyExporterLabel,
-                context: ConversationReentryRules.historyContext(leafKey: leafKey),
-                length: ConversationReentryRules.historySecretLength)
+        // Section 7 — the gap keys of the requests out: which one the
+        // re-admitter answered is not known here, so the history is looked
+        // for under each.
+        let gapKeys = ConversationReentryRules.gapKeyPairs(record.requests) {
+            reentryGapLooks.openSecret($0, accountIdB64: accountIdB64)
         }
         let back = GroupRecord(group: joined, groupId: groupId)
         back.adoptReentryRecord(old, readFrom: record.readFromAfterReentry ?? old.cursor)
@@ -706,14 +738,14 @@ extension ChatRepository {
         requestProfilesAfterJoin(groupIdHex: groupIdHex)
         // Walk-3 rule W3-R5 — and this device re-sends its own.
         resendOwnStateBackInStep(groupIdHex: groupIdHex)
-        if let historySecret {
+        if !gapKeys.isEmpty {
             // Section 7 — looked for until it arrives or the Delivery Service's
             // retention passes (rule 1 of the 2026-11-19 walk fix), not by one
             // timed wait: the re-admitter sends it only once its own poll
-            // reaches the new epoch, which may be days later.
+            // sees the replacement landed, which may be days later.
             reentryGapLooks.save(
                 ReentryGapLook(
-                    groupIdHex: groupIdHex, secret: historySecret, gapFromMs: lookFrom, gapToMs: now,
+                    groupIdHex: groupIdHex, keys: gapKeys, gapFromMs: lookFrom, gapToMs: now,
                     route: record.lastRoute),
                 accountIdB64: accountIdB64)
             Task { @MainActor [weak self] in
@@ -725,8 +757,9 @@ extension ChatRepository {
 
     // MARK: - 7. The gap history
 
-    /// The re-admitter: send every gap history owed for `groupIdHex` once
-    /// this device holds the group at the epoch the replacement created.
+    /// The re-admitter: send every gap history owed for `groupIdHex` whose
+    /// replacement has landed (``ConversationReentryRules/owedHistoryVerdict(_:epoch:rosterHasLeaf:nowMs:)``),
+    /// sealed to the request's gap key and signed by this device's leaf.
     func sendOwedReentryHistory(groupIdHex: String) async {
         guard let accountIdB64 = currentAccountIdB64, let identity = canonicalIdentity,
               let record = groups[groupIdHex], !reentryStopsActing(groupIdHex: groupIdHex) else { return }
@@ -734,31 +767,35 @@ extension ChatRepository {
         let mine = all.filter { $0.groupIdHex == groupIdHex }
         guard !mine.isEmpty, let epoch = try? record.group.epoch() else { return }
         let now = nowU64
+        let roster = Set(((try? record.group.members()) ?? []).map(\.signaturePublicKey))
         var keep = all.filter { $0.groupIdHex != groupIdHex }
         var due: [ReentryOwedHistory] = []
         for owed in mine {
-            guard ConversationReentryRules.historyStillOwed(owed, nowMs: now) else { continue }
-            if epoch < owed.targetEpoch { keep.append(owed) } else if epoch == owed.targetEpoch { due.append(owed) }
+            switch ConversationReentryRules.owedHistoryVerdict(
+                owed, epoch: epoch, rosterHasLeaf: roster.contains(owed.leafKey), nowMs: now) {
+            case .wait: keep.append(owed)
+            case .send: due.append(owed)
+            case .drop: break
+            }
         }
         reentryHistoryOwed.save(keep, accountIdB64: accountIdB64)
         guard !due.isEmpty else { return }
         persistMessageLogBestEffort()
         let rows = messageLogStore.getLog(accountIdB64: accountIdB64)?.groups[groupIdHex]?.messages ?? []
-        let roster = Set(((try? record.group.members()) ?? []).map(\.signaturePublicKey))
-        for owed in due where roster.contains(owed.leafKey) {
+        for owed in due {
             do {
-                let secret = try record.group.exportSecret(
-                    identity: identity, label: ConversationReentryRules.historyExporterLabel,
-                    context: ConversationReentryRules.historyContext(leafKey: owed.leafKey),
-                    length: ConversationReentryRules.historySecretLength)
+                guard let rendezvous = ConversationReentryRules.gapRendezvous(gapKey: owed.gapKey) else {
+                    ReentryLog.emit("conversation re-entry: the gap history was not sent: bad gap key")
+                    continue
+                }
                 let gapRows = ConversationReentryRules.gapRows(rows, gapFromMs: owed.gapFromMs)
-                if let sealed = try HistoryBundleCodec.buildForGroup(
-                    hex: groupIdHex, rows: gapRows, accountIdB64: accountIdB64, secret: secret,
+                if let sealed = try HistoryBundleCodec.buildGapForGroup(
+                    hex: groupIdHex, rows: gapRows, accountIdB64: accountIdB64,
+                    readmitter: identity, gapKey: owed.gapKey, groupId: record.groupId,
                     heldBeforeGap: ConversationReentryRules.gapHeldBefore(rows, gapFromMs: owed.gapFromMs),
                     ownKey: AuthorIdentity.own(group: record.group).flatMap { Data(base64Encoded: $0) }) {
                     try await WelcomeCourier.publishHistoryBundle(
-                        rendezvousPseudonym: ConversationReentryRules.historyRendezvous(secret: secret),
-                        sealedBytes: sealed, ds: dsClient)
+                        rendezvousPseudonym: rendezvous, sealedBytes: sealed, ds: dsClient)
                     ReentryLog.emit("conversation re-entry: the gap history was sent")
                 }
             } catch {
@@ -775,9 +812,10 @@ extension ChatRepository {
     /// rendezvous, at most once a minute per group (``ConversationReentryRules/gapLookVerdict(_:nowMs:)``).
     /// Called right after the join, at the tail of every applied poll of the
     /// group, and when the chat is opened; never from the notification
-    /// extension (C-59). The first row that opens and files ends the look and
-    /// narrows the gap line; a failed read, no row, or a row that does not
-    /// open keeps it.
+    /// extension (C-59). Reads every page of the rendezvous
+    /// (``RendezvousRead``) and tries its rows newest first; the first row
+    /// that opens and files ends the look and narrows the gap line; a failed
+    /// read, no row, or rows that do not open keep it.
     func lookForReentryGapHistory(groupIdHex: String) async {
         guard let accountIdB64 = currentAccountIdB64, !reentryHistoryReading.contains(groupIdHex),
               let look = reentryGapLooks.load(accountIdB64: accountIdB64, groupIdHex: groupIdHex) else { return }
@@ -796,43 +834,64 @@ extension ChatRepository {
         defer { reentryHistoryReading.remove(groupIdHex) }
         reentryGapLooks.markLooked(accountIdB64: accountIdB64, groupIdHex: groupIdHex, atMs: now)
         let bound = binding.capture()
-        let rows: [MailboxMessage]
-        do {
-            rows = try await dsClient.fetchRendezvous(
-                id: ConversationReentryRules.historyRendezvous(secret: look.secret),
-                after: 0, limit: Self.gapLookReadLimit, waitSecs: 0).messages
-        } catch {
-            return
-        }
-        guard bound.isCurrent, currentAccountIdB64 == accountIdB64 else { return }
-        for row in rows {
-            // Not the history bundle: skip it, as the timed wait did.
-            if RecoveryPayload.isRecoveryRow(row.payload) || StateBundle.isStateRow(row.payload) { continue }
-            let filed: HistoryBundleCodec.GapApplied
+        for key in look.keys {
+            guard let rendezvous = ConversationReentryRules.gapRendezvous(gapKey: key.publicKey) else { continue }
+            let rows: [MailboxMessage]
             do {
-                // Walk-3 rule W3-R3 — each row takes its author, and its
-                // direction from it, against this account's own key here.
-                let ownKey = groups[groupIdHex].flatMap { AuthorIdentity.own(group: $0.group) }
-                    .flatMap { Data(base64Encoded: $0) }
-                filed = try HistoryBundleCodec.applyGapBundle(
-                    accountIdB64: accountIdB64, secret: look.secret, sealedBytes: row.payload,
-                    ownKey: ownKey, route: look.route, store: messageLogStore)
+                // Every page, not the first: a member who saw the request
+                // can post junk rows ahead of the real bundle.
+                let ds = dsClient
+                rows = try await RendezvousRead.readAll { after, limit in
+                    try await ds.fetchRendezvous(id: rendezvous, after: after, limit: limit, waitSecs: 0)
+                }
             } catch {
                 continue
             }
-            reentryGapLooks.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
-            if let record = groups[groupIdHex],
-               record.narrowReentryGap(
-                   gapToMs: look.gapToMs, complete: filed.complete, earliestMs: filed.earliestMs) {
-                persistMessageLogBestEffort()
-                state = state.with(threads: buildThreadList())
+            guard bound.isCurrent, currentAccountIdB64 == accountIdB64 else { return }
+            // Newest first; a row that does not open, or whose signer is not
+            // accepted, is passed over.
+            for row in Self.gapLookCandidates(rows) {
+                guard let live = groups[groupIdHex], let identity = canonicalIdentity else { return }
+                let opened: FfiOpenedGapHistoryStructured
+                do {
+                    opened = try openGapHistoryStructured(
+                        gapSecret: key.secret, groupId: live.groupId, sealed: row.payload)
+                } catch {
+                    continue
+                }
+                // Kept only when its signer is this account, the owner or an
+                // admin, or the other person of a one-to-one (the rule a
+                // re-entry Welcome's sender passes); otherwise dropped and
+                // the gap line stays.
+                guard (try? live.group.gapHistorySignerAccepted(
+                    identity: identity, signerLeafKey: opened.signerLeafKey)) == true else {
+                    ReentryLog.emit("chat re-entry: a gap history from a signer not trusted here was dropped")
+                    continue
+                }
+                // Walk-3 rule W3-R3 — each row takes its author, and its
+                // direction from it, against this account's own key here.
+                let ownKey = AuthorIdentity.own(group: live.group).flatMap { Data(base64Encoded: $0) }
+                let filed = HistoryBundleCodec.applyOpenedGapBundle(
+                    opened.bundle, accountIdB64: accountIdB64, ownKey: ownKey, route: look.route,
+                    store: messageLogStore)
+                reentryGapLooks.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+                if live.narrowReentryGap(
+                    gapToMs: look.gapToMs, complete: filed.complete, earliestMs: filed.earliestMs) {
+                    persistMessageLogBestEffort()
+                    state = state.with(threads: buildThreadList())
+                }
+                ReentryLog.emit("chat re-entry: missed messages received: rows=\(filed.applied)")
+                return
             }
-            ReentryLog.emit("chat re-entry: missed messages received: rows=\(filed.applied)")
-            return
         }
     }
 
-    /// Rows one gap look reads from the rendezvous. Chosen, not measured:
-    /// the bundle is normally the first and only row.
-    static let gapLookReadLimit = 16
+    /// The rows of a gap look worth opening, newest first: everything but a
+    /// recovery or state row (not the history bundle; skipped as the timed
+    /// wait did).
+    nonisolated static func gapLookCandidates(_ rows: [MailboxMessage]) -> [MailboxMessage] {
+        rows.reversed().filter {
+            !RecoveryPayload.isRecoveryRow($0.payload) && !StateBundle.isStateRow($0.payload)
+        }
+    }
 }

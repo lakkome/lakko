@@ -149,7 +149,7 @@ class PublishWaitingTest {
             anonTokens = FakeAnonTokenSource(),
         ).use { client ->
             try {
-                client.identityUpload(IdentityUploadRequest(account_id = "A", signature_pubkey = "S", x25519_pubkey = "X"))
+                client.identityUpload(IdentityUploadRequest(account_id = "A", signature_pubkey = "S", x25519_pubkey = "X", x25519_binding = "B"))
                 fail("expected a 429")
             } catch (err: DiscoveryHttpError) {
                 assertEquals(429, err.status)
@@ -186,7 +186,7 @@ class PublishWaitingTest {
             anonTokens = FakeAnonTokenSource(),
         ).use { client ->
             try {
-                client.identityUpload(IdentityUploadRequest(account_id = "A", signature_pubkey = "S", x25519_pubkey = "X"))
+                client.identityUpload(IdentityUploadRequest(account_id = "A", signature_pubkey = "S", x25519_pubkey = "X", x25519_binding = "B"))
                 fail("expected a 429")
             } catch (err: DiscoveryHttpError) {
                 assertEquals(90L, err.retryAfterSecs)

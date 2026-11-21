@@ -473,6 +473,9 @@ mod route_tests {
                 "signature_pubkey": B64.encode(key),
                 "x25519_pubkey": B64.encode([0x33u8; 32]),
             });
+            if let (Some(dst), Some(b)) = (body.as_object_mut(), x25519_binding_for(&key)) {
+                dst.insert("x25519_binding".into(), serde_json::Value::String(b));
+            }
             if let (Some(dst), Some(src)) = (body.as_object_mut(), extra.as_object()) {
                 for (k, v) in src {
                     dst.insert(k.clone(), v.clone());
@@ -554,10 +557,93 @@ mod route_tests {
             .unwrap()
     }
 
-    const K1: [u8; 32] = [0x11; 32];
-    const K2: [u8; 32] = [0x22; 32];
-    const K3: [u8; 32] = [0x33; 32];
-    const K4: [u8; 32] = [0x44; 32];
+    /// The account keys these tests publish: real Ed25519 keys, so the
+    /// publish helper can sign their X25519 binding.
+    fn test_key(seed: u8) -> [u8; 32] {
+        SigningKey::from_seed(&[seed; 32])
+            .verifying_key()
+            .to_bytes()
+    }
+    fn k1() -> [u8; 32] {
+        test_key(0x11)
+    }
+    fn k2() -> [u8; 32] {
+        test_key(0x22)
+    }
+    fn k3() -> [u8; 32] {
+        test_key(0x33)
+    }
+    fn k4() -> [u8; 32] {
+        test_key(0x44)
+    }
+
+    /// The X25519 binding of `key` over the fixture X25519 key, when `key`
+    /// is `SigningKey::from_seed(&[s; 32])` for some byte `s` (every key
+    /// these tests publish is).
+    fn x25519_binding_for(key: &[u8; 32]) -> Option<String> {
+        (0..=u8::MAX).find_map(|s| {
+            let signing = SigningKey::from_seed(&[s; 32]);
+            (signing.verifying_key().to_bytes() == *key)
+                .then(|| B64.encode(lakko_contacts::sign_x25519_binding(&signing, &[0x33u8; 32])))
+        })
+    }
+
+    /// Security review 2026-11-21: an identity upload must carry the
+    /// identity key's signature over its X25519 key, and the fetch serves it.
+    /// An absent binding, one over another X25519 key, or one by another
+    /// identity key is `400 x25519-binding-invalid` and stores nothing.
+    #[tokio::test]
+    async fn an_identity_upload_without_a_valid_x25519_binding_is_refused() {
+        let Some(pool) = test_pool("an_identity_upload_without_a_valid_x25519_binding").await
+        else {
+            return;
+        };
+        let c = Client::new(pool.clone(), true, 0);
+        let acct = fresh_account(0x6A);
+        let signing = SigningKey::from_seed(&[0x11; 32]);
+        let other = SigningKey::from_seed(&[0x12; 32]);
+        let cases = [
+            // Absent: an explicit null overrides the helper's binding.
+            serde_json::json!({ "x25519_binding": serde_json::Value::Null }),
+            // Over another X25519 key.
+            serde_json::json!({
+                "x25519_binding": B64.encode(lakko_contacts::sign_x25519_binding(&signing, &[0x34u8; 32]))
+            }),
+            // By another identity key.
+            serde_json::json!({
+                "x25519_binding": B64.encode(lakko_contacts::sign_x25519_binding(&other, &[0x33u8; 32]))
+            }),
+            // Not base64, and the wrong length.
+            serde_json::json!({ "x25519_binding": "not base64!" }),
+            serde_json::json!({ "x25519_binding": B64.encode([7u8; 63]) }),
+        ];
+        for extra in cases {
+            let (status, text) = c.publish(&acct, 1, k1(), extra.clone()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{extra} {text}");
+            assert!(text.contains("x25519-binding-invalid"), "{extra} {text}");
+        }
+        let (status, _) = c
+            .call(
+                "GET",
+                &format!(
+                    "/discovery/identity/{}",
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(acct)
+                ),
+                None,
+                serde_json::json!({}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "nothing was stored");
+
+        // The valid one is stored and served.
+        let (status, text) = c.publish(&acct, 1, k1(), serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let fetched = c.fetch(&acct).await;
+        let served = B64
+            .decode(fetched["x25519_binding"].as_str().unwrap())
+            .unwrap();
+        assert!(lakko_contacts::verify_x25519_binding(&served, &k1(), &[0x33u8; 32]).is_ok());
+    }
 
     /// ADR-0073 R.3: the identity fetch serves the stored key-reset
     /// attestation to peers, the stored bytes unparsed, and omits the field
@@ -575,7 +661,7 @@ mod route_tests {
 
         // Genesis: no attestation stored, and the field is ABSENT from the
         // JSON (not null, not empty).
-        let (status, text) = c.publish(&acct, 1, K1, serde_json::json!({})).await;
+        let (status, text) = c.publish(&acct, 1, k1(), serde_json::json!({})).await;
         assert_eq!(status, StatusCode::OK, "{text}");
         let fetched = c.fetch(&acct).await;
         assert!(
@@ -588,19 +674,19 @@ mod route_tests {
         // After an attested reset the fetch returns exactly what was
         // uploaded: standard base64 of the 145 stored bytes, which verify
         // for this account, generation and key under the attest key.
-        let att2 = attestation(&acct, 2, K2);
+        let att2 = attestation(&acct, 2, k2());
         let (status, text) = c
             .publish(
                 &acct,
                 2,
-                K2,
+                k2(),
                 serde_json::json!({ "key_reset_attest": att2 }),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{text}");
         let fetched = c.fetch(&acct).await;
         assert_eq!(fetched["key_reset_attest"], att2);
-        assert_eq!(fetched["signature_pubkey"], B64.encode(K2));
+        assert_eq!(fetched["signature_pubkey"], B64.encode(k2()));
         assert_eq!(fetched["key_generation"], 2);
         let served = B64
             .decode(fetched["key_reset_attest"].as_str().unwrap())
@@ -615,10 +701,10 @@ mod route_tests {
                 key,
             )
         };
-        assert_eq!(peer_check(&served, &K2).unwrap().key_generation, 2);
+        assert_eq!(peer_check(&served, &k2()).unwrap().key_generation, 2);
 
         // A routine same-key re-upload without the attestation keeps it.
-        let (status, text) = c.publish(&acct, 2, K2, serde_json::json!({})).await;
+        let (status, text) = c.publish(&acct, 2, k2(), serde_json::json!({})).await;
         assert_eq!(status, StatusCode::OK, "{text}");
         assert_eq!(c.fetch(&acct).await["key_reset_attest"], att2);
 
@@ -640,24 +726,24 @@ mod route_tests {
         // (still the latest reset's) while the published key moves on, so it
         // no longer binds the fetched key: that path is the supersession
         // proof's, served beside it.
-        let proof = B64.encode(rotation_tests::proof(&k3_signing, &K4));
+        let proof = B64.encode(rotation_tests::proof(&k3_signing, &k4()));
         let (status, text) = c
             .publish(
                 &acct,
                 3,
-                K4,
+                k4(),
                 serde_json::json!({ "supersession_proof": proof }),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{text}");
         let fetched = c.fetch(&acct).await;
-        assert_eq!(fetched["signature_pubkey"], B64.encode(K4));
+        assert_eq!(fetched["signature_pubkey"], B64.encode(k4()));
         assert_eq!(fetched["supersession_proof"], proof);
         assert_eq!(fetched["key_reset_attest"], att3);
         let served = B64
             .decode(fetched["key_reset_attest"].as_str().unwrap())
             .unwrap();
-        assert!(peer_check(&served, &K4).is_err());
+        assert!(peer_check(&served, &k4()).is_err());
         assert_eq!(peer_check(&served, &k3).unwrap().key_generation, 3);
 
         sqlx::query("DELETE FROM identity_bundles WHERE account_id = ?")
@@ -681,7 +767,7 @@ mod route_tests {
         let k3 = k3_signing.verifying_key().to_bytes();
 
         // Genesis publish at generation 1, two devices in the directory.
-        let (status, text) = c.publish(&acct, 1, K1, serde_json::json!({})).await;
+        let (status, text) = c.publish(&acct, 1, k1(), serde_json::json!({})).await;
         assert_eq!(status, StatusCode::OK, "{text}");
         assert_eq!(c.fetch(&acct).await["key_generation"], 1);
         for device in [0xD1, 0xD2] {
@@ -692,26 +778,26 @@ mod route_tests {
 
         // The retired heal: an unattested, unproven key change is refused,
         // and nothing moved.
-        let (status, text) = c.publish(&acct, 1, K2, serde_json::json!({})).await;
+        let (status, text) = c.publish(&acct, 1, k2(), serde_json::json!({})).await;
         assert_eq!(status, StatusCode::CONFLICT, "{text}");
         assert_eq!(error_code(&text), CODE_NEEDS_ATTESTATION);
-        assert_eq!(c.fetch(&acct).await["signature_pubkey"], B64.encode(K1));
+        assert_eq!(c.fetch(&acct).await["signature_pubkey"], B64.encode(k1()));
 
         // The attested reset: generation 2, the uploaded key, the session
         // account. Accepted once; the generation is stored, the attestation
         // is stored, every KeyPackage row is gone.
-        let att2 = attestation(&acct, 2, K2);
+        let att2 = attestation(&acct, 2, k2());
         let (status, text) = c
             .publish(
                 &acct,
                 2,
-                K2,
+                k2(),
                 serde_json::json!({ "key_reset_attest": att2 }),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{text}");
         let fetched = c.fetch(&acct).await;
-        assert_eq!(fetched["signature_pubkey"], B64.encode(K2));
+        assert_eq!(fetched["signature_pubkey"], B64.encode(k2()));
         assert_eq!(fetched["key_generation"], 2);
         assert_eq!(
             stored_attestation(&pool, &acct).await,
@@ -725,13 +811,13 @@ mod route_tests {
         // not delete it again.
         let (status, text) = c.publish_keypackage(&acct, 2, 0xD1).await;
         assert_eq!(status, StatusCode::OK, "{text}");
-        let (status, text) = c.publish(&acct, 2, K2, serde_json::json!({})).await;
+        let (status, text) = c.publish(&acct, 2, k2(), serde_json::json!({})).await;
         assert_eq!(status, StatusCode::OK, "{text}");
         let (status, text) = c
             .publish(
                 &acct,
                 2,
-                K2,
+                k2(),
                 serde_json::json!({ "key_reset_attest": att2 }),
             )
             .await;
@@ -741,10 +827,10 @@ mod route_tests {
 
         // The floor: a generation-1 token is refused on both identity writes
         // with the one code a client acts on, before the change rule runs
-        // (the publish-back of K1 is a 401, not a 409).
+        // (the publish-back of k1() is a 401, not a 409).
         for (status, text) in [
-            c.publish(&acct, 1, K2, serde_json::json!({})).await,
-            c.publish(&acct, 1, K1, serde_json::json!({})).await,
+            c.publish(&acct, 1, k2(), serde_json::json!({})).await,
+            c.publish(&acct, 1, k1(), serde_json::json!({})).await,
             c.publish_keypackage(&acct, 1, 0xD2).await,
         ] {
             assert_eq!(status, StatusCode::UNAUTHORIZED, "{text}");
@@ -753,7 +839,7 @@ mod route_tests {
         assert_eq!(keypackage_rows(&pool, &acct).await, 1);
         // A publish-back of the previous key with a current token and no
         // proof is the retired heal again.
-        let (status, text) = c.publish(&acct, 2, K1, serde_json::json!({})).await;
+        let (status, text) = c.publish(&acct, 2, k1(), serde_json::json!({})).await;
         assert_eq!(status, StatusCode::CONFLICT, "{text}");
         assert_eq!(error_code(&text), CODE_NEEDS_ATTESTATION);
 
@@ -780,7 +866,7 @@ mod route_tests {
             .await;
         assert_eq!(status, StatusCode::CONFLICT, "{text}");
         assert_eq!(error_code(&text), CODE_GENERATION_NOT_NEWER);
-        assert_eq!(c.fetch(&acct).await["signature_pubkey"], B64.encode(K2));
+        assert_eq!(c.fetch(&acct).await["signature_pubkey"], B64.encode(k2()));
 
         // A later reset (generation 3) lands; the generation-2 attestation is
         // then a replay of an overtaken reset even for the key it names.
@@ -798,7 +884,7 @@ mod route_tests {
             .publish(
                 &acct,
                 3,
-                K2,
+                k2(),
                 serde_json::json!({ "key_reset_attest": att2 }),
             )
             .await;
@@ -819,25 +905,25 @@ mod route_tests {
             .publish(
                 &acct,
                 3,
-                K4,
+                k4(),
                 serde_json::json!({ "supersession_proof": B64.encode([0x99u8; 145]) }),
             )
             .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
         assert_eq!(error_code(&text), CODE_PROOF_INVALID);
         assert_eq!(c.fetch(&acct).await["signature_pubkey"], B64.encode(k3));
-        let proof = B64.encode(rotation_tests::proof(&k3_signing, &K4));
+        let proof = B64.encode(rotation_tests::proof(&k3_signing, &k4()));
         let (status, text) = c
             .publish(
                 &acct,
                 3,
-                K4,
+                k4(),
                 serde_json::json!({ "supersession_proof": proof }),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{text}");
         let fetched = c.fetch(&acct).await;
-        assert_eq!(fetched["signature_pubkey"], B64.encode(K4));
+        assert_eq!(fetched["signature_pubkey"], B64.encode(k4()));
         assert_eq!(fetched["key_generation"], 3);
         assert_eq!(fetched["supersession_proof"], proof);
 
@@ -860,24 +946,24 @@ mod route_tests {
         };
         let c = Client::new(pool.clone(), false, 0);
         let acct = fresh_account(0x66);
-        let (status, text) = c.publish(&acct, 1, K1, serde_json::json!({})).await;
+        let (status, text) = c.publish(&acct, 1, k1(), serde_json::json!({})).await;
         assert_eq!(status, StatusCode::OK, "{text}");
         let (status, text) = c
             .publish(
                 &acct,
                 2,
-                K2,
-                serde_json::json!({ "key_reset_attest": attestation(&acct, 2, K2) }),
+                k2(),
+                serde_json::json!({ "key_reset_attest": attestation(&acct, 2, k2()) }),
             )
             .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{text}");
         assert_eq!(error_code(&text), CODE_KEY_RESET_DISABLED);
-        let (status, text) = c.publish(&acct, 2, K2, serde_json::json!({})).await;
+        let (status, text) = c.publish(&acct, 2, k2(), serde_json::json!({})).await;
         assert_eq!(status, StatusCode::CONFLICT, "{text}");
         assert_eq!(error_code(&text), CODE_NEEDS_ATTESTATION);
-        assert_eq!(c.fetch(&acct).await["signature_pubkey"], B64.encode(K1));
+        assert_eq!(c.fetch(&acct).await["signature_pubkey"], B64.encode(k1()));
         // A same-key re-upload is not the attested arm.
-        let (status, text) = c.publish(&acct, 1, K1, serde_json::json!({})).await;
+        let (status, text) = c.publish(&acct, 1, k1(), serde_json::json!({})).await;
         assert_eq!(status, StatusCode::OK, "{text}");
         sqlx::query("DELETE FROM identity_bundles WHERE account_id = ?")
             .bind(&acct[..])
@@ -895,7 +981,7 @@ mod route_tests {
         let acct = fresh_account(0x67);
         let k2_signing = SigningKey::from_seed(&[0x72; 32]);
         let k2 = k2_signing.verifying_key().to_bytes();
-        let (status, text) = c.publish(&acct, 1, K1, serde_json::json!({})).await;
+        let (status, text) = c.publish(&acct, 1, k1(), serde_json::json!({})).await;
         assert_eq!(status, StatusCode::OK, "{text}");
         let (status, text) = c
             .publish(
@@ -911,8 +997,8 @@ mod route_tests {
             .publish(
                 &acct,
                 3,
-                K3,
-                serde_json::json!({ "key_reset_attest": attestation(&acct, 3, K3) }),
+                k3(),
+                serde_json::json!({ "key_reset_attest": attestation(&acct, 3, k3()) }),
             )
             .await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{text}");
@@ -931,9 +1017,9 @@ mod route_tests {
             .publish(
                 &acct,
                 2,
-                K4,
+                k4(),
                 serde_json::json!({
-                    "supersession_proof": B64.encode(rotation_tests::proof(&k2_signing, &K4)),
+                    "supersession_proof": B64.encode(rotation_tests::proof(&k2_signing, &k4())),
                 }),
             )
             .await;
@@ -1142,8 +1228,8 @@ mod route_tests {
                 .publish(
                     &acct,
                     4,
-                    K4,
-                    serde_json::json!({ "key_reset_attest": attestation(&acct, 4, K4) }),
+                    k4(),
+                    serde_json::json!({ "key_reset_attest": attestation(&acct, 4, k4()) }),
                 )
                 .await;
             assert_eq!(status, StatusCode::OK, "{text}");

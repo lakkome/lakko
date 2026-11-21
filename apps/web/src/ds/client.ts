@@ -787,13 +787,29 @@ export class DsClient implements StatementSender, CommitSender {
    * recovery, the welcome courier, the state bundle; ADR-0060 section 2).
    * Never signed and never carries a delegation or wake header: the DS
    * refuses all three there.
+   *
+   * Every write spends one anonymous `rendezvous-write` token and carries no
+   * credentials, the way a proofless mailbox write spends `mailbox-write`;
+   * a spent or expired token is replaced and the write retried once by the
+   * pool. No token to be had fails the write like a network failure, so
+   * the callers' own retry paths apply. A read needs no token.
    */
   async publishRendezvous(id: Uint8Array, payload: Uint8Array): Promise<PublishResult> {
     if (id.length !== 32) throw new DsClientArgError("rendezvous id must be 32 bytes");
     if (payload.length === 0) throw new DsClientArgError("payload must be non-empty");
-    return this.publish(`/ds/rendezvous/${pseudonymHex(id)}/messages`, payload, {
-      kind: "none",
-    });
+    const req = {
+      method: "POST" as const,
+      path: `/ds/rendezvous/${pseudonymHex(id)}/messages`,
+      query: "",
+      body: payload,
+      contentType: "application/octet-stream",
+    };
+    const response = await this.tokens.spend("rendezvous-write", (headerName, headerValue) =>
+      this.attempt({ ...req, extraHeaders: { [headerName]: headerValue }, anonymous: true }, null),
+    );
+    const ok = await this.finish(req, response);
+    const json = (await ok.json()) as { id: number; created_at: string };
+    return { id: json.id, createdAt: json.created_at };
   }
 
   /** `GET /ds/rendezvous/{hex}/messages` - unsigned, like its write. */

@@ -75,7 +75,7 @@
 //! - `GET    /ds/mailbox/{mailbox_hex}/messages`   — `?after=<id>&limit=<n>&wait=<secs>`
 //!   (personal: the mailbox-key proof, whether or not the mailbox is claimed,
 //!   ADR-0060)
-//! - `POST   /ds/rendezvous/{id_hex}/messages`     — append to a rendezvous
+//! - `POST   /ds/rendezvous/{id_hex}/messages`     — append to a rendezvous (spends one `rendezvous-write` token)
 //!   (pairing, recovery, courier, state bundle): no proof, never claimable,
 //!   its own table, so no rendezvous id names a mailbox's rows (ADR-0060)
 //! - `GET    /ds/rendezvous/{id_hex}/messages`     — `?after=<id>&limit=<n>&wait=<secs>`, no proof

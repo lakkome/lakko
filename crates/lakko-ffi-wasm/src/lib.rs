@@ -134,6 +134,7 @@ pub mod translation;
 pub mod transparency;
 pub mod ui_rules;
 pub mod vault;
+pub mod x25519_binding;
 
 // Phase 1.16f3 — wasm-bindgen-test smoke suite. Gated on BOTH
 // `cfg(test)` (so the lib build never tries to pull in the

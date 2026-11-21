@@ -148,13 +148,20 @@ public sealed class RendezvousAnswer {
 }
 
 /** The answer in one read of the rendezvous: a Welcome wins over a presence
- *  note in the same rows; `null` when there is neither. */
-public fun rendezvousAnswer(rows: List<ByteArray>, isPresent: (ByteArray) -> Boolean): RendezvousAnswer? {
+ *  note in the same rows; `null` when there is neither. Anyone who learned the
+ *  rendezvous id can write to it, so a row that is neither a presence note nor
+ *  a Welcome [isWelcome] accepts (one this joiner can open) is passed over; a
+ *  throw from [isWelcome] counts as no. */
+public fun rendezvousAnswer(
+    rows: List<ByteArray>,
+    isPresent: (ByteArray) -> Boolean,
+    isWelcome: (ByteArray) -> Boolean = { true },
+): RendezvousAnswer? {
     var present = false
     for (row in rows) {
         if (isPresent(row)) {
             present = true
-        } else if (row.isNotEmpty()) {
+        } else if (row.isNotEmpty() && runCatching { isWelcome(row) }.getOrDefault(false)) {
             return RendezvousAnswer.Welcome(row)
         }
     }

@@ -79,7 +79,14 @@ use lakko_crypto::agreement::{PublicKey as X25519PublicKey, SecretKey as X25519S
 use lakko_crypto::signing::SigningKey;
 use thiserror::Error;
 
-use crate::envelope::{self, EPH_PUB_LEN, TAG_LEN};
+use crate::envelope::{self, SealLabels, EPH_PUB_LEN, TAG_LEN};
+
+/// The sealed-box labels of this envelope: its own, so the box opens as no
+/// other sealed-to-account envelope and no contact request.
+pub(crate) const SEAL_LABELS: SealLabels = SealLabels {
+    key: b"lakko/sealed/ds-registrar-seed/v1/key",
+    nonce: b"lakko/sealed/ds-registrar-seed/v1/nonce",
+};
 
 /// 27-byte domain separator prepended to the envelope. The trailing `\x00`
 /// keeps a UTF-8 free-text payload from ever starting with it.
@@ -214,8 +221,8 @@ pub fn compose_registrar_seed(
 ) -> CoreResult<Vec<u8>, RegistrarSeedError> {
     let public_key = registrar_public_key(seed);
     let mut out = header(journal_id, member_account_key, rank, &public_key);
-    let sealed =
-        envelope::seal(member_x25519_pub, &out, seed).map_err(|_| RegistrarSeedError::Seal)?;
+    let sealed = envelope::seal_labeled(&SEAL_LABELS, member_x25519_pub, &out, seed)
+        .map_err(|_| RegistrarSeedError::Seal)?;
     if sealed.len() != REGISTRAR_SEED_SEALED_LEN {
         return Err(RegistrarSeedError::Seal);
     }
@@ -354,7 +361,7 @@ impl RegistrarSeedEnvelope {
             &self.registrar_public_key,
         );
         debug_assert_eq!(aad.len(), HEADER_LEN);
-        let plain = envelope::open(account_x25519_secret, &aad, &self.sealed)
+        let plain = envelope::open_labeled(&SEAL_LABELS, account_x25519_secret, &aad, &self.sealed)
             .map_err(|_| RegistrarSeedError::Open)?;
         let seed: [u8; REGISTRAR_SEED_KEY_LEN] = plain
             .as_slice()
@@ -528,7 +535,7 @@ mod tests {
         let (secret, public) = member_keys();
         let wrong_key = registrar_public_key(&[0x77; 32]);
         let mut bytes = header(&JOURNAL, &MEMBER, RegistrarSeedRank::Admin, &wrong_key);
-        let sealed = envelope::seal(&public, &bytes, &SEED).unwrap();
+        let sealed = envelope::seal_labeled(&SEAL_LABELS, &public, &bytes, &SEED).unwrap();
         bytes.extend_from_slice(&sealed);
         assert_eq!(bytes.len(), REGISTRAR_SEED_ENVELOPE_LEN);
         let env = decode_registrar_seed(&bytes).unwrap();

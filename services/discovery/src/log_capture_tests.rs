@@ -98,12 +98,13 @@ async fn no_identifier_reaches_the_log_on_account_and_link_routes() {
 
     // Identity: a first publish, a body naming another account, and an
     // unproven key change.
-    let key = SigningKey::generate().verifying_key().to_bytes();
-    let publish = |acct: &[u8; 16], key: [u8; 32]| {
+    let key = SigningKey::generate();
+    let publish = |acct: &[u8; 16], key: &SigningKey| {
         serde_json::json!({
             "account_id": B64.encode(acct),
-            "signature_pubkey": B64.encode(key),
+            "signature_pubkey": B64.encode(key.verifying_key().to_bytes()),
             "x25519_pubkey": B64.encode([0x33u8; 32]),
+            "x25519_binding": B64.encode(lakko_contacts::sign_x25519_binding(key, &[0x33u8; 32])),
         })
     };
     let (status, body) = call(
@@ -111,7 +112,7 @@ async fn no_identifier_reaches_the_log_on_account_and_link_routes() {
         "POST",
         "/discovery/identity",
         &bearer(token(&account, 0)),
-        publish(&account, key),
+        publish(&account, &key),
     )
     .await;
     assert!(status.is_success(), "{status} {body}");
@@ -120,7 +121,7 @@ async fn no_identifier_reaches_the_log_on_account_and_link_routes() {
         "POST",
         "/discovery/identity",
         &bearer(token(&account, 0)),
-        publish(&other, key),
+        publish(&other, &key),
     )
     .await;
     assert!(status.is_client_error());
@@ -129,7 +130,7 @@ async fn no_identifier_reaches_the_log_on_account_and_link_routes() {
         "POST",
         "/discovery/identity",
         &bearer(token(&account, 0)),
-        publish(&account, SigningKey::generate().verifying_key().to_bytes()),
+        publish(&account, &SigningKey::generate()),
     )
     .await;
     assert!(status.is_client_error());

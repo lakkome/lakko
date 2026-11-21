@@ -28,6 +28,7 @@ import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import me.lakko.app.anon.AnonTokenContext
+import me.lakko.app.anon.AnonTokenException
 import me.lakko.app.anon.AnonTokenSource
 import me.lakko.app.anon.AnonTokens
 import me.lakko.app.anon.AnonymousHttp
@@ -219,8 +220,15 @@ public class DsClient(
     /**
      * ADR-0060 §2 — `POST /ds/rendezvous/{hex}/messages`: a write into a
      * random rendezvous id (pairing, recovery, the welcome courier, the state
-     * bundle). Open and never claimable; it carries no proof, no delegation
-     * and no wake header (the server refuses any of them).
+     * bundle, the rejoin presence note, the re-entry gap history). Never
+     * claimable; it carries no proof, no delegation and no wake header (the
+     * server refuses any of them).
+     *
+     * Since 2026-11-21 every write spends one `rendezvous-write` anonymous
+     * token, on the anonymous client, the way a proofless mailbox write
+     * spends `mailbox-write` (one retry on a spent or expired token). No
+     * token to be had fails the write as a [DsNetworkError] (the token
+     * failure is its cause), so the callers' network retry paths apply.
      */
     public suspend fun publishRendezvous(
         rendezvous: ByteArray,
@@ -232,11 +240,30 @@ public class DsClient(
         if (payload.isEmpty()) {
             throw DsClientArgError("payload must be non-empty")
         }
-        return doPublish(
-            endpoint = "/ds/rendezvous/${pseudonymHex(rendezvous)}/messages",
-            payload = payload,
-            journal = null,
-        )
+        val endpoint = "/ds/rendezvous/${pseudonymHex(rendezvous)}/messages"
+        val response = try {
+            anonTokens.sendWithToken(AnonTokenContext.RENDEZVOUS_WRITE) { name, value ->
+                try {
+                    anonClient.request("$baseUrl$endpoint") {
+                        method = HttpMethod.Post
+                        header(name, value)
+                        contentType(ContentType.Application.OctetStream)
+                        setBody(payload)
+                    }
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (cause: Throwable) {
+                    throw DsNetworkError(endpoint, cause)
+                }
+            }
+        } catch (unavailable: AnonTokenException) {
+            throw DsNetworkError(endpoint, unavailable)
+        }
+        if (!response.status.isSuccess()) {
+            throw DsHttpError(response.status.value, endpoint, response.safeReadBody())
+        }
+        val parsed: PublishWireResponse = response.body()
+        return PublishResult(id = parsed.id, createdAt = parsed.created_at)
     }
 
     /**

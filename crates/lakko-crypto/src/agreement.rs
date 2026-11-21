@@ -57,9 +57,20 @@ impl SecretKey {
     ///
     /// Output is 32 bytes; callers are expected to feed it to an HKDF
     /// (per X25519 best practice — never use the raw DH output as a key).
-    #[must_use]
-    pub fn diffie_hellman(&self, peer: &PublicKey) -> SecretBytes<32> {
-        SecretBytes::new(self.0.diffie_hellman(&peer.0).to_bytes())
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NonContributory`] when the shared secret is all zeros: the
+    /// peer key is a low-order point (RFC 7748 section 6.1), so the output
+    /// does not depend on this secret and an attacker who chose the point
+    /// knows it. Every use of the result would derive a key the attacker
+    /// can compute, so the agreement is refused rather than returned.
+    pub fn diffie_hellman(&self, peer: &PublicKey) -> Result<SecretBytes<32>> {
+        let shared = self.0.diffie_hellman(&peer.0);
+        if !shared.was_contributory() {
+            return Err(Error::NonContributory);
+        }
+        Ok(SecretBytes::new(shared.to_bytes()))
     }
 }
 
@@ -100,8 +111,8 @@ mod tests {
         let alice = SecretKey::generate();
         let bob = SecretKey::generate();
 
-        let alice_view = alice.diffie_hellman(&bob.public_key());
-        let bob_view = bob.diffie_hellman(&alice.public_key());
+        let alice_view = alice.diffie_hellman(&bob.public_key()).unwrap();
+        let bob_view = bob.diffie_hellman(&alice.public_key()).unwrap();
 
         assert_eq!(alice_view, bob_view);
     }
@@ -112,8 +123,8 @@ mod tests {
         let bob = SecretKey::generate();
         let eve = SecretKey::generate();
 
-        let with_bob = alice.diffie_hellman(&bob.public_key());
-        let with_eve = alice.diffie_hellman(&eve.public_key());
+        let with_bob = alice.diffie_hellman(&bob.public_key()).unwrap();
+        let with_eve = alice.diffie_hellman(&eve.public_key()).unwrap();
 
         assert_ne!(with_bob, with_eve);
     }
@@ -125,6 +136,60 @@ mod tests {
         let restored = SecretKey::from_bytes(bytes);
 
         assert_eq!(sk.public_key(), restored.public_key());
+    }
+
+    /// RFC 7748 section 6.1 / the libsodium blocklist: every low-order point
+    /// on Curve25519 and its twist (as a `u`-coordinate, including the
+    /// non-canonical encodings above the field prime) gives an all-zero
+    /// shared secret, which is refused.
+    #[test]
+    fn a_low_order_peer_key_is_refused() {
+        let mut low_order: Vec<[u8; 32]> = vec![[0u8; 32], {
+            let mut one = [0u8; 32];
+            one[0] = 1;
+            one
+        }];
+        // 325606250916557431795983626356110631294008115727848805560023387167927233504
+        let mut p8 = [0u8; 32];
+        p8.copy_from_slice(&hex_32(
+            "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+        ));
+        low_order.push(p8);
+        let mut p8b = [0u8; 32];
+        p8b.copy_from_slice(&hex_32(
+            "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+        ));
+        low_order.push(p8b);
+        // p - 1, p, p + 1 (the twist points and non-canonical zero / one).
+        low_order.push(hex_32(
+            "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        ));
+        low_order.push(hex_32(
+            "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        ));
+        low_order.push(hex_32(
+            "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        ));
+        for _ in 0..8 {
+            let me = SecretKey::generate();
+            for point in &low_order {
+                assert!(
+                    matches!(
+                        me.diffie_hellman(&PublicKey::from_array(*point)),
+                        Err(Error::NonContributory)
+                    ),
+                    "low-order point {point:02x?} must be refused",
+                );
+            }
+        }
+    }
+
+    fn hex_32(s: &str) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        for (i, b) in out.iter_mut().enumerate() {
+            *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap();
+        }
+        out
     }
 
     #[test]

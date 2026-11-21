@@ -1465,6 +1465,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
               groupId: decoded.groupId,
               epochLeft: decoded.epochLeft,
               gapFromMs: decoded.gapFromMs,
+              gapKey: decoded.gapKey,
               keyPackage: decoded.keyPackage,
             });
           } finally {

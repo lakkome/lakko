@@ -247,6 +247,66 @@ class DsClientProofTest {
         assertEquals(listOf("tok-1", "tok-2"), seen.map { it.token })
     }
 
+    // ------------------------------------------------------------ rendezvous-write token (2026-11-21)
+
+    @Test
+    fun `a rendezvous write spends one rendezvous-write token, with no session and no proof`() = runTest {
+        val seen = mutableListOf<Seen>()
+        val tokens = FakeAnonTokenSource()
+        val rendezvous = ByteArray(32) { (0x40 + it).toByte() }
+        val result = client(listOf(Reply(HttpStatusCode.OK, published)), seen, tokens = tokens).use {
+            it.publishRendezvous(rendezvous, byteArrayOf(9, 9, 9))
+        }
+        assertEquals(7L, result.id)
+        assertEquals(listOf(AnonTokenContext.RENDEZVOUS_WRITE), tokens.taken)
+        val request = seen.single()
+        assertEquals(HttpMethod.Post, request.method)
+        assertEquals("tok-1", request.token)
+        assertNull(request.proof)
+        assertNull(request.authorization)
+        assertEquals("/native/ds/ds/rendezvous/${DsClient.pseudonymHex(rendezvous)}/messages", request.encodedPath)
+        assertArrayEquals(byteArrayOf(9, 9, 9), request.body)
+        assertTrue(request.contentType?.startsWith("application/octet-stream") == true)
+    }
+
+    @Test
+    fun `a rendezvous write whose token was spent or expired is retried once with another`() = runTest {
+        for (code in listOf("anon-token-spent", "anon-token-expired")) {
+            val seen = mutableListOf<Seen>()
+            val tokens = FakeAnonTokenSource()
+            client(
+                listOf(
+                    Reply(HttpStatusCode.Unauthorized, """{"error":"$code"}"""),
+                    Reply(HttpStatusCode.OK, published),
+                ),
+                seen,
+                tokens = tokens,
+            ).use { it.publishRendezvous(ByteArray(32) { 1 }, byteArrayOf(1)) }
+            assertEquals(code, listOf("tok-1", "tok-2"), seen.map { it.token })
+            assertEquals(code, listOf(AnonTokenContext.RENDEZVOUS_WRITE, AnonTokenContext.RENDEZVOUS_WRITE), tokens.taken)
+        }
+    }
+
+    @Test
+    fun `a rendezvous write with no token to be had fails as a network failure and sends nothing`() = runTest {
+        val seen = mutableListOf<Seen>()
+        val tokens = FakeAnonTokenSource(
+            failWith = me.lakko.app.anon.AnonTokenUnavailable(AnonTokenContext.RENDEZVOUS_WRITE, "empty"),
+        )
+        val client = client(emptyList(), seen, tokens = tokens)
+        val error = try {
+            client.publishRendezvous(ByteArray(32) { 1 }, byteArrayOf(1))
+            null
+        } catch (e: DsNetworkError) {
+            e
+        } finally {
+            client.close()
+        }
+        assertTrue(error != null)
+        assertTrue(error!!.cause is me.lakko.app.anon.AnonTokenUnavailable)
+        assertTrue(seen.isEmpty())
+    }
+
     // ------------------------------------------------------------ retry on 401
 
     @Test

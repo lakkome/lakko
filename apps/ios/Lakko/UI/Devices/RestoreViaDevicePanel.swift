@@ -281,26 +281,41 @@ public struct RestoreViaDevicePanel: View {
     /// with the recovery payload. Shared by both routes.
     private func receiveWelcome(session s: PairingOrchestrator.JoinSession) async {
         do {
-            let outcome = try await s.awaitWelcome()
-            if Task.isCancelled { return }
-            switch outcome {
-            case .received(let welcome, let welcomeCursor):
-                ui = .joining
-                let recovery = try await s.accept(
-                    welcomeBytes: welcome,
-                    welcomeCursor: welcomeCursor,
-                    recovery: true
-                )
-                guard let recovery else {
-                    ui = .error(.key("device_link.error.no_identity"))
-                    return
+            // One wait for the whole pairing; a row that does not join is
+            // passed over and the wait goes on past it.
+            let deadline = Date(timeIntervalSinceNow: WelcomeCourier.defaultTimeoutSeconds)
+            while true {
+                let outcome = try await s.awaitWelcome(
+                    timeoutSeconds: max(0, deadline.timeIntervalSinceNow))
+                if Task.isCancelled { return }
+                switch outcome {
+                case .received(let welcome, let welcomeCursor):
+                    let waiting = ui
+                    ui = .joining
+                    let recovery: PairingOrchestrator.JoinRecoveryOutcome?
+                    do {
+                        recovery = try await s.accept(
+                            welcomeBytes: welcome,
+                            welcomeCursor: welcomeCursor,
+                            recovery: true
+                        )
+                    } catch is PairingOrchestrator.WelcomeNotOpened {
+                        if Task.isCancelled { return }
+                        ui = waiting
+                        continue
+                    }
+                    guard let recovery else {
+                        ui = .error(.key("device_link.error.no_identity"))
+                        return
+                    }
+                    try await onRecovered(recovery)
+                    ui = .done
+                case .timeout:
+                    ui = .error(.key("device_link.error.timeout"))
+                case .cancelled:
+                    ui = .idle
                 }
-                try await onRecovered(recovery)
-                ui = .done
-            case .timeout:
-                ui = .error(.key("device_link.error.timeout"))
-            case .cancelled:
-                ui = .idle
+                return
             }
         } catch {
             if Task.isCancelled { return }

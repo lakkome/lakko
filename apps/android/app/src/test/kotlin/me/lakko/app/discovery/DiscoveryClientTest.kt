@@ -243,6 +243,7 @@ class DiscoveryClientTest {
                     account_id = "ACC_B64",
                     signature_pubkey = "SIG_B64",
                     x25519_pubkey = "X25_B64",
+                    x25519_binding = "BIND_B64",
                 ),
             )
             assertTrue(resp.ok)
@@ -250,6 +251,7 @@ class DiscoveryClientTest {
         val body = captured[0].body!!
         assertEquals("SIG_B64", body["signature_pubkey"]!!.jsonPrimitive.content)
         assertEquals("X25_B64", body["x25519_pubkey"]!!.jsonPrimitive.content)
+        assertEquals("BIND_B64", body["x25519_binding"]!!.jsonPrimitive.content)
     }
 
     @Test
@@ -292,12 +294,14 @@ class DiscoveryClientTest {
                 accountId = ByteArray(16),
                 signaturePubkey = ByteArray(32),
                 x25519Pubkey = ByteArray(32),
+                x25519Binding = ByteArray(64),
                 conversationLink = link,
             )
             client.uploadIdentityBundle(
                 accountId = ByteArray(16),
                 signaturePubkey = ByteArray(32),
                 x25519Pubkey = ByteArray(32),
+                x25519Binding = ByteArray(64),
             )
         }
         assertEquals(
@@ -318,6 +322,57 @@ class DiscoveryClientTest {
         ).use { client ->
             assertEquals("TElOSw==", client.identityFetch(ByteArray(16))!!.conversation_link)
             assertEquals(null, client.identityFetch(ByteArray(16))!!.conversation_link)
+        }
+    }
+
+    @Test
+    fun `every identity upload carries the signed X25519 binding as standard base64`() = runTest {
+        val captured = mutableListOf<CapturedRequest>()
+        val binding = ByteArray(64) { 0xB1.toByte() }
+        client(
+            responses = listOf(HttpStatusCode.OK to """{"ok":true}"""),
+            captured = captured,
+        ).use { client ->
+            client.uploadIdentityBundle(
+                accountId = ByteArray(16),
+                signaturePubkey = ByteArray(32),
+                x25519Pubkey = ByteArray(32),
+                x25519Binding = binding,
+            )
+        }
+        assertEquals(
+            java.util.Base64.getEncoder().encodeToString(binding),
+            captured[0].body!!["x25519_binding"]!!.jsonPrimitive.content,
+        )
+    }
+
+    @Test
+    fun `uploadIdentityBundle refuses a binding that is not 64 bytes before network`() {
+        val engine = MockEngine { error("must not reach the network") }
+        assertThrows(DiscoveryClientArgError::class.java) {
+            runTest {
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
+                    client.uploadIdentityBundle(
+                        accountId = ByteArray(16),
+                        signaturePubkey = ByteArray(32),
+                        x25519Pubkey = ByteArray(32),
+                        x25519Binding = ByteArray(63),
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `identityFetch reads the X25519 binding, absent on a row that has none`() = runTest {
+        client(
+            responses = listOf(
+                HttpStatusCode.OK to """{"signature_pubkey":"SIG","x25519_pubkey":"X25","x25519_binding":"QklORA=="}""",
+                HttpStatusCode.OK to """{"signature_pubkey":"SIG","x25519_pubkey":"X25"}""",
+            ),
+        ).use { client ->
+            assertEquals("QklORA==", client.identityFetch(ByteArray(16))!!.x25519_binding)
+            assertEquals(null, client.identityFetch(ByteArray(16))!!.x25519_binding)
         }
     }
 
@@ -375,6 +430,7 @@ class DiscoveryClientTest {
                         accountId = ByteArray(8),
                         signaturePubkey = ByteArray(32),
                         x25519Pubkey = ByteArray(32),
+                        x25519Binding = ByteArray(64),
                     )
                 }
             }
@@ -391,6 +447,7 @@ class DiscoveryClientTest {
                         accountId = ByteArray(16),
                         signaturePubkey = ByteArray(31),
                         x25519Pubkey = ByteArray(32),
+                        x25519Binding = ByteArray(64),
                     )
                 }
             }

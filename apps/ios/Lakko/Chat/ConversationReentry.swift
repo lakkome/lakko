@@ -73,13 +73,26 @@ public struct ReentrySentRequest: Codable, Equatable, Sendable {
     /// row after it was skipped (the device could read none), so a device
     /// that comes back reads the journal again from here (section 5).
     public let cursorAtSend: Int64
+    /// Section 7 (security review 2026-11-21) — the public half of the gap
+    /// key minted for this request (`generateGapKey`); the request carries
+    /// it, and the gap's history is sealed to it.
+    public let gapPublicKey: Data?
+    /// The gap key's secret, sealed under the account's gap wrap key
+    /// (``ReentryGapLookStore/sealSecret(_:accountIdB64:)``). Never written in
+    /// the clear.
+    public let sealedGapSecret: Data?
 
-    public init(keyPackage: Data, epochLeft: UInt64, sentAtMs: UInt64, route: String, cursorAtSend: Int64) {
+    public init(
+        keyPackage: Data, epochLeft: UInt64, sentAtMs: UInt64, route: String, cursorAtSend: Int64,
+        gapPublicKey: Data? = nil, sealedGapSecret: Data? = nil
+    ) {
         self.keyPackage = keyPackage
         self.epochLeft = epochLeft
         self.sentAtMs = sentAtMs
         self.route = route
         self.cursorAtSend = cursorAtSend
+        self.gapPublicKey = gapPublicKey
+        self.sealedGapSecret = sealedGapSecret
     }
 }
 
@@ -275,6 +288,13 @@ public final class ReentryObservations {
     public func noteLeafActivity(groupIdHex: String, leaf: UInt32, epoch: UInt64) {
         lock.lock(); defer { lock.unlock() }
         entries[groupIdHex, default: Entry()].leafActivity[leaf] = (epoch, nowMs())
+    }
+
+    /// When this device last decrypted an application message from `leaf`,
+    /// at any epoch (the re-admitter's `leafLastWriteMs`, section 7).
+    public func lastWrite(groupIdHex: String, leaf: UInt32) -> UInt64? {
+        lock.lock(); defer { lock.unlock() }
+        return entries[groupIdHex]?.leafActivity[leaf]?.atMs
     }
 
     /// When this device last decrypted an application message from `leaf`
@@ -580,36 +600,112 @@ public struct ReentryKnockKeyStore {
     }
 }
 
+// MARK: - When this device first saw each leaf (section 7)
+
+/// Per account and conversation, durable: the first time this device saw
+/// each leaf signature key in the roster. A re-admitter clamps the start of a
+/// gap's history to it (`gapHistoryStart`), so the rows it sends never start
+/// before its own evidence that the leaf was in the conversation. Only the
+/// first observation is kept; written only when a new key appears.
+public struct ReentryLeafFirstSeenStore {
+    let defaults: UserDefaults
+
+    public init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    public static func key(_ accountIdB64: String) -> String {
+        "lakko.conversation-reentry.leaf-first-seen.v1.\(accountIdB64)"
+    }
+
+    private func all(_ accountIdB64: String) -> [String: [String: UInt64]] {
+        defaults.data(forKey: Self.key(accountIdB64))
+            .flatMap { try? JSONDecoder().decode([String: [String: UInt64]].self, from: $0) } ?? [:]
+    }
+
+    /// The roster of `groupIdHex` was read at `nowMs`: every key not seen
+    /// before is recorded at `nowMs`; a key already recorded keeps its time.
+    public func noteRoster(accountIdB64: String, groupIdHex: String, leafKeys: [Data], nowMs: UInt64) {
+        guard !leafKeys.isEmpty else { return }
+        var map = all(accountIdB64)
+        var seen = map[groupIdHex] ?? [:]
+        var changed = false
+        for key in leafKeys {
+            let b64 = key.base64EncodedString()
+            if seen[b64] == nil {
+                seen[b64] = nowMs
+                changed = true
+            }
+        }
+        guard changed, let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        map[groupIdHex] = seen
+        defaults.set(try? JSONEncoder().encode(map), forKey: Self.key(accountIdB64))
+    }
+
+    /// When this device first saw `leafKey` in `groupIdHex`, if ever.
+    public func firstSeen(accountIdB64: String, groupIdHex: String, leafKey: Data) -> UInt64? {
+        all(accountIdB64)[groupIdHex]?[leafKey.base64EncodedString()]
+    }
+
+    public func remove(accountIdB64: String, groupIdHex: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        var map = all(accountIdB64)
+        guard map.removeValue(forKey: groupIdHex) != nil else { return }
+        defaults.set(try? JSONEncoder().encode(map), forKey: Self.key(accountIdB64))
+    }
+}
+
 // MARK: - The gap history a re-admitter owes (section 7)
 
 /// One gap history a re-admitter owes the device it brought back: sent once
-/// this device holds the group at `targetEpoch` (the epoch the replacement
-/// creates), at most ``ReentryHistoryOwed/lifetimeMs`` after it was owed.
+/// the replacement it proposed at `proposedAtEpoch` has landed (the group
+/// moved past that epoch with the leaf still in it), at most
+/// ``ReentryHistoryOwed/lifetimeMs`` after it was owed. Sealed to `gapKey`,
+/// the public gap key the request carried, so only the returning device
+/// opens it, and signed inside by this device's leaf.
 public struct ReentryOwedHistory: Codable, Equatable, Sendable {
     public let groupIdHex: String
     /// The re-entry KeyPackage (the owed row's identity).
     public let keyPackage: Data
-    /// The returning leaf's 32-byte signature key: the history secret's
-    /// context (both sides know it, whichever recorded request was used).
+    /// The returning leaf's 32-byte signature key.
     public let leafKey: Data
-    public let targetEpoch: UInt64
+    /// The 32-byte public gap key the request carried.
+    public let gapKey: Data
+    /// The epoch this device proposed the replacement at.
+    public let proposedAtEpoch: UInt64
+    /// The start of the rows sent: the request's claim clamped by
+    /// `gapHistoryStart` to what this device saw itself.
     public let gapFromMs: UInt64
     public let owedAtMs: UInt64
 
     public init(
-        groupIdHex: String, keyPackage: Data, leafKey: Data, targetEpoch: UInt64, gapFromMs: UInt64, owedAtMs: UInt64
+        groupIdHex: String, keyPackage: Data, leafKey: Data, gapKey: Data, proposedAtEpoch: UInt64,
+        gapFromMs: UInt64, owedAtMs: UInt64
     ) {
         self.groupIdHex = groupIdHex
         self.keyPackage = keyPackage
         self.leafKey = leafKey
-        self.targetEpoch = targetEpoch
+        self.gapKey = gapKey
+        self.proposedAtEpoch = proposedAtEpoch
         self.gapFromMs = gapFromMs
         self.owedAtMs = owedAtMs
     }
 }
 
+/// What an owed gap history does now.
+public enum ReentryOwedHistoryVerdict: Equatable, Sendable {
+    /// The replacement has not landed yet: keep it.
+    case wait
+    /// The replacement landed: seal and send it, then forget it.
+    case send
+    /// Expired, or the leaf left: forget it unsent.
+    case drop
+}
+
 public struct ReentryHistoryOwed {
-    /// How long an owed history waits for its epoch (`GAP_OWED_TTL_MS`).
+    /// How long an owed history waits for its replacement to land.
     /// Chosen, not measured: the returning device looks for the bundle for
     /// ``ConversationReentryRules/gapHistoryLookRetentionMs``, so the
     /// re-admitter owes it as long.
@@ -645,14 +741,27 @@ public struct ReentryHistoryOwed {
 
 // MARK: - The gap history a returning device looks for (section 7)
 
+/// One gap key a returning device minted for a request (section 7): the
+/// public half names the rendezvous, the secret opens the history.
+public struct ReentryGapKeyPair: Equatable, Sendable {
+    public let publicKey: Data
+    /// The 32-byte X25519 secret. Never written in the clear.
+    public let secret: Data
+
+    public init(publicKey: Data, secret: Data) {
+        self.publicKey = publicKey
+        self.secret = secret
+    }
+}
+
 /// One conversation whose gap history this device, back after a re-entry,
-/// still looks for: the history secret (exported at the epoch the
-/// replacement created; sealed at rest), the gap's two ends, and when it
-/// last looked.
+/// still looks for: the gap keys of the requests it had out (it cannot tell
+/// which one the re-admitter answered; at most ``reentryRequestsKept()``),
+/// the gap's two ends, and when it last looked.
 public struct ReentryGapLook: Equatable, Sendable {
     public let groupIdHex: String
-    /// The 32-byte history secret. Never written in the clear.
-    public let secret: Data
+    /// The gap keys to look under, the newest request's last.
+    public let keys: [ReentryGapKeyPair]
     public let gapFromMs: UInt64
     /// The moment the device came back: the gap line's end.
     public let gapToMs: UInt64
@@ -662,11 +771,11 @@ public struct ReentryGapLook: Equatable, Sendable {
     public let route: String?
 
     public init(
-        groupIdHex: String, secret: Data, gapFromMs: UInt64, gapToMs: UInt64,
+        groupIdHex: String, keys: [ReentryGapKeyPair], gapFromMs: UInt64, gapToMs: UInt64,
         lastLookMs: UInt64? = nil, route: String? = nil
     ) {
         self.groupIdHex = groupIdHex
-        self.secret = secret
+        self.keys = keys
         self.gapFromMs = gapFromMs
         self.gapToMs = gapToMs
         self.lastLookMs = lastLookMs
@@ -674,13 +783,21 @@ public struct ReentryGapLook: Equatable, Sendable {
     }
 }
 
-/// The durable gap looks, per account and group, in `UserDefaults`. The
+/// The durable gap looks, per account and group, in `UserDefaults`. Each gap
 /// secret is sealed with AES-GCM under a per-account wrap key kept in the
 /// Keychain (the ``PushRoutingStore`` pattern); the other fields are public.
+/// The same wrap key seals a request's gap secret in its
+/// ``ReentrySentRequest`` (``sealSecret(_:accountIdB64:)``).
 public struct ReentryGapLookStore {
+    /// One stored gap key.
+    struct StoredKey: Codable, Equatable {
+        let publicKey: Data
+        let sealedSecret: Data
+    }
+
     /// The stored form of one look.
     struct Stored: Codable, Equatable {
-        let sealedSecret: Data
+        let keys: [StoredKey]
         let gapFromMs: UInt64
         let gapToMs: UInt64
         var lastLookMs: UInt64?
@@ -708,13 +825,30 @@ public struct ReentryGapLookStore {
     }
 
     public static func key(_ accountIdB64: String) -> String {
-        "lakko.conversation-reentry.gap-look.v1.\(accountIdB64)"
+        "lakko.conversation-reentry.gap-look.v2.\(accountIdB64)"
     }
 
     /// Forget device: the rows and the account's wrap key.
     public static func wipe(accountIdB64: String, defaults: UserDefaults = .standard) {
         defaults.removeObject(forKey: key(accountIdB64))
         KeychainWrapKey.delete(service: wrapKeyService, account: accountIdB64)
+    }
+
+    /// `secret` sealed under the account's wrap key (created if absent), or
+    /// `nil` when the account is closing or no wrap key could be made.
+    public func sealSecret(_ secret: Data, accountIdB64: String) -> Data? {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return nil }
+        defer { gate.leave() }
+        guard let keyBytes = wrapKey(accountIdB64, true) else { return nil }
+        return try? AES.GCM.seal(secret, using: SymmetricKey(data: keyBytes)).combined
+    }
+
+    /// A secret ``sealSecret(_:accountIdB64:)`` sealed, or `nil` when it does
+    /// not open (a lost wrap key).
+    public func openSecret(_ sealed: Data, accountIdB64: String) -> Data? {
+        guard let keyBytes = wrapKey(accountIdB64, false),
+              let box = try? AES.GCM.SealedBox(combined: sealed) else { return nil }
+        return try? AES.GCM.open(box, using: SymmetricKey(data: keyBytes))
     }
 
     func storedRows(_ accountIdB64: String) -> [String: Stored] {
@@ -735,30 +869,36 @@ public struct ReentryGapLookStore {
         Array(storedRows(accountIdB64).keys)
     }
 
-    /// The look for `groupIdHex`, or `nil` when none is stored or its secret
-    /// does not open (a lost wrap key: the look is then useless).
+    /// The look for `groupIdHex`, or `nil` when none is stored or none of
+    /// its secrets opens (a lost wrap key: the look is then useless).
     public func load(accountIdB64: String, groupIdHex: String) -> ReentryGapLook? {
-        guard let stored = storedRows(accountIdB64)[groupIdHex],
-              let keyBytes = wrapKey(accountIdB64, false),
-              let box = try? AES.GCM.SealedBox(combined: stored.sealedSecret),
-              let secret = try? AES.GCM.open(box, using: SymmetricKey(data: keyBytes)) else { return nil }
+        guard let stored = storedRows(accountIdB64)[groupIdHex] else { return nil }
+        let keys = stored.keys.compactMap { key in
+            openSecret(key.sealedSecret, accountIdB64: accountIdB64)
+                .map { ReentryGapKeyPair(publicKey: key.publicKey, secret: $0) }
+        }
+        guard !keys.isEmpty else { return nil }
         return ReentryGapLook(
-            groupIdHex: groupIdHex, secret: secret, gapFromMs: stored.gapFromMs,
+            groupIdHex: groupIdHex, keys: keys, gapFromMs: stored.gapFromMs,
             gapToMs: stored.gapToMs, lastLookMs: stored.lastLookMs, route: stored.route)
     }
 
-    /// Store `look` (replacing any for its group). `false` when the account
-    /// is closing or the secret could not be sealed; nothing is written then.
+    /// Store `look` (replacing any for its group). `false` when the look has
+    /// no key, the account is closing or a secret could not be sealed;
+    /// nothing is written then.
     @discardableResult
     public func save(_ look: ReentryGapLook, accountIdB64: String) -> Bool {
+        guard !look.keys.isEmpty else { return false }
+        var keys: [StoredKey] = []
+        for pair in look.keys {
+            guard let sealed = sealSecret(pair.secret, accountIdB64: accountIdB64) else { return false }
+            keys.append(StoredKey(publicKey: pair.publicKey, sealedSecret: sealed))
+        }
         guard let gate = AccountStoreGate.enter(accountIdB64) else { return false }
         defer { gate.leave() }
-        guard let keyBytes = wrapKey(accountIdB64, true),
-              let sealed = try? AES.GCM.seal(look.secret, using: SymmetricKey(data: keyBytes)).combined
-        else { return false }
         var map = storedRows(accountIdB64)
         map[look.groupIdHex] = Stored(
-            sealedSecret: sealed, gapFromMs: look.gapFromMs, gapToMs: look.gapToMs, lastLookMs: look.lastLookMs,
+            keys: keys, gapFromMs: look.gapFromMs, gapToMs: look.gapToMs, lastLookMs: look.lastLookMs,
             route: look.route)
         write(map, accountIdB64)
         return true
@@ -995,24 +1135,25 @@ public enum ConversationReentryRules {
 
     // MARK: The gap history (section 7)
 
-    /// The exporter label of the gap history secret. A client convention:
-    /// the core defines no carrier for this bundle.
-    public static let historyExporterLabel = "lakko/conversation-reentry/history/v1"
+    /// The rendezvous a gap history is posted to and looked for at: derived
+    /// from the request's public gap key (`gapHistoryRendezvous`), so no
+    /// group secret names it. `nil` for a key of the wrong length.
+    public static func gapRendezvous(gapKey: Data) -> Data? {
+        try? gapHistoryRendezvous(gapKey: gapKey)
+    }
 
-    /// The exporter context: the returning leaf's signature key. A device
-    /// that re-requested at one epoch holds two KeyPackages for it and cannot
-    /// know which one the re-admitter used; the leaf key is the same for both.
-    public static func historyContext(leafKey: Data) -> Data { leafKey }
-
-    /// The exporter length of the history secret.
-    public static let historySecretLength: UInt32 = 32
-
-    /// The rendezvous mailbox the bundle is posted to, derived from the
-    /// secret so only members of the new epoch can name it.
-    public static func historyRendezvous(secret: Data) -> Data {
-        var input = Data("lakko/conversation-reentry/history-rendezvous/v1".utf8)
-        input.append(secret)
-        return Data(SHA256.hash(data: input))
+    /// The gap keys of `requests` whose secret opens (`open` unseals one),
+    /// in request order: the keys a returning device looks for its history
+    /// under. A request without a gap key, or whose secret does not open,
+    /// gives none.
+    static func gapKeyPairs(
+        _ requests: [ReentrySentRequest], open: (Data) -> Data?
+    ) -> [ReentryGapKeyPair] {
+        requests.compactMap { request in
+            guard let publicKey = request.gapPublicKey, let sealed = request.sealedGapSecret,
+                  let secret = open(sealed) else { return nil }
+            return ReentryGapKeyPair(publicKey: publicKey, secret: secret)
+        }
     }
 
     /// The rows of a gap history: the conversation's own rows from
@@ -1030,6 +1171,20 @@ public enum ConversationReentryRules {
     /// Whether an owed history is still owed at `nowMs`.
     public static func historyStillOwed(_ owed: ReentryOwedHistory, nowMs: UInt64) -> Bool {
         nowMs < owed.owedAtMs &+ ReentryHistoryOwed.lifetimeMs
+    }
+
+    /// What an owed history does when the group is at `epoch` and its roster
+    /// does or does not hold the returning leaf's key. No epoch is needed to
+    /// seal (the history is sealed to the request's gap key), so it goes
+    /// whenever the replacement has landed: the group moved past the epoch
+    /// it was proposed at (a commit carried the pair, or dropped it and the
+    /// request is asked again with a new gap key) with the leaf in it.
+    public static func owedHistoryVerdict(
+        _ owed: ReentryOwedHistory, epoch: UInt64, rosterHasLeaf: Bool, nowMs: UInt64
+    ) -> ReentryOwedHistoryVerdict {
+        guard historyStillOwed(owed, nowMs: nowMs) else { return .drop }
+        guard epoch > owed.proposedAtEpoch else { return .wait }
+        return rosterHasLeaf ? .send : .drop
     }
 
     /// Whether the sender held a row older than the gap's start: without one

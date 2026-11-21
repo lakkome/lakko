@@ -108,7 +108,11 @@ import { defaultAnonTokenStore, type AnonTokenStore } from "./anon-token-store";
  * `channel-react` and `channel-comment` are ADR-0087 section 13a: one per
  * write under a channel post (nothing on the web spends them yet: channel
  * reactions and comments are phase B);
- * `report` is ADR-0099 section 2: one report to Lakko's moderators.
+ * `report` is ADR-0099 section 2: one report to Lakko's moderators;
+ * `rendezvous-write` (wire byte 18) is one write to a random rendezvous id
+ * (pairing, recovery, the welcome courier, the state bundle, the rejoin
+ * presence note, a conversation's gap history). Wire byte 16, `beta-place`,
+ * is never issued to a session and is not in this list.
  */
 export const ANON_TOKEN_CONTEXTS = [
   "discovery-lookup",
@@ -127,6 +131,7 @@ export const ANON_TOKEN_CONTEXTS = [
   "channel-react",
   "channel-comment",
   "report",
+  "rendezvous-write",
 ] as const;
 
 /** One token context (see {@link ANON_TOKEN_CONTEXTS}). */
@@ -161,6 +166,9 @@ export const POOL_TARGET: Readonly<Record<AnonTokenContext, number>> = {
   // ADR-0099 section 2: reports to the moderators. Kept on hand so issuance
   // time says nothing about when a report is sent. Chosen, not measured.
   report: 2,
+  // One write to a rendezvous id. Chosen, not measured; same as
+  // `mailbox-write`.
+  "rendezvous-write": 4,
 };
 
 /** The pool target of `context`. */

@@ -4,13 +4,17 @@
 //! A device that fell behind a conversation asks to be brought back
 //! ([ADR-0091] phase 2, section 3).
 //!
-//! ## Wire format (v1)
+//! ## Wire format (version 2)
 //!
 //! ```text
 //! CONVERSATION_REENTRY_ENVELOPE_DOMAIN_V1 ("lakko/conversation-reentry/v1\0")
-//!   ‖ version(1)=0x01 ‖ group_id(32) ‖ epoch_left(8, BE) ‖ gap_from_ms(8, BE)
-//!   ‖ kp_len(2, BE) ‖ key_package(kp_len)
+//!   ‖ version(1)=0x02 ‖ group_id(32) ‖ epoch_left(8, BE) ‖ gap_from_ms(8, BE)
+//!   ‖ gap_key(32) ‖ kp_len(2, BE) ‖ key_package(kp_len)
 //! ```
+//!
+//! Version 1 (no gap key) is refused: its gap history was sealed under a
+//! group exporter every member holds (security review 2026-11-21). The
+//! domain separator keeps its `v1` name; the version byte is what moved.
 //!
 //! - **`group_id`** is the conversation, **`epoch_left`** the `latest_epoch`
 //!   the device read (the epoch the replacement commit must leave), and the
@@ -22,7 +26,13 @@
 //! - **`gap_from_ms`** is when the device first failed to read a row of the
 //!   conversation (section 7: the device that brings it back sends the
 //!   messages of the gap it holds, from this time to the replacement). It is
-//!   the device's own claim and only bounds what the re-admitter sends.
+//!   the device's own claim; the re-admitter clamps it with
+//!   [`crate::gap_history::gap_history_start`] before choosing rows.
+//! - **`gap_key`** is the X25519 public key of a fresh [`crate::gap_history::GapKey`]
+//!   the device minted for this request: the gap's history is sealed to it
+//!   ([`crate::gap_history::seal_gap_history`]) and posted to
+//!   [`crate::gap_history::gap_history_rendezvous`] of it, so only this
+//!   device opens it.
 //! - **`key_package`** is 1 to [`CONVERSATION_REENTRY_MAX_KEY_PACKAGE_LEN`]
 //!   bytes, opaque here.
 //!
@@ -59,8 +69,12 @@ use crate::knock::{
 /// Domain separator. Frozen: the dispatcher matches on it.
 pub const CONVERSATION_REENTRY_ENVELOPE_DOMAIN_V1: &[u8] = b"lakko/conversation-reentry/v1\x00";
 
-/// Schema-version byte carried first after the separator.
-pub const CONVERSATION_REENTRY_VERSION_V1: u8 = 0x01;
+/// Schema-version byte carried first after the separator. Version 1 (no gap
+/// key) is refused.
+pub const CONVERSATION_REENTRY_VERSION_V2: u8 = 0x02;
+
+/// Length of the gap public key.
+pub const CONVERSATION_REENTRY_GAP_KEY_LEN: usize = crate::gap_history::GAP_KEY_LEN;
 
 /// Length of a group id.
 pub const CONVERSATION_REENTRY_GROUP_ID_LEN: usize = 32;
@@ -70,7 +84,8 @@ pub const CONVERSATION_REENTRY_GROUP_ID_LEN: usize = 32;
 pub const CONVERSATION_REENTRY_MAX_KEY_PACKAGE_LEN: usize = crate::knock::KNOCK_MAX_KEY_PACKAGE_LEN;
 
 /// Bytes after the separator before the KeyPackage.
-const FIXED_PAYLOAD_LEN: usize = 1 + CONVERSATION_REENTRY_GROUP_ID_LEN + 8 + 8 + 2;
+const FIXED_PAYLOAD_LEN: usize =
+    1 + CONVERSATION_REENTRY_GROUP_ID_LEN + 8 + 8 + CONVERSATION_REENTRY_GAP_KEY_LEN + 2;
 
 /// The shortest well-formed envelope (a one-byte KeyPackage).
 pub const CONVERSATION_REENTRY_ENVELOPE_MIN_LEN: usize =
@@ -95,6 +110,8 @@ pub struct ConversationReentry {
     pub epoch_left: u64,
     /// When the device first failed to read a row of the conversation.
     pub gap_from_ms: u64,
+    /// The public half of the gap key the gap's history is sealed to.
+    pub gap_key: [u8; CONVERSATION_REENTRY_GAP_KEY_LEN],
     /// The re-entry KeyPackage wire, opaque here.
     pub key_package: Vec<u8>,
 }
@@ -109,7 +126,7 @@ pub enum ConversationReentryError {
     /// The payload is shorter or longer than its fields say.
     #[error("conversation re-entry envelope has the wrong length")]
     BadLength,
-    /// The version byte is not [`CONVERSATION_REENTRY_VERSION_V1`].
+    /// The version byte is not [`CONVERSATION_REENTRY_VERSION_V2`].
     #[error("conversation re-entry envelope carries unknown schema version {0:#04x}")]
     UnknownVersion(u8),
     /// The KeyPackage is empty or longer than its bound.
@@ -165,10 +182,11 @@ pub fn compose_conversation_reentry(
         CONVERSATION_REENTRY_ENVELOPE_DOMAIN_V1.len() + FIXED_PAYLOAD_LEN + kp_len,
     );
     out.extend_from_slice(CONVERSATION_REENTRY_ENVELOPE_DOMAIN_V1);
-    out.push(CONVERSATION_REENTRY_VERSION_V1);
+    out.push(CONVERSATION_REENTRY_VERSION_V2);
     out.extend_from_slice(&request.group_id);
     out.extend_from_slice(&request.epoch_left.to_be_bytes());
     out.extend_from_slice(&request.gap_from_ms.to_be_bytes());
+    out.extend_from_slice(&request.gap_key);
     out.extend_from_slice(&kp_len16.to_be_bytes());
     out.extend_from_slice(&request.key_package);
     Ok(out)
@@ -197,7 +215,7 @@ pub fn try_unwrap_conversation_reentry(
     let (&version, _) = payload
         .split_first()
         .ok_or(ConversationReentryError::BadLength)?;
-    if version != CONVERSATION_REENTRY_VERSION_V1 {
+    if version != CONVERSATION_REENTRY_VERSION_V2 {
         return Err(ConversationReentryError::UnknownVersion(version));
     }
     if payload.len() < FIXED_PAYLOAD_LEN {
@@ -209,7 +227,10 @@ pub fn try_unwrap_conversation_reentry(
     let at = 1 + CONVERSATION_REENTRY_GROUP_ID_LEN;
     let epoch_left = read_u64(&fixed[at..at + 8]);
     let gap_from_ms = read_u64(&fixed[at + 8..at + 16]);
-    let kp_len = usize::from(u16::from_be_bytes([fixed[at + 16], fixed[at + 17]]));
+    let mut gap_key = [0u8; CONVERSATION_REENTRY_GAP_KEY_LEN];
+    gap_key.copy_from_slice(&fixed[at + 16..at + 16 + CONVERSATION_REENTRY_GAP_KEY_LEN]);
+    let at = at + 16 + CONVERSATION_REENTRY_GAP_KEY_LEN;
+    let kp_len = usize::from(u16::from_be_bytes([fixed[at], fixed[at + 1]]));
     if kp_len == 0 || kp_len > CONVERSATION_REENTRY_MAX_KEY_PACKAGE_LEN {
         return Err(ConversationReentryError::BadKeyPackage);
     }
@@ -220,6 +241,7 @@ pub fn try_unwrap_conversation_reentry(
         group_id,
         epoch_left,
         gap_from_ms,
+        gap_key,
         key_package: key_package.to_vec(),
     }))
 }
@@ -362,6 +384,7 @@ mod tests {
             group_id: [0xC1; 32],
             epoch_left: 16,
             gap_from_ms: 1_763_000_000_000,
+            gap_key: [0x6B; 32],
             key_package: vec![0x5A; kp_len],
         }
     }
@@ -378,7 +401,8 @@ mod tests {
             CONVERSATION_REENTRY_ENVELOPE_DOMAIN_V1.len() + FIXED_PAYLOAD_LEN + 1,
             CONVERSATION_REENTRY_ENVELOPE_MIN_LEN
         );
-        assert_eq!(CONVERSATION_REENTRY_ENVELOPE_MIN_LEN, 82);
+        assert_eq!(CONVERSATION_REENTRY_ENVELOPE_MIN_LEN, 114);
+        assert_eq!(CONVERSATION_REENTRY_ENVELOPE_MAX_LEN, 4209);
     }
 
     #[test]
@@ -397,12 +421,16 @@ mod tests {
     fn version_and_lengths_are_checked() {
         let good = compose_conversation_reentry(&sample(10)).expect("compose");
         let domain = CONVERSATION_REENTRY_ENVELOPE_DOMAIN_V1.len();
-        let mut v2 = good.clone();
-        v2[domain] = 2;
-        assert_eq!(
-            try_unwrap_conversation_reentry(&v2),
-            Err(ConversationReentryError::UnknownVersion(2))
-        );
+        assert_eq!(good[domain], 2);
+        for other in [1u8, 3] {
+            let mut v = good.clone();
+            v[domain] = other;
+            assert_eq!(
+                try_unwrap_conversation_reentry(&v),
+                Err(ConversationReentryError::UnknownVersion(other)),
+                "version {other} is refused",
+            );
+        }
         assert_eq!(
             try_unwrap_conversation_reentry(&good[..good.len() - 1]),
             Err(ConversationReentryError::BadLength)
@@ -480,9 +508,10 @@ mod tests {
             group_id in any::<[u8; 32]>(),
             epoch_left in any::<u64>(),
             gap_from_ms in any::<u64>(),
+            gap_key in any::<[u8; 32]>(),
             kp in proptest::collection::vec(any::<u8>(), 1..600),
         ) {
-            let r = ConversationReentry { group_id, epoch_left, gap_from_ms, key_package: kp };
+            let r = ConversationReentry { group_id, epoch_left, gap_from_ms, gap_key, key_package: kp };
             let bytes = compose_conversation_reentry(&r).expect("compose");
             prop_assert_eq!(decode_conversation_reentry(&bytes), Ok(r));
         }

@@ -64,6 +64,19 @@ pub(crate) const DEFAULT_NAME_INTERVAL_SECS: u64 = 30 * 86_400;
 /// Env knob: seconds a retired name stays held before the pruner frees it.
 pub(crate) const RETIRED_HOLD_VAR: &str = "LAKKO_DISCOVERY_RETIRED_NAME_HOLD_SECS";
 
+/// The shortest hold the service starts with: 28 days. The clients show a
+/// `@username` only within `lakko_contacts::account_deleted::
+/// USERNAME_CONFIRMATION_VALID_MS` (21 days) of confirming it, which never
+/// names someone else only while the hold is longer than that window
+/// (ADR-0098 section 4); 28 days keeps a week of margin. A shorter hold is
+/// refused at startup, never clamped silently.
+pub(crate) const MIN_RETIRED_HOLD_SECS: u64 = 28 * 86_400;
+
+const _: () = assert!(
+    MIN_RETIRED_HOLD_SECS * 1000 > lakko_contacts::account_deleted::USERNAME_CONFIRMATION_VALID_MS
+);
+const _: () = assert!(DEFAULT_NAME_INTERVAL_SECS >= MIN_RETIRED_HOLD_SECS);
+
 /// The unique key that makes "one current name per account" structural
 /// (migration `0028`), as the database names it in a duplicate-key error.
 const CURRENT_ACCOUNT_KEY: &str = "uq_usernames_current_account";
@@ -101,21 +114,37 @@ impl NamePolicy {
     ///
     /// # Errors
     ///
-    /// A knob that is set and is not an unsigned integer of seconds.
+    /// A knob that is set and is not an unsigned integer of seconds, or is
+    /// below [`MIN_RETIRED_HOLD_SECS`].
     pub(crate) fn from_env() -> anyhow::Result<Self> {
-        fn read(var: &str, default: u64) -> anyhow::Result<u64> {
-            match std::env::var(var) {
-                Ok(v) if !v.trim().is_empty() => v
-                    .trim()
-                    .parse::<u64>()
-                    .map_err(|_| anyhow::anyhow!("{var} must be an unsigned integer of seconds")),
-                _ => Ok(default),
-            }
+        Self::from_value(std::env::var(RETIRED_HOLD_VAR).ok().as_deref())
+    }
+
+    /// [`Self::from_env`] over the knob's value (`None` when unset).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::from_env`].
+    pub(crate) fn from_value(value: Option<&str>) -> anyhow::Result<Self> {
+        let policy = Self::read(value)?;
+        if policy.retired_hold_secs < MIN_RETIRED_HOLD_SECS {
+            anyhow::bail!(
+                "{RETIRED_HOLD_VAR} must be at least {MIN_RETIRED_HOLD_SECS} seconds (28 days): \
+                 a shorter hold lets a username shown beside a deleted or renamed account \
+                 belong to someone else"
+            );
         }
-        let defaults = Self::defaults();
-        Ok(Self {
-            retired_hold_secs: read(RETIRED_HOLD_VAR, defaults.retired_hold_secs)?,
-        })
+        Ok(policy)
+    }
+
+    fn read(value: Option<&str>) -> anyhow::Result<Self> {
+        let retired_hold_secs = match value {
+            Some(v) if !v.trim().is_empty() => v.trim().parse::<u64>().map_err(|_| {
+                anyhow::anyhow!("{RETIRED_HOLD_VAR} must be an unsigned integer of seconds")
+            })?,
+            _ => Self::defaults().retired_hold_secs,
+        };
+        Ok(Self { retired_hold_secs })
     }
 }
 
@@ -606,6 +635,24 @@ mod tests {
     fn the_default_hold_is_thirty_days() {
         let policy = NamePolicy::defaults();
         assert_eq!(policy.retired_hold_secs, 2_592_000);
+        assert_eq!(NamePolicy::from_value(None).unwrap(), policy);
+        assert_eq!(NamePolicy::from_value(Some("  ")).unwrap(), policy);
+    }
+
+    /// A hold under 28 days is refused at startup: the clients' 21-day
+    /// display window relies on the hold being longer (ADR-0098 section 4).
+    #[test]
+    fn a_hold_under_twenty_eight_days_is_refused() {
+        assert!(NamePolicy::from_value(Some("0")).is_err());
+        assert!(NamePolicy::from_value(Some("86400")).is_err());
+        assert!(NamePolicy::from_value(Some(&(MIN_RETIRED_HOLD_SECS - 1).to_string())).is_err());
+        assert_eq!(
+            NamePolicy::from_value(Some(&MIN_RETIRED_HOLD_SECS.to_string()))
+                .unwrap()
+                .retired_hold_secs,
+            MIN_RETIRED_HOLD_SECS
+        );
+        assert!(NamePolicy::from_value(Some("ten days")).is_err());
     }
 }
 

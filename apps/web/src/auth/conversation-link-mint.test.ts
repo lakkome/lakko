@@ -69,6 +69,7 @@ describe("the identity upload", () => {
       new Uint8Array(16).fill(1),
       keyOf(2),
       new Uint8Array(32).fill(3),
+      new Uint8Array(64).fill(5),
       new Uint8Array(145).fill(4),
       undefined,
       undefined,
@@ -80,7 +81,7 @@ describe("the identity upload", () => {
 
   it("omits the field on an upload that carries none", async () => {
     const { client, body } = capturing();
-    await client.uploadIdentityBundle(new Uint8Array(16).fill(1), keyOf(2), new Uint8Array(32).fill(3));
+    await client.uploadIdentityBundle(new Uint8Array(16).fill(1), keyOf(2), new Uint8Array(32).fill(3), new Uint8Array(64).fill(5));
     expect(body() as IdentityUploadRequest).not.toHaveProperty("conversation_link");
   });
 });

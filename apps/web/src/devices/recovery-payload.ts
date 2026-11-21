@@ -201,6 +201,9 @@ export async function pollForRecoveryPayload(
     ds?: DsClient;
     signal?: AbortSignal;
     timeoutMs?: number;
+    /** Whether a tagged row is the payload (it opens); one that does not is
+     *  passed over and the poll reads on. Absent: the first tagged row. */
+    accept?: (row: Uint8Array) => boolean;
   } = {},
 ): Promise<RecoveryPayloadOutcome> {
   const ds = options.ds ?? new DsClient();
@@ -233,10 +236,11 @@ export async function pollForRecoveryPayload(
     if (result.messages.length > 0) {
       const first = result.messages[0];
       if (first === undefined) continue;
-      if (isRecoveryPayloadRow(first.payload)) {
+      if (isRecoveryPayloadRow(first.payload) && (options.accept === undefined || options.accept(first.payload))) {
         return { kind: "received", row: first.payload };
       }
-      // Not a recovery row (e.g. the history bundle) — skip it.
+      // Not a recovery row (e.g. the history bundle), or one that does not
+      // open (anyone who learned the rendezvous id can write one) — skip it.
       cursor = first.id;
       continue;
     }

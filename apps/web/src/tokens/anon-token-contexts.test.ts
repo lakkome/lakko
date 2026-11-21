@@ -29,7 +29,7 @@ describe("the token contexts against the core", () => {
     expect([...ANON_TOKEN_CONTEXTS]).toEqual(wasm.anonTokenContexts());
   });
 
-  it("is the eleven contexts of wire bytes 1..=11", () => {
+  it("is the session-issuable contexts: wire bytes 1..=15, 17 and 18", () => {
     // Literals on purpose: a context appended in Rust fails the comparison
     // above; this one fails when a name is edited on both sides at once.
     expect(wasm.anonTokenContexts()).toEqual([
@@ -49,6 +49,7 @@ describe("the token contexts against the core", () => {
       "channel-react",
       "channel-comment",
       "report",
+      "rendezvous-write",
     ]);
   });
 
@@ -90,6 +91,11 @@ describe("the token contexts against the core", () => {
     expect(poolTarget("blob-upload")).toBe(4);
     expect(poolTarget("blob-read")).toBe(4);
     expect(poolTarget("mailbox-write")).toBe(4);
+  });
+
+  it("rendezvous-write keeps 4 on hand, like mailbox-write", () => {
+    // Chosen, not measured: one token per rendezvous write.
+    expect(poolTarget("rendezvous-write")).toBe(4);
   });
 
   it("the ADR-0078 call-join context keeps 4 on hand", () => {

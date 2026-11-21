@@ -472,6 +472,11 @@ public struct DeviceGroupRejoinPorts {
 }
 
 extension DeviceGroupRejoin {
+    /// The answer window held rows that looked like a Welcome and none
+    /// joined: the pass ends without founding, the knock is marked
+    /// unanswered, and the caller knocks again after its back-off.
+    public struct NoRowJoined: Error, Equatable {}
+
     /// What one pass of the device's side came to.
     public enum PassOutcome: Equatable {
         /// The device is a member again (its DeviceGroup is on disk).
@@ -519,42 +524,58 @@ extension DeviceGroupRejoin {
         try await ports.postKnock(prepared)
         let rtt = max(0, ports.now() - postedAt)
         let window = answerWindowMs(rttMs: rtt)
-        let first = await watch.next(untilMs: ports.now() + window)
-        guard let first else {
-            ports.log("DeviceGroupSync rejoin: no answer within \(window) ms (knock rtt \(rtt) ms); founding")
-            return .found
+        let windowEndsMs = ports.now() + window
+        // A row that does not join (anyone who learned the rendezvous can
+        // post to it) is passed over and the window read on. Once one failed,
+        // the pass does not found: the row may have been a real Welcome that
+        // failed here, and founding would split the account.
+        var failedJoin = false
+        while let row = await watch.next(untilMs: windowEndsMs) {
+            switch row {
+            case .welcome(let welcome):
+                if try await tryJoin(prepared.state, welcome, ports: ports) {
+                    ports.log("DeviceGroupSync rejoin: answered after \(max(0, ports.now() - postedAt)) ms (knock rtt \(rtt) ms)")
+                    ports.noteAnswered()
+                    return .joined
+                }
+                failedJoin = true
+            case .presence:
+                ports.log("DeviceGroupSync rejoin: answered after \(max(0, ports.now() - postedAt)) ms (knock rtt \(rtt) ms)")
+                ports.noteAnswered()
+                var answered = prepared.state
+                answered.answered = true
+                try ports.saveState(answered)
+                return try await waitForWelcome(
+                    watch: watch, state: answered, untilMs: answered.knockedAtMs + reknockAfterMs, ports: ports)
+            }
         }
-        ports.log("DeviceGroupSync rejoin: answered after \(max(0, ports.now() - postedAt)) ms (knock rtt \(rtt) ms)")
-        ports.noteAnswered()
-        switch first {
-        case .welcome(let welcome):
-            try await join(prepared.state, welcome, ports: ports)
-            return .joined
-        case .presence:
-            var answered = prepared.state
-            answered.answered = true
-            try ports.saveState(answered)
-            return try await waitForWelcome(
-                watch: watch, state: answered, untilMs: answered.knockedAtMs + reknockAfterMs, ports: ports)
+        if failedJoin {
+            ports.log("DeviceGroupSync rejoin: no row joined within \(window) ms; knocking again, not founding")
+            throw NoRowJoined()
         }
+        ports.log("DeviceGroupSync rejoin: no answer within \(window) ms (knock rtt \(rtt) ms); founding")
+        return .found
     }
 
-    /// Join, or (a row that is no Welcome for this joiner) mark the knock
-    /// unanswered so the next pass knocks again instead of reading the same
-    /// row.
+    /// Join, `true`; or (a row that is no Welcome for this joiner: anyone
+    /// who learned the rendezvous can post to it) mark the knock unanswered
+    /// so the next pass knocks again, and `false`: the caller passes over the
+    /// row and reads on.
     @MainActor
-    private static func join(
+    private static func tryJoin(
         _ state: DeviceGroupRejoinState, _ welcome: Data, ports: DeviceGroupRejoinPorts
-    ) async throws {
+    ) async throws -> Bool {
         do {
             try await ports.join(state, welcome)
         } catch {
+            ports.log("DeviceGroupSync rejoin: a row did not join (\(errorLabel(error))); reading on")
             var unanswered = state
             unanswered.answered = false
             try? ports.saveState(unanswered)
-            throw error
+            return false
         }
         ports.clearState()
+        return true
     }
 
     @MainActor
@@ -565,8 +586,7 @@ extension DeviceGroupRejoin {
         while let row = await watch.next(untilMs: untilMs) {
             // More presence notes: more than one device is running.
             guard case .welcome(let welcome) = row else { continue }
-            try await join(state, welcome, ports: ports)
-            return .joined
+            if try await tryJoin(state, welcome, ports: ports) { return .joined }
         }
         return .waiting
     }

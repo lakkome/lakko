@@ -39,7 +39,7 @@ class OwedGapBundleStoreTest {
     fun tearDown() = AccountStoreGate.resetForTest()
 
     private fun owed(group: String, leaf: Byte, epoch: ULong = 6uL) =
-        OwedGapBundle(group, byteArrayOf(leaf, 2, 3), epochLeft = epoch, gapFromMs = 100L, owedSinceMs = 200L)
+        OwedGapBundle(group, byteArrayOf(leaf, 2, 3), epochLeft = epoch, gapFromMs = 100L, owedSinceMs = 200L, gapKey = ByteArray(32) { 7 })
 
     @Test
     fun `a bundle round-trips through a new store instance`() {
@@ -51,6 +51,7 @@ class OwedGapBundleStoreTest {
         assertEquals(ULong.MAX_VALUE, row.epochLeft)
         assertEquals(100L, row.gapFromMs)
         assertEquals(200L, row.owedSinceMs)
+        assertArrayEquals(ByteArray(32) { 7 }, row.gapKey)
         assertTrue("another account sees none", SharedPrefsOwedGapBundleStore(context).load(other).isEmpty())
     }
 

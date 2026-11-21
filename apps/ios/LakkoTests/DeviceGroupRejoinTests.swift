@@ -230,6 +230,8 @@ final class DeviceGroupRejoinTests: XCTestCase {
         var watches: [FakeWatch] = []
         var postEndedAt: Int64 = 0
         var joinFails = false
+        /// Rows that do not join (junk posted to the rendezvous).
+        var junkRows: Set<Data> = []
         /// How many times the run said a device of the account answered.
         var answeredNotes = 0
         struct JoinFailed: Error {}
@@ -259,9 +261,9 @@ final class DeviceGroupRejoinTests: XCTestCase {
                     self.postEndedAt = self.now
                     self.watches.last?.rows = self.answer.map { (self.now + $0.afterMs, $0.row) }
                 },
-                join: { [unowned self] _, _ in
+                join: { [unowned self] _, welcome in
                     self.log.append("join")
-                    if self.joinFails { throw JoinFailed() }
+                    if self.joinFails || self.junkRows.contains(welcome) { throw JoinFailed() }
                 },
                 clearState: { [unowned self] in self.log.append("clear"); self.state = nil },
                 now: { [unowned self] in self.now },
@@ -356,12 +358,45 @@ final class DeviceGroupRejoinTests: XCTestCase {
         let m = RunModel()
         m.answer = [(10, .presence), (20, .welcome(Data([0xFF])))]
         m.joinFails = true
-        do {
-            _ = try await DeviceGroupRejoin.rejoinOnce(ports: m.ports, firstPass: true)
-            XCTFail("the join failure surfaces")
-        } catch {}
+        // The row is passed over and the wait reads on to the re-knock time.
+        let outcome = try await DeviceGroupRejoin.rejoinOnce(ports: m.ports, firstPass: true)
+        XCTAssertEqual(outcome, .waiting)
         XCTAssertEqual(m.state?.answered, false)
         XCTAssertTrue(DeviceGroupRejoinState.shouldKnockAgain(m.state, nowMs: m.now))
+    }
+
+    func testAJunkRowAfterThePresenceNoteDoesNotHideTheWelcome() async throws {
+        let m = RunModel()
+        m.junkRows = [Data([0xEE])]
+        m.answer = [(10, .presence), (20, .welcome(Data([0xEE]))), (5_000, .welcome(Data([7])))]
+        let outcome = try await DeviceGroupRejoin.rejoinOnce(ports: m.ports, firstPass: true)
+        XCTAssertEqual(outcome, .joined)
+        XCTAssertEqual(m.log.suffix(3), ["join", "join", "clear"])
+        XCTAssertNil(m.state)
+    }
+
+    func testAJunkRowInTheAnswerWindowIsPassedOverForTheWelcome() async throws {
+        let m = RunModel()
+        m.junkRows = [Data([0xEE])]
+        m.answer = [(10, .welcome(Data([0xEE]))), (20, .welcome(Data([7])))]
+        let outcome = try await DeviceGroupRejoin.rejoinOnce(ports: m.ports, firstPass: true)
+        XCTAssertEqual(outcome, .joined)
+        XCTAssertEqual(m.answeredNotes, 1)
+    }
+
+    func testOnlyJunkInTheAnswerWindowNeitherJoinsNorFounds() async throws {
+        let m = RunModel()
+        m.junkRows = [Data([0xEE])]
+        m.answer = [(10, .welcome(Data([0xEE])))]
+        do {
+            _ = try await DeviceGroupRejoin.rejoinOnce(ports: m.ports, firstPass: true)
+            XCTFail("the pass ends without founding")
+        } catch let error as DeviceGroupRejoin.NoRowJoined {
+            XCTAssertEqual(error, DeviceGroupRejoin.NoRowJoined())
+        }
+        XCTAssertEqual(m.state?.answered, false)
+        XCTAssertTrue(DeviceGroupRejoinState.shouldKnockAgain(m.state, nowMs: m.now))
+        XCTAssertEqual(m.answeredNotes, 0)
     }
 
     // MARK: Section 7.2 — the answer the chat list reads

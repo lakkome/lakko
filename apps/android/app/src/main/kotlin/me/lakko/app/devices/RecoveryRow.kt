@@ -169,8 +169,8 @@ public object RecoveryRow {
     public sealed interface Outcome {
         public class Received(public val sealedBlob: ByteArray) : Outcome
 
-        /** A recovery row the core refused (v2, or empty): stop, the keys
-         *  could not be handed over. */
+        /** Only recovery rows the core refused (v2, or empty) came before
+         *  the timeout: the keys could not be handed over. */
         public data object Refused : Outcome
 
         public data object Timeout : Outcome
@@ -180,7 +180,12 @@ public object RecoveryRow {
 
     /**
      * Joining side: poll the rendezvous mailbox past the Welcome cursor for
-     * the recovery row; rows that are not one are skipped.
+     * the recovery row; rows that are not one are skipped. Anyone who learned
+     * the rendezvous id can write to it, so a recovery row the core refuses,
+     * or whose sealed blob [accepts] says no to (it does not open under the
+     * joined group's key), is passed over too and the read goes on; a throw
+     * from [accepts] counts as no. [Outcome.Refused] is the answer only when
+     * the time ran out after a refused row and no row that opens.
      */
     public suspend fun poll(
         rendezvousPseudonym: ByteArray,
@@ -188,13 +193,15 @@ public object RecoveryRow {
         timeoutMillis: Long = POLL_TIMEOUT_MS,
         ds: DsClient = DsClient(),
         codec: Codec = Ffi,
+        accepts: (ByteArray) -> Boolean = { true },
     ): Outcome = ds.use { client ->
         val deadline = System.nanoTime() + timeoutMillis * 1_000_000L
         var cursor = afterCursor
+        var sawRefused = false
         while (true) {
             if (!currentCoroutineContext().isActive) return@use Outcome.Cancelled
             val remainingNanos = deadline - System.nanoTime()
-            if (remainingNanos <= 0L) return@use Outcome.Timeout
+            if (remainingNanos <= 0L) return@use if (sawRefused) Outcome.Refused else Outcome.Timeout
             val remainingSecs = (remainingNanos / 1_000_000_000L).toInt().coerceAtLeast(1)
             val waitSecs = minOf(PER_REQUEST_LONG_POLL_SECS, remainingSecs)
             val result = try {
@@ -217,10 +224,11 @@ public object RecoveryRow {
                 val sealed = try {
                     codec.unwrap(first.payload)
                 } catch (_: RecoveryRow.Refused) {
-                    return@use Outcome.Refused
+                    sawRefused = true
+                    null
                 }
-                if (sealed != null) return@use Outcome.Received(sealed)
-                cursor = first.id
+                if (sealed != null && acceptsRow(sealed, accepts)) return@use Outcome.Received(sealed)
+                cursor = maxOf(cursor, first.id)
                 continue
             }
             cursor = result.messages.fold(cursor) { acc, msg -> maxOf(acc, msg.id) }
@@ -228,6 +236,28 @@ public object RecoveryRow {
         @Suppress("UNREACHABLE_CODE")
         Outcome.Timeout
     }
+
+    private fun acceptsRow(sealed: ByteArray, accepts: (ByteArray) -> Boolean): Boolean =
+        try {
+            accepts(sealed)
+        } catch (_: Throwable) {
+            false
+        }
+
+    /** Whether [sealed] opens and parses under [exporterKey] ([open] is
+     *  `openWithKey`). Everything opened is zeroed. */
+    public fun opensUnder(
+        exporterKey: ByteArray,
+        sealed: ByteArray,
+        open: (ByteArray, ByteArray) -> ByteArray,
+        codec: Codec = Ffi,
+    ): Boolean =
+        try {
+            this.open(exporterKey, sealed, open, codec).zero()
+            true
+        } catch (_: Throwable) {
+            false
+        }
 
     /** Open a sealed blob under the exporter key [exporterKey] with
      *  [open] (`openWithKey`) and parse it. The opened plaintext is zeroed. */

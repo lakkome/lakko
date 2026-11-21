@@ -390,7 +390,9 @@ device's own identity mailbox. The path is the service path
 (`/ds/group/<hex>/messages`), never the nginx prefix. Posting to **another**
 account's mailbox and every **rendezvous** mailbox (pairing, recovery payload,
 welcome courier, state bundle, history bundle, contact-invite reply) stays
-unsigned - those are unclaimed or open for writes by design.
+unsigned - those are unclaimed or open for writes by design. (Since
+2026-11-21 a write to a rendezvous spends one `rendezvous-write` anonymous
+token, so its name alone no longer writes without limit; G-59.)
 
 **2. Claim.** `PUT /ds/group/<hex>/access` with the signer's
 `groupClaimBodyJson()`: at `Group.create` (and DeviceGroup founding and

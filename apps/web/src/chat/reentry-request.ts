@@ -29,8 +29,10 @@
  * for the episode, so the device is never stuck on route 1.
  *
  * The request carries the time of the first row this device could not read
- * (`gap_from_ms`), which the device that brings it back uses to send the
- * missed messages it holds (section 7).
+ * (`gap_from_ms`) and a fresh public gap key (`generateGapKey`), which the
+ * device that brings it back uses to send the missed messages it holds
+ * (section 7). The gap secret is sealed under the device key and recorded
+ * with the request before anything is sent.
  *
  * A failed send is retried after {@link SEND_RETRY_MS}; the record keeps the
  * KeyPackage, so a Welcome that answers it can still be joined. Log lines
@@ -46,6 +48,7 @@ import {
   reentryRecordFor,
   type HeldKnockKey,
   type ReentryRouteName,
+  type SealedGapSecret,
 } from "./reentry-store";
 import type { Group as WasmGroup, Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 
@@ -82,7 +85,12 @@ export interface ReentryRequestPorts {
   knockKey(group: WasmGroup): Promise<HeldKnockKey | null>;
   /** Make the MLS snapshot durable (throws when it could not be). */
   persistDurable(): Promise<void>;
-  composeEnvelope(groupId: Uint8Array, epochLeft: bigint, gapFromMs: bigint, keyPackage: Uint8Array): Uint8Array;
+  /** A fresh gap key pair (`generateGapKey`). */
+  generateGapKey(): { readonly secret: Uint8Array; readonly publicKey: Uint8Array };
+  /** Seal a gap secret under the account's device key (throws when it
+   *  could not be: the request must not go out). */
+  sealGapSecret(secret: Uint8Array): Promise<SealedGapSecret>;
+  composeEnvelope(groupId: Uint8Array, epochLeft: bigint, gapFromMs: bigint, gapKey: Uint8Array, keyPackage: Uint8Array): Uint8Array;
   sealKnockRow(knockPk: Uint8Array, knockVersion: number, envelope: Uint8Array): Uint8Array;
   sendOwnDevice(envelope: Uint8Array): Promise<void>;
   sendMailbox(otherAccountKey: Uint8Array, envelope: Uint8Array, groupId: Uint8Array): Promise<void>;
@@ -197,13 +205,23 @@ async function attempt(
     return "no-epoch";
   }
 
-  // Mint, make durable, record - all before anything is sent.
+  // Mint, make durable, record - all before anything is sent. The gap
+  // secret is sealed first: a request whose secret is not kept would bring
+  // back a device that can never open its gap's messages.
+  const gapKey = ports.generateGapKey();
+  let sealedGapKey: SealedGapSecret;
+  try {
+    sealedGapKey = await ports.sealGapSecret(gapKey.secret);
+  } finally {
+    gapKey.secret.fill(0);
+  }
   const keyPackage = identity.createReentryKeyPackage(groupId, epochLeft);
   await ports.persistDurable();
   const gapFromMs = record?.gapFromMs ?? input.gapFromMs;
   const dropped = recordReentryRequest({
     groupIdB64,
     keyPackageB64: base64Encode(keyPackage),
+    gapKey: sealedGapKey,
     epochLeft,
     gapFromMs,
     sentAtMs: 0,
@@ -220,7 +238,13 @@ async function attempt(
     await ports.persistDurable().catch(() => undefined);
   }
 
-  const envelope = ports.composeEnvelope(groupId, epochLeft, BigInt(Math.max(0, Math.floor(gapFromMs))), keyPackage);
+  const envelope = ports.composeEnvelope(
+    groupId,
+    epochLeft,
+    BigInt(Math.max(0, Math.floor(gapFromMs))),
+    gapKey.publicKey,
+    keyPackage,
+  );
   if (route === "own-device") {
     try {
       await ports.sendOwnDevice(envelope);

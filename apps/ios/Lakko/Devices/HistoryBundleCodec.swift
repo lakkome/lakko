@@ -84,18 +84,22 @@ public enum HistoryBundleCodec {
     }
 
     /// ADR-0091 phase 2 section 7 — one conversation's `rows` (already the
-    /// gap's, bookkeeping rows left out) sealed under `secret`, or `nil` when
-    /// none of them projects.
+    /// gap's, bookkeeping rows left out) sealed to the request's public
+    /// `gapKey` and signed by `readmitter` (this device's identity in that
+    /// conversation, `sealGapHistoryStructured`), or `nil` when none of them
+    /// projects. Only the holder of the gap secret opens it; no member can.
     ///
     /// `heldBeforeGap`: whether this device holds a row older than the gap's
     /// start. Without one it cannot vouch that it saw the start of the gap,
     /// and the group is marked `countCapped` ("not everything"), the web rule;
     /// a receiver whose bundle is not capped drops its gap line.
-    static func buildForGroup(
+    static func buildGapForGroup(
         hex: String,
         rows: [PersistedMessage],
         accountIdB64: String,
-        secret: Data,
+        readmitter: Identity,
+        gapKey: Data,
+        groupId: Data,
         heldBeforeGap: Bool = true,
         ownKey: Data? = nil,
         cards: ChannelInviteCardStore = .shared
@@ -104,8 +108,9 @@ public enum HistoryBundleCodec {
             hex: hex, rows: rows, cap: Self.maxBundleMessages,
             accountIdB64: accountIdB64, cards: cards, notEverything: !heldBeforeGap, ownKey: ownKey),
               !projected.group.messages.isEmpty else { return nil }
-        return try sealHistoryBundleStructured(
-            secret: secret, groups: [projected.group], maxHlc: projected.maxHlc)
+        return try sealGapHistoryStructured(
+            readmitter: readmitter, gapKey: gapKey, groupId: groupId,
+            groups: [projected.group], maxHlc: projected.maxHlc)
     }
 
     /// One group's rows projected onto the structured history wire: the
@@ -173,6 +178,12 @@ public enum HistoryBundleCodec {
     /// device's persistent message log. Returns the number of
     /// rows applied (across all groups). Idempotent on
     /// `messageId` — collisions take the on-disk value.
+    /// `true` when `sealedBytes` opens as a history bundle under `secret`.
+    /// The joining device's history poll passes over a row that does not.
+    static func opens(secret: Data, sealedBytes: Data) -> Bool {
+        (try? openHistoryBundleStructured(secret: secret, sealedBytes: sealedBytes)) != nil
+    }
+
     static func applyToMessageLog(
         accountIdB64: String,
         secret: Data,
@@ -198,7 +209,8 @@ public enum HistoryBundleCodec {
         let earliestMs: Int64?
     }
 
-    /// Open a gap history, file it like ``applyToMessageLog(accountIdB64:secret:sealedBytes:store:cards:)``
+    /// File an opened gap history (`openGapHistoryStructured`, its signer
+    /// already accepted by the caller) like ``applyToMessageLog(accountIdB64:secret:sealedBytes:store:cards:)``
     /// and report what it carried (the web `applyGapHistoryBundle`).
     ///
     /// Walk-3 rule W3-R3: `ownKey` is this account's own key in the
@@ -206,16 +218,14 @@ public enum HistoryBundleCodec {
     /// `route` the route of the request that brought this device back; each
     /// row takes the author and direction ``gapRow(_:author:ownKey:route:)``
     /// gives it.
-    static func applyGapBundle(
+    static func applyOpenedGapBundle(
+        _ opened: StructuredHistoryBundle,
         accountIdB64: String,
-        secret: Data,
-        sealedBytes: Data,
         ownKey: Data? = nil,
         route: String? = nil,
         store: MessageLogStore = MessageLogStore(),
         cards: ChannelInviteCardStore = .shared
-    ) throws -> GapApplied {
-        let opened = try openHistoryBundleStructured(secret: secret, sealedBytes: sealedBytes)
+    ) -> GapApplied {
         let summary = gapSummary(opened)
         let applied = applyOpened(
             opened, accountIdB64: accountIdB64, store: store, cards: cards,

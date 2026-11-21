@@ -1197,6 +1197,25 @@ impl Group {
         Self::join_reentry_core(welcome, identity, &recorded).map_err(MlsFailure::into_js)
     }
 
+    /// Whether a gap history signed by `signerLeafKey` (from
+    /// `openGapHistory`) may be kept (ADR-0091 section 7): judged on this
+    /// group, the one the device joined by `joinReentry`, with the rule a
+    /// re-entry Welcome's sender passes. `true` when the signer is a leaf of
+    /// this group bound to `identity`'s own account, to the owner or an admin,
+    /// or in a one-to-one to the other person; otherwise drop the bundle (its
+    /// gap line stays). Whichever device committed the replacement.
+    #[wasm_bindgen(js_name = gapHistorySignerAccepted)]
+    pub fn gap_history_signer_accepted(
+        &self,
+        identity: &Identity,
+        signer_leaf_key: &[u8],
+    ) -> Result<bool, JsValue> {
+        Ok(self
+            .locked()
+            .map_err(MlsFailure::into_js)?
+            .gap_history_signer_accepted(&identity.inner, signer_leaf_key))
+    }
+
     /// Check a re-entry request's KeyPackage against this group (ADR-0091
     /// section 4). Throws a `reentryPairInvalid` refusal when it is not a
     /// re-entry for this group at this epoch. The rest of the decision is
@@ -4381,7 +4400,7 @@ pub fn seal_history_bundle_structured(
     lakko_mls::history_bundle::seal_bundle(&key, &bundle).map_err(mls_err)
 }
 
-fn build_history_bundle_proto(
+pub(crate) fn build_history_bundle_proto(
     groups: Vec<HistoryGroupInput>,
     max_hlc: u64,
 ) -> lakko_proto::mls_app::history_bundle::v1::HistoryBundle {
@@ -5200,7 +5219,14 @@ pub fn open_history_bundle_structured(
     key.copy_from_slice(secret);
 
     let bundle = lakko_mls::history_bundle::open_bundle(&key, sealed_bytes).map_err(mls_err)?;
-    Ok(OpenedHistoryBundle {
+    Ok(opened_history_bundle(bundle))
+}
+
+/// The structured projection of a decoded `HistoryBundle`.
+pub(crate) fn opened_history_bundle(
+    bundle: lakko_proto::mls_app::history_bundle::v1::HistoryBundle,
+) -> OpenedHistoryBundle {
+    OpenedHistoryBundle {
         max_hlc_val: bundle.max_hlc,
         groups_val: bundle
             .groups
@@ -5220,7 +5246,7 @@ pub fn open_history_bundle_structured(
                     .collect(),
             })
             .collect(),
-    })
+    }
 }
 
 /// G-13 (ADR-0015): the action hash a remove-device passkey ceremony and its

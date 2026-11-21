@@ -21,6 +21,7 @@ import { loadAccepted } from "../contacts/local-store";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import type { IdentitySecrets } from "../auth/AuthContext";
 import { DiscoveryClient } from "../discovery/client";
+import { boundX25519 } from "../discovery/x25519-binding";
 import { DsClient } from "../ds/client";
 import { personKeysOf, verifiedTargetOfGrant } from "../reach/mailbox-write";
 import { provenSuccessorWith } from "../contacts/proven-successor";
@@ -416,9 +417,13 @@ export function sendDeps(args: {
     identityFetch: async (accountId) => {
       const bundle = await discovery.identityFetch(accountId);
       if (bundle === null) return null;
+      // Security review 2026-11-21: a key whose binding does not verify is
+      // never sealed to; the person reads as not reachable.
+      const x25519Pub = await boundX25519(bundle);
+      if (x25519Pub === null) return null;
       return {
         signaturePub: base64Decode(bundle.signature_pubkey),
-        x25519Pub: base64Decode(bundle.x25519_pubkey),
+        x25519Pub,
       };
     },
     provenPredecessor: (foundKey, accountId) => provenPredecessorOf(discovery, foundKey, accountId),

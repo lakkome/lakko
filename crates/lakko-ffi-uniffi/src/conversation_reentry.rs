@@ -23,12 +23,18 @@ use lakko_contacts::conversation_reentry::{
     ConversationReentry, ConversationReentryError, CONVERSATION_REENTRY_ENVELOPE_MAX_LEN,
     CONVERSATION_REENTRY_ENVELOPE_MIN_LEN,
 };
+use lakko_contacts::gap_history::{
+    gap_history_rendezvous as rust_gap_rendezvous, gap_history_start as rust_gap_start,
+    open_gap_history as rust_open_gap, seal_gap_history as rust_seal_gap, GapHistoryError, GapKey,
+    OpenedGapHistory, GAP_HISTORY_MAX_BUNDLE_LEN,
+};
 use lakko_contacts::knock_key::{
     compose_knock_key as rust_compose_knock_key, decode_knock_key as rust_decode_knock_key,
     knock_key_is_newer as rust_knock_key_is_newer, KnockKey, KnockKeyError, KNOCK_KEY_ENVELOPE_LEN,
 };
+use lakko_crypto::signing::SigningKey;
 
-use crate::{FfiError, GroupKind};
+use crate::{FfiError, GroupKind, Identity, StructuredHistoryBundle, StructuredHistoryGroup};
 
 fn reentry_error(e: ConversationReentryError) -> FfiError {
     FfiError::Contacts(format!("conversationReentry.{}: {e}", e.code()))
@@ -36,6 +42,10 @@ fn reentry_error(e: ConversationReentryError) -> FfiError {
 
 fn knock_key_error(e: KnockKeyError) -> FfiError {
     FfiError::Contacts(format!("knockKey.{}: {e}", e.code()))
+}
+
+fn gap_error(e: GapHistoryError) -> FfiError {
+    FfiError::Contacts(format!("gapHistory.{}: {e}", e.code()))
 }
 
 fn key32(what: &str, bytes: &[u8]) -> Result<[u8; 32], FfiError> {
@@ -311,8 +321,11 @@ pub struct FfiConversationReentry {
     pub group_id: Vec<u8>,
     /// The `latest_epoch` the device read.
     pub epoch_left: u64,
-    /// When the device first failed to read a row of the conversation.
+    /// When the device first failed to read a row of the conversation (its
+    /// claim; the re-admitter clamps it with `gapHistoryStart`).
     pub gap_from_ms: u64,
+    /// The 32-byte public gap key the gap's history is sealed to.
+    pub gap_key: Vec<u8>,
     /// The re-entry KeyPackage wire.
     pub key_package: Vec<u8>,
 }
@@ -323,32 +336,241 @@ impl From<ConversationReentry> for FfiConversationReentry {
             group_id: r.group_id.to_vec(),
             epoch_left: r.epoch_left,
             gap_from_ms: r.gap_from_ms,
+            gap_key: r.gap_key.to_vec(),
             key_package: r.key_package,
         }
     }
 }
 
 /// Compose the request envelope (routes 1 and 2 carry it as is; route 3
-/// seals it with `sealReentryKnockRow`).
+/// seals it with `sealReentryKnockRow`). `gap_key` is the public half of the
+/// fresh gap key minted for this request (`generateGapKey`); keep its secret
+/// with the request record to open the gap's history.
 ///
 /// # Errors
 ///
 /// `FfiError::Contacts` with `conversationReentry.badKeyPackage` or
-/// `badLength` (group id).
+/// `badLength` (group id, gap key).
 #[uniffi::export]
 pub fn compose_conversation_reentry_envelope(
     group_id: Vec<u8>,
     epoch_left: u64,
     gap_from_ms: u64,
+    gap_key: Vec<u8>,
     key_package: Vec<u8>,
 ) -> Result<Vec<u8>, FfiError> {
     rust_compose(&ConversationReentry {
         group_id: key32("group id", &group_id)?,
         epoch_left,
         gap_from_ms,
+        gap_key: key32("gap key", &gap_key)?,
         key_package,
     })
     .map_err(reentry_error)
+}
+
+// ============================================================================
+// The gap's history, sealed to the returning device (section 7, security
+// review 2026-11-21)
+// ============================================================================
+
+/// A fresh gap key pair. The secret is secret material: keep it with the
+/// durable request record, never send it.
+#[derive(uniffi::Record, Clone, PartialEq, Eq)]
+pub struct FfiGapKey {
+    /// The 32-byte X25519 secret.
+    pub secret: Vec<u8>,
+    /// The 32-byte public key the request carries.
+    pub public_key: Vec<u8>,
+}
+
+impl core::fmt::Debug for FfiGapKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FfiGapKey")
+            .field("public_key", &self.public_key)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Mint a fresh gap key for one request to come back.
+#[uniffi::export]
+#[must_use]
+pub fn generate_gap_key() -> FfiGapKey {
+    let key = GapKey::generate();
+    FfiGapKey {
+        secret: key.secret().as_bytes().to_vec(),
+        public_key: key.public().to_vec(),
+    }
+}
+
+/// The public key of a stored gap secret.
+///
+/// # Errors
+///
+/// `FfiError::Contacts` with `badLength` for a secret that is not 32 bytes.
+#[uniffi::export]
+pub fn gap_public_key(secret: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    Ok(GapKey::from_secret(&key32("gap secret", &secret)?)
+        .public()
+        .to_vec())
+}
+
+/// The 32-byte DS rendezvous id the gap's history is posted to and read
+/// from: derived from the gap public key, no group secret involved.
+///
+/// # Errors
+///
+/// `FfiError::Contacts` with `badLength` for a key that is not 32 bytes.
+#[uniffi::export]
+pub fn gap_history_rendezvous(gap_key: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    Ok(rust_gap_rendezvous(&key32("gap key", &gap_key)?).to_vec())
+}
+
+/// Where the re-admitter starts the gap's rows: the later of the request's
+/// claim and the first time this device saw the returning leaf in the
+/// roster, else its last message from that leaf. `None` when neither is
+/// known: send nothing.
+#[uniffi::export]
+#[must_use]
+pub fn gap_history_start(
+    claimed_ms: u64,
+    leaf_first_seen_ms: Option<u64>,
+    leaf_last_write_ms: Option<u64>,
+) -> Option<u64> {
+    rust_gap_start(claimed_ms, leaf_first_seen_ms, leaf_last_write_ms)
+}
+
+/// An opened gap history: the bundle bytes and the 32-byte leaf key that
+/// signed them. Keep the bundle only when
+/// `Group.gapHistorySignerAccepted(identity, signerLeafKey)` says so.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct FfiOpenedGapHistory {
+    /// The leaf signature key the signature verified under.
+    pub signer_leaf_key: Vec<u8>,
+    /// The bundle bytes.
+    pub bundle: Vec<u8>,
+}
+
+/// An opened structured gap history and its signer's leaf key.
+#[derive(uniffi::Record)]
+pub struct FfiOpenedGapHistoryStructured {
+    /// The leaf signature key the signature verified under.
+    pub signer_leaf_key: Vec<u8>,
+    /// The bundle.
+    pub bundle: StructuredHistoryBundle,
+}
+
+fn signer_of(readmitter: &Identity) -> SigningKey {
+    SigningKey::from_seed(&readmitter.inner.ed25519_seed_bytes())
+}
+
+/// Seal opaque bundle bytes of the conversation `group_id` to the gap key a
+/// request carried, signed by `readmitter`: this device's identity in that
+/// conversation (its leaf signing key).
+///
+/// # Errors
+///
+/// `FfiError::Contacts` with `gapHistory.badBundle` / `badKey` or
+/// `badLength`.
+#[uniffi::export]
+pub fn seal_gap_history(
+    readmitter: &Identity,
+    gap_key: Vec<u8>,
+    group_id: Vec<u8>,
+    bundle: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    rust_seal_gap(
+        &signer_of(readmitter),
+        &key32("gap key", &gap_key)?,
+        &key32("group id", &group_id)?,
+        &bundle,
+    )
+    .map_err(gap_error)
+}
+
+fn open_gap(
+    gap_secret: &[u8],
+    group_id: &[u8],
+    sealed: &[u8],
+) -> Result<OpenedGapHistory, FfiError> {
+    rust_open_gap(
+        &key32("gap secret", gap_secret)?,
+        &key32("group id", group_id)?,
+        sealed,
+    )
+    .map_err(gap_error)
+}
+
+/// Open a sealed gap history with the gap secret, for the conversation
+/// `group_id`: verifies the signature, opens the box, and returns the bundle
+/// with the signer's leaf key. Keep it only when
+/// `Group.gapHistorySignerAccepted(identity, signerLeafKey)` on the group the
+/// device joined.
+///
+/// # Errors
+///
+/// `FfiError::Contacts` with `gapHistory.badSignature` / `notOpened` /
+/// `badLength` / `unknownVersion`.
+#[uniffi::export]
+pub fn open_gap_history(
+    gap_secret: Vec<u8>,
+    group_id: Vec<u8>,
+    sealed: Vec<u8>,
+) -> Result<FfiOpenedGapHistory, FfiError> {
+    let opened = open_gap(&gap_secret, &group_id, &sealed)?;
+    Ok(FfiOpenedGapHistory {
+        signer_leaf_key: opened.signer_leaf_key.to_vec(),
+        bundle: opened.bundle,
+    })
+}
+
+/// `sealGapHistory` over a structured history bundle (the
+/// `sealHistoryBundleStructured` records): the bundle is the prost-encoded
+/// `HistoryBundle`, sealed to the gap key and signed by `readmitter`. Refuses
+/// a bundle above `lakko_mls::history_bundle::MAX_BUNDLE_MESSAGES` messages.
+///
+/// # Errors
+///
+/// `FfiError::Codec` for too many messages, `FfiError::Contacts` as
+/// `sealGapHistory`.
+#[uniffi::export]
+pub fn seal_gap_history_structured(
+    readmitter: &Identity,
+    gap_key: Vec<u8>,
+    group_id: Vec<u8>,
+    groups: Vec<StructuredHistoryGroup>,
+    max_hlc: u64,
+) -> Result<Vec<u8>, FfiError> {
+    let bundle =
+        crate::encode_history_bundle_checked(crate::build_history_bundle_proto(groups, max_hlc))?;
+    seal_gap_history(readmitter, gap_key, group_id, bundle)
+}
+
+/// Open a structured gap history (`sealGapHistoryStructured`): the bundle
+/// and its signer's leaf key. Keep it only when
+/// `Group.gapHistorySignerAccepted`.
+///
+/// # Errors
+///
+/// As `openGapHistory`; `FfiError::Codec` when the bundle does not decode.
+#[uniffi::export]
+pub fn open_gap_history_structured(
+    gap_secret: Vec<u8>,
+    group_id: Vec<u8>,
+    sealed: Vec<u8>,
+) -> Result<FfiOpenedGapHistoryStructured, FfiError> {
+    let opened = open_gap(&gap_secret, &group_id, &sealed)?;
+    Ok(FfiOpenedGapHistoryStructured {
+        signer_leaf_key: opened.signer_leaf_key.to_vec(),
+        bundle: crate::structured_history_bundle_from_bytes(&opened.bundle)?,
+    })
+}
+
+/// The longest bundle `sealGapHistory` takes.
+#[uniffi::export]
+#[must_use]
+pub fn gap_history_max_bundle_len() -> u32 {
+    len_u32(GAP_HISTORY_MAX_BUNDLE_LEN)
 }
 
 /// Decode a request envelope (bounded, fail-closed).
@@ -480,11 +702,19 @@ mod tests {
 
     #[test]
     fn the_envelopes_round_trip_through_the_surface() {
-        let env = compose_conversation_reentry_envelope(vec![3; 32], 9, 1000, vec![1, 2, 3])
-            .expect("compose");
+        let gap = generate_gap_key();
+        let env = compose_conversation_reentry_envelope(
+            vec![3; 32],
+            9,
+            1000,
+            gap.public_key.clone(),
+            vec![1, 2, 3],
+        )
+        .expect("compose");
         let back = decode_conversation_reentry_envelope(env.clone()).expect("decode");
         assert_eq!(back.group_id, vec![3; 32]);
         assert_eq!(back.epoch_left, 9);
+        assert_eq!(back.gap_key, gap.public_key);
         assert_eq!(back.key_package, vec![1, 2, 3]);
         let seed = lakko_contacts::knock::knock_seed(&[5; 32], 2);
         let pk = lakko_contacts::knock::knock_public_key(&seed);
@@ -503,6 +733,71 @@ mod tests {
         assert_eq!(k.knock_version, 4);
         assert!(knock_key_is_newer(5, Some(4)));
         assert!(!knock_key_is_newer(4, Some(4)));
+    }
+
+    /// The gap's history through the surface: sealed to the request's gap
+    /// key, opened only with its secret and only for its conversation; the
+    /// rendezvous comes from the gap key; the start is clamped.
+    #[test]
+    fn the_gap_history_is_sealed_to_the_returning_device_only() {
+        let gap = generate_gap_key();
+        assert_eq!(
+            gap_public_key(gap.secret.clone()).expect("public"),
+            gap.public_key
+        );
+        let groups = vec![StructuredHistoryGroup {
+            group_id: vec![3; 32],
+            messages: vec![crate::StructuredHistoryMessage {
+                payload_bytes: vec![1, 2],
+                sender_leaf: 4,
+                message_id: vec![9],
+                received_at_ms: 5,
+            }],
+            count_capped: false,
+        }];
+        let readmitter = Identity::from_seed(vec![0x71; 64]).expect("readmitter");
+        let impostor = Identity::from_seed(vec![0x72; 64]).expect("impostor");
+        let sealed = seal_gap_history_structured(
+            &readmitter,
+            gap.public_key.clone(),
+            vec![3; 32],
+            groups,
+            7,
+        )
+        .expect("seal");
+        let opened = open_gap_history_structured(gap.secret.clone(), vec![3; 32], sealed.clone())
+            .expect("open");
+        assert_eq!(opened.bundle.max_hlc, 7);
+        assert_eq!(
+            opened.bundle.groups[0].messages[0].payload_bytes,
+            vec![1, 2]
+        );
+        let readmitter_leaf = readmitter.inner.signature_public_key().to_vec();
+        assert_eq!(opened.signer_leaf_key, readmitter_leaf);
+        // The signer is inside the box: not visible on the rendezvous.
+        assert!(!sealed.windows(32).any(|w| w == readmitter_leaf.as_slice()));
+        // A member who saw the request signs invented messages: it opens and
+        // names that member; `Group.gapHistorySignerAccepted` judges it.
+        let forged = seal_gap_history(
+            &impostor,
+            gap.public_key.clone(),
+            vec![3; 32],
+            b"invented".to_vec(),
+        )
+        .expect("seal");
+        let opened = open_gap_history(gap.secret.clone(), vec![3; 32], forged).expect("open");
+        assert_eq!(
+            opened.signer_leaf_key,
+            impostor.inner.signature_public_key().to_vec()
+        );
+        let other = generate_gap_key();
+        assert!(open_gap_history(other.secret, vec![3; 32], sealed.clone()).is_err());
+        assert!(open_gap_history(gap.secret, vec![4; 32], sealed).is_err());
+        let r = gap_history_rendezvous(gap.public_key.clone()).expect("rendezvous");
+        assert_eq!(r.len(), 32);
+        assert_ne!(r, gap_history_rendezvous(other.public_key).expect("r"));
+        assert_eq!(gap_history_start(100, Some(500), None), Some(500));
+        assert_eq!(gap_history_start(100, None, None), None);
     }
 
     /// The MLS half end to end through the surface: charlie misses a
@@ -575,6 +870,27 @@ mod tests {
         let c2 = Group::join_reentry(swept.welcome.expect("welcome"), &charlie, vec![k])
             .expect("charlie is back");
         assert_eq!(c2.epoch().expect("epoch"), a.epoch().expect("epoch"));
+        // On the joined group: the owner (alice) and charlie's own account
+        // may sign charlie's gap history; bob, a plain member, may not, so a
+        // bundle he signs is dropped.
+        let accepted = |key: &[u8]| {
+            c2.gap_history_signer_accepted(&charlie, key.to_vec())
+                .expect("lock")
+        };
+        assert!(accepted(alice.inner.signature_public_key()));
+        assert!(accepted(charlie.inner.signature_public_key()));
+        assert!(!accepted(bob.inner.signature_public_key()));
+        let gap = generate_gap_key();
+        let forged = seal_gap_history(
+            &bob,
+            gap.public_key.clone(),
+            c2.group_id().expect("id"),
+            b"invented".to_vec(),
+        )
+        .expect("seal");
+        let opened =
+            open_gap_history(gap.secret, c2.group_id().expect("id"), forged).expect("open");
+        assert!(!accepted(&opened.signer_leaf_key));
         let msg = a
             .create_application_message(&alice, b"hi".to_vec())
             .expect("send");

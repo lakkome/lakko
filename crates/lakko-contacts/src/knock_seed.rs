@@ -64,8 +64,15 @@ use core::result::Result as CoreResult;
 use lakko_crypto::agreement::{PublicKey as X25519PublicKey, SecretKey as X25519SecretKey};
 use thiserror::Error;
 
-use crate::envelope::{self, EPH_PUB_LEN, TAG_LEN};
+use crate::envelope::{self, SealLabels, EPH_PUB_LEN, TAG_LEN};
 use crate::knock::{knock_public_key, KNOCK_KEY_LEN};
+
+/// The sealed-box labels of this envelope: its own, so the box opens as no
+/// other sealed-to-account envelope and no contact request.
+pub(crate) const SEAL_LABELS: SealLabels = SealLabels {
+    key: b"lakko/sealed/knock-seed/v1/key",
+    nonce: b"lakko/sealed/knock-seed/v1/nonce",
+};
 
 /// 26-byte domain separator prepended to the envelope. Frozen: the
 /// dispatcher matches on it.
@@ -178,7 +185,8 @@ pub fn compose_knock_seed(
 ) -> CoreResult<Vec<u8>, KnockSeedError> {
     let public_key = knock_public_key(seed);
     let mut out = header(journal_id, member_account_key, knock_version, &public_key);
-    let sealed = envelope::seal(member_x25519_pub, &out, seed).map_err(|_| KnockSeedError::Seal)?;
+    let sealed = envelope::seal_labeled(&SEAL_LABELS, member_x25519_pub, &out, seed)
+        .map_err(|_| KnockSeedError::Seal)?;
     if sealed.len() != KNOCK_SEED_SEALED_LEN {
         return Err(KnockSeedError::Seal);
     }
@@ -271,8 +279,9 @@ impl KnockSeedEnvelope {
             self.knock_version,
             &self.knock_public_key,
         );
-        let mut plain = envelope::open(account_x25519_secret, &aad, &self.sealed)
-            .map_err(|_| KnockSeedError::Open)?;
+        let mut plain =
+            envelope::open_labeled(&SEAL_LABELS, account_x25519_secret, &aad, &self.sealed)
+                .map_err(|_| KnockSeedError::Open)?;
         let seed: Option<[u8; KNOCK_KEY_LEN]> = plain.as_slice().try_into().ok();
         plain.fill(0);
         let seed = seed.ok_or(KnockSeedError::Open)?;
@@ -365,7 +374,7 @@ mod tests {
         let (secret, public) = member_keys();
         let wrong = knock_public_key(&[0x77; 32]);
         let mut bytes = header(&JOURNAL, &MEMBER, 4, &wrong);
-        let sealed = envelope::seal(&public, &bytes, &seed()).unwrap();
+        let sealed = envelope::seal_labeled(&SEAL_LABELS, &public, &bytes, &seed()).unwrap();
         bytes.extend_from_slice(&sealed);
         let env = decode_knock_seed(&bytes).unwrap();
         assert_eq!(env.open(&secret), Err(KnockSeedError::PublicKeyMismatch));

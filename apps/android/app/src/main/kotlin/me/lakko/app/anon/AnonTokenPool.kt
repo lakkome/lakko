@@ -78,6 +78,10 @@ public enum class AnonTokenContext(public val wire: String) {
     CHANNEL_COMMENT("channel-comment"),
     /** ADR-0099 section 2: one per report sent to Lakko's moderators. */
     REPORT("report"),
+    /** One per write to a rendezvous id (pairing Welcome, history bundle,
+     *  recovery payload, state bundle, rejoin presence note, conversation
+     *  re-entry gap history); security follow-up of 2026-11-21. */
+    RENDEZVOUS_WRITE("rendezvous-write"),
 }
 
 /**
@@ -108,6 +112,9 @@ public fun anonPoolTargetFor(context: AnonTokenContext): Int = when (context) {
     // ADR-0099 section 2: pre-fetched so the issuance time says nothing
     // about when a report is sent. Chosen, not measured.
     AnonTokenContext.REPORT -> 2
+    // Rendezvous writes (2026-11-21): the same keep-on-hand target as
+    // `mailbox-write`. Chosen, not measured.
+    AnonTokenContext.RENDEZVOUS_WRITE -> 4
 }
 
 /** The first scheduled refill of a newly bound session runs at a random

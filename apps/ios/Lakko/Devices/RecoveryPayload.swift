@@ -88,7 +88,7 @@ public enum RecoveryPayload {
 
     /// Discriminated outcome of
     /// ``pollForRecoveryPayload(rendezvousPseudonym:afterCursor:timeoutSeconds:ds:)``.
-    public enum RecoveryPayloadOutcome {
+    public enum RecoveryPayloadOutcome: Equatable {
         /// The sealed blob of a v3 row.
         case received(Data)
         /// A recovery row of a version this client refuses (v2): the other
@@ -103,6 +103,12 @@ public enum RecoveryPayload {
     /// for the recovery row. Rows that are not recovery rows (the history
     /// bundle, the state bundle) are skipped by advancing the cursor.
     ///
+    /// Anyone who learned the rendezvous can post to it, so no single row
+    /// ends the poll unless it is the answer: a v3 row that `opens` refuses
+    /// is passed over, and a row of a refused version is remembered and
+    /// passed over too; at the deadline the poll ends `.refused` when it saw
+    /// one, else `.timeout`.
+    ///
     /// Absence is an expected outcome (`.timeout`): a scanner that holds no
     /// recovery phrase, or whose recovery half failed (its own predecessor
     /// slot could not be read included), publishes no row.
@@ -110,15 +116,17 @@ public enum RecoveryPayload {
         rendezvousPseudonym: Data,
         afterCursor: Int64,
         timeoutSeconds: TimeInterval = recoveryPollTimeoutSeconds,
+        opens: ((Data) -> Bool)? = nil,
         ds: DsClient = DsClient()
     ) async throws -> RecoveryPayloadOutcome {
         let deadline = Date(timeIntervalSinceNow: timeoutSeconds)
         var cursor = afterCursor
+        var sawRefused = false
 
         while true {
             if Task.isCancelled { return .cancelled }
             let remaining = deadline.timeIntervalSinceNow
-            if remaining <= 0 { return .timeout }
+            if remaining <= 0 { return sawRefused ? .refused : .timeout }
 
             let waitSecs = min(
                 Self.perRequestLongPollSeconds,
@@ -128,7 +136,7 @@ public enum RecoveryPayload {
             do {
                 result = try await ds.fetchRendezvous(id: rendezvousPseudonym,
                     after: cursor,
-                    limit: 1,
+                    limit: RendezvousRead.pageSize,
                     waitSecs: waitSecs
                 )
             } catch DsClientError.http(let status, _, _) where status == 404 {
@@ -141,18 +149,53 @@ public enum RecoveryPayload {
                 }
                 throw err
             }
-            if let first = result.messages.first {
-                switch outcome(of: first.payload) {
-                case .some(let found):
+            for row in result.messages where row.id > cursor {
+                switch pick(row.payload, opens: opens) {
+                case .answer(let found):
                     return found
-                case .none:
-                    // Not a recovery row (e.g. the history bundle) — skip it.
-                    cursor = first.id
-                    continue
+                case .refusedVersion:
+                    sawRefused = true
+                case .passOver:
+                    break
                 }
             }
             cursor = result.messages.reduce(cursor) { max($0, $1.id) }
         }
+    }
+
+    /// What the recovery poll does with one row.
+    enum Pick: Equatable {
+        /// The recovery row: the poll ends with it.
+        case answer(RecoveryPayloadOutcome)
+        /// A recovery row of a refused version: kept in mind, read on.
+        case refusedVersion
+        /// Not a recovery row, or one that does not open: read on.
+        case passOver
+    }
+
+    static func pick(_ row: Data, opens: ((Data) -> Bool)?) -> Pick {
+        switch outcome(of: row) {
+        case .none:
+            return .passOver
+        case .some(.received(let sealed)):
+            if let opens, !opens(sealed) {
+                NSLog("recovery row did not open; passed over")
+                return .passOver
+            }
+            return .answer(.received(sealed))
+        case .some(.refused):
+            return .refusedVersion
+        case .some(let other):
+            return .answer(other)
+        }
+    }
+
+    /// `true` when a v3 row's sealed blob opens under `key` and decodes as
+    /// a recovery payload.
+    static func opens(sealed: Data, key: Data) -> Bool {
+        guard var plain = try? openWithKey(key: key, wire: sealed) else { return false }
+        defer { plain.resetBytes(in: 0..<plain.count) }
+        return (try? decodeRecoveryPayload(plaintext: plain)) != nil
     }
 
     /// What one mailbox row is to the recovery poll: `nil` when it is not a

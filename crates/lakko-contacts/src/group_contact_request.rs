@@ -125,7 +125,7 @@ pub const GROUP_CONTACT_REQUEST_ENVELOPE_MAX_LEN: usize = GROUP_CONTACT_REQUEST_
 
 /// The seal labels of this box: distinct from the contact request's own
 /// seal and from the mailbox row's.
-const SEAL_LABELS: SealLabels = SealLabels {
+pub(crate) const SEAL_LABELS: SealLabels = SealLabels {
     key: b"lakko-contacts/v1/group-contact-request/key",
     nonce: b"lakko-contacts/v1/group-contact-request/nonce",
 };

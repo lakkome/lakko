@@ -49,6 +49,7 @@ import me.lakko.app.ds.dropsPendingSeed
 import me.lakko.app.ds.DsSignerSource
 import me.lakko.app.ds.DsWake
 import me.lakko.app.ds.DsWakeKind
+import me.lakko.app.ds.readWholeRendezvous
 import me.lakko.app.ds.FfiDsJournalSigner
 import me.lakko.app.ds.dsGroupKeyHex
 import me.lakko.app.ds.dsMailboxKey
@@ -9589,11 +9590,11 @@ public class ChatRepository(
      * Called from the poll's (or the sweep verdict's) locked apply region, so
      * the sender is the account key resolved from the MLS sender at receipt
      * (C-68). Verified by the core over THIS conversation's group id; a wrong
-     * sender or a bad signature changes nothing. An accepted statement marks
-     * the person deleted for good and owes their removal in EVERY group this
-     * device's account owns or administers (section 5): the statement proves
-     * the account is gone, not only its leaf here (seen live 2026-11-20, walk
-     * 12). Proposed outside this lock.
+     * sender or a bad signature changes nothing. An accepted statement shows
+     * the person deleted and asks the directory at once; once the directory
+     * also answers `404` their removal is owed in EVERY group this device's
+     * account owns or administers (section 5, `deletionEffects`; seen live
+     * 2026-11-20, walk 12). Proposed outside this lock.
      */
     private fun receiveAccountDeleted(
         groupIdHex: String,
@@ -9610,9 +9611,15 @@ public class ChatRepository(
             android.util.Log.w("ChatRepository", "ADR-0098: account-deleted statement refused")
             return
         }
-        profileDirectory.deletions?.book?.markStatementVerified(deleted)
-        // Section 5 — only the signed statement removes; never a directory
-        // answer. Every group is considered, not only this one.
+        profileDirectory.deletions?.onStatementVerified(deleted)
+        // Section 5 — a removal is owed only once the statement AND a later
+        // directory 404 hold; every group is considered, not only this one.
+        proposeOwedDeletedRemovalsEverywhere()
+    }
+
+    /** Section 5 — try every group's owed removals now (the removal rule
+     *  became true for someone, or a statement arrived). Never throws. */
+    internal fun proposeOwedDeletedRemovalsEverywhere() {
         val targets = groups.keys.toList()
         pushScope.launch {
             for (target in targets) proposeOwedDeletedRemovals(target)
@@ -9635,9 +9642,9 @@ public class ChatRepository(
         val account = currentAccountIdB64.get() ?: return
         val removals = deletedMemberRemovals(account)
         val owed = try {
-            val verified = profileDirectory.deletions?.book?.statementVerifiedKeys().orEmpty()
-            if (verified.isEmpty()) return
-            removals.owed(groupIdHex, verified)
+            val removalOwed = profileDirectory.deletions?.book?.removalOwedKeys().orEmpty()
+            if (removalOwed.isEmpty()) return
+            removals.owed(groupIdHex, removalOwed)
         } catch (_: Throwable) {
             return
         }
@@ -13810,9 +13817,13 @@ public class ChatRepository(
             android.util.Log.w("ChatRepository", "ADR-0057: identity bundle names another key; not appointing")
             return null
         }
-        return try {
-            me.lakko.app.auth.base64Decode(bundle.x25519_pubkey).takeIf { it.size == 32 }
-        } catch (_: Throwable) {
+        // Only an X25519 key the served signature key signed is sealed to.
+        return me.lakko.app.discovery.X25519Bindings.boundX25519Key(
+            bundle.signature_pubkey,
+            bundle.x25519_pubkey,
+            bundle.x25519_binding,
+        ) ?: run {
+            android.util.Log.w("ChatRepository", "member X25519 key unbound; nothing sealed to it")
             null
         }
     }
@@ -15553,6 +15564,8 @@ public class ChatRepository(
             mutableReentryGaps.update { it - hex }
             gapLookStore.remove(accountIdB64, hex)
             owedGapBundleStore.removeGroup(accountIdB64, hex)
+            gapKeyStore.removeGroup(accountIdB64, hex)
+            leafFirstSeen.removeGroup(accountIdB64, hex)
         }
         step("reach grants") { me.lakko.app.reach.ReachManager.peek()?.forgetHeldScope(hex) }
         // In memory, per group.
@@ -15772,6 +15785,14 @@ public class ChatRepository(
 
     private val gapHistoryLooker: GapHistoryLooker by lazy { GapHistoryLooker(gapLookStore) }
 
+    /** The secrets of the gap keys this device put in its requests (section
+     *  7): sealed at rest, until it came back or the request left the record. */
+    private val gapKeyStore: GapKeyStore by lazy { EncryptedGapKeyStore(applicationContext) }
+
+    /** When this device first saw each leaf in each group's roster (section
+     *  7, the re-admitter's floor for the rows it sends). */
+    private val leafFirstSeen: LeafFirstSeenStore by lazy { SharedPrefsLeafFirstSeenStore(applicationContext) }
+
     /** Requests being sent, by group: one at a time per group. */
     private val reentryRequestsInFlight: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
@@ -15943,6 +15964,16 @@ public class ChatRepository(
             conversationBehind.noteRowKnown(groupIdHex, result.lastAppliedAtMs)
             if (readIsActive { record.group.isActive() } == false) return
             val epoch = record.group.epoch()
+            // Section 7 — when this device first saw each leaf: the floor of
+            // the rows a re-admitter sends (only the first observation stays).
+            currentAccountIdB64.get()?.let { account ->
+                leafFirstSeen.noteSeen(
+                    account,
+                    groupIdHex,
+                    rosterOf(record.group).map { me.lakko.app.ds.hexOf(it.signaturePublicKey) },
+                    System.currentTimeMillis(),
+                )
+            }
             // Section 4 — the re-admitter's "the leaf is writing" fact: the
             // application rows of a batch with no commit decrypted at this
             // epoch, so their leaves are resolved against this roster.
@@ -16115,12 +16146,32 @@ public class ChatRepository(
             persistSnapshotDurableOrThrow()
             kp
         }
+        // Section 7 — a fresh gap key per request: the missed messages are
+        // sealed to it, so only this device opens them. The secret is durable
+        // before anything is sent.
+        val gapKey = uniffi.lakko_ffi_uniffi.generateGapKey()
+        val gapPublicB64 = outboxB64(gapKey.publicKey)
+        val gapKeySaved = try {
+            gapKeyStore.put(accountIdB64, groupIdHex, GapKeyEntry(gapPublicB64, outboxB64(gapKey.secret)))
+        } catch (ended: me.lakko.app.StaleBindingException) {
+            throw ended
+        } catch (_: Throwable) {
+            false
+        } finally {
+            gapKey.secret.fill(0)
+        }
+        if (!gapKeySaved) {
+            android.util.Log.w(REENTRY_LOG_TAG, "re-entry gap key not saved; nothing sent")
+            conversationBehind.noteRequestSent(groupIdHex, now - reentryIntervalMs() + reentryRetryAfterFailureMs)
+            return
+        }
         val row = ReentryRequestRow(
             keyPackageB64 = outboxB64(keyPackage),
             epochLeft = epochLeft.toLong(),
             gapFromMs = gapFromMs,
             sentAtMs = now,
             route = route,
+            gapKeyB64 = gapPublicB64,
         )
         val kept = try {
             uniffi.lakko_ffi_uniffi.reentryRequestsKept().toInt()
@@ -16132,9 +16183,11 @@ public class ChatRepository(
         // land is not sent.
         if (!reentryRecords.put(accountIdB64, next)) {
             android.util.Log.w(REENTRY_LOG_TAG, "re-entry record not saved; nothing sent")
+            gapKeyStore.remove(accountIdB64, groupIdHex, listOf(gapPublicB64))
             return
         }
         if (dropped.isNotEmpty()) {
+            gapKeyStore.remove(accountIdB64, groupIdHex, dropped.map { it.gapKeyB64 })
             providerLock.sessionLock {
                 for (old in dropped) {
                     runCatching { identity.forgetKeyPackage(outboxUnb64(old.keyPackageB64)) }
@@ -16146,6 +16199,7 @@ public class ChatRepository(
             record.groupId,
             epochLeft,
             gapFromMs.coerceAtLeast(0L).toULong(),
+            gapKey.publicKey,
             keyPackage,
         )
         val sent = try {
@@ -16319,6 +16373,7 @@ public class ChatRepository(
                         epochLeft = request.epochLeft,
                         gapFromMs = request.gapFromMs.toLong(),
                         owedSinceMs = now,
+                        gapKey = request.gapKey,
                     ),
                 )
             } catch (ended: me.lakko.app.StaleBindingException) {
@@ -16363,10 +16418,12 @@ public class ChatRepository(
 
     /**
      * Section 7 — send each gap bundle this device owes for [groupIdHex] once
-     * its group stands at the epoch the returning device joins at: the rows
-     * this device holds from the request's gap start on, sealed under an
-     * exporter secret of that epoch and posted to a rendezvous only the
-     * group and the device can name.
+     * its group moved past the epoch the request named (the replacement
+     * landed): the rows this device holds from the clamped gap start on
+     * (`gapHistoryStart`: never before this device first saw the leaf, or
+     * else its last message from it), signed by this device's leaf and sealed
+     * to the request's gap key, posted to `gapHistoryRendezvous(gapKey)`.
+     * Only the returning device opens it.
      */
     private suspend fun sendOwedGapBundlesBestEffort(groupIdHex: String) {
         val hex = groupIdHex.lowercase()
@@ -16397,34 +16454,37 @@ public class ChatRepository(
                         // growth goes to the returning device at once (it keeps
                         // its signature key, so no growth is seen anywhere).
                         resendGrowthStateAfterReentry(groupIdHex)
-                        val (secret, ownKey) = providerLock.sessionLock {
-                            record.group.exportSecret(identity, REENTRY_HISTORY_EXPORTER_LABEL, bundle.leafSignatureKey, 32u) to
-                                ownIdentity(record.group)
+                        val leafHex = me.lakko.app.ds.hexOf(bundle.leafSignatureKey)
+                        val start = uniffi.lakko_ffi_uniffi.gapHistoryStart(
+                            bundle.gapFromMs.coerceAtLeast(0L).toULong(),
+                            leafFirstSeen.firstSeen(accountIdB64, hex, leafHex)?.coerceAtLeast(0L)?.toULong(),
+                            reentryLedger.lastMessageAtAnyEpoch(hex, leafHex)?.coerceAtLeast(0L)?.toULong(),
+                        )
+                        if (start == null) {
+                            android.util.Log.i(REENTRY_LOG_TAG, "gap bundle not sent: the leaf was never seen here")
+                            continue
                         }
+                        val ownKey = providerLock.sessionLock { ownIdentity(record.group) }
                         persistMessageLogBestEffort()
-                        val rendezvous = reentryHistoryRendezvous(secret)
-                        val sealed = try {
-                            me.lakko.app.devices.HistoryBundleCodec.buildGroupSince(
-                                applicationContext,
-                                accountIdB64,
-                                secret,
-                                hex,
-                                bundle.gapFromMs,
-                                // Walk 3, W3-R3 — an outgoing row names this
-                                // account as its author.
-                                ownAuthorKeyB64 = ownKey,
-                            )
-                        } finally {
-                            secret.fill(0)
+                        val sealed = me.lakko.app.devices.HistoryBundleCodec.buildGroupSince(
+                            applicationContext,
+                            accountIdB64,
+                            hex,
+                            start.toLong().coerceAtLeast(0L),
+                            // Walk 3, W3-R3 — an outgoing row names this
+                            // account as its author.
+                            ownAuthorKeyB64 = ownKey,
+                        ) { groups, maxHlc ->
+                            uniffi.lakko_ffi_uniffi.sealGapHistoryStructured(identity, bundle.gapKey, record.groupId, groups, maxHlc)
                         }
                         if (sealed == null) {
                             android.util.Log.i(REENTRY_LOG_TAG, "gap bundle empty: nothing held in the gap")
                             continue
                         }
                         // The pairing flow's history-bundle path (a rendezvous
-                        // post), at the id both ends derive from the secret.
+                        // post), at the id derived from the gap public key.
                         me.lakko.app.devices.WelcomeCourier.publishHistoryBundle(
-                            rendezvousPseudonym = rendezvous,
+                            rendezvousPseudonym = uniffi.lakko_ffi_uniffi.gapHistoryRendezvous(bundle.gapKey),
                             sealedBytes = sealed,
                         )
                         android.util.Log.i(REENTRY_LOG_TAG, "gap bundle sent")
@@ -16595,6 +16655,7 @@ public class ChatRepository(
                 opened.groupId,
                 opened.epochLeft,
                 opened.gapFromMs,
+                opened.gapKey,
                 opened.keyPackage,
             )
         } catch (_: Throwable) {
@@ -16639,23 +16700,29 @@ public class ChatRepository(
         conversationBehind.cameBack(hex, now)
         reentryRecords.remove(accountIdB64, hex)
         android.util.Log.i(REENTRY_LOG_TAG, "back in the conversation: route=${route.name.lowercase()}")
-        // The secret is of the epoch the device joined at, which is the one
-        // the re-admitter exports at: derived now, before any later commit.
-        val secret = try {
-            joined.exportSecret(identity, REENTRY_HISTORY_EXPORTER_LABEL, identity.signaturePublicKey(), 32u)
+        // Section 7 — the gap keys of the requests this device held: it cannot
+        // know which one the re-admitter answered, so it looks at each.
+        val keys = try {
+            gapKeyStore.entries(
+                accountIdB64,
+                hex,
+                record?.requests.orEmpty().map { it.gapKeyB64 }.filter { it.isNotEmpty() },
+            )
+        } catch (ended: me.lakko.app.StaleBindingException) {
+            throw ended
         } catch (_: Throwable) {
-            null
+            emptyList()
         }
-        if (secret != null) {
-            // Section 7 — a durable look, retried from every applied poll of
-            // this group and on opening the chat, at most once a minute, for
-            // 30 days: the re-admitter may send it much later than the join.
+        if (keys.isNotEmpty()) {
+            // A durable look, retried from every applied poll of this group
+            // and on opening the chat, at most once a minute, for 30 days: the
+            // re-admitter may send it much later than the join.
             val started = try {
                 gapHistoryLooker.start(
                     accountIdB64,
                     GapLookRecord(
                         groupIdHex = hex,
-                        secretB64 = java.util.Base64.getEncoder().encodeToString(secret),
+                        keys = keys,
                         gapFromMs = gapFrom,
                         gapToMs = now,
                         route = route,
@@ -16666,10 +16733,14 @@ public class ChatRepository(
             } catch (cause: Throwable) {
                 android.util.Log.w(REENTRY_LOG_TAG, "gap look not saved (${cause.javaClass.simpleName})")
                 false
-            } finally {
-                secret.fill(0)
             }
-            if (started) pushScope.launchSession { lookForGapHistoryBestEffort(hex) }
+            // The secrets now live in the look record.
+            if (started) {
+                gapKeyStore.removeGroup(accountIdB64, hex)
+                pushScope.launchSession { lookForGapHistoryBestEffort(hex) }
+            }
+        } else {
+            gapKeyStore.removeGroup(accountIdB64, hex)
         }
     }
 
@@ -16707,16 +16778,38 @@ public class ChatRepository(
                 accountIdB64 = accountIdB64,
                 groupIdHex = hex,
                 read = { rendezvous ->
-                    val fetched = dsClient.fetchRendezvous(rendezvous, after = 0L, waitSecs = 0)
+                    // The whole rendezvous, page by page (2026-11-21): a
+                    // member who saw the request can post rows there, and
+                    // one page could hide the bundle under them.
+                    val fetched = dsClient.readWholeRendezvous(rendezvous)
                     ensureSession()
-                    fetched.messages.map { it.payload }
+                    fetched.map { it.payload }
                 },
-                open = { secret, payload, route ->
+                open = open@{ secret, payload, route ->
+                    val joined = groups[hex] ?: return@open null
+                    val identity = canonicalIdentity.get() ?: return@open null
+                    val opened = uniffi.lakko_ffi_uniffi.openGapHistoryStructured(secret, joined.groupId, payload)
+                    // Kept only from the own account, the owner or an admin,
+                    // or the other person of a one-to-one; anything else is
+                    // dropped and the gap line stays.
+                    val signerAccepted = try {
+                        providerLock.sessionLock { joined.group.gapHistorySignerAccepted(identity, opened.signerLeafKey) }
+                    } catch (ended: me.lakko.app.StaleBindingException) {
+                        throw ended
+                    } catch (cause: kotlinx.coroutines.CancellationException) {
+                        throw cause
+                    } catch (_: Throwable) {
+                        false
+                    }
+                    val kept = acceptedGapHistory(opened.signerLeafKey, opened.bundle) { signerAccepted }
+                    if (kept == null) {
+                        android.util.Log.i(REENTRY_LOG_TAG, "missed messages dropped: signer not accepted")
+                        return@open null
+                    }
                     me.lakko.app.devices.HistoryBundleCodec.applyReentryBundle(
                         applicationContext,
                         accountIdB64,
-                        secret,
-                        payload,
+                        kept,
                         hex,
                     ) { row, author -> reentryBundleRow(row, author, ownKey, route) }
                 },

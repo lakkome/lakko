@@ -1636,6 +1636,9 @@ public class DiscoveryClient(
         accountId: ByteArray,
         signaturePubkey: ByteArray,
         x25519Pubkey: ByteArray,
+        /** The 64-byte `signX25519Binding(accountIdentity)` of the identity
+         *  whose keys these are; discovery refuses an upload without it. */
+        x25519Binding: ByteArray,
         supersessionProofB64: String? = null,
         leafAuth: ByteArray? = null,
         genesisAttest: ByteArray? = null,
@@ -1662,12 +1665,18 @@ public class DiscoveryClient(
                 "x25519Pubkey must be $PUBKEY_LEN bytes (HPKE init_key)",
             )
         }
+        if (x25519Binding.size != X25519Bindings.BINDING_LEN) {
+            throw DiscoveryClientArgError(
+                "x25519Binding must be ${X25519Bindings.BINDING_LEN} bytes",
+            )
+        }
 
         val resp = identityUpload(
             IdentityUploadRequest(
                 account_id = base64Encode(accountId),
                 signature_pubkey = base64Encode(signaturePubkey),
                 x25519_pubkey = base64Encode(x25519Pubkey),
+                x25519_binding = base64Encode(x25519Binding),
                 supersession_proof = supersessionProofB64,
                 leaf_auth = leafAuth?.let { base64Encode(it) },
                 // ADR-0036 — standard-alphabet base64 (mirrors `leaf_auth`;

@@ -46,6 +46,16 @@ removed. Both exceptions are written here once, so the four gates cannot disagre
     `Standing::PairedRemove` when one of `peers` is an `Add` by the same member
     sender that is a valid re-entry for the removed leaf; every other refusal
     stands.
+- `reentry_adds_stand(scope, proposals)` (crate internal, commit-wide; security
+  review 2026-11-21): every valid re-entry `Add` replacing `L` rides with a
+  `Remove(L)` by the same sender, and no `Add` adds a leaf of an account that
+  `accounts_removed_by_others` names: an account whose leaf the same proposals
+  remove by a `Remove` from another account that is not that remover's own
+  re-entry pair (a `Leave` is the account's own act and does not count). Refused
+  with `ReentryPairInvalid`. Applied by the peer commit gate and to every
+  selection the sweep builds; the sweep's enumeration drops such an `Add` (and a
+  re-entry `Add` whose pair cannot be carried) before building, and the exclusion
+  search offers a re-entry `Add` and its paired `Remove` as one unit.
 
 ## Invariants upheld
 
@@ -56,6 +66,9 @@ removed. Both exceptions are written here once, so the four gates cannot disagre
   cannot swap a device out.
 - `owner_survives` and `one_to_one_holds` are not relaxed: the account keeps a leaf
   through `K`.
+- A member being removed by someone else cannot stay by an `Add` of its own (a
+  re-entry package of its leaf, or another device of its account) carried in the
+  same commit: the commit gate refuses it and the sweep drops the `Add`.
 - Invariant #4: every unclassifiable case refuses.
 
 ## Failure modes
@@ -81,4 +94,7 @@ bounded and exact; fuzz target `reentry_marker_decode`.
 ## References
 
 ADR-0091 sections 5 and 6 and "Phase 2 S0-S2, as built"; C-93, C-88, G-58; tests in
-`group/reentry_join.rs` (`reentry_tests`) and this module's own.
+`group/reentry_join.rs` (`reentry_tests`, including
+`a_member_being_removed_cannot_survive_by_its_own_reentry_add` and
+`a_member_being_removed_cannot_survive_by_adding_another_device`) and this module's
+own.

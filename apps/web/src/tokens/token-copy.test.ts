@@ -35,6 +35,7 @@ describe("anonTokenMessage", () => {
     "mailbox-write",
     "call-join",
     "circle-claim",
+    "rendezvous-write",
   ] as const)(
     "%s: the allowance copy",
     (context) => {

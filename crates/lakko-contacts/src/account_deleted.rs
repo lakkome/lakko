@@ -12,11 +12,15 @@
 //!    an MLS application message in every conversation it holds. A receiver
 //!    keeps it only when the MLS sender, resolved at receipt to an account key
 //!    (C-68), is the key the signature verifies under, over this
-//!    conversation's group id ([`verify_account_deleted`]). An accepted
-//!    statement is final.
+//!    conversation's group id ([`verify_account_deleted`]).
 //! 2. **The liveness rules** (pull and display). A receiver that never got the
 //!    envelope asks the directory for the person's identity bundle;
-//!    [`account_deletion_status`] combines a statement with the latest answer,
+//!    [`deletion_effects`] combines a statement with the latest answer into
+//!    what the client does (show "Deleted account", remove the person's
+//!    leaves from groups, drop held unsent messages; security review
+//!    2026-11-21: the destructive two only on a statement AND a directory
+//!    `404`, and a later `SamePerson` answer reverts the display),
+//!    [`account_deletion_status`] is its display half,
 //!    [`may_show_username`] says whether a `@username` may be shown beside the
 //!    person, and [`directory_check_due`] says when to ask again.
 //!
@@ -275,22 +279,63 @@ pub enum AccountStatus {
     Deleted,
 }
 
-/// The person's status: a verified statement (section 1 of ADR-0098) is
-/// final; otherwise the latest recorded directory answer decides, `Absent`
-/// meaning deleted. No answer is `Active`.
+/// What a client does about a person who may have deleted their account.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeletionEffects {
+    /// Show "Deleted account" in place of the person's name.
+    pub show_deleted: bool,
+    /// An owner's or admin's device proposes the removal of the person's
+    /// leaves from the groups it administers.
+    pub remove_from_groups: bool,
+    /// Messages held for the person that were never sent may be dropped.
+    pub drop_held_sends: bool,
+}
+
+/// The one rule for what a deletion does on this device (ADR-0098, security
+/// review 2026-11-21).
+///
+/// * **Display**: "Deleted account" on a verified statement or a directory
+///   `404` (`Absent`); a `SamePerson` answer always shows the person, so a
+///   later confirmation reverts the display.
+/// * **Destructive effects** (removing the person's leaves from groups,
+///   dropping held unsent messages): only on a verified statement AND a
+///   directory `404`. Neither source alone can cost the person their place in
+///   a group or their pending messages: a statement could be replayed by a
+///   device that still held an old key, and a `404` could be a directory
+///   fault or a hostile directory.
+///
+/// `directory` is the latest recorded answer, `None` when there is none. A
+/// client clears the recorded answer when it records a verified statement, so
+/// a `SamePerson` that counts is always one received after the statement.
+#[must_use]
+pub const fn deletion_effects(
+    statement_verified: bool,
+    directory: Option<DirectoryAnswer>,
+) -> DeletionEffects {
+    let absent = matches!(directory, Some(DirectoryAnswer::Absent));
+    let confirmed = matches!(directory, Some(DirectoryAnswer::SamePerson));
+    let both = statement_verified && absent;
+    DeletionEffects {
+        show_deleted: !confirmed && (statement_verified || absent),
+        remove_from_groups: both,
+        drop_held_sends: both,
+    }
+}
+
+/// The person's displayed status: [`deletion_effects`]'s `show_deleted`.
+/// Deleted on a verified statement (section 1 of ADR-0098) or an `Absent`
+/// answer, unless the latest answer is `SamePerson`. No answer and no
+/// statement is `Active`.
 #[must_use]
 pub const fn account_deletion_status(
     statement_verified: bool,
     last_answer: Option<DirectoryAnswer>,
 ) -> AccountStatus {
-    if statement_verified {
-        return AccountStatus::Deleted;
-    }
-    match last_answer {
-        Some(DirectoryAnswer::Absent) => AccountStatus::Deleted,
-        Some(DirectoryAnswer::SamePerson | DirectoryAnswer::OtherKey) | None => {
-            AccountStatus::Active
-        },
+    if deletion_effects(statement_verified, last_answer).show_deleted {
+        AccountStatus::Deleted
+    } else {
+        AccountStatus::Active
     }
 }
 
@@ -315,11 +360,19 @@ pub const fn may_show_username(
     }
 }
 
-/// Whether to ask the directory about this person now. Never after a
-/// verified statement; never within [`DIRECTORY_RETRY_AFTER_MS`] of the last
-/// attempt (answered or not); otherwise due when there is no answer, or the
-/// last answer is [`DIRECTORY_RECHECK_AFTER_MS`] old, or dated in the future.
-/// An attempt dated in the future does not hold a check back.
+/// Whether to ask the directory about this person now. Never within
+/// [`DIRECTORY_RETRY_AFTER_MS`] of the last attempt (answered or not);
+/// otherwise due when there is no answer, or the last answer is
+/// [`DIRECTORY_RECHECK_AFTER_MS`] old, or dated in the future. An attempt
+/// dated in the future does not hold a check back.
+///
+/// A verified statement no longer stops the checks (security review
+/// 2026-11-21): [`deletion_effects`] takes its destructive effects only on a
+/// statement AND a `404`, and a `SamePerson` answer reverts the display, so
+/// the directory is still asked. A client clears the recorded answer when it
+/// records a statement, which makes the check due at once (subject to the
+/// retry interval); `statement_verified` is kept for the callers and decides
+/// nothing.
 #[must_use]
 pub const fn directory_check_due(
     statement_verified: bool,
@@ -327,9 +380,7 @@ pub const fn directory_check_due(
     last_attempt_at_ms: Option<u64>,
     now_ms: u64,
 ) -> bool {
-    if statement_verified {
-        return false;
-    }
+    let _ = statement_verified;
     if let Some(at) = last_attempt_at_ms {
         if at <= now_ms && now_ms - at < DIRECTORY_RETRY_AFTER_MS {
             return false;
@@ -459,16 +510,52 @@ mod tests {
     }
 
     #[test]
-    fn status_statement_is_final_and_absent_is_deleted() {
+    fn status_shows_a_statement_or_absent_and_same_person_reverts_it() {
         use AccountStatus::{Active, Deleted};
         use DirectoryAnswer::{Absent, OtherKey, SamePerson};
         assert_eq!(account_deletion_status(false, None), Active);
         assert_eq!(account_deletion_status(false, Some(Absent)), Deleted);
         assert_eq!(account_deletion_status(false, Some(SamePerson)), Active);
         assert_eq!(account_deletion_status(false, Some(OtherKey)), Active);
-        for answer in [None, Some(Absent), Some(SamePerson), Some(OtherKey)] {
-            assert_eq!(account_deletion_status(true, answer), Deleted);
+        assert_eq!(account_deletion_status(true, None), Deleted);
+        assert_eq!(account_deletion_status(true, Some(Absent)), Deleted);
+        assert_eq!(account_deletion_status(true, Some(OtherKey)), Deleted);
+        assert_eq!(account_deletion_status(true, Some(SamePerson)), Active);
+    }
+
+    /// The full table of [`deletion_effects`].
+    #[test]
+    fn destructive_effects_need_a_statement_and_a_404() {
+        use DirectoryAnswer::{Absent, OtherKey, SamePerson};
+        for statement in [false, true] {
+            for answer in [None, Some(Absent), Some(SamePerson), Some(OtherKey)] {
+                let e = deletion_effects(statement, answer);
+                let both = statement && answer == Some(Absent);
+                assert_eq!(e.remove_from_groups, both, "{statement} {answer:?}");
+                assert_eq!(e.drop_held_sends, both, "{statement} {answer:?}");
+                let shown = answer != Some(SamePerson) && (statement || answer == Some(Absent));
+                assert_eq!(e.show_deleted, shown, "{statement} {answer:?}");
+                // A destructive effect is never taken without the display.
+                assert!(!e.remove_from_groups || e.show_deleted);
+            }
         }
+        // A statement alone, or a 404 alone, shows and destroys nothing.
+        assert_eq!(
+            deletion_effects(true, None),
+            DeletionEffects {
+                show_deleted: true,
+                remove_from_groups: false,
+                drop_held_sends: false
+            }
+        );
+        assert_eq!(
+            deletion_effects(false, Some(Absent)),
+            DeletionEffects {
+                show_deleted: true,
+                remove_from_groups: false,
+                drop_held_sends: false
+            }
+        );
     }
 
     #[test]
@@ -503,7 +590,10 @@ mod tests {
     fn check_due_rules() {
         let now = 50 * 24 * 60 * 60 * 1000;
         assert!(directory_check_due(false, None, None, now));
-        assert!(!directory_check_due(true, None, None, now));
+        // A statement does not stop the check: its destructive effects need a
+        // 404 too, and the recorded answer is cleared when it is recorded.
+        assert!(directory_check_due(true, None, None, now));
+        assert!(!directory_check_due(true, None, Some(now - 1000), now));
         // A fresh answer: not due; an old one: due.
         assert!(!directory_check_due(false, Some(now - 1000), None, now));
         assert!(directory_check_due(

@@ -270,7 +270,7 @@ private final class ForbiddenDirectory: AccountDirectory {
     }
 
     func publishIdentityBundle(
-        accountId: Data, signaturePubkey: Data, x25519Pubkey: Data,
+        accountId: Data, signaturePubkey: Data, x25519Pubkey: Data, x25519Binding: Data,
         leafAuth: Data?, genesisAttest: Data?, keyResetAttest: Data?, sessionToken: String
     ) async throws {
         calls += 1

@@ -66,7 +66,7 @@ private final class ScriptedDirectory: AccountDirectory, DeviceRestoreDirectory 
     }
 
     func publishIdentityBundle(
-        accountId: Data, signaturePubkey: Data, x25519Pubkey: Data,
+        accountId: Data, signaturePubkey: Data, x25519Pubkey: Data, x25519Binding: Data,
         leafAuth: Data?, genesisAttest: Data?, keyResetAttest: Data?, sessionToken: String
     ) async throws {
         events.append(keyResetAttest == nil ? "publish" : "publish+attest")
@@ -75,7 +75,13 @@ private final class ScriptedDirectory: AccountDirectory, DeviceRestoreDirectory 
         if let publishError { throw publishError }
         publishedKeys.append(signaturePubkey)
         publishedKey = signaturePubkey
+        publishedBindingsVerify.append(verifyX25519Binding(
+            binding: x25519Binding, ed25519PublicKey: signaturePubkey, x25519PublicKey: x25519Pubkey))
     }
+
+    /// Whether each published X25519 key carried a binding signed by the
+    /// published account key (discovery refuses an upload without one).
+    private(set) var publishedBindingsVerify: [Bool] = []
 
     private(set) var publishedAttestations: [Data?] = []
     private(set) var publishTokens: [String] = []
@@ -646,6 +652,8 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertEqual(h.directory.publishedAttestations, [h.reset.minted[0]])
         XCTAssertEqual(h.directory.publishTokens, ["tok-gen2"], "the directory upload uses the NEW pair")
         XCTAssertEqual(h.directory.publishedKeys.last, newKey)
+        XCTAssertEqual(h.directory.publishedBindingsVerify, [true],
+                       "the upload carries the account key's binding of its X25519 key")
         XCTAssertEqual(h.reset.verifyCalls[0].attestation, h.reset.minted[0])
         XCTAssertEqual(h.reset.verifyCalls[0].pubkey, newKey)
         XCTAssertNil(h.reset.verifyCalls[0].maxAgeMs, "just minted: no freshness bound")

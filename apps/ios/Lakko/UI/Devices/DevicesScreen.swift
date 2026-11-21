@@ -384,25 +384,37 @@ private struct PairView: View {
             state = .waiting(qrPayload: s.qrPayload)
             pollTask = Task { @MainActor in
                 do {
-                    let outcome = try await s.awaitWelcome()
-                    if Task.isCancelled { return }
-                    switch outcome {
-                    case .received(let welcome, let welcomeCursor):
-                        state = .joining
-                        do {
-                            try await s.accept(
-                                welcomeBytes: welcome,
-                                welcomeCursor: welcomeCursor
-                            )
-                            state = .done
-                        } catch {
-                            NSLog("[pairing] WARN join failed: \(error)")
-                            state = .error(.key("devices.add.error.generic"))
+                    // One wait for the whole pairing; a row that does not
+                    // join is passed over and the wait goes on past it.
+                    let deadline = Date(timeIntervalSinceNow: WelcomeCourier.defaultTimeoutSeconds)
+                    while true {
+                        let outcome = try await s.awaitWelcome(
+                            timeoutSeconds: max(0, deadline.timeIntervalSinceNow))
+                        if Task.isCancelled { return }
+                        switch outcome {
+                        case .received(let welcome, let welcomeCursor):
+                            let waiting = state
+                            state = .joining
+                            do {
+                                try await s.accept(
+                                    welcomeBytes: welcome,
+                                    welcomeCursor: welcomeCursor
+                                )
+                                state = .done
+                            } catch is PairingOrchestrator.WelcomeNotOpened {
+                                if Task.isCancelled { return }
+                                state = waiting
+                                continue
+                            } catch {
+                                NSLog("[pairing] WARN join failed: \(error)")
+                                state = .error(.key("devices.add.error.generic"))
+                            }
+                        case .timeout:
+                            state = .error(.key("device_link.error.timeout"))
+                        case .cancelled:
+                            state = .idle
                         }
-                    case .timeout:
-                        state = .error(.key("device_link.error.timeout"))
-                    case .cancelled:
-                        state = .idle
+                        return
                     }
                 } catch {
                     if Task.isCancelled { return }

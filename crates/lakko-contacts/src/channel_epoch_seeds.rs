@@ -64,7 +64,14 @@ use core::result::Result as CoreResult;
 use lakko_crypto::agreement::{PublicKey as X25519PublicKey, SecretKey as X25519SecretKey};
 use thiserror::Error;
 
-use crate::envelope::{self, EPH_PUB_LEN, TAG_LEN};
+use crate::envelope::{self, SealLabels, EPH_PUB_LEN, TAG_LEN};
+
+/// The sealed-box labels of this envelope: its own, so the box opens as no
+/// other sealed-to-account envelope and no contact request.
+pub(crate) const SEAL_LABELS: SealLabels = SealLabels {
+    key: b"lakko/sealed/channel-epoch-seeds/v1/key",
+    nonce: b"lakko/sealed/channel-epoch-seeds/v1/nonce",
+};
 
 /// 29-byte domain separator prepended to the envelope. Frozen: the
 /// dispatcher matches on it.
@@ -254,7 +261,7 @@ pub fn compose_channel_epoch_seeds(
         plain.extend_from_slice(&s.seed);
     }
     let mut out = header(channel_id, member_account_key, count);
-    let sealed = envelope::seal(member_x25519_pub, &out, &plain);
+    let sealed = envelope::seal_labeled(&SEAL_LABELS, member_x25519_pub, &out, &plain);
     plain.fill(0);
     let sealed = sealed.map_err(|_| ChannelEpochSeedsError::Seal)?;
     if sealed.len() != SEAL_OVERHEAD + seeds.len() * CHANNEL_EPOCH_SEED_ENTRY_LEN {
@@ -351,8 +358,9 @@ impl ChannelEpochSeedsEnvelope {
         account_x25519_secret: &X25519SecretKey,
     ) -> CoreResult<Vec<ChannelEpochSeed>, ChannelEpochSeedsError> {
         let aad = header(&self.channel_id, &self.member_account_key, self.count);
-        let mut plain = envelope::open(account_x25519_secret, &aad, &self.sealed)
-            .map_err(|_| ChannelEpochSeedsError::Open)?;
+        let mut plain =
+            envelope::open_labeled(&SEAL_LABELS, account_x25519_secret, &aad, &self.sealed)
+                .map_err(|_| ChannelEpochSeedsError::Open)?;
         let parsed = parse_plain(&plain, usize::from(self.count));
         plain.fill(0);
         parsed

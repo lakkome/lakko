@@ -25,17 +25,27 @@ use lakko_contacts::conversation_reentry::{
     ConversationReentry as RustReentry, ConversationReentryError,
     CONVERSATION_REENTRY_ENVELOPE_MAX_LEN, CONVERSATION_REENTRY_ENVELOPE_MIN_LEN,
 };
+use lakko_contacts::gap_history::{
+    gap_history_rendezvous as rust_gap_rendezvous, gap_history_start as rust_gap_start,
+    open_gap_history as rust_open_gap, seal_gap_history as rust_seal_gap, GapHistoryError,
+    GapKey as RustGapKey, OpenedGapHistory as RustOpened, GAP_HISTORY_MAX_BUNDLE_LEN,
+};
 use lakko_contacts::knock_key::{
     compose_knock_key as rust_compose_knock_key, decode_knock_key as rust_decode_knock_key,
     knock_key_is_newer as rust_knock_key_is_newer, KnockKey as RustKnockKey, KnockKeyError,
     KNOCK_KEY_ENVELOPE_LEN,
 };
+use lakko_crypto::signing::SigningKey;
 use wasm_bindgen::prelude::*;
 
-use crate::mls::GroupKind;
+use crate::mls::{GroupKind, HistoryGroupInput, Identity, OpenedHistoryBundle};
 
 fn reentry_error(e: ConversationReentryError) -> String {
     format!("conversationReentry.{}: {e}", e.code())
+}
+
+fn gap_error(e: GapHistoryError) -> String {
+    format!("gapHistory.{}: {e}", e.code())
 }
 
 fn knock_key_error(e: KnockKeyError) -> String {
@@ -331,11 +341,19 @@ impl ConversationReentry {
         self.inner.epoch_left
     }
 
-    /// When the device first failed to read a row of the conversation.
+    /// When the device first failed to read a row of the conversation (its
+    /// claim; the re-admitter clamps it with `gapHistoryStart`).
     #[wasm_bindgen(getter, js_name = gapFromMs)]
     #[must_use]
     pub fn gap_from_ms(&self) -> u64 {
         self.inner.gap_from_ms
+    }
+
+    /// The 32-byte public gap key the gap's history is sealed to.
+    #[wasm_bindgen(getter, js_name = gapKey)]
+    #[must_use]
+    pub fn gap_key(&self) -> Vec<u8> {
+        self.inner.gap_key.to_vec()
     }
 
     /// The re-entry KeyPackage wire.
@@ -346,25 +364,282 @@ impl ConversationReentry {
     }
 }
 
-/// Compose the request envelope.
+/// Compose the request envelope. `gap_key` is the public half of the fresh
+/// gap key minted for this request (`generateGapKey`); keep its secret with
+/// the request record to open the gap's history.
 ///
 /// # Errors
 ///
-/// `conversationReentry.badKeyPackage`, or `badLength` for the group id.
+/// `conversationReentry.badKeyPackage`, or `badLength` for the group id or
+/// the gap key.
 #[wasm_bindgen(js_name = composeConversationReentryEnvelope)]
 pub fn compose_conversation_reentry_envelope(
     group_id: &[u8],
     epoch_left: u64,
     gap_from_ms: u64,
+    gap_key: &[u8],
     key_package: &[u8],
 ) -> Result<Vec<u8>, String> {
     rust_compose(&RustReentry {
         group_id: key32("conversationReentry", "group id", group_id)?,
         epoch_left,
         gap_from_ms,
+        gap_key: key32("conversationReentry", "gap key", gap_key)?,
         key_package: key_package.to_vec(),
     })
     .map_err(reentry_error)
+}
+
+// ============================================================================
+// The gap's history, sealed to the returning device (section 7, security
+// review 2026-11-21)
+// ============================================================================
+
+/// A fresh gap key pair. The secret is secret material: keep it with the
+/// durable request record, never send it.
+#[wasm_bindgen]
+pub struct GapKey {
+    secret: Vec<u8>,
+    public_key: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl GapKey {
+    /// The 32-byte X25519 secret.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn secret(&self) -> Vec<u8> {
+        self.secret.clone()
+    }
+
+    /// The 32-byte public key the request carries.
+    #[wasm_bindgen(getter, js_name = publicKey)]
+    #[must_use]
+    pub fn public_key(&self) -> Vec<u8> {
+        self.public_key.clone()
+    }
+}
+
+/// Mint a fresh gap key for one request to come back.
+#[wasm_bindgen(js_name = generateGapKey)]
+#[must_use]
+pub fn generate_gap_key() -> GapKey {
+    let key = RustGapKey::generate();
+    GapKey {
+        secret: key.secret().as_bytes().to_vec(),
+        public_key: key.public().to_vec(),
+    }
+}
+
+/// The public key of a stored gap secret.
+///
+/// # Errors
+///
+/// `gapHistory.badLength` for a secret that is not 32 bytes.
+#[wasm_bindgen(js_name = gapPublicKey)]
+pub fn gap_public_key(secret: &[u8]) -> Result<Vec<u8>, String> {
+    Ok(
+        RustGapKey::from_secret(&key32("gapHistory", "gap secret", secret)?)
+            .public()
+            .to_vec(),
+    )
+}
+
+/// The 32-byte DS rendezvous id the gap's history is posted to and read
+/// from: derived from the gap public key, no group secret involved.
+///
+/// # Errors
+///
+/// `gapHistory.badLength` for a key that is not 32 bytes.
+#[wasm_bindgen(js_name = gapHistoryRendezvous)]
+pub fn gap_history_rendezvous(gap_key: &[u8]) -> Result<Vec<u8>, String> {
+    Ok(rust_gap_rendezvous(&key32("gapHistory", "gap key", gap_key)?).to_vec())
+}
+
+/// Where the re-admitter starts the gap's rows: the later of the request's
+/// claim and the first time this device saw the returning leaf in the
+/// roster, else its last message from that leaf. `undefined` when neither is
+/// known: send nothing.
+#[wasm_bindgen(js_name = gapHistoryStart)]
+#[must_use]
+pub fn gap_history_start(
+    claimed_ms: u64,
+    leaf_first_seen_ms: Option<u64>,
+    leaf_last_write_ms: Option<u64>,
+) -> Option<u64> {
+    rust_gap_start(claimed_ms, leaf_first_seen_ms, leaf_last_write_ms)
+}
+
+/// An opened gap history: the bundle bytes and the 32-byte leaf key that
+/// signed them. Keep the bundle only when
+/// `Group.gapHistorySignerAccepted(identity, signerLeafKey)` says so.
+#[wasm_bindgen]
+pub struct OpenedGapHistory {
+    signer_leaf_key: Vec<u8>,
+    bundle: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl OpenedGapHistory {
+    /// The leaf signature key the signature verified under.
+    #[wasm_bindgen(getter, js_name = signerLeafKey)]
+    #[must_use]
+    pub fn signer_leaf_key(&self) -> Vec<u8> {
+        self.signer_leaf_key.clone()
+    }
+
+    /// The bundle bytes.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn bundle(&self) -> Vec<u8> {
+        self.bundle.clone()
+    }
+}
+
+/// An opened structured gap history and its signer's leaf key.
+#[wasm_bindgen]
+pub struct OpenedGapHistoryStructured {
+    signer_leaf_key: Vec<u8>,
+    bundle: Option<OpenedHistoryBundle>,
+}
+
+#[wasm_bindgen]
+impl OpenedGapHistoryStructured {
+    /// The leaf signature key the signature verified under.
+    #[wasm_bindgen(getter, js_name = signerLeafKey)]
+    #[must_use]
+    pub fn signer_leaf_key(&self) -> Vec<u8> {
+        self.signer_leaf_key.clone()
+    }
+
+    /// The bundle; `undefined` after the first call.
+    #[wasm_bindgen(js_name = takeBundle)]
+    pub fn take_bundle(&mut self) -> Option<OpenedHistoryBundle> {
+        self.bundle.take()
+    }
+}
+
+fn signer_of(readmitter: &Identity) -> SigningKey {
+    SigningKey::from_seed(&readmitter.mls_identity().ed25519_seed_bytes())
+}
+
+/// Seal opaque bundle bytes of the conversation `group_id` to the gap key a
+/// request carried, signed by `readmitter`: this device's identity in that
+/// conversation (its leaf signing key).
+///
+/// # Errors
+///
+/// A `gapHistory.<code>` string.
+#[wasm_bindgen(js_name = sealGapHistory)]
+pub fn seal_gap_history(
+    readmitter: &Identity,
+    gap_key: &[u8],
+    group_id: &[u8],
+    bundle: &[u8],
+) -> Result<Vec<u8>, String> {
+    rust_seal_gap(
+        &signer_of(readmitter),
+        &key32("gapHistory", "gap key", gap_key)?,
+        &key32("gapHistory", "group id", group_id)?,
+        bundle,
+    )
+    .map_err(gap_error)
+}
+
+fn open_gap(gap_secret: &[u8], group_id: &[u8], sealed: &[u8]) -> Result<RustOpened, String> {
+    rust_open_gap(
+        &key32("gapHistory", "gap secret", gap_secret)?,
+        &key32("gapHistory", "group id", group_id)?,
+        sealed,
+    )
+    .map_err(gap_error)
+}
+
+/// Open a sealed gap history with the gap secret, for the conversation
+/// `group_id`: verifies the signature, opens the box, and returns the bundle
+/// with the signer's leaf key. Keep it only when
+/// `Group.gapHistorySignerAccepted(identity, signerLeafKey)` on the group the
+/// device joined.
+///
+/// # Errors
+///
+/// A `gapHistory.<code>` string (`badSignature`, `notOpened`, ...).
+#[wasm_bindgen(js_name = openGapHistory)]
+pub fn open_gap_history(
+    gap_secret: &[u8],
+    group_id: &[u8],
+    sealed: &[u8],
+) -> Result<OpenedGapHistory, String> {
+    let opened = open_gap(gap_secret, group_id, sealed)?;
+    Ok(OpenedGapHistory {
+        signer_leaf_key: opened.signer_leaf_key.to_vec(),
+        bundle: opened.bundle,
+    })
+}
+
+/// `sealGapHistory` over a structured history bundle (the
+/// `HistoryGroupInput`s `sealHistoryBundleStructured` takes): the bundle is
+/// the prost-encoded `HistoryBundle`, sealed to the gap key and signed by
+/// `readmitter`. Refuses more than 1000 messages.
+///
+/// # Errors
+///
+/// A `gapHistory.<code>` string, or `gapHistory.badBundle` for too many
+/// messages.
+#[wasm_bindgen(js_name = sealGapHistoryStructured)]
+pub fn seal_gap_history_structured(
+    readmitter: &Identity,
+    gap_key: &[u8],
+    group_id: &[u8],
+    groups: Vec<HistoryGroupInput>,
+    max_hlc: u64,
+) -> Result<Vec<u8>, String> {
+    use prost::Message as _;
+    let bundle = crate::mls::build_history_bundle_proto(groups, max_hlc);
+    let total: usize = bundle.groups.iter().map(|g| g.messages.len()).sum();
+    if total > lakko_mls::history_bundle::MAX_BUNDLE_MESSAGES {
+        return Err(format!(
+            "gapHistory.badBundle: more than {} messages",
+            lakko_mls::history_bundle::MAX_BUNDLE_MESSAGES
+        ));
+    }
+    let mut bytes = Vec::with_capacity(bundle.encoded_len());
+    bundle
+        .encode(&mut bytes)
+        .map_err(|e| format!("gapHistory.badBundle: {e}"))?;
+    seal_gap_history(readmitter, gap_key, group_id, &bytes)
+}
+
+/// Open a structured gap history (`sealGapHistoryStructured`): the bundle
+/// (`takeBundle()`) and its signer's leaf key. Keep it only when
+/// `gapHistorySignerAccepted`.
+///
+/// # Errors
+///
+/// A `gapHistory.<code>` string; `gapHistory.badBundle` when the bundle does
+/// not decode.
+#[wasm_bindgen(js_name = openGapHistoryStructured)]
+pub fn open_gap_history_structured(
+    gap_secret: &[u8],
+    group_id: &[u8],
+    sealed: &[u8],
+) -> Result<OpenedGapHistoryStructured, String> {
+    use prost::Message as _;
+    let opened = open_gap(gap_secret, group_id, sealed)?;
+    let bundle =
+        lakko_proto::mls_app::history_bundle::v1::HistoryBundle::decode(opened.bundle.as_slice())
+            .map_err(|e| format!("gapHistory.badBundle: {e}"))?;
+    Ok(OpenedGapHistoryStructured {
+        signer_leaf_key: opened.signer_leaf_key.to_vec(),
+        bundle: Some(crate::mls::opened_history_bundle(bundle)),
+    })
+}
+
+/// The longest bundle `sealGapHistory` takes.
+#[wasm_bindgen(js_name = gapHistoryMaxBundleLen)]
+#[must_use]
+pub fn gap_history_max_bundle_len() -> u32 {
+    len_u32(GAP_HISTORY_MAX_BUNDLE_LEN)
 }
 
 /// Decode a request envelope (bounded, fail-closed).
@@ -507,11 +782,36 @@ mod tests {
 
     #[test]
     fn the_envelopes_and_rules_cross_the_surface() {
+        let gap = generate_gap_key();
         let env =
-            compose_conversation_reentry_envelope(&[3; 32], 9, 1000, &[1, 2, 3]).expect("compose");
+            compose_conversation_reentry_envelope(&[3; 32], 9, 1000, &gap.public_key(), &[1, 2, 3])
+                .expect("compose");
         let back = decode_conversation_reentry_envelope(&env).expect("decode");
         assert_eq!(back.group_id(), vec![3; 32]);
         assert_eq!(back.epoch_left(), 9);
+        assert_eq!(back.gap_key(), gap.public_key());
+        let readmitter = Identity::from_seed(&[0x71; 64]).expect("readmitter");
+        let impostor = Identity::from_seed(&[0x72; 64]).expect("impostor");
+        let sealed =
+            seal_gap_history(&readmitter, &gap.public_key(), &[3; 32], b"bundle").expect("seal");
+        let opened = open_gap_history(&gap.secret(), &[3; 32], &sealed).expect("open");
+        assert_eq!(opened.bundle(), b"bundle");
+        let readmitter_leaf = readmitter.mls_identity().signature_public_key().to_vec();
+        assert_eq!(opened.signer_leaf_key(), readmitter_leaf);
+        assert!(!sealed.windows(32).any(|w| w == readmitter_leaf.as_slice()));
+        let forged =
+            seal_gap_history(&impostor, &gap.public_key(), &[3; 32], b"invented").expect("seal");
+        let opened = open_gap_history(&gap.secret(), &[3; 32], &forged).expect("open");
+        assert_eq!(
+            opened.signer_leaf_key(),
+            impostor.mls_identity().signature_public_key().to_vec()
+        );
+        assert!(open_gap_history(&generate_gap_key().secret(), &[3; 32], &sealed).is_err());
+        assert_eq!(
+            gap_history_rendezvous(&gap.public_key()).expect("r").len(),
+            32
+        );
+        assert_eq!(gap_history_start(100, None, Some(300)), Some(300));
         let seed = lakko_contacts::knock::knock_seed(&[5; 32], 2);
         let pk = lakko_contacts::knock::knock_public_key(&seed);
         let row = seal_reentry_knock_row(&pk, 2, &env).expect("seal");

@@ -622,8 +622,8 @@ const _: () = assert!(NONCE_LEN == 16);
 mod tests {
     use super::*;
     use crate::test_support::{
-        app, fresh_name, fresh_nonce, key, mailbox_body, mailbox_row, messages_uri, pk_b64, send,
-        send_with, token_at, Req,
+        app, error_code, fresh_name, fresh_nonce, key, mailbox_body, mailbox_row, messages_uri,
+        pk_b64, send, send_with, token_at, Req,
     };
     use axum::Router;
     use lakko_anon_token::TokenContext;
@@ -1270,6 +1270,56 @@ mod tests {
         assert_eq!((s1, s2), (StatusCode::CREATED, StatusCode::CREATED));
     }
 
+    fn rendezvous_token() -> String {
+        token_at(TokenContext::RendezvousWrite, 0)
+    }
+
+    /// Security review 2026-11-21: a write to a rendezvous spends one
+    /// `rendezvous-write` token. Without one, with a spent one or with a
+    /// token of another context nothing is stored; the read stays open.
+    #[tokio::test]
+    async fn a_rendezvous_write_spends_one_rendezvous_token() {
+        let Some((app, _pool)) = app().await else {
+            return;
+        };
+        let id = fresh_name(88);
+        let post = |headers: Vec<(&'static str, String)>| {
+            let app = app.clone();
+            async move {
+                let pairs: Vec<(&str, &str)> =
+                    headers.iter().map(|(n, v)| (*n, v.as_str())).collect();
+                send_with(
+                    &app,
+                    Req {
+                        method: "POST",
+                        uri: &rendezvous_uri(&id),
+                        body: b"row".to_vec(),
+                        proof: None,
+                    },
+                    &pairs,
+                )
+                .await
+            }
+        };
+        let (status, body) = post(vec![]).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error_code(&body), "anon-token-required");
+        let (status, body) = post(vec![(
+            lakko_anon_token::TOKEN_HEADER,
+            token_at(TokenContext::MailboxWrite, 0),
+        )])
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error_code(&body), "anon-token-wrong-context");
+        let token = rendezvous_token();
+        let (status, _) = post(vec![(lakko_anon_token::TOKEN_HEADER, token.clone())]).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, body) = post(vec![(lakko_anon_token::TOKEN_HEADER, token)]).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error_code(&body), "anon-token-spent");
+        assert_eq!(rendezvous_payloads(&app, &id).await, vec![b"row".to_vec()]);
+    }
+
     fn rendezvous_uri(id: &[u8; PSEUDONYM_LEN]) -> String {
         format!("/ds/rendezvous/{}/messages", hex::encode(id))
     }
@@ -1301,7 +1351,8 @@ mod tests {
             return;
         };
         let id = fresh_name(86);
-        let (status, bytes) = send(
+        let token = rendezvous_token();
+        let (status, bytes) = send_with(
             &app,
             Req {
                 method: "POST",
@@ -1309,6 +1360,7 @@ mod tests {
                 body: b"pairing payload".to_vec(),
                 proof: None,
             },
+            &[(lakko_anon_token::TOKEN_HEADER, &token)],
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
@@ -1375,7 +1427,8 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
-        let (status, _) = send(
+        let token = rendezvous_token();
+        let (status, _) = send_with(
             &app,
             Req {
                 method: "POST",
@@ -1383,6 +1436,7 @@ mod tests {
                 body: b"meeting".to_vec(),
                 proof: None,
             },
+            &[(lakko_anon_token::TOKEN_HEADER, &token)],
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);

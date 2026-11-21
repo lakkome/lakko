@@ -1239,47 +1239,58 @@ public enum StateBundle {
         timeoutSeconds: TimeInterval = pollTimeoutSeconds,
         ds: DsClient = DsClient()
     ) async -> V4? {
+        var key: Data
+        do {
+            key = try group.exportSecret(
+                identity: identity,
+                label: exporterLabel,
+                context: rendezvousPseudonym,
+                length: UInt32(exporterKeyLength)
+            )
+        } catch {
+            NSLog("state bundle key not derived: %@", error.localizedDescription)
+            return nil
+        }
+        defer { key.resetBytes(in: 0..<key.count) }
         let deadline = Date(timeIntervalSinceNow: timeoutSeconds)
         var cursor = afterCursor
-        var sealed: Data?
-        while sealed == nil {
+        while true {
             if Task.isCancelled { return nil }
             let remaining = deadline.timeIntervalSinceNow
             if remaining <= 0 { return nil }
             let waitSecs = min(perRequestLongPollSeconds, max(1, Int(remaining)))
             let result: FetchResult
             do {
-                result = try await ds.fetchRendezvous(id: rendezvousPseudonym, after: cursor, limit: 1, waitSecs: waitSecs)
+                result = try await ds.fetchRendezvous(
+                    id: rendezvousPseudonym, after: cursor, limit: RendezvousRead.pageSize, waitSecs: waitSecs)
             } catch {
                 // 404 ("no rows yet") and network blips: keep polling until
                 // the deadline, as the history and recovery polls do.
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 continue
             }
-            if let first = result.messages.first {
-                if let body = unwrapRow(first.payload) {
-                    sealed = body
-                } else {
-                    cursor = first.id
-                }
-                continue
+            if let bundle = firstOpening(result.messages, after: cursor, key: key) {
+                return bundle
             }
             cursor = result.messages.reduce(cursor) { max($0, $1.id) }
         }
-        guard let sealed else { return nil }
-        do {
-            var key = try group.exportSecret(
-                identity: identity,
-                label: exporterLabel,
-                context: rendezvousPseudonym,
-                length: UInt32(exporterKeyLength)
-            )
-            defer { key.resetBytes(in: 0..<key.count) }
-            return decode(try openWithKey(key: key, wire: sealed))
-        } catch {
-            NSLog("state bundle open failed: %@", error.localizedDescription)
-            return nil
+    }
+
+    /// The first state row among `rows` past `after` that opens under `key`
+    /// and decodes. Anyone who learned the rendezvous can post to it: a
+    /// tagged row that does not open or decode is passed over.
+    static func firstOpening(_ rows: [MailboxMessage], after: Int64, key: Data) -> V4? {
+        for row in rows where row.id > after {
+            guard let body = unwrapRow(row.payload) else { continue }
+            guard var plain = try? openWithKey(key: key, wire: body) else {
+                NSLog("state bundle row did not open; passed over")
+                continue
+            }
+            defer { plain.resetBytes(in: 0..<plain.count) }
+            if let bundle = decode(plain) { return bundle }
+            NSLog("state bundle row did not decode; passed over")
         }
+        return nil
     }
 
     /// 32 lower-case hex characters: a 16-byte account id as the pending

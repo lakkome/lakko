@@ -9286,10 +9286,12 @@ async function uploadIdentityBundle(
   keyResetAttest?: Uint8Array | string,
   conversationLink?: Uint8Array | string,
 ): Promise<void> {
+  const wasm = await loadWasm();
   await discovery.uploadIdentityBundle(
     accountId,
     identity.signaturePublicKey,
     identity.x25519PublicKey,
+    wasm.signX25519Binding(identity),
     supersessionProof,
     leafAuth,
     genesisAttest,

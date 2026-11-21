@@ -78,8 +78,13 @@ public enum WelcomeCourier {
     /// Throws on transport / server failures (404 on a fresh
     /// mailbox is treated as "no rows yet, keep polling" —
     /// not an error).
+    ///
+    /// `after` is the last row already tried as the Welcome that did not
+    /// join (``PairingOrchestrator/WelcomeNotOpened``): the poll reads past
+    /// it. A recovery or state row is never the Welcome and is skipped.
     public static func pollForWelcome(
         rendezvousPseudonym: Data,
+        after: Int64 = 0,
         timeoutSeconds: TimeInterval = defaultTimeoutSeconds,
         ds: DsClient = DsClient()
     ) async throws -> WelcomeOutcome {
@@ -88,7 +93,7 @@ public enum WelcomeCourier {
         // the beginning of this slot" cursor for the DS
         // mailbox. The slot is fresh per pairing, so the
         // first published id is 1.
-        var cursor: Int64 = 0
+        var cursor: Int64 = max(0, after)
 
         while true {
             if Task.isCancelled { return .cancelled }
@@ -103,7 +108,7 @@ public enum WelcomeCourier {
             do {
                 result = try await ds.fetchRendezvous(id: rendezvousPseudonym,
                     after: cursor,
-                    limit: 1,
+                    limit: RendezvousRead.pageSize,
                     waitSecs: waitSecs
                 )
             } catch DsClientError.http(let status, _, _) where status == 404 {
@@ -118,13 +123,11 @@ public enum WelcomeCourier {
                 }
                 throw err
             }
-            if let first = result.messages.first {
-                return .received(first.payload, welcomeCursor: first.id)
+            if let row = result.messages.first(where: { $0.id > cursor && !isTaggedRow($0.payload) }) {
+                return .received(row.payload, welcomeCursor: row.id)
             }
             // Advance cursor by the highest id seen so the
-            // next poll doesn't re-fetch the same empty
-            // range. Happy path returns above; this branch
-            // is defensive.
+            // next poll doesn't re-fetch the same range.
             cursor = result.messages.reduce(cursor) { max($0, $1.id) }
         }
     }
@@ -152,6 +155,7 @@ public enum WelcomeCourier {
         rendezvousPseudonym: Data,
         welcomeCursor: Int64,
         timeoutSeconds: TimeInterval = historyBundleTimeoutSeconds,
+        opens: ((Data) -> Bool)? = nil,
         ds: DsClient = DsClient()
     ) async throws -> HistoryBundleOutcome {
         let deadline = Date(timeIntervalSinceNow: timeoutSeconds)
@@ -170,7 +174,7 @@ public enum WelcomeCourier {
             do {
                 result = try await ds.fetchRendezvous(id: rendezvousPseudonym,
                     after: cursor,
-                    limit: 1,
+                    limit: RendezvousRead.pageSize,
                     waitSecs: waitSecs
                 )
             } catch DsClientError.http(let status, _, _) where status == 404 {
@@ -181,22 +185,31 @@ public enum WelcomeCourier {
                 }
                 throw err
             }
-            if let first = result.messages.first {
-                // ADR-0018 factor (a): the rendezvous mailbox can also
-                // carry a tagged recovery-payload row (after the
-                // Welcome, in either FIFO order relative to the
-                // bundle). It is NOT the history bundle — skip it and
-                // keep polling. Mirror of the web's
-                // `welcome-courier.ts` + Android's
-                // `WelcomeCourier.kt` skip.
-                if RecoveryPayload.isRecoveryRow(first.payload)
-                    || StateBundle.isStateRow(first.payload) {
-                    cursor = first.id
-                    continue
-                }
-                return .received(first.payload)
+            if let row = firstHistoryRow(result.messages, after: cursor, opens: opens) {
+                return .received(row)
             }
             cursor = result.messages.reduce(cursor) { max($0, $1.id) }
         }
+    }
+
+    /// A recovery or state row: tagged, never the Welcome or the history
+    /// bundle.
+    static func isTaggedRow(_ row: Data) -> Bool {
+        RecoveryPayload.isRecoveryRow(row) || StateBundle.isStateRow(row)
+    }
+
+    /// The history bundle among `rows`, in order: past `after`, not a tagged
+    /// row (ADR-0018 factor (a): the rendezvous also carries the recovery
+    /// and state rows), and, when `opens` is given, one that opens. A row
+    /// that does not open is passed over: anyone who learned the rendezvous
+    /// can post to it.
+    static func firstHistoryRow(
+        _ rows: [MailboxMessage], after: Int64, opens: ((Data) -> Bool)?
+    ) -> Data? {
+        for row in rows where row.id > after && !isTaggedRow(row.payload) {
+            if let opens, !opens(row.payload) { continue }
+            return row.payload
+        }
+        return nil
     }
 }

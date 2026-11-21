@@ -176,15 +176,21 @@ async fn upload_bundle(
     client: &reqwest::Client,
     token: &str,
     account_id: &[u8],
-    signature_pubkey: &[u8],
-    x25519_pubkey: &[u8],
+    identity: &Identity,
     leaf_auth: Option<&[u8]>,
     supersession_proof: Option<&[u8]>,
 ) -> reqwest::StatusCode {
+    // The X25519 binding discovery requires (security review 2026-11-21).
+    let x25519_pubkey = identity.x25519_public_key();
+    let binding = lakko_contacts::sign_x25519_binding(
+        &SigningKey::from_seed(&identity.ed25519_seed_bytes()),
+        &x25519_pubkey,
+    );
     let mut body = json!({
         "account_id": B64.encode(account_id),
-        "signature_pubkey": B64.encode(signature_pubkey),
+        "signature_pubkey": B64.encode(identity.signature_public_key()),
         "x25519_pubkey": B64.encode(x25519_pubkey),
+        "x25519_binding": B64.encode(binding),
     });
     if let Some(la) = leaf_auth {
         body["leaf_auth"] = json!(B64.encode(la));
@@ -392,8 +398,7 @@ async fn recovery_kt_pipeline_publish_log_fetch_verify_rotate() {
         &client,
         &token,
         &account_id,
-        &old_pubkey,
-        &id_old.x25519_public_key(),
+        &id_old,
         Some(&genesis_sig),
         None,
     )
@@ -435,8 +440,7 @@ async fn recovery_kt_pipeline_publish_log_fetch_verify_rotate() {
         &client,
         &token,
         &account_id,
-        &old_pubkey,
-        &id_old.x25519_public_key(),
+        &id_old,
         Some(&genesis_sig),
         None,
     )
@@ -468,8 +472,7 @@ async fn recovery_kt_pipeline_publish_log_fetch_verify_rotate() {
         &client,
         &token,
         &account_id,
-        &new_pubkey,
-        &id_new.x25519_public_key(),
+        &id_new,
         Some(&proof_bytes),
         Some(&proof_bytes),
     )
@@ -523,16 +526,7 @@ async fn recovery_kt_pipeline_publish_log_fetch_verify_rotate() {
     let id_bogus = Identity::from_seed(&bogus_seed).expect("bogus identity");
     // Upload may be accepted by discovery (it stores opaque), but the
     // transparency append refuses the unauthorised leaf, so it never logs.
-    let _ = upload_bundle(
-        &client,
-        &bogus_token,
-        &bogus_id,
-        id_bogus.signature_public_key(),
-        &id_bogus.x25519_public_key(),
-        None,
-        None,
-    )
-    .await;
+    let _ = upload_bundle(&client, &bogus_token, &bogus_id, &id_bogus, None, None).await;
     let slug = B64URL.encode(bogus_ak);
     let url = format!("{}/transparency/latest/{slug}", transparency_url());
     // Give the (failing) append + a reconciler cycle time, then assert absent.

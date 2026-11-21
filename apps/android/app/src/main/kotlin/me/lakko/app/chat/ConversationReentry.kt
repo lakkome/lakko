@@ -598,7 +598,9 @@ internal class ConversationBehindTracker(
 @Serializable
 internal enum class ReentryRouteKind { OWN_DEVICE, MAILBOX, KNOCK }
 
-/** One request this device sent: its KeyPackage, for `Group.joinReentry`. */
+/** One request this device sent: its KeyPackage, for `Group.joinReentry`,
+ *  and the public half of its gap key ([gapKeyB64], standard base64; the
+ *  secret is in a [GapKeyStore]). */
 @Serializable
 internal data class ReentryRequestRow(
     val keyPackageB64: String,
@@ -606,6 +608,7 @@ internal data class ReentryRequestRow(
     val gapFromMs: Long,
     val sentAtMs: Long,
     val route: ReentryRouteKind,
+    val gapKeyB64: String = "",
 )
 
 /** The requests of one conversation, oldest first. */
@@ -749,6 +752,11 @@ internal class ReentryAdmissionLedger(private val clock: () -> Long = System::cu
     fun noteMessage(groupIdHex: String, leafKeyHex: String, epoch: ULong, atMs: Long = clock()) {
         lastMessage[key(groupIdHex, leafKeyHex)] = Seen(epoch, atMs)
     }
+
+    /** The time of the last message read from the leaf, at any epoch: the
+     *  re-admitter's `leafLastWriteMs` (section 7). */
+    fun lastMessageAtAnyEpoch(groupIdHex: String, leafKeyHex: String): Long? =
+        lastMessage[key(groupIdHex, leafKeyHex)]?.atMs
 
     /** The time of the last message read from the leaf at [currentEpoch]. */
     fun lastMessageAt(groupIdHex: String, leafKeyHex: String, currentEpoch: ULong): Long? =
@@ -1031,39 +1039,24 @@ internal fun gapLineText(): me.lakko.app.l10n.UiText = me.lakko.app.l10n.UiText(
 // ---------------------------------------------------------------------------
 
 /**
- * The exporter label both ends derive the gap bundle's secret under, at the
- * epoch the replacement commit creates (`epoch_left + 1`), with the returning
- * leaf's 32-byte signature key as the context: a device that re-requested
- * holds two KeyPackages and cannot know which one was used, but its leaf key
- * is the same in both. The carrier is a client convention shared by web, iOS
- * and Android (the core names none).
+ * A gap bundle the re-admitter still owes (section 7): the rows from the
+ * returning leaf's gap on, sealed to the request's [gapKey] (the public half
+ * the returning device put in its request) and posted to
+ * `gapHistoryRendezvous(gapKey)`. [leafSignatureKey] names the returning leaf
+ * (for when this device first saw it and last read from it); [gapFromMs] is
+ * the request's claim, clamped by `gapHistoryStart` at send time;
+ * [epochLeft] is the epoch the request named, so the bundle goes once the
+ * group moved past it (the replacement landed). Every field is public (no
+ * secret): kept durably in an [OwedGapBundleStore], so a restart between the
+ * admission and the merge of the replacement does not lose it.
  */
-internal const val REENTRY_HISTORY_EXPORTER_LABEL: String = "lakko/conversation-reentry/history/v1"
-
-/** The label the rendezvous id is hashed under (no separator follows it). */
-internal const val REENTRY_HISTORY_RENDEZVOUS_LABEL: String = "lakko/conversation-reentry/history-rendezvous/v1"
-
-/** The rendezvous id the gap bundle is posted to and read from:
- *  `SHA-256(label || secret)`, so only the members at the join epoch can
- *  name it. */
-internal fun reentryHistoryRendezvous(secret: ByteArray): ByteArray {
-    val digest = java.security.MessageDigest.getInstance("SHA-256")
-    digest.update(REENTRY_HISTORY_RENDEZVOUS_LABEL.toByteArray(Charsets.US_ASCII))
-    digest.update(secret)
-    return digest.digest()
-}
-
-/** A gap bundle the re-admitter still owes: sent once its group reaches
- *  [epochLeft] + 1, the epoch the returning device joins at. [leafSignatureKey]
- *  is the returning leaf's key (the exporter context). Every field is public
- *  (no secret): kept durably in an [OwedGapBundleStore], so a restart between
- *  the admission and the merge of the replacement does not lose it. */
 internal data class OwedGapBundle(
     val groupIdHex: String,
     val leafSignatureKey: ByteArray,
     val epochLeft: ULong,
     val gapFromMs: Long,
     val owedSinceMs: Long,
+    val gapKey: ByteArray,
 )
 
 /** What to do with an owed bundle now that the group is at [epoch]. */
@@ -1076,16 +1069,35 @@ internal enum class OwedBundleStep { WAIT, SEND, DROP }
  */
 internal const val GAP_OWED_TTL_MS: Long = 30L * 24L * 60L * 60L * 1_000L
 
+/**
+ * The bundle is sealed to the request's gap key, not to an epoch secret, so
+ * it is sent at any epoch past the one the request named: the replacement
+ * landed (a replacement that lost to another commit costs nothing, since only
+ * the returning device can open it).
+ */
 internal fun owedBundleStep(owed: OwedGapBundle, epoch: ULong?, nowMs: Long): OwedBundleStep = when {
     nowMs - owed.owedSinceMs > GAP_OWED_TTL_MS -> OwedBundleStep.DROP
+    owed.gapKey.size != GAP_KEY_LEN -> OwedBundleStep.DROP
     epoch == null -> OwedBundleStep.WAIT
-    owed.epochLeft == ULong.MAX_VALUE -> OwedBundleStep.DROP
-    epoch == owed.epochLeft + 1uL -> OwedBundleStep.SEND
-    // Moved past the join epoch without this device seeing it, or the
-    // replacement lost to another commit: the key can no longer be derived.
-    epoch > owed.epochLeft + 1uL -> OwedBundleStep.DROP
+    epoch > owed.epochLeft -> OwedBundleStep.SEND
     else -> OwedBundleStep.WAIT
 }
+
+/** Length of a gap key, either half. */
+internal const val GAP_KEY_LEN: Int = 32
+
+/**
+ * Keep an opened gap history only when its signer is one the joined group
+ * accepts (`Group.gapHistorySignerAccepted`: the own account, the owner or an
+ * admin, or in a one-to-one the other person). Anything else is dropped and
+ * the gap line stays.
+ */
+internal fun <B> acceptedGapHistory(signerLeafKey: ByteArray, bundle: B, signerAccepted: (ByteArray) -> Boolean): B? =
+    try {
+        if (signerAccepted(signerLeafKey)) bundle else null
+    } catch (_: Throwable) {
+        null
+    }
 
 /**
  * A gap bundle row's direction on this device. A placeholder carries no
@@ -1167,6 +1179,7 @@ internal data class OwedGapBundleRow(
     val epochLeft: String,
     val gapFromMs: Long,
     val owedSinceMs: Long,
+    val gapKeyB64: String,
 )
 
 internal fun OwedGapBundle.toRow(): OwedGapBundleRow = OwedGapBundleRow(
@@ -1175,17 +1188,25 @@ internal fun OwedGapBundle.toRow(): OwedGapBundleRow = OwedGapBundleRow(
     epochLeft = epochLeft.toString(),
     gapFromMs = gapFromMs,
     owedSinceMs = owedSinceMs,
+    gapKeyB64 = java.util.Base64.getEncoder().encodeToString(gapKey),
 )
 
-/** `null` for a row that does not decode (dropped, never acted on). */
+/** `null` for a row that does not decode, or whose gap key is not 32 bytes
+ *  (dropped, never acted on). */
 internal fun OwedGapBundleRow.toOwed(): OwedGapBundle? = try {
-    OwedGapBundle(
-        groupIdHex = groupIdHex.lowercase(),
-        leafSignatureKey = java.util.Base64.getDecoder().decode(leafSignatureKeyB64),
-        epochLeft = epochLeft.toULong(),
-        gapFromMs = gapFromMs,
-        owedSinceMs = owedSinceMs,
-    )
+    val gap = java.util.Base64.getDecoder().decode(gapKeyB64)
+    if (gap.size != GAP_KEY_LEN) {
+        null
+    } else {
+        OwedGapBundle(
+            groupIdHex = groupIdHex.lowercase(),
+            leafSignatureKey = java.util.Base64.getDecoder().decode(leafSignatureKeyB64),
+            epochLeft = epochLeft.toULong(),
+            gapFromMs = gapFromMs,
+            owedSinceMs = owedSinceMs,
+            gapKey = gap,
+        )
+    }
 } catch (_: IllegalArgumentException) {
     null
 }
@@ -1295,27 +1316,37 @@ internal const val GAP_HISTORY_LOOK_INTERVAL_MS: Long = 60_000L
  *  Chosen, not measured. */
 internal const val GAP_HISTORY_LOOK_RETENTION_MS: Long = 30L * 24L * 60L * 60L * 1_000L
 
+/** One gap key: the public half names the rendezvous, the secret opens
+ *  what is posted there. Standard base64. */
+@Serializable
+internal data class GapKeyEntry(val publicKeyB64: String, val secretB64: String) {
+    /** A fresh copy of the secret; the caller zeroes it after use. */
+    fun secret(): ByteArray = java.util.Base64.getDecoder().decode(secretB64)
+
+    fun publicKey(): ByteArray = java.util.Base64.getDecoder().decode(publicKeyB64)
+
+    override fun toString(): String = "GapKeyEntry(publicKeyB64=$publicKeyB64)"
+}
+
 /**
- * One conversation whose gap bundle this device has not read yet. [secretB64]
- * is the 32-byte exporter secret of the join epoch (it opens the bundle and
- * names its rendezvous): a [GapLookStore] keeps it sealed at rest. [gapFromMs]
- * and [gapToMs] name the gap line it narrows; [lastLookMs] (0 before the
- * first look) throttles the looks; [route] decides the bundle rows' direction.
+ * One conversation whose gap bundle this device has not read yet. [keys] are
+ * the gap keys of the requests it held when it came back (it cannot know which
+ * one the re-admitter answered): a [GapLookStore] keeps them sealed at rest.
+ * [gapFromMs] and [gapToMs] name the gap line it narrows; [lastLookMs] (0
+ * before the first look) throttles the looks; [route] decides the bundle
+ * rows' direction.
  */
 @Serializable
 internal data class GapLookRecord(
     val groupIdHex: String,
-    val secretB64: String,
+    val keys: List<GapKeyEntry>,
     val gapFromMs: Long,
     val gapToMs: Long,
     val lastLookMs: Long = 0L,
     val route: ReentryRouteKind,
 ) {
-    /** A fresh copy of the secret; the caller zeroes it after use. */
-    fun secret(): ByteArray = java.util.Base64.getDecoder().decode(secretB64)
-
     override fun toString(): String =
-        "GapLookRecord(gapFromMs=$gapFromMs, gapToMs=$gapToMs, lastLookMs=$lastLookMs, route=$route)"
+        "GapLookRecord(keys=${keys.size}, gapFromMs=$gapFromMs, gapToMs=$gapToMs, lastLookMs=$lastLookMs, route=$route)"
 }
 
 /** What one pass of the gap look decided for a record. */
@@ -1448,16 +1479,18 @@ internal class GapHistoryLooker(
         store.put(accountIdB64, record.copy(groupIdHex = record.groupIdHex.lowercase(), lastLookMs = 0L))
 
     /**
-     * One look for [groupIdHex] when one is due. [read] returns the payloads
-     * of the rendezvous oldest first (`null` on a failed read); [open] opens
-     * and applies one, `null` (or a throw) when it is not a bundle of this
-     * secret; [received] narrows the gap line once one did.
+     * One look for [groupIdHex] when one is due: for each gap key, one read of
+     * its rendezvous ([rendezvousOf] the public key). [read] returns the
+     * payloads oldest first (`null` on a failed read); [open] opens, checks
+     * the signer and applies one, `null` (or a throw) when it is not a bundle
+     * this device keeps; [received] narrows the gap line once one did.
      */
     suspend fun <T> lookIfDue(
         accountIdB64: String,
         groupIdHex: String,
         read: suspend (rendezvous: ByteArray) -> List<ByteArray>?,
-        open: (secret: ByteArray, payload: ByteArray, route: ReentryRouteKind) -> T?,
+        open: suspend (secret: ByteArray, payload: ByteArray, route: ReentryRouteKind) -> T?,
+        rendezvousOf: (gapPublicKey: ByteArray) -> ByteArray = { uniffi.lakko_ffi_uniffi.gapHistoryRendezvous(it) },
         received: (record: GapLookRecord, applied: T) -> Unit,
     ): GapLookOutcome {
         val hex = groupIdHex.lowercase()
@@ -1477,40 +1510,267 @@ internal class GapHistoryLooker(
             // The time is written before the read: a read that fails, hangs
             // or ends with the process still counts against the minute.
             store.put(accountIdB64, record.copy(lastLookMs = now))
-            val secret = try {
-                record.secret()
-            } catch (_: IllegalArgumentException) {
+            if (record.keys.isEmpty()) {
                 store.remove(accountIdB64, hex)
                 return GapLookOutcome.DROPPED
             }
-            try {
-                val payloads = try {
-                    read(reentryHistoryRendezvous(secret))
-                } catch (cause: kotlinx.coroutines.CancellationException) {
-                    throw cause
-                } catch (_: Throwable) {
-                    null
-                } ?: return GapLookOutcome.NOTHING_YET
-                // Newest first; a row that is not a bundle of this secret is
-                // passed over.
-                for (payload in payloads.asReversed()) {
-                    val applied = try {
-                        open(secret, payload, record.route)
+            for (key in record.keys) {
+                val (public, secret) = try {
+                    key.publicKey() to key.secret()
+                } catch (_: IllegalArgumentException) {
+                    continue
+                }
+                try {
+                    val rendezvous = try {
+                        rendezvousOf(public)
+                    } catch (_: Throwable) {
+                        continue
+                    }
+                    val payloads = try {
+                        read(rendezvous)
                     } catch (cause: kotlinx.coroutines.CancellationException) {
                         throw cause
                     } catch (_: Throwable) {
                         null
                     } ?: continue
-                    received(record, applied)
-                    store.remove(accountIdB64, hex)
-                    return GapLookOutcome.RECEIVED
+                    // Newest first; a row that is not a bundle this device
+                    // keeps is passed over.
+                    for (payload in payloads.asReversed()) {
+                        val applied = try {
+                            open(secret, payload, record.route)
+                        } catch (cause: kotlinx.coroutines.CancellationException) {
+                            throw cause
+                        } catch (_: Throwable) {
+                            null
+                        } ?: continue
+                        received(record, applied)
+                        store.remove(accountIdB64, hex)
+                        return GapLookOutcome.RECEIVED
+                    }
+                } finally {
+                    secret.fill(0)
                 }
-                return GapLookOutcome.NOTHING_YET
-            } finally {
-                secret.fill(0)
             }
+            return GapLookOutcome.NOTHING_YET
         } finally {
             inFlight.remove(claim)
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The returning device's gap keys (section 7)
+// ---------------------------------------------------------------------------
+
+/**
+ * The secrets of the gap keys this device put in its re-entry requests, per
+ * conversation and public key, kept until the device came back (then they
+ * move to its [GapLookRecord]) or the request left the record.
+ */
+internal interface GapKeyStore {
+    /** `false` when the row did not reach the disk. */
+    fun put(accountIdB64: String, groupIdHex: String, entry: GapKeyEntry): Boolean
+
+    /** The kept keys of [groupIdHex] whose public half is in [publicKeysB64]. */
+    fun entries(accountIdB64: String, groupIdHex: String, publicKeysB64: Collection<String>): List<GapKeyEntry>
+
+    /** Forget the keys of [groupIdHex] named in [publicKeysB64]. */
+    fun remove(accountIdB64: String, groupIdHex: String, publicKeysB64: Collection<String>)
+
+    /** The group left this device, or the device came back: every key. */
+    fun removeGroup(accountIdB64: String, groupIdHex: String)
+
+    fun clearForAccount(accountIdB64: String)
+}
+
+/** The production [GapKeyStore]: EncryptedSharedPreferences (the Android
+ *  Keystore key), behind the ADR-0077 gate. */
+internal class EncryptedGapKeyStore(context: Context) : GapKeyStore {
+    private val app = context.applicationContext
+    private val json = Json { ignoreUnknownKeys = true }
+    private val serializer = MapSerializer(
+        String.serializer(),
+        MapSerializer(String.serializer(), String.serializer()),
+    )
+
+    private val prefs: SharedPreferences by lazy {
+        val master = androidx.security.crypto.MasterKey.Builder(app)
+            .setKeyScheme(androidx.security.crypto.MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        androidx.security.crypto.EncryptedSharedPreferences.create(
+            app,
+            PREFS_NAME,
+            master,
+            androidx.security.crypto.EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            androidx.security.crypto.EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+        )
+    }
+
+    private fun key(accountIdB64: String) = "v1:$accountIdB64"
+
+    private fun rows(accountIdB64: String): Map<String, Map<String, String>> = try {
+        prefs.getString(key(accountIdB64), null)
+            ?.let { runCatching { json.decodeFromString(serializer, it) }.getOrNull() }
+            .orEmpty()
+    } catch (_: Throwable) {
+        emptyMap()
+    }
+
+    private fun write(accountIdB64: String, rows: Map<String, Map<String, String>>): Boolean =
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            val editor = prefs.edit()
+            val kept = rows.filterValues { it.isNotEmpty() }
+            if (kept.isEmpty()) {
+                editor.remove(key(accountIdB64))
+            } else {
+                editor.putString(key(accountIdB64), json.encodeToString(serializer, kept))
+            }
+            editor.commit()
+        } ?: false
+
+    override fun put(accountIdB64: String, groupIdHex: String, entry: GapKeyEntry): Boolean = synchronized(LOCK) {
+        val all = rows(accountIdB64)
+        val hex = groupIdHex.lowercase()
+        write(accountIdB64, all + (hex to (all[hex].orEmpty() + (entry.publicKeyB64 to entry.secretB64))))
+    }
+
+    override fun entries(accountIdB64: String, groupIdHex: String, publicKeysB64: Collection<String>): List<GapKeyEntry> =
+        synchronized(LOCK) {
+            val held = rows(accountIdB64)[groupIdHex.lowercase()].orEmpty()
+            publicKeysB64.distinct().mapNotNull { pk -> held[pk]?.let { GapKeyEntry(pk, it) } }
+        }
+
+    override fun remove(accountIdB64: String, groupIdHex: String, publicKeysB64: Collection<String>) {
+        synchronized(LOCK) {
+            val all = rows(accountIdB64)
+            val hex = groupIdHex.lowercase()
+            val held = all[hex] ?: return
+            val kept = held - publicKeysB64.toSet()
+            if (kept.size != held.size) write(accountIdB64, all + (hex to kept))
+        }
+    }
+
+    override fun removeGroup(accountIdB64: String, groupIdHex: String) {
+        synchronized(LOCK) {
+            val all = rows(accountIdB64)
+            val hex = groupIdHex.lowercase()
+            if (hex in all) write(accountIdB64, all - hex)
+        }
+    }
+
+    override fun clearForAccount(accountIdB64: String) {
+        synchronized(LOCK) { prefs.edit().remove(key(accountIdB64)).commit() }
+    }
+
+    internal companion object {
+        const val PREFS_NAME = "lakko-reentry-gap-keys"
+        private val LOCK = Any()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// When this device first saw a leaf (section 7, the re-admitter's floor)
+// ---------------------------------------------------------------------------
+
+/** The key a first observation is filed under: one per (group, leaf). */
+internal fun leafFirstSeenKey(groupIdHex: String, leafKeyHex: String): String =
+    groupIdHex.lowercase() + ":" + leafKeyHex.lowercase()
+
+/**
+ * [seen] with a first observation at [nowMs] for each of [leafKeysHex] in
+ * [groupIdHex] it did not hold; an existing observation is never moved.
+ * `null` when nothing is new (nothing to write).
+ */
+internal fun withFirstSeen(
+    seen: Map<String, Long>,
+    groupIdHex: String,
+    leafKeysHex: Collection<String>,
+    nowMs: Long,
+): Map<String, Long>? {
+    val added = leafKeysHex
+        .map { leafFirstSeenKey(groupIdHex, it) }
+        .filter { it !in seen }
+        .distinct()
+    if (added.isEmpty()) return null
+    return seen + added.associateWith { nowMs }
+}
+
+/**
+ * The first time this device saw each leaf in each group's roster: the
+ * re-admitter's `leafFirstSeenMs`, so the rows it sends a returning device
+ * never start before its own evidence that the leaf was in the conversation.
+ */
+internal interface LeafFirstSeenStore {
+    fun firstSeen(accountIdB64: String, groupIdHex: String, leafKeyHex: String): Long?
+
+    /** Record [leafKeysHex] as seen in [groupIdHex] at [nowMs] where none
+     *  was; the first observation stays. */
+    fun noteSeen(accountIdB64: String, groupIdHex: String, leafKeysHex: Collection<String>, nowMs: Long)
+
+    fun removeGroup(accountIdB64: String, groupIdHex: String)
+
+    fun clearForAccount(accountIdB64: String)
+}
+
+/** The production [LeafFirstSeenStore], behind the ADR-0077 gate. Leaf keys
+ *  and times only, no secret. A read cache per account keeps the poll tail
+ *  from reading the disk on every pass. */
+internal class SharedPrefsLeafFirstSeenStore(context: Context) : LeafFirstSeenStore {
+    private val appContext = context.applicationContext
+    private val json = Json { ignoreUnknownKeys = true }
+    private val serializer = MapSerializer(String.serializer(), Long.serializer())
+    private val cache = ConcurrentHashMap<String, Map<String, Long>>()
+
+    private fun prefs(): SharedPreferences = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    private fun key(accountIdB64: String) = "v1:$accountIdB64"
+
+    private fun rows(accountIdB64: String): Map<String, Long> = cache[accountIdB64] ?: try {
+        prefs().getString(key(accountIdB64), null)
+            ?.let { runCatching { json.decodeFromString(serializer, it) }.getOrNull() }
+            .orEmpty()
+    } catch (_: Throwable) {
+        emptyMap()
+    }.also { cache[accountIdB64] = it }
+
+    private fun write(accountIdB64: String, rows: Map<String, Long>): Boolean {
+        val ok = me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            val editor = prefs().edit()
+            if (rows.isEmpty()) editor.remove(key(accountIdB64)) else editor.putString(key(accountIdB64), json.encodeToString(serializer, rows))
+            editor.commit()
+        } ?: false
+        if (ok) cache[accountIdB64] = rows else cache.remove(accountIdB64)
+        return ok
+    }
+
+    override fun firstSeen(accountIdB64: String, groupIdHex: String, leafKeyHex: String): Long? =
+        synchronized(LOCK) { rows(accountIdB64)[leafFirstSeenKey(groupIdHex, leafKeyHex)] }
+
+    override fun noteSeen(accountIdB64: String, groupIdHex: String, leafKeysHex: Collection<String>, nowMs: Long) {
+        synchronized(LOCK) {
+            val next = withFirstSeen(rows(accountIdB64), groupIdHex, leafKeysHex, nowMs) ?: return
+            write(accountIdB64, next)
+        }
+    }
+
+    override fun removeGroup(accountIdB64: String, groupIdHex: String) {
+        synchronized(LOCK) {
+            val prefix = groupIdHex.lowercase() + ":"
+            val all = rows(accountIdB64)
+            val kept = all.filterKeys { !it.startsWith(prefix) }
+            if (kept.size != all.size) write(accountIdB64, kept)
+        }
+    }
+
+    override fun clearForAccount(accountIdB64: String) {
+        synchronized(LOCK) {
+            cache.remove(accountIdB64)
+            prefs().edit().remove(key(accountIdB64)).commit()
+        }
+    }
+
+    internal companion object {
+        const val PREFS_NAME = "lakko-reentry-leaf-first-seen"
+        private val LOCK = Any()
     }
 }

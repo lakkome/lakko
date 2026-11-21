@@ -49,6 +49,7 @@ import { ownDeviceKeyPackageUsable } from "../devices/own-conversation-key";
 import type { ConversationKind } from "../chat/conversation-kind";
 import type { Wasm } from "../wasm";
 import { DiscoveryClient, DiscoveryNetworkError } from "../discovery/client";
+import { boundX25519 } from "../discovery/x25519-binding";
 import { base64Decode, base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { mintedLinkFor, rememberMintedLink } from "./minted-links";
 import { recordGroupLink, registeredLinks, revokeRegisteredLink } from "../devices/sync/link-register";
@@ -2005,7 +2006,10 @@ export class ContactsClient {
     });
     if (target === "as-supplied") return supplied;
     if (target === "current") {
-      return { signaturePubkey: published, x25519Pubkey: base64Decode(bundle.x25519_pubkey) };
+      // Security review 2026-11-21: never seal to an unbound X25519 key.
+      const x25519Pubkey = await boundX25519(bundle);
+      if (x25519Pubkey === null) throw ContactsError.noIdentityBundle(accountId);
+      return { signaturePubkey: published, x25519Pubkey };
     }
     throw new SupersessionRefused(
       "key-mismatch",
@@ -2067,10 +2071,13 @@ export class ContactsClient {
       const bundle = await this.discovery.identityFetch(recipientAccountId);
       if (bundle === null) return "skipped";
       await this.verifyBundleAccountKey(recipientAccountId, bundle);
+      // Security review 2026-11-21: nothing is sealed to an unbound key.
+      const recipientX25519 = await boundX25519(bundle);
+      if (recipientX25519 === null) return "skipped";
       await this.composeAndPublishContactRequest(
         identity,
         base64Decode(bundle.signature_pubkey),
-        base64Decode(bundle.x25519_pubkey),
+        recipientX25519,
         introMessage,
       );
       return "done";
@@ -2174,6 +2181,10 @@ export class ContactsClient {
       log,
     });
     if (verdict.kind !== "accepted") return verdict;
+    // Security review 2026-11-21: the X25519 key the re-pin writes is the
+    // one contacts are later sealed to, so it must be bound to the new
+    // signature key. An unbound one refuses the reset; nothing is written.
+    if ((await boundX25519(bundle)) === null) return { kind: "refused", why: "unconfirmed" };
     const heldConversationKey = readVerifiedBinding(accountIdB64)?.conversationKeyB64;
     const written = acceptReset({
       accountIdB64,
@@ -2679,7 +2690,10 @@ export class ContactsClient {
     // accepted inside the gate, silently.
     await this.verifyBundleAccountKey(recipientAccountId, bundle);
     const recipientSignaturePub = base64Decode(bundle.signature_pubkey);
-    const recipientX25519Pub = base64Decode(bundle.x25519_pubkey);
+    // Security review 2026-11-21: the X25519 key is used only when its
+    // binding to the signature key verifies; otherwise nothing is sealed.
+    const recipientX25519Pub = await boundX25519(bundle);
+    if (recipientX25519Pub === null) throw ContactsError.noIdentityBundle(recipientAccountId);
     this.reportUsernameResolved(recipientSignaturePub, lookup.normalisedUsername);
 
     // ADR-0078 - a person in Everyone: their public record's mailbox binding
@@ -2791,10 +2805,13 @@ export class ContactsClient {
     // The same identity gate as a request to a bundle: an unproven changed
     // key is refused, a proven successor's keys are used.
     await this.refuseContactRequestToUnverifiedKeys(recipientAccountId, recipientSignaturePubkey);
+    // Security review 2026-11-21: never seal to an unbound X25519 key.
+    const boundX25519Pub = await boundX25519(bundle);
+    if (boundX25519Pub === null) throw ContactsError.noIdentityBundle(recipientAccountId);
     const target = await this.currentRequestTarget(
       recipientAccountId,
       recipientSignaturePubkey,
-      base64Decode(bundle.x25519_pubkey),
+      boundX25519Pub,
     );
     const wire = await this.composeContactRequestWire(
       identity,

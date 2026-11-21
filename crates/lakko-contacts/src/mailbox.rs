@@ -141,7 +141,7 @@ pub const MAILBOX_MAX_BODY_LEN: usize = MAILBOX_MAX_BUCKET - MAILBOX_PLAINTEXT_H
 pub const MAILBOX_MIN_ROW_LEN: usize = MAILBOX_MIN_BUCKET + MAILBOX_ROW_OVERHEAD;
 
 /// The HKDF labels of the mailbox seal (distinct from the contact request's).
-const MAILBOX_SEAL_LABELS: SealLabels = SealLabels {
+pub(crate) const MAILBOX_SEAL_LABELS: SealLabels = SealLabels {
     key: b"lakko/mailbox-envelope/v1/key",
     nonce: b"lakko/mailbox-envelope/v1/nonce",
 };

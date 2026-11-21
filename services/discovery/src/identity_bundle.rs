@@ -82,6 +82,7 @@ type IdentityBundleRow = (
     u64,
     Option<Vec<u8>>,
     Option<Vec<u8>>,
+    Option<Vec<u8>>,
 );
 
 fn decode_fixed<const N: usize>(
@@ -275,6 +276,32 @@ pub(crate) struct UploadRequest {
     /// row holds on a same-key upload, and clears it on a key change.
     #[serde(default)]
     pub(crate) conversation_link: Option<String>,
+    /// Standard base64 of the 64-byte signature of `signature_pubkey` over
+    /// `x25519_pubkey` (`lakko_contacts::x25519_binding`, security review
+    /// 2026-11-21). Required: discovery VERIFIES it (both keys are public)
+    /// and refuses the upload with `400 {"error":"x25519-binding-invalid"}`
+    /// when it is absent or does not verify, so a client sealing to a served
+    /// X25519 key can check it belongs to the identity key it trusts.
+    #[serde(default)]
+    pub(crate) x25519_binding: Option<String>,
+}
+
+/// The refusal of an upload whose X25519 binding is absent or invalid.
+pub(crate) const CODE_X25519_BINDING_INVALID: &str = "x25519-binding-invalid";
+
+/// Decode and verify the required X25519 binding of an upload.
+fn verified_x25519_binding(
+    b64: Option<&str>,
+    signature_pubkey: &[u8; SIGNATURE_PUBKEY_LEN],
+    x25519_pubkey: &[u8; X25519_PUBKEY_LEN],
+) -> Result<[u8; lakko_contacts::X25519_BINDING_LEN], RouteError> {
+    let refused = || RouteError::Code(StatusCode::BAD_REQUEST, CODE_X25519_BINDING_INVALID);
+    let bytes = B64
+        .decode(b64.ok_or_else(refused)?)
+        .map_err(|_| refused())?;
+    lakko_contacts::verify_x25519_binding(&bytes, signature_pubkey, x25519_pubkey)
+        .map_err(|_| refused())?;
+    bytes.try_into().map_err(|_| refused())
 }
 
 #[derive(Serialize)]
@@ -338,6 +365,11 @@ async fn upload_decided(
     let signature_pubkey =
         decode_fixed::<SIGNATURE_PUBKEY_LEN>(&payload.signature_pubkey, "signature_pubkey")?;
     let x25519_pubkey = decode_fixed::<X25519_PUBKEY_LEN>(&payload.x25519_pubkey, "x25519_pubkey")?;
+    let x25519_binding = verified_x25519_binding(
+        payload.x25519_binding.as_deref(),
+        &signature_pubkey,
+        &x25519_pubkey,
+    )?;
 
     // G-4 (ADR-0016): decode the optional supersession proof (opaque to the
     // server). `None` PRESERVES any stored proof (the `COALESCE` below), so a
@@ -410,6 +442,7 @@ async fn upload_decided(
                 .as_ref()
                 .map(|(claims, bytes)| (claims.key_generation, bytes.as_slice())),
             conversation_link: conversation_link.as_deref(),
+            x25519_binding: Some(&x25519_binding),
         },
         leaf_auth.as_deref(),
         genesis_attest.as_deref(),
@@ -556,6 +589,11 @@ pub(crate) struct Evidence<'a> {
     /// ADR-0074 section 3.7: the opaque two-way conversation link. Stored, not
     /// judged: it decides nothing about the upload.
     pub(crate) conversation_link: Option<&'a [u8]>,
+    /// The identity key's signature over its X25519 key
+    /// (`lakko_contacts::x25519_binding`), verified by the route before
+    /// anything is stored; replaced with the X25519 key on every upload.
+    /// `None` only from tests that drive the store directly.
+    pub(crate) x25519_binding: Option<&'a [u8]>,
 }
 
 impl Evidence<'_> {
@@ -831,8 +869,8 @@ async fn try_apply_identity_once(
                 "INSERT INTO identity_bundles \
                     (account_id, signature_pubkey, x25519_pubkey, supersession_proof, \
                      leaf_auth, genesis_attest, key_generation, key_reset_attest, \
-                     conversation_link, account_target) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     conversation_link, account_target, x25519_binding) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(account_id)
             .bind(signature_pubkey)
@@ -845,6 +883,7 @@ async fn try_apply_identity_once(
             .bind(attested.map(|(_, bytes)| bytes))
             .bind(evidence.conversation_link)
             .bind(&account_target(signature_pubkey)[..])
+            .bind(evidence.x25519_binding)
             .execute(&mut *tx)
             .await?;
             if attested.is_some() {
@@ -936,6 +975,7 @@ async fn try_apply_identity_once(
                     signature_pubkey            = ?, \
                     account_target              = ?, \
                     x25519_pubkey               = ?, \
+                    x25519_binding              = ?, \
                     supersession_proof          = COALESCE(?, supersession_proof), \
                     leaf_auth                   = COALESCE(?, leaf_auth), \
                     genesis_attest              = COALESCE(?, genesis_attest), \
@@ -949,6 +989,7 @@ async fn try_apply_identity_once(
             .bind(signature_pubkey)
             .bind(&account_target(signature_pubkey)[..])
             .bind(x25519_pubkey)
+            .bind(evidence.x25519_binding)
             .bind(evidence.supersession_proof)
             .bind(leaf_auth)
             .bind(genesis_attest)
@@ -1379,6 +1420,14 @@ pub(crate) struct FetchResponse {
     /// pass-through; the peer verifies it against the key it pinned.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) conversation_link: Option<String>,
+    /// Standard base64 of the 64-byte X25519 binding the upload carried
+    /// (`lakko_contacts::x25519_binding`). A client verifies it against the
+    /// identity key it trusts before sealing anything to `x25519_pubkey`.
+    /// Omitted for a row stored before the binding was required (none exist
+    /// outside tests: no production deployment); a client treats an absent
+    /// binding as an unusable X25519 key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) x25519_binding: Option<String>,
 }
 
 /// `GET /discovery/identity/{account_id_b64url}` — fetch.
@@ -1413,7 +1462,7 @@ pub(crate) async fn fetch(
 
     let row: Option<IdentityBundleRow> = sqlx::query_as(
         "SELECT signature_pubkey, x25519_pubkey, supersession_proof, key_generation, \
-                key_reset_attest, conversation_link \
+                key_reset_attest, conversation_link, x25519_binding \
          FROM identity_bundles WHERE account_id = ?",
     )
     .bind(&bytes[..])
@@ -1427,10 +1476,11 @@ pub(crate) async fn fetch(
         )
     })?;
 
-    let (sig, x25519, proof, key_generation, key_reset_attest, conversation_link) = row.ok_or((
-        StatusCode::NOT_FOUND,
-        "identity bundle not found".to_string(),
-    ))?;
+    let (sig, x25519, proof, key_generation, key_reset_attest, conversation_link, x25519_binding) =
+        row.ok_or((
+            StatusCode::NOT_FOUND,
+            "identity bundle not found".to_string(),
+        ))?;
 
     if sig.len() != SIGNATURE_PUBKEY_LEN || x25519.len() != X25519_PUBKEY_LEN {
         // Schema enforces fixed lengths; a row that doesn't match
@@ -1457,6 +1507,7 @@ pub(crate) async fn fetch(
         key_reset_attest: key_reset_attest.map(|a| B64.encode(&a)),
         // The same opaque pass-through (ADR-0074 section 3.7).
         conversation_link: conversation_link.map(|l| B64.encode(&l)),
+        x25519_binding: x25519_binding.map(|b| B64.encode(&b)),
     }))
 }
 
@@ -1599,6 +1650,7 @@ mod tests {
             supersession_proof: None,
             key_reset_attest: None,
             conversation_link: link,
+            x25519_binding: None,
         };
 
         let Ok(url) = std::env::var("LAKKO_DISCOVERY_TEST_DATABASE_URL") else {
@@ -1666,6 +1718,7 @@ mod tests {
                 supersession_proof: None,
                 key_reset_attest: Some((2, &reset_att)),
                 conversation_link: None,
+                x25519_binding: None,
             },
             Some(&self_sig),
             None,
@@ -1749,6 +1802,7 @@ mod tests {
             supersession_proof: None,
             key_reset_attest: None,
             conversation_link: None,
+            x25519_binding: None,
         };
 
         // Read the stored genesis_attest back (nullable column -> Option).
@@ -1849,6 +1903,7 @@ mod tests {
                 supersession_proof: None,
                 key_reset_attest: Some((2, &reset_att)),
                 conversation_link: None,
+                x25519_binding: None,
             },
             Some(&self_sig),
             Some(&att2),

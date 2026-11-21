@@ -110,7 +110,9 @@
 //!   Malformed: startup fails.
 //! - `LAKKO_DISCOVERY_RETIRED_NAME_HOLD_SECS` — seconds a name an account
 //!   renamed away from stays unclaimable before the hourly pruner frees it
-//!   (ADR-0076 D1; default 2592000 = 30 days, chosen not measured).
+//!   (ADR-0076 D1; default 2592000 = 30 days, chosen not measured). Below
+//!   2419200 (28 days) the service refuses to start: the clients show a
+//!   username only within 21 days of confirming it (ADR-0098 section 4).
 //! - `LAKKO_DISCOVERY_MODERATION_BIND` — the internal moderation listener
 //!   (ADR-0099 step 5; default `127.0.0.1:8097`, loopback, never proxied).
 //! - `LAKKO_DISCOVERY_INTERNAL_SECRET` — standard base64 of at least 16

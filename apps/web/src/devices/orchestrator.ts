@@ -55,6 +55,7 @@ import { commitDeviceGroupChange } from "./device-group-commit-runtime";
 import { t } from "../l10n";
 import {
   pollForWelcome,
+  joinFirstWelcome,
   publishHistoryBundle,
   pollForHistoryBundle,
   type WelcomeOutcome,
@@ -338,12 +339,23 @@ export async function prepareJoinFlow(args: {
       }
       // Run the MLS join. The deterministic group_id check
       // inside wasm.DeviceGroup.joinFromWelcome rejects a
-      // misrouted Welcome before any state advance.
-      group = wasm.DeviceGroup.joinFromWelcome(
-        welcomeBytes,
-        identity,
-        args.accountIdBytes,
-      );
+      // misrouted Welcome before any state advance. A row that does not
+      // join (anyone who learned the rendezvous id can write one) is passed
+      // over and the next row read.
+      const joiner = identity;
+      const joinedAt =
+        opts === undefined
+          ? {
+              joined: wasm.DeviceGroup.joinFromWelcome(welcomeBytes, joiner, args.accountIdBytes),
+              welcomeCursor: 0,
+            }
+          : await joinFirstWelcome(
+              rendezvous,
+              { welcome: welcomeBytes, welcomeCursor: opts.welcomeCursor },
+              (bytes) => wasm.DeviceGroup.joinFromWelcome(bytes, joiner, args.accountIdBytes),
+            );
+      group = joinedAt.joined;
+      const welcomeCursor = joinedAt.welcomeCursor;
       // Persist the post-join snapshot so subsequent
       // launches can pick up the same DeviceGroup state via
       // `ensureDeviceGroup`.
@@ -375,12 +387,11 @@ export async function prepareJoinFlow(args: {
         const liveIdentity = identity;
         const historyTask = (async (): Promise<void> => {
           try {
-            const sealed = await pollForHistoryBundle(
-              rendezvous,
-              opts.welcomeCursor,
-            );
+            const secret = liveGroup.historyBundleSecret(liveIdentity);
+            const sealed = await pollForHistoryBundle(rendezvous, welcomeCursor, {
+              accept: historyBundleOpens(wasm, secret),
+            });
             if (sealed.kind === "received") {
-              const secret = liveGroup.historyBundleSecret(liveIdentity);
               const applied = await applyHistoryBundleToLog({
                 accountIdB64: args.accountIdB64,
                 deviceKey: args.deviceKey,
@@ -403,7 +414,7 @@ export async function prepareJoinFlow(args: {
               liveGroup,
               liveIdentity,
               rendezvous,
-              opts.welcomeCursor,
+              welcomeCursor,
             );
             if (bundle !== null) {
               // ADR-0074: the own predecessors first, under the device key.
@@ -438,7 +449,7 @@ export async function prepareJoinFlow(args: {
                 exporter: liveGroup,
                 identity: liveIdentity,
                 rendezvous,
-                welcomeCursor: opts.welcomeCursor,
+                welcomeCursor,
                 expectedAccountIdBytes: args.accountIdBytes,
               })
             : Promise.resolve<JoinRecoveryOutcome | null>(null);
@@ -575,6 +586,22 @@ async function storeOwnPredecessors(
   }
 }
 
+/** Whether a rendezvous row is the history bundle: it opens under the
+ *  pairing's history secret. A row that does not is passed over. */
+function historyBundleOpens(
+  wasm: Awaited<ReturnType<typeof loadWasm>>,
+  secret: Uint8Array,
+): (sealedBytes: Uint8Array) => boolean {
+  return (sealedBytes) => {
+    try {
+      wasm.openHistoryBundleStructured(secret, sealedBytes).free();
+      return true;
+    } catch {
+      return false;
+    }
+  };
+}
+
 /** Joiner side of the ADR-0050 state bundle: poll the tagged row, open it
  *  under the per-pairing exporter key, decode. `null` when the scanner sent
  *  none within the window or the bytes did not decode. */
@@ -584,8 +611,6 @@ async function receiveStateBundle(
   rendezvous: Uint8Array,
   welcomeCursor: number,
 ): Promise<StateBundle | null> {
-  const outcome = await pollForStateBundle(rendezvous, welcomeCursor);
-  if (outcome.kind !== "received") return null;
   const wasm = await loadWasm();
   let key: Uint8Array | null = null;
   try {
@@ -595,7 +620,21 @@ async function receiveStateBundle(
       rendezvous,
       STATE_EXPORTER_KEY_LENGTH,
     );
-    return decodeStateBundle(wasm.openWithKey(key, outcome.sealed));
+    const liveKey = key;
+    const open = (sealed: Uint8Array): StateBundle | null => {
+      try {
+        return decodeStateBundle(wasm.openWithKey(liveKey, sealed));
+      } catch {
+        return null;
+      }
+    };
+    // Anyone who learned the rendezvous id can write a tagged row: one that
+    // does not open and decode is passed over.
+    const outcome = await pollForStateBundle(rendezvous, welcomeCursor, {
+      accept: (sealed) => open(sealed) !== null,
+    });
+    if (outcome.kind !== "received") return null;
+    return open(outcome.sealed);
   } finally {
     key?.fill(0);
   }
@@ -640,9 +679,14 @@ export async function runJoinerRecovery(args: {
     readonly session: SessionPair;
   }>;
 }): Promise<JoinRecoveryOutcome | null> {
+  const wasm = await loadWasm();
   let outcome;
   try {
-    outcome = await pollForRecoveryPayload(args.rendezvous, args.welcomeCursor);
+    outcome = await pollForRecoveryPayload(args.rendezvous, args.welcomeCursor, {
+      // Anyone who learned the rendezvous id can write a tagged row: only a
+      // row that opens under this pairing's key is taken.
+      accept: (row) => recoveryRowOpens(wasm, args, row),
+    });
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn("recovery payload poll failed", err);
@@ -650,7 +694,6 @@ export async function runJoinerRecovery(args: {
   }
   if (outcome.kind !== "received") return null;
 
-  const wasm = await loadWasm();
   // The core reads the row: `undefined` is not a recovery row, a throw is a
   // recovery row of another version (v2) or an empty one. Either way no keys
   // are handed over.
@@ -719,6 +762,37 @@ export async function runJoinerRecovery(args: {
     key?.fill(0);
     plaintext?.fill(0);
     if (opened !== null) zeroOpenedRecoveryPayload(opened);
+  }
+}
+
+/** Whether a tagged recovery row opens under this pairing's key and
+ *  decodes; everything it opened is zeroed again. */
+function recoveryRowOpens(
+  wasm: Awaited<ReturnType<typeof loadWasm>>,
+  args: { readonly exporter: PairingExporter; readonly identity: WasmIdentity; readonly rendezvous: Uint8Array },
+  row: Uint8Array,
+): boolean {
+  let key: Uint8Array | null = null;
+  let plaintext: Uint8Array | null = null;
+  try {
+    const sealed = wasm.unwrapRecoveryRow(row);
+    if (sealed === undefined) return false;
+    key = args.exporter.exportSecret(
+      args.identity,
+      wasm.recoveryExporterLabel(),
+      args.rendezvous,
+      wasm.recoveryExporterKeyLen(),
+    );
+    plaintext = wasm.openWithKey(key, sealed);
+    zeroOpenedRecoveryPayload(decodeRecoveryPlaintext(wasm, plaintext));
+    return true;
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("recovery row passed over", refusalCode(err));
+    return false;
+  } finally {
+    key?.fill(0);
+    plaintext?.fill(0);
   }
 }
 
@@ -849,14 +923,22 @@ export async function prepareAnonymousJoinFlow(args: {
       // No account id yet: join the DeviceGroup Welcome as a plain group and
       // bind it below. ADR-0081 amendment — through the DeviceGroup entry
       // point: `Group.joinFromWelcome` refuses a Welcome with no role table.
-      const joined = wasm.DeviceGroup.joinWelcomeByName(welcomeBytes, liveIdentity);
+      // A row that does not join (anyone who learned the rendezvous id can
+      // write one) is passed over and the next row read.
+      const joinedAt = await joinFirstWelcome(
+        rendezvous,
+        { welcome: welcomeBytes, welcomeCursor: opts.welcomeCursor },
+        (bytes) => wasm.DeviceGroup.joinWelcomeByName(bytes, liveIdentity),
+      );
+      const joined = joinedAt.joined;
+      const welcomeCursor = joinedAt.welcomeCursor;
       let recovery: JoinRecoveryOutcome | null;
       try {
         recovery = await runJoinerRecovery({
           exporter: joined,
           identity: liveIdentity,
           rendezvous,
-          welcomeCursor: opts.welcomeCursor,
+          welcomeCursor,
           expectedAccountIdBytes: args.known?.accountIdBytes ?? null,
         });
         // No row, or no account learned: the restore cannot land (the
@@ -884,12 +966,14 @@ export async function prepareAnonymousJoinFlow(args: {
       const liveGroup = group;
       const historyTask = (async (): Promise<void> => {
         try {
-          const sealed = await pollForHistoryBundle(rendezvous, opts.welcomeCursor);
+          const secret = liveGroup.historyBundleSecret(liveIdentity);
+          const sealed = await pollForHistoryBundle(rendezvous, welcomeCursor, {
+            accept: historyBundleOpens(wasm, secret),
+          });
           if (sealed.kind === "received") {
-            pendingHistory = {
-              secret: liveGroup.historyBundleSecret(liveIdentity),
-              sealedBytes: sealed.sealedBytes,
-            };
+            pendingHistory = { secret, sealedBytes: sealed.sealedBytes };
+          } else {
+            secret.fill(0);
           }
         } catch (err) {
           // eslint-disable-next-line no-console
@@ -902,7 +986,7 @@ export async function prepareAnonymousJoinFlow(args: {
             liveGroup,
             liveIdentity,
             rendezvous,
-            opts.welcomeCursor,
+            welcomeCursor,
           );
         } catch (err) {
           // eslint-disable-next-line no-console

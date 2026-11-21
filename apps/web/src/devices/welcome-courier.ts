@@ -98,6 +98,8 @@ export async function pollForWelcome(
     ds?: DsClient;
     signal?: AbortSignal;
     timeoutMs?: number;
+    /** Read past this row id (a row already taken that did not join). */
+    after?: number;
   } = {},
 ): Promise<WelcomeOutcome> {
   const ds = options.ds ?? new DsClient();
@@ -109,7 +111,7 @@ export async function pollForWelcome(
   // id > 0 are the Welcome (the first publish lands as id=1).
   // `after=0` is the canonical "give me everything from the
   // beginning of this slot" cursor for the DS mailbox shape.
-  let cursor = 0;
+  let cursor = options.after ?? 0;
 
   while (true) {
     if (signal?.aborted) return { kind: "cancelled" };
@@ -167,6 +169,44 @@ export async function pollForWelcome(
   }
 }
 
+/**
+ * Join from `first`; when it does not join (a row someone else wrote to the
+ * rendezvous, which anyone who learned its id can), read on past it for the
+ * next row and try that, until one joins or `timeoutMs` passes. Throws the
+ * first row's refusal when none joins. Returns what `join` returned and the
+ * row id of the Welcome it joined from (the cursor the bundle polls start
+ * at).
+ */
+export async function joinFirstWelcome<T>(
+  rendezvousPseudonym: Uint8Array,
+  first: { readonly welcome: Uint8Array; readonly welcomeCursor: number },
+  join: (welcome: Uint8Array) => T,
+  options: { ds?: DsClient; timeoutMs?: number } = {},
+): Promise<{ readonly joined: T; readonly welcomeCursor: number }> {
+  try {
+    return { joined: join(first.welcome), welcomeCursor: first.welcomeCursor };
+  } catch (firstErr) {
+    const deadline = performance.now() + (options.timeoutMs ?? DEFAULT_POLL_TIMEOUT_MS);
+    let cursor = first.welcomeCursor;
+    for (;;) {
+      const remainingMs = deadline - performance.now();
+      if (remainingMs <= 0) throw firstErr;
+      const next = await pollForWelcome(rendezvousPseudonym, {
+        ...(options.ds === undefined ? {} : { ds: options.ds }),
+        after: cursor,
+        timeoutMs: remainingMs,
+      });
+      if (next.kind !== "received") throw firstErr;
+      cursor = next.welcomeCursor;
+      try {
+        return { joined: join(next.welcome), welcomeCursor: cursor };
+      } catch {
+        /* passed over: read on */
+      }
+    }
+  }
+}
+
 // ---------------------------------------------------------------
 // Phase 2a3d8-ui — history-bundle courier piggybacks the
 // rendezvous mailbox. After the Welcome lands on slot id=1, the
@@ -220,6 +260,9 @@ export async function pollForHistoryBundle(
     ds?: DsClient;
     signal?: AbortSignal;
     timeoutMs?: number;
+    /** Whether a row is the bundle (it opens); a row that does not is
+     *  passed over and the poll reads on. Absent: the first untagged row. */
+    accept?: (sealedBytes: Uint8Array) => boolean;
   } = {},
 ): Promise<HistoryBundleOutcome> {
   const ds = options.ds ?? new DsClient();
@@ -256,6 +299,12 @@ export async function pollForHistoryBundle(
       // FIFO order relative to the bundle). It is NOT the history
       // bundle — skip it and keep polling.
       if (isRecoveryPayloadRow(first.payload) || isStateRow(first.payload)) {
+        cursor = first.id;
+        continue;
+      }
+      // Anyone who learned the rendezvous id can write a row: one that does
+      // not open is passed over.
+      if (options.accept !== undefined && !options.accept(first.payload)) {
         cursor = first.id;
         continue;
       }

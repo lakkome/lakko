@@ -9,9 +9,9 @@
 
 use lakko_contacts::account_deleted::{
     account_deletion_status as rust_status, compose_account_deleted as rust_compose,
-    decode_account_deleted as rust_decode, directory_check_due as rust_check_due,
-    may_show_username as rust_may_show_username, verify_account_deleted as rust_verify,
-    AccountDeletedError, AccountStatus as RustAccountStatus,
+    decode_account_deleted as rust_decode, deletion_effects as rust_deletion_effects,
+    directory_check_due as rust_check_due, may_show_username as rust_may_show_username,
+    verify_account_deleted as rust_verify, AccountDeletedError, AccountStatus as RustAccountStatus,
     DirectoryAnswer as RustDirectoryAnswer, ACCOUNT_DELETED_ENVELOPE_LEN,
     DIRECTORY_RECHECK_AFTER_MS, DIRECTORY_RETRY_AFTER_MS, USERNAME_CONFIRMATION_VALID_MS,
 };
@@ -129,9 +129,41 @@ impl From<FfiAccountStatus> for RustAccountStatus {
     }
 }
 
-/// The person's status: a verified statement is final; otherwise the latest
-/// recorded directory answer decides (`absent` = deleted). No answer is
-/// `active`.
+/// What a client does about a person who may have deleted their account
+/// (ADR-0098, security review 2026-11-21).
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct FfiDeletionEffects {
+    /// Show "Deleted account" in place of the person's name.
+    pub show_deleted: bool,
+    /// An owner's or admin's device proposes the removal of the person's
+    /// leaves from the groups it administers.
+    pub remove_from_groups: bool,
+    /// Messages held for the person that were never sent may be dropped.
+    pub drop_held_sends: bool,
+}
+
+/// The one rule for what a deletion does on this device: show "Deleted
+/// account" on a verified statement or an `absent` answer, unless the latest
+/// answer is `samePerson`; remove the person from groups and drop held sends
+/// only on a verified statement AND an `absent` answer. Clear the recorded
+/// answer when recording a statement, so a `samePerson` that counts is one
+/// received after it.
+#[uniffi::export]
+#[must_use]
+pub fn deletion_effects(
+    statement_verified: bool,
+    last_directory_answer: Option<FfiDirectoryAnswer>,
+) -> FfiDeletionEffects {
+    let e = rust_deletion_effects(statement_verified, last_directory_answer.map(Into::into));
+    FfiDeletionEffects {
+        show_deleted: e.show_deleted,
+        remove_from_groups: e.remove_from_groups,
+        drop_held_sends: e.drop_held_sends,
+    }
+}
+
+/// The person's displayed status: `deletionEffects(...).showDeleted`.
 #[uniffi::export]
 #[must_use]
 pub fn account_deletion_status(
@@ -157,9 +189,11 @@ pub fn may_show_username(
 }
 
 /// Whether to ask the directory about this person now (only for a person on
-/// screen). Never after a verified statement; never within
-/// `directoryRetryAfterMs` of the last attempt; otherwise due when there is no
-/// answer or the last one is `directoryRecheckAfterMs` old.
+/// screen). Never within `directoryRetryAfterMs` of the last attempt;
+/// otherwise due when there is no answer or the last one is
+/// `directoryRecheckAfterMs` old. A verified statement no longer stops the
+/// checks (its destructive effects need an `absent` answer too);
+/// `statementVerified` decides nothing.
 #[uniffi::export]
 #[must_use]
 pub fn directory_check_due(
@@ -280,7 +314,24 @@ mod tests {
             now
         ));
         assert!(directory_check_due(false, None, None, now));
-        assert!(!directory_check_due(true, None, None, now));
+        assert!(directory_check_due(true, None, None, now));
+        assert_eq!(
+            deletion_effects(true, Some(FfiDirectoryAnswer::Absent)),
+            FfiDeletionEffects {
+                show_deleted: true,
+                remove_from_groups: true,
+                drop_held_sends: true
+            }
+        );
+        assert_eq!(
+            deletion_effects(true, None),
+            FfiDeletionEffects {
+                show_deleted: true,
+                remove_from_groups: false,
+                drop_held_sends: false
+            }
+        );
+        assert!(!deletion_effects(true, Some(FfiDirectoryAnswer::SamePerson)).show_deleted);
         assert!(!directory_check_due(false, Some(now), None, now));
         assert!(directory_retry_after_ms() < directory_recheck_after_ms());
     }

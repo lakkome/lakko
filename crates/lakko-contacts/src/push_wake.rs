@@ -119,7 +119,7 @@ const _: () = assert!(
 const _: () = assert!(PUSH_WAKE_HEADER_LEN == 312);
 
 /// The HKDF labels of the wake seal (distinct from every other sealed box).
-const PUSH_WAKE_SEAL_LABELS: SealLabels = SealLabels {
+pub(crate) const PUSH_WAKE_SEAL_LABELS: SealLabels = SealLabels {
     key: b"lakko/push-wake/v1/key",
     nonce: b"lakko/push-wake/v1/nonce",
 };

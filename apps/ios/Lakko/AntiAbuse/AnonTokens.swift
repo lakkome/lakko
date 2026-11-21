@@ -51,6 +51,10 @@ public enum AnonTokenContext: String, CaseIterable, Sendable {
     case channelComment = "channel-comment"
     /// ADR-0099 section 2: one report, `POST /moderation/report`.
     case report = "report"
+    /// One write to a rendezvous, `POST /ds/rendezvous/{hex}/messages`: the
+    /// pairing Welcome and history bundle, the recovery payload, the state
+    /// bundle, a rejoin presence note, a conversation re-entry gap history.
+    case rendezvousWrite = "rendezvous-write"
 
     /// Tokens a context keeps on hand: about a day of use plus a reserve, so
     /// a spend finds a token without waiting for an issuance (ADR-0078
@@ -75,6 +79,9 @@ public enum AnonTokenContext: String, CaseIterable, Sendable {
         case .channelComment: return 4
         // ADR-0099 section 2. Chosen, not measured.
         case .report: return 2
+        // A rendezvous write: the same number as a mailbox write. Chosen,
+        // not measured; the same on web and Android.
+        case .rendezvousWrite: return 4
         // ADR-0078 section 2: a join, a reconnect, the TURN credential of a
         // one-to-one call. Chosen, not measured.
         case .callJoin: return 4

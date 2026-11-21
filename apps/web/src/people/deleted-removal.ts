@@ -6,8 +6,10 @@
  * account's leaves from one group, and which leaf it names (the remove flow
  * removes every leaf of that account, ADR-0050).
  *
- * Only a verified statement leads here, never a directory answer: a directory
- * must not be able to make admins remove a live member. Pure.
+ * Reached only when the core's `deletionEffects` says `removeFromGroups`: a
+ * verified statement AND an `absent` directory answer received after it
+ * (security review 2026-11-21). Neither a directory nor a statement alone
+ * makes admins remove a member. Pure.
  */
 
 /** What the plan reads. */

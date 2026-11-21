@@ -134,6 +134,7 @@ pub mod conversation_reentry;
 pub mod device_card;
 pub mod envelope;
 pub mod error;
+pub mod gap_history;
 pub mod group_closed;
 pub mod group_contact_request;
 pub mod group_invite;
@@ -175,13 +176,15 @@ pub mod safety;
 pub mod shared_channels;
 pub mod username;
 pub mod visibility;
+pub mod x25519_binding;
 
 pub use account_deleted::{
-    account_deletion_status, compose_account_deleted, decode_account_deleted, directory_check_due,
-    may_show_username, try_unwrap_account_deleted, verify_account_deleted, AccountDeleted,
-    AccountDeletedError, AccountStatus, DirectoryAnswer, ACCOUNT_DELETED_ENVELOPE_DOMAIN_V1,
-    ACCOUNT_DELETED_ENVELOPE_LEN, ACCOUNT_DELETED_MAX_GROUP_ID_LEN, ACCOUNT_DELETED_VERSION_V1,
-    DIRECTORY_RECHECK_AFTER_MS, DIRECTORY_RETRY_AFTER_MS, USERNAME_CONFIRMATION_VALID_MS,
+    account_deletion_status, compose_account_deleted, decode_account_deleted, deletion_effects,
+    directory_check_due, may_show_username, try_unwrap_account_deleted, verify_account_deleted,
+    AccountDeleted, AccountDeletedError, AccountStatus, DeletionEffects, DirectoryAnswer,
+    ACCOUNT_DELETED_ENVELOPE_DOMAIN_V1, ACCOUNT_DELETED_ENVELOPE_LEN,
+    ACCOUNT_DELETED_MAX_GROUP_ID_LEN, ACCOUNT_DELETED_VERSION_V1, DIRECTORY_RECHECK_AFTER_MS,
+    DIRECTORY_RETRY_AFTER_MS, USERNAME_CONFIRMATION_VALID_MS,
 };
 pub use ack::{compose_ack, decode_and_verify_ack, ContactAck};
 pub use admission_seed::{
@@ -265,7 +268,8 @@ pub use conversation_reentry::{
     seal_reentry_knock, try_unwrap_conversation_reentry, ConversationReentry,
     ConversationReentryError, CONVERSATION_REENTRY_ENVELOPE_DOMAIN_V1,
     CONVERSATION_REENTRY_ENVELOPE_MAX_LEN, CONVERSATION_REENTRY_ENVELOPE_MIN_LEN,
-    CONVERSATION_REENTRY_MAX_KEY_PACKAGE_LEN,
+    CONVERSATION_REENTRY_GAP_KEY_LEN, CONVERSATION_REENTRY_MAX_KEY_PACKAGE_LEN,
+    CONVERSATION_REENTRY_VERSION_V2,
 };
 pub use device_card::{
     compose_device_card, decode_device_card, device_card_is_newer, try_unwrap_device_card,
@@ -275,6 +279,11 @@ pub use device_card::{
     DEVICE_CARD_MODEL_MAX_BYTES, DEVICE_CARD_OS_MAX_BYTES, DEVICE_CARD_VERSION_V1,
 };
 pub use error::{ContactError, Result};
+pub use gap_history::{
+    gap_history_rendezvous, gap_history_start, open_gap_history, seal_gap_history, GapHistoryError,
+    GapKey, OpenedGapHistory, GAP_HISTORY_MAX_BUNDLE_LEN, GAP_HISTORY_MAX_SEALED_LEN,
+    GAP_HISTORY_OVERHEAD, GAP_HISTORY_VERSION_V2,
+};
 pub use group_closed::{
     compose_group_closed, decode_group_closed, group_closed_is_newer, try_unwrap_group_closed,
     GroupClosed, GroupClosedError, GROUP_CLOSED_ENVELOPE_DOMAIN_V1, GROUP_CLOSED_ENVELOPE_MAX_LEN,
@@ -492,6 +501,10 @@ pub use visibility::{
     MAX_CHOSEN_CONTACTS, MAX_CHOSEN_SCOPES, MAX_REACH_STATE_ENTRIES, MAX_REACH_STATE_ENVELOPE_LEN,
     MAX_SCOPE_ID_LEN, MAX_VISIBILITY_ENVELOPE_LEN, REACH_STATE_ENVELOPE_DOMAIN_V1,
     VISIBILITY_ENVELOPE_DOMAIN_V1,
+};
+pub use x25519_binding::{
+    sign_x25519_binding, verify_x25519_binding, X25519BindingError, X25519_BINDING_DOMAIN,
+    X25519_BINDING_LEN,
 };
 
 /// Entry points for the fuzz harnesses in `crates/lakko-contacts/fuzz`.
@@ -781,6 +794,25 @@ pub mod fuzz_api {
             Ok(crate::incoming_envelope::IncomingEnvelope::ConversationReentry(r)) if r == request
         );
         Some(ok && dispatched)
+    }
+
+    /// Open `bytes` as a sealed gap history (ADR-0091 section 7) under a
+    /// fixed gap secret and conversation: never accepted, since a fuzzer
+    /// cannot sign and seal to that key; the signed-plaintext parser behind
+    /// the box accepts nothing a fuzzer writes; and a bundle this crate signs
+    /// and seals to that key opens back to itself and its signer, with the
+    /// signer key nowhere in the clear. `true` when all hold.
+    #[must_use]
+    pub fn gap_history_open(bytes: &[u8]) -> bool {
+        crate::gap_history::fuzz_open(bytes)
+    }
+
+    /// Verify `bytes` as an account X25519 binding: nothing verifies under
+    /// a fixed key the fuzzer does not hold, and a binding this crate signs
+    /// verifies. `true` when both hold.
+    #[must_use]
+    pub fn x25519_binding_verify(bytes: &[u8]) -> bool {
+        crate::x25519_binding::fuzz_verify(bytes)
     }
 
     /// Decode `bytes` as a knock-key envelope (ADR-0091 phase 2, route 3)

@@ -46,7 +46,7 @@ final class UsernameDirectoryTests: XCTestCase {
         func publishIdentityBundle(
             accountId: Data,
             signaturePubkey: Data,
-            x25519Pubkey: Data,
+            x25519Pubkey: Data, x25519Binding: Data,
             leafAuth: Data?,
             genesisAttest: Data?,
             keyResetAttest: Data?,

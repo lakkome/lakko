@@ -122,17 +122,24 @@ public object WelcomeCourier {
      * Throws on transport / server failures (404 on a fresh
      * mailbox is treated as "no rows yet, keep polling" — not
      * an error; same with network blips).
+     *
+     * A row [accepts] says no to (anyone who learned the rendezvous
+     * id can write to it) is passed over and the read goes on from
+     * the next row; a throw from [accepts] counts as no. The
+     * joining device passes [welcomeOpensFor].
      */
     public suspend fun pollForWelcome(
         rendezvousPseudonym: ByteArray,
         timeoutMillis: Long = DEFAULT_TIMEOUT_MS,
         ds: DsClient = DsClient(),
+        afterCursor: Long = 0L,
+        accepts: suspend (ByteArray) -> Boolean = { true },
     ): WelcomeOutcome = ds.use { client ->
         val deadline = System.nanoTime() + timeoutMillis * 1_000_000L
         // `after=0` is the canonical "give me everything from
         // the beginning of this slot" cursor. The slot is fresh
         // per pairing, so the first published id is 1.
-        var cursor = 0L
+        var cursor = afterCursor
 
         while (true) {
             if (!currentCoroutineContext().isActive) {
@@ -167,6 +174,11 @@ public object WelcomeCourier {
             }
             val first = result.messages.firstOrNull()
             if (first != null) {
+                if (!rowAccepted(first.payload, accepts)) {
+                    // Not a Welcome this device can open: pass over it.
+                    cursor = maxOf(cursor, first.id)
+                    continue
+                }
                 return@use WelcomeOutcome.Received(
                     welcomeBytes = first.payload,
                     welcomeCursor = first.id,
@@ -213,12 +225,17 @@ public object WelcomeCourier {
      * timeout (default 10 s) — the scanner side either
      * publishes within that window or never (no prior history
      * to send).
+     *
+     * A row [accepts] says no to (the bundle does not open under the
+     * joined group's history secret) is passed over like the recovery
+     * and state rows; a throw from [accepts] counts as no.
      */
     public suspend fun pollForHistoryBundle(
         rendezvousPseudonym: ByteArray,
         welcomeCursor: Long,
         timeoutMillis: Long = HISTORY_BUNDLE_TIMEOUT_MS,
         ds: DsClient = DsClient(),
+        accepts: suspend (ByteArray) -> Boolean = { true },
     ): HistoryBundleOutcome = ds.use { client ->
         val deadline = System.nanoTime() + timeoutMillis * 1_000_000L
         var cursor = welcomeCursor
@@ -257,9 +274,10 @@ public object WelcomeCourier {
                 // keep polling. Mirror of the web's
                 // `welcome-courier.ts` skip.
                 if (RecoveryRow.isRecoveryRow(first.payload) ||
-                    StateBundle.isStateRow(first.payload)
+                    StateBundle.isStateRow(first.payload) ||
+                    !rowAccepted(first.payload, accepts)
                 ) {
-                    cursor = first.id
+                    cursor = maxOf(cursor, first.id)
                     continue
                 }
                 return@use HistoryBundleOutcome.Received(first.payload)
@@ -269,4 +287,33 @@ public object WelcomeCourier {
         @Suppress("UNREACHABLE_CODE")
         HistoryBundleOutcome.Timeout
     }
+
+    /** Whether [accepts] takes [row]; a throw (other than a cancellation)
+     *  is a no. */
+    internal suspend fun rowAccepted(row: ByteArray, accepts: suspend (ByteArray) -> Boolean): Boolean =
+        try {
+            accepts(row)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            false
+        }
+
+    /**
+     * Whether [welcome] is a Welcome sealed to a KeyPackage [identity]
+     * holds: it is staged (decrypted) with `peekWelcomeFounder`, which
+     * writes nothing, so the real join of the same bytes still works. A
+     * sender whose device binding does not verify still staged: the join
+     * decides that case. Anything else (not a Welcome, not for this device)
+     * is `false`.
+     */
+    public fun welcomeOpensFor(welcome: ByteArray, identity: uniffi.lakko_ffi_uniffi.Identity): Boolean =
+        try {
+            uniffi.lakko_ffi_uniffi.peekWelcomeFounder(welcome, identity)
+            true
+        } catch (_: uniffi.lakko_ffi_uniffi.FfiException.MembershipDeviceBindingInvalid) {
+            true
+        } catch (_: Throwable) {
+            false
+        }
 }

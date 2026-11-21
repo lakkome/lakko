@@ -169,6 +169,7 @@ import {
 } from "./publisher-app-messages";
 import { accountIdB64OfKey } from "../contacts/local-store";
 import { DiscoveryClient } from "../discovery/client";
+import { boundX25519With } from "../discovery/x25519-binding";
 import { sessionTokens } from "../auth/session-token-provider";
 import { useProfiles } from "../profile/ProfileContext";
 
@@ -660,8 +661,10 @@ async function sendAdmissionSeeds(wasm: Wasm, identity: WasmIdentity, idHex: str
     if (versions.length === 0 || p.accountIdHex === "") continue;
     const bundle = await discovery.identityFetch(hexToBytes(p.accountIdHex)).catch(() => null);
     if (bundle === null || bundle.signature_pubkey !== p.accountKeyB64) continue;
-    const x = b64ToBytes(bundle.x25519_pubkey);
-    if (x.length !== 32) continue;
+    // Security review 2026-11-21: only an X25519 key bound to the account
+    // key is sealed to; an unbound one is retried next pass.
+    const x = boundX25519With((b, e, k) => wasm.verifyX25519Binding(b, e, k), bundle);
+    if (x === null) continue;
     await sendSeedsTo(wasm, identity, idHex, p, x, seedsToSend(channelsActions.accessOf(idHex), p), (seedId) =>
       channelsActions.updateAccessDurable(idHex, (r) => ({
         ...r,
@@ -741,8 +744,10 @@ async function sendReadKeys(wasm: Wasm, identity: WasmIdentity, idHex: string): 
   for (const p of pending) {
     const bundle = await discovery.identityFetch(hexToBytes(p.accountIdHex)).catch(() => null);
     if (bundle === null || bundle.signature_pubkey !== p.accountKeyB64) continue;
-    const x = b64ToBytes(bundle.x25519_pubkey);
-    if (x.length !== 32) continue;
+    // Security review 2026-11-21: only an X25519 key bound to the account
+    // key is sealed to; an unbound one is retried next pass.
+    const x = boundX25519With((b, e, k) => wasm.verifyX25519Binding(b, e, k), bundle);
+    if (x === null) continue;
     const ds = new DsClient();
     await withPublisherGroup(identity, idHex, async (group, device) => {
       const channelId = group.channelId();
@@ -823,7 +828,10 @@ async function sendEpochSeeds(wasm: Wasm, identity: WasmIdentity, idHex: string)
     } else {
       const bundle = await discovery.identityFetch(hexToBytes(p.accountIdHex)).catch(() => null);
       if (bundle === null || bundle.signature_pubkey !== p.accountKeyB64) continue;
-      x = b64ToBytes(bundle.x25519_pubkey);
+      // Security review 2026-11-21: never seal to an unbound X25519 key.
+      const bound = boundX25519With((b, e, k) => wasm.verifyX25519Binding(b, e, k), bundle);
+      if (bound === null) continue;
+      x = bound;
     }
     if (x.length !== 32) continue;
     const flat = new Uint8Array(32 * epochs.length);

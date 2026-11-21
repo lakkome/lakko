@@ -404,3 +404,17 @@ path = "fuzz_targets/account_deleted_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "gap_history_open"
+path = "fuzz_targets/gap_history_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "x25519_binding_verify"
+path = "fuzz_targets/x25519_binding_verify.rs"
+test = false
+doc = false
+bench = false

@@ -168,12 +168,15 @@ public object PairingOrchestrator {
                 selfRemovalProof = selfRemovalProof,
             )
 
-        /** Long-poll the rendezvous mailbox. */
+        /** Long-poll the rendezvous mailbox. A row that is not a Welcome
+         *  sealed to this session's KeyPackage is passed over (anyone who
+         *  learned the rendezvous id can write to it). */
         public suspend fun awaitWelcome(
             timeoutMillis: Long = WelcomeCourier.DEFAULT_TIMEOUT_MS,
         ): WelcomeCourier.WelcomeOutcome = WelcomeCourier.pollForWelcome(
             rendezvousPseudonym = rendezvous,
             timeoutMillis = timeoutMillis,
+            accepts = { WelcomeCourier.welcomeOpensFor(it, identity) },
         )
 
         /**
@@ -274,6 +277,8 @@ public object PairingOrchestrator {
                                 RecoveryRow.poll(
                                     rendezvousPseudonym = rendezvous,
                                     afterCursor = welcomeCursor,
+                                    // A row that does not open is passed over.
+                                    accepts = { sealed -> runCatching { openRecoveryRow(sealed).zero() }.isSuccess },
                                 )
                             } catch (cause: kotlinx.coroutines.CancellationException) {
                                 throw cause
@@ -390,10 +395,7 @@ public object PairingOrchestrator {
         /** Fetch (not apply) the history and state bundles. Best-effort. */
         private suspend fun fetchCatchUpBundles(joined: DeviceGroup, welcomeCursor: Long): FetchedBundles {
             val history = try {
-                val outcome = WelcomeCourier.pollForHistoryBundle(
-                    rendezvousPseudonym = rendezvous,
-                    welcomeCursor = welcomeCursor,
-                )
+                val outcome = pollHistoryBundleThatOpens(joined, welcomeCursor)
                 (outcome as? WelcomeCourier.HistoryBundleOutcome.Received)?.sealedBytes
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
@@ -403,17 +405,13 @@ public object PairingOrchestrator {
             }
             var key: ByteArray? = null
             val state = try {
-                val sealed = StateBundle.poll(rendezvous, welcomeCursor)
+                key = stateBundleKey(joined)
+                val stateKey = key
+                val sealed = StateBundle.poll(rendezvous, welcomeCursor) { StateBundle.opensUnder(stateKey, it, ::openWithKey) }
                 if (sealed == null) {
                     null
                 } else {
-                    key = joined.exportSecret(
-                        identity,
-                        StateBundle.EXPORTER_LABEL,
-                        rendezvous,
-                        StateBundle.EXPORTER_KEY_LENGTH.toUInt(),
-                    )
-                    StateBundle.decode(openWithKey(key, sealed))
+                    StateBundle.decode(openWithKey(stateKey, sealed))
                 }
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
@@ -475,10 +473,7 @@ public object PairingOrchestrator {
             welcomeCursor: Long,
         ) {
             try {
-                val outcome = WelcomeCourier.pollForHistoryBundle(
-                    rendezvousPseudonym = rendezvous,
-                    welcomeCursor = welcomeCursor,
-                )
+                val outcome = pollHistoryBundleThatOpens(joined, welcomeCursor)
                 if (outcome is WelcomeCourier.HistoryBundleOutcome.Received) {
                     val secret = joined.historyBundleSecret(identity)
                     val applied = HistoryBundleCodec.applyToMessageLog(
@@ -504,15 +499,11 @@ public object PairingOrchestrator {
 
             var key: ByteArray? = null
             try {
-                val sealed = StateBundle.poll(rendezvous, welcomeCursor)
+                key = stateBundleKey(joined)
+                val stateKey = key
+                val sealed = StateBundle.poll(rendezvous, welcomeCursor) { StateBundle.opensUnder(stateKey, it, ::openWithKey) }
                 if (sealed != null) {
-                    key = joined.exportSecret(
-                        identity,
-                        StateBundle.EXPORTER_LABEL,
-                        rendezvous,
-                        StateBundle.EXPORTER_KEY_LENGTH.toUInt(),
-                    )
-                    val bundle = StateBundle.decode(openWithKey(key, sealed))
+                    val bundle = StateBundle.decode(openWithKey(stateKey, sealed))
                     if (bundle != null) {
                         val applied = StateBundle.apply(context, accountIdB64, bundle)
                         android.util.Log.i(
@@ -534,6 +525,38 @@ public object PairingOrchestrator {
             }
         }
 
+        /** The history bundle past the Welcome, passing over rows that do
+         *  not open under [joined]'s history secret (anyone who learned the
+         *  rendezvous id can write to it). */
+        private suspend fun pollHistoryBundleThatOpens(
+            joined: DeviceGroup,
+            welcomeCursor: Long,
+        ): WelcomeCourier.HistoryBundleOutcome {
+            val secret = joined.historyBundleSecret(identity)
+            try {
+                return WelcomeCourier.pollForHistoryBundle(
+                    rendezvousPseudonym = rendezvous,
+                    welcomeCursor = welcomeCursor,
+                    accepts = { sealed ->
+                        runCatching {
+                            uniffi.lakko_ffi_uniffi.openHistoryBundleStructured(secret = secret, sealedBytes = sealed)
+                        }.isSuccess
+                    },
+                )
+            } finally {
+                secret.fill(0)
+            }
+        }
+
+        /** The key the state bundle is sealed under in [joined]. */
+        private fun stateBundleKey(joined: DeviceGroup): ByteArray =
+            joined.exportSecret(
+                identity,
+                StateBundle.EXPORTER_LABEL,
+                rendezvous,
+                StateBundle.EXPORTER_KEY_LENGTH.toUInt(),
+            )
+
         /**
          * Poll for the scanner's sealed recovery row, open it under
          * the shared post-join exporter key, redeem the grant.
@@ -551,6 +574,22 @@ public object PairingOrchestrator {
                 RecoveryRow.poll(
                     rendezvousPseudonym = rendezvous,
                     afterCursor = welcomeCursor,
+                    // A row that does not open under this group's key is
+                    // passed over.
+                    accepts = { sealed ->
+                        var key: ByteArray? = null
+                        try {
+                            key = joined.exportSecret(
+                                identity,
+                                RecoveryRow.Ffi.exporterLabel(),
+                                rendezvous,
+                                RecoveryRow.Ffi.exporterKeyLen(),
+                            )
+                            RecoveryRow.opensUnder(key, sealed, ::openWithKey)
+                        } finally {
+                            key?.fill(0)
+                        }
+                    },
                 )
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause

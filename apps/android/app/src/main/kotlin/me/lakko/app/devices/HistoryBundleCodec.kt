@@ -154,18 +154,19 @@ public object HistoryBundleCodec {
     /**
      * ADR-0091 phase 2 section 7 — the gap bundle a device that brings
      * another back sends: ONE conversation's rows from [fromMs] on (at most
-     * [MAX_BUNDLE_MESSAGES], the newest kept), sealed under [secret]. `null`
+     * [MAX_BUNDLE_MESSAGES], the newest kept), sealed by [seal] (the gap-key
+     * seal `sealGapHistoryStructured`, signed by this device's leaf). `null`
      * when there is nothing in the gap.
      */
     public fun buildGroupSince(
         context: Context,
         accountIdB64: String,
-        secret: ByteArray,
         groupIdHex: String,
         fromMs: Long,
         /** Walk 3, W3-R3 — this account's own person key in the conversation
          *  (base64): the author an outgoing row carries. */
         ownAuthorKeyB64: String? = null,
+        seal: (groups: List<StructuredHistoryGroup>, maxHlc: ULong) -> ByteArray,
     ): ByteArray? {
         val log = MessageLogStore.getLog(context, accountIdB64) ?: return null
         val slot = log.groups[groupIdHex] ?: log.groups[groupIdHex.lowercase()] ?: return null
@@ -198,10 +199,9 @@ public object HistoryBundleCodec {
             )
         }
         if (messages.isEmpty()) return null
-        return sealHistoryBundleStructured(
-            secret = secret,
-            groups = listOf(StructuredHistoryGroup(groupId = groupIdBytes, messages = messages, countCapped = capped)),
-            maxHlc = maxHlc,
+        return seal(
+            listOf(StructuredHistoryGroup(groupId = groupIdBytes, messages = messages, countCapped = capped)),
+            maxHlc,
         )
     }
 
@@ -216,8 +216,9 @@ public object HistoryBundleCodec {
     )
 
     /**
-     * ADR-0091 phase 2 section 7 — take in a gap bundle for [groupIdHex]
-     * only (any other group in it is ignored). [adapt] makes each row this
+     * ADR-0091 phase 2 section 7 — take in an opened gap bundle (its signer
+     * already accepted by the joined group) for [groupIdHex] only (any other
+     * group in it is ignored). [adapt] makes each row this
      * device's: given the decoded row (the SENDER's direction) and the
      * author the placeholder names (walk 3, W3-R3; base64, `null` when it
      * names none), it sets the author and the direction
@@ -226,12 +227,10 @@ public object HistoryBundleCodec {
     public fun applyReentryBundle(
         context: Context,
         accountIdB64: String,
-        secret: ByteArray,
-        sealedBytes: ByteArray,
+        opened: uniffi.lakko_ffi_uniffi.StructuredHistoryBundle,
         groupIdHex: String,
         adapt: (row: PersistedMessage, authorKeyB64: String?) -> PersistedMessage,
     ): ReentryBundleApplied {
-        val opened = openHistoryBundleStructured(secret = secret, sealedBytes = sealedBytes)
         val group = opened.groups.firstOrNull { bytesToHex(it.groupId).equals(groupIdHex, ignoreCase = true) }
             ?: return ReentryBundleApplied(0, emptyList(), false)
         val rows = group.messages.mapNotNull { m ->

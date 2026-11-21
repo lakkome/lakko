@@ -17,6 +17,7 @@ import { createSignal } from "solid-js";
 
 import { wasmSync } from "../wasm";
 import {
+  deletionEffectsOf,
   directoryCheckIsDue,
   isDeletedPerson,
   MEMORY_PERSON_STATUS_BACKEND,
@@ -27,6 +28,7 @@ import {
   withRemoval,
   withStatement,
   type AccountStatusRules,
+  type DeletionEffectsView,
   type DirectoryAnswerName,
   type PersonStatusBackend,
   type PersonStatusRecord,
@@ -91,11 +93,29 @@ export function isDeletedAccount(keyB64: string | null | undefined): boolean {
   const rec = store.get(keyB64);
   if (rec === undefined) return false;
   const r = rules();
-  if (r === null) return rec.statementVerified;
+  if (r === null) return false;
   try {
     return isDeletedPerson(r, rec);
   } catch {
-    return rec.statementVerified;
+    return false;
+  }
+}
+
+const NO_EFFECTS: DeletionEffectsView = { showDeleted: false, removeFromGroups: false, dropHeldSends: false };
+
+/** What a deletion does for this person now (the core's `deletionEffects`).
+ *  Nothing while the core is not loaded. Reactive. */
+export function deletionEffectsFor(keyB64: string | null | undefined): DeletionEffectsView {
+  if (keyB64 === null || keyB64 === undefined || keyB64.length === 0) return NO_EFFECTS;
+  version();
+  const rec = store.get(keyB64);
+  if (rec === undefined) return NO_EFFECTS;
+  const r = rules();
+  if (r === null) return NO_EFFECTS;
+  try {
+    return deletionEffectsOf(r, rec);
+  } catch {
+    return NO_EFFECTS;
   }
 }
 

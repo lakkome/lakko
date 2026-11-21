@@ -4263,6 +4263,7 @@ public final class AuthRepository: ObservableObject {
                     accountId: accountIdBytes,
                     signaturePubkey: derivedPubkey,
                     x25519Pubkey: identity.x25519PublicKey(),
+                    x25519Binding: signX25519Binding(accountIdentity: identity),
                     leafAuth: leafAuth,
                     genesisAttest: genesisAttest,
                     keyResetAttest: nil,
@@ -6906,6 +6907,7 @@ public final class AuthRepository: ObservableObject {
             accountId: accountId,
             signaturePubkey: identity.signaturePublicKey(),
             x25519Pubkey: identity.x25519PublicKey(),
+            x25519Binding: signX25519Binding(accountIdentity: identity),
             leafAuth: leafAuth,
             genesisAttest: genesisAttest,
             keyResetAttest: keyResetAttest,
@@ -7062,6 +7064,7 @@ public final class AuthRepository: ObservableObject {
                 accountId: accountId,
                 signaturePubkey: identity.signaturePublicKey(),
                 x25519Pubkey: identity.x25519PublicKey(),
+                x25519Binding: signX25519Binding(accountIdentity: identity),
                 leafAuth: leafAuth,
                 genesisAttest: genesisAttest
             )
@@ -8094,6 +8097,7 @@ extension AuthRepository {
             accountId: secrets.accountId,
             signaturePubkey: identity.signaturePublicKey(),
             x25519Pubkey: identity.x25519PublicKey(),
+            x25519Binding: signX25519Binding(accountIdentity: identity),
             supersessionProof: withProof ? supersessionProof : nil,
             keyResetAttest: attestation,
             conversationLink: link,

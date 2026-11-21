@@ -207,16 +207,19 @@ final class HistoryBundleMediaTests: XCTestCase {
             authored(3, "incoming", third),
             authored(4, "system", nil),
         ]
-        let sealed = try XCTUnwrap(HistoryBundleCodec.buildForGroup(
-            hex: groupHex, rows: rows, accountIdB64: "sender", secret: secret, ownKey: admitter))
-        let opened = try openHistoryBundleStructured(secret: secret, sealedBytes: sealed)
+        let readmitter = try Identity.fromSeed(seed: Data(repeating: 0x44, count: 32))
+        let gapKey = generateGapKey()
+        let groupId = Data(repeating: 0xCD, count: 32)
+        let sealed = try XCTUnwrap(HistoryBundleCodec.buildGapForGroup(
+            hex: groupHex, rows: rows, accountIdB64: "sender", readmitter: readmitter,
+            gapKey: gapKey.publicKey, groupId: groupId, ownKey: admitter))
+        let opened = try openGapHistoryStructured(gapSecret: gapKey.secret, groupId: groupId, sealed: sealed).bundle
         XCTAssertEqual(
             opened.groups.flatMap(\.messages).map { HistoryBundleCodec.decodeOpenedPlaceholder($0.payloadBytes)?.authorKey },
             [admitter, member, third, nil])
 
-        _ = try HistoryBundleCodec.applyGapBundle(
-            accountIdB64: receiver, secret: secret, sealedBytes: sealed,
-            ownKey: member, route: "knock", store: store)
+        _ = HistoryBundleCodec.applyOpenedGapBundle(
+            opened, accountIdB64: receiver, ownKey: member, route: "knock", store: store)
 
         let back = try XCTUnwrap(store.getLog(accountIdB64: receiver)?.groups[groupHex]?.messages)
         let byId = Dictionary(uniqueKeysWithValues: back.map { ($0.messageId, $0) })

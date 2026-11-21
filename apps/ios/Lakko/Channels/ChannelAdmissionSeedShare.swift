@@ -271,7 +271,8 @@ enum ChannelAdmissionSeedShare {
             guard let bundle = try? await discovery.identityFetch(accountId: accountId),
                   let accountKey = Data(base64Encoded: bundle.signaturePubkey),
                   Self.provesSamePerson(requestKeyHex: publisher.accountKeyHex, bundle: bundle),
-                  let x25519 = Data(base64Encoded: bundle.x25519Pubkey), x25519.count == 32
+                  // Seal nothing to an X25519 key the account key did not bind.
+                  let x25519 = bundle.verifiedX25519Pubkey
             else { continue }
             for seed in owed {
                 do {

@@ -164,6 +164,8 @@ pub(crate) enum IdentityRefusal {
     CoolingDown,
     /// `supersession-proof-invalid`.
     ProofInvalid,
+    /// `x25519-binding-invalid`.
+    X25519BindingInvalid,
     /// A code not in this list.
     Other,
 }
@@ -180,6 +182,7 @@ impl IdentityRefusal {
             k::CODE_KEY_RESET_DISABLED => Self::ResetDisabled,
             k::CODE_COOLING_DOWN => Self::CoolingDown,
             k::CODE_PROOF_INVALID => Self::ProofInvalid,
+            crate::identity_bundle::CODE_X25519_BINDING_INVALID => Self::X25519BindingInvalid,
             _ => Self::Other,
         }
     }
@@ -193,6 +196,7 @@ impl IdentityRefusal {
             Self::ResetDisabled => "key_reset_disabled",
             Self::CoolingDown => "identity_changed_too_recently",
             Self::ProofInvalid => "supersession_proof_invalid",
+            Self::X25519BindingInvalid => "x25519_binding_invalid",
             Self::Other => "refused_other",
         }
     }

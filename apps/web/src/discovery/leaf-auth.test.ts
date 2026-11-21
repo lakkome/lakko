@@ -46,6 +46,7 @@ const ACCOUNT_ID = new Uint8Array([
 const ED25519_SEED = new Uint8Array(32).fill(7);
 const SIG_PUBKEY = new Uint8Array(32).fill(1);
 const X25519_PUBKEY = new Uint8Array(32).fill(2);
+const BINDING = new Uint8Array(64).fill(5);
 
 /**
  * Build a `DiscoveryClient` whose `identityUpload` captures the request
@@ -70,7 +71,7 @@ function clientCapturingUpload(): {
 describe("uploadIdentityBundle leaf_auth wiring (G-30 #2)", () => {
   it("omits leaf_auth when no leafAuth is supplied (routine same-key path)", async () => {
     const { client, lastBody } = clientCapturingUpload();
-    await client.uploadIdentityBundle(ACCOUNT_ID, SIG_PUBKEY, X25519_PUBKEY);
+    await client.uploadIdentityBundle(ACCOUNT_ID, SIG_PUBKEY, X25519_PUBKEY, BINDING);
     const body = lastBody();
     expect(body).not.toBeNull();
     expect(body?.leaf_auth).toBeUndefined();
@@ -84,6 +85,7 @@ describe("uploadIdentityBundle leaf_auth wiring (G-30 #2)", () => {
       ACCOUNT_ID,
       SIG_PUBKEY,
       X25519_PUBKEY,
+      BINDING,
       undefined,
       leafAuth,
     );
@@ -97,6 +99,7 @@ describe("uploadIdentityBundle leaf_auth wiring (G-30 #2)", () => {
       ACCOUNT_ID,
       SIG_PUBKEY,
       X25519_PUBKEY,
+      BINDING,
       undefined,
       preEncoded,
     );
@@ -117,6 +120,7 @@ describe("uploadIdentityBundle leaf_auth wiring (G-30 #2)", () => {
       ACCOUNT_ID,
       SIG_PUBKEY,
       X25519_PUBKEY,
+      BINDING,
       undefined,
       genesis,
     );

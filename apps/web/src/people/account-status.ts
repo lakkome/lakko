@@ -8,13 +8,18 @@
  *
  * Two sources write here:
  *
- *   * a verified account-deleted statement (push, section 1): final;
- *   * a directory answer for the person's account id (pull, section 2):
- *     `absent` makes the person deleted until a later `same-person`.
+ *   * a verified account-deleted statement (push, section 1). Not final
+ *     (security review 2026-11-21): recording one clears the recorded
+ *     directory answer, so only an answer received after it counts, and a
+ *     later `same-person` answer brings the person back;
+ *   * a directory answer for the person's account id (pull, section 2).
  *
- * The decisions are the core's (`lakko-contacts::account_deleted`, through
- * the wasm rules port {@link AccountStatusRules}); nothing here restates
- * them. The row codec and the in-memory store are pure so they run under
+ * What a record does is the core's `deletionEffects`: show "Deleted
+ * account", remove the person's leaves from groups, drop messages held for
+ * them. The destructive two need a verified statement AND an `absent`
+ * answer, so neither a directory nor a forged statement alone can cause
+ * them. Nothing here restates the rule (wasm rules port
+ * {@link AccountStatusRules}). The row codec and the in-memory store are pure so they run under
  * vitest; persistence is `account-status-idb.ts`.
  */
 
@@ -23,7 +28,8 @@ export type DirectoryAnswerName = "absent" | "same-person" | "other-key";
 
 /** What is kept for one person. */
 export interface PersonStatusRecord {
-  /** A verified account-deleted statement arrived. Final. */
+  /** A verified account-deleted statement arrived. Not final: the effects
+   *  are `deletionEffects` of it and the latest answer. */
   readonly statementVerified: boolean;
   readonly lastDirectoryAnswer?: DirectoryAnswerName | undefined;
   readonly lastAnswerAtMs?: number | undefined;
@@ -47,6 +53,10 @@ export const UNKNOWN_PERSON: PersonStatusRecord = { statementVerified: false };
  */
 export interface AccountStatusRules {
   accountDeletionStatus(statement_verified: boolean, last_directory_answer?: number | null): number;
+  deletionEffects(
+    statement_verified: boolean,
+    last_directory_answer?: number | null,
+  ): { readonly showDeleted: boolean; readonly removeFromGroups: boolean; readonly dropHeldSends: boolean; free(): void };
   mayShowUsername(status: number, confirmed_at_ms: bigint | null | undefined, now_ms: bigint): boolean;
   directoryCheckDue(
     statement_verified: boolean,
@@ -81,9 +91,30 @@ function statusOf(rules: AccountStatusRules, rec: PersonStatusRecord | undefined
   return rules.accountDeletionStatus(r.statementVerified, answerOf(rules, r.lastDirectoryAnswer) ?? null);
 }
 
-/** `accountDeletionStatus`: shown as "Deleted account". */
+/** What a deletion does on this device (the core's `deletionEffects`). */
+export interface DeletionEffectsView {
+  /** Show "Deleted account" in place of the person's name. */
+  readonly showDeleted: boolean;
+  /** An owner's or admin's device proposes the removal of the person's leaves. */
+  readonly removeFromGroups: boolean;
+  /** Messages held for the person, never sent, may be dropped. */
+  readonly dropHeldSends: boolean;
+}
+
+/** `deletionEffects` of the record. */
+export function deletionEffectsOf(rules: AccountStatusRules, rec: PersonStatusRecord | undefined): DeletionEffectsView {
+  const r = rec ?? UNKNOWN_PERSON;
+  const e = rules.deletionEffects(r.statementVerified, answerOf(rules, r.lastDirectoryAnswer) ?? null);
+  try {
+    return { showDeleted: e.showDeleted, removeFromGroups: e.removeFromGroups, dropHeldSends: e.dropHeldSends };
+  } finally {
+    e.free();
+  }
+}
+
+/** `deletionEffects(...).showDeleted`: shown as "Deleted account". */
 export function isDeletedPerson(rules: AccountStatusRules, rec: PersonStatusRecord | undefined): boolean {
-  return statusOf(rules, rec) === rules.AccountStatus.Deleted;
+  return deletionEffectsOf(rules, rec).showDeleted;
 }
 
 /** `mayShowUsername`: a `@username` may be drawn beside this person now. The
@@ -111,10 +142,15 @@ export function directoryCheckIsDue(
   );
 }
 
-/** `rec` with a verified statement recorded. */
+/**
+ * `rec` with a verified statement recorded. The recorded directory answer
+ * and the last attempt are cleared: only an answer received after the
+ * statement counts, and the directory is asked again at once.
+ */
 export function withStatement(rec: PersonStatusRecord | undefined, accountIdHex?: string): PersonStatusRecord {
   const r = rec ?? UNKNOWN_PERSON;
-  return { ...r, statementVerified: true, ...(accountIdHex === undefined ? {} : { accountIdHex }) };
+  const { lastDirectoryAnswer: _a, lastAnswerAtMs: _t, lastAttemptAtMs: _x, ...rest } = r;
+  return { ...rest, statementVerified: true, ...(accountIdHex === undefined ? {} : { accountIdHex }) };
 }
 
 /** `rec` with a directory answer recorded at `nowMs`. */

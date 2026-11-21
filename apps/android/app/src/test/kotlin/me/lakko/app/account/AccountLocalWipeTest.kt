@@ -643,6 +643,9 @@ class AccountLocalWipeTest {
             // ADR-0091 phase 2 section 7 - the returning device's gap looks
             // (their history secret is sealed under the Keystore key).
             "reentry-gap-looks",
+            // Security review 2026-11-21 - the secrets of the gap keys of
+            // requests still out.
+            "reentry-gap-keys",
         )
     }
 }

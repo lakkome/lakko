@@ -8,9 +8,11 @@ import XCTest
 @testable import Lakko
 
 // ADR-0098 (`docs/ux/deleted-account.md`) — a deleted account is shown as
-// `Deleted account`, learned from a verified statement (final) or the
-// directory (reversible), and its username is shown only while recently
-// confirmed. The core rules run through the real FFI.
+// `Deleted account`, learned from a verified statement or the directory; a
+// directory answer that the account exists, received after them, shows the
+// person again (security review 2026-11-21); only both together remove them
+// from groups and drop what was held for them; the username is shown only
+// while recently confirmed. The core rules run through the real FFI.
 @MainActor
 final class DeletedAccountTests: XCTestCase {
 
@@ -33,6 +35,9 @@ final class DeletedAccountTests: XCTestCase {
         let deletions = DeletedAccounts(store: DeletedAccountStore(defaults: defaults))
         deletions.nowMs = { [unowned self] in self.now }
         deletions.heldKeysForAccountId = { _ in [] }
+        // No account id known and no network unless a test sets its own.
+        deletions.accountIdForPersonKey = { _ in nil }
+        deletions.fetchIdentity = { _ in throw URLError(.notConnectedToInternet) }
         deletions.activate(accountIdB64: own)
         return deletions
     }
@@ -113,7 +118,7 @@ final class DeletedAccountTests: XCTestCase {
 
     // MARK: - Receive: verified at receipt
 
-    func testAVerifiedStatementMarksThePersonDeletedForGood() throws {
+    func testAVerifiedStatementShowsDeletedUntilTheDirectorySaysOtherwise() throws {
         let deletions = makeDeletions()
         let group = Data(repeating: 0x33, count: 32)
         let wire = try statement(7, group: group)
@@ -121,9 +126,81 @@ final class DeletedAccountTests: XCTestCase {
         XCTAssertTrue(ChatRepository.acceptAccountDeleted(
             envelope: wire, groupId: group, groupIdHex: "33", senderKeyB64: sender, into: deletions))
         XCTAssertTrue(deletions.isDeleted(keysB64: [sender]))
-        // Final: a later directory answer that the account exists changes nothing.
+        let alone = deletions.effects(keysB64: [sender])
+        XCTAssertFalse(alone.removeFromGroups, "a statement alone removes no one")
+        XCTAssertFalse(alone.dropHeldSends, "nor drops what was held")
+        // Not final: the directory confirming the account afterwards shows
+        // the person again (and the one-to-one gets its composer back).
+        now += 1
         deletions.noteAnswer(personKeyB64: sender, accountIdB64: nil, .samePerson)
-        XCTAssertTrue(deletions.isDeleted(keysB64: [sender]))
+        XCTAssertFalse(deletions.isDeleted(keysB64: [sender]))
+        XCTAssertEqual(
+            ChatViewModel.composerSlot(peerDeleted: deletions.isDeleted(keysB64: [sender]), membership: .active, draft: ""),
+            .composer)
+    }
+
+    /// Only an answer received after the statement counts: the recorded one
+    /// is cleared, and the directory is asked at once.
+    func testAStatementClearsTheEarlierAnswerAndAsksTheDirectoryAtOnce() async {
+        let deletions = makeDeletions()
+        let person = key(7)
+        let sender = base64Encode(person)
+        let accountId = Data(repeating: 0xAB, count: 16)
+        let asked = Recorder()
+        var exists = true
+        deletions.accountIdForPersonKey = { _ in accountId }
+        deletions.fetchIdentity = { _ in
+            asked.add("ask")
+            return exists ? IdentityFetchResponse(signaturePubkey: sender, x25519Pubkey: "") : nil
+        }
+        // Confirmed a minute ago, and asked then: within the hour's retry.
+        deletions.checkIfDue(personKey: person, accountId: accountId)
+        for _ in 0..<20 { await Task.yield() }
+        var record = deletions.record(personKeyB64: sender)
+        XCTAssertEqual(record?.lastAnswer, "samePerson")
+        exists = false
+        now += 60 * 1000
+        deletions.noteStatement(personKeyB64: sender, groupIdHex: "g1")
+        record = deletions.record(personKeyB64: sender)
+        XCTAssertTrue(deletions.isDeleted(keysB64: [sender]), "the earlier confirmation no longer counts")
+        XCTAssertEqual(record?.lastAttemptAtMs, now, "asked at once, not on the weekly schedule")
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(asked.items.count, 2)
+        // The `404` after the statement: both sources now agree.
+        let both = deletions.effects(keysB64: [sender])
+        XCTAssertTrue(both.showDeleted)
+        XCTAssertTrue(both.removeFromGroups)
+        XCTAssertTrue(both.dropHeldSends)
+        XCTAssertEqual(deletions.removalsOwed(groupIdHex: "g1"), [sender])
+    }
+
+    /// The checks go on after a statement; the same statement seen again
+    /// (a re-read journal) is not news.
+    func testTheDirectoryIsStillAskedAfterAStatement() async {
+        let deletions = makeDeletions()
+        let person = key(7)
+        let sender = base64Encode(person)
+        let accountId = Data(repeating: 0xAB, count: 16)
+        let asked = Recorder()
+        var changes = 0
+        deletions.onDeletionChanged = { _ in changes += 1 }
+        deletions.accountIdForPersonKey = { _ in accountId }
+        deletions.fetchIdentity = { _ in
+            asked.add("ask")
+            return IdentityFetchResponse(signaturePubkey: sender, x25519Pubkey: "")
+        }
+        deletions.noteStatement(personKeyB64: sender, groupIdHex: "g1")
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(changes, 2, "the statement, then the confirmation that reverted it")
+        XCTAssertFalse(deletions.isDeleted(keysB64: [sender]))
+        now += 60 * 1000
+        deletions.noteStatement(personKeyB64: sender, groupIdHex: "g1")
+        XCTAssertEqual(changes, 2, "the same statement again changes nothing")
+        XCTAssertEqual(asked.items.count, 1)
+        now += 8 * day
+        deletions.checkIfDue(personKey: person, accountId: accountId)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(asked.items.count, 2, "still checked weekly after a statement")
     }
 
     func testAStatementFromAnotherSenderOrForAnotherGroupIsIgnored() throws {
@@ -271,6 +348,13 @@ final class DeletedAccountTests: XCTestCase {
         XCTAssertEqual(resolved.name, ResolvedDisplayName.deletedName)
         XCTAssertNil(resolved.verifiedUsername)
         XCTAssertNil(directory.avatar(signatureKey: person))
+        XCTAssertFalse(directory.deletionDropsHeldSends(signatureKey: person),
+                       "a `404` alone shows the name, and drops nothing held")
+        now += 1
+        deletions.noteStatement(personKeyB64: base64Encode(person), groupIdHex: "g1")
+        now += 1
+        deletions.noteAnswer(personKeyB64: base64Encode(person), accountIdB64: nil, .absent)
+        XCTAssertTrue(directory.deletionDropsHeldSends(signatureKey: person), "a statement and a `404` after it")
         XCTAssertFalse(ContactListPresentation.matches(
             ContactListPresentation.Item(
                 id: 1, name: resolved.name, username: resolved.verifiedUsername,
@@ -297,13 +381,16 @@ final class DeletedAccountTests: XCTestCase {
 
     // MARK: - Groups: the owner's or an admin's device proposes the removal
 
-    func testAnOwnerOrAdminProposesRemovalOnceAndNeverOnAbsent() {
+    func testAnOwnerOrAdminProposesRemovalOnceAndNeverOnOneSourceAlone() {
         let deletions = makeDeletions()
         let statement = base64Encode(key(7))
         let pulled = base64Encode(key(9))
         deletions.noteAnswer(personKeyB64: pulled, accountIdB64: nil, .absent)
-        XCTAssertTrue(deletions.removalsOwed(groupIdHex: "g1").isEmpty, "a directory answer never removes")
+        XCTAssertTrue(deletions.removalsOwed(groupIdHex: "g1").isEmpty, "a directory answer alone never removes")
         deletions.noteStatement(personKeyB64: statement, groupIdHex: "g1")
+        XCTAssertTrue(deletions.removalsOwed(groupIdHex: "g1").isEmpty, "a statement alone never removes")
+        now += 1
+        deletions.noteAnswer(personKeyB64: statement, accountIdB64: nil, .absent)
         XCTAssertEqual(deletions.removalsOwed(groupIdHex: "g1"), [statement])
         XCTAssertEqual(deletions.removalsOwed(groupIdHex: "g2"), [statement], "the account is gone everywhere")
         deletions.noteRemovalProposed(personKeyB64: statement, groupIdHex: "g1")
@@ -337,6 +424,8 @@ final class DeletedAccountTests: XCTestCase {
         let personKey = key(7)
         let person = base64Encode(personKey)
         deletions.noteStatement(personKeyB64: person, groupIdHex: "one-to-one")
+        now += 1
+        deletions.noteAnswer(personKeyB64: person, accountIdB64: nil, .absent)
 
         // A group this device owns, the person on leaves 3 and 5.
         let ownedRoles = RoleTable(owner: key(1), admins: [])
@@ -396,6 +485,21 @@ final class DeletedAccountTests: XCTestCase {
         let pulled = base64Encode(key(9))
         deletions.noteAnswer(personKeyB64: pulled, accountIdB64: nil, .absent)
         XCTAssertTrue(deletions.removalsOwed(groupIdHex: "owned").isEmpty)
+        XCTAssertTrue(deletions.isDeleted(keysB64: [pulled]), "shown deleted")
+        XCTAssertFalse(deletions.effects(keysB64: [pulled]).dropHeldSends, "nothing held is dropped")
+    }
+
+    /// A `404` recorded before the statement does not count with it: only an
+    /// answer after the statement completes the pair.
+    func testAnAbsentBeforeTheStatementDoesNotCompleteThePair() {
+        let deletions = makeDeletions()
+        let person = base64Encode(key(7))
+        deletions.noteAnswer(personKeyB64: person, accountIdB64: nil, .absent)
+        now += 1
+        deletions.noteStatement(personKeyB64: person, groupIdHex: "g1")
+        XCTAssertTrue(deletions.isDeleted(keysB64: [person]))
+        XCTAssertFalse(deletions.effects(keysB64: [person]).removeFromGroups)
+        XCTAssertTrue(deletions.removalsOwed(groupIdHex: "g1").isEmpty)
     }
 
     // MARK: - Requests and the records

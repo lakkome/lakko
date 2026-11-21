@@ -245,6 +245,11 @@ data class IdentityUploadRequest(
     val signature_pubkey: String,
     /** base64(X25519 public key) — 32 bytes after decode. */
     val x25519_pubkey: String,
+    /** Standard base64 of the 64-byte signed X25519 binding
+     *  (`signX25519Binding`): the signature key's signature over the X25519
+     *  key. Discovery refuses an upload without a valid one (`400
+     *  x25519-binding-invalid`). */
+    val x25519_binding: String,
     /** G-4 (ADR-0016): base64 of an optional old-key-signed supersession
      *  proof bridging an AccountIdentity rotation. `null` for a normal
      *  upload — its absence clears any stored proof server-side. */
@@ -291,6 +296,10 @@ data class IdentityUploadResponse(
 data class IdentityFetchResponse(
     val signature_pubkey: String,
     val x25519_pubkey: String,
+    /** Standard base64 of the 64-byte signed X25519 binding; absent on a row
+     *  that has none. Nothing is sealed to [x25519_pubkey] unless it verifies
+     *  ([boundX25519Key]). */
+    val x25519_binding: String? = null,
     /** G-4 (ADR-0016): base64 of the stored supersession proof when the
      *  account rotated recently; `null` otherwise. Verified locally by the
      *  peer — the server passes the bytes through opaquely. */

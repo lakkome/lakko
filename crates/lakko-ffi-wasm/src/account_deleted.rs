@@ -9,11 +9,11 @@
 
 use lakko_contacts::account_deleted::{
     account_deletion_status as rust_status, compose_account_deleted as rust_compose,
-    decode_account_deleted as rust_decode, directory_check_due as rust_check_due,
-    may_show_username as rust_may_show_username, verify_account_deleted as rust_verify,
-    AccountStatus as RustAccountStatus, DirectoryAnswer as RustDirectoryAnswer,
-    ACCOUNT_DELETED_ENVELOPE_LEN, DIRECTORY_RECHECK_AFTER_MS, DIRECTORY_RETRY_AFTER_MS,
-    USERNAME_CONFIRMATION_VALID_MS,
+    decode_account_deleted as rust_decode, deletion_effects as rust_deletion_effects,
+    directory_check_due as rust_check_due, may_show_username as rust_may_show_username,
+    verify_account_deleted as rust_verify, AccountStatus as RustAccountStatus,
+    DirectoryAnswer as RustDirectoryAnswer, ACCOUNT_DELETED_ENVELOPE_LEN,
+    DIRECTORY_RECHECK_AFTER_MS, DIRECTORY_RETRY_AFTER_MS, USERNAME_CONFIRMATION_VALID_MS,
 };
 use lakko_crypto::signing::SigningKey;
 use wasm_bindgen::prelude::*;
@@ -121,9 +121,64 @@ impl From<AccountStatus> for RustAccountStatus {
     }
 }
 
-/// The person's status: a verified statement is final; otherwise the latest
-/// recorded directory answer decides (`Absent` = deleted); `undefined` (no
-/// answer) is `Active`.
+/// What a client does about a person who may have deleted their account
+/// (ADR-0098, security review 2026-11-21).
+#[wasm_bindgen]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct DeletionEffects {
+    show_deleted: bool,
+    remove_from_groups: bool,
+    drop_held_sends: bool,
+}
+
+#[wasm_bindgen]
+impl DeletionEffects {
+    /// Show "Deleted account" in place of the person's name.
+    #[wasm_bindgen(getter, js_name = showDeleted)]
+    #[must_use]
+    pub fn show_deleted(&self) -> bool {
+        self.show_deleted
+    }
+
+    /// An owner's or admin's device proposes the removal of the person's
+    /// leaves from the groups it administers.
+    #[wasm_bindgen(getter, js_name = removeFromGroups)]
+    #[must_use]
+    pub fn remove_from_groups(&self) -> bool {
+        self.remove_from_groups
+    }
+
+    /// Messages held for the person that were never sent may be dropped.
+    #[wasm_bindgen(getter, js_name = dropHeldSends)]
+    #[must_use]
+    pub fn drop_held_sends(&self) -> bool {
+        self.drop_held_sends
+    }
+}
+
+/// The one rule for what a deletion does on this device: show "Deleted
+/// account" on a verified statement or an `Absent` answer, unless the latest
+/// answer is `SamePerson`; remove the person from groups and drop held sends
+/// only on a verified statement AND an `Absent` answer. Clear the recorded
+/// answer when recording a statement, so a `SamePerson` that counts is one
+/// received after it. `undefined` is no answer.
+#[wasm_bindgen(js_name = deletionEffects)]
+#[must_use]
+pub fn deletion_effects(
+    statement_verified: bool,
+    last_directory_answer: Option<DirectoryAnswer>,
+) -> DeletionEffects {
+    let e = rust_deletion_effects(statement_verified, last_directory_answer.map(Into::into));
+    DeletionEffects {
+        show_deleted: e.show_deleted,
+        remove_from_groups: e.remove_from_groups,
+        drop_held_sends: e.drop_held_sends,
+    }
+}
+
+/// The person's displayed status: `deletionEffects(...).showDeleted`;
+/// `undefined` (no answer) and no statement is `Active`.
 #[wasm_bindgen(js_name = accountDeletionStatus)]
 #[must_use]
 pub fn account_deletion_status(
@@ -144,9 +199,11 @@ pub fn may_show_username(status: AccountStatus, confirmed_at_ms: Option<u64>, no
 }
 
 /// Whether to ask the directory about this person now (only for a person on
-/// screen). Never after a verified statement; never within
-/// `directoryRetryAfterMs()` of the last attempt; otherwise due when there is
-/// no answer or the last one is `directoryRecheckAfterMs()` old.
+/// screen). Never within `directoryRetryAfterMs()` of the last attempt;
+/// otherwise due when there is no answer or the last one is
+/// `directoryRecheckAfterMs()` old. A verified statement no longer stops the
+/// checks (its destructive effects need an `Absent` answer too);
+/// `statementVerified` decides nothing.
 #[wasm_bindgen(js_name = directoryCheckDue)]
 #[must_use]
 pub fn directory_check_due(
@@ -225,6 +282,11 @@ mod tests {
         assert!(may_show_username(AccountStatus::Active, Some(now), now));
         assert!(!may_show_username(AccountStatus::Active, None, now));
         assert!(directory_check_due(false, None, None, now));
-        assert!(!directory_check_due(true, None, None, now));
+        assert!(directory_check_due(true, None, None, now));
+        let e = deletion_effects(true, Some(DirectoryAnswer::Absent));
+        assert!(e.show_deleted() && e.remove_from_groups() && e.drop_held_sends());
+        let e = deletion_effects(true, None);
+        assert!(e.show_deleted() && !e.remove_from_groups() && !e.drop_held_sends());
+        assert!(!deletion_effects(true, Some(DirectoryAnswer::SamePerson)).show_deleted());
     }
 }

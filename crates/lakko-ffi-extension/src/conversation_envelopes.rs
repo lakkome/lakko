@@ -397,6 +397,7 @@ mod tests {
                 group_id: [0x0D; 32],
                 epoch_left: 16,
                 gap_from_ms: 1,
+                gap_key: [0x6B; 32],
                 key_package: vec![0x55],
             },
         )
@@ -486,12 +487,14 @@ mod tests {
         assert_eq!(publisher_device_request_envelope_min_len(), 84);
         assert_eq!(publisher_device_request_envelope_max_len(), 7208);
         assert_eq!(channel_admission_mark_envelope_len(), 57);
-        assert_eq!(conversation_reentry_envelope_min_len(), 82);
-        assert_eq!(conversation_reentry_envelope_max_len(), 4177);
+        // Version 2 carries the 32-byte gap key (security review 2026-11-21).
+        assert_eq!(conversation_reentry_envelope_min_len(), 114);
+        assert_eq!(conversation_reentry_envelope_max_len(), 4209);
         assert_eq!(knock_key_envelope_len(), 60);
         let re = reentry();
         assert_eq!(&re[..30], b"lakko/conversation-reentry/v1\x00");
-        assert_eq!(re.len(), 82);
+        assert_eq!(re.len(), 114);
+        assert_eq!(re[30], 0x02);
         let kk = knock_key();
         assert_eq!(&kk[..25], b"lakko/group-knock-key/v1\x00");
         assert_eq!(kk.len(), 60);

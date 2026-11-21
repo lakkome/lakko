@@ -7,20 +7,23 @@
  *
  * ## The carrier (one for all three request routes; same on iOS and Android)
  *
- * - **secret** = `Group.exportSecret({@link GAP_HISTORY_LABEL}, context =
- *   the returning leaf's 32-byte signature key, 32)`, exported at epoch
- *   `epoch_left + 1` (the epoch the replacement created) by both the
- *   re-admitter and the returning device;
- * - **rendezvous id** = `SHA-256({@link GAP_HISTORY_RENDEZVOUS_DOMAIN} ‖
- *   secret)`, no separator byte;
- * - **payload**: the history bundle sealed under that secret
- *   (`sealHistoryBundleStructured`, the pairing bundle's format) holding the
- *   gap's rows (`createdAt >= gap_from_ms`).
+ * Security review 2026-11-21: the history no longer rides an exporter secret
+ * of the group (every member after the commit held it, and any of them could
+ * post a bundle the returning device took as the re-admitter's). Instead:
  *
- * Only the members after that commit hold the secret; the returning device
- * holds it the moment it joins. The re-admitter posts once its own group is
- * at exactly that epoch (a later commit changes the exporter; then nothing is
- * sent and the gap line stays).
+ * - the returning device mints a gap key per request (`generateGapKey`),
+ *   keeps the secret durably with the request record (sealed under the
+ *   device key, `reentry-store.ts`) and puts the public key in the request;
+ * - the re-admitter starts the gap's rows at `gapHistoryStart(claim,
+ *   leafFirstSeen, leafLastWrite)` (nothing when that is `undefined`), seals
+ *   them to the gap key and signs them with its own leaf key
+ *   (`sealGapHistoryStructured`), and posts to
+ *   `gapHistoryRendezvous(gapKey)` once the replacement landed;
+ * - the returning device opens a row with its gap secret
+ *   (`openGapHistoryStructured`) and keeps the bundle only when the joined
+ *   group accepts its signer (`Group.gapHistorySignerAccepted`: its own
+ *   account, the owner or an admin, the other person of a one-to-one).
+ *   Otherwise the bundle is dropped and the gap line stays.
  *
  * ## When the replacement lands
  *
@@ -39,17 +42,12 @@ import {
   saveGapLook,
   saveOwedGapSends,
   type ReentryRouteName,
+  type SealedGapSecret,
   type StoredGapLook,
   type StoredOwedGapSend,
 } from "./reentry-store";
 import { DEVICE_CIPHER_IV_LEN, type DeviceCipher } from "../auth/device-cipher";
 import type { Group as WasmGroup, Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
-
-/** The exporter label of the secret. Must match iOS and Android. */
-export const GAP_HISTORY_LABEL = "lakko/conversation-reentry/history/v1";
-/** The domain hashed in front of the secret for the rendezvous id. Must
- *  match iOS and Android. */
-export const GAP_HISTORY_RENDEZVOUS_DOMAIN = "lakko/conversation-reentry/history-rendezvous/v1";
 
 /** Told when the gap's messages of a conversation were filed into the log,
  *  so an open chat shows them at once. */
@@ -87,32 +85,19 @@ export const GAP_HISTORY_LOOK_INTERVAL_MS = 60_000;
  *  the gap line stays (chosen, not measured). */
 export const GAP_HISTORY_LOOK_RETENTION_MS = 30 * 24 * 60 * 60_000;
 
-/** The key and the rendezvous id. */
-export interface GapChannel {
-  readonly secret: Uint8Array;
-  readonly rendezvous: Uint8Array;
-}
-
-/** `SHA-256(domain ‖ secret)`. */
-export async function gapRendezvousOf(secret: Uint8Array): Promise<Uint8Array> {
-  const domain = new TextEncoder().encode(GAP_HISTORY_RENDEZVOUS_DOMAIN);
-  const input = new Uint8Array(domain.length + secret.length);
-  input.set(domain, 0);
-  input.set(secret, domain.length);
-  return new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", input));
-}
-
-/** The gap channel of `group` at its current epoch, for the leaf whose
- *  signature key is `returningLeafKey`. */
-export async function gapChannelOf(group: WasmGroup, identity: WasmIdentity, returningLeafKey: Uint8Array): Promise<GapChannel> {
-  const secret = group.exportSecret(identity, GAP_HISTORY_LABEL, returningLeafKey, 32);
-  return { secret, rendezvous: await gapRendezvousOf(secret) };
+/** Seal a 32-byte gap secret under the device key for storage. Throws when
+ *  it could not be sealed. */
+export async function sealGapSecret(secret: Uint8Array, deviceKey: DeviceCipher): Promise<SealedGapSecret> {
+  const iv = globalThis.crypto.getRandomValues(new Uint8Array(DEVICE_CIPHER_IV_LEN));
+  const sealed = new Uint8Array(await deviceKey.encrypt(iv, secret));
+  return { ivB64: base64Encode(iv), sealedSecretB64: base64Encode(sealed) };
 }
 
 /** One owed send of the re-admitter. */
 interface Owed {
   readonly groupIdB64: string;
-  readonly leafKey: Uint8Array;
+  readonly leafKeyB64: string;
+  readonly gapKey: Uint8Array;
   readonly epochAfter: bigint;
   readonly gapFromMs: number;
   readonly notedAtMs: number;
@@ -124,9 +109,12 @@ function keyOf(o: { readonly groupIdB64: string; readonly leafKeyB64: string }):
 
 function toOwed(row: StoredOwedGapSend): Owed | null {
   try {
+    const gapKey = base64Decode(row.gapKeyB64);
+    if (gapKey.length !== 32) return null;
     return {
       groupIdB64: row.groupIdB64,
-      leafKey: base64Decode(row.leafKeyB64),
+      leafKeyB64: row.leafKeyB64,
+      gapKey,
       epochAfter: BigInt(row.epochAfter),
       gapFromMs: row.gapFromMs,
       notedAtMs: row.notedAtMs,
@@ -150,13 +138,18 @@ export function resetGapHistoryMemory(): void {
 export function noteGapHistoryOwed(input: {
   readonly groupIdB64: string;
   readonly leafKey: Uint8Array;
+  /** The request's 32-byte public gap key. */
+  readonly gapKey: Uint8Array;
   readonly epochAfter: bigint;
+  /** The request's claim of where the gap starts. */
   readonly gapFromMs: number;
   readonly nowMs: number;
 }): void {
+  if (input.gapKey.length !== 32) return;
   const row: StoredOwedGapSend = {
     groupIdB64: input.groupIdB64,
     leafKeyB64: base64Encode(input.leafKey),
+    gapKeyB64: base64Encode(input.gapKey),
     epochAfter: input.epochAfter.toString(),
     gapFromMs: input.gapFromMs,
     notedAtMs: input.nowMs,
@@ -186,20 +179,35 @@ export function owedGapHistoryGroups(): { readonly groupIdB64: string; readonly 
 /** What the send needs from the app. */
 export interface GapSendPorts {
   now(): number;
+  /** This device's identity in the conversation (its leaf signs). */
   identity(): WasmIdentity | null;
   /** The replacement landed: re-send the growth-time group state. */
   landed(group: WasmGroup): void;
-  /** Build the sealed bundle from this device's log (`null`: nothing held). */
-  build(group: WasmGroup, secret: Uint8Array, fromMs: number): Promise<Uint8Array | null>;
+  /** When this device first saw the leaf in the group's roster. */
+  leafFirstSeenMs(groupIdB64: string, leafKeyB64: string): number | undefined;
+  /** The last message this device decrypted from the leaf. */
+  leafLastWriteMs(groupIdB64: string, leafKeyB64: string): number | undefined;
+  /** The core's `gapHistoryStart`: `null` when nothing may be sent. */
+  gapStart(claimedMs: number, leafFirstSeenMs: number | undefined, leafLastWriteMs: number | undefined): number | null;
+  /** Seal the gap's rows from `fromMs` on to `gapKey`, signed by
+   *  `readmitter` (`null`: nothing held). */
+  build(group: WasmGroup, readmitter: WasmIdentity, gapKey: Uint8Array, fromMs: number): Promise<Uint8Array | null>;
+  /** The core's `gapHistoryRendezvous(gapKey)`. */
+  rendezvous(gapKey: Uint8Array): Uint8Array;
   publish(rendezvous: Uint8Array, sealed: Uint8Array): Promise<void>;
 }
 
+/** What happened to one owed send. */
+export type GapSendOutcome = "sent" | "waiting" | "dropped" | "no-start";
+
 /**
  * A poll of `group` applied: for each owed send of the group, send the bundle
- * if the group is at the replacement's epoch, drop it if the group moved past
- * or it is stale. Never throws. Returns what happened to each owed send.
+ * once the replacement landed (the group stands at or past the epoch it
+ * created; nothing depends on the exact epoch any more), drop it when stale.
+ * The rows start at the core's clamp of the request's claim; when the core
+ * names no start, nothing is sent. Never throws.
  */
-export async function afterGroupPollForGapHistory(group: WasmGroup, ports: GapSendPorts): Promise<("sent" | "waiting" | "dropped")[]> {
+export async function afterGroupPollForGapHistory(group: WasmGroup, ports: GapSendPorts): Promise<GapSendOutcome[]> {
   let groupIdB64: string;
   let epoch: bigint;
   try {
@@ -208,7 +216,7 @@ export async function afterGroupPollForGapHistory(group: WasmGroup, ports: GapSe
   } catch {
     return [];
   }
-  const out: ("sent" | "waiting" | "dropped")[] = [];
+  const out: GapSendOutcome[] = [];
   let landedSignalled = false;
   // The group's rows are claimed (removed from the store) before the first
   // wait, so two poll paths never send one bundle twice.
@@ -219,7 +227,7 @@ export async function afterGroupPollForGapHistory(group: WasmGroup, ports: GapSe
   const due: Owed[] = [];
   for (const row of mine) {
     const entry = toOwed(row);
-    if (entry === null || ports.now() - entry.notedAtMs > GAP_OWED_TTL_MS || epoch > entry.epochAfter) {
+    if (entry === null || ports.now() - entry.notedAtMs > GAP_OWED_TTL_MS) {
       out.push("dropped");
       continue;
     }
@@ -246,13 +254,23 @@ export async function afterGroupPollForGapHistory(group: WasmGroup, ports: GapSe
       continue;
     }
     try {
-      const channel = await gapChannelOf(group, identity, entry.leafKey);
-      const sealed = await ports.build(group, channel.secret, entry.gapFromMs);
+      const fromMs = ports.gapStart(
+        entry.gapFromMs,
+        ports.leafFirstSeenMs(groupIdB64, entry.leafKeyB64),
+        ports.leafLastWriteMs(groupIdB64, entry.leafKeyB64),
+      );
+      if (fromMs === null) {
+        // eslint-disable-next-line no-console
+        console.info("chat re-entry: missed messages not sent: no start");
+        out.push("no-start");
+        continue;
+      }
+      const sealed = await ports.build(group, identity, entry.gapKey, fromMs);
       if (sealed === null) {
         out.push("dropped");
         continue;
       }
-      await ports.publish(channel.rendezvous, sealed);
+      await ports.publish(ports.rendezvous(entry.gapKey), sealed);
       // eslint-disable-next-line no-console
       console.info("chat re-entry: missed messages sent");
       out.push("sent");
@@ -296,14 +314,54 @@ export interface GapLookPorts {
   now(): number;
   /** The account's device key, or `null`. */
   deviceKey(): Promise<DeviceCipher | null>;
-  /** One short read of the rendezvous: every row's payload, or `null` when
-   *  the read failed. */
-  read(rendezvous: Uint8Array): Promise<readonly Uint8Array[] | null>;
-  /** Open and file one row; `null` when it is not the bundle or does not open.
-   *  `route` is the request's (absent on a look stored before it was kept). */
+  /** The rendezvous a gap secret's history is posted to
+   *  (`gapHistoryRendezvous(gapPublicKey(secret))`). */
+  rendezvousOf(secret: Uint8Array): Uint8Array;
+  /** One page of the rendezvous: the rows after row id `after`, at most
+   *  `limit`, oldest first, and whether more follow; `null` when the read
+   *  failed. */
+  readPage(rendezvous: Uint8Array, after: number, limit: number): Promise<GapLookPage | null>;
+  /** Open and file one row; `null` when it is not the bundle, does not open,
+   *  or its signer is not one the joined group accepts (the bundle is then
+   *  dropped). `route` is the request's. */
   apply(secret: Uint8Array, sealed: Uint8Array, groupIdB64: string, route: ReentryRouteName | undefined): Promise<FiledGapHistory | null>;
   /** The bundle was filed: narrow the gap line ending at `gapToMs`, show the rows. */
   received(groupIdB64: string, gapToMs: number, filed: FiledGapHistory): void;
+}
+
+/** One page of a gap rendezvous (`GapLookPorts.readPage`). */
+export interface GapLookPage {
+  readonly rows: readonly { readonly id: number; readonly payload: Uint8Array }[];
+  readonly hasMore: boolean;
+}
+
+/** Rows asked for per page of a gap rendezvous (the DS's own default). */
+export const GAP_LOOK_PAGE_SIZE = 100;
+/** Pages read per rendezvous per look: 1000 rows. Chosen, not measured. Anyone
+ *  who saw the request can write rows there, so the look reads past them
+ *  instead of stopping at the first page. */
+export const GAP_LOOK_PAGE_CAP = 10;
+
+/**
+ * Every row of one gap rendezvous, oldest first: page after page from row 0,
+ * at most {@link GAP_LOOK_PAGE_CAP} pages. `null` when the first page could
+ * not be read; a later page that fails ends the read with what was read.
+ */
+export async function readGapRendezvous(
+  ports: Pick<GapLookPorts, "readPage">,
+  rendezvous: Uint8Array,
+): Promise<Uint8Array[] | null> {
+  const rows: Uint8Array[] = [];
+  let after = 0;
+  for (let page = 0; page < GAP_LOOK_PAGE_CAP; page += 1) {
+    const read = await ports.readPage(rendezvous, after, GAP_LOOK_PAGE_SIZE).catch(() => null);
+    if (read === null) return page === 0 ? null : rows;
+    for (const row of read.rows) rows.push(row.payload);
+    const last = read.rows[read.rows.length - 1];
+    if (!read.hasMore || last === undefined || last.id <= after) break;
+    after = last.id;
+  }
+  return rows;
 }
 
 /** Groups whose look is running now. */
@@ -311,41 +369,33 @@ const looking = new Set<string>();
 
 /**
  * The device came back: keep looking for the gap's messages (durable). The
- * secret is sealed under the device key before it is stored. Returns `false`
- * when nothing could be stored.
+ * gap secrets are the ones the request record holds, already sealed under
+ * the device key. Returns `false` when nothing could be stored.
  */
-export async function recordGapLook(
-  input: {
-    readonly groupIdB64: string;
-    readonly secret: Uint8Array;
-    readonly gapFromMs: number;
-    readonly gapToMs: number;
-    readonly route?: ReentryRouteName;
-  },
-  deviceKey: DeviceCipher,
-): Promise<boolean> {
-  try {
-    const iv = globalThis.crypto.getRandomValues(new Uint8Array(DEVICE_CIPHER_IV_LEN));
-    const sealed = new Uint8Array(await deviceKey.encrypt(iv, input.secret));
-    const look: StoredGapLook = {
-      ivB64: base64Encode(iv),
-      sealedSecretB64: base64Encode(sealed),
-      gapFromMs: input.gapFromMs,
-      gapToMs: input.gapToMs,
-      lastLookMs: 0,
-      ...(input.route === undefined ? {} : { route: input.route }),
-    };
-    return saveGapLook(input.groupIdB64, look);
-  } catch {
-    return false;
-  }
+export function recordGapLook(input: {
+  readonly groupIdB64: string;
+  readonly secrets: readonly SealedGapSecret[];
+  readonly gapFromMs: number;
+  readonly gapToMs: number;
+  readonly route?: ReentryRouteName;
+}): boolean {
+  if (input.secrets.length === 0) return false;
+  const look: StoredGapLook = {
+    secrets: [...input.secrets],
+    gapFromMs: input.gapFromMs,
+    gapToMs: input.gapToMs,
+    lastLookMs: 0,
+    ...(input.route === undefined ? {} : { route: input.route }),
+  };
+  return saveGapLook(input.groupIdB64, look);
 }
 
 /**
- * One look for the gap's messages of `groupIdB64`, if one is due: one short
- * read of the rendezvous; the first row that opens is filed and the look
- * ends. A failed read, no row, or no row that opens keeps the look for the
- * next one. Never throws.
+ * One look for the gap's messages of `groupIdB64`, if one is due: a read of
+ * every page of each request's rendezvous (up to {@link GAP_LOOK_PAGE_CAP});
+ * rows are tried newest first, and the first row that opens and whose
+ * signer the group accepts is filed and the look ends. A failed read, no
+ * row, or no row that is kept keeps the look for the next one. Never throws.
  */
 export async function lookForGapHistory(
   groupIdB64: string,
@@ -369,24 +419,36 @@ export async function lookForGapHistory(
     saveGapLook(groupIdB64, { ...look, lastLookMs: nowMs });
     const deviceKey = await ports.deviceKey();
     if (deviceKey === null) return "none";
-    let secret: Uint8Array;
-    try {
-      secret = new Uint8Array(await deviceKey.decrypt(base64Decode(look.ivB64), base64Decode(look.sealedSecretB64)));
-    } catch {
-      // Sealed under a key this device no longer holds: it never opens.
+    const secrets: Uint8Array[] = [];
+    for (const sealed of look.secrets) {
+      try {
+        secrets.push(new Uint8Array(await deviceKey.decrypt(base64Decode(sealed.ivB64), base64Decode(sealed.sealedSecretB64))));
+      } catch {
+        /* sealed under a key this device no longer holds: it never opens */
+      }
+    }
+    if (secrets.length === 0) {
       deleteGapLook(groupIdB64);
       return "dropped";
     }
-    const rows = await ports.read(await gapRendezvousOf(secret)).catch(() => null);
-    if (rows === null || rows.length === 0) return "none";
-    for (const row of [...rows].reverse()) {
-      const filed = await ports.apply(secret, row, groupIdB64, look.route).catch(() => null);
-      if (filed === null) continue;
-      deleteGapLook(groupIdB64);
-      ports.received(groupIdB64, look.gapToMs, filed);
-      // eslint-disable-next-line no-console
-      console.info(`chat re-entry: missed messages received: rows=${filed.applied}`);
-      return "received";
+    for (const secret of [...secrets].reverse()) {
+      let rendezvous: Uint8Array;
+      try {
+        rendezvous = ports.rendezvousOf(secret);
+      } catch {
+        continue;
+      }
+      const rows = await readGapRendezvous(ports, rendezvous);
+      if (rows === null || rows.length === 0) continue;
+      for (const row of [...rows].reverse()) {
+        const filed = await ports.apply(secret, row, groupIdB64, look.route).catch(() => null);
+        if (filed === null) continue;
+        deleteGapLook(groupIdB64);
+        ports.received(groupIdB64, look.gapToMs, filed);
+        // eslint-disable-next-line no-console
+        console.info(`chat re-entry: missed messages received: rows=${filed.applied}`);
+        return "received";
+      }
     }
     return "none";
   } catch (err) {

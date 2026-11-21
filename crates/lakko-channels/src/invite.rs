@@ -210,7 +210,9 @@ impl ChannelInviteSigner {
 
         let eph = X25519SecretKey::generate();
         let eph_pub = eph.public_key().to_bytes();
-        let shared = eph.diffie_hellman(&recipient);
+        let shared = eph
+            .diffie_hellman(&recipient)
+            .map_err(|_| AdmissionTicketError::BadKey)?;
         let (key, nonce) = ticket_key_and_nonce(shared.as_bytes(), &eph_pub)?;
         let ciphertext = aead::seal(
             ALG,
@@ -474,7 +476,9 @@ pub fn open_admission_ticket(
         .try_into()
         .map_err(|_| AdmissionTicketError::BadLength)?;
     let eph_pub = X25519PublicKey::from_bytes(&eph).map_err(|_| AdmissionTicketError::BadKey)?;
-    let shared = X25519SecretKey::from_bytes(*admission_seed).diffie_hellman(&eph_pub);
+    let shared = X25519SecretKey::from_bytes(*admission_seed)
+        .diffie_hellman(&eph_pub)
+        .map_err(|_| AdmissionTicketError::BadKey)?;
     let (key, nonce) = ticket_key_and_nonce(shared.as_bytes(), &eph)?;
     let mut plain = aead::open(
         ALG,

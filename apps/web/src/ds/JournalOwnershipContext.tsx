@@ -55,6 +55,7 @@ import { ChatClient } from "../chat/client";
 import { readIsActive } from "../chat/membership-ended";
 import { sweepBackoff } from "../chat/sweep-backoff";
 import { DiscoveryClient } from "../discovery/client";
+import { boundX25519With } from "../discovery/x25519-binding";
 import { onGroupMlsIdle } from "../mls/group-lock";
 import { useProfiles } from "../profile/ProfileContext";
 import { loadWasm, type Wasm } from "../wasm";
@@ -279,8 +280,9 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
       console.warn("ds: an identity bundle did not match the member's account key; not appointed");
       return null;
     }
-    const x = base64Decode(bundle.x25519_pubkey);
-    return x.length === 32 ? x : null;
+    // Security review 2026-11-21: the X25519 key must be bound to the
+    // served signature key; an unbound key is never sealed to.
+    return boundX25519With((b, e, x) => wasm.verifyX25519Binding(b, e, x), bundle);
   }
 
   // Per-group reconcile scheduling.

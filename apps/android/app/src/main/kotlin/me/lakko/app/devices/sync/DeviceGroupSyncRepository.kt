@@ -3052,9 +3052,17 @@ public class DeviceGroupSyncRepository(
     /**
      * Read a rejoin rendezvous until it holds an answer: a Welcome, or (with
      * [acceptPresence]) a presence note. Runs until cancelled; network
-     * failures are retried.
+     * failures are retried. A row that is neither a presence note nor a
+     * Welcome the joiner kept in [state] can open is passed over (anyone who
+     * learned the rendezvous id can write to it) and the read goes on.
      */
-    private suspend fun readRendezvous(rendezvous: ByteArray, acceptPresence: Boolean): RendezvousAnswer {
+    private suspend fun readRendezvous(
+        rendezvous: ByteArray,
+        acceptPresence: Boolean,
+        state: RejoinState,
+        accountIdB64: String,
+    ): RendezvousAnswer {
+        val isWelcome = { row: ByteArray -> rejoinWelcomeOpens(state, accountIdB64, row) }
         var cursor = 0L
         DsClient().use { ds ->
             while (true) {
@@ -3072,9 +3080,11 @@ public class DeviceGroupSyncRepository(
                 }
                 if (result.messages.isEmpty()) continue
                 cursor = result.messages.maxOf { it.id }
-                val answer = rendezvousAnswer(result.messages.map { it.payload }) {
-                    uniffi.lakko_ffi_uniffi.isRejoinPresent(it)
-                }
+                val answer = rendezvousAnswer(
+                    result.messages.map { it.payload },
+                    isPresent = { uniffi.lakko_ffi_uniffi.isRejoinPresent(it) },
+                    isWelcome = isWelcome,
+                )
                 when {
                     answer is RendezvousAnswer.Welcome -> return answer
                     answer == RendezvousAnswer.Present && acceptPresence -> return answer
@@ -3084,6 +3094,42 @@ public class DeviceGroupSyncRepository(
         }
         @Suppress("UNREACHABLE_CODE")
         error("unreachable")
+    }
+
+    /**
+     * Whether [welcome] is a Welcome sealed to the KeyPackage of the joiner
+     * kept in [state]: a throwaway copy of the joiner is restored and the
+     * Welcome staged on it ([me.lakko.app.devices.WelcomeCourier.welcomeOpensFor],
+     * which writes nothing), then dropped.
+     */
+    private fun rejoinWelcomeOpens(state: RejoinState, accountIdB64: String, welcome: ByteArray): Boolean {
+        val seed = try {
+            me.lakko.app.auth.DeviceIdentityStore.ensureDeviceIdentitySeed(
+                context = applicationContext, accountIdB64 = accountIdB64,
+            )
+        } catch (_: Throwable) {
+            return false
+        }
+        val probe = try {
+            Identity.fromSeed(seed)
+        } catch (_: Throwable) {
+            return false
+        } finally {
+            seed.fill(0)
+        }
+        return try {
+            val snapshot = java.util.Base64.getDecoder().decode(state.joinerSnapshotB64)
+            try {
+                probe.restoreStorage(snapshot)
+            } finally {
+                snapshot.fill(0)
+            }
+            me.lakko.app.devices.WelcomeCourier.welcomeOpensFor(welcome, probe)
+        } catch (_: Throwable) {
+            false
+        } finally {
+            probe.close()
+        }
     }
 
     private fun rejoinPorts(accountIdBytes: ByteArray, accountIdB64: String): RejoinPorts = object : RejoinPorts {
@@ -3178,7 +3224,7 @@ public class DeviceGroupSyncRepository(
             // before the knock goes out, the knock's own round trip is timed,
             // and the answer is waited for max(4 x rtt, 1 s).
             val answer = coroutineScope {
-                val reader = async { readRendezvous(rendezvous, acceptPresence = true) }
+                val reader = async { readRendezvous(rendezvous, acceptPresence = true, state, accountIdB64) }
                 try {
                     val sent = System.nanoTime()
                     DsClient().use { ds -> ds.knock(groupId, listOf(payload)) }
@@ -3204,7 +3250,7 @@ public class DeviceGroupSyncRepository(
         override suspend fun awaitWelcome(state: RejoinState, deadlineMs: Long): ByteArray? {
             val rendezvous = b64d.decode(state.rendezvousB64)
             val remaining = (deadlineMs - System.currentTimeMillis()).coerceIn(1L, REKNOCK_AFTER_MS)
-            val got = withTimeoutOrNull(remaining) { readRendezvous(rendezvous, acceptPresence = false) }
+            val got = withTimeoutOrNull(remaining) { readRendezvous(rendezvous, acceptPresence = false, state, accountIdB64) }
             return (got as? RendezvousAnswer.Welcome)?.bytes
         }
 
