@@ -503,3 +503,75 @@ enum KeyResetVerifyFailure {
         return error is KeyResetSignInRequired
     }
 }
+
+// MARK: - The X25519 binding of an own bundle published before it existed
+
+/// Security review 2026-11-21: discovery now requires `x25519_binding` on
+/// every identity upload and every client refuses to seal to an account
+/// X25519 key whose binding does not verify. A row published before the
+/// binding existed carries none, so the account cannot be sent anything
+/// sealed until its bundle is uploaded again. A silent restore never uploads
+/// (``KeyResetLanding``), so the foreground app re-uploads the SAME keys with
+/// their binding once, here (maintainer decision 2026-11-21; mirror of web
+/// and Android).
+enum X25519BindingRepublish {
+
+    /// What the landing does about the binding.
+    enum Step: Equatable {
+        /// The row already carries a binding that verifies: record it, so
+        /// later landings skip the question.
+        case confirmed
+        /// The row holds this device's keys and no valid binding: upload
+        /// the same keys with the binding.
+        case republish
+        /// Nothing: the binding was already confirmed, nothing is published,
+        /// or the row holds other keys (a reset or rotation elsewhere, which
+        /// the landing rule handles).
+        case nothing
+    }
+
+    /// Decide from the account's own published row.
+    static func decide(
+        bundle: IdentityFetchResponse?,
+        ownSignaturePubkey: Data,
+        ownX25519Pubkey: Data,
+        alreadyConfirmed: Bool
+    ) -> Step {
+        guard !alreadyConfirmed, let bundle else { return .nothing }
+        guard let published = Data(base64Encoded: bundle.signaturePubkey), published == ownSignaturePubkey,
+              let publishedX = Data(base64Encoded: bundle.x25519Pubkey), publishedX == ownX25519Pubkey
+        else { return .nothing }
+        return bundle.verifiedX25519Pubkey != nil ? .confirmed : .republish
+    }
+}
+
+/// Per account: the directory row of this account is known to carry a valid
+/// X25519 binding of this device's keys. Set after a successful upload of
+/// the binding or when the fetched row already carries one; cleared only by
+/// the account wipe (``AccountLocalDataWipe``), so a failure leaves it unset
+/// and the next landing asks again.
+struct X25519BindingConfirmedMarks {
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    static func key(accountIdB64: String) -> String {
+        "lakko.x25519-binding-confirmed.v1.\(accountIdB64)"
+    }
+
+    func isConfirmed(accountIdB64: String) -> Bool {
+        defaults.bool(forKey: Self.key(accountIdB64: accountIdB64))
+    }
+
+    func markConfirmed(accountIdB64: String) {
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
+        defaults.set(true, forKey: Self.key(accountIdB64: accountIdB64))
+    }
+
+    func clear(accountIdB64: String) {
+        defaults.removeObject(forKey: Self.key(accountIdB64: accountIdB64))
+    }
+}

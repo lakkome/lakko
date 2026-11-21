@@ -172,6 +172,9 @@ enum AccountLocalDataWipe {
         // ADR-0074 — the "account key recorded at auth" mark and the owed
         // device removals belong to the account's data on this device.
         step("identity-key-record") { IdentityKeyRecordMarks().clear(accountIdB64: accountIdB64) }
+        // Security review 2026-11-21 — "the directory row carries the X25519
+        // binding of these keys".
+        step("x25519-binding-confirmed") { X25519BindingConfirmedMarks().clear(accountIdB64: accountIdB64) }
         step("device-removal-owed") { DeviceRemovalStore().clear(accountIdB64: accountIdB64) }
         // ADR-0074 part 3 — the owed key rotation, the pending rotation
         // envelopes of a kept device, the account's own predecessor seed and

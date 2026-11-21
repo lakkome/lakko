@@ -475,13 +475,24 @@ final class KeysSignOutTests: XCTestCase {
     /// Discovery, scripted: what it publishes for the account.
     private final class Directory: AccountDirectory, DeviceRestoreDirectory {
         var published: (key: Data, generation: UInt64)?
+        /// The X25519 key and binding the row carries (none by default).
+        var publishedX25519: Data?
+        var publishedBinding: Data?
         var fetchError: Error?
+        var uploadError: Error?
         private(set) var uploads = 0
+        private(set) var lastUpload: (
+            signaturePubkey: Data, x25519Pubkey: Data, x25519Binding: Data,
+            leafAuth: Data?, genesisAttest: Data?, keyResetAttest: Data?
+        )?
         func fetchIdentityBundle(accountId: Data, sessionToken: String?) async throws -> IdentityFetchResponse? {
             if let fetchError { throw fetchError }
             guard let published else { return nil }
             return IdentityFetchResponse(
-                signaturePubkey: base64Encode(published.key), x25519Pubkey: "", keyGeneration: published.generation)
+                signaturePubkey: base64Encode(published.key),
+                x25519Pubkey: publishedX25519.map { base64Encode($0) } ?? "",
+                x25519Binding: publishedBinding.map { base64Encode($0) },
+                keyGeneration: published.generation)
         }
         func lookupAccount(username: String, accountId: Data, sessionToken: String) async throws -> Data? { nil }
         func registerUsername(accountId: Data, username: String, sessionToken: String) async throws -> RegisterResult {
@@ -492,6 +503,8 @@ final class KeysSignOutTests: XCTestCase {
             leafAuth: Data?, genesisAttest: Data?, keyResetAttest: Data?, sessionToken: String
         ) async throws {
             uploads += 1
+            lastUpload = (signaturePubkey, x25519Pubkey, x25519Binding, leafAuth, genesisAttest, keyResetAttest)
+            if let uploadError { throw uploadError }
         }
     }
 
@@ -529,7 +542,8 @@ final class KeysSignOutTests: XCTestCase {
     private func restoredSession(
         refresh: Result<SessionPair, Error>? = nil,
         directory: Directory = Directory(),
-        holdsKeys: Bool = true
+        holdsKeys: Bool = true,
+        bindingMarks: X25519BindingConfirmedMarks? = nil
     ) -> Harness {
         let store = SessionStore(defaults: defaults("keys-signout"))
         store.save(PersistedSession(accountIdB64: accountIdB64, username: "alice"))
@@ -553,6 +567,8 @@ final class KeysSignOutTests: XCTestCase {
             wipeAfterKeyReset: { account in wiped.note(account) },
             recallRecords: recalls,
             recallOperations: .unreachable,
+            x25519BindingMarks: bindingMarks
+                ?? X25519BindingConfirmedMarks(defaults: defaults("keys-signout-binding")),
             earlierKeysInputs: skipEarlierKeysGate
         )
         if let refresh {
@@ -647,6 +663,77 @@ final class KeysSignOutTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertNil(h.repository.keysSignOut)
         XCTAssertEqual(h.directory.uploads, 0, "a silent restore does not re-publish an unchanged key")
+        XCTAssertEqual(h.repository.state, .session(SessionAccount(accountIdB64: accountIdB64, username: "alice")))
+    }
+
+    // MARK: Security review 2026-11-21 — the X25519 binding of an old row
+
+    /// A directory row that holds this device's keys.
+    private func ownRow(binding: Bool) -> Directory {
+        let identity = try! Identity.fromSeed(seed: seed)
+        let directory = Directory()
+        directory.published = (identity.signaturePublicKey(), 1)
+        directory.publishedX25519 = identity.x25519PublicKey()
+        if binding { directory.publishedBinding = signX25519Binding(accountIdentity: identity) }
+        return directory
+    }
+
+    func testASilentRestoreRepublishesTheSameKeysWithTheBindingWhenTheRowHasNone() async {
+        let marks = X25519BindingConfirmedMarks(defaults: defaults("binding-marks"))
+        let h = restoredSession(directory: ownRow(binding: false), bindingMarks: marks)
+        let marked = await waitUntil { marks.isConfirmed(accountIdB64: self.accountIdB64) }
+        XCTAssertTrue(marked, "a successful re-upload records the binding")
+        XCTAssertEqual(h.directory.uploads, 1)
+        let identity = try! Identity.fromSeed(seed: seed)
+        let upload = h.directory.lastUpload
+        XCTAssertEqual(upload?.signaturePubkey, identity.signaturePublicKey(), "the same keys")
+        XCTAssertEqual(upload?.x25519Pubkey, identity.x25519PublicKey())
+        XCTAssertTrue(verifyX25519Binding(
+            binding: upload?.x25519Binding ?? Data(),
+            ed25519PublicKey: identity.signaturePublicKey(),
+            x25519PublicKey: identity.x25519PublicKey()), "the upload carries a binding that verifies")
+        XCTAssertNil(upload?.leafAuth, "a same-key upload names nothing else; discovery keeps what it stores")
+        XCTAssertNil(upload?.genesisAttest)
+        XCTAssertNil(upload?.keyResetAttest)
+        XCTAssertNil(h.repository.keysSignOut)
+    }
+
+    func testARowThatCarriesAValidBindingIsRecordedAndNothingIsUploaded() async {
+        let marks = X25519BindingConfirmedMarks(defaults: defaults("binding-marks"))
+        let h = restoredSession(directory: ownRow(binding: true), bindingMarks: marks)
+        let marked = await waitUntil { marks.isConfirmed(accountIdB64: self.accountIdB64) }
+        XCTAssertTrue(marked)
+        XCTAssertEqual(h.directory.uploads, 0)
+    }
+
+    func testAConfirmedBindingIsNotAskedAgain() async {
+        let marks = X25519BindingConfirmedMarks(defaults: defaults("binding-marks"))
+        marks.markConfirmed(accountIdB64: accountIdB64)
+        let h = restoredSession(directory: ownRow(binding: false), bindingMarks: marks)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(h.directory.uploads, 0, "the mark stops the re-upload")
+    }
+
+    func testARowWithAnotherX25519KeyIsLeftAlone() async {
+        let marks = X25519BindingConfirmedMarks(defaults: defaults("binding-marks"))
+        let directory = ownRow(binding: false)
+        directory.publishedX25519 = Data(repeating: 0x33, count: 32)
+        let h = restoredSession(directory: directory, bindingMarks: marks)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(h.directory.uploads, 0, "keys that are not this device's are the landing rule's business")
+        XCTAssertFalse(marks.isConfirmed(accountIdB64: accountIdB64))
+    }
+
+    func testAFailedRepublishLeavesTheMarkUnsetForTheNextLaunch() async {
+        let marks = X25519BindingConfirmedMarks(defaults: defaults("binding-marks"))
+        let directory = ownRow(binding: false)
+        directory.uploadError = URLError(.notConnectedToInternet)
+        let h = restoredSession(directory: directory, bindingMarks: marks)
+        let tried = await waitUntil { h.directory.uploads == 1 }
+        XCTAssertTrue(tried)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(marks.isConfirmed(accountIdB64: accountIdB64))
+        XCTAssertNil(h.repository.keysSignOut, "nothing on screen changes")
         XCTAssertEqual(h.repository.state, .session(SessionAccount(accountIdB64: accountIdB64, username: "alice")))
     }
 
@@ -964,5 +1051,63 @@ final class DeviceGroupJournalOneShotTests: XCTestCase {
 
     func testThePublishedBoundIsFortySeconds() {
         XCTAssertEqual(OneShot.deadlineMs, 40_000)
+    }
+}
+
+
+// MARK: - The X25519 binding rule (security review 2026-11-21)
+
+final class X25519BindingRepublishTests: XCTestCase {
+    private let identity = try! Identity.fromSeed(seed: Data(repeating: 0x5A, count: 64))
+
+    private func row(sig: Data? = nil, x: Data? = nil, binding: Data?) -> IdentityFetchResponse {
+        IdentityFetchResponse(
+            signaturePubkey: base64Encode(sig ?? identity.signaturePublicKey()),
+            x25519Pubkey: base64Encode(x ?? identity.x25519PublicKey()),
+            x25519Binding: binding.map { base64Encode($0) })
+    }
+
+    private func decide(_ bundle: IdentityFetchResponse?, confirmed: Bool = false) -> X25519BindingRepublish.Step {
+        X25519BindingRepublish.decide(
+            bundle: bundle,
+            ownSignaturePubkey: identity.signaturePublicKey(),
+            ownX25519Pubkey: identity.x25519PublicKey(),
+            alreadyConfirmed: confirmed)
+    }
+
+    func testOwnKeysWithoutABindingAreRepublished() {
+        XCTAssertEqual(decide(row(binding: nil)), .republish)
+    }
+
+    func testABindingThatDoesNotVerifyIsRepublished() {
+        XCTAssertEqual(decide(row(binding: Data(repeating: 1, count: 64))), .republish)
+    }
+
+    func testAValidBindingIsConfirmed() {
+        XCTAssertEqual(decide(row(binding: signX25519Binding(accountIdentity: identity))), .confirmed)
+    }
+
+    func testTheMarkSkipsEverything() {
+        XCTAssertEqual(decide(row(binding: nil), confirmed: true), .nothing)
+    }
+
+    func testNoRowOrOtherKeysDoNothing() {
+        XCTAssertEqual(decide(nil), .nothing)
+        XCTAssertEqual(decide(row(sig: Data(repeating: 0xBB, count: 32), binding: nil)), .nothing)
+        XCTAssertEqual(decide(row(x: Data(repeating: 0x33, count: 32), binding: nil)), .nothing)
+    }
+
+    func testTheMarkIsPerAccountAndCleared() {
+        let suite = "binding-marks-\(UUID().uuidString)"
+        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        let marks = X25519BindingConfirmedMarks(defaults: UserDefaults(suiteName: suite)!)
+        let account = "acct-\(UUID().uuidString)"
+        AccountStoreGate.open(account)
+        XCTAssertFalse(marks.isConfirmed(accountIdB64: account))
+        marks.markConfirmed(accountIdB64: account)
+        XCTAssertTrue(marks.isConfirmed(accountIdB64: account))
+        XCTAssertFalse(marks.isConfirmed(accountIdB64: "other"))
+        marks.clear(accountIdB64: account)
+        XCTAssertFalse(marks.isConfirmed(accountIdB64: account))
     }
 }

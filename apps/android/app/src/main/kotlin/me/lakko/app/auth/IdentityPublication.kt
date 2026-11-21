@@ -93,9 +93,11 @@ internal enum class IdentityPublication {
     REFRESH,
 
     /**
-     * As [REFRESH], but publish only when the directory is missing the bundle
-     * or serves a different X25519 key for the same signature key — a relaunch
-     * must not pay an upload for a no-op.
+     * As [REFRESH], but publish only when the directory is missing the bundle,
+     * serves a different X25519 key for the same signature key, or serves our
+     * keys without a valid X25519 binding (a row written before discovery
+     * required one; until it carries one no client seals to this account) —
+     * a relaunch must not pay an upload for a no-op.
      */
     REFRESH_IF_CHANGED,
 
@@ -123,6 +125,11 @@ internal class PublishedIdentityKeys(
     val signaturePubkey: ByteArray,
     val x25519Pubkey: ByteArray,
     val keyGeneration: Long,
+    /** The row carries an X25519 binding (the signature key's signature over
+     *  the X25519 key) that verifies for these two keys. A row written before
+     *  discovery required the binding has none, and every client refuses to
+     *  seal to such an X25519 key (security review 2026-11-21). */
+    val x25519BindingValid: Boolean,
 )
 
 /** What the directory's answer means for this device's keys. */
@@ -287,7 +294,12 @@ internal suspend fun publishIdentity(
     if (publication == IdentityPublication.REFRESH_IF_CHANGED &&
         published != null && published.x25519Pubkey.contentEquals(ports.x25519Pubkey)
     ) {
-        return IdentityPublicationResult.UpToDate
+        if (published.x25519BindingValid) return IdentityPublicationResult.UpToDate
+        // Our keys, but no valid binding beside them: the row predates the
+        // required binding. Re-upload the same keys with it; discovery keeps
+        // the stored proof, leaf authorisation, genesis attestation and link
+        // on a same-key upload. A failure is retried at the next launch.
+        log("the directory serves our keys without a valid X25519 binding; re-publishing them", null)
     }
 
     // Genesis authorisation only when the directory PROVABLY has nothing: that

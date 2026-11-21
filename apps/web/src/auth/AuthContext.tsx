@@ -408,6 +408,7 @@ import {
   writeKnownDeviceId,
   type LandingTarget,
 } from "./session-device";
+import { republishBindingIfMissing, writeBindingConfirmed } from "./own-binding-republish";
 import {
   clearLogoutOwed,
   isLogoutOwed,
@@ -2553,11 +2554,30 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         current !== null &&
         bytesEqual(base64Decode(current.x25519_pubkey), canonical.x25519PublicKey)
       ) {
+        // The directory serves exactly these keys, so a reload uploads
+        // nothing; unless the row predates the X25519 binding (security
+        // review 2026-11-21), which is then uploaded once with the same keys
+        // (`own-binding-republish.ts`).
+        const wasm = await loadWasm();
+        await republishBindingIfMissing({
+          storage: plainStorage(),
+          accountIdB64,
+          own: canonical,
+          row: current,
+          verify: (b, e, x) => wasm.verifyX25519Binding(b, e, x),
+          upload: async () => {
+            // A logout or another sign-in while the check ran: upload nothing.
+            if (chats.accountIdentity() !== canonical) throw new Error("session changed");
+            await uploadIdentityBundle(discovery, accountIdBytes, canonical);
+          },
+        });
         return verdict;
       }
     }
     try {
       await uploadIdentityBundle(discovery, accountIdBytes, canonical);
+      // Every upload carries the binding of these keys.
+      writeBindingConfirmed(plainStorage(), accountIdB64, base64Encode(canonical.signaturePublicKey));
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("identity bundle refresh failed", err);

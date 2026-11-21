@@ -3576,6 +3576,10 @@ account's lineage seed, which every device of the account holds.
     design.
   - Identity bundles written before migration `0041` carry no binding and
     are unusable for sealing until re-uploaded (no production deployment).
+    Since the same day every client checks its own row when a session
+    lands or is restored at launch and re-publishes the same keys with the
+    binding when it is missing (web incl. desktop, iOS, Android; seen on the
+    Pixel: a contact request to it then went through).
   - A holder of the account key can still make the person read "Deleted
     account" until the next directory answer, which a client asks for at
     once; a hostile directory answering `404` after a genuine statement

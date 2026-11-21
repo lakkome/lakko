@@ -1216,7 +1216,9 @@ public class AuthRepository(
                 // ADR-0073 section 4.2 - the same read-before-write check a
                 // password login runs (does the directory still serve OUR
                 // keys, at OUR generation?), re-publishing only when the
-                // directory is missing the bundle; stale keys land the
+                // directory is missing the bundle or serves our keys without
+                // a valid X25519 binding (a row from before discovery
+                // required one, which no client seals to); stale keys land the
                 // signed-out screen and never an upload. Preceded by the
                 // refresh, so a reset the server already knows about is
                 // learned from the refresh refusal first. Not while a reset's
@@ -6426,6 +6428,11 @@ public class AuthRepository(
                                 signaturePubkey = base64Decode(it.signature_pubkey),
                                 x25519Pubkey = base64Decode(it.x25519_pubkey),
                                 keyGeneration = it.key_generation,
+                                x25519BindingValid = me.lakko.app.discovery.X25519Bindings.boundX25519Key(
+                                    it.signature_pubkey,
+                                    it.x25519_pubkey,
+                                    it.x25519_binding,
+                                ) != null,
                             )
                         }
 

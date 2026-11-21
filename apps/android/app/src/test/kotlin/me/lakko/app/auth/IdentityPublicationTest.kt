@@ -62,8 +62,12 @@ class IdentityPublicationTest {
         ownGeneration: Long = 1L,
     ) = RecordingPorts(ourSig, ourX, ownGeneration, published, uploadFailure)
 
-    private fun served(sig: ByteArray = ourSig, x: ByteArray = ourX, generation: Long = 1L) =
-        PublishedIdentityKeys(sig, x, generation)
+    private fun served(
+        sig: ByteArray = ourSig,
+        x: ByteArray = ourX,
+        generation: Long = 1L,
+        bindingValid: Boolean = true,
+    ) = PublishedIdentityKeys(sig, x, generation, x25519BindingValid = bindingValid)
 
     private val logged = mutableListOf<String>()
     private val log: (String, Throwable?) -> Unit = { message, _ -> logged += message }
@@ -229,6 +233,46 @@ class IdentityPublicationTest {
             land(IdentityLanding.SESSION_RESTORE, unreadable),
         )
         assertEquals(listOf("fetch"), unreadable.calls)
+    }
+
+    @Test
+    fun `a restore re-publishes our keys when the directory row carries no valid X25519 binding`() = runTest {
+        // A row written before discovery required the binding: our keys, no
+        // binding. Every client refuses to seal to it, so the restore uploads
+        // the same keys again (with the binding), never as a genesis entry.
+        val p = ports(published = { served(bindingValid = false) })
+
+        val result = land(IdentityLanding.SESSION_RESTORE, p)
+
+        assertEquals(IdentityPublicationResult.Uploaded(withGenesisAuth = false), result)
+        assertEquals(listOf("fetch", "upload(genesis=false)"), p.calls)
+        assertTrue(p.stale.isEmpty())
+    }
+
+    @Test
+    fun `a restore that finds other keys without a binding uploads nothing`() = runTest {
+        // A reset or rotation elsewhere is the landing rule's, binding or not.
+        val reset = ports(published = { served(sig = otherSig, generation = 3L, bindingValid = false) }, ownGeneration = 2L)
+        assertEquals(IdentityPublicationResult.StaleKeys, land(IdentityLanding.SESSION_RESTORE, reset))
+        assertEquals(listOf("fetch"), reset.calls)
+
+        val mismatch = ports(published = { served(sig = otherSig, generation = 1L, bindingValid = false) })
+        assertEquals(IdentityPublicationResult.KeyMismatch, land(IdentityLanding.SESSION_RESTORE, mismatch))
+        assertEquals(listOf("fetch"), mismatch.calls)
+    }
+
+    @Test
+    fun `a failed binding re-publish is logged and leaves the next launch to try again`() = runTest {
+        val p = ports(published = { served(bindingValid = false) }, uploadFailure = RuntimeException("offline"))
+
+        val result = land(IdentityLanding.SESSION_RESTORE, p)
+
+        assertEquals(IdentityPublicationResult.UploadFailed, result)
+        assertEquals(listOf("fetch", "upload(genesis=false)"), p.calls)
+        // Nothing is recorded: the next launch reads the row again, and an
+        // unbound row is re-published again.
+        val again = ports(published = { served(bindingValid = false) })
+        assertEquals(IdentityPublicationResult.Uploaded(withGenesisAuth = false), land(IdentityLanding.SESSION_RESTORE, again))
     }
 
     @Test

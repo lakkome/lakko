@@ -412,6 +412,10 @@ public final class AuthRepository: ObservableObject {
     /// auth" mark.
     private let identityKeyMarks: IdentityKeyRecordMarks
 
+    /// Security review 2026-11-21 — the per-account "the directory row
+    /// carries a valid X25519 binding" mark (``X25519BindingRepublish``).
+    private let x25519BindingMarks: X25519BindingConfirmedMarks
+
     /// ADR-0074 section 2.3 — the owed server half of Log out.
     private let logoutOwed: LogoutOwedStoring
 
@@ -733,6 +737,7 @@ public final class AuthRepository: ObservableObject {
         recallOperations: RecallOperations? = nil,
         ownDeviceId: OwnDeviceId? = nil,
         identityKeyMarks: IdentityKeyRecordMarks = IdentityKeyRecordMarks(),
+        x25519BindingMarks: X25519BindingConfirmedMarks = X25519BindingConfirmedMarks(),
         logoutOwed: LogoutOwedStoring = KeychainLogoutOwedStore(),
         rotationPending: KeyRotationPendingStoring = KeychainKeyRotationPendingStore(),
         ownPredecessors: OwnPredecessorStoring = KeychainOwnPredecessorStore(),
@@ -783,6 +788,7 @@ public final class AuthRepository: ObservableObject {
         self.protectionStore = protectionStore
         self.ownDeviceId = ownDeviceId ?? AuthRepository.storedOwnDeviceId
         self.identityKeyMarks = identityKeyMarks
+        self.x25519BindingMarks = x25519BindingMarks
         self.logoutOwed = logoutOwed
         self.tokenProvider = tokenProvider
         self.keyResetOperation = keyResetOperation ?? { sessionToken, freshGrant, seed, newKey, accountId in
@@ -4201,9 +4207,11 @@ public final class AuthRepository: ObservableObject {
 
         let observed: KeyResetLanding.Observation
         var publishedSignaturePubkey: Data?
+        var fetchedBundle: IdentityFetchResponse?
         do {
             if let bundle = try await restoreDirectory.fetchIdentityBundle(
                 accountId: accountIdBytes, sessionToken: tokenProvider.current?.sessionToken) {
+                fetchedBundle = bundle
                 publishedSignaturePubkey = base64Decode(bundle.signaturePubkey)
                 noteOwnLinkAtLanding(bundle: bundle, accountIdB64: accountIdB64, currentKey: derivedPubkey,
                                      accountIdentitySeed: accountIdentitySeed)
@@ -4241,7 +4249,16 @@ public final class AuthRepository: ObservableObject {
             showKeysMismatch(accountIdB64: accountIdB64)
             return
         case .land(let publish):
-            guard publish != .skip, let token = tokenProvider.current?.sessionToken else { return }
+            guard publish != .skip else {
+                await republishX25519BindingIfMissing(
+                    bundle: fetchedBundle,
+                    identity: identity,
+                    accountIdBytes: accountIdBytes,
+                    accountIdB64: accountIdB64,
+                    accountIdentitySeed: accountIdentitySeed)
+                return
+            }
+            guard let token = tokenProvider.current?.sessionToken else { return }
             do {
                 let leafAuth = try signLeafGenesis(
                     ed25519Seed: identity.ed25519Seed(),
@@ -4269,12 +4286,67 @@ public final class AuthRepository: ObservableObject {
                     keyResetAttest: nil,
                     sessionToken: token
                 )
+                // The upload carried the binding of these keys.
+                x25519BindingMarks.markConfirmed(accountIdB64: accountIdB64)
             } catch {
                 if IdentityUploadRefusal.of(error) == .superseded {
                     handleKeysSuperseded(accountIdB64: accountIdB64)
                     return
                 }
                 NSLog("identity bundle refresh (sign-in) failed: \(error)")
+            }
+        }
+    }
+
+    /// Security review 2026-11-21 — a landing that uploads nothing (the
+    /// silent restore) still re-uploads this device's SAME keys with their
+    /// X25519 binding when the directory row predates the binding
+    /// (``X25519BindingRepublish``). Once per landing, from the bundle the
+    /// landing rule already fetched; skipped once the per-account mark says
+    /// the binding is confirmed. A same-key upload names no proof, leaf
+    /// authorisation, attestation or link: discovery keeps the stored ones
+    /// (`COALESCE`). A failure leaves the mark unset, logs one line and is
+    /// retried at the next landing; nothing on screen changes.
+    private func republishX25519BindingIfMissing(
+        bundle: IdentityFetchResponse?,
+        identity: Identity,
+        accountIdBytes: Data,
+        accountIdB64: String,
+        accountIdentitySeed: Data
+    ) async {
+        let step = X25519BindingRepublish.decide(
+            bundle: bundle,
+            ownSignaturePubkey: identity.signaturePublicKey(),
+            ownX25519Pubkey: identity.x25519PublicKey(),
+            alreadyConfirmed: x25519BindingMarks.isConfirmed(accountIdB64: accountIdB64))
+        switch step {
+        case .nothing:
+            return
+        case .confirmed:
+            x25519BindingMarks.markConfirmed(accountIdB64: accountIdB64)
+        case .republish:
+            guard let token = tokenProvider.current?.sessionToken,
+                  isLiveSession(accountIdBytes: accountIdBytes, accountIdentitySeed: accountIdentitySeed)
+            else { return }
+            do {
+                try await accountDirectory.publishIdentityBundle(
+                    accountId: accountIdBytes,
+                    signaturePubkey: identity.signaturePublicKey(),
+                    x25519Pubkey: identity.x25519PublicKey(),
+                    x25519Binding: signX25519Binding(accountIdentity: identity),
+                    leafAuth: nil,
+                    genesisAttest: nil,
+                    keyResetAttest: nil,
+                    sessionToken: token
+                )
+                x25519BindingMarks.markConfirmed(accountIdB64: accountIdB64)
+                NSLog("[auth] identity bundle re-published with its key binding")
+            } catch {
+                if IdentityUploadRefusal.of(error) == .superseded {
+                    handleKeysSuperseded(accountIdB64: accountIdB64)
+                    return
+                }
+                NSLog("[auth] identity bundle key-binding re-publish failed; retried at the next launch")
             }
         }
     }

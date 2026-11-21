@@ -437,7 +437,7 @@ class KeyRotationKeptTest {
     fun `the directory still serving this account's previous key is not a mismatch`() {
         val own = ByteArray(32) { 2 }
         val previous = ByteArray(32) { 1 }
-        val published = PublishedIdentityKeys(previous, ByteArray(32), keyGeneration = 4)
+        val published = PublishedIdentityKeys(previous, ByteArray(32), keyGeneration = 4, x25519BindingValid = true)
         // This device adopted (generation 5); the rotating device's upload
         // has not landed yet. Nothing is uploaded, nothing is reported.
         assertEquals(
@@ -452,13 +452,13 @@ class KeyRotationKeptTest {
             landingVerdict(published, own, ownKeyGeneration = 4, ownPredecessors = listOf(previous)),
         )
         // And a stranger's key is never excused by a predecessor.
-        val stranger = PublishedIdentityKeys(ByteArray(32) { 9 }, ByteArray(32), keyGeneration = 4)
+        val stranger = PublishedIdentityKeys(ByteArray(32) { 9 }, ByteArray(32), keyGeneration = 4, x25519BindingValid = true)
         assertEquals(
             LandingVerdict.KeyMismatch,
             landingVerdict(stranger, own, ownKeyGeneration = 5, ownPredecessors = listOf(previous)),
         )
         // A higher generation is a reset elsewhere, predecessor or not.
-        val later = PublishedIdentityKeys(previous, ByteArray(32), keyGeneration = 6)
+        val later = PublishedIdentityKeys(previous, ByteArray(32), keyGeneration = 6, x25519BindingValid = true)
         assertEquals(
             LandingVerdict.StaleKeys,
             landingVerdict(later, own, ownKeyGeneration = 5, ownPredecessors = listOf(previous)),

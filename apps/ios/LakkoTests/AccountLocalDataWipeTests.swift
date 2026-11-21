@@ -125,6 +125,8 @@ final class AccountLocalDataWipeTests: XCTestCase {
         XCTAssertEqual(removals, 1)
         XCTAssertNil(SessionStore().load(), "the session record named the wiped account")
         XCTAssertNil(PushAccountBindingStore.live.current(), "the binding named the wiped account")
+        XCTAssertFalse(X25519BindingConfirmedMarks().isConfirmed(accountIdB64: a), "the binding mark is wiped")
+        XCTAssertTrue(X25519BindingConfirmedMarks().isConfirmed(accountIdB64: b))
 
         // The other account's data is exactly what it was.
         XCTAssertEqual(Set(AccountDataInventory.remaining(accountIdB64: b)), Set(beforeB))
@@ -394,6 +396,7 @@ final class AccountLocalDataWipeTests: XCTestCase {
                 newSignaturePubkey: Data(repeating: 0x0A, count: 32)),
             accountIdB64: x)
         RecoveryMarkers().markPhraseOwed(accountIdB64: x)
+        X25519BindingConfirmedMarks().markConfirmed(accountIdB64: x)
         SnapshotLeafKeyStore().save(accountIdB64: x, leafKeyB64: "leaf")
         KnownGroupsStore().add(accountIdB64: x, groupIdHex: group)
         GroupNameStore().record(

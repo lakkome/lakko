@@ -132,6 +132,7 @@ import { deletePhrase } from "../backup/phrase-store";
 import { clearBudget, clearThreeWordsSuspended } from "./recover/three-words";
 import { clearKeyResetOwed } from "./key-reset-owed";
 import { clearGenesisRecorded, clearKnownDeviceId } from "./session-device";
+import { clearBindingConfirmed } from "./own-binding-republish";
 import { clearNoPrfPasskeys } from "./passkey-no-prf";
 import { clearLogoutOwed } from "./logout-owed";
 import { clearRemovals } from "../devices/removal";
@@ -326,6 +327,12 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // was finishing (they need the account seed, which is gone).
     { name: "known-device-id", run: () => clearKnownDeviceId(storage, accountIdB64) },
     { name: "genesis-recorded", run: () => clearGenesisRecorded(storage, accountIdB64) },
+    // The "own bundle carries its X25519 binding" mark (security review
+    // 2026-11-21, `own-binding-republish.ts`).
+    {
+      name: "x25519-binding-confirmed",
+      run: () => clearBindingConfirmed(storage, accountIdB64),
+    },
     // UX 10.2: the passkeys this device found cannot carry keys.
     { name: "passkey-no-prf", run: () => clearNoPrfPasskeys(storage, accountIdB64) },
     { name: "logout-owed", run: () => clearLogoutOwed(storage, accountIdB64) },
