@@ -34,8 +34,9 @@ under. The test stack was given a TEST root and one test moderator on
 2026-11-20, made with `tools/moderation-root` (`lakko-moderation-root keygen`,
 `dev-moderator`, `sign-list --version 1 --rp-id test.lakko.me --origin
 https://test.lakko.me`). Its private files (the root seed, the moderator's
-report secret and software signing seed) are kept off the server by whoever
-made them; a test root is never used anywhere else. What is on the server:
+report secret and software signing seed) are kept off the server, on the
+maintainer's machine in `~/.lakko/moderation-test/` (0700); a test root is never
+used anywhere else. What is on the server:
 
 | What | Where |
 |---|---|
