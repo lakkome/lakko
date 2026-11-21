@@ -69,6 +69,7 @@ class AddMembersFlowTest {
     @Test
     fun `Add returns to the info at once and the picks are added there`() {
         val held = mutableListOf<String>()
+        val gids = mutableListOf<String>()
         val repo = ChatRepository(applicationContext = InMemoryContext())
         val chats = OpenChats()
         try {
@@ -76,8 +77,10 @@ class AddMembersFlowTest {
                 ChatViewModel(
                     repo = repo,
                     groupIdHex = "00".repeat(16),
-                    keepFoundGrant = { _, wire ->
+                    keepFoundGrant = { gid, _, wire ->
+                        // G-53 — kept as the found grant of the add into this group.
                         held += wire
+                        gids += gid
                         awaitCancellation()
                     },
                 ),
@@ -91,6 +94,7 @@ class AddMembersFlowTest {
             assertTrue(vm.membersPanelOpen.value)
             assertEquals(emptyList<AddMemberPick>(), vm.addPicks.value)
             assertEquals(listOf("g"), held)
+            assertEquals(listOf("00".repeat(16)), gids)
             assertTrue(vm.membershipBusy.value)
         } finally {
             chats.leaveAllAndSettle()
@@ -110,7 +114,7 @@ class AddMembersFlowTest {
                 ChatViewModel(
                     repo = repo,
                     groupIdHex = "11".repeat(16),
-                    keepFoundGrant = { _, wire -> grants += wire },
+                    keepFoundGrant = { _, _, wire -> grants += wire },
                     keepFoundBinding = { gid, _, binding ->
                         bindings += gid to binding
                         awaitCancellation()

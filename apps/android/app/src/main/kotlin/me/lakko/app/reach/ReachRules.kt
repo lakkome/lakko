@@ -298,61 +298,41 @@ public enum class WritePurpose {
 }
 
 /**
- * Which of the grants held for one person authorises a write of [purpose]
- * (ADR-0060 §6), or `null` for none (the write then goes unsigned, which an
- * open mailbox takes and a closed one drops).
+ * Which of the grants held for one person authorises a contact request or the
+ * answer to their own request (ADR-0060 §6), or `null` for none (the write
+ * then goes unsigned, which an open mailbox takes and a closed one drops).
  *
  * - A contact request never uses `member`: a co-member the person hides from
  *   holds it, and it authorises only Welcomes (the ADR's residual).
  * - A reply is the person's `reply` key, then `contact`, and nothing else.
- * - A Welcome prefers `reply`, `contact`, then `member` of THAT group (the
- *   ADR-0050 re-admission of the person's new device), then anything that
- *   says the person lets this device find them.
+ *
+ * A Welcome is not ordered here: G-53, the core's `planReachWrites`
+ * ([planHeldWrites]) orders it and the committer delegation.
  */
 public fun pickWriteGrant(
     held: Collection<HeldGrantRef>,
     purpose: WritePurpose,
-    groupHex: String? = null,
-): HeldGrantRef? = orderedWriteGrants(held, purpose, groupHex).firstOrNull()
+): HeldGrantRef? = orderedWriteGrants(held, purpose).firstOrNull()
 
 /**
- * Every grant held for one person that may authorise a write of [purpose], in
- * the order [pickWriteGrant] prefers them (within one class, by scope), each
- * once. ADR-0050 section 2.5a item 7: a Welcome writer tries them in this
- * order and moves to the next on a `401` (the person rotated that key away),
- * so a stale grant never hides a live one held under another class or scope.
+ * Every grant held for one person that may authorise a contact request or a
+ * reply ([purpose]), in the order [pickWriteGrant] prefers them (within one
+ * class, by scope), each once; a writer moves to the next on a `401`. Empty for
+ * [WritePurpose.WELCOME], which the core plans (G-53, [planHeldWrites]).
  */
 public fun orderedWriteGrants(
     held: Collection<HeldGrantRef>,
     purpose: WritePurpose,
-    groupHex: String? = null,
 ): List<HeldGrantRef> {
-    fun all(kind: ReachKind, scope: String? = null): List<HeldGrantRef> =
-        held.filter { it.kind == kind && (scope == null || it.scopeHex == scope) }
-            .sortedBy { it.scopeHex }
-    val order: List<() -> List<HeldGrantRef>> = when (purpose) {
-        WritePurpose.CONTACT_REQUEST -> listOf(
-            { all(ReachKind.CONTACT) },
-            { all(ReachKind.GROUP) },
-            { all(ReachKind.CHANNEL) },
-            { all(ReachKind.FOF) },
-        )
-        WritePurpose.REPLY -> listOf(
-            { all(ReachKind.REPLY) },
-            { all(ReachKind.CONTACT) },
-        )
-        WritePurpose.WELCOME -> listOf(
-            { all(ReachKind.REPLY) },
-            { all(ReachKind.CONTACT) },
-            { groupHex?.let { all(ReachKind.MEMBER, it) }.orEmpty() },
-            { groupHex?.let { all(ReachKind.GROUP, it) }.orEmpty() },
-            { all(ReachKind.GROUP) },
-            { all(ReachKind.CHANNEL) },
-            { all(ReachKind.FOF) },
-        )
+    fun all(kind: ReachKind): List<HeldGrantRef> =
+        held.filter { it.kind == kind }.sortedBy { it.scopeHex }
+    val order: List<ReachKind> = when (purpose) {
+        WritePurpose.CONTACT_REQUEST -> listOf(ReachKind.CONTACT, ReachKind.GROUP, ReachKind.CHANNEL, ReachKind.FOF)
+        WritePurpose.REPLY -> listOf(ReachKind.REPLY, ReachKind.CONTACT)
+        WritePurpose.WELCOME -> emptyList()
     }
     val out = LinkedHashSet<HeldGrantRef>()
-    for (candidate in order) out.addAll(candidate())
+    for (kind in order) out.addAll(all(kind))
     return out.toList()
 }
 
@@ -405,8 +385,14 @@ public sealed class SignedWriteOutcome<out T> {
     public data class Written<T>(val result: T) : SignedWriteOutcome<T>()
 
     /** No candidate was accepted: none existed ([lastRefusal] `null`), or each
-     *  was refused with a `401`. Nothing was written. */
-    public data class Exhausted(val lastRefusal: Throwable?) : SignedWriteOutcome<Nothing>()
+     *  was refused with a `401`. Nothing was written. [tried] counts the
+     *  candidates that yielded an authorisation, [refused] the `401`s
+     *  (equal here: any other answer ends the loop). */
+    public data class Exhausted(
+        val lastRefusal: Throwable?,
+        val tried: Int = 0,
+        val refused: Int = 0,
+    ) : SignedWriteOutcome<Nothing>()
 }
 
 /**
@@ -422,20 +408,24 @@ public suspend fun <A, T> firstAcceptedWrite(
     isRefusal: (Throwable) -> Boolean,
 ): SignedWriteOutcome<T> {
     var lastRefusal: Throwable? = null
+    var tried = 0
+    var refused = 0
     for (candidate in candidates) {
         val auth = try {
             candidate()
         } catch (_: Throwable) {
             null
         } ?: continue
+        tried += 1
         try {
             return SignedWriteOutcome.Written(write(auth))
         } catch (cause: Throwable) {
             if (cause is kotlinx.coroutines.CancellationException || !isRefusal(cause)) throw cause
             lastRefusal = cause
+            refused += 1
         }
     }
-    return SignedWriteOutcome.Exhausted(lastRefusal)
+    return SignedWriteOutcome.Exhausted(lastRefusal, tried, refused)
 }
 
 // -----------------------------------------------------------------

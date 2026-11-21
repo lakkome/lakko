@@ -34,6 +34,7 @@ import me.lakko.app.contacts.grantMailboxPkOrNull
 import me.lakko.app.contacts.verifiedGrantDest
 import uniffi.lakko_ffi_uniffi.FfiReachClass
 import uniffi.lakko_ffi_uniffi.FfiReachGrant
+import uniffi.lakko_ffi_uniffi.FfiReachPurpose
 import uniffi.lakko_ffi_uniffi.FfiReachState
 import uniffi.lakko_ffi_uniffi.FfiScopeId
 import uniffi.lakko_ffi_uniffi.FfiScopeKind
@@ -111,6 +112,20 @@ public class ReachManager internal constructor(
      */
     @Volatile
     public var acceptedResetOf: ((ownerKey: ByteArray) -> me.lakko.app.contacts.AcceptedResetOfKey?)? = null
+
+    /**
+     * G-53 — the groups (hex) this account and the person known by the given
+     * CURRENT account key are both current members of, read from the live
+     * rosters. A `group` or `member` grant is planned for a Welcome only with
+     * one of these (or when a search of this add found it). Installed by the
+     * chat repository; `null` (or a throw) is none.
+     */
+    @Volatile
+    public var sharedScopesOf: ((personCurrentKey: ByteArray) -> Collection<String>)? = null
+
+    /** G-53 — the core's plan of which held grant writes ([planHeldWrites]).
+     *  A test injects a stand-in (the host JVM loads no native library). */
+    internal var reachPlanner: ReachPlanner = NativeReachPlanner
 
     /** The own-profile store (ADR-0048 section 4a), keyed by the raw account
      *  id: the own name travels between the account's devices beside the
@@ -1632,7 +1647,10 @@ public class ReachManager internal constructor(
         scope.launch {
             lock.withLock {
                 if (binding.get() !== b) return@withLock
-                doc = doc.copy(held = doc.held.filterNot { it.ownerKeyHex in ownerKeys })
+                doc = doc.copy(
+                    held = doc.held.filterNot { it.ownerKeyHex in ownerKeys },
+                    foundGrants = doc.foundGrants.filterNot { it.addedAccountKeyHex in ownerKeys },
+                )
                 store.save(b.accountIdB64, doc)
             }
         }
@@ -1647,7 +1665,111 @@ public class ReachManager internal constructor(
         scope.launch {
             lock.withLock {
                 if (binding.get() !== b) return@withLock
-                doc = doc.copy(held = doc.held.filterNot { it.scopeHex == scoped })
+                doc = doc.copy(
+                    held = doc.held.filterNot { it.scopeHex == scoped },
+                    foundGrants = doc.foundGrants.filterNot { it.groupHex == scoped },
+                )
+                store.save(b.accountIdB64, doc)
+            }
+        }
+    }
+
+    /**
+     * G-53 — keep the grant a search found [ownerKey] through for the add this
+     * device is about to propose in [groupHex]: filed as a held grant, and
+     * recorded as THE found grant of that add, so the Welcome and the
+     * committer delegations of it are planned with it first.
+     */
+    public suspend fun keepFoundGrant(groupHex: String, ownerKey: ByteArray, grant: FfiReachGrant) {
+        val b = binding.get() ?: return
+        val wire = try {
+            uniffi.lakko_ffi_uniffi.encodeReachGrant(grant)
+        } catch (_: Throwable) {
+            return
+        }
+        val owner = reachHex(mailboxAccountKey(ownerKey))
+        // Recorded before filing: filing wakes the Welcome owed to them,
+        // which must already see this grant as the found one.
+        lock.withLock {
+            if (binding.get() !== b) return@withLock
+            val next = withFoundGrant(doc.foundGrants, groupHex, owner, reachHex(wire))
+            // The latest search decides: an open binding an earlier search
+            // recorded for this add no longer stands.
+            val open = withoutOpenBinding(doc.openBindings, groupHex, owner)
+            if (next == doc.foundGrants && open == doc.openBindings) return@withLock
+            doc = doc.copy(foundGrants = next, openBindings = open)
+            store.save(b.accountIdB64, doc)
+        }
+        storeHeld(b, ownerKey, grant, scopeHex = "")
+    }
+
+    /**
+     * G-53 — a group shrank: the people whose grants were received in
+     * [groupHex] are planned again, and what a higher version of the same key
+     * replaced is deleted (the core decides; a grant at its key's highest
+     * version stays, whatever group it arrived in).
+     */
+    public fun pruneHeldAfterShrink(groupHex: String) {
+        if (binding.get() == null) return
+        val scoped = groupHex.lowercase()
+        val owners = doc.held.filter { it.scopeHex == scoped }.map { it.ownerKeyHex }.distinct()
+        for (ownerHex in owners) {
+            val owner = reachUnhex(ownerHex) ?: continue
+            try {
+                planHeld(owner, mailboxAccountKey(owner), FfiReachPurpose.WELCOME, groupHex = null)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "G-53: held grants not pruned: ${cause.javaClass.simpleName}")
+            }
+        }
+    }
+
+    /**
+     * G-53 — the core's plan ([planHeldWrites]) of the grants held for the
+     * person known by [ownerKey] for a write of [purpose] into the mailbox of
+     * [current] (their current key), with the grant a search of the add into
+     * [groupHex] found them through first. Only grants whose binding verifies
+     * against [current] are planned (any other opens no mailbox of theirs).
+     * The grants a higher version replaced are deleted. SECRET.
+     */
+    private fun planHeld(
+        ownerKey: ByteArray,
+        current: ByteArray,
+        purpose: FfiReachPurpose,
+        groupHex: String?,
+    ): HeldWritePlan<FfiReachGrant> {
+        val keys = personKeys(ownerKey)
+        val held = ArrayList<HeldForPlan<FfiReachGrant>>()
+        for (h in heldForPerson(doc.held, keys)) {
+            val kind = runCatching { ReachKind.valueOf(h.kind) }.getOrNull() ?: continue
+            for (wireHex in grantWiresOf(h)) {
+                val grant = runCatching { uniffi.lakko_ffi_uniffi.decodeReachGrant(reachUnhex(wireHex)!!) }
+                    .getOrNull() ?: continue
+                val mailboxPk = mailboxCrypto.grantMailboxPkOrNull(grant, current) ?: continue
+                held += HeldForPlan(kind, h.scopeHex, grant.version, reachHex(mailboxPk), wireHex.lowercase(), grant)
+            }
+        }
+        if (held.isEmpty()) return HeldWritePlan(emptyList(), emptyList())
+        val shared = try {
+            sharedScopesOf?.invoke(current.copyOf()).orEmpty()
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        val found = groupHex?.let { foundGrantFor(doc.foundGrants, it, keys) }
+        val plan = planHeldWrites(held, purpose, groupHex?.lowercase(), shared, found, reachPlanner)
+        if (plan.superseded.isNotEmpty()) dropSuperseded(keys, plan.superseded)
+        return plan
+    }
+
+    /** Delete the grants [gone] the plan named superseded, held for the
+     *  person filed under [keys]. */
+    private fun dropSuperseded(keys: List<String>, gone: List<HeldForPlan<FfiReachGrant>>) {
+        val b = binding.get() ?: return
+        scope.launch {
+            lock.withLock {
+                if (binding.get() !== b) return@withLock
+                val next = withoutSupersededGrants(doc.held, keys, gone.map { it.kind.name to it.grantHex })
+                if (next === doc.held) return@withLock
+                doc = doc.copy(held = next)
                 store.save(b.accountIdB64, doc)
             }
         }
@@ -1697,17 +1819,22 @@ public class ReachManager internal constructor(
     /**
      * ADR-0078 - where a write of [purpose] to [ownerKey] may go, in turn:
      * [first] (a grant or binding the caller holds for this write), each held
-     * grant that verifies, and a proofless write to the mailbox key a held
-     * binding names ([mailboxPkFor]; it spends one `mailbox-write` token), the
-     * last only when nothing before it yielded a destination.
+     * grant that verifies (the core's plan for a Welcome and a contact
+     * request, G-53), and a proofless write to the mailbox key a held binding
+     * names ([mailboxPkFor]; it spends one `mailbox-write` token), the last
+     * only when nothing before it yielded a destination and the plan allows it
+     * ([prooflessAfterPlan]: not after held grants none of which is usable).
      */
     public fun writeDestCandidates(
         ownerKey: ByteArray,
         purpose: WritePurpose,
         first: MailboxDest? = null,
     ): List<() -> MailboxDest?> {
-        val grants = reachAuthCandidates(ownerKey, purpose)
+        val (grants, proofless) = authCandidates(ownerKey, purpose, groupHex = null)
         val all = if (first == null) grants else listOf<() -> MailboxDest?>({ first }) + grants
+        // G-53 — no proofless write after grants that are held but unusable
+        // ([prooflessAfterPlan]).
+        if (!proofless) return all
         return withProoflessLast(all) { mailboxPkFor(ownerKey)?.let { MailboxDest(it, null) } }
     }
 
@@ -1723,19 +1850,43 @@ public class ReachManager internal constructor(
         ownerKey: ByteArray,
         purpose: WritePurpose,
         groupHex: String? = null,
-    ): List<() -> MailboxDest?> {
-        val b = binding.get() ?: return emptyList()
+    ): List<() -> MailboxDest?> = authCandidates(ownerKey, purpose, groupHex).first
+
+    /** [reachAuthCandidates], and whether a proofless write may follow them
+     *  ([prooflessAfterPlan]; always for a write the core does not plan). */
+    private fun authCandidates(
+        ownerKey: ByteArray,
+        purpose: WritePurpose,
+        groupHex: String?,
+    ): Pair<List<() -> MailboxDest?>, Boolean> {
+        val b = binding.get() ?: return emptyList<() -> MailboxDest?>() to true
         // ADR-0074 3.5a rule 1: this account's own conversation key (a
         // proven predecessor after a rotation) IS this account.
         val current = mailboxAccountKey(ownerKey)
         if (current.contentEquals(b.accountKey)) {
-            return listOf({
+            return listOf<() -> MailboxDest?>({
                 grant(ReachKind.CONTACT)?.let { MailboxDest(b.mailboxPk.copyOf(), DsReachAuth(reachSigner(it.seed))) }
-            })
+            }) to true
         }
-        val held = heldFor(ownerKey)
         val out = ArrayList<() -> MailboxDest?>()
-        for (ref in orderedWriteGrants(held.map { it.first }, purpose, groupHex?.lowercase())) {
+        // G-53 — the core orders a Welcome's grants (the found one, contact,
+        // reply, member, group, channel, contacts of contacts; group and
+        // member only with a group shared now), one per key at its highest
+        // version; lower versions are deleted. A contact request is addressed
+        // the same way, so a stale group grant with no group shared now is
+        // not used (the request then goes inside a shared group, or waits).
+        val planned = purpose == WritePurpose.WELCOME || purpose == WritePurpose.CONTACT_REQUEST
+        var proofless = true
+        if (planned) {
+            val plan = planHeld(ownerKey, current, FfiReachPurpose.WELCOME, groupHex)
+            proofless = prooflessAfterPlan(plan.considered, plan.candidates.size)
+            for (candidate in plan.candidates) {
+                val grant = candidate.payload
+                out += { verifiedGrantDest(grant, current, mailboxCrypto) { seed -> DsReachAuth(reachSigner(seed)) } }
+            }
+        }
+        val held = if (planned) emptyList() else heldFor(ownerKey)
+        for (ref in orderedWriteGrants(held.map { it.first }, purpose)) {
             // Rule 2: one class and scope may be held under the current key
             // and under a predecessor; each is a candidate, the current
             // key's first, and a `401` moves on to the next.
@@ -1769,7 +1920,7 @@ public class ReachManager internal constructor(
                 }
             }
         }
-        return out
+        return out to proofless
     }
 
     /** ADR-0050 section 2.5a item 7 — told the owner key of a grant (or a
@@ -2019,15 +2170,17 @@ public class ReachManager internal constructor(
      * delegation per committer candidate ([candidateKeys], owner first then
      * admins by rank, at most 16), each to that candidate's account key,
      * living [ttlMs] (at most 24 h), signed with the first grant held for the
-     * person whose binding verifies against their current key
-     * ([delegationGrantOrder]: contact, group, channel, contacts of
-     * contacts; a grant a search found them through was kept as one).
+     * person whose binding verifies against their current key, in the
+     * core's order (G-53, [planHeldWrites]: the grant a search of this add
+     * found them through, then contact, group, channel, contacts of
+     * contacts).
      *
-     * With no such grant but a binding this device recorded for the add of a
-     * person found in Everyone ([recordOpenBinding]): the envelope with that
-     * binding and NO delegation, which tells the committer it may write the
-     * Welcome into their open mailbox without a proof (ADR-0060 section 6,
-     * amended 2026-10-29). `null` when neither is held.
+     * With a binding this device recorded for the add of a person found in
+     * Everyone ([recordOpenBinding]), whatever grant is held (G-53,
+     * [committerEnvelopeKind]): the envelope with that binding and NO
+     * delegation, which tells the committer it may write the Welcome into
+     * their open mailbox without a proof (ADR-0060 section 6, amended
+     * 2026-10-29). `null` when neither is held.
      */
     public fun composeDelegations(
         addedAccountKey: ByteArray,
@@ -2040,15 +2193,24 @@ public class ReachManager internal constructor(
         // CURRENT mailbox, and is signed to each candidate's current key
         // (the key that candidate's device signs the write with).
         val addedCurrent = mailboxAccountKey(addedAccountKey)
-        val held = heldFor(addedAccountKey)
         // ADR-0078: the mailbox comes from the grant's binding, verified
         // against that current key; a grant whose binding is refused is
-        // passed over.
-        val signing = delegationGrantOrder(held.map { it.first }).asSequence()
-            .flatMap { ref -> held.filter { it.first == ref }.map { it.second }.asSequence() }
-            .mapNotNull { grant -> mailboxCrypto.grantMailboxPkOrNull(grant, addedCurrent)?.let { grant to it } }
-            .firstOrNull()
-        if (signing != null) {
+        // passed over. G-53: the core's plan picks the grant (the one the
+        // search of this add found first, then contact, group, channel,
+        // contacts of contacts).
+        // G-53 — a person the search of this add found in Everyone gets the
+        // open envelope, whatever grant is held for them.
+        val openBinding = groupHex?.let { ownOpenBindingFor(it, addedAccountKey) }
+        val signing = if (openBinding != null) {
+            null
+        } else {
+            planHeld(addedAccountKey, addedCurrent, FfiReachPurpose.DELEGATION, groupHex).candidates
+                .firstNotNullOfOrNull { planned ->
+                    mailboxCrypto.grantMailboxPkOrNull(planned.payload, addedCurrent)?.let { planned.payload to it }
+                }
+        }
+        val kind = committerEnvelopeKind(foundOpen = openBinding != null, signingGrantHeld = signing != null)
+        if (kind == CommitterEnvelopeKind.SIGNED && signing != null) {
             val (grant, mailboxPk) = signing
             val mailbox = mailboxCrypto.address(mailboxPk)
             val expires = (nowMs + ttlMs).toULong()
@@ -2067,8 +2229,8 @@ public class ReachManager internal constructor(
             )
             return ComposedDelegations(envelope, signed = true)
         }
-        val group = groupHex ?: return null
-        val binding = ownOpenBindingFor(group, addedAccountKey) ?: return null
+        if (kind != CommitterEnvelopeKind.OPEN) return null
+        val binding = openBinding ?: return null
         val envelope = uniffi.lakko_ffi_uniffi.composeCommitterDelegationEnvelope(
             uniffi.lakko_ffi_uniffi.FfiCommitterDelegationEnvelope(
                 addedAccountKey = addedAccountKey,
@@ -2124,8 +2286,11 @@ public class ReachManager internal constructor(
         val changed = lock.withLock {
             if (binding.get() !== b) return@withLock false
             val next = withOpenBinding(doc.openBindings, groupHex, reachHex(current), reachHex(mailboxBinding))
-            if (next == doc.openBindings) return@withLock true
-            doc = doc.copy(openBindings = next)
+            // G-53 — the latest search decides: a grant an earlier search
+            // found for this add is no longer the found one.
+            val found = withoutFoundGrant(doc.foundGrants, groupHex, reachHex(current))
+            if (next == doc.openBindings && found == doc.foundGrants) return@withLock true
+            doc = doc.copy(openBindings = next, foundGrants = found)
             store.save(b.accountIdB64, doc)
             true
         }

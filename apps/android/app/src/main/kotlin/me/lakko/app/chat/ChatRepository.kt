@@ -1935,16 +1935,19 @@ public class ChatRepository(
      * ADR-0060 §2 / §6 — write a Welcome into an account mailbox, signed with
      * [explicit] when the caller holds the grant for this flow, else with the
      * grants this device holds for the person
-     * ([me.lakko.app.reach.ReachManager.reachAuthCandidates]: their reply key,
-     * contact key, `member` key of [groupIdHex], any group / channel key, a
-     * committer delegation...), each tried in turn and the next one after a
-     * `401` (ADR-0050 section 2.5a item 7). This account's own mailbox and an
+     * ([me.lakko.app.reach.ReachManager.reachAuthCandidates]: the core's plan,
+     * G-53 — the grant the search of this add found, contact, reply, member,
+     * group, channel, contacts of contacts, one per key at its highest
+     * version — then a committer delegation), each tried in turn and the next
+     * one after a `401` (ADR-0050 section 2.5a item 7). This account's own mailbox and an
      * [explicit] grant are written exactly as before.
      *
      * With no grant left:
-     *   * [requireGrant] (the sweep's Welcome) — nothing is written: a write
-     *     with no proof to a closed mailbox is answered as stored and dropped,
-     *     so it would count a lost Welcome as delivered. The person is noted
+     *   * [requireGrant] (the sweep's Welcome) — the open mailbox of a person
+     *     found in Everyone when the core allows it (G-53: every candidate
+     *     refused with a `401`, none included), else nothing is written: a
+     *     write with no proof to a closed mailbox is answered as stored and
+     *     dropped, so it would count a lost Welcome as delivered. The person is noted
      *     ([undeliveredWelcomeGroups]) and [WelcomeUndeliverable] keeps the
      *     Welcome owed; the next poll and a new grant for them retry it.
      *   * otherwise (the direct add and group-creation paths, unchanged) — no
@@ -2066,13 +2069,12 @@ public class ChatRepository(
                 isRefusal = { it is me.lakko.app.ds.DsReachRefusedError },
                 requireGrant = requireGrant || answering,
                 accountKeyHex = accountHex,
-                // ADR-0060 section 6 (amended 2026-10-29) — only when this
-                // device holds no grant or delegation for the person at all
-                // (a refused one keeps the Welcome owed): a person found in
+                // ADR-0060 section 6 (amended 2026-10-29) — a person found in
                 // Everyone, named by this device's record or a kept
                 // no-delegation envelope, is written proofless into their
-                // open mailbox (one `mailbox-write` token). Never for anyone
-                // else.
+                // open mailbox (one `mailbox-write` token) when the core's
+                // rule allows it (G-53: no candidate, or every candidate
+                // refused with a `401`). Never for anyone else.
                 openFallback = groupIdHex?.takeUnless { answering }?.let { group ->
                     {
                         reach.openWelcomeMailboxPk(group, account)?.let {
@@ -2094,6 +2096,25 @@ public class ChatRepository(
             )
             throw undeliverable
         }
+    }
+
+    /**
+     * G-53 — the groups (hex) this account and the person whose CURRENT
+     * account key is [personCurrentKey] are both current members of, from
+     * the live rosters (a roster key is resolved through the proven steps
+     * first). A group this device is no longer active in does not count.
+     */
+    private fun sharedGroupsWith(personCurrentKey: ByteArray): List<String> {
+        val snapshot = synchronized(groups) { groups.entries.map { it.key to it.value.group } }
+        val rosters = snapshot.map { (groupIdHex, group) ->
+            val people = if (readIsActive { group.isActive() } == true) {
+                rosterOf(group).map(::personKeyOf)
+            } else {
+                null
+            }
+            groupIdHex to people
+        }
+        return me.lakko.app.reach.sharedScopesWith(rosters, personCurrentKey, ::mailboxAccountKeyOf)
     }
 
     /**
@@ -2379,6 +2400,9 @@ public class ChatRepository(
             // ADR-0050 section 2.5a item 7 — a Welcome kept owed for want of a
             // grant is retried the moment one for that person arrives.
             reach.onGrantHeld = { ownerKey -> retryOwedWelcomesFor(ownerKey) }
+            // G-53 — a `group` or `member` grant writes a Welcome only while
+            // the person and this account share a group now.
+            reach.sharedScopesOf = { personCurrentKey -> sharedGroupsWith(personCurrentKey) }
             reach.bind(accountIdB64, account)
             // ADR-0092 section 7 — a setting chosen while this device was
             // away (or restored with a backup) reaches the stored flag here.
@@ -11098,6 +11122,9 @@ public class ChatRepository(
             reachScope.launchSession {
                 try {
                     val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
+                    // G-53 — the grants received in this group are planned
+                    // again: what a higher version replaced is deleted.
+                    reach.pruneHeldAfterShrink(groupIdHex)
                     // Republishes in every group through the visibility
                     // listener (the same path a setting change takes).
                     reach.rotateClasses(listOf(me.lakko.app.reach.ReachKind.MEMBER, me.lakko.app.reach.ReachKind.GROUP))

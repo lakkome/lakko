@@ -82,6 +82,8 @@ struct ComposerTextField: View {
     /// Paste of a copied photo or video: the pasteboard's items, in order.
     /// `nil` keeps Paste a text paste only.
     var onPasteMedia: (([NSItemProvider]) -> Void)? = nil
+    /// The empty field's text; `nil` is the conversation's "Message".
+    var placeholder: String? = nil
 
     @Environment(\.chatTextScale) private var scale
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -89,7 +91,7 @@ struct ComposerTextField: View {
     var body: some View {
         ComposerTextView(
             text: $text, caret: caret, disabled: disabled,
-            placeholder: Localization.text("chat.composer.placeholder"),
+            placeholder: placeholder ?? Localization.text("chat.composer.placeholder"),
             // `docs/ux/text-size.md` — the composer follows the chat text size.
             fontSize: ChatFontSize.points(style: .body, dynamicTypeSize: dynamicTypeSize, scale: scale),
             onReturn: onReturn, focus: focus, onPasteMedia: onPasteMedia)

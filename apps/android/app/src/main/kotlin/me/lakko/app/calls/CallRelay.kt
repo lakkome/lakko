@@ -159,6 +159,11 @@ public class CallPeerAnnouncer(
      *  refusal. Absent: no message is ever accepted. */
     public val verifyCallChat: (from: String, signerKey: ByteArray, bytes: ByteArray) -> VerifiedCallChatView? =
         { _, _, _ -> null },
+    /** This device's signed picture message (`CallChatPictures.kt`,
+     *  section 4.1.4.1) as `selfPeerId`, numbered `seq`; `null` when it
+     *  cannot be composed. Absent: no picture is ever sent. */
+    public val composeCallChatPicture: (selfPeerId: String, seq: ULong, picture: CallChatPictureRef) -> ByteArray? =
+        { _, _, _ -> null },
 ) {
     public companion object {
         /** The announcer for a call whose roster is `group()`. */
@@ -226,16 +231,51 @@ public class CallPeerAnnouncer(
                         }
                     }
                 },
-                verifyCallChat = { from, signerKey, bytes ->
-                    group()?.let { g ->
+                composeCallChatPicture = { selfPeerId, seq, picture ->
+                    if (group() == null) {
+                        null
+                    } else {
                         try {
-                            uniffi.lakko_ffi_uniffi.verifyCallChat(g, callId, from, signerKey, bytes)
-                                .let { VerifiedCallChatView(seq = it.seq, text = it.text) }
+                            uniffi.lakko_ffi_uniffi.composeCallChatPicture(
+                                identity,
+                                callId,
+                                selfPeerId,
+                                seq,
+                                uniffi.lakko_ffi_uniffi.CallChatPicture(
+                                    blobId = picture.blobId,
+                                    key = picture.key,
+                                    nonce = picture.nonce,
+                                    size = picture.size,
+                                    width = picture.width,
+                                    height = picture.height,
+                                ),
+                            )
                         } catch (_: Throwable) {
                             null
                         }
                     }
                 },
+                verifyCallChat = { from, signerKey, bytes ->
+                    group()?.let { g ->
+                        try {
+                            uniffi.lakko_ffi_uniffi.verifyCallChat(g, callId, from, signerKey, bytes)
+                                .let { VerifiedCallChatView(seq = it.seq, text = it.text, picture = it.picture?.let(::pictureRefOf)) }
+                        } catch (_: Throwable) {
+                            null
+                        }
+                    }
+                },
+            )
+
+        /** The core's picture as the Kotlin twin. */
+        private fun pictureRefOf(p: uniffi.lakko_ffi_uniffi.CallChatPicture): CallChatPictureRef =
+            CallChatPictureRef(
+                blobId = p.blobId,
+                key = p.key,
+                nonce = p.nonce,
+                size = p.size,
+                width = p.width,
+                height = p.height,
             )
 
         /** `verifyCallPeerAnnouncement`, as the identity a tile and the

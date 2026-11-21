@@ -442,14 +442,18 @@ the call lasts:
   left keeps what they saw until their call ends.
 - Gone when the call ends for this device (End, or the call ending). Nothing is
   kept on the device after that, nothing is written into the conversation the
-  call came from, nothing is stored on any server. A connection that drops and
+  call came from, nothing is stored on any server (a picture's encrypted file
+  stays in the file store a few days at most, section 4.1.4.1). A connection that drops and
   comes back inside the same call keeps the messages; joining the same call
   again after End starts empty.
 - Sealed for the people in the call and signed by the sender; the server
   forwards ciphertext and cannot read or forge a message.
-- Text only. No photos, files, voice messages, stickers, replies, reactions,
-  edits or deletions. Links in a message are live, by the rule of
-  [`message-links.md`](message-links.md).
+- Text, emoji and pasted pictures (the emoji button of the composer, below,
+  and section 4.1.4.1; both added 2026-11-21). No files, voice messages,
+  stickers, GIFs, replies,
+  reactions, edits or deletions. Links in a message are live, by the rule of
+  [`message-links.md`](message-links.md). Pictures pasted from the clipboard
+  since 2026-11-21 (section 4.1.4.1).
 
 It is not the conversation the call came from, on purpose: a message written in
 the call reaches only the people in the call and leaves no trace in the group.
@@ -503,10 +507,38 @@ Top to bottom:
    on this device, `14:05`, 11 muted. No delivery or read state.
 3. **The composer**: the design system's composer without the attach button
    and without the microphone: a growing text field (up to 5 lines, then it
-   scrolls) with the placeholder `Message everyone in the call`, and a send
-   button, disabled while the field is empty or only white space. On a
-   keyboard Enter sends and Shift+Enter starts a new line; on a phone the
-   keyboard's return key starts a new line and the button sends.
+   scrolls) with the placeholder `Message everyone in the call`, the emoji
+   button, and a send button, disabled while the field is empty or only white
+   space. On a keyboard Enter sends and Shift+Enter starts a new line; on a
+   phone the keyboard's return key starts a new line and the button sends.
+
+   **The emoji button** (added 2026-11-21, after people in calls asked for
+   it): the smiling-face button of the conversation composer, between the
+   field and Send, spoken `Emoji`. It opens the conversation composer's own
+   emoji picker with the Emoji tab only: no GIF tab, since the call chat
+   carries text. Search, categories, Recent and skin tones are the picker's
+   own, shared with the conversation composer (one Recent list).
+
+   - **Web and desktop**: the picker opens as the conversation composer's
+     popover, anchored above the composer, inside the panel or the column.
+     A click on an emoji puts it at the caret and keeps the picker open;
+     `Esc`, a click outside it, or the button again closes it, and `Esc`
+     then does not close the panel too. Focus stays in the text field.
+   - **iOS and Android**: the picker is the conversation composer's bottom
+     sheet, over the call chat panel; a tap puts the emoji at the caret and
+     keeps the sheet open, `Done` (iOS) or a swipe down closes it. The call
+     keeps running behind it; the mute button of the panel header is under
+     the sheet while it is open, as it is under the keyboard.
+   - **The limit**: an emoji counts toward the 800 bytes like any text (an
+     emoji is 4 to about 30 bytes). An emoji that would pass the limit is not
+     put in, and the `A message in a call can't be longer than this.` line
+     shows, as when typing reaches the limit.
+   - **Sending** is unchanged: the picker never sends anything by itself. A
+     message of emoji only is an ordinary message.
+
+   Copy: the button's label and spoken name `Emoji` (catalog key
+   `call.chat.emoji`); the picker's own strings are the conversation
+   composer's.
 
 **Empty state.** Centred in the message area, muted, two lines and no action:
 `Messages here are seen only by people in the call.` /
@@ -558,6 +590,91 @@ count changes, read as part of the circle's spoken name
 | A text bound, checked by the composer and by every receiver | The relay carries at most 1024 bytes of plaintext |
 | De-duplication by (sender, sequence number) | A relay frame re-sent after a reconnect must not show twice |
 | The same verify and bound on every client, written once in the core | The three clients must agree on what a valid message is |
+
+### 4.1.4.1 Pictures pasted into the call chat
+
+Asked by the maintainer on 2026-11-21 and decided the same day (option 1
+below, with saving allowed and nothing for later joiners).
+
+**What a person does.** On web and desktop, paste (`Cmd+V` / `Ctrl+V`) with a
+picture on the clipboard while the call chat's text field has focus, or drop
+a picture file on the panel. On iOS and Android, paste a picture into the
+field (the keyboard's or the field's own Paste). The picture goes into a
+small tray above the field: a thumbnail 64 high with a cross to remove it,
+one picture at a time (a second paste replaces the first). Send is enabled
+while the tray holds a picture, with or without text.
+
+- **Sending.** The picture is sent first, as a message of its own; text in
+  the field, if any, follows as a second message. Both bubbles show at once;
+  the text waits until the picture's file has uploaded and the picture is on
+  its way (or failed), drawn at 60% meanwhile, so everyone receives the two
+  in that order. A failed picture does not hold the text back. The picture is prepared on
+  the device the way a photo in a conversation is: decoded, its longest side
+  brought down to the conversation's limit (2560), re-encoded as JPEG, which
+  drops every piece of metadata (location, camera, time).
+- **Refused.** Anything that does not decode as a picture: one line under
+  the field, `Only pictures can be sent in a call.` (13 muted), the tray
+  stays as it was. A picture larger than 10 MB after preparing (not reachable
+  with the 2560 limit, kept as a bound): `This picture is too large to send in
+  a call.`
+- **While it uploads** the bubble shows at once with the thumbnail at 60%
+  opacity and a small spinner; when it is sent, full opacity. If the upload
+  fails: the bubble at 60% with `Not sent.` and `Send again`, as for text.
+
+**Why it is not just more text.** A message in the call chat travels on the
+call's sealed relay, which carries at most 1024 bytes; a picture does not fit.
+It goes the way a picture goes in a conversation: encrypted on the sender's
+device with a fresh key (`lakko-attachments`), uploaded to the file store as
+an unreadable blob, and the message carries only its address, key, nonce,
+size and pixel size, sealed and signed like a text message
+(`lakko_calls::call_chat` kind `picture`). Each receiver downloads it at once,
+decrypts it and keeps it in memory only.
+
+**What everyone sees.** The picture in the bubble, fitted into at most 240 x
+240 keeping its shape, each side at least 80 (a very long or very tall picture
+is cropped by the box), no caption (text is its own bubble). While it downloads: a box of the picture's shape on the
+sunken fill with a spinner. One that cannot be downloaded or opened: the box
+with `Picture not available.` (13 muted). A tap (click) opens it full size over
+the call screen on black, closed by a tap, `Esc` or the close button; the
+call runs on behind it.
+
+**What a person can do with a picture.** The action sheet (long-press, right
+click) has `Save picture` in place of `Copy`: web saves `picture.jpg` through
+the browser, the desktop app through its own save dialog, iOS and Android
+through the same save the conversation's photo viewer uses. Nothing else.
+
+**What happens to the picture when the call ends** (option 1 of the three
+offered on 2026-11-21):
+
+- The sender's device deletes every picture it uploaded in this call when its
+  call ends (End, or the call ending), through the same owed delete a message
+  deleted for everyone uses (ADR-0065: kept on the device until the file store
+  confirms it, retried at the next start).
+- Every upload asks the file store for an idle life of one day
+  (`x-lakko-blob-idle-days: 1`, ADR-0087 section 13), so the store's daily
+  sweep removes it even when the sender never deletes it (a crash, a lost
+  connection): once a full day has passed since it was last downloaded, which
+  is within three days of the call at most. This is not a 24-hour timer: the
+  store keeps days, not hours, and a precise timer would need a store change.
+- On every device the decrypted picture lives in memory and goes with the
+  call's messages; nothing is written to disk unless the person used
+  `Save picture`.
+- Someone in the call who had not downloaded a picture when its sender left
+  sees `Picture not available.`
+- Someone who joins after a picture was sent does not see it, as for text.
+
+**What the file store sees.** That a blob of this size was uploaded and
+downloaded by N anonymous passes at these times; never the picture, the call,
+or who is in it. Several people downloading one blob within seconds tells the
+operator that they are probably in one conversation; the same holds for a
+picture in a group conversation today (ADR-0084 records it for profile
+photos).
+
+Copy (catalog keys `call.chat.picture_*`): `Only pictures can be sent in a
+call.`, `This picture is too large to send in a call.`, `Picture not
+available.`, `Save picture`, `Remove picture` (the tray's cross, spoken),
+`Picture` (a picture bubble's spoken name; the preview line above the control
+bar shows `Anna: Picture`).
 
 ### 4.1.5 Camera background
 

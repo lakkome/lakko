@@ -85,6 +85,7 @@ pub mod phrase_check;
 pub mod pow;
 pub mod publisher_devices;
 pub mod push_wake;
+pub mod reach_plan;
 pub mod reaction_rules;
 pub mod recovery_payload;
 pub mod release;

@@ -7,9 +7,10 @@ package me.lakko.app.reach
  * ADR-0060 section 6 (amended 2026-10-29) — an add of a person found by
  * search, the pure half:
  *
- *  - which held grants a committer delegation may be signed with (a grant the
- *    search found the person through is kept as a held grant first, so it
- *    is one of these);
+ *  - which held grant a committer delegation is signed with is the core's
+ *    plan (G-53, [planHeldWrites]: the grant the search found the person
+ *    through first, then contact, group, channel, contacts of contacts;
+ *    never member, reply or link);
  *  - which bindings let a sweep write the Welcome to a person found in
  *    Everyone into their open mailbox WITHOUT a proof: only one this device
  *    recorded for the group when it proposed the add, or one carried by a
@@ -20,25 +21,6 @@ package me.lakko.app.reach
  *
  * No Android, no native calls: the host JVM tests run all of it.
  */
-
-/**
- * The classes of held grant a committer delegation is signed with, in the
- * order tried: the contact key, then a `group`, `channel` or
- * contacts-of-contacts key (each of these is a key the person handed out to
- * let someone write to them, and a search finds people through the last
- * three). Never `member` (a co-member the person hides from holds it, UX
- * section 6.2), `reply` or `link` (each opens the mailbox for one flow).
- */
-public val DELEGATION_GRANT_KINDS: List<ReachKind> =
-    listOf(ReachKind.CONTACT, ReachKind.GROUP, ReachKind.CHANNEL, ReachKind.FOF)
-
-/** [held] in the order a delegation is signed from them ([DELEGATION_GRANT_KINDS],
- *  then by scope), each once; classes outside that list are left out. */
-public fun delegationGrantOrder(held: Collection<HeldGrantRef>): List<HeldGrantRef> {
-    val out = LinkedHashSet<HeldGrantRef>()
-    for (kind in DELEGATION_GRANT_KINDS) out.addAll(held.filter { it.kind == kind }.sortedBy { it.scopeHex })
-    return out.toList()
-}
 
 /** A kept committer-delegation envelope as the open-Welcome rule reads it. */
 public class KeptDelegationView(

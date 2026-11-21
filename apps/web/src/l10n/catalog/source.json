@@ -824,6 +824,10 @@
       "text": "Close chat",
       "comment": "Accessible name of the button that closes the chat panel inside a group call."
     },
+    "call.chat.emoji": {
+      "text": "Emoji",
+      "comment": "Button in the composer of a call's chat that opens the emoji picker, and its spoken name. The call chat has no GIFs."
+    },
     "call.chat.message_a11y": {
       "text": "{name}: {text}",
       "comment": "Spoken announcement of a new message in a group call's chat; {name} is the sender, {text} the message."
@@ -845,6 +849,30 @@
       "text": "Messages here are seen only by people in the call.",
       "comment": "First line of the empty state of a group call's chat, kept as a small note at the top of the list once there are messages. Someone who joins later does not see earlier messages.",
       "security_critical": true
+    },
+    "call.chat.picture": {
+      "text": "Picture",
+      "comment": "Spoken name of a picture in a call's chat, and the text after the sender's name in the one-line preview above the call controls."
+    },
+    "call.chat.picture_only": {
+      "text": "Only pictures can be sent in a call.",
+      "comment": "Line under the text field of a call's chat when something that is not a picture was pasted or dropped."
+    },
+    "call.chat.picture_remove": {
+      "text": "Remove picture",
+      "comment": "Spoken name of the cross on the picture waiting to be sent in a call's chat."
+    },
+    "call.chat.picture_save": {
+      "text": "Save picture",
+      "comment": "Action on a picture in a call's chat: saves it on this device."
+    },
+    "call.chat.picture_too_large": {
+      "text": "This picture is too large to send in a call.",
+      "comment": "Line under the text field of a call's chat when a pasted picture is too large even after it was made smaller."
+    },
+    "call.chat.picture_unavailable": {
+      "text": "Picture not available.",
+      "comment": "In a picture bubble of a call's chat when the picture could not be downloaded or opened (for example its sender left the call)."
     },
     "call.chat.placeholder": {
       "text": "Message everyone in the call",
@@ -1666,7 +1694,19 @@
     },
     "call.screen_share.own_tile": {
       "text": "You're sharing your screen",
-      "comment": "Text on this device's own share tile, which shows no picture of the share."
+      "comment": "This device's own share tile when its share shows the call itself and the browser does not say whether a tab, a window or a screen is shared; the tile then shows no picture."
+    },
+    "call.screen_share.own_tile_this_screen": {
+      "text": "You're sharing this screen",
+      "comment": "This device's own share tile when it shares the screen the call is on, so the tile shows no picture of it."
+    },
+    "call.screen_share.own_tile_this_tab": {
+      "text": "You're sharing this tab",
+      "comment": "This device's own share tile when it shares the browser tab the call is in, so the tile shows no picture of it."
+    },
+    "call.screen_share.own_tile_this_window": {
+      "text": "You're sharing this window",
+      "comment": "This device's own share tile when it shares the window the call is in, so the tile shows no picture of it."
     },
     "call.screen_share.pinned_chip": {
       "text": "{name} is sharing their screen",

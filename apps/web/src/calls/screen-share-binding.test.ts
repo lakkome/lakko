@@ -13,7 +13,8 @@ import { describe, expect, it } from "vitest";
 import { t } from "../l10n";
 import { ScreenShareBinding, type ScreenCapture } from "./screen-share-binding";
 import type { FoldCurrent, ShareFold } from "./screen-share-controller";
-import type { ScreenShareControl, ShareOnScreen } from "./screen-share-store";
+import type { OwnSharePicture, ScreenShareControl, ShareOnScreen } from "./screen-share-store";
+import type { MirrorFacts } from "./screen-share-mirror";
 import { ScreenShareNotSealedError } from "./screen-share-tracks";
 
 class FakeTrack {
@@ -89,7 +90,12 @@ interface Harness {
   notices: string[];
   attached: MediaStream[];
   detached: number;
-  store: { current: ShareOnScreen | null; control: ScreenShareControl | null; busy: boolean };
+  store: {
+    current: ShareOnScreen | null;
+    control: ScreenShareControl | null;
+    busy: boolean;
+    own: OwnSharePicture | null;
+  };
 }
 
 function harness(capture: Partial<ScreenCapture>, attach?: (s: MediaStream) => Promise<void>): Harness {
@@ -99,7 +105,7 @@ function harness(capture: Partial<ScreenCapture>, attach?: (s: MediaStream) => P
     notices: [],
     attached: [],
     detached: 0,
-    store: { current: null, control: null, busy: false },
+    store: { current: null, control: null, busy: false, own: null },
   };
   const now = { ms: 0 };
   h.binding = new ScreenShareBinding<never>({
@@ -129,6 +135,9 @@ function harness(capture: Partial<ScreenCapture>, attach?: (s: MediaStream) => P
       },
       setBusy: (b) => {
         h.store.busy = b;
+      },
+      setOwnPicture: (o) => {
+        h.store.own = o;
       },
     },
     notice: (text) => h.notices.push(text),
@@ -214,6 +223,45 @@ describe("ScreenShareBinding", () => {
     expect(h.detached).toBeGreaterThan(0);
     expect(h.store.current).toBeNull();
     expect(h.binding.sharing()).toBe(false);
+  });
+
+  it("shows the own picture, and no picture for a share of this very screen", async () => {
+    const facts: MirrorFacts = {
+      displaySurface: "window",
+      captured: { width: 1920, height: 1080 },
+      captureHandleIsOwn: undefined,
+          ownWindow: { width: 1440, height: 900 },
+      ownScreen: { width: 1512, height: 982 },
+      devicePixelRatio: 2,
+      screenExtended: undefined,
+    };
+    let current = facts;
+    let resized: (() => void) | null = null;
+    const capture = fakeStream(false);
+    const h = harness({
+      getDisplayMedia: () => Promise.resolve(capture.stream),
+      mirrorFacts: () => Promise.resolve(current),
+      onWindowChange: (l) => {
+        resized = l;
+        return () => {
+          resized = null;
+        };
+      },
+    });
+    await h.binding.start();
+    await Promise.resolve();
+    expect(h.store.own?.stream).toBe(capture.stream);
+    expect(h.store.own?.view).toEqual({ kind: "picture" });
+
+    // The person switches the share to the screen the call is on.
+    current = { ...facts, displaySurface: "monitor", captured: { width: 3024, height: 1964 } };
+    (resized as (() => void) | null)?.();
+    await Promise.resolve();
+    expect(h.store.own?.view).toEqual({ kind: "mirror", surface: "screen" });
+
+    h.binding.stop();
+    expect(h.store.own).toBeNull();
+    expect(resized).toBeNull();
   });
 
   it("stops the capture and says so when the call ends", async () => {

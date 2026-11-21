@@ -80,11 +80,26 @@ not known yet and is part of the build.
 - **A strip across the top of the call screen**: `You're sharing your screen`
   and a `Stop` button. With tab or system sound: `You're sharing your screen
   and its sound`.
-- **Their own tile for the share** shows no picture of the share, to avoid the
-  endless-mirror effect when the person shares the screen the call is on. It
-  shows a screen glyph and `You're sharing your screen` on the share tile's
-  black ground, small, in the strip (group) or next to the self-view
-  (one-to-one). Open question 1.
+- **Their own tile for the share** (decided by the maintainer on 2026-11-21,
+  closing open question 1) shows the live picture of what they share, small,
+  in the strip (group) or next to the self-view (one-to-one), uncropped on
+  black like every share, with no zoom controls and no sound. The one
+  exception is the **mirror**: when the share contains the call itself (the
+  tab, the window or the screen Lakko is in), the tile shows no picture, to
+  avoid the endless mirror, and keeps the share tile's black ground with the
+  screen glyph and one line saying what is shared:
+  `You're sharing this tab`, `You're sharing this window` or
+  `You're sharing this screen`. When the browser does not say what kind of
+  surface is shared and the share is a mirror, the line is
+  `You're sharing your screen`.
+
+  Whether a share is a mirror is decided on the device from what the browser
+  or the desktop app reports (section 3.1), checked again every 2 seconds
+  and when the window changes size, so moving the call to another screen or
+  switching the shared surface in the browser's own bar changes the tile.
+  When nothing reported can tell, the tile shows the picture: a mirror shown
+  by mistake is a small repeating picture, a picture hidden by mistake is the
+  defect this replaced.
 - **The camera and the microphone are unchanged.** A share is a separate
   picture; the camera tile goes on as it was.
 - **Stopping**: the row button, the strip's `Stop`, or the browser's own
@@ -97,6 +112,36 @@ not known yet and is part of the build.
 - **The connection drops and comes back**: the share is still running in the
   browser; it is re-sent when the call reconnects. If the browser ended the
   capture meanwhile, the share is over and the person is not asked again.
+
+### 3.1 What each engine lets the device know
+
+The rule, in order (pure, in `apps/web/src/calls/screen-share-mirror.ts`):
+
+1. **The desktop app** asks its host how many screens there are and the
+   sizes of its window and of the screen that window is on, in device pixels
+   (`GET /__host/app/surfaces`); the webview's page cannot tell the first.
+   The rules below then run on the host's figures.
+2. **A tab** (`displaySurface` `browser`): a mirror only when the captured
+   tab is this one, which Chromium reports through the Capture Handle this
+   page sets (`setCaptureHandleConfig` / `getCaptureHandle()`). Lakko already
+   asks Chromium to leave its own tab out of the picker
+   (`selfBrowserSurface: "exclude"`), so this is the rare case of a browser
+   that ignored the option.
+3. **A window** (`window`): a mirror when the captured picture has the size of
+   this browser window (within 2 pixels on each side, in CSS pixels, device
+   pixels or the other way round), since
+   the browser does not say which window it captured. Another window of
+   exactly the same size reads as a mirror: the tile then shows the line,
+   which is what it did before.
+4. **A screen** (`monitor`): a mirror when the captured picture has the size
+   of the screen this window is on in device pixels (within 2 pixels), or
+   when the browser says there is only one screen (`screen.isExtended ===
+   false`). Two screens of the same size read as a mirror for either.
+5. **No surface reported**: the size checks of 3 and 4; neither matching
+   means the picture is shown.
+
+What was measured per engine on 2026-11-21 is recorded in
+[ADR-0083](../adr/0083-screen-share.md) section 6.
 
 ## 4. One share at a time
 
@@ -187,7 +232,8 @@ chosen, not measured.
 |---|---|---|
 | Sender | Can share | `Share screen` button |
 | Sender | Picker open | The browser's picker; the row unchanged behind it |
-| Sender | Sharing | Filled button, top strip, own share tile without the picture, bar status |
+| Sender | Sharing | Filled button, top strip, own share tile with the live picture, bar status |
+| Sender | Sharing the tab, window or screen Lakko is in | As above, the own tile shows no picture and says `You're sharing this tab` / `window` / `screen` |
 | Sender | Sharing with sound | As above, strip names the sound |
 | Sender | Stopped by a newer share | Line `Boris is sharing now, so your share stopped.` |
 | Sender | Refused / could not arm | Line from section 2.1 |
@@ -246,8 +292,7 @@ share; recording.
 
 ## 12. Open questions for the maintainer
 
-1. **The sender's own preview.** The spec shows the sender no picture of their
-   own share (the mirror effect). Meet shows a small preview with a warning
-   instead. Which?
+1. **The sender's own preview.** Decided 2026-11-21: the live picture, and
+   no picture only for a mirror (section 3).
 2. **Motion versus detail.** A share favours sharpness. Should a shared tab
    that plays a video switch to smooth motion automatically?

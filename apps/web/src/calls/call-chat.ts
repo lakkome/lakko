@@ -5,8 +5,8 @@
  * The chat of a group call (`docs/ux/calls.md` section 4.1.4,
  * `lakko_calls::call_chat`).
  *
- * Text messages between the people in the call, for as long as the call
- * lasts. A message rides the sealed SFU relay (ADR-0078 section 2), signed
+ * Text messages and pictures (section 4.1.4.1) between the people in the
+ * call, for as long as the call lasts. A message rides the sealed SFU relay (ADR-0078 section 2), signed
  * with the sender's MLS leaf key, and a receiver shows it only once it
  * verified against the leaf key that peer's announcement verified with.
  * Nothing is kept: the chat belongs to the call's session and is cleared when
@@ -30,7 +30,8 @@
  * {@link callChatState} / {@link callChatActions} are the small store the
  * call screen reads.
  *
- * Pure apart from the Solid signals of the store: no wasm, no network.
+ * Pure apart from the Solid signals of the store: no wasm, and the network
+ * only through the injected {@link CallChatPictureIo}.
  */
 import { createSignal } from "solid-js";
 
@@ -54,8 +55,48 @@ export const MAX_PENDING_PER_PEER = 50;
  *  limit, far above what a call's chat holds. */
 export const MAX_CALL_CHAT_MESSAGES = 1000;
 
-/** What a message on screen is. */
-export type CallChatDelivery = "sent" | "not-sent";
+/** What a message on screen is. `sending` only for a picture of this
+ *  device's while its file uploads (section 4.1.4.1). */
+export type CallChatDelivery = "sent" | "sending" | "not-sent";
+
+/** Where a picture's encrypted file is and how to open it
+ *  (`lakko_calls::call_chat` kind `picture`). */
+export interface CallChatPictureRef {
+  readonly blobId: Uint8Array;
+  readonly key: Uint8Array;
+  readonly nonce: Uint8Array;
+  readonly size: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+/** A picture as a bubble shows it (section 4.1.4.1). */
+export interface CallChatPictureView {
+  readonly width: number;
+  readonly height: number;
+  /** `loading`: downloading or opening; `ready`: `url` shows it;
+   *  `unavailable`: it could not be downloaded or opened. This device's own
+   *  picture is `ready` from the start. */
+  readonly status: "loading" | "ready" | "unavailable";
+  /** An object URL of the decrypted JPEG while `ready`. */
+  readonly url: string | null;
+}
+
+/** The network and memory a picture needs, plugged in by the call. */
+export interface CallChatPictureIo {
+  /** Encrypt and upload `jpeg` (asking the store for a one-day idle life);
+   *  the reference and the blob id in hex, or `null` when it failed. */
+  upload(jpeg: Uint8Array, width: number, height: number): Promise<{
+    readonly ref: CallChatPictureRef;
+    readonly blobIdHex: string;
+  } | null>;
+  /** Download and decrypt; `null` when it is gone or does not open. */
+  download(ref: CallChatPictureRef): Promise<Uint8Array | null>;
+  makeUrl(jpeg: Uint8Array): string;
+  revokeUrl(url: string): void;
+  /** The call ended: delete these of this device's uploads (owed deletes). */
+  deleteUploaded(blobIdsHex: readonly string[]): void;
+}
 
 /** One message in the call's chat. */
 export interface CallChatMessage {
@@ -67,7 +108,10 @@ export interface CallChatMessage {
   /** The sender's SFU peer id; `null` for this device's own messages. */
   readonly peerId: string | null;
   readonly seq: bigint;
+  /** The text; empty for a picture. */
   readonly text: string;
+  /** The picture, for a picture message. */
+  readonly picture?: CallChatPictureView | undefined;
   /** When the message arrived on this device (or was written here). */
   readonly arrivedAtMs: number;
   /** Always `sent` for others' messages. */
@@ -79,13 +123,19 @@ export interface CallChatSigner {
   /** This device's signed message as `selfPeerId`, numbered `seq`, or `null`
    *  when it cannot make one yet (no group). */
   composeCallChat?(selfPeerId: string, seq: bigint, text: string): Uint8Array | null;
+  /** The same for a picture. */
+  composeCallChatPicture?(selfPeerId: string, seq: bigint, picture: CallChatPictureRef): Uint8Array | null;
   /** A message from `from`, verified against the leaf key its announcement
    *  verified with, or `null`. */
   verifyCallChat?(
     from: string,
     signerKey: Uint8Array,
     bytes: Uint8Array,
-  ): { readonly seq: bigint; readonly text: string } | null;
+  ): {
+    readonly seq: bigint;
+    readonly text: string;
+    readonly picture?: CallChatPictureRef | null | undefined;
+  } | null;
 }
 
 /** What the channel is plugged into. */
@@ -104,6 +154,16 @@ export interface CallChatChannelDeps {
   onIncoming(message: CallChatMessage): void;
   /** One plain line, never with text or ids in it. */
   log?(line: string): void;
+  /** Pictures (section 4.1.4.1); absent, no picture is sent or shown. */
+  readonly pictures?: CallChatPictureIo | undefined;
+}
+
+/** This device's picture while it is not on the relay yet. */
+interface OwnPicture {
+  readonly jpeg: Uint8Array;
+  readonly width: number;
+  readonly height: number;
+  ref: CallChatPictureRef | null;
 }
 
 interface Held {
@@ -121,6 +181,18 @@ export class CallChatChannel {
   private readonly pending = new Map<string, Held[]>();
   /** The `(peer, seq)` pairs already shown. */
   private readonly seen = new Map<string, Set<bigint>>();
+  /** This device's pictures by seq, kept until they are on the relay. */
+  private readonly ownPictures = new Map<bigint, OwnPicture>();
+  /** The blob ids (hex) this device uploaded in this call. */
+  private readonly uploaded = new Set<string>();
+  /** Every object URL made in this call, revoked when it ends. */
+  private readonly urls = new Set<string>();
+  /** Bumped by {@link clear}, so work that finishes after it does nothing. */
+  private generation = 0;
+  /** This device's pictures between their start and their send attempt. */
+  private picturesInFlight = 0;
+  /** Texts written while a picture was in flight, oldest first. */
+  private readonly waitingTexts: string[] = [];
 
   constructor(private readonly deps: CallChatChannelDeps) {}
 
@@ -137,7 +209,10 @@ export class CallChatChannel {
   send(text: string): CallChatMessage {
     this.ownSeq += 1n;
     const seq = this.ownSeq;
-    const sent = this.transmit(seq, text);
+    // A text written after a picture that is still uploading waits for it,
+    // so everyone sees the two in the order they were sent (section 4.1.4.1).
+    const waits = this.picturesInFlight > 0;
+    const sent = waits ? false : this.transmit(seq, text);
     const message: CallChatMessage = {
       id: `own:${seq}`,
       own: true,
@@ -145,24 +220,132 @@ export class CallChatChannel {
       seq,
       text,
       arrivedAtMs: this.deps.now(),
-      delivery: sent ? "sent" : "not-sent",
+      delivery: waits ? "sending" : sent ? "sent" : "not-sent",
     };
+    if (waits) this.waitingTexts.push(message.id);
     this.push(message);
     this.deps.onChange(this.messages);
     return message;
   }
 
+  /** The pictures in flight are done: the texts that waited for them go,
+   *  in order, whatever became of the pictures. */
+  private releaseWaitingTexts(): void {
+    if (this.picturesInFlight > 0) return;
+    const waiting = this.waitingTexts.splice(0);
+    for (const id of waiting) {
+      const m = this.messages.find((x) => x.id === id);
+      if (m === undefined || m.delivery !== "sending") continue;
+      const sent = this.transmit(m.seq, m.text);
+      this.update(id, (x) => ({ ...x, delivery: sent ? "sent" : "not-sent" }));
+    }
+  }
+
+  /**
+   * Send a picture (section 4.1.4.1): `jpeg` is the prepared JPEG of
+   * `width` x `height`. Shown at once, as sending while its file uploads,
+   * then as sent, or as not sent when the upload or the relay failed.
+   */
+  sendPicture(jpeg: Uint8Array, width: number, height: number): CallChatMessage | null {
+    const io = this.deps.pictures;
+    if (io === undefined) return null;
+    this.ownSeq += 1n;
+    const seq = this.ownSeq;
+    const url = io.makeUrl(jpeg);
+    this.urls.add(url);
+    this.ownPictures.set(seq, { jpeg, width, height, ref: null });
+    const message: CallChatMessage = {
+      id: `own:${seq}`,
+      own: true,
+      peerId: null,
+      seq,
+      text: "",
+      picture: { width, height, status: "ready", url },
+      arrivedAtMs: this.deps.now(),
+      delivery: "sending",
+    };
+    this.push(message);
+    this.deps.onChange(this.messages);
+    void this.uploadAndTransmit(message.id, seq);
+    return message;
+  }
+
   /** Send a message that was not sent again: the same number and, once it
-   *  was composed, the same bytes. Returns whether it left the device. */
+   *  was composed, the same bytes; a picture whose file never uploaded is
+   *  uploaded again. Returns whether it left the device (a picture: whether
+   *  its upload started). */
   sendAgain(id: string): boolean {
     const at = this.messages.findIndex((m) => m.id === id);
     const message = this.messages[at];
-    if (message === undefined || !message.own || message.delivery === "sent") return false;
+    if (message === undefined || !message.own || message.delivery !== "not-sent") return false;
+    if (message.picture !== undefined) {
+      if (!this.ownPictures.has(message.seq) && !this.ownWires.has(message.seq)) return false;
+      this.update(id, (m) => ({ ...m, delivery: "sending" }));
+      void this.uploadAndTransmit(id, message.seq);
+      return true;
+    }
     if (!this.transmit(message.seq, message.text)) return false;
-    this.messages = [...this.messages];
-    this.messages[at] = { ...message, delivery: "sent" };
-    this.deps.onChange(this.messages);
+    this.update(id, (m) => ({ ...m, delivery: "sent" }));
     return true;
+  }
+
+  private async uploadAndTransmit(id: string, seq: bigint): Promise<void> {
+    const generation = this.generation;
+    this.picturesInFlight += 1;
+    try {
+      await this.uploadAndTransmitOnce(id, seq, generation);
+    } finally {
+      if (generation === this.generation) {
+        this.picturesInFlight -= 1;
+        this.releaseWaitingTexts();
+      }
+    }
+  }
+
+  private async uploadAndTransmitOnce(id: string, seq: bigint, generation: number): Promise<void> {
+    const io = this.deps.pictures;
+    const own = this.ownPictures.get(seq);
+    if (own !== undefined && own.ref === null && io !== undefined) {
+      let done: Awaited<ReturnType<CallChatPictureIo["upload"]>> = null;
+      try {
+        done = await io.upload(own.jpeg, own.width, own.height);
+      } catch {
+        done = null;
+      }
+      if (generation !== this.generation) return;
+      if (done === null) {
+        this.deps.log?.("call chat: a picture did not upload");
+        this.update(id, (m) => ({ ...m, delivery: "not-sent" }));
+        return;
+      }
+      own.ref = done.ref;
+      this.uploaded.add(done.blobIdHex);
+    }
+    const sent = this.transmitPicture(seq);
+    if (sent) this.ownPictures.delete(seq);
+    this.update(id, (m) => ({ ...m, delivery: sent ? "sent" : "not-sent" }));
+  }
+
+  private transmitPicture(seq: bigint): boolean {
+    let wire = this.ownWires.get(seq) ?? null;
+    if (wire === null) {
+      const ref = this.ownPictures.get(seq)?.ref ?? null;
+      const self = this.deps.selfPeerId();
+      if (ref === null || self === null) return false;
+      wire = this.deps.signer?.composeCallChatPicture?.(self, seq, ref) ?? null;
+      if (wire === null) return false;
+      this.ownWires.set(seq, wire);
+    }
+    return this.deps.sendSealed(wire);
+  }
+
+  private update(id: string, fn: (m: CallChatMessage) => CallChatMessage): void {
+    const at = this.messages.findIndex((m) => m.id === id);
+    const message = this.messages[at];
+    if (message === undefined) return;
+    this.messages = [...this.messages];
+    this.messages[at] = fn(message);
+    this.deps.onChange(this.messages);
   }
 
   /** `peerId`'s announcement verified with `signerKey`: messages it sent
@@ -197,9 +380,21 @@ export class CallChatChannel {
     this.pending.delete(peerId);
   }
 
-  /** The call ended for this device: every message goes. */
+  /** The call ended for this device: every message goes, every picture's
+   *  memory is freed, and this device's uploads are deleted. */
   clear(): void {
     const hadAny = this.messages.length > 0;
+    this.generation += 1;
+    const io = this.deps.pictures;
+    if (io !== undefined) {
+      for (const url of this.urls) io.revokeUrl(url);
+      if (this.uploaded.size > 0) io.deleteUploaded([...this.uploaded]);
+    }
+    this.urls.clear();
+    this.uploaded.clear();
+    this.ownPictures.clear();
+    this.picturesInFlight = 0;
+    this.waitingTexts.length = 0;
     this.messages = [];
     this.ownWires.clear();
     this.peerKeys.clear();
@@ -232,26 +427,62 @@ export class CallChatChannel {
       this.seen.set(peerId, seen);
     }
     if (seen.has(verified.seq)) return;
+    const ref = verified.picture ?? null;
+    // Without the means to fetch it, a picture is not shown at all.
+    if (ref !== null && this.deps.pictures === undefined) return;
     seen.add(verified.seq);
     const message: CallChatMessage = {
       id: `${peerId}:${verified.seq}`,
       own: false,
       peerId,
       seq: verified.seq,
-      text: verified.text,
+      text: ref === null ? verified.text : "",
+      picture:
+        ref === null ? undefined : { width: ref.width, height: ref.height, status: "loading", url: null },
       arrivedAtMs: atMs,
       delivery: "sent",
     };
     this.push(message);
     this.deps.onIncoming(message);
     this.deps.onChange(this.messages);
+    if (ref !== null) void this.fetchPicture(message.id, ref);
+  }
+
+  private async fetchPicture(id: string, ref: CallChatPictureRef): Promise<void> {
+    const io = this.deps.pictures;
+    if (io === undefined) return;
+    const generation = this.generation;
+    let jpeg: Uint8Array | null = null;
+    try {
+      jpeg = await io.download(ref);
+    } catch {
+      jpeg = null;
+    }
+    if (generation !== this.generation) return;
+    if (jpeg === null) {
+      this.deps.log?.("call chat: a picture is not available");
+      this.update(id, (m) =>
+        m.picture === undefined ? m : { ...m, picture: { ...m.picture, status: "unavailable" } },
+      );
+      return;
+    }
+    const url = io.makeUrl(jpeg);
+    this.urls.add(url);
+    this.update(id, (m) =>
+      m.picture === undefined ? m : { ...m, picture: { ...m.picture, status: "ready", url } },
+    );
   }
 
   private push(message: CallChatMessage): void {
     const next = [...this.messages, message];
     while (next.length > MAX_CALL_CHAT_MESSAGES) {
       const dropped = next.shift();
-      if (dropped?.own === true) this.ownWires.delete(dropped.seq);
+      if (dropped?.own === true) {
+        this.ownWires.delete(dropped.seq);
+        this.ownPictures.delete(dropped.seq);
+      }
+      const url = dropped?.picture?.url ?? null;
+      if (url !== null && this.urls.delete(url)) this.deps.pictures?.revokeUrl(url);
     }
     this.messages = next;
   }
@@ -265,6 +496,8 @@ export class CallChatChannel {
 export interface CallChatControl {
   /** Send `text` (already passed `checkCallChatText`). */
   send(text: string): void;
+  /** Send a prepared JPEG picture; absent where pictures cannot be sent. */
+  sendPicture?(jpeg: Uint8Array, width: number, height: number): void;
   /** Send a message that was not sent again. */
   sendAgain(id: string): void;
 }

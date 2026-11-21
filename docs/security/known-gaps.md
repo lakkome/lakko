@@ -76,7 +76,7 @@ entry's status line, not a mechanical fact.
 | [G-50](./known-gaps.md#g-50) | Channel PublisherGroup commits publish before they persist | Closed in code (2026-10-16) | a durable commit record on web, iOS and Android; host-tested, not walked |
 | [G-51](./known-gaps.md#g-51) | Channel publish counters restart at 0 after Forget device | Not real as reported | the reported path holds on none of the three; two adjacent reuse paths were fixed |
 | [G-52](./known-gaps.md#g-52) | ADR-0081 residual: a rejoin under the attested-removal policy waits for a person | Closed in code (2026-10-19) | a self-removal proof (C-85); host-tested, not walked |
-| [G-53](./known-gaps.md#g-53) | A person re-added by someone holding only rotated reach keys gets no Welcome | Open | needs a decision on the key rotation or a grant channel; see the entry |
+| [G-53](./known-gaps.md#g-53) | A person re-added by someone holding only rotated reach keys gets no Welcome | Closed in code (2026-11-21) | unit tests only; a person neither a contact, nor sharing a conversation, nor found by search is invited by link |
 | [G-54](./known-gaps.md#g-54) | An owner's or publisher's second device cannot post; a lost publishing device orphans the channel | Closed in code (2026-11-14) | per-device PublisherGroup leaves (ADR-0090) on web, iOS and Android; walked on web only; an owner's channels from before the flag day stay read-only on its own device and show no line; see the entry |
 | [G-55](./known-gaps.md#g-55) | An owner-device channel entry and the DeviceGroup rejoin knock show the account key to the Delivery Service | Closed in code (2026-11-14), host-tested only | both rows wrapped under keys every member holds (ADR-0078 section 4); see the entry |
 | [G-56](./known-gaps.md#g-56) | A device bound under the current key after a rotation derives another PublisherGroup id than its siblings, and the clients disagree on it | Closed in code (2026-11-15; ADR-0074 amendment), host-tested only | join routes, pairing recovery row, DeviceGroup lineage on web, iOS, Android |
@@ -3230,6 +3230,24 @@ were walked.
 
 **Closing:** not a client fix. Either the rotation changes, or a grant reaches
 the adder some other way. Maintainer's decision.
+
+**Status 2026-11-21: CLOSED in code, not walked.** The maintainer decided
+that Add is offered only for people this device can reach now (a contact, a
+person in a conversation both are in, a person just found by search), anyone
+else is invited by link, and the rotation stays. The Add members picker
+already listed only contacts and search results; the defect was grant
+selection: grants were filed per group and compared only within it, a stale
+grant was tried first, a search-found grant ranked after stale ones, and any
+held grant blocked the open-mailbox Welcome. Closed by one core rule,
+`lakko_contacts::reach_plan` (`planReachWrites`,
+`reachOpenMailboxWriteAllowed` on both FFI surfaces), used by web, iOS and
+Android for the Welcome, the committer delegation and the contact request
+(ADR-0060 section 6, amended 2026-11-21): the highest version per class wins
+across groups and lower ones are deleted, `group`/`member` grants are used
+only while a conversation is shared, the found grant leads, the open mailbox
+follows every 401, and a proposer that found the person in Everyone posts
+the envelope without delegations. Residual: a person who is neither a
+contact, nor in a shared conversation, nor findable must be invited by link.
 
 <a id="g-54"></a>
 ### G-54: A channel has one publishing device per owner or publisher

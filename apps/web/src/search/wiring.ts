@@ -14,7 +14,7 @@ import type { LookupResponse } from "../discovery/wire";
 import { avatarFromWasm } from "../profile/avatar-model";
 import type { FoundConversation } from "./people-search";
 import type { ContactsClient } from "../contacts/client";
-import { ContactsError } from "../contacts/client";
+import { ContactsError, isAnswerUnreachable } from "../contacts/client";
 import { contactsErrorText } from "../contacts/errors";
 import type { ProfileApi } from "../profile/ProfileContext";
 import { loadAccepted } from "../contacts/local-store";
@@ -441,7 +441,11 @@ export function sendDeps(args: {
         }),
       );
     },
-    isRefusal: (err) => err instanceof ContactsError && err.variant.kind === "username-unknown",
+    // G-53 - no kept grant reaching the person (every one refused, or none
+    // the plan offers) is a refusal too: the request then goes inside a
+    // shared group (`docs/ux/who-can-find-me.md` section 6.4).
+    isRefusal: (err) =>
+      (err instanceof ContactsError && err.variant.kind === "username-unknown") || isAnswerUnreachable(err),
     errorMessage: (err) => contactsErrorText(err, "contacts.error.send", args.peerLabel),
   };
 }

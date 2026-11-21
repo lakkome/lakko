@@ -264,7 +264,7 @@ describe("the committer's Welcome", () => {
     }
   });
 
-  it("goes through a held grant first; with that grant refused it is not written unsigned", async () => {
+  it("goes through a held grant first; with that grant refused it is written unsigned (G-53)", async () => {
     const bob = person(0x6b);
     try {
       const contact = grantWire(bob, wasm.ReachClass.Contact);
@@ -279,14 +279,14 @@ describe("the committer's Welcome", () => {
         scopeHex: hex(SCOPE),
       });
       const kinds: string[] = [];
-      const write = vi.fn(async (_t: unknown, _a: unknown, kind: string) => {
+      const write = vi.fn(async (target: { address: Uint8Array }, auth: { signer?: unknown }, kind: string) => {
         kinds.push(kind);
-        throw refused();
+        if (kind !== "none") throw refused();
+        expect(auth.signer ?? null).toBeNull();
+        return hex(target.address);
       });
-      await expect(writeWelcome(bob.signaturePublicKey, { scope: SCOPE, recheck: null }, write)).rejects.toBeInstanceOf(
-        MailboxUnreachableError,
-      );
-      expect(kinds).toEqual(["kept"]);
+      expect(await writeWelcome(bob.signaturePublicKey, { scope: SCOPE, recheck: null }, write)).toBe(addressOf(bob));
+      expect(kinds).toEqual(["kept", "none"]);
     } finally {
       bob.free();
     }

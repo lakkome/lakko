@@ -58,6 +58,9 @@ class SfuCallUi(
     /** Reads who is speaking while the call is connected. */
     private val speaking: SpeakingMonitor
 
+    /** The call chat's control, with its pictures (section 4.1.4.1). */
+    private val chatSender: CallChatSender
+
     private val _videoPublishState =
         MutableStateFlow(SfuCallSession.VideoPublishState.OFF)
 
@@ -108,6 +111,9 @@ class SfuCallUi(
         // The call's chat (`docs/ux/calls.md` section 4.1.4): one per call,
         // gone when the call ends for this device.
         val chat = CallChatModel()
+        // Its pictures (section 4.1.4.1): uploads, downloads and the delete
+        // at the end. Made once the session exists, so read through a holder.
+        var senderRef: CallChatSender? = null
 
         // Who is speaking (`docs/ux/group-call-grid.md` section 7.3), read on
         // this device from the session's own connection. The session is
@@ -148,7 +154,9 @@ class SfuCallUi(
                     SfuCallSession.State.FAILED,
                     SfuCallSession.State.CLOSED -> {
                         monitor.stop()
-                        // The chat goes with the call.
+                        // The chat goes with the call, and every picture
+                        // this device uploaded in it is deleted.
+                        senderRef?.endCall()
                         chat.clear()
                         // The call's tracks are gone with its connection.
                         ui.clearRemoteCopyVideoTracks()
@@ -284,6 +292,10 @@ class SfuCallUi(
             onCallChat = { peerId, seq, text ->
                 chat.addReceived(peerId, seq, text, peerNames?.name(peerId).orEmpty())
             },
+            // A picture in the call's chat: shown at once, downloaded now.
+            onCallChatPicture = { peerId, seq, picture ->
+                senderRef?.onReceivedPicture(peerId, seq, picture, peerNames?.name(peerId).orEmpty())
+            },
             onServerError = { _, _ -> },
         )
         session = SfuCallSession(
@@ -309,7 +321,10 @@ class SfuCallUi(
             own = ownCallName,
             default = localDisplayName,
         )
-        ui.setCallChat(CallChatHandle(chat, sessionChatControl(session, chat)))
+        val sender = CallChatSender(scope, chat, session.callChatWire, callChatPictureDeps(applicationContext))
+        senderRef = sender
+        chatSender = sender
+        ui.setCallChat(CallChatHandle(chat, sender))
     }
 
     /** Open the SFU connection + publish (delegates to the session). */
@@ -324,7 +339,9 @@ class SfuCallUi(
         remoteMics.clear()
         // The name field belongs to a call that can carry a call name.
         ui.setCallNameControl(null, own = "", default = "")
-        // Nothing of the call's chat is kept.
+        // Nothing of the call's chat is kept; the pictures this device
+        // uploaded are deleted.
+        chatSender.endCall()
         ui.setCallChat(null)
         session.hangUp()
     }

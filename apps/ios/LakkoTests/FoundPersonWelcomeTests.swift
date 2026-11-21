@@ -152,6 +152,91 @@ final class FoundPersonWelcomeTests: XCTestCase {
         XCTAssertNil(c.writePlan(toAccountKey: try key(0x02)))
     }
 
+    // MARK: - G-53: which held grant writes (the core's plan)
+
+    private func groupGrant(_ byte: UInt8, version: UInt32) throws -> FfiReachGrant {
+        try deriveReachGrant(
+            accountSeed: identity(byte).ed25519Seed(), class: .group, scopeId: Data(), version: version)
+    }
+
+    /// The grant the search of this add found leads, ahead of a group key
+    /// held from a conversation both are in, for the Welcome and for the
+    /// delegations.
+    func testTheFoundGrantOfThisAddLeads() throws {
+        let c = try center(0x30)
+        let person = try key(0x01)
+        c.sharedScopesProvider = { _ in ["aa"] }
+        XCTAssertTrue(c.keep(
+            try groupGrant(0x01, version: 0), carrier: .groupProfile, fromAccountKeyB64: b64(person),
+            scopeHex: "aa"))
+        XCTAssertEqual(
+            c.writePlan(toAccountKey: person, groupIdHex: group)?.candidates.first?.reachSeed,
+            try groupGrant(0x01, version: 0).seed)
+
+        XCTAssertTrue(c.keepFoundGrant(try fofGrant(0x01), accountKey: person))
+        XCTAssertEqual(
+            c.writePlan(toAccountKey: person, groupIdHex: group)?.candidates.map(\.reachSeed),
+            [try fofGrant(0x01).seed, try groupGrant(0x01, version: 0).seed])
+        XCTAssertEqual(c.heldSeed(forAccountKeyB64: b64(person), groupIdHex: group), try fofGrant(0x01).seed)
+    }
+
+    /// A group key from a conversation the person and this account are no
+    /// longer both in is kept but never tried: the person is then reached
+    /// as nobody (no Welcome without another way in), not under a dead key.
+    func testAGroupKeyWithNoSharedConversationIsNotTried() throws {
+        let c = try center(0x30)
+        let person = try key(0x01)
+        XCTAssertTrue(c.keep(
+            try groupGrant(0x01, version: 0), carrier: .groupProfile, fromAccountKeyB64: b64(person),
+            scopeHex: "aa"))
+        XCTAssertNil(c.writePlan(toAccountKey: person, groupIdHex: group))
+        XCTAssertNil(c.composeDelegations(
+            addedAccountKey: person, candidateAccountKeys: [try key(0x31)], groupIdHex: group))
+        XCTAssertTrue(c.holdsGrant(.group, fromAccountKeyB64: b64(person), scopeHex: "aa"), "kept")
+        c.sharedScopesProvider = { _ in ["bb"] }
+        XCTAssertNotNil(c.writePlan(toAccountKey: person, groupIdHex: group), "usable from any shared one")
+    }
+
+    /// The one `group` key is account-wide: an older version filed in
+    /// another conversation is deleted once a plan sees the newer one.
+    func testALowerVersionOfTheGroupKeyIsDeleted() throws {
+        let c = try center(0x30)
+        let person = try key(0x01)
+        c.sharedScopesProvider = { _ in ["aa", "bb"] }
+        XCTAssertTrue(c.keep(
+            try groupGrant(0x01, version: 0), carrier: .groupProfile, fromAccountKeyB64: b64(person),
+            scopeHex: "aa"))
+        XCTAssertTrue(c.keep(
+            try groupGrant(0x01, version: 1), carrier: .groupProfile, fromAccountKeyB64: b64(person),
+            scopeHex: "bb"))
+        XCTAssertEqual(
+            c.writePlan(toAccountKey: person, groupIdHex: "aa")?.candidates.map(\.reachSeed),
+            [try groupGrant(0x01, version: 1).seed])
+        XCTAssertFalse(c.holdsGrant(.group, fromAccountKeyB64: b64(person), scopeHex: "aa"))
+        XCTAssertTrue(c.holdsGrant(.group, fromAccountKeyB64: b64(person), scopeHex: "bb"))
+    }
+
+    /// A member left a conversation: the grants filed there are planned
+    /// again; a lower version goes, the highest stays.
+    func testAShrinkPrunesTheLowerVersionsFiledThere() throws {
+        let c = try center(0x30)
+        let person = try key(0x01)
+        let other = try key(0x02)
+        XCTAssertTrue(c.keep(
+            try groupGrant(0x01, version: 0), carrier: .groupProfile, fromAccountKeyB64: b64(person),
+            scopeHex: "aa"))
+        XCTAssertTrue(c.keep(
+            try groupGrant(0x01, version: 1), carrier: .groupProfile, fromAccountKeyB64: b64(person),
+            scopeHex: "bb"))
+        XCTAssertTrue(c.keep(
+            try groupGrant(0x02, version: 0), carrier: .groupProfile, fromAccountKeyB64: b64(other),
+            scopeHex: "aa"))
+        c.pruneHeld(inScope: "aa")
+        XCTAssertFalse(c.holdsGrant(.group, fromAccountKeyB64: b64(person), scopeHex: "aa"))
+        XCTAssertTrue(c.holdsGrant(.group, fromAccountKeyB64: b64(person), scopeHex: "bb"))
+        XCTAssertTrue(c.holdsGrant(.group, fromAccountKeyB64: b64(other), scopeHex: "aa"), "highest stays")
+    }
+
     // MARK: - An Everyone pick: a no-delegation envelope and a local record
 
     func testAnEveryoneAddPostsAnEnvelopeWithNoDelegation() throws {
@@ -168,6 +253,9 @@ final class FoundPersonWelcomeTests: XCTestCase {
         XCTAssertEqual(CommitterDelegationChoice.envelope(signed: nil, open: open), open)
         XCTAssertEqual(CommitterDelegationChoice.envelope(signed: Data([1]), open: open), Data([1]))
         XCTAssertNil(CommitterDelegationChoice.envelope(signed: nil, open: nil))
+        // G-53 — the search of this add found the open record: it goes.
+        XCTAssertEqual(CommitterDelegationChoice.envelope(signed: Data([1]), open: open, openIsFound: true), open)
+        XCTAssertEqual(CommitterDelegationChoice.envelope(signed: Data([1]), open: nil, openIsFound: true), Data([1]))
     }
 
     func testTheProposersOwnRecordLetsItsOwnSweepDeliver() throws {
@@ -337,7 +425,9 @@ final class FoundPersonWelcomeTests: XCTestCase {
         let record = try XCTUnwrap(body.range(of: "recordOpenAdd(groupIdHex: groupIdHex"))
         let propose = try XCTUnwrap(body.range(of: "addOneDeviceToGroup("))
         XCTAssertTrue(record.lowerBound < propose.lowerBound, "recorded before the proposal")
-        XCTAssertTrue(body.contains("addedAccountKey: recipientSignaturePubkey, openMailbox: open)"))
+        XCTAssertTrue(body.contains("addedAccountKey: recipientSignaturePubkey, openMailbox: open,"))
+        // G-53 — the open record the search found is named whatever grant is held.
+        XCTAssertTrue(body.contains("openIsFound: open != nil)"))
     }
 }
 

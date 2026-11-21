@@ -411,6 +411,7 @@ export class MultiJoinerCall {
         setCurrent: ifCurrent(screenShareActions.setCurrent),
         setControl: ifCurrent(screenShareActions.setControl),
         setBusy: ifCurrent(screenShareActions.setBusy),
+        setOwnPicture: ifCurrent(screenShareActions.setOwnPicture),
         setStream: ifCurrent(screenShareActions.setStream),
       },
     });
@@ -496,6 +497,8 @@ export class MultiJoinerCall {
       callChatActions.reset();
       callChatActions.setControl({
         send: (text: string): void => this.session.sendCallChat(text),
+        sendPicture: (jpeg: Uint8Array, width: number, height: number): void =>
+          this.session.sendCallChatPicture(jpeg, width, height),
         sendAgain: (id: string): void => this.session.resendCallChat(id),
       });
     }

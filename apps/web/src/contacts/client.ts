@@ -2992,6 +2992,10 @@ export class ContactsClient {
           explicit: options?.writeGrant ?? null,
           openBinding: options?.openBinding ?? null,
           exactKey: true,
+          // G-53 - the kept grants are the core's plan (a stale group key
+          // with no conversation shared is not used); none reaching is
+          // `MailboxUnreachableError`, which the search reads as refused.
+          contactRequest: true,
         },
         (target, auth) =>
           this.ds.publishMailbox(target.address, sealRowFor(wasm, target, "contact-request", wireBytes), auth),

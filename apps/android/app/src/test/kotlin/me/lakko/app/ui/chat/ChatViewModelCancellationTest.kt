@@ -64,7 +64,7 @@ class ChatViewModelCancellationTest {
                 ChatViewModel(
                     repo = repo,
                     groupIdHex = "00".repeat(16),
-                    keepFoundGrant = { _, wire ->
+                    keepFoundGrant = { _, _, wire ->
                         held += wire
                         try {
                             awaitCancellation()

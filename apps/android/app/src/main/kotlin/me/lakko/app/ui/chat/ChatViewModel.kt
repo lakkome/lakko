@@ -67,10 +67,12 @@ public class ChatViewModel(
     private val sessionTokenProvider: () -> String? = { null },
     /** `docs/ux/conversation-info.md` section 2.4 — keep the reach grant a
      *  person found by the network search handed out (standard base64 of its
-     *  wire), before they are added, so the Welcome the sweep owes them can
-     *  be written into their mailbox with it. Wired from `MainActivity` to
-     *  `ReachManager.fileHeld`; a no-op by default (tests). */
-    private val keepFoundGrant: suspend (accountKey: ByteArray, grantWireB64: String) -> Unit = { _, _ -> },
+     *  wire), before they are added to the group (group id hex), so the
+     *  Welcome the sweep owes them and the committer delegations are planned
+     *  with it first (G-53, the core's `found`). Wired from `MainActivity` to
+     *  `ReachManager.keepFoundGrant`; a no-op by default (tests). */
+    private val keepFoundGrant: suspend (groupIdHex: String, accountKey: ByteArray, grantWireB64: String) -> Unit =
+        { _, _, _ -> },
     /** ADR-0060 section 6 (amended 2026-10-29) — record the mailbox binding
      *  of a person found in Everyone for the add about to be proposed in
      *  the group (group id hex), so the delegation envelope carries it and
@@ -2238,7 +2240,7 @@ public class ChatViewModel(
                     val key = me.lakko.app.chat.outboxUnb64(pick.keyB64)
                     val accountId = me.lakko.app.chat.outboxUnb64(pick.accountIdB64)
                     when (val found = me.lakko.app.chat.foundReachOf(pick)) {
-                        is me.lakko.app.chat.FoundReach.Grant -> keepFoundGrant(key, found.wireB64)
+                        is me.lakko.app.chat.FoundReach.Grant -> keepFoundGrant(groupIdHex, key, found.wireB64)
                         is me.lakko.app.chat.FoundReach.OpenBinding -> keepFoundBinding(groupIdHex, key, found.bindingB64)
                         null -> Unit
                     }

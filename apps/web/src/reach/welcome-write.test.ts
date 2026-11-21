@@ -112,25 +112,22 @@ describe("trying every grant", () => {
   });
 });
 
-describe("the order grants are tried in", () => {
-  it("contact, the scopes' group keys (this scope first), their channel keys, then this group's member key", () => {
+describe("the order grants are tried in (a write that is not a Welcome)", () => {
+  it("contact, the scopes' group keys (this scope first), their channel keys; never a member key", () => {
     const g = (n: number) => ({ wireB64: `w${n}`, version: n, receivedAtMs: 0 });
     let store = fileScopedGrant(EMPTY_RECEIVED_GRANTS, "p", "s2", "group", g(2));
     store = fileScopedGrant(store, "p", "s1", "member", g(5));
     store = fileScopedGrant(store, "p", "s1", "group", g(1));
     store = fileScopedGrant(store, "p", "s2", "channel", g(3));
     store = fileContactGrant(store, "p", g(0));
-    const order = grantsInOrder(store, "p", { scopeHex: "s1", allowMember: true }).map((h) => h.wireB64);
-    expect(order).toEqual(["w0", "w1", "w2", "w3", "w5"]);
-    // The single-grant rule is the first of the same order.
-    expect(bestGrantFor(store, "p", { scopeHex: "s1", allowMember: true })?.wireB64).toBe("w0");
-    // No member key unless the write is a Welcome into that scope.
     expect(grantsInOrder(store, "p", { scopeHex: "s1" }).map((h) => h.wireB64)).toEqual([
       "w0",
       "w1",
       "w2",
       "w3",
     ]);
+    // The single-grant rule is the first of the same order.
+    expect(bestGrantFor(store, "p", { scopeHex: "s1" })?.wireB64).toBe("w0");
   });
 });
 

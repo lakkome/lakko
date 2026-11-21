@@ -400,6 +400,10 @@ final class SfuCallUi {
             onCallChat: { peerId, seq, text in
                 // A verified message in the call's chat (section 4.1.4).
                 ui.chat.receive(peerId: peerId, seq: seq, text: text)
+            },
+            onCallChatPicture: { peerId, seq, picture in
+                // A verified picture in the call's chat (section 4.1.4.1).
+                ui.chat.receivePicture(peerId: peerId, seq: seq, picture: picture)
             }
         )
         let session = SfuCallSession(config: config, callbacks: callbacks)
@@ -422,6 +426,10 @@ final class SfuCallUi {
         ui.chat.setActions(
             send: { [weak session] text in session?.sendCallChat(text) ?? (seq: 0, sent: false) },
             resend: { [weak session] seq in session?.resendCallChat(seq: seq) ?? false })
+        // Pictures in the call's chat (section 4.1.4.1).
+        ui.chat.setPictureActions(
+            reserveSeq: { [weak session] in session?.reserveCallChatSeq() ?? 0 },
+            send: { [weak session] content, seq in session?.sendCallChat(content, seq: seq) ?? false })
         speaking.source = { [weak session] in await session?.sampleAudioLevels() }
         // What a tile shows of a person, for the SFU (``VideoWants``).
         ui.tileVideoQualitySink = { [weak session] tile, peerId, quality in

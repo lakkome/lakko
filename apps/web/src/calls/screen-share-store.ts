@@ -16,6 +16,7 @@
 import { createSignal, type Accessor } from "solid-js";
 import type { GroupLayoutKind } from "./group-call-layout";
 import { isRemoteShare, shareLayoutStep } from "./screen-share-layout";
+import { sameView, type OwnShareView } from "./screen-share-mirror";
 
 /** The share on screen, named. */
 export interface ShareOnScreen {
@@ -28,6 +29,14 @@ export interface ShareOnScreen {
   readonly name: string;
   readonly isOwn: boolean;
   readonly withSound: boolean;
+}
+
+/** This device's own share as its tile shows it (section 3): the capture's
+ *  stream, and whether the tile shows its picture or, for the mirror, the
+ *  line. */
+export interface OwnSharePicture {
+  readonly stream: MediaStream;
+  readonly view: OwnShareView;
 }
 
 /** What the active call lets the screen do. */
@@ -43,6 +52,7 @@ const [current, setCurrent] = createSignal<ShareOnScreen | null>(null);
 const [streams, setStreams] = createSignal<ReadonlyMap<string, MediaStream>>(new Map());
 const [control, setControl] = createSignal<ScreenShareControl | null>(null);
 const [busy, setBusy] = createSignal(false);
+const [ownPicture, setOwnPicture] = createSignal<OwnSharePicture | null>(null);
 /** What a share moved the group layout from (`shareLayoutStep`), kept here
  *  rather than in the call screen, which is taken down when the call is put
  *  away and would forget it. */
@@ -57,7 +67,9 @@ export const screenShareState: {
   readonly busy: Accessor<boolean>;
   /** The received share's stream, by sharer peer id. */
   readonly streams: Accessor<ReadonlyMap<string, MediaStream>>;
-} = { current, control, busy, streams };
+  /** This device's own capture and what its tile shows. */
+  readonly ownPicture: Accessor<OwnSharePicture | null>;
+} = { current, control, busy, streams, ownPicture };
 
 /** The stream of the share on screen, or `undefined` (none, this device's
  *  own, or not arrived yet). */
@@ -85,6 +97,11 @@ export const screenShareActions = {
   },
   setBusy(on: boolean): void {
     setBusy(on);
+  },
+  setOwnPicture(next: OwnSharePicture | null): void {
+    const before = ownPicture();
+    if (before?.stream === next?.stream && sameView(before?.view ?? null, next?.view ?? null)) return;
+    setOwnPicture(next);
   },
   /** A share stream of `peerId` arrived (`stream`) or went (`null`). With
    *  `only` given, only that very stream is removed, so a replaced stream's
@@ -124,5 +141,6 @@ export const screenShareActions = {
     setStreams(new Map());
     setControl(null);
     setBusy(false);
+    setOwnPicture(null);
   },
 };

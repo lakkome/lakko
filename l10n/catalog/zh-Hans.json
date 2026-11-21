@@ -557,6 +557,10 @@
       "text": "关闭聊天",
       "status": "machine"
     },
+    "call.chat.emoji": {
+      "text": "表情",
+      "status": "machine"
+    },
     "call.chat.message_a11y": {
       "text": "{name}：{text}",
       "status": "machine"
@@ -575,6 +579,30 @@
     },
     "call.chat.notice_people": {
       "text": "只有通话中的人能看到这里的消息。",
+      "status": "machine"
+    },
+    "call.chat.picture": {
+      "text": "图片",
+      "status": "machine"
+    },
+    "call.chat.picture_only": {
+      "text": "通话中只能发送图片。",
+      "status": "machine"
+    },
+    "call.chat.picture_remove": {
+      "text": "移除图片",
+      "status": "machine"
+    },
+    "call.chat.picture_save": {
+      "text": "保存图片",
+      "status": "machine"
+    },
+    "call.chat.picture_too_large": {
+      "text": "这张图片太大，无法在通话中发送。",
+      "status": "machine"
+    },
+    "call.chat.picture_unavailable": {
+      "text": "图片不可用。",
       "status": "machine"
     },
     "call.chat.placeholder": {
@@ -1343,6 +1371,18 @@
     },
     "call.quality.up": {
       "text": "上行",
+      "status": "machine"
+    },
+    "call.screen_share.own_tile_this_screen": {
+      "text": "你正在共享此屏幕",
+      "status": "machine"
+    },
+    "call.screen_share.own_tile_this_tab": {
+      "text": "你正在共享此标签页",
+      "status": "machine"
+    },
+    "call.screen_share.own_tile_this_window": {
+      "text": "你正在共享此窗口",
       "status": "machine"
     },
     "call.self.camera_a11y": {

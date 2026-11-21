@@ -22,7 +22,12 @@
 //! - `POST open-url` `{url}`: open an `http` or `https` link in the system's
 //!   default browser (`docs/ux/message-links.md`);
 //! - `POST attention`: bounce the Dock icon once / flash the taskbar (an
-//!   incoming call with the window open, `desktop.md` section 4.1).
+//!   incoming call with the window open, `desktop.md` section 4.1);
+//! - `GET surfaces` -> `{screens, window: {width, height}, screen: {width,
+//!   height}}`: how many screens there are, and the main window's outer size
+//!   and its screen's size in device pixels, for the own screen share's
+//!   mirror rule (`docs/ux/screen-share.md` section 3.1). The webview's own
+//!   page does not say how many screens there are.
 //!
 //! The host talks to the page with a DOM event, `lakko:host`, whose `detail`
 //! is `{kind: "quit-requested"}`, `{kind: "open-settings"}`,
@@ -433,6 +438,7 @@ pub fn handle<R: Runtime>(
             Some(link) => json_response(&link),
             None => no_content(),
         },
+        (&Method::GET, "/surfaces") => json_response(&surfaces(app)),
         (&Method::GET, "/capabilities") => {
             json_response(&json!({ "privacySettings": privacy_link("microphone").is_some() }))
         },
@@ -785,9 +791,42 @@ fn autostart_entry(exe: &str) -> String {
     format!("[Desktop Entry]\nType=Application\nName=Lakko\nExec=\"{quoted}\" {HIDDEN_ARG}\nX-GNOME-Autostart-enabled=true\n")
 }
 
+/// The answer of `GET surfaces`: what the page needs to tell whether a
+/// screen share shows this window (no identifier, only counts and sizes).
+fn surfaces<R: Runtime>(app: &AppHandle<R>) -> Value {
+    let Some(w) = app.get_webview_window(MAIN) else {
+        return json!({});
+    };
+    let screens = w.available_monitors().map(|m| m.len()).unwrap_or(0);
+    let window = w.outer_size().ok();
+    let screen = w.current_monitor().ok().flatten().map(|m| *m.size());
+    surfaces_json(
+        screens,
+        window.map(|s| (s.width, s.height)),
+        screen.map(|s| (s.width, s.height)),
+    )
+}
+
+fn surfaces_json(screens: usize, window: Option<(u32, u32)>, screen: Option<(u32, u32)>) -> Value {
+    let size = |s: Option<(u32, u32)>| {
+        s.map(|(width, height)| json!({ "width": width, "height": height }))
+    };
+    json!({ "screens": screens, "window": size(window), "screen": size(screen) })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn surfaces_carry_counts_and_sizes_only() {
+        let v = surfaces_json(2, Some((2880, 1800)), Some((3024, 1964)));
+        assert_eq!(v["screens"], 2);
+        assert_eq!(v["window"]["width"], 2880);
+        assert_eq!(v["screen"]["height"], 1964);
+        let none = surfaces_json(0, None, None);
+        assert!(none["window"].is_null() && none["screen"].is_null());
+    }
 
     #[test]
     fn settings_default_and_merge() {

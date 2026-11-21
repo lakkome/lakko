@@ -32,8 +32,10 @@ package me.lakko.app.calls
 public data class VerifiedCallChatView(
     /** The message's sequence number, per sender. */
     val seq: ULong,
-    /** The text. */
+    /** The text; empty for a picture. */
     val text: String,
+    /** The picture (section 4.1.4.1), for a picture message. */
+    val picture: CallChatPictureRef? = null,
 )
 
 /** What the channel is plugged into. */
@@ -53,6 +55,12 @@ public class CallChatChannelDeps(
     public val onMessage: (peerId: String, seq: ULong, text: String) -> Unit,
     /** A message did not verify: one log line, no text, no ids. */
     public val onRejected: () -> Unit = {},
+    /** This device's signed picture message (section 4.1.4.1) as
+     *  `selfPeerId`, numbered `seq`, or `null` when it cannot make one yet. */
+    public val composePicture: (selfPeerId: String, seq: ULong, picture: CallChatPictureRef) -> ByteArray? =
+        { _, _, _ -> null },
+    /** A verified picture message from [peerId], shown once. */
+    public val onPicture: (peerId: String, seq: ULong, picture: CallChatPictureRef) -> Unit = { _, _, _ -> },
 )
 
 /** What happened to a message this device wrote. */
@@ -65,7 +73,9 @@ public data class CallChatSendResult(
 
 /** The chat state of one SFU call session. */
 public class CallChatChannel(private val deps: CallChatChannelDeps) {
-    private class Outgoing(val text: String, var wire: ByteArray?)
+    /** A message this device wrote: a text, or a picture whose reference
+     *  is attached once its upload finished. */
+    private class Outgoing(val text: String?, var picture: CallChatPictureRef?, var wire: ByteArray?)
 
     private var ownSeq: ULong = 0uL
     private val outgoing = HashMap<ULong, Outgoing>()
@@ -76,11 +86,26 @@ public class CallChatChannel(private val deps: CallChatChannelDeps) {
     /** Write [text] (already passed the core's text rule): numbered, signed
      *  and sent. The message is kept, sent or not, so it can be sent again. */
     public fun send(text: String): CallChatSendResult {
+        val seq = reserve(text)
+        return CallChatSendResult(seq, resend(seq))
+    }
+
+    /**
+     * Number a message without sending it: [text], or a picture when
+     * [text] is `null` (its reference is attached with [attachPicture] once
+     * uploaded). Pictures and texts share one numbering per sender.
+     */
+    public fun reserve(text: String?): ULong {
         ownSeq += 1uL
-        val seq = ownSeq
-        val message = Outgoing(text, wire = null)
-        outgoing[seq] = message
-        return CallChatSendResult(seq, transmit(seq, message))
+        outgoing[ownSeq] = Outgoing(text, picture = null, wire = null)
+        return ownSeq
+    }
+
+    /** Picture message [seq] was uploaded: what it carries. A text, or a
+     *  picture already attached, is left as it is. */
+    public fun attachPicture(seq: ULong, picture: CallChatPictureRef) {
+        val message = outgoing[seq] ?: return
+        if (message.text == null && message.picture == null) message.picture = picture
     }
 
     /** Send message [seq] again: the same bytes, the same number. `false`
@@ -93,7 +118,15 @@ public class CallChatChannel(private val deps: CallChatChannelDeps) {
     private fun transmit(seq: ULong, message: Outgoing): Boolean {
         val wire = message.wire ?: run {
             val self = deps.selfPeerId() ?: return false
-            deps.compose(self, seq, message.text)?.also { message.wire = it } ?: return false
+            val text = message.text
+            val picture = message.picture
+            val composed = when {
+                text != null -> deps.compose(self, seq, text)
+                picture != null -> deps.composePicture(self, seq, picture)
+                // A picture still uploading has nothing to send yet.
+                else -> null
+            }
+            composed?.also { message.wire = it } ?: return false
         }
         return deps.sendSealed(wire)
     }
@@ -121,7 +154,12 @@ public class CallChatChannel(private val deps: CallChatChannelDeps) {
             return
         }
         if (!shown.add(peerId to verified.seq)) return
-        deps.onMessage(peerId, verified.seq, verified.text)
+        val picture = verified.picture
+        if (picture != null) {
+            deps.onPicture(peerId, verified.seq, picture)
+        } else {
+            deps.onMessage(peerId, verified.seq, verified.text)
+        }
     }
 
     /** [peerId] left. What it wrote and was shown stays; what was held for

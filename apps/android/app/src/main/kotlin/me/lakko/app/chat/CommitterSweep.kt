@@ -1131,19 +1131,18 @@ public class WelcomeUndeliverable(public val accountKeyHex: String) :
  * unsigned write.
  *
  * When no grant is accepted:
- *   * [requireGrant] — when NO candidate yielded an authorisation (this
- *     device holds no usable grant or delegation for the person at all), the
- *     proofless [openFallback] is written if it names a destination
- *     (ADR-0060 section 6, amended 2026-10-29: a person found in Everyone,
- *     named by this device's own record or a kept no-delegation envelope,
- *     whose mailbox is open: "only when it holds no grant or delegation for
- *     them"). A grant or delegation that was tried and refused (`401`) never
- *     falls back to an unsigned write. Otherwise nothing is written and
- *     [WelcomeUndeliverable] is thrown (the sweep keeps the Welcome owed).
- *     "No candidate" is judged by what the candidates yielded, not by the
- *     list's length: the list always carries lambdas that yield nothing
- *     (the continuity no-op, a delegation lookup that finds none, a held
- *     grant whose binding does not verify);
+ *   * [requireGrant] — the proofless [openFallback] (ADR-0060 section 6,
+ *     amended 2026-10-29: a person found in Everyone, named by this device's
+ *     own record or a kept no-delegation envelope, whose mailbox is open) is
+ *     written when the core's rule allows it ([openRule], G-53
+ *     `reachOpenMailboxWriteAllowed`): the record is open and every candidate
+ *     that yielded an authorisation was refused with a `401`, none at all
+ *     included. A stale grant no longer blocks the open mailbox. Any other
+ *     failure propagates (the Welcome stays owed). With no open record
+ *     nothing is written and [WelcomeUndeliverable] is thrown (the sweep
+ *     keeps the Welcome owed). Candidates are counted by what they yielded,
+ *     not by the list's length: the list always carries lambdas that yield
+ *     nothing (the continuity no-op, a delegation lookup that finds none);
  *   * otherwise — with no grant held at all the write goes unsigned (an open
  *     mailbox takes it), and when every grant held was refused the last
  *     refusal propagates, as a single signed write did before.
@@ -1155,17 +1154,21 @@ internal suspend fun <A, T> writeWelcomeWithGrants(
     requireGrant: Boolean,
     accountKeyHex: String,
     openFallback: (() -> A?)? = null,
+    openRule: me.lakko.app.reach.OpenWriteRule = me.lakko.app.reach.NativeOpenWriteRule,
 ): T {
     val outcome = me.lakko.app.reach.firstAcceptedWrite(candidates, { auth: A -> write(auth) }, isRefusal)
     return when (outcome) {
         is me.lakko.app.reach.SignedWriteOutcome.Written -> outcome.result
         is me.lakko.app.reach.SignedWriteOutcome.Exhausted -> {
             if (requireGrant) {
-                // A signed candidate was refused: never unsigned, stays owed.
-                if (outcome.lastRefusal != null) throw WelcomeUndeliverable(accountKeyHex)
+                val open = openFallback?.invoke()
+                // G-53 — the core decides: an open record, and every
+                // candidate that yielded one refused with a `401`.
+                if (open == null || !openRule.allowed(true, outcome.tried, outcome.refused)) {
+                    throw WelcomeUndeliverable(accountKeyHex)
+                }
                 // Counted delivered when the write is answered 2xx (the DS
                 // never tells an open mailbox from a closed one).
-                val open = openFallback?.invoke() ?: throw WelcomeUndeliverable(accountKeyHex)
                 return write(open)
             }
             outcome.lastRefusal?.let { throw it }

@@ -94,6 +94,22 @@ internal data class StoredOpenBinding(
     val bindingHex: String,
 )
 
+/**
+ * G-53 — the grant a search found a person through, recorded by the device
+ * that proposed their add to [groupHex], so the Welcome and the committer
+ * delegations of that add are planned with it first (the core's `found`).
+ * The grant itself is filed as a held grant; this names which one it was.
+ * SECRET (a grant wire).
+ */
+@Serializable
+internal data class StoredFoundGrant(
+    val groupHex: String,
+    /** The added person's account key (their current one when recorded), hex. */
+    val addedAccountKeyHex: String,
+    /** The 37-byte grant wire, hex. */
+    val grantHex: String,
+)
+
 /** ADR-0060 §4 — a contact's relayed introductions bundle, kept whole. */
 @Serializable
 internal data class StoredIntroBundle(
@@ -125,6 +141,9 @@ internal data class ReachDoc(
     /** ADR-0060 section 6 — the open-mailbox bindings this device recorded
      *  for adds of people found in Everyone ([StoredOpenBinding]). */
     val openBindings: List<StoredOpenBinding> = emptyList(),
+    /** G-53 — the grants searches found people through, per add
+     *  ([StoredFoundGrant]); the newest [MAX_FOUND_GRANTS]. */
+    val foundGrants: List<StoredFoundGrant> = emptyList(),
     /** The visibility setting envelope (`composeVisibilityEnvelope`), hex. */
     val visibilityHex: String? = null,
     /** The `open` flag the server was last told, or `null` when never told. */

@@ -14,14 +14,20 @@
  * 2. **explicit** - the caller holds the grant for exactly this write (the
  *    requester's `reply` grant when accepting a contact request, a `/g/`
  *    joiner's `reply` grant, an invite link's `link` grant), tried first;
- * 3. **kept** - a grant the person handed us and we kept (contact, then the
- *    group / channel keys of a scope they let find them, then - only for a
- *    Welcome into that group - their `member` key);
+ * 3. **kept** - a grant the person handed us and we kept. For a Welcome the
+ *    order is the core's (G-53, `write-plan.ts`: the grant a search found
+ *    them through, contact, member, group, channel, fof, each at its key's
+ *    highest version, `group` / `member` only while we share a conversation
+ *    with them); for any other write contact, then the group / channel keys,
+ *    then the found grant (`grantsInOrderForPerson`);
  * 4. **delegation** - a committer delegation a proposer posted for this
  *    person, naming our account key: the proof is signed with our account
  *    seed, next to the delegation header;
- * 5. **none** - unsigned, spending one `mailbox-write` token. An Everyone
- *    (open) or unclaimed mailbox stores it.
+ * 5. **none** - unsigned, spending one `mailbox-write` token, to a mailbox
+ *    the person's record says is open, and only once every signed
+ *    candidate above was refused (`401`) or there was none (the core's
+ *    `reachOpenMailboxWriteAllowed`). An Everyone (open) or unclaimed mailbox
+ *    stores it.
  *
  * The answer to a contact request is its own, shorter list
  * (`answersRequest`): the request's `reply` grant, then a held `contact`
@@ -56,6 +62,7 @@ import {
   type HeldGrant,
 } from "./received-grants";
 import { reachSession, reachSignerForGrant, reachSignerForGrantWire } from "./reach-service";
+import { forgetSuperseded, openMailboxWriteAllowed, planPersonReach, sharedScopesOf } from "./write-plan";
 
 export type { MailboxTarget } from "../contacts/mailbox-row";
 
@@ -235,11 +242,17 @@ export async function accountKeyOfKeyPackage(keyPackage: Uint8Array): Promise<Ui
  */
 export class MailboxUnreachableError extends Error {
   override name = "MailboxUnreachableError";
-  constructor(public readonly tried: number) {
+  /** @param cause the last refusal, when there was one (so a clock-skewed
+   *  `401` is still found in the chain). */
+  constructor(
+    public readonly tried: number,
+    cause?: unknown,
+  ) {
     super(
       tried === 0
         ? "no reach grant is held for this mailbox; the write is kept for later"
         : `every reach grant held for this mailbox was refused (${tried}); the write is kept for later`,
+      cause === undefined || cause === null ? undefined : { cause },
     );
   }
 }
@@ -249,7 +262,20 @@ export class MailboxUnreachableError extends Error {
  *  candidate's mailbox binding did not verify, and it is skipped. */
 export interface WriteCandidate {
   readonly kind: WriteAuthKind;
+  /** The unsigned write to an open mailbox (G-53): tried only when the core
+   *  allows it after the signed candidates before it ({@link openFallbackAllowed}). */
+  readonly openFallback?: boolean;
   resolve(): Promise<ResolvedWriteAuth | null>;
+}
+
+/**
+ * Whether an open-fallback candidate may run, given the signed candidates
+ * tried before it in this pass (`tried`: resolved, i.e. their binding
+ * verified) and how many of them were refused with `401`. The core's rule;
+ * only a `401` counts, and any other failure has already ended the write.
+ */
+async function openFallbackAllowed(tried: number, refused: number): Promise<boolean> {
+  return openMailboxWriteAllowed(true, tried, refused);
 }
 
 /** `true` for the DS refusal that means "this key does not open the
@@ -273,7 +299,9 @@ export async function writeThroughCandidates<T>(
   write: MailboxWrite<T>,
 ): Promise<T> {
   let tried = 0;
+  let refused = 0;
   for (const candidate of candidates) {
+    if (candidate.openFallback === true && !(await openFallbackAllowed(tried, refused))) continue;
     const resolved = await candidate.resolve();
     if (resolved === null) continue;
     tried += 1;
@@ -281,6 +309,7 @@ export async function writeThroughCandidates<T>(
       return await write(resolved.target, resolved.auth, resolved.kind);
     } catch (err) {
       if (!isWriteRefusal(err)) throw err;
+      refused += 1;
     } finally {
       resolved.release();
     }
@@ -336,8 +365,10 @@ export async function writeWithAddressRecheck<T>(
   for (;;) {
     let refusal: unknown = null;
     let tried = 0;
+    let refused = 0;
     let again = false;
     for (const candidate of current.candidates) {
+      if (candidate.openFallback === true && !(await openFallbackAllowed(tried, refused))) continue;
       const resolved = await candidate.resolve();
       if (resolved === null) continue;
       tried += 1;
@@ -346,6 +377,7 @@ export async function writeWithAddressRecheck<T>(
       } catch (err) {
         if (!isWriteRefusal(err)) throw err;
         refusal = err;
+        refused += 1;
       } finally {
         resolved.release();
       }
@@ -362,7 +394,7 @@ export async function writeWithAddressRecheck<T>(
       }
     }
     if (again) continue;
-    if (options.unreachable === true || refusal === null) throw new MailboxUnreachableError(tried);
+    if (options.unreachable === true || refusal === null) throw new MailboxUnreachableError(tried, refusal);
     throw refusal;
   }
 }
@@ -398,13 +430,19 @@ function grantCandidate(
  *   - an explicit grant for exactly this write, first;
  *   - then every grant kept for the person under any key they have had
  *     (rule 2), the ones of before a rotation last and only while the old
- *     address stands (rule 6), then a committer delegation;
- *   - with none of those, for a Welcome (`openWelcome`), the unsigned write
- *     to the binding a kept no-delegation committer envelope names for this
- *     person in `scope` (ADR-0060 section 6, a person found in Everyone);
- *   - and, with none of those, unless `neverUnsigned`, and only when the
- *     caller holds the person's mailbox binding (`openBinding`: from the
- *     public record of a person in Everyone), the unsigned write.
+ *     address stands (rule 6); for a Welcome (`allowMember`) and a contact
+ *     request (`contactRequest`) the grants and their order are the core's plan (G-53, {@link planPersonReach}), whose
+ *     superseded grants are deleted; then a committer delegation;
+ *   - for a Welcome (`openWelcome`), the unsigned write to the binding a
+ *     kept no-delegation committer envelope names for this person in `scope`
+ *     (ADR-0060 section 6, a person found in Everyone);
+ *   - unless `neverUnsigned`, when the caller holds the person's mailbox
+ *     binding (`openBinding`: from the public record of a person in
+ *     Everyone), the unsigned write.
+ *
+ * An unsigned candidate is tried only when every signed candidate before it
+ * was refused with `401`, or there was none (G-53, the core's
+ * `reachOpenMailboxWriteAllowed`).
  *
  * Every candidate's binding is verified against the person's pinned keys
  * (`exactKey`: against `targetAccountKey` alone) when it is resolved.
@@ -418,6 +456,11 @@ export async function planWriteToPerson(
      *  `reply` grant. See above. */
     readonly answersRequest?: boolean;
     readonly allowMember?: boolean;
+    /** A contact request: its kept grants are the core's plan, as for a
+     *  Welcome (G-53), and with every candidate refused the write throws
+     *  {@link MailboxUnreachableError} (the request then goes inside a shared
+     *  group, `docs/ux/who-can-find-me.md` section 6.4). */
+    readonly contactRequest?: boolean;
     readonly neverUnsigned?: boolean;
     /** The person's 97-byte mailbox binding from a public record, for the
      *  unsigned write to an open mailbox. */
@@ -490,23 +533,41 @@ export async function planWriteToPerson(
     return { candidates };
   }
   if (session !== null) {
-    // ADR-0073 R.7 case 3 - a Welcome into the successor of a conversation
-    // may use the `member` key the person granted for the conversation's
-    // EARLIER group: the lineage makes it the same conversation. The scope
-    // itself is tried first; each grant once.
-    const scopeHexes =
-      options.scope === undefined
-        ? [undefined]
-        : [journalHex(options.scope), ...scopeLineage(journalHex(options.scope))];
     const offered = new Set<string>(typeof explicit === "string" ? [explicit] : []);
-    for (const scopeHex of scopeHexes) {
-      for (const held of grantsInOrderForPerson(session.receivedGrants(), personHexes, {
-        ...(scopeHex === undefined ? {} : { scopeHex }),
-        allowMember: options.allowMember === true,
-      })) {
-        if (offered.has(held.wireB64)) continue;
-        offered.add(held.wireB64);
-        candidates.push(grantCandidate("kept", held.wireB64, personKeys));
+    if (options.allowMember === true || options.contactRequest === true) {
+      // G-53 - a Welcome or a contact request: the core's plan over every kept grant, per mailbox
+      // (the person's current one first), its superseded grants deleted. The
+      // `member` key is account-wide (ADR-0078 section 9), so a Welcome into
+      // the successor of a conversation (ADR-0073 R.7 case 3) needs no
+      // lineage: the key is offered while this account shares a conversation
+      // with the person, the successor included once they are in its roster.
+      const plan = await planPersonReach(session.receivedGrants(), personHexes, personKeys, "welcome", {
+        ...(options.scope === undefined ? {} : { targetScopeHex: journalHex(options.scope) }),
+        sharedScopeHexes: sharedScopesOf(personHexes),
+      });
+      await forgetSuperseded(plan.superseded);
+      for (const entry of plan.candidates) {
+        if (offered.has(entry.grant.wireB64)) continue;
+        offered.add(entry.grant.wireB64);
+        candidates.push(grantCandidate("kept", entry.grant.wireB64, personKeys));
+      }
+    } else {
+      // The scope itself first, then the earlier groups of its conversation
+      // (ADR-0073 R.5); each grant once.
+      const scopeHexes =
+        options.scope === undefined
+          ? [undefined]
+          : [journalHex(options.scope), ...scopeLineage(journalHex(options.scope))];
+      for (const scopeHex of scopeHexes) {
+        for (const held of grantsInOrderForPerson(
+          session.receivedGrants(),
+          personHexes,
+          scopeHex === undefined ? {} : { scopeHex },
+        )) {
+          if (offered.has(held.wireB64)) continue;
+          offered.add(held.wireB64);
+          candidates.push(grantCandidate("kept", held.wireB64, personKeys));
+        }
       }
     }
     const delegation = await delegationFor(personHexes);
@@ -524,12 +585,18 @@ export async function planWriteToPerson(
       });
     }
   }
-  if (candidates.length === 0 && options.openWelcome === true && options.scope !== undefined && session !== null) {
+  // G-53 - the open fallback follows every signed candidate; whether it runs
+  // is decided when it is reached (`openFallback`).
+  if (options.openWelcome === true && options.scope !== undefined && session !== null) {
     const binding = await openWelcomeBinding(personHexes, journalHex(options.scope));
     if (binding !== null) candidates.push(unsignedCandidate(binding, personKeys));
   }
   const openBinding = options.openBinding ?? null;
-  if (candidates.length === 0 && options.neverUnsigned !== true && openBinding !== null) {
+  if (
+    options.neverUnsigned !== true &&
+    openBinding !== null &&
+    !candidates.some((c) => c.openFallback === true)
+  ) {
     candidates.push(unsignedCandidate(openBinding, personKeys));
   }
   return { candidates };
@@ -540,6 +607,7 @@ export async function planWriteToPerson(
 function unsignedCandidate(binding: Uint8Array, personKeys: readonly Uint8Array[]): WriteCandidate {
   return {
     kind: "none",
+    openFallback: true,
     resolve: async () => {
       const target = await verifiedTargetOfBinding(binding, personKeys);
       if (target === null) {
@@ -623,8 +691,9 @@ export type ScopeLineage = (scopeHex: string) => readonly string[];
 
 let installedScopeLineage: ScopeLineage | null = null;
 
-/** Install (or, with `null`, remove) the lineage a Welcome's grant scope is
- *  widened through. */
+/** Install (or, with `null`, remove) the lineage a write's grant scope is
+ *  widened through (a write that is not a Welcome; a Welcome's grants are
+ *  the core's plan, G-53). */
 export function installScopeLineage(lineage: ScopeLineage | null): void {
   installedScopeLineage = lineage;
 }
@@ -665,6 +734,8 @@ export async function writeToPerson<T>(
     /** See {@link planWriteToPerson}. */
     readonly answersRequest?: boolean;
     readonly allowMember?: boolean;
+    /** See {@link planWriteToPerson}. */
+    readonly contactRequest?: boolean;
     /** A Welcome: never written unsigned, and an exhausted write throws
      *  {@link MailboxUnreachableError} so the caller keeps it owed. */
     readonly neverUnsigned?: boolean;
@@ -683,7 +754,8 @@ export async function writeToPerson<T>(
   const recheck = options.recheck === undefined ? installedRecheck : options.recheck;
   return writeWithAddressRecheck(() => planWriteToPerson(targetAccountKey, options), write, {
     recheck: recheck === null ? null : () => recheck(targetAccountKey),
-    unreachable: options.neverUnsigned === true || options.answersRequest === true,
+    unreachable:
+      options.neverUnsigned === true || options.answersRequest === true || options.contactRequest === true,
   });
 }
 
@@ -706,21 +778,22 @@ export async function hasWelcomeCandidate(targetAccountKey: Uint8Array): Promise
  * unsigned (ADR-0050 section 2.5a item 7):
  *
  *   - this account's own mailbox: one candidate;
- *   - otherwise an explicit grant, then every kept grant for that account in
- *     order (contact, the scopes' `group`, their `channel`, then this group's
- *     `member`), then a committer delegation naming this account, moving to
- *     the next on `401`;
+ *   - otherwise an explicit grant, then the kept grants the core's plan
+ *     offers for that account (G-53: the grant a search found them through,
+ *     contact, member, group, channel, fof), then a committer delegation
+ *     naming this account, moving to the next on `401`;
  *   - with nothing left, {@link MailboxUnreachableError} and no write.
  *
  * The web client cannot tell whether a person's mailbox is open (Everyone):
  * the DS answers an unsigned write to an open and to a closed mailbox alike.
  * So a Welcome for an account this device holds no grant for waits, owed,
  * until one arrives. One exception (ADR-0060 section 6, amended 2026-10-29):
- * when none of the above exists and a kept committer-delegation envelope with
- * NO delegation names the person for this group (their proposer found them
- * in Everyone; this device's own record when it proposed), the Welcome is
- * written unsigned to that envelope's verified binding, spending one
- * `mailbox-write` token, and counted delivered on a 2xx.
+ * when a kept committer-delegation envelope with NO delegation names the
+ * person for this group (their proposer found them in Everyone; this
+ * device's own record when it proposed), and every signed candidate above was
+ * refused with `401` or there was none (G-53), the Welcome is written
+ * unsigned to that envelope's verified binding, spending one `mailbox-write`
+ * token, and counted delivered on a 2xx.
  *
  * ADR-0074 section 3.5a rule 6: with `recheck`, the first refusal re-checks
  * the person's address once. `write` receives the verified target.

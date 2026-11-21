@@ -89,7 +89,8 @@ import { loadWasm } from "../wasm";
 import { iceServersFor, iceServersLine } from "./ice-servers";
 import { bytesOfHex, CallRelay, type PeerAnnouncer, type VerifiedPeerIdentity } from "./call-relay";
 import { CallNameChannel } from "./call-name";
-import { CallChatChannel, type CallChatMessage } from "./call-chat";
+import { CallChatChannel, type CallChatMessage, type CallChatPictureIo } from "./call-chat";
+import { storeCallChatPictureIo } from "./call-chat-pictures";
 import { describeLocalCamera } from "./local-preview";
 import {
   attachReceiverSFrame,
@@ -251,6 +252,11 @@ export interface SfuCallConfig {
    * named (tests).
    */
   readonly peerAnnouncer?: PeerAnnouncer;
+  /**
+   * Pictures in the call's chat (`docs/ux/calls.md` section 4.1.4.1).
+   * Absent: the file store of the signed-in account; `null`: none (tests).
+   */
+  readonly callChatPictures?: CallChatPictureIo | null;
   /**
    * ICE servers (STUN / TURN). Defaults to public STUN; production adds the
    * TURN credential minted beside the call token (`setTurnProvider`).
@@ -675,6 +681,8 @@ export class SfuCallSession {
       onChange: (messages) => this.callbacks.onCallChatChanged?.(messages),
       onIncoming: (message) => this.callbacks.onCallChatIncoming?.(message),
       log: (line) => console.info(line),
+      pictures:
+        config.callChatPictures === null ? undefined : (config.callChatPictures ?? storeCallChatPictureIo()),
     });
     this.wantsSender = new VideoWantsSender(this.wantsBook, (frame) => this.sendVideoWants(frame), {
       now: () => this.nowMs(),
@@ -1391,6 +1399,12 @@ export class SfuCallSession {
   sendCallChat(text: string): void {
     if (this.isOver()) return;
     this.callChat.send(text);
+  }
+
+  /** Send a prepared JPEG picture to the call's chat (section 4.1.4.1). */
+  sendCallChatPicture(jpeg: Uint8Array, width: number, height: number): void {
+    if (this.isOver()) return;
+    this.callChat.sendPicture(jpeg, width, height);
   }
 
   /** Send a chat message that was not sent again (the same bytes). */

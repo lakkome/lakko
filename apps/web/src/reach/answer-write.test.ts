@@ -24,12 +24,32 @@ import {
 
 const session = vi.hoisted(() => ({ store: null as unknown }));
 
-vi.mock("../wasm", () => ({
-  loadWasm: async () => ({
-    decodeReachGrant: () => ({ mailboxPkVerified: (key: Uint8Array) => key, free: () => {} }),
-    mailboxAddress: (pk: Uint8Array) => pk,
-  }),
-}));
+// The grants are stand-ins named by their class; the plan a Welcome uses is
+// the REAL core's (G-53).
+vi.mock("../wasm", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const real = await import("../../wasm/lakko_ffi_wasm");
+  await real.default({
+    module_or_path: readFileSync(fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url))),
+  });
+  const CLASS: Record<string, number> = { contact: 1, group: 4, member: 5, channel: 6, found: 7 };
+  return {
+    loadWasm: async () => ({
+      decodeReachGrant: (bytes: Uint8Array) => ({
+        class: CLASS[new TextDecoder().decode(bytes)] ?? 1,
+        version: 1,
+        mailboxPkVerified: (key: Uint8Array) => key,
+        free: () => {},
+      }),
+      mailboxAddress: (pk: Uint8Array) => pk,
+      HeldReach: real.HeldReach,
+      ReachPurpose: real.ReachPurpose,
+      planReachWrites: real.planReachWrites,
+      reachOpenMailboxWriteAllowed: real.reachOpenMailboxWriteAllowed,
+    }),
+  };
+});
 vi.mock("../contacts/address-resolver", () => ({ personKeysHex: (hex: string) => [hex] }));
 vi.mock("./reach-service", () => ({
   reachSession: () => ({ accountKeyHex: "own", receivedGrants: () => session.store, delegateKeys: () => [] }),
@@ -38,6 +58,7 @@ vi.mock("./reach-service", () => ({
 }));
 
 import { MailboxUnreachableError, writeToPerson, writeWelcome } from "./mailbox-write";
+import { installSharedScopes } from "./write-plan";
 
 const PERSON = new Uint8Array(32).fill(0xb0);
 const HEX = "b0".repeat(32);
@@ -133,10 +154,23 @@ describe.each([
 });
 
 describe("any other write with a grant of its own", () => {
-  it("moves on to the kept grants at a 401", async () => {
-    const r = recorder(["joiner", "contact"]);
+  it("moves on to the kept grants at a 401, in the core's order (found first)", async () => {
+    const r = recorder(["joiner", "found", "contact"]);
     const out = await writeWelcome(PERSON, { scope: SCOPE, explicit: wire("joiner") }, r.write);
-    expect(out).toBe("group");
-    expect(r.tried).toEqual(["joiner", "contact", "group"]);
+    // No conversation is shared with the person: no group or member key.
+    expect(out).toBe("channel");
+    expect(r.tried).toEqual(["joiner", "found", "contact", "channel"]);
+  });
+
+  it("offers the member and group keys while a conversation is shared with the person", async () => {
+    installSharedScopes(() => ["e0".repeat(32)]);
+    try {
+      const r = recorder(["joiner", "found", "contact", "member"]);
+      const out = await writeWelcome(PERSON, { scope: SCOPE, explicit: wire("joiner") }, r.write);
+      expect(out).toBe("group");
+      expect(r.tried).toEqual(["joiner", "found", "contact", "member", "group"]);
+    } finally {
+      installSharedScopes(null);
+    }
   });
 });

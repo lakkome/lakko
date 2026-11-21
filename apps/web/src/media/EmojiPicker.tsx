@@ -174,7 +174,13 @@ export function EmojiPicker(props: EmojiPickerProps): JSX.Element {
       data-mode={props.mode}
       style={props.align === "right" ? { left: "auto", right: 0 } : undefined}
       role="dialog"
-      aria-label={props.mode === "reaction" ? t("chat.emoji.choose_reaction") : t("chat.composer.emoji_gifs")}
+      aria-label={
+        props.mode === "reaction"
+          ? t("chat.emoji.choose_reaction")
+          : gifAvailable()
+            ? t("chat.composer.emoji_gifs")
+            : t("chat.emoji.tab")
+      }
     >
       <Show when={gifAvailable()}>
         <div class="lakko-picker-tabs" role="tablist">

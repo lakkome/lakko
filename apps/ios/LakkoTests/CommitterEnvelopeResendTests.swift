@@ -649,6 +649,41 @@ final class CommitterEnvelopeResendTests: XCTestCase {
         XCTAssertEqual(fx.intent?.lastEnvelope?.coveredB64, [b64(fx.owner), b64(fx.admin)])
     }
 
+    /// G-53 — an add the search found open names the open record, with no
+    /// delegation, even while a grant for the person is held (it may be one
+    /// they retired), and its re-send does the same.
+    func testAnAddFoundOpenPostsTheOpenEnvelopeWhateverGrantIsHeld() async throws {
+        let fx = try await makeFixture(grant: true)
+        defer { fx.cleanUp() }
+        XCTAssertNotNil(fx.reach.composeDelegations(
+            addedAccountKey: try key(0x01), candidateAccountKeys: [fx.owner], groupIdHex: fx.groupIdHex),
+            "a grant is held: a signed envelope could be composed")
+        try await propose(fx, open: try openMailbox(0x01))
+        XCTAssertEqual(fx.rows, 2)
+        XCTAssertEqual(fx.intent?.lastEnvelope?.signed, false, "the open envelope went")
+        XCTAssertEqual(
+            fx.reach.ownOpenAddTarget(ofPerson: try key(0x01), groupIdHex: fx.groupIdHex),
+            try openMailbox(0x01))
+
+        fx.clock.nowMs += 30 * twelveHours
+        await resend(fx)
+        XCTAssertEqual(fx.rows, 2, "a binding does not expire")
+
+        try forget(fx, candidate: fx.admin)
+        await resend(fx)
+        XCTAssertEqual(fx.rows, 3)
+        XCTAssertEqual(fx.intent?.lastEnvelope?.signed, false, "the re-send names the open record again")
+    }
+
+    /// Without an open record found by the search, a held grant still signs.
+    func testAnAddWithAGrantAndNoFoundOpenRecordIsSigned() async throws {
+        let fx = try await makeFixture(grant: true)
+        defer { fx.cleanUp() }
+        try await propose(fx)
+        XCTAssertEqual(fx.intent?.lastEnvelope?.signed, true)
+        XCTAssertNil(fx.reach.ownOpenAddTarget(ofPerson: try key(0x01), groupIdHex: fx.groupIdHex))
+    }
+
     func testNoReSendForAnAddThatLandedAndTheRecordGoesWithIt() async throws {
         let fx = try await makeFixture()
         defer { fx.cleanUp() }

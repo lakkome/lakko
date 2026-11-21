@@ -253,19 +253,16 @@ class ReachRulesTest {
     }
 
     @Test
-    fun `a Welcome uses the member key of that group before a group key elsewhere`() {
-        val held = listOf(
-            HeldGrantRef(ReachKind.GROUP, "zz"),
-            HeldGrantRef(ReachKind.MEMBER, "aa"),
-            HeldGrantRef(ReachKind.MEMBER, "bb"),
-        )
-        assertEquals(HeldGrantRef(ReachKind.MEMBER, "bb"), pickWriteGrant(held, WritePurpose.WELCOME, "bb"))
-        assertEquals(HeldGrantRef(ReachKind.GROUP, "zz"), pickWriteGrant(held, WritePurpose.WELCOME, "cc"))
+    fun `a Welcome is not ordered by the client`() {
+        // G-53 — the core's plan orders a Welcome (planHeldWrites).
+        val held = listOf(HeldGrantRef(ReachKind.CONTACT, ""), HeldGrantRef(ReachKind.MEMBER, "aa"))
+        assertTrue(orderedWriteGrants(held, WritePurpose.WELCOME).isEmpty())
+        assertNull(pickWriteGrant(held, WritePurpose.WELCOME))
     }
 
     @Test
     fun `nothing held means no grant`() {
-        for (purpose in WritePurpose.entries) assertNull(pickWriteGrant(emptyList(), purpose, "aa"))
+        for (purpose in WritePurpose.entries) assertNull(pickWriteGrant(emptyList(), purpose))
     }
 
     // -----------------------------------------------------------------
@@ -430,11 +427,6 @@ class ReachWelcomeGrantOrderTest {
             listOf(HeldGrantRef(ReachKind.REPLY, ""), HeldGrantRef(ReachKind.CONTACT, "")),
             orderedWriteGrants(everyKind, WritePurpose.REPLY),
         )
-        // A group is named: still nothing of it.
-        assertEquals(
-            listOf(HeldGrantRef(ReachKind.REPLY, ""), HeldGrantRef(ReachKind.CONTACT, "")),
-            orderedWriteGrants(everyKind, WritePurpose.REPLY, "g1"),
-        )
     }
 
     @Test
@@ -478,6 +470,9 @@ class ReachWelcomeGrantOrderTest {
         )
         assertEquals(refusal, (outcome as SignedWriteOutcome.Exhausted).lastRefusal)
         assertEquals(listOf("REPLY", "CONTACT"), tried)
+        // G-53 — what the open-mailbox rule is told: two tried, two refused.
+        assertEquals(2, outcome.tried)
+        assertEquals(2, outcome.refused)
     }
 
     @Test
@@ -542,32 +537,6 @@ class ReachWelcomeGrantOrderTest {
             listOf("contact", "group1", "group1-older", "group2", "channel", "fof"),
             contactRequestGrantsInOrder(held),
         )
-    }
-
-    @Test
-    fun `every held grant is listed in the preferred order, each once`() {
-        val held = listOf(
-            HeldGrantRef(ReachKind.CHANNEL, "c1"),
-            HeldGrantRef(ReachKind.GROUP, "g2"),
-            HeldGrantRef(ReachKind.MEMBER, "aa"),
-            HeldGrantRef(ReachKind.MEMBER, "zz"),
-            HeldGrantRef(ReachKind.CONTACT, ""),
-            HeldGrantRef(ReachKind.GROUP, "aa"),
-        )
-        val order = orderedWriteGrants(held, WritePurpose.WELCOME, "aa")
-        assertEquals(
-            listOf(
-                HeldGrantRef(ReachKind.CONTACT, ""),
-                HeldGrantRef(ReachKind.MEMBER, "aa"),
-                HeldGrantRef(ReachKind.GROUP, "aa"),
-                HeldGrantRef(ReachKind.GROUP, "g2"),
-                HeldGrantRef(ReachKind.CHANNEL, "c1"),
-            ),
-            order,
-        )
-        // The member key of ANOTHER group never authorises this Welcome.
-        assertFalse(HeldGrantRef(ReachKind.MEMBER, "zz") in order)
-        assertEquals(order.first(), pickWriteGrant(held, WritePurpose.WELCOME, "aa"))
     }
 
     // --- only the contacts I choose ------------------------------------------

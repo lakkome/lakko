@@ -359,6 +359,10 @@ final class MultiJoinerCall {
             onCallChat: { [weak self] peerId, seq, text in
                 // A verified message in the call's chat (section 4.1.4).
                 self?.ui.chat.receive(peerId: peerId, seq: seq, text: text)
+            },
+            onCallChatPicture: { [weak self] peerId, seq, picture in
+                // A verified picture in the call's chat (section 4.1.4.1).
+                self?.ui.chat.receivePicture(peerId: peerId, seq: seq, picture: picture)
             }
         )
         self.session = SfuCallSession(config: config, callbacks: callbacks)
@@ -386,6 +390,10 @@ final class MultiJoinerCall {
         ui.chat.setActions(
             send: { [weak self] text in self?.session.sendCallChat(text) ?? (seq: 0, sent: false) },
             resend: { [weak self] seq in self?.session.resendCallChat(seq: seq) ?? false })
+        // Pictures in the call's chat (section 4.1.4.1).
+        ui.chat.setPictureActions(
+            reserveSeq: { [weak self] in self?.session.reserveCallChatSeq() ?? 0 },
+            send: { [weak self] content, seq in self?.session.sendCallChat(content, seq: seq) ?? false })
         self.speaking.source = { [weak self] in await self?.session.sampleAudioLevels() }
         // What a tile shows of a person, for the SFU (``VideoWants``).
         ui.tileVideoQualitySink = { [weak self] tile, peerId, quality in

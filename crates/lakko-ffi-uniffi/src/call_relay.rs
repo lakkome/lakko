@@ -22,7 +22,8 @@
 //! - [`compose_call_name`], [`verify_call_name`], [`call_name_is_newer`] -
 //!   the name a participant gives themself for one call
 //!   (`lakko_calls::call_name`, `docs/ux/calls.md` section 4.1).
-//! - [`compose_call_chat`], [`verify_call_chat`], [`check_call_chat_text`],
+//! - [`compose_call_chat`], [`compose_call_chat_picture`], [`verify_call_chat`],
+//!   [`check_call_chat_text`],
 //!   [`clamp_call_chat_text`] - a message in the call's own chat
 //!   (`lakko_calls::call_chat`, `docs/ux/calls.md` section 4.1.4).
 //!
@@ -473,6 +474,96 @@ pub fn compose_call_chat(
         .map_err(relay_err)
 }
 
+/// A picture in the call's chat (`docs/ux/calls.md` section 4.1.4.1): the
+/// encrypted JPEG's address in the file store and how to open it.
+#[derive(uniffi::Record, Clone, PartialEq, Eq)]
+pub struct CallChatPicture {
+    /// SHA-256 of the ciphertext (32 bytes).
+    pub blob_id: Vec<u8>,
+    /// The attachment key (32 bytes). Secret.
+    pub key: Vec<u8>,
+    /// The AEAD nonce (12 bytes).
+    pub nonce: Vec<u8>,
+    /// Plaintext size in bytes.
+    pub size: u32,
+    /// Width in pixels.
+    pub width: u16,
+    /// Height in pixels.
+    pub height: u16,
+}
+
+impl std::fmt::Debug for CallChatPicture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallChatPicture")
+            .field("size", &self.size)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CallChatPicture {
+    fn to_core(&self) -> Result<chat::CallChatPicture, FfiError> {
+        let bad = |what: &str| FfiError::CallRelay(format!("malformed: picture {what}"));
+        Ok(chat::CallChatPicture {
+            blob_id: self
+                .blob_id
+                .as_slice()
+                .try_into()
+                .map_err(|_| bad("blob id"))?,
+            key: self.key.as_slice().try_into().map_err(|_| bad("key"))?,
+            nonce: self.nonce.as_slice().try_into().map_err(|_| bad("nonce"))?,
+            size: self.size,
+            width: self.width,
+            height: self.height,
+        })
+    }
+
+    fn from_core(p: &chat::CallChatPicture) -> Self {
+        Self {
+            blob_id: p.blob_id.to_vec(),
+            key: p.key.to_vec(),
+            nonce: p.nonce.to_vec(),
+            size: p.size,
+            width: p.width,
+            height: p.height,
+        }
+    }
+}
+
+/// Compose a call-chat picture message (`docs/ux/calls.md` section
+/// 4.1.4.1). Seal it with [`CallRelayKey::seal`].
+///
+/// # Errors
+///
+/// [`FfiError::CallRelay`] `callIdLength`, `malformed` (a bad peer id, a seq
+/// of 0, a wrong-length blob id, key or nonce, a size or dimension out of
+/// bounds) or `identityKeyMismatch`.
+#[uniffi::export]
+pub fn compose_call_chat_picture(
+    identity: Arc<Identity>,
+    call_id: Vec<u8>,
+    peer_id: String,
+    seq: u64,
+    picture: CallChatPicture,
+) -> Result<Vec<u8>, FfiError> {
+    chat::compose_call_chat_picture(
+        &identity.inner,
+        &call_id16(&call_id)?,
+        &peer_id,
+        seq,
+        &picture.to_core()?,
+    )
+    .map_err(relay_err)
+}
+
+/// The largest picture of a call-chat message, in plaintext bytes.
+#[uniffi::export]
+#[must_use]
+pub const fn call_chat_max_picture_bytes() -> u32 {
+    chat::MAX_CALL_CHAT_PICTURE_BYTES
+}
+
 /// A call-chat message that verified against the call's roster.
 #[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedCallChat {
@@ -481,10 +572,13 @@ pub struct VerifiedCallChat {
     /// The message's sequence number; show a message once per
     /// `(peer_id, seq)`.
     pub seq: u64,
-    /// The text.
+    /// The text; empty for a picture.
     pub text: String,
     /// The account key the signer's leaf resolves to: the person.
     pub account_key: Vec<u8>,
+    /// The picture, for a picture message.
+    #[uniffi(default = None)]
+    pub picture: Option<CallChatPicture>,
 }
 
 /// Verify a call-chat message. `peer_id` is the relay `from`,
@@ -510,7 +604,8 @@ pub fn verify_call_chat(
     Ok(VerifiedCallChat {
         peer_id: v.peer_id,
         seq: v.seq,
-        text: v.text,
+        text: v.content.text().unwrap_or_default().to_owned(),
+        picture: v.content.picture().map(CallChatPicture::from_core),
         account_key: v.account_key,
     })
 }
@@ -722,9 +817,54 @@ mod tests {
                 message: wire.clone()
             }
         );
-        let v = verify_call_chat(group, vec![9; 16], "bob".into(), bob_key, wire).expect("verify");
+        let v = verify_call_chat(
+            group.clone(),
+            vec![9; 16],
+            "bob".into(),
+            bob_key.clone(),
+            wire,
+        )
+        .expect("verify");
         assert_eq!(v.text, "hi all");
+        assert_eq!(v.picture, None);
         assert_eq!(v.seq, 1);
+        let picture = CallChatPicture {
+            blob_id: vec![1; 32],
+            key: vec![2; 32],
+            nonce: vec![3; 12],
+            size: 1000,
+            width: 640,
+            height: 480,
+        };
+        let pic =
+            compose_call_chat_picture(bob.clone(), vec![9; 16], "bob".into(), 2, picture.clone())
+                .expect("picture");
+        let v = verify_call_chat(group, vec![9; 16], "bob".into(), bob_key, pic).expect("verify");
+        assert_eq!(v.text, "");
+        assert_eq!(v.picture, Some(picture.clone()));
+        assert!(!format!("{picture:?}").contains("[2, 2"));
+        assert!(compose_call_chat_picture(
+            bob.clone(),
+            vec![9; 16],
+            "bob".into(),
+            3,
+            CallChatPicture {
+                key: vec![2; 31],
+                ..picture.clone()
+            },
+        )
+        .is_err());
+        assert!(compose_call_chat_picture(
+            bob.clone(),
+            vec![9; 16],
+            "bob".into(),
+            3,
+            CallChatPicture {
+                size: call_chat_max_picture_bytes() + 1,
+                ..picture
+            },
+        )
+        .is_err());
         assert_eq!(check_call_chat_text("ok".into()), None);
         assert_eq!(check_call_chat_text("  ".into()).as_deref(), Some("blank"));
         assert_eq!(

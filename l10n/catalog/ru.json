@@ -597,6 +597,10 @@
       "text": "Закрыть чат",
       "status": "machine"
     },
+    "call.chat.emoji": {
+      "text": "Эмодзи",
+      "status": "machine"
+    },
     "call.chat.message_a11y": {
       "text": "{name}: {text}",
       "status": "machine"
@@ -615,6 +619,30 @@
     },
     "call.chat.notice_people": {
       "text": "Сообщения здесь видят только участники звонка.",
+      "status": "machine"
+    },
+    "call.chat.picture": {
+      "text": "Картинка",
+      "status": "machine"
+    },
+    "call.chat.picture_only": {
+      "text": "В звонке можно отправлять только картинки.",
+      "status": "machine"
+    },
+    "call.chat.picture_remove": {
+      "text": "Убрать картинку",
+      "status": "machine"
+    },
+    "call.chat.picture_save": {
+      "text": "Сохранить картинку",
+      "status": "machine"
+    },
+    "call.chat.picture_too_large": {
+      "text": "Эта картинка слишком большая для звонка.",
+      "status": "machine"
+    },
+    "call.chat.picture_unavailable": {
+      "text": "Картинка недоступна.",
       "status": "machine"
     },
     "call.chat.placeholder": {
@@ -1411,6 +1439,18 @@
     },
     "call.screen_share.own_tile": {
       "text": "Вы показываете свой экран",
+      "status": "machine"
+    },
+    "call.screen_share.own_tile_this_screen": {
+      "text": "Вы показываете этот экран",
+      "status": "machine"
+    },
+    "call.screen_share.own_tile_this_tab": {
+      "text": "Вы показываете эту вкладку",
+      "status": "machine"
+    },
+    "call.screen_share.own_tile_this_window": {
+      "text": "Вы показываете это окно",
       "status": "machine"
     },
     "call.screen_share.pinned_chip": {

@@ -32,6 +32,8 @@ import {
   EMPTY_RECEIVED_GRANTS,
   fileContactGrant,
   fileDelegations,
+  fileFoundGrant,
+  fileScopedGrant,
   type ReceivedGrants,
 } from "./received-grants";
 
@@ -310,6 +312,104 @@ describe("the first send", () => {
     globalThis.localStorage.setItem(key, JSON.stringify(raw));
     expect(record()?.envelope).toBeUndefined();
     expect(record()?.deviceKeysB64).toEqual([DEVICE_KEY_B64]);
+  });
+});
+
+describe("which grant signs (G-53, the core's plan)", () => {
+  function wireOf(cls: wasm.ReachClass, version = 0): { wireB64: string; issuerHex: string } {
+    const g = wasm.deriveReachGrant(bob.ed25519Seed, cls, new Uint8Array(0), version);
+    try {
+      return { wireB64: b64(wasm.encodeReachGrant(g)), issuerHex: hex(g.verifyingKey()) };
+    } finally {
+      g.free();
+    }
+  }
+  function issuersOf(bytes: Uint8Array): string[] {
+    const env = wasm.decodeCommitterDelegationEnvelope(bytes);
+    const list = wasm.checkCommitterDelegations(env);
+    const out = list.map((d) => hex(d.issuerPk));
+    list.forEach((d) => d.free());
+    env.free();
+    return out;
+  }
+  const OTHER_SCOPE_HEX = "5a".repeat(32);
+
+  it("the grant a search found leads; a group key of a conversation no longer shared is not used", async () => {
+    const group = wireOf(wasm.ReachClass.Group, 4);
+    const fof = wireOf(wasm.ReachClass.Fof);
+    store = fileScopedGrant(store, hex(bob.signaturePublicKey), OTHER_SCOPE_HEX, "group", {
+      wireB64: group.wireB64,
+      version: 4,
+      receivedAtMs: START_MS,
+    });
+    store = fileFoundGrant(store, hex(bob.signaturePublicKey), { wireB64: fof.wireB64, version: 0, receivedAtMs: START_MS });
+    expect(await send()).toBe("sent");
+    expect(issuersOf(h.bytes[0] as Uint8Array)).toEqual([fof.issuerHex]);
+  });
+
+  it("an add from search with an open record posts the open envelope whatever grant is held, and re-sends it", async () => {
+    holdGrantForBob();
+    const binding = wasm.signMailboxBinding(bob);
+    const r = await sendCommitterEnvelope({
+      group: groupDouble(),
+      addedAccountKey: bob.signaturePublicKey,
+      openBindingB64: b64(binding),
+      broadcast: async (bytes) => {
+        h.bytes.push(bytes);
+      },
+      onSent: (sent) => noteCommitterEnvelopeSent(OWN_ID_B64, GROUP_B64, bobKeyB64, sent),
+    });
+    expect(r).toBe("sent");
+    expect(record()?.envelope?.signed).toBe(false);
+    const env = wasm.decodeCommitterDelegationEnvelope(h.bytes[0] as Uint8Array);
+    try {
+      expect(env.delegationCount()).toBe(0);
+      expect(hex(env.addedMailboxBinding)).toBe(hex(binding));
+    } finally {
+      env.free();
+    }
+    // A re-send carries no binding: the recorded open envelope goes again,
+    // not one signed with the held grant.
+    expect(await send()).toBe("sent");
+    expect(b64(h.bytes[1] as Uint8Array)).toBe(b64(h.bytes[0] as Uint8Array));
+  });
+
+  it("an open binding that is not the person's falls back to the signed envelope", async () => {
+    holdGrantForBob();
+    const mallory = person(0x64);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const r = await sendCommitterEnvelope({
+        group: groupDouble(),
+        addedAccountKey: bob.signaturePublicKey,
+        openBindingB64: b64(wasm.signMailboxBinding(mallory)),
+        broadcast: async (bytes) => {
+          h.bytes.push(bytes);
+        },
+        onSent: () => undefined,
+      });
+      expect(r).toBe("sent");
+      expect(issuersOf(h.bytes[0] as Uint8Array)).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+      mallory.free();
+    }
+  });
+
+  it("never signs with a member key, and deletes a lower version it replaced", async () => {
+    const member = wireOf(wasm.ReachClass.Member);
+    const oldContact = wireOf(wasm.ReachClass.Contact, 0);
+    const contact = wireOf(wasm.ReachClass.Contact, 1);
+    const pk = hex(bob.signaturePublicKey);
+    store = fileScopedGrant(store, pk, OTHER_SCOPE_HEX, "member", { wireB64: member.wireB64, version: 0, receivedAtMs: 1 });
+    // A contact grant of a lower version, still filed as found: the same key
+    // family as the held contact grant.
+    store = fileFoundGrant(store, pk, { wireB64: oldContact.wireB64, version: 0, receivedAtMs: 1 });
+    store = fileContactGrant(store, pk, { wireB64: contact.wireB64, version: 1, receivedAtMs: 1 });
+    expect(await send()).toBe("sent");
+    expect(issuersOf(h.bytes[0] as Uint8Array)).toEqual([contact.issuerHex]);
+    expect(store.people[pk]?.found).toBeUndefined();
+    expect(store.people[pk]?.scopes[OTHER_SCOPE_HEX]?.member?.wireB64).toBe(member.wireB64);
   });
 });
 

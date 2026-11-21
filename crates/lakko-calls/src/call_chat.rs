@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! A text message in a group call's own chat (2026-11-07,
-//! `docs/ux/calls.md` section 4.1.4).
+//! A message in a group call's own chat (2026-11-07, `docs/ux/calls.md`
+//! section 4.1.4): a text, or since 2026-11-21 a picture (section 4.1.4.1).
 //!
 //! # Why
 //!
@@ -18,15 +18,29 @@
 //! # Wire
 //!
 //! ```text
-//! "lakko/call/chat/v1\0" (19) || version(1) = 0x01 ||
+//! "lakko/call/chat/v1\0" (19) || version(1) = 0x02 ||
 //! call_id(16) || peer_id_len(1) || peer_id(1..=64, visible ASCII) ||
-//! seq(8, BE u64, >= 1) || text_len(2, BE) || text(1..=800 bytes UTF-8) ||
+//! seq(8, BE u64, >= 1) || kind(1) || body ||
 //! signer_key(32) || signature(64)
+//!
+//! kind 0x01, text:    text_len(2, BE) || text(1..=800 bytes UTF-8)
+//! kind 0x02, picture: blob_id(32) || key(32) || nonce(12) ||
+//!                     size(4, BE, 1..=10 MiB) || width(2, BE) || height(2, BE)
 //! ```
 //!
 //! The signature is Ed25519 by `signer_key` (the sender's MLS leaf key) over
-//! `"lakko/call/chat/sig/v1\0" || call_id || peer_id_len || peer_id || seq
-//! || text_len || text`.
+//! `"lakko/call/chat/sig/v2\0" || call_id || peer_id_len || peer_id || seq
+//! || kind || body`. Version 0x01 (text only, no kind byte) is refused: no
+//! deployment carries it.
+//!
+//! # The picture
+//!
+//! A picture does not fit the relay, so the sender encrypts it with a fresh
+//! key (`lakko_attachments::encrypt_attachment`), uploads the ciphertext to
+//! the file store and sends its address, key, nonce, plaintext size and pixel
+//! size. The picture is always a JPEG the sender re-encoded (no metadata), so
+//! the wire names no format. The key rides only inside the sealed relay
+//! plaintext; `Debug` never prints it.
 //!
 //! # The text
 //!
@@ -50,10 +64,26 @@ use crate::relay::{RelayError, CALL_ID_LEN, MAX_PEER_ID_LEN};
 pub const CALL_CHAT_DOMAIN: &[u8] = b"lakko/call/chat/v1\x00";
 
 /// Version byte of a call-chat message.
-pub const CALL_CHAT_VERSION: u8 = 0x01;
+pub const CALL_CHAT_VERSION: u8 = 0x02;
 
 /// Domain of the signed bytes; distinct from every other relay payload's.
-const CALL_CHAT_SIG_DOMAIN: &[u8] = b"lakko/call/chat/sig/v1\x00";
+const CALL_CHAT_SIG_DOMAIN: &[u8] = b"lakko/call/chat/sig/v2\x00";
+
+/// Kind byte of a text message.
+pub const CALL_CHAT_KIND_TEXT: u8 = 0x01;
+
+/// Kind byte of a picture message.
+pub const CALL_CHAT_KIND_PICTURE: u8 = 0x02;
+
+/// Length of a picture body.
+pub const CALL_CHAT_PICTURE_LEN: usize = 32 + 32 + 12 + 4 + 2 + 2;
+
+/// Largest picture, in plaintext bytes. Chosen: a re-encoded photo of the
+/// conversation's largest size is well under it.
+pub const MAX_CALL_CHAT_PICTURE_BYTES: u32 = 10 * 1024 * 1024;
+
+/// Largest picture side, in pixels.
+pub const MAX_CALL_CHAT_PICTURE_SIDE: u16 = 8192;
 
 /// Longest text, in bytes. Chosen so the longest message fits
 /// [`crate::relay::MAX_RELAY_PLAINTEXT`] with a 64-byte peer id.
@@ -127,8 +157,8 @@ pub fn clamp_call_chat_text(text: &str) -> &str {
     &text[..end]
 }
 
-/// Length of a call-chat message carrying a `peer_id_len`-byte peer id and
-/// a `text_len`-byte text.
+/// Length of a call-chat text message carrying a `peer_id_len`-byte peer id
+/// and a `text_len`-byte text.
 #[must_use]
 pub const fn call_chat_len(peer_id_len: usize, text_len: usize) -> usize {
     CALL_CHAT_DOMAIN.len()
@@ -137,10 +167,164 @@ pub const fn call_chat_len(peer_id_len: usize, text_len: usize) -> usize {
         + 1
         + peer_id_len
         + 8
+        + 1
         + 2
         + text_len
         + PUBLIC_KEY_LEN
         + SIGNATURE_LEN
+}
+
+/// Length of a call-chat picture message carrying a `peer_id_len`-byte
+/// peer id.
+#[must_use]
+pub const fn call_chat_picture_len(peer_id_len: usize) -> usize {
+    CALL_CHAT_DOMAIN.len()
+        + 1
+        + CALL_ID_LEN
+        + 1
+        + peer_id_len
+        + 8
+        + 1
+        + CALL_CHAT_PICTURE_LEN
+        + PUBLIC_KEY_LEN
+        + SIGNATURE_LEN
+}
+
+/// A picture sent in the call's chat: where its ciphertext is and how to open
+/// it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CallChatPicture {
+    /// SHA-256 of the ciphertext, its address in the file store.
+    pub blob_id: [u8; 32],
+    /// The ChaCha20-Poly1305 key it was sealed with. Secret.
+    pub key: [u8; 32],
+    /// The AEAD nonce.
+    pub nonce: [u8; 12],
+    /// Plaintext size in bytes, `1..=MAX_CALL_CHAT_PICTURE_BYTES`.
+    pub size: u32,
+    /// Width in pixels, `1..=MAX_CALL_CHAT_PICTURE_SIDE`.
+    pub width: u16,
+    /// Height in pixels, `1..=MAX_CALL_CHAT_PICTURE_SIDE`.
+    pub height: u16,
+}
+
+impl core::fmt::Debug for CallChatPicture {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CallChatPicture")
+            .field("size", &self.size)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CallChatPicture {
+    /// Whether the numbers are within their bounds.
+    ///
+    /// # Errors
+    ///
+    /// [`RelayError::Malformed`] naming the field.
+    pub fn check(&self) -> Result<(), RelayError> {
+        if self.size == 0 || self.size > MAX_CALL_CHAT_PICTURE_BYTES {
+            return Err(RelayError::Malformed("picture size"));
+        }
+        let side = |v: u16| (1..=MAX_CALL_CHAT_PICTURE_SIDE).contains(&v);
+        if !side(self.width) || !side(self.height) {
+            return Err(RelayError::Malformed("picture dimensions"));
+        }
+        Ok(())
+    }
+
+    fn encode_into(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.blob_id);
+        out.extend_from_slice(&self.key);
+        out.extend_from_slice(&self.nonce);
+        out.extend_from_slice(&self.size.to_be_bytes());
+        out.extend_from_slice(&self.width.to_be_bytes());
+        out.extend_from_slice(&self.height.to_be_bytes());
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, RelayError> {
+        if body.len() != CALL_CHAT_PICTURE_LEN {
+            return Err(RelayError::BadLength);
+        }
+        let mut blob_id = [0u8; 32];
+        blob_id.copy_from_slice(&body[..32]);
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&body[32..64]);
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(&body[64..76]);
+        let size = u32::from_be_bytes([body[76], body[77], body[78], body[79]]);
+        let width = u16::from_be_bytes([body[80], body[81]]);
+        let height = u16::from_be_bytes([body[82], body[83]]);
+        let picture = Self {
+            blob_id,
+            key,
+            nonce,
+            size,
+            width,
+            height,
+        };
+        picture.check()?;
+        Ok(picture)
+    }
+}
+
+/// What a call-chat message carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallChatContent {
+    /// A text, admitted by [`check_call_chat_text`].
+    Text(String),
+    /// A picture.
+    Picture(CallChatPicture),
+}
+
+impl CallChatContent {
+    fn kind(&self) -> u8 {
+        match self {
+            Self::Text(_) => CALL_CHAT_KIND_TEXT,
+            Self::Picture(_) => CALL_CHAT_KIND_PICTURE,
+        }
+    }
+
+    /// The bytes after the kind byte.
+    fn body(&self) -> Vec<u8> {
+        match self {
+            Self::Text(text) => {
+                let bytes = text.as_bytes();
+                let mut out = Vec::with_capacity(2 + bytes.len());
+                // Bounded by `check_call_chat_text` (800).
+                out.extend_from_slice(
+                    &u16::try_from(bytes.len()).unwrap_or(u16::MAX).to_be_bytes(),
+                );
+                out.extend_from_slice(bytes);
+                out
+            },
+            Self::Picture(p) => {
+                let mut out = Vec::with_capacity(CALL_CHAT_PICTURE_LEN);
+                p.encode_into(&mut out);
+                out
+            },
+        }
+    }
+
+    /// The text, or `None` for a picture.
+    #[must_use]
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            Self::Text(t) => Some(t),
+            Self::Picture(_) => None,
+        }
+    }
+
+    /// The picture, or `None` for a text.
+    #[must_use]
+    pub const fn picture(&self) -> Option<&CallChatPicture> {
+        match self {
+            Self::Text(_) => None,
+            Self::Picture(p) => Some(p),
+        }
+    }
 }
 
 /// A decoded (not yet verified) call-chat message.
@@ -152,8 +336,8 @@ pub struct CallChatMessage {
     pub peer_id: String,
     /// The sender's sequence number for this message (>= 1).
     pub seq: u64,
-    /// The text.
-    pub text: String,
+    /// The text or the picture.
+    pub content: CallChatContent,
     /// The leaf key that signed it.
     pub signer_key: [u8; PUBLIC_KEY_LEN],
     /// The signature.
@@ -167,8 +351,8 @@ pub struct VerifiedCallChat {
     pub peer_id: String,
     /// The sequence number; with `peer_id` the message's identity.
     pub seq: u64,
-    /// The text.
-    pub text: String,
+    /// The text or the picture.
+    pub content: CallChatContent,
     /// The account key the signer's leaf resolves to (ADR-0050): the person.
     pub account_key: Vec<u8>,
 }
@@ -183,23 +367,30 @@ fn check_peer_id(peer_id: &[u8]) -> Result<(), RelayError> {
     Ok(())
 }
 
-fn signed_bytes(call_id: &[u8; CALL_ID_LEN], peer_id: &[u8], seq: u64, text: &[u8]) -> Vec<u8> {
+fn signed_bytes(
+    call_id: &[u8; CALL_ID_LEN],
+    peer_id: &[u8],
+    seq: u64,
+    kind: u8,
+    body: &[u8],
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(
-        CALL_CHAT_SIG_DOMAIN.len() + CALL_ID_LEN + 1 + peer_id.len() + 8 + 2 + text.len(),
+        CALL_CHAT_SIG_DOMAIN.len() + CALL_ID_LEN + 1 + peer_id.len() + 8 + 1 + body.len(),
     );
     out.extend_from_slice(CALL_CHAT_SIG_DOMAIN);
     out.extend_from_slice(call_id);
-    // Both lengths are bounded by every caller (64 and 800).
+    // Bounded by every caller (64).
     out.push(u8::try_from(peer_id.len()).unwrap_or(u8::MAX));
     out.extend_from_slice(peer_id);
     out.extend_from_slice(&seq.to_be_bytes());
-    out.extend_from_slice(&u16::try_from(text.len()).unwrap_or(u16::MAX).to_be_bytes());
-    out.extend_from_slice(text);
+    out.push(kind);
+    out.extend_from_slice(body);
     out
 }
 
-/// Compose a call-chat message: `text` numbered `seq` for call `call_id`
-/// under SFU `peer_id`, signed with `identity`'s leaf signature key.
+/// Compose a call-chat text message: `text` numbered `seq` for call
+/// `call_id` under SFU `peer_id`, signed with `identity`'s leaf signature
+/// key.
 ///
 /// # Errors
 ///
@@ -214,31 +405,82 @@ pub fn compose_call_chat(
     seq: u64,
     text: &str,
 ) -> Result<Vec<u8>, RelayError> {
+    check_call_chat_text(text).map_err(|_| RelayError::Malformed("text"))?;
+    compose_content(
+        identity,
+        call_id,
+        peer_id,
+        seq,
+        &CallChatContent::Text(text.to_owned()),
+    )
+}
+
+/// Compose a call-chat picture message (`docs/ux/calls.md` section
+/// 4.1.4.1).
+///
+/// # Errors
+///
+/// As [`compose_call_chat`], and [`RelayError::Malformed`] for a picture
+/// whose size or dimensions are out of bounds.
+pub fn compose_call_chat_picture(
+    identity: &Identity,
+    call_id: &[u8; CALL_ID_LEN],
+    peer_id: &str,
+    seq: u64,
+    picture: &CallChatPicture,
+) -> Result<Vec<u8>, RelayError> {
+    picture.check()?;
+    compose_content(
+        identity,
+        call_id,
+        peer_id,
+        seq,
+        &CallChatContent::Picture(picture.clone()),
+    )
+}
+
+fn compose_content(
+    identity: &Identity,
+    call_id: &[u8; CALL_ID_LEN],
+    peer_id: &str,
+    seq: u64,
+    content: &CallChatContent,
+) -> Result<Vec<u8>, RelayError> {
     let peer = peer_id.as_bytes();
     check_peer_id(peer)?;
     if seq == 0 {
         return Err(RelayError::Malformed("seq"));
     }
-    check_call_chat_text(text).map_err(|_| RelayError::Malformed("text"))?;
-    let text_bytes = text.as_bytes();
     let signing = SigningKey::from_seed(&identity.ed25519_seed_bytes());
     let signer_key = signing.verifying_key().to_bytes();
     if identity.signature_public_key() != signer_key.as_slice() {
         return Err(RelayError::IdentityKeyMismatch);
     }
+    let kind = content.kind();
+    let body = content.body();
     let signature = signing
-        .sign(&signed_bytes(call_id, peer, seq, text_bytes))
+        .sign(&signed_bytes(call_id, peer, seq, kind, &body))
         .to_bytes();
-    let text_len = u16::try_from(text_bytes.len()).map_err(|_| RelayError::Malformed("text"))?;
-    let mut out = Vec::with_capacity(call_chat_len(peer.len(), text_bytes.len()));
+    let mut out = Vec::with_capacity(
+        CALL_CHAT_DOMAIN.len()
+            + 1
+            + CALL_ID_LEN
+            + 1
+            + peer.len()
+            + 8
+            + 1
+            + body.len()
+            + PUBLIC_KEY_LEN
+            + SIGNATURE_LEN,
+    );
     out.extend_from_slice(CALL_CHAT_DOMAIN);
     out.push(CALL_CHAT_VERSION);
     out.extend_from_slice(call_id);
     out.push(u8::try_from(peer.len()).map_err(|_| RelayError::Malformed("peer id length"))?);
     out.extend_from_slice(peer);
     out.extend_from_slice(&seq.to_be_bytes());
-    out.extend_from_slice(&text_len.to_be_bytes());
-    out.extend_from_slice(text_bytes);
+    out.push(kind);
+    out.extend_from_slice(&body);
     out.extend_from_slice(&signer_key);
     out.extend_from_slice(&signature);
     Ok(out)
@@ -266,22 +508,15 @@ pub fn decode_call_chat(bytes: &[u8]) -> Result<CallChatMessage, RelayError> {
     let (call_id_bytes, rest) = rest.split_at(CALL_ID_LEN);
     let (&peer_len, rest) = rest.split_first().ok_or(RelayError::BadLength)?;
     let peer_len = usize::from(peer_len);
-    if rest.len() < peer_len + 8 + 2 {
+    if rest.len() < peer_len + 8 + 1 + PUBLIC_KEY_LEN + SIGNATURE_LEN {
         return Err(RelayError::BadLength);
     }
     let (peer, rest) = rest.split_at(peer_len);
     check_peer_id(peer)?;
     let (seq_bytes, rest) = rest.split_at(8);
-    let (len_bytes, rest) = rest.split_at(2);
-    let text_len = usize::from(u16::from_be_bytes([len_bytes[0], len_bytes[1]]));
-    if text_len > MAX_CALL_CHAT_TEXT_BYTES {
-        return Err(RelayError::Malformed("text"));
-    }
-    if rest.len() != text_len + PUBLIC_KEY_LEN + SIGNATURE_LEN {
-        return Err(RelayError::BadLength);
-    }
-    let (text_bytes, rest) = rest.split_at(text_len);
-    let (key_bytes, sig_bytes) = rest.split_at(PUBLIC_KEY_LEN);
+    let (&kind, rest) = rest.split_first().ok_or(RelayError::BadLength)?;
+    let (body, tail) = rest.split_at(rest.len() - PUBLIC_KEY_LEN - SIGNATURE_LEN);
+    let (key_bytes, sig_bytes) = tail.split_at(PUBLIC_KEY_LEN);
 
     let mut seq_be = [0u8; 8];
     seq_be.copy_from_slice(seq_bytes);
@@ -289,9 +524,27 @@ pub fn decode_call_chat(bytes: &[u8]) -> Result<CallChatMessage, RelayError> {
     if seq == 0 {
         return Err(RelayError::Malformed("seq"));
     }
-    let text =
-        String::from_utf8(text_bytes.to_vec()).map_err(|_| RelayError::Malformed("utf-8"))?;
-    check_call_chat_text(&text).map_err(|_| RelayError::Malformed("text"))?;
+    let content = match kind {
+        CALL_CHAT_KIND_TEXT => {
+            if body.len() < 2 {
+                return Err(RelayError::BadLength);
+            }
+            let (len_bytes, text_bytes) = body.split_at(2);
+            let text_len = usize::from(u16::from_be_bytes([len_bytes[0], len_bytes[1]]));
+            if text_len > MAX_CALL_CHAT_TEXT_BYTES {
+                return Err(RelayError::Malformed("text"));
+            }
+            if text_bytes.len() != text_len {
+                return Err(RelayError::BadLength);
+            }
+            let text = String::from_utf8(text_bytes.to_vec())
+                .map_err(|_| RelayError::Malformed("utf-8"))?;
+            check_call_chat_text(&text).map_err(|_| RelayError::Malformed("text"))?;
+            CallChatContent::Text(text)
+        },
+        CALL_CHAT_KIND_PICTURE => CallChatContent::Picture(CallChatPicture::decode(body)?),
+        _ => return Err(RelayError::Malformed("kind")),
+    };
     let mut call_id = [0u8; CALL_ID_LEN];
     call_id.copy_from_slice(call_id_bytes);
     let mut signer_key = [0u8; PUBLIC_KEY_LEN];
@@ -304,7 +557,7 @@ pub fn decode_call_chat(bytes: &[u8]) -> Result<CallChatMessage, RelayError> {
         call_id,
         peer_id,
         seq,
-        text,
+        content,
         signer_key,
         signature,
     })
@@ -357,7 +610,8 @@ pub fn verify_call_chat(
                 &decoded.call_id,
                 decoded.peer_id.as_bytes(),
                 decoded.seq,
-                decoded.text.as_bytes(),
+                decoded.content.kind(),
+                &decoded.content.body(),
             ),
             &signature,
         )
@@ -368,7 +622,7 @@ pub fn verify_call_chat(
     Ok(VerifiedCallChat {
         peer_id: decoded.peer_id,
         seq: decoded.seq,
-        text: decoded.text,
+        content: decoded.content,
         account_key: member.account_key,
     })
 }
@@ -405,7 +659,7 @@ mod tests {
         assert_eq!(d.call_id, CALL);
         assert_eq!(d.peer_id, "bobpeer");
         assert_eq!(d.seq, 3);
-        assert_eq!(d.text, "see you\nat 5");
+        assert_eq!(d.content, CallChatContent::Text("see you\nat 5".into()));
         assert_eq!(d.signer_key.as_slice(), bob.signature_public_key());
         assert_eq!(
             classify_relay_plaintext(&wire),
@@ -472,7 +726,7 @@ mod tests {
     fn a_text_that_breaks_the_rule_is_refused_at_decode() {
         let bob = identity(2);
         let good = compose_call_chat(&bob, &CALL, "p", 1, "hi").unwrap();
-        let text_at = CALL_CHAT_DOMAIN.len() + 1 + CALL_ID_LEN + 1 + 1 + 8 + 2;
+        let text_at = CALL_CHAT_DOMAIN.len() + 1 + CALL_ID_LEN + 1 + 1 + 8 + 1 + 2;
         let mut bad = good.clone();
         bad[text_at] = 0x07;
         assert_eq!(decode_call_chat(&bad), Err(RelayError::Malformed("text")));
@@ -488,7 +742,7 @@ mod tests {
         let wire = compose_call_chat(&bob, &CALL, "bobpeer", 1, "hello").unwrap();
         let ok =
             verify_call_chat(&group, &CALL, "bobpeer", bob.signature_public_key(), &wire).unwrap();
-        assert_eq!(ok.text, "hello");
+        assert_eq!(ok.content.text(), Some("hello"));
         assert_eq!(ok.seq, 1);
         assert_eq!(ok.account_key.as_slice(), bob.signature_public_key());
 
@@ -557,6 +811,105 @@ mod tests {
     #[test]
     fn the_largest_message_fits_a_relay_payload() {
         assert!(call_chat_len(MAX_PEER_ID_LEN, MAX_CALL_CHAT_TEXT_BYTES) <= MAX_RELAY_PLAINTEXT);
+        assert!(call_chat_picture_len(MAX_PEER_ID_LEN) <= MAX_RELAY_PLAINTEXT);
+    }
+
+    fn picture() -> CallChatPicture {
+        CallChatPicture {
+            blob_id: [0xb1; 32],
+            key: [0x4b; 32],
+            nonce: [0x0e; 12],
+            size: 123_456,
+            width: 2560,
+            height: 1440,
+        }
+    }
+
+    #[test]
+    fn a_picture_round_trips_and_verifies() {
+        let (_alice, bob, group) = two_member_group();
+        let wire = compose_call_chat_picture(&bob, &CALL, "bobpeer", 4, &picture()).unwrap();
+        assert_eq!(wire.len(), call_chat_picture_len(7));
+        assert_eq!(
+            classify_relay_plaintext(&wire),
+            RelayPayload::CallChat(wire.clone())
+        );
+        let d = decode_call_chat(&wire).unwrap();
+        assert_eq!(d.content, CallChatContent::Picture(picture()));
+        let v =
+            verify_call_chat(&group, &CALL, "bobpeer", bob.signature_public_key(), &wire).unwrap();
+        assert_eq!(v.content.picture(), Some(&picture()));
+        assert_eq!(v.content.text(), None);
+        assert_eq!(v.seq, 4);
+    }
+
+    #[test]
+    fn a_picture_out_of_bounds_is_refused_both_ways() {
+        let bob = identity(2);
+        let cases = [
+            CallChatPicture {
+                size: 0,
+                ..picture()
+            },
+            CallChatPicture {
+                size: MAX_CALL_CHAT_PICTURE_BYTES + 1,
+                ..picture()
+            },
+            CallChatPicture {
+                width: 0,
+                ..picture()
+            },
+            CallChatPicture {
+                height: MAX_CALL_CHAT_PICTURE_SIDE + 1,
+                ..picture()
+            },
+        ];
+        for bad in &cases {
+            assert!(compose_call_chat_picture(&bob, &CALL, "p", 1, bad).is_err());
+        }
+        // The same bounds at decode: write a zero size into a good wire.
+        let good = compose_call_chat_picture(&bob, &CALL, "p", 1, &picture()).unwrap();
+        let size_at = CALL_CHAT_DOMAIN.len() + 1 + CALL_ID_LEN + 1 + 1 + 8 + 1 + 76;
+        let mut zero = good.clone();
+        zero[size_at..size_at + 4].copy_from_slice(&0u32.to_be_bytes());
+        assert_eq!(
+            decode_call_chat(&zero),
+            Err(RelayError::Malformed("picture size"))
+        );
+        // An unknown kind and the retired version are refused.
+        let kind_at = size_at - 77;
+        let mut kind = good.clone();
+        kind[kind_at] = 0x03;
+        assert_eq!(decode_call_chat(&kind), Err(RelayError::Malformed("kind")));
+        let mut old = good;
+        old[CALL_CHAT_DOMAIN.len()] = 0x01;
+        assert_eq!(decode_call_chat(&old), Err(RelayError::UnknownVersion));
+    }
+
+    #[test]
+    fn a_picture_and_a_text_never_verify_as_each_other() {
+        // The kind byte is signed: turning a text message into a picture
+        // (or back) breaks the signature even when the lengths line up.
+        let (_alice, bob, group) = two_member_group();
+        let wire = compose_call_chat_picture(&bob, &CALL, "bobpeer", 1, &picture()).unwrap();
+        let kind_at = CALL_CHAT_DOMAIN.len() + 1 + CALL_ID_LEN + 1 + 7 + 8;
+        let mut flipped = wire;
+        flipped[kind_at] = CALL_CHAT_KIND_TEXT;
+        assert!(verify_call_chat(
+            &group,
+            &CALL,
+            "bobpeer",
+            bob.signature_public_key(),
+            &flipped
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn debug_never_prints_the_picture_key() {
+        let shown = format!("{:?}", CallChatContent::Picture(picture()));
+        assert!(!shown.contains("75")); // 0x4b
+        assert!(shown.contains("2560"));
     }
 
     fn valid_text() -> impl Strategy<Value = String> {
@@ -585,7 +938,7 @@ mod tests {
             prop_assert_eq!(d.call_id, call_id);
             prop_assert_eq!(d.peer_id, peer);
             prop_assert_eq!(d.seq, seq);
-            prop_assert_eq!(d.text, text);
+            prop_assert_eq!(d.content, CallChatContent::Text(text));
         }
 
         #[test]
@@ -613,6 +966,23 @@ mod tests {
             prop_assert!(verify_call_chat(
                 &group, &CALL, "bobpeer", bob.signature_public_key(), &bad
             ).is_err());
+        }
+
+        #[test]
+        fn a_picture_compose_then_decode_is_the_identity(
+            peer in "[!-~]{1,64}",
+            seq in 1u64..=u64::MAX,
+            blob_id in proptest::array::uniform32(any::<u8>()),
+            key in proptest::array::uniform32(any::<u8>()),
+            size in 1u32..=MAX_CALL_CHAT_PICTURE_BYTES,
+            width in 1u16..=MAX_CALL_CHAT_PICTURE_SIDE,
+            height in 1u16..=MAX_CALL_CHAT_PICTURE_SIDE,
+        ) {
+            let bob = identity(2);
+            let p = CallChatPicture { blob_id, key, nonce: [7; 12], size, width, height };
+            let wire = compose_call_chat_picture(&bob, &CALL, &peer, seq, &p).unwrap();
+            prop_assert_eq!(wire.len(), call_chat_picture_len(peer.len()));
+            prop_assert_eq!(decode_call_chat(&wire).unwrap().content, CallChatContent::Picture(p));
         }
 
         #[test]

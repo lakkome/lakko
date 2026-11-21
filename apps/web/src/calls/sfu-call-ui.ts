@@ -509,6 +509,8 @@ export function createSfuCallUi(
   callChatActions.reset();
   callChatActions.setControl({
     send: (text: string): void => session.sendCallChat(text),
+    sendPicture: (jpeg: Uint8Array, width: number, height: number): void =>
+      session.sendCallChatPicture(jpeg, width, height),
     sendAgain: (id: string): void => session.resendCallChat(id),
   });
 

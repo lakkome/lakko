@@ -133,7 +133,27 @@ describe("call chat through the real core (docs/ux/calls.md 4.1.4)", () => {
     expect(verifier.verifyCallChat?.("bobpeer", bob.signaturePublicKey, wire!)).toEqual({
       seq: 1n,
       text: "hello\nthere https://lakko.me",
+      picture: null,
     });
+    // A picture (section 4.1.4.1) through the real core.
+    const ref = {
+      blobId: new Uint8Array(32).fill(1),
+      key: new Uint8Array(32).fill(2),
+      nonce: new Uint8Array(12).fill(3),
+      size: 1234,
+      width: 640,
+      height: 480,
+    };
+    const pictureWire = asBob.composeCallChatPicture?.("bobpeer", 2n, ref) ?? null;
+    expect(pictureWire).not.toBeNull();
+    expect(relay.open(relay.seal(pictureWire!)!)).toEqual({ kind: "call-chat", bytes: pictureWire });
+    expect(verifier.verifyCallChat?.("bobpeer", bob.signaturePublicKey, pictureWire!)).toEqual({
+      seq: 2n,
+      text: "",
+      picture: ref,
+    });
+    expect(asBob.composeCallChatPicture?.("bobpeer", 3n, { ...ref, size: 0 })).toBeNull();
+    expect(asBob.composeCallChatPicture?.("bobpeer", 3n, { ...ref, key: new Uint8Array(31) })).toBeNull();
     expect(verifier.verifyCallChat?.("alicepeer", bob.signaturePublicKey, wire!)).toBeNull();
     expect(verifier.verifyCallChat?.("bobpeer", alice.signaturePublicKey, wire!)).toBeNull();
     // The core refuses what the composer must never send.

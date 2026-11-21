@@ -17,6 +17,18 @@
  */
 
 import { t } from "../l10n";
+import type { OwnSharePicture } from "./screen-share-store";
+import {
+  browserMirrorFacts,
+  MIRROR_RECHECK_MS,
+  mirrorFactsLine,
+  ownShareView,
+  sameView,
+  setOwnCaptureHandle,
+  type MirrorFacts,
+  type OwnShareView,
+} from "./screen-share-mirror";
+import { hostSurfaces } from "./screen-share-host";
 import {
   browserScreenShareEnv,
   canSendScreenShare,
@@ -57,6 +69,14 @@ export interface ScreenCapture {
   /** Whether the page runs on macOS. */
   macOs(): boolean;
   now(): number;
+  /** Prepare what {@link mirrorFacts} reads (Chromium's Capture Handle);
+   *  called before the picker opens. */
+  prepareMirrorCheck?(): void;
+  /** What decides whether the own share shows the call itself (section 3.1). */
+  mirrorFacts?(track: MediaStreamTrack): Promise<MirrorFacts>;
+  /** Calls `listener` when this window's size or screen may have changed;
+   *  returns its removal. */
+  onWindowChange?(listener: () => void): () => void;
 }
 
 /** The page's own capture. */
@@ -80,6 +100,16 @@ export function browserScreenCapture(): ScreenCapture {
       }
     },
     now: () => Date.now(),
+    prepareMirrorCheck: () => setOwnCaptureHandle(),
+    mirrorFacts: async (track) => browserMirrorFacts(track, await hostSurfaces()),
+    onWindowChange: (listener) => {
+      try {
+        globalThis.addEventListener("resize", listener);
+        return () => globalThis.removeEventListener("resize", listener);
+      } catch {
+        return () => undefined;
+      }
+    },
   };
 }
 
@@ -88,6 +118,9 @@ export interface ScreenShareStoreWriter {
   setCurrent(next: ShareOnScreen | null): void;
   setControl(next: ScreenShareControl | null): void;
   setBusy(on: boolean): void;
+  /** This device's own capture and what its tile shows (section 3); absent
+   *  where nothing shows the own tile. */
+  setOwnPicture?(next: OwnSharePicture | null): void;
 }
 
 /** What one call's binding needs. */
@@ -122,6 +155,11 @@ export interface ScreenShareBindingDeps<V> {
 export class ScreenShareBinding<V> {
   readonly controller: ScreenShareController<V>;
   private captureStream: MediaStream | null = null;
+  /** The own tile's view of the live capture, and what keeps it current. */
+  private ownView: OwnShareView | null = null;
+  private mirrorTimer: ReturnType<typeof setInterval> | null = null;
+  private mirrorUnlisten: (() => void) | null = null;
+  private mirrorLogged = false;
   private starting = false;
   private disposed = false;
   private readonly capture: ScreenCapture;
@@ -207,6 +245,7 @@ export class ScreenShareBinding<V> {
     this.starting = true;
     this.deps.store.setBusy(true);
     const startedAt = this.capture.now();
+    this.capture.prepareMirrorCheck?.();
     let stream: MediaStream;
     try {
       stream = await this.capture.getDisplayMedia(
@@ -267,6 +306,7 @@ export class ScreenShareBinding<V> {
     video.addEventListener("ended", () => {
       if (this.captureStream === stream) this.stop();
     });
+    this.watchOwnPicture(stream, video);
     this.controller.startOwn(peerId, withSound);
     this.deps.log?.(`call screen share started sound=${withSound ? "yes" : "no"}`);
     this.finishStart();
@@ -298,7 +338,58 @@ export class ScreenShareBinding<V> {
     this.deps.store.setBusy(false);
   }
 
+  /**
+   * Keep the own tile's view of `stream` current (section 3): judged at once,
+   * then every {@link MIRROR_RECHECK_MS} and when the window changes. Until the
+   * first judgement the tile shows no picture.
+   */
+  private watchOwnPicture(stream: MediaStream, video: MediaStreamTrack): void {
+    this.ownView = null;
+    this.mirrorLogged = false;
+    const facts = this.capture.mirrorFacts;
+    if (facts === undefined) {
+      this.showOwnPicture(stream, { kind: "mirror", surface: "unknown" });
+      return;
+    }
+    const judge = (): void => {
+      void facts(video).then(
+        (f) => {
+          if (this.captureStream !== stream) return;
+          const view = ownShareView(f);
+          if (!this.mirrorLogged) {
+            this.mirrorLogged = true;
+            this.deps.log?.(`call screen share own tile ${mirrorFactsLine(f, view)}`);
+          }
+          this.showOwnPicture(stream, view);
+        },
+        () => undefined,
+      );
+    };
+    judge();
+    this.mirrorTimer = setInterval(judge, MIRROR_RECHECK_MS);
+    this.mirrorUnlisten = this.capture.onWindowChange?.(judge) ?? null;
+  }
+
+  private showOwnPicture(stream: MediaStream, view: OwnShareView): void {
+    if (this.captureStream !== stream && this.captureStream !== null) return;
+    const before = this.ownView;
+    this.ownView = view;
+    if (before !== null && sameView(before, view)) return;
+    if (before !== null) {
+      this.deps.log?.(
+        `call screen share own tile now ${view.kind === "picture" ? "picture" : `mirror-${view.surface}`}`,
+      );
+    }
+    this.deps.store.setOwnPicture?.({ stream, view });
+  }
+
   private endCapture(): void {
+    if (this.mirrorTimer !== null) clearInterval(this.mirrorTimer);
+    this.mirrorTimer = null;
+    this.mirrorUnlisten?.();
+    this.mirrorUnlisten = null;
+    this.ownView = null;
+    this.deps.store.setOwnPicture?.(null);
     const stream = this.captureStream;
     this.captureStream = null;
     if (stream !== null) stopAll(stream);

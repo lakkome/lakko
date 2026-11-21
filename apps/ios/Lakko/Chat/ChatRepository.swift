@@ -3466,6 +3466,18 @@ public final class ChatRepository: ObservableObject {
         return PersonKey.collapse(roster, ownLeafIndex: try? record.group.ownLeafIndex())
     }
 
+    /// G-53 — the conversations (hex ids, one-to-ones included) this device is
+    /// an active member of and the person `accountKey` (any of their proven
+    /// keys) is a current member of, read from the live rosters.
+    func sharedConversationScopes(with accountKey: Data) -> [String] {
+        let resolver = ReachCenter.shared.keyResolver
+        return groups.keys.sorted().filter { groupIdHex in
+            guard isActive(groupIdHex: groupIdHex) == true,
+                  let members = members(groupIdHex: groupIdHex) else { return false }
+            return members.contains { resolver.samePerson($0.signaturePublicKey, accountKey) }
+        }
+    }
+
     /// ADR-0060 section 1 (2026-11-06) — the other person of this one-to-one
     /// was removed from this account's contacts: their conversation gets no
     /// `contact` grant (the rotation on Remove contact took theirs away).
@@ -3868,8 +3880,11 @@ public final class ChatRepository: ObservableObject {
         // a grant. Hand each committer candidate a delegation signed with this
         // device's grant for the person, in the group beside the proposal.
         if case .proposed = outcome {
+            // G-53 — `open` is the reach the search of this add found (the
+            // person's open record): it is what the envelope names.
             await sendCommitterDelegations(
-                groupIdHex: groupIdHex, addedAccountKey: recipientSignaturePubkey, openMailbox: open)
+                groupIdHex: groupIdHex, addedAccountKey: recipientSignaturePubkey, openMailbox: open,
+                openIsFound: open != nil)
         }
         return outcome
     }
@@ -5474,6 +5489,10 @@ public final class ChatRepository: ObservableObject {
         if !selfEvicted,
            ReachRules.membershipShrank(previous: previousMemberKeys, current: current) {
             ReachCenter.shared.rotateGroup(record.groupId)
+            // G-53 — the grants a departed member handed out here: a lower
+            // version of a key goes; the highest stays (the core decides
+            // whether it is still usable without this group).
+            ReachCenter.shared.pruneHeld(inScope: groupIdHex)
         }
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -9486,8 +9505,14 @@ public final class ChatRepository: ObservableObject {
     /// (``MembershipIntent/lastEnvelope``), which is what
     /// ``resendCommitterEnvelopesIfDue(groupIdHex:)`` reads. One at a time per
     /// (group, person).
+    ///
+    /// G-53 — `openIsFound`: `openMailbox` is the open record the search of
+    /// THIS add found. The envelope then names it with no delegation whatever
+    /// grant is held, since a held grant may be one the person retired and a
+    /// committer holding only that delegation could never write the Welcome.
     func sendCommitterDelegations(
-        groupIdHex: String, addedAccountKey: Data, openMailbox: MailboxTarget? = nil
+        groupIdHex: String, addedAccountKey: Data, openMailbox: MailboxTarget? = nil,
+        openIsFound: Bool = false
     ) async {
         let personKeyB64 = base64Encode(addedAccountKey)
         let inFlightKey = groupIdHex + "|" + personKeyB64
@@ -9497,12 +9522,14 @@ public final class ChatRepository: ObservableObject {
         let bound = binding.capture()
         defer { if bound.isCurrent { committerEnvelopesInFlight.remove(inFlightKey) } }
         let reach = committerEnvelopeReach()
-        let signed = reach.composeDelegationEnvelope(
+        let foundOpen = openIsFound ? openMailbox : nil
+        let signed = foundOpen != nil ? nil : reach.composeDelegationEnvelope(
             addedAccountKey: addedAccountKey, candidateAccountKeys: candidates,
             groupIdHex: groupIdHex)
         guard let envelope = CommitterDelegationChoice.envelope(
             signed: signed?.wire,
-            open: openMailbox.flatMap { reach.composeOpenEnvelope(target: $0) })
+            open: openMailbox.flatMap { reach.composeOpenEnvelope(target: $0) },
+            openIsFound: foundOpen != nil)
         else { return }
         do {
             try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: envelope)
@@ -9559,10 +9586,14 @@ public final class ChatRepository: ObservableObject {
                   committerEnvelopeIsDue(
                       intent.lastEnvelope, candidates: candidates, nowMs: committerEnvelopeClock())
             else { continue }
+            // G-53 — this device's own add found the person open: the same
+            // open envelope again; otherwise as before.
+            let reach = committerEnvelopeReach()
+            let found = reach.ownOpenAddTarget(ofPerson: person, groupIdHex: groupIdHex)
             await sendCommitterDelegations(
                 groupIdHex: groupIdHex, addedAccountKey: person,
-                openMailbox: committerEnvelopeReach().openWelcomeTarget(
-                    ofPerson: person, groupIdHex: groupIdHex))
+                openMailbox: found ?? reach.openWelcomeTarget(ofPerson: person, groupIdHex: groupIdHex),
+                openIsFound: found != nil)
         }
     }
 
@@ -9809,20 +9840,24 @@ public final class ChatRepository: ObservableObject {
                     guard let mailboxTarget = attempt.target else {
                         throw SweepWelcomeUndeliverable(triedKeys: 0)
                     }
-                    let row = try mailboxTarget.seal(kind: .welcome, body: bytes)
-                    let id: Int64
-                    if attempt.openUnsigned {
-                        // ADR-0060 section 6 — one proofless write, spending a
-                        // `mailbox-write` token, as a contact request to a
-                        // person in Everyone is written.
-                        id = try await deliverOpenSweepWelcome {
+                    // ADR-0060 section 6 — one proofless write, spending a
+                    // `mailbox-write` token, as a contact request to a
+                    // person in Everyone is written.
+                    @MainActor func writeOpen(_ open: MailboxTarget) async throws -> Int64 {
+                        let openRow = try open.seal(kind: .welcome, body: bytes)
+                        let id = try await deliverOpenSweepWelcome {
                             try await client.publishMailbox(
-                                pseudonym: mailboxTarget.address, payload: row, writeAuth: nil
+                                pseudonym: open.address, payload: openRow, writeAuth: nil
                             ).id
                         }
-                        ReachCenter.shared.dropOpenAdd(
-                            groupIdHex: groupIdHex, person: mailboxTarget.accountKey)
-                    } else {
+                        ReachCenter.shared.dropOpenAdd(groupIdHex: groupIdHex, person: open.accountKey)
+                        delivered = open.address
+                        return id
+                    }
+                    if attempt.openUnsigned { return try await writeOpen(mailboxTarget) }
+                    let row = try mailboxTarget.seal(kind: .welcome, body: bytes)
+                    let id: Int64
+                    do {
                         id = try await deliverSweepWelcome(
                             candidates: attempt.candidates,
                             publish: { auth in
@@ -9830,6 +9865,14 @@ public final class ChatRepository: ObservableObject {
                                     pseudonym: mailboxTarget.address, payload: row, writeAuth: auth
                                 ).id
                             })
+                    } catch let undeliverable as SweepWelcomeUndeliverable {
+                        // G-53 — every held key refused (`401`): the open
+                        // mailbox, when the core allows it, before the
+                        // Welcome stays owed.
+                        guard let open = attempt.openAfterRefusals(undeliverable.triedKeys) else {
+                            throw undeliverable
+                        }
+                        return try await writeOpen(open)
                     }
                     delivered = mailboxTarget.address
                     return id
@@ -9917,6 +9960,11 @@ public final class ChatRepository: ObservableObject {
         // claim so the sync below sees this account's groups.
         ReachCenter.shared.groupIdsProvider = { [weak self] in
             self?.allGroupIds() ?? []
+        }
+        // G-53 — which conversations this account and a person are both in
+        // now: what makes a `group` / `member` grant held for them usable.
+        ReachCenter.shared.sharedScopesProvider = { [weak self] person in
+            self?.sharedConversationScopes(with: person) ?? []
         }
         // ADR-0050 2.5a item 7 — a key for someone just arrived: a Welcome
         // owed to their mailbox for lack of one is retried now.

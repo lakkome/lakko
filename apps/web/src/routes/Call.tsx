@@ -152,8 +152,11 @@ import {
   currentShareStream,
   screenShareActions,
   screenShareState,
+  type OwnSharePicture,
   type ShareOnScreen,
 } from "../calls/screen-share-store";
+import type { MirrorSurface } from "../calls/screen-share-mirror";
+import { Spinner } from "../ui/Spinner";
 import {
   isRemoteShare,
   nameOrUnnamed,
@@ -194,42 +197,6 @@ import { wasmSync } from "../wasm";
 // ============================================================================
 // Small shared pieces
 // ============================================================================
-
-/** Indeterminate spinner glyph. Self-contained SVG (SMIL rotation, no global
- *  keyframes); takes the surrounding text colour. */
-const Spinner: Component<{ size?: number }> = (props) => {
-  const size = (): number => props.size ?? 22;
-  return (
-    <svg
-      class="lk-spinner"
-      width={size()}
-      height={size()}
-      viewBox="0 0 24 24"
-      fill="none"
-      aria-hidden="true"
-    >
-      <circle
-        cx="12"
-        cy="12"
-        r="9"
-        stroke="currentColor"
-        stroke-width="3"
-        stroke-linecap="round"
-        stroke-dasharray="40 60"
-      >
-        <animateTransform
-          attributeName="transform"
-          attributeType="XML"
-          type="rotate"
-          from="0 12 12"
-          to="360 12 12"
-          dur="0.8s"
-          repeatCount="indefinite"
-        />
-      </circle>
-    </svg>
-  );
-};
 
 interface QualityDotProps {
   tier: QualityTier;
@@ -1883,6 +1850,82 @@ const ParticipantTile: Component<TileProps> = (props) => {
  * This device's own share shows no picture (the endless mirror): the glyph
  * and `You're sharing your screen`.
  */
+/** The own share's line for a mirror, by what is shared (section 3). */
+function ownShareMirrorText(surface: MirrorSurface): string {
+  switch (surface) {
+    case "tab":
+      return t("call.screen_share.own_tile_this_tab");
+    case "window":
+      return t("call.screen_share.own_tile_this_window");
+    case "screen":
+      return t("call.screen_share.own_tile_this_screen");
+    case "unknown":
+      return t("call.screen_share.own_tile");
+  }
+}
+
+/**
+ * This device's own share tile (`docs/ux/screen-share.md` section 3): the
+ * live picture of what is shared, uncropped on black, no zoom and no sound;
+ * for a share that shows the call itself, no picture and one line.
+ */
+const OwnShareTile: Component<{ large: boolean; class?: string | undefined }> = (props) => {
+  const own = (): OwnSharePicture | null => screenShareState.ownPicture();
+  const pictureStream = (): MediaStream | undefined => {
+    const o = own();
+    return o !== null && o.view.kind === "picture" ? o.stream : undefined;
+  };
+  const line = (): string => {
+    const o = own();
+    return o !== null && o.view.kind === "mirror" ? ownShareMirrorText(o.view.surface) : t("call.screen_share.own_tile");
+  };
+  let videoEl: HTMLVideoElement | undefined;
+  createEffect(
+    on(pictureStream, (stream) => {
+      if (videoEl === undefined) return;
+      videoEl.srcObject = stream ?? null;
+      if (stream !== undefined) {
+        void videoEl.play().catch(() => {
+          // A muted element may autoplay; a refusal leaves a black tile.
+        });
+      }
+    }),
+  );
+  return (
+    <Show
+      when={pictureStream() !== undefined}
+      fallback={
+        <div class={`lk-call-share own ${props.class ?? ""}`} role="img" aria-label={line()}>
+          <Icon name="display" size={props.large ? 33 : 20} />
+          <span class="lk-call-share-own-text">{line()}</span>
+        </div>
+      }
+    >
+      <div
+        class={`lk-call-share own-picture ${props.class ?? ""}`}
+        role="img"
+        aria-label={t("call.screen_share.own_strip")}
+      >
+        <video
+          ref={(el): void => {
+            videoEl = el;
+            const stream = pictureStream();
+            if (stream !== undefined) {
+              el.srcObject = stream;
+              void el.play().catch(() => undefined);
+            }
+          }}
+          class="lk-call-share-video"
+          muted
+          autoplay
+          playsinline
+          aria-hidden="true"
+        />
+      </div>
+    </Show>
+  );
+};
+
 const ScreenShareView: Component<{
   share: ShareOnScreen;
   stream: MediaStream | undefined;
@@ -1932,12 +1975,7 @@ const ScreenShareView: Component<{
   return (
     <Show
       when={!props.share.isOwn}
-      fallback={
-        <div class={`lk-call-share own ${props.class ?? ""}`} role="img" aria-label={t("call.screen_share.own_tile")}>
-          <Icon name="display" size={props.large ? 33 : 20} />
-          <span class="lk-call-share-own-text">{t("call.screen_share.own_tile")}</span>
-        </div>
-      }
+      fallback={<OwnShareTile large={props.large} class={props.class} />}
     >
       <div
         class={`lk-call-share ${props.class ?? ""}`}
@@ -3325,7 +3363,9 @@ const Call: Component<{
             }}
           >
             <span class="lk-call-chat-preview-name">{chatNameOf(preview().peerId)}</span>
-            <span class="lk-call-chat-preview-text">{preview().text}</span>
+            <span class="lk-call-chat-preview-text">
+              {preview().picture ? t("call.chat.picture") : preview().text}
+            </span>
           </button>
         )}
       </Show>

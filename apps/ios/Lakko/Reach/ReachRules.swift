@@ -546,70 +546,132 @@ public enum ReachRules {
         }
     }
 
-    /// ADR-0078 — the grants held for one person grouped by the mailbox they
-    /// write to, best mailbox first. `verify` answers the mailbox a grant's
-    /// binding names once it verified against one of the person's account
-    /// keys (`nil` refuses the grant: it is never written under). The
-    /// mailbox of the grant ``writeSeeds(from:groupIdHex:)`` prefers comes
-    /// first; within a mailbox the seeds keep that order.
-    public static func writeMailboxes(
-        from held: [HeldGrant], groupIdHex: String?, verify: (HeldGrant) -> MailboxTarget?
-    ) -> [(target: MailboxTarget, seeds: [Data])] {
-        var verified: [(grant: HeldGrant, target: MailboxTarget)] = []
+    // MARK: - Which held grant writes (G-53, core `planReachWrites`)
+
+    /// What the core decided for the grants held for one person at ONE
+    /// mailbox: the ones to try, best first, and the ones a newer version of
+    /// the same key replaced (the caller deletes these).
+    public struct GrantPlan: Equatable {
+        public var candidates: [HeldGrant]
+        public var superseded: [HeldGrant]
+
+        public init(candidates: [HeldGrant], superseded: [HeldGrant]) {
+            self.candidates = candidates
+            self.superseded = superseded
+        }
+    }
+
+    /// G-53 (maintainer decision 2026-11-21) — the core's
+    /// `planReachWrites` over the grants held for one person at one mailbox.
+    /// This client keeps no order of its own: `Welcome` is found, `contact`,
+    /// `reply`, `member`, `group`, `channel`, `fof`; `delegation` drops
+    /// `member` and `reply`. A `group` / `member` grant is a candidate only
+    /// when `sharedScopeHexes` (the conversations this account and the person
+    /// are both current members of) is not empty, or when it is `found`.
+    /// `found` is the grant the search of this add found (the same seed),
+    /// `nil` otherwise. A grant whose class, seed or scope does not decode is
+    /// left out (neither tried nor deleted); a refusal of the core plans
+    /// nothing (logged).
+    public static func plan(
+        _ grants: [HeldGrant], purpose: FfiReachPurpose, targetScopeHex: String?,
+        sharedScopeHexes: [String], foundSeedB64: String?
+    ) -> GrantPlan {
+        var input: [(grant: HeldGrant, held: FfiHeldReach)] = []
+        for grant in grants {
+            guard let cls = grant.reachClass, grant.seed?.count == 32 else { continue }
+            let scope: Data
+            if let hex = grant.scopeHex {
+                guard let decoded = hexDecode(hex), decoded.count <= 64 else { continue }
+                scope = decoded
+            } else {
+                scope = Data()
+            }
+            input.append((grant, FfiHeldReach(
+                class: cls, scope: scope, version: grant.version, index: UInt32(input.count))))
+        }
+        guard !input.isEmpty else { return GrantPlan(candidates: [], superseded: []) }
+        let found = foundSeedB64.flatMap { seed in
+            input.first { $0.grant.seedB64 == seed }?.held.index
+        }
+        let target = targetScopeHex.flatMap(hexDecode)
+        let shared = sharedScopeHexes.compactMap(hexDecode)
+        let planned: FfiReachWritePlan
+        do {
+            planned = try planReachWrites(
+                held: input.map(\.held), purpose: purpose, targetScope: target,
+                sharedScopes: shared, found: found)
+        } catch {
+            NSLog("G-53: the reach write plan was refused: \(error)")
+            return GrantPlan(candidates: [], superseded: [])
+        }
+        func grant(_ index: UInt32) -> HeldGrant? {
+            Int(index) < input.count ? input[Int(index)].grant : nil
+        }
+        var seen = Set<String>()
+        let candidates = planned.candidates.compactMap(grant).filter { seen.insert($0.seedB64).inserted }
+        return GrantPlan(candidates: candidates, superseded: planned.superseded.compactMap(grant))
+    }
+
+    /// One mailbox the grants held for a person write to, and the core's
+    /// plan for the grants that open it.
+    public struct MailboxGrantPlan: Equatable {
+        public let target: MailboxTarget
+        public let plan: GrantPlan
+
+        /// The seeds to try at this mailbox, best first.
+        public var seeds: [Data] { plan.candidates.compactMap(\.seed) }
+    }
+
+    /// ADR-0078 / G-53 — the grants held for one person grouped by the
+    /// mailbox they write to (`verify` answers the mailbox a grant's binding
+    /// names once it verified against one of the person's account keys;
+    /// `nil` refuses the grant), each group planned by the core on its own
+    /// (one call per mailbox: a grant for an older mailbox of a rotated
+    /// account never competes with the current ones). Every mailbox is
+    /// returned, one with no candidate too, so its superseded grants can be
+    /// deleted. Order (which mailbox is tried first, not which grant): a
+    /// mailbox holding a grant no rotation displaced first (ADR-0074 section
+    /// 3.5a rule 6), then the one of `personKey`, then as first held.
+    public static func planMailboxes(
+        from held: [HeldGrant], personKey: Data?, purpose: FfiReachPurpose, targetScopeHex: String?,
+        sharedScopeHexes: [String], foundSeedB64: String?, verify: (HeldGrant) -> MailboxTarget?
+    ) -> [MailboxGrantPlan] {
+        var order: [MailboxTarget] = []
+        var grouped: [MailboxTarget: [HeldGrant]] = [:]
         for grant in held {
             guard let target = verify(grant) else { continue }
-            verified.append((grant, target))
+            if grouped[target] == nil { order.append(target) }
+            grouped[target, default: []].append(grant)
         }
-        var order: [MailboxTarget] = []
-        for seed in writeSeeds(from: verified.map(\.grant), groupIdHex: groupIdHex) {
-            guard let entry = verified.first(where: { $0.grant.seed == seed }),
-                  !order.contains(entry.target) else { continue }
-            order.append(entry.target)
-        }
-        return order.map { target in
-            let grants = verified.filter { $0.target == target }.map(\.grant)
-            return (target, writeSeeds(from: grants, groupIdHex: groupIdHex))
-        }
-    }
-
-    /// The seed to sign a write to a person's mailbox with, from the grants
-    /// held for them: `contact` first (the steadiest), then `member` of the
-    /// group the write concerns, then any `member` / `group`, then a `reply`.
-    /// `nil` when nothing is held — the write then goes unsigned, which only an
-    /// open (Everyone) mailbox stores.
-    public static func writeSeed(from held: [HeldGrant], groupIdHex: String?) -> Data? {
-        writeSeeds(from: held, groupIdHex: groupIdHex).first
-    }
-
-    /// Every distinct seed held for one person, in the order ``writeSeed(from:groupIdHex:)``
-    /// prefers them: `contact`, then `member` of the group the write concerns,
-    /// then any `member`, `group`, `channel`, `fof`, `reply` — newest first within a
-    /// class. A Welcome writer tries them in this order and moves to the next
-    /// on a `401` (ADR-0050 2.5a item 7): one key the owner rotated away must
-    /// not cost a Welcome another key still opens.
-    public static func writeSeeds(from held: [HeldGrant], groupIdHex: String?) -> [Data] {
-        func ordered(_ held: [HeldGrant]) -> [Data] {
-            func all(_ cls: FfiReachClass, scope: String?? = nil) -> [Data] {
-                held.filter { $0.reachClass == cls && (scope == nil || $0.scopeHex == scope!) }
-                    .sorted { $0.storedAtMs > $1.storedAtMs }
-                    .compactMap(\.seed)
+        let ranked = order.enumerated().sorted { a, b in
+            func rank(_ entry: (offset: Int, element: MailboxTarget)) -> (Int, Int, Int) {
+                let grants = grouped[entry.element] ?? []
+                return (grants.contains { !$0.isSuperseded } ? 0 : 1,
+                        entry.element.accountKey == personKey ? 0 : 1,
+                        entry.offset)
             }
-            var out: [Data] = all(.contact)
-            if let groupIdHex { out += all(.member, scope: .some(groupIdHex)) }
-            out += all(.member)
-            out += all(.group)
-            out += all(.channel)
-            // ADR-0060 section 6 — a `fof` grant is held only when this
-            // device added a person the search found through it.
-            out += all(.fof)
-            out += all(.reply)
-            return out
+            return rank(a) < rank(b)
+        }.map(\.element)
+        return ranked.map { target in
+            MailboxGrantPlan(target: target, plan: plan(
+                grouped[target] ?? [], purpose: purpose, targetScopeHex: targetScopeHex,
+                sharedScopeHexes: sharedScopeHexes, foundSeedB64: foundSeedB64))
         }
-        // ADR-0074 section 3.5a rule 6 — a grant a rotation displaced comes
-        // after every current one: it opens only the old mailbox.
-        let ordered = ordered(held.filter { !$0.isSuperseded }) + ordered(held.filter(\.isSuperseded))
-        var seen = Set<Data>()
-        return ordered.filter { $0.count == 32 && seen.insert($0).inserted }
+    }
+
+    private static func hexDecode(_ hex: String) -> Data? {
+        let chars = Array(hex.utf8)
+        guard chars.count % 2 == 0 else { return nil }
+        var out = Data(capacity: chars.count / 2)
+        var i = 0
+        while i < chars.count {
+            guard let byte = UInt8(String(decoding: chars[i..<(i + 2)], as: UTF8.self), radix: 16) else {
+                return nil
+            }
+            out.append(byte)
+            i += 2
+        }
+        return out
     }
 
     // MARK: - A device that holds nothing asks (ADR-0060 section 4)
@@ -734,7 +796,7 @@ public enum ReachRules {
     /// newest first within a class. Never a `member` grant: a co-member the
     /// person hides from holds one (UX section 6.2). Never a `reply`: it
     /// answers one request. A grant a rotation displaced comes after every
-    /// current one, as in ``writeSeeds(from:groupIdHex:)``.
+    /// current one, as in the write plan.
     public static func searchGrants(from held: [HeldGrant]) -> [HeldGrant] {
         func ordered(_ held: [HeldGrant]) -> [HeldGrant] {
             func all(_ cls: FfiReachClass) -> [HeldGrant] {
@@ -886,8 +948,14 @@ public enum ReachRules {
 /// the one signed with a grant this device holds for the added person when
 /// there is one; else, for a person found in Everyone, the one with no
 /// delegation naming their open mailbox; else none.
+///
+/// G-53 (2026-11-21) — when the search of this add found the person's open
+/// record (`openIsFound`), the open envelope goes whatever grant is held: a
+/// held grant may be one the person retired, and a committer given only
+/// delegations under it could never write the Welcome.
 public enum CommitterDelegationChoice {
-    public static func envelope(signed: Data?, open: Data?) -> Data? {
-        signed ?? open
+    public static func envelope(signed: Data?, open: Data?, openIsFound: Bool = false) -> Data? {
+        if openIsFound, let open { return open }
+        return signed ?? open
     }
 }

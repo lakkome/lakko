@@ -557,6 +557,10 @@
       "text": "إغلاق الدردشة",
       "status": "machine"
     },
+    "call.chat.emoji": {
+      "text": "الرموز التعبيرية",
+      "status": "machine"
+    },
     "call.chat.message_a11y": {
       "text": "{name}: {text}",
       "status": "machine"
@@ -575,6 +579,30 @@
     },
     "call.chat.notice_people": {
       "text": "لا يرى الرسائل هنا إلا الموجودون في المكالمة.",
+      "status": "machine"
+    },
+    "call.chat.picture": {
+      "text": "صورة",
+      "status": "machine"
+    },
+    "call.chat.picture_only": {
+      "text": "يمكن إرسال الصور فقط في المكالمة.",
+      "status": "machine"
+    },
+    "call.chat.picture_remove": {
+      "text": "إزالة الصورة",
+      "status": "machine"
+    },
+    "call.chat.picture_save": {
+      "text": "حفظ الصورة",
+      "status": "machine"
+    },
+    "call.chat.picture_too_large": {
+      "text": "هذه الصورة كبيرة جدًا لإرسالها في المكالمة.",
+      "status": "machine"
+    },
+    "call.chat.picture_unavailable": {
+      "text": "الصورة غير متاحة.",
       "status": "machine"
     },
     "call.chat.placeholder": {
@@ -1343,6 +1371,18 @@
     },
     "call.quality.up": {
       "text": "رفع",
+      "status": "machine"
+    },
+    "call.screen_share.own_tile_this_screen": {
+      "text": "أنت تشارك هذه الشاشة",
+      "status": "machine"
+    },
+    "call.screen_share.own_tile_this_tab": {
+      "text": "أنت تشارك علامة التبويب هذه",
+      "status": "machine"
+    },
+    "call.screen_share.own_tile_this_window": {
+      "text": "أنت تشارك هذه النافذة",
       "status": "machine"
     },
     "call.self.camera_a11y": {

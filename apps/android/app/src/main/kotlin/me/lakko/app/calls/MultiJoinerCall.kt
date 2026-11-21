@@ -248,6 +248,10 @@ class MultiJoinerCall private constructor(
      *  holders and guests alike; gone when the call ends for this device. */
     private val chat = CallChatModel()
 
+    /** The chat's control with its pictures (section 4.1.4.1); made once the
+     *  session exists. */
+    private var chatSender: CallChatSender? = null
+
     init {
         localLeaf = initialLeaf
         session = SfuCallSession(
@@ -316,6 +320,10 @@ class MultiJoinerCall private constructor(
                 onCallChat = { peerId, seq, text ->
                     chat.addReceived(peerId, seq, text, opts.names.name(peerId))
                 },
+                // A picture in the call's chat: shown at once, downloaded now.
+                onCallChatPicture = { peerId, seq, picture ->
+                    chatSender?.onReceivedPicture(peerId, seq, picture, opts.names.name(peerId))
+                },
             ),
         )
         // A joiner behind a symmetric NAT has no server-reflexive candidate
@@ -340,7 +348,9 @@ class MultiJoinerCall private constructor(
             own = ownCallName,
             default = opts.localDisplayName,
         )
-        ui.setCallChat(CallChatHandle(chat, sessionChatControl(session, chat)))
+        val sender = CallChatSender(opts.scope, chat, session.callChatWire, callChatPictureDeps(applicationContext))
+        chatSender = sender
+        ui.setCallChat(CallChatHandle(chat, sender))
     }
 
     companion object {
@@ -467,7 +477,9 @@ class MultiJoinerCall private constructor(
         lastKnownCameraOn.clear()
         remoteMics.clear()
         ui.setCallNameControl(null, own = "", default = "")
-        // Nothing of the call's chat is kept.
+        // Nothing of the call's chat is kept; the pictures this device
+        // uploaded are deleted.
+        chatSender?.endCall()
         ui.setCallChat(null)
         session.hangUp()
     }
@@ -636,7 +648,9 @@ class MultiJoinerCall private constructor(
             SfuCallSession.State.FAILED,
             SfuCallSession.State.CLOSED -> {
                 speaking.stop()
-                // The chat goes with the call.
+                // The chat goes with the call, and every picture this device
+                // uploaded in it is deleted.
+                chatSender?.endCall()
                 chat.clear()
                 // The call's tracks are gone with its connection.
                 ui.clearRemoteCopyVideoTracks()

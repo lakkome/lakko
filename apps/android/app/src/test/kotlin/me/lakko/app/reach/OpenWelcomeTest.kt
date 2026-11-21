@@ -24,28 +24,6 @@ class OpenWelcomeTest {
     private fun hex(b: ByteArray) = reachHex(b)
 
     @Test
-    fun `a delegation is signed with a contact, group, channel or fof key, never member, reply or link`() {
-        val held = listOf(
-            HeldGrantRef(ReachKind.MEMBER, group),
-            HeldGrantRef(ReachKind.FOF, ""),
-            HeldGrantRef(ReachKind.REPLY, "11"),
-            HeldGrantRef(ReachKind.CHANNEL, ""),
-            HeldGrantRef(ReachKind.LINK, "22"),
-            HeldGrantRef(ReachKind.GROUP, ""),
-            HeldGrantRef(ReachKind.CONTACT, ""),
-        )
-        assertEquals(
-            listOf(ReachKind.CONTACT, ReachKind.GROUP, ReachKind.CHANNEL, ReachKind.FOF),
-            delegationGrantOrder(held).map { it.kind },
-        )
-        // A found fof grant alone signs.
-        assertEquals(
-            listOf(HeldGrantRef(ReachKind.FOF, "")),
-            delegationGrantOrder(listOf(HeldGrantRef(ReachKind.FOF, ""), HeldGrantRef(ReachKind.MEMBER, group))),
-        )
-    }
-
-    @Test
     fun `this device's own record opens the proofless path for that group and person only`() {
         val records = withOpenBinding(emptyList(), group, eve, "aa11")
         assertEquals(listOf("aa11"), openWelcomeBindings(records, emptyList(), group, listOf(eve)).map(::hex))

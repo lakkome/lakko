@@ -212,6 +212,9 @@ class SfuCallSession(
          *  `docs/ux/calls.md` section 4.1.4), verified against the leaf key
          *  the peer's announcement named, once per `(peerId, seq)`. */
         val onCallChat: (peerId: String, seq: ULong, text: String) -> Unit = { _, _, _ -> },
+        /** A picture message of the call's chat arrived (section 4.1.4.1),
+         *  verified as [onCallChat] is, once per `(peerId, seq)`. */
+        val onCallChatPicture: (peerId: String, seq: ULong, picture: CallChatPictureRef) -> Unit = { _, _, _ -> },
     )
 
     class SfuCallException(message: String) : Exception(message)
@@ -319,8 +322,28 @@ class SfuCallSession(
             selfPeerId = { selfPeerId },
             onMessage = { peerId, seq, text -> callbacks.onCallChat(peerId, seq, text) },
             onRejected = { android.util.Log.w(MEDIA_LOG_TAG, CALL_CHAT_REJECTED_WARNING) },
+            composePicture = { self, seq, picture ->
+                config.peerAnnouncer?.composeCallChatPicture?.invoke(self, seq, picture)
+            },
+            onPicture = { peerId, seq, picture -> callbacks.onCallChatPicture(peerId, seq, picture) },
         ),
     )
+
+    /** The call chat as [CallChatSender] drives it (section 4.1.4.1): each
+     *  step runs on [scope], where the chat state lives. */
+    internal val callChatWire: CallChatWire = object : CallChatWire {
+        override suspend fun reserve(text: String?): ULong = onScope { callChat.reserve(text) }
+
+        override suspend fun attachPicture(seq: ULong, picture: CallChatPictureRef) {
+            onScope { callChat.attachPicture(seq, picture) }
+        }
+
+        override suspend fun transmit(seq: ULong): Boolean = onScope { callChat.resend(seq) }
+    }
+
+    /** Run [block] on [scope]'s dispatcher, as the rest of the session does. */
+    private suspend fun <T> onScope(block: () -> T): T =
+        kotlinx.coroutines.withContext(scope.coroutineContext.minusKey(kotlinx.coroutines.Job)) { block() }
 
     /** Send [text] (it passed the core's text rule) to everyone in the call;
      *  [done] says on [scope] which number it got and whether it went. */

@@ -557,6 +557,10 @@
       "text": "Cerrar chat",
       "status": "machine"
     },
+    "call.chat.emoji": {
+      "text": "Emoji",
+      "status": "machine"
+    },
     "call.chat.message_a11y": {
       "text": "{name}: {text}",
       "status": "machine"
@@ -575,6 +579,30 @@
     },
     "call.chat.notice_people": {
       "text": "Solo las personas que están en la llamada ven estos mensajes.",
+      "status": "machine"
+    },
+    "call.chat.picture": {
+      "text": "Imagen",
+      "status": "machine"
+    },
+    "call.chat.picture_only": {
+      "text": "Solo se pueden enviar imágenes en una llamada.",
+      "status": "machine"
+    },
+    "call.chat.picture_remove": {
+      "text": "Quitar imagen",
+      "status": "machine"
+    },
+    "call.chat.picture_save": {
+      "text": "Guardar imagen",
+      "status": "machine"
+    },
+    "call.chat.picture_too_large": {
+      "text": "Esta imagen es demasiado grande para enviarla en una llamada.",
+      "status": "machine"
+    },
+    "call.chat.picture_unavailable": {
+      "text": "La imagen no está disponible.",
       "status": "machine"
     },
     "call.chat.placeholder": {
@@ -1343,6 +1371,18 @@
     },
     "call.quality.up": {
       "text": "Subida",
+      "status": "machine"
+    },
+    "call.screen_share.own_tile_this_screen": {
+      "text": "Estás compartiendo esta pantalla",
+      "status": "machine"
+    },
+    "call.screen_share.own_tile_this_tab": {
+      "text": "Estás compartiendo esta pestaña",
+      "status": "machine"
+    },
+    "call.screen_share.own_tile_this_window": {
+      "text": "Estás compartiendo esta ventana",
       "status": "machine"
     },
     "call.self.camera_a11y": {

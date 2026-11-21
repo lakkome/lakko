@@ -262,18 +262,83 @@ final class ReachRulesTests: XCTestCase {
 
     // MARK: - Which grant signs a write
 
-    func testTheWriteSeedPrefersContactThenThisGroupsMember() throws {
-        let member = ReachRules.HeldGrant(grant: try grant(.member), scopeHex: "aa", storedAtMs: 1)
-        let otherMember = ReachRules.HeldGrant(
-            grant: try grant(.member, version: 2), scopeHex: "bb", storedAtMs: 2)
-        let reply = ReachRules.HeldGrant(grant: try grant(.reply), scopeHex: nil, storedAtMs: 3)
-        let contact = ReachRules.HeldGrant(grant: try grant(.contact), scopeHex: nil, storedAtMs: 4)
-        XCTAssertEqual(
-            ReachRules.writeSeed(from: [reply, otherMember, member], groupIdHex: "aa"), member.seed)
-        XCTAssertEqual(
-            ReachRules.writeSeed(from: [reply, member, contact], groupIdHex: "aa"), contact.seed)
-        XCTAssertEqual(ReachRules.writeSeed(from: [reply], groupIdHex: nil), reply.seed)
-        XCTAssertNil(ReachRules.writeSeed(from: [], groupIdHex: "aa"))
+    /// G-53 — the order is the core's: contact, then reply, then `member`,
+    /// `group`, `channel`, `fof`; a `group` / `member` grant counts only with
+    /// a conversation both are in now; a lower version of an account-wide key
+    /// is superseded whatever conversation it arrived in.
+    func testTheWritePlanIsTheCores() throws {
+        func held(_ g: FfiReachGrant, _ scope: String?, at: UInt64) -> ReachRules.HeldGrant {
+            ReachRules.HeldGrant(grant: g, scopeHex: scope, storedAtMs: at)
+        }
+        let member = held(try grant(.member), "aa", at: 1)
+        let newerMember = held(try grant(.member, version: 2), "bb", at: 2)
+        let reply = held(try grant(.reply), nil, at: 3)
+        let contact = held(try grant(.contact), nil, at: 4)
+        let group = held(try grant(.group), "aa", at: 5)
+        let fof = held(try grant(.fof), nil, at: 6)
+
+        let all = ReachRules.plan(
+            [fof, group, reply, member, newerMember, contact], purpose: .welcome, targetScopeHex: "aa",
+            sharedScopeHexes: ["aa"], foundSeedB64: nil)
+        XCTAssertEqual(all.candidates, [contact, reply, newerMember, group, fof],
+                       "the highest member version from any shared scope")
+        XCTAssertEqual(all.superseded, [member], "a lower version of the one member key goes")
+
+        let noShared = ReachRules.plan(
+            [group, member, reply], purpose: .welcome, targetScopeHex: "aa", sharedScopeHexes: [],
+            foundSeedB64: nil)
+        XCTAssertEqual(noShared.candidates, [reply], "no conversation both are in: no group key")
+        XCTAssertTrue(noShared.superseded.isEmpty)
+
+        let delegation = ReachRules.plan(
+            [reply, member, group, fof], purpose: .delegation, targetScopeHex: "aa",
+            sharedScopeHexes: ["aa"], foundSeedB64: nil)
+        XCTAssertEqual(delegation.candidates, [group, fof], "a delegation is never signed with member or reply")
+
+        XCTAssertTrue(ReachRules.plan(
+            [], purpose: .welcome, targetScopeHex: nil, sharedScopeHexes: [], foundSeedB64: nil
+        ).candidates.isEmpty)
+    }
+
+    /// G-53 — the grant the search of this add found leads, ahead of a stale
+    /// group key and even of a contact key.
+    func testAFoundGrantLeads() throws {
+        let group = ReachRules.HeldGrant(grant: try grant(.group), scopeHex: "aa", storedAtMs: 1)
+        let contact = ReachRules.HeldGrant(grant: try grant(.contact), scopeHex: nil, storedAtMs: 2)
+        let fof = ReachRules.HeldGrant(grant: try grant(.fof), scopeHex: nil, storedAtMs: 3)
+        for purpose: FfiReachPurpose in [.welcome, .delegation] {
+            let plan = ReachRules.plan(
+                [group, contact, fof], purpose: purpose, targetScopeHex: "aa", sharedScopeHexes: ["aa"],
+                foundSeedB64: fof.seedB64)
+            XCTAssertEqual(plan.candidates.first, fof)
+        }
+        let order = ReachRules.plan(
+            [fof, contact, group], purpose: .welcome, targetScopeHex: "aa", sharedScopeHexes: ["aa"],
+            foundSeedB64: nil)
+        XCTAssertEqual(order.candidates, [contact, group, fof], "the input order does not matter")
+    }
+
+    /// G-53 — the unsigned write to an open mailbox: at once when nothing is
+    /// held, and after every candidate was refused with `401`, never before.
+    func testTheOpenMailboxFollowsEveryRefusedCandidate() throws {
+        let open = try MailboxTarget.verified(
+            grant: try grant(.contact), accountKey: peerIdentity.signaturePublicKey())
+        let none = SweepWelcomeAttempt.decide(plan: nil, open: open)
+        XCTAssertTrue(none.openUnsigned)
+        XCTAssertEqual(none.target, open)
+
+        let plan = MailboxWritePlan(target: open, candidates: [
+            DsMailboxWriteAuth(reachSeed: Data(repeating: 1, count: 32)),
+            DsMailboxWriteAuth(reachSeed: Data(repeating: 2, count: 32)),
+        ])
+        let signed = SweepWelcomeAttempt.decide(plan: plan, open: open)
+        XCTAssertFalse(signed.openUnsigned)
+        XCTAssertEqual(signed.candidates.count, 2)
+        XCTAssertNil(signed.openAfterRefusals(1), "one key still unrefused")
+        XCTAssertEqual(signed.openAfterRefusals(2), open)
+
+        let closed = SweepWelcomeAttempt.decide(plan: plan, open: nil)
+        XCTAssertNil(closed.openAfterRefusals(2), "no open record: the Welcome stays owed")
     }
 
     // MARK: - Answering a contact request
@@ -317,8 +382,13 @@ final class ReachRulesTests: XCTestCase {
         XCTAssertTrue(c.keep(try grant(.reply), carrier: .request, fromAccountKeyB64: person, scopeHex: nil))
 
         XCTAssertEqual(
-            c.writePlan(toAccountKey: key)?.candidates.first?.reachSeed, try grant(.member).seed,
-            "the general order puts the stale key first")
+            c.writePlan(toAccountKey: key)?.candidates.map(\.reachSeed), [try grant(.reply).seed],
+            "G-53: a group key from a group both are no longer in is no candidate")
+        c.sharedScopesProvider = { _ in ["aa"] }
+        XCTAssertEqual(
+            c.writePlan(toAccountKey: key)?.candidates.map(\.reachSeed),
+            [try grant(.reply).seed, try grant(.member).seed, try grant(.group).seed])
+        c.sharedScopesProvider = { _ in [] }
 
         let plans = c.answerPlans(toRequester: key)
         XCTAssertEqual(plans.count, 1)
@@ -837,6 +907,10 @@ extension ReachRulesTests {
                              fromAccountKeyB64: peerB64, scopeHex: "aa"))
         let mailbox = MailboxKey.fromAccountIdentity(accountIdentity: peerIdentity).address()
 
+        // G-53 — a `member` key counts only while both are in a conversation.
+        XCTAssertEqual(
+            c.writeAuthCandidates(toMailbox: mailbox, groupIdHex: groupHex).map(\.reachSeed), [contact.seed])
+        c.sharedScopesProvider = { _ in [groupHex] }
         XCTAssertEqual(
             c.writeAuthCandidates(toMailbox: mailbox, groupIdHex: groupHex).map(\.reachSeed),
             [contact.seed, member.seed])

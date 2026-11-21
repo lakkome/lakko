@@ -13,7 +13,6 @@ import { afterProvenRotation, afterReset, type AccountKeys } from "../contacts/p
 import { EMPTY_REACH_BOOK, bindReachBook, decodeReachBook, encodeReachBook, reachRebind } from "./reach-model";
 import {
   EMPTY_RECEIVED_GRANTS,
-  bestGrantForPerson,
   contactGrantsForPerson,
   delegationsForPerson,
   fileContactGrant,
@@ -52,8 +51,8 @@ describe("grant lookup across a proven rotation", () => {
   it("a grant filed under a key that LATER became a proven predecessor is still found", () => {
     const store = fileContactGrant(EMPTY_RECEIVED_GRANTS, K0, grant("old"));
     // Looked up by either key of the person.
-    expect(bestGrantForPerson(store, keysOfPerson(K1, [alice], null))?.wireB64).toBe("old");
-    expect(bestGrantForPerson(store, person)?.wireB64).toBe("old");
+    expect(grantsInOrderForPerson(store, keysOfPerson(K1, [alice], null))[0]?.wireB64).toBe("old");
+    expect(grantsInOrderForPerson(store, person)[0]?.wireB64).toBe("old");
     expect(heldClassesForPerson(store, person).has("contact")).toBe(true);
   });
 
@@ -64,20 +63,20 @@ describe("grant lookup across a proven rotation", () => {
       "for-new-mailbox",
       "for-old-mailbox",
     ]);
-    expect(bestGrantForPerson(store, person, { scopeHex: GROUP })?.wireB64).toBe("for-new-mailbox");
+    expect(grantsInOrderForPerson(store, person, { scopeHex: GROUP })[0]?.wireB64).toBe("for-new-mailbox");
   });
 
   it("an UNPROVEN change finds nothing of the old key", () => {
     const reset = afterReset({ currentKeyB64: K0, provenPredecessorsB64: [] }, K1);
     const store = fileContactGrant(EMPTY_RECEIVED_GRANTS, K0, grant("old"));
-    expect(bestGrantForPerson(store, keysOfPerson(K1, [reset], null))).toBeNull();
+    expect(grantsInOrderForPerson(store, keysOfPerson(K1, [reset], null))).toEqual([]);
   });
 
   it("the re-sent profile's grant (same version, another key) replaces the stored one", () => {
     // The version counters survive a rotation; the key does not.
     let store = fileContactGrant(EMPTY_RECEIVED_GRANTS, K0, grant("old-seed", 2));
     store = fileContactGrant(store, K0, grant("new-seed", 2));
-    expect(bestGrantForPerson(store, [K0])?.wireB64).toBe("new-seed");
+    expect(grantsInOrderForPerson(store, [K0])[0]?.wireB64).toBe("new-seed");
     // The same grant re-sent changes nothing; a lower version is a replay.
     expect(fileContactGrant(store, K0, grant("new-seed", 2))).toBe(store);
     expect(fileContactGrant(store, K0, grant("older", 1))).toBe(store);

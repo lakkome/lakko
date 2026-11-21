@@ -472,6 +472,21 @@ now carries a grant, or a delegation to a key known in advance.
     for a person named by such an envelope, and only when it holds no grant
     or delegation for them.
 
+  **Amended 2026-11-21 (G-53, maintainer decision).** Which held grant writes
+  a Welcome or signs a delegation is decided by one core rule,
+  `lakko_contacts::reach_plan` (`planReachWrites` on both FFI surfaces), on
+  web, iOS and Android: for one person and one mailbox, the highest version
+  of each account-wide class counts whatever group it arrived in and lower
+  versions are deleted; a `group` or `member` grant is used only while this
+  account and the person share a conversation; the grant a search found for
+  this add comes first (Welcome: found, contact, reply, member, group,
+  channel, fof; delegation: found, contact, group, channel, fof). A committer
+  now also writes the unsigned Welcome to an open mailbox after every signed
+  attempt was refused with a 401 (`reachOpenMailboxWriteAllowed`), not only
+  when it holds nothing; and a proposer that found the person in Everyone
+  posts the envelope with no delegation whatever grant it holds. A contact
+  request uses the same plan. Unit-tested on all three clients; not walked.
+
   **Residual, accepted.** If the person leaves Everyone between the search
   and the sweep, the mailbox is closed when the Welcome is written; the
   Delivery Service drops the proofless write and answers as for a stored

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import LakkoCore
 import XCTest
 @testable import Lakko
 
@@ -177,6 +178,77 @@ final class CallChatTests: XCTestCase {
         let cyrillic = CallChatText.edited(String(repeating: "ж", count: 401))
         XCTAssertTrue(cyrillic.tooLong)
         XCTAssertEqual(cyrillic.text.count, 400)
+    }
+
+    func testAnEmojiGoesAtTheEndOfTheDraft() {
+        let picked = CallChatText.appendingEmoji("\u{1F600}", to: "hi ")
+        XCTAssertEqual(picked.text, "hi \u{1F600}")
+        XCTAssertFalse(picked.tooLong)
+        let empty = CallChatText.appendingEmoji("\u{1F44D}", to: "")
+        XCTAssertEqual(empty.text, "\u{1F44D}")
+        XCTAssertFalse(empty.tooLong)
+    }
+
+    func testAnEmojiThatWouldPassTheLimitIsNotPutIn() {
+        // 797 bytes + a 4-byte emoji = 801: refused whole, the draft unchanged.
+        let draft = String(repeating: "a", count: 797)
+        let refused = CallChatText.appendingEmoji("\u{1F600}", to: draft)
+        XCTAssertEqual(refused.text, draft)
+        XCTAssertTrue(refused.tooLong)
+        // 796 bytes + 4 = 800: fits exactly.
+        let exact = CallChatText.appendingEmoji("\u{1F600}", to: String(repeating: "a", count: 796))
+        XCTAssertEqual(exact.text.utf8.count, 800)
+        XCTAssertFalse(exact.tooLong)
+        // A long ZWJ sequence is never cut in part.
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}"
+        let longDraft = String(repeating: "a", count: 790)
+        let refusedFamily = CallChatText.appendingEmoji(family, to: longDraft)
+        XCTAssertEqual(refusedFamily.text, longDraft)
+        XCTAssertTrue(refusedFamily.tooLong)
+    }
+
+    func testAnEmojiGoesAtTheCaretInTheMiddle() {
+        // "hello world", caret after "hello " (offset 6).
+        let put = CallChatText.insertingEmoji("\u{1F600}", into: "hello world", range: 6..<6)
+        XCTAssertEqual(put.text, "hello \u{1F600}world")
+        XCTAssertFalse(put.tooLong)
+        // The caret moves after the emoji (two UTF-16 units).
+        XCTAssertEqual(put.caret, 8)
+    }
+
+    func testAnEmojiReplacesTheSelection() {
+        // "hello world" with "world" selected (offsets 6..<11).
+        let put = CallChatText.insertingEmoji("\u{1F44D}", into: "hello world", range: 6..<11)
+        XCTAssertEqual(put.text, "hello \u{1F44D}")
+        XCTAssertFalse(put.tooLong)
+        XCTAssertEqual(put.caret, 8)
+        // A selection after an earlier emoji counts UTF-16 units.
+        let after = CallChatText.insertingEmoji("!", into: "\u{1F600}ab", range: 2..<3)
+        XCTAssertEqual(after.text, "\u{1F600}!b")
+        XCTAssertEqual(after.caret, 3)
+    }
+
+    func testAnEmojiAtTheCaretThatWouldPassTheLimitIsNotPutIn() {
+        let draft = String(repeating: "a", count: 797)
+        let refused = CallChatText.insertingEmoji("\u{1F600}", into: draft, range: 100..<100)
+        XCTAssertEqual(refused.text, draft)
+        XCTAssertTrue(refused.tooLong)
+        XCTAssertNil(refused.caret)
+        // Replacing a selection frees room: 800 bytes, 4 replaced by 4.
+        let full = String(repeating: "a", count: 800)
+        let replaced = CallChatText.insertingEmoji("\u{1F600}", into: full, range: 0..<4)
+        XCTAssertEqual(replaced.text.utf8.count, 800)
+        XCTAssertFalse(replaced.tooLong)
+        XCTAssertEqual(replaced.caret, 2)
+    }
+
+    func testAnEmojiWithNoUsableCaretGoesAtTheEnd() {
+        // No caret (iOS 17), a stale range, and one inside a character.
+        XCTAssertEqual(CallChatText.insertingEmoji("\u{1F600}", into: "hi", range: nil).text, "hi\u{1F600}")
+        XCTAssertEqual(CallChatText.insertingEmoji("\u{1F600}", into: "hi", range: 5..<5).text, "hi\u{1F600}")
+        let inside = CallChatText.insertingEmoji("x", into: "\u{1F600}", range: 1..<1)
+        XCTAssertEqual(inside.text, "\u{1F600}x")
+        XCTAssertEqual(inside.caret, 3)
     }
 
     // MARK: - The panel, the badge, the preview
@@ -369,5 +441,289 @@ final class CallChatTests: XCTestCase {
                 handRaised: false, quality: .good, speaking: false, screenSharing: false),
         ])
         XCTAssertEqual(ui.chat.senderName("p1"), "Mia")
+    }
+
+    // MARK: - Pictures (section 4.1.4.1)
+
+    private func picture(_ byte: UInt8, width: UInt16 = 400, height: UInt16 = 300) -> CallChatPicture {
+        CallChatPicture(
+            blobId: Data(repeating: byte, count: 32), key: Data(repeating: 2, count: 32),
+            nonce: Data(repeating: 3, count: 12), size: 1000, width: width, height: height)
+    }
+
+    private func prepared(_ byte: UInt8, width: UInt16 = 400, height: UInt16 = 300) -> CallChatPreparedPicture {
+        CallChatPreparedPicture(jpeg: Data([0xFF, 0xD8, byte]), width: width, height: height)
+    }
+
+    /// Lets the model's main-actor tasks run until `condition` holds.
+    private func settle(_ condition: () -> Bool) async {
+        for _ in 0..<500 where !condition() { await Task.yield() }
+    }
+
+    /// A model wired for pictures over fakes: what went out, what was
+    /// uploaded, what was deleted.
+    @MainActor
+    private final class PictureHarness {
+        let model = CallChatModel()
+        var seq: UInt64 = 0
+        var sent: [(content: CallChatChannel.Content, seq: UInt64)] = []
+        var sendWorks = true
+        var uploads = 0
+        var uploadFails = false
+        var uploadGate: CheckedContinuation<Void, Never>?
+        var holdUploads = false
+        var nextBlob: UInt8 = 0xA0
+        var deleted: [[Data]] = []
+        var downloadData: Data?
+
+        init() {
+            model.schedule = { _, _ in }
+            model.announce = { _ in }
+            model.setActions(
+                send: { [unowned self] text in
+                    self.seq += 1
+                    if self.sendWorks { self.sent.append((.text(text), self.seq)) }
+                    return (self.seq, self.sendWorks)
+                },
+                resend: { _ in true })
+            model.setPictureActions(
+                reserveSeq: { [unowned self] in
+                    self.seq += 1
+                    return self.seq
+                },
+                send: { [unowned self] content, seq in
+                    guard self.sendWorks else { return false }
+                    self.sent.append((content, seq))
+                    return true
+                })
+            model.pictureIO = CallChatPictureIO(
+                upload: { [unowned self] prepared in
+                    self.uploads += 1
+                    if self.holdUploads {
+                        await withCheckedContinuation { self.uploadGate = $0 }
+                    }
+                    if self.uploadFails { throw CancellationError() }
+                    self.nextBlob += 1
+                    return CallChatPicture(
+                        blobId: Data(repeating: self.nextBlob, count: 32), key: Data(repeating: 2, count: 32),
+                        nonce: Data(repeating: 3, count: 12), size: UInt32(prepared.jpeg.count),
+                        width: prepared.width, height: prepared.height)
+                },
+                download: { [unowned self] _ in
+                    guard let data = self.downloadData else { throw CancellationError() }
+                    return data
+                },
+                deleteUploaded: { [unowned self] ids in self.deleted.append(ids) })
+        }
+
+        func releaseUpload() {
+            let gate = uploadGate
+            uploadGate = nil
+            gate?.resume()
+        }
+    }
+
+    func testTheTrayHoldsOnePictureASecondPasteReplacesIt() {
+        let h = PictureHarness()
+        XCTAssertFalse(h.model.canSend(""))
+        h.model.pasted(.success(prepared(1)))
+        XCTAssertEqual(h.model.trayPicture, prepared(1))
+        XCTAssertTrue(h.model.canSend(""), "a picture alone can be sent")
+        XCTAssertTrue(h.model.canSend("   "))
+        h.model.pasted(.success(prepared(2)))
+        XCTAssertEqual(h.model.trayPicture, prepared(2), "a second paste replaces the first")
+        // Something that is not a picture: the line shows, the tray stays.
+        h.model.pasted(.failure(.notPicture))
+        XCTAssertEqual(h.model.trayPicture, prepared(2))
+        XCTAssertEqual(h.model.pictureRefusal, .notPicture)
+        XCTAssertEqual(CallChatPictures.Refusal.notPicture.textKey, "call.chat.picture_only")
+        XCTAssertEqual(CallChatPictures.Refusal.tooLarge.textKey, "call.chat.picture_too_large")
+        // The next good paste clears the line.
+        h.model.pasted(.success(prepared(3)))
+        XCTAssertNil(h.model.pictureRefusal)
+        h.model.removeTrayPicture()
+        XCTAssertNil(h.model.trayPicture)
+        XCTAssertFalse(h.model.canSend(""))
+    }
+
+    func testTheBubbleFitsIntoTwoFortyAndKeepsEightyOnEachSide() {
+        XCTAssertEqual(CallChatPictures.bubbleSize(width: 4000, height: 3000), CGSize(width: 240, height: 180))
+        XCTAssertEqual(CallChatPictures.bubbleSize(width: 3000, height: 4000), CGSize(width: 180, height: 240))
+        XCTAssertEqual(CallChatPictures.bubbleSize(width: 2560, height: 2560), CGSize(width: 240, height: 240))
+        // Never enlarged, but at least 80 on each side.
+        XCTAssertEqual(CallChatPictures.bubbleSize(width: 100, height: 50), CGSize(width: 100, height: 80))
+        XCTAssertEqual(CallChatPictures.bubbleSize(width: 40, height: 40), CGSize(width: 80, height: 80))
+        // A very long picture is cropped by an 80-high box.
+        XCTAssertEqual(CallChatPictures.bubbleSize(width: 2560, height: 100), CGSize(width: 240, height: 80))
+        XCTAssertEqual(CallChatPictures.bubbleSize(width: 0, height: 10), CGSize(width: 240, height: 240))
+    }
+
+    func testThePictureGoesFirstAndTheTextFollows() {
+        XCTAssertEqual(
+            CallChatPictures.parts(draft: "hello", hasPicture: true), [.picture, .text("hello")])
+        XCTAssertEqual(CallChatPictures.parts(draft: "  \n ", hasPicture: true), [.picture])
+        XCTAssertEqual(CallChatPictures.parts(draft: "hi", hasPicture: false), [.text("hi")])
+        XCTAssertEqual(CallChatPictures.parts(draft: " ", hasPicture: false), [])
+    }
+
+    func testTheTextWaitsForThePictureAndGoesOutAfterIt() async {
+        let h = PictureHarness()
+        h.holdUploads = true
+        h.model.pasted(.success(prepared(1)))
+        XCTAssertTrue(h.model.send("after"))
+        XCTAssertNil(h.model.trayPicture, "the tray empties on Send")
+        // Both bubbles show at once, the picture first, both on their way.
+        XCTAssertEqual(h.model.messages.map(\.seq), [1, 2])
+        XCTAssertNotNil(h.model.messages[0].picture)
+        XCTAssertEqual(h.model.messages[1].text, "after")
+        XCTAssertEqual(h.model.messages.map(\.delivery), [.sending, .sending])
+        await settle { h.uploadGate != nil }
+        XCTAssertTrue(h.sent.isEmpty, "nothing goes out before the picture's file is up")
+        h.releaseUpload()
+        await settle { h.sent.count == 2 }
+        XCTAssertEqual(h.sent.map(\.seq), [1, 2])
+        guard case .picture(let sentPicture) = h.sent[0].content else {
+            return XCTFail("the picture goes out first")
+        }
+        XCTAssertEqual(sentPicture.width, 400)
+        XCTAssertEqual(h.sent[1].content, .text("after"))
+        XCTAssertEqual(h.model.messages.map(\.delivery), [.sent, .sent])
+    }
+
+    func testAPictureAndATextShareOneCounter() async {
+        let h = PictureHarness()
+        XCTAssertTrue(h.model.send("one"))
+        h.model.pasted(.success(prepared(1)))
+        XCTAssertTrue(h.model.send(""))
+        XCTAssertTrue(h.model.send("three"))
+        await settle { h.sent.count == 3 }
+        XCTAssertEqual(h.model.messages.map(\.seq), [1, 2, 3])
+    }
+
+    func testAFailedUploadIsNotSentAndSendAgainUploadsAgain() async {
+        let h = PictureHarness()
+        h.uploadFails = true
+        h.model.pasted(.success(prepared(1)))
+        XCTAssertTrue(h.model.send("text"))
+        await settle { h.model.messages.allSatisfy { $0.delivery != .sending } }
+        XCTAssertEqual(h.model.messages.map(\.delivery), [.notSent, .sent], "the text still follows")
+        XCTAssertEqual(h.sent.map(\.seq), [2])
+        h.uploadFails = false
+        h.model.sendAgain(h.model.messages[0].id)
+        XCTAssertEqual(h.model.messages[0].delivery, .sending)
+        await settle { h.model.messages[0].delivery == .sent }
+        XCTAssertEqual(h.uploads, 2, "the file is uploaded again")
+        XCTAssertEqual(h.sent.map(\.seq), [2, 1])
+        XCTAssertEqual(h.model.uploadedBlobIds.count, 1)
+    }
+
+    func testEveryUploadOfThisCallIsDeletedWhenItEnds() async {
+        let h = PictureHarness()
+        for byte in [UInt8(1), 2] {
+            h.model.pasted(.success(prepared(byte)))
+            XCTAssertTrue(h.model.send(""))
+        }
+        await settle { h.sent.count == 2 }
+        let uploaded = h.model.uploadedBlobIds
+        XCTAssertEqual(uploaded.count, 2)
+        h.model.callEnded()
+        XCTAssertEqual(h.deleted, [uploaded], "one owed delete with every upload of the call")
+        XCTAssertTrue(h.model.uploadedBlobIds.isEmpty)
+        XCTAssertTrue(h.model.messages.isEmpty)
+        XCTAssertTrue(h.model.pictureImages.isEmpty)
+        // Ending again deletes nothing more.
+        h.model.callEnded()
+        XCTAssertEqual(h.deleted.count, 1)
+    }
+
+    func testAnUploadThatFinishesAfterTheCallEndedIsDeletedAtOnce() async {
+        let h = PictureHarness()
+        h.holdUploads = true
+        h.model.pasted(.success(prepared(1)))
+        XCTAssertTrue(h.model.send("late"))
+        await settle { h.uploadGate != nil }
+        h.model.callEnded()
+        XCTAssertTrue(h.deleted.isEmpty, "nothing was up yet")
+        h.releaseUpload()
+        await settle { !h.deleted.isEmpty }
+        XCTAssertEqual(h.deleted.count, 1)
+        XCTAssertEqual(h.deleted[0].count, 1)
+        XCTAssertTrue(h.sent.isEmpty, "nothing goes out after the call ended")
+        XCTAssertTrue(h.model.messages.isEmpty)
+    }
+
+    func testAReceivedPictureLoadsOrIsNotAvailable() async throws {
+        let h = PictureHarness()
+        h.downloadData = try XCTUnwrap(UIGraphicsImageRenderer(size: CGSize(width: 20, height: 10))
+            .jpegData(withCompressionQuality: 0.8) { ctx in
+                UIColor.red.setFill()
+                ctx.fill(CGRect(x: 0, y: 0, width: 20, height: 10))
+            })
+        h.model.receivePicture(peerId: "p1", seq: 1, picture: picture(1))
+        XCTAssertEqual(h.model.messages.first?.picture?.state, .loading)
+        XCTAssertEqual(h.model.unread, 1)
+        XCTAssertEqual(h.model.preview?.text, "Picture")
+        await settle { h.model.messages.first?.picture?.state != .loading }
+        XCTAssertEqual(h.model.messages.first?.picture?.state, .ready)
+        XCTAssertNotNil(h.model.pictureImages["p1-1"])
+        XCTAssertEqual(h.model.pictureData("p1-1"), h.downloadData)
+        // The same message once.
+        h.model.receivePicture(peerId: "p1", seq: 1, picture: picture(1))
+        XCTAssertEqual(h.model.messages.count, 1)
+        // One that cannot be downloaded.
+        h.downloadData = nil
+        h.model.receivePicture(peerId: "p1", seq: 2, picture: picture(2))
+        await settle { h.model.messages.last?.picture?.state != .loading }
+        XCTAssertEqual(h.model.messages.last?.picture?.state, .unavailable)
+        XCTAssertNil(h.model.pictureImages["p1-2"])
+    }
+
+    func testAPastedPictureIsReencodedAsJPEGAndBroughtDown() throws {
+        let png = UIGraphicsImageRenderer(
+            size: CGSize(width: 4000, height: 100), format: {
+                let format = UIGraphicsImageRendererFormat()
+                format.scale = 1
+                return format
+            }()
+        ).pngData { ctx in
+            UIColor.blue.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 4000, height: 100))
+        }
+        guard case .success(let ready) = CallChatPictures.prepare(png, maxSide: 2560) else {
+            return XCTFail("a PNG is a picture")
+        }
+        XCTAssertEqual(Array(ready.jpeg.prefix(2)), [0xFF, 0xD8], "re-encoded as JPEG")
+        XCTAssertEqual(ready.width, 2560)
+        XCTAssertEqual(ready.height, 64)
+        XCTAssertEqual(CallChatPictures.prepare(Data("not a picture".utf8)), .failure(.notPicture))
+        XCTAssertEqual(CallChatPictures.prepare(png, maxSide: 2560, maxBytes: 10), .failure(.tooLarge))
+    }
+
+    func testAChannelPictureIsComposedAndReadBackUnderTheSharedCounter() {
+        var composed: [(UInt64, CallChatPicture)] = []
+        var shown: [CallChatChannel.Verified] = []
+        let pic = picture(9)
+        let channel = CallChatChannel(deps: CallChatChannel.Deps(
+            compose: { _, seq, text in Data("t|\(seq)|\(text)".utf8) },
+            verify: { _, _, bytes in
+                bytes == Data("pic".utf8)
+                    ? CallChatChannel.Verified(seq: 4, text: "", picture: pic) : nil
+            },
+            sendSealed: { _ in true },
+            selfPeerId: { "me" },
+            onMessage: { _, message in shown.append(message) },
+            composePicture: { _, seq, picture in
+                composed.append((seq, picture))
+                return Data("p|\(seq)".utf8)
+            }))
+        XCTAssertEqual(channel.send("hi").seq, 1)
+        let seq = channel.reserveSeq()
+        XCTAssertEqual(seq, 2)
+        XCTAssertTrue(channel.send(.picture(pic), seq: seq))
+        XCTAssertEqual(composed.map(\.0), [2])
+        XCTAssertEqual(channel.send("after").seq, 3)
+        channel.peerIdentified("p1", signerKey: Data(repeating: 7, count: 32))
+        channel.received(from: "p1", bytes: Data("pic".utf8))
+        XCTAssertEqual(shown.first?.picture, pic)
     }
 }

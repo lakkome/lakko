@@ -343,6 +343,7 @@ mod tests {
                 "channel-react",
                 "channel-comment",
                 "report",
+                "rendezvous-write",
             ]
         );
         // Every listed name is one a request can be built for.

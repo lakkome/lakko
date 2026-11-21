@@ -657,6 +657,56 @@ pub fn compose_call_chat(
     .map_err(relay_err)
 }
 
+/// Compose a call-chat picture message (`docs/ux/calls.md` section
+/// 4.1.4.1): the encrypted JPEG's `blobId` (32 bytes), attachment `key` (32)
+/// and `nonce` (12), its plaintext `size` and its pixel `width` and `height`.
+/// Seal it with `CallRelayKey.seal`.
+///
+/// # Errors
+///
+/// `callIdLength`, `malformed` (a bad peer id, a seq of 0, a wrong-length
+/// blob id, key or nonce, a size or dimension out of bounds) or
+/// `identityKeyMismatch`.
+#[wasm_bindgen(js_name = composeCallChatPicture)]
+#[allow(clippy::too_many_arguments)]
+pub fn compose_call_chat_picture(
+    identity: &Identity,
+    call_id: &[u8],
+    peer_id: &str,
+    seq: u64,
+    blob_id: &[u8],
+    key: &[u8],
+    nonce: &[u8],
+    size: u32,
+    width: u16,
+    height: u16,
+) -> Result<Vec<u8>, JsValue> {
+    let bad = |what: &str| coded_error(&format!("picture {what}"), PROPERTY, "malformed");
+    let picture = chat::CallChatPicture {
+        blob_id: blob_id.try_into().map_err(|_| bad("blob id"))?,
+        key: key.try_into().map_err(|_| bad("key"))?,
+        nonce: nonce.try_into().map_err(|_| bad("nonce"))?,
+        size,
+        width,
+        height,
+    };
+    chat::compose_call_chat_picture(
+        identity.mls_identity(),
+        &call_id16(call_id)?,
+        peer_id,
+        seq,
+        &picture,
+    )
+    .map_err(relay_err)
+}
+
+/// The largest picture of a call-chat message, in plaintext bytes.
+#[wasm_bindgen(js_name = callChatMaxPictureBytes)]
+#[must_use]
+pub fn call_chat_max_picture_bytes() -> u32 {
+    chat::MAX_CALL_CHAT_PICTURE_BYTES
+}
+
 /// A call-chat message that verified against the call's roster.
 #[wasm_bindgen]
 #[derive(Clone)]
@@ -665,6 +715,7 @@ pub struct VerifiedCallChat {
     seq: u64,
     text: String,
     account_key: Vec<u8>,
+    picture: Option<chat::CallChatPicture>,
 }
 
 #[wasm_bindgen]
@@ -697,6 +748,64 @@ impl VerifiedCallChat {
     pub fn account_key(&self) -> Vec<u8> {
         self.account_key.clone()
     }
+
+    /// Whether this message is a picture (then `text` is empty).
+    #[wasm_bindgen(getter, js_name = isPicture)]
+    #[must_use]
+    pub fn is_picture(&self) -> bool {
+        self.picture.is_some()
+    }
+
+    /// The picture's blob id (32 bytes); empty for a text.
+    #[wasm_bindgen(getter, js_name = pictureBlobId)]
+    #[must_use]
+    pub fn picture_blob_id(&self) -> Vec<u8> {
+        self.picture
+            .as_ref()
+            .map(|p| p.blob_id.to_vec())
+            .unwrap_or_default()
+    }
+
+    /// The picture's attachment key (32 bytes); empty for a text.
+    #[wasm_bindgen(getter, js_name = pictureKey)]
+    #[must_use]
+    pub fn picture_key(&self) -> Vec<u8> {
+        self.picture
+            .as_ref()
+            .map(|p| p.key.to_vec())
+            .unwrap_or_default()
+    }
+
+    /// The picture's nonce (12 bytes); empty for a text.
+    #[wasm_bindgen(getter, js_name = pictureNonce)]
+    #[must_use]
+    pub fn picture_nonce(&self) -> Vec<u8> {
+        self.picture
+            .as_ref()
+            .map(|p| p.nonce.to_vec())
+            .unwrap_or_default()
+    }
+
+    /// The picture's plaintext size; 0 for a text.
+    #[wasm_bindgen(getter, js_name = pictureSize)]
+    #[must_use]
+    pub fn picture_size(&self) -> u32 {
+        self.picture.as_ref().map_or(0, |p| p.size)
+    }
+
+    /// The picture's width in pixels; 0 for a text.
+    #[wasm_bindgen(getter, js_name = pictureWidth)]
+    #[must_use]
+    pub fn picture_width(&self) -> u16 {
+        self.picture.as_ref().map_or(0, |p| p.width)
+    }
+
+    /// The picture's height in pixels; 0 for a text.
+    #[wasm_bindgen(getter, js_name = pictureHeight)]
+    #[must_use]
+    pub fn picture_height(&self) -> u16 {
+        self.picture.as_ref().map_or(0, |p| p.height)
+    }
 }
 
 /// Verify a call-chat message. `peerId` is the relay `from`,
@@ -724,7 +833,8 @@ pub fn verify_call_chat(
     Ok(VerifiedCallChat {
         peer_id: v.peer_id,
         seq: v.seq,
-        text: v.text,
+        text: v.content.text().unwrap_or_default().to_owned(),
+        picture: v.content.picture().cloned(),
         account_key: v.account_key,
     })
 }
@@ -917,5 +1027,22 @@ mod tests {
         assert_eq!(check_call_chat_text(" ").as_deref(), Some("blank"));
         assert_eq!(clamp_call_chat_text(&"я".repeat(500)).len(), 800);
         assert_eq!(call_chat_max_text_bytes(), 800);
+        assert_eq!(call_chat_max_picture_bytes(), 10 * 1024 * 1024);
+        let pic = chat::compose_call_chat_picture(
+            &alice,
+            &[9; 16],
+            "a",
+            2,
+            &chat::CallChatPicture {
+                blob_id: [1; 32],
+                key: [2; 32],
+                nonce: [3; 12],
+                size: 10,
+                width: 4,
+                height: 3,
+            },
+        )
+        .expect("picture");
+        assert_eq!(classify_call_relay_plaintext(&pic).kind, "call-chat");
     }
 }

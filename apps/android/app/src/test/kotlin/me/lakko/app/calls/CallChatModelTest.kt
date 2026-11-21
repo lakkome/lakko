@@ -227,6 +227,37 @@ class CallChatModelTest {
     }
 
     @Test
+    fun `an emoji from the picker goes in at the caret and replaces a selection`() {
+        val grin = "\uD83D\uDE00"
+        // At the caret, in the middle.
+        assertEquals(
+            CallChatEmojiInsert("ab${grin}c", caret = 4, inserted = true, tooLong = false),
+            callChatInsertEmoji("abc", 2, 2, grin, rule),
+        )
+        // A selection is replaced, whichever way it was dragged.
+        assertEquals(
+            CallChatEmojiInsert("a${grin}d", caret = 3, inserted = true, tooLong = false),
+            callChatInsertEmoji("abcd", 3, 1, grin, rule),
+        )
+        // A caret past the end (a stale selection) is read as the end.
+        assertEquals("ab$grin", callChatInsertEmoji("ab", 9, 9, grin, rule).text)
+    }
+
+    @Test
+    fun `an emoji that would pass the limit is not put in and the too-long line shows`() {
+        val grin = "\uD83D\uDE00"
+        // 4 + 4 bytes = 8: fits exactly, and then no more fits.
+        val full = callChatInsertEmoji("abcd", 4, 4, grin, rule)
+        assertTrue(full.inserted)
+        assertTrue(full.tooLong)
+        // 5 + 4 bytes = 9: refused; text and caret unchanged.
+        assertEquals(
+            CallChatEmojiInsert("abcde", caret = 2, inserted = false, tooLong = true),
+            callChatInsertEmoji("abcde", 2, 2, grin, rule),
+        )
+    }
+
+    @Test
     fun `send is enabled only for text the rule accepts`() {
         assertFalse(callChatCanSend("", rule))
         assertFalse(callChatCanSend("  \n ", rule))

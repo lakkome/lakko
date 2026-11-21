@@ -140,28 +140,81 @@ class WelcomeGrantFallbackTest {
 
     // ---- a person found in Everyone (ADR-0060 section 6, 2026-10-29) ------
 
+    /** The core's `reachOpenMailboxWriteAllowed`, restated for the host JVM
+     *  (no native library here) and recording what it was asked: the rule
+     *  itself is tested in `lakko-contacts::reach_plan`. */
+    private class RecordingRule : me.lakko.app.reach.OpenWriteRule {
+        val asked = mutableListOf<Triple<Boolean, Int, Int>>()
+        override fun allowed(recordOpen: Boolean, candidates: Int, refused: Int): Boolean {
+            asked += Triple(recordOpen, candidates, refused)
+            return recordOpen && refused >= candidates
+        }
+    }
+
     @Test
-    fun `a held grant that is refused never falls back to an unsigned write and stays owed`() = runTest {
-        var asked = false
+    fun `every held grant refused falls back to the open mailbox when the core allows it`() = runTest {
+        // G-53 — a stale grant no longer blocks the open mailbox.
+        val rule = RecordingRule()
+        val tried = mutableListOf<String?>()
+        val id = writeWelcomeWithGrants(
+            candidates = listOf({ "stale-group-key" }, { null }, { "stale-member-key" }),
+            write = { auth ->
+                tried += auth
+                if (auth != "open-mailbox") throw refused()
+                5L
+            },
+            isRefusal = { it is DsReachRefusedError },
+            requireGrant = true,
+            accountKeyHex = "aa",
+            openFallback = { "open-mailbox" },
+            openRule = rule,
+        )
+        assertEquals(5L, id)
+        assertEquals(listOf<String?>("stale-group-key", "stale-member-key", "open-mailbox"), tried)
+        // Two candidates yielded an authorisation, both refused with a 401.
+        assertEquals(listOf(Triple(true, 2, 2)), rule.asked)
+    }
+
+    @Test
+    fun `a refusal the core does not accept keeps the Welcome owed`() = runTest {
         val tried = mutableListOf<String?>()
         try {
             writeWelcomeWithGrants(
-                candidates = listOf({ "held-grant" }, { null }),
-                write = { auth ->
-                    tried += auth
-                    throw refused()
-                },
+                candidates = listOf({ "held-grant" }),
+                write = { auth -> tried += auth; throw refused() },
                 isRefusal = { it is DsReachRefusedError },
                 requireGrant = true,
                 accountKeyHex = "aa",
-                openFallback = { asked = true; "open-mailbox" },
+                openFallback = { "open-mailbox" },
+                openRule = { _, _, _ -> false },
             )
             fail("expected WelcomeUndeliverable")
         } catch (e: WelcomeUndeliverable) {
             assertEquals("aa", e.accountKeyHex)
         }
         assertEquals(listOf<String?>("held-grant"), tried)
-        assertTrue("the open path was not consulted", !asked)
+    }
+
+    @Test
+    fun `a refused grant with no open record stays owed and writes nothing unsigned`() = runTest {
+        val rule = RecordingRule()
+        val tried = mutableListOf<String?>()
+        try {
+            writeWelcomeWithGrants<String, Long>(
+                candidates = listOf({ "held-grant" }),
+                write = { auth -> tried += auth; throw refused() },
+                isRefusal = { it is DsReachRefusedError },
+                requireGrant = true,
+                accountKeyHex = "aa",
+                openFallback = { null },
+                openRule = rule,
+            )
+            fail("expected WelcomeUndeliverable")
+        } catch (_: WelcomeUndeliverable) {
+            // owed
+        }
+        assertEquals(listOf<String?>("held-grant"), tried)
+        assertTrue("no open record: the rule is not even asked", rule.asked.isEmpty())
     }
 
     @Test
@@ -175,6 +228,7 @@ class WelcomeGrantFallbackTest {
             requireGrant = true,
             accountKeyHex = "aa",
             openFallback = { "open-mailbox" },
+            openRule = RecordingRule(),
         )
         assertEquals(9L, id)
         assertEquals(listOf<String?>("open-mailbox"), tried)
@@ -206,6 +260,7 @@ class WelcomeGrantFallbackTest {
             requireGrant = true,
             accountKeyHex = "aa",
             openFallback = { "open-mailbox" },
+            openRule = RecordingRule(),
         )
         assertEquals(listOf<String?>("open-mailbox"), tried)
     }

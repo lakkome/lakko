@@ -11,6 +11,7 @@
  * the messages in `call-chat.ts`.
  */
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, type Component } from "solid-js";
+import { Portal } from "solid-js/web";
 
 import { t } from "../l10n";
 import { Icon } from "../ui/icons";
@@ -19,13 +20,23 @@ import { MessageText } from "../chat/MessageText";
 import { copyMessageText } from "../chat/copy-message";
 import { shortTime } from "../chat/timeline-layout";
 import { loadWasm } from "../wasm";
+import { EmojiPicker } from "../media/EmojiPicker";
+import { saveDecryptedBytes } from "../chat/attachments";
+import { Spinner } from "../ui/Spinner";
+import { firstPicture, pictureBox, preparePicture } from "./call-chat-pictures";
 import { callActions, callState } from "../state/call-state";
 import { callBarMuteControl } from "./call-bar-model";
-import { callChatActions, callChatState, type CallChatMessage } from "./call-chat";
+import {
+  callChatActions,
+  callChatState,
+  type CallChatMessage,
+  type CallChatPictureView,
+} from "./call-chat";
 import {
   composerInput,
   EMPTY_COMPOSER,
   enterSends,
+  insertEmoji,
   startsOthersRun,
   type ChatTextRule,
   type ComposerText,
@@ -56,10 +67,51 @@ function touchKeyboard(): boolean {
     : false;
 }
 
+/** A picture in a bubble (section 4.1.4.1). */
+const PictureInBubble: Component<{
+  picture: CallChatPictureView;
+  sending: boolean;
+  onOpen: (url: string) => void;
+}> = (props) => {
+  const box = (): { width: number; height: number } => pictureBox(props.picture.width, props.picture.height);
+  return (
+    <span
+      class="lk-call-chat-picture"
+      classList={{ sending: props.sending }}
+      style={{ width: `${box().width}px`, height: `${box().height}px` }}
+    >
+      <Show when={props.picture.status === "ready" && props.picture.url}>
+        {(url) => (
+          <button
+            type="button"
+            class="lk-call-chat-picture-open"
+            aria-label={t("call.chat.picture")}
+            onClick={(e): void => {
+              e.stopPropagation();
+              props.onOpen(url());
+            }}
+          >
+            <img src={url()} alt="" draggable={false} />
+          </button>
+        )}
+      </Show>
+      <Show when={props.picture.status === "loading" || props.sending}>
+        <span class="lk-call-chat-picture-spinner" role="status" aria-label={t("call.chat.picture")}>
+          <Spinner size={22} />
+        </span>
+      </Show>
+      <Show when={props.picture.status === "unavailable"}>
+        <span class="lk-call-chat-picture-gone">{t("call.chat.picture_unavailable")}</span>
+      </Show>
+    </span>
+  );
+};
+
 const Bubble: Component<{
   message: CallChatMessage;
   name: string | null;
   onMenu: (message: CallChatMessage, x: number, y: number) => void;
+  onOpen: (url: string) => void;
 }> = (props) => {
   const press = createLongPress((x, y) => props.onMenu(props.message, x, y));
   return (
@@ -67,7 +119,12 @@ const Bubble: Component<{
       <Show when={props.name}>{(name) => <span class="lk-call-chat-sender">{name()}</span>}</Show>
       <div
         class="lk-call-chat-bubble"
-        classList={{ "not-sent": props.message.delivery === "not-sent" }}
+        classList={{
+          "not-sent": props.message.delivery === "not-sent",
+          // A text waiting for the picture sent before it.
+          waiting: props.message.delivery === "sending" && props.message.picture === undefined,
+          "with-picture": props.message.picture !== undefined,
+        }}
         tabIndex={0}
         onContextMenu={(e): void => {
           e.preventDefault();
@@ -80,9 +137,16 @@ const Bubble: Component<{
         onPointerLeave={press.onPointerLeave}
         onClick={(e): void => void press.swallowClick(e)}
       >
-        <span class="lk-call-chat-text">
-          <MessageText text={props.message.text} />
-        </span>
+        <Show
+          when={props.message.picture}
+          fallback={
+            <span class="lk-call-chat-text">
+              <MessageText text={props.message.text} />
+            </span>
+          }
+        >
+          {(picture) => <PictureInBubble picture={picture()} sending={props.message.delivery === "sending"} onOpen={props.onOpen} />}
+        </Show>
         <span class="lk-call-chat-time">{shortTime(new Date(props.message.arrivedAtMs).toISOString())}</span>
       </div>
       <Show when={props.message.delivery === "not-sent"}>
@@ -112,6 +176,20 @@ export const CallChatPanel: Component<{
   let field: HTMLTextAreaElement | undefined;
   const [composer, setComposer] = createSignal<ComposerText>(EMPTY_COMPOSER);
   const [said, setSaid] = createSignal("");
+  // The emoji button (section 4.1.4): the conversation composer's picker,
+  // Emoji tab only.
+  const [pickerOpen, setPickerOpen] = createSignal(false);
+  // Section 4.1.4.1: the picture waiting to be sent, and the line under the
+  // field when a paste or a drop was refused.
+  const [tray, setTray] = createSignal<{
+    jpeg: Uint8Array;
+    width: number;
+    height: number;
+    url: string;
+  } | null>(null);
+  const [pictureNote, setPictureNote] = createSignal<string | null>(null);
+  const [viewing, setViewing] = createSignal<string | null>(null);
+  let trayTicket = 0;
   // On a phone the one-row action sheet sits at the bottom of the screen; with
   // a pointer it is a popover where the right click was (design system,
   // Action sheet).
@@ -151,7 +229,12 @@ export const CallChatPanel: Component<{
     lastId = last.id;
     if (panel().atBottom) scrollToNewest();
     if (!last.own && last.peerId !== null) {
-      setSaid(t("call.chat.message_a11y", { name: props.nameOf(last.peerId), text: last.text }));
+      setSaid(
+        t("call.chat.message_a11y", {
+          name: props.nameOf(last.peerId),
+          text: last.picture !== undefined ? t("call.chat.picture") : last.text,
+        }),
+      );
     }
   });
 
@@ -188,11 +271,53 @@ export const CallChatPanel: Component<{
     fitField();
   };
 
+  const clearTray = (): void => {
+    const t0 = tray();
+    if (t0 !== null) URL.revokeObjectURL(t0.url);
+    setTray(null);
+  };
+
+  /** Pasted or dropped files: the first picture goes into the tray. */
+  const takeFiles = (files: readonly File[]): void => {
+    if (files.length === 0) return;
+    const control = callChatState.control();
+    if (control?.sendPicture === undefined) return;
+    const picture = firstPicture(files);
+    if (picture === null) {
+      setPictureNote(t("call.chat.picture_only"));
+      return;
+    }
+    const ticket = ++trayTicket;
+    void preparePicture(picture).then((prepared) => {
+      if (ticket !== trayTicket) return;
+      if (prepared.kind !== "ok") {
+        setPictureNote(
+          prepared.kind === "too-large" ? t("call.chat.picture_too_large") : t("call.chat.picture_only"),
+        );
+        return;
+      }
+      clearTray();
+      setPictureNote(null);
+      const url = URL.createObjectURL(new Blob([prepared.jpeg.slice()], { type: "image/jpeg" }));
+      setTray({ jpeg: prepared.jpeg, width: prepared.width, height: prepared.height, url });
+      field?.focus();
+    });
+  };
+
+  const canSend = (): boolean => composer().sendable || tray() !== null;
+
   const send = (): void => {
     const c = composer();
     const control = callChatState.control();
-    if (!c.sendable || control === null) return;
-    control.send(c.text);
+    if (!canSend() || control === null) return;
+    // The picture first, the text after it (section 4.1.4.1).
+    const picture = tray();
+    if (picture !== null && control.sendPicture !== undefined) {
+      control.sendPicture(picture.jpeg, picture.width, picture.height);
+      clearTray();
+      setPictureNote(null);
+    }
+    if (c.sendable) control.send(c.text);
     setComposer(EMPTY_COMPOSER);
     if (field !== undefined) {
       field.value = "";
@@ -201,6 +326,20 @@ export const CallChatPanel: Component<{
     }
     callChatActions.ownSent();
     scrollToNewest();
+  };
+
+  const pickEmoji = (emoji: string): void => {
+    const rule = textRule();
+    if (rule === null || field === undefined) return;
+    const value = field.value;
+    const start = field.selectionStart ?? value.length;
+    const end = field.selectionEnd ?? value.length;
+    const next = insertEmoji(value, start, end, emoji, composer(), rule);
+    setComposer(next.composer);
+    if (field.value !== next.composer.text) field.value = next.composer.text;
+    field.focus();
+    field.setSelectionRange(next.caret, next.caret);
+    fitField();
   };
 
   const openMenu = (message: CallChatMessage, x: number, y: number): void => {
@@ -213,11 +352,15 @@ export const CallChatPanel: Component<{
     if (e.key !== "Escape") return;
     e.preventDefault();
     e.stopPropagation();
-    if (menu() !== null) setMenu(null);
+    if (viewing() !== null) setViewing(null);
+    else if (menu() !== null) setMenu(null);
     else props.onClose();
   };
 
-  onCleanup(() => setMenu(null));
+  onCleanup(() => {
+    setMenu(null);
+    clearTray();
+  });
 
   return (
     <aside
@@ -228,6 +371,15 @@ export const CallChatPanel: Component<{
       // Not delegated: the call screen listens for `Esc` on the document,
       // and only a listener on this element can stop it reaching there.
       on:keydown={onKeyDown}
+      onDragOver={(e): void => {
+        if (e.dataTransfer?.types.includes("Files") === true) e.preventDefault();
+      }}
+      onDrop={(e): void => {
+        const files = e.dataTransfer === null ? [] : [...e.dataTransfer.files];
+        if (files.length === 0) return;
+        e.preventDefault();
+        takeFiles(files);
+      }}
     >
       <header class="lk-call-chat-head">
         <h2>{t("call.control.chat")}</h2>
@@ -286,6 +438,7 @@ export const CallChatPanel: Component<{
                       : null
                   }
                   onMenu={openMenu}
+                  onOpen={(url): void => void setViewing(url)}
                 />
               )}
             </For>
@@ -308,6 +461,38 @@ export const CallChatPanel: Component<{
       </div>
 
       <div class="lk-call-chat-composer">
+        <Show when={tray()}>
+          {(t0) => (
+            <div class="lk-call-chat-tray">
+              <img src={t0().url} alt="" />
+              <button
+                type="button"
+                class="lk-call-chat-tray-remove"
+                aria-label={t("call.chat.picture_remove")}
+                title={t("call.chat.picture_remove")}
+                onClick={(): void => {
+                  clearTray();
+                  field?.focus();
+                }}
+              >
+                <Icon name="xmark" size={14} />
+              </button>
+            </div>
+          )}
+        </Show>
+        <Show when={pickerOpen()}>
+          <EmojiPicker
+            mode="compose"
+            align="right"
+            onEmoji={pickEmoji}
+            onClose={(): void => {
+              setPickerOpen(false);
+              field?.focus();
+            }}
+            // No GIF tab here, so the picker never needs a session.
+            sessionToken={(): string | null => null}
+          />
+        </Show>
         <div class="lk-call-chat-field-row">
           <textarea
             ref={field}
@@ -316,6 +501,13 @@ export const CallChatPanel: Component<{
             placeholder={t("call.chat.placeholder")}
             aria-label={t("call.chat.placeholder")}
             onInput={(e): void => onInput(e.currentTarget.value)}
+            onPaste={(e): void => {
+              const files = e.clipboardData === null ? [] : [...e.clipboardData.files];
+              if (files.length === 0) return;
+              // A file on the clipboard is not text: it never goes in the field.
+              e.preventDefault();
+              takeFiles(files);
+            }}
             onKeyDown={(e): void => {
               if (
                 enterSends({
@@ -332,10 +524,26 @@ export const CallChatPanel: Component<{
           />
           <button
             type="button"
+            class="lk-call-chat-emoji"
+            data-picker-toggle
+            aria-label={t("call.chat.emoji")}
+            aria-expanded={pickerOpen()}
+            title={t("call.chat.emoji")}
+            // Keep the caret in the field.
+            onMouseDown={(e): void => e.preventDefault()}
+            onClick={(): void => {
+              setPickerOpen(!pickerOpen());
+              field?.focus();
+            }}
+          >
+            <Icon name="face-smiling" size={22} />
+          </button>
+          <button
+            type="button"
             class="lk-call-chat-send"
             aria-label={t("call.chat.send_a11y")}
             title={t("call.chat.send_a11y")}
-            disabled={!composer().sendable}
+            disabled={!canSend()}
             onClick={send}
           >
             <Icon name="arrow-up-circle-fill" size={36} />
@@ -343,6 +551,9 @@ export const CallChatPanel: Component<{
         </div>
         <Show when={composer().tooLong}>
           <p class="lk-call-chat-too-long">{t("call.chat.too_long")}</p>
+        </Show>
+        <Show when={pictureNote()}>
+          {(note) => <p class="lk-call-chat-too-long">{note()}</p>}
         </Show>
       </div>
 
@@ -377,23 +588,92 @@ export const CallChatPanel: Component<{
                 });
               }}
             >
-              <button
-                type="button"
-                role="menuitem"
-                class="lk-call-menu-item"
-                onClick={(): void => {
-                  const text = m().message.text;
-                  setMenu(null);
-                  void copyMessageText(text);
-                }}
+              <Show
+                when={m().message.picture}
+                fallback={
+                  <button
+                    type="button"
+                    role="menuitem"
+                    class="lk-call-menu-item"
+                    onClick={(): void => {
+                      const text = m().message.text;
+                      setMenu(null);
+                      void copyMessageText(text);
+                    }}
+                  >
+                    <Icon name="copy" size={20} />
+                    <span>{t("common.copy")}</span>
+                  </button>
+                }
               >
-                <Icon name="copy" size={20} />
-                <span>{t("common.copy")}</span>
-              </button>
+                {(picture) => (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    class="lk-call-menu-item"
+                    disabled={picture().url === null}
+                    onClick={(): void => {
+                      const url = picture().url;
+                      setMenu(null);
+                      if (url !== null) void savePicture(url);
+                    }}
+                  >
+                    <Icon name="download" size={20} />
+                    <span>{t("call.chat.picture_save")}</span>
+                  </button>
+                )}
+              </Show>
             </div>
           </>
+        )}
+      </Show>
+      <Show when={viewing()}>
+        {(url) => (
+          <Portal>
+          <div
+            class="lk-call-chat-viewer"
+            role="dialog"
+            aria-label={t("call.chat.picture")}
+            onClick={(): void => void setViewing(null)}
+            // Outside the panel (a portal): its own `Esc`, which must not
+            // reach the call screen and put the call away.
+            on:keydown={(e: KeyboardEvent): void => {
+              if (e.key !== "Escape") return;
+              e.preventDefault();
+              e.stopPropagation();
+              setViewing(null);
+              field?.focus();
+            }}
+          >
+            <img src={url()} alt="" />
+            <button
+              type="button"
+              class="lk-call-chat-viewer-close"
+              aria-label={t("call.chat.close_a11y")}
+              ref={(el): void => {
+                requestAnimationFrame(() => el.focus());
+              }}
+              onClick={(e): void => {
+                e.stopPropagation();
+                setViewing(null);
+              }}
+            >
+              <Icon name="xmark" size={22} />
+            </button>
+          </div>
+          </Portal>
         )}
       </Show>
     </aside>
   );
 };
+
+/** `Save picture` (section 4.1.4.1): the decrypted JPEG, as a file. */
+async function savePicture(url: string): Promise<void> {
+  try {
+    const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
+    await saveDecryptedBytes(bytes, "picture.jpg", "image/jpeg");
+  } catch {
+    // The picture's memory is gone (the call ended); nothing to save.
+  }
+}

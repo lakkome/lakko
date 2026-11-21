@@ -239,6 +239,9 @@ final class SfuCallSession {
         /// ``CallChatChannel``) verified against the leaf key its sender's
         /// announcement verified with; each `(peer, seq)` once.
         var onCallChat: ((_ peerId: String, _ seq: UInt64, _ text: String) -> Void)? = nil
+        /// A picture in the call's chat (section 4.1.4.1), verified the
+        /// same way; each `(peer, seq)` once, one counter with the text.
+        var onCallChatPicture: ((_ peerId: String, _ seq: UInt64, _ picture: CallChatPicture) -> Void)? = nil
     }
 
     private let config: Config
@@ -376,7 +379,14 @@ final class SfuCallSession {
         },
         selfPeerId: { [weak self] in self?.selfPeerId },
         onMessage: { [weak self] peerId, message in
-            self?.callbacks.onCallChat?(peerId, message.seq, message.text)
+            if let picture = message.picture {
+                self?.callbacks.onCallChatPicture?(peerId, message.seq, picture)
+            } else {
+                self?.callbacks.onCallChat?(peerId, message.seq, message.text)
+            }
+        },
+        composePicture: { [weak self] selfPeerId, seq, picture in
+            self?.config.peerAnnouncer?.composeCallChatPicture(selfPeerId, seq, picture)
         }
     ))
 
@@ -562,6 +572,17 @@ final class SfuCallSession {
     /// `Send again` on the chat message numbered `seq`: the same signed bytes.
     func resendCallChat(seq: UInt64) -> Bool {
         callChats.resend(seq: seq)
+    }
+
+    /// The next chat sequence number, for a message that goes out later (a
+    /// picture waiting for its upload, the text after it; section 4.1.4.1).
+    func reserveCallChatSeq() -> UInt64 {
+        callChats.reserveSeq()
+    }
+
+    /// Send a chat message under a number ``reserveCallChatSeq()`` gave it.
+    func sendCallChat(_ content: CallChatChannel.Content, seq: UInt64) -> Bool {
+        callChats.send(content, seq: seq)
     }
 
     private func startAnnouncing() {

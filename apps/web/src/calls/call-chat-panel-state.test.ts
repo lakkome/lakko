@@ -8,6 +8,7 @@ import {
   chatControlName,
   chatPanelShape,
   composerInput,
+  insertEmoji,
   EMPTY_COMPOSER,
   enterSends,
   initialChatPanel,
@@ -180,6 +181,29 @@ describe("the composer", () => {
     // The line stays while the text is still at the bound.
     expect(composerInput("0123456789", over, rule).tooLong).toBe(true);
     expect(composerInput("012345678", over, rule).tooLong).toBe(false);
+  });
+
+  it("puts a picked emoji over the selection and the caret after it", () => {
+    const r = insertEmoji("ab", 1, 1, "\u{1F600}", EMPTY_COMPOSER, rule);
+    expect(r.inserted).toBe(true);
+    expect(r.composer.text).toBe("a\u{1F600}b");
+    expect(r.caret).toBe(3);
+    expect(r.composer.sendable).toBe(true);
+    const replaced = insertEmoji("abc", 1, 2, "!", EMPTY_COMPOSER, rule);
+    expect(replaced.composer.text).toBe("a!c");
+    expect(replaced.caret).toBe(2);
+    // A reversed or out-of-range selection reads as the caret at its ends.
+    expect(insertEmoji("ab", 9, 9, "x", EMPTY_COMPOSER, rule).composer.text).toBe("abx");
+  });
+
+  it("does not put in an emoji that passes the bound, and says so", () => {
+    const start = composerInput("0123456", EMPTY_COMPOSER, rule);
+    // 7 bytes + a 4-byte emoji = 11 > 10.
+    const r = insertEmoji("0123456", 7, 7, "\u{1F600}", start, rule);
+    expect(r.inserted).toBe(false);
+    expect(r.composer.text).toBe("0123456");
+    expect(r.composer.tooLong).toBe(true);
+    expect(r.caret).toBe(7);
   });
 
   it("sends on Enter from a keyboard, never with Shift, while composing, or on a phone", () => {

@@ -170,6 +170,9 @@ export function parseBlobPass(json: unknown, kind: BlobPassKind): BlobPass {
 /** The account-bound ports a blob request needs. */
 export interface BlobAccess {
   readonly passes: BlobPassCache;
+  /** The account these ports belong to (its owed deletes are kept under
+   *  it); absent in tests. */
+  readonly accountId?: string;
   /** The 32-byte public delete key an upload of `blobId` carries. */
   deleteKey(blobId: Uint8Array): Promise<Uint8Array>;
   /** The `x-lakko-storage-proof` header (name, value) for

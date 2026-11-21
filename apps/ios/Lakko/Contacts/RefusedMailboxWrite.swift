@@ -138,13 +138,21 @@ public struct SweepWelcomeAttempt: Equatable {
     public let candidates: [DsMailboxWriteAuth]
     /// ADR-0060 section 6 — the Welcome goes to `target` WITHOUT a proof,
     /// spending one `mailbox-write` token: the person was found in Everyone
-    /// and this device holds no grant or delegation for them.
+    /// and this device holds no candidate key for them.
     public let openUnsigned: Bool
+    /// G-53 — the person's open mailbox (a kept no-delegation envelope or
+    /// this device's own record names it), where the Welcome may go without
+    /// a proof once every candidate was refused (``openAfterRefusals(_:)``).
+    public let openFallback: MailboxTarget?
 
-    public init(target: MailboxTarget?, candidates: [DsMailboxWriteAuth], openUnsigned: Bool = false) {
+    public init(
+        target: MailboxTarget?, candidates: [DsMailboxWriteAuth], openUnsigned: Bool = false,
+        openFallback: MailboxTarget? = nil
+    ) {
         self.target = target
         self.candidates = candidates
         self.openUnsigned = openUnsigned
+        self.openFallback = openFallback
     }
 
     /// The address the row is posted under, `nil` when no mailbox is known.
@@ -154,19 +162,32 @@ public struct SweepWelcomeAttempt: Equatable {
     /// exception of ADR-0060 section 6). The signed order first: `plan` is
     /// this device's own mailbox, an explicit grant, the held grants and the
     /// delegation naming this account (``ReachCenter/writePlan(toAccountKey:groupIdHex:)``).
-    /// Only when it offers no signed candidate at all, and `open` (a kept
-    /// no-delegation envelope or this device's own record naming the person)
-    /// is known, the Welcome goes to that mailbox unsigned. Neither: nothing
-    /// is written and the Welcome stays owed. A grant or delegation that is
-    /// held but refused never falls back to an unsigned write.
+    /// When it offers no candidate and `open` is known, the Welcome goes to
+    /// that mailbox unsigned at once; when it offers candidates, `open` is
+    /// kept as the fallback the core allows after every one of them was
+    /// refused (G-53: a stale grant no longer blocks the open mailbox).
+    /// Neither: nothing is written and the Welcome stays owed.
     public static func decide(plan: MailboxWritePlan?, open: MailboxTarget?) -> SweepWelcomeAttempt {
         if let plan, !plan.candidates.isEmpty {
-            return SweepWelcomeAttempt(target: plan.target, candidates: plan.candidates)
+            return SweepWelcomeAttempt(target: plan.target, candidates: plan.candidates, openFallback: open)
         }
-        if let open {
+        if let open, reachOpenMailboxWriteAllowed(recordOpen: true, candidates: 0, refused: 0) {
             return SweepWelcomeAttempt(target: open, candidates: [], openUnsigned: true)
         }
         return SweepWelcomeAttempt(target: plan?.target, candidates: [])
+    }
+
+    /// G-53 — the open mailbox the Welcome goes to without a proof after
+    /// `refused` of the candidates were refused with `401` (the core's
+    /// `reachOpenMailboxWriteAllowed`): only when the record is open and every
+    /// candidate was refused. `nil` otherwise: the Welcome stays owed. Only a
+    /// `401` counts; any other failure never reaches this.
+    public func openAfterRefusals(_ refused: Int) -> MailboxTarget? {
+        guard let openFallback, !openUnsigned else { return nil }
+        let allowed = reachOpenMailboxWriteAllowed(
+            recordOpen: true, candidates: UInt32(clamping: candidates.count),
+            refused: UInt32(clamping: max(refused, 0)))
+        return allowed ? openFallback : nil
     }
 }
 

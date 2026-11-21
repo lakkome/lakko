@@ -138,6 +138,12 @@ struct CallPeerAnnouncer {
     var verifyCallChat: @MainActor (
         _ from: String, _ signerKey: Data, _ message: Data
     ) -> CallChatChannel.Verified? = { _, _, _ in nil }
+    /// This device's signed call-chat picture (`docs/ux/calls.md` section
+    /// 4.1.4.1) as `selfPeerId`, numbered `seq`; `nil` when it cannot make
+    /// one (no group yet, a picture out of bounds).
+    var composeCallChatPicture: @MainActor (
+        _ selfPeerId: String, _ seq: UInt64, _ picture: CallChatPicture
+    ) -> Data? = { _, _, _ in nil }
 
     /// The announcer for a call whose roster is `group()`.
     static func forGroup(
@@ -185,7 +191,13 @@ struct CallPeerAnnouncer {
                           message: message),
                       verified.peerId == from
                 else { return nil }
-                return CallChatChannel.Verified(seq: verified.seq, text: verified.text)
+                return CallChatChannel.Verified(
+                    seq: verified.seq, text: verified.text, picture: verified.picture)
+            },
+            composeCallChatPicture: { selfPeerId, seq, picture in
+                guard group() != nil else { return nil }
+                return try? LakkoCore.composeCallChatPicture(
+                    identity: identity, callId: callId, peerId: selfPeerId, seq: seq, picture: picture)
             }
         )
     }

@@ -124,6 +124,7 @@ export function BlobAccessRuntime(): JSX.Element {
       keys = blobDeleteVaultKeys(w, lineage, identity);
     })();
     installBlobAccess({
+      accountId: account,
       passes: new BlobPassCache(buyPass),
       async deleteKey(blobId) {
         await ready;

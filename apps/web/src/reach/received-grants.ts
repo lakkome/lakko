@@ -57,8 +57,10 @@ export interface PersonGrants {
    * Kept so the committer delegations are signed with it, re-sent while the
    * add is pending, and a sweep this device runs can deliver the Welcome. Its
    * mailbox binding was verified against the person's account key before it
-   * was filed ({@link fileFoundGrant}'s caller). Offered after the channel
-   * grants. Secret.
+   * was filed ({@link fileFoundGrant}'s caller). A Welcome and a committer
+   * delegation lead with it while it is at its key's highest version (G-53,
+   * the core's plan); any other write offers it after the channel grants.
+   * Secret.
    */
   readonly found?: HeldGrant;
 }
@@ -302,33 +304,37 @@ export function heldClasses(
 }
 
 /**
- * The grant that lets this account write to `accountHex`, preferring the
- * widest: a contact grant; then a `group` / `channel` grant (the person lets
- * these members find them); then, only when `allowMember`, a `member` grant
- * of `scopeHex` (a Welcome for that group - the one write a hidden person's
- * member key is for). `null` when nothing kept authorises the write.
+ * The grant that lets this account write to `accountHex` (a write that is
+ * not a Welcome), preferring the widest: a contact grant; then a `group` /
+ * `channel` grant (the person lets these members find them); then the grant
+ * a search found them through. Never a `member` grant. `null` when nothing
+ * kept authorises the write.
  */
 export function bestGrantFor(
   store: ReceivedGrants,
   accountHex: string,
-  options: { readonly scopeHex?: string; readonly allowMember?: boolean } = {},
+  options: { readonly scopeHex?: string } = {},
 ): HeldGrant | null {
   return grantsInOrder(store, accountHex, options)[0] ?? null;
 }
 
 /**
- * Every kept grant that may authorise a write to `accountHex`, in the order of
- * {@link bestGrantFor} (which is its first element): the contact grant, then
- * each scope's `group` grant (the given scope first), then each scope's
- * `channel` grant, then the grant a search found them through, then - only
- * when `allowMember` - the given scope's `member` grant. A writer refused (`401`) under one moves to the next
+ * Every kept grant that may authorise a write to `accountHex` that is not a
+ * Welcome (a contact request, a re-entry request, the search's reach check),
+ * in the order of {@link bestGrantFor} (which is its first element): the
+ * contact grant, then each scope's `group` grant (the given scope first), then
+ * each scope's `channel` grant, then the grant a search found them through.
+ * Never a `member` grant. A writer refused (`401`) under one moves to the next
  * (ADR-0050 section 2.5a item 7): a key the person rotated away answers 401,
  * another key they handed out may still work.
+ *
+ * A Welcome and a committer delegation do not use this order: theirs is the
+ * core's plan (G-53, `write-plan.ts`).
  */
 export function grantsInOrder(
   store: ReceivedGrants,
   accountHex: string,
-  options: { readonly scopeHex?: string; readonly allowMember?: boolean } = {},
+  options: { readonly scopeHex?: string } = {},
 ): HeldGrant[] {
   const person = store.people[accountHex];
   if (person === undefined) return [];
@@ -350,10 +356,6 @@ export function grantsInOrder(
   if (person.found !== undefined && !out.some((g) => g.wireB64 === person.found?.wireB64)) {
     out.push(person.found);
   }
-  if (options.allowMember === true && options.scopeHex !== undefined) {
-    const member = person.scopes[options.scopeHex]?.member;
-    if (member !== undefined) out.push(member);
-  }
   return out;
 }
 
@@ -368,7 +370,7 @@ export function grantsInOrder(
 export function grantsInOrderForPerson(
   store: ReceivedGrants,
   keysHex: readonly string[],
-  options: { readonly scopeHex?: string; readonly allowMember?: boolean } = {},
+  options: { readonly scopeHex?: string } = {},
 ): HeldGrant[] {
   const out: HeldGrant[] = [];
   const seen = new Set<string>();
@@ -425,7 +427,7 @@ export function previousGrantsInOrder(
   store: ReceivedGrants,
   accountHex: string,
   addressHex: string,
-  options: { readonly scopeHex?: string; readonly allowMember?: boolean } = {},
+  options: { readonly scopeHex?: string } = {},
 ): HeldGrant[] {
   const previous = store.people[accountHex]?.previous;
   if (previous === undefined) return [];
@@ -447,20 +449,7 @@ export function previousGrantsInOrder(
     const g = scopes[s]?.channel;
     if (live(g)) out.push(g);
   }
-  if (options.allowMember === true && options.scopeHex !== undefined) {
-    const g = scopes[options.scopeHex]?.member;
-    if (live(g)) out.push(g);
-  }
   return out;
-}
-
-/** The best grant held for a person ({@link grantsInOrderForPerson}). */
-export function bestGrantForPerson(
-  store: ReceivedGrants,
-  keysHex: readonly string[],
-  options: { readonly scopeHex?: string; readonly allowMember?: boolean } = {},
-): HeldGrant | null {
-  return grantsInOrderForPerson(store, keysHex, options)[0] ?? null;
 }
 
 /** {@link heldClasses} over every key of one person. */

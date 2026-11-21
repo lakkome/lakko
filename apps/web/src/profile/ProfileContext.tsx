@@ -91,6 +91,7 @@ import { rosterOf } from "../chat/client";
 import { reachSession, reachSessionSignal, reachVersionsTick } from "../reach/reach-service";
 import { foldProfileGrants, grantsWithVerifiedBindings } from "../reach/grant-intake";
 import { personKeysOf } from "../reach/mailbox-write";
+import { pruneGrantsOfScope } from "../reach/write-plan";
 import {
   installProfileResend,
   owedProfileConversations,
@@ -1042,6 +1043,10 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       // evicted member cannot open the republished profile.
       const session = reachSession();
       if (session === null) return;
+      // G-53 - a person left: the grants kept from this conversation that a
+      // higher version of the same key replaced are deleted (the core
+      // decides; a grant at its key's highest version stays). Not awaited.
+      void pruneGrantsOfScope(journalHex(base64Decode(groupIdB64)));
       try {
         await session.rotateOnShrink(base64Decode(groupIdB64));
       } catch (err) {

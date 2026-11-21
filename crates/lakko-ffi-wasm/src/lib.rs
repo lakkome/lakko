@@ -119,6 +119,7 @@ pub mod presence;
 pub mod publisher_devices;
 pub mod push;
 pub mod push_wake;
+pub mod reach_plan;
 pub mod reaction_rules;
 pub mod recovery_payload;
 pub mod release;

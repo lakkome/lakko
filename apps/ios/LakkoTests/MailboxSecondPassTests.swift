@@ -291,8 +291,22 @@ final class MailboxSecondPassTests: XCTestCase {
 
         XCTAssertEqual(merged.count, 2, "same class, scope and version under another seed: two mailboxes")
         XCTAssertEqual(merged.filter(\.isSuperseded).compactMap(\.seed), [old.seed])
-        XCTAssertEqual(ReachRules.writeSeeds(from: merged, groupIdHex: nil), [new.seed, old.seed])
-        XCTAssertEqual(ReachRules.writeSeed(from: merged, groupIdHex: nil), new.seed)
+        // G-53 — each mailbox is planned on its own: the two keys of one
+        // version are never collapsed into one, and the current mailbox comes
+        // first.
+        let byKey: [Data: Data] = [
+            old.seed: try identity(0x01).signaturePublicKey(), new.seed: try identity(0x02).signaturePublicKey(),
+        ]
+        let plans = ReachRules.planMailboxes(
+            from: merged, personKey: byKey[new.seed], purpose: .welcome, targetScopeHex: nil,
+            sharedScopeHexes: [], foundSeedB64: nil
+        ) { grant in
+            grant.seed.flatMap { byKey[$0] }.flatMap { key in
+                grant.ffiGrant.flatMap { MailboxTarget.verifiedOrNil(grant: $0, accountKey: key) }
+            }
+        }
+        XCTAssertEqual(plans.map(\.seeds), [[new.seed], [old.seed]])
+        XCTAssertTrue(plans.allSatisfy(\.plan.superseded.isEmpty))
         XCTAssertEqual(ReachRules.droppingSuperseded(merged).compactMap(\.seed), [new.seed])
     }
 

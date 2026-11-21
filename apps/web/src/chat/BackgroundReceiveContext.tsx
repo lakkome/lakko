@@ -149,6 +149,8 @@ import {
 import { readVerifiedBinding } from "../contacts/verified-binding";
 import { subscribeResetAccepted } from "../contacts/reset-events";
 import { installScopeLineage } from "../reach/mailbox-write";
+import { installSharedScopes } from "../reach/write-plan";
+import { sharedScopeHexesFor } from "../contacts/shared-groups";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { savedEntriesOf, unsaveEdit } from "./saved-messages";
 import { useLineage } from "./use-lineage";
@@ -1366,6 +1368,15 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   });
   // A Welcome's grant scope is widened through the lineage (R.7 case 3).
   installScopeLineage((scopeHex) => lineageView.lineage().segmentsOf(lineageView.lineage().conversationOf(scopeHex)));
+  // G-53 - the conversations this account shares with a person, read off the
+  // live rosters, for the core's reach-write plan.
+  installSharedScopes((keysHex) =>
+    sharedScopeHexesFor({
+      groups: chats.groups(),
+      ownKeyB64: ownPersonKeyB64(chats.identity()),
+      personKeysHex: keysHex,
+    }),
+  );
 
   /**
    * ADR-0050 section 2.5a point 4 — the background half of the superseded
@@ -2519,6 +2530,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     groupClosed.onPendingClaim(null);
     groupClosed.onAcceptedClaim(null);
     installScopeLineage(null);
+    installSharedScopes(null);
     installDeadSessionGuard(null);
     unsubscribeGrants();
     unregisterHeadPoller();

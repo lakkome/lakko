@@ -78,3 +78,64 @@ export async function sharedGroupsFor(input: {
     },
   });
 }
+
+/**
+ * G-53 - the conversations (group id hex) this account and a person are both
+ * current members of, for the core's reach-write plan (`reach/write-plan.ts`
+ * `sharedScopes`): any conversation, a one-to-one included, this device is
+ * still a current member of and whose roster holds this account and one of
+ * the person's keys (`personKeysHex`: the current key and the proven
+ * predecessors). Pure; the readers are passed in.
+ */
+export function sharedScopeHexesWith<G>(input: {
+  readonly groups: readonly G[];
+  /** The person's keys, hex, current first. */
+  readonly personKeysHex: readonly string[];
+  /** This account's key, hex. */
+  readonly ownKeyHex: string | null;
+  readonly isActive: (g: G) => boolean;
+  /** The roster's person keys, hex. */
+  readonly peopleHexOf: (g: G) => readonly string[];
+  readonly groupIdHexOf: (g: G) => string;
+}): string[] {
+  if (input.ownKeyHex === null) return [];
+  const own = input.ownKeyHex;
+  const person = input.personKeysHex.filter((k) => k !== own);
+  if (person.length === 0) return [];
+  const out: string[] = [];
+  for (const g of input.groups) {
+    if (!input.isActive(g)) continue;
+    const people = input.peopleHexOf(g);
+    if (!people.includes(own)) continue;
+    if (!person.some((k) => people.includes(k))) continue;
+    const id = input.groupIdHexOf(g);
+    if (!out.includes(id)) out.push(id);
+  }
+  return out;
+}
+
+/** {@link sharedScopeHexesWith} over the live registry. Never throws. */
+export function sharedScopeHexesFor(input: {
+  readonly groups: readonly ActiveGroup[];
+  readonly ownKeyB64: string | null;
+  readonly personKeysHex: readonly string[];
+}): string[] {
+  const hexOfB64 = (b64: string): string => {
+    const bin = atob(b64);
+    let out = "";
+    for (let i = 0; i < bin.length; i++) out += bin.charCodeAt(i).toString(16).padStart(2, "0");
+    return out;
+  };
+  try {
+    return sharedScopeHexesWith({
+      groups: input.groups,
+      personKeysHex: input.personKeysHex,
+      ownKeyHex: input.ownKeyB64 === null ? null : hexOfB64(input.ownKeyB64),
+      isActive: (g) => readIsActive(g.group) !== false,
+      peopleHexOf: (g) => personKeysOf(g.group).map(hexOfB64),
+      groupIdHexOf: (g) => syncGroupIdHex(g.group.groupId),
+    });
+  } catch {
+    return [];
+  }
+}

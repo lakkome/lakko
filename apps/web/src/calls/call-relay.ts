@@ -45,6 +45,7 @@ export type CallRelayWasm = Pick<
   | "composeCallName"
   | "verifyCallName"
   | "composeCallChat"
+  | "composeCallChatPicture"
   | "verifyCallChat"
 >;
 
@@ -278,6 +279,25 @@ export function groupPeerAnnouncer(
         return null;
       }
     },
+    composeCallChatPicture: (selfPeerId, seq, p) => {
+      if (group() === null) return null;
+      try {
+        return wasm.composeCallChatPicture(
+          identity,
+          callId,
+          selfPeerId,
+          seq,
+          p.blobId,
+          p.key,
+          p.nonce,
+          p.size,
+          p.width,
+          p.height,
+        );
+      } catch {
+        return null;
+      }
+    },
     verifyCallChat: (from, signerKey, bytes) => {
       const g = group();
       if (g === null) return null;
@@ -287,7 +307,17 @@ export function groupPeerAnnouncer(
           // The relay `from` is what the message was verified against; a
           // message naming another peer id is not this sender's.
           if (verified.peerId !== from) return null;
-          return { seq: verified.seq, text: verified.text };
+          const picture = verified.isPicture
+            ? {
+                blobId: verified.pictureBlobId,
+                key: verified.pictureKey,
+                nonce: verified.pictureNonce,
+                size: verified.pictureSize,
+                width: verified.pictureWidth,
+                height: verified.pictureHeight,
+              }
+            : null;
+          return { seq: verified.seq, text: verified.text, picture };
         } finally {
           verified.free();
         }

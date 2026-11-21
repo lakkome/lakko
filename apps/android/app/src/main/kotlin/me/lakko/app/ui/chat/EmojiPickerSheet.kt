@@ -122,7 +122,15 @@ internal fun EmojiPickerSheet(
     if (!gifAvailable && tab == 1) tab = 0
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
-        val sheetLabel = t(if (mode == PickerMode.REACTION) "chat.emoji.choose_reaction" else "chat.composer.emoji_gifs")
+        val sheetLabel = t(
+            when {
+                mode == PickerMode.REACTION -> "chat.emoji.choose_reaction"
+                // No GIF tab (the call chat, a server with no GIF provider):
+                // the sheet is named for what it holds.
+                !gifAvailable -> "chat.emoji.tab"
+                else -> "chat.composer.emoji_gifs"
+            },
+        )
         Column(
             modifier = Modifier
                 .fillMaxWidth()

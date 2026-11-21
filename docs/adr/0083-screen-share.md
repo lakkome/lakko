@@ -205,6 +205,39 @@ test-stack web configurations. The desktop client, when it exists, uses this
 code if its webview offers screen capture; otherwise it needs a native
 capture path, decided then.
 
+**The sender's own tile (amendment, 2026-11-21, maintainer).** The person
+sharing sees the live picture of their share, and no picture only when the
+share contains the call itself (UX spec section 3 and 3.1). No browser says
+which window or screen it captured, so the device decides from what each
+engine reports (`apps/web/src/calls/screen-share-mirror.ts`, pure, judged at
+the start, every 2 s and on a resize): a tab is a mirror only when Chromium's
+Capture Handle names this page; a window when the captured picture has this
+window's size; a screen when there is one screen or the picture has this
+screen's size; anything else shows the picture. The desktop app's host adds
+the screen count and the sizes in device pixels (`GET /__host/app/surfaces`).
+What each engine allows, and how much of it was measured:
+
+| Engine | `displaySurface` | Capture Handle | `screen.isExtended` | Which window or screen |
+|---|---|---|---|---|
+| Chromium (Chrome, Edge) | yes | yes | yes | not reported |
+| Firefox | not measured | no (not implemented) | no | not reported |
+| Safari | not measured | no | no | not reported |
+| WKWebView (desktop app, macOS) | not measured | no | no; the host reports the screen count | not reported to the page; the host knows its own window, which does not help without the captured one |
+
+Measured 2026-11-21 in the Chromium 156 browser pane of the Claude app:
+`displaySurface`, `restrictOwnAudio` and `CaptureController` present,
+`setCaptureHandleConfig` accepted, `screen.isExtended` true on a Mac with two
+screens; `getDisplayMedia` itself was refused there, so no captured track was
+read. Nothing was measured in Firefox, Safari or the desktop app: the system
+pickers need a person's click, and the share was not walked. The
+"not reported" column is from the engines' public APIs: no engine exposes a
+captured window's or screen's identity to the page (`CaptureController`
+steers focus and zoom, it does not identify). The size rule therefore errs
+both ways in stated cases: another window or screen of exactly this window's
+or screen's size reads as a mirror (the tile then shows the line, as before);
+a capture the engine scaled reads as no mirror (the tile shows a small
+repeating picture).
+
 ## Alternatives considered
 
 - **Last start heard wins.** Simple and wrong: two devices can each hear the

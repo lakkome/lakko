@@ -85,6 +85,15 @@ public final class ReachCenter: ObservableObject {
     private let ds: ReachDsTransport
     /// The ids of every group this account is in (set by the chat layer).
     public var groupIdsProvider: () -> [Data] = { [] }
+    /// G-53 — the conversations (hex group ids) this account and the person
+    /// with the given current account key are BOTH current members of, from
+    /// the live rosters (set by the chat layer). What makes a `group` or
+    /// `member` grant held for them a candidate (core `planReachWrites`).
+    public var sharedScopesProvider: (Data) -> [String] = { _ in [] }
+    /// G-53 — the seed (b64) of the grant a search found for a person (by
+    /// current account key b64), kept by ``keepFoundGrant(_:accountKey:)``:
+    /// the write plan tries it first. Memory only.
+    private var foundSeeds: [String: String] = [:]
     /// The ids of every channel this account subscribes to (set by the app
     /// shell): whether the one `channel` key is wanted, and which channel the
     /// account left (ADR-0078 section 9).
@@ -289,7 +298,10 @@ public final class ReachCenter: ObservableObject {
     /// signer registers them. Idempotent for the bound account.
     public func activate(accountIdB64: String, accountIdentity: Identity) {
         if self.accountIdB64 == accountIdB64, accountSeed != nil { return }
-        if self.accountIdB64 != accountIdB64 { hiddenFromSearch = false }
+        if self.accountIdB64 != accountIdB64 {
+            hiddenFromSearch = false
+            foundSeeds = [:]
+        }
         self.accountIdB64 = accountIdB64
         accountSeed = accountIdentity.ed25519Seed()
         ownAccountKey = accountIdentity.signaturePublicKey()
@@ -391,6 +403,7 @@ public final class ReachCenter: ObservableObject {
         ownMailbox = nil
         ownPredecessorMailboxes = []
         bindingCache = [:]
+        foundSeeds = [:]
         keyResolver = AccountKeyResolver()
         record = ReachRecord()
         heldEnvelopes = []
@@ -1219,6 +1232,24 @@ public final class ReachCenter: ObservableObject {
         if changed { persist() }
     }
 
+    /// G-53 — a member left the conversation `scopeHex` (a roster shrink was
+    /// observed): every person holding a grant filed there is planned again,
+    /// and what the core names superseded (a lower version of the same key)
+    /// is deleted. A highest-version grant stays: the core decides whether
+    /// it is still a candidate (it needs a conversation both are in now).
+    public func pruneHeld(inScope scopeHex: String) {
+        let scope = scopeHex.lowercased()
+        var people: [Data] = []
+        for (keyB64, held) in record.held where held.contains(where: { $0.scopeHex == scope }) {
+            guard let key = Data(base64Encoded: keyB64) else { continue }
+            let person = keyResolver.current(of: key)
+            if !people.contains(person) { people.append(person) }
+        }
+        for person in people {
+            _ = grantMailboxes(ofPerson: person, purpose: .welcome, groupIdHex: nil)
+        }
+    }
+
     /// Every key (base64) of the person `keyB64` belongs to, `keyB64` itself
     /// when it does not decode.
     private func personKeysB64(_ keyB64: String) -> [String] {
@@ -1277,18 +1308,49 @@ public final class ReachCenter: ObservableObject {
     /// from the grants held for them and the committer delegations kept for
     /// them, best first.
     private func knownTargets(ofPerson person: Data) -> [MailboxTarget] {
-        var out = grantMailboxes(ofPerson: person, groupIdHex: nil).map(\.target)
+        var out = grantMailboxes(ofPerson: person, purpose: .welcome, groupIdHex: nil).map(\.target)
         for target in delegationTargets(ofPerson: person) where !out.contains(target) {
             out.append(target)
         }
         return out
     }
 
-    private func grantMailboxes(ofPerson person: Data, groupIdHex: String?) -> [(target: MailboxTarget, seeds: [Data])] {
+    /// G-53 — the core's plan of the grants held for `person` (under any of
+    /// their keys), one per verified mailbox (``ReachRules/planMailboxes``).
+    /// The grants it names superseded are deleted here, whichever of the
+    /// person's keys they are filed under.
+    private func grantMailboxes(
+        ofPerson person: Data, purpose: FfiReachPurpose, groupIdHex: String?
+    ) -> [ReachRules.MailboxGrantPlan] {
         let keys = keyResolver.allKeys(of: person)
         let held = keys.flatMap { record.held[$0.base64EncodedString()] ?? [] }
-        return ReachRules.writeMailboxes(from: held, groupIdHex: groupIdHex) { [self] grant in
+        guard !held.isEmpty else { return [] }
+        let needsShared = held.contains { $0.reachClass == .group || $0.reachClass == .member }
+        let plans = ReachRules.planMailboxes(
+            from: held, personKey: person, purpose: purpose, targetScopeHex: groupIdHex?.lowercased(),
+            sharedScopeHexes: needsShared ? sharedScopesProvider(person).map { $0.lowercased() } : [],
+            foundSeedB64: foundSeeds[person.base64EncodedString()]
+        ) { [self] grant in
             target(of: grant, personKeys: keys)
+        }
+        deleteSuperseded(plans.flatMap(\.plan.superseded), filedUnder: keys)
+        return plans
+    }
+
+    /// Delete `superseded` from the grants filed under any of `keys`.
+    private func deleteSuperseded(_ superseded: [ReachRules.HeldGrant], filedUnder keys: [Data]) {
+        guard !superseded.isEmpty else { return }
+        var changed = false
+        for key in keys.map({ $0.base64EncodedString() }) {
+            guard let held = record.held[key] else { continue }
+            let kept = held.filter { !superseded.contains($0) }
+            guard kept.count != held.count else { continue }
+            record.held[key] = kept.isEmpty ? nil : kept
+            changed = true
+        }
+        if changed {
+            NSLog("G-53: \(superseded.count) reach grant(s) a newer version replaced were deleted")
+            persist()
         }
     }
 
@@ -1310,12 +1372,21 @@ public final class ReachCenter: ObservableObject {
                 candidates: ownContactSeed().map { [DsMailboxWriteAuth(reachSeed: $0)] } ?? [])
         }
         let person = currentAccountKey(of: accountKey)
-        if let best = grantMailboxes(ofPerson: person, groupIdHex: groupIdHex).first {
+        // G-53 — the core's Welcome order over the grants held for the
+        // person: the first mailbox with a candidate wins. A mailbox whose
+        // grants are all kept but none usable (a `group` / `member` grant
+        // with no conversation both are in now) offers only a delegation.
+        let plans = grantMailboxes(ofPerson: person, purpose: .welcome, groupIdHex: groupIdHex)
+        if let best = plans.first(where: { !$0.plan.candidates.isEmpty }) {
             var candidates = best.seeds.map { DsMailboxWriteAuth(reachSeed: $0) }
             if let delegated = delegatedAuth(toMailbox: best.target.address) { candidates.append(delegated) }
             return WritePlan(target: best.target, candidates: candidates)
         }
-        for target in delegationTargets(ofPerson: person) {
+        var targets = plans.map(\.target)
+        for target in delegationTargets(ofPerson: person) where !targets.contains(target) {
+            targets.append(target)
+        }
+        for target in targets {
             if let delegated = delegatedAuth(toMailbox: target.address) {
                 return WritePlan(target: target, candidates: [delegated])
             }
@@ -1520,6 +1591,17 @@ public final class ReachCenter: ObservableObject {
                 return verified
             }
         }
+        return ownOpenAddTarget(ofPerson: person, groupIdHex: groupIdHex)
+    }
+
+    /// G-53 — the open mailbox THIS device's own add of `person` to
+    /// `groupIdHex` found by search (``recordOpenAdd(groupIdHex:target:)``),
+    /// verified again; `nil` when no such add is recorded. Never an envelope
+    /// another device posted.
+    public func ownOpenAddTarget(ofPerson person: Data, groupIdHex: String) -> MailboxTarget? {
+        guard !keyResolver.isOwn(person), person != ownAccountKey else { return nil }
+        let current = keyResolver.current(of: person)
+        let group = groupIdHex.lowercased()
         for add in (record.openAdds ?? []).reversed() where add.groupIdHex == group {
             guard let key = Data(base64Encoded: add.accountKeyB64),
                   keyResolver.current(of: key) == current,
@@ -1590,6 +1672,9 @@ public final class ReachCenter: ObservableObject {
             record.held[key] = merged
             persist()
         }
+        // G-53 — the search just checked this grant live: the write plan of
+        // this add tries it first.
+        foundSeeds[key] = held.seedB64
         onGrantKept?(key)
         return true
     }
@@ -1680,7 +1765,10 @@ public final class ReachCenter: ObservableObject {
         // another mailbox than its binding's); each committer candidate is
         // named by its current key, the key it signs the delegated write with.
         let person = keyResolver.current(of: addedAccountKey)
-        guard let best = grantMailboxes(ofPerson: person, groupIdHex: groupIdHex).first,
+        // G-53 — the core's delegation order (found, contact, group,
+        // channel, fof): a `member` or `reply` grant never signs one.
+        guard let best = grantMailboxes(ofPerson: person, purpose: .delegation, groupIdHex: groupIdHex)
+            .first(where: { !$0.plan.candidates.isEmpty }),
               let issuer = best.seeds.first else { return nil }
         let expires = clockMs() + ReachRules.delegationLifetimeMs
         var blobs: [Data] = []
@@ -1781,7 +1869,8 @@ public final class ReachCenter: ObservableObject {
     public func heldMailbox(forAccountKeyB64 key: String, groupIdHex: String?) -> (seed: Data, target: MailboxTarget)? {
         guard let accountKey = Data(base64Encoded: key) else { return nil }
         let person = keyResolver.current(of: accountKey)
-        guard let best = grantMailboxes(ofPerson: person, groupIdHex: groupIdHex).first,
+        guard let best = grantMailboxes(ofPerson: person, purpose: .delegation, groupIdHex: groupIdHex)
+            .first(where: { !$0.plan.candidates.isEmpty }),
               let seed = best.seeds.first else { return nil }
         return (seed, best.target)
     }

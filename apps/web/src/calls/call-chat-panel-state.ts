@@ -32,13 +32,18 @@ export interface ChatPanelMessage {
   readonly own: boolean;
   readonly peerId: string | null;
   readonly text: string;
+  /** Present for a picture (section 4.1.4.1). */
+  readonly picture?: unknown;
 }
 
 /** The one-line preview of a message from someone else. */
 export interface ChatPreview {
   readonly messageId: string;
   readonly peerId: string;
+  /** The text; empty for a picture. */
   readonly text: string;
+  /** A picture: the line says `Picture` after the name. */
+  readonly picture: boolean;
   readonly expiresAtMs: number;
 }
 
@@ -76,6 +81,7 @@ export function panelIncoming(
       messageId: message.id,
       peerId: message.peerId,
       text: message.text,
+      picture: message.picture !== undefined,
       expiresAtMs: nowMs + CHAT_PREVIEW_MS,
     },
   };
@@ -187,6 +193,44 @@ export function composerInput(raw: string, previous: ComposerText, rule: ChatTex
   const cut = text !== normalised;
   const tooLong = cut || (previous.tooLong && text.length >= previous.text.length);
   return { text, tooLong, sendable: rule.checkCallChatText(text) === undefined };
+}
+
+/** The composer after an emoji was picked, and where the caret goes. */
+export interface EmojiInsert {
+  readonly composer: ComposerText;
+  /** The caret after the emoji, or the old caret when nothing went in. */
+  readonly caret: number;
+  /** The emoji went in. */
+  readonly inserted: boolean;
+}
+
+/**
+ * Put a picked emoji over the selection `[start, end)` of `value`
+ * (`docs/ux/calls.md` section 4.1.4, the emoji button). An emoji that would
+ * pass the length bound is not put in, not even in part: the text stays and
+ * the too-long line shows, as when typing reaches the bound.
+ */
+export function insertEmoji(
+  value: string,
+  start: number,
+  end: number,
+  emoji: string,
+  previous: ComposerText,
+  rule: ChatTextRule,
+): EmojiInsert {
+  const from = Math.max(0, Math.min(start, end, value.length));
+  const to = Math.max(from, Math.min(Math.max(start, end), value.length));
+  const candidate = value.slice(0, from) + emoji + value.slice(to);
+  const normalised = candidate.replace(/\r\n?/g, "\n");
+  if (rule.clampCallChatText(normalised) !== normalised) {
+    const kept = composerInput(value, previous, rule);
+    return { composer: { ...kept, tooLong: true }, caret: to, inserted: false };
+  }
+  return {
+    composer: composerInput(normalised, previous, rule),
+    caret: from + emoji.length,
+    inserted: true,
+  };
 }
 
 /** The empty composer. */

@@ -67,6 +67,9 @@
 //! - [`reach`] — ADR-0060 reach keys: the per-class, per-scope Ed25519 keys
 //!   an identity mailbox accepts a write under, derived from the account
 //!   seed, and the [`ReachGrant`] that hands one to someone.
+//! - [`reach_plan`] — G-53: which held grant writes a Welcome or signs a
+//!   committer delegation (supersession, shared-scope rule, one order for
+//!   every client) and when the unsigned write to an open mailbox may follow.
 //! - [`introduction`] — ADR-0060 contacts of contacts: introduction records
 //!   sealed under OPRF outputs, the offer that asks a contact to relay one,
 //!   and the padded bundle a contact relays.
@@ -169,6 +172,7 @@ pub mod publisher_device_request;
 pub mod push_routing;
 pub mod push_wake;
 pub mod reach;
+pub mod reach_plan;
 pub mod registrar_seed;
 pub mod rejoin_present;
 pub mod request;

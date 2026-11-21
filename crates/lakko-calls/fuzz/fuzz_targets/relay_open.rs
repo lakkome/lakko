@@ -22,7 +22,7 @@
 //!      call) never panics, on the raw input and behind the call-name
 //!      domain, and a name that decodes has a peer id and a name within
 //!      their bounds, a non-zero seq, and accounts for every input byte;
-//!   5. `decode_call_chat` (a message in the call's chat) likewise: a
+//!   5. `decode_call_chat` (a text or a picture in the call's chat) likewise: a
 //!      message that decodes has a peer id and a text within their bounds,
 //!      a text the composer would accept, a non-zero seq, and accounts for
 //!      every input byte.
@@ -30,8 +30,8 @@
 #![no_main]
 
 use lakko_calls::call_chat::{
-    call_chat_len, check_call_chat_text, decode_call_chat, CALL_CHAT_DOMAIN,
-    MAX_CALL_CHAT_TEXT_BYTES,
+    call_chat_len, call_chat_picture_len, check_call_chat_text, decode_call_chat, CallChatContent,
+    CALL_CHAT_DOMAIN, MAX_CALL_CHAT_TEXT_BYTES,
 };
 use lakko_calls::call_name::{
     call_name_len, decode_call_name, CALL_NAME_DOMAIN, MAX_CALL_NAME_BYTES,
@@ -80,10 +80,18 @@ fuzz_target!(|data: &[u8]| {
     for input in [data, prefixed.as_slice()] {
         if let Ok(m) = decode_call_chat(input) {
             assert!(!m.peer_id.is_empty() && m.peer_id.len() <= MAX_PEER_ID_LEN);
-            assert!(!m.text.is_empty() && m.text.len() <= MAX_CALL_CHAT_TEXT_BYTES);
-            assert!(check_call_chat_text(&m.text).is_ok());
             assert!(m.seq >= 1);
-            assert_eq!(call_chat_len(m.peer_id.len(), m.text.len()), input.len());
+            match &m.content {
+                CallChatContent::Text(text) => {
+                    assert!(!text.is_empty() && text.len() <= MAX_CALL_CHAT_TEXT_BYTES);
+                    assert!(check_call_chat_text(text).is_ok());
+                    assert_eq!(call_chat_len(m.peer_id.len(), text.len()), input.len());
+                },
+                CallChatContent::Picture(p) => {
+                    assert!(p.check().is_ok());
+                    assert_eq!(call_chat_picture_len(m.peer_id.len()), input.len());
+                },
+            }
         }
     }
 });

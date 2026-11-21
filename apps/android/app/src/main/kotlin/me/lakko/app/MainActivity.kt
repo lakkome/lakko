@@ -3200,13 +3200,15 @@ private fun SessionRoot(
                                 // sweep owes them can be written with it. A grant
                                 // that cannot be kept is logged and the add goes
                                 // on (the Welcome then waits for another grant).
-                                keepFoundGrant = { accountKey, wireB64 ->
+                                keepFoundGrant = { gidHex, accountKey, wireB64 ->
                                     try {
                                         val grant = uniffi.lakko_ffi_uniffi.decodeReachGrant(
                                             java.util.Base64.getDecoder().decode(wireB64),
                                         )
+                                        // G-53 — kept as THE found grant of
+                                        // this add, planned first.
                                         me.lakko.app.reach.ReachManager.get(appContext)
-                                            .fileHeld(accountKey, grant, scopeHex = "")
+                                            .keepFoundGrant(gidHex, accountKey, grant)
                                     } catch (cause: Throwable) {
                                         me.lakko.app.rethrowIfCancelled(cause)
                                         android.util.Log.w("MainActivity", "found grant not kept: ${cause.javaClass.simpleName}")

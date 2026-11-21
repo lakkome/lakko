@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import LakkoCore
 import SwiftUI
 import UIKit
 
@@ -111,6 +112,16 @@ struct CallChatPanel: View {
 
     @State private var draft = ""
     @State private var tooLong = false
+    /// The emoji picker's sheet is open over the panel.
+    @State private var choosingEmoji = false
+    /// The field's last selection as UTF-16 offsets into `draft`, where the
+    /// emoji picker inserts. The composer's text view reports it on every
+    /// iOS version.
+    @StateObject private var caret = ComposerCaret()
+    /// The picture shown full size over the call (section 4.1.4.1).
+    @State private var viewing: CallChatViewedPicture?
+    /// The picture the system's save picker is up for (`Save picture`).
+    @State private var exporting: ExportedFile?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -120,6 +131,42 @@ struct CallChatPanel: View {
             composer
         }
         .background(Color.lakkoSurface)
+        // `docs/ux/calls.md` section 4.1.4, "The emoji button": the
+        // conversation composer's emoji grid, Emoji only (the call chat
+        // carries text). A tap puts the emoji in and keeps the sheet open;
+        // `Done` closes it. The picker never sends.
+        .sheet(isPresented: $choosingEmoji) {
+            NavigationStack {
+                EmojiTab(onPick: { emoji in
+                    let edited = CallChatText.insertingEmoji(emoji, into: draft, range: caret.utf16Range)
+                    // The caret moves after the emoji, so the next pick
+                    // follows it (the field may report nothing while the
+                    // sheet holds the screen).
+                    if let after = edited.caret { caret.utf16Range = after..<after }
+                    draft = edited.text
+                    tooLong = edited.tooLong
+                })
+                .navigationTitle(l10n.t("call.chat.emoji"))
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button(l10n.t("common.done")) { choosingEmoji = false }
+                    }
+                }
+            }
+            .presentationDetents([.medium, .large])
+        }
+        // Section 4.1.4.1 — a picture full size over the call, on black.
+        .fullScreenCover(item: $viewing) { viewed in
+            CallChatPictureViewer(image: viewed.image)
+        }
+        .fileExport($exporting)
+        .onChange(of: exporting) { old, new in
+            // The copy written for the save picker goes once it is done.
+            if new == nil, let old {
+                try? FileManager.default.removeItem(at: old.url.deletingLastPathComponent())
+            }
+        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(l10n.t("call.chat.a11y"))
         // Esc on a hardware keyboard closes the panel first.
@@ -280,20 +327,39 @@ struct CallChatPanel: View {
             }
             HStack {
                 if message.isOwn { Spacer(minLength: 0) }
-                bubble(message)
-                    .opacity(message.delivery == .notSent ? 0.6 : 1)
-                    .lakkoLongPressMenu {
-                        [.action(l10n.t("common.copy"), icon: .copy) {
-                            UIPasteboard.general.string = message.text
-                        }]
-                    }
-                    .accessibilityElement(children: .combine)
-                    .accessibilityLabel(
-                        name.map {
-                            l10n.t("call.chat.message_a11y", texts: ["name": $0, "text": message.text])
-                        } ?? message.text)
-                    // At most 65% of the pane (design system, message bubble).
-                    .frame(maxWidth: maxBubbleWidth, alignment: message.isOwn ? .trailing : .leading)
+                if let picture = message.picture {
+                    pictureBubble(message, picture)
+                        .opacity(message.delivery == .sent ? 1 : 0.6)
+                        .lakkoLongPressMenu {
+                            guard let data = chat.pictureData(message.id) else { return [] }
+                            return [.action(l10n.t("call.chat.picture_save"), icon: .download) {
+                                savePicture(data)
+                            }]
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel(
+                            name.map {
+                                l10n.t("call.chat.message_a11y", texts: [
+                                    "name": $0, "text": l10n.t("call.chat.picture"),
+                                ])
+                            } ?? l10n.t("call.chat.picture"))
+                        .accessibilityAddTraits(.isButton)
+                } else {
+                    bubble(message)
+                        .opacity(message.delivery == .sent ? 1 : 0.6)
+                        .lakkoLongPressMenu {
+                            [.action(l10n.t("common.copy"), icon: .copy) {
+                                UIPasteboard.general.string = message.text
+                            }]
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel(
+                            name.map {
+                                l10n.t("call.chat.message_a11y", texts: ["name": $0, "text": message.text])
+                            } ?? message.text)
+                        // At most 65% of the pane (design system, message bubble).
+                        .frame(maxWidth: maxBubbleWidth, alignment: message.isOwn ? .trailing : .leading)
+                }
                 if !message.isOwn { Spacer(minLength: 0) }
             }
             if message.delivery == .notSent {
@@ -340,29 +406,161 @@ struct CallChatPanel: View {
                 .fill(own ? Color.lakkoAccent : Color.lakkoSurfaceSunken))
     }
 
+    /// A picture in its bubble (section 4.1.4.1): fitted into 240 x 240,
+    /// a box of its shape with a spinner while it downloads, `Picture not
+    /// available.` when it cannot be. A tap opens it full size.
+    private func pictureBubble(_ message: CallChatMessage, _ picture: CallChatMessage.Picture) -> some View {
+        let size = CallChatPictures.bubbleSize(width: picture.width, height: picture.height)
+        let image = chat.pictureImages[message.id]
+        return Button {
+            if let image { viewing = CallChatViewedPicture(id: message.id, image: image) }
+        } label: {
+            ZStack {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.lakkoSurfaceSunken)
+                if let image, picture.state == .ready {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: size.width, height: size.height)
+                        .clipped()
+                } else if picture.state == .unavailable {
+                    Text(l10n.t("call.chat.picture_unavailable"))
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.lakkoTextMuted)
+                        .multilineTextAlignment(.center)
+                        .padding(8)
+                } else {
+                    ProgressView()
+                }
+            }
+            .frame(width: size.width, height: size.height)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(alignment: .topTrailing) {
+                if message.delivery == .sending {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(Color.white)
+                        .padding(6)
+                        .background(Circle().fill(Color.black.opacity(0.4)))
+                        .padding(6)
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                Text(message.arrivedAt, format: .dateTime.hour().minute())
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.black.opacity(0.4)))
+                    .padding(6)
+                    .environment(\.locale, l10n.locale)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// `Save picture`: the same save the conversation's photo viewer uses, a
+    /// copy handed to the system's save picker.
+    private func savePicture(_ data: Data) {
+        let ref = AttachmentRef(
+            blobId: Data(), key: Data(), nonce: Data(), mime: "image/jpeg",
+            size: UInt64(data.count), name: "picture.jpg")
+        guard let url = MediaShareCopy.write(data, ref: ref) else { return }
+        // The action sheet this comes from is still closing; a second sheet
+        // asked for in the same moment is not presented, so the save picker
+        // waits for it.
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            exporting = ExportedFile(url: url)
+        }
+    }
+
     // MARK: Composer
 
-    private var sendable: Bool { CallChatText.isSendable(draft) }
+    private var sendable: Bool { chat.canSend(draft) }
+
+    /// The draft's binding: every edit is clamped at the limit.
+    private var draftBinding: Binding<String> {
+        Binding(
+            get: { draft },
+            set: { input in
+                let edited = CallChatText.edited(input)
+                draft = edited.text
+                tooLong = edited.tooLong
+            })
+    }
+
+    /// The conversation composer's text field: it grows to five lines, a
+    /// hardware Return sends (Shift+Return breaks the line), Paste of a
+    /// copied picture puts it in the tray (section 4.1.4.1), and it reports
+    /// its caret for the emoji picker on every iOS version.
+    private var field: some View {
+        ComposerTextField(
+            text: draftBinding, caret: caret, disabled: false,
+            onReturn: send,
+            onPasteMedia: chat.picturesAvailable ? { pastePicture($0) } : nil,
+            placeholder: l10n.t("call.chat.placeholder"))
+    }
+
+    /// The picture waiting above the field: a thumbnail 64 high with a cross.
+    @ViewBuilder
+    private var tray: some View {
+        if let image = chat.trayImage {
+            HStack {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 192, maxHeight: CallChatPictures.trayHeight)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(alignment: .topTrailing) {
+                        Button {
+                            chat.removeTrayPicture()
+                        } label: {
+                            LkIconView(.xmark, size: 12, relativeTo: nil)
+                                .foregroundStyle(Color.white)
+                                .frame(width: 22, height: 22)
+                                .background(Circle().fill(Color.black.opacity(0.6)))
+                                .frame(width: 44, height: 44, alignment: .topTrailing)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .offset(x: 8, y: -8)
+                        .accessibilityLabel(l10n.t("call.chat.picture_remove"))
+                    }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 4)
+            .padding(.top, 4)
+        }
+    }
+
+    private func pastePicture(_ providers: [NSItemProvider]) {
+        Task { @MainActor in
+            chat.pasted(await CallChatPictures.loadPasted(providers))
+        }
+    }
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 4) {
+            tray
             HStack(alignment: .bottom, spacing: 8) {
-                TextField(
-                    l10n.t("call.chat.placeholder"),
-                    text: Binding(
-                        get: { draft },
-                        set: { input in
-                            let edited = CallChatText.edited(input)
-                            draft = edited.text
-                            tooLong = edited.tooLong
-                        }),
-                    axis: .vertical
-                )
-                .lineLimit(1...5)
-                .composerFieldChrome()
-                // A hardware keyboard's Return sends; Shift+Return breaks the
-                // line. The on-screen keyboard's return keeps breaking it.
-                .submitOnHardwareReturn(send)
+                field
+                // The conversation composer's smiley, between the field and
+                // Send. The emoji goes at the caret on iOS 18 and later, at the
+                // end of the draft on iOS 17 (its text field reports no caret).
+                Button {
+                    choosingEmoji = true
+                } label: {
+                    LkIconView(.faceSmiling, size: 20, relativeTo: nil)
+                        .foregroundStyle(Color.lakkoTextMuted)
+                        .frame(width: 40, height: 40)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(l10n.t("call.chat.emoji"))
+                .padding(.bottom, 2)
                 Button(action: send) {
                     LkIconView(.arrowUpCircleFill, size: 36, relativeTo: nil)
                         .foregroundStyle(sendable ? Color.lakkoAccent : Color.lakkoTextMuted)
@@ -379,6 +577,12 @@ struct CallChatPanel: View {
                     .foregroundStyle(Color.lakkoTextMuted)
                     .padding(.horizontal, 6)
             }
+            if let refusal = chat.pictureRefusal {
+                Text(l10n.t(refusal.textKey))
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .padding(.horizontal, 6)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -391,8 +595,52 @@ struct CallChatPanel: View {
     private func send() {
         guard sendable else { return }
         if chat.send(draft) {
+            caret.utf16Range = nil
             draft = ""
             tooLong = false
+        }
+    }
+}
+
+/// A picture opened from the call chat.
+private struct CallChatViewedPicture: Identifiable {
+    let id: String
+    let image: UIImage
+}
+
+/// A call-chat picture full size over the call screen, on black (section
+/// 4.1.4.1): closed by a tap, `Esc` or the close button; the call runs on
+/// behind it.
+private struct CallChatPictureViewer: View {
+    let image: UIImage
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Color.black.ignoresSafeArea()
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .ignoresSafeArea()
+                .accessibilityLabel(Localization.text("call.chat.picture"))
+            Button {
+                dismiss()
+            } label: {
+                LkIconView(.xmark, size: 20)
+                    .foregroundStyle(Color.white)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 8)
+            .accessibilityLabel(Localization.text("common.close"))
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { dismiss() }
+        .onKeyPress(.escape) {
+            dismiss()
+            return .handled
         }
     }
 }

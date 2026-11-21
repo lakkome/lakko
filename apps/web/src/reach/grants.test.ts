@@ -85,12 +85,11 @@ describe("the received-grant store", () => {
     expect(heldClasses(s, ALICE, "g1")).toEqual(new Set(["member"]));
   });
 
-  it("prefers contact, then a group key, then a channel key; a member key only for a Welcome into its scope", () => {
+  it("prefers contact, then a group key, then a channel key; never a member key (a Welcome is the core's plan)", () => {
     let s = fileScopedGrant(EMPTY_RECEIVED_GRANTS, ALICE, "g1", "member", g("mem"));
     expect(bestGrantFor(s, ALICE)).toBeNull();
     expect(canFind(s, ALICE)).toBe(false);
-    expect(bestGrantFor(s, ALICE, { scopeHex: "g1", allowMember: true })?.wireB64).toBe("mem");
-    expect(bestGrantFor(s, ALICE, { scopeHex: "g2", allowMember: true })).toBeNull();
+    expect(bestGrantFor(s, ALICE, { scopeHex: "g1" })).toBeNull();
     s = fileScopedGrant(s, ALICE, "c1", "channel", g("chan"));
     expect(bestGrantFor(s, ALICE)?.wireB64).toBe("chan");
     s = fileScopedGrant(s, ALICE, "g2", "group", g("grp"));

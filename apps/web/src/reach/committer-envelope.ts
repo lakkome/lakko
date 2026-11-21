@@ -34,7 +34,7 @@ import { DELEGATION_TTL_MS, committerCandidates } from "./delegation-rules";
 import { openCommitterEnvelope } from "./found-grant";
 import { personKeysOf, verifiedTargetOfGrant } from "./mailbox-write";
 import { reachSession } from "./reach-service";
-import { bestGrantForPerson } from "./received-grants";
+import { forgetSuperseded, planPersonReach, sharedScopesOf } from "./write-plan";
 
 /** What a send came to. */
 export type EnvelopeSendResult =
@@ -173,16 +173,22 @@ async function signedEnvelope(
  * Post the envelope for an Add this device proposed: one delegation per
  * committer candidate (the owner, then the admins by rank, at most
  * `maxCommitterDelegations()`), each signed with the grant this account keeps
- * for the added person (a grant a search found them through is kept before the
- * add, `reach/found-grant.ts`) and naming the candidate's account key.
+ * for the added person and naming the candidate's account key. Which grant is
+ * the core's plan (G-53, `write-plan.ts`, delegation purpose): the grant a
+ * search found them through (kept before the add, `reach/found-grant.ts`),
+ * then contact, group, channel, fof, each at its key's highest version, a
+ * `group` grant only while this account shares a conversation with them; the
+ * superseded grants the plan names are deleted.
  *
- * With no grant held, a person found in **Everyone** gets the envelope with NO
- * delegation and their mailbox binding (`openBindingB64`, from their public
- * record, verified under the added account key): whichever candidate commits
- * writes the Welcome unsigned to that mailbox. This device records the same
+ * A person the search found in **Everyone** (`openBindingB64`, the mailbox
+ * binding of their public record, verified under the added account key) gets
+ * the envelope with NO delegation and that binding, whatever grant is held
+ * (G-53): whichever candidate commits writes the Welcome unsigned to that
+ * mailbox, after any signed way it holds. This device records the same
  * envelope for itself (a device never receives its own group messages), so its
  * own sweep can deliver; a send with no binding in hand re-sends the recorded
- * one. With neither, nothing is posted.
+ * one for this group. Otherwise the envelope is signed with the plan's grant;
+ * with neither, nothing is posted.
  *
  * `onSent` runs only after the publish succeeded. Never throws.
  */
@@ -200,19 +206,21 @@ export async function sendCommitterEnvelope(args: {
   let signed: boolean;
   let coveredHex: string[];
   try {
-    // ADR-0074 section 3.5a rules 1 and 2 - the grant held for the PERSON
-    // (under any key they have had), for their CURRENT mailbox.
-    const held = bestGrantForPerson(
-      session.receivedGrants(),
-      personKeysHex(journalHex(addedAccountKey)),
-      { scopeHex: journalHex(group.groupId) },
-    );
     coveredHex = await committerCandidateHexes(group);
-    signed = held !== null;
-    bytes =
-      held === null
-        ? await openCommitterEnvelope(journalHex(group.groupId), addedAccountKey, openBindingB64)
-        : await signedEnvelope(coveredHex, addedAccountKey, held.wireB64);
+    const scopeHex = journalHex(group.groupId);
+    // G-53 - an add from search whose found reach is the person's OPEN
+    // mailbox posts the open envelope (no delegation, the binding the search
+    // found) whatever grant is held: a held grant may be dead, and a signed
+    // envelope leaves the committer no open fallback. The first send carries
+    // the binding; a re-send finds the envelope this device recorded for the
+    // group. A binding that does not verify falls through to the plan.
+    const open = await openCommitterEnvelope(scopeHex, addedAccountKey, openBindingB64);
+    if (open !== null) {
+      bytes = open;
+      signed = false;
+    } else {
+      ({ bytes, signed } = await plannedEnvelope(session, coveredHex, scopeHex, addedAccountKey));
+    }
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn("ContactsClient: committer delegations not built", err instanceof Error ? err.message : "");
@@ -228,6 +236,31 @@ export async function sendCommitterEnvelope(args: {
   }
   args.onSent({ sentAtMs: Date.now(), signed, coveredHex });
   return "sent";
+}
+
+/** The envelope signed with the plan's first delegation candidate (G-53), or
+ *  `null` with no candidate (an open envelope needs a binding this device
+ *  does not hold). Deletes the grants the plan names superseded. */
+async function plannedEnvelope(
+  session: NonNullable<ReturnType<typeof reachSession>>,
+  coveredHex: readonly string[],
+  scopeHex: string,
+  addedAccountKey: Uint8Array,
+): Promise<{ bytes: Uint8Array | null; signed: boolean }> {
+  // ADR-0074 section 3.5a rules 1 and 2 - the grant held for the PERSON
+  // (under any key they have had), for their CURRENT mailbox first.
+  const keysHex = personKeysHex(journalHex(addedAccountKey));
+  const plan = await planPersonReach(
+    session.receivedGrants(),
+    keysHex,
+    personKeysOf(addedAccountKey),
+    "delegation",
+    { targetScopeHex: scopeHex, sharedScopeHexes: sharedScopesOf(keysHex) },
+  );
+  await forgetSuperseded(plan.superseded);
+  const held = plan.candidates[0]?.grant ?? null;
+  if (held === null) return { bytes: null, signed: false };
+  return { bytes: await signedEnvelope(coveredHex, addedAccountKey, held.wireB64), signed: true };
 }
 
 /** What the re-send pass needs from its host. */

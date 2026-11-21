@@ -206,6 +206,114 @@ describe("the composer", () => {
   });
 });
 
+describe("the emoji button", () => {
+  it("opens the emoji picker without a GIF tab and puts an emoji at the caret", async () => {
+    await settle();
+    chatButton().click();
+    await settle();
+    const button = one<HTMLButtonElement>(".lk-call-chat-emoji");
+    expect(button.getAttribute("aria-label")).toBe("Emoji");
+    expect(present(".lk-call-chat .lakko-picker")).toBe(false);
+    const field = type("ab");
+    field.setSelectionRange(1, 1);
+    button.click();
+    await settle();
+    expect(present(".lk-call-chat .lakko-picker")).toBe(true);
+    expect(present(".lk-call-chat .lakko-picker-tabs")).toBe(false);
+
+    const cell = one<HTMLButtonElement>(".lk-call-chat .lakko-emoji-grid button");
+    const glyph = cell.textContent ?? "";
+    expect(glyph.length).toBeGreaterThan(0);
+    cell.click();
+    await settle();
+    expect(field.value).toBe(`a${glyph}b`);
+    // The picker stays open for another one, and nothing was sent.
+    expect(present(".lk-call-chat .lakko-picker")).toBe(true);
+    expect(sent).toEqual([]);
+    expect(one<HTMLButtonElement>(".lk-call-chat-send").disabled).toBe(false);
+  });
+
+  it("closes on Esc and leaves the panel open", async () => {
+    await settle();
+    chatButton().click();
+    await settle();
+    one<HTMLButtonElement>(".lk-call-chat-emoji").click();
+    await settle();
+    key(one(".lk-call-chat-field"), "Escape");
+    await settle();
+    expect(present(".lk-call-chat .lakko-picker")).toBe(false);
+    expect(present(".lk-call-chat")).toBe(true);
+    expect(collapses).toBe(0);
+  });
+});
+
+describe("pictures (section 4.1.4.1)", () => {
+  it("says only pictures can be sent when a pasted file is not one", async () => {
+    await settle();
+    chatButton().click();
+    callChatActions.setControl({
+      send: (text) => sent.push(text),
+      sendAgain: (id) => resent.push(id),
+      sendPicture: () => undefined,
+    });
+    await settle();
+    const field = one<HTMLTextAreaElement>(".lk-call-chat-field");
+    // jsdom has no DataTransfer: the panel reads only `files`.
+    const data = { files: [new File([new Uint8Array(4)], "notes.pdf", { type: "application/pdf" })] };
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", { value: data });
+    field.dispatchEvent(paste);
+    await settle();
+    expect(paste.defaultPrevented).toBe(true);
+    expect(field.value).toBe("");
+    expect(all(".lk-call-chat-too-long").map((el) => el.textContent)).toContain(
+      "Only pictures can be sent in a call.",
+    );
+    expect(present(".lk-call-chat-tray")).toBe(false);
+  });
+
+  it("draws a picture, its loading and its missing state, and offers Save picture", async () => {
+    await settle();
+    chatButton().click();
+    callChatActions.setMessages([
+      message({ id: "anna:1", text: "", picture: { width: 640, height: 480, status: "ready", url: "blob:x" } }),
+      message({ id: "anna:2", seq: 2n, text: "", picture: { width: 10, height: 10, status: "loading", url: null } }),
+      message({ id: "anna:3", seq: 3n, text: "", picture: { width: 10, height: 10, status: "unavailable", url: null } }),
+    ]);
+    await settle();
+    const pictures = all(".lk-call-chat-picture");
+    expect(pictures).toHaveLength(3);
+    expect(pictures[0]?.style.width).toBe("240px");
+    expect(pictures[0]?.style.height).toBe("180px");
+    expect(pictures[0]?.querySelector("img")?.getAttribute("src")).toBe("blob:x");
+    expect(present(".lk-call-chat-picture-spinner")).toBe(true);
+    expect(one(".lk-call-chat-picture-gone").textContent).toBe("Picture not available.");
+
+    one(".lk-call-chat-bubble").dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }),
+    );
+    await settle();
+    expect(all(".lk-call-chat-menu [role=menuitem]").map((el) => el.textContent)).toEqual(["Save picture"]);
+  });
+
+  it("opens a picture over the call and closes it on Esc without closing the chat", async () => {
+    await settle();
+    chatButton().click();
+    callChatActions.setMessages([
+      message({ id: "anna:1", text: "", picture: { width: 640, height: 480, status: "ready", url: "blob:x" } }),
+    ]);
+    await settle();
+    one<HTMLButtonElement>(".lk-call-chat-picture-open").click();
+    await settle();
+    const viewer = one(".lk-call-chat-viewer");
+    key(viewer, "Escape");
+    await settle();
+    expect(present(".lk-call-chat-viewer")).toBe(false);
+    expect(present(".lk-call-chat")).toBe(true);
+    expect(collapses).toBe(0);
+  });
+});
+
 describe("a message that was not sent", () => {
   it("says so and sends it again", async () => {
     await settle();
