@@ -45,6 +45,7 @@
  * of the session rather than acquiring + releasing per call,
  * because the poll loop needs a long-lived handle.
  */
+import { PHASE_SYNCED_STATE, registerBeforeYield } from "../../tab/before-yield";
 import type { DeviceCipher } from "../../auth/device-cipher";
 import {
   createContext,
@@ -1305,6 +1306,15 @@ export function DeviceGroupSyncProvider(props: {
       return false;
     }
   }
+
+  // docs/ux/one-tab.md section 4 — a takeover by another tab writes the
+  // synced state now, past the debounce, after the open composer's draft was
+  // folded into it (phase 0), so the next tab finds the draft.
+  onCleanup(
+    registerBeforeYield(PHASE_SYNCED_STATE, async () => {
+      await persistSyncedNow();
+    }),
+  );
 
   // ----- Growth re-send (ADR-0058 section 5.1) -------------------
 

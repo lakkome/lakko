@@ -10096,6 +10096,22 @@
     "recovery_phrase.fresh.publish_waiting": {
       "text": "کلیدهای حساب شما کمتر از یک ساعت پس از آخرین تغییر بازنشانی شد. تغییر تا {minutes, plural, one {# دقیقه} other {# دقیقه}} دیگر خودبه‌خود کامل می‌شود و سپس Lakko کلمات جدید را نشان می‌دهد.",
       "status": "machine"
+    },
+    "tab.other.title": {
+      "text": "Lakko در زبانه‌ای دیگر باز است.",
+      "status": "machine"
+    },
+    "tab.other.body": {
+      "text": "Lakko هر بار فقط در یک زبانه کار می‌کند. اینجا از آن استفاده کنید تا زبانهٔ دیگر متوقف شود.",
+      "status": "machine"
+    },
+    "tab.other.use_here": {
+      "text": "استفاده در اینجا",
+      "status": "machine"
+    },
+    "tab.other.opening": {
+      "text": "در حال باز شدن در اینجا...",
+      "status": "machine"
     }
   },
   "language": "fa"

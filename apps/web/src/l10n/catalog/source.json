@@ -11928,6 +11928,22 @@
       "text": "Who can find me",
       "comment": "Title of the Settings > Privacy screen that decides who can find the person by username or name and ask to be their contact.",
       "security_critical": true
+    },
+    "tab.other.title": {
+      "text": "Lakko is open in another tab.",
+      "comment": "Title of the notice a browser tab shows while Lakko runs in another tab of the same browser (docs/ux/one-tab.md). Plain statement, no blame."
+    },
+    "tab.other.body": {
+      "text": "Lakko works in one tab at a time. Use it here and the other tab stops.",
+      "comment": "Line under 'Lakko is open in another tab.'; explains the button 'Use here', which moves Lakko to this tab and stops the other one."
+    },
+    "tab.other.use_here": {
+      "text": "Use here",
+      "comment": "Button on the 'open in another tab' notice: moves Lakko to this tab; the other tab stops and shows the same notice."
+    },
+    "tab.other.opening": {
+      "text": "Opening here...",
+      "comment": "The 'Use here' button while this tab waits for the other tab to stop (a few seconds at most)."
     }
   }
 }

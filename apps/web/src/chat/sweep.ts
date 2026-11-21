@@ -381,12 +381,13 @@ export interface SweepPorts {
   /** Echo-suppress a row this device published, so its own next poll drops it
    *  instead of hitting `CannotDecryptOwnMessage`. */
   markOwnPublished(messageId: number): void;
-  /** Best-effort MLS snapshot persist after a merge / abandon. */
+  /** Best-effort MLS snapshot persist after an abandon (a merge uses the
+   *  fail-closed {@link persistApplied}). */
   persist(): Promise<void>;
   /**
    * FAIL-CLOSED MLS snapshot persist — REJECTS on a failed write.
    *
-   * Used by {@link adjudicate} only, and it has to be a separate port from
+   * Used by {@link adjudicate} and after a merge, and it has to be a separate port from
    * {@link persist} because the two want opposite things from a failure. The
    * verdict apply consumes journal rows the poll will never fetch again, so it
    * advances the shared cursor over them — which makes it subject to exactly
@@ -851,7 +852,25 @@ async function publishAndAdjudicate(
   // key registered before the publish), so there is nothing to heal.
   await finishApply?.(false);
   group.mergeStagedSweep();
-  await ports.persist();
+  // docs/ux/one-tab.md backstop (option 4) — the merge must reach disk before
+  // the entry says the verdict is settled. A failure here is not swallowed:
+  // the entry then stays owed (`sweepVerdictPending`), so a reload that loads
+  // the N snapshot still holding this staged commit re-sends it (the DS
+  // answers the original id), reads the verdict again and merges, instead of
+  // finding an acked entry, abandoning the stage as an orphan and leaving the
+  // device below its own commit for good. The Welcome still goes out below:
+  // the verdict is in, and a second copy after such a reload is inert.
+  let mergeDurable = true;
+  try {
+    await ports.persistApplied();
+  } catch (err) {
+    mergeDurable = false;
+    // eslint-disable-next-line no-console
+    console.warn(
+      "ADR-0045: the merged sweep did not reach disk; its commit stays owed for the next start",
+      err instanceof Error ? err.name : "unknown",
+    );
+  }
 
   // The verdict is settled and the merge is durable, so from here on the ONLY
   // thing this entry still owes is the mailbox fan-out. Say so durably before
@@ -866,7 +885,7 @@ async function publishAndAdjudicate(
   // publishing now is correct with or without it, and refusing to publish
   // because a bookkeeping write failed would manufacture the very ghost member
   // this records against.
-  if (entry.welcomeEnvelopeB64 !== undefined) {
+  if (mergeDurable && entry.welcomeEnvelopeB64 !== undefined) {
     try {
       await ports.outbox.markWelcomesOwed(entry.id, commitMessageId);
     } catch (err) {
@@ -887,7 +906,7 @@ async function publishAndAdjudicate(
   // A mailbox no grant reaches keeps the entry owed (not acked); the commit
   // itself is settled, so the caller still gets `committed` and runs every
   // post-commit step.
-  if (unreachable === 0) {
+  if (unreachable === 0 && mergeDurable) {
     await ports.outbox.ack(entry.id, commitMessageId, welcomeMessageIds[0]);
   }
 

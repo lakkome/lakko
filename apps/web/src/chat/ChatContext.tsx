@@ -75,10 +75,7 @@ import {
   installMailboxAccess,
   installPredecessorChainAccess,
 } from "../ds/session-access";
-import {
-  saveMlsSnapshot,
-  saveSnapshotWithCommitEntry,
-} from "./mls-store";
+import { mlsSnapshotWriter, type SnapshotCapture } from "./mls-store";
 import type { NewCommitEntry, PendingCommitEntry } from "./commit-outbox";
 
 /** One entry in the active-groups registry. */
@@ -226,6 +223,21 @@ export interface ChatApi {
 
 const ChatContext = createContext<ChatApi>();
 
+/** The epoch of every group in the registry, for the snapshot writer's
+ *  monotone check (docs/ux/one-tab.md section 6). A group whose epoch cannot
+ *  be read (freed) is left out. */
+export function groupEpochsOf(groups: readonly ActiveGroup[]): Record<string, bigint> {
+  const out: Record<string, bigint> = {};
+  for (const g of groups) {
+    try {
+      out[g.groupIdB64] = g.group.epoch;
+    } catch {
+      /* freed: not part of the check */
+    }
+  }
+  return out;
+}
+
 /** When this device created or joined each group, for the snapshot row. */
 export function joinedTimes(groups: readonly ActiveGroup[]): Record<string, number> {
   return Object.fromEntries(
@@ -343,6 +355,20 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
   });
   onCleanup(() => installOwnAccountKeys(() => []));
 
+  /** What one snapshot write captures, taken at its turn in the writer's
+   *  chain (`mls-store.ts` SnapshotWriter): the provider bytes and the group
+   *  epochs in one synchronous turn. */
+  function captureFrom(id: WasmIdentity): SnapshotCapture {
+    const list = groups();
+    return {
+      snapshotBytes: id.snapshotStorage(),
+      knownGroupIds: list.map((g) => g.groupIdB64),
+      leafKeyB64: base64Encode(id.signaturePublicKey),
+      joinedAtMs: joinedTimes(list),
+      groupEpochs: groupEpochsOf(list),
+    };
+  }
+
   const api: ChatApi = {
     groups,
     identity,
@@ -447,16 +473,7 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
         // rather than throwing — there's no recoverable state.
         return;
       }
-      const snapshotBytes = id.snapshotStorage();
-      const knownGroupIds = groups().map((g) => g.groupIdB64);
-      await saveMlsSnapshot(
-        accountIdB64,
-        deviceKey,
-        snapshotBytes,
-        knownGroupIds,
-        base64Encode(id.signaturePublicKey),
-        joinedTimes(groups()),
-      );
+      await mlsSnapshotWriter.write(accountIdB64, deviceKey, () => captureFrom(id));
     },
     async persistSnapshotDurable(accountIdB64, expectedIdentity) {
       const id = identity();
@@ -472,23 +489,17 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
       if (deviceKey === null) {
         throw new Error("persistSnapshotDurable: no device key");
       }
-      // Re-checked after the await: a logout / forgetDevice in that window
-      // freed the identity this snapshot would be taken from.
-      if (identity() !== id) {
-        throw new Error(
-          "persistSnapshotDurable: the canonical Identity changed (session switched)",
-        );
-      }
-      const snapshotBytes = id.snapshotStorage();
-      const knownGroupIds = groups().map((g) => g.groupIdB64);
-      await saveMlsSnapshot(
-        accountIdB64,
-        deviceKey,
-        snapshotBytes,
-        knownGroupIds,
-        base64Encode(id.signaturePublicKey),
-        joinedTimes(groups()),
-      );
+      // Re-checked at the write's turn in the chain (after the device-key
+      // await and any write queued before it): a logout / forgetDevice in
+      // that window freed the identity this snapshot would be taken from.
+      await mlsSnapshotWriter.write(accountIdB64, deviceKey, () => {
+        if (identity() !== id) {
+          throw new Error(
+            "persistSnapshotDurable: the canonical Identity changed (session switched)",
+          );
+        }
+        return captureFrom(id);
+      });
     },
     async persistSnapshotWithCommit(accountIdB64, entry) {
       // FAIL-CLOSED (unlike persistSnapshot's no-op returns): a commit path is
@@ -506,26 +517,29 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
           "persistSnapshotWithCommit: no device key — commit aborted",
         );
       }
-      const snapshotBytes = id.snapshotStorage();
-      const knownGroupIds = groups().map((g) => g.groupIdB64);
       const full: PendingCommitEntry = {
         ...entry,
         accountId: accountIdB64,
         acked: false,
       };
       // ONE atomic transaction over the snapshot + outbox stores.
-      await saveSnapshotWithCommitEntry(
+      await mlsSnapshotWriter.write(
         accountIdB64,
         deviceKey,
-        snapshotBytes,
-        knownGroupIds,
+        () => {
+          if (identity() !== id) {
+            throw new Error(
+              "persistSnapshotWithCommit: the canonical Identity changed — commit aborted",
+            );
+          }
+          return captureFrom(id);
+        },
         full,
-        base64Encode(id.signaturePublicKey),
-        joinedTimes(groups()),
       );
     },
     clear() {
       setGroups([]);
+      mlsSnapshotWriter.reset();
       replaceIdentity(null);
       replaceAccountIdentity(null);
       replacePredecessorIdentity(null);

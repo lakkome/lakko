@@ -10096,6 +10096,22 @@
     "recovery_phrase.fresh.publish_waiting": {
       "text": "Hesap anahtarlarınız son değişiklikten bir saatten kısa süre sonra sıfırlandı. Değişiklik {minutes, plural, one {# dakika} other {# dakika}} içinde kendiliğinden tamamlanacak; ardından Lakko yeni kelimeleri gösterecek.",
       "status": "machine"
+    },
+    "tab.other.title": {
+      "text": "Lakko başka bir sekmede açık.",
+      "status": "machine"
+    },
+    "tab.other.body": {
+      "text": "Lakko aynı anda tek bir sekmede çalışır. Burada kullanın, diğer sekme durur.",
+      "status": "machine"
+    },
+    "tab.other.use_here": {
+      "text": "Burada kullan",
+      "status": "machine"
+    },
+    "tab.other.opening": {
+      "text": "Burada açılıyor...",
+      "status": "machine"
     }
   },
   "language": "tr"

@@ -10096,6 +10096,22 @@
     "recovery_phrase.fresh.publish_waiting": {
       "text": "आपके अकाउंट की कुंजियाँ पिछले बदलाव के एक घंटे से भी कम समय बाद रीसेट हुईं। बदलाव {minutes, plural, one {# मिनट} other {# मिनट}} में अपने-आप पूरा हो जाएगा, फिर Lakko नए शब्द दिखाएगा।",
       "status": "machine"
+    },
+    "tab.other.title": {
+      "text": "Lakko किसी दूसरे टैब में खुला है।",
+      "status": "machine"
+    },
+    "tab.other.body": {
+      "text": "Lakko एक समय में एक ही टैब में चलता है। इसे यहाँ इस्तेमाल करें, दूसरा टैब रुक जाएगा।",
+      "status": "machine"
+    },
+    "tab.other.use_here": {
+      "text": "यहाँ इस्तेमाल करें",
+      "status": "machine"
+    },
+    "tab.other.opening": {
+      "text": "यहाँ खुल रहा है...",
+      "status": "machine"
     }
   },
   "language": "hi"

@@ -10096,6 +10096,22 @@
     "recovery_phrase.fresh.publish_waiting": {
       "text": "أُعيد تعيين مفاتيح حسابك بعد أقل من ساعة من آخر تغيير. سيكتمل التغيير من تلقاء نفسه خلال {minutes, plural, zero {# دقيقة} one {دقيقة واحدة} two {دقيقتين} few {# دقائق} many {# دقيقة} other {# دقيقة}}، ثم يعرض Lakko الكلمات الجديدة.",
       "status": "machine"
+    },
+    "tab.other.title": {
+      "text": "Lakko مفتوح في علامة تبويب أخرى.",
+      "status": "machine"
+    },
+    "tab.other.body": {
+      "text": "يعمل Lakko في علامة تبويب واحدة في كل مرة. استخدمه هنا وستتوقف علامة التبويب الأخرى.",
+      "status": "machine"
+    },
+    "tab.other.use_here": {
+      "text": "استخدم هنا",
+      "status": "machine"
+    },
+    "tab.other.opening": {
+      "text": "جارٍ الفتح هنا...",
+      "status": "machine"
     }
   },
   "language": "ar"

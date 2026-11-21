@@ -1899,7 +1899,7 @@ under residual 1 is a live multi-device proof, not a mechanism.**
    a cross-tab lock, still builds on a stale epoch and clobbers tab A. Two tabs on one
    account are already broken independently of commits — two ordinary messages clobber
    each other the same way — so a cross-tab lock here would buy nothing and imply a
-   safety that does not exist.
+   safety that does not exist. **CLOSED 2026-11-21** by one active tab per browser (`docs/ux/one-tab.md`, `apps/web/src/tab/active-tab.ts`): a second tab shows "Lakko is open in another tab." with "Use here", which moves Lakko there and reloads the old tab; the app is loaded only in the tab holding the `lakko-active-tab` Web Lock (a BroadcastChannel probe where Web Locks are absent). Backstops in `chat/mls-store.ts`: one snapshot write chain per page, a write generation and a per-group epoch floor checked in the same transaction (a stale page writes nothing, publishes nothing and reloads), and the conversation cursor epoch taken from the last durable write. Found live on test.lakko.me the same day: a second page of one account rewrote the snapshot at an older epoch and stranded the owner's only device behind its own commits. Unit-tested; walked only without signing in.
 3. **web `CoPublishersPanel` (`routes/Channels.tsx`) — CLOSED (2026-08).** It was
    unguarded: a 5-second
    `setInterval` calls `refreshPending()` → `pollCoPublisherJournal` →

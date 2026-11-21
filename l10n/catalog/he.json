@@ -10096,6 +10096,22 @@
     "recovery_phrase.fresh.publish_waiting": {
       "text": "מפתחות החשבון שלכם אופסו פחות משעה אחרי השינוי הקודם. השינוי יסתיים מעצמו בעוד {minutes, plural, one {דקה אחת} two {שתי דקות} other {# דקות}}, ואז Lakko יציג את המילים החדשות.",
       "status": "machine"
+    },
+    "tab.other.title": {
+      "text": "Lakko פתוח בכרטיסייה אחרת.",
+      "status": "machine"
+    },
+    "tab.other.body": {
+      "text": "Lakko פועל בכרטיסייה אחת בכל פעם. השתמשו בו כאן והכרטיסייה האחרת תיעצר.",
+      "status": "machine"
+    },
+    "tab.other.use_here": {
+      "text": "שימוש כאן",
+      "status": "machine"
+    },
+    "tab.other.opening": {
+      "text": "נפתח כאן...",
+      "status": "machine"
     }
   },
   "language": "he"

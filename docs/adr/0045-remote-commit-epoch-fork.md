@@ -2269,7 +2269,7 @@ The recon was honest about Option C's limits; B's deserve the same treatment.
    provider and clobber each other through an `accountId`-keyed snapshot row. Under
    B both tabs derive the **same** signature key and therefore the **same rank**, so
    the deterministic ordering cannot separate them. ADR-0044's cross-tab Web Lock
-   remains the only mitigation, and it is secure-context-only.
+   remains the only mitigation, and it is secure-context-only. **CLOSED 2026-11-21** by one active tab per browser (`docs/ux/one-tab.md`, `apps/web/src/tab/active-tab.ts`): a second tab shows "Lakko is open in another tab." with "Use here", which moves Lakko there and reloads the old tab; the app is loaded only in the tab holding the `lakko-active-tab` Web Lock (a BroadcastChannel probe where Web Locks are absent). Backstops in `chat/mls-store.ts`: one snapshot write chain per page, a write generation and a per-group epoch floor checked in the same transaction (a stale page writes nothing, publishes nothing and reloads), and the conversation cursor epoch taken from the last durable write. Found live on test.lakko.me the same day: a second page of one account rewrote the snapshot at an older epoch and stranded the owner's only device behind its own commits. Unit-tested; walked only without signing in.
 7. **DeviceGroups and call groups are out of scope, for different reasons.** A
    DeviceGroup has no ADR-0022 role table (it carries the ADR-0015 removal policy
    instead) and its members are one user's own devices, so it has neither the

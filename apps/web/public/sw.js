@@ -322,6 +322,38 @@ self.addEventListener("push", (event) => {
  *
  * Click-through: `notificationclick` (below) opens the right route.
  */
+/**
+ * docs/ux/one-tab.md — the window that runs Lakko. One tab per browser holds
+ * the Web Lock `lakko-active-tab`; the others show "Lakko is open in another
+ * tab." and have no app loaded, so a message posted to one is lost and raising
+ * one shows the notice. `locks.query()` names the holder's client id, which is
+ * `Client.id`. Returns the windows of this origin that run Lakko: the lock
+ * holder alone (none when no tab runs), or every window of the origin where
+ * the worker cannot query locks (the behaviour before one tab).
+ *
+ * matchAll and the query run side by side, so a click handler waits no longer
+ * than it did for matchAll alone (the user activation `openWindow` needs).
+ */
+async function runningWindows() {
+  const [clients, held] = await Promise.all([
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).catch(() => []),
+    (async () => {
+      const locks = self.navigator?.locks;
+      if (locks === undefined || typeof locks.query !== "function") return undefined;
+      try {
+        const state = await locks.query();
+        const entry = (state?.held ?? []).find((l) => l.name === "lakko-active-tab");
+        return entry?.clientId ?? null;
+      } catch {
+        return undefined;
+      }
+    })(),
+  ]);
+  const ours = clients.filter((c) => c.url.startsWith(self.location.origin));
+  if (held === undefined) return ours;
+  return ours.filter((c) => c.id === held);
+}
+
 async function handlePush(wake) {
   // (0) The gate. Nothing below runs for a wake that is not the bound
   //     account's: no postMessage (the open app belongs to the signed-in
@@ -337,11 +369,10 @@ async function handlePush(wake) {
   // (a) Notify open tabs + detect whether one is visible.
   let hasVisibleTab = false;
   try {
-    const clients = await self.clients.matchAll({
-      type: "window",
-      includeUncontrolled: false,
-    });
-    for (const c of clients) {
+    // A visible tab that is not running Lakko (docs/ux/one-tab.md) shows a
+    // notice and nothing else: it does not count as a visible tab.
+    const running = await runningWindows();
+    for (const c of running) {
       c.postMessage({ type: "LAKKO_PUSH_WAKE", wake });
       if (c.visibilityState === "visible") hasVisibleTab = true;
     }
@@ -1077,7 +1108,7 @@ self.addEventListener("notificationclick", (event) => {
   if (event.notification.data?.lakkoDevicesNotice === true) {
     event.waitUntil(
       (async () => {
-        const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+        const clients = await runningWindows();
         for (const c of clients) {
           if (c.url.startsWith(self.location.origin)) {
             try {
@@ -1102,7 +1133,7 @@ self.addEventListener("notificationclick", (event) => {
   if (typeof openPath === "string" && /^\/channel\/[0-9a-f]{32}$/.test(openPath)) {
     event.waitUntil(
       (async () => {
-        const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+        const clients = await runningWindows();
         for (const c of clients) {
           if (c.url.startsWith(self.location.origin)) {
             try {
@@ -1145,10 +1176,7 @@ self.addEventListener("notificationclick", (event) => {
     (async () => {
       // If a Lakko tab is already open, tell it which chat was tapped
       // and raise it.
-      const clients = await self.clients.matchAll({
-        type: "window",
-        includeUncontrolled: true,
-      });
+      const clients = await runningWindows();
       for (const c of clients) {
         if (c.url.startsWith(self.location.origin)) {
           // G-36 — focusing alone tells the tab nothing about WHICH
@@ -1216,13 +1244,12 @@ async function handleCallClick(intent) {
     core = null;
   }
 
-  let clients = [];
+  let ours = [];
   try {
-    clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    ours = await runningWindows();
   } catch {
-    clients = [];
+    ours = [];
   }
-  const ours = clients.filter((c) => c.url.startsWith(self.location.origin));
 
   // Without the module the pure plan is unavailable; fall back to the shape
   // it would have produced for the commonest case rather than doing nothing.

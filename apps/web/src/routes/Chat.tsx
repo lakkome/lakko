@@ -587,6 +587,8 @@ import {
 } from "../chat/timeline-layout";
 import { conversationKindOf, type ConversationKind } from "../chat/conversation-kind";
 import { createDraftSeed } from "../chat/draft-seed";
+import { createDraftBroadcaster } from "../chat/draft-broadcaster";
+import { PHASE_DRAFTS, registerBeforeYield } from "../tab/before-yield";
 import {
   membershipNoticeAfterAttempt,
   membershipNoticeLanded,
@@ -1948,37 +1950,23 @@ function ChatView(props: {
   // Outbound broadcast — debounced. Every keystroke fires a
   // signal change; we batch ≤ 1 payload / DRAFT_DEBOUNCE_MS to
   // avoid drowning the DS journal in single-character commits.
-  let draftBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
-  let lastBroadcastDraft: string | null = null;
+  // docs/ux/one-tab.md section 4: a takeover by another tab sends the
+  // pending draft at once (phase 0), before the synced state that holds it
+  // is written (phase 1) and the tab reloads.
   const DRAFT_DEBOUNCE_MS = 500;
+  const draftBroadcaster = createDraftBroadcaster({
+    send: (text) => sync.setDraft(conversationIdBytes(), text),
+    debounceMs: DRAFT_DEBOUNCE_MS,
+    onError: (err) => {
+      // eslint-disable-next-line no-console
+      console.warn("setDraft failed", err);
+    },
+  });
   createEffect(() => {
-    const text = input();
-    // Cleared first: a message sent within the debounce leaves the composer
-    // where the last write left it, and the timer would save what was sent.
-    if (draftBroadcastTimer !== null) {
-      clearTimeout(draftBroadcastTimer);
-      draftBroadcastTimer = null;
-    }
-    if (text === lastBroadcastDraft) return;
-    draftBroadcastTimer = setTimeout(() => {
-      draftBroadcastTimer = null;
-      lastBroadcastDraft = text;
-      // Best-effort — a transient DS failure shouldn't crash
-      // the composer; the next keystroke will re-broadcast.
-      void sync
-        .setDraft(conversationIdBytes(), text)
-        .catch((err: unknown) => {
-          // eslint-disable-next-line no-console
-          console.warn("setDraft failed", err);
-        });
-    }, DRAFT_DEBOUNCE_MS);
+    draftBroadcaster.update(input());
   });
-  onCleanup(() => {
-    if (draftBroadcastTimer !== null) {
-      clearTimeout(draftBroadcastTimer);
-      draftBroadcastTimer = null;
-    }
-  });
+  onCleanup(registerBeforeYield(PHASE_DRAFTS, () => draftBroadcaster.flush()));
+  onCleanup(() => draftBroadcaster.dispose());
   // ----- ADR-0065: file lifetime and saved messages ---------------------
 
   /** The signed-in account, for the blob deletes it owes. */

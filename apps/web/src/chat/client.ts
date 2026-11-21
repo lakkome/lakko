@@ -123,6 +123,7 @@ import { clearReentryReadFrom, noteLeavesSeen, reentryReadFrom } from "./reentry
 import { deliverReentryRequest, noteLeafWrote } from "./reentry-admit";
 import { consumeKnockKeyRow } from "./knock-key";
 import { readCursorEpoch, recordCursorEpoch, rewindLine, snapshotRewindFrom } from "./cursor-epoch";
+import { mlsSnapshotWriter } from "./mls-store";
 import { errorLogTag } from "./log-tag";
 import {
   consumeOwnPublished,
@@ -2021,6 +2022,18 @@ export class ChatClient {
     // ADR-0091 phase 1 - a hold the group is already past, or a behind mark
     // it moved above, is over.
     registeredCommitHolds.observeEpoch(groupIdB64, readGroupEpoch(group));
+    // docs/ux/one-tab.md backstop (option 4) — the group in memory is past
+    // the last snapshot that reached disk (an own commit merged whose
+    // persist did not land): this batch persists before the cursor moves,
+    // even when every row in it was our own echo.
+    {
+      const inMemory = readGroupEpoch(group);
+      const onDisk = mlsSnapshotWriter.durableEpoch(groupIdB64);
+      if (inMemory !== undefined && onDisk !== undefined && onDisk < inMemory) {
+        this.cursorGate.markTouched();
+      }
+    }
+    let persistedThisBatch = false;
     const verdict = await this.cursorGate.commit(
       async () => {
         // Who-can-find-me 6.4: an opened contact request that could not be
@@ -2028,12 +2041,19 @@ export class ChatClient {
         // its row again instead of losing it.
         if (groupRequestUnwritten) throw new Error("a contact request from this group is not written yet");
         await this.persistDurableOrThrow();
+        persistedThisBatch = true;
       },
       () => {
         cursorRef?.advance(Math.max(cursor, after));
-        // ADR-0091 phase 1b - the epoch the snapshot just written is at, with
-        // the cursor it was written for.
-        const durableEpoch = readGroupEpoch(group);
+        // ADR-0091 phase 1b - the epoch the group is at ON DISK, with the
+        // cursor it was written for: the epoch of the last write that
+        // landed, never the in-memory epoch (which leads it after a failed
+        // persist and made a rewind point past the snapshot). A hook that is
+        // not the store's writer (tests) leaves no durable epoch: the
+        // in-memory one stands for it only when this batch persisted.
+        const durableEpoch =
+          mlsSnapshotWriter.durableEpoch(groupIdB64) ??
+          (persistedThisBatch ? readGroupEpoch(group) : undefined);
         if (durableEpoch !== undefined) recordCursorEpoch(groupIdB64, durableEpoch);
         // Consume the echo registry entries only now: on the held path they
         // stay armed so the re-fetched batch still suppresses our own rows.

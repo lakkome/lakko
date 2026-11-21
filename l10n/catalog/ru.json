@@ -10704,6 +10704,22 @@
     "recovery_phrase.fresh.publish_waiting": {
       "text": "Ключи вашего аккаунта сброшены меньше чем через час после прошлого изменения. Изменение завершится само через {minutes, plural, one {# минуту} few {# минуты} many {# минут} other {# минуты}}, затем Lakko покажет новые слова.",
       "status": "machine"
+    },
+    "tab.other.title": {
+      "text": "Lakko открыт в другой вкладке.",
+      "status": "machine"
+    },
+    "tab.other.body": {
+      "text": "Lakko работает в одной вкладке за раз. Откройте его здесь, и другая вкладка остановится.",
+      "status": "machine"
+    },
+    "tab.other.use_here": {
+      "text": "Открыть здесь",
+      "status": "machine"
+    },
+    "tab.other.opening": {
+      "text": "Открываем здесь...",
+      "status": "machine"
     }
   },
   "language": "ru"

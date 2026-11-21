@@ -589,7 +589,7 @@ describe("ADR-0045 — obligation 4: record before publish, verdict before merge
       "own:101",
       "fetch>0", // the verdict read
       "merge",
-      "persist",
+      "persist-applied", // fail-closed since docs/ux/one-tab.md: before the ack
       "ack",
     ]);
     expect(m.epoch()).toBe(7n);
@@ -1174,8 +1174,36 @@ describe("ADR-0045 — the verdict apply must not swallow the rows it consumes",
     const m = model({ rank: 0, pending: 1, epoch: 6 });
     const out = await runCommitterSweep(m.ports);
     expect(out.kind).toBe("committed");
-    expect(m.order).not.toContain("persist-applied");
+    // The only fail-closed write is the merge's own (docs/ux/one-tab.md):
+    // nothing was written for the verdict apply, before the merge.
+    expect(m.order.indexOf("persist-applied")).toBeGreaterThan(m.order.indexOf("merge"));
+    expect(m.order.filter((o) => o === "persist-applied")).toHaveLength(1);
     expect(m.cursorValue()).toBe(0);
+  });
+
+  it("a merge whose write fails leaves the entry owed: no ack, no welcomes-owed marker", async () => {
+    // docs/ux/one-tab.md backstop: an acked entry over an N snapshot that still
+    // holds the staged commit is abandoned as an orphan at the next start, and
+    // the device is then below its own commit for good. Owed, it is re-sent
+    // and merged again.
+    const m = model({ rank: 0, pending: 1, epoch: 6, adds: [new Uint8Array([0xa3])] });
+    let merged = false;
+    const persistApplied = m.ports.persistApplied;
+    m.ports.persistApplied = async () => {
+      if (m.order.includes("merge") && !merged) {
+        merged = true;
+        throw new Error("IndexedDB quota");
+      }
+      await persistApplied();
+    };
+    const out = await runCommitterSweep(m.ports);
+    expect(out.kind).toBe("committed");
+    expect(m.epoch()).toBe(7n);
+    expect(m.order).not.toContain("ack");
+    expect(m.welcomesOwed().size).toBe(0);
+    expect(m.entries().size).toBe(1);
+    // The verdict is in: the Welcome still went out.
+    expect(m.order).toContain("publish-welcome");
   });
 
   it("a LOSING sweep still surfaces the rows it applied", async () => {

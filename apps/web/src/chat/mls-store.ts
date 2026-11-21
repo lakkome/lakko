@@ -59,6 +59,7 @@
 
 import type { DeviceCipher } from "../auth/device-cipher";
 import { requireAccountStoresWritable } from "../auth/account-store-gate";
+import { requireTabActive } from "../tab/tab-state";
 import type { PendingCommitEntry } from "./commit-outbox";
 
 const DB_NAME = "lakko-mls";
@@ -94,6 +95,10 @@ export interface MlsSnapshotRecord {
    *  base64 `group_id`. Joining counts as activity in the conversation list
    *  and has to outlast a reload, when no message may say so yet. */
   joinedAtMs?: Readonly<Record<string, number>>;
+  /** docs/ux/one-tab.md backstop — the row's write generation (0 on a row
+   *  written before the field existed). A realm adopts it when it restores
+   *  the row and may only write over that same generation. */
+  generation: number;
 }
 
 /** Internal on-disk row shape. The `ciphertext` here actually
@@ -105,6 +110,11 @@ interface PersistedRow {
   knownGroupIds: string[];
   leafKeyB64?: string;
   joinedAtMs?: Readonly<Record<string, number>>;
+  /** Bumped by every write (see {@link SnapshotWriter}). */
+  generation?: number;
+  /** The epoch of every conversation group the provider held at the write,
+   *  decimal, by base64 `group_id` (see {@link SnapshotWriter}). */
+  groupEpochs?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -192,7 +202,216 @@ async function decryptSnapshot(
 // ---------------------------------------------------------------
 
 /**
- * Persist (or replace) the MLS snapshot for an account.
+ * A write refused because the row on disk is newer than what this realm holds
+ * (docs/ux/one-tab.md section 6). Another tab of the browser wrote the row
+ * after this realm restored it, or this realm's copy of a group is at an
+ * epoch below the one on disk. Nothing was written; the realm must reload
+ * from disk rather than write again.
+ */
+export class StaleProviderError extends Error {
+  override name = "StaleProviderError";
+  constructor(reason: "generation" | "epoch") {
+    super(`the stored MLS snapshot is newer than this page's copy (${reason})`);
+  }
+}
+
+/** What one write captures, at its turn in the write chain. */
+export interface SnapshotCapture {
+  /** `Identity.snapshotStorage()`, taken INSIDE the capture call. */
+  readonly snapshotBytes: Uint8Array;
+  readonly knownGroupIds: readonly string[];
+  readonly leafKeyB64?: string;
+  readonly joinedAtMs?: Readonly<Record<string, number>>;
+  /** The epoch of every conversation group the provider holds, by base64
+   *  `group_id`, read in the same synchronous turn as the snapshot. */
+  readonly groupEpochs?: Readonly<Record<string, bigint>>;
+}
+
+/**
+ * The one writer of a realm's MLS provider snapshot (docs/ux/one-tab.md
+ * backstops; the 2026-11-21 stranded-owner defect).
+ *
+ * Three rules, each closing one way an older copy of the provider reached disk
+ * after a newer one:
+ *
+ * 1. **One chain per realm.** Writes run one at a time in call order, and each
+ *    takes `snapshotStorage()` inside its turn ({@link SnapshotCapture} is a
+ *    callback). Two persists of one page used to capture, then encrypt and
+ *    open the database concurrently, so the older capture could land last.
+ * 2. **Generation check.** Every write bumps the row's generation. A realm
+ *    adopts the generation of the row it restored ({@link adoptLoaded}) and a
+ *    write finds, in the same readwrite transaction, that the row is still
+ *    at that generation; otherwise another tab wrote since and the write is
+ *    refused with {@link StaleProviderError}. A realm that never restored the
+ *    row (no device key at the time) is not bound by it.
+ * 3. **Epoch check.** A write may not put any conversation group at an epoch
+ *    below the one the row holds for it.
+ *
+ * A refusal writes nothing, throws (so a fail-closed persist stops its
+ * publish) and calls the stale listener (`main.tsx` freezes the page and
+ * reloads). Holds a frozen page to {@link requireTabActive} too.
+ *
+ * It also remembers the epoch of each group as of the last write that landed
+ * ({@link durableEpoch}): the cursor epoch is recorded from it, never from
+ * the in-memory group (`chat/client.ts`, ADR-0091 phase 1b).
+ */
+export class SnapshotWriter {
+  private chain: Promise<unknown> = Promise.resolve();
+  private readonly expected = new Map<string, number>();
+  private readonly durable = new Map<string, bigint>();
+  private readonly staleListeners = new Set<() => void>();
+
+  /** Observe a refused stale write. */
+  onStale(fn: () => void): () => void {
+    this.staleListeners.add(fn);
+    return () => {
+      this.staleListeners.delete(fn);
+    };
+  }
+
+  /** This realm restored `accountIdB64`'s row at `generation` (0 when there
+   *  was no row), with these group epochs. */
+  adoptLoaded(
+    accountIdB64: string,
+    generation: number,
+    groupEpochs: Readonly<Record<string, bigint>> = {},
+  ): void {
+    this.expected.set(accountIdB64, generation);
+    for (const [gid, epoch] of Object.entries(groupEpochs)) this.durable.set(gid, epoch);
+  }
+
+  /** A group loaded from the snapshot this realm restored is at `epoch` on
+   *  disk. */
+  noteRestoredEpoch(groupIdB64: string, epoch: bigint): void {
+    this.durable.set(groupIdB64, epoch);
+  }
+
+  /** The epoch `groupIdB64` was at in the last snapshot this realm restored
+   *  or wrote, `undefined` when it has none. */
+  durableEpoch(groupIdB64: string): bigint | undefined {
+    return this.durable.get(groupIdB64);
+  }
+
+  /** The row was deleted (Forget device, a recover that starts over). */
+  forgetAccount(accountIdB64: string): void {
+    this.expected.delete(accountIdB64);
+  }
+
+  /** Sign-out: forget everything this realm knew. */
+  reset(): void {
+    this.expected.clear();
+    this.durable.clear();
+  }
+
+  /**
+   * Write the provider snapshot (and, with `entry`, the ADR-0040 outbox entry
+   * in the same transaction). Resolves once on disk; rejects on any failure,
+   * {@link StaleProviderError} when refused as stale.
+   */
+  write(
+    accountIdB64: string,
+    deviceKey: DeviceCipher,
+    capture: () => SnapshotCapture,
+    entry?: PendingCommitEntry,
+  ): Promise<void> {
+    const run = (): Promise<void> => this.runWrite(accountIdB64, deviceKey, capture, entry);
+    const result = this.chain.then(run, run);
+    this.chain = result.catch(() => undefined);
+    return result;
+  }
+
+  private isStale(
+    accountIdB64: string,
+    prior: PersistedRow | undefined,
+    epochs: Readonly<Record<string, bigint>>,
+  ): "generation" | "epoch" | null {
+    if (prior === undefined) return null;
+    const expected = this.expected.get(accountIdB64);
+    if (expected !== undefined && (prior.generation ?? 0) !== expected) return "generation";
+    const stored = prior.groupEpochs ?? {};
+    for (const [gid, epoch] of Object.entries(epochs)) {
+      const onDisk = stored[gid];
+      if (onDisk !== undefined && /^\d{1,20}$/.test(onDisk) && BigInt(onDisk) > epoch) return "epoch";
+    }
+    return null;
+  }
+
+  private async runWrite(
+    accountIdB64: string,
+    deviceKey: DeviceCipher,
+    capture: () => SnapshotCapture,
+    entry: PendingCommitEntry | undefined,
+  ): Promise<void> {
+    requireTabActive();
+    const cap = capture();
+    const epochs = cap.groupEpochs ?? {};
+    const ciphertext = await encryptSnapshot(deviceKey, cap.snapshotBytes);
+    const groupEpochs: Record<string, string> = {};
+    for (const [gid, epoch] of Object.entries(epochs)) groupEpochs[gid] = epoch.toString();
+    const base: PersistedRow = {
+      accountId: accountIdB64,
+      ciphertext,
+      knownGroupIds: [...cap.knownGroupIds],
+      ...(cap.leafKeyB64 === undefined ? {} : { leafKeyB64: cap.leafKeyB64 }),
+      ...(cap.joinedAtMs === undefined ? {} : { joinedAtMs: cap.joinedAtMs }),
+      groupEpochs,
+    };
+    const verdict: { stale: "generation" | "epoch" | null; generation: number } = {
+      stale: null,
+      generation: 0,
+    };
+    const put = (tx: IDBTransaction): void => {
+      const store = tx.objectStore(STORE);
+      const read = store.get(accountIdB64);
+      read.onsuccess = (): void => {
+        const prior = read.result as PersistedRow | undefined;
+        verdict.stale = this.isStale(accountIdB64, prior, epochs);
+        if (verdict.stale !== null) return;
+        verdict.generation = (prior?.generation ?? 0) + 1;
+        store.put({ ...base, generation: verdict.generation });
+        if (entry !== undefined) tx.objectStore(OUTBOX_STORE).put(entry);
+      };
+    };
+    const db = await openMlsDb();
+    try {
+      requireTabActive();
+      if (entry === undefined) {
+        requireAccountStoresWritable(accountIdB64);
+        const tx = db.transaction(STORE, "readwrite");
+        put(tx);
+        await awaitTx(tx, undefined);
+      } else {
+        // ONE transaction over BOTH stores — atomic: both puts land on
+        // `tx.oncomplete`, or neither does on any abort/error.
+        requireAccountStoresWritable(accountIdB64);
+        const tx = db.transaction([STORE, OUTBOX_STORE], "readwrite");
+        put(tx);
+        await awaitTx(tx, undefined);
+      }
+    } finally {
+      db.close();
+    }
+    if (verdict.stale !== null) {
+      for (const fn of [...this.staleListeners]) {
+        try {
+          fn();
+        } catch {
+          /* the refusal below is what the caller acts on */
+        }
+      }
+      throw new StaleProviderError(verdict.stale);
+    }
+    this.expected.set(accountIdB64, verdict.generation);
+    for (const [gid, epoch] of Object.entries(epochs)) this.durable.set(gid, epoch);
+  }
+}
+
+/** The realm's writer: every MLS provider snapshot of this page goes through it. */
+export const mlsSnapshotWriter = new SnapshotWriter();
+
+/**
+ * Persist (or replace) the MLS snapshot for an account, through
+ * {@link mlsSnapshotWriter}.
  *
  * @param accountIdB64    Same string the rest of the auth
  *                        layer uses to identify the account.
@@ -216,29 +435,19 @@ export async function saveMlsSnapshot(
   leafKeyB64?: string,
   joinedAtMs?: Readonly<Record<string, number>>,
 ): Promise<void> {
-  const ciphertext = await encryptSnapshot(deviceKey, snapshotBytes);
-  const row: PersistedRow = {
-    accountId: accountIdB64,
-    ciphertext,
-    knownGroupIds: [...knownGroupIds],
+  await mlsSnapshotWriter.write(accountIdB64, deviceKey, () => ({
+    snapshotBytes,
+    knownGroupIds,
     ...(leafKeyB64 === undefined ? {} : { leafKeyB64 }),
     ...(joinedAtMs === undefined ? {} : { joinedAtMs }),
-  };
-  const db = await openMlsDb();
-  try {
-    requireAccountStoresWritable(accountIdB64);
-    const tx = db.transaction(STORE, "readwrite");
-    tx.objectStore(STORE).put(row);
-    await awaitTx(tx, undefined);
-  } finally {
-    db.close();
-  }
+  }));
 }
 
 /**
  * ADR-0040 (G-35) — persist the MLS snapshot AND a durable pending-commit outbox
  * entry in ONE atomic IndexedDB transaction spanning both stores of the
- * `lakko-mls` database, awaited, THROWING on failure (fail-closed).
+ * `lakko-mls` database, awaited, THROWING on failure (fail-closed). Through
+ * {@link mlsSnapshotWriter}.
  *
  * This is the load-bearing atomicity primitive for the crash-safe commit paths:
  * a group-membership commit path calls this BEFORE publishing the commit. Because
@@ -266,26 +475,17 @@ export async function saveSnapshotWithCommitEntry(
   leafKeyB64?: string,
   joinedAtMs?: Readonly<Record<string, number>>,
 ): Promise<void> {
-  const ciphertext = await encryptSnapshot(deviceKey, snapshotBytes);
-  const snapshotRow: PersistedRow = {
-    accountId: accountIdB64,
-    ciphertext,
-    knownGroupIds: [...knownGroupIds],
-    ...(leafKeyB64 === undefined ? {} : { leafKeyB64 }),
-    ...(joinedAtMs === undefined ? {} : { joinedAtMs }),
-  };
-  const db = await openMlsDb();
-  try {
-    // ONE transaction over BOTH stores — atomic: both puts land on
-    // `tx.oncomplete`, or neither does on any abort/error.
-    requireAccountStoresWritable(accountIdB64);
-    const tx = db.transaction([STORE, OUTBOX_STORE], "readwrite");
-    tx.objectStore(STORE).put(snapshotRow);
-    tx.objectStore(OUTBOX_STORE).put(entry);
-    await awaitTx(tx, undefined);
-  } finally {
-    db.close();
-  }
+  await mlsSnapshotWriter.write(
+    accountIdB64,
+    deviceKey,
+    () => ({
+      snapshotBytes,
+      knownGroupIds,
+      ...(leafKeyB64 === undefined ? {} : { leafKeyB64 }),
+      ...(joinedAtMs === undefined ? {} : { joinedAtMs }),
+    }),
+    entry,
+  );
 }
 
 /**
@@ -321,6 +521,7 @@ export async function loadMlsSnapshot(
     knownGroupIds: row.knownGroupIds,
     ...(row.leafKeyB64 === undefined ? {} : { leafKeyB64: row.leafKeyB64 }),
     ...(row.joinedAtMs === undefined ? {} : { joinedAtMs: row.joinedAtMs }),
+    generation: row.generation ?? 0,
   };
 }
 
@@ -338,6 +539,7 @@ export async function deleteMlsSnapshot(accountIdB64: string): Promise<void> {
   } finally {
     db.close();
   }
+  mlsSnapshotWriter.forgetAccount(accountIdB64);
 }
 
 /**
@@ -354,4 +556,5 @@ export async function clearAllMlsSnapshots(): Promise<void> {
   } finally {
     db.close();
   }
+  mlsSnapshotWriter.reset();
 }

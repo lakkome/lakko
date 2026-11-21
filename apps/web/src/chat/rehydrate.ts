@@ -63,7 +63,7 @@ import { ChatClient } from "./client";
 import { type ChatApi } from "./ChatContext";
 import { loadGroupNameRows } from "./group-name-idb";
 import { GROUP_STAND_IN } from "./group-title";
-import { loadMlsSnapshot } from "./mls-store";
+import { loadMlsSnapshot, mlsSnapshotWriter } from "./mls-store";
 import { durableSnapshotHook } from "./persist-hooks";
 
 /**
@@ -146,6 +146,9 @@ async function rehydrateInto(
     console.warn("rehydrateMlsState: loadMlsSnapshot failed", err);
     return;
   }
+  // docs/ux/one-tab.md section 6 — this realm may write over exactly the row
+  // it read (generation 0: no row). Adopted before anything below can write.
+  mlsSnapshotWriter.adoptLoaded(accountIdB64, snapshot?.generation ?? 0);
   if (snapshot === null) {
     // First signup, or post-recover after the snapshot was
     // explicitly deleted, or a device that's never been
@@ -256,6 +259,13 @@ async function rehydrateInto(
         groupIdB64,
       );
       continue;
+    }
+    // ADR-0091 phase 1b — the epoch this group is at on disk: the cursor
+    // epoch is recorded from it until a later write lands (`client.ts`).
+    try {
+      mlsSnapshotWriter.noteRestoredEpoch(groupIdB64, group.epoch);
+    } catch {
+      /* unreadable: the poll records nothing for it until a write lands */
     }
 
     chats.add({

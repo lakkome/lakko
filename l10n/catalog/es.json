@@ -10096,6 +10096,22 @@
     "recovery_phrase.fresh.publish_waiting": {
       "text": "Las claves de tu cuenta se restablecieron menos de una hora después del último cambio. El cambio terminará solo en {minutes, plural, one {# minuto} other {# minutos}}; después Lakko mostrará las palabras nuevas.",
       "status": "machine"
+    },
+    "tab.other.title": {
+      "text": "Lakko está abierto en otra pestaña.",
+      "status": "machine"
+    },
+    "tab.other.body": {
+      "text": "Lakko funciona en una sola pestaña a la vez. Úsalo aquí y la otra pestaña se detendrá.",
+      "status": "machine"
+    },
+    "tab.other.use_here": {
+      "text": "Usar aquí",
+      "status": "machine"
+    },
+    "tab.other.opening": {
+      "text": "Abriendo aquí...",
+      "status": "machine"
     }
   },
   "language": "es"

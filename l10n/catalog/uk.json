@@ -10096,6 +10096,22 @@
     "recovery_phrase.fresh.publish_waiting": {
       "text": "Ключі вашого облікового запису скинуто менш ніж за годину після попередньої зміни. Зміна завершиться сама за {minutes, plural, one {# хвилину} few {# хвилини} many {# хвилин} other {# хвилини}}, потім Lakko покаже нові слова.",
       "status": "machine"
+    },
+    "tab.other.title": {
+      "text": "Lakko відкрито в іншій вкладці.",
+      "status": "machine"
+    },
+    "tab.other.body": {
+      "text": "Lakko працює в одній вкладці водночас. Відкрийте його тут, і інша вкладка зупиниться.",
+      "status": "machine"
+    },
+    "tab.other.use_here": {
+      "text": "Відкрити тут",
+      "status": "machine"
+    },
+    "tab.other.opening": {
+      "text": "Відкриваємо тут...",
+      "status": "machine"
     }
   },
   "language": "uk"

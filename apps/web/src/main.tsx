@@ -14,7 +14,6 @@
  * registration failure / network blip can't block the first paint.
  */
 import { render } from "solid-js/web";
-import App from "./App";
 import "./styles.css";
 import { registerServiceWorker } from "./sw/register";
 import { runBootUpdateCheck } from "./update/release-check";
@@ -25,6 +24,10 @@ import { bootstrapVideoSurfaces } from "./calls/video-surface";
 import { bootstrapL10n, LANGUAGE_STORAGE_KEY } from "./l10n";
 import { publishNotificationStrings } from "./l10n/notification-strings";
 import { installOriginHistory } from "./routes/origin-history";
+import { browserActiveTabDeps, claimActiveTab, type ActiveTabClaim } from "./tab/active-tab";
+import { freezeTab } from "./tab/tab-state";
+import { runBeforeYield } from "./tab/before-yield";
+import { OtherTabNotice } from "./tab/OtherTabNotice";
 
 /** Longest the first paint waits for a non-English catalog. Chosen, not measured. */
 const FIRST_PAINT_WAIT_MS = 2000;
@@ -78,8 +81,61 @@ installOriginHistory();
 const l10nReady = bootstrapL10n();
 // ADR-0061: the service worker's notification words follow the language.
 void l10nReady.then(publishNotificationStrings);
-const mount = (): void => {
+// docs/ux/one-tab.md — one Lakko tab per browser runs. The app is imported
+// only once this tab runs, so a tab showing the notice has none of it loaded
+// (no poll, no send, no save). A takeover by another tab freezes every writer
+// here at once and reloads, which releases the lock (`tab/active-tab.ts`).
+// On a takeover the open composer's draft and the synced state holding it are
+// saved first, for at most a second (`tab/before-yield.ts`); the new tab
+// waits on the lock until this page goes. A stolen lock or a stale write
+// stops at once.
+const stopAndReload = (): void => {
+  freezeTab();
+  location.reload();
+};
+const onLost = (reason: "takeover" | "stolen"): void => {
+  if (reason === "stolen") {
+    stopAndReload();
+    return;
+  }
+  void runBeforeYield().finally(stopAndReload);
+};
+const mountApp = async (): Promise<void> => {
+  const [{ default: App }, { mlsSnapshotWriter }] = await Promise.all([
+    import("./App"),
+    import("./chat/mls-store"),
+  ]);
+  // The store refused a write because the row on disk is newer than this
+  // page's copy (another tab wrote it): stop and reload, like a takeover.
+  mlsSnapshotWriter.onStale(stopAndReload);
   render(() => <App />, root);
+};
+const mount = (): void => {
+  void (async () => {
+    let claim: ActiveTabClaim;
+    try {
+      claim = await claimActiveTab(browserActiveTabDeps(onLost));
+    } catch {
+      claim = { kind: "active" };
+    }
+    if (claim.kind === "active") {
+      await mountApp();
+      return;
+    }
+    const takeOver = claim.takeOver;
+    const dispose = render(
+      () => (
+        <OtherTabNotice
+          onUseHere={async () => {
+            await takeOver();
+            dispose();
+            await mountApp();
+          }}
+        />
+      ),
+      root,
+    );
+  })();
 };
 if (likelyNonEnglish()) {
   void Promise.race([l10nReady, new Promise((done) => setTimeout(done, FIRST_PAINT_WAIT_MS))]).then(

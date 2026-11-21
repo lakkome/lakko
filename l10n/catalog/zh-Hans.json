@@ -10096,6 +10096,22 @@
     "recovery_phrase.fresh.publish_waiting": {
       "text": "你的账号密钥在上次更改后不到一小时内被重置。更改将在 {minutes, plural, other {# 分钟}}后自动完成，届时 Lakko 会显示新的词语。",
       "status": "machine"
+    },
+    "tab.other.title": {
+      "text": "Lakko 已在另一个标签页中打开。",
+      "status": "machine"
+    },
+    "tab.other.body": {
+      "text": "Lakko 一次只能在一个标签页中使用。在这里使用后，另一个标签页会停止。",
+      "status": "machine"
+    },
+    "tab.other.use_here": {
+      "text": "在此使用",
+      "status": "machine"
+    },
+    "tab.other.opening": {
+      "text": "正在此处打开...",
+      "status": "machine"
     }
   },
   "language": "zh-Hans"

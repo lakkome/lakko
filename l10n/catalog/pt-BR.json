@@ -10096,6 +10096,22 @@
     "recovery_phrase.fresh.publish_waiting": {
       "text": "As chaves da sua conta foram redefinidas menos de uma hora após a última mudança. A mudança termina sozinha em {minutes, plural, one {# minuto} other {# minutos}}; depois o Lakko mostrará as novas palavras.",
       "status": "machine"
+    },
+    "tab.other.title": {
+      "text": "O Lakko está aberto em outra aba.",
+      "status": "machine"
+    },
+    "tab.other.body": {
+      "text": "O Lakko funciona em uma aba por vez. Use-o aqui e a outra aba para.",
+      "status": "machine"
+    },
+    "tab.other.use_here": {
+      "text": "Usar aqui",
+      "status": "machine"
+    },
+    "tab.other.opening": {
+      "text": "Abrindo aqui...",
+      "status": "machine"
     }
   },
   "language": "pt-BR"
