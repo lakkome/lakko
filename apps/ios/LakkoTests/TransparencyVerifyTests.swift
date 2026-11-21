@@ -606,43 +606,36 @@ final class TransparencyVerifyTests: XCTestCase {
             ContactsViewModel.supersessionRefusedMessage(loggedReset: nil, peerLabel: "@alice"))
     }
 
-    func testMessageLoggedResetFalseIsPossibleCompromise() {
-        let msg = ContactsViewModel.supersessionRefusedMessage(
-            loggedReset: false, peerLabel: "@bob"
-        )
-        XCTAssertTrue(msg.contains("@bob"))
-        XCTAssertTrue(msg.contains("does NOT show an owner reset"))
-        XCTAssertTrue(msg.contains("possible account compromise"))
-        XCTAssertTrue(msg.contains("Verify out of band"))
+    func testMessageNamesTheContactAndSaysOnlyTheOutcome() {
+        // The formatter wraps a text argument in Unicode isolates (FSI/PDI).
+        let msg = ContactsViewModel.supersessionRefusedMessage(loggedReset: nil, peerLabel: "@carol")
+            .replacingOccurrences(of: "\u{2068}", with: "")
+            .replacingOccurrences(of: "\u{2069}", with: "")
+        XCTAssertEqual(msg, "Couldn't confirm this is still @carol's account, so nothing was sent.")
     }
 
-    func testMessageLoggedResetNilIsNeutralCouldNotConfirm() {
-        let msg = ContactsViewModel.supersessionRefusedMessage(
-            loggedReset: nil, peerLabel: "@carol"
-        )
-        XCTAssertTrue(msg.contains("@carol"))
-        XCTAssertTrue(msg.contains("could not be confirmed"))
-        XCTAssertTrue(msg.contains("Verify out of band"))
-        // The neutral message must not assert a compromise OR a reset.
-        XCTAssertFalse(msg.contains("compromise"))
-        XCTAssertFalse(msg.contains("owner-initiated reset"))
+    func testMessageFallsBackToTheSameAccountWhenNoLabel() {
+        let unnamed = "Couldn't confirm this is still the same account, so nothing was sent."
+        XCTAssertEqual(ContactsViewModel.supersessionRefusedMessage(loggedReset: true, peerLabel: nil), unnamed)
+        XCTAssertEqual(ContactsViewModel.supersessionRefusedMessage(loggedReset: false, peerLabel: ""), unnamed)
     }
 
-    func testMessageFallsBackToThisContactWhenNoLabel() {
-        XCTAssertTrue(
-            ContactsViewModel.supersessionRefusedMessage(loggedReset: true, peerLabel: nil)
-                .contains("This contact")
-        )
-        XCTAssertTrue(
-            ContactsViewModel.supersessionRefusedMessage(loggedReset: true, peerLabel: "")
-                .contains("This contact")
-        )
-    }
-
-    func testMessageTwoVerdictsAreDistinct() {
+    /// The person is not told which case it was: both refusals read the same.
+    func testMessageBothVerdictsReadTheSame() {
         let b = ContactsViewModel.supersessionRefusedMessage(loggedReset: false, peerLabel: "@x")
         let c = ContactsViewModel.supersessionRefusedMessage(loggedReset: nil, peerLabel: "@x")
-        XCTAssertNotEqual(b, c)
+        XCTAssertEqual(b, c)
+    }
+
+    func testMessageExplainsNoMachinery() {
+        for reset in [true, false, nil] as [Bool?] {
+            for label in ["@x", nil] as [String?] {
+                let msg = ContactsViewModel.supersessionRefusedMessage(loggedReset: reset, peerLabel: label).lowercased()
+                for word in ["identity", "transparency", "out of band", "verify", "compromise", "key"] {
+                    XCTAssertFalse(msg.contains(word), "'\(word)' in: \(msg)")
+                }
+            }
+        }
     }
 
     // MARK: - G-30 #2 (ADR-0019): verifyRotationChain outcome mapping

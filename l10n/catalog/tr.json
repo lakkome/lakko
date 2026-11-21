@@ -114,7 +114,7 @@
       "status": "machine"
     },
     "auth.passkey.error.not_registered": {
-      "text": "Bu hesap için kayıtlı geçiş anahtarı yok. Önce şifrenizle giriş yapın, ardından Ana sayfadan bir geçiş anahtarı ekleyin.",
+      "text": "Bu hesap için ayarlanmış geçiş anahtarı yok. Şifrenizle giriş yapın, ardından Ayarlar'dan bir geçiş anahtarı ekleyin.",
       "status": "machine"
     },
     "auth.passkey.error.server_disabled": {
@@ -374,11 +374,11 @@
       "status": "machine"
     },
     "backup.stale_restore.reason.head_stripped": {
-      "text": "imzası kaldırılmış ve bu cihazın bildiği son yedekten farklı",
+      "text": "en son yedeğiniz olduğunu gösteren işaret eksik ve bu cihazın bildiği son yedekten farklı",
       "status": "machine"
     },
     "backup.stale_restore.reason.too_old": {
-      "text": "güncel bir yedeğin olabileceğinden daha önce imzalanmış",
+      "text": "güncel bir yedeğin olabileceğinden daha önce oluşturulmuş",
       "status": "machine"
     },
     "backup.stale_restore.title": {
@@ -1830,7 +1830,7 @@
       "status": "machine"
     },
     "channels.keys_reset.notice": {
-      "text": "Bu kanalda artık paylaşım yapamazsınız. Hesap anahtarlarınız sıfırlandı ve kanalın gönderileri eski anahtarlarla imzalanmıştı. Abonelere haber verilmez; yeni bir kanal oluşturup onlarla paylaşın.",
+      "text": "Hesap anahtarlarınız sıfırlandığı için bu kanalda artık paylaşım yapamazsınız. Abonelere haber verilmez; yeni bir kanal oluşturup onlarla paylaşın.",
       "status": "machine"
     },
     "channels.keys_reset.remove": {
@@ -3486,7 +3486,7 @@
       "status": "machine"
     },
     "chat.reauth.body": {
-      "text": "Mesajların şifresini çözmek ve imzalamak için gereken anahtarlar bu oturumda yok. Bu sohbeti açmak için tekrar giriş yapın.",
+      "text": "Bu sohbet şu anda bu cihazda açılamıyor. Açmak için tekrar giriş yapın.",
       "status": "machine"
     },
     "chat.reauth.title": {
@@ -4338,15 +4338,15 @@
       "status": "machine"
     },
     "common.error.session_ended": {
-      "text": "Oturumunuz sona erdi. Tekrar giriş yapın.",
+      "text": "Oturumunuz kapatıldı. Tekrar giriş yapın.",
       "status": "machine"
     },
     "common.error.session_expired": {
-      "text": "Oturumun süresi doldu. Tekrar giriş yapın.",
+      "text": "Oturumunuz kapatıldı. Tekrar giriş yapın.",
       "status": "machine"
     },
     "common.error.session_not_ready": {
-      "text": "Oturum henüz hazır değil.",
+      "text": "Bu şu anda kullanılamıyor. Tekrar giriş yapıp yeniden deneyin.",
       "status": "machine"
     },
     "common.error.starting_up": {
@@ -4586,19 +4586,19 @@
       "status": "machine"
     },
     "contacts.identity_changed.unconfirmed": {
-      "text": "Güvenli kimlik değişti ve şeffaflık kaydından doğrulanamadı: {name}. Güvenmeden önce başka bir kanaldan doğrulayın.",
+      "text": "Bunun hâlâ aynı hesap olduğu doğrulanamadığı için hiçbir şey gönderilmedi: {name}.",
       "status": "machine"
     },
     "contacts.identity_changed.unconfirmed_unnamed": {
-      "text": "Bu kişinin güvenli kimliği değişti ve şeffaflık kaydından doğrulanamadı. Güvenmeden önce başka bir kanaldan doğrulayın.",
+      "text": "Bunun hâlâ aynı hesap olduğu doğrulanamadığı için hiçbir şey gönderilmedi.",
       "status": "machine"
     },
     "contacts.identity_changed.unexplained": {
-      "text": "Güvenli kimlik değişti ve şeffaflık kaydı sahibin yaptığı bir sıfırlamayı GÖSTERMİYOR — bunu olası bir hesap ele geçirmesi olarak değerlendirin: {name}. Güvenmeden önce başka bir kanaldan doğrulayın.",
+      "text": "Bunun hâlâ aynı hesap olduğu doğrulanamadığı için hiçbir şey gönderilmedi: {name}.",
       "status": "machine"
     },
     "contacts.identity_changed.unexplained_unnamed": {
-      "text": "Bu kişinin güvenli kimliği değişti ve şeffaflık kaydı sahibin yaptığı bir sıfırlamayı GÖSTERMİYOR — bunu olası bir hesap ele geçirmesi olarak değerlendirin. Güvenmeden önce başka bir kanaldan doğrulayın.",
+      "text": "Bunun hâlâ aynı hesap olduğu doğrulanamadığı için hiçbir şey gönderilmedi.",
       "status": "machine"
     },
     "contacts.invite_links.subtitle": {
@@ -4666,7 +4666,7 @@
       "status": "machine"
     },
     "contacts.reauth.body": {
-      "text": "Bu oturumun kişiler için ihtiyaç duyduğu anahtarlar yok. Kişiler'i kullanmak için tekrar giriş yapın.",
+      "text": "Kişiler şu anda bu cihazda açılamıyor. Tekrar giriş yapın.",
       "status": "machine"
     },
     "contacts.remove.body": {
@@ -4890,7 +4890,7 @@
       "status": "machine"
     },
     "device_link.error.identity_mismatch": {
-      "text": "Diğer cihazınızdan gelen kimlik, bu hesabın yayımlanmış kimliğiyle eşleşmiyor. Kullanılmayacak.",
+      "text": "Diğer cihazınız bu hesaba ait olmayan anahtarlar gönderdi. Hiçbir şey değiştirilmedi.",
       "status": "machine"
     },
     "device_link.error.name_other_account": {
@@ -4898,11 +4898,11 @@
       "status": "machine"
     },
     "device_link.error.no_identity": {
-      "text": "Diğer cihaz onayladı ancak kimliğinizi göndermedi. O cihazda Lakko'yu güncelleyip tekrar deneyin veya kurtarma ifadenizi kullanın.",
+      "text": "Diğer cihazınız onayladı ancak hesabınızın anahtarlarını göndermedi. O cihazda Lakko'yu güncelleyip tekrar deneyin veya kurtarma ifadenizi kullanın.",
       "status": "machine"
     },
     "device_link.error.not_let_in": {
-      "text": "Diğer cihazınız kimliği gönderdi ancak bu cihazda giriş yapılamadı. Tekrar deneyin veya kurtarma ifadenizi kullanın.",
+      "text": "Diğer cihazınız yanıt verdi ancak bu cihaz eklenemedi. Tekrar deneyin veya kurtarma ifadenizi kullanın.",
       "status": "machine"
     },
     "device_link.error.request_limited": {
@@ -4934,7 +4934,7 @@
       "status": "machine"
     },
     "device_link.qr.intro": {
-      "text": "Bu kodu hesabınızın hâlâ bulunduğu bir cihaza gösterin. O cihaz bu cihazı ekler ve kimliğinizi uçtan uca şifreli olarak aktarır; ifade yazmanız gerekmez.",
+      "text": "Bu kodu hesabınızın hâlâ bulunduğu bir cihaza gösterin. O cihaz bu cihazı ekler; ifade yazmanız gerekmez.",
       "status": "machine"
     },
     "device_link.qr.scan_hint": {
@@ -4974,7 +4974,7 @@
       "status": "machine"
     },
     "device_link.request.error.no_device_key": {
-      "text": "Bu tarayıcıda cihaz anahtarı yok. Tekrar giriş yapın.",
+      "text": "Bu tarayıcıda artık giriş yapılmış değil. Tekrar giriş yapın.",
       "status": "machine"
     },
     "device_link.request.expired": {
@@ -5298,7 +5298,7 @@
       "status": "machine"
     },
     "devices.scan.confirm.body": {
-      "text": "Bu işlem, taranan cihaza hesabınıza tam erişim verir: mesajlarınız, kişileriniz ve kimliğiniz. Yalnızca kod kendi yeni cihazınızdaysa devam edin.",
+      "text": "Bu işlem, taranan cihaza hesabınıza, mesajlarınıza ve kişilerinize tam erişim verir. Yalnızca kod kendi yeni cihazınızdaysa devam edin.",
       "status": "machine"
     },
     "devices.scan.confirm.submit": {
@@ -5346,7 +5346,7 @@
       "status": "machine"
     },
     "devices.signed_out.body_mismatch": {
-      "text": "Bu cihazın anahtarları, hesabın yayımlanmış kimliğiyle eşleşmiyor.",
+      "text": "Bu cihazın anahtarları artık hesabınızla eşleşmiyor.",
       "status": "machine"
     },
     "devices.signed_out.body_removed": {
@@ -7398,7 +7398,7 @@
       "status": "machine"
     },
     "ios.permission.camera": {
-      "text": "Lakko kamerayı, hesabına bağlamak istediğin cihazların QR kodlarını taramak, aramalarda görüntü göndermek ve göndermeyi seçtiğin görüntülü mesajları kaydetmek için kullanır. Kameranın yakaladığı her şey gönderilmeden önce cihazında uçtan uca şifrelenir.",
+      "text": "Lakko kamerayı, hesabına bağlamak istediğin cihazların ve Lakko bağlantılarının QR kodlarını taramak, görüntülü aramalar ve göndermeyi seçtiğin görüntülü mesajları kaydetmek için kullanır. Kameranın yakaladığı her şey gönderilmeden önce cihazında uçtan uca şifrelenir.",
       "status": "machine"
     },
     "ios.permission.face_id": {
@@ -8438,7 +8438,7 @@
       "status": "machine"
     },
     "restore_identity.error.not_published": {
-      "text": "Kurtarılan kimliği doğrulamak için yayımlanmış bir kimlik bulunamadı. Tekrar deneyin veya hesabınızın hâlâ bulunduğu bir cihazdan geri yükleyin.",
+      "text": "Bunun hesabınıza ait olduğu doğrulanamadı. Tekrar deneyin veya hesabınızın hâlâ bulunduğu bir cihazdan geri yükleyin.",
       "status": "machine"
     },
     "restore_identity.error.nothing": {
@@ -8446,11 +8446,11 @@
       "status": "machine"
     },
     "restore_identity.error.phrase_mismatch": {
-      "text": "Bu kurtarma ifadesi bu hesabın kimliğiyle eşleşmiyor. İfadeyi kontrol edin veya bunun yerine mevcut bir cihazı eşleştirin.",
+      "text": "Bu kurtarma ifadesi bu hesaba ait değil. İfadeyi kontrol edin veya bu cihazı hesabınızın hâlâ bulunduğu bir cihazdan ekleyin.",
       "status": "machine"
     },
     "restore_identity.error.unreachable": {
-      "text": "Kurtarılan kimliği doğrulamak için dizine ulaşılamadı. Bağlantınızı kontrol edip tekrar deneyin.",
+      "text": "Bunun hesabınıza ait olduğu doğrulanamadı. Bağlantınızı kontrol edip tekrar deneyin.",
       "status": "machine"
     },
     "restore_identity.from_passkey_no_keys": {
@@ -8894,7 +8894,7 @@
       "status": "machine"
     },
     "settings.data.export_note": {
-      "text": "Mesajlarınız, kişileriniz ve grup durumunuz uçtan uca şifrelenir ve yalnızca cihazlarınızda bulunur.",
+      "text": "Mesajlarınız, kişileriniz ve gruplarınız uçtan uca şifrelenir ve yalnızca cihazlarınızda bulunur.",
       "status": "machine"
     },
     "settings.data.lede": {
@@ -10051,6 +10051,10 @@
     },
     "call.screen_share.refused_macos_desktop": {
       "text": "Ekranınız paylaşılamıyor. Sistem Ayarları'ndan Lakko'ya ekran kaydı izni verin.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_waiting": {
+      "text": "Hesap anahtarlarınız son değişiklikten bir saatten kısa süre sonra sıfırlandı. Değişiklik {minutes, plural, one {# dakika} other {# dakika}} içinde kendiliğinden tamamlanacak; ardından Lakko yeni kelimeleri gösterecek.",
       "status": "machine"
     }
   },

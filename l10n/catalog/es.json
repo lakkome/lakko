@@ -114,7 +114,7 @@
       "status": "machine"
     },
     "auth.passkey.error.not_registered": {
-      "text": "Esta cuenta no tiene ninguna llave de acceso registrada. Primero inicia sesión con tu contraseña y luego añade una llave de acceso desde Inicio.",
+      "text": "Esta cuenta no tiene ninguna llave de acceso configurada. Inicia sesión con tu contraseña y luego añade una llave de acceso en Ajustes.",
       "status": "machine"
     },
     "auth.passkey.error.server_disabled": {
@@ -374,11 +374,11 @@
       "status": "machine"
     },
     "backup.stale_restore.reason.head_stripped": {
-      "text": "le quitaron la firma y no coincide con la última copia que conocía este dispositivo",
+      "text": "le falta la marca que demuestra que es tu copia más reciente y no coincide con la última copia que conocía este dispositivo",
       "status": "machine"
     },
     "backup.stale_restore.reason.too_old": {
-      "text": "se firmó hace más tiempo del que tendría una copia actual",
+      "text": "se hizo hace más tiempo del que tendría una copia actual",
       "status": "machine"
     },
     "backup.stale_restore.title": {
@@ -1830,7 +1830,7 @@
       "status": "machine"
     },
     "channels.keys_reset.notice": {
-      "text": "Ya no puedes publicar en este canal. Las claves de tu cuenta se restablecieron y las publicaciones del canal se firmaron con las antiguas. Los suscriptores no reciben aviso; crea un canal nuevo y compártelo con ellos.",
+      "text": "Ya no puedes publicar en este canal porque las claves de tu cuenta se restablecieron. Los suscriptores no reciben aviso; crea un canal nuevo y compártelo con ellos.",
       "status": "machine"
     },
     "channels.keys_reset.remove": {
@@ -3486,7 +3486,7 @@
       "status": "machine"
     },
     "chat.reauth.body": {
-      "text": "Las claves necesarias para descifrar y firmar mensajes no están disponibles en esta sesión. Vuelve a iniciar sesión para abrir este chat.",
+      "text": "Este chat no se puede abrir en este dispositivo ahora mismo. Vuelve a iniciar sesión para abrirlo.",
       "status": "machine"
     },
     "chat.reauth.title": {
@@ -4338,15 +4338,15 @@
       "status": "machine"
     },
     "common.error.session_ended": {
-      "text": "Tu sesión terminó. Vuelve a iniciar sesión.",
+      "text": "Se cerró tu sesión. Vuelve a iniciar sesión.",
       "status": "machine"
     },
     "common.error.session_expired": {
-      "text": "La sesión caducó. Vuelve a iniciar sesión.",
+      "text": "Se cerró tu sesión. Vuelve a iniciar sesión.",
       "status": "machine"
     },
     "common.error.session_not_ready": {
-      "text": "La sesión aún no está lista.",
+      "text": "Esto no está disponible ahora. Vuelve a iniciar sesión y reinténtalo.",
       "status": "machine"
     },
     "common.error.starting_up": {
@@ -4586,19 +4586,19 @@
       "status": "machine"
     },
     "contacts.identity_changed.unconfirmed": {
-      "text": "La identidad segura de {name} cambió y no se pudo confirmar con el registro de transparencia. Verifícala por otro medio antes de confiar.",
+      "text": "No se pudo confirmar que esta sigue siendo la cuenta de {name}, así que no se envió nada.",
       "status": "machine"
     },
     "contacts.identity_changed.unconfirmed_unnamed": {
-      "text": "La identidad segura de este contacto cambió y no se pudo confirmar con el registro de transparencia. Verifícala por otro medio antes de confiar.",
+      "text": "No se pudo confirmar que sigue siendo la misma cuenta, así que no se envió nada.",
       "status": "machine"
     },
     "contacts.identity_changed.unexplained": {
-      "text": "La identidad segura de {name} cambió y el registro de transparencia NO muestra un restablecimiento hecho por el titular: trátalo como un posible robo de la cuenta. Verifícala por otro medio antes de confiar.",
+      "text": "No se pudo confirmar que esta sigue siendo la cuenta de {name}, así que no se envió nada.",
       "status": "machine"
     },
     "contacts.identity_changed.unexplained_unnamed": {
-      "text": "La identidad segura de este contacto cambió y el registro de transparencia NO muestra un restablecimiento hecho por el titular: trátalo como un posible robo de la cuenta. Verifícala por otro medio antes de confiar.",
+      "text": "No se pudo confirmar que sigue siendo la misma cuenta, así que no se envió nada.",
       "status": "machine"
     },
     "contacts.invite_links.subtitle": {
@@ -4666,7 +4666,7 @@
       "status": "machine"
     },
     "contacts.reauth.body": {
-      "text": "Las claves que esta sesión necesita para los contactos no están disponibles. Vuelve a iniciar sesión para usar Contactos.",
+      "text": "Los contactos no se pueden abrir en este dispositivo ahora mismo. Vuelve a iniciar sesión.",
       "status": "machine"
     },
     "contacts.remove.body": {
@@ -4890,7 +4890,7 @@
       "status": "machine"
     },
     "device_link.error.identity_mismatch": {
-      "text": "La identidad recibida de tu otro dispositivo no coincide con la identidad publicada de esta cuenta, así que no se usará.",
+      "text": "Tu otro dispositivo envió claves que no pertenecen a esta cuenta. No se cambió nada.",
       "status": "machine"
     },
     "device_link.error.name_other_account": {
@@ -4898,11 +4898,11 @@
       "status": "machine"
     },
     "device_link.error.no_identity": {
-      "text": "El otro dispositivo confirmó, pero no envió tu identidad. Actualiza Lakko en él e inténtalo de nuevo, o usa tu frase de recuperación.",
+      "text": "Tu otro dispositivo confirmó, pero no envió las claves de tu cuenta. Actualiza Lakko en él e inténtalo de nuevo, o usa tu frase de recuperación.",
       "status": "machine"
     },
     "device_link.error.not_let_in": {
-      "text": "Tu otro dispositivo envió la identidad, pero no se pudo dar acceso a este dispositivo. Inténtalo de nuevo o usa tu frase de recuperación.",
+      "text": "Tu otro dispositivo respondió, pero no se pudo añadir este dispositivo. Inténtalo de nuevo o usa tu frase de recuperación.",
       "status": "machine"
     },
     "device_link.error.request_limited": {
@@ -4934,7 +4934,7 @@
       "status": "machine"
     },
     "device_link.qr.intro": {
-      "text": "Muestra este código a un dispositivo que todavía tenga tu cuenta. Añadirá este dispositivo y transferirá tu identidad con cifrado de extremo a extremo, sin tener que escribir ninguna frase.",
+      "text": "Muestra este código a un dispositivo que todavía tenga tu cuenta. Añadirá este dispositivo sin que tengas que escribir ninguna frase.",
       "status": "machine"
     },
     "device_link.qr.scan_hint": {
@@ -4974,7 +4974,7 @@
       "status": "machine"
     },
     "device_link.request.error.no_device_key": {
-      "text": "Este navegador no tiene clave de dispositivo. Vuelve a iniciar sesión.",
+      "text": "Este navegador ya no tiene la sesión iniciada. Vuelve a iniciar sesión.",
       "status": "machine"
     },
     "device_link.request.expired": {
@@ -5298,7 +5298,7 @@
       "status": "machine"
     },
     "devices.scan.confirm.body": {
-      "text": "El dispositivo escaneado tendrá acceso completo a tu cuenta: tus mensajes, tus contactos y tu identidad. Continúa solo si el código está en tu propio dispositivo nuevo.",
+      "text": "El dispositivo escaneado tendrá acceso completo a tu cuenta, tus mensajes y tus contactos. Continúa solo si el código está en tu propio dispositivo nuevo.",
       "status": "machine"
     },
     "devices.scan.confirm.submit": {
@@ -5346,7 +5346,7 @@
       "status": "machine"
     },
     "devices.signed_out.body_mismatch": {
-      "text": "Las claves de este dispositivo no coinciden con la identidad publicada de la cuenta.",
+      "text": "Las claves de este dispositivo ya no coinciden con tu cuenta.",
       "status": "machine"
     },
     "devices.signed_out.body_removed": {
@@ -7398,7 +7398,7 @@
       "status": "machine"
     },
     "ios.permission.camera": {
-      "text": "Lakko usa la cámara para escanear códigos QR de los dispositivos que quieres vincular a tu cuenta, para enviar video en las llamadas y para grabar los mensajes de video que decidas enviar. Todo lo que capta la cámara se cifra de extremo a extremo en tu dispositivo antes de enviarse.",
+      "text": "Lakko usa la cámara para escanear códigos QR de los dispositivos que quieres vincular a tu cuenta y de enlaces de Lakko, para las videollamadas y para grabar los mensajes de video que decidas enviar. Todo lo que capta la cámara se cifra de extremo a extremo en tu dispositivo antes de enviarse.",
       "status": "machine"
     },
     "ios.permission.face_id": {
@@ -8438,7 +8438,7 @@
       "status": "machine"
     },
     "restore_identity.error.not_published": {
-      "text": "No se encontró ninguna identidad publicada con la que verificar la identidad recuperada. Inténtalo de nuevo o restaura desde un dispositivo que todavía tenga tu cuenta.",
+      "text": "No se pudo confirmar que esto pertenece a tu cuenta. Inténtalo de nuevo o restaura desde un dispositivo que todavía tenga tu cuenta.",
       "status": "machine"
     },
     "restore_identity.error.nothing": {
@@ -8446,11 +8446,11 @@
       "status": "machine"
     },
     "restore_identity.error.phrase_mismatch": {
-      "text": "Esa frase de recuperación no coincide con la identidad de esta cuenta. Revisa la frase o vincula un dispositivo existente.",
+      "text": "Esa frase de recuperación no pertenece a esta cuenta. Revisa la frase o añade este dispositivo desde uno que todavía tenga tu cuenta.",
       "status": "machine"
     },
     "restore_identity.error.unreachable": {
-      "text": "No se pudo conectar con el directorio para verificar la identidad recuperada. Revisa tu conexión e inténtalo de nuevo.",
+      "text": "No se pudo confirmar que esto pertenece a tu cuenta. Revisa tu conexión e inténtalo de nuevo.",
       "status": "machine"
     },
     "restore_identity.from_passkey_no_keys": {
@@ -8894,7 +8894,7 @@
       "status": "machine"
     },
     "settings.data.export_note": {
-      "text": "Tus mensajes, contactos y el estado de tus grupos tienen cifrado de extremo a extremo y solo están en tus dispositivos.",
+      "text": "Tus mensajes, contactos y grupos tienen cifrado de extremo a extremo y solo están en tus dispositivos.",
       "status": "machine"
     },
     "settings.data.lede": {
@@ -10051,6 +10051,10 @@
     },
     "call.screen_share.refused_macos_desktop": {
       "text": "No se puede compartir tu pantalla. Permite que Lakko grabe la pantalla en Ajustes del Sistema.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_waiting": {
+      "text": "Las claves de tu cuenta se restablecieron menos de una hora después del último cambio. El cambio terminará solo en {minutes, plural, one {# minuto} other {# minutos}}; después Lakko mostrará las palabras nuevas.",
       "status": "machine"
     }
   },

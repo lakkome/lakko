@@ -345,11 +345,11 @@ targets:
         # InfoPlist.strings (`just l10n-compile`); change the catalog and
         # these together.
         NSCameraUsageDescription: >-
-          Lakko uses the camera to scan QR codes from devices
-          you want to link to your account, to capture video for
-          in-call streams, and to record video messages you
-          choose to send. Everything the camera captures is
-          end-to-end encrypted on your device before it is sent.
+          Lakko uses the camera to scan QR codes of devices you
+          want to link to your account and of Lakko links, for
+          video calls, and to record video messages you choose
+          to send. Everything the camera captures is end-to-end
+          encrypted on your device before it is sent.
         # G3-1 — microphone access for in-call audio capture
         # via `RTCAudioTrack`. iOS refuses to instantiate the
         # `AVAudioSession` shared instance for capture without

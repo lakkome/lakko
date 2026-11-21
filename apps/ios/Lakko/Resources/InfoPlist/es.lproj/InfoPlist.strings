@@ -6,7 +6,7 @@
   `just l10n-compile` from l10n/catalog; do not edit by hand.
 */
 
-"NSCameraUsageDescription" = "Lakko usa la cámara para escanear códigos QR de los dispositivos que quieres vincular a tu cuenta, para enviar video en las llamadas y para grabar los mensajes de video que decidas enviar. Todo lo que capta la cámara se cifra de extremo a extremo en tu dispositivo antes de enviarse.";
+"NSCameraUsageDescription" = "Lakko usa la cámara para escanear códigos QR de los dispositivos que quieres vincular a tu cuenta y de enlaces de Lakko, para las videollamadas y para grabar los mensajes de video que decidas enviar. Todo lo que capta la cámara se cifra de extremo a extremo en tu dispositivo antes de enviarse.";
 
 "NSMicrophoneUsageDescription" = "Lakko usa el micrófono para las llamadas cifradas de extremo a extremo y para grabar los mensajes de voz y de video que decidas enviar. El micrófono solo está activo durante una llamada o mientras grabas un mensaje, y todo lo que capta se cifra en tu dispositivo antes de enviarse.";
 

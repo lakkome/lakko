@@ -20,33 +20,32 @@ describe("supersessionRefusedMessage (KT-log S4)", () => {
     );
   });
 
-  it("loggedReset=false → possible-compromise copy", () => {
-    const msg = supersessionRefusedMessage(false, "@bob");
-    expect(msg).toContain("@bob");
-    expect(msg).toContain("does NOT show an owner reset");
-    expect(msg).toContain("possible account compromise");
-    expect(msg).toContain("Verify out of band");
-  });
-
-  it("loggedReset=null → neutral could-not-confirm copy", () => {
-    const msg = supersessionRefusedMessage(null, "@carol");
-    expect(msg).toContain("@carol");
-    expect(msg).toContain("could not be confirmed");
-    expect(msg).toContain("Verify out of band");
-    // The neutral message must not assert a compromise OR a reset.
-    expect(msg).not.toContain("compromise");
-    expect(msg).not.toContain("owner-initiated reset");
+  it("names the contact and says only the outcome", () => {
+    expect(supersessionRefusedMessage(null, "@carol")).toBe(
+      "Couldn't confirm this is still @carol's account, so nothing was sent.",
+    );
   });
 
   it("falls back to a subject-less sentence when no peer label is given", () => {
-    expect(supersessionRefusedMessage(false)).toContain("This contact");
-    expect(supersessionRefusedMessage(null, "")).toContain("This contact");
+    const unnamed = "Couldn't confirm this is still the same account, so nothing was sent.";
+    expect(supersessionRefusedMessage(false)).toBe(unnamed);
+    expect(supersessionRefusedMessage(null, "")).toBe(unnamed);
   });
 
-  it("the two refusals produce two DISTINCT messages", () => {
-    const b = supersessionRefusedMessage(false, "@x");
-    const c = supersessionRefusedMessage(null, "@x");
-    expect(b).not.toBe(c);
+  it("does not tell the person which case it was: both refusals read the same", () => {
+    expect(supersessionRefusedMessage(false, "@x")).toBe(supersessionRefusedMessage(null, "@x"));
+    expect(supersessionRefusedMessage(false)).toBe(supersessionRefusedMessage(null));
+  });
+
+  it("explains no machinery (no key ceremony in the copy)", () => {
+    for (const lr of [true, false, null] as const) {
+      for (const label of ["@x", undefined]) {
+        const msg = supersessionRefusedMessage(lr, label).toLowerCase();
+        for (const word of ["identity", "transparency", "out of band", "verify", "compromise", "key"]) {
+          expect(msg).not.toContain(word);
+        }
+      }
+    }
   });
 
   it("contains no emoji / pictographs (copy-style invariant)", () => {

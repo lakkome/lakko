@@ -328,8 +328,8 @@
       "comment": "The connection failed during passkey sign-in."
     },
     "auth.passkey.error.not_registered": {
-      "text": "No passkey is registered for this account. Sign in with password first, then add a passkey from Home.",
-      "comment": "No passkey exists for the account."
+      "text": "No passkey is set up for this account. Sign in with your password, then add a passkey in Settings.",
+      "comment": "No passkey exists for the account. 'Settings' is the name of the Settings tab."
     },
     "auth.passkey.error.server_disabled": {
       "text": "Passkeys are not available right now.",
@@ -571,7 +571,7 @@
     },
     "backup.stale_restore.body": {
       "text": "This backup is older than expected ({reason}). {consequence}",
-      "comment": "Dialog body; {reason} says why it was judged old (e.g. how long ago it was signed); {consequence} is the consequence sentence, passed already translated.",
+      "comment": "Dialog body; {reason} says why it was judged old (e.g. how long ago it was made); {consequence} is the consequence sentence, passed already translated.",
       "security_critical": true
     },
     "backup.stale_restore.confirm": {
@@ -595,13 +595,13 @@
       "security_critical": true
     },
     "backup.stale_restore.reason.head_stripped": {
-      "text": "its signature was removed and it differs from the last backup this device knew",
-      "comment": "Phrase inside the parentheses of backup.stale_restore.body: the backup came without its signed header and does not match the last known backup.",
+      "text": "it is missing the mark that shows it is your latest backup, and it differs from the last backup this device knew",
+      "comment": "Phrase inside the parentheses of backup.stale_restore.body: the backup came without the mark that proves it is the account's latest one and does not match the last known backup. Do not use a word for a cryptographic signature.",
       "security_critical": true
     },
     "backup.stale_restore.reason.too_old": {
-      "text": "it was signed longer ago than a current backup would be",
-      "comment": "Phrase inside the parentheses of backup.stale_restore.body: on a new device, the backup's signature is older than the allowed window.",
+      "text": "it was made longer ago than a current backup would be",
+      "comment": "Phrase inside the parentheses of backup.stale_restore.body: on a new device, the backup is older than the allowed window.",
       "security_critical": true
     },
     "backup.stale_restore.title": {
@@ -2289,7 +2289,7 @@
       "comment": "A request to be a publisher of a channel is being sent, or was sent less than 7 days ago and waits for the owner's device. Never say it was refused."
     },
     "channels.keys_reset.notice": {
-      "text": "You can no longer post to this channel. Your account keys were reset, and the channel's posts were signed with the old ones. Subscribers are not told; create a new channel and share it with them.",
+      "text": "You can no longer post to this channel because your account keys were reset. Subscribers are not told; create a new channel and share it with them.",
       "comment": "Notice on the detail of a channel the person owned before resetting their account keys.",
       "security_critical": true
     },
@@ -4030,7 +4030,7 @@
       "comment": "Button that signs out and returns to sign-in."
     },
     "chat.reauth.body": {
-      "text": "The keys needed to decrypt and sign messages are not available in this session. Sign in again to open this chat.",
+      "text": "This chat can't be opened on this device right now. Sign in again to open it.",
       "comment": "Body of the page shown when this session cannot open a chat without signing in again."
     },
     "chat.reauth.title": {
@@ -5005,16 +5005,16 @@
       "comment": "Generic error when the app cannot reach Lakko over the network."
     },
     "common.error.session_ended": {
-      "text": "Your session has ended. Sign in again.",
-      "comment": "The signed-in session is gone; the action needs a new sign-in."
+      "text": "You were signed out. Sign in again.",
+      "comment": "The sign-in is gone; the action needs a new sign-in."
     },
     "common.error.session_expired": {
-      "text": "Session expired. Sign in again.",
-      "comment": "The server no longer accepts this session."
+      "text": "You were signed out. Sign in again.",
+      "comment": "The server no longer accepts this sign-in; the person must sign in again."
     },
     "common.error.session_not_ready": {
-      "text": "Session not ready.",
-      "comment": "An action was tried before the signed-in session finished loading."
+      "text": "This isn't available right now. Sign in again, then retry.",
+      "comment": "Fallback when an action needs a fully signed-in account and this device does not have one at that moment (still loading after start, signed out meanwhile, or an account that cannot do this action). Must be true in all of these cases."
     },
     "common.error.starting_up": {
       "text": "Lakko is still starting up. Try again in a moment.",
@@ -5303,22 +5303,22 @@
       "comment": "Starting the one-to-one chat with a contact failed (after accepting a request, or from Message on the contact card)."
     },
     "contacts.identity_changed.unconfirmed": {
-      "text": "{name}'s secure identity changed and could not be confirmed against the transparency log. Verify out of band before trusting.",
-      "comment": "A contact's identity key changed and the transparency log could not be checked. Neither a reset nor a compromise is claimed. {name} is the contact's @username.",
+      "text": "Couldn't confirm this is still {name}'s account, so nothing was sent.",
+      "comment": "Shown when an action toward a contact is refused because this device could not confirm the contact's account is the same one as before. Say only the outcome: no keys, logs, verification or reasons. {name} is the contact's @username.",
       "security_critical": true
     },
     "contacts.identity_changed.unconfirmed_unnamed": {
-      "text": "This contact's secure identity changed and could not be confirmed against the transparency log. Verify out of band before trusting.",
+      "text": "Couldn't confirm this is still the same account, so nothing was sent.",
       "comment": "Same as contacts.identity_changed.unconfirmed when the contact's name is not known.",
       "security_critical": true
     },
     "contacts.identity_changed.unexplained": {
-      "text": "{name}'s secure identity changed, and the transparency log does NOT show an owner reset — treat this as a possible account compromise. Verify out of band before trusting.",
-      "comment": "A contact's identity key changed and the key transparency log shows no owner reset: a possible compromise. {name} is the contact's @username. Keep the emphasis on NOT.",
+      "text": "Couldn't confirm this is still {name}'s account, so nothing was sent.",
+      "comment": "Same text as contacts.identity_changed.unconfirmed (the clients pick this key in a different case, which the person is not told about). {name} is the contact's @username.",
       "security_critical": true
     },
     "contacts.identity_changed.unexplained_unnamed": {
-      "text": "This contact's secure identity changed, and the transparency log does NOT show an owner reset — treat this as a possible account compromise. Verify out of band before trusting.",
+      "text": "Couldn't confirm this is still the same account, so nothing was sent.",
       "comment": "Same as contacts.identity_changed.unexplained when the contact's name is not known.",
       "security_critical": true
     },
@@ -5387,8 +5387,8 @@
       "comment": "Checking for contact requests needs keys this session does not hold."
     },
     "contacts.reauth.body": {
-      "text": "The keys this session needs for contacts are not available. Sign in again to use Contacts.",
-      "comment": "Web: shown on the Contacts screen when the tab holds no identity secrets."
+      "text": "Contacts can't be opened on this device right now. Sign in again.",
+      "comment": "Shown on the Contacts screen (and on an invite page) when this device cannot open contacts until the person signs in again."
     },
     "contacts.remove.body": {
       "text": "Any chats you share stay as they are; only your contact list changes. You can add them again later.",
@@ -5622,8 +5622,8 @@
       "comment": "Restoring from another device failed for a reason with no more specific message."
     },
     "device_link.error.identity_mismatch": {
-      "text": "The identity received from your other device doesn't match this account's published identity — refusing to use it.",
-      "comment": "The identity from the other device does not match the account; it is refused for safety.",
+      "text": "Your other device sent keys that don't belong to this account. Nothing was changed.",
+      "comment": "Adding this device from another device: the keys that arrived do not belong to this account, so they were refused and nothing was saved.",
       "security_critical": true
     },
     "device_link.error.name_other_account": {
@@ -5632,12 +5632,12 @@
       "security_critical": true
     },
     "device_link.error.no_identity": {
-      "text": "The other device confirmed but did not send your identity. Update Lakko on it and try again, or use your recovery phrase.",
-      "comment": "The other device confirmed without sending the identity."
+      "text": "Your other device confirmed but did not send your account's keys. Update Lakko on it and try again, or use your recovery phrase.",
+      "comment": "The other device confirmed without sending the account's keys."
     },
     "device_link.error.not_let_in": {
-      "text": "Your other device sent the identity, but this device could not be let in. Try again, or use your recovery phrase.",
-      "comment": "The identity arrived but signing in on this device failed."
+      "text": "Your other device answered, but this device could not be added. Try again, or use your recovery phrase.",
+      "comment": "The other device answered but adding this device to the account failed."
     },
     "device_link.error.request_limited": {
       "text": "Too many requests to your other devices. Try again in a few minutes.",
@@ -5671,7 +5671,7 @@
       "security_critical": true
     },
     "device_link.qr.intro": {
-      "text": "Show this code to a device that still has your account. It adds this device and transfers your identity end-to-end encrypted, with no phrase to type.",
+      "text": "Show this code to a device that still has your account. It adds this device, with no phrase to type.",
       "comment": "Line above the pairing code shown on a new device.",
       "security_critical": true
     },
@@ -5717,8 +5717,8 @@
       "comment": "Adding the new device failed for a reason with no more specific message."
     },
     "device_link.request.error.no_device_key": {
-      "text": "No device key on this browser. Sign in again.",
-      "comment": "This browser lost its device key; signing in again fixes it."
+      "text": "This browser is no longer signed in. Sign in again.",
+      "comment": "This browser lost what keeps it signed in; signing in again fixes it."
     },
     "device_link.request.expired": {
       "text": "The sign-in request expired. Nothing was added.",
@@ -6140,7 +6140,7 @@
       "comment": "Third line of a device row: the city and country the device's internet address belongs to, e.g. Almere, Netherlands. {city} is a city name, {country} a country name, both already in the right language."
     },
     "devices.scan.confirm.body": {
-      "text": "This gives the scanned device full access to your account: your messages, your contacts and your identity. Continue only if the code is on your own new device.",
+      "text": "This gives the scanned device full access to your account, your messages and your contacts. Continue only if the code is on your own new device.",
       "comment": "Warning before the scanned device is let into the account.",
       "security_critical": true
     },
@@ -6200,7 +6200,7 @@
       "comment": "Section heading on Settings > Devices above the one row of the device the person is using (docs/ux/second-device.md section 3)."
     },
     "devices.signed_out.body_mismatch": {
-      "text": "This device's keys do not match the account's published identity.",
+      "text": "This device's keys no longer match your account.",
       "comment": "Body of the signed-out screen when the account publishes other keys of the same generation (an anomaly, not a known reset); the Sign out button deletes the account's data from this device.",
       "security_critical": true
     },
@@ -8286,7 +8286,7 @@
       "comment": "iOS name of the .lakkofeed file type (Info.plist document type), shown in Files and share sheets."
     },
     "ios.permission.camera": {
-      "text": "Lakko uses the camera to scan QR codes of devices you want to link to your account and of Lakko links, to capture video for in-call streams, and to record video messages you choose to send. Everything the camera captures is end-to-end encrypted on your device before it is sent.",
+      "text": "Lakko uses the camera to scan QR codes of devices you want to link to your account and of Lakko links, for video calls, and to record video messages you choose to send. Everything the camera captures is end-to-end encrypted on your device before it is sent.",
       "comment": "iOS system permission prompt for camera access (Info.plist usage description). iOS shows it in its own alert, in the language iOS uses for Lakko, the first time Lakko asks. It must say why Lakko needs the access. No placeholders."
     },
     "ios.permission.face_id": {
@@ -9689,8 +9689,8 @@
       "security_critical": true
     },
     "recovery_phrase.fresh.publish_waiting": {
-      "text": "Your account keys were reset less than an hour after the last change, so they can be published in {minutes, plural, one {# minute} other {# minutes}}. Lakko will finish by itself and then show the new words.",
-      "comment": "Shown instead of the new recovery phrase when the directory refused to publish the new keys because the account's keys were already changed less than an hour ago; {minutes} is how long until it accepts them (rounded up). No Try again button: the app retries by itself at that time and whenever it opens (UX identity-recovery 15.4).",
+      "text": "Your account keys were reset less than an hour after the last change. The change finishes in {minutes, plural, one {# minute} other {# minutes}}, by itself; Lakko will then show the new words.",
+      "comment": "Shown instead of the new recovery phrase when the new keys cannot be used yet because the account's keys were already changed less than an hour ago; {minutes} is how long until the change can finish (rounded up). No Try again button: the app retries by itself at that time and whenever it opens (UX identity-recovery 15.4).",
       "security_critical": true
     },
     "recovery_phrase.fresh.safety_note": {
@@ -9941,8 +9941,8 @@
       "security_critical": true
     },
     "restore_identity.error.not_published": {
-      "text": "No published identity was found to verify the recovered identity. Try again, or restore from a device that still has your account.",
-      "comment": "The account's identity could not be found to check against; refused for safety.",
+      "text": "Couldn't confirm this belongs to your account. Try again, or restore from a device that still has your account.",
+      "comment": "Restoring the account (from the recovery phrase, a passkey or another device): there was nothing on the server to check the restored keys against, so they were refused for safety.",
       "security_critical": true
     },
     "restore_identity.error.nothing": {
@@ -9950,13 +9950,13 @@
       "comment": "The restore screen was reached without a sign-in."
     },
     "restore_identity.error.phrase_mismatch": {
-      "text": "That recovery phrase doesn't match this account's identity. Check the phrase, or pair an existing device instead.",
-      "comment": "The typed phrase belongs to a different identity; it is refused for safety.",
+      "text": "That recovery phrase doesn't belong to this account. Check the phrase, or add this device from one that still has your account.",
+      "comment": "The typed recovery phrase belongs to a different account; it is refused for safety.",
       "security_critical": true
     },
     "restore_identity.error.unreachable": {
-      "text": "Could not reach the directory to verify the recovered identity. Check your connection and try again.",
-      "comment": "The identity could not be checked because the server was unreachable."
+      "text": "Couldn't confirm this belongs to your account. Check your connection and try again.",
+      "comment": "Restoring the account (from the recovery phrase, a passkey or another device): the restored keys could not be checked because the server was unreachable."
     },
     "restore_identity.from_passkey_no_keys": {
       "text": "Your passkey logged you in. It does not carry your keys.",
@@ -10489,7 +10489,7 @@
       "comment": "Button that downloads the account export."
     },
     "settings.data.export_note": {
-      "text": "Your messages, contacts, and group state are end-to-end encrypted and live only on your devices.",
+      "text": "Your messages, contacts, and groups are end-to-end encrypted and live only on your devices.",
       "comment": "A note written inside the exported file."
     },
     "settings.data.lede": {

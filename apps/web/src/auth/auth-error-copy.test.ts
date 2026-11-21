@@ -187,9 +187,9 @@ describe("restore identity checks render from their kind (ADR-0061 section 6)", 
       name: "IdentityVerificationUnavailable",
       kind,
     });
-  const PHRASE = "That recovery phrase doesn't match this account's identity. Check the phrase, or pair an existing device instead.";
+  const PHRASE = "That recovery phrase doesn't belong to this account. Check the phrase, or add this device from one that still has your account.";
   const DEVICE =
-    "The identity received from your other device doesn't match this account's published identity — refusing to use it.";
+    "Your other device sent keys that don't belong to this account. Nothing was changed.";
 
   it("follows the source the mismatch carries, whichever form shows it", () => {
     expect(screenText(mismatch("device"))).toBe(DEVICE);
@@ -206,10 +206,10 @@ describe("restore identity checks render from their kind (ADR-0061 section 6)", 
 
   it("says why the identity could not be checked", () => {
     expect(screenText(unavailable("missing"))).toBe(
-      "No published identity was found to verify the recovered identity. Try again, or restore from a device that still has your account.",
+      "Couldn't confirm this belongs to your account. Try again, or restore from a device that still has your account.",
     );
     expect(screenText(unavailable("unreachable"))).toBe(
-      "Could not reach the directory to verify the recovered identity. Check your connection and try again.",
+      "Couldn't confirm this belongs to your account. Check your connection and try again.",
     );
   });
 });

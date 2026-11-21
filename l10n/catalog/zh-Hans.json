@@ -114,7 +114,7 @@
       "status": "machine"
     },
     "auth.passkey.error.not_registered": {
-      "text": "此账号尚未注册通行密钥。请先使用密码登录，然后在主页添加通行密钥。",
+      "text": "此账号尚未设置通行密钥。请使用密码登录，然后在设置中添加通行密钥。",
       "status": "machine"
     },
     "auth.passkey.error.server_disabled": {
@@ -374,11 +374,11 @@
       "status": "machine"
     },
     "backup.stale_restore.reason.head_stripped": {
-      "text": "它的签名已被移除，并且与此设备所知的最近一次备份不同",
+      "text": "它缺少表明这是你最新备份的标记，并且与此设备所知的最近一次备份不同",
       "status": "machine"
     },
     "backup.stale_restore.reason.too_old": {
-      "text": "它的签名时间早于当前备份应有的时间",
+      "text": "它的创建时间早于当前备份应有的时间",
       "status": "machine"
     },
     "backup.stale_restore.title": {
@@ -1830,7 +1830,7 @@
       "status": "machine"
     },
     "channels.keys_reset.notice": {
-      "text": "你无法再在此频道发布。你的账号密钥已重置，而此频道的帖子是用旧密钥签名的。订阅者不会收到通知；请创建新频道并分享给他们。",
+      "text": "你的账号密钥已重置，因此无法再在此频道发布。订阅者不会收到通知；请创建新频道并分享给他们。",
       "status": "machine"
     },
     "channels.keys_reset.remove": {
@@ -3486,7 +3486,7 @@
       "status": "machine"
     },
     "chat.reauth.body": {
-      "text": "此会话中没有用于解密和签名消息的密钥。请重新登录以打开此聊天。",
+      "text": "此聊天目前无法在此设备上打开。请重新登录以打开它。",
       "status": "machine"
     },
     "chat.reauth.title": {
@@ -4338,15 +4338,15 @@
       "status": "machine"
     },
     "common.error.session_ended": {
-      "text": "你的会话已结束。请重新登录。",
+      "text": "你已退出登录。请重新登录。",
       "status": "machine"
     },
     "common.error.session_expired": {
-      "text": "会话已过期。请重新登录。",
+      "text": "你已退出登录。请重新登录。",
       "status": "machine"
     },
     "common.error.session_not_ready": {
-      "text": "会话尚未就绪。",
+      "text": "此操作当前不可用。请重新登录后重试。",
       "status": "machine"
     },
     "common.error.starting_up": {
@@ -4586,19 +4586,19 @@
       "status": "machine"
     },
     "contacts.identity_changed.unconfirmed": {
-      "text": "{name} 的安全身份已更改，且无法通过透明度日志确认。在信任之前，请通过其他渠道核实。",
+      "text": "无法确认这仍是 {name} 的账号，因此未发送任何内容。",
       "status": "machine"
     },
     "contacts.identity_changed.unconfirmed_unnamed": {
-      "text": "此联系人的安全身份已更改，且无法通过透明度日志确认。在信任之前，请通过其他渠道核实。",
+      "text": "无法确认这仍是同一个账号，因此未发送任何内容。",
       "status": "machine"
     },
     "contacts.identity_changed.unexplained": {
-      "text": "{name} 的安全身份已更改，而透明度日志并未显示所有者本人重置——请视为账号可能已被盗用。在信任之前，请通过其他渠道核实。",
+      "text": "无法确认这仍是 {name} 的账号，因此未发送任何内容。",
       "status": "machine"
     },
     "contacts.identity_changed.unexplained_unnamed": {
-      "text": "此联系人的安全身份已更改，而透明度日志并未显示所有者本人重置——请视为账号可能已被盗用。在信任之前，请通过其他渠道核实。",
+      "text": "无法确认这仍是同一个账号，因此未发送任何内容。",
       "status": "machine"
     },
     "contacts.invite_links.subtitle": {
@@ -4666,7 +4666,7 @@
       "status": "machine"
     },
     "contacts.reauth.body": {
-      "text": "此会话缺少联系人功能所需的密钥。请重新登录以使用联系人。",
+      "text": "联系人目前无法在此设备上打开。请重新登录。",
       "status": "machine"
     },
     "contacts.remove.body": {
@@ -4890,7 +4890,7 @@
       "status": "machine"
     },
     "device_link.error.identity_mismatch": {
-      "text": "从你的另一台设备收到的身份与此账号公开的身份不符，已拒绝使用。",
+      "text": "你的另一台设备发送的密钥不属于此账号。未做任何更改。",
       "status": "machine"
     },
     "device_link.error.name_other_account": {
@@ -4898,11 +4898,11 @@
       "status": "machine"
     },
     "device_link.error.no_identity": {
-      "text": "另一台设备已确认，但没有发送你的身份。请在该设备上更新 Lakko 后重试，或使用恢复短语。",
+      "text": "你的另一台设备已确认，但没有发送你账号的密钥。请在该设备上更新 Lakko 后重试，或使用恢复短语。",
       "status": "machine"
     },
     "device_link.error.not_let_in": {
-      "text": "你的另一台设备已发送身份，但此设备无法登录。请重试，或使用恢复短语。",
+      "text": "你的另一台设备已回应，但无法添加此设备。请重试，或使用恢复短语。",
       "status": "machine"
     },
     "device_link.error.request_limited": {
@@ -4934,7 +4934,7 @@
       "status": "machine"
     },
     "device_link.qr.intro": {
-      "text": "将此二维码出示给仍登录着你账号的设备。它会添加此设备，并以端到端加密方式转移你的身份，无需输入短语。",
+      "text": "将此二维码出示给仍登录着你账号的设备。它会添加此设备，无需输入短语。",
       "status": "machine"
     },
     "device_link.qr.scan_hint": {
@@ -4974,7 +4974,7 @@
       "status": "machine"
     },
     "device_link.request.error.no_device_key": {
-      "text": "此浏览器上没有设备密钥。请重新登录。",
+      "text": "此浏览器已不再处于登录状态。请重新登录。",
       "status": "machine"
     },
     "device_link.request.expired": {
@@ -5298,7 +5298,7 @@
       "status": "machine"
     },
     "devices.scan.confirm.body": {
-      "text": "这会让扫描到的设备完全访问你的账号：你的消息、联系人和身份。仅当二维码显示在你自己的新设备上时才继续。",
+      "text": "这会让扫描到的设备完全访问你的账号、消息和联系人。仅当二维码显示在你自己的新设备上时才继续。",
       "status": "machine"
     },
     "devices.scan.confirm.submit": {
@@ -5346,7 +5346,7 @@
       "status": "machine"
     },
     "devices.signed_out.body_mismatch": {
-      "text": "此设备的密钥与账号公开发布的身份不一致。",
+      "text": "此设备的密钥与你的账号已不再匹配。",
       "status": "machine"
     },
     "devices.signed_out.body_removed": {
@@ -7398,7 +7398,7 @@
       "status": "machine"
     },
     "ios.permission.camera": {
-      "text": "Lakko 使用摄像头扫描你要关联到账户的设备上的二维码、在通话中传输视频，以及录制你选择发送的视频消息。摄像头捕获的所有内容在发送前都会在你的设备上进行端到端加密。",
+      "text": "Lakko 使用摄像头扫描你要关联到账户的设备上的二维码和 Lakko 链接的二维码、进行视频通话，以及录制你选择发送的视频消息。摄像头捕获的所有内容在发送前都会在你的设备上进行端到端加密。",
       "status": "machine"
     },
     "ios.permission.face_id": {
@@ -8438,7 +8438,7 @@
       "status": "machine"
     },
     "restore_identity.error.not_published": {
-      "text": "未找到可用于验证所恢复身份的公开身份。请重试，或从仍登录着你账号的设备恢复。",
+      "text": "无法确认这属于你的账号。请重试，或从仍登录着你账号的设备恢复。",
       "status": "machine"
     },
     "restore_identity.error.nothing": {
@@ -8446,11 +8446,11 @@
       "status": "machine"
     },
     "restore_identity.error.phrase_mismatch": {
-      "text": "该恢复短语与此账号的身份不匹配。请检查短语，或改为与现有设备配对。",
+      "text": "该恢复短语不属于此账号。请检查短语，或从仍登录着你账号的设备添加此设备。",
       "status": "machine"
     },
     "restore_identity.error.unreachable": {
-      "text": "无法连接到目录服务来验证所恢复的身份。请检查网络连接后重试。",
+      "text": "无法确认这属于你的账号。请检查网络连接后重试。",
       "status": "machine"
     },
     "restore_identity.from_passkey_no_keys": {
@@ -8894,7 +8894,7 @@
       "status": "machine"
     },
     "settings.data.export_note": {
-      "text": "你的消息、联系人和群组状态均为端到端加密，只保存在你的设备上。",
+      "text": "你的消息、联系人和群组均为端到端加密，只保存在你的设备上。",
       "status": "machine"
     },
     "settings.data.lede": {
@@ -10051,6 +10051,10 @@
     },
     "call.screen_share.refused_macos_desktop": {
       "text": "无法共享你的屏幕。请在“系统设置”中允许 Lakko 录制屏幕。",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_waiting": {
+      "text": "你的账号密钥在上次更改后不到一小时内被重置。更改将在 {minutes, plural, other {# 分钟}}后自动完成，届时 Lakko 会显示新的词语。",
       "status": "machine"
     }
   },

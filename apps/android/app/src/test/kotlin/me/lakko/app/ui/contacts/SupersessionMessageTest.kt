@@ -58,39 +58,48 @@ class SupersessionMessageTest {
     }
 
     @Test
-    fun `loggedReset false flags a possible compromise`() {
-        val msg = supersessionRefusedMessage(false, "@alice").en
+    fun `a refusal names the contact and says only the outcome`() {
         assertEquals(
-            "@alice's secure identity changed, and the transparency log does " +
-                "NOT show an owner reset — treat this as a possible account " +
-                "compromise. Verify out of band before trusting.",
-            msg,
+            "Couldn't confirm this is still @alice's account, so nothing was sent.",
+            supersessionRefusedMessage(null, "@alice").en,
         )
     }
 
     @Test
-    fun `loggedReset null is inconclusive`() {
-        val msg = supersessionRefusedMessage(null, "@alice").en
+    fun `both refusals read the same, so the person is not told which case it was`() {
+        assertEquals(supersessionRefusedMessage(null, "@alice").en, supersessionRefusedMessage(false, "@alice").en)
+        assertEquals(supersessionRefusedMessage(null, null).en, supersessionRefusedMessage(false, null).en)
+    }
+
+    // -----------------------------------------------------------------
+    // peerLabel fallback — a subject-less sentence when no handle was typed
+    // -----------------------------------------------------------------
+
+    @Test
+    fun `null peer label falls back to the same account`() {
+        val unnamed = "Couldn't confirm this is still the same account, so nothing was sent."
+        assertEquals(unnamed, supersessionRefusedMessage(false, null).en)
+        assertEquals(unnamed, supersessionRefusedMessage(null, null).en)
+    }
+
+    @Test
+    fun `empty peer label falls back to the same account`() {
         assertEquals(
-            "@alice's secure identity changed and could not be confirmed " +
-                "against the transparency log. Verify out of band before trusting.",
-            msg,
+            "Couldn't confirm this is still the same account, so nothing was sent.",
+            supersessionRefusedMessage(false, "").en,
         )
     }
 
-    // -----------------------------------------------------------------
-    // peerLabel fallback — "This contact" when no handle was typed
-    // -----------------------------------------------------------------
-
     @Test
-    fun `null peer label falls back to This contact`() {
-        assertTrue(supersessionRefusedMessage(false, null).en.startsWith("This contact's "))
-        assertTrue(supersessionRefusedMessage(null, null).en.startsWith("This contact's "))
-    }
-
-    @Test
-    fun `empty peer label falls back to This contact`() {
-        assertTrue(supersessionRefusedMessage(false, "").en.startsWith("This contact's "))
+    fun `the copy explains no machinery`() {
+        for (reset in listOf(true, false, null)) {
+            for (label in listOf("@alice", null)) {
+                val msg = supersessionRefusedMessage(reset, label).en.lowercase()
+                for (word in listOf("identity", "transparency", "out of band", "verify", "compromise", "key")) {
+                    assertTrue("'$word' in: $msg", !msg.contains(word))
+                }
+            }
+        }
     }
 
     @Test

@@ -6,7 +6,7 @@
   `just l10n-compile` from l10n/catalog; do not edit by hand.
 */
 
-"NSCameraUsageDescription" = "Lakko kamerayı, hesabına bağlamak istediğin cihazların QR kodlarını taramak, aramalarda görüntü göndermek ve göndermeyi seçtiğin görüntülü mesajları kaydetmek için kullanır. Kameranın yakaladığı her şey gönderilmeden önce cihazında uçtan uca şifrelenir.";
+"NSCameraUsageDescription" = "Lakko kamerayı, hesabına bağlamak istediğin cihazların ve Lakko bağlantılarının QR kodlarını taramak, görüntülü aramalar ve göndermeyi seçtiğin görüntülü mesajları kaydetmek için kullanır. Kameranın yakaladığı her şey gönderilmeden önce cihazında uçtan uca şifrelenir.";
 
 "NSMicrophoneUsageDescription" = "Lakko mikrofonu uçtan uca şifreli aramalar ve göndermeyi seçtiğin sesli ve görüntülü mesajları kaydetmek için kullanır. Mikrofon yalnızca bir aramadayken veya mesaj kaydederken açıktır ve yakaladığı her şey gönderilmeden önce cihazında şifrelenir.";
 

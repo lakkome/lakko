@@ -114,7 +114,7 @@
       "status": "machine"
     },
     "auth.passkey.error.not_registered": {
-      "text": "Nenhuma chave de acesso está registrada nesta conta. Entre com a senha primeiro e depois adicione uma chave de acesso no Início.",
+      "text": "Nenhuma chave de acesso está configurada nesta conta. Entre com sua senha e depois adicione uma chave de acesso em Configurações.",
       "status": "machine"
     },
     "auth.passkey.error.server_disabled": {
@@ -374,11 +374,11 @@
       "status": "machine"
     },
     "backup.stale_restore.reason.head_stripped": {
-      "text": "a assinatura foi removida e ele é diferente do último backup que este dispositivo conhecia",
+      "text": "falta a marca que mostra que ele é o seu backup mais recente, e ele é diferente do último backup que este dispositivo conhecia",
       "status": "machine"
     },
     "backup.stale_restore.reason.too_old": {
-      "text": "foi assinado há mais tempo do que um backup atual seria",
+      "text": "foi feito há mais tempo do que um backup atual seria",
       "status": "machine"
     },
     "backup.stale_restore.title": {
@@ -1830,7 +1830,7 @@
       "status": "machine"
     },
     "channels.keys_reset.notice": {
-      "text": "Você não pode mais publicar neste canal. As chaves da sua conta foram redefinidas, e as publicações do canal foram assinadas com as antigas. Os inscritos não são avisados; crie um novo canal e compartilhe com eles.",
+      "text": "Você não pode mais publicar neste canal porque as chaves da sua conta foram redefinidas. Os inscritos não são avisados; crie um novo canal e compartilhe com eles.",
       "status": "machine"
     },
     "channels.keys_reset.remove": {
@@ -3486,7 +3486,7 @@
       "status": "machine"
     },
     "chat.reauth.body": {
-      "text": "As chaves necessárias para descriptografar e assinar mensagens não estão disponíveis nesta sessão. Entre novamente para abrir esta conversa.",
+      "text": "Esta conversa não pode ser aberta neste dispositivo agora. Entre novamente para abri-la.",
       "status": "machine"
     },
     "chat.reauth.title": {
@@ -4338,15 +4338,15 @@
       "status": "machine"
     },
     "common.error.session_ended": {
-      "text": "Sua sessão terminou. Entre novamente.",
+      "text": "Você foi desconectado. Entre novamente.",
       "status": "machine"
     },
     "common.error.session_expired": {
-      "text": "Sessão expirada. Entre novamente.",
+      "text": "Você foi desconectado. Entre novamente.",
       "status": "machine"
     },
     "common.error.session_not_ready": {
-      "text": "A sessão ainda não está pronta.",
+      "text": "Isso não está disponível agora. Entre novamente e tente de novo.",
       "status": "machine"
     },
     "common.error.starting_up": {
@@ -4586,19 +4586,19 @@
       "status": "machine"
     },
     "contacts.identity_changed.unconfirmed": {
-      "text": "A identidade segura de {name} mudou e não pôde ser confirmada no registro de transparência. Verifique por outro canal antes de confiar.",
+      "text": "Não foi possível confirmar que esta ainda é a conta de {name}, então nada foi enviado.",
       "status": "machine"
     },
     "contacts.identity_changed.unconfirmed_unnamed": {
-      "text": "A identidade segura deste contato mudou e não pôde ser confirmada no registro de transparência. Verifique por outro canal antes de confiar.",
+      "text": "Não foi possível confirmar que esta ainda é a mesma conta, então nada foi enviado.",
       "status": "machine"
     },
     "contacts.identity_changed.unexplained": {
-      "text": "A identidade segura de {name} mudou, e o registro de transparência NÃO mostra uma redefinição feita pelo dono — trate isso como um possível comprometimento da conta. Verifique por outro canal antes de confiar.",
+      "text": "Não foi possível confirmar que esta ainda é a conta de {name}, então nada foi enviado.",
       "status": "machine"
     },
     "contacts.identity_changed.unexplained_unnamed": {
-      "text": "A identidade segura deste contato mudou, e o registro de transparência NÃO mostra uma redefinição feita pelo dono — trate isso como um possível comprometimento da conta. Verifique por outro canal antes de confiar.",
+      "text": "Não foi possível confirmar que esta ainda é a mesma conta, então nada foi enviado.",
       "status": "machine"
     },
     "contacts.invite_links.subtitle": {
@@ -4666,7 +4666,7 @@
       "status": "machine"
     },
     "contacts.reauth.body": {
-      "text": "As chaves que esta sessão precisa para os contatos não estão disponíveis. Entre novamente para usar Contatos.",
+      "text": "Os contatos não podem ser abertos neste dispositivo agora. Entre novamente.",
       "status": "machine"
     },
     "contacts.remove.body": {
@@ -4890,7 +4890,7 @@
       "status": "machine"
     },
     "device_link.error.identity_mismatch": {
-      "text": "A identidade recebida do seu outro dispositivo não corresponde à identidade publicada desta conta — ela não será usada.",
+      "text": "Seu outro dispositivo enviou chaves que não pertencem a esta conta. Nada foi alterado.",
       "status": "machine"
     },
     "device_link.error.name_other_account": {
@@ -4898,11 +4898,11 @@
       "status": "machine"
     },
     "device_link.error.no_identity": {
-      "text": "O outro dispositivo confirmou, mas não enviou sua identidade. Atualize o Lakko nele e tente novamente, ou use sua frase de recuperação.",
+      "text": "Seu outro dispositivo confirmou, mas não enviou as chaves da sua conta. Atualize o Lakko nele e tente novamente, ou use sua frase de recuperação.",
       "status": "machine"
     },
     "device_link.error.not_let_in": {
-      "text": "Seu outro dispositivo enviou a identidade, mas não foi possível dar acesso a este dispositivo. Tente novamente ou use sua frase de recuperação.",
+      "text": "Seu outro dispositivo respondeu, mas não foi possível adicionar este dispositivo. Tente novamente ou use sua frase de recuperação.",
       "status": "machine"
     },
     "device_link.error.request_limited": {
@@ -4934,7 +4934,7 @@
       "status": "machine"
     },
     "device_link.qr.intro": {
-      "text": "Mostre este código a um dispositivo que ainda tenha sua conta. Ele adiciona este dispositivo e transfere sua identidade com criptografia de ponta a ponta, sem precisar digitar nenhuma frase.",
+      "text": "Mostre este código a um dispositivo que ainda tenha sua conta. Ele adiciona este dispositivo, sem precisar digitar nenhuma frase.",
       "status": "machine"
     },
     "device_link.qr.scan_hint": {
@@ -4974,7 +4974,7 @@
       "status": "machine"
     },
     "device_link.request.error.no_device_key": {
-      "text": "Não há chave de dispositivo neste navegador. Entre novamente.",
+      "text": "Este navegador não está mais conectado à sua conta. Entre novamente.",
       "status": "machine"
     },
     "device_link.request.expired": {
@@ -5298,7 +5298,7 @@
       "status": "machine"
     },
     "devices.scan.confirm.body": {
-      "text": "Isso dá ao dispositivo escaneado acesso total à sua conta: suas mensagens, seus contatos e sua identidade. Continue apenas se o código estiver no seu próprio dispositivo novo.",
+      "text": "Isso dá ao dispositivo escaneado acesso total à sua conta, às suas mensagens e aos seus contatos. Continue apenas se o código estiver no seu próprio dispositivo novo.",
       "status": "machine"
     },
     "devices.scan.confirm.submit": {
@@ -5346,7 +5346,7 @@
       "status": "machine"
     },
     "devices.signed_out.body_mismatch": {
-      "text": "As chaves deste dispositivo não correspondem à identidade publicada da conta.",
+      "text": "As chaves deste dispositivo não correspondem mais à sua conta.",
       "status": "machine"
     },
     "devices.signed_out.body_removed": {
@@ -7398,7 +7398,7 @@
       "status": "machine"
     },
     "ios.permission.camera": {
-      "text": "O Lakko usa a câmera para ler QR codes de dispositivos que você quer vincular à sua conta, para enviar vídeo nas chamadas e para gravar as mensagens de vídeo que você decidir enviar. Tudo o que a câmera captura é criptografado de ponta a ponta no seu dispositivo antes do envio.",
+      "text": "O Lakko usa a câmera para ler QR codes de dispositivos que você quer vincular à sua conta e de links do Lakko, para chamadas de vídeo e para gravar as mensagens de vídeo que você decidir enviar. Tudo o que a câmera captura é criptografado de ponta a ponta no seu dispositivo antes do envio.",
       "status": "machine"
     },
     "ios.permission.face_id": {
@@ -8438,7 +8438,7 @@
       "status": "machine"
     },
     "restore_identity.error.not_published": {
-      "text": "Nenhuma identidade publicada foi encontrada para verificar a identidade recuperada. Tente novamente ou restaure a partir de um dispositivo que ainda tenha sua conta.",
+      "text": "Não foi possível confirmar que isto pertence à sua conta. Tente novamente ou restaure a partir de um dispositivo que ainda tenha sua conta.",
       "status": "machine"
     },
     "restore_identity.error.nothing": {
@@ -8446,11 +8446,11 @@
       "status": "machine"
     },
     "restore_identity.error.phrase_mismatch": {
-      "text": "Essa frase de recuperação não corresponde à identidade desta conta. Confira a frase ou pareie um dispositivo existente.",
+      "text": "Essa frase de recuperação não pertence a esta conta. Confira a frase ou adicione este dispositivo a partir de um que ainda tenha sua conta.",
       "status": "machine"
     },
     "restore_identity.error.unreachable": {
-      "text": "Não foi possível conectar ao diretório para verificar a identidade recuperada. Verifique sua conexão e tente novamente.",
+      "text": "Não foi possível confirmar que isto pertence à sua conta. Verifique sua conexão e tente novamente.",
       "status": "machine"
     },
     "restore_identity.from_passkey_no_keys": {
@@ -8894,7 +8894,7 @@
       "status": "machine"
     },
     "settings.data.export_note": {
-      "text": "Suas mensagens, contatos e o estado dos grupos têm criptografia de ponta a ponta e ficam apenas nos seus dispositivos.",
+      "text": "Suas mensagens, contatos e grupos têm criptografia de ponta a ponta e ficam apenas nos seus dispositivos.",
       "status": "machine"
     },
     "settings.data.lede": {
@@ -10051,6 +10051,10 @@
     },
     "call.screen_share.refused_macos_desktop": {
       "text": "Não foi possível compartilhar sua tela. Permita a gravação de tela para o Lakko nos Ajustes do Sistema.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_waiting": {
+      "text": "As chaves da sua conta foram redefinidas menos de uma hora após a última mudança. A mudança termina sozinha em {minutes, plural, one {# minuto} other {# minutos}}; depois o Lakko mostrará as novas palavras.",
       "status": "machine"
     }
   },
