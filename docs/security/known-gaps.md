@@ -81,7 +81,7 @@ entry's status line, not a mechanical fact.
 | [G-55](./known-gaps.md#g-55) | An owner-device channel entry and the DeviceGroup rejoin knock show the account key to the Delivery Service | Closed in code (2026-11-14), host-tested only | both rows wrapped under keys every member holds (ADR-0078 section 4); see the entry |
 | [G-56](./known-gaps.md#g-56) | A device bound under the current key after a rotation derives another PublisherGroup id than its siblings, and the clients disagree on it | Closed in code (2026-11-15; ADR-0074 amendment), host-tested only | join routes, pairing recovery row, DeviceGroup lineage on web, iOS, Android |
 | [G-58](./known-gaps.md#g-58) | A device behind a conversation: what recovery cannot reach | Open | a fake epoch from a member registrar; a removed single-device account; a group whose only owner or admin is the behind device; no push routing secret after a plain member brought the device back |
-| [G-59](./known-gaps.md#g-59) | Security review of conversation rejoin, deleted accounts and the sealed box | Closed in code (2026-11-21), unit tests only | a leaf's first-seen time only from this build on; unsigned rendezvous posts dropped, rendezvous writes cost a token (follow-up, not deployed); invite-capability X25519 keys covered by the capability, by design |
+| [G-59](./known-gaps.md#g-59) | Security review of conversation rejoin, deleted accounts and the sealed box | Closed in code (2026-11-21), unit tests only | a leaf's first-seen time only from this build on; unsigned rendezvous posts dropped, rendezvous writes cost a token (follow-up, walked on web and Android); invite-capability X25519 keys covered by the capability, by design |
 
 ## MLS state machine
 
@@ -3554,7 +3554,7 @@ account's lineage seed, which every device of the account holds.
     signed by an accepted leaf, so nothing can be forged. Junk posts could
     bury the real bundle: until the follow-up below the web and iOS look read
     only the first 16 rows and Android the first 100.
-  - **Follow-up the same day (unit tests only, not deployed):** a write to
+  - **Follow-up the same day (deployed to the test stack; walked once each: adding a device, the web confirming and the Android emulator joining; and a group rejoin with the Android owner writing the gap history and the web member reading it, both through the token; iOS not walked):** a write to
     any rendezvous (pairing, recovery, the state bundle, a rejoin note, a gap
     history) spends one `rendezvous-write` anonymous token (wire byte 18,
     500 a day per account, chosen, not measured); before it a rendezvous

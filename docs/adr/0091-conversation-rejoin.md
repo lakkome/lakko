@@ -1237,8 +1237,8 @@ uses and bound the account X25519 key to the identity key (C-99, G-59).
 build on; for a leaf it saw before, the floor is its last message from that
 leaf, and with none it sends nothing. Anyone who learns the gap public key
 can post to the rendezvous; a post not signed by an accepted leaf is dropped
-(the gap line stays). Follow-up the same day (maintainer decision, unit tests
-only): every write to a rendezvous spends one `rendezvous-write` anonymous
+(the gap line stays). Follow-up the same day (maintainer decision; walked on the
+test stack with an Android owner writing and a web member reading, iOS not walked): every write to a rendezvous spends one `rendezvous-write` anonymous
 token (500 a day per account, chosen), and the returning device reads the
 rendezvous page after page up to 1000 rows (chosen) instead of the first page
 only, so junk posted between the knock and the re-admitter's post buries the
