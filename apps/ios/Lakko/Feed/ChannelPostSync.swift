@@ -253,6 +253,7 @@ final class ChannelPostSync: ObservableObject {
                     // ADR-0087 section 13 — the plaintext is the chat
                     // envelope; an edit or a delete is not a feed item.
                     let body = ChannelPostBody.read(envelope)
+                    if case .delete(let target) = body { return .delete(target: target) }
                     guard let line = body.feedText else { return .skip }
                     // The attachments go with the line, so the feed draws a
                     // photo, GIF, voice or video message in place; a content

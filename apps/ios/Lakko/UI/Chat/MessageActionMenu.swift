@@ -533,7 +533,12 @@ struct MessageMenuHost<Content: View>: View {
 
     private let content: Content
 
-    init(@ViewBuilder content: () -> Content) {
+    /// `docs/ux/message-actions.md` section 9 — the messages whose deletion
+    /// was just applied: a menu open on one of them closes.
+    private let closingIds: Set<Int64>
+
+    init(closingIds: Set<Int64> = [], @ViewBuilder content: () -> Content) {
+        self.closingIds = closingIds
         self.content = content()
     }
 
@@ -546,6 +551,9 @@ struct MessageMenuHost<Content: View>: View {
                 MessageActionMenu(request: request) { presenter.close() }
                     .transition(.opacity)
             }
+        }
+        .onChange(of: closingIds) { _, ids in
+            if let open = presenter.request?.id, ids.contains(open) { presenter.close() }
         }
     }
 }

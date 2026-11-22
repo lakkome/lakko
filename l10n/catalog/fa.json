@@ -3757,6 +3757,10 @@
       "text": "مالک گروه نمی‌تواند از گروه خارج شود.",
       "status": "machine"
     },
+    "chat.refusal.admin_not_member": {
+      "text": "فقط یکی از اعضای فعلی این گروه می‌تواند مدیر باشد.",
+      "status": "machine"
+    },
     "chat.refusal.owner_not_member": {
       "text": "فقط عضو فعلی این گروه می‌تواند مالک آن باشد.",
       "status": "machine"

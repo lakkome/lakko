@@ -67,7 +67,7 @@ final class ChatListRedesignTests: XCTestCase {
         XCTAssertFalse(publish.contains("/g/"))
         XCTAssertEqual(
             ChatListFormatting.preview(
-                text: publish, attachmentLabels: [], direction: .outgoing, deleted: false,
+                text: publish, attachmentLabels: [], direction: .outgoing,
                 isGroup: false, senderName: nil).withoutIsolates,
             "You: Invitation to publish in Pixel Pub Walk")
     }
@@ -75,23 +75,23 @@ final class ChatListRedesignTests: XCTestCase {
     func testPreviewPrefixes() {
         XCTAssertEqual(
             ChatListFormatting.preview(
-                text: "hi", attachmentLabels: [], direction: .outgoing, deleted: false,
+                text: "hi", attachmentLabels: [], direction: .outgoing,
                 isGroup: false, senderName: nil).withoutIsolates,
             "You: hi")
         XCTAssertEqual(
             ChatListFormatting.preview(
-                text: "hi", attachmentLabels: [], direction: .incoming, deleted: false,
+                text: "hi", attachmentLabels: [], direction: .incoming,
                 isGroup: true, senderName: "Anna").withoutIsolates,
             "Anna: hi")
         // No sender prefix in a 1x1, nor when the author has no name.
         XCTAssertEqual(
             ChatListFormatting.preview(
-                text: "hi", attachmentLabels: [], direction: .incoming, deleted: false,
+                text: "hi", attachmentLabels: [], direction: .incoming,
                 isGroup: false, senderName: "Anna").withoutIsolates,
             "hi")
         XCTAssertEqual(
             ChatListFormatting.preview(
-                text: "hi", attachmentLabels: [], direction: .incoming, deleted: false,
+                text: "hi", attachmentLabels: [], direction: .incoming,
                 isGroup: true, senderName: nil).withoutIsolates,
             "hi")
     }
@@ -99,24 +99,19 @@ final class ChatListRedesignTests: XCTestCase {
     func testPreviewMediaAndDeleted() {
         XCTAssertEqual(
             ChatListFormatting.preview(
-                text: "", attachmentLabels: ["Photo"], direction: .incoming, deleted: false,
+                text: "", attachmentLabels: ["Photo"], direction: .incoming,
                 isGroup: false, senderName: nil).withoutIsolates,
             "Photo")
         XCTAssertEqual(
             ChatListFormatting.preview(
-                text: "", attachmentLabels: ["Photo", "File"], direction: .outgoing, deleted: false,
+                text: "", attachmentLabels: ["Photo", "File"], direction: .outgoing,
                 isGroup: false, senderName: nil).withoutIsolates,
             "You: Photo and 1 more")
         XCTAssertEqual(
             ChatListFormatting.preview(
-                text: "line one\nline two", attachmentLabels: [], direction: .incoming, deleted: false,
+                text: "line one\nline two", attachmentLabels: [], direction: .incoming,
                 isGroup: false, senderName: nil).withoutIsolates,
             "line one line two")
-        XCTAssertEqual(
-            ChatListFormatting.preview(
-                text: "secret", attachmentLabels: [], direction: .incoming, deleted: true,
-                isGroup: true, senderName: "Anna").withoutIsolates,
-            "Anna: Message deleted")
     }
 
     func testMediaLabelsFollowTheInlineDecision() {
@@ -274,7 +269,7 @@ final class ChatListRedesignTests: XCTestCase {
             XCTAssertEqual(last?.messageId, 3, "the preview is the last drawn row")
             let preview = ChatListFormatting.preview(
                 text: last?.text ?? "", attachmentLabels: [], direction: last?.direction ?? .system,
-                deleted: false, isGroup: isGroup, senderName: nil)
+                isGroup: isGroup, senderName: nil)
             XCTAssertFalse(preview.contains(membersChanged))
             XCTAssertFalse(preview.contains("[mls"))
         }

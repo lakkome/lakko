@@ -436,6 +436,10 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  * @property {boolean} readRan  The read ran to the end: the snapshot was
  *   restored and the rows were fetched and processed. `false` on every early
  *   return, where nothing is known about the wake.
+ * @property {string} [previewMessageId]  The DS id (decimal) of the message
+ *   the preview stands for, when it stands for one; the page withdraws the
+ *   notification when that message is deleted
+ *   (`docs/ux/message-actions.md` section 9).
  * @property {number} unreadableRows  Rows that did not decrypt and that the
  *   app's message log does not hold: a message this device cannot read. A row
  *   that does not decrypt but IS held is this device's own message coming
@@ -749,6 +753,17 @@ export async function decryptPushWake(wake, deps) {
     let latestReaction = null;
     /** @type {{ notice: CallNotice, senderKeyB64: string | null } | null} */
     let latestCall = null;
+    /** `docs/ux/message-actions.md` section 9 — every message preview of the
+     *  batch, oldest first, with the message it stands for (`subject`: its DS
+     *  id, or an edit's target) and its author. A later delete by the author
+     *  takes the message out, and the newest one left becomes the preview: a
+     *  notification never describes a deleted message. */
+    /** @type {Array<{ subject: string, senderKeyB64: string | null, preview: PushPreview }>} */
+    const previewStack = [];
+    /** The DS id of the message the preview stands for, when it stands for
+     *  one: the page withdraws the notification if that message is deleted. */
+    /** @type {string | null} */
+    let latestMessageId = null;
     /** ADR-0048 — profiles the batch's own rows carried (in memory only). */
     /** @type {Map<string, BatchProfile>} */
     const batchProfiles = new Map();
@@ -867,6 +882,7 @@ export async function decryptPushWake(wake, deps) {
             latest = null;
             latestReaction = null;
             latestSenderKeyB64 = null;
+            latestMessageId = null;
           }
           continue;
         }
@@ -874,20 +890,44 @@ export async function decryptPushWake(wake, deps) {
           latest = { title: "Lakko", body: reaction.emoji, tag: groupHex };
           latestReaction = { senderKeyB64: senderKey, emoji: reaction.emoji, target: reaction.target };
           latestSenderKeyB64 = senderKey;
+          latestMessageId = null;
+        }
+        continue;
+      }
+      // Section 9 of message-actions.md — a deletion is never a
+      // notification; it takes its message out of the batch's previews (the
+      // author's own delete only, as the app applies it), and the newest
+      // message left is the preview again.
+      const deleted = deleteTargetFromProcessed(deps.wasm, processed);
+      if (deleted !== null) {
+        const by = senderKeyOf(group, processed);
+        const before = previewStack.length;
+        for (let i = previewStack.length - 1; i >= 0; i -= 1) {
+          const c = previewStack[i];
+          if (c !== undefined && c.subject === deleted && c.senderKeyB64 === by) previewStack.splice(i, 1);
+        }
+        if (previewStack.length !== before && latestReaction === null) {
+          const top = previewStack.length === 0 ? undefined : previewStack[previewStack.length - 1];
+          latest = top === undefined ? null : top.preview;
+          latestSenderKeyB64 = top === undefined ? null : top.senderKeyB64;
+          latestMessageId = top === undefined ? null : top.subject;
         }
         continue;
       }
       const preview = previewFromProcessed(deps.wasm, processed, words);
       if (preview !== null) {
         latestReaction = null;
+        const subject = preview.subject ?? String(message.id);
         latest =
           preview.image === null
             ? { title: "Lakko", body: preview.body, tag: groupHex }
             : { title: "Lakko", body: preview.body, tag: groupHex, image: preview.image };
+        latestMessageId = subject;
         // ADR-0048 / C-68 — resolve the sender's KEY now, against the roster
         // of the epoch this frame decrypted at; a leaf resolved later could
         // name whoever took the slot.
         latestSenderKeyB64 = senderKeyOf(group, processed);
+        previewStack.push({ subject, senderKeyB64: latestSenderKeyB64, preview: latest });
       }
     }
 
@@ -990,7 +1030,12 @@ export async function decryptPushWake(wake, deps) {
         latest = notificationWithPicture({ ...latest, title: shaped.title, body: shaped.body }, latestReaction === null);
       }
     }
-    return { preview: latest, readRan: true, unreadableRows };
+    return {
+      preview: latest,
+      readRan: true,
+      unreadableRows,
+      ...(latest !== null && latestMessageId !== null ? { previewMessageId: latestMessageId } : {}),
+    };
   } finally {
     // Discard the throwaway MLS state. Freeing is best-effort — the GC
     // reclaims it regardless; we NEVER snapshot it back to IDB.
@@ -2556,15 +2601,52 @@ function reactionFromProcessed(wasm, processed, ownKeyB64) {
 }
 
 /**
+ * The DS id a delete op names (`docs/ux/message-actions.md` section 9), as a
+ * string, or `null` for anything that is not a delete.
+ *
+ * @param {DecryptWasm} wasm
+ * @param {any} processed
+ * @returns {string | null}
+ */
+function deleteTargetFromProcessed(wasm, processed) {
+  if (
+    processed === null ||
+    processed === undefined ||
+    processed.kind !== "Application" ||
+    processed.applicationData === undefined ||
+    processed.applicationData === null
+  ) {
+    return null;
+  }
+  const bytes = processed.applicationData;
+  // An op is a JSON chat envelope.
+  if (bytes.length === 0 || bytes[0] !== 0x7b) return null;
+  let parsed;
+  try {
+    parsed = wasm.parseBodyEnvelope(bytes);
+  } catch {
+    return null;
+  }
+  try {
+    if (parsed.kind !== "delete") return null;
+    const target = parsed.target;
+    return target === undefined || target === null ? null : String(target);
+  } finally {
+    freeQuietly(parsed);
+  }
+}
+
+/**
  * Extract a user-visible preview string from a processed MLS message,
  * or `null` for anything that is not a renderable chat/edit body.
  *
  * @param {DecryptWasm} wasm
  * @param {any} processed
  * @param {{ attachments: readonly string[], unsupportedMessage: string, newMessage?: string, channelInvite?: string, publisherInvite?: string, channelFallbackName?: string }} words
- * @returns {{ body: string, image: string | null } | null}  The preview
+ * @returns {{ body: string, image: string | null, subject?: string } | null}  The preview
  *   words and, for a chat message carrying a photo or video, its micro
- *   thumbnail (ADR-0047 section 6) as a `data:` URL.
+ *   thumbnail (ADR-0047 section 6) as a `data:` URL; for an edit, `subject`
+ *   is the DS id of the message it edits.
  */
 function previewFromProcessed(wasm, processed, words) {
   /** @param {string | null} body */
@@ -2631,10 +2713,11 @@ function previewFromProcessed(wasm, processed, words) {
     if (kind === "poll" || kind === "checklist" || kind === "location" || kind === "contact-card" || kind === "article") {
       return plain(contentPreviewLine(parsed.content, words));
     }
-    // An edit rewrites a prior message → surface the new text.
+    // An edit rewrites a prior message → surface the new text. It stands
+    // for the message it edits, so a later delete of that message takes it.
     if (kind === "edit") {
       const text = typeof parsed.text === "string" ? parsed.text : "";
-      return text.length > 0 ? plain(truncate(text)) : null;
+      return text.length > 0 ? { body: truncate(text), image: null, subject: String(parsed.target ?? "") } : null;
     }
     // delete / reaction / typing / read-receipt carry no standalone
     // preview — skip so an older real message stays the preview.

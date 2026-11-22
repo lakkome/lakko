@@ -2867,6 +2867,17 @@ Pinned by `a_joiner_who_left_does_not_return_to_an_admins_queue` in
 checked by removing it). A request already left over on a device from before
 this change stays until rejected there.
 
+## Amendment (2026-11-22): the sweep also drops departing admins
+
+A sweep that takes an admin's last leaf out of the group now folds a by-value
+role-table prune into its commit, and a pending role change that still names
+such an admin is left out of that sweep, because RFC 9420 admits one
+`GroupContextExtensions` proposal per commit (C-65). Decided and specified in
+[ADR-0022's amendment of the same date](0022-group-admin-roles.md#amendment-2026-11-22-a-person-who-is-not-in-the-group-is-not-its-admin)
+(C-100); the commit-wide rule `admins_present` joins `owner_survives` at the
+peer commit gate and in `selection_is_admissible`. The external review of this
+surface is tracked in G-39 ([ADR-0046](0046-external-crypto-review.md)).
+
 ## Blast radius, per sprint
 
 | Sprint | Surface | What changes |

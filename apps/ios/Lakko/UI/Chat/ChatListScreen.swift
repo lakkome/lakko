@@ -970,6 +970,9 @@ public struct ChatListScreen: View {
             // group whose timeline showed nothing new (2026-11-22).
             if msg.direction != .incoming { return acc }
             if msg.messageId <= 0 { return acc }
+            // `docs/ux/message-actions.md` section 9 — a deleted message is
+            // never unread.
+            if msg.deleted { return acc }
             if PairingHistory.isHistory(messageId: msg.messageId, floor: thread.syncedThroughMessageId) {
                 return acc
             }
@@ -1388,7 +1391,7 @@ public final class ChatListViewModel: ObservableObject {
     /// Only messages the timeline draws count (a bookkeeping system row is
     /// not a last message).
     func preview(thread: ChatThread, isGroup: Bool) -> String {
-        guard let last = thread.messages.last(where: { ChatTimeline.isListPreviewRow($0) }) else {
+        guard let last = DeletedRows.listPreviewRow(thread.messages, isPreviewRow: ChatTimeline.isListPreviewRow) else {
             return Localization.text("chats.row.no_messages")
         }
         let senderName = last.authorKeyB64.flatMap {
@@ -1407,21 +1410,20 @@ public final class ChatListViewModel: ObservableObject {
         } else if let line = ContentPreview.line(last) {
             // ADR-0092 — `Poll: {question}`, `Location`, ...
             text = line
-        } else if !last.deleted, let link = BareGroupLink.link(of: text) {
+        } else if let link = BareGroupLink.link(of: text) {
             // A bare `/g/` link with no card (an older message): never its
             // secret (``BareGroupLink``; seen live 2026-11-13).
             text = BareGroupLink.rowLine(text: text, opening: BareGroupLinks.shared.opening(link)) ?? text
         }
         // `docs/ux/media-messages.md` section 11 — files only: the words, then
         // the text ("2 files · Weekend plans").
-        if !last.deleted, last.content == nil, CallTranscriptRow.parse(text) == nil {
+        if last.content == nil, CallTranscriptRow.parse(text) == nil {
             text = ChatListFormatting.textWithFileWords(text, refs: last.attachments)
         }
         return ChatListFormatting.preview(
             text: text,
             attachmentLabels: last.content != nil ? [] : ChatListFormatting.attachmentLabels(last.attachments),
             direction: last.direction,
-            deleted: last.deleted,
             unsupported: last.unsupportedVersion != nil,
             isGroup: isGroup,
             senderName: senderName)
@@ -1430,15 +1432,15 @@ public final class ChatListViewModel: ObservableObject {
     /// `docs/ux/media-messages.md` section 11 — the row's thumbnail of the
     /// last message's first photo or video.
     func previewMedia(thread: ChatThread) -> ConversationPreviewMedia? {
-        guard let last = thread.messages.last(where: { ChatTimeline.isListPreviewRow($0) }),
-              !last.deleted, last.content == nil, last.unsupportedVersion == nil else { return nil }
+        guard let last = DeletedRows.listPreviewRow(thread.messages, isPreviewRow: ChatTimeline.isListPreviewRow),
+              last.content == nil, last.unsupportedVersion == nil else { return nil }
         return ChatListFormatting.previewMedia(last.attachments)
     }
 
     /// The server time of the last drawn message, for the row's time and the
     /// list order; `nil` when there is none or it does not parse.
     func lastMessageMs(thread: ChatThread) -> Int64? {
-        guard let last = thread.messages.last(where: { ChatTimeline.isListPreviewRow($0) }) else {
+        guard let last = DeletedRows.listPreviewRow(thread.messages, isPreviewRow: ChatTimeline.isListPreviewRow) else {
             return nil
         }
         return ChatRepository.parseDsTimestampMs(last.createdAt)

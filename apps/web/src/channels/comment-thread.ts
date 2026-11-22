@@ -128,6 +128,24 @@ export function withoutComment(state: ThreadState, cursor: number): ThreadState 
   };
 }
 
+/**
+ * The comments a re-read of the first page shows to be gone
+ * (`message-actions.md` section 9): held before, absent from the page, and
+ * inside what the page covers (below its newest comment, or anywhere when the
+ * page was the last). A comment beyond the page is not gone, only unread.
+ * Pure.
+ */
+export function commentsGoneOnReread(
+  before: readonly CommentView[],
+  page: readonly CommentView[],
+  pageLen: number = page.length,
+): CommentView[] {
+  const now = new Set(page.map((c) => c.cursor));
+  const done = pageLen < COMMENT_PAGE;
+  const newest = page.reduce((m, c) => Math.max(m, c.cursor), 0);
+  return before.filter((c) => !now.has(c.cursor) && (done || c.cursor < newest));
+}
+
 /** What the collapsed thread shows under a post. Pure. */
 export interface CollapsedView {
   readonly shown: readonly CommentView[];

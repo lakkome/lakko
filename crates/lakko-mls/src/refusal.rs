@@ -289,6 +289,14 @@ pub enum RefusalReason {
     /// stored. Nothing changed. Not retried: the device waits for the next
     /// re-entry Welcome.
     ReentryWelcomeRefused,
+
+    // ---- Admin presence (ADR-0022 amendment of 2026-11-22) -------------------
+    /// A role table would name as admin an account that holds no leaf in the
+    /// group (after the commit, for a commit). A person removed from the group,
+    /// or who left it, is no longer an admin: the commit that takes an admin's
+    /// last leaf out also drops them from the table, so a later re-add brings
+    /// them back as a plain member. Not retried: the table must be changed.
+    AdminNotAMember,
 }
 
 impl RefusalReason {
@@ -298,7 +306,7 @@ impl RefusalReason {
     /// Exists so a test can assert over the whole set — adding a variant without
     /// classifying it deliberately then fails a test rather than defaulting
     /// silently — and so an FFI surface can enumerate without re-listing.
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 27] = [
         Self::NotAMember,
         Self::AddNotOwnerOrAdmin,
         Self::RemoveNotOwnerOrAdmin,
@@ -325,6 +333,7 @@ impl RefusalReason {
         Self::GroupStillActive,
         Self::ReentryPairInvalid,
         Self::ReentryWelcomeRefused,
+        Self::AdminNotAMember,
     ];
 
     /// What the caller should do about this refusal.
@@ -361,6 +370,7 @@ impl RefusalReason {
             | Self::UnsupportedProposal
             | Self::NoRoleTable
             | Self::OwnerNotAMember
+            | Self::AdminNotAMember
             | Self::RoleTableWouldVanish
             | Self::ProposalsPending
             | Self::SweepAlreadyStaged
@@ -436,6 +446,7 @@ impl RefusalReason {
             Self::GroupStillActive => "groupStillActive",
             Self::ReentryPairInvalid => "reentryPairInvalid",
             Self::ReentryWelcomeRefused => "reentryWelcomeRefused",
+            Self::AdminNotAMember => "adminNotAMember",
         }
     }
 }

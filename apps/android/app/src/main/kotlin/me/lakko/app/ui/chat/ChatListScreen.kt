@@ -1126,7 +1126,10 @@ internal fun threadConversationRows(
  * parts, so the two are told apart by what the row HOLDS, not by its text.
  */
 internal fun previewSourceRow(messages: List<ChatMessage>): ChatMessage? =
-    messages.lastOrNull { it.direction != Direction.System || it.call != null }
+    // `docs/ux/message-actions.md` section 9 — never a deleted message: the
+    // newest one that is not, with its time; none left reads as a
+    // conversation with no messages.
+    me.lakko.app.chat.DeletedRows.previewSource(messages)
 
 /**
  * The second line of a row: the membership-ended line when this device's
@@ -1230,6 +1233,8 @@ internal fun unreadCount(thread: ChatThread, cursor: ReadCursorState?): Int {
         val position = me.lakko.app.chat.decodeReadPosition(c.upToMessageId) ?: return@let 0
         thread.messages.count { m ->
             m.direction == Direction.Incoming &&
+                // Section 9 — a deleted message is never unread.
+                !m.deleted &&
                 !me.lakko.app.chat.rowInPairingHistory(thread, m) &&
                 me.lakko.app.chat.rowPastReadPosition(thread, m, position) &&
                 // The feed's own marks are the head group's ids.

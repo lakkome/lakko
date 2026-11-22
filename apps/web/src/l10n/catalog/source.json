@@ -4305,6 +4305,10 @@
       "text": "The group owner cannot leave the group.",
       "comment": "Refusal: a group's owner cannot leave it (ownership must be transferred first)."
     },
+    "chat.refusal.admin_not_member": {
+      "text": "Only a current member of this group can be an admin.",
+      "comment": "Refusal: only somebody who is currently in the group can be made an admin; the person may have left or been removed a moment ago."
+    },
     "chat.refusal.owner_not_member": {
       "text": "Ownership can only be held by a current member of this group.",
       "comment": "Refusal: ownership can only be handed to someone who is currently in the group."

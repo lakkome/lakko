@@ -187,6 +187,8 @@ public data class ProcessedRow(
     /** Reactions only: the account key (base64) of the reacted-to message's
      *  author, as the reactor named it. */
     val reactionTargetAuthorB64: String? = null,
+    /** Edits and deletes only: the DS id of the message the op names. */
+    val target: Long? = null,
 )
 
 /** What the superseded-sender rule reads off the group as the batch left it
@@ -211,6 +213,14 @@ public data class PushPreview(
      *  decoded in memory for the notification's picture. Set only on a
      *  preview that shows the message's text; `null` otherwise. */
     val picture: ByteArray? = null,
+    /** `docs/ux/message-actions.md` section 9 — the DS id of the message this
+     *  preview shows (in the real group [tag] names), carried into the
+     *  notification's extras so a later deletion of it withdraws the
+     *  notification. `null` for a preview that shows no message text (the
+     *  generic and unnamed-sender banners, a reaction line). */
+    val messageId: Long? = null,
+    /** The account key (base64) of that message's author, when known. */
+    val authorKeyB64: String? = null,
 )
 
 /**
@@ -520,6 +530,13 @@ public data class PushWakeOutcome(
     /** A short detail for [fallbackReason] (an HTTP status, an exception
      *  class), never an identifier ([fetchFailureDetail]). */
     val fallbackDetail: String? = null,
+    /** `docs/ux/message-actions.md` section 9 — the real DS group (hex) the
+     *  wake was read for, `null` when the read did not get that far. */
+    val groupHex: String? = null,
+    /** The deletions this wake carried, each with its sender's account key
+     *  (unchecked against the author here): a notification already on screen
+     *  for one of them is withdrawn ([withdrawDeletedMessageNotifications]). */
+    val deletes: List<AppliedDelete> = emptyList(),
 ) {
     /**
      * Whether a wake that showed no preview and rang for nothing still posts
@@ -848,6 +865,18 @@ public suspend fun decryptPushWake(
         // them first, in which case its stored log holds the text.
         val failedWakeRows = ArrayList<Long>()
         var latestUnnamed = false
+        // `docs/ux/message-actions.md` section 9 — every preview this batch
+        // produced, keyed on the message it describes, newest last: a delete
+        // in the same batch takes its message's preview away, and the
+        // notification describes the newest message that is not deleted.
+        val previews = LinkedHashMap<Long, Pair<PushPreview, Boolean>>()
+        val deletes = ArrayList<AppliedDelete>()
+        fun putPreview(messageId: Long, preview: PushPreview, unnamed: Boolean) {
+            previews.remove(messageId)
+            previews[messageId] = preview to unnamed
+            latest = preview
+            latestUnnamed = unnamed
+        }
         for (row in rows) {
             val processed = try {
                 group.process(row.payload)
@@ -900,6 +929,27 @@ public suspend fun decryptPushWake(
                 processed.callSignal == null &&
                 processed.senderAccountB64 == ownPersonKeyB64
             if (fromOwnAccount) continue
+            // Section 9 — a deletion never makes a notification; it takes away
+            // the preview of the message it names when this batch made one.
+            if (processed?.kind == ProcessedKind.DELETE) {
+                suppressedRows += 1
+                val target = processed.target
+                val deleter = processed.senderAccountB64
+                // Only the message's author deletes it (ADR-0023). This read
+                // holds no message log, so the check is against the author the
+                // preview recorded; a delete from anyone else takes nothing.
+                if (target != null && deleter != null) {
+                    deletes += AppliedDelete(target, deleter)
+                    val held = previews[target]
+                    if (held != null && (held.first.authorKeyB64 == null || held.first.authorKeyB64 == deleter)) {
+                        previews.remove(target)
+                        val newest = previews.values.lastOrNull()
+                        latest = newest?.first
+                        latestUnnamed = newest?.second ?: false
+                    }
+                }
+                continue
+            }
             // reactions-and-emoji section 12 — a reaction added to one of
             // this person's own messages is a notification of its own,
             // "Anna reacted ❤️ to your message", unless the switch is off or
@@ -916,26 +966,36 @@ public suspend fun decryptPushWake(
             if (reactionBody != null) {
                 // The reaction line names the reactor itself: no prefix.
                 val shape = notificationShape(conversationKind, groupName, processed?.senderName, reactionBody, prefixSender = false)
-                latestUnnamed = shape == null
-                latest = shape?.let { PushPreview(title = it.first, body = it.second, tag = realGroupHex) }
-                    ?: unnamedSenderPreview(realGroupHex)
+                putPreview(
+                    row.id,
+                    shape?.let { PushPreview(title = it.first, body = it.second, tag = realGroupHex) }
+                        ?: unnamedSenderPreview(realGroupHex),
+                    unnamed = shape == null,
+                )
                 continue
             }
             val body = previewBodyOf(processed) ?: continue
             // The conversation's name as the title; in a group the sender's
             // name before the text.
             val shape = notificationShape(conversationKind, groupName, processed?.senderName, body)
-            latestUnnamed = shape == null
             // ADR-0047 section 6 — the picture rides only a preview that shows
-            // the text; the unnamed-sender fallback shows neither.
-            latest = shape?.let {
-                PushPreview(
-                    title = it.first,
-                    body = it.second,
-                    tag = realGroupHex,
-                    picture = me.lakko.app.media.inlineThumbOrNull(processed?.previewPicture),
-                )
-            } ?: unnamedSenderPreview(realGroupHex)
+            // the text; the unnamed-sender fallback shows neither. An edit's
+            // preview describes the message it names.
+            val describes = if (processed?.kind == ProcessedKind.EDIT) processed.target ?: row.id else row.id
+            putPreview(
+                describes,
+                shape?.let {
+                    PushPreview(
+                        title = it.first,
+                        body = it.second,
+                        tag = realGroupHex,
+                        picture = me.lakko.app.media.inlineThumbOrNull(processed?.previewPicture),
+                        messageId = describes,
+                        authorKeyB64 = processed?.senderAccountB64,
+                    )
+                } ?: unnamedSenderPreview(realGroupHex),
+                unnamed = shape == null,
+            )
         }
         // `docs/ux/calls.md` section 2.1 — resolved only when this batch
         // actually rings for something, so an ordinary message wake never pays
@@ -987,6 +1047,8 @@ public suspend fun decryptPushWake(
             unreadableRows = if (storedPreview != null) 0 else unreadableRows,
             storedPreview = storedPreview,
             fallbackReason = fallbackReason,
+            groupHex = realGroupHex,
+            deletes = deletes,
         )
     } finally {
         // Discard the throwaway MLS state. We NEVER snapshot it back —
@@ -1062,8 +1124,9 @@ internal class StoredFallback(
             val groupName = runCatching { deps.groupName(accountIdB64, groupHex) }.getOrNull()
             val shape = notificationShape(kind, groupName, name, body)
             unnamed = shape == null
-            val preview = shape?.let { PushPreview(title = it.first, body = it.second, tag = groupHex) }
-                ?: unnamedSenderPreview(groupHex)
+            val preview = shape?.let {
+                PushPreview(title = it.first, body = it.second, tag = groupHex, messageId = id, authorKeyB64 = author)
+            } ?: unnamedSenderPreview(groupHex)
             return Scan(preview, missing)
         }
         return Scan(null, missing)

@@ -134,6 +134,10 @@ public enum ChannelTimeline {
         /// want of its epoch's seed: the line "Earlier posts aren't
         /// available." shows at the top.
         public var earlierUnavailable: Bool
+        /// The cursors a delete op named (`docs/ux/message-actions.md`
+        /// section 9): what tells a post that left the timeline because it
+        /// was deleted, so an open channel can show it going.
+        public var deleted: Set<UInt64> = []
     }
 
     public static func fold(_ posts: [ChannelDecodedPost]) -> Folded {
@@ -222,7 +226,7 @@ public enum ChannelTimeline {
             }
         }
         let visible = order.filter { !deleted.contains($0) }.compactMap { items[$0] }
-        return Folded(items: visible, earlierUnavailable: earlier)
+        return Folded(items: visible, earlierUnavailable: earlier, deleted: deleted)
     }
 
     /// The word the feed and a row preview use for a post with no text.
@@ -240,7 +244,7 @@ public enum ChannelTimeline {
     /// The timeline row of an item, in the shape the chat's message row
     /// draws: an incoming bubble with no author (section 12: the channel is
     /// the sender, on every device, the owner's included).
-    public static func message(_ item: ChannelTimelineItem) -> ChatMessage {
+    public static func message(_ item: ChannelTimelineItem, deleted: Bool = false) -> ChatMessage {
         ChatMessage(
             messageId: Int64(clamping: item.cursor),
             direction: .incoming,
@@ -249,7 +253,7 @@ public enum ChannelTimeline {
             createdAt: ChatRepository.isoTimestamp(ms: Int64(clamping: item.serverTsMs)),
             authorKeyB64: item.contentEnvelopeB64 == nil ? nil : channelKeyB64,
             edited: item.edited,
-            deleted: false,
+            deleted: deleted,
             forward: item.forward,
             content: item.contentEnvelopeB64.map { PersistedContent(envelopeB64: $0, ops: item.contentOps) })
     }

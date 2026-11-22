@@ -155,7 +155,10 @@ class TimelinePresentationTest {
                 author = null,
             ),
         )
-        assertEquals("Message deleted", previewLine("gone", emptyList(), deleted = true, author = null))
+        // docs/ux/message-actions.md section 9 — the list never says
+        // "Message deleted": a deleted message has no line.
+        assertEquals("", previewLine("gone", emptyList(), deleted = true, author = null))
+        assertEquals("", previewLine("gone", emptyList(), deleted = true, author = PreviewAuthor.Own))
         assertEquals("", previewLine("", emptyList(), deleted = false, author = PreviewAuthor.Own))
     }
 

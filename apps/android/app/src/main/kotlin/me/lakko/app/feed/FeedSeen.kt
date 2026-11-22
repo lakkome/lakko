@@ -26,8 +26,10 @@ package me.lakko.app.feed
  */
 public const val FEED_SEEN_DWELL_MS: Long = 2_000L
 
-/** One message of a group as the seen rule reads it. */
-public data class SeenRow(val messageId: Long, val direction: String)
+/** One message of a group as the seen rule reads it. A [deleted] message
+ *  counts as seen (`docs/ux/message-actions.md` section 9): it is never
+ *  shown, so it must never hold back how far the conversation is read. */
+public data class SeenRow(val messageId: Long, val direction: String, val deleted: Boolean = false)
 
 /** A group's seen state. */
 public data class GroupSeenState(
@@ -81,7 +83,7 @@ public fun markSeen(
     for (r in rows) {
         if (r.messageId <= 0) continue
         all += r.messageId
-        val isSeenRow = r.direction != "incoming" ||
+        val isSeenRow = r.deleted || r.direction != "incoming" ||
             (through != null && r.messageId <= through) ||
             r.messageId in feedSeen
         if (isSeenRow) seen += r.messageId

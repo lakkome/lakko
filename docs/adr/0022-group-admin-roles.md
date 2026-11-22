@@ -350,6 +350,88 @@ only to the owner). The gate is the security boundary; the UI gating is just UX
   PublisherGroup is unaffected (it uses `create_with_id`, which does not seed
   `0xFF02`).
 
+## Amendment (2026-11-22): a person who is not in the group is not its admin
+
+**Decided by the maintainer on 2026-11-22; built the same day in `lakko-mls`
+and both FFI surfaces, host-tested only, not walked on a device.** An
+invariant #3 change (the MLS commit gate), so the G-39 surface of
+[ADR-0046](0046-external-crypto-review.md) grows by it; property tests in
+`crates/lakko-mls/tests/admin_presence.rs` and
+`crates/lakko-mls/src/group/admin_presence_tests.rs`. Indexed as **C-100**.
+
+**What was wrong.** The role table names account keys, not leaves, and only an
+owner's role rewrite ever changed it. Removing an admin, or an admin leaving
+(ADR-0045 `Leave` / `SelfRemove`), took their leaves out of the roster and left
+their entry in the table; re-adding the person later made them an admin again.
+Seen live on the test stack on 2026-11-22: a web owner removed an admin and
+added them back, and every client showed "Admin".
+
+**Decision.**
+
+1. **The rule, enforced by every peer** (`group_proposals::admins_present`, run
+   by the commit gate beside `owner_survives`): a commit that removes any leaf
+   or rewrites the role table must leave a table naming as admin only accounts
+   that hold at least one leaf in the roster the commit produces. The table
+   judged is the one the commit installs, else the pre-merge one. Refusal
+   `RefusalReason::AdminNotAMember` (appended; `DoNotRetry`). A commit that
+   neither removes nor rewrites is not judged, so a bare `self_update` or an
+   `Add`-only commit is never refused for a table it did not write.
+2. **Presence is per account (ADR-0050).** Removing one device of an admin who
+   keeps another changes nothing; the commit that takes the account's last
+   leaf drops the role. An ADR-0091 re-entry pair (remove a leaf and add the
+   same account back in one commit) keeps the role, because the account is in
+   the roster the commit produces.
+3. **The committer writes the drop into the same commit.** When a commit takes
+   an admin's last leaf out and carries no role change of its own, the
+   committing device folds a by-value `GroupContextExtensions` proposal into
+   it: the pre-merge GroupContext with exactly the departing admins removed
+   from the role table (the **prune**; `Group::admin_prune_for`, built through
+   the same `role_rewrite_extensions` as every role rewrite). The ADR-0045
+   sweep does it (`stage_sweep_of`, `sweep_selection_builds`, the commit
+   builder's filter `sweep_selects` lets the by-value prune through by
+   content), and so do the direct `remove_member` / `stage_remove_member` and
+   `replace_member` paths. The Welcome of a later re-add therefore carries a
+   table without the person, so they join as a plain member.
+4. **A prune is the one role rewrite a non-owner may carry.** An admin who
+   sweeps may write it; the owner-only rule for role changes is otherwise
+   unchanged. Every peer recomputes the prune from its own pre-merge
+   GroupContext and the commit's effects (`Group::expected_prune`) and accepts
+   a non-owner's role rewrite only when it is by value, from the committer, the
+   committer's account is owner or admin, and its extensions are byte-for-byte
+   that prune (`is_verified_prune`). Any other table from a non-owner (one that
+   also demotes a present admin, promotes anybody, or moves the owner slot) is
+   judged as an ordinary role change and refused (`NotOwner`), so the prune
+   adds no way to change roles.
+5. **One `GroupContextExtensions` slot per commit (RFC 9420, C-65).** A
+   pending role change whose table still names an admin the same sweep takes
+   out of the group is left out of that sweep (`sweep_keeps_role_change`); the
+   removal lands and carries the prune, and the role change's author proposes
+   again (OpenMLS empties the proposal store on every merged commit, so an
+   excluded proposal is dropped, as every other exclusion of ADR-0045 is). A
+   role change that names only present admins rides with the removal and needs
+   no prune. A device that may not administer (an ADR-0050 member-scope sweep)
+   never needs one in practice, since its own proposals cannot remove an
+   admin; if one is needed the selection is inadmissible.
+6. **Authoring.** `propose_group_roles` and `set_group_roles` refuse a table
+   naming an admin with no leaf (`AdminNotAMember`), and an ownership transfer
+   keeps only admins who hold a leaf.
+
+**Not covered (maintainer, 2026-11-22: not to be fixed).** A table that
+already names an absent admin from before this amendment exists only in
+test-stack groups (there is no production); such groups are deleted and
+recreated. In one, the owner's role changes are refused (the client builds
+the new table from the current one, which still names the absent admin), a
+re-add of that person finds them an admin, and a member-scope sweep is refused
+locally.
+
+**Client impact.** None in behaviour: every client reads roles from the live
+role table, so a re-added person shows as Member. The new refusal reason is
+appended to the UniFFI `FfiError` / `FfiRefusalReason` and carried by code
+(`adminNotAMember`) on wasm; each client shows "Only a current member of this
+group can be an admin." (catalog key `chat.refusal.admin_not_member`, machine
+translations), reached when the owner taps "Make admin" on somebody who left a
+moment before.
+
 ## References
 
 - [ADR-0015](0015-device-removal-authorization.md) — peer-verified attested

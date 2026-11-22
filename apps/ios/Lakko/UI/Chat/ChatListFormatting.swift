@@ -134,7 +134,7 @@ public enum ChatListFormatting {
         return nil
     }
 
-    /// The attachment labels ``preview(text:attachmentLabels:direction:deleted:unsupported:isGroup:senderName:)``
+    /// The attachment labels ``preview(text:attachmentLabels:direction:unsupported:isGroup:senderName:)``
     /// takes: section 11's words for photos, videos and files, else one word
     /// per attachment.
     public static func attachmentLabels(
@@ -195,15 +195,15 @@ public enum ChatListFormatting {
         text: String,
         attachmentLabels: [String],
         direction: Direction,
-        deleted: Bool,
         unsupported: Bool = false,
         isGroup: Bool,
         senderName: String?
     ) -> String {
+        // `docs/ux/message-actions.md` section 9 — the row never previews a
+        // deleted message: the caller picks the newest one that is not
+        // deleted (``DeletedRows/listPreviewRow(_:isPreviewRow:)``).
         let body: String
-        if deleted {
-            body = Localization.text("chat.message.deleted")
-        } else if unsupported {
+        if unsupported {
             // ADR-0061 section 6 — a message from a newer version of Lakko;
             // its text is empty and the sentence is the client's own.
             body = Localization.text("chat.message.unsupported")

@@ -3757,6 +3757,10 @@
       "text": "הבעלים של הקבוצה לא יכולים לצאת ממנה.",
       "status": "machine"
     },
+    "chat.refusal.admin_not_member": {
+      "text": "רק חבר נוכחי בקבוצה הזו יכול להיות מנהל.",
+      "status": "machine"
+    },
     "chat.refusal.owner_not_member": {
       "text": "רק חבר נוכחי בקבוצה יכול להיות הבעלים שלה.",
       "status": "machine"

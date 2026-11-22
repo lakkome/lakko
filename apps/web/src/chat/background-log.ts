@@ -37,6 +37,7 @@ import { persistedFromAttachmentRef } from "./persisted-attachment";
 import { persistedFromMembership } from "./membership-rows";
 import { persistedFromForwardRef } from "./forward";
 import { persistedFromReplyRef } from "./reply-snapshot";
+import { newestNotDeleted } from "./deleted-rows";
 import { t } from "../l10n";
 
 /** Numeric DS id of a persisted row, or `null` when it does not parse. */
@@ -348,6 +349,9 @@ export function summarizeGroupSlot(
   for (const m of messages) {
     if (m.direction !== "incoming" || fromSelf(m)) continue;
     if (blockedRow(m)) continue;
+    // docs/ux/message-actions.md section 9 - a deleted message is never
+    // unread.
+    if (m.deleted === true) continue;
     const id = idOf(m);
     if (id === null) continue;
     if (historyThrough !== null && id <= historyThrough) continue;
@@ -356,14 +360,9 @@ export function summarizeGroupSlot(
       if (unread >= 100) break;
     }
   }
-  let last: PersistedMessage | undefined;
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const m = messages[i] as PersistedMessage;
-    if (m.direction !== "system") {
-      last = m;
-      break;
-    }
-  }
+  // Section 9 - the preview is the newest message that is not deleted (with
+  // that message's time); none left reads as a conversation with no messages.
+  const last = newestNotDeleted(messages, (m) => m.direction !== "system");
   return {
     unread,
     preview: last === undefined ? null : blockedRow(last) ? t("block.group_row") : previewText(last),
@@ -373,11 +372,11 @@ export function summarizeGroupSlot(
       last !== undefined && !fromSelf(last) && last.direction === "incoming" && typeof last.authorKeyB64 === "string"
         ? last.authorKeyB64
         : null,
-    ...(last !== undefined && last.deleted !== true && !blockedRow(last) && typeof last.channelInviteB64 === "string"
+    ...(last !== undefined && !blockedRow(last) && typeof last.channelInviteB64 === "string"
       ? { previewChannelInviteB64: last.channelInviteB64 }
       : {}),
     ...(() => {
-      if (last === undefined || last.deleted === true || blockedRow(last) || contentPreviewOf(last.content) !== null) return {};
+      if (last === undefined || blockedRow(last) || contentPreviewOf(last.content) !== null) return {};
       const media = previewMediaOf(last.attachments);
       return media === null ? {} : { previewMedia: media };
     })(),
@@ -385,13 +384,6 @@ export function summarizeGroupSlot(
 }
 
 function previewText(m: PersistedMessage): string {
-  // ADR-0023 — a deleted message reads as the tombstone, the same words the
-  // bubble shows and the same rule Android's `previewLine` applies. Checked
-  // FIRST: the row is stored with no text and no attachments, so without this
-  // the conversation would show a blank second line rather than saying what
-  // happened - and before the delete was persisted at all it showed the
-  // deleted text, which is worse than blank.
-  if (m.deleted === true) return t("chat.message.deleted");
   // ADR-0061 section 6 — a message from a newer Lakko: the catalog's words,
   // never the core's English placeholder.
   if (typeof m.unsupportedVersion === "number") return t("chat.message.unsupported");

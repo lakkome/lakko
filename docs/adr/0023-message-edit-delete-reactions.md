@@ -9,6 +9,16 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 - **Date:** 2026-06-18
 - **Context:** Phase 3 — block B (chat-feature parity)
 
+> **AMENDED 2026-11-22 (maintainer) — no permanent tombstone.** The wire, the
+> author gate and the stored `deleted` state are unchanged. What a client draws
+> changed: a deleted message is not drawn. Only when its deletion is applied
+> in front of the person (the conversation open, the app in the foreground,
+> the row already on screen) does the bubble read "Message deleted" for 2
+> seconds and then collapse over 250 ms (both chosen, not measured; no collapse
+> with reduced motion). It is never a chat list preview, never counts as
+> unread, and channel posts and comments follow the same rule. UX spec:
+> [`docs/ux/message-actions.md`](../ux/message-actions.md) section 9.
+
 > **AMENDED 2026-08-31 (`5b2b654`) — the author gate was an impersonation, and
 > it is fixed. Recorded here 2026-09-02.** The decision below is unchanged in
 > shape: an author-only, peer-verified, client-side, fail-closed gate is still
@@ -175,7 +185,8 @@ it).
 A per-message action menu (web right-click / long-press; iOS context menu;
 Android long-press) offers **Edit** + **Delete** on *own* messages and
 **React** on any. An edited message renders its latest text with an "edited"
-marker; a deleted message renders a "message deleted" tombstone; reactions
+marker; a deleted message renders a "message deleted" tombstone (superseded
+2026-11-22, see the amendment below); reactions
 render as emoji chips with counts under the bubble. Editing/deleting is offered
 only on own messages (the gate is the receive-side enforcement, not just the UI
 affordance).

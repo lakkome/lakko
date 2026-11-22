@@ -909,6 +909,16 @@ pub enum FfiError {
     /// `not-a-chat-envelope`, `key-mismatch`, ...).
     #[error("{0}")]
     Moderation(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0022 amendment of 2026-11-22 (C-100). APPENDED last: a
+    // `flat_error` lowers by ordinal.
+    // ------------------------------------------------------------------
+    /// A role table would name as admin somebody who holds no leaf in the
+    /// group ([`lakko_mls::RefusalReason::AdminNotAMember`]). A person removed
+    /// from the group, or who left it, is no longer an admin.
+    #[error("{0}")]
+    MembershipAdminNotAMember(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {
@@ -1027,6 +1037,7 @@ impl FfiError {
             MlsRefusalReason::ReentryWelcomeRefused => {
                 Self::MembershipReentryWelcomeRefused(detail)
             },
+            MlsRefusalReason::AdminNotAMember => Self::MembershipAdminNotAMember(detail),
         }
     }
 
@@ -1068,6 +1079,7 @@ impl FfiError {
             Self::MembershipGroupStillActive(_) => FfiRefusalReason::GroupStillActive,
             Self::MembershipReentryPairInvalid(_) => FfiRefusalReason::ReentryPairInvalid,
             Self::MembershipReentryWelcomeRefused(_) => FfiRefusalReason::ReentryWelcomeRefused,
+            Self::MembershipAdminNotAMember(_) => FfiRefusalReason::AdminNotAMember,
             _ => return None,
         })
     }
@@ -1149,6 +1161,9 @@ pub enum FfiRefusalReason {
     /// A Welcome offered as a re-entry is not this device's (ADR-0091).
     /// Appended.
     ReentryWelcomeRefused,
+    /// A role table would name as admin somebody with no leaf in the group
+    /// (ADR-0022 amendment, C-100). Appended.
+    AdminNotAMember,
 }
 
 impl From<MlsRefusalReason> for FfiRefusalReason {
@@ -1180,6 +1195,7 @@ impl From<MlsRefusalReason> for FfiRefusalReason {
             MlsRefusalReason::GroupStillActive => Self::GroupStillActive,
             MlsRefusalReason::ReentryPairInvalid => Self::ReentryPairInvalid,
             MlsRefusalReason::ReentryWelcomeRefused => Self::ReentryWelcomeRefused,
+            MlsRefusalReason::AdminNotAMember => Self::AdminNotAMember,
         }
     }
 }
@@ -1213,6 +1229,7 @@ impl From<FfiRefusalReason> for MlsRefusalReason {
             FfiRefusalReason::GroupStillActive => Self::GroupStillActive,
             FfiRefusalReason::ReentryPairInvalid => Self::ReentryPairInvalid,
             FfiRefusalReason::ReentryWelcomeRefused => Self::ReentryWelcomeRefused,
+            FfiRefusalReason::AdminNotAMember => Self::AdminNotAMember,
         }
     }
 }

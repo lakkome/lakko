@@ -3757,6 +3757,10 @@
       "text": "لا يمكن لمالك المجموعة مغادرتها.",
       "status": "machine"
     },
+    "chat.refusal.admin_not_member": {
+      "text": "يمكن فقط لعضو حالي في هذه المجموعة أن يكون مشرفًا.",
+      "status": "machine"
+    },
     "chat.refusal.owner_not_member": {
       "text": "لا يمكن أن يكون مالك المجموعة إلا عضوًا حاليًا فيها.",
       "status": "machine"

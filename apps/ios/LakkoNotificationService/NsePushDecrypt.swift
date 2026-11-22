@@ -237,6 +237,10 @@ public struct NseProcessedRow: Equatable {
     /// Kept for a chat row only, and only within its bound
     /// (``notificationPicture(_:)``).
     public let inlineThumb: Data?
+    /// `docs/ux/message-actions.md` section 9 — the DS message id a delete
+    /// row names; `nil` for every other kind. A message and its deletion in
+    /// one wake: the deleted message is never the preview.
+    public let deleteTargetId: Int64?
 
     public init(
         kind: NseProcessedKind,
@@ -249,8 +253,10 @@ public struct NseProcessedRow: Equatable {
         reaction: NseReaction? = nil,
         profileName: String? = nil,
         attachmentCounts: NseAttachmentCounts = NseAttachmentCounts(),
-        inlineThumb: Data? = nil
+        inlineThumb: Data? = nil,
+        deleteTargetId: Int64? = nil
     ) {
+        self.deleteTargetId = kind == .delete ? deleteTargetId : nil
         self.attachmentCounts = attachmentCounts
         self.inlineThumb = kind == .chat ? notificationPicture(inlineThumb) : nil
         self.reaction = kind == .reaction ? reaction : nil
@@ -272,7 +278,8 @@ public struct NseProcessedRow: Equatable {
             kind: kind, text: text, attachmentCount: attachmentCount,
             singleAttachmentKind: singleAttachmentKind, callIdHex: callIdHex,
             senderKeyB64: senderKeyB64, resendOrigin: resendOrigin, reaction: reaction,
-            attachmentCounts: attachmentCounts, inlineThumb: inlineThumb)
+            attachmentCounts: attachmentCounts, inlineThumb: inlineThumb,
+            deleteTargetId: deleteTargetId)
     }
 }
 
@@ -900,6 +907,12 @@ public func decryptPushOutcome(
     // first. When the app's cursor is already at or past the pointer the
     // message was not even fetched; the app applied it.
     var storedCandidates: [Int64] = after >= pointer ? [pointer] : []
+    // `docs/ux/message-actions.md` section 9 — the message previews of this
+    // wake, by row, so a deletion of the one shown falls back to the newest
+    // message that is not deleted (or to nothing new).
+    var messagePreviews: [(id: Int64, sender: String?, preview: NsePushPreview)] = []
+    var latestMessageRowId: Int64?
+    var deletedInBatch: Set<Int64> = []
     for row in rows {
         let decoded: NseProcessedRow?
         do {
@@ -942,6 +955,22 @@ public func decryptPushOutcome(
                 nseTrace("row \(row.id): own other device")
                 continue
             }
+            // Section 9 — a deletion never makes a notification. One of a
+            // message this wake would preview (by its own author) takes that
+            // preview back: the newest message left, or nothing new.
+            if processed.kind == .delete {
+                if let target = processed.deleteTargetId,
+                   messagePreviews.contains(where: { $0.id == target && $0.sender == processed.senderKeyB64 }) {
+                    deletedInBatch.insert(target)
+                    if latestMessageRowId == target {
+                        let left = messagePreviews.last { !deletedInBatch.contains($0.id) }
+                        latest = left?.preview
+                        latestMessageRowId = left?.id
+                        nseTrace("row \(row.id): deletion of the previewed message")
+                    }
+                }
+                continue
+            }
             // Section 12 — a reaction to one of this person's own messages.
             if processed.kind == .reaction {
                 guard let reaction = processed.reaction, let sender = processed.senderKeyB64,
@@ -952,7 +981,7 @@ public func decryptPushOutcome(
                 let key = reaction.key(groupIdHex: realGroupHex, senderKeyB64: sender)
                 if !reaction.add {
                     reactionRemovals.append(key)
-                    if latest?.reactionKey == key { latest = nil }
+                    if latest?.reactionKey == key { latest = nil; latestMessageRowId = nil }
                     continue
                 }
                 guard deps.reactionNotificationsOn(),
@@ -968,9 +997,11 @@ public func decryptPushOutcome(
                     nseLogMissingSenderName()
                     namelessRows += 1
                     latest = nil
+                    latestMessageRowId = nil
                     continue
                 }
                 nseTrace("row \(row.id): reaction preview, named sender")
+                latestMessageRowId = nil
                 latest = NsePushPreview(
                     title: title, body: nseReactionBody(name: name, emoji: reaction.emoji), tag: conversationTag,
                     movedConversation: conversationTag.caseInsensitiveCompare(realGroupHex) != .orderedSame,
@@ -986,6 +1017,7 @@ public func decryptPushOutcome(
                 nseLogMissingSenderName()
                 namelessRows += 1
                 latest = nil
+                latestMessageRowId = nil
                 continue
             }
             nseTrace("row \(row.id): message preview, sender named=\(senderName != nil)")
@@ -994,10 +1026,13 @@ public func decryptPushOutcome(
                 senderName: senderName,
                 isGroup: group.isGroupConversation,
                 text: text)
-            latest = NsePushPreview(
+            let preview = NsePushPreview(
                 title: shown.title, body: shown.body, tag: conversationTag,
                 movedConversation: conversationTag.caseInsensitiveCompare(realGroupHex) != .orderedSame,
                 picture: processed.inlineThumb)
+            latest = preview
+            latestMessageRowId = row.id
+            messagePreviews.append((id: row.id, sender: processed.senderKeyB64, preview: preview))
         }
     }
     if let latestCall, let callIdHex = latestCall.row.callIdHex {

@@ -209,6 +209,7 @@ describe("membership refusal copy", () => {
     // Reachable from the §6.1 transfer picker when the chosen member left.
     expect(say("ownerNotAMember")).toBe(OWNER_NOT_A_MEMBER());
     expect(OWNER_NOT_A_MEMBER()).toBe("Ownership can only be held by a current member of this group.");
+    expect(say("adminNotAMember")).toBe("Only a current member of this group can be an admin.");
     // Reachable from a stale Approve/Reject tap in the join-requests panel.
     expect(say("noSuchJoinRequest")).toBe(NO_SUCH_JOIN_REQUEST());
     expect(NO_SUCH_JOIN_REQUEST()).toBe("That join request is no longer waiting.");

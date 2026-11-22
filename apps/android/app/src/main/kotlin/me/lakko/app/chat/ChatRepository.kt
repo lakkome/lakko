@@ -7206,6 +7206,32 @@ public class ChatRepository(
             // conversation it belongs to.
             ?: conversationThreadOf(state.value.conversations, conversationIdOf(segmentHex))
 
+    /**
+     * `docs/ux/message-actions.md` section 9 — a notification already on
+     * screen for a message a delete in [events] removed is withdrawn. Only a
+     * delete that took effect counts (the record holds the message deleted:
+     * ADR-0023's author gate passed), so the withdrawal needs no author check.
+     */
+    private fun withdrawNotificationsOfDeletes(groupIdHex: String, record: GroupRecord, events: List<IncomingChatEvent>) {
+        val targets = events.asSequence()
+            .filterIsInstance<IncomingChatEvent.Op>()
+            .filter { it.op == MessageOp.Delete }
+            .map { it.target }
+            .toHashSet()
+        if (targets.isEmpty()) return
+        val deleted = try {
+            record.snapshot().filter { it.deleted && it.messageId in targets }.map { it.messageId }
+        } catch (_: Throwable) {
+            return
+        }
+        if (deleted.isEmpty()) return
+        me.lakko.app.push.withdrawDeletedMessageNotifications(
+            applicationContext,
+            groupIdHex,
+            deleted.map { me.lakko.app.push.AppliedDelete(it) },
+        )
+    }
+
     private fun dropPinsOfDeletedMessages(groupIdHex: String, record: GroupRecord) {
         try {
             val deletedIds = record.snapshot().asSequence().filter { it.deleted && it.messageId > 0L }
@@ -11546,6 +11572,8 @@ public class ChatRepository(
             // pins with it (section 4.1: no tombstone in the bar).
             if (batchEvents.any { it is IncomingChatEvent.Op && it.op == MessageOp.Delete }) {
                 dropPinsOfDeletedMessages(groupIdHex, record)
+                // message-actions section 9 — and its notification.
+                withdrawNotificationsOfDeletes(groupIdHex, record, batchEvents)
             }
             // ADR-0024 — a receipt advanced the watermark: persist it off the lock.
             persistReadWatermarksIfReceipts(groupIdHex, record, batchEvents)
@@ -17595,6 +17623,7 @@ public class ChatRepository(
                         )
                         persistReadWatermarksIfReceipts(groupIdHex, record, sweptEvents)
                         settleHeldCopies(groupIdHex, record, sweptEvents)
+                        withdrawNotificationsOfDeletes(groupIdHex, record, sweptEvents)
                         // A swept chat message counts toward the chat list's
                         // unread badge exactly as a polled one does.
                         localUnread.onIncomingApplied(
@@ -18425,7 +18454,11 @@ public class ChatRepository(
         val leaveAccount = currentAccountIdB64.get()
         val threads = records.map { record ->
             val thread = record.toThread()
-            val unread = localUnread.snapshot(thread.groupIdHex)
+            // Section 9 of message-actions — a deleted message is never unread.
+            val unread = localUnread.snapshot(
+                thread.groupIdHex,
+                thread.messages.asSequence().filter { it.deleted && it.messageId > 0L }.map { it.messageId }.toHashSet(),
+            )
             thread.copy(
                 leaveWaiting = !thread.membershipEnded && leaveAccount != null &&
                     loadLeaveRequestedAt(leaveRecords, leaveAccount, thread.groupIdHex) != null,
@@ -18498,6 +18531,7 @@ public class ChatRepository(
                             Direction.Outgoing -> "outgoing"
                             Direction.System -> "system"
                         },
+                        deleted = it.deleted,
                     )
                 }
                 val cursor = readCursorThrough(hex)

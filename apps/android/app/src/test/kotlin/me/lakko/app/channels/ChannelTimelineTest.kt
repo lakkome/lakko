@@ -41,6 +41,9 @@ class ChannelTimelineTest {
             listOf(post(1, "a"), post(2, "b"), ChannelRow(3, 3000, 1u, ChannelRowContent.Delete(1))),
         )
         assertEquals(listOf(2L), t.posts.map { it.cursor })
+        // docs/ux/message-actions.md section 9 — what a screen in front reads
+        // to show the post going.
+        assertEquals(setOf(1L), t.deletedCursors)
     }
 
     @Test

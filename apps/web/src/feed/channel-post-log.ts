@@ -179,10 +179,15 @@ export function mergeChannelPosts(
   fresh: readonly PersistedChannelPost[],
   cursor: number,
   nowMs: number,
+  /** `docs/ux/message-actions.md` section 9 — the posts a delete op removed:
+   *  they leave the log, so they are never a channel's preview, never unread
+   *  and never in the feed. */
+  deleted: ReadonlySet<number> = new Set(),
 ): ChannelPostSlot {
   const byCursor = new Map<number, PersistedChannelPost>();
   for (const p of slot?.posts ?? []) byCursor.set(p.cursor, p);
   for (const p of fresh) byCursor.set(p.cursor, p);
+  for (const c of deleted) byCursor.delete(c);
   const oldest = nowMs - CHANNEL_POST_RETENTION_MS;
   const posts = Array.from(byCursor.values())
     .filter((p) => p.serverTsMs >= oldest)
@@ -214,6 +219,9 @@ export type PostOutcome =
   /** Read and not a feed item (a metadata record, a malformed record, a
    *  post that failed to open under its epoch's seed): passed over. */
   | { readonly kind: "skip" }
+  /** A delete op of an earlier post (`message-actions.md` section 9): the
+   *  post leaves the log. */
+  | { readonly kind: "delete"; readonly target: number }
   /** No seed for the post's epoch and one may still arrive (the epoch is
    *  newer than every seed this device holds): the cursor stops before it
    *  so the next sync tries again. */
@@ -247,6 +255,7 @@ export async function syncChannelSlot(
 ): Promise<ChannelPostSlot> {
   let cursor = slot?.cursor ?? 0;
   const fresh: PersistedChannelPost[] = [];
+  const deleted = new Set<number>();
   for (let page = 0; page < CHANNEL_POST_MAX_PAGES; page += 1) {
     const res = await deps.fetchPage(channelIdHex, cursor, CHANNEL_POST_PAGE);
     if (res.posts.length === 0) break;
@@ -257,6 +266,10 @@ export async function syncChannelSlot(
       if (outcome.kind === "wait") {
         blocked = true;
         break;
+      }
+      if (outcome.kind === "delete") {
+        // An op only reaches back.
+        if (outcome.target < p.cursor) deleted.add(outcome.target);
       }
       if (outcome.kind === "text") {
         const media = (outcome.media ?? []).slice(0, CHANNEL_POST_MEDIA_CAP);
@@ -272,5 +285,5 @@ export async function syncChannelSlot(
     }
     if (blocked || res.posts.length < CHANNEL_POST_PAGE) break;
   }
-  return mergeChannelPosts(slot, fresh, cursor, nowMs);
+  return mergeChannelPosts(slot, fresh, cursor, nowMs, deleted);
 }

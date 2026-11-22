@@ -71,10 +71,15 @@ internal class LocalUnreadCounter {
         }
     }
 
-    /** The current count and whether this process has shown the chat. */
-    fun snapshot(groupIdHex: String): LocalUnread = synchronized(lock) {
+    /** The current count and whether this process has shown the chat. A
+     *  counted message that has since been deleted ([deleted]) is not
+     *  counted (`docs/ux/message-actions.md` section 9: a deleted message is
+     *  never unread). */
+    fun snapshot(groupIdHex: String, deleted: Set<Long> = emptySet()): LocalUnread = synchronized(lock) {
         val entry = entries[groupIdHex]
-        LocalUnread(count = entry?.counted?.size ?: 0, viewedThisSession = entry?.viewedThisSession == true)
+        val counted = entry?.counted.orEmpty()
+        val count = if (deleted.isEmpty()) counted.size else counted.count { it !in deleted }
+        LocalUnread(count = count, viewedThisSession = entry?.viewedThisSession == true)
     }
 
     /** ADR-0063 section 5 — the messages [seen] of [groupIdHex] were shown in

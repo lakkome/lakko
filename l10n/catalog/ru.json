@@ -3921,6 +3921,10 @@
       "text": "Владелец группы не может выйти из неё.",
       "status": "machine"
     },
+    "chat.refusal.admin_not_member": {
+      "text": "Администратором может быть только текущий участник этой группы.",
+      "status": "machine"
+    },
     "chat.refusal.owner_not_member": {
       "text": "Владельцем может быть только текущий участник этой группы.",
       "status": "machine"

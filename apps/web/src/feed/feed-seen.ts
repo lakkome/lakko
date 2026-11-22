@@ -8,7 +8,8 @@
  * A group's seen set is every message at or below `lastViewedMessageId` (the
  * open chat marks all it holds, which is what "highest viewed" always meant)
  * plus the ids in `feedSeen`, the messages the feed kept fully on screen for
- * `FEED_SEEN_DWELL_MS`. The person's own and system rows count as seen.
+ * `FEED_SEEN_DWELL_MS`. The person's own and system rows count as seen, and
+ * so does a deleted message (`docs/ux/message-actions.md` section 9).
  * When the seen set becomes contiguous past `lastViewedMessageId` —
  * `contiguousSeen` in the core, the one definition every client uses — the
  * watermark moves up to it, the ids below it are dropped from `feedSeen`,
@@ -41,6 +42,8 @@ function idOf(m: PersistedMessage): bigint | null {
 /** `true` when the person has seen `message` in this slot. */
 export function isSeenInSlot(slot: PersistedGroup | undefined, message: PersistedMessage): boolean {
   if (message.direction !== "incoming") return true;
+  // docs/ux/message-actions.md section 9 - a deleted message counts as seen.
+  if (message.deleted === true) return true;
   const id = idOf(message);
   if (id === null) return false;
   const through = parseId(slot?.lastViewedMessageId);
@@ -76,6 +79,9 @@ export function markSeenInSlot(
     all.push(id);
     const isSeen =
       m.direction !== "incoming" ||
+      // Section 9 of message-actions.md - a deleted message never holds back
+      // how far a conversation is read.
+      m.deleted === true ||
       (through !== null && id <= through) ||
       feedSeen.has(m.messageId);
     if (isSeen) seen.push(id);

@@ -462,3 +462,99 @@ of the header, the action bar in place of the composer, the mark at the leading
 edge of each row. Web adds Escape and the right-click toggle; iOS and Android
 add the long-press toggle. The gates are the ones the single actions already
 compute (own, deleted, send complete), read once for the whole selection.
+
+## 9. A deleted message leaves the conversation
+
+Decided 2026-11-22 by the maintainer, looking at a web chat full of "Message
+deleted" rows: a deleted message does not stay on screen as a permanent
+placeholder. This replaces the "message deleted" tombstone of ADR-0023 on every
+client (web and desktop, iOS, Android). The wire does not change: the delete is
+the ADR-0023 `delete_of` op, sent to everyone and accepted only from the
+message's author, and every device still stores that the message was deleted.
+What changes is only what is drawn.
+
+**Seen going.** When the deletion is applied while the person is looking at the
+conversation - this conversation is the open screen, the app or tab is in the
+foreground, and the message's row was already in the timeline before the
+deletion was applied - the bubble turns into the line "Message deleted" (the
+existing `chat.message.deleted` text, in the bubble's own shape, no chips, no
+quote, no attachments, no menu) and holds for **2 seconds**, then the row
+collapses: its height animates to zero over **250 ms** and it is gone. Both
+durations are chosen, not measured. With reduced motion turned on (the
+platform's setting) the row is removed at the end of the hold without the
+collapse. This covers a delete by the person themselves (one message or a bulk
+delete from selection mode, each row on its own timer), a delete by the author
+on another device of theirs, and a delete by another person.
+
+**Never seen going.** Every other deletion shows nothing at all: when the
+conversation is opened, the message is simply not there. That covers a
+deletion that arrived while another screen was open or the app was in the
+background, a message and its deletion that arrive in the same batch (the
+message was never drawn), a reload or restart, every other device of the
+account, history restored from a backup or a conversation vault, and history
+handed over at pairing. A row in its 2-second hold that leaves the screen
+(the person opens another conversation, the app goes to the background) is
+gone when they come back.
+
+**Rows around it.** The timeline is computed without the deleted message: the
+grouping of consecutive bubbles from one author, the author name on the first
+bubble of a run, and the date separators all follow the remaining messages; a
+date separator with no message left under it is not drawn. Where the platform
+keeps the scroll anchor, a row collapsing above the visible area does not move
+what the person is reading.
+
+**What else goes with it.**
+- Its reactions go with it (they are drawn on the row).
+- A pin of it leaves the pinned bar, personal or shared (section 4.1, already
+  the rule).
+- A reply that quotes it keeps its quote block, the snapshot it carries
+  (ADR-0052). Tapping the quote does what section 3.1 says for a target that is
+  not in the timeline: nothing, and nothing is said.
+- An open action card or reaction row on the message closes when the deletion
+  is applied. An edit of it in progress (the author's own message, deleted from
+  another device) ends as Cancel would end it. A reply strip already armed with
+  it stays: the reply still sends, with its snapshot.
+- In selection mode a deleted or going row is not selectable and leaves the
+  selection.
+- Saved messages, the feed and search never show it; the feed already removes
+  a deleted message (`feed.md` section 3).
+
+**Unread and read.** A deleted message is never unread: it does not count in a
+conversation's unread badge, in the app's total, or in a folder's count, and a
+conversation whose only unread messages were deleted shows no badge. When the
+conversation is read, the read position moves to the newest message this
+device holds, deleted ones included, so the read receipt the person sends and
+the read cursor their other devices get cover it. A deleted message counts as
+seen for the feed's contiguous-seen rule (ADR-0063), so it never holds back how
+far a conversation is read.
+
+**Chat list and notifications.** The chat list preview never says "Message
+deleted": it shows the newest message of the conversation that is not deleted
+(with that message's time), and when none is left, what the list shows for a
+conversation with no messages yet. A deletion never makes a notification. A
+notification about a message never reads "Message deleted"; when the newest
+thing a wake finds is a deletion, the notification describes the newest
+message that is not deleted, or nothing new is shown. A notification already on
+screen for the deleted message is withdrawn where the platform lets the app do
+that.
+
+**Channels.** A post deleted by the owner or a publisher, and a comment deleted
+by its author or by the owner or a publisher, follow the same two rules: seen
+going, it turns into "Message deleted" for 2 seconds and collapses; otherwise
+it is not there. A channel's preview in the chat list and its unread count
+follow the same rule as a chat. A comment thread's count under a post does not
+count a deleted comment. The comments service sends no deletion event: it drops
+the comment's row. So a comment deleted on this device gets the hold, and a
+comment deleted elsewhere is simply gone at the next read of its thread (a
+missing comment cannot be told apart from one hidden for another reason, such
+as a banned author).
+
+**Cross-platform shape.** One rule on every client: a deleted message is not
+drawn, except during its 2-second hold when its deletion was applied in front
+of the person. "In front of the person" is: this conversation open, and web's
+`document.visibilityState` is `visible`, iOS's scene phase is `active`,
+Android's lifecycle is at least `RESUMED`. The hold is kept in memory only; it
+is never persisted.
+
+**Copy.** No new text: "Message deleted" (`chat.message.deleted`) is now used
+only during the hold, and no longer as a chat list preview.

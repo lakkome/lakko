@@ -706,7 +706,7 @@ progress, the failed-upload state and the viewer are the group's.
 | Older post, no key on this device | "This post isn't available." |
 | File past its life, or deleted | The "no longer available" state of [`saved-messages-and-file-lifetime.md`](saved-messages-and-file-lifetime.md). A post lives 30 days and its file about 45. |
 | Edited | The `edited` mark, as in a chat. |
-| Deleted | The post leaves the timeline for everyone, as delete for everyone does. |
+| Deleted | The post leaves the timeline for everyone, as delete for everyone does: seen going it reads "Message deleted" for 2 seconds and collapses, otherwise it is not there ([`message-actions.md`](message-actions.md) section 9, 2026-11-22). A deleted comment the same. |
 
 **What someone who subscribes later reads.**
 

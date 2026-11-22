@@ -427,6 +427,9 @@ private class RealThrowawayGroup(
             },
             reactionEmoji = body.emoji,
             reactionTargetAuthorB64 = body.reactionTargetAuthor?.let { java.util.Base64.getEncoder().encodeToString(it) },
+            // `docs/ux/message-actions.md` section 9 — the message an edit or
+            // a delete names, so a wake never previews a deleted message.
+            target = if (kind == ProcessedKind.EDIT || kind == ProcessedKind.DELETE) body.target else null,
         )
     }
 

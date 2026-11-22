@@ -67,7 +67,7 @@ use openmls::group::{
     GroupContext, GroupEpoch, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig, QueuedProposal,
     StagedCommit, StagedWelcome,
 };
-use openmls::messages::proposals::{Proposal, ProposalType};
+use openmls::messages::proposals::{Proposal, ProposalOrRefType, ProposalType};
 use openmls::prelude::{
     Ciphersuite, KeyPackage, LeafNodeIndex, ProcessedMessageContent, ProtocolVersion,
 };
@@ -82,9 +82,10 @@ use zeroize::Zeroizing;
 use crate::error::{Error, Result};
 use crate::group_kind::{GroupKind, KindState, GROUP_KIND_EXTENSION_TYPE};
 use crate::group_proposals::{
-    account_key_at_leaf, authorise, classify, commit_effects, group_kind_unchanged,
-    is_owner_response, leaves_of_account, one_to_one_allows, one_to_one_holds, owner_survives,
-    proposal_keeps_group_kind, proposer_at, CommitEffects, ProposalKind, ProposalRecord, Proposer,
+    absent_admins, account_key_at_leaf, admins_present, authorise, classify, commit_effects,
+    group_kind_unchanged, is_owner_response, leaves_of_account, one_to_one_allows,
+    one_to_one_holds, owner_survives, proposal_keeps_group_kind, proposer_at, pruned_table,
+    role_change_keeps_admins_present, CommitEffects, ProposalKind, ProposalRecord, Proposer,
     MAX_LEAVES_PER_ACCOUNT,
 };
 use crate::group_roles::{OutgoingOwner, Role, RoleTable, ROLE_EXTENSION_TYPE};
@@ -302,6 +303,8 @@ pub struct Group {
     entry: external_entry::EntryState,
 }
 
+#[cfg(test)]
+mod admin_presence_tests;
 mod external_entry;
 mod reentry_join;
 pub(crate) use external_entry::ExternalEntryView;
@@ -1339,12 +1342,25 @@ impl Group {
                 "replace_member refused: the added leaf's device binding does not verify",
             ));
         }
-        let bundle = self
+        let added_account = crate::device_binding::account_key_of_credential(
+            added.credential().serialized_content(),
+            added.signature_key().as_slice(),
+        )
+        .map(|a| a.to_vec());
+        let effects = CommitEffects::direct(vec![leaf.u32()], vec![added_account]);
+        let prune = self.direct_prune_for(identity, &effects, &self.members())?;
+        let mut builder = self
             .inner
             .commit_builder()
             .consume_proposal_store(false)
             .propose_removals([leaf])
-            .propose_adds([key_package])
+            .propose_adds([key_package]);
+        if let Some(prune) = prune {
+            builder = builder
+                .propose_group_context_extensions(prune)
+                .map_err(|e| Error::Group(format!("replace_member prune: {e:?}")))?;
+        }
+        let bundle = builder
             .load_psks(identity.provider.storage())
             .map_err(|e| Error::Group(format!("replace_member load_psks: {e:?}")))?
             .build(
@@ -1654,15 +1670,44 @@ impl Group {
         self.refuse_if_proposals_pending("remove_member")?;
         // ADR-0062: removing a person's last leaf from a one-to-one is refused
         // here, locally, before the commit is built; every peer refuses it too.
-        one_to_one_holds(
-            &CommitEffects::direct(vec![leaf.u32()], Vec::new()),
-            &self.members(),
-            self.group_kind(),
-        )?;
-        let (commit, _welcome_for_external_joiners, _group_info) = self
-            .inner
-            .remove_members(&identity.provider, &identity.signature_keys, &[leaf])
-            .map_err(|e| Error::Group(format!("remove_members: {e:?}")))?;
+        let effects = CommitEffects::direct(vec![leaf.u32()], Vec::new());
+        let members = self.members();
+        one_to_one_holds(&effects, &members, self.group_kind())?;
+        // ADR-0022 amendment (C-100): removing an admin's last leaf drops them
+        // from the role table in the same commit, or every peer refuses it.
+        // A device that may not administer the group gets no prune: its
+        // removal of someone else is refused by every peer anyway (`authorise`),
+        // and building it unchanged keeps that refusal the peers' to make.
+        let commit = match self.direct_prune_for(identity, &effects, &members)? {
+            None => {
+                let (commit, _welcome_for_external_joiners, _group_info) = self
+                    .inner
+                    .remove_members(&identity.provider, &identity.signature_keys, &[leaf])
+                    .map_err(|e| Error::Group(format!("remove_members: {e:?}")))?;
+                commit
+            },
+            Some(prune) => {
+                let bundle = self
+                    .inner
+                    .commit_builder()
+                    .consume_proposal_store(false)
+                    .propose_removals([leaf])
+                    .propose_group_context_extensions(prune)
+                    .map_err(|e| Error::Group(format!("remove_member prune: {e:?}")))?
+                    .load_psks(identity.provider.storage())
+                    .map_err(|e| Error::Group(format!("remove_member load_psks: {e:?}")))?
+                    .build(
+                        identity.provider.rand(),
+                        identity.provider.crypto(),
+                        &identity.signature_keys,
+                        |_| true,
+                    )
+                    .map_err(|e| Error::Group(format!("remove_member build: {e:?}")))?
+                    .stage_commit(&identity.provider)
+                    .map_err(|e| Error::Group(format!("remove_member stage_commit: {e:?}")))?;
+                bundle.into_contents().0
+            },
+        };
 
         self.finish_direct(identity, finish)?;
 
@@ -2613,7 +2658,106 @@ impl Group {
                 "role-table change refused: the named owner is not a member of this group",
             ));
         }
+        // ADR-0022 amendment of 2026-11-22 (C-100): an admin is a member too.
+        // Every peer refuses a role table naming an admin with no leaf
+        // (`admins_present`); refusing here keeps this device from publishing it.
+        let members = self.members();
+        if roles
+            .admins()
+            .iter()
+            .any(|a| leaves_of_account(&members, a) == 0)
+        {
+            return Err(Error::refused(
+                RefusalReason::AdminNotAMember,
+                "role-table change refused: a named admin is not a member of this group",
+            ));
+        }
         Ok(())
+    }
+
+    /// The by-value role-table **prune** this device, as committer, must fold
+    /// into a commit whose proposals have `effects` (ADR-0022 amendment of
+    /// 2026-11-22, C-100), or `None` when the commit needs none.
+    ///
+    /// A commit that takes an admin's last leaf out of the group must leave a
+    /// role table without them, or every peer refuses it
+    /// ([`crate::group_proposals::admins_present`]). When the commit carries no
+    /// role change of its own, this device writes that table itself: the
+    /// pre-merge table with exactly the departing admins removed, which is the
+    /// only role rewrite a non-owner committer may carry (see
+    /// `is_verified_prune`). When it carries a role change, there is a single
+    /// `GroupContextExtensions` slot per commit (RFC 9420, C-65), so no prune
+    /// can be added and the role change's own table must already pass.
+    ///
+    /// # Errors
+    ///
+    /// A [`RefusalReason::AdminNotAMember`] refusal when the commit's role
+    /// change names a departing admin, or when an admin departs and this device
+    /// is neither owner nor admin (it may not rewrite the table).
+    fn admin_prune_for(
+        &self,
+        identity: &Identity,
+        effects: &CommitEffects,
+        members: &[MemberRecord],
+    ) -> Result<Option<Extensions<GroupContext>>> {
+        let Some(table) = self.group_roles() else {
+            return Ok(None);
+        };
+        if !effects.proposed_tables().is_empty() {
+            admins_present(effects, members, &table)?;
+            return Ok(None);
+        }
+        let absent = absent_admins(&table, effects, members);
+        if absent.is_empty() {
+            return Ok(None);
+        }
+        let own_account = identity.account_public_key().unwrap_or_default();
+        if !table.can_administer(&own_account) {
+            return Err(Error::refused(
+                RefusalReason::AdminNotAMember,
+                "commit refused: an admin leaves the group, and only an owner or admin may drop \
+                 them from the role table",
+            ));
+        }
+        self.role_rewrite_extensions(&pruned_table(&table, &absent))
+            .map(Some)
+    }
+
+    /// [`Self::admin_prune_for`] for a **direct** commit: `None` when this
+    /// device may not administer the group (a direct removal it is not
+    /// authorised to make is refused by every peer by the ordinary rule, so no
+    /// table is written for it).
+    fn direct_prune_for(
+        &self,
+        identity: &Identity,
+        effects: &CommitEffects,
+        members: &[MemberRecord],
+    ) -> Result<Option<Extensions<GroupContext>>> {
+        let own_account = identity.account_public_key().unwrap_or_default();
+        match self.group_roles() {
+            Some(table) if table.can_administer(&own_account) => {
+                self.admin_prune_for(identity, effects, members)
+            },
+            _ => Ok(None),
+        }
+    }
+
+    /// The prune a commit with `effects` must carry, as every **peer** computes
+    /// it: the pre-merge `table` without the admins the commit takes out of the
+    /// group, written through the same [`Self::role_rewrite_extensions`] the
+    /// committer used, or `None` when no admin departs.
+    fn expected_prune(
+        &self,
+        table: &RoleTable,
+        effects: &CommitEffects,
+        members: &[MemberRecord],
+    ) -> Option<Extensions<GroupContext>> {
+        let absent = absent_admins(table, effects, members);
+        if absent.is_empty() {
+            return None;
+        }
+        self.role_rewrite_extensions(&pruned_table(table, &absent))
+            .ok()
     }
 
     /// Rewrite the group's ADR-0022 role table (promote / demote admins).
@@ -3026,7 +3170,17 @@ impl Group {
                 "ownership transfer refused: the named owner is not a member of this group",
             ));
         }
-        Ok(table.with_owner_transferred(new_owner, outgoing))
+        // ADR-0022 amendment (C-100): the transferred table keeps only admins
+        // who hold a leaf, as every peer's `admins_present` demands.
+        let transferred = table.with_owner_transferred(new_owner, outgoing);
+        let members = self.members();
+        let absent: Vec<[u8; 32]> = transferred
+            .admins()
+            .iter()
+            .filter(|a| leaves_of_account(&members, a.as_slice()) == 0)
+            .copied()
+            .collect();
+        Ok(pruned_table(&transferred, &absent))
     }
 
     /// Hand the group's owner slot to `new_owner`, as a direct commit
@@ -3515,6 +3669,7 @@ impl Group {
             members: &members,
             kind_before: &kind_before,
             role_change_survives,
+            effects: &effects,
             removed_leaves: &removed_leaves,
             admission: &admission,
             identity,
@@ -3621,7 +3776,7 @@ impl Group {
         let admissible = {
             let members = self.members();
             let queued: Vec<QueuedProposal> = self.inner.pending_proposals().cloned().collect();
-            self.selection_is_admissible(&queued, &candidates, &members)
+            self.selection_is_admissible(identity, &queued, &candidates, &members)
         };
         let first = if admissible {
             self.stage_sweep_of(identity, &candidates)
@@ -3678,17 +3833,25 @@ impl Group {
         selection: &[ProposalRef],
     ) -> std::result::Result<ProposalCommit, SweepAttemptError> {
         count_sweep_build();
-        let complete = self
-            .inner
-            .commit_builder()
-            .consume_proposal_store(true)
+        let prune = self
+            .selection_prune(identity, selection)
+            .map_err(SweepAttemptError::Refused)?;
+        let mut builder = self.inner.commit_builder().consume_proposal_store(true);
+        if let Some(prune) = prune.clone() {
+            builder = builder
+                .propose_group_context_extensions(prune)
+                .map_err(|e| {
+                    SweepAttemptError::Fatal(Error::Group(format!("sweep prune: {e:?}")))
+                })?;
+        }
+        let complete = builder
             .load_psks(identity.provider.storage())
             .map_err(|e| SweepAttemptError::Fatal(Error::Group(format!("sweep load_psks: {e:?}"))))?
             .build(
                 identity.provider.rand(),
                 identity.provider.crypto(),
                 &identity.signature_keys,
-                |qp| selection.contains(qp.proposal_reference_ref()),
+                |qp| sweep_selects(selection, prune.as_ref(), qp),
             )
             .map_err(|e| SweepAttemptError::Refused(Error::Group(format!("sweep build: {e:?}"))))?;
         let bundle = complete.stage_commit(&identity.provider).map_err(|e| {
@@ -3739,12 +3902,17 @@ impl Group {
     /// successful one throws away a commit nobody will ever see.
     fn sweep_selection_builds(&mut self, identity: &Identity, selection: &[ProposalRef]) -> bool {
         count_sweep_build();
-        let Ok(loaded) = self
-            .inner
-            .commit_builder()
-            .consume_proposal_store(true)
-            .load_psks(identity.provider.storage())
-        else {
+        let Ok(prune) = self.selection_prune(identity, selection) else {
+            return false;
+        };
+        let mut builder = self.inner.commit_builder().consume_proposal_store(true);
+        if let Some(prune) = prune.clone() {
+            let Ok(with_prune) = builder.propose_group_context_extensions(prune) else {
+                return false;
+            };
+            builder = with_prune;
+        }
+        let Ok(loaded) = builder.load_psks(identity.provider.storage()) else {
             return false;
         };
         loaded
@@ -3752,7 +3920,7 @@ impl Group {
                 identity.provider.rand(),
                 identity.provider.crypto(),
                 &identity.signature_keys,
-                |qp| selection.contains(qp.proposal_reference_ref()),
+                |qp| sweep_selects(selection, prune.as_ref(), qp),
             )
             .is_ok()
     }
@@ -3875,7 +4043,7 @@ impl Group {
     ) -> bool {
         let mut trial = accepted.to_vec();
         trial.extend_from_slice(candidate);
-        if !self.selection_is_admissible(queued, &trial, members) {
+        if !self.selection_is_admissible(identity, queued, &trial, members) {
             return false;
         }
         self.sweep_selection_builds(identity, &trial)
@@ -3890,6 +4058,7 @@ impl Group {
     /// whole selection can answer.
     fn selection_is_admissible(
         &self,
+        identity: &Identity,
         queued: &[QueuedProposal],
         selection: &[ProposalRef],
         members: &[MemberRecord],
@@ -3903,12 +4072,29 @@ impl Group {
         owner_survives(&effects, members, &owner).is_ok()
             && group_kind_unchanged(&effects, &self.kind_state()).is_ok()
             && one_to_one_holds(&effects, members, self.group_kind()).is_ok()
+            && self.admin_prune_for(identity, &effects, members).is_ok()
             && self.reentry_pairs_hold(&chosen, members)
     }
 
     /// ADR-0091 M2 over a whole selection, the rule a peer's commit gate
     /// applies: every proposal stands with its pairs drawn from the selection
     /// itself, so a re-entry `Remove` is never carried without its `Add`.
+    /// The role-table prune ([`Self::admin_prune_for`]) the sweep of
+    /// `selection` must carry, computed over the proposals it selects.
+    fn selection_prune(
+        &self,
+        identity: &Identity,
+        selection: &[ProposalRef],
+    ) -> Result<Option<Extensions<GroupContext>>> {
+        let members = self.members();
+        let effects = commit_effects(
+            self.inner
+                .pending_proposals()
+                .filter(|qp| selection.contains(qp.proposal_reference_ref())),
+        );
+        self.admin_prune_for(identity, &effects, &members)
+    }
+
     fn reentry_pairs_hold(&self, chosen: &[&QueuedProposal], members: &[MemberRecord]) -> bool {
         let Some(table) = self.group_roles() else {
             return true;
@@ -4188,7 +4374,18 @@ impl Group {
                         epoch: self.epoch(),
                         members: &members,
                     };
-                    authorise_role_commit(&table, scope, &self.kind_state(), &staged)?;
+                    // ADR-0022 amendment (C-100): the one role rewrite a
+                    // non-owner committer may carry, computed here from the
+                    // pre-merge GroupContext exactly as the committer did.
+                    let effects = commit_effects(staged.queued_proposals());
+                    let expected_prune = self.expected_prune(&table, &effects, &members);
+                    authorise_role_commit(
+                        &table,
+                        scope,
+                        &self.kind_state(),
+                        expected_prune.as_ref(),
+                        &staged,
+                    )?;
                 }
                 self.inner
                     .merge_staged_commit(&identity.provider, *staged)
@@ -5009,6 +5206,27 @@ fn refuse_unclassifiable_conversation(extensions: &Extensions<GroupContext>) -> 
     })
 }
 
+/// The sweep's `CommitBuilder::build` filter: the stored proposals the sweep
+/// selected, plus this device's own by-value role-table prune when it folds
+/// one in (ADR-0022 amendment, C-100). OpenMLS runs the filter over the
+/// builder's own proposals too, so the prune must be let through by name: a
+/// by-value `GroupContextExtensions` carrying exactly the prune's extensions.
+fn sweep_selects(
+    selection: &[ProposalRef],
+    prune: Option<&Extensions<GroupContext>>,
+    qp: &QueuedProposal,
+) -> bool {
+    if selection.contains(qp.proposal_reference_ref()) {
+        return true;
+    }
+    match (prune, qp.proposal()) {
+        (Some(prune), Proposal::GroupContextExtensions(gce)) => {
+            qp.proposal_or_ref_type() == ProposalOrRefType::Proposal && gce.extensions() == prune
+        },
+        _ => false,
+    }
+}
+
 /// `true` when a member that is neither owner nor admin may carry `qp` in a
 /// sweep (ADR-0050 section 2.5a) — when `qp` is either
 ///
@@ -5160,6 +5378,9 @@ struct SweepContext<'a> {
     /// Whether the authorised set's role change would leave the group with an
     /// owner inside it (`owner_survives`, computed once over the whole set).
     role_change_survives: bool,
+    /// What the authorised set does taken together, for the admin-presence
+    /// question a role change is asked (ADR-0022 amendment, C-100).
+    effects: &'a CommitEffects,
     /// Leaves the authorised set removes. Removes and leaves are never excluded
     /// by this filter, so this is exactly the set the emitted commit removes.
     removed_leaves: &'a [u32],
@@ -5470,7 +5691,13 @@ fn sweep_keeps_role_change(
 ) -> bool {
     // ADR-0062: no rewrite that changes the kind is ever swept, and in a
     // one-to-one no rewrite is swept at all.
+    // ADR-0022 amendment (C-100): a role change that still names an admin the
+    // same sweep takes out of the group cannot ride with that removal, and
+    // there is one GroupContextExtensions slot per commit, so the role change
+    // is the one left out (its author re-proposes); the removal carries the
+    // prune instead.
     if !ctx.role_change_survives
+        || !role_change_keeps_admins_present(qp.proposal(), ctx.effects, ctx.members)
         || state.role_change_taken
         || !proposal_keeps_group_kind(qp.proposal(), ctx.kind_before)
         || ctx.kind_before.kind() == Some(GroupKind::OneToOne)
@@ -5818,6 +6045,7 @@ fn authorise_role_commit(
     table: &RoleTable,
     scope: crate::reentry::ReentryScope<'_>,
     kind_before: &KindState,
+    expected_prune: Option<&Extensions<GroupContext>>,
     staged: &StagedCommit,
 ) -> Result<()> {
     let members = scope.members;
@@ -5827,6 +6055,11 @@ fn authorise_role_commit(
     // an owner who is not in it. See `owner_survives` for the two ways that
     // happens and why neither is visible to a per-proposal check.
     owner_survives(&effects, members, table.owner())?;
+    // ADR-0022 amendment of 2026-11-22 (C-100): a commit that changes who is
+    // in the group leaves no admin without a leaf. Judged against the table
+    // the commit installs (the owner's role change, or the committer's prune),
+    // else the pre-merge one.
+    admins_present(&effects, members, table)?;
     // ADR-0062: no commit changes the conversation's kind, and a one-to-one's
     // commit keeps its two people and rewrites nothing — judged against the
     // pre-merge GroupContext, like the role table.
@@ -5851,6 +6084,13 @@ fn authorise_role_commit(
         // ADR-0091 M2: the ordinary rule (an unresolvable author is refused
         // there), the collision rule for an Add, and the pair rule for a
         // Remove, its pair drawn from THIS commit's proposals.
+        //
+        // ADR-0022 amendment (C-100): the committer's by-value prune is a
+        // role rewrite a non-owner may carry, so it is judged by
+        // `is_verified_prune` instead of the owner-only role-change rule.
+        if is_verified_prune(table, members, expected_prune, qp) {
+            continue;
+        }
         crate::reentry::judge(
             scope,
             table,
@@ -5862,6 +6102,36 @@ fn authorise_role_commit(
         )?;
     }
     Ok(())
+}
+
+/// `true` when `qp` is the committer's own **prune** (ADR-0022 amendment of
+/// 2026-11-22, C-100): a by-value `GroupContextExtensions` proposal from a
+/// committer whose account is owner or admin in the pre-merge `table`, whose
+/// extensions are byte-for-byte `expected_prune` — the pre-merge GroupContext
+/// with exactly the admins this commit takes out of the group removed from the
+/// role table. Nothing else about the group may differ, so a non-owner gains
+/// no way to change roles: the table it writes is the one every peer computes.
+///
+/// Any other role rewrite, from anyone else, is judged by the ordinary
+/// owner-only rule and refused unless its author is the owner.
+fn is_verified_prune(
+    table: &RoleTable,
+    members: &[MemberRecord],
+    expected_prune: Option<&Extensions<GroupContext>>,
+    qp: &QueuedProposal,
+) -> bool {
+    let (Some(expected), Proposal::GroupContextExtensions(gce)) = (expected_prune, qp.proposal())
+    else {
+        return false;
+    };
+    if qp.proposal_or_ref_type() != ProposalOrRefType::Proposal {
+        return false;
+    }
+    let Sender::Member(committer) = qp.sender() else {
+        return false;
+    };
+    account_key_at_leaf(members, committer.u32()).is_some_and(|a| table.can_administer(&a))
+        && gce.extensions() == expected
 }
 
 /// Encode any [`MlsMessageOut`] to its TLS wire form.
@@ -7342,10 +7612,13 @@ mod proposal_gate_tests {
             .commit_pending_proposals(&s.alice)
             .expect("the sweep must be buildable")
             .expect("something is swept");
+        // Bob is an admin, so removing him also drops him from the role table
+        // in the same commit (ADR-0022 amendment, C-100): one add, the owner's
+        // removal, and the committer's prune.
         assert_eq!(
             swept.swept.len(),
-            2,
-            "one add out of the whole flood, plus the owner's removal",
+            3,
+            "one add out of the whole flood, the owner's removal, and the prune",
         );
         assert!(
             !s.alice_g
@@ -7353,6 +7626,13 @@ mod proposal_gate_tests {
                 .iter()
                 .any(|m| m.signature_public_key == s.bob.signature_public_key()),
             "the flooding admin is gone",
+        );
+        assert!(
+            !s.alice_g
+                .group_roles()
+                .expect("role table")
+                .can_administer(s.bob.signature_public_key()),
+            "and is no longer an admin",
         );
     }
 
@@ -7379,11 +7659,13 @@ mod proposal_gate_tests {
         admission: &'a GroupAdmission,
     ) -> SweepContext<'a> {
         static NO_KIND: std::sync::OnceLock<KindState> = std::sync::OnceLock::new();
+        static NO_EFFECTS: std::sync::OnceLock<CommitEffects> = std::sync::OnceLock::new();
         SweepContext {
             table,
             members,
             kind_before: NO_KIND.get_or_init(KindState::default),
             role_change_survives: true,
+            effects: NO_EFFECTS.get_or_init(CommitEffects::default),
             removed_leaves: &[],
             admission,
             identity,

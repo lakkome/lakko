@@ -143,6 +143,12 @@ public struct ChatScreen: View {
     /// mode, and a `@State` on the screen dies with the screen.
     @State private var selection: MessageSelection?
 
+    /// `docs/ux/message-actions.md` section 9 — a row seen going is in front
+    /// of the person only while the scene is `active`; with Reduce Motion it
+    /// goes without the collapse.
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     /// Section 8 — the "Forward to" picker opened from the action bar (the
     /// single forward's picker is driven by the view model's
     /// `forwardingMessage`; the bulk one has no single message to hang on).
@@ -245,7 +251,7 @@ public struct ChatScreen: View {
         // draws the menu over it. Inside the `.environmentObject` calls below,
         // deliberately: the menu re-draws the production bubble, and a media
         // bubble reads the controller out of the environment.
-        MessageMenuHost { chatBody }
+        MessageMenuHost(closingIds: viewModel.lastAppliedDeletions) { chatBody }
             // ADR-0098 section 2 — an open one-to-one asks whether the other
             // person still has an account, when a check is due.
             .checksAccountExists(personKey: viewModel.presentsAsGroup ? nil : viewModel.oneToOnePeerSignatureKey)
@@ -459,6 +465,22 @@ public struct ChatScreen: View {
         // The read position is written before the app can be closed.
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
             viewModel.flushPendingReadCursor()
+        }
+        // `docs/ux/message-actions.md` section 9 — a row in its going is gone
+        // when the person comes back to the app.
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { viewModel.endDeletedHolds() }
+        }
+        .onAppear { viewModel.reduceMotion = reduceMotion }
+        .onChange(of: reduceMotion) { _, on in viewModel.reduceMotion = on }
+        // Section 9 — an open action card, reaction list or picker on a
+        // message closes when its deletion is applied; the selection drops it.
+        .onChange(of: viewModel.lastAppliedDeletions) { _, deleted in
+            if let message = picker?.message, deleted.contains(message.messageId) { picker = nil }
+            if let request = reactorsRequest, deleted.contains(request.message.messageId) { reactorsRequest = nil }
+            if let current = selection, !bulkRunning, !current.ids.isDisjoint(with: deleted) {
+                selection = MessageSelection(remaining: current.ids.subtracting(deleted))
+            }
         }
         .onChange(of: viewModel.composerFocusRequest) { _, _ in
             // ADR-0052 — choosing Reply puts the keyboard on the composer.
@@ -826,11 +848,15 @@ public struct ChatScreen: View {
     }
 
     /// The rows the timeline draws: every message except the bookkeeping
-    /// system rows, laid out into days and runs (UX spec section 5.2).
+    /// system rows and the deleted messages (`docs/ux/message-actions.md`
+    /// section 9: only one in its 2-second going is still drawn), laid out
+    /// into days and runs (UX spec section 5.2) over what remains.
     private var timelineEntries: [ChatTimeline.Entry] {
-        ChatTimeline.layout(
+        let held = viewModel.heldDeletedIds
+        return ChatTimeline.layout(
             messages: viewModel.messages.filter {
-                !ChatTimeline.isHiddenSystemRow($0, isGroup: viewModel.presentsAsGroup)
+                DeletedRows.isDrawn($0, held: held)
+                    && !ChatTimeline.isHiddenSystemRow($0, isGroup: viewModel.presentsAsGroup)
             },
             nowMs: ChatRepository.nowMs(),
             calendar: .current,
@@ -863,8 +889,10 @@ public struct ChatScreen: View {
     }
 
     private var lastDrawnMessageId: Int64? {
-        viewModel.messages.last(where: {
-            !ChatTimeline.isHiddenSystemRow($0, isGroup: viewModel.presentsAsGroup)
+        let held = viewModel.heldDeletedIds
+        return viewModel.messages.last(where: {
+            DeletedRows.isDrawn($0, held: held)
+                && !ChatTimeline.isHiddenSystemRow($0, isGroup: viewModel.presentsAsGroup)
         })?.messageId
     }
 
@@ -937,7 +965,9 @@ public struct ChatScreen: View {
                     if viewModel.isAloneInGroup {
                         soloGroupBlock
                     }
-                    if viewModel.messages.isEmpty {
+                    // Section 9 — a conversation whose every message was
+                    // deleted reads as one with no messages yet.
+                    if !viewModel.messages.contains(where: viewModel.isDrawn) {
                         if !viewModel.isAloneInGroup { emptyHint }
                     } else {
                         let entries = timelineEntries
@@ -1081,6 +1111,10 @@ public struct ChatScreen: View {
                                     || rowSelection == .selected
                                     ? Color.lakkoSurfaceSelected : Color.clear
                             )
+                            // `docs/ux/message-actions.md` section 9 — a row
+                            // seen going holds "Message deleted", then its
+                            // height goes to zero.
+                            .modifier(DeletedRowCollapse(phase: viewModel.deletedPhase(entry.message.messageId)))
                             .id(entry.message.messageId)
                         }
                     }
@@ -1185,8 +1219,10 @@ public struct ChatScreen: View {
         // carries target 0: the quote is drawn, and there is nowhere to jump
         // (an unsent row also has id 0 and is not what was quoted).
         guard messageId != HeldSend.replyNoJumpTarget else { return }
+        // Section 9 — a deleted message is not in the timeline: the quote
+        // keeps its snapshot and a tap on it does nothing.
         guard viewModel.messages.contains(where: {
-            $0.messageId == messageId && !ChatTimeline.isHiddenSystemRow($0)
+            $0.messageId == messageId && !$0.deleted && !ChatTimeline.isHiddenSystemRow($0)
         }) else { return }
         quoteJump = QuoteJump(messageId: messageId, nonce: (quoteJump?.nonce ?? 0) + 1)
     }

@@ -3757,6 +3757,10 @@
       "text": "群主不能退出群组。",
       "status": "machine"
     },
+    "chat.refusal.admin_not_member": {
+      "text": "只有本群组的现有成员才能成为管理员。",
+      "status": "machine"
+    },
     "chat.refusal.owner_not_member": {
       "text": "群主身份只能由此群组的现有成员持有。",
       "status": "machine"

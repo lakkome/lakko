@@ -37,6 +37,14 @@ describe("markSeenInSlot", () => {
     expect(again.advancedTo).toBeNull();
   });
 
+  it("a deleted message counts as seen and never holds the watermark back", () => {
+    // docs/ux/message-actions.md section 9.
+    const s = slot({ lastViewedMessageId: "1", messages: [m(1), m(2, "outgoing"), { ...m(3), deleted: true }, m(4), m(5)] });
+    expect(isSeenInSlot(s, { ...m(3), deleted: true })).toBe(true);
+    const res = markSeenInSlot(s, ["4"], contiguous);
+    expect(res.advancedTo).toBe(4n);
+  });
+
   it("closing the gap folds the ids into the watermark (own rows count as seen)", () => {
     const first = markSeenInSlot(slot({ lastViewedMessageId: "1" }), ["4"], contiguous).slot;
     const res = markSeenInSlot(first, ["3"], contiguous);

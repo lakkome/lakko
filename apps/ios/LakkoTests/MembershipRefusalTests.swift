@@ -257,6 +257,16 @@ final class MembershipRefusalTests: XCTestCase {
         }
     }
 
+    func testTheAdminPresenceRefusalMapsAndHasItsOwnSentence() {
+        // ADR-0022 amendment (C-100): an owner naming somebody who just left as
+        // admin is told so in plain words.
+        XCTAssertEqual(
+            membershipRefusalReason(of: FfiError.MembershipAdminNotAMember(message: "x")),
+            .adminNotAMember)
+        XCTAssertEqual(
+            say(.adminNotAMember), "Only a current member of this group can be an admin.")
+    }
+
     func testItFindsTheReasonThroughTheWrapperTheRepositoryThrows() {
         // Every membership call leaves `ChatRepository` as
         // `ChatError.wrapped(_, underlying:)`, which is what reaches the view

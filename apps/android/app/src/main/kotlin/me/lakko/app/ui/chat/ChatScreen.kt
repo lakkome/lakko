@@ -381,9 +381,23 @@ public fun ChatScreen(
     val strings = LocalStrings.current
     val locale = remember(strings.language) { Locale.forLanguageTag(strings.language) }
     val use24h = remember(context) { me.lakko.app.l10n.DeviceFormats.is24Hour(context) }
-    val timeline = remember(state.messages, zone, use24h, strings, isGroupChat, reentryGaps) {
+    // `docs/ux/message-actions.md` section 9 — a deleted message is not drawn,
+    // except in its short hold when its deletion was applied in front of the
+    // person.
+    val heldDeleted by viewModel.heldDeleted.collectAsStateWithLifecycle()
+    val heldDeletedIds = heldDeleted.keys
+    val timeline = remember(state.messages, zone, use24h, strings, isGroupChat, reentryGaps, heldDeletedIds) {
         // UX second-device.md section 4 — a group draws its membership rows.
-        val built = buildTimeline(state.messages, System.currentTimeMillis(), zone, use24h, locale, strings, isGroup = isGroupChat)
+        val built = buildTimeline(
+            state.messages,
+            System.currentTimeMillis(),
+            zone,
+            use24h,
+            locale,
+            strings,
+            isGroup = isGroupChat,
+            heldDeleted = heldDeletedIds,
+        )
         // ADR-0091 phase 2 / conversation-rejoin 2.4 — the gap lines.
         withReentryGapLines(built, reentryGaps) { _ -> reentryGapLabel(strings) }
     }
@@ -415,7 +429,8 @@ public fun ChatScreen(
         val index = if (target == me.lakko.app.chat.REPLY_NO_JUMP_TARGET) {
             -1
         } else {
-            timeline.indexOfFirst { it is TimelineItem.Row && it.message.messageId == target }
+            // Section 9 — a deleted message is not a target, even in its hold.
+            timeline.indexOfFirst { it is TimelineItem.Row && it.message.messageId == target && !it.message.deleted }
         }
         if (index >= 0) {
             scope.launch {
@@ -725,6 +740,21 @@ public fun ChatScreen(
     // reactions, and the open reactions list (section 8.1).
     var reactorsFor by remember { mutableStateOf<Pair<Long, String?>?>(null) }
     val capNoticeId by viewModel.reactionCapNotice.collectAsStateWithLifecycle()
+    // `docs/ux/message-actions.md` section 9 — what was open on a message
+    // closes when its deletion is applied: the reaction picker, the reactions
+    // list, the pin sheet; an edit of it in progress ends as Cancel would. An
+    // armed reply strip stays (it sends with its snapshot).
+    LaunchedEffect(state.messages) {
+        val deleted = state.messages.asSequence()
+            .filter { it.deleted && it.messageId != 0L }
+            .map { it.messageId }
+            .toHashSet()
+        if (deleted.isEmpty()) return@LaunchedEffect
+        if (picker?.messageId?.let { it in deleted } == true) picker = null
+        if (reactorsFor?.first?.let { it in deleted } == true) reactorsFor = null
+        if (pinSheet?.first?.let { it in deleted } == true) pinSheet = null
+        if (editTarget?.messageId?.let { it in deleted } == true) editTarget = null
+    }
     val quickChosen by me.lakko.app.chat.QuickReaction.chosen.collectAsStateWithLifecycle()
     val settingsVersion by me.lakko.app.chat.GroupSettingsStore.version.collectAsStateWithLifecycle()
     // ADR-0098 — no React in a one-to-one whose other person is deleted.
@@ -1171,6 +1201,12 @@ public fun ChatScreen(
                         // cannot be acted on shows no mark and answers nothing.
                         val selectable = me.lakko.app.chat.canSelectMessage(msg)
                         val isSelected = selection?.contains(msg.messageId) == true
+                        // `docs/ux/message-actions.md` section 9 — a held
+                        // deleted row reads "Message deleted", then collapses.
+                        DeletedRowCollapse(
+                            deleted = msg.deleted,
+                            collapsing = heldDeleted[msg.messageId] == me.lakko.app.chat.DeletedRowPhase.COLLAPSE,
+                        ) {
                         SelectableTimelineRow(
                             selecting = selecting,
                             selectable = selectable,
@@ -1360,6 +1396,7 @@ public fun ChatScreen(
                                     isBlocked = { true },
                                 ) == uniffi.lakko_ffi_uniffi.BlockVerdict.COLLAPSE,
                         )
+                        }
                         }
                         }
                     }
@@ -2759,7 +2796,10 @@ internal fun Bubble(
             // above the bubble, one tap each, because reacting is the commonest
             // thing a person does here and used to cost two taps.
             val bounds = bubbleBounds
-            if (menuOpen && bounds != null) {
+            // `docs/ux/message-actions.md` section 9 — an open card on a
+            // message closes when its deletion is applied.
+            LaunchedEffect(menuAvailable) { if (!menuAvailable) menuOpen = false }
+            if (menuOpen && menuAvailable && bounds != null) {
                 MessageActionMenuOverlay(
                     bubbleBounds = bounds,
                     alignEnd = isOwn,

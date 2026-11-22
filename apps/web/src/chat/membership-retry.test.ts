@@ -165,6 +165,7 @@ describe("what arms a retry", () => {
       "sweepAlreadyStaged",
       "noSuchJoinRequest",
       "joinerAlreadyAMember",
+      "adminNotAMember",
     ];
     for (const reason of never) {
       expect(membershipRefusalRetryMaySucceed(reason), reason).toBe(false);

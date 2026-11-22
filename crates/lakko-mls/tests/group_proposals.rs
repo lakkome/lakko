@@ -2010,8 +2010,11 @@ fn a_pending_add_or_remove_does_not_block_a_role_change() {
     assert_eq!(s.alice_g.pending_proposals().len(), 2);
 
     // The role change still goes out, and all three compose into one commit.
+    // (It does not name charlie: a role change naming somebody the same sweep
+    // takes out of the group cannot ride with that removal, see
+    // `a_role_change_naming_a_departing_admin_is_left_out_of_the_sweep`.)
     s.alice_g
-        .propose_group_roles(&s.alice, &promote_charlie(&s))
+        .propose_group_roles(&s.alice, &demote_bob(&s))
         .expect("an add and a remove must not block a role change");
     let sweep = s
         .alice_g
@@ -2157,10 +2160,23 @@ fn a_departing_admins_sweep_is_rescued_and_its_commit_lands_on_every_peer() {
         .commit_pending_proposals(&s.alice)
         .expect("the owner sweeps")
         .expect("something is swept");
-    assert_eq!(owner_sweep.swept.len(), 1, "bob's departure, this time");
+    // bob is an admin, so the owner's sweep also drops him from the role
+    // table in the same commit (ADR-0022 amendment, C-100).
+    assert_eq!(
+        owner_sweep.swept.len(),
+        2,
+        "bob's departure, this time, and the prune of his admin entry",
+    );
     assert!(
         !is_member(&s.alice_g, &s.bob),
         "bob is gone from the owner's roster",
+    );
+    assert!(
+        !s.alice_g
+            .group_roles()
+            .expect("role table")
+            .can_administer(&pk32(&s.bob)),
+        "and from the admin set",
     );
     s.bob_g
         .process_incoming_verifying_roles(&s.bob, &wire(owner_sweep.commit))

@@ -168,7 +168,8 @@ section 16).
   every other way of reacting does).
 - Nothing happens, silently, when: the conversation does not allow that
   reaction, the message is not sent yet or failed, the membership has ended,
-  selection mode is on, or the message is a deleted tombstone.
+  selection mode is on, or the message is in its "Message deleted" hold
+  (`message-actions.md` section 9; a deleted message is otherwise not drawn).
 - When the person already has 3 reactions on the message and the quick
   reaction is not one of them, nothing is sent and the line "You can add up to
   3 reactions. Take one off to add another." shows under the message's chips

@@ -113,6 +113,7 @@ enum FailedApplyKind {
         case .groupStillActive: return "groupStillActive"
         case .reentryPairInvalid: return "reentryPairInvalid"
         case .reentryWelcomeRefused: return "reentryWelcomeRefused"
+        case .adminNotAMember: return "adminNotAMember"
         }
     }
 }

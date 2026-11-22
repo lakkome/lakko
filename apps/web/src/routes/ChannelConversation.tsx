@@ -66,7 +66,14 @@ import {
 } from "../channels/channel-access";
 import { channelErrorText } from "../channels/channel-error-copy";
 import { channelFacts, channelHeaderLine } from "../channels/channel-facts";
-import { channelDayLabels, channelTimeline } from "../channels/channel-timeline";
+import { channelDayLabels, channelTimeline, deletedPostCursors } from "../channels/channel-timeline";
+import { DeletedRowStub } from "../chat/DeletedRowStub";
+import {
+  DeletedHold,
+  idsEnteringHold,
+  prefersReducedMotion,
+  type DeletedPhase,
+} from "../chat/deleted-rows";
 import { dayLabelOf, sameDay } from "../chat/timeline-layout";
 import { ChannelComposer } from "../channels/ChannelComposer";
 import { ChannelInfo, ChannelInfoScreenHost, type ChannelInfoScreen } from "../channels/ChannelInfo";
@@ -358,7 +365,41 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
   // posts aren't available." goes once every earlier item opens.
   const heldSeedCount = createMemo(() => channelsState.subscribedSeedsByChannel().get(id)?.size ?? 0);
   createEffect(on(heldSeedCount, () => void load({ redecode: true }), { defer: true }));
-  const timeline = createMemo(() => channelTimeline(posts(), decoded()));
+  // docs/ux/message-actions.md section 9 — a post deleted while the person
+  // looks at the channel reads "Message deleted" for 2 s and collapses;
+  // every other deleted post is simply not there. In memory only.
+  const [postHeld, setPostHeld] = createSignal<ReadonlyMap<number, DeletedPhase>>(new Map());
+  const postHold = new DeletedHold((phases) => setPostHeld(phases), prefersReducedMotion);
+  onCleanup(() => postHold.clear());
+  onMount(() => {
+    const onVisibility = (): void => {
+      if (document.visibilityState !== "visible") postHold.clear();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    onCleanup(() => document.removeEventListener("visibilitychange", onVisibility));
+  });
+  const timeline = createMemo(() => channelTimeline(posts(), decoded(), new Set(postHeld().keys())));
+  /** Posts that already had their hold: their removal is not a new one. */
+  const postsHeldOnce = new Set<number>();
+  createEffect(
+    on(timeline, (now, prev) => {
+      if (prev === undefined) return;
+      const still = new Set(now.posts.map((p) => p.cursor));
+      // Drawn before (a read post, not a loading card) and gone now.
+      const gone = prev.posts
+        .filter((p) => p.state === "ok" && p.deleted !== true && !still.has(p.cursor) && !postsHeldOnce.has(p.cursor))
+        .map((p) => p.cursor);
+      if (gone.length === 0) return;
+      const deletedNow = deletedPostCursors(untrack(posts), untrack(decoded));
+      const enter = idsEnteringHold({
+        drawnBefore: new Set(gone),
+        newlyDeleted: gone.filter((c) => deletedNow.has(c)),
+        inFront: document.visibilityState === "visible",
+      });
+      for (const c of enter) postsHeldOnce.add(c);
+      postHold.start(enter);
+    }),
+  );
 
   // ADR-0060 section 3: a subscriber keeps its member card current while the
   // channel is open: once it is let in and holds a seed (a private channel's
@@ -387,7 +428,7 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
   // counts come with them.
   function requestCountsInView(): void {
     const cursors = timeline()
-      .posts.filter((p) => p.state === "ok")
+      .posts.filter((p) => p.state === "ok" && p.deleted !== true)
       .map((p) => p.cursor)
       .slice(-50);
     if (cursors.length > 0 && reading() && !removed()) requestReactionCounts(id, cursors);
@@ -541,7 +582,7 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
           text: p.text,
           filesLabel: attachmentsPreviewLabel(p.attachments.map((a) => ({ mime: a.mime ?? null, kind: a.kind ?? null }))),
           createdAt: new Date(p.serverTsMs).toISOString(),
-          deleted: p.state !== "ok",
+          deleted: p.state !== "ok" || p.deleted === true,
         })),
     }),
   );
@@ -767,6 +808,12 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
                         </li>
                       )}
                     </Show>
+                    <Show
+                      when={post.deleted !== true}
+                      fallback={
+                        <DeletedRowStub class="lk-post lk-channel-post" phase={postHeld().get(post.cursor) ?? "hold"} />
+                      }
+                    >
                     <ChannelPostItem
                       channelIdHex={id}
                       post={post}
@@ -790,6 +837,7 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
                         setArticleOpen({ article, attachments, atMs: post.serverTsMs })
                       }
                     />
+                    </Show>
                     </>
                   )}
                 </For>

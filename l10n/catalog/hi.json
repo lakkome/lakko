@@ -3757,6 +3757,10 @@
       "text": "ग्रुप का मालिक ग्रुप नहीं छोड़ सकता।",
       "status": "machine"
     },
+    "chat.refusal.admin_not_member": {
+      "text": "केवल इस समूह का मौजूदा सदस्य ही एडमिन हो सकता है।",
+      "status": "machine"
+    },
     "chat.refusal.owner_not_member": {
       "text": "मालिकाना हक सिर्फ़ इस ग्रुप के मौजूदा सदस्य के पास हो सकता है।",
       "status": "machine"

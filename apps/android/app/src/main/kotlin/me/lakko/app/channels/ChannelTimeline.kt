@@ -98,6 +98,10 @@ public data class ChannelTimeline(
     /** Section 13 — older posts exist that this device cannot read: the line
      *  "Earlier posts aren't available." at the top. */
     val earlierUnavailable: Boolean,
+    /** `docs/ux/message-actions.md` section 9 — the posts a publisher deleted
+     *  (gone from [posts]); what a screen in front of the person reads to
+     *  show a post going. */
+    val deletedCursors: Set<Long> = emptySet(),
 )
 
 /**
@@ -182,7 +186,7 @@ public fun foldChannelTimeline(rows: List<ChannelRow>): ChannelTimeline {
             }
         }
     }
-    return ChannelTimeline(posts = posts.values.toList(), earlierUnavailable = earlier)
+    return ChannelTimeline(posts = posts.values.toList(), earlierUnavailable = earlier, deletedCursors = deleted)
 }
 
 /** The cursor a channel screen marks read once its list shows the newest

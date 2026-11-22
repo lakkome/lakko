@@ -71,16 +71,10 @@ final class DeletedMessagePersistenceTests: XCTestCase {
         XCTAssertEqual(stored.reactions, [PersistedReaction(reactorKeyB64: bob, emoji: "👍")])
     }
 
-    func testTheConversationRowReadsTheTombstoneFromTheFlag() {
-        // Which is what makes emptying the row safe: the preview never looked
-        // at the text of a deleted message in the first place.
-        let line = ChatListFormatting.preview(
-            text: "",
-            attachmentLabels: [],
-            direction: .incoming,
-            deleted: true,
-            isGroup: false,
-            senderName: nil)
-        XCTAssertEqual(line, "Message deleted")
+    func testTheConversationRowNeverPreviewsADeletedMessage() {
+        // `docs/ux/message-actions.md` section 9 — the row shows the newest
+        // message that is not deleted, never "Message deleted"; with none
+        // left, nothing is previewed.
+        XCTAssertNil(DeletedRows.listPreviewRow([message(deleted: true)], isPreviewRow: ChatTimeline.isListPreviewRow))
     }
 }

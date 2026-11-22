@@ -197,10 +197,15 @@ public fun mergeChannelPosts(
     fresh: List<PersistedChannelPost>,
     cursor: Long,
     nowMs: Long,
+    /** `docs/ux/message-actions.md` section 9 — posts a publisher deleted:
+     *  they leave the log, so no list preview, unread count or feed item
+     *  ever shows them. */
+    deleted: Set<Long> = emptySet(),
 ): ChannelPostSlot {
     val byCursor = LinkedHashMap<Long, PersistedChannelPost>()
     for (p in slot?.posts.orEmpty()) byCursor[p.cursor] = p
     for (p in fresh) byCursor[p.cursor] = p
+    for (c in deleted) byCursor.remove(c)
     val oldest = nowMs - CHANNEL_POST_RETENTION_MS
     val posts = byCursor.values
         .filter { it.serverTsMs >= oldest }
@@ -233,6 +238,10 @@ public sealed interface PostOutcome {
      *  newer than every seed this device holds): the cursor stops before it
      *  so the next sync tries again. */
     public object Wait : PostOutcome
+
+    /** ADR-0023 — a publisher deleted the post at [target]: it leaves the
+     *  log (`docs/ux/message-actions.md` section 9). */
+    public data class Delete(val target: Long) : PostOutcome
 }
 
 /** One fetched post, before decoding. */
@@ -260,6 +269,7 @@ public suspend fun syncChannelSlot(
 ): ChannelPostSlot {
     var cursor = slot?.cursor ?: 0L
     val fresh = ArrayList<PersistedChannelPost>()
+    val deleted = HashSet<Long>()
     for (page in 0 until CHANNEL_POST_MAX_PAGES) {
         val res = deps.fetchPage(channelIdHex, cursor, CHANNEL_POST_PAGE)
         if (res.posts.isEmpty()) break
@@ -282,10 +292,15 @@ public suspend fun syncChannelSlot(
                     cursor = p.cursor
                 }
                 PostOutcome.Skip -> cursor = p.cursor
+                is PostOutcome.Delete -> {
+                    deleted += outcome.target
+                    fresh.removeAll { it.cursor == outcome.target }
+                    cursor = p.cursor
+                }
             }
             if (blocked) break
         }
         if (blocked || res.posts.size < CHANNEL_POST_PAGE) break
     }
-    return mergeChannelPosts(slot, fresh, cursor, nowMs)
+    return mergeChannelPosts(slot, fresh, cursor, nowMs, deleted)
 }

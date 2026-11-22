@@ -306,6 +306,7 @@ internal fun decodeChannelPost(
                         )
                     },
                     envelope = c.text.toByteArray(Charsets.UTF_8),
+                    target = body.target,
                 )
             }
         }
@@ -323,7 +324,8 @@ internal fun decodeChannelPost(
  * What the feed keeps of a decoded channel post (ADR-0063 / ADR-0092): a chat
  * post with words or attachments; a location, contact card or article with
  * its envelope (and an article's images, which are its attachments). A poll
- * or a checklist, an edit, a delete or anything else is passed over: votes
+ * or a checklist, an edit or anything else is passed over (a delete takes its
+ * post out of the log, `docs/ux/message-actions.md` section 9): votes
  * and ticks belong to the channel view.
  */
 internal fun feedPostOutcome(
@@ -331,7 +333,12 @@ internal fun feedPostOutcome(
     text: String,
     media: List<PersistedChannelPostMedia>,
     envelope: ByteArray,
+    /** The post an edit or a delete names. */
+    target: Long? = null,
 ): PostOutcome = when (kind) {
+    // `docs/ux/message-actions.md` section 9 — a deleted post leaves the log.
+    uniffi.lakko_ffi_uniffi.MessageBodyKind.DELETE ->
+        target?.let { PostOutcome.Delete(it) } ?: PostOutcome.Skip
     uniffi.lakko_ffi_uniffi.MessageBodyKind.CHAT ->
         if (text.isNotEmpty() || media.isNotEmpty()) PostOutcome.Text(text, media) else PostOutcome.Skip
     uniffi.lakko_ffi_uniffi.MessageBodyKind.LOCATION,

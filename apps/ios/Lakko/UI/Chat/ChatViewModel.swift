@@ -4,6 +4,7 @@
 import Combine
 import Foundation
 import LakkoCore
+import SwiftUI
 import UIKit
 
 /// State + dispatcher for the per-thread ``ChatScreen``.
@@ -505,6 +506,9 @@ public final class ChatViewModel: ObservableObject {
                 flushPendingReadCursor()
                 // Left the thread — stop advertising that we're typing.
                 stopTyping()
+                // `docs/ux/message-actions.md` section 9 — a row in its going
+                // is gone when the person comes back.
+                endDeletedHolds()
                 // ADR-0052 — and drop an armed reply: "a reply is not a draft
                 // that follows the person" (section 3.1).
                 replyingTo = nil
@@ -2672,7 +2676,9 @@ public final class ChatViewModel: ObservableObject {
     private func sync(state: ChatRepositoryState) {
         let thread = conversationThread(in: state)
         if let thread { followHead(thread.groupIdHex) }
+        let before = self.messages
         self.messages = thread?.messages ?? []
+        noteDeletionsApplied(before: before, after: self.messages)
         self.threadKnown = thread != nil
         // ADR-0045 UX §6.2 — every poll batch republishes the repository state,
         // and a removing commit arrives on a poll like any other, so this is
@@ -2687,6 +2693,89 @@ public final class ChatViewModel: ObservableObject {
         // request. This state publishes whichever poll carried the change (the
         // chat's own, or the app-wide one while the chat is covered).
         if conversationInfoOpen { refreshMembers() }
+    }
+
+    // MARK: - `docs/ux/message-actions.md` section 9 — a deleted message leaves
+
+    /// The deleted messages still in their 2-second going, by id. In memory
+    /// only, never persisted: leaving the conversation or the scene leaving
+    /// `active` ends every hold (``endDeletedHolds()``).
+    @Published private(set) var deletedHolds: [Int64: DeletedRows.Phase] = [:]
+
+    /// The ids whose deletion the last state update applied, whether seen or
+    /// not: what lets the screen close a menu, a reaction list or a picker
+    /// still open on one of them.
+    @Published private(set) var lastAppliedDeletions: Set<Int64> = []
+
+    /// The platform's Reduce Motion setting, as the screen last read it: a
+    /// held row is then removed at the end of its hold without the collapse.
+    var reduceMotion = false
+
+    private var deletedHoldTasks: [Int64: Task<Void, Never>] = [:]
+
+    /// The ids of the deleted messages the timeline still draws.
+    var heldDeletedIds: Set<Int64> { Set(deletedHolds.keys) }
+
+    /// The messages the timeline lays out: deleted ones are gone except
+    /// those in their hold.
+    var drawnMessages: [ChatMessage] { DeletedRows.drawn(messages, held: heldDeletedIds) }
+
+    /// Whether the timeline draws `message` (``DeletedRows/isDrawn(_:held:)``).
+    func isDrawn(_ message: ChatMessage) -> Bool {
+        DeletedRows.isDrawn(message, held: heldDeletedIds)
+    }
+
+    /// Where a deleted message is in its going, `nil` when it is not held.
+    func deletedPhase(_ messageId: Int64) -> DeletedRows.Phase? {
+        deletedHolds[messageId]
+    }
+
+    private func noteDeletionsApplied(before: [ChatMessage], after: [ChatMessage]) {
+        let newly = DeletedRows.newlyDeleted(before: before, after: after)
+        guard !newly.isEmpty else { return }
+        lastAppliedDeletions = newly
+        // An edit of it in progress (deleted from another device) ends as
+        // Cancel would end it. A reply strip armed with it stays.
+        if let editing = editingMessage, newly.contains(editing.messageId) { cancelEdit() }
+        let isGroup = presentsAsGroup
+        let drawnBefore = Set(
+            before.lazy
+                .filter { DeletedRows.isDrawn($0, held: self.heldDeletedIds) }
+                .filter { !ChatTimeline.isHiddenSystemRow($0, isGroup: isGroup) }
+                .map(\.messageId))
+        let entering = DeletedRows.enteringHold(
+            drawnBefore: drawnBefore, deletedNow: newly,
+            alreadyHeld: heldDeletedIds, inFront: isForeground)
+        for id in entering { startDeletedHold(id) }
+    }
+
+    /// One row's going, on its own timer: the hold, then the collapse (or,
+    /// with Reduce Motion, nothing), then the row is gone.
+    private func startDeletedHold(_ id: Int64) {
+        deletedHolds[id] = .holding
+        deletedHoldTasks[id]?.cancel()
+        deletedHoldTasks[id] = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(DeletedRows.holdSeconds * 1_000_000_000))
+            guard let self, !Task.isCancelled, self.deletedHolds[id] != nil else { return }
+            if !self.reduceMotion {
+                withAnimation(.easeInOut(duration: DeletedRows.collapseSeconds)) {
+                    self.deletedHolds[id] = .collapsing
+                }
+                try? await Task.sleep(nanoseconds: UInt64(DeletedRows.collapseSeconds * 1_000_000_000))
+                guard !Task.isCancelled, self.deletedHolds[id] != nil else { return }
+            }
+            self.deletedHolds[id] = nil
+            self.deletedHoldTasks[id] = nil
+        }
+    }
+
+    /// The conversation stopped being in front of the person: every row in
+    /// its going is gone when they come back.
+    func endDeletedHolds() {
+        guard !deletedHolds.isEmpty || !deletedHoldTasks.isEmpty else { return }
+        for task in deletedHoldTasks.values { task.cancel() }
+        deletedHoldTasks = [:]
+        deletedHolds = [:]
     }
 
     /// UX 9.1, 9.4 — the conversation left from under this screen. Answered

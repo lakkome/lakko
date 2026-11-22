@@ -4,6 +4,7 @@
 import Combine
 import Foundation
 import LakkoCore
+import SwiftUI
 import UIKit
 
 /// ADR-0087 sections 12 to 13a — one channel as a conversation: its posts
@@ -311,7 +312,123 @@ final class ChannelConversationModel: ObservableObject {
                 cursor: post.cursor, serverTsMs: post.serverTsMs, epoch: epoch, state: state)
         }
         decoded = next
+        let before = timeline.items
         timeline = ChannelTimeline.fold(Array(next.values))
+        noteDeletedPosts(before: before, after: timeline)
+    }
+
+    // MARK: - `docs/ux/message-actions.md` section 9 — a deleted post leaves
+
+    /// A deleted post in its 2-second going: the item as it was drawn, and
+    /// where it is in its going.
+    struct HeldPost: Equatable {
+        let item: ChannelTimelineItem
+        var phase: DeletedRows.Phase
+    }
+
+    /// In memory only, never persisted.
+    @Published private(set) var heldPosts: [UInt64: HeldPost] = [:]
+    private var heldPostTasks: [UInt64: Task<Void, Never>] = [:]
+
+    /// Set by the screen: the channel is the open screen.
+    var screenVisible = false {
+        didSet { if !screenVisible { endDeletedHolds() } }
+    }
+
+    /// The platform's Reduce Motion setting, as the screen last read it.
+    var reduceMotion = false
+
+    /// The items the timeline lays out: the posts, plus the deleted ones
+    /// still in their going, in cursor order.
+    var drawnItems: [ChannelTimelineItem] {
+        guard !heldPosts.isEmpty else { return timeline.items }
+        return (timeline.items + heldPosts.values.map(\.item)).sorted { $0.cursor < $1.cursor }
+    }
+
+    private func noteDeletedPosts(before: [ChannelTimelineItem], after: ChannelTimeline.Folded) {
+        let drawnBefore = Set(before.map(\.cursor))
+        let newly = drawnBefore.intersection(after.deleted)
+        guard !newly.isEmpty else { return }
+        let inFront = screenVisible && UIApplication.shared.applicationState == .active
+        let entering = DeletedRows.enteringHold(
+            drawnBefore: drawnBefore, deletedNow: newly,
+            alreadyHeld: Set(heldPosts.keys), inFront: inFront)
+        for item in before where entering.contains(item.cursor) {
+            heldPosts[item.cursor] = HeldPost(item: item, phase: .holding)
+            heldPostTasks[item.cursor]?.cancel()
+            let cursor = item.cursor
+            heldPostTasks[cursor] = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(DeletedRows.holdSeconds * 1_000_000_000))
+                guard let self, !Task.isCancelled, self.heldPosts[cursor] != nil else { return }
+                if !self.reduceMotion {
+                    withAnimation(.easeInOut(duration: DeletedRows.collapseSeconds)) {
+                        self.heldPosts[cursor]?.phase = .collapsing
+                    }
+                    try? await Task.sleep(nanoseconds: UInt64(DeletedRows.collapseSeconds * 1_000_000_000))
+                    guard !Task.isCancelled, self.heldPosts[cursor] != nil else { return }
+                }
+                self.heldPosts[cursor] = nil
+                self.heldPostTasks[cursor] = nil
+            }
+        }
+    }
+
+    /// A comment in its going, keyed by post and comment cursor.
+    struct HeldCommentKey: Hashable {
+        let post: UInt64
+        let comment: UInt64
+    }
+
+    /// Section 9 — the comments this device deleted while the channel was
+    /// in front of the person, in their going. In memory only.
+    @Published private(set) var heldComments: [HeldCommentKey: DeletedRows.Phase] = [:]
+    private var heldCommentTasks: [HeldCommentKey: Task<Void, Never>] = [:]
+
+    /// Where a comment is in its going, `nil` when it is not held.
+    func commentPhase(post: UInt64, comment: UInt64) -> DeletedRows.Phase? {
+        heldComments[HeldCommentKey(post: post, comment: comment)]
+    }
+
+    /// A comment's delete landed: seen going when the channel is in front,
+    /// else gone at once.
+    private func commentDeleted(post: UInt64, comment: UInt64) {
+        let key = HeldCommentKey(post: post, comment: comment)
+        let inFront = screenVisible && UIApplication.shared.applicationState == .active
+        guard inFront, heldComments[key] == nil else {
+            if heldComments[key] == nil { threads[post]?.comments.removeAll { $0.cursor == comment } }
+            return
+        }
+        heldComments[key] = .holding
+        heldCommentTasks[key] = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(DeletedRows.holdSeconds * 1_000_000_000))
+            guard let self, !Task.isCancelled, self.heldComments[key] != nil else { return }
+            if !self.reduceMotion {
+                withAnimation(.easeInOut(duration: DeletedRows.collapseSeconds)) {
+                    self.heldComments[key] = .collapsing
+                }
+                try? await Task.sleep(nanoseconds: UInt64(DeletedRows.collapseSeconds * 1_000_000_000))
+                guard !Task.isCancelled, self.heldComments[key] != nil else { return }
+            }
+            self.threads[post]?.comments.removeAll { $0.cursor == comment }
+            self.heldComments[key] = nil
+            self.heldCommentTasks[key] = nil
+        }
+    }
+
+    /// The channel stopped being in front of the person: every post and
+    /// comment in its going is gone when they come back.
+    func endDeletedHolds() {
+        for task in heldPostTasks.values { task.cancel() }
+        heldPostTasks = [:]
+        if !heldPosts.isEmpty { heldPosts = [:] }
+        for task in heldCommentTasks.values { task.cancel() }
+        heldCommentTasks = [:]
+        if !heldComments.isEmpty {
+            for key in heldComments.keys {
+                threads[key.post]?.comments.removeAll { $0.cursor == key.comment }
+            }
+            heldComments = [:]
+        }
     }
 
     /// ADR-0099 — the evidence item of a post as it was received (its wire),
@@ -1273,7 +1390,7 @@ final class ChannelConversationModel: ObservableObject {
             } else {
                 return
             }
-            threads[item.cursor]?.comments.removeAll { $0.cursor == comment.cursor }
+            commentDeleted(post: item.cursor, comment: comment.cursor)
         } catch {
             NSLog("[channels] a comment delete failed")
         }

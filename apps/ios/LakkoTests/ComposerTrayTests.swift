@@ -212,12 +212,12 @@ final class ComposerTrayTests: XCTestCase {
         XCTAssertEqual(
             ChatListFormatting.preview(
                 text: "", attachmentLabels: ChatListFormatting.attachmentLabels(refs), direction: .incoming,
-                deleted: false, isGroup: false, senderName: nil),
+                isGroup: false, senderName: nil),
             "2 photos")
         XCTAssertEqual(
             ChatListFormatting.preview(
                 text: "Look", attachmentLabels: ChatListFormatting.attachmentLabels(refs), direction: .incoming,
-                deleted: false, isGroup: false, senderName: nil),
+                isGroup: false, senderName: nil),
             "Look")
     }
 
@@ -227,7 +227,7 @@ final class ComposerTrayTests: XCTestCase {
             ChatListFormatting.preview(
                 text: ChatListFormatting.textWithFileWords(text, refs: refs),
                 attachmentLabels: ChatListFormatting.attachmentLabels(refs), direction: .incoming,
-                deleted: false, isGroup: false, senderName: nil)
+                isGroup: false, senderName: nil)
         }
         // Files only, with text: the words, the separator, the text.
         XCTAssertEqual(line("Weekend plans", [f, f]), "2 files · Weekend plans")

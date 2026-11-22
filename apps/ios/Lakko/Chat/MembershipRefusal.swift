@@ -174,6 +174,8 @@ public var pendingSetFullMessage: String { Localization.text("chat.refusal.pendi
 /// the reason also covers a role-table rewrite whose owner slot names a
 /// non-member, where there is no "that person" the user chose.
 public var ownerNotAMemberMessage: String { Localization.text("chat.refusal.owner_not_member") }
+/// ADR-0022 amendment (C-100): only a current member can be made an admin.
+public var adminNotAMemberMessage: String { Localization.text("chat.refusal.admin_not_member") }
 
 /// NEW — a stale-view refusal, and the one an admin hits after tapping an
 /// affordance that should no longer have been on screen. Not phrased as an
@@ -325,6 +327,7 @@ private func refusalCopy(_ reason: FfiRefusalReason) -> RefusalCopy {
     case .ownerCannotLeave: return RefusalCopy(ownerCannotLeaveMessage)
     case .notOwner: return RefusalCopy(notOwnerMessage)
     case .ownerNotAMember: return RefusalCopy(ownerNotAMemberMessage)
+    case .adminNotAMember: return RefusalCopy(adminNotAMemberMessage)
     case .noSuchJoinRequest: return RefusalCopy(noSuchJoinRequestMessage)
     case .joinerAlreadyAMember: return RefusalCopy(joinerAlreadyAMemberMessage)
     case .roleChangePending:
@@ -440,6 +443,8 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
             // ADR-0091 phase 2 — the re-entry refusals.
             case .MembershipReentryPairInvalid: return .reentryPairInvalid
             case .MembershipReentryWelcomeRefused: return .reentryWelcomeRefused
+            // ADR-0022 amendment (C-100).
+            case .MembershipAdminNotAMember: return .adminNotAMember
 
             // Everything that is NOT a membership refusal. Enumerated rather
             // than defaulted, so a new `FfiError` variant has to be classified

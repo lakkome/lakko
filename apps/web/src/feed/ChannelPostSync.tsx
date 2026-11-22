@@ -207,6 +207,9 @@ export async function syncAll(
         const media = mediaOf(d.body.attachments);
         return { kind: "text", text: "", content: d.body.content, ...(media.length > 0 ? { media } : {}) };
       }
+      // docs/ux/message-actions.md section 9 — a deleted post leaves the log:
+      // never the channel's preview, never unread, never in the feed.
+      if (d.kind === "op" && d.body.kind === "delete") return { kind: "delete", target: d.body.target };
       return { kind: "skip" };
     };
     const slot = log.channels[channel.idHex];

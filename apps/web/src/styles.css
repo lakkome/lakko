@@ -4048,6 +4048,32 @@ a.ghost.small:hover {
   font-style: italic;
   opacity: 0.7;
 }
+/* docs/ux/message-actions.md section 9 — a message deleted in front of the
+   person reads "Message deleted" for 2 s, then its row collapses: the height
+   goes to zero (set from the row's own height by TimelineBubble) over 250 ms,
+   the DELETED_COLLAPSE_MS of chat/deleted-rows.ts, and the row is removed.
+   With reduced motion the row is removed at the end of the hold instead, so
+   no collapse is ever drawn; the transition is off there too. */
+.lk-timeline .deleted-collapsing,
+.lk-post-list .deleted-collapsing,
+.lk-comment-list .deleted-collapsing {
+  overflow: hidden;
+  opacity: 0;
+  margin-top: 0;
+  margin-bottom: 0;
+  pointer-events: none;
+  transition:
+    height 250ms ease-in,
+    margin 250ms ease-in,
+    opacity 250ms ease-in;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lk-timeline .deleted-collapsing,
+  .lk-post-list .deleted-collapsing,
+  .lk-comment-list .deleted-collapsing {
+    transition: none;
+  }
+}
 .lk-bubble-media {
   display: flex;
   flex-direction: column;

@@ -42,11 +42,16 @@ enum ChannelPostLog {
         _ slot: ChannelPostSlot?,
         fresh: [PersistedChannelPost],
         cursor: UInt64,
-        nowMs: Int64
+        nowMs: Int64,
+        deleted: Set<UInt64> = []
     ) -> ChannelPostSlot {
         var byCursor: [UInt64: PersistedChannelPost] = [:]
         for p in slot?.posts ?? [] { byCursor[p.cursor] = p }
         for p in fresh { byCursor[p.cursor] = p }
+        // `docs/ux/message-actions.md` section 9 — a deleted post leaves the
+        // log: the channel's row never previews it, never counts it unread,
+        // and the feed never shows it.
+        for target in deleted { byCursor[target] = nil }
         let oldest = nowMs - retentionMs
         let posts = byCursor.values
             .filter { $0.serverTsMs >= oldest }
@@ -78,6 +83,8 @@ enum ChannelPostLog {
         /// is newer than every seed this device holds): the cursor stops
         /// before it so the next sync tries again.
         case wait
+        /// A publisher's delete of an earlier post: that post leaves the log.
+        case delete(target: UInt64)
     }
 
     struct Page {
@@ -96,6 +103,7 @@ enum ChannelPostLog {
     ) async throws -> ChannelPostSlot {
         var cursor = slot?.cursor ?? 0
         var fresh: [PersistedChannelPost] = []
+        var deleted: Set<UInt64> = []
         for _ in 0..<maxPages {
             let res = try await fetchPage(cursor, page)
             if res.posts.isEmpty { break }
@@ -106,6 +114,11 @@ enum ChannelPostLog {
                 if outcome == .wait {
                     blocked = true
                     break
+                }
+                // An op names an earlier post (``ChannelTimeline/fold(_:)``).
+                if case .delete(let target) = outcome, target < p.cursor {
+                    deleted.insert(target)
+                    fresh.removeAll { $0.cursor == target }
                 }
                 if case .text(let text, let caption, let attachments, let content) = outcome {
                     fresh.append(
@@ -120,7 +133,7 @@ enum ChannelPostLog {
             }
             if blocked || res.posts.count < page { break }
         }
-        return merge(slot, fresh: fresh, cursor: cursor, nowMs: nowMs)
+        return merge(slot, fresh: fresh, cursor: cursor, nowMs: nowMs, deleted: deleted)
     }
 }
 

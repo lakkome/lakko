@@ -230,7 +230,6 @@ final class CallTranscriptTests: XCTestCase {
             text: row(.incoming, .missed).marker,
             attachmentLabels: [],
             direction: .system,
-            deleted: false,
             isGroup: false,
             senderName: nil)
         XCTAssertEqual(preview, "Missed call")
@@ -241,7 +240,6 @@ final class CallTranscriptTests: XCTestCase {
             text: row(.outgoing, .answered(durationMs: 724_000)).marker,
             attachmentLabels: [],
             direction: .system,
-            deleted: false,
             isGroup: false,
             senderName: nil)
         XCTAssertEqual(l10nPlain(preview), "Outgoing call, 12:04")

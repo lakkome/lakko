@@ -389,6 +389,49 @@ final class NsePushDecryptTests: XCTestCase {
         XCTAssertEqual(preview?.body, "hi")
     }
 
+    /// `docs/ux/message-actions.md` section 9 — a message and its deletion
+    /// in one wake: the deleted message is never the preview; the newest
+    /// message left is, or nothing new is shown.
+    func testAMessageDeletedInTheSameWakeIsNeverThePreview() async {
+        let group = FakeThrowawayGroup(decode: { payload in
+            switch payload[payload.startIndex] {
+            case 1: return NseProcessedRow(kind: .chat, text: "first", attachmentCount: 0, senderKeyB64: "anna")
+            case 2: return NseProcessedRow(kind: .chat, text: "oops", attachmentCount: 0, senderKeyB64: "anna")
+            case 3:
+                return NseProcessedRow(
+                    kind: .delete, text: "", attachmentCount: 0, senderKeyB64: "anna", deleteTargetId: 11)
+            default: return nil
+            }
+        })
+        let fallsBack = await decryptPushPreview(
+            NsePushWake(groupHex: groupHex, pointer: 12),
+            FakeDeps(account: okAccount(), group: group, rows: [row(10, 1), row(11, 2), row(12, 3)]))
+        XCTAssertEqual(fallsBack?.body, "first")
+
+        let alone = await decryptPushPreview(
+            NsePushWake(groupHex: groupHex, pointer: 12),
+            FakeDeps(account: okAccount(), group: group, rows: [row(11, 2), row(12, 3)]))
+        XCTAssertNil(alone, "the only message was deleted: nothing new")
+    }
+
+    /// A deletion by someone other than the message's author changes nothing
+    /// (the app refuses it too).
+    func testADeletionByAnotherSenderKeepsThePreview() async {
+        let group = FakeThrowawayGroup(decode: { payload in
+            switch payload[payload.startIndex] {
+            case 1: return NseProcessedRow(kind: .chat, text: "hello", attachmentCount: 0, senderKeyB64: "anna")
+            case 2:
+                return NseProcessedRow(
+                    kind: .delete, text: "", attachmentCount: 0, senderKeyB64: "ben", deleteTargetId: 10)
+            default: return nil
+            }
+        })
+        let preview = await decryptPushPreview(
+            NsePushWake(groupHex: groupHex, pointer: 11),
+            FakeDeps(account: okAccount(), group: group, rows: [row(10, 1), row(11, 2)]))
+        XCTAssertEqual(preview?.body, "hello")
+    }
+
     func testOnlyNonPreviewOpsYieldGeneric() async {
         for kind in [NseProcessedKind.delete, .reaction, .typing, .readReceipt] {
             let group = FakeThrowawayGroup(decode: { _ in

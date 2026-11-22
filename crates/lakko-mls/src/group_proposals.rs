@@ -546,6 +546,9 @@ pub(crate) struct CommitEffects {
     /// proposal per commit — but the check is written for a list so a
     /// hypothetical second one cannot slip past by being ignored.
     proposed_owners: Vec<Vec<u8>>,
+    /// The whole role table each of those rewrites installs, in the same
+    /// order, for [`admins_present`].
+    proposed_tables: Vec<RoleTable>,
     /// `true` when the commit rewrites the GroupContext but the result carries
     /// no readable `0xFF02` role table. In a role-enabled group that means the
     /// commit would **delete** the group's authority structure, silently
@@ -593,7 +596,10 @@ pub(crate) fn commit_effects<'a>(
                 // `ProposalKind` is an FFI-facing type and carries no table), so
                 // the fields these rules need are read from the raw proposal.
                 match role_table_of(qp.proposal()) {
-                    Some(table) => effects.proposed_owners.push(table.owner().to_vec()),
+                    Some(table) => {
+                        effects.proposed_owners.push(table.owner().to_vec());
+                        effects.proposed_tables.push(table);
+                    },
                     None => effects.role_table_would_vanish = true,
                 }
                 effects
@@ -640,6 +646,122 @@ impl CommitEffects {
     pub(crate) fn removed_leaves(&self) -> &[u32] {
         &self.removed_leaves
     }
+
+    /// The role table each role-table rewrite in this set installs.
+    pub(crate) fn proposed_tables(&self) -> &[RoleTable] {
+        &self.proposed_tables
+    }
+
+    /// `true` when `account` holds a leaf in the roster the commit produces:
+    /// a pre-merge leaf the commit does not remove, or one it adds (ADR-0050:
+    /// a person is an account, present while any one of its devices is).
+    pub(crate) fn account_survives(&self, members: &[MemberRecord], account: &[u8]) -> bool {
+        let stays = members.iter().any(|m| {
+            m.account_key.as_slice() == account && !self.removed_leaves.contains(&m.leaf_index)
+        });
+        stays
+            || self
+                .added_accounts
+                .iter()
+                .any(|a| a.as_deref() == Some(account))
+    }
+}
+
+/// The admins of `table` that hold no leaf in the roster `effects` produces
+/// from `members` (ADR-0022 amendment of 2026-11-22), in the table's order.
+///
+/// These are the people the commit takes out of the group while they are
+/// admins; the commit must drop them from the role table it leaves behind
+/// ([`admins_present`]).
+pub(crate) fn absent_admins(
+    table: &RoleTable,
+    effects: &CommitEffects,
+    members: &[MemberRecord],
+) -> Vec<[u8; 32]> {
+    table
+        .admins()
+        .iter()
+        .filter(|a| !effects.account_survives(members, a.as_slice()))
+        .copied()
+        .collect()
+}
+
+/// `true` when the role table `proposal` installs names no admin that holds no
+/// leaf in the roster `effects` produces — what the sweep asks before it carries
+/// a role change ([`admins_present`]). Any other proposal, and one whose table
+/// does not decode (that is [`owner_survives`]' refusal), passes.
+pub(crate) fn role_change_keeps_admins_present(
+    proposal: &Proposal,
+    effects: &CommitEffects,
+    members: &[MemberRecord],
+) -> bool {
+    role_table_of(proposal).map_or(true, |t| absent_admins(&t, effects, members).is_empty())
+}
+
+/// `table` with `absent` removed from its admin set: the **prune** a commit
+/// installs when it takes admins out of the group (ADR-0022 amendment of
+/// 2026-11-22). The owner and every other admin are kept verbatim.
+pub(crate) fn pruned_table(table: &RoleTable, absent: &[[u8; 32]]) -> RoleTable {
+    RoleTable::new(
+        *table.owner(),
+        table
+            .admins()
+            .iter()
+            .filter(|a| !absent.contains(a))
+            .copied()
+            .collect(),
+    )
+}
+
+/// **A person who is not in the group is not its admin** (ADR-0022 amendment
+/// of 2026-11-22, C-100) — a commit-wide rule in the style of
+/// [`owner_survives`].
+///
+/// A commit that removes any leaf or rewrites the role table must leave a role
+/// table that names as admin only accounts holding at least one leaf in the
+/// roster the commit produces. The table judged is the one the commit
+/// installs, or the pre-merge `table` when it installs none.
+///
+/// Why "when it removes a leaf or rewrites roles" rather than every commit: a
+/// commit that does neither cannot make an admin absent, so it has nothing to
+/// prune, and refusing it for a table it did not write would refuse a bare
+/// `self_update` or an `Add`-only sweep over a state no current commit can
+/// produce. Any commit that changes who is in the group is judged.
+///
+/// What it buys: the role table names keys, not leaves, so before this rule
+/// nothing removed an admin's entry when the admin's last device left the
+/// group, and re-adding that person made them admin again. The commit that
+/// removes them now drops them in the same epoch ([`crate::Group`] folds the
+/// prune into the sweep), so the Welcome a re-added person later receives
+/// carries a table without them. Removing **one** device of an admin who keeps
+/// another changes nothing: the account still holds a leaf (ADR-0050).
+///
+/// # Errors
+///
+/// A [`RefusalReason::AdminNotAMember`] refusal when an admin the resulting
+/// table names holds no leaf after the commit.
+pub(crate) fn admins_present(
+    effects: &CommitEffects,
+    members: &[MemberRecord],
+    table: &RoleTable,
+) -> Result<()> {
+    if effects.removed_leaves.is_empty() && effects.proposed_tables.is_empty() {
+        return Ok(());
+    }
+    let judged: Vec<&RoleTable> = if effects.proposed_tables.is_empty() {
+        vec![table]
+    } else {
+        effects.proposed_tables.iter().collect()
+    };
+    for t in judged {
+        if !absent_admins(t, effects, members).is_empty() {
+            return Err(Error::refused(
+                RefusalReason::AdminNotAMember,
+                "commit refused: its role table names an admin who holds no leaf in the group",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The role table a `GroupContextExtensions` proposal would install, or `None`
@@ -898,16 +1020,7 @@ pub(crate) fn owner_survives(
     // ADR-0050: an owner is an account, and it survives when at least one of
     // its leaves is in the roster the commit produces — a leaf that stays, or
     // one the commit adds.
-    let survives = |key: &[u8]| {
-        let stays = members.iter().any(|m| {
-            m.account_key.as_slice() == key && !effects.removed_leaves.contains(&m.leaf_index)
-        });
-        stays
-            || effects
-                .added_accounts
-                .iter()
-                .any(|a| a.as_deref() == Some(key))
-    };
+    let survives = |key: &[u8]| effects.account_survives(members, key);
     if effects.proposed_owners.is_empty() {
         // No role change: the current owner must still hold a leaf afterwards,
         // or the group could never be administered again.
@@ -1272,6 +1385,37 @@ mod tests {
 
     fn reason_of(r: Result<()>) -> Option<RefusalReason> {
         r.err().and_then(|e| e.refusal_reason())
+    }
+
+    /// C-100, the pure rule. An admin with two leaves keeps the role while one
+    /// stays; the commit taking the last one must drop them; a commit that
+    /// neither removes nor rewrites is not judged at all.
+    #[test]
+    fn admins_present_is_about_accounts_and_only_judges_membership_changes() {
+        // owner 1 on leaf 0; admin 2 on leaves 1 and 2.
+        let members = vec![rec(0, 1), rec(1, 2), rec(2, 2)];
+        let table = RoleTable::new(pk(1), vec![pk(2)]);
+        let one_device = CommitEffects::direct(vec![1], Vec::new());
+        assert!(absent_admins(&table, &one_device, &members).is_empty());
+        assert!(admins_present(&one_device, &members, &table).is_ok());
+
+        let both = CommitEffects::direct(vec![1, 2], Vec::new());
+        assert_eq!(absent_admins(&table, &both, &members), vec![pk(2)]);
+        assert_eq!(
+            reason_of(admins_present(&both, &members, &table)),
+            Some(RefusalReason::AdminNotAMember),
+        );
+        let pruned = pruned_table(&table, &[pk(2)]);
+        assert!(pruned.admins().is_empty());
+        assert_eq!(pruned.owner(), table.owner(), "the owner is untouched");
+
+        // A table already naming an absent admin (account 9) is not judged by
+        // a commit that removes nothing and rewrites nothing.
+        let stale = RoleTable::new(pk(1), vec![pk(9)]);
+        assert!(admins_present(&CommitEffects::default(), &members, &stale).is_ok());
+        // ...but re-adding account 9 in the commit makes them present.
+        let readd = CommitEffects::direct(vec![1], vec![Some(pk(9).to_vec())]);
+        assert!(absent_admins(&stale, &readd, &members).is_empty());
     }
 
     #[test]

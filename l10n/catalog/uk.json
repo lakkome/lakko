@@ -3757,6 +3757,10 @@
       "text": "Власник групи не може з неї вийти.",
       "status": "machine"
     },
+    "chat.refusal.admin_not_member": {
+      "text": "Адміністратором може бути лише поточний учасник цієї групи.",
+      "status": "machine"
+    },
     "chat.refusal.owner_not_member": {
       "text": "Власником може бути лише поточний учасник цієї групи.",
       "status": "machine"

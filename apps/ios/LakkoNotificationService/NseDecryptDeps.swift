@@ -501,7 +501,9 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             attachmentCounts: nseAttachmentCounts(body.attachments.map { (kind: $0.kind, mime: $0.mime) }),
             // ADR-0047 section 6 — the first photo or video's micro
             // thumbnail, as the core read it from the envelope.
-            inlineThumb: body.inlineThumb
+            inlineThumb: body.inlineThumb,
+            // `docs/ux/message-actions.md` section 9 — what a delete names.
+            deleteTargetId: kind == .delete ? body.target : nil
         )
     }
 

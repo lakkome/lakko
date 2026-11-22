@@ -197,6 +197,9 @@ internal val PENDING_SET_FULL: UiText = UiText("chat.refusal.pending_full")
  */
 internal val OWNER_NOT_A_MEMBER: UiText = UiText("chat.refusal.owner_not_member")
 
+/** ADR-0022 amendment (C-100): only a current member can be made an admin. */
+internal val ADMIN_NOT_A_MEMBER: UiText = UiText("chat.refusal.admin_not_member")
+
 /**
  * NEW — a stale-view refusal, and the one an admin hits after tapping an
  * affordance that should no longer have been on screen. Not phrased as an
@@ -335,6 +338,7 @@ private fun refusalCopy(reason: FfiRefusalReason): RefusalCopy = when (reason) {
     FfiRefusalReason.OWNER_CANNOT_LEAVE -> RefusalCopy(OWNER_CANNOT_LEAVE)
     FfiRefusalReason.NOT_OWNER -> RefusalCopy(NOT_OWNER)
     FfiRefusalReason.OWNER_NOT_A_MEMBER -> RefusalCopy(OWNER_NOT_A_MEMBER)
+    FfiRefusalReason.ADMIN_NOT_A_MEMBER -> RefusalCopy(ADMIN_NOT_A_MEMBER)
     FfiRefusalReason.NO_SUCH_JOIN_REQUEST -> RefusalCopy(NO_SUCH_JOIN_REQUEST)
     FfiRefusalReason.JOINER_ALREADY_A_MEMBER -> RefusalCopy(JOINER_ALREADY_A_MEMBER)
     FfiRefusalReason.ROLE_CHANGE_PENDING -> RefusalCopy(ROLE_CHANGE_PENDING, RETRY_WHEN_IT_LANDS)
@@ -497,6 +501,8 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.MembershipReentryPairInvalid -> FfiRefusalReason.REENTRY_PAIR_INVALID
                 is FfiException.MembershipReentryWelcomeRefused ->
                     FfiRefusalReason.REENTRY_WELCOME_REFUSED
+                // ADR-0022 amendment (C-100).
+                is FfiException.MembershipAdminNotAMember -> FfiRefusalReason.ADMIN_NOT_A_MEMBER
                 // ADR-0051 — a channel metadata record out of bounds; not a
                 // membership refusal.
                 is FfiException.ChannelMeta -> null

@@ -36,6 +36,7 @@
  * rotated away from (the mid-call rekey, ADR-0029, fires when the poll that
  * applies the commit drains the group's MLS lock).
  */
+import { withdrawDeletedMessageNotifications } from "../push/deleted-notifications";
 import { installHandoverPublisher } from "../attach/admission-hook";
 import {
   createContext,
@@ -2188,6 +2189,9 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       for (const id of unseen) markUnseenReaction(account, entry.groupIdB64, id);
       // The pin store is the live session's.
       if (!scope.current()) return;
+      // docs/ux/message-actions.md section 9 — a notification still on
+      // screen for a deleted message is withdrawn.
+      void withdrawDeletedMessageNotifications(hex, newlyDeleted);
       for (const id of newlyDeleted) {
         void pins.messageDeleted(entry.groupIdB64, id).catch((err) => {
           // eslint-disable-next-line no-console

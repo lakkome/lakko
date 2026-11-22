@@ -22,7 +22,7 @@
  * on a deliberate gesture and rendered outside the bubble.
  */
 import { accountSuspended } from "../auth/suspension-state";
-import { createEffect, createResource, createSignal, For, Index, onCleanup, Show, type JSX } from "solid-js";
+import { createEffect, createResource, createSignal, For, Index, on, onCleanup, Show, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
 import { A } from "@solidjs/router";
 
@@ -44,6 +44,7 @@ import { useChats } from "./ChatContext";
 import { bubbleCopyText, bubbleOffersEdit, bubbleOffersForward } from "./bubble-copy";
 import { copyMessageText } from "./copy-message";
 import { heldBy, type MessageOpState } from "./message-ops";
+import { collapseRowHeight, type DeletedPhase } from "./deleted-rows";
 import {
   chipRow,
   maxPerPerson,
@@ -141,6 +142,10 @@ export interface BubbleHost {
   ownIdentity: MemberIdentity | undefined;
   /** Reactive overlay accessor for a given target messageId. */
   opState: (messageId: number) => MessageOpState | undefined;
+  /** `message-actions.md` section 9 — where a deleted row is in its hold
+   *  (`hold`: reads "Message deleted"; `collapsing`: its height goes to
+   *  zero), or `undefined`. Reactive. Absent: no row is ever held. */
+  deletedPhaseOf?: (messageId: number) => DeletedPhase | undefined;
   /** ADR-0024 — reactive read-state accessor: has this messageId
    *  been read by EVERY other member? Drives the own-message
    *  Sent -> Read indicator. */
@@ -562,6 +567,19 @@ function ChatBubbleBody(
   const state = (): MessageOpState | undefined =>
     props.messageId === undefined ? undefined : props.opState(props.messageId);
   const isDeleted = (): boolean => state()?.deleted === true;
+  /** Section 9 — the row's hold phase while it is held, else `undefined`. */
+  const deletedPhase = (): DeletedPhase | undefined =>
+    props.messageId === undefined || !isDeleted() ? undefined : props.deletedPhaseOf?.(props.messageId);
+  let rowEl: HTMLLIElement | undefined;
+  // The collapse: the row's height goes from what it is now to zero over
+  // DELETED_COLLAPSE_MS (the transition is in styles.css); the view removes
+  // the row when the time is up.
+  createEffect(
+    on(deletedPhase, (phase) => {
+      if (phase !== "collapsing" || rowEl === undefined) return;
+      collapseRowHeight(rowEl);
+    }),
+  );
   const editedText = (): string | undefined => state()?.editedText;
   const displayText = (): string => editedText() ?? props.originalText;
   const isEdited = (): boolean => editedText() !== undefined;
@@ -995,11 +1013,15 @@ function ChatBubbleBody(
 
   return (
     <li
+      ref={rowEl}
       class="lk-bubble-row"
       // ADR-0052 — what a quote block's jump looks the row up by. A DS id,
       // never a tempId: an un-acked outgoing row has nothing to be quoted by.
       data-message-id={props.messageId}
+      aria-hidden={deletedPhase() === "collapsing" ? "true" : undefined}
       classList={{
+        "deleted-hold": deletedPhase() !== undefined,
+        "deleted-collapsing": deletedPhase() === "collapsing",
         incoming: isIncoming,
         outgoing: !isIncoming,
         "run-start": props.startsRun,

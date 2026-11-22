@@ -24,7 +24,14 @@
  */
 import { accountSuspended } from "../auth/suspension-state";
 import { SuspendedComposerLine } from "../auth/SuspendedReadOnly";
-import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack, type JSX } from "solid-js";
+import { batch, createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack, type JSX } from "solid-js";
+import { DeletedRowStub } from "../chat/DeletedRowStub";
+import {
+  DeletedHold,
+  idsEnteringHold,
+  prefersReducedMotion,
+  type DeletedPhase,
+} from "../chat/deleted-rows";
 
 import { base64Encode } from "../auth/account-id";
 import { useAuth } from "../auth/AuthContext";
@@ -55,6 +62,8 @@ import {
   COMMENT_PAGE,
   collapsedView,
   commentRefresh,
+  commentsGoneOnReread,
+  mergeComments,
   needsFirstRead,
   EMPTY_THREAD,
   openView,
@@ -170,6 +179,43 @@ export function PostComments(props: {
   const identity = (): Identity | null => chats.conversationAccountIdentity();
   const banned = (authorHex: string): boolean => isBannedAuthor(props.channelIdHex, authorHex);
 
+  // docs/ux/message-actions.md section 9 — a comment deleted while the person
+  // looks at it reads "Message deleted" for 2 s and collapses; otherwise it is
+  // simply gone. `heldComments` keeps what the row was drawn from; in memory
+  // only.
+  const [commentHeld, setCommentHeld] = createSignal<ReadonlyMap<number, DeletedPhase>>(new Map());
+  const [heldComments, setHeldComments] = createSignal<ReadonlyMap<number, CommentView>>(new Map());
+  const commentHold = new DeletedHold((phases) => {
+    setCommentHeld(phases);
+    const kept = new Map([...untrack(heldComments)].filter(([cursor]) => phases.has(cursor)));
+    if (kept.size !== untrack(heldComments).size) setHeldComments(kept);
+  }, prefersReducedMotion);
+  onCleanup(() => commentHold.clear());
+  onMount(() => {
+    const onVisibility = (): void => {
+      if (document.visibilityState !== "visible") commentHold.clear();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    onCleanup(() => document.removeEventListener("visibilitychange", onVisibility));
+  });
+  /** `gone` left the thread: those on screen enter their hold; a menu open on
+   *  one closes. */
+  function holdGone(gone: readonly CommentView[]): void {
+    if (gone.length === 0) return;
+    const open = untrack(menu);
+    if (open !== null && gone.some((c) => c.cursor === open.c.cursor)) setMenu(null);
+    const enter = idsEnteringHold({
+      drawnBefore: new Set(untrack(drawn).map((c) => c.cursor)),
+      newlyDeleted: gone.map((c) => c.cursor),
+      inFront: document.visibilityState === "visible",
+    });
+    if (enter.length === 0) return;
+    const next = new Map(untrack(heldComments));
+    for (const c of gone) if (enter.includes(c.cursor)) next.set(c.cursor, c);
+    setHeldComments(next);
+    commentHold.start(enter);
+  }
+
   /** This account's comments under the post: writer key hex -> nonce. */
   const ownKeys = createMemo((): ReadonlyMap<string, Uint8Array> => {
     const id = identity();
@@ -210,7 +256,12 @@ export function PostComments(props: {
     }
     // The page length decides `done`, so rows that did not open still count.
     const base = fresh ? { ...EMPTY_THREAD, expanded: thread().expanded, shownCount: thread().shownCount } : thread();
-    setThread(withPage(base, opened, page.nextAfter, mode, page.comments.length));
+    batch(() => {
+      // message-actions.md section 9 — a comment deleted elsewhere that this
+      // re-read no longer finds: seen going, it is held before it goes.
+      if (fresh) holdGone(commentsGoneOnReread(thread().rows, opened, page.comments.length));
+      setThread(withPage(base, opened, page.nextAfter, mode, page.comments.length));
+    });
   }
 
   async function loadFirst(): Promise<void> {
@@ -446,7 +497,10 @@ export function PostComments(props: {
       } else {
         return;
       }
-      setThread(withoutComment(thread(), c.cursor));
+      batch(() => {
+        holdGone([c]);
+        setThread(withoutComment(thread(), c.cursor));
+      });
       requestReactionCounts(props.channelIdHex, [props.cursor]);
     } catch {
       setError(() => t("channels.comments.delete_failed"));
@@ -467,6 +521,16 @@ export function PostComments(props: {
   const collapsed = createMemo(() => collapsedView(thread(), banned, serverCount(), uiRules()));
   const opened = createMemo(() => openView(thread(), banned));
   const shown = (): readonly CommentView[] => (thread().expanded ? opened().shown : collapsed().shown);
+  /** What the list draws: the shown comments and, in place, the deleted ones
+   *  in their hold. */
+  const drawn = (): readonly CommentView[] => {
+    const held = commentHeld();
+    if (held.size === 0) return shown();
+    return mergeComments(
+      shown(),
+      [...heldComments().values()].filter((c) => held.has(c.cursor)),
+    );
+  };
 
   // The reaction counts of the comments on screen, one call per post.
   createEffect(() => {
@@ -576,9 +640,18 @@ export function PostComments(props: {
             </button>
           </p>
         </Show>
-        <Show when={shown().length > 0}>
+        <Show when={drawn().length > 0}>
           <ul class="lk-comment-list" style={{ "list-style": "none", margin: "0", padding: "0" }}>
-            <For each={shown()}>{(c) => <CommentRowView c={c} />}</For>
+            <For each={drawn()}>
+              {(c) => (
+                <Show
+                  when={commentHeld().get(c.cursor)}
+                  fallback={<CommentRowView c={c} />}
+                >
+                  {(phase) => <DeletedRowStub class="lk-comment" phase={phase()} />}
+                </Show>
+              )}
+            </For>
           </ul>
         </Show>
         <Show when={thread().expanded}>

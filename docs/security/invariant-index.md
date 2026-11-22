@@ -13,10 +13,10 @@ section that describes it.
 | Class | Count | Range | Source file |
 |---|---|---|---|
 | **I-** | 8   | I-1..I-8   | [`mls-state-machine.md`](./mls-state-machine.md) |
-| **C-** | 98  | C-1..C-80, C-82..C-99  | [`calls.md`](./calls.md) |
+| **C-** | 99  | C-1..C-80, C-82..C-100 | [`calls.md`](./calls.md) |
 | **T-** | 16  | T-1..T-16  | [`transport.md`](./transport.md) |
 | **G-** | 59  | G-1..G-59 | [`known-gaps.md`](./known-gaps.md) â open / deferred |
-| Total invariants  | 122 | (I + C + T) | live properties |
+| Total invariants  | 123 | (I + C + T) | live properties |
 | Total open gaps   | 21  | (G)         | tracked + scoped |
 
 **Note on the `G-` counts.** These two rows had drifted badly and were corrected
@@ -416,6 +416,12 @@ store gate and persist-before-publish rules).
 | ID   | Title |
 |---|---|
 | C-99 | **A sealed box to an account uses an X25519 key the account's identity key signed, refuses a non-contributory agreement, binds both public keys, and opens for one use only** (security review 2026-11-21, G-59; built in `lakko-crypto`, `lakko-contacts`, both FFI surfaces, `services/discovery` and web / iOS / Android, unit tests only, nothing walked). `lakko-contacts::x25519_binding` (64-byte Ed25519 by the identity key over `"lakko/account/x25519-binding/v1\0" ‖ ed25519_pub ‖ x25519_pub`), required on `POST /discovery/identity` (migration `0041`, `400 x25519-binding-invalid`) and served on fetch, verified by every client before sealing to a fetched account X25519 key (a key inside a signed invite capability is covered by the capability, by design); `lakko_crypto::agreement::diffie_hellman` refuses an all-zero shared secret (`NonContributory`); the sealed box puts `eph_pub ‖ recipient_pub` in the HKDF `info` and every use has its own `SealLabels`. Pinned by `a_low_order_peer_key_is_refused`, `a_low_order_key_is_refused_on_both_sides`, `the_recipient_key_is_bound_into_the_kdf`, `every_use_has_its_own_labels`, `a_box_sealed_under_one_use_never_opens_under_another`, the `x25519_binding` tests and fuzz `x25519_binding_verify`. **Does NOT** decide whether the identity key is right (pin, KT log, supersession gates). Invariants **#2** / **#4**. Full entry: [`calls.md` C-99](./calls.md). |
+
+### C-100 — A person who is not in the group is not its admin (ADR-0022 amendment 2026-11-22)
+
+| ID   | Title |
+|---|---|
+| C-100 | **A commit that removes a leaf or rewrites the role table leaves no admin without a leaf: the table it installs (else the pre-merge one) names as admin only accounts holding a leaf in the roster the commit produces** ([ADR-0022](../adr/0022-group-admin-roles.md) amendment of 2026-11-22, with [ADR-0045](../adr/0045-remote-commit-epoch-fork.md); built in `lakko-mls` and both FFI surfaces, host-tested only). `group_proposals::admins_present` at the peer commit gate (refusal `AdminNotAMember`) and in `selection_is_admissible`; the committer folds the by-value prune (`Group::admin_prune_for`) into the sweep and the direct remove / replace paths; a non-owner's role rewrite is accepted only as that exact prune (`is_verified_prune` against `Group::expected_prune`); a pending role change naming a departing admin is left out of the sweep (one `GroupContextExtensions` per commit, C-65). Presence is per account (ADR-0050), so retiring one of an admin's devices keeps the role. Pinned by `tests/admin_presence.rs` (incl. the proptest `no_history_leaves_an_admin_without_a_leaf`) and `src/group/admin_presence_tests.rs` (a committer omitting the prune, or writing a wider table under its name, is refused). **Does NOT** handle a table that already named an absent admin before this rule (not to be fixed, maintainer 2026-11-22: such test-stack groups are recreated). Invariants **#3** / **#4**. Full entry: [`calls.md` C-100](./calls.md). |
 
 ### C-88 — A Welcome replaces an ended group and nothing else (ADR-0045 amendment)
 

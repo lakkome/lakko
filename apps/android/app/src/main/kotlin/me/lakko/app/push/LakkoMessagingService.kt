@@ -181,6 +181,14 @@ public class LakkoMessagingService : FirebaseMessagingService() {
             } else {
                 PushWakeOutcome.emptyBecause(WakeFallbackReason.NO_POINTER)
             }
+        // `docs/ux/message-actions.md` section 9 — a deletion this wake
+        // carried withdraws a notification already on screen for that message
+        // (only one whose recorded author is the deleter). Before anything
+        // else: a wake of deletions alone posts nothing.
+        val wakeGroup = outcome.groupHex
+        if (wakeGroup != null && outcome.deletes.isNotEmpty()) {
+            withdrawDeletedMessageNotifications(applicationContext, wakeGroup, outcome.deletes)
+        }
         // ADR-0073 phase 2 / UX 16.4 — a wake for a closed one-to-one posts
         // nothing at all: no banner, no ring.
         if (outcome.suppressed) {
@@ -375,6 +383,19 @@ public class LakkoMessagingService : FirebaseMessagingService() {
             .setGroup(groupKey ?: "lakko-default")
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+        // `docs/ux/message-actions.md` section 9 — the message this banner
+        // shows, so a later deletion of it withdraws the banner. Only a
+        // banner that shows a message's text carries it.
+        val shownId = preview?.messageId
+        if (shownId != null) {
+            builder.addExtras(
+                android.os.Bundle().apply {
+                    putString(EXTRA_PREVIEW_GROUP_HEX, preview.tag.lowercase())
+                    putLong(EXTRA_PREVIEW_MESSAGE_ID, shownId)
+                    preview.authorKeyB64?.let { putString(EXTRA_PREVIEW_AUTHOR_KEY, it) }
+                },
+            )
+        }
         // Section 11 — the picture rides the same notification as the text, so
         // the lock screen shows it exactly when it shows the text.
         if (picture != null) {

@@ -3757,6 +3757,10 @@
       "text": "O proprietário do grupo não pode sair do grupo.",
       "status": "machine"
     },
+    "chat.refusal.admin_not_member": {
+      "text": "Só um membro atual deste grupo pode ser administrador.",
+      "status": "machine"
+    },
     "chat.refusal.owner_not_member": {
       "text": "A propriedade só pode ficar com um membro atual deste grupo.",
       "status": "machine"

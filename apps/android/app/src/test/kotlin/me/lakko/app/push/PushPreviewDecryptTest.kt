@@ -330,6 +330,70 @@ class PushPreviewDecryptTest {
     }
 
     @Test
+    fun `a message deleted in the same wake is never the preview`() = runTest {
+        // docs/ux/message-actions.md section 9: rows chat "one" (10), chat
+        // "two" (11), delete of 11 (12). The preview is the newest message
+        // that is not deleted.
+        val group = FakeThrowawayGroup(decode = { payload ->
+            when (payload[0].toInt()) {
+                1 -> chat("one").copy(senderAccountB64 = "anna-key")
+                2 -> chat("two").copy(senderAccountB64 = "anna-key")
+                3 -> ProcessedRow(ProcessedKind.DELETE, "", 0, senderAccountB64 = "anna-key", target = 11)
+                else -> null
+            }
+        })
+        val preview = decryptPushPreview(
+            PushWake(groupHex, 10, accountIdB64 = accountId),
+            FakeDeps(okAccount(), group = group, rows = listOf(row(10, 1), row(11, 2), row(12, 3))),
+        )
+        assertEquals("Anna: one", preview?.body)
+        // The banner records the message it shows, for a later withdrawal.
+        assertEquals(10L, preview?.messageId)
+        assertEquals("anna-key", preview?.authorKeyB64)
+    }
+
+    @Test
+    fun `a delete from someone who is not the author takes no preview away`() = runTest {
+        val group = FakeThrowawayGroup(decode = { payload ->
+            when (payload[0].toInt()) {
+                1 -> chat("mine").copy(senderAccountB64 = "anna-key")
+                2 -> ProcessedRow(ProcessedKind.DELETE, "", 0, senderAccountB64 = "bob-key", target = 10)
+                else -> null
+            }
+        })
+        val outcome = decryptPushWake(
+            PushWake(groupHex, 10, accountIdB64 = accountId),
+            FakeDeps(okAccount(), group = group, rows = listOf(row(10, 1), row(11, 2))),
+            nowMs = 0L,
+            ringWindowMs = 0L,
+        )
+        assertEquals("Anna: mine", outcome.preview?.body)
+        // The delete is still reported, with its sender: the withdrawal of an
+        // earlier banner checks the author it recorded.
+        assertEquals(listOf(AppliedDelete(10, "bob-key")), outcome.deletes)
+    }
+
+    @Test
+    fun `a wake whose only message was deleted in it posts nothing`() = runTest {
+        val group = FakeThrowawayGroup(decode = { payload ->
+            when (payload[0].toInt()) {
+                1 -> chat("gone").copy(senderAccountB64 = "anna-key")
+                2 -> ProcessedRow(ProcessedKind.DELETE, "", 0, senderAccountB64 = "anna-key", target = 10)
+                else -> null
+            }
+        })
+        val outcome = decryptPushWake(
+            PushWake(groupHex, 10, accountIdB64 = accountId),
+            FakeDeps(okAccount(), group = group, rows = listOf(row(10, 1), row(11, 2))),
+            nowMs = 0L,
+            ringWindowMs = 0L,
+        )
+        assertNull(outcome.preview)
+        assertTrue("a deletion never makes a notification", outcome.suppressed)
+        assertEquals(listOf(AppliedDelete(10, "anna-key")), outcome.deletes)
+    }
+
+    @Test
     fun `only-non-preview ops yield generic`() = runTest {
         for (kind in listOf(
             ProcessedKind.DELETE,

@@ -94,12 +94,13 @@ class DeletedMessagePersistenceTest {
     }
 
     @Test
-    fun `the conversation row reads the tombstone from the flag`() {
-        // Which is what makes emptying the row safe: the preview never looked
-        // at the text of a deleted message in the first place.
+    fun `the conversation row never previews a deleted message`() {
+        // docs/ux/message-actions.md section 9 — a deleted message has no
+        // preview line; the row is taken from the newest message that is not
+        // deleted. The preview never looked at the text of a deleted message.
         assertEquals(
-            "Message deleted",
-            previewLine(text = "", attachments = emptyList(), deleted = true, author = null),
+            "",
+            previewLine(text = "gone", attachments = emptyList(), deleted = true, author = null),
         )
     }
 }

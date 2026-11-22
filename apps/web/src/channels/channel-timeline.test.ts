@@ -38,6 +38,21 @@ describe("channelTimeline", () => {
     expect(t.posts[0]?.edited).toBe(true);
   });
 
+  it("keeps a deleted post in its hold as a deleted card, and only then", () => {
+    // message-actions.md section 9.
+    const decoded = new Map<number, PostDecode>([
+      [1, text("first")],
+      [2, text("second")],
+      [3, { kind: "op", body: { kind: "delete", target: 2 } }],
+    ]);
+    const held = channelTimeline(page(1, 2, 3), decoded, new Set([2]));
+    expect(held.posts.map((p) => [p.cursor, p.deleted === true, p.text])).toEqual([
+      [1, false, "first"],
+      [2, true, ""],
+    ]);
+    expect(channelTimeline(page(1, 2, 3), decoded).posts.map((p) => p.cursor)).toEqual([1]);
+  });
+
   it("folds unreadable posts at the start into one line", () => {
     const decoded = new Map<number, PostDecode>([
       [1, { kind: "older-key" }],

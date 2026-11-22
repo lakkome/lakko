@@ -1033,8 +1033,12 @@ mod reentry_tests {
             .collect();
         let members = s.b.members();
         // The pair is admissible together, the removal never alone.
-        assert!(s.b.selection_is_admissible(&queued, &refs, &members));
-        assert!(!s.b.selection_is_admissible(&queued, &refs[1..], &members));
+        assert!(s
+            .b
+            .selection_is_admissible(&s.bob, &queued, &refs, &members));
+        assert!(!s
+            .b
+            .selection_is_admissible(&s.bob, &queued, &refs[1..], &members));
         // The exclusion search never keeps the removal without its add.
         let narrowed =
             s.b.narrow_sweep_by_exclusion(&s.bob, &queued, &members, &refs[1..]);
@@ -1044,11 +1048,13 @@ mod reentry_tests {
         let removed = vec![leaf_of(&s.b, &s.alice)];
         let admission = s.b.admission_requirements(&removed);
         let kind = s.b.kind_state();
+        let no_effects = crate::group_proposals::CommitEffects::default();
         let ctx = SweepContext {
             table: &table,
             members: &members,
             kind_before: &kind,
             role_change_survives: true,
+            effects: &no_effects,
             removed_leaves: &removed,
             admission: &admission,
             identity: &s.bob,

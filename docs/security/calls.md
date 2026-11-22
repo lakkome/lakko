@@ -6452,3 +6452,55 @@ existing TOFU residual. Rows written before migration `0041` carry no
 binding and are unusable for sealing (there is no production deployment).
 Invariants **#2** (the binding is a public artefact) and **#4** (no sealing
 to an unbound key).
+
+### C-100: a person who is not in the group is not its admin
+
+[ADR-0022](../adr/0022-group-admin-roles.md) keys roles on account keys in the
+`0xFF02` GroupContext extension, and before its amendment of 2026-11-22 only an
+owner's role rewrite ever changed that table: removing an admin, or an admin
+leaving, left their entry in place, and re-adding the person made them an
+admin again (seen live on the test stack that day).
+
+**The rule** (`lakko_mls::group_proposals::admins_present`): a commit that
+removes any leaf or rewrites the role table must leave a table naming as admin
+only accounts that hold at least one leaf in the roster the commit produces
+(pre-merge leaves it does not remove, plus the leaves it adds, resolved to
+accounts per ADR-0050). The table judged is the one the commit installs, else
+the pre-merge one. Every peer runs it at the commit gate beside
+`owner_survives` and refuses with `RefusalReason::AdminNotAMember`, merging
+nothing (invariant #4). A commit that neither removes nor rewrites is not
+judged.
+
+**How an honest committer satisfies it.** When the commit takes an admin's last
+leaf out and carries no role change, the committer folds a by-value
+`GroupContextExtensions` proposal: the pre-merge GroupContext with exactly the
+departing admins removed from the table (`Group::admin_prune_for`). The ADR-0045
+sweep, `remove_member` / `stage_remove_member` and `replace_member` all do it.
+A pending role change still naming a departing admin is left out of the sweep,
+because RFC 9420 admits one `GroupContextExtensions` proposal per commit (C-65).
+
+**Why the prune grants nothing.** A role rewrite stays owner-only, except that
+a peer accepts a non-owner's rewrite when it is by value, from the committer,
+whose account is owner or admin, and byte-for-byte the prune the peer itself
+computes from its pre-merge GroupContext and the commit's effects
+(`Group::expected_prune`, `is_verified_prune`). A table that also demotes a
+present admin, promotes anyone or moves the owner slot is judged as an ordinary
+role change and refused (`NotOwner`), or as naming an absent admin
+(`AdminNotAMember`).
+
+Pinned by `crates/lakko-mls/tests/admin_presence.rs` (owner removal and re-add,
+an admin leaving, one of two devices retired, an admin committer dropping
+another admin with the owner accepting, a role change naming a departing admin
+left out, the authoring refusal, the peer refusal, and the proptest
+`no_history_leaves_an_admin_without_a_leaf` over random promote / demote /
+remove / leave / re-add histories) and `src/group/admin_presence_tests.rs` (a
+committer omitting the prune is refused; the exact prune from an admin is
+accepted; a prune that also drops a present admin, takes the owner slot or
+names a stranger is refused; the owner may fold any table that keeps its
+admins present).
+
+**Does NOT** handle a table that already named an absent admin before the rule
+(the maintainer chose not to: such test-stack groups are deleted and recreated):
+there the owner's role changes are refused, and a re-add finds the person an
+admin. Invariants **#3** (an MLS commit-gate change, G-39 surface) and
+**#4**.

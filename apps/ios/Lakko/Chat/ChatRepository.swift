@@ -10620,6 +10620,16 @@ public final class ChatRepository: ObservableObject {
         state = state.with(threads: buildThreadList())
     }
 
+    /// The local unread count of one group: the ids the receive counted,
+    /// without the messages deleted since (`docs/ux/message-actions.md`
+    /// section 9: a deleted message is never unread).
+    func liveUnreadCount(groupIdHex: String) -> Int {
+        guard let ids = unreadMessageIds[groupIdHex], !ids.isEmpty else { return 0 }
+        guard let record = groups[groupIdHex] else { return ids.count }
+        let deleted = Set(record.messages.lazy.filter(\.deleted).map(\.messageId))
+        return deleted.isEmpty ? ids.count : ids.subtracting(deleted).count
+    }
+
     /// ADR-0073 R.5 — one thread per CONVERSATION. The groups this device
     /// holds are folded by lineage: the thread is the conversation's current
     /// group (the head), with the rows of the older segments it still holds
@@ -10634,11 +10644,11 @@ public final class ChatRepository: ObservableObject {
             let headAt = plan.heldSegments.firstIndex(of: plan.headHex) ?? 0
             let older = Array(plan.heldSegments.prefix(headAt))
             var history: [ChatMessage] = []
-            var unread = unreadMessageIds[plan.headHex]?.count ?? 0
+            var unread = liveUnreadCount(groupIdHex: plan.headHex)
             for (index, hex) in older.enumerated() {
                 guard let record = groups[hex] else { continue }
                 let distance = older.count - index
-                unread += unreadMessageIds[hex]?.count ?? 0
+                unread += liveUnreadCount(groupIdHex: hex)
                 for message in record.messages where message.messageId > 0 && message.ack == .sent {
                     history.append(message.asHistoryRow(distanceFromHead: distance))
                 }
@@ -11280,7 +11290,9 @@ final class GroupRecord {
 
     /// The rows as the seen rule reads them.
     var seenRows: [FeedSeen.Row] {
-        messages.map { FeedSeen.Row(messageId: $0.messageId, incoming: $0.direction == .incoming) }
+        // `docs/ux/message-actions.md` section 9 — a deleted message counts
+        // as seen, so it never holds back how far the group is read.
+        messages.map { FeedSeen.Row(messageId: $0.messageId, incoming: $0.direction == .incoming && !$0.deleted) }
     }
 
     /// The chat screen shows everything it holds: move the watermark to the
@@ -11875,6 +11887,9 @@ final class GroupRecord {
             messages[idx].deleted = true
             messages[idx].noteOp(at)
             MessageTranslationPurge.messageDeleted(groupId: groupId, messageId: target)
+            // `docs/ux/message-actions.md` section 9 — and a notification
+            // still on screen for it goes.
+            DeletedMessageNotifications.withdraw(groupId: groupId, messageId: target)
         case .reaction(let add, _):
             guard let emoji = emoji, !emoji.isEmpty else { return }
             recordReaction(target: target, reactor: senderKey, emoji: emoji, add: add, at: at)

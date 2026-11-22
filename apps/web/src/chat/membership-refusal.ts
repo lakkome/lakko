@@ -201,6 +201,8 @@ export const PENDING_SET_FULL = (): string => t("chat.refusal.pending_full");
  * sentence, true on both paths.
  */
 export const OWNER_NOT_A_MEMBER = (): string => t("chat.refusal.owner_not_member");
+/** ADR-0022 amendment (C-100) — only a current member can be made an admin. */
+export const ADMIN_NOT_A_MEMBER = (): string => t("chat.refusal.admin_not_member");
 
 /**
  * NEW — a stale-view refusal, and the one an admin hits after tapping an
@@ -276,6 +278,7 @@ const TABLE: Readonly<Record<string, Copy>> = {
   ownerCannotLeave: { fact: OWNER_CANNOT_LEAVE },
   notOwner: { fact: NOT_OWNER },
   ownerNotAMember: { fact: OWNER_NOT_A_MEMBER },
+  adminNotAMember: { fact: ADMIN_NOT_A_MEMBER },
   noSuchJoinRequest: { fact: NO_SUCH_JOIN_REQUEST },
   joinerAlreadyAMember: { fact: JOINER_ALREADY_A_MEMBER },
   roleChangePending: { fact: ROLE_CHANGE_PENDING, invitation: RETRY_WHEN_IT_LANDS },

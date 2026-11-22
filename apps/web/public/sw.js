@@ -482,11 +482,17 @@ async function handlePush(wake) {
       ? storedIncomingCallWord(await readNotificationStrings())
       : storedNewMessageWord(await readNotificationStrings()));
   const tag = preview?.tag ?? wake?.groupHex ?? "lakko-default";
+  // `docs/ux/message-actions.md` section 9 — the message the preview stands
+  // for, so the page can withdraw this notification when it is deleted.
+  const previewMessageId =
+    preview !== null && typeof background?.previewMessageId === "string" ? background.previewMessageId : null;
   const data =
     wake !== null
-      ? tapGroupHex !== null
-        ? { wake, tapGroupHex }
-        : { wake }
+      ? {
+          wake,
+          ...(tapGroupHex !== null ? { tapGroupHex } : {}),
+          ...(previewMessageId !== null ? { previewMessageId } : {}),
+        }
       : {};
   // ADR-0047 section 6 — the first photo's or video's micro thumbnail, a
   // `data:` URL the decrypt core built from bytes inside the message, set
@@ -787,6 +793,7 @@ async function backgroundPreview(wake) {
   const outcome = await core.decryptPushWake(wake, deps);
   return {
     preview: outcome.preview,
+    previewMessageId: typeof outcome.previewMessageId === "string" ? outcome.previewMessageId : null,
     showGeneric: core.genericNotificationWanted(outcome),
     reason: outcome.readRan !== true
       ? "the read did not reach the end"

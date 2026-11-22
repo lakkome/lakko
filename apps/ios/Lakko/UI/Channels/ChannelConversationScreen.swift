@@ -37,6 +37,8 @@ struct ChannelConversationScreen: View {
     @EnvironmentObject private var inviteIntake: InviteIntake
     @ObservedObject private var l10n = Localization.shared
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// ADR-0099 step 3 — a suspended account reads; it does not post.
     @Environment(\.accountSuspended) private var accountSuspended
 
@@ -133,8 +135,20 @@ struct ChannelConversationScreen: View {
     // MARK: - Body
 
     var body: some View {
-        MessageMenuHost { content }
+        MessageMenuHost(closingIds: Set(model.timeline.deleted.map { Int64(clamping: $0) })) { content }
             .overlay { VideoNoteOverlay(media: media) }
+            // `docs/ux/message-actions.md` section 9 — a post seen going is
+            // in front of the person only while this channel is open and the
+            // scene is `active`.
+            .onAppear {
+                model.reduceMotion = reduceMotion
+                model.screenVisible = true
+            }
+            .onDisappear { model.screenVisible = false }
+            .onChange(of: scenePhase) { _, phase in
+                if phase != .active { model.endDeletedHolds() }
+            }
+            .onChange(of: reduceMotion) { _, on in model.reduceMotion = on }
             .environmentObject(media)
             .environmentObject(media.live)
             .navigationBarTitleDisplayMode(.inline)
@@ -308,9 +322,13 @@ struct ChannelConversationScreen: View {
 
     // MARK: - Timeline
 
+    /// `docs/ux/message-actions.md` section 9 — a deleted post is not drawn,
+    /// except one in its going (``ChannelConversationModel/heldPosts``),
+    /// which reads "Message deleted" for 2 seconds.
     private var entries: [ChatTimeline.Entry] {
-        ChatTimeline.layout(
-            messages: model.timeline.items.map(ChannelTimeline.message),
+        let held = model.heldPosts
+        return ChatTimeline.layout(
+            messages: model.drawnItems.map { ChannelTimeline.message($0, deleted: held[$0.cursor] != nil) },
             nowMs: ChatRepository.nowMs(),
             calendar: .current,
             locale: l10n.locale,
@@ -318,7 +336,7 @@ struct ChannelConversationScreen: View {
     }
 
     private func item(_ message: ChatMessage) -> ChannelTimelineItem? {
-        model.timeline.items.first { Int64(clamping: $0.cursor) == message.messageId }
+        model.drawnItems.first { Int64(clamping: $0.cursor) == message.messageId }
     }
 
     @ViewBuilder
@@ -333,14 +351,21 @@ struct ChannelConversationScreen: View {
                             .frame(maxWidth: .infinity, alignment: .center)
                             .padding(.top, 12)
                     }
-                    if model.timeline.items.isEmpty {
+                    if model.drawnItems.isEmpty {
                         emptyState
                     }
                     ForEach(entries, id: \.message.messageId) { entry in
                         if let dateLabel = entry.dateLabel { DateSeparator(label: dateLabel) }
                         if let item = item(entry.message) {
-                            postRow(entry: entry, item: item)
+                            Group {
+                                if model.heldPosts[item.cursor] != nil {
+                                    heldPostRow(entry: entry)
+                                } else {
+                                    postRow(entry: entry, item: item)
+                                }
+                            }
                                 .padding(.top, 10)
+                                .modifier(DeletedRowCollapse(phase: model.heldPosts[item.cursor]?.phase))
                                 .id(item.cursor)
                                 .onAppear {
                                     onScreen.insert(item.cursor)
@@ -380,6 +405,24 @@ struct ChannelConversationScreen: View {
                 .frame(maxWidth: .infinity)
                 .padding(.top, 40)
         }
+    }
+
+    /// Section 9 — a post seen going: "Message deleted" in the post's own
+    /// shape, no reactions, no comments, no menu.
+    private func heldPostRow(entry: ChatTimeline.Entry) -> some View {
+        MessageRow(
+            message: entry.message,
+            ownIdentity: nil,
+            timeLabel: entry.timeLabel,
+            maxBubbleWidth: width,
+            actionsAvailable: false,
+            readState: nil,
+            onPreview: { _ in },
+            onEdit: {},
+            onDelete: {},
+            onReact: { _ in },
+            channelPost: role
+        )
     }
 
     @ViewBuilder

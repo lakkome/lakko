@@ -10,7 +10,8 @@
  *
  * - An edit (a later post naming an earlier cursor) replaces the text and
  *   marks the post edited; the newest edit wins.
- * - A delete removes the post for everyone.
+ * - A delete removes the post for everyone; one in its hold
+ *   (`message-actions.md` section 9) stays as a "Message deleted" card.
  * - A metadata record, a ban list, an op and a malformed record are never a
  *   post.
  * - Posts with no key on this device at the start of the timeline fold into
@@ -55,6 +56,9 @@ export interface TimelinePost {
    *  edits, the close), attributed to the channel (a post is signed by a
    *  publisher; the service never says which). */
   readonly checklistOps?: ChannelChecklistOps;
+  /** `message-actions.md` section 9 — a deleted post in its hold: drawn as
+   *  "Message deleted" until it collapses. Absent on every other post. */
+  readonly deleted?: true;
 }
 
 /** The channel's stand-in author and ticker key: a post is the channel's. */
@@ -73,10 +77,27 @@ export interface ChannelTimeline {
   readonly earlierUnavailable: boolean;
 }
 
+/** The cursors a page's delete ops remove (an op only reaches back). */
+export function deletedPostCursors(
+  page: readonly TimelineInput[],
+  decoded: ReadonlyMap<number, PostDecode>,
+): Set<number> {
+  const out = new Set<number>();
+  for (const p of page) {
+    const d = decoded.get(p.cursor);
+    if (d?.kind === "op" && d.body.kind === "delete" && d.body.target < p.cursor) out.add(d.body.target);
+  }
+  return out;
+}
+
 /** Build the timeline from a page (any order) and the decode per cursor. */
 export function channelTimeline(
   page: readonly TimelineInput[],
   decoded: ReadonlyMap<number, PostDecode>,
+  /** `message-actions.md` section 9 — the deleted posts in their hold, drawn
+   *  as "Message deleted" (`deleted: true`); every other deleted post is not
+   *  there. */
+  held: ReadonlySet<number> = new Set(),
 ): ChannelTimeline {
   const ordered = [...page].sort((a, b) => a.cursor - b.cursor);
   const edits = new Map<number, string>();
@@ -124,7 +145,12 @@ export function channelTimeline(
   const posts: TimelinePost[] = [];
   let earlierUnavailable = false;
   for (const p of ordered) {
-    if (deleted.has(p.cursor)) continue;
+    if (deleted.has(p.cursor)) {
+      if (held.has(p.cursor)) {
+        posts.push({ cursor: p.cursor, serverTsMs: p.serverTsMs, state: "ok", text: "", attachments: [], edited: false, deleted: true });
+      }
+      continue;
+    }
     const d = decoded.get(p.cursor);
     if (d === undefined) {
       posts.push({ cursor: p.cursor, serverTsMs: p.serverTsMs, state: "loading", text: "", attachments: [], edited: false });

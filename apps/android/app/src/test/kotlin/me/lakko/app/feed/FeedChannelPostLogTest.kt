@@ -90,6 +90,38 @@ class FeedChannelPostLogTest {
     }
 
     @Test
+    fun aDeletedPostLeavesTheLogInTheSameSyncAndInALaterOne() = runTest {
+        // docs/ux/message-actions.md section 9 — a deleted post is never a
+        // list preview, an unread post or a feed item.
+        val first = syncChannelSlot(
+            id,
+            null,
+            FakeDeps(
+                pages = listOf(listOf(wire(1), wire(2), wire(3))),
+                outcomes = mapOf(
+                    "w1" to PostOutcome.Text("kept"),
+                    "w2" to PostOutcome.Text("gone at once"),
+                    "w3" to PostOutcome.Delete(2),
+                ),
+            ),
+            now,
+        )
+        assertEquals(3L, first.cursor)
+        assertEquals(listOf(1L), first.posts.map { it.cursor })
+        val later = syncChannelSlot(
+            id,
+            first,
+            FakeDeps(
+                pages = listOf(listOf(wire(4))),
+                outcomes = mapOf("w4" to PostOutcome.Delete(1)),
+            ),
+            now,
+        )
+        assertEquals(4L, later.cursor)
+        assertTrue(later.posts.isEmpty())
+    }
+
+    @Test
     fun aLogStoredWithNoVersionIsTheOldOneAndIsFetchedAgain() {
         // Live on the Pixel 7a (2026-11-12): the store's JSON leaves default
         // values out, so the version-1 log carried no version and was read as

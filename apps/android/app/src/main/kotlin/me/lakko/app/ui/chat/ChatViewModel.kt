@@ -439,6 +439,61 @@ public class ChatViewModel(
     public val state: StateFlow<ChatScreenUiState> = derived.asStateFlow()
 
     // -------------------------------------------------------------
+    // `docs/ux/message-actions.md` section 9 — a deleted message leaves
+    // -------------------------------------------------------------
+
+    /** Whether this conversation is in front of the person: its screen is
+     *  RESUMED ([setOnScreen]). */
+    private var inFront: Boolean = false
+
+    /** The rows whose deletion was applied in front of the person, in memory
+     *  only ([me.lakko.app.chat.DeletedRowHold]). */
+    private val deletedHold = me.lakko.app.chat.DeletedRowHold()
+    private val deletedHoldJobs = HashMap<Long, Job>()
+    private val mutableHeldDeleted: MutableStateFlow<Map<Long, me.lakko.app.chat.DeletedRowPhase>> =
+        MutableStateFlow(emptyMap())
+
+    /**
+     * Section 9 — the deleted rows still drawn, and their phase: "Message
+     * deleted" for [me.lakko.app.chat.DeletedRows.HOLD_MS], then the collapse
+     * for [me.lakko.app.chat.DeletedRows.COLLAPSE_MS]. Every other deleted
+     * message is not drawn.
+     */
+    public val heldDeleted: StateFlow<Map<Long, me.lakko.app.chat.DeletedRowPhase>> =
+        mutableHeldDeleted.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            state.collect { s -> onMessagesApplied(s.messages) }
+        }
+    }
+
+    private fun onMessagesApplied(messages: List<ChatMessage>) {
+        val entered = deletedHold.observe(messages, inFront)
+        for (id in entered) {
+            deletedHoldJobs.remove(id)?.cancel()
+            deletedHoldJobs[id] = viewModelScope.launch {
+                delay(me.lakko.app.chat.DeletedRows.HOLD_MS)
+                if (deletedHold.startCollapse(id)) mutableHeldDeleted.value = deletedHold.phases
+                delay(me.lakko.app.chat.DeletedRows.COLLAPSE_MS)
+                if (deletedHold.release(id)) mutableHeldDeleted.value = deletedHold.phases
+                deletedHoldJobs.remove(id)
+            }
+        }
+        val phases = deletedHold.phases
+        if (phases != mutableHeldDeleted.value) mutableHeldDeleted.value = phases
+        // Section 9 — a deleted row is not selectable and leaves the selection.
+        val selected = mutableSelection.value
+        if (selected != null) {
+            val deleted = messages.asSequence().filter { it.deleted && it.messageId != 0L }.map { it.messageId }.toHashSet()
+            val all = selected.own + selected.others
+            if (all.any { it in deleted }) {
+                mutableSelection.value = selected.retain(all.filter { it !in deleted })
+            }
+        }
+    }
+
+    // -------------------------------------------------------------
     // Phase 3a10 — call surface
     // -------------------------------------------------------------
 
@@ -632,6 +687,15 @@ public class ChatViewModel(
     /** The chat screen became visible (resumed) or stopped being visible. */
     public fun setOnScreen(onScreen: Boolean) {
         repo.setThreadOnScreen(groupIdHex, onScreen)
+        inFront = onScreen
+        if (!onScreen) {
+            // Message-actions section 9 — a row in its hold that leaves the
+            // screen is gone when the person comes back.
+            for (job in deletedHoldJobs.values) job.cancel()
+            deletedHoldJobs.clear()
+            deletedHold.leaveFront()
+            mutableHeldDeleted.value = emptyMap()
+        }
     }
 
     /**

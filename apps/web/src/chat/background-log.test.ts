@@ -145,26 +145,42 @@ describe("summarizeGroupSlot (the chat list row)", () => {
     expect(s.previewIsOwn).toBe(false);
   });
 
-  it("previews a deleted message as the tombstone, never as its text", () => {
-    // ADR-0023 — the stored row carries no text and no attachments, so
-    // without the rule the conversation row would go blank; and the reason
-    // it carries none is that keeping a deleted message's words on disk is
-    // the thing being fixed.
+  it("never previews a deleted message: falls back to the newest one left", () => {
+    // docs/ux/message-actions.md section 9 — the preview never says "Message
+    // deleted"; it shows the newest message that is not deleted, with that
+    // message's time.
     const slot: PersistedGroup = {
-      cursor: "2",
-      messages: [{ ...msg(2, "incoming", ""), deleted: true }],
+      cursor: "3",
+      messages: [
+        { ...msg(1, "incoming", "still here"), createdAt: "t1" },
+        { ...msg(2, "incoming", "the secret"), createdAt: "t2", deleted: true },
+        { ...msg(3, "incoming", ""), createdAt: "t3", deleted: true },
+      ],
     };
-    expect(summarizeGroupSlot(slot, null).preview).toBe("Message deleted");
+    const s = summarizeGroupSlot(slot, null);
+    expect(s.preview).toBe("still here");
+    expect(s.lastAt).toBe("t1");
   });
 
-  it("prefers the tombstone over any text a deleted row still carries", () => {
-    // Belt and braces for a row written by an older build, or by a native
-    // client, which keeps the text beside the flag.
+  it("previews nothing when every message was deleted", () => {
     const slot: PersistedGroup = {
       cursor: "2",
       messages: [{ ...msg(2, "incoming", "the secret"), deleted: true }],
     };
-    expect(summarizeGroupSlot(slot, null).preview).toBe("Message deleted");
+    const s = summarizeGroupSlot(slot, null);
+    expect(s.preview).toBeNull();
+    expect(s.lastAt).toBeNull();
+  });
+
+  it("never counts a deleted message as unread", () => {
+    const slot: PersistedGroup = {
+      cursor: "3",
+      messages: [msg(1), { ...msg(2), deleted: true }, { ...msg(3), deleted: true }],
+      lastViewedMessageId: "1",
+    };
+    expect(summarizeGroupSlot(slot, null).unread).toBe(0);
+    const { lastViewedMessageId: _viewed, ...some } = slot;
+    expect(summarizeGroupSlot(some, null).unread).toBe(1);
   });
 
   it("labels an attachment-only message and truncates long text", () => {

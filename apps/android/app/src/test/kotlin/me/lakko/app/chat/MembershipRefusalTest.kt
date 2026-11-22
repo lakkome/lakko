@@ -99,8 +99,9 @@ class MembershipRefusalTest {
         // 20 since ADR-0050 appended DEVICE_BINDING_INVALID and DEVICE_LIMIT_REACHED;
         // 23 since ADR-0062 appended the three conversation-kind reasons, 24
         // since ADR-0045 appended the Welcome for a group still held, 26 since
-        // ADR-0091 phase 2 appended the two re-entry refusals.
-        assertEquals(26, FfiRefusalReason.entries.size)
+        // ADR-0091 phase 2 appended the two re-entry refusals, 27 since the
+        // ADR-0022 amendment of 2026-11-22 appended ADMIN_NOT_A_MEMBER.
+        assertEquals(27, FfiRefusalReason.entries.size)
 
         for (reason in FfiRefusalReason.entries) {
             assertTrue("$reason rendered an empty sentence", say(reason).isNotEmpty())
@@ -202,6 +203,11 @@ class MembershipRefusalTest {
         assertEquals(
             "Ownership can only be held by a current member of this group.",
             say(FfiRefusalReason.OWNER_NOT_A_MEMBER),
+        )
+        // ADR-0022 amendment (C-100): "Make admin" on somebody who just left.
+        assertEquals(
+            "Only a current member of this group can be an admin.",
+            say(FfiRefusalReason.ADMIN_NOT_A_MEMBER),
         )
         // Reachable from a stale Approve / Reject tap.
         assertEquals(
@@ -361,6 +367,7 @@ class MembershipRefusalTest {
             FfiException.MembershipReentryPairInvalid("x") to FfiRefusalReason.REENTRY_PAIR_INVALID,
             FfiException.MembershipReentryWelcomeRefused("x") to
                 FfiRefusalReason.REENTRY_WELCOME_REFUSED,
+            FfiException.MembershipAdminNotAMember("x") to FfiRefusalReason.ADMIN_NOT_A_MEMBER,
         )
         assertEquals(FfiRefusalReason.entries.size, pairs.size)
         assertEquals(FfiRefusalReason.entries.toSet(), pairs.map { it.second }.toSet())

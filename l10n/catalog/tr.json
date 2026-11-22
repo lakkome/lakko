@@ -3757,6 +3757,10 @@
       "text": "Grup sahibi gruptan ayrılamaz.",
       "status": "machine"
     },
+    "chat.refusal.admin_not_member": {
+      "text": "Yalnızca bu grubun mevcut bir üyesi yönetici olabilir.",
+      "status": "machine"
+    },
     "chat.refusal.owner_not_member": {
       "text": "Sahiplik yalnızca bu grubun mevcut bir üyesinde olabilir.",
       "status": "machine"

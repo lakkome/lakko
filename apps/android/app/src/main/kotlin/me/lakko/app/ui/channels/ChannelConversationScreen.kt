@@ -392,6 +392,51 @@ private fun ChannelTimelineView(
     val reader = remember(channelId) { ChannelReader(context.applicationContext, state, client, channelId) }
     val feedback = remember(channelId) { ChannelFeedback(context.applicationContext, state, client, channelId, reader) }
     var timeline by remember(channelId) { mutableStateOf<ChannelTimeline?>(null) }
+    // `docs/ux/message-actions.md` section 9 — a post whose deletion was
+    // read while the channel is in front reads "Message deleted" for a moment,
+    // then collapses; every other deleted post is simply not there. In memory
+    // only.
+    val postHold = remember(channelId) { me.lakko.app.chat.DeletedRowHold() }
+    var lastDrawnPosts by remember(channelId) { mutableStateOf<Map<Long, ChannelPostItem>>(emptyMap()) }
+    val heldPostItems = remember(channelId) { mutableStateMapOf<Long, ChannelPostItem>() }
+    val heldPostPhase = remember(channelId) { mutableStateMapOf<Long, me.lakko.app.chat.DeletedRowPhase>() }
+    val holdLifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+    androidx.compose.runtime.DisposableEffect(holdLifecycle, channelId) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_PAUSE) {
+                postHold.leaveFront()
+                heldPostItems.clear()
+                heldPostPhase.clear()
+            }
+        }
+        holdLifecycle.addObserver(observer)
+        onDispose { holdLifecycle.removeObserver(observer) }
+    }
+    LaunchedEffect(timeline) {
+        val t = timeline ?: return@LaunchedEffect
+        val drawn = t.posts.filter { !it.unavailable }
+        val drawnIds = drawn.mapTo(HashSet()) { it.cursor }
+        val entered = postHold.observeIds(
+            drawn = drawnIds,
+            deleted = t.deletedCursors,
+            present = drawnIds + t.deletedCursors,
+            inFront = holdLifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED),
+        )
+        for (id in entered) {
+            val item = lastDrawnPosts[id] ?: continue
+            heldPostItems[id] = item
+            heldPostPhase[id] = me.lakko.app.chat.DeletedRowPhase.HOLD
+            scope.launch {
+                delay(me.lakko.app.chat.DeletedRows.HOLD_MS)
+                if (postHold.startCollapse(id)) heldPostPhase[id] = me.lakko.app.chat.DeletedRowPhase.COLLAPSE
+                delay(me.lakko.app.chat.DeletedRows.COLLAPSE_MS)
+                postHold.release(id)
+                heldPostItems.remove(id)
+                heldPostPhase.remove(id)
+            }
+        }
+        lastDrawnPosts = drawn.associateBy { it.cursor }
+    }
     var phase by remember(channelId) { mutableStateOf(if (isPublisher) ReaderPhase.Active else ReaderPhase.Registering) }
     var failure by remember(channelId) { mutableStateOf<UiText?>(null) }
     var attempt by remember(channelId) { mutableIntStateOf(0) }
@@ -767,7 +812,10 @@ private fun ChannelTimelineView(
     Column(Modifier.fillMaxSize()) {
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
             val width = maxWidth - 24.dp
-            val items = timeline?.posts.orEmpty().asReversed()
+            val items = timeline?.posts.orEmpty().let { posts ->
+                // Section 9 — the posts in their hold, in their place.
+                if (heldPostItems.isEmpty()) posts else (posts + heldPostItems.values).sortedBy { it.cursor }
+            }.asReversed()
             val listState = androidx.compose.foundation.lazy.rememberLazyListState()
             // docs/ux/feed.md section 5 — the list at its newest end, in the
             // foreground: the newest post shown is read and the channel's
@@ -824,7 +872,15 @@ private fun ChannelTimelineView(
                                 ),
                             )
                         }
-                        if (post.unavailable) {
+                        val heldPhase = heldPostPhase[post.cursor]
+                        if (heldPhase != null) {
+                            me.lakko.app.ui.chat.DeletedRowCollapse(
+                                deleted = true,
+                                collapsing = heldPhase == me.lakko.app.chat.DeletedRowPhase.COLLAPSE,
+                            ) {
+                                me.lakko.app.ui.chat.DeletedMessageBubble()
+                            }
+                        } else if (post.unavailable) {
                             Text(
                                 t("channels.post.unavailable"),
                                 style = MaterialTheme.typography.bodyMedium,
@@ -1315,6 +1371,22 @@ private fun CommentsBlock(
     val context = LocalContext.current
     val strings = LocalStrings.current
     var loaded by remember(post.cursor) { mutableStateOf<List<ChannelFeedback.Comment>>(emptyList()) }
+    // `docs/ux/message-actions.md` section 9 — a comment this device deleted
+    // in front of the person reads "Message deleted" for a moment, then
+    // collapses and leaves [loaded]. In memory only.
+    val heldComments = remember(post.cursor) { mutableStateMapOf<Long, me.lakko.app.chat.DeletedRowPhase>() }
+    val commentLifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+    androidx.compose.runtime.DisposableEffect(commentLifecycle, post.cursor) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_PAUSE && heldComments.isNotEmpty()) {
+                val gone = heldComments.keys.toSet()
+                heldComments.clear()
+                loaded = loaded.filterNot { it.cursor in gone }
+            }
+        }
+        commentLifecycle.addObserver(observer)
+        onDispose { commentLifecycle.removeObserver(observer) }
+    }
     var nextAfter by remember(post.cursor) { mutableStateOf(0L) }
     var more by remember(post.cursor) { mutableStateOf(false) }
     // Rows the service returned, opened or not, and whether the first page
@@ -1455,6 +1527,16 @@ private fun CommentsBlock(
             }
         }
         for (c in shown) {
+            val heldPhase = heldComments[c.cursor]
+            if (heldPhase != null) {
+                me.lakko.app.ui.chat.DeletedRowCollapse(
+                    deleted = true,
+                    collapsing = heldPhase == me.lakko.app.chat.DeletedRowPhase.COLLAPSE,
+                ) {
+                    me.lakko.app.ui.chat.DeletedMessageBubble(Modifier.padding(vertical = 2.dp))
+                }
+                continue
+            }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1516,7 +1598,7 @@ private fun CommentsBlock(
         // Section 13.2 — never a count of comments this reader hides: the
         // service's count (13a, phase B) stands only for rows not read yet.
         if (!open) {
-            when (val m = collapsedMore(loaded.size, rowsRead, firstRead, more, count)) {
+            when (val m = collapsedMore(loaded.count { it.cursor !in heldComments }, rowsRead, firstRead, more, count)) {
                 is CollapsedMore.Count -> TextButton(onClick = { open = true }) {
                     Text(strings.format("channels.comments.show_more", emptyMap(), mapOf("count" to m.n.toULong())))
                 }
@@ -1651,6 +1733,15 @@ private fun CommentsBlock(
                     scope.launch {
                         try {
                             feedback.deleteComment(post.cursor, c.cursor, c.writerKey)
+                            if (commentLifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
+                                heldComments[c.cursor] = me.lakko.app.chat.DeletedRowPhase.HOLD
+                                delay(me.lakko.app.chat.DeletedRows.HOLD_MS)
+                                if (heldComments.containsKey(c.cursor)) {
+                                    heldComments[c.cursor] = me.lakko.app.chat.DeletedRowPhase.COLLAPSE
+                                    delay(me.lakko.app.chat.DeletedRows.COLLAPSE_MS)
+                                }
+                                heldComments.remove(c.cursor)
+                            }
                             loaded = loaded.filterNot { it.cursor == c.cursor }
                         } catch (e: kotlinx.coroutines.CancellationException) {
                             throw e

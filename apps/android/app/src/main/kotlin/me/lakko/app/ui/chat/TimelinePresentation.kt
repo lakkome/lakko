@@ -213,9 +213,11 @@ public fun messagePreviewBody(text: String, attachments: List<PreviewAttachment>
 
 /**
  * The second line of a conversation row: the text, else the media word, else
- * nothing; a deleted message reads "Message deleted". [prefix] is the
- * sender-name prefix ("Anna: " in groups, "You: " for own messages) and is
- * applied to every non-empty line.
+ * nothing. A deleted message has no line at all (`docs/ux/message-actions.md`
+ * section 9: the list never says "Message deleted"; the row is taken from the
+ * newest message that is not deleted, [me.lakko.app.chat.DeletedRows.previewSource]).
+ * [author] is the sender-name prefix ("Anna: " in groups, "You: " for own
+ * messages) and is applied to every non-empty line.
  */
 public fun previewLine(
     text: String,
@@ -226,7 +228,7 @@ public fun previewLine(
     unsupported: Boolean = false,
 ): String {
     val body = when {
-        deleted -> strings["chat.message.deleted"]
+        deleted -> ""
         // ADR-0061 section 6 — a message from a newer wire version.
         unsupported -> strings[UNSUPPORTED_MESSAGE_KEY]
         text.isNotBlank() || attachments.isNotEmpty() -> messagePreviewBody(text, attachments, strings)
@@ -374,10 +376,17 @@ public fun buildTimeline(
     /** ADR-0062 — whether the conversation is a group: only a group draws a
      *  membership row. */
     isGroup: Boolean = false,
+    /** `docs/ux/message-actions.md` section 9 — the deleted messages in their
+     *  short hold ("Message deleted", then the collapse). Every other deleted
+     *  message is not drawn. */
+    heldDeleted: Set<Long> = emptySet(),
 ): List<TimelineItem> {
     // Dropped before the fold, so a hidden row neither opens a date separator
-    // nor breaks a run between two messages that read as one.
-    val messages = allMessages.filterNot { isHiddenSystemRow(it, isGroup) }
+    // nor breaks a run between two messages that read as one. Section 9: the
+    // same for a deleted message, so a day with nothing left under it draws no
+    // separator and a run is taken over the messages that remain.
+    val messages = me.lakko.app.chat.DeletedRows.visible(allMessages, heldDeleted)
+        .filterNot { isHiddenSystemRow(it, isGroup) }
     val out = ArrayList<TimelineItem>(messages.size + 8)
     val times = messages.map { parseMessageTimeMs(it.createdAt) }
     var lastSeparatorDayMs: Long? = null

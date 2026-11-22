@@ -112,7 +112,22 @@ struct ChannelCommentsView: View {
         .foregroundStyle(Color.lakkoAccent)
     }
 
+    @ViewBuilder
     private func commentRow(_ comment: ChannelConversationModel.Comment) -> some View {
+        // `docs/ux/message-actions.md` section 9 — a comment seen going reads
+        // "Message deleted" for 2 seconds, then collapses; no menu.
+        if let phase = model.commentPhase(post: item.cursor, comment: comment.cursor) {
+            Label(l10n.t("chat.message.deleted"), icon: .trash)
+                .font(.footnote.italic())
+                .foregroundStyle(Color.lakkoTextMuted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .modifier(DeletedRowCollapse(phase: phase))
+        } else {
+            liveCommentRow(comment)
+        }
+    }
+
+    private func liveCommentRow(_ comment: ChannelConversationModel.Comment) -> some View {
         commentContent(comment, chips: true)
             .contentShape(Rectangle())
             .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {

@@ -56,6 +56,7 @@ import type { Article, ContentState, MessageContent, SharedContactCard } from ".
 import { loadWasm as loadAttachWasm } from "../wasm";
 import { openHostUrl } from "../platform/host";
 import {
+  batch,
   createEffect,
   createMemo,
   createSignal,
@@ -580,6 +581,15 @@ import {
   type TimelineRow,
 } from "../chat/timeline-row";
 import { TimelineBubble } from "../chat/TimelineBubble";
+import {
+  DeletedHold,
+  idsEnteringHold,
+  newlyDeletedIds,
+  prefersReducedMotion,
+  withoutDeleted,
+  type DeletedPhase,
+} from "../chat/deleted-rows";
+import { withdrawDeletedMessageNotifications } from "../push/deleted-notifications";
 import { CallTimelineRow } from "../chat/CallTimelineRow";
 import { useTranslation } from "../translation/context";
 import { AutoTranslateSwitch, TranslateBar, type BarCandidate } from "../translation/ConversationControls";
@@ -936,6 +946,57 @@ function ChatView(props: {
   const [historyRows, setHistoryRows] = createSignal<TimelineRow[]>([]);
   /** The edit / delete / reaction overlay of those rows, keyed like them. */
   const [historyOps, setHistoryOps] = createSignal<Map<number, MessageOpState>>(new Map());
+  // ADR-0023 — per-message op overlay (edit / delete / reaction).
+  // Keyed on the target's DS `messageId`. In-memory + session-
+  // scoped: multi-device convergence (the persisted-log replay
+  // of ops) is deferred to Phase 2, so a reload starts the
+  // overlay empty. The render path reads it by messageId and
+  // folds it onto the bubble; the receive loop folds incoming
+  // ops into it; the send handlers apply the own-op locally
+  // (the sender never receives its own application message
+  // back). A fresh Map replaces the signal on every mutation so
+  // SolidJS re-renders the affected bubbles.
+  const [msgOps, setMsgOpsSignal] = createSignal<Map<number, MessageOpState>>(
+    new Map(),
+  );
+  /** As `setRows`: an op applied after the view closed still reaches the log. */
+  const setMsgOps = (next: Map<number, MessageOpState>): void => {
+    setMsgOpsSignal(next);
+    noteClosedViewChange();
+  };
+  /**
+   * Apply an op overlay that may delete messages (section 9 of
+   * `message-actions.md`). `drawnBefore` is what the timeline drew before the
+   * batch that produced `next` was applied: a deleted row in it enters its
+   * hold when this conversation is in front of the person; every other
+   * deleted row simply is not drawn. A reload's restored overlay never comes
+   * here, so it holds nothing.
+   */
+  function applyOpsWithHold(next: Map<number, MessageOpState>, drawnBefore: ReadonlySet<number>): void {
+    const gone = newlyDeletedIds(msgOps(), next);
+    const inFront = !viewIsClosed && globalThis.document?.visibilityState === "visible";
+    batch(() => {
+      deletedHold.start(idsEnteringHold({ drawnBefore, newlyDeleted: gone, inFront }));
+      setMsgOps(next);
+    });
+    if (gone.length > 0) afterMessagesDeleted(gone);
+  }
+  // docs/ux/message-actions.md section 9 — a deleted message is not drawn,
+  // except during its hold: deleted in front of the person, its row reads
+  // "Message deleted" for 2 s, collapses and is gone. The hold is in memory
+  // only; leaving the conversation or the tab going hidden ends it.
+  const [deletedHeld, setDeletedHeld] = createSignal<ReadonlyMap<number, DeletedPhase>>(new Map());
+  const deletedHold = new DeletedHold((phases) => setDeletedHeld(phases), prefersReducedMotion);
+  onCleanup(() => deletedHold.clear());
+  onMount(() => {
+    const onVisibility = (): void => {
+      if (document.visibilityState !== "visible") deletedHold.clear();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    onCleanup(() => document.removeEventListener("visibilitychange", onVisibility));
+  });
+  const isMessageDeleted = (id: number): boolean =>
+    (msgOps().get(id) ?? historyOps().get(id))?.deleted === true;
   /** The conversation as the reader sees it: the journal's rows and this
    *  device's call rows, in time order (`chat/call-timeline.ts`). Merged
    *  BEFORE the layout, so a call on a new day carries that day's separator
@@ -952,8 +1013,25 @@ function ChatView(props: {
       conversationKindOf(props.entry.group),
     ),
   );
+  /** The rows the timeline draws (section 9): `uniqueRows` without the
+   *  deleted messages, except those in their hold. The same array while
+   *  nothing drawn changed, so a reaction does not redo the layout. */
+  const shownRows = createMemo(
+    () => withoutDeleted(uniqueRows(), rowMessageId, isMessageDeleted, deletedHeld()),
+    [],
+    { equals: (a, b) => a.length === b.length && a.every((r, i) => r === b[i]) },
+  );
+  /** The DS ids of the rows drawn now. */
+  const drawnMessageIds = (): Set<number> => {
+    const out = new Set<number>();
+    for (const r of shownRows()) {
+      const id = rowMessageId(r);
+      if (id !== undefined) out.add(id);
+    }
+    return out;
+  };
   const timelineEntries = createMemo(() =>
-    mergeConversationEntries(uniqueRows, callRows(), rowCreatedAt, rowIdentity),
+    mergeConversationEntries(shownRows, callRows(), rowCreatedAt, rowIdentity),
   );
   /** ADR-0082 / UX 3.6 — the incoming messages the conversation bar's rule
    *  reads, newest first. Not the person's own, from any of their devices. */
@@ -1030,24 +1108,6 @@ function ChatView(props: {
     setCursorSignal(Math.max(cursorSignal(), next));
   };
 
-  // ADR-0023 — per-message op overlay (edit / delete / reaction).
-  // Keyed on the target's DS `messageId`. In-memory + session-
-  // scoped: multi-device convergence (the persisted-log replay
-  // of ops) is deferred to Phase 2, so a reload starts the
-  // overlay empty. The render path reads it by messageId and
-  // folds it onto the bubble; the receive loop folds incoming
-  // ops into it; the send handlers apply the own-op locally
-  // (the sender never receives its own application message
-  // back). A fresh Map replaces the signal on every mutation so
-  // SolidJS re-renders the affected bubbles.
-  const [msgOps, setMsgOpsSignal] = createSignal<Map<number, MessageOpState>>(
-    new Map(),
-  );
-  /** As `setRows`: an op applied after the view closed still reaches the log. */
-  const setMsgOps = (next: Map<number, MessageOpState>): void => {
-    setMsgOpsSignal(next);
-    noteClosedViewChange();
-  };
   // Inline-edit composer state — the messageId currently being
   // edited (or `null`), plus the working text.
   const [editingId, setEditingId] = createSignal<number | null>(null);
@@ -4389,6 +4449,9 @@ function ChatView(props: {
         r.kind === "incoming" ? [r.event.messageId] : [],
       ),
     );
+    // Section 9 of message-actions.md — what was drawn before this batch: a
+    // message and its deletion that arrive together were never drawn.
+    const drawnBefore = drawnMessageIds();
     // ADR-0023 — split the batch: chat / system / callSignaling
     // events become timeline rows as before; edit / delete /
     // reaction OPS fold into the per-message overlay instead of
@@ -4689,7 +4752,7 @@ function ChatView(props: {
       setRows([...rows(), ...fresh]);
     }
     if (opsChanged) {
-      setMsgOps(ops);
+      applyOpsWithHold(ops, drawnBefore);
     }
     if (typingChanged) {
       setTypingMap(typing);
@@ -5320,7 +5383,7 @@ function ChatView(props: {
       const envelopeBytes = await composeDeleteEnvelope(messageId);
       opId = (await publishQuiet(envelopeBytes, true)).messageId;
     }
-    setMsgOps(applyOp(msgOps(), { op: "delete", target: messageId, opId }));
+    applyOpsWithHold(applyOp(msgOps(), { op: "delete", target: messageId, opId }), drawnMessageIds());
     // Section 4.1 — a deleted message leaves the bar and its pin records
     // go with it.
     void pins.messageDeleted(props.entry.groupIdB64, messageId);
@@ -6540,6 +6603,22 @@ function ChatView(props: {
   // ADR-0047 — the composer's emoji / GIF picker, and the reaction picker.
   const [composerPickerOpen, setComposerPickerOpen] = createSignal(false);
   const [fullReactPickerId, setFullReactPickerId] = createSignal<number | null>(null);
+  /**
+   * Section 9 of `message-actions.md` — what goes with a deleted message: an
+   * edit of it in progress ends as Cancel would end it, the full reaction
+   * picker on it closes (the action card closes with the bubble's own menu
+   * gate), it leaves the selection, and a notification still on screen for it
+   * is withdrawn. A reply strip already armed with it stays.
+   */
+  function afterMessagesDeleted(ids: readonly number[]): void {
+    const gone = new Set(ids);
+    const editing = editingId();
+    if (editing !== null && gone.has(editing)) setEditingId(null);
+    const picker = fullReactPickerId();
+    if (picker !== null && gone.has(picker)) setFullReactPickerId(null);
+    if ([...selection()].some((id) => gone.has(id))) setSelection(withoutDone(selection(), ids));
+    void withdrawDeletedMessageNotifications(hexOf(props.entry.group.groupId), ids);
+  }
   let composerInput: HTMLTextAreaElement | undefined;
   // Reactions section 13 — the `:` suggestion strip above the composer.
   const [colonQuery, setColonQuery] = createSignal<ColonQuery | null>(null);
@@ -7971,6 +8050,9 @@ function ChatView(props: {
     // A reply whose original belongs to another segment carries no jump
     // target (`held-send.ts` `replyForSend`): the quote is all there is.
     if (messageId === REPLY_NO_JUMP_TARGET) return;
+    // Section 9 of message-actions.md — a deleted message is not in the
+    // timeline (even during its hold): the quote does nothing.
+    if (isMessageDeleted(messageId)) return;
     const root = scrollEl;
     if (root === undefined) return;
     const target = root.querySelector<HTMLElement>(
@@ -8600,6 +8682,7 @@ function ChatView(props: {
                 getCachedUrl={getCachedAttachmentUrl}
                 ownIdentity={ownSignatureKeyB64()}
                 opState={(id) => msgOps().get(id) ?? historyOps().get(id)}
+                deletedPhaseOf={(id) => deletedHeld().get(id)}
                 readByOthers={(id) =>
                   isReadByEveryOther(readWatermarks(), id, ownSignatureKeyB64())
                 }

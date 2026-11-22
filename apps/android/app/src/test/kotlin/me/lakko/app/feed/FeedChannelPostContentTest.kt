@@ -59,6 +59,10 @@ class FeedChannelPostContentTest {
         }
         assertEquals(PostOutcome.Skip, feedPostOutcome(MessageBodyKind.POLL, "", emptyList(), envelope))
         assertEquals(PostOutcome.Skip, feedPostOutcome(MessageBodyKind.CHECKLIST, "", emptyList(), envelope))
+        // docs/ux/message-actions.md section 9 — a delete takes its post out
+        // of the log; one naming nothing is passed over.
+        assertEquals(PostOutcome.Delete(7), feedPostOutcome(MessageBodyKind.DELETE, "", emptyList(), envelope, target = 7))
+        assertEquals(PostOutcome.Skip, feedPostOutcome(MessageBodyKind.DELETE, "", emptyList(), envelope))
     }
 
     @Test

@@ -83,7 +83,6 @@ final class UnsupportedWireVersionTests: XCTestCase {
             text: "",
             attachmentLabels: [],
             direction: .incoming,
-            deleted: false,
             unsupported: true,
             isGroup: false,
             senderName: nil)
