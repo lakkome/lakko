@@ -1947,7 +1947,7 @@ public class ContactsRepository(
                             // A damaged row: the old mailbox is read from 0.
                         }
                     }
-                    pollPredecessorWelcomes()
+                    pollPredecessorWelcomes(secrets.accountId)
                     val result = client.pollStrangerInbox(
                         own = sender.ownMailbox,
                         myX25519Secret = sender.x25519Secret,
@@ -2061,8 +2061,10 @@ public class ContactsRepository(
                     // KeyPackage after every attempt, success or failure.
                     var joinFailure: InboxError? = null
                     // ADR-0087 section 9 — a Welcome that could not be kept
-                    // stays behind the cursor, or it is lost.
-                    var welcomeNotKept = false
+                    // stays behind the cursor, or it is lost: the DS ids of
+                    // the Welcomes this pass keeps for a later one. The
+                    // cursor stops just before the earliest of them.
+                    val heldWelcomeIds = ArrayList<Long>()
                     val answeredBy = HashMap<String, String>()
                     if (welcomes.isNotEmpty()) {
                         Log.i(TAG, "inbox: ${welcomes.size} Welcome row(s) received")
@@ -2073,7 +2075,7 @@ public class ContactsRepository(
                     // request's: nothing. A landed join that cannot be made
                     // durable holds the cursor.
                     val publisherLander = me.lakko.app.channels.PendingPublisherRequests.lander
-                    suspend fun landPublisherWelcome(bytes: ByteArray): Boolean {
+                    suspend fun landPublisherWelcome(messageId: Long, bytes: ByteArray): Boolean {
                         val land = publisherLander ?: return false
                         return try {
                             land(bytes)
@@ -2081,19 +2083,37 @@ public class ContactsRepository(
                             throw e
                         } catch (e: Throwable) {
                             Log.w(TAG, "inbox: a publisher Welcome was not kept (${e.javaClass.simpleName})")
-                            welcomeNotKept = true
+                            heldWelcomeIds += messageId
                             true
                         }
                     }
                     for (pw in result.events.filterIsInstance<IncomingMailboxEvent.PublisherWelcome>()) {
                         if (!bound.isCurrent) return@useClientWith
-                        if (landPublisherWelcome(pw.welcomeBytes)) Log.i(TAG, "inbox: a publisher request landed")
+                        if (landPublisherWelcome(pw.messageId, pw.welcomeBytes)) Log.i(TAG, "inbox: a publisher request landed")
+                    }
+                    // A Welcome can only be joined once this device's chat
+                    // layer is bootstrapped for this account. At launch the
+                    // inbox pass can run before that bootstrap finished (a
+                    // Welcome already waiting in the mailbox): it waits for it,
+                    // within this pass's long-poll budget, and when the layer
+                    // is still not ready the Welcomes stay behind the cursor
+                    // for the next pass instead of being consumed. Waiting
+                    // here is what keeps a held Welcome from being re-read in
+                    // a tight loop.
+                    val chatReady = chatRepo == null || welcomes.isEmpty() ||
+                        chatRepo.awaitReadyFor(secrets.accountId, waitSecs.coerceAtLeast(0) * 1_000L)
+                    if (!chatReady) {
+                        Log.i(TAG, "inbox: ${welcomes.size} Welcome row(s) kept until the chat layer is ready")
                     }
                     for (welcome in welcomes) {
                         if (!bound.isCurrent) return@useClientWith
                         // A pending publisher request's Welcome sent as a plain
                         // Welcome row is the request's, never a chat to join.
-                        if (landPublisherWelcome(welcome.welcomeBytes)) continue
+                        if (landPublisherWelcome(welcome.messageId, welcome.welcomeBytes)) continue
+                        if (chatRepo != null && !chatReady) {
+                            heldWelcomeIds += welcome.messageId
+                            continue
+                        }
                         if (chatRepo != null) {
                             // ADR-0060 section 1 (2026-11-06) — a Welcome admitted
                             // by a retired contact key: its founder is read
@@ -2141,6 +2161,13 @@ public class ContactsRepository(
                                     TAG,
                                     "inbox: Welcome ${me.lakko.app.chat.welcomeOutcomeOf(e)} (${e.javaClass.simpleName})",
                                 )
+                                // The chat layer stopped being ready between the
+                                // wait above and the join (a session switch):
+                                // the Welcome was never tried, so it stays.
+                                if (me.lakko.app.chat.isChatLayerNotReady(e)) {
+                                    heldWelcomeIds += welcome.messageId
+                                    continue
+                                }
                                 // ADR-0060 — every device of the account reads
                                 // the one account mailbox, so a Welcome sealed
                                 // to another of its devices lands here too and
@@ -2159,7 +2186,7 @@ public class ContactsRepository(
                                 // is tried again; the cursor must not take it.
                                 val stillActive = me.lakko.app.chat.groupStillActiveHex(e)
                                 if (stillActive != null) {
-                                    if (!chatRepo.holdWelcome(stillActive, welcome.welcomeBytes)) welcomeNotKept = true
+                                    if (!chatRepo.holdWelcome(stillActive, welcome.welcomeBytes)) heldWelcomeIds += welcome.messageId
                                     continue
                                 }
                                 // A dropped Welcome is a chat someone started
@@ -2188,8 +2215,12 @@ public class ContactsRepository(
                     // belongs to the previous account's inbox. `clear()` already
                     // reset the state; do not land the rows or the cursor in it.
                     if (!bound.isCurrent || boundAccountB64 != accountB64) return@useClientWith
-                    if (!read.usesKeptCursor && !welcomeNotKept) {
-                        inboxMailboxStore?.advance(accountB64, currentKeyB64, result.cursor)
+                    if (!read.usesKeptCursor) {
+                        inboxMailboxStore?.advance(
+                            accountB64,
+                            currentKeyB64,
+                            me.lakko.app.chat.inboxCursorAfterPass(read.after, result.cursor, heldWelcomeIds),
+                        )
                     }
 
                     // ADR-0074 3.5a rule 5 - a request sent again from a
@@ -2249,8 +2280,11 @@ public class ContactsRepository(
                             // Never backwards: a stale batch cannot re-arm a
                             // re-fetch of rows this device already handled.
                             // A later mailbox's cursor is kept apart.
+                            // A Welcome kept for a later pass stays ahead of
+                            // the cursor (it used to move past it here and the
+                            // Welcome was lost).
                             cursor = if (read.usesKeptCursor) {
-                                advanceInboxCursor(state.cursor, result.cursor)
+                                me.lakko.app.chat.inboxCursorAfterPass(state.cursor, result.cursor, heldWelcomeIds)
                             } else {
                                 state.cursor
                             },
@@ -4022,8 +4056,12 @@ public class ContactsRepository(
      * identity bundle and follows the proof). Best-effort; the cursor of
      * each mailbox only moves forward.
      */
-    private suspend fun pollPredecessorWelcomes() {
+    private suspend fun pollPredecessorWelcomes(accountId: ByteArray) {
         val chat = chatRepo ?: return
+        // Not bootstrapped for this account yet: the previous mailboxes are
+        // left unread (their cursors stay) and read on a later pass, so a
+        // Welcome waiting there is not consumed by a join that cannot run.
+        if (!chat.isReadyFor(accountId)) return
         val predecessors = try {
             authRepo.ownPredecessors()
         } catch (_: Throwable) {
@@ -4053,6 +4091,7 @@ public class ContactsRepository(
                                         uniffi.lakko_ffi_uniffi.dsMailboxSigner(identity),
                                     ),
                                 )
+                                val held = ArrayList<Long>()
                                 for (event in result.events) {
                                     val welcome = event as? IncomingMailboxEvent.Welcome ?: continue
                                     try {
@@ -4060,12 +4099,18 @@ public class ContactsRepository(
                                     } catch (cancel: kotlinx.coroutines.CancellationException) {
                                         throw cancel
                                     } catch (cause: Throwable) {
-                                        if (!me.lakko.app.chat.isWelcomeForAnotherDevice(cause)) {
+                                        // Never tried: kept behind the cursor.
+                                        if (me.lakko.app.chat.isChatLayerNotReady(cause)) {
+                                            held += welcome.messageId
+                                        } else if (!me.lakko.app.chat.isWelcomeForAnotherDevice(cause)) {
                                             Log.w(TAG, "a Welcome in a previous mailbox was not joined: ${cause.javaClass.simpleName}")
                                         }
                                     }
                                 }
-                                authRepo.advancePredecessorMailboxCursor(previous.signaturePubkey, result.cursor)
+                                authRepo.advancePredecessorMailboxCursor(
+                                    previous.signaturePubkey,
+                                    me.lakko.app.chat.inboxCursorAfterPass(previous.mailboxCursor, result.cursor, held),
+                                )
                             } finally {
                                 secret.fill(0)
                             }

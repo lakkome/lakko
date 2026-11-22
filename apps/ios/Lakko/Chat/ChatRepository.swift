@@ -2035,6 +2035,16 @@ public final class ChatRepository: ObservableObject {
     /// (``holdWelcomeForActiveGroup(groupIdHex:welcome:)``) instead of losing
     /// it. When the replaced group's person was out, nothing of it carries;
     /// when only this device's leaf was retired, the history does.
+    /// Whether this repository can join Welcomes for the account
+    /// ``accountIdB64`` (base64): its bootstrap for that account finished.
+    /// Before that ``joinGroupFromWelcome(welcomeBytes:)`` throws "not
+    /// bootstrapped", which the inbox must not take as a refusal.
+    public func isReady(forAccountIdB64 accountIdB64: String) -> Bool {
+        ChatLayerReadiness.isReady(
+            bootstrapped: state.bootstrapped, chatAccountIdB64: currentAccountIdB64,
+            hasIdentity: canonicalIdentity != nil, wantedAccountIdB64: accountIdB64)
+    }
+
     public func joinGroupFromWelcome(welcomeBytes: Data) async throws -> String {
         defer { republishKeyPackage() }
         guard let identity = canonicalIdentity else {

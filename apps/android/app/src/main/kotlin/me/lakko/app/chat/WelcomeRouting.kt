@@ -3,6 +3,8 @@
 
 package me.lakko.app.chat
 
+import kotlinx.coroutines.flow.first
+
 /*
  * ADR-0060 section 6, "one inbound mailbox per person" (amending ADR-0050
  * section 2.7) — a Welcome goes to the added leaf's ACCOUNT mailbox, one write
@@ -73,7 +75,8 @@ public fun isWelcomeNotAConversation(error: Throwable): Boolean {
  * Welcome while one is awaited ([awaitingCoPublishWelcome]) raise nothing.
  */
 public fun welcomeFailureRaisesBanner(error: Throwable, awaitingCoPublishWelcome: Boolean): Boolean =
-    !isWelcomeForAnotherDevice(error) &&
+    !isChatLayerNotReady(error) &&
+        !isWelcomeForAnotherDevice(error) &&
         groupStillActiveHex(error) == null &&
         !isWelcomeNotAConversation(error) &&
         !awaitingCoPublishWelcome
@@ -93,6 +96,10 @@ public enum class WelcomeOutcome {
     /** Refused for a group this device still holds as active: kept, tried again. */
     HELD_GROUP_STILL_ACTIVE,
 
+    /** Not tried: this device's chat layer was not ready for the account
+     *  (not bootstrapped yet, or another account). Kept, tried again. */
+    HELD_CHAT_NOT_READY,
+
     /** Not a conversation (a PublisherGroup or DeviceGroup Welcome): not this
      *  intake's, nothing to report. */
     NOT_A_CONVERSATION,
@@ -103,8 +110,75 @@ public enum class WelcomeOutcome {
 
 /** The outcome of a join attempt that threw [error]. */
 public fun welcomeOutcomeOf(error: Throwable): WelcomeOutcome = when {
+    isChatLayerNotReady(error) -> WelcomeOutcome.HELD_CHAT_NOT_READY
     isWelcomeForAnotherDevice(error) -> WelcomeOutcome.FOR_ANOTHER_DEVICE
     groupStillActiveHex(error) != null -> WelcomeOutcome.HELD_GROUP_STILL_ACTIVE
     isWelcomeNotAConversation(error) -> WelcomeOutcome.NOT_A_CONVERSATION
     else -> WelcomeOutcome.REFUSED
+}
+
+/**
+ * The chat layer cannot act for the signed-in account yet: [ChatRepository]
+ * has not finished its bootstrap, or it holds another account. Nothing about
+ * the input is wrong; the same call succeeds once the layer is ready, so a
+ * Welcome refused with it is kept behind the inbox cursor, never consumed.
+ */
+public class ChatLayerNotReady(message: String) : IllegalStateException(message)
+
+/** Whether [error] (or anything in its cause chain) is [ChatLayerNotReady].
+ *  Typed, never matched by message. */
+public fun isChatLayerNotReady(error: Throwable): Boolean {
+    var cause: Throwable? = error
+    val seen = HashSet<Throwable>()
+    while (cause != null && seen.add(cause)) {
+        if (cause is ChatLayerNotReady) return true
+        cause = cause.cause
+    }
+    return false
+}
+
+/**
+ * Whether the chat layer can join Welcomes for [wantedAccountB64]: it finished
+ * its bootstrap ([bootstrapped]), holds an identity ([hasIdentity]) and that
+ * bootstrap was for this account ([chatAccountB64]).
+ */
+public fun chatLayerReadyFor(
+    bootstrapped: Boolean,
+    chatAccountB64: String?,
+    hasIdentity: Boolean,
+    wantedAccountB64: String,
+): Boolean = bootstrapped && hasIdentity && chatAccountB64 == wantedAccountB64
+
+/**
+ * Wait until [isReady] holds, re-checking on every emission of [changes],
+ * for at most [timeoutMs]. `true` when it holds (at once, or within the
+ * time); `false` when it did not. A [timeoutMs] of 0 or less does not wait.
+ *
+ * The inbox poll waits here before it joins Welcomes: a pass that met an
+ * unready chat layer spends its long-poll budget waiting rather than
+ * returning at once and re-reading the held rows in a tight loop.
+ */
+public suspend fun awaitChatLayerReady(
+    isReady: () -> Boolean,
+    changes: kotlinx.coroutines.flow.Flow<*>,
+    timeoutMs: Long,
+): Boolean {
+    if (isReady()) return true
+    if (timeoutMs <= 0) return false
+    return kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+        changes.first { isReady() }
+        true
+    } ?: isReady()
+}
+
+/**
+ * The inbox cursor after a pass that fetched up to [fetched]: never backward
+ * from [current], and never past a Welcome this pass kept for later
+ * ([heldWelcomeIds], DS message ids). The cursor stops just before the
+ * earliest held Welcome, so the next pass reads it again; the rows after it
+ * are read again too, and the steps that take them are idempotent.
+ */
+public fun inboxCursorAfterPass(current: Long, fetched: Long, heldWelcomeIds: Collection<Long>): Long {
+    val earliestHeld = heldWelcomeIds.minOrNull() ?: return maxOf(current, fetched)
+    return maxOf(current, minOf(fetched, earliestHeld - 1))
 }

@@ -214,4 +214,52 @@ public enum ContactsInboxMerge {
     public static func advancedCursor(current: Int64, polled: Int64) -> Int64 {
         max(current, polled)
     }
+
+    /// The cursor after a batch in which some Welcomes were kept for a later
+    /// pass (``heldWelcomeIds``, DS message ids): never backward, and never
+    /// past the earliest held Welcome, so the next poll reads it again. The
+    /// rows after it are read again too; the steps that take them are
+    /// idempotent.
+    public static func advancedCursor(current: Int64, polled: Int64, heldWelcomeIds: [Int64]) -> Int64 {
+        guard let earliest = heldWelcomeIds.min() else { return advancedCursor(current: current, polled: polled) }
+        return max(current, min(polled, earliest - 1))
+    }
+}
+
+/// Whether this device's chat layer can join a Welcome for an account. Seen
+/// on Android 2026-11-22: the inbox pass ran before the chat bootstrap
+/// finished, the join threw "not bootstrapped" and the cursor moved past the
+/// Welcome, so the person never joined. On iOS the same pass runs from a
+/// background refresh with no session root at all. A Welcome the chat layer
+/// cannot try yet stays ahead of the cursor.
+public enum ChatLayerReadiness {
+    public static func isReady(
+        bootstrapped: Bool, chatAccountIdB64: String?, hasIdentity: Bool, wantedAccountIdB64: String
+    ) -> Bool {
+        bootstrapped && hasIdentity && chatAccountIdB64 == wantedAccountIdB64
+    }
+
+    /// Wait until ``isReady`` holds, checking every ``stepMs``, for at most
+    /// ``timeoutMs``. `true` when it holds. A ``timeoutMs`` of 0 or less does
+    /// not wait. The inbox pass waits here before it joins Welcomes, so a
+    /// pass that met an unready chat layer spends its long-poll budget rather
+    /// than re-reading the held rows in a tight loop. Cancellation ends the
+    /// wait (`false` unless ready).
+    @MainActor
+    public static func awaitReady(
+        timeoutMs: Int64,
+        stepMs: Int64 = 250,
+        sleep: (UInt64) async -> Void = { try? await Task.sleep(nanoseconds: $0) },
+        isReady: () -> Bool
+    ) async -> Bool {
+        if isReady() { return true }
+        var waited: Int64 = 0
+        while waited < timeoutMs, !Task.isCancelled {
+            let step = min(stepMs, timeoutMs - waited)
+            await sleep(UInt64(step) * 1_000_000)
+            waited += step
+            if isReady() { return true }
+        }
+        return isReady()
+    }
 }

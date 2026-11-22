@@ -744,6 +744,29 @@ public final class ContactsRepository: ObservableObject {
             // one bound of a few seconds. Only a verified `suspended` counts;
             // a late or failed answer shows the request as before.
             let suspendedSenders = await suspendedRequestSenders(Self.requestSenders(pollResult.events))
+            // A Welcome can only be joined once the chat layer is bootstrapped
+            // for this account. A background refresh runs with no session
+            // root (nothing bootstrapped it), and at launch this pass can run
+            // first: it waits for the bootstrap within its long-poll budget,
+            // and the Welcomes the chat layer still cannot try stay ahead of
+            // the cursor (``ContactsInboxMerge/advancedCursor(current:polled:heldWelcomeIds:)``)
+            // instead of being consumed. The wait is what keeps a held
+            // Welcome from being re-read in a tight loop.
+            let hasWelcomes = pollResult.events.contains {
+                if case .welcome = $0 { return true } else { return false }
+            }
+            var chatReady = true
+            if hasWelcomes {
+                chatReady = await ChatLayerReadiness.awaitReady(
+                    timeoutMs: Int64(max(waitSecs, 0)) * 1000
+                ) { [weak self] in
+                    self?.chatRepository?.isReady(forAccountIdB64: pollAccountIdB64) ?? false
+                }
+            }
+            var heldWelcomeIds: [Int64] = []
+            if !chatReady {
+                NSLog("contacts inbox: Welcome row(s) kept until the chat layer is ready")
+            }
             for event in pollResult.events {
                 // The session ended (or changed account) while this batch
                 // was in flight, or while a Welcome of it was being joined:
@@ -754,6 +777,17 @@ public final class ContactsRepository: ObservableObject {
                 // decides about it: no grant, profile, regrant, link-answer
                 // acceptance or card.
                 if Self.droppedAsSuspended(event, suspendedSenders: suspendedSenders) { continue }
+                // Before anything reads it (the founder peek below needs the
+                // chat layer too): a Welcome this device cannot try yet. A
+                // publisher request's Welcome sent as a plain row is landed
+                // as before.
+                if !chatReady, case .welcome(let messageId, let welcomeBytes, _) = event {
+                    if try landPublisherWelcome(welcomeBytes, accountIdB64: pollAccountIdB64, holdWhenNotReady: false) {
+                        continue
+                    }
+                    heldWelcomeIds.append(messageId)
+                    continue
+                }
                 let decision = Self.rowContactDecision(
                     event, reachKeys: pollResult.reachKeyByMessageId,
                     isContact: { [weak self] in self?.isCurrentContact($0) ?? false },
@@ -817,7 +851,7 @@ public final class ContactsRepository: ObservableObject {
                     // holds the cursor.
                     _ = try landPublisherWelcome(welcomeBytes, accountIdB64: pollAccountIdB64, holdWhenNotReady: true)
                     continue
-                case .welcome(_, let welcomeBytes, _):
+                case .welcome(let messageId, let welcomeBytes, _):
                     // A pending publisher request's Welcome sent as a plain
                     // Welcome row is the request's, never a chat to join.
                     if try landPublisherWelcome(welcomeBytes, accountIdB64: pollAccountIdB64, holdWhenNotReady: false) {
@@ -851,6 +885,13 @@ public final class ContactsRepository: ObservableObject {
                             // them goes out now, in order.
                             handOverJoinedPendingContacts()
                         } catch {
+                            // The chat layer stopped being ready between the
+                            // wait above and the join (a session switch):
+                            // the Welcome was never tried, so it stays.
+                            if !chatRepository.isReady(forAccountIdB64: pollAccountIdB64) {
+                                heldWelcomeIds.append(messageId)
+                                continue
+                            }
                             let refusal = Self.mailboxWelcomeRefusal(error)
                             if refusal.raisesJoinFailureBanner {
                                 welcomeJoinFailure = Self.welcomeJoinFailureMessage
@@ -942,7 +983,7 @@ public final class ContactsRepository: ObservableObject {
             state = state.with(
                 pending: merged.applied(to: state.pending),
                 cursor: ContactsInboxMerge.advancedCursor(
-                    current: state.cursor, polled: pollResult.cursor),
+                    current: state.cursor, polled: pollResult.cursor, heldWelcomeIds: heldWelcomeIds),
                 refreshing: false,
                 lastError: welcomeJoinFailure ?? carriedJoinFailure
             )
@@ -996,6 +1037,10 @@ public final class ContactsRepository: ObservableObject {
     /// ``PredecessorMailbox/pollIntervalMs``. Best effort: a failure is
     /// logged and the next round reads again.
     private func pollPredecessorMailboxes(accountIdB64: String) async {
+        // Not bootstrapped for this account: the previous mailboxes are left
+        // unread (their cursors stay), so a Welcome there is not consumed by
+        // a join that cannot run.
+        guard chatRepository?.isReady(forAccountIdB64: accountIdB64) == true else { return }
         let seeds = KeychainOwnPredecessorStore().load(accountIdB64: accountIdB64)
         guard !seeds.isEmpty else { return }
         let now = Int64(Date().timeIntervalSince1970 * 1000)
@@ -1018,12 +1063,19 @@ public final class ContactsRepository: ObservableObject {
                     waitSecs: 0
                 )
                 guard boundAccountIdB64 == accountIdB64 else { return }
+                var held: [Int64] = []
                 for event in result.events {
                     switch event {
-                    case .welcome(_, let welcomeBytes, _):
+                    case .welcome(let messageId, let welcomeBytes, _):
                         do {
                             _ = try await chatRepository?.joinGroupFromWelcome(welcomeBytes: welcomeBytes)
                         } catch {
+                            // Never tried (the session ended or switched
+                            // meanwhile): kept behind the cursor.
+                            if chatRepository?.isReady(forAccountIdB64: accountIdB64) != true {
+                                held.append(messageId)
+                                continue
+                            }
                             NSLog("contacts inbox: a predecessor-mailbox Welcome did not open as a chat: \(error)")
                         }
                     case .contactRequest, .contactAck, .linkRefusal, .publisherWelcome, .conversationReentry:
@@ -1039,7 +1091,11 @@ public final class ContactsRepository: ObservableObject {
                     }
                 }
                 guard boundAccountIdB64 == accountIdB64 else { return }
-                cursors.advance(accountIdB64: accountIdB64, keyB64: keyB64, to: result.cursor)
+                cursors.advance(
+                    accountIdB64: accountIdB64, keyB64: keyB64,
+                    to: ContactsInboxMerge.advancedCursor(
+                        current: cursors.cursor(accountIdB64: accountIdB64, keyB64: keyB64),
+                        polled: result.cursor, heldWelcomeIds: held))
             } catch {
                 NSLog("contacts inbox: a predecessor mailbox could not be read: \(type(of: error))")
             }

@@ -2561,6 +2561,25 @@ public class ChatRepository(
     public suspend fun joinGroupFromWelcome(welcomeBytes: ByteArray): String =
         forSession { joinGroupFromWelcomeOnMlsThread(welcomeBytes = welcomeBytes) }
 
+    /**
+     * Whether this repository can join Welcomes for [accountId] now: its
+     * bootstrap for that account finished. Before that a join throws
+     * [ChatLayerNotReady].
+     */
+    public fun isReadyFor(accountId: ByteArray): Boolean = chatLayerReadyFor(
+        bootstrapped = mutableState.value.bootstrapped,
+        chatAccountB64 = currentAccountIdB64.get(),
+        hasIdentity = canonicalIdentity.get() != null,
+        wantedAccountB64 = base64UrlSafe(accountId),
+    )
+
+    /**
+     * Wait up to [timeoutMs] for [isReadyFor] to hold (checked again on every
+     * state change of this repository). `false` when it still does not.
+     */
+    public suspend fun awaitReadyFor(accountId: ByteArray, timeoutMs: Long): Boolean =
+        awaitChatLayerReady({ isReadyFor(accountId) }, state, timeoutMs)
+
     private suspend fun joinGroupFromWelcomeOnMlsThread(welcomeBytes: ByteArray): String {
         // ADR-0060 §6 — every device of the account reads the one account
         // mailbox, so a Welcome sealed to ANOTHER of its devices fails here
@@ -2571,7 +2590,9 @@ public class ChatRepository(
         try {
             return joinGroupFromWelcomeAttempt(welcomeBytes)
         } catch (e: Throwable) {
-            forAnotherDevice = isWelcomeForAnotherDevice(e)
+            // A join that was never tried (the chat layer is not ready) says
+            // nothing about the KeyPackage either.
+            forAnotherDevice = isWelcomeForAnotherDevice(e) || isChatLayerNotReady(e)
             throw e
         } finally {
             // After every other attempt. A KeyPackage is a last-resort package
@@ -2596,15 +2617,17 @@ public class ChatRepository(
      */
     public suspend fun welcomeFounderAccountKey(welcomeBytes: ByteArray): ByteArray = forSession {
         val identity = canonicalIdentity.get()
-            ?: throw IllegalStateException("ChatRepository not bootstrapped — call bootstrap() first")
+            ?: throw ChatLayerNotReady("ChatRepository not bootstrapped — call bootstrap() first")
         providerLock.sessionLock {
             uniffi.lakko_ffi_uniffi.peekWelcomeFounder(welcomeBytes, identity).founderAccountKey
         }
     }
 
     private suspend fun joinGroupFromWelcomeAttempt(welcomeBytes: ByteArray): String {
+        // Not bootstrapped yet: nothing about the Welcome is wrong, and the
+        // inbox keeps it behind its cursor for the next pass ([ChatLayerNotReady]).
         val identity = canonicalIdentity.get()
-            ?: throw IllegalStateException(
+            ?: throw ChatLayerNotReady(
                 "ChatRepository not bootstrapped — call bootstrap() first",
             )
         // G-37 — provider-only (no DS call in this path), and the group id is

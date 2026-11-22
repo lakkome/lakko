@@ -170,4 +170,101 @@ final class ContactsInboxStoreTests: XCTestCase {
     func testCursorIsIdempotentOnEqualPoll() {
         XCTAssertEqual(ContactsInboxMerge.advancedCursor(current: 15, polled: 15), 15)
     }
+
+    // MARK: - A Welcome the chat layer cannot try yet (seen on Android 2026-11-22)
+
+    /// The inbox pass ran before the chat bootstrap finished (on iOS, a
+    /// background refresh runs with no session root at all): the join threw
+    /// "not bootstrapped" and the cursor moved past the Welcome, so the
+    /// person never joined the group. A held Welcome stays ahead of the cursor.
+    func testCursorStopsJustBeforeTheEarliestHeldWelcome() {
+        XCTAssertEqual(ContactsInboxMerge.advancedCursor(current: 10, polled: 40, heldWelcomeIds: []), 40)
+        // The defect: one row, the Welcome at id 11.
+        XCTAssertEqual(ContactsInboxMerge.advancedCursor(current: 10, polled: 11, heldWelcomeIds: [11]), 10)
+        XCTAssertEqual(ContactsInboxMerge.advancedCursor(current: 10, polled: 30, heldWelcomeIds: [20, 15]), 14)
+        // Never backward.
+        XCTAssertEqual(ContactsInboxMerge.advancedCursor(current: 10, polled: 30, heldWelcomeIds: [5]), 10)
+        XCTAssertEqual(ContactsInboxMerge.advancedCursor(current: 50, polled: 40, heldWelcomeIds: []), 50)
+    }
+
+    func testChatLayerIsReadyOnlyOnceBootstrappedForThisAccount() {
+        XCTAssertTrue(ChatLayerReadiness.isReady(
+            bootstrapped: true, chatAccountIdB64: "A", hasIdentity: true, wantedAccountIdB64: "A"))
+        XCTAssertFalse(ChatLayerReadiness.isReady(
+            bootstrapped: false, chatAccountIdB64: "A", hasIdentity: true, wantedAccountIdB64: "A"))
+        XCTAssertFalse(ChatLayerReadiness.isReady(
+            bootstrapped: true, chatAccountIdB64: nil, hasIdentity: true, wantedAccountIdB64: "A"))
+        XCTAssertFalse(ChatLayerReadiness.isReady(
+            bootstrapped: true, chatAccountIdB64: "A", hasIdentity: false, wantedAccountIdB64: "A"))
+        XCTAssertFalse(ChatLayerReadiness.isReady(
+            bootstrapped: true, chatAccountIdB64: "B", hasIdentity: true, wantedAccountIdB64: "A"))
+    }
+
+    @MainActor
+    func testThePassWaitsForABootstrapThatFinishesWithinItsBudget() async {
+        var ready = false
+        var slept: UInt64 = 0
+        let result = await ChatLayerReadiness.awaitReady(
+            timeoutMs: 30_000, stepMs: 250,
+            sleep: { ns in
+                slept += ns
+                // The bootstrap finishes after two seconds of waiting.
+                if slept >= 2_000_000_000 { ready = true }
+            },
+            isReady: { ready })
+        XCTAssertTrue(result)
+        XCTAssertEqual(slept, 2_000_000_000)
+    }
+
+    @MainActor
+    func testABootstrapThatDoesNotFinishSpendsTheWholeBudget() async {
+        var slept: UInt64 = 0
+        let result = await ChatLayerReadiness.awaitReady(
+            timeoutMs: 30_000, stepMs: 250, sleep: { slept += $0 }, isReady: { false })
+        XCTAssertFalse(result)
+        // Waited the budget rather than returning at once: a held Welcome is
+        // read again once per budget, never in a tight loop.
+        XCTAssertEqual(slept, 30_000_000_000)
+    }
+
+    @MainActor
+    func testReadyAtOnceAndAZeroBudgetDoNotWait() async {
+        var slept: UInt64 = 0
+        let sleep: (UInt64) async -> Void = { slept += $0 }
+        let atOnce = await ChatLayerReadiness.awaitReady(timeoutMs: 30_000, sleep: sleep, isReady: { true })
+        XCTAssertTrue(atOnce)
+        let zero = await ChatLayerReadiness.awaitReady(timeoutMs: 0, sleep: sleep, isReady: { false })
+        XCTAssertFalse(zero)
+        XCTAssertEqual(slept, 0)
+    }
+
+    /// Two inbox passes over one mailbox row (the Welcome, id 11) with the
+    /// cursor at 10, using the steps the pass runs: held while the chat layer
+    /// is not ready, joined on the pass after the bootstrap.
+    @MainActor
+    func testAWelcomeWaitingAtLaunchIsJoinedOnThePassAfterTheBootstrap() async {
+        var bootstrapped = false
+        var cursor: Int64 = 10
+        var joined: [Int64] = []
+        func pass() async {
+            let rows = [Int64(11)].filter { $0 > cursor }
+            var held: [Int64] = []
+            let ready = rows.isEmpty
+                ? true
+                : await ChatLayerReadiness.awaitReady(timeoutMs: 1_000, sleep: { _ in }, isReady: { bootstrapped })
+            for id in rows {
+                if !ready { held.append(id); continue }
+                joined.append(id)
+            }
+            cursor = ContactsInboxMerge.advancedCursor(
+                current: cursor, polled: rows.max() ?? cursor, heldWelcomeIds: held)
+        }
+        await pass()
+        XCTAssertEqual(joined, [])
+        XCTAssertEqual(cursor, 10)
+        bootstrapped = true
+        await pass()
+        XCTAssertEqual(joined, [11])
+        XCTAssertEqual(cursor, 11)
+    }
 }
