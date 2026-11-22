@@ -10105,6 +10105,14 @@
       "text": "Lakko funciona en una sola pestaña a la vez. Úsalo aquí y la otra pestaña se detendrá.",
       "status": "machine"
     },
+    "tab.other.close_body": {
+      "text": "Otra pestaña o ventana de Lakko sigue abierta en este navegador. Ciérrala y luego usa Lakko aquí.",
+      "status": "machine"
+    },
+    "tab.other.close_body_desktop": {
+      "text": "Otra ventana de Lakko sigue abierta en este ordenador. Ciérrala y luego usa Lakko aquí.",
+      "status": "machine"
+    },
     "tab.other.use_here": {
       "text": "Usar aquí",
       "status": "machine"

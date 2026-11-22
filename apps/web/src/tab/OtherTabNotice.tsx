@@ -10,7 +10,12 @@ import { createSignal, type JSX } from "solid-js";
 import { t } from "../l10n";
 import { PublicLayout } from "../ui/PublicLayout";
 
-export function OtherTabNotice(props: { onUseHere: () => Promise<void> }): JSX.Element {
+export function OtherTabNotice(props: {
+  onUseHere: () => Promise<void>;
+  /** An older page keeps writing and cannot be stopped from here: ask the
+   *  person to close it (`stale-reload.ts`). */
+  closeOther?: boolean;
+}): JSX.Element {
   const [opening, setOpening] = createSignal(false);
   const useHere = async (): Promise<void> => {
     if (opening()) return;
@@ -26,7 +31,7 @@ export function OtherTabNotice(props: { onUseHere: () => Promise<void> }): JSX.E
   return (
     <PublicLayout>
       <h1>{t("tab.other.title")}</h1>
-      <p style={{ margin: 0, color: "var(--surface-muted)" }}>{t("tab.other.body")}</p>
+      <p style={{ margin: 0, color: "var(--surface-muted)" }}>{props.closeOther === true ? t("tab.other.close_body") : t("tab.other.body")}</p>
       <button type="button" class="primary" disabled={opening()} onClick={() => void useHere()}>
         {opening() ? t("tab.other.opening") : t("tab.other.use_here")}
       </button>

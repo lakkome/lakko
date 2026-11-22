@@ -837,6 +837,9 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   // ADR-0088 / docs/ux/calls.md 4.1.3: the noise suppression switch is
   // chosen per device and names no account.
   "lakko.call.noise-suppression": "device",
+  // docs/ux/one-tab.md section 6: when this tab last reloaded because its
+  // save was refused as stale (sessionStorage, per tab). Names no account.
+  "lakko-stale-reload-at": "device",
   // not storage names
   // The notification tag of identity-recovery 17.5 (`added-notice.ts`).
   "lakko-device-added:": "not-storage",

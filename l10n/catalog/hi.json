@@ -10105,6 +10105,14 @@
       "text": "Lakko एक समय में एक ही टैब में चलता है। इसे यहाँ इस्तेमाल करें, दूसरा टैब रुक जाएगा।",
       "status": "machine"
     },
+    "tab.other.close_body": {
+      "text": "इस ब्राउज़र में Lakko का दूसरा टैब या विंडो अभी भी चल रहा है। उसे बंद करें, फिर Lakko यहाँ इस्तेमाल करें।",
+      "status": "machine"
+    },
+    "tab.other.close_body_desktop": {
+      "text": "इस कंप्यूटर पर Lakko की दूसरी विंडो अभी भी चल रही है। उसे बंद करें, फिर Lakko यहाँ इस्तेमाल करें।",
+      "status": "machine"
+    },
     "tab.other.use_here": {
       "text": "यहाँ इस्तेमाल करें",
       "status": "machine"

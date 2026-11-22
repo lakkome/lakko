@@ -208,6 +208,7 @@ import {
   type SavedEntry,
 } from "./synced-projection";
 import { drainOutbox, type OutboxBatch } from "./folder-outbox";
+import { foldThenPublish } from "./draft-write";
 import { publishOwnDeviceRoster } from "../own-device-roster";
 import {
   detectGrowth,
@@ -349,6 +350,17 @@ export interface DeviceGroupSyncApi {
   /** Compose + publish a `Draft` payload. Empty `text` clears
    *  the receivers' draft for the same group. */
   setDraft(
+    groupId: Uint8Array,
+    text: string,
+    replyToId?: Uint8Array,
+  ): Promise<void>;
+
+  /** The composer's draft: folded into this device's state before this
+   *  returns (so it reaches disk with the next write whatever the network
+   *  does), then published. The promise is the publish alone.
+   *  {@link setDraft} folds only after the publish succeeded, which a
+   *  caller that retries until the publish lands relies on. */
+  saveDraft(
     groupId: Uint8Array,
     text: string,
     replyToId?: Uint8Array,
@@ -3741,6 +3753,32 @@ export function DeviceGroupSyncProvider(props: {
     if (synced === s && s.applyDraft(hlc, groupId, text, reply)) refresh();
   }
 
+  function saveDraftImpl(
+    groupId: Uint8Array,
+    text: string,
+    replyToId?: Uint8Array,
+  ): Promise<void> {
+    let ready: { g: WasmDeviceGroup; id: WasmIdentity; s: WasmSyncedState };
+    try {
+      ready = requireReady();
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    const { g, id, s } = ready;
+    const hlc = mintHlc();
+    const reply = replyToId ?? new Uint8Array(0);
+    const bytes = g.createDeviceGroupDraftMessage(id, groupId, text, reply, hlc);
+    // A device never receives its own DeviceGroup messages: the fold is the
+    // only copy this device keeps, so it goes in now, at the stamp the
+    // publish carries, and the persister writes it whatever the publish does.
+    return foldThenPublish(
+      () => {
+        if (s.applyDraft(hlc, groupId, text, reply)) refresh();
+      },
+      () => publishGroupMessage(bytes),
+    );
+  }
+
   async function setFlagsImpl(
     groupId: Uint8Array,
     next: {
@@ -3957,6 +3995,7 @@ export function DeviceGroupSyncProvider(props: {
       return readCursors()[groupIdHex(groupId)];
     },
     setDraft: setDraftImpl,
+    saveDraft: saveDraftImpl,
     setFlags: setFlagsImpl,
     setReadCursor: setReadCursorImpl,
     setOrder: setOrderImpl,

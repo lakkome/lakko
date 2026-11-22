@@ -10105,6 +10105,14 @@
       "text": "Lakko працює в одній вкладці водночас. Відкрийте його тут, і інша вкладка зупиниться.",
       "status": "machine"
     },
+    "tab.other.close_body": {
+      "text": "У цьому браузері ще працює інша вкладка чи вікно Lakko. Закрийте їх, потім відкрийте Lakko тут.",
+      "status": "machine"
+    },
+    "tab.other.close_body_desktop": {
+      "text": "На цьому комп'ютері ще працює інше вікно Lakko. Закрийте його, потім відкрийте Lakko тут.",
+      "status": "machine"
+    },
     "tab.other.use_here": {
       "text": "Відкрити тут",
       "status": "machine"

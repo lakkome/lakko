@@ -44,6 +44,7 @@ export const DESKTOP_COPY: Readonly<Record<string, string>> = {
   "settings.translation.unavailable.transcription_web": "settings.translation.unavailable.transcription",
   "settings.translation.unavailable.translation_web": "settings.translation.unavailable.translation",
   "translate.pack.source.web": "translate.pack.source.desktop",
+  "tab.other.close_body": "tab.other.close_body_desktop",
 };
 
 /** The key to render for `key` on this platform. */

@@ -10105,6 +10105,14 @@
       "text": "Lakko هر بار فقط در یک زبانه کار می‌کند. اینجا از آن استفاده کنید تا زبانهٔ دیگر متوقف شود.",
       "status": "machine"
     },
+    "tab.other.close_body": {
+      "text": "یک زبانه یا پنجره دیگر Lakko هنوز در این مرورگر در حال اجراست. آن را ببندید، سپس از Lakko اینجا استفاده کنید.",
+      "status": "machine"
+    },
+    "tab.other.close_body_desktop": {
+      "text": "یک پنجره دیگر Lakko هنوز روی این رایانه در حال اجراست. آن را ببندید، سپس از Lakko اینجا استفاده کنید.",
+      "status": "machine"
+    },
     "tab.other.use_here": {
       "text": "استفاده در اینجا",
       "status": "machine"

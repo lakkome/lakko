@@ -11937,6 +11937,14 @@
       "text": "Lakko works in one tab at a time. Use it here and the other tab stops.",
       "comment": "Line under 'Lakko is open in another tab.'; explains the button 'Use here', which moves Lakko to this tab and stops the other one."
     },
+    "tab.other.close_body": {
+      "text": "Another Lakko tab or window in this browser is still running. Close it, then use Lakko here.",
+      "comment": "Line under 'Lakko is open in another tab.' when an older Lakko page in this browser keeps saving over this one and cannot be stopped from here; the button 'Use here' reloads this tab."
+    },
+    "tab.other.close_body_desktop": {
+      "text": "Another Lakko window is still running on this computer. Close it, then use Lakko here.",
+      "comment": "The desktop app's form of tab.other.close_body: another Lakko window keeps saving over this one."
+    },
     "tab.other.use_here": {
       "text": "Use here",
       "comment": "Button on the 'open in another tab' notice: moves Lakko to this tab; the other tab stops and shows the same notice."

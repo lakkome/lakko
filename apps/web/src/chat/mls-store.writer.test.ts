@@ -27,13 +27,15 @@ import type { DsClient } from "../ds/client";
 import { ChatClient } from "./client";
 import { readCursorEpoch, recordCursorEpoch } from "./cursor-epoch";
 import {
+  awaitTx,
   loadMlsSnapshot,
+  openMlsDb,
   SnapshotWriter,
   StaleProviderError,
   type SnapshotCapture,
 } from "./mls-store";
 import { markOwnPublished } from "./own-published";
-import { failedApplyKind } from "./registered-commit-hold";
+import { failedApplyKind, registeredCommitHolds } from "./registered-commit-hold";
 
 const ACCOUNT = "b25lLXRhYi1hY2NvdW50LTAw";
 const DEVICE_SEED = new Uint8Array(64).fill(0x41);
@@ -310,5 +312,123 @@ describe("the cursor epoch follows the disk, not memory (c1)", () => {
     await f.chat.pollMessages(null, f.group, cursor, 0, { read: () => cursor, advance: (to) => void (cursor = to) });
     expect(f.persists()).toBe(0);
     expect(readCursorEpoch(f.gid)).toBe(79n);
+  });
+});
+
+/** The stored row as it is, or put back as it was (raw, no writer). */
+async function rawRow(): Promise<Record<string, unknown> | undefined> {
+  const db = await openMlsDb();
+  try {
+    const tx = db.transaction("snapshots", "readonly");
+    const req = tx.objectStore("snapshots").get(ACCOUNT);
+    return await new Promise((res, rej) => {
+      req.onsuccess = (): void => res(req.result as Record<string, unknown> | undefined);
+      req.onerror = (): void => rej(req.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+async function putRawRow(row: Record<string, unknown>): Promise<void> {
+  const db = await openMlsDb();
+  try {
+    const tx = db.transaction("snapshots", "readwrite");
+    tx.objectStore("snapshots").put(row);
+    await awaitTx(tx, undefined);
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * The live sequence of 2026-11-21 (test.lakko.me): the owner's row loads with
+ * the group at N, no `generation` field (written by a build before the
+ * writer), and the cursor recorded at N+2. The poll reads again from the
+ * commit that leaves N, which is this device's own and cannot apply: held,
+ * attempt 1, then attempt 2, each with a persist through the writer.
+ */
+describe("one page, a group behind its cursor (live 2026-11-21)", () => {
+  async function behindOwner() {
+    const { gid, startEpoch, m1, leafM2 } = await founded();
+    const atN = await rawRow(); // the row with the group at N
+    const tabA = await openRealm();
+    const gA = tabA.groups[0]!;
+    const c1 = sweepCommit(tabA.identity, gA, () => gA.proposeRemoveMember(tabA.identity, leafM2));
+    const c2 = sweepCommit(tabA.identity, gA, () =>
+      gA.proposeGroupRoles(tabA.identity, tabA.identity.signaturePublicKey, m1.signaturePublicKey),
+    );
+    recordCursorEpoch(gid, startEpoch + 2n);
+    // What the older build left on disk: N, and no generation.
+    const legacy = { ...atN! };
+    delete legacy["generation"];
+    delete legacy["groupEpochs"];
+    await putRawRow(legacy);
+    const page = await openRealm();
+    expect(page.groups[0]!.epoch).toBe(startEpoch);
+    const ds = {
+      fetchGroup: async () => ({
+        messages: [
+          { id: 101, payload: c1, createdAt: "2026-11-21T10:00:00Z" },
+          { id: 102, payload: c2, createdAt: "2026-11-21T10:00:01Z" },
+        ],
+        hasMore: false,
+        latestEpoch: Number(startEpoch + 2n),
+        registeredCommits: new Map<bigint, number>([
+          [startEpoch + 1n, 101],
+          [startEpoch + 2n, 102],
+        ]),
+      }),
+    } as unknown as DsClient;
+    const chat = new ChatClient(ds, {
+      identityProvider: () => page.identity,
+      onPersist: () => page.persist(),
+    });
+    return { gid, page, chat };
+  }
+
+  afterEach(() => {
+    registeredCommitHolds.clear();
+  });
+
+  it("the hold and its retries write through the writer and are never refused as stale", async () => {
+    const { gid, page, chat } = await behindOwner();
+    const stale = vi.fn();
+    page.writer.onStale(stale);
+    let cursor = 102;
+    const ref = { read: () => cursor, advance: (to: number) => void (cursor = to) };
+    let clock = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      await chat.pollMessages(null, page.groups[0]!, cursor, 0, ref);
+      clock += 60_000; // past the next retry
+    }
+    expect(registeredCommitHolds.heldRowId(gid)).toBe(101);
+    expect(stale).not.toHaveBeenCalled();
+    // Every write of the page landed: the row now carries a generation.
+    expect(((await rawRow())?.["generation"] as number) >= 1).toBe(true);
+    await expect(page.persist()).resolves.toBeUndefined();
+    expect(stale).not.toHaveBeenCalled();
+  });
+
+  it("what the live page met: an older build writes the row between two writes, and only then is the page refused", async () => {
+    const { page, chat } = await behindOwner();
+    const stale = vi.fn();
+    page.writer.onStale(stale);
+    let cursor = 102;
+    await chat.pollMessages(null, page.groups[0]!, cursor, 0, {
+      read: () => cursor,
+      advance: (to) => void (cursor = to),
+    });
+    await page.persist();
+    expect(stale).not.toHaveBeenCalled();
+    // The older build has no generation field and no lock: it puts its own
+    // copy back.
+    const foreign = { ...(await rawRow())! };
+    delete foreign["generation"];
+    delete foreign["groupEpochs"];
+    await putRawRow(foreign);
+    await expect(page.persist()).rejects.toBeInstanceOf(StaleProviderError);
+    expect(stale).toHaveBeenCalledTimes(1);
   });
 });

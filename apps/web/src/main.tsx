@@ -28,6 +28,7 @@ import { browserActiveTabDeps, claimActiveTab, type ActiveTabClaim } from "./tab
 import { freezeTab } from "./tab/tab-state";
 import { runBeforeYield } from "./tab/before-yield";
 import { OtherTabNotice } from "./tab/OtherTabNotice";
+import { staleReaction } from "./tab/stale-reload";
 
 /** Longest the first paint waits for a non-English catalog. Chosen, not measured. */
 const FIRST_PAINT_WAIT_MS = 2000;
@@ -106,9 +107,42 @@ const mountApp = async (): Promise<void> => {
     import("./chat/mls-store"),
   ]);
   // The store refused a write because the row on disk is newer than this
-  // page's copy (another tab wrote it): stop and reload, like a takeover.
-  mlsSnapshotWriter.onStale(stopAndReload);
-  render(() => <App />, root);
+  // page's copy (something else wrote it): stop, and reload once. A refusal
+  // again soon after that reload means a writer that keeps going (an older
+  // build open elsewhere in this browser); the page then stays stopped and
+  // shows the notice instead of reloading in a loop (`tab/stale-reload.ts`).
+  let disposeApp: (() => void) | null = null;
+  mlsSnapshotWriter.onStale(() => {
+    freezeTab();
+    let storage: Storage | null = null;
+    try {
+      storage = sessionStorage;
+    } catch {
+      storage = null;
+    }
+    if (staleReaction(storage, Date.now()) === "reload") {
+      location.reload();
+      return;
+    }
+    if (disposeApp === null) return;
+    const stop = disposeApp;
+    disposeApp = null;
+    // eslint-disable-next-line no-console
+    console.warn("one tab: the store keeps being written elsewhere; stopped, not reloading");
+    stop();
+    render(
+      () => (
+        <OtherTabNotice
+          closeOther
+          onUseHere={async () => {
+            location.reload();
+          }}
+        />
+      ),
+      root,
+    );
+  });
+  disposeApp = render(() => <App />, root);
 };
 const mount = (): void => {
   void (async () => {

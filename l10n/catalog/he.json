@@ -10105,6 +10105,14 @@
       "text": "Lakko פועל בכרטיסייה אחת בכל פעם. השתמשו בו כאן והכרטיסייה האחרת תיעצר.",
       "status": "machine"
     },
+    "tab.other.close_body": {
+      "text": "כרטיסייה או חלון אחרים של Lakko עדיין פועלים בדפדפן הזה. סגרו אותם ואז השתמשו ב-Lakko כאן.",
+      "status": "machine"
+    },
+    "tab.other.close_body_desktop": {
+      "text": "חלון אחר של Lakko עדיין פועל במחשב הזה. סגרו אותו ואז השתמשו ב-Lakko כאן.",
+      "status": "machine"
+    },
     "tab.other.use_here": {
       "text": "שימוש כאן",
       "status": "machine"

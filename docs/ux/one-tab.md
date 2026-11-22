@@ -59,8 +59,9 @@ There is no Close button: closing the tab is the browser's.
 
 Nothing typed is lost. Before it reloads, the tab that stops saves the open
 composer's draft (as it does after a pause in typing) and writes it to the browser, for
-at most a second; the new tab opens the conversation with the draft in place. If the
-save fails or takes longer, the tab reloads anyway. It never asks: a question would
+at most a second; the new tab opens the conversation with the draft in place. The draft
+is kept in the browser before it is sent to the person's other devices, so a slow or
+refused send never costs it. If the write fails or takes longer, the tab reloads anyway. It never asks: a question would
 leave two tabs running. A tab taken over after 10 seconds without an answer (step 4)
 has already lost the lock and saves nothing more.
 
@@ -84,6 +85,14 @@ are missing, every tab runs as before this change.
 In every case the storage keeps the backstop: a tab that loaded an older copy than the
 one saved now cannot save over it; it reloads instead (and then shows the notice if
 another tab runs).
+
+It reloads once. A Lakko page that does not take part in the lock (an older version
+still open somewhere in this browser) can keep saving over the copy; seen 2026-11-21,
+every 30 seconds. If the save is refused again within two minutes of that reload, the
+tab stops saving and shows the notice with a different line: "Another Lakko tab or
+window in this browser is still running. Close it, then use Lakko here." The button
+reloads only when the person presses it. It never reloads on its own a second time,
+so nothing typed is wiped by a loop.
 
 ## 7. Desktop app
 

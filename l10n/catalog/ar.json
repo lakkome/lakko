@@ -10105,6 +10105,14 @@
       "text": "يعمل Lakko في علامة تبويب واحدة في كل مرة. استخدمه هنا وستتوقف علامة التبويب الأخرى.",
       "status": "machine"
     },
+    "tab.other.close_body": {
+      "text": "لا تزال علامة تبويب أو نافذة أخرى من Lakko تعمل في هذا المتصفح. أغلقها، ثم استخدم Lakko هنا.",
+      "status": "machine"
+    },
+    "tab.other.close_body_desktop": {
+      "text": "لا تزال نافذة أخرى من Lakko تعمل على هذا الكمبيوتر. أغلقها، ثم استخدم Lakko هنا.",
+      "status": "machine"
+    },
     "tab.other.use_here": {
       "text": "استخدم هنا",
       "status": "machine"

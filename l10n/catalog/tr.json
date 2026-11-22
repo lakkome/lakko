@@ -10105,6 +10105,14 @@
       "text": "Lakko aynı anda tek bir sekmede çalışır. Burada kullanın, diğer sekme durur.",
       "status": "machine"
     },
+    "tab.other.close_body": {
+      "text": "Bu tarayıcıda başka bir Lakko sekmesi veya penceresi hâlâ çalışıyor. Onu kapatın, sonra Lakko'yu burada kullanın.",
+      "status": "machine"
+    },
+    "tab.other.close_body_desktop": {
+      "text": "Bu bilgisayarda başka bir Lakko penceresi hâlâ çalışıyor. Onu kapatın, sonra Lakko'yu burada kullanın.",
+      "status": "machine"
+    },
     "tab.other.use_here": {
       "text": "Burada kullan",
       "status": "machine"

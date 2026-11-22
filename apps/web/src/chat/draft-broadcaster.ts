@@ -11,10 +11,17 @@
  * sent within the debounce leaves the composer where the last write left it:
  * the pending timer is replaced by the next update, so what was sent is never
  * saved as a draft.
+ *
+ * `send` must keep the draft on this device before it returns (the sync
+ * context's `saveDraft` folds it synchronously); its promise is the publish
+ * to the other devices. A flush therefore waits for nothing on the network:
+ * the takeover's bound is spent writing the state that holds the draft, not
+ * on a publish that may be slow or refused.
  */
 export interface DraftBroadcaster {
   update(text: string): void;
-  /** Send a pending draft now; resolves when sent, rejects when the send did. */
+  /** Hand a pending draft to `send` now. Resolves once `send` has kept it
+   *  on this device; the publish goes on, and its failure goes to `onError`. */
   flush(): Promise<void>;
   dispose(): void;
 }
@@ -32,12 +39,22 @@ export function createDraftBroadcaster(opts: {
   let last: string | null = null;
   let pending: string | null = null;
 
-  const fire = async (): Promise<void> => {
+  /** Starts the send of the pending draft; the draft is kept on this device
+   *  when this returns. Best-effort: a failed publish must not break the
+   *  composer, and the next keystroke sends again. */
+  const fire = (): void => {
     const text = pending;
     if (text === null) return;
     pending = null;
     last = text;
-    await opts.send(text);
+    let publish: Promise<void>;
+    try {
+      publish = opts.send(text);
+    } catch (err) {
+      opts.onError?.(err);
+      return;
+    }
+    void publish.catch((err: unknown) => opts.onError?.(err));
   };
   const stop = (): void => {
     if (timer !== null) {
@@ -56,14 +73,13 @@ export function createDraftBroadcaster(opts: {
       pending = text;
       timer = setTimer(() => {
         timer = null;
-        // Best-effort: a transient failure must not break the composer; the
-        // next keystroke sends again.
-        void fire().catch((err: unknown) => opts.onError?.(err));
+        fire();
       }, opts.debounceMs);
     },
-    async flush() {
+    flush() {
       stop();
-      await fire();
+      fire();
+      return Promise.resolve();
     },
     dispose() {
       stop();

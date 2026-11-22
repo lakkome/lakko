@@ -10105,6 +10105,14 @@
       "text": "O Lakko funciona em uma aba por vez. Use-o aqui e a outra aba para.",
       "status": "machine"
     },
+    "tab.other.close_body": {
+      "text": "Outra aba ou janela do Lakko ainda está aberta neste navegador. Feche-a e use o Lakko aqui.",
+      "status": "machine"
+    },
+    "tab.other.close_body_desktop": {
+      "text": "Outra janela do Lakko ainda está aberta neste computador. Feche-a e use o Lakko aqui.",
+      "status": "machine"
+    },
     "tab.other.use_here": {
       "text": "Usar aqui",
       "status": "machine"

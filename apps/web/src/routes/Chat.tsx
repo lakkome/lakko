@@ -1955,7 +1955,7 @@ function ChatView(props: {
   // is written (phase 1) and the tab reloads.
   const DRAFT_DEBOUNCE_MS = 500;
   const draftBroadcaster = createDraftBroadcaster({
-    send: (text) => sync.setDraft(conversationIdBytes(), text),
+    send: (text) => sync.saveDraft(conversationIdBytes(), text),
     debounceMs: DRAFT_DEBOUNCE_MS,
     onError: (err) => {
       // eslint-disable-next-line no-console
