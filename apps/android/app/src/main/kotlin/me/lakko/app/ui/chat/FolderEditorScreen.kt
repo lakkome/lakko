@@ -255,7 +255,7 @@ public fun FolderEditorScreen(
                         style = MaterialTheme.typography.bodyLarge,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { confirmingDelete = true }
+                            .clickable(role = Role.Button) { confirmingDelete = true }
                             .padding(horizontal = 16.dp, vertical = 16.dp),
                     )
                 }

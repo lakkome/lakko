@@ -167,6 +167,7 @@ import me.lakko.app.ui.components.LakkoDialogTone
 import me.lakko.app.R
 import me.lakko.app.ui.components.LkIcon
 import me.lakko.app.ui.components.LkIconSize
+import me.lakko.app.ui.components.TextAction
 
 /**
  * 1×1 chat screen — `LazyColumn` of messages + composer.
@@ -1892,16 +1893,21 @@ private fun MessageRow(
     val gapAbove = if (firstInRun) 8.dp else 2.dp
     var revealedBlocked by remember(msg.messageId) { mutableStateOf(false) }
     if (collapsedBlocked && !revealedBlocked) {
-        Text(
-            t("block.group_row"),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        TextAction(
+            onClick = { revealedBlocked = true },
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = gapAbove)
-                .clickable { revealedBlocked = true }
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-        )
+                .padding(top = gapAbove),
+        ) {
+            Text(
+                t("block.group_row"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            )
+        }
         return
     }
     // UX 3.1 — "the surface tint used for the pressed state": Material's
@@ -3241,15 +3247,16 @@ private fun BubbleMeta(
         }
         if (onRetry != null) {
             val sendAgain = t("common.retry")
-            Text(
-                text = t("common.retry"),
-                style = MaterialTheme.typography.labelSmall,
-                textDecoration = TextDecoration.Underline,
-                color = contentColor,
-                modifier = Modifier
-                    .clickable(onClick = onRetry)
-                    .semantics { contentDescription = sendAgain },
-            )
+            // A 48dp target around the small word, drawn as before.
+            TextAction(onClick = onRetry) {
+                Text(
+                    text = t("common.retry"),
+                    style = MaterialTheme.typography.labelSmall,
+                    textDecoration = TextDecoration.Underline,
+                    color = contentColor,
+                    modifier = Modifier.semantics { contentDescription = sendAgain },
+                )
+            }
         }
         if (readState != OwnReadState.None) {
             val read = readState == OwnReadState.Read

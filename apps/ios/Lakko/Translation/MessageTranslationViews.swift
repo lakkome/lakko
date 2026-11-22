@@ -123,7 +123,7 @@ struct TranslationQuietLine: View {
 
     private func link(_ title: String, _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(title).foregroundStyle(linkTint)
+            Text(title).foregroundStyle(linkTint).lakkoTouchTarget()
         }
         .buttonStyle(.plain)
     }
@@ -539,7 +539,7 @@ struct TranscriptBlock: View {
     }
 
     private func link(_ title: String, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) { Text(title).foregroundStyle(linkTint) }
+        Button(action: action) { Text(title).foregroundStyle(linkTint).lakkoTouchTarget() }
             .buttonStyle(.plain)
     }
 }

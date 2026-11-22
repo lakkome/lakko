@@ -10438,3 +10438,36 @@ button.lk-card-row-button {
   font-size: 0.9rem;
   text-align: center;
 }
+
+/* Touch targets. On a touch screen a small text action (a `.small` button,
+   a ghost link, the word actions under a message or in an attachment chip)
+   takes taps in at least a 48px area centred on it, the Android and Material
+   minimum, without changing how it is drawn: the area is a transparent
+   pseudo-element. `:where` keeps the rule at zero specificity, so a button
+   positioned by its own class keeps that position (and still anchors the
+   area). Dense grids are not listed here: neighbouring areas would overlap. */
+@media (pointer: coarse) {
+  :where(
+      button.small,
+      a.ghost.small,
+      button.lk-attachment-retry,
+      button.lk-translate-line-action,
+      button.lk-chip-action
+    ) {
+    position: relative;
+  }
+  :where(
+      button.small,
+      a.ghost.small,
+      button.lk-attachment-retry,
+      button.lk-translate-line-action,
+      button.lk-chip-action
+    )::after {
+    content: "";
+    position: absolute;
+    top: min(0px, calc(50% - 24px));
+    bottom: min(0px, calc(50% - 24px));
+    left: min(0px, calc(50% - 24px));
+    right: min(0px, calc(50% - 24px));
+  }
+}

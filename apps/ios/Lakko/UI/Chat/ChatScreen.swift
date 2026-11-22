@@ -3298,10 +3298,12 @@ struct MessageRow: View {
             // The action sits next to the message it belongs to, which is the
             // only place that can say WHICH message failed.
             if message.ack == .failed {
-                Button(l10n.t("common.retry")) { onRetrySend(message.localId) }
-                    .chatFont(.caption2)
-                    .buttonStyle(.plain)
-                    .underline()
+                Button { onRetrySend(message.localId) } label: {
+                    Text(l10n.t("common.retry")).lakkoTouchTarget()
+                }
+                .chatFont(.caption2)
+                .buttonStyle(.plain)
+                .underline()
             }
             if isOutgoing, !message.deleted {
                 deliveryGlyph
@@ -3975,6 +3977,7 @@ struct GroupInfoScreen: View {
                                 LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                                     .foregroundStyle(Color.lakkoTextMuted)
                             }
+                            .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                     }
@@ -4064,6 +4067,7 @@ struct GroupInfoScreen: View {
                                 LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                                     .foregroundStyle(Color.lakkoTextMuted)
                             }
+                            .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                     }
@@ -4115,6 +4119,7 @@ struct GroupInfoScreen: View {
                                 LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                                     .foregroundStyle(Color.lakkoTextMuted)
                             }
+                            .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .disabled(viewModel.membershipBusy)
@@ -4383,6 +4388,7 @@ struct GroupInfoScreen: View {
                                         )
                                     } label: {
                                         Text(l10n.t(isAdmin ? "chat.members.admin.remove" : "chat.members.admin.make"))
+                                            .lakkoTouchTarget()
                                     }
                                     .buttonStyle(.borderless)
                                     .disabled(viewModel.membershipBusy)
@@ -4410,7 +4416,7 @@ struct GroupInfoScreen: View {
                                         // removed.` says when it waits.
                                         viewModel.onRemoveMember(leafIndex: member.leafIndex)
                                     } label: {
-                                        Text(l10n.t("common.remove"))
+                                        Text(l10n.t("common.remove")).lakkoTouchTarget()
                                     }
                                     .buttonStyle(.borderless)
                                     // UX 5.3 / 16.3 — visible but disabled while
@@ -4849,6 +4855,7 @@ struct TransferOwnershipStep: View {
                                 LkIconView(.checkmark, size: 20)
                             }
                         }
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     // A single-select GROUP, not a list of buttons, and the row
@@ -4887,6 +4894,7 @@ struct TransferOwnershipStep: View {
                                 LkIconView(.checkmark, size: 20)
                             }
                         }
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityElement(children: .ignore)

@@ -314,6 +314,7 @@ struct AllowedReactionsScreen<Model: AllowedReactionsModel>: View {
                                     LkIconView(.minusCircle, size: 20)
                                         .foregroundStyle(Color.lakkoTextMuted)
                                 }
+                                .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel(emoji)

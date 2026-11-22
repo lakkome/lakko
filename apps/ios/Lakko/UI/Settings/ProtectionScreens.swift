@@ -1030,6 +1030,7 @@ struct AccountProtectionSection: View {
                 LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }

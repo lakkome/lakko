@@ -79,14 +79,19 @@ struct InviteLinksListView: View {
                                 .truncationMode(.middle)
                                 .environment(\.layoutDirection, .leftToRight)
                             HStack {
-                                Button(l10n.t(copied == link.id ? "common.copied" : "chat.invite_link.copy")) {
+                                Button {
                                     UIPasteboard.general.string = link.url
                                     copied = link.id
+                                } label: {
+                                    Text(l10n.t(copied == link.id ? "common.copied" : "chat.invite_link.copy"))
+                                        .lakkoTouchTarget()
                                 }
                                 .buttonStyle(.borderless)
                                 Spacer()
-                                Button(l10n.t("chat.invite_link.revoke"), role: .destructive) { revoking = link }
-                                    .buttonStyle(.borderless)
+                                Button(role: .destructive) { revoking = link } label: {
+                                    Text(l10n.t("chat.invite_link.revoke")).lakkoTouchTarget()
+                                }
+                                .buttonStyle(.borderless)
                             }
                         }
                     }

@@ -210,6 +210,36 @@ extension View {
     }
 }
 
+// MARK: - Touch targets
+
+/// The smallest touch area of an action (Apple Human Interface Guidelines).
+let lakkoMinTouchTarget: CGFloat = 44
+
+extension View {
+    /// A text action keeps its look and takes taps in at least a
+    /// ``lakkoMinTouchTarget`` area centred on it. Put it on a plain or
+    /// borderless button's LABEL: those styles hit-test the label alone, so a
+    /// one-line `Retry` or `Remove` takes taps only on its glyphs. Layout is
+    /// unchanged; the larger area is a content shape around the label.
+    func lakkoTouchTarget() -> some View { modifier(LakkoTouchTarget()) }
+}
+
+private struct LakkoTouchTarget: ViewModifier {
+    @State private var size: CGSize = .zero
+
+    func body(content: Content) -> some View {
+        let dx = max(0, (lakkoMinTouchTarget - size.width) / 2)
+        let dy = max(0, (lakkoMinTouchTarget - size.height) / 2)
+        content
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
+            .padding(.horizontal, dx)
+            .padding(.vertical, dy)
+            .contentShape(Rectangle())
+            .padding(.horizontal, -dx)
+            .padding(.vertical, -dy)
+    }
+}
+
 // MARK: - Initials avatar
 
 /// A circle with one or two initials on one of four tints chosen by a hash of

@@ -138,6 +138,7 @@ struct SettingsScreen: View {
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
                     .padding(.vertical, 4)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
@@ -242,6 +243,7 @@ struct SettingsScreen: View {
                         LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("settings-text-size")
@@ -256,6 +258,7 @@ struct SettingsScreen: View {
                         LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             } header: {
@@ -307,6 +310,7 @@ struct SettingsScreen: View {
                         LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
@@ -487,6 +491,7 @@ struct SettingsScreen: View {
                 LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -512,6 +517,7 @@ private struct DevicesSettingsRow: View {
                 LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(

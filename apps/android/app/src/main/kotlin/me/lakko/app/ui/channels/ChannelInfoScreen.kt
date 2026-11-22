@@ -6,6 +6,7 @@ package me.lakko.app.ui.channels
 import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -72,6 +73,7 @@ import uniffi.lakko_ffi_uniffi.InfoSection
 import me.lakko.app.R
 import me.lakko.app.ui.components.LkIcon
 import me.lakko.app.ui.components.LkIconSize
+import me.lakko.app.ui.components.TextAction
 
 private const val INFO_TAG = "ChannelInfo"
 
@@ -247,15 +249,19 @@ public fun ChannelInfoScreen(
                 InfoPage.Info -> {
                     // Section 4.4 — a lapsed @name: the owner is asked for one.
                     if (owner && handle == null && removedLine == null) {
-                        Text(
-                            t("channels.info.handle_lapsed"),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { page = InfoPage.ChannelType }
-                                .padding(vertical = 8.dp),
-                        )
+                        TextAction(
+                            onClick = { page = InfoPage.ChannelType },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(
+                                t("channels.info.handle_lapsed"),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 8.dp),
+                            )
+                        }
                     }
                     InfoHeader(
                         channel = channel,
@@ -298,7 +304,7 @@ public fun ChannelInfoScreen(
                                     style = MaterialTheme.typography.bodyLarge,
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .clickable { confirmDelete = true }
+                                        .clickable(role = Role.Button) { confirmDelete = true }
                                         .padding(vertical = 14.dp),
                                 )
                                 deleteError?.let {
@@ -314,7 +320,7 @@ public fun ChannelInfoScreen(
                                     style = MaterialTheme.typography.bodyLarge,
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .clickable {
+                                        .clickable(role = Role.Button) {
                                             me.lakko.app.ui.moderation.ModerationRequests.openReport(
                                                 me.lakko.app.ui.moderation.ReportRequest(
                                                     subject = me.lakko.app.moderation.channelReportSubject(
@@ -342,7 +348,7 @@ public fun ChannelInfoScreen(
                                     style = MaterialTheme.typography.bodyLarge,
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .clickable { confirmUnsubscribe = true }
+                                        .clickable(role = Role.Button) { confirmUnsubscribe = true }
                                         .padding(vertical = 14.dp),
                                 )
                             }
@@ -613,12 +619,14 @@ private fun InfoHeader(
                 ) { Text(if (busy) t("common.saving") else t("common.save")) }
             }
         } else {
-            Text(
-                title,
-                style = MaterialTheme.typography.headlineSmall,
-                textAlign = TextAlign.Center,
-                modifier = if (canRename) Modifier.clickable { editing = true } else Modifier,
-            )
+            val titleText: @Composable () -> Unit = {
+                Text(
+                    title,
+                    style = MaterialTheme.typography.headlineSmall,
+                    textAlign = TextAlign.Center,
+                )
+            }
+            if (canRename) TextAction(onClick = { editing = true }) { titleText() } else titleText()
             handle?.let { h ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("@$h", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -630,7 +638,11 @@ private fun InfoHeader(
             line?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             channelDescription(channel)?.let {
                 Spacer(Modifier.height(8.dp))
-                Text(it, style = MaterialTheme.typography.bodyMedium, modifier = if (canRename) Modifier.clickable { editing = true } else Modifier)
+                if (canRename) {
+                    TextAction(onClick = { editing = true }) { Text(it, style = MaterialTheme.typography.bodyMedium) }
+                } else {
+                    Text(it, style = MaterialTheme.typography.bodyMedium)
+                }
             }
         }
     }

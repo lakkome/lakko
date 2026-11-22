@@ -65,6 +65,7 @@ import java.util.Locale
 import me.lakko.app.R
 import me.lakko.app.ui.components.LkIcon
 import me.lakko.app.ui.components.LkIconSize
+import me.lakko.app.ui.components.TextAction
 
 /**
  * The conversation (the hex id of the group a message is stored in) whose
@@ -94,15 +95,16 @@ private fun langName(tag: String): String = languageName(tag, LocalStrings.curre
 /** A word of the quiet line that is a button. */
 @Composable
 private fun LineButton(label: String, color: Color, onClick: () -> Unit) {
-    Text(
-        label,
-        style = MaterialTheme.typography.labelSmall,
-        color = color,
-        fontWeight = FontWeight.SemiBold,
-        modifier = Modifier
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(vertical = 4.dp),
-    )
+    // A 48dp target around the word, drawn as before.
+    TextAction(onClick = onClick) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = color,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(vertical = 4.dp),
+        )
+    }
 }
 
 @Composable

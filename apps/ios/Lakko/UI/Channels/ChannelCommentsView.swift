@@ -68,6 +68,7 @@ struct ChannelCommentsView: View {
                         Button { model.expandComments(item) } label: {
                             Text(l10n.t(more == .comment ? "channels.comments.comment" : "channels.comments.write"))
                                 .font(.footnote)
+                                .lakkoTouchTarget()
                         }
                         .buttonStyle(.plain)
                         .foregroundStyle(Color.lakkoTextMuted)
@@ -106,7 +107,7 @@ struct ChannelCommentsView: View {
         Button {
             model.expandComments(item)
         } label: {
-            Text(label).font(.footnote.weight(.medium))
+            Text(label).font(.footnote.weight(.medium)).lakkoTouchTarget()
         }
         .buttonStyle(.plain)
         .foregroundStyle(Color.lakkoAccent)
@@ -245,8 +246,10 @@ struct ChannelCommentsView: View {
         HStack(spacing: 8) {
             Text(comment.text).font(.footnote).foregroundStyle(Color.lakkoTextMuted).lineLimit(2)
             Spacer(minLength: 0)
-            Button(l10n.t("common.retry")) {
+            Button {
                 Task { await model.comment(item, text: comment.text, replyTo: comment.replyTo) }
+            } label: {
+                Text(l10n.t("common.retry")).lakkoTouchTarget()
             }
             .font(.footnote)
         }

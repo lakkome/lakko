@@ -99,6 +99,7 @@ import me.lakko.app.ui.components.LakkoDialogTone
 import me.lakko.app.R
 import me.lakko.app.ui.components.LkIcon
 import me.lakko.app.ui.components.LkIconSize
+import me.lakko.app.ui.components.TextAction
 
 /**
  * docs/ux/profile-screen.md — Settings > Profile.
@@ -473,13 +474,14 @@ private fun RowWithPencil(
     onEdit: () -> Unit,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(
-            text = text,
-            style = if (title) MaterialTheme.typography.titleLarge else MaterialTheme.typography.bodyLarge,
-            fontWeight = if (title && !secondary) FontWeight.SemiBold else null,
-            color = if (secondary) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.clickable(enabled = enabled, onClick = onEdit),
-        )
+        TextAction(enabled = enabled, onClick = onEdit, onClickLabel = pencilLabel) {
+            Text(
+                text = text,
+                style = if (title) MaterialTheme.typography.titleLarge else MaterialTheme.typography.bodyLarge,
+                fontWeight = if (title && !secondary) FontWeight.SemiBold else null,
+                color = if (secondary) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
+            )
+        }
         IconButton(enabled = enabled, onClick = onEdit) {
             LkIcon(R.drawable.ic_lk_pencil, contentDescription = pencilLabel, size = LkIconSize.Row)
         }
