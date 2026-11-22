@@ -5022,9 +5022,10 @@ private fun MembersSheet(
         contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
             TopAppBar(
-                title = {
-                    Text(t("chat.members.heading", emptyMap(), mapOf("count" to members.size.toULong())))
-                },
+                // conversation-info.md section 3 — the screen is the group's
+                // info, titled as on web and iOS; the member count heads the
+                // members list below.
+                title = { Text(t("chat.info.group")) },
                 navigationIcon = {
                     IconButton(onClick = viewModel::toggleMembersPanel) {
                         LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
@@ -5448,6 +5449,12 @@ private fun MembersSheet(
                 // a section, because the rule names the LIST and says nothing
                 // about what a row carries.
                 if (InfoSection.MEMBER_LIST in sections) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = t("chat.members.heading", emptyMap(), mapOf("count" to members.size.toULong())),
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.semantics { heading() },
+                    )
                     // Section 2.4 — the one way to add people: the FIRST row of
                     // the members list, for whoever may add (the same section the
                     // rule grants the add to).
@@ -5476,6 +5483,9 @@ private fun MembersSheet(
                     // The whole screen scrolls, so the roster is a plain column
                     // (a group's roster is bounded by MLS, and a lazy list inside
                     // a scrolling column would need a fixed height).
+                    // The own row's initials come from the person's own name
+                    // (their profile), never from the word "You" the row reads.
+                    val ownInitialsName = me.lakko.app.ui.components.rememberOwnAvatarName("?")
                     Column {
                         members.forEach { member ->
                             // Section 2.2 — a member who is a contact (and not
@@ -5535,7 +5545,7 @@ private fun MembersSheet(
                                 LakkoAvatar(
                                     // Initials from the name alone, never
                                     // the ` · @username` label.
-                                    name = viewModel.memberAvatarName(member),
+                                    name = if (isOwnRow) ownInitialsName else viewModel.memberAvatarName(member),
                                     seed = java.util.Base64.getEncoder().encodeToString(member.signaturePublicKey),
                                     size = 32.dp,
                                     personKey = if (isOwnRow) null else member.signaturePublicKey,

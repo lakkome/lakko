@@ -141,12 +141,12 @@ final class GroupInvitePageTests: XCTestCase {
         XCTAssertNil(headline.members)
     }
 
-    func testTheFooterNamesTheInviterAndNeverDigits() {
-        XCTAssertEqual(
-            plain(GroupInviteHeadline.footer(inviterName: " Nora ")),
-            "Invited by Nora")
-        XCTAssertNil(GroupInviteHeadline.footer(inviterName: nil), "no name, no line")
-        XCTAssertNil(GroupInviteHeadline.footer(inviterName: "   "))
+    /// Spec section 3, amended 2026-11-22: the inviter is named once, in the
+    /// headline; no "Invited by" line repeats it under the button.
+    func testTheInviterIsNamedOnceInTheHeadline() {
+        let headline = GroupInviteHeadline.derive(
+            from: GroupInviteFacts(groupName: "Trip", inviterName: "Nora", memberCount: 3))
+        XCTAssertEqual(plain(headline.lead), "Nora invites you to")
         XCTAssertEqual(groupInviteInvalidMessage, "This invite link is invalid or has expired.")
     }
 

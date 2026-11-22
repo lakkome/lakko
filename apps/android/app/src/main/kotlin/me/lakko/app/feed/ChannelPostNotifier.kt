@@ -31,6 +31,10 @@ public class ChannelPostNotifier(
     private val store: ChannelNotifiedStore,
     private val rule: ChannelNotifyRule = coreChannelNotifyRule,
     private val clock: () -> Long = System::currentTimeMillis,
+    /** `docs/ux/message-actions.md` section 9 — takes back the channel's
+     *  notification (tag) when it stands for one of the posts (cursors) a
+     *  read took out of the channel. */
+    private val withdraw: (tag: String, gone: Set<Long>) -> Unit = { _, _ -> },
     private val show: (ChannelNotice) -> Unit,
 ) {
     /** What the caller knows of the channels when the reads are judged. */
@@ -62,6 +66,16 @@ public class ChannelPostNotifier(
             val stored = store.read(accountIdB64)
             for (read in reads) {
                 val id = read.channelIdHex.lowercase()
+                // A post this read took out of the channel (deleted) takes
+                // its notification with it.
+                val gone = postsGoneIn(read, clock())
+                if (gone.isNotEmpty()) {
+                    try {
+                        withdraw(channelNotificationTag(id), gone)
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "channel notification not withdrawn", e)
+                    }
+                }
                 val decision = try {
                     decideChannelRead(
                         rule,
@@ -87,6 +101,7 @@ public class ChannelPostNotifier(
                             tag = channelNotificationTag(id),
                             title = facts.title(id),
                             body = facts.body(id, post),
+                            postCursor = post.cursor,
                         ),
                     )
                 } catch (e: Throwable) {
@@ -110,7 +125,36 @@ public data class ChannelNotice(
     val tag: String,
     val title: String,
     val body: String,
+    /** The post the notification stands for, so its deletion finds it. */
+    val postCursor: Long = 0L,
 )
+
+/**
+ * The posts a read took out of a channel's record: in the slot before it,
+ * not in the slot after, and not merely past the retention window. These are
+ * the posts a delete op removed. Pure. Mirror of web
+ * `feed/channel-notification-withdraw.ts` `postsGoneIn`.
+ */
+public fun postsGoneIn(read: ChannelRead, nowMs: Long): Set<Long> {
+    val before = read.slotBefore?.posts.orEmpty()
+    if (before.isEmpty()) return emptySet()
+    val kept = read.slotAfter.posts.mapTo(HashSet()) { it.cursor }
+    val oldest = nowMs - CHANNEL_POST_RETENTION_MS
+    return before.filter { it.cursor !in kept && it.serverTsMs >= oldest }.mapTo(LinkedHashSet()) { it.cursor }
+}
+
+/** Notification extra: the cursor of the channel post a notification shows. */
+public const val EXTRA_CHANNEL_POST_CURSOR: String = "lakko.channelPostCursor"
+
+/** The channel notifications to take back: those under [tag] whose recorded
+ *  post is one of [gone]. A notification without the extra is left alone. Pure. */
+public fun channelNotificationsToWithdraw(
+    active: List<Pair<String?, Long?>>,
+    tag: String,
+    gone: Set<Long>,
+): List<Int> = active.withIndex().filter { (_, n) ->
+    n.first == tag && n.second != null && n.second in gone
+}.map { it.index }
 
 /**
  * The channel screen open in front of the person, or `null`. Set by the
@@ -191,11 +235,35 @@ public object ChannelNotificationPoster {
             .setGroup(notice.tag)
             .setContentIntent(pending)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .addExtras(android.os.Bundle().apply { putLong(EXTRA_CHANNEL_POST_CURSOR, notice.postCursor) })
             .build()
         try {
             manager.notify(notice.tag, NOTIFICATION_ID, notification)
         } catch (cause: SecurityException) {
             Log.w(TAG, "notify failed (missing POST_NOTIFICATIONS?)", cause)
+        }
+    }
+
+    /**
+     * `docs/ux/message-actions.md` section 9 — cancel the channel's
+     * notification under [tag] when it shows one of the [gone] posts. Best
+     * effort: a failure leaves it where it is.
+     */
+    public fun withdraw(context: Context, tag: String, gone: Set<Long>) {
+        if (gone.isEmpty()) return
+        try {
+            val manager = context.applicationContext
+                .getSystemService(android.app.NotificationManager::class.java) ?: return
+            val active = manager.activeNotifications.filter { it.id == NOTIFICATION_ID }
+            val rows = active.map { sbn ->
+                val extras = sbn.notification?.extras
+                sbn.tag to extras?.takeIf { it.containsKey(EXTRA_CHANNEL_POST_CURSOR) }?.getLong(EXTRA_CHANNEL_POST_CURSOR)
+            }
+            for (i in channelNotificationsToWithdraw(rows, tag, gone)) {
+                manager.cancel(active[i].tag, NOTIFICATION_ID)
+            }
+        } catch (cause: Throwable) {
+            Log.w(TAG, "withdraw failed (${cause.javaClass.simpleName})")
         }
     }
 }

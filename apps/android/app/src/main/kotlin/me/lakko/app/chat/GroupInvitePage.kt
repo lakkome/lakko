@@ -213,8 +213,8 @@ public data class GroupInvitePreviewUi(
 
 /**
  * The card's text, spec section 3. [headline] is always present; [groupLine]
- * and [membersLine] only when the preview supplies them. The fingerprint foot
- * is [invitedByLine].
+ * and [membersLine] only when the preview supplies them. The inviter is
+ * named once, in the headline (spec section 3, amended 2026-11-22).
  */
 public data class GroupInvitePageLines(
     val headline: UiText,
@@ -222,13 +222,6 @@ public data class GroupInvitePageLines(
     val groupLine: String?,
     val membersLine: UiText?,
 )
-
-/** Text of the muted foot under the button: `Invited by <name>`, from the
- *  sealed preview; `null` with no name, and then the line is gone. */
-public fun invitedByLine(preview: GroupInvitePreviewUi?): UiText? =
-    preview?.inviterName?.trim()?.takeIf { it.isNotEmpty() }?.let { name ->
-        UiText("invite.group.invited_by", texts = mapOf("name" to name))
-    }
 
 /**
  * Derive the card copy from a preview (or its absence).

@@ -27,13 +27,20 @@ import { channelRowPreview, channelTitle } from "../channels/channel-row";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { t } from "../l10n";
 import { isDesktop } from "../platform";
-import { showHostNotification } from "../platform/host";
+import { showHostNotification, withdrawHostNotification } from "../platform/host";
 import { paths } from "../routes/paths";
 import { channelsState } from "../state/channels-state";
 import { loadWasm } from "../wasm";
 import { subscribeChannelReads } from "./ChannelPostSync";
 import { channelNotificationTag, decideChannelRead, type ChannelRead } from "./channel-notify";
 import { readChannelNotified, writeChannelNotified } from "./channel-notified-store";
+import {
+  CHANNEL_POST_CURSOR_KEY,
+  forgetChannelNotification,
+  postsGoneIn,
+  recordChannelNotification,
+  withdrawGoneChannelNotification,
+} from "./channel-notification-withdraw";
 
 /** The message the service worker posts when its copy of a channel
  *  notification is tapped in an open tab (`public/sw.js`). */
@@ -50,10 +57,11 @@ async function showChannelNotification(
   title: string,
   body: string,
   path: string,
+  cursor: number,
   open: (path: string) => void,
 ): Promise<void> {
   if (isDesktop()) {
-    await showHostNotification({ tag, title, body, target: path });
+    if (await showHostNotification({ tag, title, body, target: path })) recordChannelNotification(tag, cursor);
     return;
   }
   try {
@@ -63,6 +71,8 @@ async function showChannelNotification(
       open(path);
       n.close();
     };
+    n.onclose = () => forgetChannelNotification(tag, cursor);
+    recordChannelNotification(tag, cursor, () => n.close());
     return;
   } catch {
     // Some browsers (Chrome on Android) allow notifications only from a
@@ -70,7 +80,13 @@ async function showChannelNotification(
   }
   try {
     const reg = await navigator.serviceWorker?.getRegistration();
-    await reg?.showNotification(title, { body, tag, data: { lakkoOpenPath: path } });
+    // The post's cursor rides in the notification, so a deletion of the post
+    // finds it (`channel-notification-withdraw.ts`).
+    await reg?.showNotification(title, {
+      body,
+      tag,
+      data: { lakkoOpenPath: path, [CHANNEL_POST_CURSOR_KEY]: cursor },
+    });
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn("[feed] channel notification not shown", err instanceof Error ? err.name : "");
@@ -100,6 +116,12 @@ export function ChannelPostNotifier(): JSX.Element {
     for (const read of reads) {
       const id = read.channelIdHex;
       const path = paths.channel(id);
+      // message-actions.md section 9 — a post this read took out of the
+      // channel (deleted) takes its notification with it.
+      await withdrawGoneChannelNotification(channelNotificationTag(id), postsGoneIn(read, Date.now()), {
+        getRegistration: async () => navigator.serviceWorker?.getRegistration(),
+        withdrawHost: withdrawHostNotification,
+      });
       const role = channelRoleOf(id);
       const decision = decideChannelRead(wasm, read, {
         muted: channelFlagsOf(sync.flags(), id).muted,
@@ -119,7 +141,9 @@ export function ChannelPostNotifier(): JSX.Element {
         channelHandleOf(id) ?? channel?.localHandle,
       );
       const body = channelRowPreview(decision.post, t("notification.message.new"));
-      await showChannelNotification(channelNotificationTag(id), title, body, path, (p) => navigate(p));
+      await showChannelNotification(channelNotificationTag(id), title, body, path, decision.post.cursor, (p) =>
+        navigate(p),
+      );
     }
   }
 

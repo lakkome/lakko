@@ -3515,9 +3515,8 @@
       "comment": "Button in group info that asks to leave the group."
     },
     "chat.leave.body": {
-      "text": "It leaves your list and its messages are removed from all your devices. You keep receiving messages until an owner or an admin applies your request.",
-      "comment": "Body of the dialog confirming that the reader leaves a group. Leaving takes effect only when an owner or admin applies it. \"It\" is the group.",
-      "security_critical": true
+      "text": "The group and all its messages will be removed from all your devices.",
+      "comment": "Body of the dialog confirming that the reader leaves a group: what they lose."
     },
     "chat.leave.confirm": {
       "text": "Leave",
@@ -3528,8 +3527,8 @@
       "comment": "Button in the dialog confirming that the reader leaves a group; {name} is the group's name."
     },
     "chat.leave.requested": {
-      "text": "Leave requested. It applies when an owner or an admin applies the change.",
-      "comment": "Notice after the reader asked to leave a group."
+      "text": "You will leave once an owner or an admin next opens Lakko.",
+      "comment": "Notice after a plain member asked to leave a group: the leave lands when an owner or an admin next opens the app."
     },
     "chat.leave.title": {
       "text": "Leave this group?",
@@ -8042,10 +8041,6 @@
     "invite.go_home": {
       "text": "Go to Lakko home",
       "comment": "Link on an invite page back to the app's start page."
-    },
-    "invite.group.invited_by": {
-      "text": "Invited by {name}",
-      "comment": "Muted line of the group invite page. {name} is the inviter's display name from the link's sealed preview. With no name the line is not shown."
     },
     "invite.group.lead_anonymous": {
       "text": "You are invited to",

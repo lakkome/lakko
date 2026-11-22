@@ -295,11 +295,14 @@ public fun NewChannelScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            // Before a name is typed: the group glyph, as on New group, never
+            // a "?" from initials of nothing.
             LakkoAvatar(
-                name = name.ifBlank { "#" },
-                seed = name,
+                name = name,
+                seed = name.ifBlank { "new-channel" },
                 size = 96.dp,
                 group = true,
+                groupGlyph = name.isBlank(),
                 modifier = Modifier.align(Alignment.CenterHorizontally),
             )
             OutlinedTextField(

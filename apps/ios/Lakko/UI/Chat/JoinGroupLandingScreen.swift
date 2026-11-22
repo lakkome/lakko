@@ -498,7 +498,6 @@ public struct JoinGroupLandingScreen: View {
                     onDone()
                 }
                 .tint(.lakkoAccent)
-                footer
             case .ready where viewModel.publisher != nil:
                 if let publisher = viewModel.publisher {
                     publisherBlock(publisher)
@@ -521,19 +520,16 @@ public struct JoinGroupLandingScreen: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.lakkoAccent)
                 .disabled(viewModel.requesting)
-                footer
             case .requesting:
                 headlineBlock
                 ProgressView(l10n.t("group.join.sending"))
                     .tint(.lakkoAccent)
-                footer
             case .waiting:
                 // Inside the day: the one line, nothing to press.
                 headlineBlock
                 Text(joinWaitPrimary)
                     .foregroundStyle(Color.lakkoText)
                     .fixedSize(horizontal: false, vertical: true)
-                footer
             case .noAnswer:
                 headlineBlock
                 Text(l10n.t("requests_sent.no_answer"))
@@ -545,7 +541,6 @@ public struct JoinGroupLandingScreen: View {
                 .buttonStyle(.bordered)
                 .tint(.lakkoAccent)
                 .disabled(viewModel.requesting)
-                footer
             case .joined:
                 // Shown only while the chat opens (the `onChange` below).
                 headlineBlock
@@ -629,19 +624,6 @@ public struct JoinGroupLandingScreen: View {
                 .foregroundStyle(Color.lakkoText)
                 .fixedSize(horizontal: false, vertical: true)
             CoPublisherInviteAction(facts: facts)
-        }
-    }
-
-    /// `Invited by <name>`, from the sealed preview: small, muted, one line.
-    /// With no name the line is gone: digits never appear here.
-    @ViewBuilder
-    private var footer: some View {
-        if let line = GroupInviteHeadline.footer(inviterName: viewModel.preview?.inviterName) {
-            Text(line)
-                .font(.caption)
-                .foregroundStyle(Color.lakkoTextMuted)
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
         }
     }
 }

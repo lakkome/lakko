@@ -328,9 +328,10 @@ export default function NewGroup(): JSX.Element {
         <section class="lk-card lk-info-header">
           <div class="lk-profile-avatar lk-menu-anchor">
             <Avatar
-              label={name().trim().length > 0 ? name() : "#"}
+              label={name()}
               id={handle()}
               size="profile"
+              groupGlyph={name().trim().length === 0}
               media={photo() === null ? null : { stillUrl: photo()?.stillUrl ?? null, videoUrl: photo()?.videoUrl ?? null }}
               playVideo
             />

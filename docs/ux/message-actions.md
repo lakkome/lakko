@@ -542,7 +542,10 @@ that.
 by its author or by the owner or a publisher, follow the same two rules: seen
 going, it turns into "Message deleted" for 2 seconds and collapses; otherwise
 it is not there. A channel's preview in the chat list and its unread count
-follow the same rule as a chat. A comment thread's count under a post does not
+follow the same rule as a chat, and so does a notification already on screen for
+a deleted post: it is withdrawn when this device next reads the channel and finds
+the post gone (amended 2026-11-22; each channel notification records the post it
+shows). A comment thread's count under a post does not
 count a deleted comment. The comments service sends no deletion event: it drops
 the comment's row. So a comment deleted on this device gets the hold, and a
 comment deleted elsewhere is simply gone at the next read of its thread (a

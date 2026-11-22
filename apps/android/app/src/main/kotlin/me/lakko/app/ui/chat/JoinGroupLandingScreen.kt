@@ -43,7 +43,6 @@ import me.lakko.app.chat.GROUP_INVITE_INVALID_TEXT
 import me.lakko.app.chat.GROUP_INVITE_REQUEST_TO_JOIN_TEXT
 import me.lakko.app.chat.GroupInviteCard
 import me.lakko.app.chat.groupInvitePageLines
-import me.lakko.app.chat.invitedByLine
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 import me.lakko.app.R
@@ -520,7 +519,6 @@ public fun JoinGroupLandingScreen(
                     InviteHeadline(card)
                     Spacer(Modifier.height(16.dp))
                     Button(onClick = { viewModel.request() }) { Text(GROUP_INVITE_REQUEST_TO_JOIN_TEXT.text()) }
-                    InviteFoot(card)
                 }
             }
             is JoinGroupLandingViewModel.State.Requesting -> {
@@ -529,7 +527,6 @@ public fun JoinGroupLandingScreen(
                 CircularProgressIndicator()
                 Spacer(Modifier.height(8.dp))
                 Text(t("group.join.sending"))
-                InviteFoot(card)
             }
             is JoinGroupLandingViewModel.State.Waiting -> {
                 InviteHeadline(card)
@@ -548,7 +545,6 @@ public fun JoinGroupLandingScreen(
                 } else {
                     Text(me.lakko.app.chat.JOIN_WAIT_PRIMARY.text(), textAlign = TextAlign.Center)
                 }
-                InviteFoot(card)
             }
             is JoinGroupLandingViewModel.State.Joined -> {
                 // Shown only for the moment the navigation takes.
@@ -569,7 +565,6 @@ public fun JoinGroupLandingScreen(
                 } else {
                     Button(onClick = onDone) { Text(t("common.close")) }
                 }
-                InviteFoot(card)
             }
         }
     }
@@ -610,21 +605,6 @@ private fun InviteHeadline(card: GroupInviteCard?) {
             modifier = Modifier.fillMaxWidth(),
         )
     }
-}
-
-/** The muted foot: `Invited by <name>`. No name, no line: digits mean nothing
- *  to a person. */
-@Composable
-private fun InviteFoot(card: GroupInviteCard?) {
-    val line = invitedByLine(card?.preview) ?: return
-    Spacer(Modifier.height(16.dp))
-    Text(
-        text = line.text(),
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        textAlign = TextAlign.Center,
-        modifier = Modifier.fillMaxWidth(),
-    )
 }
 
 /** Section 15.2 — `Accept` on a publisher link: joins here, the progress and

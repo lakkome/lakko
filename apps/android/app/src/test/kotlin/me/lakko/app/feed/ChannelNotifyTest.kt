@@ -169,7 +169,7 @@ class ChannelNotifyTest {
         val store = ChannelNotifiedStore.on(context)
         val shown = Shown()
         val rule = SpyRule(notify = listOf(0, 1))
-        val notifier = ChannelPostNotifier(store, rule, { now }, shown)
+        val notifier = ChannelPostNotifier(store, rule, { now }, show = shown)
         notifier.onReads(
             account,
             listOf(
@@ -200,6 +200,61 @@ class ChannelNotifyTest {
         assertEquals(7UL, ctx.lastNotified)
         assertTrue(ctx.muted)
         assertTrue(rule.posts.single().single().own)
+    }
+
+    // ---- a deleted post takes its notification with it ---------------------
+
+    @Test
+    fun aPostARemovedReadTakesOutIsGoneButOneThatAgedOutIsNot() {
+        val aged = PersistedChannelPost(1L, now - CHANNEL_POST_RETENTION_MS - 1_000, "old")
+        val read = ChannelRead(
+            channel,
+            ChannelPostSlot(cursor = 3, posts = listOf(aged, post(2), post(3))),
+            ChannelPostSlot(cursor = 4, posts = listOf(post(3))),
+            3L,
+        )
+        assertEquals(setOf(2L), postsGoneIn(read, now))
+        assertTrue(postsGoneIn(read.copy(slotBefore = null), now).isEmpty())
+    }
+
+    @Test
+    fun theNotifierWithdrawsTheChannelNoticeForAGonePostAndRecordsTheShownPost() = runTest {
+        val store = ChannelNotifiedStore.on(context)
+        val shown = Shown()
+        val withdrawn = mutableListOf<Pair<String, Set<Long>>>()
+        val notifier = ChannelPostNotifier(
+            store,
+            SpyRule(notify = listOf(0)),
+            { now },
+            withdraw = { tag, gone -> withdrawn += tag to gone },
+            show = shown,
+        )
+        notifier.onReads(
+            account,
+            listOf(
+                ChannelRead(
+                    channel,
+                    ChannelPostSlot(cursor = 5, posts = listOf(post(4), post(5))),
+                    ChannelPostSlot(cursor = 7, posts = listOf(post(4), post(7))),
+                    5L,
+                ),
+            ),
+            factsOf(),
+        )
+        assertEquals(listOf("channel:$channel" to setOf(5L)), withdrawn)
+        assertEquals(7L, shown.notices.single().postCursor)
+    }
+
+    @Test
+    fun onlyTheChannelsNotificationForAGonePostIsWithdrawn() {
+        val tag = "channel:$channel"
+        val active = listOf<Pair<String?, Long?>>(
+            tag to 5L,
+            tag to 6L,
+            "channel:$other" to 5L,
+            tag to null,
+        )
+        assertEquals(listOf(0), channelNotificationsToWithdraw(active, tag, setOf(5L)))
     }
 
     // ---- store ---------------------------------------------------------------

@@ -3002,7 +3002,7 @@
       "status": "machine"
     },
     "chat.leave.body": {
-      "text": "از فهرست شما خارج می‌شود و پیام‌هایش از همهٔ دستگاه‌هایتان حذف می‌شوند. تا وقتی مالک یا یکی از مدیران درخواست شما را اعمال کند، همچنان پیام دریافت می‌کنید.",
+      "text": "گروه و همهٔ پیام‌هایش از همهٔ دستگاه‌هایتان حذف می‌شوند.",
       "status": "machine"
     },
     "chat.leave.confirm": {
@@ -3014,7 +3014,7 @@
       "status": "machine"
     },
     "chat.leave.requested": {
-      "text": "درخواست خروج ثبت شد. وقتی مالک یا یکی از مدیران تغییر را اعمال کند، انجام می‌شود.",
+      "text": "وقتی مالک یا یکی از مدیران دفعهٔ بعد Lakko را باز کند، از گروه خارج می‌شوید.",
       "status": "machine"
     },
     "chat.leave.title": {
@@ -7159,10 +7159,6 @@
     },
     "invite.go_home": {
       "text": "رفتن به صفحه اصلی Lakko",
-      "status": "machine"
-    },
-    "invite.group.invited_by": {
-      "text": "دعوت از طرف {name}",
       "status": "machine"
     },
     "invite.group.lead_anonymous": {

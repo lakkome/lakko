@@ -23,9 +23,9 @@ import { t } from "../l10n";
 export const LEAVE_GROUP_TITLE = (): string => t("chat.leave.title");
 
 /**
- * The body: what leaving does, then §3's honesty rule applied to your own
- * departure: you are still in the group until the commit lands, and the UI
- * must not imply otherwise.
+ * The body: what the person loses (amended 2026-11-22). That they stay in the
+ * group until the leave lands is shown by the row's `Waiting to leave.` line
+ * and the notice after Leave, not narrated here.
  */
 export const LEAVE_GROUP_BODY = (): string => t("chat.leave.body");
 

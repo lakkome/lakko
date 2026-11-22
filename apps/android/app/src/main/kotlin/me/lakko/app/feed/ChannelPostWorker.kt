@@ -84,7 +84,10 @@ public class ChannelPostWorker(
             )
         }
         if (reads.isEmpty()) return
-        val notifier = ChannelPostNotifier(ChannelNotifiedStore.on(ctx)) { ChannelNotificationPoster.show(ctx, it) }
+        val notifier = ChannelPostNotifier(
+            ChannelNotifiedStore.on(ctx),
+            withdraw = { tag, gone -> ChannelNotificationPoster.withdraw(ctx, tag, gone) },
+        ) { ChannelNotificationPoster.show(ctx, it) }
         notifier.onReads(account, reads, storedChannelFacts(ctx, account, stored))
     }
 

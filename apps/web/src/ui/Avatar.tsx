@@ -81,6 +81,9 @@ export function Avatar(props: {
   /** When a profile video plays (`ui/avatar-video.ts`): `true` always (large
    *  views), `"hover"` while the row is hovered, `"header"` the chat header. */
   playVideo?: AvatarVideoMode;
+  /** Draw the group glyph instead of initials when there is no photo (a new
+   *  group or channel before its name is typed), as iOS and Android do. */
+  groupGlyph?: boolean;
 }): JSX.Element {
   const [broken, setBroken] = createSignal<string | null>(null);
   const [hovering, setHovering] = createSignal(false);
@@ -158,6 +161,9 @@ export function Avatar(props: {
         </Match>
         <Match when={still()}>
           {(url) => <img class="lk-avatar-media" src={url()} alt="" onError={() => setBroken(url())} />}
+        </Match>
+        <Match when={props.groupGlyph === true}>
+          <Icon name="person-3-fill" size={glyphSize(props.size)} />
         </Match>
       </Switch>
     </span>

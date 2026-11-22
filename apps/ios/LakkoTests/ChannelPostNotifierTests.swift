@@ -164,10 +164,56 @@ final class ChannelPostNotifierTests: XCTestCase {
     private final class Poster: ChannelPostNotificationPoster {
         var shown: [(String, String, String)] = []
         var pictures: [Data?] = []
-        func post(channelIdHex: String, title: String, body: String, picture: Data?) {
+        var cursors: [UInt64] = []
+        var withdrawn: [(String, Set<UInt64>)] = []
+        func post(channelIdHex: String, title: String, body: String, picture: Data?, postCursor: UInt64) {
             shown.append((channelIdHex, title, body))
             pictures.append(picture)
+            cursors.append(postCursor)
         }
+        func withdraw(channelIdHex: String, gone: Set<UInt64>) {
+            withdrawn.append((channelIdHex, gone))
+        }
+    }
+
+    // MARK: - A deleted post takes its notification with it (message-actions.md 9)
+
+    func testAPostAReadTookOutIsGoneButOneThatAgedOutIsNot() {
+        let aged = PersistedChannelPost(
+            cursor: 1, serverTsMs: Int64(now) - ChannelPostLog.retentionMs - 1_000, text: "old")
+        let read = ChannelRead(
+            channelIdHex: channel,
+            slotBefore: ChannelPostSlot(cursor: 3, posts: [aged, post(2), post(3)]),
+            slotAfter: ChannelPostSlot(cursor: 4, posts: [post(3)]),
+            readMarker: 3)
+        XCTAssertEqual(ChannelNotify.postsGone(read: read, nowMs: Int64(now)), [2])
+        XCTAssertEqual(ChannelNotify.postsGone(read: ongoing([11]), nowMs: Int64(now)), [])
+    }
+
+    func testTheNotifierWithdrawsForAGonePostAndRecordsTheShownPost() {
+        let poster = Poster()
+        let n = notifier(poster: poster)
+        let read = ChannelRead(
+            channelIdHex: channel,
+            slotBefore: ChannelPostSlot(cursor: 12, posts: [post(11, "p11"), post(12, "p12")]),
+            slotAfter: ChannelPostSlot(cursor: 13, posts: [post(11, "p11"), post(13, "p13")]),
+            readMarker: 12)
+        n.handle(accountIdB64: account, reads: [read])
+        XCTAssertEqual(poster.withdrawn.count, 1)
+        XCTAssertEqual(poster.withdrawn.first?.0, channel)
+        XCTAssertEqual(poster.withdrawn.first?.1, [12])
+        XCTAssertEqual(poster.cursors, [13])
+    }
+
+    func testOnlyTheChannelsNotificationForAGonePostIsWithdrawn() {
+        let tag = ChannelNotify.tag(channelIdHex: channel)
+        let delivered: [(identifier: String, userInfo: [AnyHashable: Any])] = [
+            (identifier: tag, userInfo: [ChannelNotify.postCursorKey: NSNumber(value: 5)]),
+            (identifier: ChannelNotify.tag(channelIdHex: other), userInfo: [ChannelNotify.postCursorKey: NSNumber(value: 5)]),
+            (identifier: tag, userInfo: [:]),
+        ]
+        XCTAssertEqual(ChannelNotify.identifiersToWithdraw(delivered, tag: tag, gone: [5]), [tag])
+        XCTAssertEqual(ChannelNotify.identifiersToWithdraw(delivered, tag: tag, gone: [6]), [])
     }
 
     private func notifier(muted: Set<String> = [], poster: Poster) -> ChannelPostNotifier {

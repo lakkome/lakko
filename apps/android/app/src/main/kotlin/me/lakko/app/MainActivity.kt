@@ -2081,6 +2081,7 @@ private fun SessionRoot(
     DisposableEffect(channelsState, deviceGroupSync) {
         val notifier = me.lakko.app.feed.ChannelPostNotifier(
             me.lakko.app.feed.ChannelNotifiedStore.on(backupContext),
+            withdraw = { tag, gone -> me.lakko.app.feed.ChannelNotificationPoster.withdraw(backupContext, tag, gone) },
         ) { me.lakko.app.feed.ChannelNotificationPoster.show(backupContext, it) }
         val off = me.lakko.app.feed.subscribeChannelReads { account, reads ->
             // Only the reads of the account this state is bound to.

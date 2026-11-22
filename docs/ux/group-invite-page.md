@@ -42,7 +42,6 @@ Every state shows one card. The card's headline changes; the controls do not.
 <N> members
 
 [ Request to join ]
-Invited by <Inviter name>           (small, muted, one line)
 ```
 
 - The inviter's name is the headline's subject. A missing inviter name reads
@@ -50,9 +49,10 @@ Invited by <Inviter name>           (small, muted, one line)
 - A missing group name reads `a group` in the headline (`Anna invites you to a
   group`) and the group line is omitted.
 - `1 member` / `N members`; the count is the roster at mint time.
-- The foot line carries the inviter's name in the muted style, prefixed
-  `Invited by`. With no name the line is gone. Amended 2026-11-01: digits never
-  appear on this page; they meant nothing to the person reading it.
+- The inviter is named once, in the headline. Amended 2026-11-22 (maintainer,
+  seen on Android): the muted `Invited by <Inviter name>` foot line under the
+  button repeated the headline and is gone on every client. Digits never appear
+  on this page (2026-11-01); they meant nothing to the person reading it.
 
 **Without a preview** (a link minted without one; since 2026-09-28 a link
 whose fragment was lost is no longer this state, it is damaged - below):

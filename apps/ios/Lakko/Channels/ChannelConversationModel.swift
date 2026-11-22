@@ -125,6 +125,17 @@ final class ChannelConversationModel: ObservableObject {
 
     private var currentIdentity: Identity? { try? Identity.fromSeed(seed: accountIdentitySeed) }
 
+    /// UX group-and-channel-privacy.md section 12 — the header line carries
+    /// the subscriber count where this device can know it: the owner's and a
+    /// publisher's (the count route answers only them, section 15.1), as the
+    /// info screen reads it. Nothing changes on a failure.
+    func refreshSubscriberCount() async {
+        guard isPublisher, let identity = currentIdentity,
+              let exact = try? await client.subscriberCount(channelIdHex: channelId, accountIdentity: identity)
+        else { return }
+        state.setSubscriberCount(channelId: channelId, count: Int(clamping: exact))
+    }
+
     /// The identity a subscriber's per-write keys and comment author key
     /// derive from: the lineage one, so a rotation does not lose the
     /// reactions and comments already written (ADR-0087 section 13a).

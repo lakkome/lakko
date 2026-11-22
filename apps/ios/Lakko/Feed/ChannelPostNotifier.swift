@@ -114,6 +114,43 @@ enum ChannelNotify {
         "channel:\(channelIdHex.lowercased())"
     }
 
+    /// The notification's `userInfo` key carrying the cursor of the post it
+    /// shows, so a deletion of that post finds it.
+    static let postCursorKey = "lakko.channel-notify.post"
+
+    /// `docs/ux/message-actions.md` section 9 — the posts a read took out of
+    /// the channel's record: in the slot before it, not in the slot after,
+    /// and not merely past the retention window (deleted). Mirror of web
+    /// `feed/channel-notification-withdraw.ts` `postsGoneIn`.
+    static func postsGone(read: ChannelRead, nowMs: Int64) -> Set<UInt64> {
+        guard let before = read.slotBefore?.posts, !before.isEmpty else { return [] }
+        let kept = Set(read.slotAfter.posts.map(\.cursor))
+        let oldest = nowMs - ChannelPostLog.retentionMs
+        return Set(before.filter { !kept.contains($0.cursor) && $0.serverTsMs >= oldest }.map(\.cursor))
+    }
+
+    /// The delivered notifications to take back: the channel's (its tag is
+    /// the request identifier) when it shows one of the `gone` posts. A
+    /// notification without the cursor is left alone.
+    static func identifiersToWithdraw(
+        _ delivered: [(identifier: String, userInfo: [AnyHashable: Any])],
+        tag: String,
+        gone: Set<UInt64>
+    ) -> [String] {
+        delivered.filter { item in
+            guard item.identifier == tag else { return false }
+            let cursor: UInt64?
+            if let number = item.userInfo[postCursorKey] as? NSNumber {
+                cursor = number.uint64Value
+            } else if let string = item.userInfo[postCursorKey] as? String {
+                cursor = UInt64(string)
+            } else {
+                cursor = nil
+            }
+            return cursor.map(gone.contains) ?? false
+        }.map(\.identifier)
+    }
+
     /// The notification's body: the post as the channel's row in Chats reads
     /// it (``ChatListScreen/channelRows``), else the generic line.
     static func body(post: PersistedChannelPost, generic: String) -> String {
@@ -182,8 +219,10 @@ struct ChannelNotifiedStore {
 /// Shows a channel's notification. Injectable for tests.
 protocol ChannelPostNotificationPoster {
     /// `picture`: the post's micro thumbnail (``ChannelNotify/picture(post:)``),
-    /// `nil` for none.
-    @MainActor func post(channelIdHex: String, title: String, body: String, picture: Data?)
+    /// `nil` for none. `postCursor`: the post it shows.
+    @MainActor func post(channelIdHex: String, title: String, body: String, picture: Data?, postCursor: UInt64)
+    /// Take the channel's notification back when it shows one of `gone`.
+    @MainActor func withdraw(channelIdHex: String, gone: Set<UInt64>)
 }
 
 /// The system notification through `UNUserNotificationCenter`, under the
@@ -191,7 +230,7 @@ protocol ChannelPostNotificationPoster {
 /// request identifier is the channel's tag, so a newer post replaces the
 /// older notification; the thread identifier groups it with the channel.
 struct SystemChannelPostNotifier: ChannelPostNotificationPoster {
-    func post(channelIdHex: String, title: String, body: String, picture: Data?) {
+    func post(channelIdHex: String, title: String, body: String, picture: Data?, postCursor: UInt64) {
         let tag = ChannelNotify.tag(channelIdHex: channelIdHex)
         let content = UNMutableNotificationContent()
         content.title = title
@@ -204,10 +243,27 @@ struct SystemChannelPostNotifier: ChannelPostNotificationPoster {
         }
         content.sound = .default
         content.threadIdentifier = tag
-        content.userInfo = [ChannelNotificationTaps.routeKey: channelIdHex.lowercased()]
+        content.userInfo = [
+            ChannelNotificationTaps.routeKey: channelIdHex.lowercased(),
+            ChannelNotify.postCursorKey: NSNumber(value: postCursor),
+        ]
         let request = UNNotificationRequest(identifier: tag, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request) { error in
             if error != nil { NSLog("[feed] channel notification not shown") }
+        }
+    }
+
+    func withdraw(channelIdHex: String, gone: Set<UInt64>) {
+        guard !gone.isEmpty else { return }
+        let tag = ChannelNotify.tag(channelIdHex: channelIdHex)
+        Task {
+            let center = UNUserNotificationCenter.current()
+            let delivered = await center.deliveredNotifications().map {
+                (identifier: $0.request.identifier, userInfo: $0.request.content.userInfo)
+            }
+            let ids = ChannelNotify.identifiersToWithdraw(delivered, tag: tag, gone: gone)
+            guard !ids.isEmpty else { return }
+            center.removeDeliveredNotifications(withIdentifiers: ids)
         }
     }
 }
@@ -284,6 +340,10 @@ final class ChannelPostNotifier {
         let generic = Localization.text("notification.message.new")
         for read in reads {
             let id = read.channelIdHex.lowercased()
+            // A post this read took out of the channel (deleted) takes its
+            // notification with it.
+            let gone = ChannelNotify.postsGone(read: read, nowMs: Int64(clamping: now))
+            if !gone.isEmpty { poster.withdraw(channelIdHex: id, gone: gone) }
             let decision = ChannelNotify.decide(
                 read: read,
                 facts: ChannelNotify.Facts(
@@ -301,7 +361,8 @@ final class ChannelPostNotifier {
                 channelIdHex: id,
                 title: deps.title(id),
                 body: ChannelNotify.body(post: post, generic: generic),
-                picture: ChannelNotify.picture(post: post))
+                picture: ChannelNotify.picture(post: post),
+                postCursor: post.cursor)
         }
     }
 

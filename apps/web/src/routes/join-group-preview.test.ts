@@ -9,7 +9,6 @@
 import { describe, expect, it } from "vitest";
 import {
   inviteHeadline,
-  invitedByLine,
   memberCountLine,
 } from "./join-group-preview";
 
@@ -76,14 +75,12 @@ describe("inviteHeadline", () => {
   });
 });
 
-describe("invitedByLine", () => {
-  it("names the inviter from the preview", () => {
-    expect(invitedByLine({ inviterName: " Anna ", memberCount: 2 })).toBe("Invited by Anna");
-  });
-
-  it("is gone with no name, so no digits can stand in for one", () => {
-    expect(invitedByLine({ memberCount: 2 })).toBeNull();
-    expect(invitedByLine({ inviterName: "  ", memberCount: 2 })).toBeNull();
-    expect(invitedByLine(null)).toBeNull();
+describe("the inviter is named once", () => {
+  it("in the headline, and the card carries no other line naming them", () => {
+    // Spec section 3, amended 2026-11-22: an "Invited by Anna" line under the
+    // button repeated the headline.
+    const h = inviteHeadline({ groupName: "Trip", inviterName: "Anna", memberCount: 2 });
+    const lines = [h.lead, h.title, h.members].filter((l): l is string => l !== null);
+    expect(lines.filter((l) => l.includes("Anna"))).toEqual(["Anna invites you to"]);
   });
 });

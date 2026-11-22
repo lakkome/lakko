@@ -141,7 +141,9 @@ Group info and channel info gain, in the header, the one line that says what thi
 
 - `Private group · 12 members`
 - `Public group · 1,204 members`
-- `Private channel`, `Public channel`
+- `Private channel`, `Public channel`, and `Public channel · 10k+ subscribers` on the
+  owner's and publishers' devices (section 12; amended 2026-11-22: every client fetches the
+  count for the header when the channel opens, not only when its info is opened)
 
 Under it, the row **@name** with `family_k3x9` and a copy icon. Copy is `Copy` on
 every platform, no system share sheet.
@@ -569,8 +571,11 @@ The same, for one rule. The confirmation in `proposal-based-membership.md` secti
 becomes:
 
 - Title: `Leave this group?`
-- Body: "It leaves your list and its messages are removed from all your devices. You
-  keep receiving messages until an owner or an admin applies your request."
+- Body: "The group and all its messages will be removed from all your devices."
+  (Amended 2026-11-22, maintainer: the sentence that followed, "You keep receiving
+  messages until an owner or an admin applies your request.", narrated how a leave
+  lands; the `Waiting to leave.` line and the notice after `Leave` already say the
+  person is still in the group.)
 - Buttons: `Leave` (destructive) / `Cancel`
 
 While it waits the row stays, with `Waiting to leave.` When it lands the row goes with no
@@ -970,7 +975,7 @@ requests to join that a person sent from search.
 | Key idea | Copy |
 |---|---|
 | Header, group | Private group · {n} members / Public group · {n} members |
-| Header, channel | Private channel / Public channel |
+| Header, channel | Private channel / Public channel · {band} subscribers (the band on the owner's and publishers' devices, which can read the count; `Public channel` alone elsewhere) |
 | Search row | Public group · {band} members / Public channel · {band} subscribers |
 | Held name | That @name isn't available. Try another. |
 | Visibly taken | That @name is taken. |

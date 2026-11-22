@@ -165,6 +165,7 @@ struct ChannelConversationScreen: View {
             .task {
                 model.attach(sync: sync)
                 await model.start(subscribeOnOpen: subscribeOnOpen)
+                await model.refreshSubscriberCount()
                 // While the screen is up (ADR-0087 section 12, 2026-11-06):
                 // every 10 s only the posts after the newest one held, then
                 // the counts of the posts on screen (comment counts with

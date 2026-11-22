@@ -98,7 +98,6 @@ import { journalHex } from "../ds/access";
 import { isDiscoveryRateLimited } from "../discovery/client";
 import {
   inviteHeadline,
-  invitedByLine,
   resolveInvitePreview,
   type GroupInvitePreviewData,
 } from "./join-group-preview";
@@ -413,9 +412,6 @@ function JoinGroupFlow() {
                   <button type="button">{t("auth.login.submit")}</button>
                 </A>
               </div>
-              <Show when={invitedByLine(ticket()?.preview ?? null)}>
-                {(line) => <p class="lk-meta">{line()}</p>}
-              </Show>
             </>
           }
         >
@@ -462,12 +458,6 @@ function JoinGroupFlow() {
                 {JOIN_TRY_AGAIN()}
               </button>
             </Show>
-          </Show>
-          {/* The one thing on the page the inviter cannot fake stays, at the
-              foot and in the muted style, for a person who was told the
-              digits out of band. */}
-          <Show when={invitedByLine(ticket()?.preview ?? null)}>
-            {(line) => <p class="lk-meta">{line()}</p>}
           </Show>
         </Show>
       </Show>

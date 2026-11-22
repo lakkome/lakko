@@ -18,7 +18,7 @@
  */
 import { accountSuspended } from "../auth/suspension-state";
 import { SuspendedComposerLine } from "../auth/SuspendedReadOnly";
-import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show, untrack, type JSX } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show, untrack, type JSX } from "solid-js";
 import { useLocation, useNavigate, useParams } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
@@ -59,6 +59,7 @@ import {
   channelReaderDeviceRoleOf,
   channelRoleOf,
   channelSeedFor,
+  channelSubscriberCount,
   channelVisibilityOf,
   publishChannelPost,
   subscribeToChannel,
@@ -672,10 +673,25 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
     }
   }
 
+  // UX group-and-channel-privacy.md section 12: the header line carries the
+  // subscriber count where this device can know it, the owner's and a
+  // publisher's (the count route answers only them, section 15.1).
+  const [subscriberCount] = createResource(
+    () => (canPublish() && !removed() ? id : null),
+    async (channelId) => {
+      const identity = chats.conversationAccountIdentity();
+      if (identity === null) return null;
+      try {
+        return await channelSubscriberCount(identity, channelId);
+      } catch {
+        return null;
+      }
+    },
+  );
   const headerLine = (): string => {
     if (role() === null) return "";
     if (!canPublish() && channelReadStateOf(id) === "waiting") return t("channels.subscribe.status.waiting");
-    return channelHeaderLine(channelVisibilityOf(id), null);
+    return channelHeaderLine(channelVisibilityOf(id), canPublish() ? (subscriberCount() ?? null) : null);
   };
 
   return (

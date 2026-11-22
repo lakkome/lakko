@@ -321,11 +321,16 @@ class GroupInvitePageTest {
     }
 
     @Test
-    fun `the foot names the inviter from the preview, and is gone with no name`() {
+    fun `the inviter is named once, in the headline`() {
         val named = GroupInvitePreviewUi(groupName = "Trip", inviterName = "Anna", memberCount = 3)
-        assertEquals("Invited by Anna", invitedByLine(named)?.en)
-        assertNull(invitedByLine(named.copy(inviterName = "  ")))
-        assertNull(invitedByLine(null))
+        val lines = groupInvitePageLines(named)
+        assertEquals("Anna invites you to", lines.headline.en)
+        assertEquals("Trip", lines.groupLine)
+        // The card has no second line naming the inviter (spec section 3,
+        // amended 2026-11-22: "Invited by Anna" under the button repeated the
+        // headline).
+        val texts = listOfNotNull(lines.headline.en, lines.groupLine, lines.membersLine?.en)
+        assertEquals(1, texts.count { it.contains("Anna") })
     }
 
     // ADR-0087 15.2 — seen live 2026-11-12: a publisher link opened as

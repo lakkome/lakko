@@ -432,7 +432,8 @@ that annotation stays.
 
 - Control: `Leave group`
 - Title: `Leave this group?`
-- Body: `You will keep receiving messages until an owner or an admin applies your request. You will need a new invite to rejoin.`
+- Body: superseded by [`group-and-channel-privacy.md`](group-and-channel-privacy.md) section 9.4, which reads (2026-11-22) `The group and all its messages will be removed from all your devices.`
+- Notice after `Leave` while it waits (amended 2026-11-22): `You will leave once an owner or an admin next opens Lakko.`
 - Buttons: `Leave` (destructive) / `Cancel`
 - Pending annotation on your own row: `Waiting to leave.`
 - The control is **not live for the group owner** — the owner cannot leave *while owner*

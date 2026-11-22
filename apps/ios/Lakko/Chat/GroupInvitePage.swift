@@ -139,14 +139,6 @@ public struct GroupInviteHeadline: Equatable {
         return GroupInviteHeadline(lead: lead, groupName: group, members: members)
     }
 
-    /// The foot of the card: who invites, from the sealed preview. `nil`
-    /// with no name: the line is gone, digits never appear.
-    public static func footer(inviterName: String?) -> String? {
-        nonBlank(inviterName).map {
-            Localization.text("invite.group.invited_by", texts: ["name": $0])
-        }
-    }
-
     private static func nonBlank(_ value: String?) -> String? {
         guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
               !trimmed.isEmpty else { return nil }

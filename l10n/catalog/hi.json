@@ -3002,7 +3002,7 @@
       "status": "machine"
     },
     "chat.leave.body": {
-      "text": "यह आपकी सूची से हट जाएगा और इसके मैसेज आपके सभी डिवाइस से हटा दिए जाएँगे। जब तक मालिक या कोई एडमिन आपका अनुरोध लागू नहीं करता, आपको मैसेज मिलते रहेंगे।",
+      "text": "यह ग्रुप और इसके सभी मैसेज आपके सभी डिवाइस से हटा दिए जाएँगे।",
       "status": "machine"
     },
     "chat.leave.confirm": {
@@ -3014,7 +3014,7 @@
       "status": "machine"
     },
     "chat.leave.requested": {
-      "text": "ग्रुप छोड़ने का अनुरोध भेजा गया। यह तब लागू होगा जब मालिक या कोई एडमिन बदलाव लागू करेगा।",
+      "text": "जब मालिक या कोई एडमिन अगली बार Lakko खोलेगा, आप ग्रुप छोड़ देंगे।",
       "status": "machine"
     },
     "chat.leave.title": {
@@ -7159,10 +7159,6 @@
     },
     "invite.go_home": {
       "text": "Lakko के होम पेज पर जाएँ",
-      "status": "machine"
-    },
-    "invite.group.invited_by": {
-      "text": "{name} ने इनवाइट किया",
       "status": "machine"
     },
     "invite.group.lead_anonymous": {

@@ -23,6 +23,10 @@ kind a new message in a group shows:
   one notification per channel on web and desktop, the newest replacing the
   older).
 
+- **Deleted post** (amended 2026-11-22): the notification records the post it
+  shows; when a read of the channel finds that post deleted, the notification is
+  withdrawn, as a chat notification is (`message-actions.md` section 9).
+
 **On by default** (decided 2026-11-13): subscribing turns them on. Mute in
 the row menu, or in Channel info, turns them off for that channel, as for a
 group.

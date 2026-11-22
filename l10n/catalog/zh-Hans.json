@@ -3002,7 +3002,7 @@
       "status": "machine"
     },
     "chat.leave.body": {
-      "text": "它会从你的列表中移除，其消息也会从你的所有设备上删除。在群主或管理员应用你的请求之前，你会继续收到消息。",
+      "text": "该群组及其所有消息将从你的所有设备上删除。",
       "status": "machine"
     },
     "chat.leave.confirm": {
@@ -3014,7 +3014,7 @@
       "status": "machine"
     },
     "chat.leave.requested": {
-      "text": "已请求退出。群主或管理员应用此变更后生效。",
+      "text": "群主或管理员下次打开 Lakko 时，你将退出群组。",
       "status": "machine"
     },
     "chat.leave.title": {
@@ -7159,10 +7159,6 @@
     },
     "invite.go_home": {
       "text": "前往 Lakko 首页",
-      "status": "machine"
-    },
-    "invite.group.invited_by": {
-      "text": "邀请人：{name}",
       "status": "machine"
     },
     "invite.group.lead_anonymous": {

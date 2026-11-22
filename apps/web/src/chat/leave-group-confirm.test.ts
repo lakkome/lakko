@@ -22,13 +22,10 @@ import {
 } from "./leave-group-confirm";
 
 describe("the leave-group confirmation", () => {
-  it("states §6's copy verbatim", () => {
+  it("states what the person loses, in plain words", () => {
     const c = leaveGroupConfirmation({ groupLabel: null });
     expect(c.title).toBe("Leave this group?");
-    expect(c.body).toBe(
-      "It leaves your list and its messages are removed from all your devices. " +
-        "You keep receiving messages until an owner or an admin applies your request.",
-    );
+    expect(c.body).toBe("The group and all its messages will be removed from all your devices.");
     expect(LEAVE_GROUP_TITLE()).toBe(c.title);
     expect(LEAVE_GROUP_BODY()).toBe(c.body);
     expect(LEAVE_GROUP_CANCEL_LABEL()).toBe("Cancel");
