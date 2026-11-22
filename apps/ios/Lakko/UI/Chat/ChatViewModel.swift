@@ -1526,23 +1526,41 @@ public final class ChatViewModel: ObservableObject {
         roleTable?.owner == member.signaturePublicKey
     }
 
+    /// `docs/ux/conversation-info.md` section 2.2 / ADR-0022 — the row's role
+    /// mark and which of `Remove` / `Make admin` this reader gets on it; never
+    /// anything on the owner's row (``MemberRowActions``).
+    func memberRowActions(_ member: GroupMember) -> MemberRowActions {
+        let viewer: MemberRole?
+        if roleTable == nil {
+            viewer = nil
+        } else if isOwner {
+            viewer = .owner
+        } else if canManageMembers {
+            viewer = .admin
+        } else {
+            viewer = .member
+        }
+        return MemberRowActions.of(
+            viewerRole: viewer,
+            rowRole: MemberRole.of(
+                person: member.signaturePublicKey,
+                owner: roleTable?.owner,
+                admins: roleTable?.admins ?? []),
+            ownRow: ownLeafIndex == member.leafIndex,
+            membershipEnded: membershipHasEnded)
+    }
+
     /// Our own leaf index — the roster marks it "(you)" and blocks self-removal.
     var ownLeafIndex: UInt32? {
         repository.ownLeafIndex(groupIdHex: groupIdHex)
     }
 
-    /// Human label for a roster member: a matched contact's chosen name (or its
-    /// fingerprint), else a short fingerprint of the signature key. "(you)" is
-    /// appended for the local leaf. Mirrors the ADR-0021 resolution the call
-    /// roster uses, keyed on the member's signature public key.
-    func memberLabel(_ member: GroupMember) -> String {
-        // The local leaf is not in the contact directory, so the resolver
-        // would fall back to "Member"; the row is simply "You".
-        if ownLeafIndex == member.leafIndex { return Localization.text("chat.author.you") }
-        // ADR-0048 — the member list has room for the verified username under
-        // the name, so it shows the list form (`Alice Petrova · @alice`); the
-        // resolver already falls back to the fingerprint WITHOUT `@`.
-        return ProfileDirectory.shared.resolve(signatureKey: member.signaturePublicKey).listLabel
+    /// A member list row's two lines: the name, and the verified `@username`
+    /// under it (never `Name · @name` on the first line, which wrapped on a
+    /// phone and repeated what the second line says). `You` for this device.
+    func memberRowText(_ member: GroupMember) -> PersonRowText {
+        if ownLeafIndex == member.leafIndex { return .own(Localization.text("chat.author.you")) }
+        return PersonRowText(ProfileDirectory.shared.resolve(signatureKey: member.signaturePublicKey))
     }
 
     /// ADR-0053 — the label of a pending join request row: the contact's name
@@ -2019,15 +2037,17 @@ public final class ChatViewModel: ObservableObject {
     // MARK: - ADR-0045 UX §6.1 ownership transfer
 
     /// The roster's OWN identity treatment, in the roster's own order, as the
-    /// picker reads it. Built from ``memberLabel(_:)`` rather than a second
+    /// picker reads it. Built from ``memberRowText(_:)`` rather than a second
     /// derivation, so the picker and the members list cannot render the same
     /// person differently — that is the one thing the user cross-checks.
     var rosterViews: [RosterEntryView] {
         members.map {
-            RosterEntryView(
+            let text = memberRowText($0)
+            return RosterEntryView(
                 leafIndex: $0.leafIndex,
                 signatureKeyB64: base64Encode($0.signaturePublicKey),
-                label: memberLabel($0))
+                label: text.title,
+                usernameLine: text.subtitle)
         }
     }
 

@@ -3193,6 +3193,10 @@
       "text": "عبر {name} · عضو",
       "status": "machine"
     },
+    "chat.members.owner.marker": {
+      "text": "المالك",
+      "status": "machine"
+    },
     "chat.members.pending.adds_heading": {
       "text": "بانتظار الإضافة ({count})",
       "status": "machine"

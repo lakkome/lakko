@@ -3193,6 +3193,10 @@
       "text": "via {name} · membro",
       "status": "machine"
     },
+    "chat.members.owner.marker": {
+      "text": "Proprietário",
+      "status": "machine"
+    },
     "chat.members.pending.adds_heading": {
       "text": "Aguardando ser adicionados ({count})",
       "status": "machine"

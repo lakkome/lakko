@@ -313,20 +313,24 @@ private func transferControl(_ input: ExitBlockInput) -> GuardedControl {
 
 // MARK: - §6.1.3 the picker
 
-/// One roster row, as this module reads it. `label` is the roster's OWN identity
-/// treatment — an accepted contact's display name when we have one, else the
-/// short fingerprint — passed in rather than re-derived, so the picker and the
-/// members list cannot render the same person differently.
+/// One roster row, as this module reads it. `label` and `usernameLine` are the
+/// roster's OWN identity treatment (the name, and the verified `@username`
+/// under it) passed in rather than re-derived, so the picker and the members
+/// list cannot render the same person differently.
 public struct RosterEntryView: Equatable {
     public var leafIndex: UInt32
     /// Standard base64 of the member's 32-byte Ed25519 signature public key.
     public var signatureKeyB64: String
+    /// The name alone: the row's first line, and the name a sentence uses.
     public var label: String
+    /// `@username` for the row's second line, or `nil`.
+    public var usernameLine: String?
 
-    public init(leafIndex: UInt32, signatureKeyB64: String, label: String) {
+    public init(leafIndex: UInt32, signatureKeyB64: String, label: String, usernameLine: String? = nil) {
         self.leafIndex = leafIndex
         self.signatureKeyB64 = signatureKeyB64
         self.label = label
+        self.usernameLine = usernameLine
     }
 }
 
@@ -335,6 +339,8 @@ public struct TransferCandidate: Equatable, Identifiable {
     public var leafIndex: UInt32
     public var signatureKeyB64: String
     public var label: String
+    /// `@username` under the name, as the members list shows it, or `nil`.
+    public var usernameLine: String?
     /// Renders a muted `Admin` marker. Information the owner assigned and worth
     /// having when choosing a successor — never a reason to hide anyone.
     public var isAdmin: Bool
@@ -344,10 +350,13 @@ public struct TransferCandidate: Equatable, Identifiable {
     /// name someone else mid-render.
     public var id: String { signatureKeyB64 }
 
-    public init(leafIndex: UInt32, signatureKeyB64: String, label: String, isAdmin: Bool) {
+    public init(
+        leafIndex: UInt32, signatureKeyB64: String, label: String, usernameLine: String? = nil, isAdmin: Bool
+    ) {
         self.leafIndex = leafIndex
         self.signatureKeyB64 = signatureKeyB64
         self.label = label
+        self.usernameLine = usernameLine
         self.isAdmin = isAdmin
     }
 }
@@ -384,6 +393,7 @@ public func transferCandidates(
                 leafIndex: $0.leafIndex,
                 signatureKeyB64: $0.signatureKeyB64,
                 label: $0.label,
+                usernameLine: $0.usernameLine,
                 isAdmin: adminKeysB64.contains($0.signatureKeyB64))
         }
 }

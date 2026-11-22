@@ -293,9 +293,27 @@ class GroupContactRequestTest {
         val contactWithChat = AcceptedContact(request = request(messageId = -5L), groupIdHex = "one2one")
         val viaGroup = request(messageId = groupRequestMessageId("abcd", 3L), via = "abcd")
         assertTrue(mergeFetchedRequests(emptyList(), listOf(contactWithChat), listOf(viaGroup)).pending.isEmpty())
-        // A mailbox request from a contact goes as before.
+        // A mailbox request from a contact with a chat here goes as before.
         val mailbox = request(messageId = 9L)
-        val contactNoChat = AcceptedContact(request = request(messageId = -5L), groupIdHex = null)
-        assertTrue(mergeFetchedRequests(emptyList(), listOf(contactNoChat), listOf(mailbox)).pending.isEmpty())
+        assertTrue(mergeFetchedRequests(emptyList(), listOf(contactWithChat), listOf(mailbox)).pending.isEmpty())
+    }
+
+    @Test
+    fun `base scenario 7 - a mailbox request listed because no chat is held here stays a request row`() {
+        // The silent answer is given only while a one-to-one is held; without
+        // one the known-contact check marks the request and it is listed.
+        val plain = request(messageId = 9L)
+        val marked = plain.copy(asksForChat = true, asksPastChatHex = "dead")
+        val contactStaleChat = AcceptedContact(request = request(messageId = -5L), groupIdHex = "dead")
+        assertEquals(listOf(marked), mergeFetchedRequests(emptyList(), listOf(contactStaleChat), listOf(marked)).pending)
+        assertEquals(listOf(marked), withoutAcceptedSenders(listOf(marked), listOf(contactStaleChat)))
+        // Unmarked, the same row from a contact is not a request (it was
+        // answered silently, or re-fetched).
+        assertTrue(mergeFetchedRequests(emptyList(), listOf(contactStaleChat), listOf(plain)).pending.isEmpty())
+        assertFalse(asksForChat(plain, listOf(contactStaleChat)))
+        // Once the row names another chat, they have one: no longer asking.
+        val contactNewChat = contactStaleChat.copy(groupIdHex = "fresh")
+        assertFalse(asksForChat(marked, listOf(contactNewChat)))
+        assertTrue(withoutAcceptedSenders(listOf(marked), listOf(contactNewChat)).isEmpty())
     }
 }

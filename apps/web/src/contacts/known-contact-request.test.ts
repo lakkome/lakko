@@ -9,6 +9,9 @@ import {
   establishedContactOfAccount,
   knownContactRequestVerdict,
   pinKeysOf,
+  requestPredatesContact,
+  SIBLING_ADMIT_WAIT_MS,
+  siblingMayAdmit,
 } from "./known-contact-request";
 
 describe("knownContactRequestVerdict", () => {
@@ -27,6 +30,47 @@ describe("knownContactRequestVerdict", () => {
   });
   it("no verdict yet: it waits, unshown", () => {
     expect(knownContactRequestVerdict({ ...base, check: "inconclusive", trustedKeyB64: "old" })).toBe("wait");
+  });
+  it("base scenario 7: answered silently only while a one-to-one is held here, else listed", () => {
+    expect(knownContactRequestVerdict({ ...base, holdsOneToOne: true })).toBe("answer");
+    expect(knownContactRequestVerdict({ ...base, holdsOneToOne: false })).toBe("show");
+    // Dropping and waiting do not depend on it.
+    expect(knownContactRequestVerdict({ ...base, holdsOneToOne: false, requestKeyB64: "old" })).toBe("drop");
+    expect(knownContactRequestVerdict({ ...base, holdsOneToOne: false, check: "refused" })).toBe("drop");
+    expect(knownContactRequestVerdict({ ...base, holdsOneToOne: false, check: "inconclusive" })).toBe("wait");
+  });
+  it("after a lost cursor: a request no newer than the contact is dropped, not listed", () => {
+    expect(knownContactRequestVerdict({ ...base, holdsOneToOne: false, predatesContact: true })).toBe("drop");
+    expect(knownContactRequestVerdict({ ...base, holdsOneToOne: false, predatesContact: false })).toBe("show");
+    // With a chat held it is answered as before.
+    expect(knownContactRequestVerdict({ ...base, holdsOneToOne: true, predatesContact: true })).toBe("answer");
+  });
+  it("a sibling may still admit this device: the request waits, then is listed", () => {
+    expect(knownContactRequestVerdict({ ...base, holdsOneToOne: false, siblingMayAdmit: true })).toBe("wait");
+    expect(knownContactRequestVerdict({ ...base, holdsOneToOne: false, siblingMayAdmit: false })).toBe("show");
+    // Once the chat is here it is answered; an old one is still dropped.
+    expect(knownContactRequestVerdict({ ...base, holdsOneToOne: true, siblingMayAdmit: true })).toBe("answer");
+    expect(
+      knownContactRequestVerdict({ ...base, holdsOneToOne: false, siblingMayAdmit: true, predatesContact: true }),
+    ).toBe("drop");
+  });
+  it("siblingMayAdmit: another device, and the request younger than the wait", () => {
+    const at = "2026-11-22T09:00:00Z";
+    const t = Date.parse(at);
+    expect(siblingMayAdmit({ otherDeviceCount: 1, requestCreatedAt: at, nowMs: t + 1000 })).toBe(true);
+    expect(siblingMayAdmit({ otherDeviceCount: 1, requestCreatedAt: at, nowMs: t + SIBLING_ADMIT_WAIT_MS })).toBe(false);
+    expect(siblingMayAdmit({ otherDeviceCount: 0, requestCreatedAt: at, nowMs: t + 1000 })).toBe(false);
+    expect(siblingMayAdmit({ otherDeviceCount: null, requestCreatedAt: at, nowMs: t + 1000 })).toBe(false);
+    expect(siblingMayAdmit({ otherDeviceCount: 2, requestCreatedAt: "bad", nowMs: t })).toBe(false);
+  });
+  it("requestPredatesContact compares the DS stamp with the relationship time", () => {
+    const since = Date.parse("2026-11-22T09:00:00Z");
+    expect(requestPredatesContact("2026-11-21T09:00:00Z", since)).toBe(true);
+    expect(requestPredatesContact("2026-11-22T09:00:00Z", since)).toBe(true);
+    expect(requestPredatesContact("2026-11-22T09:19:00Z", since)).toBe(false);
+    expect(requestPredatesContact("not a date", since)).toBe(false);
+    expect(requestPredatesContact("2026-11-21T09:00:00Z", undefined)).toBe(false);
+    expect(requestPredatesContact("2026-11-21T09:00:00Z", 0)).toBe(false);
   });
   it("a request from any other key of a contact's account is dropped", () => {
     expect(knownContactRequestVerdict({ ...base, requestKeyB64: "old" })).toBe("drop");

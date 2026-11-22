@@ -3193,6 +3193,10 @@
       "text": "davet eden: {name} · üye",
       "status": "machine"
     },
+    "chat.members.owner.marker": {
+      "text": "Sahip",
+      "status": "machine"
+    },
     "chat.members.pending.adds_heading": {
       "text": "Eklenmeyi bekleyenler ({count})",
       "status": "machine"

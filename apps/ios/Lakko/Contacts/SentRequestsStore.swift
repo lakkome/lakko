@@ -184,6 +184,20 @@ public enum SentRequests {
         }
     }
 
+    /// Whether a row under Sent asked the person who signed an ack: a row that
+    /// names that key, or names the account the ack names and no key at all.
+    /// A row naming the account under another key is not theirs: an ack
+    /// names its account id itself, and only the key is verified.
+    public static func askedAcker(
+        in sent: [SentContactRequest], key: Data, accountIdB64: String
+    ) -> Bool {
+        let keyB64 = base64Encode(key)
+        return sent.contains { row in
+            row.recipientKeyB64 == keyB64
+                || (row.recipientKeyB64 == nil && row.recipientAccountIdB64 == accountIdB64)
+        }
+    }
+
     /// The list after the person holding `recipientAccountIdB64` answered.
     public static func answered(
         recipientAccountIdB64: String, in sent: [SentContactRequest]

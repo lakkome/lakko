@@ -3193,6 +3193,10 @@
       "text": "דרך {name} · חבר",
       "status": "machine"
     },
+    "chat.members.owner.marker": {
+      "text": "בעלים",
+      "status": "machine"
+    },
     "chat.members.pending.adds_heading": {
       "text": "ממתינים להוספה ({count})",
       "status": "machine"

@@ -280,6 +280,12 @@ export interface DeviceGroupSyncApi {
   /** Reactive: `true` once the per-session DeviceGroup handle
    *  is loaded and the poll loop has started. */
   readonly ready: Accessor<boolean>;
+  /** How many OTHER devices the account's DeviceGroup lists, as the live
+   *  handle reads it; `null` when no handle is held or the roster cannot be
+   *  read. Base scenario 9: a request from a contact this device holds no
+   *  chat with waits a while for a sibling to admit it. Optional for test
+   *  doubles. */
+  readonly otherDeviceCount?: () => number | null;
   /** Reactive snapshot of the per-group draft map. */
   readonly drafts: Accessor<DraftMap>;
   /** Reactive snapshot of the per-group flags map. */
@@ -3955,6 +3961,11 @@ export function DeviceGroupSyncProvider(props: {
   // ----- Hook API ------------------------------------------------
 
   const api: DeviceGroupSyncApi = {
+    otherDeviceCount: () => {
+      if (group === null || reloading || deviceRemoved()) return null;
+      const keys = deviceKeysOf(group);
+      return keys === null || keys.length === 0 ? null : keys.length - 1;
+    },
     ready,
     drafts,
     flags,

@@ -3193,6 +3193,10 @@
       "text": "通过 {name} · 成员",
       "status": "machine"
     },
+    "chat.members.owner.marker": {
+      "text": "群主",
+      "status": "machine"
+    },
     "chat.members.pending.adds_heading": {
       "text": "等待添加（{count}）",
       "status": "machine"

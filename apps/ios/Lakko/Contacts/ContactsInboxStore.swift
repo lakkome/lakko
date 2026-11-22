@@ -161,7 +161,7 @@ public enum ContactsInboxMerge {
                 dropped.append((request, .blocked))
             } else if pendingIds.contains(request.messageId) {
                 dropped.append((request, .alreadyPending))
-            } else if acceptedKeys.contains(person) {
+            } else if acceptedKeys.contains(person), request.asksForChat != true {
                 dropped.append((request, .alreadyAccepted))
             } else if person != request.fromPubkey,
                       (live + kept).contains(where: { currentKey($0.fromPubkey) == person }) {

@@ -71,6 +71,7 @@ import {
 } from "../contacts/address-resolver";
 import { clearInboxForAccount } from "../contacts/inbox-store";
 import { clearSentRequests } from "../contacts/sent-requests";
+import { clearHeldSince } from "../contacts/held-since";
 import { deleteSentIntrosForAccount } from "../contacts/sent-request-intros";
 import { clearSpendOwed } from "../contacts/rotation-spent";
 import { clearInviteLinkSecrets } from "../contacts/invite-link-secrets";
@@ -296,6 +297,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "verified-bindings", run: () => clearVerifiedBindingsForAccount(accountIdB64) },
     { name: "contact-inbox", run: () => clearInboxForAccount(accountIdB64) },
     { name: "sent-requests", run: () => clearSentRequests(accountIdB64) },
+    { name: "conversation-held-since", run: () => clearHeldSince(accountIdB64) },
     { name: "pending-publisher-requests", run: () => clearPendingPublisherRequests(accountIdB64) },
     {
       name: "invite-link-secrets",

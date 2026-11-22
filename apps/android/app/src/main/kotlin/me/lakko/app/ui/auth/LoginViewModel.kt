@@ -14,6 +14,7 @@ import me.lakko.app.auth.AuthClientArgError
 import me.lakko.app.auth.AuthHttpError
 import me.lakko.app.auth.AuthNetworkError
 import me.lakko.app.auth.AuthRepository
+import me.lakko.app.auth.PasswordLoginRejected
 import me.lakko.app.l10n.UiText
 
 /**
@@ -87,31 +88,13 @@ public class LoginViewModel(
                 mutableState.update {
                     it.copy(busy = false, error = null, password = "")
                 }
-            } catch (err: AuthClientArgError) {
-                mutableState.update {
-                    it.copy(busy = false, error = err.text ?: WRONG_CREDENTIALS)
-                }
-            } catch (err: AuthHttpError) {
-                mutableState.update {
-                    it.copy(busy = false, error = userFacingHttpError(err))
-                }
-            } catch (_: AuthNetworkError) {
-                // Same indistinguishable-network-failure copy as
-                // signup — the user takes the same action either way
-                // (check connection, retry).
-                mutableState.update {
-                    it.copy(
-                        busy = false,
-                        error = OFFLINE,
-                    )
-                }
             } catch (err: Throwable) {
                 me.lakko.app.rethrowIfCancelled(err) {
                     mutableState.update { it.copy(busy = false) }
                 }
-                mutableState.update {
-                    it.copy(busy = false, error = WRONG_CREDENTIALS)
-                }
+                // Plain text, no identifiers: what failed.
+                android.util.Log.w("lakko-auth", "[auth] login failed: ${loginFailureLogLine(err)}")
+                mutableState.update { it.copy(busy = false, error = loginFailureText(err)) }
             } finally {
                 passwordBytes.fill(0)
             }
@@ -207,3 +190,39 @@ public data class LoginUiState(
     /** The form's error sentence (ADR-0061: rendered from its key). */
     val error: UiText? = null,
 )
+
+/**
+ * What the login form says for a failed password sign-in. Only a refused
+ * password says "wrong username or password": the OPAQUE exchange refused on
+ * the device ([PasswordLoginRejected]), the server's `401`, or an empty
+ * field. A limit, an outage and no connection keep their own sentences.
+ * Anything else (a malformed answer, an error nobody named) is not the
+ * person's typing and shows the generic failure.
+ */
+internal fun loginFailureText(err: Throwable): UiText = when (err) {
+    is AuthNetworkError -> UiText("common.error.offline")
+    is me.lakko.app.anon.AnonTokenException -> UiText("common.error.offline")
+    is PasswordLoginRejected -> UiText("auth.error.wrong_credentials")
+    is AuthClientArgError -> when (err.message) {
+        "username must be non-empty", "password must be non-empty" -> UiText("auth.error.wrong_credentials")
+        else -> err.text ?: UiText("common.error.unavailable")
+    }
+    is AuthHttpError -> me.lakko.app.auth.authLimitText(err) ?: when (err.status) {
+        401 -> UiText("auth.error.wrong_credentials")
+        429 -> UiText("common.error.too_many_attempts")
+        else -> UiText("common.error.unavailable")
+    }
+    else -> UiText("common.error.unavailable")
+}
+
+/** A plain-text description of a failed login for the device log: the
+ *  error's class, the HTTP status and endpoint path when there is one.
+ *  Never a message, a body, a username or a secret. */
+internal fun loginFailureLogLine(err: Throwable): String {
+    val kind = err.javaClass.simpleName.ifEmpty { "Throwable" }
+    return when (err) {
+        is AuthHttpError -> "error=$kind status=${err.status} endpoint=${err.endpoint}"
+        is AuthNetworkError -> "error=$kind status=none endpoint=${err.endpoint} cause=${err.cause?.javaClass?.simpleName}"
+        else -> "error=$kind status=none"
+    }
+}

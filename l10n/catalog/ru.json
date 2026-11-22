@@ -3345,6 +3345,10 @@
       "text": "через {name} · участник",
       "status": "machine"
     },
+    "chat.members.owner.marker": {
+      "text": "Владелец",
+      "status": "machine"
+    },
     "chat.members.pending.adds_heading": {
       "text": "Ожидают добавления ({count})",
       "status": "machine"

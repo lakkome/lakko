@@ -359,7 +359,7 @@ public fun mergeFetchedRequests(
             it.fromPubkey.contentEquals(req.fromPubkey) && it.validAfterMs == req.validAfterMs
         }
         val duplicateRow = !seenIds.add(req.messageId) || sameRequest
-        val alreadyAccepted = !askedForChatThroughGroup(req, accepted) && acceptedKeys.any {
+        val alreadyAccepted = !asksForChat(req, accepted) && acceptedKeys.any {
             it.contentEquals(req.fromPubkey) || supersedes(req.fromPubkey, it)
         }
         if (duplicateRow || alreadyAccepted) {
@@ -426,7 +426,7 @@ public fun withoutAcceptedSenders(
 ): List<IncomingContactRequest> {
     if (pending.isEmpty() || accepted.isEmpty()) return pending
     val acceptedKeys = accepted.mapTo(HashSet()) { it.request.fromPubkey.toList() }
-    return pending.filterNot { it.fromPubkey.toList() in acceptedKeys && !askedForChatThroughGroup(it, accepted) }
+    return pending.filterNot { it.fromPubkey.toList() in acceptedKeys && !asksForChat(it, accepted) }
 }
 
 /**
@@ -441,6 +441,23 @@ public fun askedForChatThroughGroup(request: IncomingContactRequest, accepted: L
     if (request.viaGroupIdHex == null) return false
     val row = accepted.firstOrNull { it.request.fromPubkey.contentEquals(request.fromPubkey) } ?: return true
     return row.groupIdHex == null
+}
+
+/**
+ * Whether a request from someone who may be a contact stays a request row:
+ * one through a group ([askedForChatThroughGroup]), or (base scenario 7,
+ * 2026-11-22) one from the inbox that the known-contact check listed because
+ * this device holds no live one-to-one with them
+ * ([IncomingContactRequest.asksForChat]): the silent answer is given only
+ * while one is held, so without one Accept starts the chat, and the request
+ * must survive the accepted-sender filters.
+ */
+public fun asksForChat(request: IncomingContactRequest, accepted: List<AcceptedContact>): Boolean {
+    if (askedForChatThroughGroup(request, accepted)) return true
+    if (!request.asksForChat) return false
+    // Until the row names a chat other than the one it named when listed.
+    val row = accepted.firstOrNull { it.request.fromPubkey.contentEquals(request.fromPubkey) } ?: return true
+    return row.groupIdHex == null || row.groupIdHex == request.asksPastChatHex
 }
 
 /**
@@ -621,6 +638,69 @@ public fun applyContactAcks(
     return AppliedContactAcks(nextAccepted, nextSent, changed)
 }
 
+/**
+ * Base scenario 7 (2026-11-22) — the acks that are a silent answer: a person
+ * this account removed and asked again still has this account as a contact,
+ * so their device answers with the ack alone and founds nothing. When the ack
+ * answers a Sent request this device made to that key and this device holds a
+ * live one-to-one with them, that one-to-one is the answer. Returns signature
+ * key (standard base64) -> the one-to-one's group id (hex), for
+ * [applyAnsweringWelcomes], which makes them a contact with it (a removal does
+ * not hold: asking them was a decision to have them back) and retires the
+ * request.
+ *
+ * A request counts when it names the ack's key, or names the ack's account
+ * and no key: an ack names its account id itself, and only the key is
+ * verified.
+ */
+public fun acksAnsweredByLiveOneToOne(
+    sent: List<SentContactRequest>,
+    acks: List<IncomingContactAck>,
+    liveOneToOneWith: (ByteArray) -> String?,
+): Map<String, String> {
+    if (acks.isEmpty() || sent.isEmpty()) return emptyMap()
+    val encoder = java.util.Base64.getEncoder()
+    val out = LinkedHashMap<String, String>()
+    for (ack in acks) {
+        val keyB64 = encoder.encodeToString(ack.accepterPubkey)
+        if (keyB64 in out || !sentAskedAcker(sent, ack)) continue
+        val groupHex = liveOneToOneWith(ack.accepterPubkey) ?: continue
+        out[keyB64] = groupHex
+    }
+    return out
+}
+
+/**
+ * Base scenario 7 — the acks that are a silent answer while this device holds
+ * NO live one-to-one with the person (it lost its chat while theirs still
+ * stands): no Welcome will come, so this device founds one with them, as
+ * Message on a contact card does, and they are a contact with it. One per
+ * person, in arrival order. The answering device answers silently only while
+ * it holds a live one-to-one ([knownContactRequestVerdict]), so only one side
+ * ever founds.
+ */
+public fun silentAnswersNeedingChat(
+    sent: List<SentContactRequest>,
+    acks: List<IncomingContactAck>,
+    liveOneToOneWith: (ByteArray) -> String?,
+): List<IncomingContactAck> {
+    if (acks.isEmpty() || sent.isEmpty()) return emptyList()
+    return acks
+        .filter { sentAskedAcker(sent, it) && liveOneToOneWith(it.accepterPubkey) == null }
+        .distinctBy { java.util.Base64.getEncoder().encodeToString(it.accepterPubkey) }
+}
+
+/** Whether a Sent request asked the person who signed [ack]: it names that
+ *  key, or names the ack's account and no key. */
+private fun sentAskedAcker(sent: List<SentContactRequest>, ack: IncomingContactAck): Boolean {
+    val encoder = java.util.Base64.getEncoder()
+    val keyB64 = encoder.encodeToString(ack.accepterPubkey)
+    val accountB64 = encoder.encodeToString(ack.accepterAccountId)
+    return sent.any {
+        it.recipientKeyB64 == keyB64 || (it.recipientKeyB64 == null && it.recipientAccountIdB64 == accountB64)
+    }
+}
+
 /** What a Sent record knew about the person it went to. */
 public data class FoundName(
     /** The person's signature key, standard base64. */
@@ -696,6 +776,10 @@ private data class StoredPendingRequest(
     val viaGroupIdHex: String? = null,
     /** ADR-0099 section 2 — the request's wire, the evidence of a report. */
     val wireB64: String? = null,
+    /** Base scenario 7 — [IncomingContactRequest.asksForChat]. */
+    val asksForChat: Boolean = false,
+    /** Base scenario 7 — [IncomingContactRequest.asksPastChatHex]. */
+    val asksPastChatHex: String? = null,
 )
 
 /** JSON for [pending]; `java.util.Base64` for the byte fields so the codec
@@ -713,6 +797,8 @@ internal fun encodePendingRequests(pending: List<IncomingContactRequest>): Strin
                 createdAt = r.createdAt,
                 viaGroupIdHex = r.viaGroupIdHex,
                 wireB64 = r.wire?.let { base64Encode(it) },
+                asksForChat = r.asksForChat,
+                asksPastChatHex = r.asksPastChatHex,
             )
         },
     )
@@ -731,6 +817,8 @@ internal fun decodePendingRequests(raw: String): List<IncomingContactRequest>? =
                 createdAt = s.createdAt,
                 viaGroupIdHex = s.viaGroupIdHex,
                 wire = s.wireB64?.let { base64Decode(it) },
+                asksForChat = s.asksForChat,
+                asksPastChatHex = s.asksPastChatHex,
             )
         }
     } catch (_: Exception) {

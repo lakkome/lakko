@@ -149,6 +149,47 @@ final class DuplicateOneToOneTests: XCTestCase {
             [])
     }
 
+    // Base scenario 9 (2026-11-22) — ordered by when this device first held them.
+
+    private func at(_ held: DuplicateOneToOne.Held, _ ms: Int64) -> DuplicateOneToOne.Held {
+        var out = held
+        out.heldSinceMs = ms
+        return out
+    }
+
+    func testTheNewerOneToOneTheSamePersonFoundedContinuesTheOlderOne() {
+        XCTAssertEqual(
+            DuplicateOneToOne.folds(held: [at(chat("aa", vg3), 1), at(chat("bb", vg3), 2)], ownKeyB64: me),
+            [fold("bb", "aa")])
+        XCTAssertEqual(
+            DuplicateOneToOne.folds(held: [at(chat("bb", vg3), 2), at(chat("aa", vg3), 1)], ownKeyB64: me),
+            [fold("bb", "aa")])
+    }
+
+    func testAOneToOneASiblingFoundedContinuesAnOlderOneThePersonFounded() {
+        XCTAssertEqual(
+            DuplicateOneToOne.folds(held: [at(chat("aa", vg3), 1), at(chat("bb", me), 2)], ownKeyB64: me),
+            [fold("bb", "aa")])
+    }
+
+    func testEqualOrUnknownTimesKeepTheRuleAsItWas() {
+        XCTAssertEqual(
+            DuplicateOneToOne.folds(held: [at(chat("aa", vg3), 1), at(chat("bb", vg3), 1)], ownKeyB64: me), [])
+        XCTAssertEqual(
+            DuplicateOneToOne.folds(held: [chat("aa", vg3), at(chat("bb", vg3), 2)], ownKeyB64: me), [])
+        XCTAssertEqual(
+            DuplicateOneToOne.folds(held: [at(chat("aa", me), 1), at(chat("bb", vg3), 1)], ownKeyB64: me),
+            [fold("bb", "aa")])
+    }
+
+    func testTheHeldSinceRecordKeepsFirstTimesAndDropsGroupsNoLongerHeld() {
+        let first = ConversationHeldSince.next(stored: [:], groupHexes: ["aa"], nowMs: 100)
+        XCTAssertEqual(first, ["aa": 100])
+        let second = ConversationHeldSince.next(stored: first, groupHexes: ["aa", "bb"], nowMs: 200)
+        XCTAssertEqual(second, ["aa": 100, "bb": 200])
+        XCTAssertEqual(ConversationHeldSince.next(stored: second, groupHexes: ["bb"], nowMs: 300), ["bb": 200])
+    }
+
     func testLeavesOneToOnesWithDifferentPeopleApart() {
         XCTAssertEqual(
             DuplicateOneToOne.folds(held: [chat("aa", me, peer: anna), chat("bb", vg3)], ownKeyB64: me),

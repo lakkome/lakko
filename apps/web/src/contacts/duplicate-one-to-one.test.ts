@@ -77,4 +77,45 @@ describe("duplicateOneToOneFolds", () => {
       { successorHex: "bb", rootHex: "aa" },
     ]);
   });
+
+  describe("ordered by when this device first held them (base scenario 9, 2026-11-22)", () => {
+    const at = (g: HeldConversationGroup, heldSinceMs: number): HeldConversationGroup => ({ ...g, heldSinceMs });
+
+    it("the newer one-to-one the same person founded continues the older one", () => {
+      // VG3 lost its chat and founded a new one; this device still held the
+      // old one, founded by VG3 too.
+      expect(duplicateOneToOneFolds([at(chat("aa", VG3), 1), at(chat("bb", VG3), 2)], ME)).toEqual([
+        { successorHex: "bb", rootHex: "aa" },
+      ]);
+      expect(duplicateOneToOneFolds([at(chat("bb", VG3), 2), at(chat("aa", VG3), 1)], ME)).toEqual([
+        { successorHex: "bb", rootHex: "aa" },
+      ]);
+    });
+
+    it("a one-to-one another device of this account founded continues an older one the person founded", () => {
+      expect(duplicateOneToOneFolds([at(chat("aa", VG3), 1), at(chat("bb", ME), 2)], ME)).toEqual([
+        { successorHex: "bb", rootHex: "aa" },
+      ]);
+    });
+
+    it("the person's older one-to-one never continues this account's newer one", () => {
+      expect(duplicateOneToOneFolds([at(chat("bb", ME), 2), at(chat("aa", VG3), 1)], ME)).toEqual([
+        { successorHex: "bb", rootHex: "aa" },
+      ]);
+    });
+
+    it("equal or unknown times keep the rule as it was", () => {
+      expect(duplicateOneToOneFolds([at(chat("aa", VG3), 1), at(chat("bb", VG3), 1)], ME)).toEqual([]);
+      expect(duplicateOneToOneFolds([at(chat("aa", ME), 1), at(chat("bb", VG3), 1)], ME)).toEqual([
+        { successorHex: "bb", rootHex: "aa" },
+      ]);
+      expect(duplicateOneToOneFolds([chat("aa", VG3), at(chat("bb", VG3), 2)], ME)).toEqual([]);
+    });
+
+    it("a folded pair writes nothing more", () => {
+      expect(
+        duplicateOneToOneFolds([at(chat("aa", VG3), 1), at(chat("bb", VG3, VG3, "aa"), 2)], ME),
+      ).toEqual([]);
+    });
+  });
 });

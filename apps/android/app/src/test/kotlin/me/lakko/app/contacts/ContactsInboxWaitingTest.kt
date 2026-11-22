@@ -71,4 +71,73 @@ class ContactsInboxWaitingTest {
         assertEquals(KnownRequestVerdict.DROP, knownContactRequestVerdict(true, KnownRequestCheck.CURRENT, key, "OTHER"))
         assertEquals(KnownRequestVerdict.DROP, knownContactRequestVerdict(true, KnownRequestCheck.CURRENT, key, null))
     }
+
+    @Test
+    fun `a sibling may still admit this device - the request waits, then is listed`() {
+        val key = "KEY"
+        assertEquals(
+            KnownRequestVerdict.WAIT,
+            knownContactRequestVerdict(true, KnownRequestCheck.CURRENT, key, key, holdsOneToOne = false, siblingMayAdmit = true),
+        )
+        assertEquals(
+            KnownRequestVerdict.ANSWER,
+            knownContactRequestVerdict(true, KnownRequestCheck.CURRENT, key, key, holdsOneToOne = true, siblingMayAdmit = true),
+        )
+        assertEquals(
+            KnownRequestVerdict.DROP,
+            knownContactRequestVerdict(
+                true, KnownRequestCheck.CURRENT, key, key,
+                holdsOneToOne = false, predatesContact = true, siblingMayAdmit = true,
+            ),
+        )
+        val at = "2026-11-22T09:00:00Z"
+        val t = java.time.Instant.parse(at).toEpochMilli()
+        assertTrue(siblingMayAdmit(1, at, t + 1000))
+        assertFalse(siblingMayAdmit(1, at, t + SIBLING_ADMIT_WAIT_MS))
+        assertFalse(siblingMayAdmit(0, at, t + 1000))
+        assertFalse(siblingMayAdmit(null, at, t + 1000))
+        assertFalse(siblingMayAdmit(2, "bad", t))
+    }
+
+    @Test
+    fun `after a lost cursor a request no newer than the contact is dropped, not listed`() {
+        val key = "KEY"
+        assertEquals(
+            KnownRequestVerdict.DROP,
+            knownContactRequestVerdict(true, KnownRequestCheck.CURRENT, key, key, holdsOneToOne = false, predatesContact = true),
+        )
+        assertEquals(
+            KnownRequestVerdict.ANSWER,
+            knownContactRequestVerdict(true, KnownRequestCheck.CURRENT, key, key, holdsOneToOne = true, predatesContact = true),
+        )
+        val since = "2026-11-22T09:00:00Z"
+        assertTrue(requestPredatesContact("2026-11-21T09:00:00Z", since))
+        assertTrue(requestPredatesContact("2026-11-22T09:00:00Z", since))
+        assertFalse(requestPredatesContact("2026-11-22T09:19:00Z", since))
+        assertFalse(requestPredatesContact("not a date", since))
+        assertFalse(requestPredatesContact("2026-11-21T09:00:00Z", null))
+        assertFalse(requestPredatesContact("2026-11-21T09:00:00Z", ""))
+    }
+
+    @Test
+    fun `base scenario 7 - answered silently only while a one-to-one is held, else listed`() {
+        val key = "KEY"
+        assertEquals(
+            KnownRequestVerdict.ANSWER,
+            knownContactRequestVerdict(true, KnownRequestCheck.CURRENT, key, key, holdsOneToOne = true),
+        )
+        assertEquals(
+            KnownRequestVerdict.SHOW,
+            knownContactRequestVerdict(true, KnownRequestCheck.CURRENT, key, key, holdsOneToOne = false),
+        )
+        // Dropping and waiting do not depend on it.
+        assertEquals(
+            KnownRequestVerdict.DROP,
+            knownContactRequestVerdict(true, KnownRequestCheck.CURRENT, key, "OTHER", holdsOneToOne = false),
+        )
+        assertEquals(
+            KnownRequestVerdict.WAIT,
+            knownContactRequestVerdict(true, KnownRequestCheck.INCONCLUSIVE, key, key, holdsOneToOne = false),
+        )
+    }
 }

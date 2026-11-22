@@ -72,6 +72,27 @@ export function bubbleSenderLabelOf(resolved: ResolvedName | null, keyB64: strin
   return memberNameOf(resolved, "a message bubble");
 }
 
+/** A two-line person row: the name, and the verified `@username` under it. */
+export interface MemberRowText {
+  readonly title: string;
+  /** `@username`, or `null` when there is none or the title already is it. */
+  readonly subtitle: string | null;
+}
+
+/**
+ * A group's member row and an Add members picker row
+ * (`docs/ux/conversation-info.md` sections 2.2 and 2.4,
+ * `docs/ux/profile-names.md` section 3): the name as the title, the verified
+ * username once as the second line, never both on the first line (seen live
+ * 2026-11-22: `G53Person · @w6g53x2201` wrapped on a phone, with the username
+ * again under it). The placeholder word is reported as in {@link memberNameOf}.
+ */
+export function memberRowTextOf(resolved: ResolvedName, surface = "a list row"): MemberRowText {
+  const title = memberNameOf(resolved, surface);
+  const subtitle = resolved.source !== "username" && resolved.username !== null ? resolved.username : null;
+  return { title, subtitle };
+}
+
 /** Roster rows: `Name · @username` when there is one, never a fingerprint;
  *  the placeholder word is reported as in {@link memberNameOf}. */
 export function memberListLabelOf(resolved: ResolvedName, surface = "a list row"): string {

@@ -42,16 +42,14 @@ struct AddMembersScreen: View {
         ReachCenter.shared.currentAccountKey(of: key)
     }
 
-    /// Every accepted contact, named the way every list names them.
+    /// Every accepted contact: the name, and the username as the second line.
     private var allContacts: [AddMembersRules.Contact] {
         let _ = directory.revision
         return contacts.repositoryState.accepted.map { entry in
-            let resolved = directory.resolve(signatureKey: entry.request.fromPubkey)
-            return AddMembersRules.Contact(
+            AddMembersRules.contact(
                 personKey: entry.request.fromPubkey,
                 accountId: entry.request.fromAccountId,
-                name: resolved.listLabel,
-                username: resolved.source == .verifiedUsername ? nil : resolved.verifiedUsername)
+                resolved: directory.resolve(signatureKey: entry.request.fromPubkey))
         }
     }
 

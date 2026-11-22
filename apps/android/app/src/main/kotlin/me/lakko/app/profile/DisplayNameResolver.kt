@@ -244,6 +244,21 @@ public fun deletedName(signatureKey: ByteArray): ResolvedName =
  */
 public fun avatarName(name: ResolvedName): String = name.primary
 
+/** A two-line person row: the name, and the verified `@username` under it. */
+public data class PersonRowText(val title: String, val subtitle: String?)
+
+/**
+ * A group's member row and the ownership-transfer picker row
+ * (`docs/ux/conversation-info.md` 2.2, `docs/ux/profile-names.md` §3): the name
+ * as the title, the verified `@username` once as the second line, never both on
+ * the first line (seen live 2026-11-22: `G53Person · @w6g53x2201`). A person
+ * known only by username is titled `@username`, with no second line.
+ */
+public fun personRowText(name: ResolvedName): PersonRowText {
+    val line = name.verifiedUsername?.let { "@$it" }?.takeIf { it != name.primary }
+    return PersonRowText(title = name.primary, subtitle = line)
+}
+
 /** The label for the sender of a request: the list label, or
  *  [PLACEHOLDER_SOMEONE] when nothing is known about them. */
 public fun requestSenderLabel(name: ResolvedName): String =

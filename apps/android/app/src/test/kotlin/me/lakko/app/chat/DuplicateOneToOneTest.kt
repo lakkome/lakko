@@ -81,4 +81,53 @@ class DuplicateOneToOneTest {
             duplicateOneToOneFolds(listOf(chat("cc", me), chat("aa", me), chat("bb", vg3)), me),
         )
     }
+
+    // Base scenario 9 (2026-11-22) — ordered by when this device first held them.
+
+    private fun HeldConversationGroup.at(ms: Long) = copy(heldSinceMs = ms)
+
+    @Test
+    fun `the newer one-to-one the same person founded continues the older one`() {
+        assertEquals(
+            listOf(DuplicateFold("bb", "aa")),
+            duplicateOneToOneFolds(listOf(chat("aa", vg3).at(1), chat("bb", vg3).at(2)), me),
+        )
+        assertEquals(
+            listOf(DuplicateFold("bb", "aa")),
+            duplicateOneToOneFolds(listOf(chat("bb", vg3).at(2), chat("aa", vg3).at(1)), me),
+        )
+    }
+
+    @Test
+    fun `a one-to-one another device of this account founded continues an older one the person founded`() {
+        assertEquals(
+            listOf(DuplicateFold("bb", "aa")),
+            duplicateOneToOneFolds(listOf(chat("aa", vg3).at(1), chat("bb", me).at(2)), me),
+        )
+    }
+
+    @Test
+    fun `equal or unknown times keep the rule as it was`() {
+        assertEquals(emptyList<DuplicateFold>(), duplicateOneToOneFolds(listOf(chat("aa", vg3).at(1), chat("bb", vg3).at(1)), me))
+        assertEquals(emptyList<DuplicateFold>(), duplicateOneToOneFolds(listOf(chat("aa", vg3), chat("bb", vg3).at(2)), me))
+        assertEquals(
+            listOf(DuplicateFold("bb", "aa")),
+            duplicateOneToOneFolds(listOf(chat("aa", me).at(1), chat("bb", vg3).at(1)), me),
+        )
+        assertEquals(
+            emptyList<DuplicateFold>(),
+            duplicateOneToOneFolds(listOf(chat("aa", vg3).at(1), chat("bb", vg3, conversationHex = "aa").at(2)), me),
+        )
+    }
+
+    @Test
+    fun `the held-since record keeps first times and drops groups no longer held`() {
+        val first = ConversationHeldSince.next(emptyMap(), listOf("aa"), 100)
+        assertEquals(mapOf("aa" to 100L), first)
+        val second = ConversationHeldSince.next(first, listOf("aa", "bb"), 200)
+        assertEquals(mapOf("aa" to 100L, "bb" to 200L), second)
+        assertEquals(mapOf("bb" to 200L), ConversationHeldSince.next(second, listOf("bb"), 300))
+        assertEquals(second, ConversationHeldSince.decode(ConversationHeldSince.encode(second)))
+        assertEquals(emptyMap<String, Long>(), ConversationHeldSince.decode("garbage;=1;x=y"))
+    }
 }

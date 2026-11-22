@@ -148,10 +148,13 @@ import { groupTitle, isUnnamedGroupLabel } from "../chat/group-title";
 import {
   UNNAMED_MEMBER,
   memberListLabelOf,
+  memberRowTextOf,
+  type MemberRowText,
   memberNameOf,
   realNameOf as realNameOfResolved,
   reportUnnamedPerson,
 } from "../profile/member-label";
+import { memberRowActions, rowRoleOf, type MemberRowActions } from "../chat/member-row-actions";
 import { pendingJoinLabel, pendingJoinName, pendingJoinPersonKey } from "../chat/pending-join-label";
 import { JoinAttributionGate } from "../chat/join-attribution-gate";
 import { groupCallsFor } from "../calls/group-call-store";
@@ -2370,6 +2373,10 @@ function ChatView(props: {
     memberNameOf(profiles.resolve(keyB64), surface);
   const memberListLabel = (keyB64: string): string =>
     memberListLabelOf(profiles.resolve(keyB64), "a member list row");
+  /** A member row's two lines (`docs/ux/conversation-info.md` 2.2): the
+   *  name, and the verified `@username` under it. */
+  const memberRowText = (keyB64: string): MemberRowText =>
+    memberRowTextOf(profiles.resolve(keyB64), "a member list row");
   // ADR-0050 — one row per PERSON: `sigPubkey` is the member's account key
   // (what roles, names and authorship key on), `leafIndex` its first leaf,
   // `deviceCount` how many leaves the person holds. Removing the row removes
@@ -3819,10 +3826,12 @@ function ChatView(props: {
   const rosterViews = createMemo(() =>
     members().map((m) => {
       const keyB64 = base64Encode(m.sigPubkey);
+      const text = memberRowText(keyB64);
       return {
         leafIndex: m.leafIndex,
         signatureKeyB64: keyB64,
-        label: memberListLabel(keyB64),
+        label: text.title,
+        usernameLine: text.subtitle,
       };
     }),
   );
@@ -6850,12 +6859,13 @@ function ChatView(props: {
     profiles.version();
     acceptedVersion();
     return loadAccepted().map((c) => {
-      const resolved = profiles.resolve(c.signaturePubkeyB64);
+      // The name, and the username once under it (never `@ann` twice).
+      const text = memberRowTextOf(profiles.resolve(c.signaturePubkeyB64), "a chat member row");
       return {
         keyB64: c.signaturePubkeyB64,
         accountIdHex: c.accountIdHex,
-        name: memberNameOf(resolved, "a chat member row"),
-        username: resolved.username,
+        name: text.title,
+        username: text.subtitle,
       };
     });
   });
@@ -9894,7 +9904,18 @@ function ChatView(props: {
                     rowAnnotation(pendingRequests(), m.leafIndex, ownLeaf());
                   const removePending = (): boolean =>
                     rowAnnotation(pendingRequests(), m.leafIndex, ownLeaf()) !== null;
-                  const label = (): string => memberListLabel(memberKeyB64);
+                  const rowText = (): MemberRowText => memberRowText(memberKeyB64);
+                  const label = (): string => rowText().title;
+                  // conversation-info.md section 2.2 / ADR-0022 — the row's
+                  // role mark and which of Remove / Make admin this reader
+                  // gets on it; never anything on the owner's row.
+                  const rowActions = (): MemberRowActions =>
+                    memberRowActions({
+                      viewerRole: ownRole(),
+                      rowRole: rowRoleOf(hexOf(m.sigPubkey), ownerPubkeyHex(), adminPubkeys()),
+                      ownRow: isSelf,
+                      membershipEnded: membershipEnded(),
+                    });
                   /** Tapping opens the contact screen for a contact who is
                    *  not this account (section 2.2); anyone else's row is not
                    *  a control. */
@@ -9912,12 +9933,23 @@ function ChatView(props: {
                       >
                         <span class="lk-row-title">
                           {label()}
+                          <Show when={rowActions().mark}>
+                            {(mark) => (
+                              <span class="lk-member-role">
+                                {" "}
+                                {t(mark() === "owner" ? "chat.members.owner.marker" : "chat.members.admin.marker")}
+                              </span>
+                            )}
+                          </Show>
                           {/* ADR-0099 step 4, UX 3 - a member whose account
                               is suspended: a muted word after the name. */}
                           <Show when={!isSelf && isSuspendedKeyB64(memberKeyB64)}>
                             <span class="lk-member-suspended">{" "}{t("suspended.member")}</span>
                           </Show>
                         </span>
+                        {/* profile-names.md section 3 — the verified username
+                            under the name, once. */}
+                        <Show when={rowText().subtitle}>{(u) => <span class="lk-row-sub">{u()}</span>}</Show>
                         <Show when={m.deviceCount > 1}>
                           <span class="lk-row-sub">{t("chat.members.devices", { count: m.deviceCount })}</span>
                         </Show>
@@ -9989,31 +10021,31 @@ function ChatView(props: {
                         }
                       >
                         {/* ADR-0022 — only the owner promotes / demotes admins;
-                            never the owner's own row. */}
-                        <Show when={isOwner() && ownerPubkeyHex() !== hexOf(m.sigPubkey)}>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              void onToggleAdmin(
-                                m,
-                                !adminPubkeys().has(hexOf(m.sigPubkey)),
-                              );
-                            }}
-                            class="ghost small"
-                            disabled={busy()}
-                          >
-                            {adminPubkeys().has(hexOf(m.sigPubkey))
-                              ? t("chat.members.admin.remove")
-                              : t("chat.members.admin.make")}
-                          </button>
+                            never the owner's own row (`memberRowActions`). */}
+                        <Show when={rowActions().adminToggle}>
+                          {(toggle) => (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void onToggleAdmin(m, toggle() === "make");
+                              }}
+                              class="ghost small"
+                              disabled={busy()}
+                            >
+                              {toggle() === "take"
+                                ? t("chat.members.admin.remove")
+                                : t("chat.members.admin.make")}
+                            </button>
+                          )}
                         </Show>
-                        {/* ADR-0022 — only owner/admin (or an open/legacy
-                            group) sees Remove; a member's removal is refused.
+                        {/* ADR-0022 — the owner removes anyone else, an admin
+                            plain members only, a member nobody; an open/legacy
+                            group anyone (`memberRowActions`).
                             ADR-0045 UX §5.3 — while a removal is pending the
                             button stays VISIBLE but disabled: hiding it would
                             read as the permission having vanished, and the row
                             annotation is what explains the disabled state. */}
-                        <Show when={canManageMembers()}>
+                        <Show when={rowActions().remove}>
                           <button
                             type="button"
                             onClick={() => {
@@ -10321,7 +10353,11 @@ function ChatView(props: {
                           onChange={() => setTransferPick(row.signatureKeyB64)}
                         />
                         <Avatar label={memberName(row.signatureKeyB64)} id={row.signatureKeyB64} size="sm" personKey={row.signatureKeyB64} />
-                        <span aria-hidden="true">{row.label}</span>
+                        <span aria-hidden="true" style={{ display: "flex", "flex-direction": "column", "min-width": 0 }}>
+                          <span>{row.label}</span>
+                          {/* The members list's own two lines (§6.1.3). */}
+                          <Show when={row.usernameLine}>{(u) => <span class="lk-row-sub">{u()}</span>}</Show>
+                        </span>
                         {/* MARK, do not filter and do not sort. Who is already an
                             admin is information the owner assigned and is worth
                             having when choosing a successor; it is not a reason to

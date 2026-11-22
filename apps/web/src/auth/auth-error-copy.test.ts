@@ -9,6 +9,7 @@ import {
   identityRestoreErrorMessage,
   isSignupRateLimited,
   loginErrorMessage,
+  loginFailureLogLine,
   passkeyErrorMessage,
   recoverErrorMessage,
   screenText,
@@ -18,7 +19,14 @@ import {
   wrongCredentials,
 } from "./auth-error-copy";
 import { totpRecoverErrorMessage } from "./recover/TotpRecover";
-import { AuthHttpError, AuthNetworkError } from "./client";
+import {
+  AuthClientArgError,
+  AuthHttpError,
+  AuthNetworkError,
+  PasswordLoginRejectedError,
+  passwordLoginRejectedOr,
+} from "./client";
+import { t } from "../l10n";
 import { DiscoveryHttpError, DiscoveryNetworkError } from "../discovery/client";
 
 const BANNED = /OPAQUE|PAKE|OPRF|MLS|KeyPackage|epoch|pseudonym|→|\/auth\//i;
@@ -32,7 +40,36 @@ describe("loginErrorMessage", () => {
     expect(loginErrorMessage(new AuthHttpError(401, "/login/finish", "unauthorized"))).toBe(
       wrongCredentials(),
     );
-    expect(loginErrorMessage(new DiscoveryHttpError(404, "/lookup", ""))).toBe(wrongCredentials());
+    expect(loginErrorMessage(new PasswordLoginRejectedError())).toBe(wrongCredentials());
+    expect(loginErrorMessage(new AuthClientArgError("password must be non-empty"))).toBe(
+      wrongCredentials(),
+    );
+  });
+
+  it("never shows an error that is not a refused password as a wrong password", () => {
+    const generic = t("common.error.unavailable");
+    expect(loginErrorMessage(new Error("invalid OPAQUE wire payload"))).toBe(generic);
+    expect(loginErrorMessage(new AuthHttpError(404, "/login/start", ""))).toBe(generic);
+    expect(loginErrorMessage(new AuthHttpError(400, "/login/start", ""))).toBe(generic);
+    expect(loginErrorMessage(new AuthClientArgError("handle must be 32 bytes"))).toBe(generic);
+    expect(loginErrorMessage("garbage")).toBe(generic);
+  });
+
+  it("reads the core's OPAQUE failure, and only it, as a refused password", () => {
+    expect(passwordLoginRejectedOr(new Error("OPAQUE protocol failure"))).toBeInstanceOf(
+      PasswordLoginRejectedError,
+    );
+    const other = new Error("invalid OPAQUE wire payload");
+    expect(passwordLoginRejectedOr(other)).toBe(other);
+  });
+
+  it("logs the kind and the status, never a body", () => {
+    expect(loginFailureLogLine(new AuthHttpError(401, "/login/finish", "secret body alice"))).toBe(
+      "error=AuthHttpError status=401 endpoint=/login/finish",
+    );
+    expect(loginFailureLogLine(new PasswordLoginRejectedError())).toBe(
+      "error=PasswordLoginRejectedError status=none",
+    );
   });
 
   it("names the network, never the endpoint", () => {
@@ -46,7 +83,6 @@ describe("loginErrorMessage", () => {
     const m = loginErrorMessage(new AuthHttpError(500, "/login/finish", "boom"));
     expect(m).not.toMatch(BANNED);
     expect(m.endsWith(".")).toBe(true);
-    expect(loginErrorMessage("garbage")).toBe(wrongCredentials());
   });
 
   it("passes through a sentence the context already wrote for the user", () => {

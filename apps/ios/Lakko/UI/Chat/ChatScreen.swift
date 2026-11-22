@@ -46,6 +46,9 @@ public struct ChatScreen: View {
     /// (`docs/ux/conversation-info.md` section 3): a screen with a back that
     /// returns here as it was left.
     public var onOpenGroupInfo: () -> Void
+    /// ADR-0087 section 10 — `Add members` in a group of one opens the Add
+    /// members screen itself (over the info), not the info.
+    public var onOpenAddMembers: () -> Void
     /// ADR-0052 decision 2 — open another conversation, pushed the way the
     /// Chats list pushes it: after a forward, the conversation it went to;
     /// on a tapped attribution, the origin, with the message to scroll to.
@@ -195,6 +198,7 @@ public struct ChatScreen: View {
         onBack: @escaping () -> Void,
         onOpenContact: @escaping (Int64) -> Void = { _ in },
         onOpenGroupInfo: @escaping () -> Void = {},
+        onOpenAddMembers: @escaping () -> Void = {},
         onOpenConversation: @escaping (String, Int64?) -> Void = { _, _ in }
     ) {
         self.viewModel = viewModel
@@ -202,6 +206,7 @@ public struct ChatScreen: View {
         self.onBack = onBack
         self.onOpenContact = onOpenContact
         self.onOpenGroupInfo = onOpenGroupInfo
+        self.onOpenAddMembers = onOpenAddMembers
         self.onOpenConversation = onOpenConversation
         _media = StateObject(wrappedValue: ChatMediaController(port: viewModel.mediaPort()))
     }
@@ -1223,7 +1228,7 @@ public struct ChatScreen: View {
                 .foregroundStyle(Color.lakkoTextMuted)
             HStack(spacing: 12) {
                 if viewModel.canManageMembers {
-                    Button(l10n.t("group_solo.add_members")) { onOpenGroupInfo() }
+                    Button(l10n.t("group_solo.add_members")) { onOpenAddMembers() }
                         .buttonStyle(.bordered)
                     Button(l10n.t("group_solo.copy_invite")) {
                         Task { @MainActor in
@@ -4328,12 +4333,13 @@ struct GroupInfoScreen: View {
                                 // would be offered a button whose every press is
                                 // rejected.
                                 //
-                                // `memberIsOwner` stays a separate, per-ROW test.
-                                // The rule answers whether this reader gets the
-                                // control at all; which rows carry one is about a
-                                // member, which the rule says nothing about.
-                                if sections.contains(.roles), !viewModel.memberIsOwner(member) {
-                                    let isAdmin = viewModel.memberIsAdmin(member)
+                                // The section rule answers whether this reader
+                                // gets the control at all; which ROW carries one
+                                // is ``MemberRowActions``: never the owner's row,
+                                // never our own.
+                                let rowActions = viewModel.memberRowActions(member)
+                                if sections.contains(.roles), let toggle = rowActions.adminToggle {
+                                    let isAdmin = toggle == .take
                                     Button {
                                         viewModel.onToggleAdmin(
                                             member: member,
@@ -4345,8 +4351,11 @@ struct GroupInfoScreen: View {
                                     .buttonStyle(.borderless)
                                     .disabled(viewModel.membershipBusy)
                                 }
-                                // Remove only when we may manage members (owner /
-                                // admin / open group) and it is not our own leaf.
+                                // Remove: the owner on anyone else, an admin on
+                                // plain members only, a member on nobody, anyone
+                                // in an open group (``MemberRowActions``; seen
+                                // live 2026-11-22: an admin had it on the owner's
+                                // row).
                                 //
                                 // NOT routed through `sections`: the shared rule
                                 // has no section for removing a member. `.addMember`
@@ -4356,8 +4365,7 @@ struct GroupInfoScreen: View {
                                 // same one `.addMember` was computed from, read
                                 // directly, which is what the rule expects of a
                                 // control it does not name.
-                                if viewModel.canManageMembers,
-                                    viewModel.ownLeafIndex != member.leafIndex {
+                                if viewModel.canManageMembers, rowActions.remove {
                                     Button(role: .destructive) {
                                         // `proposal-based-membership.md` section
                                         // 6, "No confirmation" (2026-11-04): an
@@ -4641,6 +4649,7 @@ struct GroupInfoScreen: View {
     /// whose back returns here; anyone else is not tappable.
     @ViewBuilder
     private func memberIdentity(_ member: GroupMember) -> some View {
+        let rowText = viewModel.memberRowText(member)
         let content = HStack {
             InitialsAvatar(
                 name: viewModel.memberInitialsName(member),
@@ -4649,8 +4658,14 @@ struct GroupInfoScreen: View {
                 photo: viewModel.memberPhoto(member))
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(viewModel.memberLabel(member))
+                    Text(rowText.title)
                         .foregroundStyle(Color.lakkoText)
+                    // Section 2.2 — "Owner" / "Admin" after the name, muted.
+                    if let mark = viewModel.memberRowActions(member).mark {
+                        Text(l10n.t(mark == .owner ? "chat.members.owner.marker" : "chat.members.admin.marker"))
+                            .font(.footnote)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                    }
                     // ADR-0099 step 4 — a suspended member: a muted marker
                     // after the name. The remove control stays as it is.
                     if SuspensionMarkRules.showsMemberMarker(
@@ -4660,6 +4675,13 @@ struct GroupInfoScreen: View {
                             .font(.footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
+                }
+                // `docs/ux/profile-names.md` section 3 — the verified username
+                // under the name, once.
+                if let subtitle = rowText.subtitle {
+                    Text(subtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(Color.lakkoTextMuted)
                 }
                 // ADR-0045 S4a — NO optimistic update: a member with a pending
                 // removal stays in the roster and is annotated. Dropping the row
@@ -4770,11 +4792,21 @@ struct TransferOwnershipStep: View {
                         viewModel.transferPick = row.signatureKeyB64
                     } label: {
                         HStack {
-                            Text(row.label)
-                            if row.isAdmin {
-                                Text(l10n.t("chat.members.admin.marker"))
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                            // The members list's own two lines (§6.1.3).
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 6) {
+                                    Text(row.label)
+                                    if row.isAdmin {
+                                        Text(l10n.t("chat.members.admin.marker"))
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                if let line = row.usernameLine {
+                                    Text(line)
+                                        .font(.subheadline)
+                                        .foregroundStyle(Color.lakkoTextMuted)
+                                }
                             }
                             Spacer()
                             if viewModel.transferPick == row.signatureKeyB64 {

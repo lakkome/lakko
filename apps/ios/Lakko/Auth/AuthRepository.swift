@@ -2153,13 +2153,8 @@ public final class AuthRepository: ObservableObject {
         username: String,
         password: Data
     ) async throws {
-        guard !password.isEmpty else {
-            throw AuthClientError.argument("password must be non-empty")
-        }
-        let name = try LoginName.make(
-            username,
-            emptyError: AuthClientError.argument("username must be non-empty")
-        )
+        guard !password.isEmpty else { throw LoginFieldsEmpty() }
+        let name = try LoginName.make(username, emptyError: LoginFieldsEmpty())
 
         let client = authClientFactory()
         let bound = binding.capture()

@@ -93,9 +93,13 @@ enum ContactConversation {
 /// history above it, and A's journal no longer polled.
 ///
 /// Only a one-to-one founded by the PEER continues one founded by THIS
-/// account. Two one-to-ones founded by the same side, or by each side about
-/// the same time, are left as they are: neither side's founding then says
-/// which one the other reads.
+/// account, unless this device knows which of the two it held first
+/// (``Held/heldSinceMs``, ``ConversationHeldSince``): then the newer
+/// one-to-one with the person continues the older one whoever founded either
+/// (base scenario 9, 2026-11-22): a person who lost their one-to-one and
+/// founded a new one, or a one-to-one another device of this account founded
+/// while this device held an older one. When the times are equal or unknown,
+/// two one-to-ones founded by the same side are left as they are.
 ///
 /// Pure: the caller reads the rosters, founders and lineage.
 enum DuplicateOneToOne {
@@ -111,6 +115,14 @@ enum DuplicateOneToOne {
         let people: [String]
         /// The founder's account key (base64), or `nil` when unreadable.
         let founderKeyB64: String?
+        /// When this device first held the group, or `nil` when unknown.
+        var heldSinceMs: Int64? = nil
+    }
+
+    /// Whether `a` was first held strictly after `b` on this device.
+    static func heldAfter(_ a: Held, _ b: Held) -> Bool {
+        guard let at = a.heldSinceMs, let bt = b.heldSinceMs else { return false }
+        return at > bt
     }
 
     /// One lineage register to write: `successorHex` continues `rootHex`.
@@ -139,7 +151,7 @@ enum DuplicateOneToOne {
         }
         var out: [Fold] = []
         for joined in held {
-            guard let peer = peerOf(joined), joined.founderKeyB64 == peer else { continue }
+            guard let peer = peerOf(joined) else { continue }
             // Already part of a conversation (a successor, or a root others
             // continue).
             guard joined.conversationHex == joined.groupHex else { continue }
@@ -150,13 +162,62 @@ enum DuplicateOneToOne {
                 .filter {
                     $0.groupHex != joined.groupHex
                         && $0.conversationHex != joined.conversationHex
-                        && $0.founderKeyB64 == ownKeyB64
                         && peerOf($0) == peer
+                        // Newer, whoever founded either; else the peer's over
+                        // this account's, unless this device knows the latter
+                        // is the newer.
+                        && (heldAfter(joined, $0)
+                            || (joined.founderKeyB64 == peer && $0.founderKeyB64 == ownKeyB64
+                                && !heldAfter($0, joined)))
                 }
                 .map(\.conversationHex)
                 .sorted()
             if let root = roots.first { out.append(Fold(successorHex: joined.groupHex, rootHex: root)) }
         }
         return out
+    }
+}
+
+/// When this device first held each conversation group, per account (base
+/// scenario 9): a group joined later is recorded later, which orders two
+/// one-to-ones with the same person for ``DuplicateOneToOne/folds(held:ownKeyB64:)``.
+/// A group seen for the first time together with others (the first run after
+/// an upgrade, a restore) shares their time and orders nothing. Device-local
+/// (`UserDefaults`); never sent.
+enum ConversationHeldSince {
+    /// Pure: `stored` completed with `nowMs` for groups without a time, and
+    /// groups no longer held dropped.
+    static func next(stored: [String: Int64], groupHexes: [String], nowMs: Int64) -> [String: Int64] {
+        var out: [String: Int64] = [:]
+        for hex in groupHexes { out[hex] = stored[hex] ?? nowMs }
+        return out
+    }
+
+    static var defaults: UserDefaults = .standard
+
+    private static func key(_ accountIdB64: String) -> String {
+        "lakko.conversationHeldSince." + accountIdB64
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "="))
+    }
+
+    /// The record of `accountIdB64`, completed and stored.
+    static func record(accountIdB64: String, groupHexes: [String], nowMs: Int64) -> [String: Int64] {
+        let raw = defaults.dictionary(forKey: key(accountIdB64)) ?? [:]
+        var stored: [String: Int64] = [:]
+        for (hex, value) in raw {
+            if let n = value as? NSNumber { stored[hex] = n.int64Value }
+        }
+        let next = next(stored: stored, groupHexes: groupHexes, nowMs: nowMs)
+        if next != stored {
+            defaults.set(next.mapValues { NSNumber(value: $0) }, forKey: key(accountIdB64))
+        }
+        return next
+    }
+
+    /// Forget device / delete account.
+    static func clear(accountIdB64: String) {
+        defaults.removeObject(forKey: key(accountIdB64))
     }
 }

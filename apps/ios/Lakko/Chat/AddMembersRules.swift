@@ -63,6 +63,23 @@ public enum AddMembersRules {
         }
     }
 
+    /// The contact a resolved name becomes on this screen
+    /// (`docs/ux/conversation-info.md` section 2.4: avatar, name, `@username`
+    /// where known): the name alone, and the verified username once, as the
+    /// second line. Never the list label (`Name · @name`): that put the
+    /// username on the first line as well and took the avatar's initials
+    /// from it (seen live 2026-11-22: "G53Person · @w6g53x2201", initials
+    /// "GW").
+    public static func contact(
+        personKey: Data, accountId: Data?, resolved: ResolvedDisplayName
+    ) -> Contact {
+        Contact(
+            personKey: personKey,
+            accountId: accountId,
+            name: resolved.name,
+            username: resolved.source == .verifiedUsername ? nil : resolved.verifiedUsername)
+    }
+
     /// One row of the contacts list.
     public struct ContactRow: Equatable, Identifiable {
         public let contact: Contact

@@ -869,9 +869,16 @@ public class ContactsRepository(
      * nothing is sent to the keys that sent the request, and nothing is
      * shown for any outcome.
      */
+    /** Base scenario 7 — the requests [handleKnownContactRequest] listed
+     *  because this device holds no one-to-one with the contact who sent
+     *  them, with the chat their row named; marked
+     *  [IncomingContactRequest.asksForChat] as they are listed. */
+    private val asksForChatIds: MutableMap<Long, String?> = java.util.Collections.synchronizedMap(HashMap())
+
     private suspend fun handleKnownContactRequest(request: IncomingContactRequest): Boolean {
         val fromAccountId = request.fromAccountId ?: return false
-        if (establishedContact(fromAccountId) == null &&
+        val established = establishedContact(fromAccountId)
+        if (established == null &&
             !isContactKey(
                 base64Encode(request.fromPubkey),
                 mutableState.value.accepted.map { base64Encode(it.request.fromPubkey) },
@@ -880,14 +887,45 @@ public class ContactsRepository(
             return false
         }
         val check = checkContactIdentity(fromAccountId)
+        // Base scenario 7 (2026-11-22) — answered silently only while this
+        // device holds a live one-to-one with them; else the request is
+        // listed and Accept starts the chat. No chat layer (tests): as held.
+        val holdsOneToOne = chatRepo?.let { repo ->
+            repo.liveOneToOneWith(request.fromPubkey) != null ||
+                (established != null && repo.liveOneToOneWith(established.request.fromPubkey) != null)
+        } ?: true
         val verdict = knownContactRequestVerdict(
             senderIsContact = true,
             check = check,
             requestKeyB64 = base64Encode(request.fromPubkey),
             trustedKeyB64 = pinnedKeyOf(base64Encode(fromAccountId)),
+            holdsOneToOne = holdsOneToOne,
+            // A request read again after a lost cursor is not a new one.
+            predatesContact = requestPredatesContact(
+                request.createdAt,
+                (established ?: mutableState.value.accepted.firstOrNull {
+                    it.request.fromPubkey.contentEquals(request.fromPubkey)
+                })?.request?.createdAt,
+            ),
+            // A sibling device that holds the chat answers it; this one waits
+            // to be admitted rather than offer an Accept that founds a second.
+            siblingMayAdmit = siblingMayAdmit(
+                me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.rosterSignatureKeys()?.size?.minus(1),
+                request.createdAt,
+                System.currentTimeMillis(),
+            ),
         )
         when (verdict) {
-            KnownRequestVerdict.SHOW -> return false
+            KnownRequestVerdict.SHOW -> {
+                if (!holdsOneToOne) {
+                    // Listed as a request row ([asksForChat]) although they
+                    // are a contact: Accept starts the chat.
+                    asksForChatIds[request.messageId] = mutableState.value.accepted
+                        .firstOrNull { it.request.fromPubkey.contentEquals(request.fromPubkey) }?.groupIdHex
+                    dropWaiting(request.messageId)
+                }
+                return false
+            }
             KnownRequestVerdict.WAIT -> {
                 // Kept on disk first: the cursor is about to move past it.
                 val kept = synchronized(waitingKnownRequests) {
@@ -1404,6 +1442,39 @@ public class ContactsRepository(
     /** Whether the viewer removed the person holding [signatureKey] from
      *  their contact list. */
     public fun isRemovedContact(signatureKey: ByteArray): Boolean = keyHex(signatureKey) in removedContactKeys
+
+    /**
+     * Base scenario 7 — found a one-to-one with each person whose silent
+     * answer arrived while this device holds none with them, as Message on a
+     * contact card does ([foundOneToOneWith] over `ChatRepository.startGroupWith`),
+     * and make them a contact with it ([restoreRemovedContact]: asking them was
+     * a decision to have them back; the Sent request goes with the adoption).
+     * Their device joins it; the duplicate-one-to-one rule makes it the head of
+     * the conversation they had. A failure keeps the request under Sent.
+     */
+    private suspend fun foundForSilentAnswers(acks: List<IncomingContactAck>) {
+        val chat = chatRepo ?: return
+        for (ack in acks) {
+            if (chat.liveOneToOneWith(ack.accepterPubkey) != null) continue
+            try {
+                val groupIdHex = chat.startGroupWith(
+                    recipientAccountId = ack.accepterAccountId,
+                    recipientSignaturePubkey = ack.accepterPubkey,
+                    kind = uniffi.lakko_ffi_uniffi.GroupKind.ONE_TO_ONE,
+                )
+                restoreRemovedContact(
+                    signatureKey = ack.accepterPubkey,
+                    accountId = ack.accepterAccountId,
+                    groupIdHex = groupIdHex,
+                    nowMs = System.currentTimeMillis().toULong(),
+                    createdAt = java.time.Instant.now().toString(),
+                )
+            } catch (e: Throwable) {
+                me.lakko.app.rethrowIfCancelled(e)
+                Log.w(TAG, "inbox: founding a chat after a silent answer failed (${e.javaClass.simpleName})")
+            }
+        }
+    }
 
     /**
      * Record [groupIdHex] as the one-to-one with the contact holding
@@ -2017,7 +2088,13 @@ public class ContactsRepository(
                                 !askedForChatThroughGroup(it, mutableState.value.accepted) &&
                                     handleKnownContactRequest(it)
                             },
-                    )
+                    ).map {
+                        if (asksForChatIds.containsKey(it.messageId)) {
+                            it.copy(asksForChat = true, asksPastChatHex = asksForChatIds.remove(it.messageId))
+                        } else {
+                            it
+                        }
+                    }
                     val welcomes = result.events.filterIsInstance<
                         IncomingMailboxEvent.Welcome>(
                     )
@@ -2235,6 +2312,25 @@ public class ContactsRepository(
                         keyPrecedes(base64Encode(oldKey), base64Encode(newKey), links) ||
                             provenNow.any { it.second.contentEquals(newKey) && it.third.contentEquals(oldKey) }
                     }
+                    // Base scenario 7 (2026-11-22) — the silent answer: a
+                    // person this account removed and asked again still has
+                    // this account as a contact, so their device answers with
+                    // the ack alone and no Welcome follows. The one-to-one
+                    // both still hold is the answer: they are put back with
+                    // it below, as by a joined Welcome, and the request goes.
+                    val needChat = chatRepo?.let { repo ->
+                        silentAnswersNeedingChat(mutableState.value.sent, acks) { key -> repo.liveOneToOneWith(key) }
+                    }.orEmpty()
+                    chatRepo?.let { repo ->
+                        val silent = acksAnsweredByLiveOneToOne(mutableState.value.sent, acks) { key ->
+                            repo.liveOneToOneWith(key)
+                        }
+                        for ((keyB64, groupHex) in silent) {
+                            if (answeredBy.putIfAbsent(keyB64, groupHex) == null) {
+                                reach()?.retireRepliesTo(java.util.Base64.getDecoder().decode(keyB64))
+                            }
+                        }
+                    }
                     // A person who answered is a contact from here on and
                     // their profile comes after: the name they were found
                     // under stands in for it, filed before the row appears
@@ -2322,6 +2418,11 @@ public class ContactsRepository(
                     // An answered request leaves the durable Sent list.
                     if (acks.isNotEmpty() || answeredBy.isNotEmpty()) persistSent()
                     persistInboxCursor()
+                    // Base scenario 7 — a silent answer from a person this
+                    // device holds no one-to-one with: founded now, unless a
+                    // Welcome of this pass was kept for later (it may be
+                    // that very chat).
+                    if (needChat.isNotEmpty() && heldWelcomeIds.isEmpty()) foundForSilentAnswers(needChat)
                     // ADR-0060 section 1 — after the rows were processed: the
                     // current contact grant to each contact who wrote with a
                     // retired key, in the one-to-one, nothing shown.

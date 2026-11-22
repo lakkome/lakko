@@ -2432,6 +2432,13 @@ private struct SessionRoot: View, Equatable {
                     binding.wrappedValue = GroupInfoNavigation.openInfo(
                         binding.wrappedValue, groupIdHex: groupIdHex)
                 },
+                // ADR-0087 section 10 — `Add members` in a group of one:
+                // the Add members screen, pushed over the info.
+                onOpenAddMembers: {
+                    let binding = path(for: tab)
+                    binding.wrappedValue = GroupInfoNavigation.openAddMembersFromConversation(
+                        binding.wrappedValue, groupIdHex: groupIdHex)
+                },
                 // ADR-0052 decision 2 — after a forward, the conversation it
                 // went to; on a tapped attribution, the origin, told which
                 // message to show before it is on screen. Pop back to it when

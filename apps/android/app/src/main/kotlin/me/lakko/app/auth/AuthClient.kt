@@ -24,6 +24,7 @@ import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.OpaqueLogin
 import uniffi.lakko_ffi_uniffi.OpaqueRegister
 import uniffi.lakko_ffi_uniffi.RecoveryMnemonic
@@ -615,7 +616,15 @@ public class AuthClient(
                 ),
             )
 
-            val out = login.finish(password, startResp.response)
+            // A wrong password (or a name nobody holds) is found HERE, on the
+            // device: the server's answer does not open under these bytes,
+            // and no `/login/finish` is sent. Any other failure of this step
+            // is passed on unchanged.
+            val out = try {
+                login.finish(password, startResp.response)
+            } catch (err: FfiException) {
+                throw passwordLoginRejectedOr(err)
+            }
             try {
                 val finishResp = loginFinish(
                     LoginFinishRequest(
@@ -2512,6 +2521,24 @@ public class AuthHttpError(
      *  credential (read from the whole body, before [body] is truncated). */
     public val suspended: SuspendedCredentials? = null,
 ) : RuntimeException("auth $endpoint → $status: $body")
+
+/** The password login was refused as a wrong password: the OPAQUE exchange
+ *  did not complete under the typed password. By design the same outcome as
+ *  a name nobody holds (the server answers a stand-in account). */
+public class PasswordLoginRejected : RuntimeException("invalid credentials")
+
+/** The `Display` of `lakko_auth_client::AuthClientError::Opaque`, which a
+ *  flat `FfiException.Auth` carries after the `auth error: ` prefix. */
+internal const val OPAQUE_FAILURE_TEXT: String = "OPAQUE protocol failure"
+
+/** [PasswordLoginRejected] for the core's OPAQUE protocol failure, [err]
+ *  itself for anything else. */
+internal fun passwordLoginRejectedOr(err: Throwable): Throwable =
+    if (err is FfiException.Auth && err.message.orEmpty().endsWith(OPAQUE_FAILURE_TEXT)) {
+        PasswordLoginRejected()
+    } else {
+        err
+    }
 
 /** Network failure (DNS / connectivity / TLS). Distinct from
  *  [AuthHttpError] so the UI can suggest "check connection" rather

@@ -78,6 +78,14 @@ class ContactsInboxStoreTest {
     }
 
     @Test
+    fun `a request listed because no chat is held keeps its mark across a relaunch`() {
+        val marked = request(7L, 0x11).copy(asksForChat = true, asksPastChatHex = "dead")
+        val back = decodePendingRequests(encodePendingRequests(listOf(marked, request(8L, 0x22)))).orEmpty()
+        assertEquals(listOf(true, false), back.map { it.asksForChat })
+        assertEquals(listOf("dead", null), back.map { it.asksPastChatHex })
+    }
+
+    @Test
     fun `an empty pending list is a valid persisted state`() {
         val store = InMemoryContactsInboxStore()
         store.savePending(account, listOf(request(1L, 0x01)))

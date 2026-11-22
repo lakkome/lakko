@@ -3193,6 +3193,10 @@
       "text": "через {name} · учасник",
       "status": "machine"
     },
+    "chat.members.owner.marker": {
+      "text": "Власник",
+      "status": "machine"
+    },
     "chat.members.pending.adds_heading": {
       "text": "Очікують додавання ({count})",
       "status": "machine"

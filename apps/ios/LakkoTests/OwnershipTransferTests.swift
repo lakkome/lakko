@@ -326,6 +326,21 @@ final class OwnershipTransferTests: XCTestCase {
         XCTAssertEqual(rows.map(\.leafIndex), [1, 2])
     }
 
+    /// The picker row is the members list's two lines: the name, and the
+    /// verified `@username` under it (seen live 2026-11-22: the members row
+    /// read `G53Person · @w6g53x2201` on one line).
+    func testThePickerCarriesTheRostersUsernameLine() {
+        let rows = transferCandidates(
+            [
+                RosterEntryView(leafIndex: 0, signatureKeyB64: Self.ownerKey, label: "Owner"),
+                RosterEntryView(
+                    leafIndex: 1, signatureKeyB64: Self.aliceKey, label: "G53Person", usernameLine: "@w6g53x2201"),
+            ],
+            ownerKeyB64: Self.ownerKey, adminKeysB64: [])
+        XCTAssertEqual(rows.map(\.label), ["G53Person"])
+        XCTAssertEqual(rows.map(\.usernameLine), ["@w6g53x2201"])
+    }
+
     func testAOnePersonGroupYieldsNoCandidates() {
         let rows = transferCandidates(
             [RosterEntryView(leafIndex: 0, signatureKeyB64: Self.ownerKey, label: "Owner")],

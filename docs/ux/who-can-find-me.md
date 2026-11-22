@@ -384,8 +384,23 @@ started through the inbox key the request carries, so the reply does not go
 through the group. Decline and ignore are as today. A request through a
 group from someone who is already a contact, while this device holds no
 one-to-one with them, is shown the same way and its Accept starts the
-chat; it is never answered silently, as a mailbox request from a contact
-is, which would leave both people without a chat. An opened request is
+chat; it is never answered silently, which would leave both people
+without a chat. The same holds for a mailbox request from a contact (base
+scenario 7, 2026-11-22): it is answered silently, with an acknowledgement
+alone, only while this device holds a live one-to-one with them; otherwise it is listed
+the same way and its Accept starts the chat. On the asking side, an
+acknowledgement that answers a request this device sent puts the person back
+as a contact with the live one-to-one it holds with them; when it holds none,
+it founds one with them at once (their device still holds one, so no
+Welcome is coming), and their device joins it. So only one side ever founds,
+and both end as contacts sharing one working one-to-one. Three refinements (base scenario 9, 2026-11-22: one person is one row):
+a request no newer than the contact relationship (read again after a lost
+mailbox cursor) is dropped, not listed; a device of an account with other
+devices waits up to 15 minutes for one of them to bring it into the chat
+(it then answers silently) before it lists the request; and when a device
+ends up holding two one-to-ones with one person, the one it came to hold
+later continues the earlier one, whoever founded either, so the list shows
+one row whose history includes both. An opened request is
 stored on the device before the group is read past it, so closing the app
 in between does not lose it.
 

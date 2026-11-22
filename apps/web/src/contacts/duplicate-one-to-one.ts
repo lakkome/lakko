@@ -20,7 +20,14 @@
  * group its peer founded.
  *
  * Only a one-to-one founded by the PEER continues one founded by THIS
- * account. Two one-to-ones founded by the same side are left as they are.
+ * account, unless this device knows which of the two it held first
+ * (`heldSinceMs`, `held-since.ts`): then the newer one-to-one with the
+ * person continues the older one whoever founded either (base scenario 9,
+ * 2026-11-22). That is the case of a person who lost their one-to-one and
+ * founded a new one (both founded by them), and of a one-to-one another
+ * device of this account founded while this device held an older one. When
+ * the times are equal or unknown, two one-to-ones founded by the same side
+ * are left as they are, as before.
  *
  * Pure: the caller reads the rosters, founders and lineage.
  */
@@ -38,6 +45,13 @@ export interface HeldConversationGroup {
   readonly people: readonly string[];
   /** The founder's account key (base64), or `null` when unreadable. */
   readonly founderKeyB64: string | null;
+  /** When this device first held the group (`held-since.ts`), or absent. */
+  readonly heldSinceMs?: number;
+}
+
+/** Whether `a` was first held strictly after `b` on this device. */
+function heldAfter(a: HeldConversationGroup, b: HeldConversationGroup): boolean {
+  return a.heldSinceMs !== undefined && b.heldSinceMs !== undefined && a.heldSinceMs > b.heldSinceMs;
 }
 
 /** One lineage register to write: `successorHex` continues `rootHex`. */
@@ -64,7 +78,7 @@ export function duplicateOneToOneFolds(
   const out: DuplicateFold[] = [];
   for (const joined of held) {
     const peer = peerOf(joined);
-    if (peer === null || joined.founderKeyB64 !== peer) continue;
+    if (peer === null) continue;
     // Already part of a conversation (a successor, or a root others continue).
     if (joined.conversationHex !== joined.groupHex) continue;
     if (held.some((g) => g.groupHex !== joined.groupHex && g.conversationHex === joined.groupHex)) continue;
@@ -73,8 +87,11 @@ export function duplicateOneToOneFolds(
         (g) =>
           g.groupHex !== joined.groupHex &&
           g.conversationHex !== joined.conversationHex &&
-          g.founderKeyB64 === ownKeyB64 &&
-          peerOf(g) === peer,
+          peerOf(g) === peer &&
+          // Newer, whoever founded either; else the peer's over this
+          // account's, unless this device knows the latter is the newer.
+          (heldAfter(joined, g) ||
+            (joined.founderKeyB64 === peer && g.founderKeyB64 === ownKeyB64 && !heldAfter(g, joined))),
       )
       .map((g) => g.conversationHex)
       .sort();

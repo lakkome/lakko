@@ -243,6 +243,28 @@ export class AuthClientArgError extends Error {
   override name = "AuthClientArgError";
 }
 
+/** The password login was refused as a wrong password: the OPAQUE exchange
+ *  did not complete under the typed password. By design the same outcome as
+ *  a name nobody holds. Its message is the one `loginErrorMessage` has
+ *  always read as wrong credentials. */
+export class PasswordLoginRejectedError extends Error {
+  override name = "PasswordLoginRejectedError";
+  constructor() {
+    super("invalid credentials");
+  }
+}
+
+/** The `Display` of `lakko_auth_client::AuthClientError::Opaque`, which the
+ *  wasm OPAQUE client finish throws on a wrong password. */
+export const OPAQUE_FAILURE_TEXT = "OPAQUE protocol failure";
+
+/** {@link PasswordLoginRejectedError} for the core's OPAQUE protocol failure,
+ *  `err` itself for anything else. */
+export function passwordLoginRejectedOr(err: unknown): unknown {
+  if (err instanceof Error && err.message === OPAQUE_FAILURE_TEXT) return new PasswordLoginRejectedError();
+  return err;
+}
+
 /** A request to the auth service did not return 2xx. The original
  *  status code and (truncated) body are exposed for diagnostics. */
 /** Account statement kinds (`lakko-attest::account_statement`). */
@@ -856,7 +878,15 @@ export class AuthClient {
       request: login.requestB64,
     });
 
-    const out = login.finish(password, startResp.response);
+    let out;
+    try {
+      out = login.finish(password, startResp.response);
+    } catch (err) {
+      // A wrong password (or a name nobody holds) is found HERE, on the
+      // device: the server's answer does not open under these bytes, and no
+      // `/login/finish` is sent. Any other failure of this step is passed on.
+      throw passwordLoginRejectedOr(err);
+    }
 
     const finishResp = await this.loginFinish({
       session_id: startResp.session_id,

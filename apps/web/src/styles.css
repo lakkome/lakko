@@ -9977,6 +9977,13 @@ button.lk-card-row-button {
   font-weight: normal;
   color: var(--surface-muted);
 }
+/* "Owner" / "Admin" after a member's name in a group's member list
+   (conversation-info.md section 2.2). */
+.lk-member-role {
+  font-weight: normal;
+  font-size: 0.8rem;
+  color: var(--surface-muted);
+}
 /* The sheet's "Choose messages" list (UX 2.2). */
 .lk-report-choose-list {
   list-style: none;

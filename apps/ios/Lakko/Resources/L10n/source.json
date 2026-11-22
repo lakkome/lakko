@@ -3724,6 +3724,10 @@
       "text": "via {name} · member",
       "comment": "Under a join request: the invite link was made by {name}, who is still in the group."
     },
+    "chat.members.owner.marker": {
+      "text": "Owner",
+      "comment": "Marker next to the group owner in the member list."
+    },
     "chat.members.pending.adds_heading": {
       "text": "Waiting to be added ({count})",
       "comment": "Heading of the list of people whose addition was requested but not applied yet."

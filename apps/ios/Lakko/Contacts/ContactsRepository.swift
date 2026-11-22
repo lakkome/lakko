@@ -764,6 +764,9 @@ public final class ContactsRepository: ObservableObject {
                 }
             }
             var heldWelcomeIds: [Int64] = []
+            /// Base scenario 7 — silent answers from people this device holds
+            /// no one-to-one with; founded for after the batch.
+            var needChat: [IncomingContactAck] = []
             if !chatReady {
                 NSLog("contacts inbox: Welcome row(s) kept until the chat layer is ready")
             }
@@ -842,7 +845,7 @@ public final class ContactsRepository: ObservableObject {
                         undecidedArrived = true
                         continue
                     }
-                    newPending.append(req)
+                    newPending.append(markingAsksForChat(req))
                 case .publisherWelcome(_, let welcomeBytes):
                     // ADR-0087 section 15, ADR-0045 decision 2 — an owner's
                     // device approved a publisher request of this account; it
@@ -935,7 +938,7 @@ public final class ContactsRepository: ObservableObject {
                     // batch was in flight: the ack belongs to the old
                     // account, never to whoever is bound now.
                     guard boundAccountIdB64 == pollAccountIdB64 else { continue }
-                    applyContactAck(ack)
+                    if applyContactAck(ack) { needChat.append(ack) }
                     continue
                 }
             }
@@ -987,6 +990,11 @@ public final class ContactsRepository: ObservableObject {
                 refreshing: false,
                 lastError: welcomeJoinFailure ?? carriedJoinFailure
             )
+            // Base scenario 7 — founded now, unless a Welcome of this pass
+            // was kept for later (it may be that very chat).
+            if !needChat.isEmpty, heldWelcomeIds.isEmpty, boundAccountIdB64 == pollAccountIdB64 {
+                await foundForSilentAnswers(needChat)
+            }
             // ADR-0074 section 3.5a rule 4 — after a rotation the account
             // moved to the new mailbox at once; a sender that has not seen
             // the proven change yet still writes to the old one, which is
@@ -1188,7 +1196,8 @@ public final class ContactsRepository: ObservableObject {
             }) ?? state.accepted
         // A request from them is gone with it (a process that died inside an
         // accept left both), carried on the row so its ack can still go out.
-        let rows = Self.reconciled(accepted: next, pending: state.pending, samePerson: samePerson)
+        let rows = Self.reconciled(
+            accepted: next, pending: state.pending, samePerson: samePerson, answered: [signatureKey])
         guard rows.accepted != state.accepted || rows.pending != state.pending else { return false }
         state = state.with(pending: rows.pending, accepted: rows.accepted)
         return true
@@ -1536,10 +1545,14 @@ public final class ContactsRepository: ObservableObject {
         return changed ? rows : nil
     }
 
+    /// Tests only: answers ``liveOneToOne(with:)`` in place of the chat layer.
+    var liveOneToOneLookup: ((Data) -> String?)?
+
     /// The live one-to-one this device holds with a person, if any: a
     /// conversation of one-to-one kind whose other person is `signatureKey`
     /// and whose membership is active on this device.
     func liveOneToOne(with signatureKey: Data) -> String? {
+        if let liveOneToOneLookup { return liveOneToOneLookup(signatureKey) }
         guard let chatRepository else { return nil }
         return chatRepository.conversationHeadIdHexes.first { groupIdHex in
             chatRepository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) == signatureKey
@@ -1550,9 +1563,15 @@ public final class ContactsRepository: ObservableObject {
     /// One person is one row, and a request whose contact exists is gone:
     /// two rows of one key become one, and a pending request from a contact
     /// moves onto that contact's row. Pure.
+    ///
+    /// A request that asks for a chat (``IncomingContactRequest/asksForChatHere``:
+    /// through a group, or listed for want of a one-to-one) is not folded
+    /// unless its sender is among `answered`, the people a one-to-one was
+    /// just adopted with: until then Accept is how the chat starts.
     nonisolated static func reconciled(
         accepted: [AcceptedContact], pending: [IncomingContactRequest],
-        samePerson: (Data, Data) -> Bool = { $0 == $1 }
+        samePerson: (Data, Data) -> Bool = { $0 == $1 },
+        answered: [Data] = []
     ) -> (accepted: [AcceptedContact], pending: [IncomingContactRequest]) {
         var rows: [AcceptedContact] = []
         for row in accepted {
@@ -1564,7 +1583,9 @@ public final class ContactsRepository: ObservableObject {
         }
         var left: [IncomingContactRequest] = []
         for request in pending {
-            if rows.contains(where: { $0.request.fromPubkey == request.fromPubkey }) {
+            let stillAsking = request.asksForChatHere
+                && !answered.contains(where: { samePerson($0, request.fromPubkey) })
+            if !stillAsking, rows.contains(where: { $0.request.fromPubkey == request.fromPubkey }) {
                 rows = accepting(request, into: rows, groupIdHex: nil)
             } else {
                 left.append(request)
@@ -1807,7 +1828,14 @@ public final class ContactsRepository: ObservableObject {
     /// (``noteAnsweredByWelcome(groupIdHex:)``), which then makes the contact
     /// and retires the row. A person already a contact (the Welcome came
     /// first) only loses the row.
-    func applyContactAck(_ ack: IncomingContactAck) {
+    ///
+    /// Returns `true` for a silent answer while this device holds NO live
+    /// one-to-one with the person (it lost its chat while theirs still
+    /// stands): the caller founds one with them after the batch
+    /// (``foundForSilentAnswers(_:)``); the request stays under Sent until
+    /// then.
+    @discardableResult
+    func applyContactAck(_ ack: IncomingContactAck) -> Bool {
         let samePerson = provenSamePerson
         let alreadyKnown = state.accepted.contains {
             samePerson($0.request.fromPubkey, ack.accepterPubkey)
@@ -1820,17 +1848,81 @@ public final class ContactsRepository: ObservableObject {
         fileFoundName(
             answering: SentRequests.row(recipientAccountIdB64: accepterAccountIdB64, in: state.sent),
             signatureKey: ack.accepterPubkey)
-        if alreadyKnown || liveOneToOne(with: ack.accepterPubkey) != nil {
+        let liveHex = alreadyKnown ? nil : liveOneToOne(with: ack.accepterPubkey)
+        if alreadyKnown || liveHex != nil {
+            // Base scenario 7 (seen 2026-11-22) — the silent answer: this
+            // account removed the person and asked them again; on their side
+            // this account is still a contact, so their device answers with
+            // the ack alone and no Welcome follows. The one-to-one both still
+            // hold is the answer: they are put back with it (asking them was
+            // a decision to have them back), the contact first and only then
+            // the row under Sent.
+            if let liveHex, SentRequests.askedAcker(
+                in: state.sent, key: ack.accepterPubkey, accountIdB64: accepterAccountIdB64)
+            {
+                restoreRemovedContact(
+                    signatureKey: ack.accepterPubkey,
+                    accountId: ack.accepterAccountId,
+                    groupIdHex: liveHex,
+                    nowMs: UInt64(Date().timeIntervalSince1970 * 1000),
+                    createdAt: ISO8601DateFormatter().string(from: Date()))
+            }
             let remainingSent = SentRequests.answered(
                 recipientAccountIdB64: accepterAccountIdB64, in: state.sent)
             if remainingSent.count != state.sent.count {
                 state = state.with(sent: remainingSent)
             }
-            return
+            return false
         }
+        let asked = SentRequests.askedAcker(
+            in: state.sent, key: ack.accepterPubkey, accountIdB64: accepterAccountIdB64)
         let acked = SentRequests.acknowledged(
             recipientAccountIdB64: accepterAccountIdB64, byKey: ack.accepterPubkey, in: state.sent)
         if acked != state.sent { state = state.with(sent: acked) }
+        return asked
+    }
+
+    /// Founds the one-to-one for a silent answer: a seam for tests. Default:
+    /// ``ChatRepository/startGroupWith(recipientAccountId:recipientSignaturePubkey:kind:)``
+    /// with the one-to-one kind, as Message on a contact card does.
+    lazy var silentAnswerFounder: (IncomingContactAck) async throws -> String = { [weak self] ack in
+        guard let chatRepository = self?.chatRepository else { throw InviteContactSendError.chatUnavailable }
+        return try await chatRepository.startGroupWith(
+            recipientAccountId: ack.accepterAccountId,
+            recipientSignaturePubkey: ack.accepterPubkey,
+            kind: .oneToOne)
+    }
+
+    /// Base scenario 7 (2026-11-22) — a person this device asked answered
+    /// silently (their device still holds this account as a contact, and a
+    /// one-to-one), while this device holds no one-to-one with them: no
+    /// Welcome will come, so one is founded here and they are a contact with
+    /// it (asking them was a decision to have them back). Their device joins
+    /// it; the duplicate-one-to-one rule makes it the head of the
+    /// conversation they had. A failure keeps the request under Sent.
+    func foundForSilentAnswers(_ acks: [IncomingContactAck]) async {
+        var seen: Set<Data> = []
+        for ack in acks where seen.insert(ack.accepterPubkey).inserted {
+            guard liveOneToOne(with: ack.accepterPubkey) == nil else { continue }
+            let bound = binding.capture()
+            do {
+                let groupIdHex = try await silentAnswerFounder(ack)
+                try bound.require()
+                restoreRemovedContact(
+                    signatureKey: ack.accepterPubkey,
+                    accountId: ack.accepterAccountId,
+                    groupIdHex: groupIdHex,
+                    nowMs: UInt64(Date().timeIntervalSince1970 * 1000),
+                    createdAt: ISO8601DateFormatter().string(from: Date()))
+                let remainingSent = SentRequests.answered(
+                    recipientAccountIdB64: base64Encode(ack.accepterAccountId), in: state.sent)
+                if remainingSent.count != state.sent.count {
+                    state = state.with(sent: remainingSent)
+                }
+            } catch {
+                NSLog("contacts inbox: founding a chat after a silent answer failed: \(type(of: error))")
+            }
+        }
     }
 
     /// `docs/ux/who-can-find-me.md` section 6.1 — the person holding
@@ -2060,6 +2152,27 @@ public final class ContactsRepository: ObservableObject {
             })
     }
 
+    /// How many OTHER devices the account's DeviceGroup lists, or `nil` when
+    /// unknown. A seam for tests; default: the chat layer's roster.
+    lazy var otherDeviceCount: () -> Int? = { [weak self] in
+        guard let roster = self?.chatRepository?.ownDeviceGroupRosterProvider(), !roster.isEmpty else { return nil }
+        return roster.count - 1
+    }
+
+    /// Base scenario 7 — the requests ``handleKnownContactRequest(_:client:)``
+    /// listed because this device holds no one-to-one with the contact who
+    /// sent them; marked ``IncomingContactRequest/asksForChat`` as listed.
+    private var asksForChatIds: Set<Int64> = []
+
+    /// `request`, marked as asking for a chat when the known-contact check
+    /// listed it for want of a one-to-one.
+    private func markingAsksForChat(_ request: IncomingContactRequest) -> IncomingContactRequest {
+        guard asksForChatIds.remove(request.messageId) != nil else { return request }
+        var marked = request
+        marked.asksForChat = true
+        return marked
+    }
+
     /// Returns `true` when `request` came from an account that is already an
     /// established contact and was dealt with here (answered, dropped or
     /// kept waiting): the caller then lists nothing. `false` for a
@@ -2084,15 +2197,38 @@ public final class ContactsRepository: ObservableObject {
             check = .inconclusive
         }
         guard boundAccountIdB64 == accountIdB64 else { return true }
+        // Base scenario 7 (2026-11-22) — answered silently only while this
+        // device holds a live one-to-one with them; else listed, and Accept
+        // starts the chat.
+        // A one-to-one whose membership ended here is no chat. Without a
+        // chat layer (tests) as held.
+        let holdsOneToOne: Bool = {
+            guard let held = heldOneToOne(request.fromPubkey) else { return chatRepository == nil }
+            return chatRepository?.isActive(groupIdHex: held) != false
+        }()
         let verdict = KnownContactRequest.verdict(
             senderIsContact: true,
             check: check,
             requestKeyB64: base64Encode(request.fromPubkey),
             trustedKeyB64: PeerPinStore().readPin(accountIdB64: base64Encode(fromAccountId))?
-                .pinnedSignaturePubkeyB64)
+                .pinnedSignaturePubkeyB64,
+            holdsOneToOne: holdsOneToOne,
+            predatesContact: KnownContactRequest.requestPredatesContact(
+                requestCreatedAt: request.createdAt,
+                contactSince: (establishedContact(ofAccountId: fromAccountId)
+                    ?? state.accepted.first { $0.request.fromPubkey == request.fromPubkey })?
+                    .request.createdAt),
+            siblingMayAdmit: KnownContactRequest.siblingMayAdmit(
+                otherDeviceCount: otherDeviceCount(),
+                requestCreatedAt: request.createdAt,
+                nowMs: Int64(Date().timeIntervalSince1970 * 1000)))
         let waiting = KnownRequestWaitingStore()
         switch verdict {
         case .show:
+            if !holdsOneToOne {
+                asksForChatIds.insert(request.messageId)
+                waiting.drop(messageId: request.messageId, accountIdB64: accountIdB64)
+            }
             return false
         case .answer:
             // The ack is the whole of the answer on this path: the reset the
@@ -2125,7 +2261,7 @@ public final class ContactsRepository: ObservableObject {
             if await handleKnownContactRequest(request, client: client) { continue }
             guard boundAccountIdB64 == accountIdB64 else { return [] }
             store.drop(messageId: request.messageId, accountIdB64: accountIdB64)
-            listed.append(request)
+            listed.append(markingAsksForChat(request))
         }
         return listed
     }

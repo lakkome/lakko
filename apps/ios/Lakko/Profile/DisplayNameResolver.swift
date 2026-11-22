@@ -103,6 +103,31 @@ public struct ResolvedDisplayName: Equatable, Sendable {
     }
 }
 
+/// A two-line person row (a group's member list, `docs/ux/conversation-info.md`
+/// section 2.2; `docs/ux/profile-names.md` section 3: the verified username
+/// shown under the name): the name as the title, the verified `@username` as
+/// the second line, never both on the first line. The own row is the one word
+/// `You`, with no second line.
+public struct PersonRowText: Equatable, Sendable {
+    public let title: String
+    public let subtitle: String?
+
+    public init(title: String, subtitle: String?) {
+        self.title = title
+        self.subtitle = subtitle
+    }
+
+    /// Another person's row.
+    public init(_ resolved: ResolvedDisplayName) {
+        self.init(title: resolved.name, subtitle: resolved.usernameLine)
+    }
+
+    /// The own row: `you` (the interface word), no second line.
+    public static func own(_ you: String) -> PersonRowText {
+        PersonRowText(title: you, subtitle: nil)
+    }
+}
+
 /// Resolve the name for the person holding `signatureKey`.
 ///
 /// - Parameters:

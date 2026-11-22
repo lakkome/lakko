@@ -765,7 +765,12 @@ private fun GroupTypeScreen(
  * link`. Goes when a second person lands.
  */
 @Composable
-internal fun SoloGroupBlock(viewModel: ChatViewModel, onAddMembers: () -> Unit, alone: Boolean = true) {
+internal fun SoloGroupBlock(
+    viewModel: ChatViewModel,
+    onAddMembers: () -> Unit,
+    alone: Boolean = true,
+    canAddMembers: Boolean = remember(viewModel.groupIdHex, alone) { viewModel.canAddMembersNow() },
+) {
     val context = LocalContext.current
     val created = remember(viewModel.groupIdHex) { viewModel.createdGroup() }
     if (!created && !alone) return
@@ -791,7 +796,10 @@ internal fun SoloGroupBlock(viewModel: ChatViewModel, onAddMembers: () -> Unit, 
         if (!alone) return@Column
         Text(t("group_solo.only_you"), style = MaterialTheme.typography.bodyMedium)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onAddMembers) { Text(t("group_solo.add_members")) }
+            // Only for whoever may add people (the info's own gate).
+            if (canAddMembers) {
+                Button(onClick = onAddMembers) { Text(t("group_solo.add_members")) }
+            }
             TextButton(onClick = { viewModel.copySoloInviteLink(context) }) { Text(t("group_solo.copy_invite")) }
         }
     }

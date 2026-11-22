@@ -101,7 +101,13 @@ open from its header; it is not a state with a screen.
   removal stays (amended 2026-10-24): the rule that makes a one-to-one peer a
   contact skips a removed person, so the remaining conversation never brings
   them back; adding them again (Accept, an invite link, starting a chat from
-  their profile) does. The card closes once the removal is done, back to the
+  their profile) does. A request sent to them again from search does too:
+  their device still holds the viewer as a contact and answers it with an
+  acknowledgement alone, and that answer, with the one-to-one both still
+  hold, puts them back with it and clears the request under Sent (base
+  scenario 7, 2026-11-22); when the viewer's device holds no live
+  one-to-one with them, it starts one with them instead
+  ([`who-can-find-me.md`](who-can-find-me.md) section 6.4). The card closes once the removal is done, back to the
   list or the conversation it was opened from (2026-10-31), on every client and
   whichever way the contact came to be.
 - **Add to contacts**, on the card of a person the viewer removed (amended
@@ -159,6 +165,28 @@ row with a copy icon, and the owner has a `Group type` row. A group of one offer
 
 This is what exists today, minus its habit of appearing where there is no
 group.
+
+**A member row (amended 2026-11-22).** Seen live that day: an admin's iOS
+list offered `Remove` on the owner's row, and no client marked who the owner
+or the admins were. The row is the name, then `Owner` or `Admin` after it in
+the muted style of `Suspended`, and the `@username` under it; a plain member
+has no mark, and a group with no role table marks nobody. What each reader
+gets on a row, per ADR-0022:
+
+| Reader | Owner's row | An admin's row | A member's row | Own row |
+|---|---|---|---|---|
+| Owner | - | `Remove admin`, `Remove` | `Make admin`, `Remove` | - |
+| Admin | - | - | `Remove` | - |
+| Member | - | - | - | - |
+| No role table | `Remove` | `Remove` | `Remove` | - |
+
+An admin does not remove or demote another admin (ADR-0022 v1; who manages
+admins besides the owner is an open question there). Once the reader's own
+membership has ended the list is read-only and shows no marks, since a
+removal changes no roles and the frozen list could name someone an admin who
+no longer is. The rule is written once per client (web
+`chat/member-row-actions.ts`, iOS `Chat/MemberRowActions.swift`, Android
+`chat/MemberRowActions.kt`) with the same test table.
 
 Tapping a member who is a contact opens their contact screen, which returns
 to the group's info by its back control (section 3.1).

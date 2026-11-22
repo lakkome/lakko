@@ -11,10 +11,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("./sent-request-intros", () => ({ forgetSentIntro: async () => {} }));
 
 import { base64Encode } from "../auth/account-id";
-import { applyContactAck, foundNameForKey, retireAnsweredSentRequests } from "./contact-ack";
+import {
+  adoptAnsweredOneToOne,
+  applyContactAck,
+  foundNameForKey,
+  retireAnsweredSentRequests,
+  sentRecordAskedAcker,
+} from "./contact-ack";
 import { waitingSentRequests, type FoundName } from "./contact-list-model";
 import { requestsToResend } from "./rotation-spent";
-import { adoptOneToOne, loadAccepted } from "./local-store";
+import { adoptOneToOne, isRemovedContact, loadAccepted, removeAccepted } from "./local-store";
 import { loadSentRequests, recordSentRequest } from "./sent-requests";
 
 const ACCOUNT = "owner";
@@ -119,5 +125,73 @@ describe("joining the one-to-one makes the contact and retires the request", () 
 
   it("nobody was found under a key with no record", () => {
     expect(foundNameForKey(ACCOUNT, base64Encode(new Uint8Array(32).fill(9)))).toBeNull();
+  });
+});
+
+describe("the silent answer: a removed contact asked again (base scenario 7, 2026-11-22)", () => {
+  function sessionWithOneToOne(groupIdB64: string | null): Parameters<typeof applyContactAck>[2] {
+    return { current: () => true, fileFoundName: () => {}, liveOneToOneWith: () => groupIdB64 };
+  }
+
+  it("an ack from a removed person this device holds a one-to-one with puts them back, with it, and retires Sent", () => {
+    // Was a contact with chat G, removed, asked again from search.
+    expect(adoptOneToOne({ signatureKey: keyB64, groupIdB64: "G", nowMs: 1 }, ACCOUNT)).toBe(true);
+    removeAccepted(keyB64, ACCOUNT);
+    expect(isRemovedContact(keyB64, ACCOUNT)).toBe(true);
+    expect(applyContactAck(ack, ACCOUNT, sessionWithOneToOne("G"))).toBe("restored");
+    const [contact] = loadAccepted(ACCOUNT);
+    expect(contact?.signaturePubkeyB64).toBe(keyB64);
+    expect(contact?.groupIdB64).toBe("G");
+    expect(contact?.accountIdHex).toBe(accountIdHex);
+    expect(contact?.x25519PubkeyB64).toBe(base64Encode(ack.accepterX25519Pubkey));
+    expect(isRemovedContact(keyB64, ACCOUNT)).toBe(false);
+    expect(loadSentRequests(ACCOUNT)).toEqual([]);
+  });
+
+  it("without a one-to-one on this device the caller founds one; until then nothing is made", () => {
+    removeAccepted(keyB64, ACCOUNT);
+    expect(applyContactAck(ack, ACCOUNT, sessionWithOneToOne(null))).toBe("needs-one-to-one");
+    expect(loadAccepted(ACCOUNT)).toEqual([]);
+    expect(isRemovedContact(keyB64, ACCOUNT)).toBe(true);
+    expect(waitingSentRequests(loadSentRequests(ACCOUNT), new Set())).toHaveLength(1);
+    // The founded one-to-one makes the contact and retires the request.
+    expect(adoptAnsweredOneToOne(ACCOUNT, keyB64, accountIdHex, "NEW")).toBe(true);
+    const [contact] = loadAccepted(ACCOUNT);
+    expect(contact?.groupIdB64).toBe("NEW");
+    expect(contact?.x25519PubkeyB64).toBe(base64Encode(ack.accepterX25519Pubkey));
+    expect(isRemovedContact(keyB64, ACCOUNT)).toBe(false);
+    expect(loadSentRequests(ACCOUNT)).toEqual([]);
+  });
+
+  it("a session that cannot see conversations asks for nothing", () => {
+    expect(applyContactAck(ack, ACCOUNT, sessionFiling().session)).toBe("none");
+  });
+
+  it("a one-to-one with a person this device never asked brings nobody back", () => {
+    const other = new Uint8Array(32).fill(9);
+    const otherB64 = base64Encode(other);
+    removeAccepted(otherB64, ACCOUNT);
+    const stray = { ...ack, accepterPubkey: other, accepterAccountId: new Uint8Array(16).fill(0xbb) };
+    expect(applyContactAck(stray, ACCOUNT, sessionWithOneToOne("H"))).toBe("none");
+    expect(applyContactAck(stray, ACCOUNT, sessionWithOneToOne(null))).toBe("none");
+    expect(loadAccepted(ACCOUNT)).toEqual([]);
+    expect(isRemovedContact(otherB64, ACCOUNT)).toBe(true);
+    expect(loadSentRequests(ACCOUNT)).toHaveLength(1);
+  });
+
+  it("an ack naming the asked account under another key restores nobody", () => {
+    const other = new Uint8Array(32).fill(9);
+    const forged = { ...ack, accepterPubkey: other };
+    expect(applyContactAck(forged, ACCOUNT, sessionWithOneToOne("H"))).toBe("none");
+    expect(applyContactAck(forged, ACCOUNT, sessionWithOneToOne(null))).toBe("none");
+    expect(loadAccepted(ACCOUNT)).toEqual([]);
+  });
+
+  it("sentRecordAskedAcker: the key, or the account when the record names no key", () => {
+    const rec = { recipientAccountIdHex: accountIdHex, recipientKeyB64: keyB64 };
+    expect(sentRecordAskedAcker(rec, keyB64, "bb".repeat(16))).toBe(true);
+    expect(sentRecordAskedAcker(rec, "other", accountIdHex)).toBe(false);
+    expect(sentRecordAskedAcker({ recipientAccountIdHex: accountIdHex }, "any", accountIdHex)).toBe(true);
+    expect(sentRecordAskedAcker({ recipientAccountIdHex: accountIdHex }, "any", "bb".repeat(16))).toBe(false);
   });
 });

@@ -4943,7 +4943,7 @@ public class AuthRepository(
             // answer about the password.
             if (err.status != HTTP_UNAUTHORIZED && err.status != HTTP_NOT_FOUND) throw err
             false
-        } catch (_: FfiException) {
+        } catch (_: PasswordLoginRejected) {
             // A wrong password fails the exchange on this side.
             false
         }
@@ -5923,7 +5923,7 @@ public class AuthRepository(
             // The proof's sign-in replaces the session pair, so it must name
             // this device like the pair it replaces.
             authClientFactory().use { it.login(named.handle, password, landingDeviceId(target.accountIdB64)) }
-        } catch (cause: FfiException) {
+        } catch (cause: PasswordLoginRejected) {
             // The OPAQUE finish refused the server's answer on this device:
             // the password does not open the envelope.
             throw FreshAuthWrongPassword()

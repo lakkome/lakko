@@ -14926,6 +14926,12 @@ public class ChatRepository(
         val own = ownPersonKeyB64() ?: return
         val lineage = lineageNow()
         val records = synchronized(groups) { groups.entries.map { it.key to it.value } }
+        // Base scenario 9 — when this device first held each group.
+        val since: Map<String, Long?> = currentAccountIdB64.get()?.let { account ->
+            ConversationHeldSince.record(
+                applicationContext, account, records.map { it.first.lowercase() }, System.currentTimeMillis(),
+            )
+        }.orEmpty()
         val held = records.mapNotNull { (hex, record) ->
             if (hex.lowercase() in endingGroups) return@mapNotNull null
             try {
@@ -14936,6 +14942,7 @@ public class ChatRepository(
                     isOneToOne = record.group.groupKind() == GroupKind.ONE_TO_ONE,
                     people = personKeysOf(members),
                     founderKey = founderKeyOf(record.group, members),
+                    heldSinceMs = since[hex.lowercase()],
                 )
             } catch (_: Throwable) {
                 null

@@ -447,3 +447,107 @@ final class LoginByNameFlowTests: XCTestCase {
         XCTAssertEqual(NameRouteStub.requests(host).map(\.path), ["/totp/recover"])
     }
 }
+
+// MARK: - What a failed login shows (2026-11-22)
+
+/// Only a refused password reads "Wrong username or password"; the login form
+/// reads its fields once editing has ended.
+@MainActor
+final class LoginFailureCopyTests: XCTestCase {
+
+    private let wrong = Localization.text("auth.error.wrong_credentials")
+    private let generic = Localization.text("common.error.unavailable")
+
+    func testTheCoresOpaqueFailureIsAWrongPasswordAndNothingElseIs() {
+        XCTAssertTrue(
+            PasswordLoginRejected.classify(FfiError.Auth(message: "auth error: OPAQUE protocol failure"))
+                is PasswordLoginRejected)
+        XCTAssertFalse(
+            PasswordLoginRejected.classify(FfiError.Auth(message: "auth error: invalid OPAQUE wire payload"))
+                is PasswordLoginRejected)
+        XCTAssertFalse(
+            PasswordLoginRejected.classify(FfiError.AuthAlreadyFinalized(message: "x")) is PasswordLoginRejected)
+        XCTAssertFalse(PasswordLoginRejected.classify(CancellationError()) is PasswordLoginRejected)
+    }
+
+    func testOnlyARefusedPasswordShowsTheWrongCredentialsSentence() {
+        XCTAssertEqual(AuthErrorCopy.login(PasswordLoginRejected()), wrong)
+        XCTAssertEqual(AuthErrorCopy.login(LoginFieldsEmpty()), wrong)
+        XCTAssertEqual(AuthErrorCopy.login(AuthClientError.http(status: 401, endpoint: "/login/finish", body: "")), wrong)
+
+        XCTAssertEqual(AuthErrorCopy.login(FfiError.Auth(message: "auth error: invalid OPAQUE wire payload")), generic)
+        XCTAssertEqual(AuthErrorCopy.login(AuthClientError.http(status: 404, endpoint: "/login/start", body: "")), generic)
+        XCTAssertEqual(AuthErrorCopy.login(AuthClientError.http(status: 200, endpoint: "/login/start", body: "decode failed")), generic)
+        XCTAssertEqual(AuthErrorCopy.login(AuthClientError.argument("login handle must be 32 bytes")), generic)
+        XCTAssertEqual(AuthErrorCopy.login(AccountStoreGate.Sealed()), generic)
+        struct Unnamed: Error {}
+        XCTAssertEqual(AuthErrorCopy.login(Unnamed()), generic)
+    }
+
+    func testTheProofSignInReadsTheDeviceSideRefusalAsAWrongPassword() {
+        XCTAssertTrue(FreshAuthRefusal.isWrongPassword(PasswordLoginRejected()))
+        XCTAssertFalse(FreshAuthRefusal.isWrongPassword(FfiError.Auth(message: "auth error: invalid OPAQUE wire payload")))
+    }
+
+    func testTheLogLineNamesTheKindAndStatusButNoMessageOrBody() {
+        let http = AuthErrorCopy.loginFailureLogLine(
+            AuthClientError.http(status: 401, endpoint: "/login/finish", body: "secret body alice"))
+        XCTAssertEqual(http, "error=AuthClientError.http status=401 endpoint=/login/finish")
+
+        let ffi = AuthErrorCopy.loginFailureLogLine(FfiError.Auth(message: "auth error: something alice"))
+        XCTAssertEqual(ffi, "error=FfiError.Auth status=none")
+
+        let network = AuthErrorCopy.loginFailureLogLine(
+            AuthClientError.network(endpoint: "/login/start", underlying: URLError(.timedOut)))
+        XCTAssertTrue(network.hasPrefix("error=AuthClientError.network status=none endpoint=/login/start"), network)
+        XCTAssertTrue(network.contains("url_error=\(URLError.Code.timedOut.rawValue)"), network)
+
+        XCTAssertEqual(AuthErrorCopy.loginFailureLogLine(PasswordLoginRejected()), "error=PasswordLoginRejected status=none")
+    }
+
+    private func repository(_ host: String) -> AuthRepository {
+        AuthRepository(
+            sessionStore: SessionStore(defaults: UserDefaults(suiteName: "login-failure-\(UUID().uuidString)")!),
+            authClientFactory: { NameRouteStub.client(host) },
+            persistence: NoPersistence(),
+            nowMs: { 1_000_000 },
+            accountDirectory: ForbiddenDirectory(),
+            restoreDirectory: OfflineRestoreDirectory(),
+            earlierKeysInputs: skipEarlierKeysGate
+        )
+    }
+
+    private func waitUntilIdle(_ vm: LoginViewModel) async {
+        let deadline = Date().addingTimeInterval(5)
+        repeat { try? await Task.sleep(nanoseconds: 10_000_000) } while vm.busy && Date() < deadline
+    }
+
+    /// The keyboard still holds the last key presses when Log in is tapped;
+    /// ending editing applies them. The form must read the field after that.
+    func testTheFieldsAreReadAfterEditingEnds() async {
+        let host = NameRouteStub.scope { _, _, _ in (401, "") }
+        var vm: LoginViewModel?
+        vm = LoginViewModel(repository: repository(host), endEditing: { vm?.password = "password1" })
+        guard let vm else { return XCTFail() }
+        vm.username = "alice"
+        vm.password = ""
+        vm.onSubmit()
+        await waitUntilIdle(vm)
+        XCTAssertEqual(NameRouteStub.requests(host).map(\.path), ["/login/start"], "read after editing ended")
+        XCTAssertEqual(vm.error, wrong)
+    }
+
+    /// A start answer the device cannot use is not the person's password.
+    func testAMalformedStartAnswerIsNotShownAsAWrongPassword() async {
+        let host = NameRouteStub.scope { _, _, _ in
+            (200, #"{"session_id":"00000000-0000-0000-0000-000000000000","response":"AAAA"}"#)
+        }
+        let vm = LoginViewModel(repository: repository(host), endEditing: {})
+        vm.username = "alice"
+        vm.password = "password1"
+        vm.onSubmit()
+        await waitUntilIdle(vm)
+        XCTAssertEqual(NameRouteStub.requests(host).map(\.path), ["/login/start"])
+        XCTAssertEqual(vm.error, generic)
+    }
+}

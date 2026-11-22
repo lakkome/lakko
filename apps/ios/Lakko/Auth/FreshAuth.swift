@@ -164,9 +164,11 @@ enum FreshAuthRefusal {
         return json?["error"] as? String == code
     }
 
-    /// The password login's `401`: a wrong password (by design the same
-    /// answer as an unknown account).
+    /// A wrong password (by design the same answer as an unknown account):
+    /// the OPAQUE exchange refused on the device (``PasswordLoginRejected``,
+    /// the usual case, since no finish is sent then) or the login's `401`.
     static func isWrongPassword(_ error: Error) -> Bool {
+        if error is PasswordLoginRejected { return true }
         guard case .http(let status, _, _) = error as? AuthClientError else { return false }
         return status == 401
     }

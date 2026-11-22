@@ -43,6 +43,69 @@ final class KnownContactRequestTests: XCTestCase {
         XCTAssertEqual(verdict(check: .inconclusive, trustedKeyB64: "old"), .wait)
     }
 
+    /// Base scenario 7 (2026-11-22): the silent answer holds only while a
+    /// one-to-one is held here; without one the request is listed.
+    func testAnsweredSilentlyOnlyWhileAOneToOneIsHeld() {
+        let held = KnownContactRequest.verdict(
+            senderIsContact: true, check: .current, requestKeyB64: "new", trustedKeyB64: "new",
+            holdsOneToOne: true)
+        XCTAssertEqual(held, .answer)
+        let none = KnownContactRequest.verdict(
+            senderIsContact: true, check: .current, requestKeyB64: "new", trustedKeyB64: "new",
+            holdsOneToOne: false)
+        XCTAssertEqual(none, .show)
+        XCTAssertEqual(KnownContactRequest.verdict(
+            senderIsContact: true, check: .current, requestKeyB64: "old", trustedKeyB64: "new",
+            holdsOneToOne: false), .drop)
+        XCTAssertEqual(KnownContactRequest.verdict(
+            senderIsContact: true, check: .inconclusive, requestKeyB64: "new", trustedKeyB64: "new",
+            holdsOneToOne: false), .wait)
+    }
+
+    /// After a lost mailbox cursor: a request no newer than the contact is
+    /// dropped instead of listed.
+    func testARequestOlderThanTheContactIsDroppedNotListed() {
+        XCTAssertEqual(KnownContactRequest.verdict(
+            senderIsContact: true, check: .current, requestKeyB64: "new", trustedKeyB64: "new",
+            holdsOneToOne: false, predatesContact: true), .drop)
+        XCTAssertEqual(KnownContactRequest.verdict(
+            senderIsContact: true, check: .current, requestKeyB64: "new", trustedKeyB64: "new",
+            holdsOneToOne: true, predatesContact: true), .answer)
+        let since = "2026-11-22T09:00:00Z"
+        XCTAssertTrue(KnownContactRequest.requestPredatesContact(
+            requestCreatedAt: "2026-11-21T09:00:00Z", contactSince: since))
+        XCTAssertTrue(KnownContactRequest.requestPredatesContact(
+            requestCreatedAt: "2026-11-22T09:00:00.000Z", contactSince: since))
+        XCTAssertFalse(KnownContactRequest.requestPredatesContact(
+            requestCreatedAt: "2026-11-22T09:19:00Z", contactSince: since))
+        XCTAssertFalse(KnownContactRequest.requestPredatesContact(
+            requestCreatedAt: "garbage", contactSince: since))
+        XCTAssertFalse(KnownContactRequest.requestPredatesContact(
+            requestCreatedAt: "2026-11-21T09:00:00Z", contactSince: nil))
+    }
+
+    /// Another device of the account may still admit this one to the chat:
+    /// the request waits, then is listed.
+    func testASiblingMayStillAdmitThisDeviceSoTheRequestWaits() {
+        XCTAssertEqual(KnownContactRequest.verdict(
+            senderIsContact: true, check: .current, requestKeyB64: "new", trustedKeyB64: "new",
+            holdsOneToOne: false, siblingMayAdmit: true), .wait)
+        XCTAssertEqual(KnownContactRequest.verdict(
+            senderIsContact: true, check: .current, requestKeyB64: "new", trustedKeyB64: "new",
+            holdsOneToOne: true, siblingMayAdmit: true), .answer)
+        XCTAssertEqual(KnownContactRequest.verdict(
+            senderIsContact: true, check: .current, requestKeyB64: "new", trustedKeyB64: "new",
+            holdsOneToOne: false, predatesContact: true, siblingMayAdmit: true), .drop)
+        let at = "2026-11-22T09:00:00Z"
+        let t = Int64(ISO8601DateFormatter().date(from: at)!.timeIntervalSince1970 * 1000)
+        XCTAssertTrue(KnownContactRequest.siblingMayAdmit(otherDeviceCount: 1, requestCreatedAt: at, nowMs: t + 1000))
+        XCTAssertFalse(KnownContactRequest.siblingMayAdmit(
+            otherDeviceCount: 1, requestCreatedAt: at, nowMs: t + KnownContactRequest.siblingAdmitWaitMs))
+        XCTAssertFalse(KnownContactRequest.siblingMayAdmit(otherDeviceCount: 0, requestCreatedAt: at, nowMs: t + 1000))
+        XCTAssertFalse(KnownContactRequest.siblingMayAdmit(otherDeviceCount: nil, requestCreatedAt: at, nowMs: t + 1000))
+        XCTAssertFalse(KnownContactRequest.siblingMayAdmit(otherDeviceCount: 2, requestCreatedAt: "bad", nowMs: t))
+    }
+
     func testARequestFromAnyOtherKeyOfAContactsAccountIsDropped() {
         XCTAssertEqual(verdict(requestKeyB64: "old"), .drop)
         XCTAssertEqual(verdict(trustedKeyB64: nil), .drop)

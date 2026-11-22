@@ -3193,6 +3193,10 @@
       "text": "{name} के ज़रिए · सदस्य",
       "status": "machine"
     },
+    "chat.members.owner.marker": {
+      "text": "मालिक",
+      "status": "machine"
+    },
     "chat.members.pending.adds_heading": {
       "text": "जोड़े जाने का इंतज़ार ({count})",
       "status": "machine"

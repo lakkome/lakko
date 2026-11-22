@@ -51,6 +51,13 @@ export type KnownRequestVerdict =
  * | yes                 | `current`      | yes                            | `answer` |
  * | yes                 | `current`      | no                             | `drop`   |
  *
+ * `answer` holds only while this device holds a live one-to-one with them
+ * (`holdsOneToOne`, base scenario 7, 2026-11-22): the ack alone starts no
+ * chat, so a contact with none here is `show`n and Accept starts it, as a
+ * request through a group is (`docs/ux/who-can-find-me.md` 6.4). Absent:
+ * held. A request no newer than the contact relationship (`predatesContact`:
+ * read again after a lost mailbox cursor) is dropped instead of listed.
+ *
  * `trustedKeyB64` is the pin AFTER the check ran; `null` (no pin) cannot
  * happen for a contact with a known account id once the check passed, and
  * reads as "not the trusted key".
@@ -60,11 +67,62 @@ export function knownContactRequestVerdict(input: {
   readonly check: KnownRequestCheck;
   readonly requestKeyB64: string;
   readonly trustedKeyB64: string | null;
+  readonly holdsOneToOne?: boolean;
+  /** Whether the request is no newer than the contact relationship (its DS
+   *  stamp at or before the contact row was made): a request read again
+   *  after a lost mailbox cursor. Such a request is not listed for want of a
+   *  one-to-one; it is dropped. Absent: newer. */
+  readonly predatesContact?: boolean;
+  /** Whether another device of this account may still be admitting this one
+   *  to the chat with them ({@link siblingMayAdmit}). The request then waits,
+   *  unshown, and is answered silently once the chat is here; listed only
+   *  after that. Absent: no. */
+  readonly siblingMayAdmit?: boolean;
 }): KnownRequestVerdict {
   if (!input.senderIsContact) return "show";
   if (input.check === "refused") return "drop";
   if (input.check === "inconclusive") return "wait";
-  return input.trustedKeyB64 === input.requestKeyB64 ? "answer" : "drop";
+  if (input.trustedKeyB64 !== input.requestKeyB64) return "drop";
+  if (input.holdsOneToOne !== false) return "answer";
+  if (input.predatesContact === true) return "drop";
+  return input.siblingMayAdmit === true ? "wait" : "show";
+}
+
+/** How long a request from a contact this device holds no chat with waits
+ *  for another device of the account to admit this one (ADR-0050
+ *  re-admission) before it is listed. Chosen, not measured. */
+export const SIBLING_ADMIT_WAIT_MS = 15 * 60 * 1000;
+
+/**
+ * Whether another device of this account may still bring this one into the
+ * chat with the person (base scenario 9): the account has another device and
+ * the request is younger than {@link SIBLING_ADMIT_WAIT_MS}. A device of an
+ * account that already holds the chat answers such a request silently; this
+ * one would otherwise list it and its Accept would found a second chat.
+ * Unknown facts read as "no" (the request is listed at once).
+ */
+export function siblingMayAdmit(input: {
+  readonly otherDeviceCount: number | null;
+  readonly requestCreatedAt: string;
+  readonly nowMs: number;
+}): boolean {
+  if (input.otherDeviceCount === null || input.otherDeviceCount < 1) return false;
+  const at = Date.parse(input.requestCreatedAt);
+  if (!Number.isFinite(at)) return false;
+  return input.nowMs - at < SIBLING_ADMIT_WAIT_MS;
+}
+
+/**
+ * Whether a request is no newer than the contact relationship: its DS stamp
+ * (`createdAt`, server-set) is at or before the time the contact row was
+ * made. An unparseable stamp or an unknown relationship time reads as newer
+ * (`false`): a request is never dropped on a missing fact.
+ */
+export function requestPredatesContact(requestCreatedAt: string, contactSinceMs: number | undefined): boolean {
+  if (contactSinceMs === undefined || !Number.isFinite(contactSinceMs) || contactSinceMs <= 0) return false;
+  const at = Date.parse(requestCreatedAt);
+  if (!Number.isFinite(at)) return false;
+  return at <= contactSinceMs;
 }
 
 /** The slice of a contact row this reads. */

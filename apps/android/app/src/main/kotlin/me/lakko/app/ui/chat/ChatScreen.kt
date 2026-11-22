@@ -1084,7 +1084,7 @@ public fun ChatScreen(
                     if (isGroupChat) {
                         SoloGroupBlock(
                             viewModel = viewModel,
-                            onAddMembers = viewModel::toggleMembersPanel,
+                            onAddMembers = viewModel::openAddMembersFromConversation,
                             alone = otherMembers.isEmpty(),
                         )
                     }
@@ -1119,7 +1119,7 @@ public fun ChatScreen(
                         item(key = "solo-group") {
                             SoloGroupBlock(
                                 viewModel = viewModel,
-                                onAddMembers = viewModel::toggleMembersPanel,
+                                onAddMembers = viewModel::openAddMembersFromConversation,
                                 alone = otherMembers.isEmpty(),
                             )
                         }
@@ -4529,7 +4529,17 @@ private fun TransferOwnershipStep(
                             enabled = !busy,
                         )
                         Spacer(Modifier.width(6.dp))
-                        Text(text = row.label, style = MaterialTheme.typography.bodyMedium)
+                        // The members list's own two lines (§6.1.3).
+                        Column {
+                            Text(text = row.label, style = MaterialTheme.typography.bodyMedium)
+                            row.usernameLine?.let {
+                                Text(
+                                    text = it,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
                         // MARK, do not filter and do not sort. Who is already an
                         // admin is information the owner assigned and is worth
                         // having when choosing a successor; it is not a reason to
@@ -5448,7 +5458,8 @@ private fun MembersSheet(
                                 )
                                 // ADR-0084 — a person's photo beside their name;
                                 // the own row shows the owner's own photo.
-                                val memberName = membersNameVersion.let { viewModel.memberLabel(member) }
+                                val memberRow = membersNameVersion.let { viewModel.memberRowText(member) }
+                                val memberName = memberRow.title
                                 val isOwnRow = ownLeaf == member.leafIndex
                                 // ADR-0098 section 2 — a visible member row: the
                                 // directory is asked about them when a check is due.
@@ -5471,11 +5482,45 @@ private fun MembersSheet(
                                     avatar = if (isOwnRow) me.lakko.app.ui.components.rememberOwnAvatar() else null,
                                 )
                                 Spacer(Modifier.width(10.dp))
+                                // conversation-info.md section 2.2 / ADR-0022 — the
+                                // row's role mark and which of Remove / Make admin
+                                // this reader gets on it; never anything on the
+                                // owner's row (`memberRowActions`).
+                                val rowActions = me.lakko.app.chat.memberRowActions(
+                                    viewerRole = when {
+                                        roleTable == null -> null
+                                        isOwner -> me.lakko.app.chat.MemberRole.OWNER
+                                        canManage -> me.lakko.app.chat.MemberRole.ADMIN
+                                        else -> me.lakko.app.chat.MemberRole.MEMBER
+                                    },
+                                    rowRole = me.lakko.app.chat.rowRoleOf(
+                                        member.signaturePublicKey,
+                                        roleTable?.owner,
+                                        roleTable?.admins.orEmpty(),
+                                    ),
+                                    ownRow = isOwnRow,
+                                    membershipEnded = membershipEnded,
+                                )
                                 Column(modifier = Modifier.weight(1f)) {
                                     val memberSuspended = !isOwnRow && member.accountKey.size == 32 &&
                                         java.util.Base64.getEncoder().encodeToString(member.accountKey) in suspendedMembers
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Text(text = memberName, modifier = Modifier.weight(1f, fill = false))
+                                        // Section 2.2 — "Owner" / "Admin" after the name, muted.
+                                        rowActions.mark?.let { mark ->
+                                            Spacer(Modifier.width(6.dp))
+                                            Text(
+                                                text = t(
+                                                    if (mark == me.lakko.app.chat.MemberRole.OWNER) {
+                                                        "chat.members.owner.marker"
+                                                    } else {
+                                                        "chat.members.admin.marker"
+                                                    },
+                                                ),
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
                                         // UX 3 — "Suspended" after the name, muted.
                                         if (memberSuspended) {
                                             Spacer(Modifier.width(6.dp))
@@ -5486,6 +5531,15 @@ private fun MembersSheet(
                                             )
                                         }
                                     }
+                                    // profile-names.md §3 — the verified username
+                                    // under the name, once.
+                                    memberRow.subtitle?.let {
+                                        Text(
+                                            text = it,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
                                     annotation?.let {
                                         Text(
                                             text = it.text(),
@@ -5495,30 +5549,23 @@ private fun MembersSheet(
                                     }
                                 }
                                 // ADR-0022 — owner-only promote / demote toggle;
-                                // never the owner's own row.
-                                //
-                                // `ROLES` is OWNER-only in the shared rule and must
-                                // never widen to admins: a role-table change is
-                                // owner-only and every peer refuses an admin's, so
-                                // an admin offered this would be offered a button
-                                // whose every press is rejected. Which ROW it may
-                                // not appear on is this client's, because the rule
-                                // is about the block and knows nothing of rows.
-                                val isMemberOwner = roleTable?.owner
-                                    ?.contentEquals(member.signaturePublicKey) ?: false
-                                if (InfoSection.ROLES in sections && !isMemberOwner) {
-                                    val isAdmin = roleTable?.admins
-                                        ?.any {
-                                            it.contentEquals(member.signaturePublicKey)
-                                        } ?: false
+                                // never the owner's own row. `ROLES` is OWNER-only
+                                // in the shared rule and must never widen to
+                                // admins: a role-table change is owner-only and
+                                // every peer refuses an admin's. Which ROW carries
+                                // one is `memberRowActions`.
+                                val toggle = rowActions.adminToggle
+                                if (InfoSection.ROLES in sections && toggle != null) {
+                                    val isAdmin = toggle == me.lakko.app.chat.AdminToggle.TAKE
                                     TextButton(
                                         onClick = { viewModel.onToggleAdmin(member, !isAdmin) },
                                         enabled = !busy,
                                     ) { Text(t(if (isAdmin) "chat.members.admin.remove" else "chat.members.admin.make")) }
                                 }
-                                // ADR-0022 — Remove only when we may manage members
-                                // (owner / admin / open group) and not our own leaf.
-                                if (canManage && ownLeaf != member.leafIndex) {
+                                // ADR-0022 — the owner removes anyone else, an
+                                // admin plain members only, a member nobody; an
+                                // open group anyone (`memberRowActions`).
+                                if (canManage && rowActions.remove) {
                                     TextButton(
                                         // proposal-based-membership.md section 6,
                                         // "No confirmation" (2026-11-04): Remove

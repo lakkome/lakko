@@ -127,3 +127,9 @@ final class LoginHandleBindLedger: @unchecked Sendable {
         lock.withLock { claimed.insert("\(canonical)\n\(sessionToken)").inserted }
     }
 }
+
+/// The login form was submitted with an empty username or password. Shown as
+/// the wrong-credentials sentence (nothing was sent).
+public struct LoginFieldsEmpty: Error, Equatable {
+    public init() {}
+}

@@ -600,10 +600,18 @@ public final class AuthClient {
             )
         )
 
-        let out = try login.finish(
-            secret: password,
-            serverResponseB64: startResp.response
-        )
+        let out: OpaqueLoginOutput
+        do {
+            out = try login.finish(
+                secret: password,
+                serverResponseB64: startResp.response
+            )
+        } catch {
+            // A wrong password (or a name nobody holds) is found HERE, on the
+            // device: the server's answer does not open under these bytes,
+            // and no `/login/finish` is ever sent.
+            throw PasswordLoginRejected.classify(error)
+        }
         let deviceId = LandingDevice.usable(deviceId)
         let finishResp: LoginFinishResponse
         do {
@@ -1922,6 +1930,31 @@ private struct TotpEnrollFinishAck: Decodable {}
 /// `Equatable` synthesis covers the `argument` and `http` cases
 /// trivially; the `network` case holds an `Error` (existential, not
 /// `Equatable`) so we hand-roll the equality below.
+/// The password login was refused as a wrong password: the OPAQUE exchange
+/// did not complete under the typed password. By design the same outcome as
+/// a username nobody holds (the server answers a stand-in account).
+///
+/// Thrown by ``AuthClient/login(handle:password:deviceId:)`` when the core's
+/// OPAQUE client finish fails with its protocol failure. Every other failure
+/// of that step (a malformed server answer, a finished session) is passed on
+/// unchanged, so a screen never reads a broken exchange as a wrong password.
+public struct PasswordLoginRejected: Error, Equatable {
+    public init() {}
+
+    /// The core's `Display` of `lakko_auth_client::AuthClientError::Opaque`,
+    /// which a flat `FfiError.Auth` carries after the `auth error: ` prefix.
+    static let opaqueFailureText = "OPAQUE protocol failure"
+
+    /// `PasswordLoginRejected` for the core's OPAQUE protocol failure,
+    /// `error` itself for anything else.
+    static func classify(_ error: Error) -> Error {
+        if case .Auth(let message) = error as? FfiError, message.hasSuffix(opaqueFailureText) {
+            return PasswordLoginRejected()
+        }
+        return error
+    }
+}
+
 public enum AuthClientError: Error {
     /// A precondition was violated by the caller — e.g. an empty
     /// password. Distinct from a network error so the UI can surface

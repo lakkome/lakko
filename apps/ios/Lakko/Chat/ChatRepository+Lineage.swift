@@ -31,14 +31,20 @@ extension ChatRepository {
     /// whenever the held groups or the lineage move; writing the same
     /// register again changes nothing.
     func foldDuplicateOneToOnes() {
-        guard currentAccountIdB64 != nil, lineageReady() else { return }
-        let held: [DuplicateOneToOne.Held] = groups.keys.sorted().map { hex in
+        guard let account = currentAccountIdB64, lineageReady() else { return }
+        let hexes = groups.keys.sorted()
+        // Base scenario 9 — when this device first held each group.
+        let since = ConversationHeldSince.record(
+            accountIdB64: account, groupHexes: hexes,
+            nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+        let held: [DuplicateOneToOne.Held] = hexes.map { hex in
             DuplicateOneToOne.Held(
                 groupHex: hex,
                 conversationHex: conversationLineage.conversationOf(hex),
                 isOneToOne: isOneToOne(groupIdHex: hex),
                 people: (members(groupIdHex: hex) ?? []).map { base64Encode($0.signaturePublicKey) },
-                founderKeyB64: founderKeyB64(groupIdHex: hex))
+                founderKeyB64: founderKeyB64(groupIdHex: hex),
+                heldSinceMs: since[hex])
         }
         let own = conversationAccountIdentity.map { base64Encode($0.signaturePublicKey()) }
         for fold in DuplicateOneToOne.folds(held: held, ownKeyB64: own) {

@@ -13,7 +13,12 @@
  *
  * Pure, so the collapse is pinned by a test.
  */
-import { AuthHttpError, AuthNetworkError } from "./client";
+import {
+  AuthClientArgError,
+  AuthHttpError,
+  AuthNetworkError,
+  PasswordLoginRejectedError,
+} from "./client";
 import { DiscoveryHttpError, DiscoveryNetworkError } from "../discovery/client";
 import { isAnonTokenNetworkFailure } from "../tokens/anon-token-pool";
 import { isDsNetworkFailure } from "../ds/client";
@@ -160,19 +165,38 @@ export function screenText(err: unknown): string | null {
   return null;
 }
 
-/** The login form. */
+/** The login form. Only a refused password says "wrong username or
+ *  password": the OPAQUE exchange refused on the device, the server's 401,
+ *  or an empty password. Anything else (a malformed answer, an error nobody
+ *  named) is not the person's typing and shows the generic failure. */
 export function loginErrorMessage(err: unknown): string {
   if (isOffline(err)) return offline();
   const limit = authLimitMessage(err);
   if (limit !== null) return limit;
   // The username lookup could not get an anonymous token (ADR-0054 S3).
   if (isAnonTokenNetworkFailure(err)) return offline();
-  const s = status(err);
-  if (s === 503) return unavailable();
-  // 401 / 404 / a lookup miss / "invalid credentials": all the same sentence.
-  if (s === 401 || s === 404 || s === 400) return wrongCredentials();
-  if (err instanceof Error && err.message === "invalid credentials") return wrongCredentials();
-  return screenText(err) ?? wrongCredentials();
+  if (isWrongCredentials(err)) return wrongCredentials();
+  return screenText(err) ?? unavailable();
+}
+
+/** Whether a password login failed because of what was typed. */
+export function isWrongCredentials(err: unknown): boolean {
+  if (err instanceof PasswordLoginRejectedError) return true;
+  // An empty password: nothing was sent.
+  if (err instanceof AuthClientArgError && err.message === "password must be non-empty") return true;
+  if (status(err) === 401) return true;
+  return err instanceof Error && err.message === "invalid credentials";
+}
+
+/** A plain-text description of a failed login for the console: the error's
+ *  class name, the HTTP status and endpoint path when there is one. Never a
+ *  message, a body, a username or a secret. */
+export function loginFailureLogLine(err: unknown): string {
+  const kind = err instanceof Error ? err.name : typeof err;
+  if (err instanceof AuthHttpError) {
+    return `error=${kind} status=${err.status} endpoint=${err.endpoint}`;
+  }
+  return `error=${kind} status=none`;
 }
 
 /** The passkey button on the login form. The context throws keyed errors;

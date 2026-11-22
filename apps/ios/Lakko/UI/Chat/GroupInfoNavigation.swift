@@ -48,6 +48,18 @@ enum GroupInfoNavigation {
         return path.last == add ? path : path + [add]
     }
 
+    /// ADR-0087 section 10 — `Add members` in a group of one: the Add members
+    /// screen straight from the conversation, with the info under it, so its
+    /// back and **Add** return to the info (section 2.4), where a failed add
+    /// is reported. Already on top: nothing; an info already open is not
+    /// opened a second time.
+    static func openAddMembersFromConversation(_ path: [TabRoute], groupIdHex: String) -> [TabRoute] {
+        if path.last == .addMembers(groupIdHex: groupIdHex) { return path }
+        let withInfo = path.contains(.groupInfo(groupIdHex: groupIdHex))
+            ? path : openInfo(path, groupIdHex: groupIdHex)
+        return openAddMembers(withInfo, groupIdHex: groupIdHex)
+    }
+
     /// Add pressed: back to the info at once (the Add members screen and
     /// anything above it go; the info stays).
     static func afterAdd(_ path: [TabRoute], groupIdHex: String) -> [TabRoute] {

@@ -162,10 +162,51 @@ enum AuthErrorCopy {
     }
 
     /// The login form.
+    ///
+    /// Only a refused password says "wrong username or password": the OPAQUE
+    /// exchange refused on the device (``PasswordLoginRejected``), the
+    /// server's `401`, or an empty field. Anything else (a malformed answer,
+    /// a failed key write, an error nobody named) is not the person's typing
+    /// and shows the generic failure.
     static func login(_ error: Error) -> String {
         if let common = shared(error) { return common }
         if let rule = rule(error) { return rule }
-        return t("auth.error.wrong_credentials")
+        if isWrongCredentials(error) { return t("auth.error.wrong_credentials") }
+        return unavailable
+    }
+
+    /// Whether a password login failed because of what was typed.
+    static func isWrongCredentials(_ error: Error) -> Bool {
+        if error is PasswordLoginRejected || error is LoginFieldsEmpty { return true }
+        return status(error) == 401
+    }
+
+    /// A plain-text description of a failed login for the device log: the
+    /// error's type and case, the HTTP status and endpoint path when there is
+    /// one. Never a message, a body, a username or a secret.
+    static func loginFailureLogLine(_ error: Error) -> String {
+        let kind = errorKind(error)
+        var line = "error=\(kind)"
+        if case .http(let status, let endpoint, _) = error as? AuthClientError {
+            line += " status=\(status) endpoint=\(endpoint)"
+        } else if case .network(let endpoint, let underlying) = error as? AuthClientError {
+            line += " status=none endpoint=\(endpoint) underlying=\(errorKind(underlying))"
+            if let url = underlying as? URLError { line += " url_error=\(url.code.rawValue)" }
+        } else {
+            line += " status=none"
+        }
+        return line
+    }
+
+    /// `Type.case` for an enum error, `Type` otherwise. Reads only the case
+    /// label, never an associated value.
+    static func errorKind(_ error: Error) -> String {
+        let type = String(describing: Swift.type(of: error))
+        let mirror = Mirror(reflecting: error)
+        // A case without a payload has no child to read its label from, and
+        // its description may be custom text: the type alone is logged.
+        guard mirror.displayStyle == .enum, let label = mirror.children.first?.label else { return type }
+        return "\(type).\(label)"
     }
 
     /// Whether the person dismissed the passkey sheet: not an error, the

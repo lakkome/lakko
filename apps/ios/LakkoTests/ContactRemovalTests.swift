@@ -226,6 +226,28 @@ final class ContactRemovalTests: XCTestCase {
         XCTAssertEqual(rows.accepted.map(\.request.messageId), [7])
     }
 
+    /// Base scenario 7 — a request listed because no one-to-one was held (or
+    /// one through a group) is not folded onto the contact's row, until a
+    /// one-to-one with them is adopted; and the merge keeps it although the
+    /// sender is a contact.
+    func testARequestAskingForAChatStaysUntilAOneToOneIsAdopted() {
+        var asking = request(7, byte: 0xA1)
+        asking.asksForChat = true
+        let rows = ContactsRepository.reconciled(
+            accepted: [adopted(byte: 0xA1, group: "g1")], pending: [asking])
+        XCTAssertEqual(rows.pending, [asking])
+        let answered = ContactsRepository.reconciled(
+            accepted: [adopted(byte: 0xA1, group: "g1")], pending: [asking],
+            answered: [Data(repeating: 0xA1, count: 32)])
+        XCTAssertTrue(answered.pending.isEmpty)
+        let merged = ContactsInboxMerge.merge(
+            fetched: [asking], pending: [], accepted: [adopted(byte: 0xA1, group: "g1")])
+        XCTAssertEqual(merged.kept, [asking])
+        let plain = request(8, byte: 0xA1)
+        XCTAssertTrue(ContactsInboxMerge.merge(
+            fetched: [plain], pending: [], accepted: [adopted(byte: 0xA1, group: "g1")]).kept.isEmpty)
+    }
+
     func testTwoRowsOfOnePersonBecomeOneKeepingWhatEitherKnew() {
         var named = contact(7, byte: 0xA1)
         named.displayName = "Renamed"
@@ -349,6 +371,112 @@ final class ContactRemovalTests: XCTestCase {
         repository.applyContactAck(ack(key: stranger, accountId: accountId))
 
         XCTAssertTrue(ProfileDirectory.shared.resolve(signatureKey: stranger).isPlaceholder)
+    }
+
+    // MARK: - The silent answer (base scenario 7, 2026-11-22)
+
+    /// This account removed a person and asked them again. Their device still
+    /// has this account as a contact and answers with the ack alone; the
+    /// one-to-one both still hold is the answer: they are back, with it, and
+    /// the request is gone.
+    func testASilentAnswerFromARemovedPersonPutsThemBackWithTheirOneToOne() {
+        let key = Data(repeating: 0xA1, count: 32)
+        let accountId = Data(repeating: 0xA2, count: 16)
+        seed([AcceptedContact(request: request(1, byte: 0xA1), groupIdHex: "beef", displayName: "Ada")])
+        let sent = FakeSentStore()
+        sent.rows = [SentContactRequest(
+            recipientUsername: "ada", recipientAccountIdB64: base64Encode(accountId), messageId: 2,
+            createdAt: "", recipientKeyB64: base64Encode(key))]
+        let repository = makeRepository(sentStore: sent)
+        repository.removeContact(messageId: 1)
+        XCTAssertTrue(repository.isRemovedContact(key))
+        XCTAssertEqual(repository.state.sent.count, 1)
+        repository.liveOneToOneLookup = { $0 == key ? "beef" : nil }
+
+        repository.applyContactAck(ack(key: key, accountId: accountId))
+
+        XCTAssertFalse(repository.isRemovedContact(key))
+        XCTAssertEqual(repository.state.accepted.map(\.request.fromPubkey), [key])
+        XCTAssertEqual(repository.state.accepted.first?.groupIdHex, "beef")
+        XCTAssertTrue(repository.state.sent.isEmpty)
+        XCTAssertTrue(sent.rows.isEmpty, "and the Sent list is stored so")
+        XCTAssertEqual(persisted().map(\.request.fromPubkey), [key])
+    }
+
+    /// A person with a one-to-one here whom this device never asked (or an
+    /// ack naming the asked account under another key) is not brought back.
+    func testAnAckThatAnsweredNoRequestOfThisDeviceBringsNobodyBack() {
+        let key = Data(repeating: 0xA1, count: 32)
+        let asked = Data(repeating: 0xA3, count: 32)
+        let accountId = Data(repeating: 0xA2, count: 16)
+        seed([AcceptedContact(request: request(1, byte: 0xA1), groupIdHex: "beef", displayName: "Ada")])
+        let sent = FakeSentStore()
+        sent.rows = [SentContactRequest(
+            recipientUsername: "ada", recipientAccountIdB64: base64Encode(accountId), messageId: 2,
+            createdAt: "", recipientKeyB64: base64Encode(asked))]
+        let repository = makeRepository(sentStore: sent)
+        repository.removeContact(messageId: 1)
+        repository.liveOneToOneLookup = { $0 == key ? "beef" : nil }
+
+        repository.applyContactAck(ack(key: key, accountId: accountId))
+
+        XCTAssertTrue(repository.isRemovedContact(key))
+        XCTAssertTrue(repository.state.accepted.isEmpty)
+    }
+
+    /// The silent answer while this device holds NO one-to-one with them:
+    /// the ack asks for one to be founded, and founding it makes them a
+    /// contact with it and retires the request.
+    func testASilentAnswerWithNoOneToOneHereFoundsOne() async {
+        let key = Data(repeating: 0xA1, count: 32)
+        let accountId = Data(repeating: 0xA2, count: 16)
+        seed([AcceptedContact(request: request(1, byte: 0xA1), groupIdHex: "gone", displayName: "Ada")])
+        let sent = FakeSentStore()
+        sent.rows = [SentContactRequest(
+            recipientUsername: "ada", recipientAccountIdB64: base64Encode(accountId), messageId: 2,
+            createdAt: "", recipientKeyB64: base64Encode(key))]
+        let repository = makeRepository(sentStore: sent)
+        repository.removeContact(messageId: 1)
+        repository.liveOneToOneLookup = { _ in nil }
+        let founded = FoundedKeys()
+        repository.silentAnswerFounder = { ack in
+            founded.keys.append(ack.accepterPubkey)
+            return "fresh"
+        }
+
+        XCTAssertTrue(repository.applyContactAck(ack(key: key, accountId: accountId)))
+        XCTAssertTrue(repository.state.accepted.isEmpty, "nothing until a chat stands")
+        await repository.foundForSilentAnswers([
+            ack(key: key, accountId: accountId), ack(key: key, accountId: accountId),
+        ])
+
+        XCTAssertEqual(founded.keys, [key], "one chat per person")
+        XCTAssertFalse(repository.isRemovedContact(key))
+        XCTAssertEqual(repository.state.accepted.map(\.request.fromPubkey), [key])
+        XCTAssertEqual(repository.state.accepted.first?.groupIdHex, "fresh")
+        XCTAssertTrue(repository.state.sent.isEmpty)
+    }
+
+    /// An ack for nothing this device asked founds nothing.
+    func testAnAckForNoRequestOfThisDeviceFoundsNothing() {
+        let repository = makeRepository(sentStore: FakeSentStore())
+        repository.liveOneToOneLookup = { _ in nil }
+        XCTAssertFalse(repository.applyContactAck(
+            ack(key: Data(repeating: 0xA1, count: 32), accountId: Data(repeating: 0xA2, count: 16))))
+    }
+
+    func testAskedAckerMatchesTheKeyOrAnAccountWithNoKey() {
+        let key = Data(repeating: 0x01, count: 32)
+        let withKey = SentContactRequest(
+            recipientUsername: "", recipientAccountIdB64: "acct", messageId: 1, createdAt: "",
+            recipientKeyB64: base64Encode(key))
+        let noKey = SentContactRequest(
+            recipientUsername: "", recipientAccountIdB64: "acct", messageId: 1, createdAt: "")
+        XCTAssertTrue(SentRequests.askedAcker(in: [withKey], key: key, accountIdB64: "other"))
+        XCTAssertFalse(SentRequests.askedAcker(
+            in: [withKey], key: Data(repeating: 0x02, count: 32), accountIdB64: "acct"))
+        XCTAssertTrue(SentRequests.askedAcker(in: [noKey], key: key, accountIdB64: "acct"))
+        XCTAssertFalse(SentRequests.askedAcker(in: [noKey], key: key, accountIdB64: "other"))
     }
 
     // MARK: - Message on the contact card (2026-11-05)
@@ -1018,6 +1146,11 @@ final class ContactRemovalTests: XCTestCase {
     private func contact(_ messageId: Int64, byte: UInt8) -> AcceptedContact {
         AcceptedContact(request: request(messageId, byte: byte))
     }
+}
+
+/// The keys a test founder was called with.
+private final class FoundedKeys: @unchecked Sendable {
+    var keys: [Data] = []
 }
 
 /// A ``SessionPersistence`` that holds nothing, so building an

@@ -7,6 +7,7 @@ import {
   bubbleSenderLabelOf,
   memberListLabelOf,
   memberNameOf,
+  memberRowTextOf,
   ownAvatarLabel,
   realNameOf,
   UNNAMED_MEMBER,
@@ -38,6 +39,40 @@ describe("member labels", () => {
     expect(memberNameOf(r, "a test label")).toBe(UNNAMED_MEMBER());
     expect(memberListLabelOf(r)).toBe(UNNAMED_MEMBER());
     expect(memberListLabelOf(r)).not.toMatch(/[0-9a-f]{4} [0-9a-f]{4}/);
+  });
+});
+
+describe("memberRowTextOf — a member row and an Add members row (seen live 2026-11-22)", () => {
+  it("the name as the title and the verified username once under it", () => {
+    const r = resolveDisplay({
+      signatureKey: key,
+      profile: { displayName: "G53Person", username: "w6g53x2201" },
+      verification: "verified",
+    });
+    expect(memberRowTextOf(r)).toEqual({ title: "G53Person", subtitle: "@w6g53x2201" });
+  });
+
+  it("a person known only by username: the username once, as the title", () => {
+    const r = resolveDisplay({
+      signatureKey: key,
+      profile: { displayName: null, username: "ann" },
+      verification: "verified",
+    });
+    expect(memberRowTextOf(r)).toEqual({ title: "@ann", subtitle: null });
+  });
+
+  it("an unverified username is not shown", () => {
+    const r = resolveDisplay({
+      signatureKey: key,
+      profile: { displayName: "Bob", username: "bob" },
+      verification: "mismatch",
+    });
+    expect(memberRowTextOf(r)).toEqual({ title: "Bob", subtitle: null });
+  });
+
+  it("never a fingerprint", () => {
+    const r = resolveDisplay({ signatureKey: key });
+    expect(memberRowTextOf(r)).toEqual({ title: UNNAMED_MEMBER(), subtitle: null });
   });
 });
 

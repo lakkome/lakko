@@ -57,15 +57,65 @@ public enum KnownContactRequest {
     /// `trustedKeyB64` is the pin AFTER the check ran; `nil` (no pin) cannot
     /// happen for a contact with a known account id once the check passed,
     /// and reads as "not the trusted key".
+    ///
+    /// `answer` holds only while this device holds a live one-to-one with them
+    /// (`holdsOneToOne`, base scenario 7, 2026-11-22): the ack alone starts no
+    /// chat, so a contact with none here is `show`n and Accept starts it, as a
+    /// request through a group is (`docs/ux/who-can-find-me.md` 6.4).
     public static func verdict(
-        senderIsContact: Bool, check: Check, requestKeyB64: String, trustedKeyB64: String?
+        senderIsContact: Bool, check: Check, requestKeyB64: String, trustedKeyB64: String?,
+        holdsOneToOne: Bool = true,
+        predatesContact: Bool = false,
+        siblingMayAdmit: Bool = false
     ) -> Verdict {
         if !senderIsContact { return .show }
         switch check {
         case .refused: return .drop
         case .inconclusive: return .wait
-        case .current: return trustedKeyB64 == requestKeyB64 ? .answer : .drop
+        case .current:
+            guard trustedKeyB64 == requestKeyB64 else { return .drop }
+            if holdsOneToOne { return .answer }
+            // Read again after a lost mailbox cursor: not a new request.
+            if predatesContact { return .drop }
+            // Another device of this account may still admit this one to the
+            // chat: wait, unshown, rather than offer an Accept that founds a
+            // second chat.
+            return siblingMayAdmit ? .wait : .show
         }
+    }
+
+    /// How long a request from a contact this device holds no chat with waits
+    /// for another device of the account to admit this one (ADR-0050
+    /// re-admission) before it is listed. Chosen, not measured.
+    public static let siblingAdmitWaitMs: Int64 = 15 * 60 * 1000
+
+    /// Whether another device of this account may still bring this one into
+    /// the chat with the person (base scenario 9): the account has another
+    /// device and the request is younger than ``siblingAdmitWaitMs``. Unknown
+    /// facts read as "no".
+    public static func siblingMayAdmit(otherDeviceCount: Int?, requestCreatedAt: String, nowMs: Int64) -> Bool {
+        guard let otherDeviceCount, otherDeviceCount >= 1 else { return false }
+        let withFrac = ISO8601DateFormatter()
+        withFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let at = withFrac.date(from: requestCreatedAt) ?? ISO8601DateFormatter().date(from: requestCreatedAt)
+        else { return false }
+        return nowMs - Int64(at.timeIntervalSince1970 * 1000) < siblingAdmitWaitMs
+    }
+
+    /// Whether a request is no newer than the contact relationship: its DS
+    /// stamp (`createdAt`, server-set) is at or before the contact row's own
+    /// stamp (the request it was made from, or the time the one-to-one rule
+    /// made it). A stamp that does not parse reads as newer: a request is
+    /// never dropped on a missing fact.
+    public static func requestPredatesContact(requestCreatedAt: String, contactSince: String?) -> Bool {
+        func parse(_ value: String) -> Date? {
+            let withFrac = ISO8601DateFormatter()
+            withFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return withFrac.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+        }
+        guard let at = parse(requestCreatedAt), let contactSince, let since = parse(contactSince),
+              since.timeIntervalSince1970 > 0 else { return false }
+        return at <= since
     }
 
     /// The slice of a contact row this reads.

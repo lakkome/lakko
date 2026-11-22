@@ -334,7 +334,10 @@ internal data class RosterEntryView(
     val leafIndex: UInt,
     /** Standard base64 of the member's 32-byte Ed25519 signature public key. */
     val signatureKeyB64: String,
+    /** The name alone: the row's first line, and the name a sentence uses. */
     val label: String,
+    /** `@username` for the row's second line, as the members list shows it. */
+    val usernameLine: String? = null,
 )
 
 /** A picker row. */
@@ -342,6 +345,8 @@ public data class TransferCandidate(
     val leafIndex: UInt,
     val signatureKeyB64: String,
     val label: String,
+    /** `@username` under the name, as the members list shows it, or `null`. */
+    val usernameLine: String? = null,
     /** Renders a muted `Admin` marker. Information the owner assigned and worth
      *  having when choosing a successor — never a reason to hide anyone. */
     val isAdmin: Boolean,
@@ -380,6 +385,7 @@ internal fun transferCandidates(
             leafIndex = it.leafIndex,
             signatureKeyB64 = it.signatureKeyB64,
             label = it.label,
+            usernameLine = it.usernameLine,
             isAdmin = it.signatureKeyB64 in adminKeysB64,
         )
     }

@@ -1567,6 +1567,12 @@ public struct IncomingContactRequest: Equatable, Codable {
     /// the request can carry it as evidence. `nil` for a row stored before
     /// the field existed.
     public let wire: Data?
+    /// Base scenario 7 (2026-11-22) — a request from someone who is already a
+    /// contact, listed because this device held no one-to-one with them:
+    /// Accept starts the chat. Kept listed until a one-to-one with them is
+    /// adopted (``ContactsRepository/reconciled(accepted:pending:samePerson:answered:)``).
+    /// `nil` reads as `false` (a row stored before the field existed).
+    public var asksForChat: Bool?
 
     public init(
         messageId: Int64,
@@ -1578,9 +1584,11 @@ public struct IncomingContactRequest: Equatable, Codable {
         profile: ProfileClaim? = nil,
         createdAt: String,
         viaGroupIdHex: String? = nil,
-        wire: Data? = nil
+        wire: Data? = nil,
+        asksForChat: Bool? = nil
     ) {
         self.wire = wire
+        self.asksForChat = asksForChat
         self.messageId = messageId
         self.fromPubkey = fromPubkey
         self.fromAccountId = fromAccountId
@@ -1591,6 +1599,12 @@ public struct IncomingContactRequest: Equatable, Codable {
         self.createdAt = createdAt
         self.viaGroupIdHex = viaGroupIdHex
     }
+
+    /// Whether this request asks for a chat from someone who may already be
+    /// a contact: it came inside a group, or was listed because no
+    /// one-to-one was held (base scenario 7). Such a request is not folded
+    /// onto the contact's row until a one-to-one with them is adopted.
+    public var asksForChatHere: Bool { viaGroupIdHex != nil || asksForChat == true }
 
     /// The DS stamp as Unix ms, or `nil` when it does not parse.
     public var createdAtMs: UInt64? {

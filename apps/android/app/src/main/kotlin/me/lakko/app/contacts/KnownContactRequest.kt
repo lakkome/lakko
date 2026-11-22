@@ -65,12 +65,63 @@ public fun knownContactRequestVerdict(
     check: KnownRequestCheck,
     requestKeyB64: String,
     trustedKeyB64: String?,
+    /** Base scenario 7 (2026-11-22): whether this device holds a live
+     *  one-to-one with them. The ack alone starts no chat, so a contact with
+     *  none here is [KnownRequestVerdict.SHOW]n and Accept starts it, as a
+     *  request through a group is (`docs/ux/who-can-find-me.md` 6.4). */
+    holdsOneToOne: Boolean = true,
+    /** Whether the request is no newer than the contact relationship
+     *  ([requestPredatesContact]): read again after a lost mailbox cursor.
+     *  Dropped instead of listed for want of a one-to-one. */
+    predatesContact: Boolean = false,
+    /** Whether another device of this account may still be admitting this
+     *  one to the chat with them ([siblingMayAdmit]): the request waits,
+     *  unshown, and is answered silently once the chat is here. */
+    siblingMayAdmit: Boolean = false,
 ): KnownRequestVerdict = when {
     !senderIsContact -> KnownRequestVerdict.SHOW
     check == KnownRequestCheck.REFUSED -> KnownRequestVerdict.DROP
     check == KnownRequestCheck.INCONCLUSIVE -> KnownRequestVerdict.WAIT
-    trustedKeyB64 == requestKeyB64 -> KnownRequestVerdict.ANSWER
-    else -> KnownRequestVerdict.DROP
+    trustedKeyB64 != requestKeyB64 -> KnownRequestVerdict.DROP
+    holdsOneToOne -> KnownRequestVerdict.ANSWER
+    predatesContact -> KnownRequestVerdict.DROP
+    siblingMayAdmit -> KnownRequestVerdict.WAIT
+    else -> KnownRequestVerdict.SHOW
+}
+
+/** How long a request from a contact this device holds no chat with waits
+ *  for another device of the account to admit this one (ADR-0050
+ *  re-admission) before it is listed. Chosen, not measured. */
+public const val SIBLING_ADMIT_WAIT_MS: Long = 15L * 60L * 1000L
+
+/**
+ * Whether another device of this account may still bring this one into the
+ * chat with the person (base scenario 9): the account has another device and
+ * the request ([requestCreatedAt], the DS stamp) is younger than
+ * [SIBLING_ADMIT_WAIT_MS]. Unknown facts read as "no".
+ */
+public fun siblingMayAdmit(otherDeviceCount: Int?, requestCreatedAt: String, nowMs: Long): Boolean {
+    if (otherDeviceCount == null || otherDeviceCount < 1) return false
+    val at = runCatching { java.time.Instant.parse(requestCreatedAt).toEpochMilli() }
+        .recoverCatching { java.time.OffsetDateTime.parse(requestCreatedAt).toInstant().toEpochMilli() }
+        .getOrNull() ?: return false
+    return nowMs - at < SIBLING_ADMIT_WAIT_MS
+}
+
+/**
+ * Whether a request is no newer than the contact relationship: its DS stamp
+ * ([requestCreatedAt], server-set) is at or before the contact row's own
+ * stamp ([contactSince], the request it was made from, or the time the
+ * one-to-one rule made it). A stamp that does not parse reads as newer: a
+ * request is never dropped on a missing fact.
+ */
+public fun requestPredatesContact(requestCreatedAt: String, contactSince: String?): Boolean {
+    fun parse(value: String): Long? = runCatching { java.time.Instant.parse(value).toEpochMilli() }
+        .recoverCatching { java.time.OffsetDateTime.parse(value).toInstant().toEpochMilli() }
+        .getOrNull()
+    val at = parse(requestCreatedAt) ?: return false
+    val since = contactSince?.let(::parse)?.takeIf { it > 0 } ?: return false
+    return at <= since
 }
 
 /**

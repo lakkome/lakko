@@ -3193,6 +3193,10 @@
       "text": "از طریق {name} · عضو",
       "status": "machine"
     },
+    "chat.members.owner.marker": {
+      "text": "مالک",
+      "status": "machine"
+    },
     "chat.members.pending.adds_heading": {
       "text": "در انتظار افزوده شدن ({count})",
       "status": "machine"

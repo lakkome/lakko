@@ -67,6 +67,36 @@ class AddMembersFlowTest {
     }
 
     @Test
+    fun `Add members in a group of one opens the picker over the info, not the info alone`() {
+        val repo = ChatRepository(applicationContext = InMemoryContext())
+        val chats = OpenChats()
+        try {
+            val vm = chats.open(ChatViewModel(repo = repo, groupIdHex = "00".repeat(16)))
+            vm.openAddMembersFromConversation()
+            assertTrue(vm.membersPanelOpen.value)
+            assertTrue(vm.addMembersOpen.value)
+            assertEquals(
+                me.lakko.app.chat.GroupInfoLayer.ADD_MEMBERS,
+                me.lakko.app.chat.groupInfoLayer(
+                    infoOpen = vm.membersPanelOpen.value, isGroup = true,
+                    addMembersOpen = vm.addMembersOpen.value, transferOpen = false,
+                ),
+            )
+            // Its back returns to the info, which stays open under it.
+            vm.closeAddMembers()
+            assertTrue(vm.membersPanelOpen.value)
+            assertFalse(vm.addMembersOpen.value)
+            // Pressed again with the info already open: the info is not closed.
+            vm.openAddMembersFromConversation()
+            assertTrue(vm.membersPanelOpen.value)
+            assertTrue(vm.addMembersOpen.value)
+        } finally {
+            chats.leaveAllAndSettle()
+            repo.close()
+        }
+    }
+
+    @Test
     fun `Add returns to the info at once and the picks are added there`() {
         val held = mutableListOf<String>()
         val gids = mutableListOf<String>()

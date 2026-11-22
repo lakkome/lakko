@@ -727,4 +727,21 @@ class OwnershipTransferTest {
                 ?.transferToB64,
         )
     }
+
+    /** The picker row is the members list's two lines (§6.1.3). */
+    @Test
+    fun `the picker carries the roster's username line`() {
+        val rows = transferCandidates(
+            listOf(
+                RosterEntryView(leafIndex = 0u, signatureKeyB64 = OWNER_KEY, label = "Owner"),
+                RosterEntryView(
+                    leafIndex = 1u, signatureKeyB64 = ALICE_KEY, label = "G53Person", usernameLine = "@w6g53x2201",
+                ),
+            ),
+            OWNER_KEY,
+            emptySet(),
+        )
+        assertEquals(listOf("G53Person"), rows.map { it.label })
+        assertEquals(listOf<String?>("@w6g53x2201"), rows.map { it.usernameLine })
+    }
 }

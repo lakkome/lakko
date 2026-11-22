@@ -3,6 +3,7 @@
 
 import XCTest
 @testable import Lakko
+import LakkoCore
 
 /// `docs/ux/conversation-info.md` sections 2.4, 3 and 3.1 — who the Add
 /// members screen lists and lets be picked, how an Add runs, and where each
@@ -18,6 +19,62 @@ final class AddMembersTests: XCTestCase {
     {
         AddMembersRules.Contact(
             personKey: key(byte), accountId: accountId ? id(byte) : nil, name: name, username: username)
+    }
+
+    private func resolved(_ byte: UInt8, name: String?, username: String?, verified: Bool = true)
+        -> ResolvedDisplayName
+    {
+        resolveDisplayName(
+            signatureKey: key(byte),
+            localRename: nil,
+            profile: ProfileClaim(displayName: name, username: username, updatedAtMs: 1),
+            verification: verified ? .verified : nil)
+    }
+
+    // MARK: - Row text (seen live 2026-11-22)
+
+    /// The picker row read "G53Person · @w6g53x2201" with "@w6g53x2201" again
+    /// under it, and its avatar "GW". The row is the name, the username once
+    /// under it, initials from the name.
+    func testAPickerRowIsTheNameWithTheUsernameOnceUnderIt() {
+        let row = AddMembersRules.contact(
+            personKey: key(1), accountId: id(1),
+            resolved: resolved(1, name: "G53Person", username: "w6g53x2201"))
+        XCTAssertEqual(row.name, "G53Person")
+        XCTAssertEqual(row.username, "w6g53x2201")
+        XCTAssertEqual(avatarInitials(name: row.name), "G5")
+        XCTAssertEqual(AddMembersRules.pick(AddMembersRules.ContactRow(contact: row))?.name, "G53Person",
+                       "the chip and a failure name the person, not the label")
+        // Still found by the username.
+        XCTAssertTrue(AddMembersRules.matches(query: "w6g", name: row.name, username: row.username))
+    }
+
+    func testAPickerRowWithoutANameIsTheUsernameOnce() {
+        let row = AddMembersRules.contact(
+            personKey: key(2), accountId: id(2), resolved: resolved(2, name: nil, username: "ann"))
+        XCTAssertEqual(row.name, "@ann")
+        XCTAssertNil(row.username, "not repeated as the second line")
+    }
+
+    func testAnUnverifiedUsernameIsNotShownOnAPickerRow() {
+        let row = AddMembersRules.contact(
+            personKey: key(3), accountId: id(3),
+            resolved: resolved(3, name: "Bob", username: "bob", verified: false))
+        XCTAssertEqual(row.name, "Bob")
+        XCTAssertNil(row.username)
+    }
+
+    /// The member row read "G53Person · @w6g53x2201", wrapped to two lines.
+    func testAMemberRowIsTheNameWithTheUsernameUnderIt() {
+        let named = PersonRowText(resolved(4, name: "G53Person", username: "w6g53x2201"))
+        XCTAssertEqual(named, PersonRowText(title: "G53Person", subtitle: "@w6g53x2201"))
+        XCTAssertEqual(
+            PersonRowText(resolved(5, name: nil, username: "ann")),
+            PersonRowText(title: "@ann", subtitle: nil))
+        XCTAssertEqual(
+            PersonRowText(resolved(6, name: "Bob", username: "bob", verified: false)),
+            PersonRowText(title: "Bob", subtitle: nil))
+        XCTAssertEqual(PersonRowText.own("You"), PersonRowText(title: "You", subtitle: nil))
     }
 
     // MARK: - Contacts
@@ -167,6 +224,21 @@ final class AddMembersTests: XCTestCase {
         let adding = GroupInfoNavigation.openAddMembers(path, groupIdHex: "g")
         XCTAssertEqual(adding.last, .addMembers(groupIdHex: "g"))
         XCTAssertEqual(GroupInfoNavigation.afterAdd(adding, groupIdHex: "g"), path)
+    }
+
+    /// ADR-0087 section 10 — `Add members` in a group of one opens the Add
+    /// members screen (it opened the info), with the info under it so its
+    /// back and Add return there.
+    func testAddMembersInAGroupOfOneOpensThePickerOverTheInfo() {
+        let path: [TabRoute] = [.chat(groupIdHex: "g")]
+        let adding = GroupInfoNavigation.openAddMembersFromConversation(path, groupIdHex: "g")
+        XCTAssertEqual(adding, [.chat(groupIdHex: "g"), .groupInfo(groupIdHex: "g"), .addMembers(groupIdHex: "g")])
+        XCTAssertEqual(
+            GroupInfoNavigation.afterAdd(adding, groupIdHex: "g"),
+            [.chat(groupIdHex: "g"), .groupInfo(groupIdHex: "g")])
+        XCTAssertEqual(
+            GroupInfoNavigation.openAddMembersFromConversation(adding, groupIdHex: "g"), adding,
+            "nothing pushed twice")
     }
 
     func testAMembersContactScreenBacksOntoTheInfo() {

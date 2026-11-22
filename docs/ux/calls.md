@@ -656,6 +656,7 @@ offered on 2026-11-21):
   connection): once a full day has passed since it was last downloaded, which
   is within three days of the call at most. This is not a 24-hour timer: the
   store keeps days, not hours, and a precise timer would need a store change.
+  The maintainer kept this rule on 2026-11-22 over an exact 24-hour expiry.
 - On every device the decrypted picture lives in memory and goes with the
   call's messages; nothing is written to disk unless the person used
   `Save picture`.

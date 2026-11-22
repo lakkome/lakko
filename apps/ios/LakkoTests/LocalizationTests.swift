@@ -147,7 +147,9 @@ final class LocalizationTests: XCTestCase {
         XCTAssertEqual(
             AuthErrorCopy.login(AuthClientError.http(status: 401, endpoint: "invalid", body: "server prose")),
             t("auth.error.wrong_credentials"))
-        XCTAssertEqual(AuthErrorCopy.login(AuthClientError.argument("core prose")), t("auth.error.wrong_credentials"))
+        // An error that is not a refused password is not shown as one.
+        XCTAssertEqual(AuthErrorCopy.login(AuthClientError.argument("core prose")), t("common.error.unavailable"))
+        XCTAssertEqual(AuthErrorCopy.login(PasswordLoginRejected()), t("auth.error.wrong_credentials"))
         XCTAssertEqual(
             AuthErrorCopy.signup(AuthClientError.http(status: 409, endpoint: "taken", body: "")), t("auth.signup.error.username_taken"))
         XCTAssertEqual(AuthErrorCopy.signup(AuthClientError.http(status: 502, endpoint: "", body: "")), t("common.error.unavailable"))

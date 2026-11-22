@@ -246,6 +246,7 @@ function seedAccount(acct: string, acctUrl: string): void {
   );
   put(`lakko.contacts.inbox.v1.${acct}`, JSON.stringify({ cursor: 3, pending: [] }));
   put(`lakko.contacts.sent.v1:${acct}`, JSON.stringify([{ recipientUsername: "bob", recipientAccountIdHex: "00", sentAtMs: 1 }]));
+  put(`lakko:conversation-held-since:${acct}`, JSON.stringify({ ab: 1 }));
   put(
     `lakko.channels.pending-publisher.v1:${acct}`,
     JSON.stringify([{ channelIdHex: "07", groupIdHex: "ab", joinerKeyB64: "k", name: "", description: "", requestedAtMs: 1 }]),
@@ -692,6 +693,9 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.contacts.v3.": "account",
   "lakko.contacts.inbox.v1.": "account",
   "lakko.contacts.sent.v1:": "account",
+  // When this device first held each conversation, per account (base
+  // scenario 9, `contacts/held-since.ts`): wiped with the account.
+  "lakko:conversation-held-since:": "account",
   "lakko.channels.pending-publisher.v1:": "account",
   "lakko/invite-link-secrets/v1/": "account",
   "lakko.readmission.removed.v1:": "account",

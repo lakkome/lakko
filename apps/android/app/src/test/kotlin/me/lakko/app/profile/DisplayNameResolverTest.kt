@@ -33,6 +33,24 @@ class DisplayNameResolverTest {
         verification: UsernameVerification? = null,
     ): ResolvedName = resolveName(rename, profile, { verification }, key)
 
+    /** Seen live 2026-11-22: a member row read `G53Person · @w6g53x2201` on
+     *  one line. A row is the name, and the verified username once under it. */
+    @Test
+    fun `a member row is the name with the verified username once under it`() {
+        assertEquals(
+            PersonRowText("G53Person", "@w6g53x2201"),
+            personRowText(resolve(profile = profile("G53Person", "w6g53x2201"), verification = UsernameVerification.VERIFIED)),
+        )
+        assertEquals(
+            PersonRowText("@ann", null),
+            personRowText(resolve(profile = profile(null, "ann"), verification = UsernameVerification.VERIFIED)),
+        )
+        assertEquals(
+            PersonRowText("Bob", null),
+            personRowText(resolve(profile = profile("Bob", "bob"), verification = null)),
+        )
+    }
+
     @Test
     fun `the precedence table`() {
         // 1. rename beats everything.

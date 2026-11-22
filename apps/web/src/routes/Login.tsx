@@ -18,7 +18,12 @@ import { createSignal, Show, type JSX } from "solid-js";
 import { A, useLocation, useNavigate } from "@solidjs/router";
 import { paths } from "./paths";
 import { useAuth } from "../auth/AuthContext";
-import { loginErrorMessage, passkeyErrorMessage, screenText } from "../auth/auth-error-copy";
+import {
+  loginErrorMessage,
+  loginFailureLogLine,
+  passkeyErrorMessage,
+  screenText,
+} from "../auth/auth-error-copy";
 import { t } from "../l10n";
 import { KeyedError } from "../l10n/keyed-error";
 import { tRich } from "../l10n/rich";
@@ -77,6 +82,9 @@ export default function Login(): JSX.Element {
     } catch (err) {
       // Overtaken by another session on this device: nothing to report.
       if (isAbandoned(err)) return;
+      // Plain text, no identifiers: what failed.
+      // eslint-disable-next-line no-console
+      console.warn(`[auth] login failed: ${loginFailureLogLine(err)}`);
       setError(loginErrorMessage(err));
     } finally {
       setBusy(false);

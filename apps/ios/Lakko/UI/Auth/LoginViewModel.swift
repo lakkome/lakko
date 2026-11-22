@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import UIKit
 
 /// State + dispatcher for ``LoginScreen``.
 ///
@@ -35,9 +36,16 @@ public final class LoginViewModel: ObservableObject {
     // MARK: - Wiring
 
     private let repository: AuthRepository
+    /// Ends text editing before the fields are read (``onSubmit()``).
+    private let endEditing: @MainActor () -> Void
 
-    public init(repository: AuthRepository, cachedUsername: String? = nil) {
+    public init(
+        repository: AuthRepository,
+        cachedUsername: String? = nil,
+        endEditing: @escaping @MainActor () -> Void = LoginViewModel.resignKeyboard
+    ) {
         self.repository = repository
+        self.endEditing = endEditing
         self.username = cachedUsername ?? ""
         // ADR-0073 section 3.3 — the session was refused as expired on the
         // way here (the refresh credential is dead): say so, once.
@@ -45,6 +53,13 @@ public final class LoginViewModel: ObservableObject {
             self.errorText = .key("common.error.session_expired")
             repository.clearSessionExpiredNotice()
         }
+    }
+
+    /// Resign the first responder, so the keyboard applies every key press it
+    /// still holds to the field before the form is read.
+    public static func resignKeyboard() {
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
 
     // MARK: - Submit
@@ -57,17 +72,26 @@ public final class LoginViewModel: ObservableObject {
     ///
     /// Wrong-password / unknown-username collapse to the same
     /// generic copy — by design (OPAQUE indistinguishable failure
-    /// + the same posture as the web side).
+    /// + the same posture as the web side). Any other failure shows the
+    /// generic failure, never the wrong-password sentence.
+    ///
+    /// The fields are read after editing has ended and one main-actor turn
+    /// has passed, not at the tap: seen on the simulator (2026-11-22), a tap
+    /// that landed while typed key presses were still being applied to the
+    /// password field read a password missing its last characters, and the
+    /// login was refused as a wrong password.
     public func onSubmit() {
         guard !busy else { return } // ignore double-tap
 
         busy = true
         errorText = nil
-
-        let usernameSnapshot = username
-        let passwordBytes = Data(password.utf8)
+        endEditing()
 
         Task {
+            await Task.yield()
+            let usernameSnapshot = username
+            let passwordSnapshot = password
+            let passwordBytes = Data(passwordSnapshot.utf8)
             do {
                 try await repository.login(
                     username: usernameSnapshot,
@@ -83,8 +107,13 @@ public final class LoginViewModel: ObservableObject {
                 password = ""
             } catch {
                 busy = false
-                // Overtaken by a sign-out or another sign-in: not a failure.
-                if error is StaleBindingError { return }
+                // Overtaken by a sign-out or another sign-in, or called off:
+                // not a failure.
+                if error is StaleBindingError || Cancellation.isCancellation(error) { return }
+                // Plain text, no identifiers: what failed, and whether the
+                // fields changed after they were read.
+                let changed = username != usernameSnapshot || password != passwordSnapshot
+                NSLog("[auth] login failed: \(AuthErrorCopy.loginFailureLogLine(error)) fields_changed_after_submit=\(changed)")
                 self.errorText = UiText { AuthErrorCopy.login(error) }
             }
         }

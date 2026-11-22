@@ -256,6 +256,8 @@ public object AccountLocalWipe {
         Step("reentry-leaf-first-seen") { ctx, acct ->
             me.lakko.app.chat.SharedPrefsLeafFirstSeenStore(ctx).clearForAccount(acct)
         },
+        // Base scenario 9 — when this device first held each conversation.
+        Step("conversation-held-since") { ctx, acct -> me.lakko.app.chat.ConversationHeldSince.clear(ctx, acct) },
         Step("journal-ownership") { ctx, acct ->
             me.lakko.app.ds.EncryptedJournalOwnershipStore(ctx).clearForAccount(acct)
         },

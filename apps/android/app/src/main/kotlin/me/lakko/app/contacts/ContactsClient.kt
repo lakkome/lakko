@@ -1910,6 +1910,14 @@ public data class IncomingContactRequest(
     /** ADR-0099 section 2 — the verified request's wire as received, what a
      *  report of the request includes. Not part of equality. */
     val wire: ByteArray? = null,
+    /** Base scenario 7 (2026-11-22) — a request from someone who is already
+     *  a contact while this device holds no one-to-one with them: listed, and
+     *  Accept starts the chat ([asksForChat]). Not part of equality. */
+    val asksForChat: Boolean = false,
+    /** With [asksForChat]: the chat the contact's row named when the request
+     *  was listed (not live on this device), or `null`. A row that names any
+     *  other chat since has one: the request is no longer asking. */
+    val asksPastChatHex: String? = null,
 ) {
     /** The DS stamp ([createdAt], server-set) as Unix ms, or `null` when it
      *  does not parse. For a request through an invite link it decides the

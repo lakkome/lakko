@@ -38,6 +38,7 @@ import {
   createContext,
   createEffect,
   createSignal,
+  on,
   onCleanup,
   Show,
   untrack,
@@ -62,7 +63,9 @@ import {
 import { reachSession, reachSessionSignal } from "../reach/reach-service";
 import { DiscoveryClient } from "../discovery/client";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
-import { applyContactAck } from "./contact-ack";
+import { adoptAnsweredOneToOne, applyContactAck } from "./contact-ack";
+import { foundOneToOneWith } from "./found-one-to-one";
+import { heldSince } from "./held-since";
 import { waitingSentRequests } from "./contact-list-model";
 import { forgetInviteLinkSecret } from "./invite-link-secrets";
 import { listMintedLinks } from "./minted-links";
@@ -97,6 +100,7 @@ import {
   ContactsError,
   decodeContactRequestBody,
   SupersessionRefused,
+  type IncomingContactAck,
   type IncomingContactRequest,
   type MailboxRow,
   type IncomingMailboxEvent,
@@ -118,6 +122,8 @@ import {
   contactSignedBy,
   establishedContactOfAccount,
   knownContactRequestVerdict,
+  requestPredatesContact,
+  siblingMayAdmit,
   pinKeysOf,
   type KnownRequestCheck,
 } from "./known-contact-request";
@@ -394,6 +400,16 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     untrack(() => {
       const lineage = buildLineage(entries);
       const held: HeldConversationGroup[] = [];
+      const hexes: string[] = [];
+      for (const g of groups) {
+        try {
+          hexes.push(groupIdHex(g.group.groupId));
+        } catch {
+          continue;
+        }
+      }
+      const account = sessionAccountOf(auth.state());
+      const since = account === null ? new Map<string, number | undefined>() : heldSince(account, hexes, Date.now());
       for (const g of groups) {
         let groupHex: string;
         try {
@@ -401,12 +417,14 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         } catch {
           continue;
         }
+        const heldSinceMs = since.get(groupHex);
         held.push({
           groupHex,
           conversationHex: lineage.conversationOf(groupHex),
           isOneToOne: conversationKindOf(g.group) === "chat",
           people: personKeysOf(g.group),
           founderKeyB64: founderKeyOf(g.group),
+          ...(heldSinceMs === undefined ? {} : { heldSinceMs }),
         });
       }
       for (const fold of duplicateOneToOneFolds(held, ownPersonKeyB64(identity))) {
@@ -427,17 +445,24 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     return landPublisherDeviceWelcome(identity, welcome);
   }
 
-  /** Whether this device holds a live one-to-one with the person. */
-  function holdsOneToOneWith(keyB64: string): boolean {
+  /** base64(group id) of the live one-to-one this device holds with the
+   *  person, or `null`. A one-to-one whose membership ended here is not
+   *  live. */
+  function oneToOneGroupWith(keyB64: string): string | null {
     return (
       conversationWithContact({
         contact: { signaturePubkeyB64: keyB64 },
-        conversations: chats.groups(),
+        conversations: chats.groups().filter((g) => readIsActive(g.group) !== false),
         ownKeyB64: ownPersonKeyB64(chats.identity()),
         peopleOf: (g) => personKeysOf(g.group),
         isOneToOne: (g) => conversationKindOf(g.group) === "chat",
-      }) !== undefined
+      })?.groupIdB64 ?? null
     );
+  }
+
+  /** Whether this device holds a live one-to-one with the person. */
+  function holdsOneToOneWith(keyB64: string): boolean {
+    return oneToOneGroupWith(keyB64) !== null;
   }
 
   // ADR-0074 section 3.5a rule 5 - what was granted before a rotation of
@@ -623,6 +648,51 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
    * contact and was dealt with here (answered, dropped or kept waiting):
    * the caller then lists nothing. `false` for a stranger's request.
    */
+  /**
+   * Base scenario 7 - a person this device asked answered silently (their
+   * device still holds this account as a contact, and a one-to-one), while
+   * this device holds no one-to-one with them: no Welcome will come, so one
+   * is founded here, as Message on a contact card does, and they are a
+   * contact with it. Their device joins it; the duplicate-one-to-one rule
+   * makes it the head of the conversation they had. A failure keeps the
+   * request under Sent and is logged.
+   */
+  async function foundForSilentAnswers(
+    accountIdB64: string,
+    acks: readonly IncomingContactAck[],
+    current: () => boolean,
+  ): Promise<void> {
+    const identity = auth.identitySecrets();
+    if (identity === null) return;
+    for (const ack of acks) {
+      if (!current()) return;
+      const keyB64 = base64Encode(ack.accepterPubkey);
+      if (oneToOneGroupWith(keyB64) !== null) continue;
+      const accountIdHex = groupIdHex(ack.accepterAccountId);
+      try {
+        const founded = await foundOneToOneWith({
+          client,
+          identity,
+          chats,
+          profiles,
+          contact: {
+            signaturePubkeyB64: keyB64,
+            displayName: "",
+            acceptedAtMs: Date.now(),
+            accountIdHex,
+          },
+          peerAccountId: ack.accepterAccountId,
+          peerPubkey: ack.accepterPubkey,
+        });
+        adoptAnsweredOneToOne(accountIdB64, keyB64, accountIdHex, founded.conversation.groupIdB64);
+        setAcceptedVersion(acceptedVersion() + 1);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("contacts inbox: founding a chat after a silent answer failed", err instanceof Error ? err.name : "");
+      }
+    }
+  }
+
   async function handleKnownContactRequest(
     request: IncomingContactRequest,
     accountIdB64: string,
@@ -654,7 +724,31 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       check,
       requestKeyB64: base64Encode(request.fromPubkey),
       trustedKeyB64: readPin(base64Encode(fromAccountId), accountIdB64)?.pinnedSignaturePubkeyB64 ?? null,
+      // Base scenario 7 - answered silently only while this device holds a
+      // live one-to-one with them; else listed, and Accept starts the chat.
+      holdsOneToOne:
+        holdsOneToOneWith(base64Encode(request.fromPubkey)) ||
+        conversationWithContact({
+          contact: known,
+          conversations: chats.groups().filter((g) => readIsActive(g.group) !== false),
+          ownKeyB64: ownPersonKeyB64(chats.identity()),
+          peopleOf: (g) => personKeysOf(g.group),
+          isOneToOne: (g) => conversationKindOf(g.group) === "chat",
+        }) !== undefined,
+      // A request read again after a lost cursor is not a new one.
+      predatesContact: requestPredatesContact(request.createdAt, known.acceptedAtMs),
+      // A sibling device that holds the chat answers it; this one waits to
+      // be admitted rather than offer an Accept that founds a second chat.
+      siblingMayAdmit: siblingMayAdmit({
+        otherDeviceCount: sync.otherDeviceCount?.() ?? null,
+        requestCreatedAt: request.createdAt,
+        nowMs: Date.now(),
+      }),
     });
+    if (verdict === "show") {
+      inbox?.dropWaiting(request.messageId);
+      return false;
+    }
     let answered = true;
     if (verdict === "answer") {
       // The ack is the whole of the answer on this path: the reset the check
@@ -727,6 +821,22 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     void retryWaitingKnownRequests();
   });
   onCleanup(unsubscribeResetAccepted);
+  // Base scenario 9 - a request waiting for a sibling to admit this device to
+  // the chat is judged again when the conversations change (the admission
+  // landed) and each minute (its wait ends), not only at the next mailbox row.
+  createEffect(
+    on(
+      () => chats.groups().length,
+      () => {
+        if (waitingKnownRequests.length > 0) void retryWaitingKnownRequests();
+      },
+      { defer: true },
+    ),
+  );
+  const waitingRetryTimer = setInterval(() => {
+    if (waitingKnownRequests.length > 0) void retryWaitingKnownRequests();
+  }, 60_000);
+  onCleanup(() => clearInterval(waitingRetryTimer));
 
   /**
    * ADR-0079 section 3 - the winning device's accept of a request sent
@@ -1327,6 +1437,12 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     const fresh: FetchedRequest[] = [];
     await retryWaitingKnownRequests();
     let welcomeAttempted = false;
+    /** Base scenario 7 - acks answering a request of this device from a
+     *  person it holds no one-to-one with; founded for after the batch. */
+    const needsOneToOne: IncomingContactAck[] = [];
+    /** A Welcome of this batch kept for later: a one-to-one it may carry is
+     *  not founded a second time. */
+    let welcomeKept = false;
     let joined = false;
     const joinedEntries: ActiveGroup[] = [];
     let failed = false;
@@ -1446,6 +1562,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
               welcomeB64: base64Encode(ev.welcome.welcomeBytes),
               heldAtMs: Date.now(),
             });
+            welcomeKept = true;
           }
         } else if (ev.kind === "conversation-reentry") {
           // ADR-0091 section 3, route 2 - the other person of a one-to-one
@@ -1497,11 +1614,23 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           }
           if (ackAction === "regrant") regrant(ackSenderB64);
           // 1.9b1: contact-ack — the recipient of our ContactRequest pressed
-          // Accept.
-          applyContactAck(ev.ack, accountIdB64, {
+          // Accept. A silent answer from a person this device removed and
+          // asked again puts them back with the one-to-one both still hold
+          // (base scenario 7).
+          const ackOutcome = applyContactAck(ev.ack, accountIdB64, {
             current,
             fileFoundName: (key, found) => profiles.fileFoundName(key, found),
+            liveOneToOneWith: (key) => (current() ? oneToOneGroupWith(key) : null),
           });
+          // ... and when this device holds no one-to-one with them, one is
+          // founded after this batch (their device still holds one, so no
+          // Welcome comes).
+          if (
+            ackOutcome === "needs-one-to-one" &&
+            !needsOneToOne.some((a) => base64Encode(a.accepterPubkey) === ackSenderB64)
+          ) {
+            needsOneToOne.push(ev.ack);
+          }
           if (current()) setAcceptedVersion(acceptedVersion() + 1);
         }
       }
@@ -1514,6 +1643,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         requireCurrent();
         await settleJoins(accountIdB64, joinedEntries);
       }
+      if (needsOneToOne.length > 0 && !welcomeKept) await foundForSilentAnswers(accountIdB64, needsOneToOne, current);
       if (fresh.some((f) => f.undecidedLink === true)) void decideLinkRequests();
       void retryHeldWelcomes();
     } finally {
@@ -1643,8 +1773,10 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       accountIdB64,
       isAccepted: (keyB64) =>
         loadAccepted(accountIdB64).some((c) => c.signaturePubkeyB64 === keyB64),
-      keepsFromContact: (request) =>
-        request.viaGroupIdB64 !== undefined && !holdsOneToOneWith(base64Encode(request.fromPubkey)),
+      // A request from a contact this device holds no one-to-one with is
+      // listed whichever way it came (a group, or the inbox: base scenario
+      // 7); Accept starts the chat.
+      keepsFromContact: (request) => !holdsOneToOneWith(base64Encode(request.fromPubkey)),
       onChange: () => setPending(opened.pending()),
     });
     inbox = opened;

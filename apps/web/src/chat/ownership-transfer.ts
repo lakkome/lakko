@@ -308,7 +308,11 @@ export interface RosterEntryView {
   readonly leafIndex: number;
   /** Standard base64 of the member's 32-byte Ed25519 signature public key. */
   readonly signatureKeyB64: string;
+  /** The name alone: the row's first line, and the name a sentence uses. */
   readonly label: string;
+  /** `@username` for the row's second line, as the members list shows it, or
+   *  `null`. Optional so a roster built without it reads as having none. */
+  readonly usernameLine?: string | null;
 }
 
 /** A picker row. */

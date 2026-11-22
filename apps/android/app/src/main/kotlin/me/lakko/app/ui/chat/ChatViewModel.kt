@@ -1023,6 +1023,15 @@ public class ChatViewModel(
         mutableAddMembersOpen.value = true
     }
 
+    /** ADR-0087 section 10 — `Add members` in a group of one: the Add
+     *  members screen straight from the conversation, as on the web. The
+     *  info opens under it, so its back and **Add** return to the info
+     *  (section 2.4), where a failed add is reported. */
+    public fun openAddMembersFromConversation() {
+        if (!mutableMembersPanelOpen.value) toggleMembersPanel()
+        openAddMembers()
+    }
+
     /** Its back control: return to the info, dropping the picks. */
     public fun closeAddMembers() {
         mutableAddMembersOpen.value = false
@@ -1667,7 +1676,7 @@ public class ChatViewModel(
         // group, and one gate cannot be partly applied. Note the difference
         // from role-gating, which hides what SOMEONE ELSE may do — this hides
         // what nobody in this group may do any more.
-        mutableCanManageMembers.value = role != Role.MEMBER && !ended
+        mutableCanManageMembers.value = canManageMembersFor(role, ended)
         // §6.2.7 — and the owner-only admin toggle goes with it. Defence in
         // depth rather than a reachable case: §6.2.9 establishes that a sitting
         // owner cannot reach this state at all (`authorise` refuses a `Remove`
@@ -1730,15 +1739,17 @@ public class ChatViewModel(
     // -----------------------------------------------------------------------
 
     /** The roster's OWN identity treatment, in the roster's own order, as the
-     *  picker reads it. Built from [memberLabel] rather than re-derived, so the
+     *  picker reads it. Built from [memberRowText] rather than re-derived, so the
      *  picker and the members list cannot render the same person differently —
      *  that is the one thing the user cross-checks. */
     internal fun rosterViews(): List<me.lakko.app.chat.RosterEntryView> =
         mutableMembers.value.map {
+            val text = memberRowText(it)
             me.lakko.app.chat.RosterEntryView(
                 leafIndex = it.leafIndex,
                 signatureKeyB64 = me.lakko.app.chat.outboxB64(it.signaturePublicKey),
-                label = memberLabel(it),
+                label = text.title,
+                usernameLine = text.subtitle,
             )
         }
 
@@ -2013,21 +2024,28 @@ public class ChatViewModel(
      * appended for the local leaf. Mirrors the ADR-0021 call-roster resolution,
      * keyed on the member's signature public key.
      */
-    /** The name [memberLabel]'s avatar takes its initials from: the display
-     *  name without the ` · @username` the label adds. */
+    /** The name a member row's avatar takes its initials from: the display
+     *  name, never the `@username` line. */
     public fun memberAvatarName(member: GroupMember): String {
         if (ownLeafIndex() == member.leafIndex) return Localization.strings.value["chat.author.you"]
         return me.lakko.app.profile.avatarName(profileNames.resolve(member.signaturePublicKey))
     }
 
-    public fun memberLabel(member: GroupMember): String {
+    /** A member row's two lines: the name and the verified `@username` under
+     *  it ([me.lakko.app.profile.personRowText]); "You" for this device. */
+    public fun memberRowText(member: GroupMember): me.lakko.app.profile.PersonRowText {
         // The local leaf is not in the contact directory, so the resolver
         // would fall back to "Member"; the row is simply "You".
-        if (ownLeafIndex() == member.leafIndex) return Localization.strings.value["chat.author.you"]
+        if (ownLeafIndex() == member.leafIndex) {
+            return me.lakko.app.profile.PersonRowText(Localization.strings.value["chat.author.you"], null)
+        }
         // ADR-0048 UX §3 — the one resolver: rename, profile name, verified
         // @username, fingerprint (never `@` + hex).
-        return profileNames.resolve(member.signaturePublicKey).listLabel
+        return me.lakko.app.profile.personRowText(profileNames.resolve(member.signaturePublicKey))
     }
+
+    /** The member's name alone (the first line of [memberRowText]). */
+    public fun memberLabel(member: GroupMember): String = memberRowText(member).title
 
     /**
      * ADR-0048 — the resolved name for a member IDENTITY (signature key,
@@ -3867,6 +3885,12 @@ public class ChatViewModel(
         repo.deleteSoloGroup(groupIdHex)
     }
 
+    /** ADR-0087 section 10 — whether the group-of-one block offers `Add
+     *  members`: the same gate as the info's Add members row
+     *  ([canManageMembersFor]), read live rather than from [canManageMembers],
+     *  which is filled by the first roster refresh. */
+    public fun canAddMembersNow(): Boolean = canManageMembersFor(repo.ownRole(groupIdHex), membershipEnded.value)
+
     /** Section 10 — this device created the group (the creation row). */
     public fun createdGroup(): Boolean = repo.createdGroup(groupIdHex)
 
@@ -4286,3 +4310,12 @@ internal fun inviteLinkRevokeNotice(revoked: Boolean): UiText =
 
 /** reactions-and-emoji sections 6 and 7 — how long the 3-reactions line stays. */
 internal const val REACTION_CAP_NOTICE_MS: Long = 3_000L
+
+/**
+ * ADR-0022 — whether this device may add and remove members: the owner, an
+ * admin, or anyone in a group with no role table (`role == null`); never a
+ * plain member, and nobody once their own membership has ended (ADR-0045 UX
+ * §6.2.7). The members info and the group-of-one block ask this one rule.
+ */
+internal fun canManageMembersFor(role: Role?, membershipEnded: Boolean): Boolean =
+    role != Role.MEMBER && !membershipEnded

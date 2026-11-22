@@ -299,6 +299,8 @@ enum AccountLocalDataWipe {
             standard.removeObject(forKey: ReentryKnockKeySentStore.key(accountIdB64))
             // When this device first saw each leaf (the gap history's floor).
             standard.removeObject(forKey: ReentryLeafFirstSeenStore.key(accountIdB64))
+            // Base scenario 9 — when this device first held each conversation.
+            ConversationHeldSince.clear(accountIdB64: accountIdB64)
             // The gap histories still looked for, and their wrap key.
             ReentryGapLookStore.wipe(accountIdB64: accountIdB64, defaults: standard)
         }
