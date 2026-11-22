@@ -291,6 +291,21 @@ final class PairingHistoryTests: XCTestCase {
         XCTAssertEqual(ChatListScreen.unreadCount(thread: thread, cursor: cursor(6)), 0)
     }
 
+    /// A system row (a commit, a membership line) is not a message: with a
+    /// read cursor it never counts, so two hidden commit rows put no badge on
+    /// a chat whose timeline shows nothing new (seen live 2026-11-22).
+    func testACursorNeverCountsSystemRows() {
+        let thread = ChatThread(
+            groupIdHex: "aa",
+            messages: [
+                chat(4, direction: .system), chat(5, direction: .system), chat(6),
+            ],
+            cursor: 0)
+        let cursor = ReadCursorState(
+            upToMessageId: UnreadCounting.cursorBytes(0), readAtMs: 1, updatedAtHlc: 1)
+        XCTAssertEqual(ChatListScreen.unreadCount(thread: thread, cursor: cursor), 1)
+    }
+
     func testWithoutAFloorEveryRowPastTheCursorCounts() {
         let thread = ChatThread(groupIdHex: "aa", messages: [chat(4), chat(5)], cursor: 0)
         let cursor = ReadCursorState(

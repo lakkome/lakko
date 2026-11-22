@@ -110,3 +110,19 @@ public fun appPollSweepSecs(
     minWaitSecs: Int = APP_POLL_MIN_WAIT_SECS,
 ): Int = appPollWaves(groupCount, concurrency) *
     appPollWaitSecs(groupCount, concurrency, maxWaitSecs, budgetSecs, minWaitSecs)
+
+/**
+ * Whether an open chat screen long-polls its group right now: while the app
+ * is started (on screen), or while a call is up (the call's signaling may ride
+ * this group's journal). Otherwise the screen's poll pauses, as the app-level
+ * sweep does.
+ *
+ * Why it pauses: with the app in the background a new message, a call offer
+ * or an end reaches the device through its push wake, whose background read
+ * decrypts the rows itself. A screen poll still running behind the home
+ * screen consumed the same rows first; a row the app applied cannot be
+ * decrypted a second time (its key is gone), so the wake showed the generic
+ * "New message" banner, or nothing, and a call offer held by the
+ * backgrounded call host never rang (seen on a Pixel, 2026-11-22).
+ */
+public fun screenPollRuns(appStarted: Boolean, callUp: Boolean): Boolean = appStarted || callUp

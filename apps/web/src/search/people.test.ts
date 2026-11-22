@@ -12,19 +12,20 @@ import { fileURLToPath } from "node:url";
 
 import initWasm, { normalizeNameForSearch } from "../../wasm/lakko_ffi_wasm";
 import {
-  asContacts,
   canAddContact,
   fallbackNormalize,
   localPeople,
   matchesLoosely,
   mergePeople,
   namesFormerContact,
-  peopleRows,
+  searchPeopleRows,
   searchNormalizer,
   shownUsername,
   type LocalCandidate,
   type Normalize,
   type PersonResult,
+  type SearchContact,
+  type SearchIdentity,
 } from "./people";
 
 let normalize: Normalize;
@@ -251,42 +252,6 @@ describe("canAddContact", () => {
   });
 });
 
-describe("a row as the contact list stands now", () => {
-  const found = (over: Partial<PersonResult> = {}): PersonResult => ({
-    keyB64: "KEY",
-    keyHex: "aa",
-    accountIdHex: "11",
-    name: "Anna",
-    username: "anna",
-    reach: "open",
-    grantWireB64: null,
-    openBindingB64: "BINDING",
-    ...over,
-  });
-  const none = { keysB64: new Set<string>(), accountIdsHex: new Set<string>() };
-
-  it("a person who became a contact since the answer offers nothing more to add", () => {
-    const [row] = asContacts([found()], { ...none, keysB64: new Set(["KEY"]) });
-    expect(row).toMatchObject({ reach: "contact", grantWireB64: null, username: "anna" });
-    expect(row!.openBindingB64).toBeUndefined();
-    expect(canAddContact(row!)).toBe(false);
-  });
-
-  it("finds them by account id when their key rotated", () => {
-    const [row] = asContacts(
-      [found({ reach: "grant", grantWireB64: "G", grantChecked: true })],
-      { ...none, accountIdsHex: new Set(["11"]) },
-    );
-    expect(row).toMatchObject({ reach: "contact", grantWireB64: null });
-    expect(row!.grantChecked).toBeUndefined();
-  });
-
-  it("leaves everyone else as found", () => {
-    const person = found();
-    expect(asContacts([person], none)[0]).toBe(person);
-  });
-});
-
 describe("the rows under People in Chats", () => {
   const person = (keyB64: string, reach: PersonResult["reach"]): PersonResult => ({
     keyB64,
@@ -296,34 +261,6 @@ describe("the rows under People in Chats", () => {
     username: null,
     reach,
     grantWireB64: null,
-  });
-
-  it("a contact whose one-to-one matched stands there and leaves People", () => {
-    expect(peopleRows([person("A", "contact")], new Set(), new Set(["A"]))).toEqual([]);
-  });
-
-  it("a contact with no matching conversation stays", () => {
-    expect(peopleRows([person("A", "contact")], new Set(), new Set(["B"]))).toHaveLength(1);
-  });
-
-  it("a person who is no contact keeps their row, and the way to add them", () => {
-    expect(peopleRows([person("A", "open")], new Set(), new Set(["A"]))).toHaveLength(1);
-  });
-
-  it("a contact the list does not show yet keeps a row, so the field is not blank", () => {
-    expect(peopleRows([person("A", "contact")], new Set(), new Set())).toHaveLength(1);
-  });
-
-  it("a person a list row shows leaves People whatever their reach", () => {
-    for (const reach of ["contact", "open", "grant", "none"] as const) {
-      expect(peopleRows([person("A", reach)], new Set(["A"]), new Set())).toEqual([]);
-    }
-  });
-
-  it("the list hides only the people it shows", () => {
-    expect(peopleRows([person("A", "open"), person("B", "open")], new Set(["A"]), new Set())).toEqual([
-      person("B", "open"),
-    ]);
   });
 
   it("an answer that calls a removed contact a contact is false", () => {
@@ -336,5 +273,89 @@ describe("the rows under People in Chats", () => {
   it("a rotated key is still the contact: the account id names them", () => {
     const rotated = { ...person("NEW", "contact"), accountIdHex: "aa" };
     expect(namesFormerContact([rotated], { keysB64: new Set(), accountIdsHex: new Set(["aa"]) })).toBe(false);
+  });
+});
+
+// Base scenario 9 - one person, one row. The same table as iOS
+// `PeopleSearchRowsTests` and Android `PeopleModelTest`. Own keys: OWN_OLD
+// was proven superseded by OWN_NEW. Contact Cara is stored under C_OLD and
+// rotated (proven) to C_NEW; contact Dan is stored under D.
+describe("one person, one row", () => {
+  const links: Record<string, string> = { OWN_OLD: "OWN_NEW", C_OLD: "C_NEW" };
+  const identity: SearchIdentity = {
+    ownKeysB64: ["OWN_NEW", "OWN_OLD"],
+    ownAccountIdHex: "aa",
+    personOf: (k) => links[k] ?? k,
+  };
+  const contacts: SearchContact[] = [
+    { keyB64: "C_OLD", keyHex: "c0", accountIdHex: "cc" },
+    { keyB64: "D", keyHex: "d0", accountIdHex: "dd" },
+  ];
+  const hit = (
+    keyB64: string,
+    reach: PersonResult["reach"],
+    over: Partial<PersonResult> = {},
+  ): PersonResult => ({
+    keyB64,
+    keyHex: keyB64.toLowerCase(),
+    accountIdHex: null,
+    name: "Kaj",
+    username: null,
+    reach,
+    grantWireB64: null,
+    ...over,
+  });
+  const rows = (
+    lists: PersonResult[][],
+    listed: string[] = [],
+    chatPeers: string[] = [],
+  ): PersonResult[] => searchPeopleRows(lists, identity, contacts, new Set(listed), new Set(chatPeers));
+
+  it("the own account never appears, under any key or by its account id", () => {
+    expect(
+      rows([[hit("OWN_OLD", "none")], [hit("OWN_NEW", "open"), hit("X", "open", { accountIdHex: "AA" })]]),
+    ).toEqual([]);
+  });
+
+  it("a contact found under their new key is their one contact row", () => {
+    const found = rows([
+      [hit("C_OLD", "contact", { name: "Cara" })],
+      [hit("C_NEW", "open", { accountIdHex: "cc", name: "Cara N", openBindingB64: "B" })],
+    ]);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ keyB64: "C_OLD", keyHex: "c0", reach: "contact", name: "Cara", grantWireB64: null });
+    expect(found[0]!.openBindingB64).toBeUndefined();
+    expect(canAddContact(found[0]!)).toBe(false);
+  });
+
+  it("a contact the network alone found, by key or by account id, is no Add contact", () => {
+    const byKey = rows([[hit("C_NEW", "open", { accountIdHex: "cc" })]]);
+    expect(byKey.map((p) => [p.keyB64, p.reach])).toEqual([["C_OLD", "contact"]]);
+    const byAccount = rows([[hit("Y", "grant", { accountIdHex: "DD", grantWireB64: "G", grantChecked: true })]]);
+    expect(byAccount.map((p) => [p.keyB64, p.reach])).toEqual([["D", "contact"]]);
+    expect(byAccount[0]!.grantChecked).toBeUndefined();
+    expect(canAddContact(byAccount[0]!)).toBe(false);
+  });
+
+  it("a person whose one-to-one stands above has no second row, contact or not", () => {
+    expect(
+      rows([[hit("C_NEW", "open", { accountIdHex: "cc" }), hit("P", "open", { accountIdHex: "pp" })]], [], ["C_OLD", "P"]),
+    ).toEqual([]);
+  });
+
+  it("a person listed above leaves, and a stranger keeps Add contact", () => {
+    const stranger = hit("S", "open", { accountIdHex: "ss" });
+    const found = rows([[hit("Q", "open", { accountIdHex: "qq" }), stranger]], ["Q"]);
+    expect(found).toEqual([stranger]);
+    expect(canAddContact(found[0]!)).toBe(true);
+  });
+
+  it("a contact the list cannot match yet keeps one row", () => {
+    expect(rows([[hit("D", "contact")]]).map((p) => p.keyB64)).toEqual(["D"]);
+  });
+
+  it("a key nothing proved related is another person", () => {
+    const other = hit("C_OTHER", "open", { accountIdHex: "ee" });
+    expect(rows([[other]])).toEqual([other]);
   });
 });

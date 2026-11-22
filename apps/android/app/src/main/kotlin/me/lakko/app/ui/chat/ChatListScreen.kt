@@ -1202,10 +1202,13 @@ internal fun rowPreview(
 /** Compute unread count for a thread.
  *
  *  Two sources, folded by [me.lakko.app.chat.combinedUnread]:
- *   - the cross-device read cursor (Phase 2a3e2c-followup): every incoming /
- *     system row whose `messageId` is strictly greater than the last broadcast
+ *   - the cross-device read cursor (Phase 2a3e2c-followup): every incoming
+ *     row whose `messageId` is strictly greater than the last broadcast
  *     cursor. Outgoing rows never count — the sender already "read" them by
- *     composing. `null` when the chat has no cursor.
+ *     composing — and neither do system rows (a commit, a membership line, a
+ *     call row): they are not messages, and a plain commit row is not even
+ *     drawn, so counting them put a badge on a chat whose timeline showed
+ *     nothing new (2026-11-22). `null` when the chat has no cursor.
  *   - the local count of incoming messages this device's polls applied while
  *     the chat was not on screen ([ChatThread.localUnread]). Without it a chat
  *     with no cursor never showed a badge, whatever arrived.
@@ -1226,7 +1229,7 @@ internal fun unreadCount(thread: ChatThread, cursor: ReadCursorState?): Int {
         // An undecodable cursor counts nothing, as before.
         val position = me.lakko.app.chat.decodeReadPosition(c.upToMessageId) ?: return@let 0
         thread.messages.count { m ->
-            m.direction != Direction.Outgoing &&
+            m.direction == Direction.Incoming &&
                 !me.lakko.app.chat.rowInPairingHistory(thread, m) &&
                 me.lakko.app.chat.rowPastReadPosition(thread, m, position) &&
                 // The feed's own marks are the head group's ids.

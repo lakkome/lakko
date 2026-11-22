@@ -525,6 +525,7 @@ public final class ChatClient {
         var resendOrigins: [Int64: ResendMarker.Origin] = [:]
         var eventSenders: [MemberIdentity?] = []
         var evidence: [Int64: MessageEvidence] = [:]
+        var personKeysAfterCommit: [Int64: [String]] = [:]
         var held = false
         for message in raw.messages {
             // ADR-0091 phase 1 — where the cursor goes back to when this row
@@ -631,6 +632,12 @@ public final class ChatClient {
             // ring of an open anonymous poll. The roster is read HERE, on the
             // line after the apply, the one moment it is this commit's.
             if case .commit = processed {
+                // Membership rows — the people right after THIS commit, so
+                // each commit of a batch is judged on its own (a removal and a
+                // re-add in one batch would otherwise cancel out).
+                if let members = try? group.members() {
+                    personKeysAfterCommit[message.id] = MembershipRow.personKeysB64(members)
+                }
                 events.append(.commitRoster(
                     messageId: message.id, accountKeys: ContentRing.accountKeys(of: group)))
                 eventSenders.append(nil)
@@ -652,7 +659,8 @@ public final class ChatClient {
             touchedMlsState: touchedMlsState,
             resendOrigins: resendOrigins,
             eventSenders: eventSenders,
-            evidence: evidence
+            evidence: evidence,
+            personKeysAfterCommit: personKeysAfterCommit
         )
     }
 
@@ -1955,6 +1963,10 @@ public struct PollMessagesResult: Equatable {
     /// batch, by DS message id, read at receipt (the leaf may be reused
     /// later, C-68). The repository keeps it for rows from someone else.
     public let evidence: [Int64: MessageEvidence]
+    /// Membership rows — the people of the group (ADR-0050 person keys,
+    /// base64) read right after each commit of this batch, by DS message id.
+    /// A commit whose roster could not be read is absent.
+    public let personKeysAfterCommit: [Int64: [String]]
 
     public init(
         events: [IncomingChatEvent],
@@ -1963,9 +1975,11 @@ public struct PollMessagesResult: Equatable {
         touchedMlsState: Bool = false,
         resendOrigins: [Int64: ResendMarker.Origin] = [:],
         eventSenders: [MemberIdentity?] = [],
-        evidence: [Int64: MessageEvidence] = [:]
+        evidence: [Int64: MessageEvidence] = [:],
+        personKeysAfterCommit: [Int64: [String]] = [:]
     ) {
         self.evidence = evidence
+        self.personKeysAfterCommit = personKeysAfterCommit
         self.eventSenders = eventSenders
         self.events = events
         self.cursor = cursor

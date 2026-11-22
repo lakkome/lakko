@@ -95,6 +95,20 @@ public sealed interface PickedRead {
 }
 
 /**
+ * The MIME type of a file the app wrote itself, from its extension: only the
+ * types the in-app camera writes and the inline photo / video allowlist.
+ * `null` for anything else (the item is then taken for a file).
+ */
+public fun mimeOfFileName(name: String): String? = when (name.substringAfterLast('.', "").lowercase()) {
+    "jpg", "jpeg" -> "image/jpeg"
+    "png" -> "image/png"
+    "gif" -> "image/gif"
+    "webp" -> "image/webp"
+    "mp4" -> "video/mp4"
+    else -> null
+}
+
+/**
  * Resolve a `content://` URI from a system picker to bytes, MIME type and
  * display name. The declared size is checked BEFORE reading so a huge video
  * fails with a readable error instead of exhausting memory. Must run off the
@@ -121,8 +135,12 @@ public fun readPickedUri(context: android.content.Context, uri: android.net.Uri,
             }
         }
     }
-    val name = displayName?.takeUnless { it.isEmpty() }
-    val size = declaredSize
+    // A `file://` URI (the in-app camera's take) has no provider: no type,
+    // no display name, no declared size. Its own file name stands in.
+    val fileName = if (uri.scheme == "file") uri.lastPathSegment?.takeUnless { it.isEmpty() } else null
+    val name = displayName?.takeUnless { it.isEmpty() } ?: fileName
+    val type = mime ?: fileName?.let(::mimeOfFileName)
+    val size = declaredSize ?: if (uri.scheme == "file") uri.path?.let { java.io.File(it).length() } else null
     if (size != null && size > maxBytes) {
         return PickedRead.Failed(name, AttachmentBridgeException.TooLarge(got = size.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(), max = maxBytes))
     }
@@ -131,7 +149,7 @@ public fun readPickedUri(context: android.content.Context, uri: android.net.Uri,
         when {
             bytes == null -> PickedRead.Failed(name, null)
             bytes.size > maxBytes -> PickedRead.Failed(name, AttachmentBridgeException.TooLarge(bytes.size, maxBytes))
-            else -> PickedRead.Ok(PickedPayload(bytes, mime, name))
+            else -> PickedRead.Ok(PickedPayload(bytes, type, name))
         }
     } catch (e: Throwable) {
         // OutOfMemoryError included.

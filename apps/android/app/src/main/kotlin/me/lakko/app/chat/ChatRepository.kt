@@ -6094,23 +6094,32 @@ public class ChatRepository(
             android.util.Log.i("ChatRepository", "ADR-0060 Everyone refresh waits for the session")
             return
         }
+        // Asked for before the lock is tried: a run that is finishing reads it
+        // after unlocking, so a request that arrives as it ends is not lost.
+        everyoneAgain = true
         reachScope.launchSession {
-            if (!everyoneMutex.tryLock()) {
-                everyoneAgain = true
-                return@launchSession
-            }
-            try {
-                do {
-                    everyoneAgain = false
-                    refreshEveryone(account)
-                } while (everyoneAgain)
-            } catch (cause: kotlinx.coroutines.CancellationException) {
-                throw cause
-            } catch (cause: Throwable) {
-                android.util.Log.w("ChatRepository", "ADR-0060 Everyone publication failed: ${cause.javaClass.simpleName}")
-                me.lakko.app.reach.ReachManager.get(applicationContext).noteEveryoneStuck()
-            } finally {
-                everyoneMutex.unlock()
+            while (everyoneAgain && everyoneMutex.tryLock()) {
+                try {
+                    while (everyoneAgain) {
+                        everyoneAgain = false
+                        // A failed run does not drop a request queued behind
+                        // it: a setting chosen while a publish was failing is
+                        // still sent.
+                        try {
+                            refreshEveryone(account)
+                        } catch (cause: kotlinx.coroutines.CancellationException) {
+                            throw cause
+                        } catch (cause: Throwable) {
+                            android.util.Log.w(
+                                "ChatRepository",
+                                "ADR-0060 Everyone publication failed: ${cause.javaClass.simpleName}",
+                            )
+                            me.lakko.app.reach.ReachManager.get(applicationContext).noteEveryoneStuck()
+                        }
+                    }
+                } finally {
+                    everyoneMutex.unlock()
+                }
             }
         }
     }
@@ -6146,16 +6155,18 @@ public class ChatRepository(
         }
         val key = me.lakko.app.reach.everyonePublishKey(name, own?.username, certificate, reach.ownMailboxBinding())
         val (published, publishedKey) = reach.publishedEveryone()
+        val settingMs = setting.updatedAtMs.toLong()
         val first = everyoneCheckedThisSession.compareAndSet(false, true)
-        when (me.lakko.app.reach.everyoneActionForRefresh(everyone, published, publishedKey, key, first)) {
-            me.lakko.app.reach.EveryoneAction.NONE -> return
-            me.lakko.app.reach.EveryoneAction.NOTE_WITHDRAWN -> {
-                // Never published: nothing to withdraw beyond the default.
-                reach.notePublishedEveryone(false, null)
-                return
-            }
-            me.lakko.app.reach.EveryoneAction.PUT -> Unit
-        }
+        val action = me.lakko.app.reach.everyoneActionForRefresh(
+            wantPublic = everyone,
+            published = published,
+            publishedKey = publishedKey,
+            currentKey = key,
+            withdrawnForSettingMs = reach.everyoneWithdrawnForSettingMs(),
+            settingMs = settingMs,
+            firstOfSession = first,
+        )
+        if (action == me.lakko.app.reach.EveryoneAction.NONE) return
         val outcome = try {
             publishEveryoneWith(account, reach, everyone, name, own, certificate)
         } catch (cause: kotlinx.coroutines.CancellationException) {
@@ -6174,8 +6185,14 @@ public class ChatRepository(
         // it; the reach manager may hold another one by now.
         ensureSession()
         when (outcome) {
-            me.lakko.app.reach.EveryoneOutcome.PUBLISHED -> reach.notePublishedEveryone(true, key)
-            me.lakko.app.reach.EveryoneOutcome.WITHDRAWN -> reach.notePublishedEveryone(false, null)
+            me.lakko.app.reach.EveryoneOutcome.PUBLISHED -> {
+                android.util.Log.i("ChatRepository", "ADR-0060 Everyone published at discovery")
+                reach.notePublishedEveryone(true, key)
+            }
+            me.lakko.app.reach.EveryoneOutcome.WITHDRAWN -> {
+                android.util.Log.i("ChatRepository", "ADR-0060 Everyone withdrawn at discovery")
+                reach.notePublishedEveryone(false, null, withdrawnForSettingMs = settingMs)
+            }
             me.lakko.app.reach.EveryoneOutcome.NOTHING_TO_PUBLISH -> {
                 android.util.Log.w(
                     "ChatRepository",
@@ -11394,8 +11411,14 @@ public class ChatRepository(
             )
             // ADR-0073 R.7 case 2 — read once: the verdict keeps per-group
             // memory of a reset's devices swapping across two batches.
-            val accountKeysAfterPoll = memberAccountKeysOrNull(record.group)
-            val swapSuppressed = suppressMembersChangedRow(groupIdHex, accountKeysBeforePoll, accountKeysAfterPoll)
+            // `docs/ux/second-device.md` section 4 — each commit of the batch
+            // judged on its own (the roster right after it against the one
+            // after the commit before it), so a removal and a re-add in one
+            // batch do not cancel out. The swap memory advances per commit.
+            val commitMembership = membershipOfCommits(batchEvents, accountKeysBeforePoll) { before, after ->
+                val suppressed = suppressMembersChangedRow(groupIdHex, before, after)
+                suppressed to membershipChangeForGroup(groupIdHex, before, after, suppressed)
+            }
             // R.7 case 1 — one predicate for the rows and for the unread
             // count: a re-send whose original is held is neither.
             val heldResend = heldResendPredicate(groupIdHex, batchEvents)
@@ -11441,14 +11464,7 @@ public class ChatRepository(
                 // UX second-device.md section 4 — a batch of commits that
                 // changed the PEOPLE of a group names them on its last commit
                 // row; a device change or a one-to-one records nothing.
-                membershipChange = membershipRowChange(
-                    groupIdHex,
-                    batchEvents,
-                    accountKeysBeforePoll,
-                    accountKeysAfterPoll,
-                    swapSuppressed,
-                ),
-                suppressCommitRows = swapSuppressed,
+                commitMembership = commitMembership,
                 heldResend = heldResend,
                 pinSink = { senderKey, op ->
                     // ADR-0052 decision 3 — same critical section as the group
@@ -19243,6 +19259,10 @@ private class GroupRecord(
          *  added and removed in a GROUP ([membershipChangeOf]), recorded on
          *  the batch's LAST commit row; `null` records nothing. */
         membershipChange: MembershipChange? = null,
+        /** `docs/ux/second-device.md` section 4 — the poll's batch judged
+         *  commit by commit ([membershipOfCommits]). When given it replaces
+         *  [membershipChange] and [suppressCommitRows]. */
+        commitMembership: CommitMembership? = null,
         /** ADR-0073 R.7 case 1 — whether a received message is a RE-SEND
          *  whose original this device already holds ([resendVerdict]): such a
          *  row is dropped before storage, so it is shown, counted and
@@ -19320,22 +19340,26 @@ private class GroupRecord(
                 )
                 is IncomingChatEvent.System -> {
                     event.rosterAccountKeys?.let(::extendOpenPollRings)
-                    if (!(suppressCommitRows && event.systemKind == SystemKind.Commit)) messages.add(
+                    val isCommit = event.systemKind == SystemKind.Commit
+                    val suppressed = isCommit && if (commitMembership != null) {
+                        event.messageId in commitMembership.suppressed
+                    } else {
+                        suppressCommitRows
+                    }
+                    val named = when {
+                        !isCommit -> null
+                        commitMembership != null -> commitMembership.changes[event.messageId]
+                        eventIndex == membershipRowIndex -> membershipChange
+                        else -> null
+                    }
+                    if (!suppressed) messages.add(
                     ChatMessage(
                         messageId = event.messageId,
                         direction = Direction.System,
                         text = systemRowText(event.systemKind),
                         createdAt = event.createdAt,
-                        membershipJoined = if (eventIndex == membershipRowIndex) {
-                            membershipChange?.joined.orEmpty()
-                        } else {
-                            emptyList()
-                        },
-                        membershipLeft = if (eventIndex == membershipRowIndex) {
-                            membershipChange?.left.orEmpty()
-                        } else {
-                            emptyList()
-                        },
+                        membershipJoined = named?.joined.orEmpty(),
+                        membershipLeft = named?.left.orEmpty(),
                     ),
                 )
                 }

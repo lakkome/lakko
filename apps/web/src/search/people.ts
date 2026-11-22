@@ -243,23 +243,6 @@ export interface ContactSet {
 }
 
 /**
- * The rows as the contact list stands now. An answer was built when it was
- * asked, so a person who became a contact since would still offer **Add
- * contact**, and the moment their request leaves the Sent list that row would
- * offer a second request. By account id too: their key may have rotated.
- */
-export function asContacts(people: readonly PersonResult[], contacts: ContactSet): PersonResult[] {
-  return people.map((p) => {
-    if (p.reach === "contact") return p;
-    const isContact =
-      contacts.keysB64.has(p.keyB64) || (p.accountIdHex !== null && contacts.accountIdsHex.has(p.accountIdHex));
-    if (!isContact) return p;
-    const { openBindingB64: _binding, grantChecked: _checked, ...rest } = p;
-    return { ...rest, reach: "contact", grantWireB64: null };
-  });
-}
-
-/**
  * Whether an answer names as a contact someone who is no longer one. Such a
  * row is wrong twice: the person has no way to be added from it, and in
  * Contacts it is hidden as "listed above", where they no longer stand.
@@ -273,27 +256,84 @@ export function namesFormerContact(people: readonly PersonResult[], contacts: Co
   );
 }
 
+/** A contact as the search rows match them: the key the contact row is under
+ *  and the account id they asked from, when known. */
+export interface SearchContact {
+  readonly keyB64: string;
+  readonly keyHex: string;
+  readonly accountIdHex: string | null;
+}
+
+/** Who the searching account is, and how a key is matched to a person. */
+export interface SearchIdentity {
+  /** Every key of this account: the current one, its own predecessors, the
+   *  key its chats are bound to. Standard base64. */
+  readonly ownKeysB64: readonly string[];
+  /** This account's id as lower-case hex, `null` when not known. */
+  readonly ownAccountIdHex: string | null;
+  /** The current key of the person a key names, across PROVEN rotations
+   *  only (ADR-0074 3.5); the key itself otherwise. */
+  readonly personOf: (keyB64: string) => string;
+}
+
 /**
- * The rows under People: one person, one row (UX 6.1).
+ * Base scenario 9, `docs/ux/who-can-find-me.md` section 6.1 "One person, one
+ * row" (iOS `PeopleSearch.searchRows`, Android `searchPeopleRows`): the people
+ * rows of the search field from the result lists, local first. A person is
+ * matched by account key across proven rotations, or by account id; never by
+ * name.
  *
- * `listedB64` are the people a list row above shows: a contact, or someone
- * added through their link. They leave People whatever their reach.
- *
- * `chatPeersB64` are the people whose one-to-one matched (Chats). Only a
- * contact among them leaves: a removed person with a chat keeps their row,
- * and with it the way to add them.
- *
- * A contact who stands in neither (their name has not arrived, so nothing
- * matches them yet) keeps a row here, so the field is never blank.
+ * - The own account never appears, under any of its keys.
+ * - A contact found under another key of theirs (a rotation) or by their
+ *   account id is their contact row: under the key the contact is stored
+ *   with, reach `contact`, no **Add contact**.
+ * - Results naming one person are merged into one row ({@link mergePeople}).
+ * - A person the list above already shows leaves: `listedB64` (a contact or
+ *   someone added through their link) and `chatPeersB64` (a one-to-one that
+ *   matched), whether or not they are a contact. Someone who is no contact is
+ *   added from that conversation's info.
  */
-export function peopleRows(
-  people: readonly PersonResult[],
+export function searchPeopleRows(
+  lists: readonly (readonly PersonResult[])[],
+  identity: SearchIdentity,
+  contacts: readonly SearchContact[],
   listedB64: ReadonlySet<string>,
   chatPeersB64: ReadonlySet<string>,
 ): PersonResult[] {
-  return people.filter(
-    (p) => !listedB64.has(p.keyB64) && !(p.reach === "contact" && chatPeersB64.has(p.keyB64)),
+  const personOf = identity.personOf;
+  const ownPersons = new Set(identity.ownKeysB64.map(personOf));
+  const ownAccount = identity.ownAccountIdHex?.toLowerCase() ?? null;
+  const byPerson = new Map<string, SearchContact>();
+  const byAccount = new Map<string, SearchContact>();
+  for (const c of contacts) {
+    const person = personOf(c.keyB64);
+    if (!byPerson.has(person)) byPerson.set(person, c);
+    const account = c.accountIdHex?.toLowerCase();
+    if (account !== undefined && !byAccount.has(account)) byAccount.set(account, c);
+  }
+  const rewritten = lists.map((list) =>
+    list.flatMap((p): PersonResult[] => {
+      const person = personOf(p.keyB64);
+      const account = p.accountIdHex?.toLowerCase() ?? null;
+      if (ownPersons.has(person) || (account !== null && account === ownAccount)) return [];
+      const c = byPerson.get(person) ?? (account === null ? undefined : byAccount.get(account));
+      if (c === undefined) return [p];
+      return [
+        {
+          keyB64: c.keyB64,
+          keyHex: c.keyHex,
+          accountIdHex: p.accountIdHex ?? c.accountIdHex,
+          name: p.name,
+          ...(p.nameIsFallback === true ? { nameIsFallback: true } : {}),
+          username: shownUsername(p.username, "contact"),
+          reach: "contact",
+          grantWireB64: null,
+        },
+      ];
+    }),
   );
+  const shownAbove = new Set([...listedB64, ...chatPeersB64].map(personOf));
+  return mergePeople(rewritten, null).filter((p) => !shownAbove.has(personOf(p.keyB64)));
 }
 
 /** Lower-case hex of a byte string. */

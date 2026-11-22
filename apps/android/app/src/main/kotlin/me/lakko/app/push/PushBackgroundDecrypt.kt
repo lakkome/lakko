@@ -261,6 +261,26 @@ internal fun buildBackgroundDecryptDeps(
         override fun lineage(accountIdB64: String): List<me.lakko.app.chat.LineageEntry> =
             me.lakko.app.chat.LineageMirror.load(appContext, accountIdB64)
 
+        // The app's own stored message log, read FRESH (no cache): the
+        // running app may write it while this read runs. A READ (C-59).
+        override fun storedMessage(accountIdB64: String, groupHex: String, messageId: Long): StoredWakeMessage? =
+            try {
+                storedWakeMessageIn(MessageLogStore.getLog(appContext, accountIdB64), groupHex, messageId)
+            } catch (_: Throwable) {
+                null
+            }
+
+        // ADR-0048 — the stored name of a person (an account key), the same
+        // lookup the decrypted rows use. A READ (C-59).
+        override fun personName(accountIdB64: String, personKeyB64: String): String? {
+            val lookup = namesFor(accountIdB64) ?: return null
+            return try {
+                backgroundSenderName(personKeyB64, null, lookup::resolve)
+            } catch (_: Throwable) {
+                null
+            }
+        }
+
         // ADR-0073 R.7 case 1 — the app's own stored message log, the same
         // file [startCursor] reads. Opened at most once per wake and only
         // when a row carries a re-send marker; never written from here.

@@ -205,28 +205,6 @@ class PeopleModelTest {
     private fun row(key: String, reach: PersonReach) = PersonResult(key, key, null, "Kaj", null, reach, null)
 
     @Test
-    fun `a contact listed above leaves People, and a person who is no contact stays`() {
-        val listed = row("k", PersonReach.CONTACT)
-        val chat = row("c", PersonReach.CONTACT)
-        val noChat = row("n", PersonReach.CONTACT)
-        val removed = row("r", PersonReach.GRANT)
-        assertEquals(
-            listOf(noChat, removed),
-            peopleRows(listOf(listed, chat, noChat, removed), setOf("k"), setOf("c", "r")),
-        )
-    }
-
-    @Test
-    fun `a pending contact listed above leaves People whatever their reach`() {
-        // Added through their link and not answered yet: the row above is
-        // theirs, and People offers them no second row reading Request sent.
-        val pending = row("p", PersonReach.OPEN)
-        val granted = row("g", PersonReach.GRANT)
-        val elsewhere = row("e", PersonReach.OPEN)
-        assertEquals(listOf(elsewhere), peopleRows(listOf(pending, granted, elsewhere), setOf("p", "g"), emptySet()))
-    }
-
-    @Test
     fun `a channel the card already shows gets no second handle row`() {
         // Base scenario 22 (2026-11-12): "@walk_22_channel" listed the card
         // and, below it, the same channel again from the handle lookup.
@@ -258,17 +236,94 @@ class PeopleModelTest {
         assertEquals("@trip", channelResultLabel("  ", "trip"))
     }
 
+    // -------------------------------------------------------------------------
+    // Base scenario 9 - one person, one row. The same table as web
+    // `people.test.ts` and iOS `PeopleSearchRowsTests`.
+    // -------------------------------------------------------------------------
+
+    /** Own keys: OWN_OLD was proven superseded by OWN_NEW. Contact Cara is
+     *  stored under C_OLD and rotated (proven) to C_NEW. */
+    private val links = mapOf("OWN_OLD" to "OWN_NEW", "C_OLD" to "C_NEW")
+    private val identity = SearchIdentity(
+        ownKeysB64 = setOf("OWN_NEW", "OWN_OLD"),
+        ownAccountIdHex = "aa",
+        personOf = { links[it] ?: it },
+    )
+    private val cara = SearchContact("C_OLD", "C_OLD", "cc")
+    private val dan = SearchContact("D", "D", "dd")
+
+    private fun hit(key: String, reach: PersonReach, account: String? = null, name: String = "Kaj", grant: String? = null) =
+        PersonResult(key, key, account, name, null, reach, grant)
+
+    private fun rows(
+        vararg lists: List<PersonResult>,
+        listed: Set<String> = emptySet(),
+        chatPeers: Set<String> = emptySet(),
+    ) = searchPeopleRows(lists.toList(), identity, listOf(cara, dan), listed, chatPeers)
+
     @Test
-    fun `a held answer never offers a second request to a person who accepted`() {
-        val held = PersonResult("k", "k", "aa", "Eivor", null, PersonReach.OPEN, null)
-        val row = withCurrentContacts(listOf(held), setOf("k")).single()
-        assertEquals(PersonReach.CONTACT, row.reach)
-        assertFalse(canAddContact(row))
+    fun `the own account never appears, under any key or by its account id`() {
+        assertEquals(
+            emptyList<PersonResult>(),
+            rows(
+                listOf(hit("OWN_OLD", PersonReach.NONE)),
+                listOf(hit("OWN_NEW", PersonReach.OPEN), hit("X", PersonReach.OPEN, account = "AA")),
+            ),
+        )
     }
 
     @Test
-    fun `a person who is no contact keeps their row and their grant`() {
-        val held = PersonResult("k", "k", "aa", "Eivor", null, PersonReach.GRANT, "G", grantChecked = true)
-        assertEquals(listOf(held), withCurrentContacts(listOf(held), setOf("other")))
+    fun `a contact found under their new key is their one contact row`() {
+        val found = rows(
+            listOf(hit("C_OLD", PersonReach.CONTACT, name = "Cara")),
+            listOf(hit("C_NEW", PersonReach.OPEN, account = "cc", name = "Cara N", grant = "G")),
+        ).single()
+        assertEquals("C_OLD", found.keyB64)
+        assertEquals(PersonReach.CONTACT, found.reach)
+        assertEquals("Cara", found.name)
+        assertNull(found.grantWireB64)
+        assertFalse(canAddContact(found))
+    }
+
+    @Test
+    fun `a contact the network alone found, by key or by account id, is no Add contact`() {
+        val byKey = rows(listOf(hit("C_NEW", PersonReach.OPEN, account = "cc"))).single()
+        assertEquals("C_OLD", byKey.keyB64)
+        assertEquals(PersonReach.CONTACT, byKey.reach)
+        val byAccount = rows(listOf(hit("Y", PersonReach.GRANT, account = "DD", grant = "G"))).single()
+        assertEquals("D", byAccount.keyB64)
+        assertEquals(PersonReach.CONTACT, byAccount.reach)
+        assertFalse(canAddContact(byAccount))
+    }
+
+    @Test
+    fun `a person whose one-to-one stands above has no second row, contact or not`() {
+        assertEquals(
+            emptyList<PersonResult>(),
+            rows(
+                listOf(hit("C_NEW", PersonReach.OPEN, account = "cc"), hit("P", PersonReach.OPEN, account = "pp")),
+                chatPeers = setOf("C_OLD", "P"),
+            ),
+        )
+    }
+
+    @Test
+    fun `a person listed above leaves, and a stranger keeps Add contact`() {
+        val stranger = hit("S", PersonReach.OPEN, account = "ss")
+        val found = rows(listOf(hit("Q", PersonReach.OPEN, account = "qq"), stranger), listed = setOf("Q"))
+        assertEquals(listOf(stranger), found)
+        assertTrue(canAddContact(found.single()))
+    }
+
+    @Test
+    fun `a contact the list cannot match yet keeps one row`() {
+        val found = rows(listOf(hit("D", PersonReach.CONTACT)))
+        assertEquals(listOf("D"), found.map { it.keyB64 })
+    }
+
+    @Test
+    fun `a key nothing proved related is another person`() {
+        val other = hit("C_OTHER", PersonReach.OPEN, account = "ee")
+        assertEquals(listOf(other), rows(listOf(other)))
     }
 }

@@ -170,4 +170,70 @@ class MembershipRowsTest {
         // A device-only own commit records nothing to write.
         assertNull(membershipChangeOf(listOf(own, ana), listOf(own, ana), noAccount, false, own))
     }
+
+    // Each commit of a batch on its own (seen live 2026-11-22).
+
+    private fun commitAfter(id: Long, people: List<String>?) =
+        IncomingChatEvent.System(id, SystemKind.Commit, "2026-11-22T10:20:0${id % 10}Z", personKeysAfter = people)
+
+    private fun notACommit(id: Long) =
+        IncomingChatEvent.System(id, SystemKind.ExternalJoinProposal, "2026-11-22T10:20:00Z")
+
+    private val plainJudge: (List<String>?, List<String>?) -> Pair<Boolean, MembershipChange?> = { before, after ->
+        false to membershipChangeOf(before, after, noAccount, false, own)
+    }
+
+    @Test
+    fun `a removal and a re-add in one batch name both, each on its own commit row`() {
+        // Judged as one batch the people are the same before and after.
+        assertNull(membershipChangeOf(listOf(own, ana, bea), listOf(own, ana, bea), noAccount, false, own))
+        val events = listOf(
+            commitAfter(2, listOf(own, ana)),
+            notACommit(3),
+            commitAfter(4, listOf(own, ana, bea)),
+        )
+        val result = membershipOfCommits(events, listOf(own, ana, bea), plainJudge)
+        assertEquals(MembershipChange(joined = emptyList(), left = listOf(bea)), result.changes[2L])
+        assertEquals(MembershipChange(joined = listOf(bea), left = emptyList()), result.changes[4L])
+        assertTrue(result.suppressed.isEmpty())
+        val rows = listOf(
+            commitRow(2, left = listOf(bea)),
+            commitRow(4, joined = listOf(bea)),
+        )
+        assertEquals(listOf("Bea is no longer in the group", "Bea joined"), rows.map { membershipRowText(it, nameOf) })
+    }
+
+    @Test
+    fun `a torn roster read records nothing for that commit and the next`() {
+        val events = listOf(
+            commitAfter(2, null),
+            commitAfter(3, listOf(own, ana, bea)),
+            commitAfter(4, listOf(own, ana)),
+        )
+        val result = membershipOfCommits(events, listOf(own, ana), plainJudge)
+        assertNull(result.changes[2L])
+        assertNull(result.changes[3L])
+        assertEquals(MembershipChange(joined = emptyList(), left = listOf(bea)), result.changes[4L])
+    }
+
+    @Test
+    fun `the swap verdict is asked once per commit, in order, and its suppression is kept per commit`() {
+        val asked = mutableListOf<Pair<List<String>?, List<String>?>>()
+        val events = listOf(commitAfter(2, listOf(own)), commitAfter(3, listOf(own, ana)))
+        val result = membershipOfCommits(events, listOf(own, ana)) { before, after ->
+            asked += before to after
+            (after == listOf(own)) to null
+        }
+        assertEquals(listOf(listOf(own, ana) to listOf(own), listOf(own) to listOf(own, ana)), asked)
+        assertEquals(setOf(2L), result.suppressed)
+        assertTrue(result.changes.isEmpty())
+    }
+
+    @Test
+    fun `a batch with no commit asks nothing`() {
+        val result = membershipOfCommits(listOf(notACommit(5)), listOf(own, ana)) { _, _ ->
+            throw AssertionError("not asked")
+        }
+        assertTrue(result.changes.isEmpty() && result.suppressed.isEmpty())
+    }
 }

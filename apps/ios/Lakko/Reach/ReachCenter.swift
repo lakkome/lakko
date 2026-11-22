@@ -701,11 +701,14 @@ public final class ReachCenter: ObservableObject {
     func forgetPublishedEveryone(accountIdB64: String) {
         if self.accountIdB64 == accountIdB64 {
             publishedEveryoneFor = nil
-            guard record.publishedEveryone != nil else { return }
+            guard record.publishedEveryone != nil || record.everyoneWithdrawnForSettingMs != nil else { return }
             record.publishedEveryone = nil
+            record.everyoneWithdrawnForSettingMs = nil
             persist()
-        } else if var held = persistence.load(accountIdB64: accountIdB64), held.publishedEveryone != nil {
+        } else if var held = persistence.load(accountIdB64: accountIdB64),
+                  held.publishedEveryone != nil || held.everyoneWithdrawnForSettingMs != nil {
             held.publishedEveryone = nil
+            held.everyoneWithdrawnForSettingMs = nil
             persistence.save(held, accountIdB64: accountIdB64)
         }
     }
@@ -1935,12 +1938,21 @@ public final class ReachCenter: ObservableObject {
         record.offers.values.compactMap { Data(base64Encoded: $0) }
     }
 
-    /// Forget what a removed contact offered and relayed.
-    public func dropIntroductions(fromAccountKeyB64 key: String) {
-        guard record.offers[key] != nil || record.bundles[key] != nil else { return }
-        record.offers[key] = nil
-        record.bundles[key] = nil
+    /// Forget what a removed contact offered and relayed, under every key
+    /// they have had (ADR-0074 section 3.5a: an offer kept before their key
+    /// rotation is filed under the old key). Their record is no longer
+    /// relayed. Returns whether anything was dropped.
+    @discardableResult
+    public func dropIntroductions(fromAccountKeyB64 key: String) -> Bool {
+        let keys = Set(personKeysB64(key) + [key])
+        guard keys.contains(where: { record.offers[$0] != nil || record.bundles[$0] != nil }) else { return false }
+        for k in keys {
+            record.offers[k] = nil
+            record.bundles[k] = nil
+        }
         persist()
+        NSLog("ADR-0060: a removed contact's introductions were dropped")
+        return true
     }
 
     // MARK: - Everyone (ADR-0060 section 5)
@@ -1984,9 +1996,12 @@ public final class ReachCenter: ObservableObject {
         let publishKey = ReachRules.everyonePublishKey(
             displayName: name, username: own.username, certificate: cert,
             accountKey: ownAccountKey, mailboxBinding: ownMailbox?.binding)
-        if record.publishedEveryone == wantPublic, !wantPublic || publishedEveryoneFor == publishKey {
-            return
-        }
+        let settingMs = setting.updatedAtMs
+        guard ReachRules.everyoneNeedsSending(
+            wantPublic: wantPublic, published: record.publishedEveryone,
+            publishedFor: publishedEveryoneFor, publishKey: publishKey,
+            withdrawnForSettingMs: record.everyoneWithdrawnForSettingMs, settingMs: settingMs)
+        else { return }
         do {
             var nameTermLookupKeys: [Data] = []
             var publicRecord: Data?
@@ -2034,9 +2049,13 @@ public final class ReachCenter: ObservableObject {
             // record.
             guard self.accountIdB64 == accountIdB64 else { return }
             record.publishedEveryone = wantPublic
+            record.everyoneWithdrawnForSettingMs = wantPublic ? nil : settingMs
             publishedEveryoneFor = wantPublic ? publishKey : nil
             noteEveryonePublished(wantPublic: wantPublic)
             persist()
+            NSLog(wantPublic
+                ? "ADR-0060: Everyone published at discovery"
+                : "ADR-0060: Everyone withdrawn at discovery")
         } catch {
             guard self.accountIdB64 == accountIdB64 else { return }
             if noteEveryoneRefusedAsHidden(error, wantPublic: wantPublic) { return }
@@ -2220,9 +2239,15 @@ public final class ReachCenter: ObservableObject {
     }
 
     /// Whether the relayed set digested `digest` has not been sent as a bundle
-    /// in `groupIdHex` yet.
-    public func bundleNeedsSending(groupIdHex: String, digest: String) -> Bool {
-        record.bundleSentDigest?[groupIdHex] != digest
+    /// in `groupIdHex` yet. A set that became empty (`isEmpty`: the last
+    /// contact who offered a record was removed) goes, as padding only, where a
+    /// bundle was sent before: it replaces theirs, so the removed person's
+    /// record stops being relayed. A conversation never sent a bundle gets no
+    /// empty one.
+    public func bundleNeedsSending(groupIdHex: String, digest: String, isEmpty: Bool = false) -> Bool {
+        let sent = record.bundleSentDigest?[groupIdHex]
+        if isEmpty { return sent != nil && sent != digest }
+        return sent != digest
     }
 
     public func markBundleSent(groupIdHex: String, digest: String) {

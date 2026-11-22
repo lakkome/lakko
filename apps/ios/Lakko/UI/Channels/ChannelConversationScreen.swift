@@ -152,11 +152,12 @@ struct ChannelConversationScreen: View {
                 model.attach(sync: sync)
                 await model.start(subscribeOnOpen: subscribeOnOpen)
                 // While the screen is up (ADR-0087 section 12, 2026-11-06):
-                // every 10 s only the posts after the newest one held; the
-                // counts move with new posts and once a minute otherwise; the
-                // seed envelopes are read once a minute (every pass while
-                // waiting to be let in). Chosen, not measured; the web
-                // client uses the same.
+                // every 10 s only the posts after the newest one held, then
+                // the counts of the posts on screen (comment counts with
+                // them), and the threads whose count moved read on (UX
+                // section 13.2, 2026-11-22); the seed envelopes are read once
+                // a minute (every pass while waiting to be let in). Chosen,
+                // not measured; the web and Android clients use the same.
                 var ticks = 0
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 10_000_000_000)
@@ -164,7 +165,9 @@ struct ChannelConversationScreen: View {
                     ticks += 1
                     if model.access == .waiting || ticks % 6 == 0 { await model.catchUp() }
                     let arrived = await model.poll()
-                    if !arrived, ticks % 6 == 0 { await model.refreshCounts() }
+                    let inView = onScreen
+                    if !arrived { await model.refreshCounts(only: inView) }
+                    await model.refreshComments(inView)
                     await model.flushPendingReactions()
                 }
             }

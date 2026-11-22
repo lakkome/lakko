@@ -37,24 +37,34 @@ internal enum class EveryoneAction {
     /** The server already holds what the setting asks for. */
     NONE,
 
-    /** Outside Everyone and never published: only record that. */
-    NOTE_WITHDRAWN,
-
     /** Send `PUT /discovery/visibility`. */
     PUT,
 }
 
-/** Decide from what the server was last told ([published], [publishedKey])
- *  and what is wanted now. */
+/**
+ * Decide from what this device last told the server ([published],
+ * [publishedKey], and [withdrawnForSettingMs], the stamp of the setting a
+ * withdraw was sent for) and what is wanted now ([settingMs] is the stamp of
+ * the setting in force).
+ *
+ * Outside Everyone the withdraw is sent unless THIS device already withdrew
+ * for this very setting. Whether this device ever published does not matter:
+ * the record at discovery is the account's, and another device of the account
+ * (one that is offline, lost or removed), or this device before its note was
+ * lost, may have published it. The setting's stamp changes with every choice
+ * made on any device, so a device withdraws once per choice that leaves
+ * Everyone, not on every refresh.
+ */
 internal fun everyoneAction(
     wantPublic: Boolean,
     published: Boolean?,
     publishedKey: String?,
     currentKey: String,
+    withdrawnForSettingMs: Long?,
+    settingMs: Long,
 ): EveryoneAction = when {
     wantPublic -> if (published == true && publishedKey == currentKey) EveryoneAction.NONE else EveryoneAction.PUT
-    published == false -> EveryoneAction.NONE
-    published == null -> EveryoneAction.NOTE_WITHDRAWN
+    published == false && withdrawnForSettingMs != null && withdrawnForSettingMs == settingMs -> EveryoneAction.NONE
     else -> EveryoneAction.PUT
 }
 
@@ -69,9 +79,11 @@ internal fun everyoneActionForRefresh(
     published: Boolean?,
     publishedKey: String?,
     currentKey: String,
+    withdrawnForSettingMs: Long?,
+    settingMs: Long,
     firstOfSession: Boolean,
 ): EveryoneAction {
-    val action = everyoneAction(wantPublic, published, publishedKey, currentKey)
+    val action = everyoneAction(wantPublic, published, publishedKey, currentKey, withdrawnForSettingMs, settingMs)
     return if (action == EveryoneAction.NONE && wantPublic && firstOfSession) EveryoneAction.PUT else action
 }
 

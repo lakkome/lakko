@@ -6075,10 +6075,14 @@ public final class ChatRepository: ObservableObject {
                 self?.receiveContentHandover(groupIdHex: groupIdHex, event: event)
             }
         )
-        // Membership rows — before the log is written below.
-        noteMembershipChange(
+        // Membership rows — before the log is written below. Each commit of
+        // the batch on its own row: a removal and a re-add in one batch must
+        // not cancel out.
+        noteMembershipChanges(
             groupIdHex: groupIdHex, record: record, events: events,
-            personKeysBefore: personKeysBeforeBatch, firstNewRow: firstNewRow)
+            personKeysBefore: personKeysBeforeBatch,
+            personKeysAfterCommit: result.personKeysAfterCommit,
+            firstNewRow: firstNewRow)
         // THE ORDERING RULE — persist first, advance the cursor second, and hold
         // the cursor when the write does not land. See `Chat/DurableCursor.swift`
         // for why the cursor may lag the durable MLS state but must never lead
@@ -10085,8 +10089,10 @@ public final class ChatRepository: ObservableObject {
                     if !ConversationReentryRules.isBehindRefusal(error) { NSLog("ADR-0060: introduction offer not sent: \(error)") }
                 }
             }
-            if !capped.isEmpty,
-               ReachCenter.shared.bundleNeedsSending(groupIdHex: groupIdHex, digest: bundleDigest) {
+            // An empty set still replaces a bundle sent before: a removed
+            // contact's record stops being relayed.
+            if ReachCenter.shared.bundleNeedsSending(
+                groupIdHex: groupIdHex, digest: bundleDigest, isEmpty: capped.isEmpty) {
                 do {
                     let bundle = try composeIntroductionsBundle(
                         records: capped, updatedAtMs: UInt64(Self.nowMs()))
@@ -11957,6 +11963,19 @@ final class GroupRecord {
     func recordMembershipChange(_ row: MembershipRow, fromIndex: Int) -> Bool {
         guard let index = messages.indices.last(where: {
             $0 >= fromIndex && messages[$0].direction == .system
+                && messages[$0].text == MembershipRow.plainCommitText
+        }) else { return false }
+        messages[index].text = row.marker
+        return true
+    }
+
+    /// The same, on the plain commit row with DS id `messageId` at or after
+    /// `fromIndex` (a batch names each of its commits on its own row).
+    @discardableResult
+    func recordMembershipChange(_ row: MembershipRow, messageId: Int64, fromIndex: Int) -> Bool {
+        guard let index = messages.indices.last(where: {
+            $0 >= fromIndex && messages[$0].messageId == messageId
+                && messages[$0].direction == .system
                 && messages[$0].text == MembershipRow.plainCommitText
         }) else { return false }
         messages[index].text = row.marker

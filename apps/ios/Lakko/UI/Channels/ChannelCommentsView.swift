@@ -81,10 +81,16 @@ struct ChannelCommentsView: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(Color.lakkoAccent)
                 }
-                if let newCount = thread?.newSinceOpen, newCount > 0 {
-                    Text(l10n.t("channels.comments.new", counts: ["count": UInt64(newCount)]))
-                        .font(.footnote)
-                        .foregroundStyle(Color.lakkoTextMuted)
+                // Section 13.2 — comments that arrived while the thread is
+                // open wait behind this line; pressing it shows them.
+                let newCount = model.arrivedCount(item.cursor)
+                if newCount > 0 {
+                    Button { model.showArrived(item) } label: {
+                        Text(l10n.t("channels.comments.new", counts: ["count": UInt64(newCount)]))
+                            .font(.footnote.weight(.medium))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.lakkoAccent)
                 }
                 field
                 Button { model.collapseComments(item) } label: {

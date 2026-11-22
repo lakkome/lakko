@@ -680,6 +680,80 @@ public enum PeopleSearch {
         return order.compactMap { byKey[$0] }
     }
 
+    /// A contact as the search rows match them: the key the contact row is
+    /// under and the account id they asked from, when known.
+    public struct SearchContact: Equatable {
+        public let accountKey: Data
+        public let accountId: Data?
+
+        public init(accountKey: Data, accountId: Data?) {
+            self.accountKey = accountKey
+            self.accountId = accountId
+        }
+    }
+
+    /// Who the searching account is, and how a key is matched to a person.
+    public struct SearchIdentity {
+        /// Every key of this account: the current one and its own
+        /// predecessors (and the key its chats are bound to).
+        public let ownKeys: [Data]
+        /// This account's 16-byte id, `nil` when not known.
+        public let ownAccountId: Data?
+        /// The current key of the person a key names, across PROVEN
+        /// rotations only (ADR-0074 3.5); the key itself otherwise.
+        public let personOf: (Data) -> Data
+
+        public init(ownKeys: [Data], ownAccountId: Data?, personOf: @escaping (Data) -> Data = { $0 }) {
+            self.ownKeys = ownKeys
+            self.ownAccountId = ownAccountId
+            self.personOf = personOf
+        }
+    }
+
+    /// Base scenario 9, `docs/ux/who-can-find-me.md` section 6.1 "One
+    /// person, one row" (web `searchPeopleRows`, Android
+    /// `searchPeopleRows`): the people rows of the search field from the
+    /// result lists, local first. A person is matched by account key across
+    /// proven rotations, or by account id; never by name.
+    ///
+    /// - The own account never appears, under any of its keys.
+    /// - A contact found under another key of theirs (a rotation) or by
+    ///   their account id is their contact row: under the key the contact is
+    ///   stored with, reach `.contact`, no **Add contact**.
+    /// - Results naming one person are merged into one row (``merge(_:ownAccountKey:)``).
+    /// - A person the list above already shows leaves: `listed` (a contact or
+    ///   someone added through their link) and `chatPeers` (a one-to-one
+    ///   that matched), whether or not they are a contact. Someone who is no
+    ///   contact is added from that conversation's info.
+    public static func searchRows(
+        _ lists: [[FoundPerson]], identity: SearchIdentity, contacts: [SearchContact],
+        listed: Set<Data>, chatPeers: Set<Data>
+    ) -> [FoundPerson] {
+        let personOf = identity.personOf
+        let ownPersons = Set(identity.ownKeys.map(personOf))
+        var byPerson: [Data: SearchContact] = [:]
+        var byAccount: [Data: SearchContact] = [:]
+        for c in contacts {
+            let person = personOf(c.accountKey)
+            if byPerson[person] == nil { byPerson[person] = c }
+            if let id = c.accountId, byAccount[id] == nil { byAccount[id] = c }
+        }
+        let rewritten: [[FoundPerson]] = lists.map { list in
+            list.compactMap { p in
+                let person = personOf(p.accountKey)
+                if ownPersons.contains(person) { return nil }
+                if let id = p.accountId, id == identity.ownAccountId { return nil }
+                guard let c = byPerson[person] ?? p.accountId.flatMap({ byAccount[$0] }) else { return p }
+                return FoundPerson(
+                    accountKey: c.accountKey, accountId: p.accountId ?? c.accountId,
+                    displayName: p.displayName, username: p.username, writeSeed: nil,
+                    reach: .contact)
+            }
+        }
+        let shownAbove = Set(listed.map(personOf)).union(chatPeers.map(personOf))
+        return merge(rewritten, ownAccountKey: nil).filter { !shownAbove.contains(personOf($0.accountKey)) }
+    }
+
     /// One introduction record, opened with the OPRF output of the username or
     /// of the name term and filtered by the whole query: by `nameMatchesQuery`
     /// when opened under a name term, by the exact username when opened under
@@ -1178,6 +1252,11 @@ public final class PeopleSearchSession: ObservableObject {
         public var heldGrants: @MainActor (Data) -> [KeptGrant]
         /// Whether this person is a contact now.
         public var isContact: @MainActor (FoundPerson) -> Bool
+        /// Base scenario 9 — who this account is (every own key, its id) and
+        /// who a key names across proven rotations.
+        public var searchIdentity: @MainActor () -> PeopleSearch.SearchIdentity
+        /// Base scenario 9 — the contacts as the search rows match them.
+        public var searchContacts: @MainActor () -> [PeopleSearch.SearchContact]
 
         public init(
             candidates: @escaping @MainActor () -> [LocalCandidate],
@@ -1189,7 +1268,9 @@ public final class PeopleSearchSession: ObservableObject {
             sentRow: @escaping @MainActor (FoundPerson) -> SentContactRequest? = { _ in nil },
             dismissSent: @escaping @MainActor (SentContactRequest) -> Void = { _ in },
             heldGrants: (@MainActor (Data) -> [KeptGrant])? = nil,
-            isContact: @escaping @MainActor (FoundPerson) -> Bool = { _ in false }
+            isContact: @escaping @MainActor (FoundPerson) -> Bool = { _ in false },
+            searchIdentity: (@MainActor () -> PeopleSearch.SearchIdentity)? = nil,
+            searchContacts: @escaping @MainActor () -> [PeopleSearch.SearchContact] = { [] }
         ) {
             self.sentRow = sentRow
             self.dismissSent = dismissSent
@@ -1203,6 +1284,10 @@ public final class PeopleSearchSession: ObservableObject {
                 candidates().first { $0.accountKey == key }?.known.keptGrants ?? []
             }
             self.isContact = isContact
+            self.searchIdentity = searchIdentity ?? {
+                PeopleSearch.SearchIdentity(ownKeys: ownAccountKey().map { [$0] } ?? [], ownAccountId: nil)
+            }
+            self.searchContacts = searchContacts
         }
     }
 
@@ -1549,20 +1634,27 @@ public final class PeopleSearchModel: ObservableObject {
     /// A person who became a contact while the text stands leaves the network
     /// part at once, whatever the remembered answer says of them.
     ///
-    /// One person, one row (UX section 6.1). `listed` are the people a list
-    /// row above shows, a contact or someone added through their invite link:
-    /// they stand nowhere here, whatever their reach. `chatPeers` are the
-    /// people whose one-to-one matched above: a contact among them is not
-    /// listed twice, and someone who is no contact keeps their row, and the
-    /// way to add them. A contact the list does not match yet (their name has
-    /// not arrived) is in neither and keeps a row, so the field is never
-    /// blank.
+    /// One person, one row (UX section 6.1, base scenario 9). `listed` are
+    /// the people a list row above shows, a contact or someone added through
+    /// their invite link; `chatPeers` are the people whose one-to-one matched
+    /// above. Neither stands here, whatever their reach: someone who is no
+    /// contact is added from that conversation's info. The own account never
+    /// stands here, under any of its keys. A contact the list does not match
+    /// yet (their name has not arrived) is in neither and keeps a row, so the
+    /// field is never blank.
     public func rows(
         showsLocalContacts: Bool, listed: Set<Data> = [], chatPeers: Set<Data> = []
     ) -> (local: [FoundPerson], network: [FoundPerson]) {
-        let merged = PeopleSearch.merge([local, answer?.people ?? []], ownAccountKey: nil).map { person in
-            person.reach != .contact && session.ports.isContact(person) ? person.asContact : person
-        }.filter { !listed.contains($0.accountKey) }
+        // Base scenario 9 — one person, one row: the own account never, a
+        // contact under any key of theirs as their contact row, nobody the
+        // list above already shows.
+        let ports = session.ports
+        let merged = PeopleSearch.searchRows(
+            [local, answer?.people ?? []], identity: ports.searchIdentity(),
+            contacts: ports.searchContacts(), listed: listed, chatPeers: chatPeers
+        ).map { person in
+            person.reach != .contact && ports.isContact(person) ? person.asContact : person
+        }
         // ADR-0099 step 4 — a person known suspended is dropped as their
         // standing arrives; nothing waits for the check.
         let visible = SuspensionMarkRules.searchVisible(merged, key: \.accountKey, isSuspended: isSuspended)
@@ -1571,7 +1663,7 @@ public final class PeopleSearchModel: ObservableObject {
             localKeys.contains(person.accountKey) || person.reach == .contact
         }
         func listedAbove(_ person: FoundPerson) -> Bool {
-            person.reach == .contact && (!showsLocalContacts || chatPeers.contains(person.accountKey))
+            person.reach == .contact && !showsLocalContacts
         }
         return (
             visible.filter { isLocal($0) && !listedAbove($0) },

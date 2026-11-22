@@ -841,13 +841,15 @@ final class PeopleSearchFieldTests: XCTestCase {
         XCTAssertTrue(rows.local.isEmpty && rows.network.isEmpty, "the chat row stands above")
     }
 
-    func testSomeoneWhoIsNoContactKeepsTheirRowBesideTheirChat() async {
+    /// Base scenario 9: a person whose one-to-one stands above has no second
+    /// row, contact or not; they are added from that conversation's info.
+    func testSomeoneWhoIsNoContactHasNoSecondRowBesideTheirChat() async {
         let rec = Recorder()
         rec.candidates = [candidate(4, grants: [kept(1)])]
         let model = instantModel(session(rec))
         await type("anna", into: model)
         let rows = model.rows(showsLocalContacts: true, chatPeers: [candidate(4).accountKey])
-        XCTAssertEqual(rows.local.map(\.accountKey), [candidate(4).accountKey], "the way to add them stays")
+        XCTAssertTrue(rows.local.isEmpty && rows.network.isEmpty, "the chat row stands for them")
     }
 
     /// One person, one row: someone added through their link stands in the
@@ -877,21 +879,6 @@ final class PeopleSearchFieldTests: XCTestCase {
         XCTAssertNil(
             model.peopleMessage(includesChannels: true, showsLocalContacts: true, listed: both),
             "and no line stands with no row")
-    }
-
-    /// `listed` and `chatPeers` are two rules: a person whose chat matched
-    /// keeps the way to add them unless a list row shows them.
-    func testAChatPeerIsNotAListedPerson() async {
-        let rec = Recorder()
-        rec.candidates = [candidate(4, grants: [kept(1)])]
-        let model = instantModel(session(rec))
-        await type("anna", into: model)
-        let key = candidate(4).accountKey
-
-        XCTAssertEqual(
-            model.rows(showsLocalContacts: true, chatPeers: [key]).local.map(\.accountKey), [key])
-        XCTAssertTrue(
-            model.rows(showsLocalContacts: true, listed: [key], chatPeers: [key]).local.isEmpty)
     }
 
     func testAKnownPersonWhoBecameAContactIsReadAgainWithTheTextStanding() async {
@@ -1052,5 +1039,101 @@ final class PeopleSearchFieldTests: XCTestCase {
         XCTAssertEqual(model.rows(showsLocalContacts: false).network.map(\.accountKey), [person(2).accountKey])
         XCTAssertEqual(Set(model.suspensionCheckKeys), [person(1).accountKey, person(2).accountKey],
                        "the check keys stay the unfiltered answer")
+    }
+}
+
+// MARK: - Base scenario 9: one person, one row
+//
+// The same table as web `people.test.ts` ("one person, one row") and Android
+// `PeopleModelTest`. Own keys: OWN_OLD was proven superseded by OWN_NEW.
+// Contact Cara is stored under C_OLD and rotated (proven) to C_NEW; contact
+// Dan is stored under D.
+@MainActor
+final class PeopleSearchRowsTests: XCTestCase {
+
+    private func key(_ b: UInt8) -> Data { Data(repeating: b, count: 32) }
+    private func id(_ b: UInt8) -> Data { Data(repeating: b, count: 16) }
+
+    private var ownOld: Data { key(1) }
+    private var ownNew: Data { key(2) }
+    private var cOld: Data { key(3) }
+    private var cNew: Data { key(4) }
+    private var d: Data { key(5) }
+
+    private var identity: PeopleSearch.SearchIdentity {
+        let links = [ownOld: ownNew, cOld: cNew]
+        return PeopleSearch.SearchIdentity(
+            ownKeys: [ownNew, ownOld], ownAccountId: id(0xaa), personOf: { links[$0] ?? $0 })
+    }
+
+    private var contacts: [PeopleSearch.SearchContact] {
+        [.init(accountKey: cOld, accountId: id(0xcc)), .init(accountKey: d, accountId: id(0xdd))]
+    }
+
+    private func hit(
+        _ key: Data, _ reach: PersonReach, account: Data? = nil, name: String = "Kaj", seed: Data? = nil
+    ) -> FoundPerson {
+        FoundPerson(
+            accountKey: key, accountId: account, displayName: name, username: nil, writeSeed: seed,
+            reach: reach)
+    }
+
+    private func rows(
+        _ lists: [[FoundPerson]], listed: Set<Data> = [], chatPeers: Set<Data> = []
+    ) -> [FoundPerson] {
+        PeopleSearch.searchRows(
+            lists, identity: identity, contacts: contacts, listed: listed, chatPeers: chatPeers)
+    }
+
+    func testTheOwnAccountNeverAppearsUnderAnyKeyOrByItsAccountId() {
+        XCTAssertTrue(rows([
+            [hit(ownOld, .none)],
+            [hit(ownNew, .open), hit(key(9), .open, account: id(0xaa))],
+        ]).isEmpty)
+    }
+
+    func testAContactFoundUnderTheirNewKeyIsTheirOneContactRow() {
+        let found = rows([
+            [hit(cOld, .contact, name: "Cara")],
+            [hit(cNew, .open, account: id(0xcc), name: "Cara N")],
+        ])
+        XCTAssertEqual(found.count, 1)
+        XCTAssertEqual(found.first?.accountKey, cOld)
+        XCTAssertEqual(found.first?.reach, .contact)
+        XCTAssertEqual(found.first?.displayName, "Cara")
+        XCTAssertEqual(found.first?.canAddContact, false)
+    }
+
+    func testAContactTheNetworkAloneFoundByKeyOrByAccountIdIsNoAddContact() {
+        let byKey = rows([[hit(cNew, .open, account: id(0xcc))]])
+        XCTAssertEqual(byKey.map(\.accountKey), [cOld])
+        XCTAssertEqual(byKey.first?.reach, .contact)
+        let byAccount = rows([[hit(key(8), .grant, account: id(0xdd), seed: key(7))]])
+        XCTAssertEqual(byAccount.map(\.accountKey), [d])
+        XCTAssertEqual(byAccount.first?.reach, .contact)
+        XCTAssertEqual(byAccount.first?.canAddContact, false)
+    }
+
+    func testAPersonWhoseOneToOneStandsAboveHasNoSecondRowContactOrNot() {
+        let p = key(6)
+        XCTAssertTrue(rows(
+            [[hit(cNew, .open, account: id(0xcc)), hit(p, .open, account: id(0x66))]],
+            chatPeers: [cOld, p]).isEmpty)
+    }
+
+    func testAPersonListedAboveLeavesAndAStrangerKeepsAddContact() {
+        let stranger = hit(key(10), .open, account: id(0x10))
+        let found = rows([[hit(key(11), .open, account: id(0x11)), stranger]], listed: [key(11)])
+        XCTAssertEqual(found, [stranger])
+        XCTAssertEqual(found.first?.canAddContact, true)
+    }
+
+    func testAContactTheListCannotMatchYetKeepsOneRow() {
+        XCTAssertEqual(rows([[hit(d, .contact)]]).map(\.accountKey), [d])
+    }
+
+    func testAKeyNothingProvedRelatedIsAnotherPerson() {
+        let other = hit(key(12), .open, account: id(0xee))
+        XCTAssertEqual(rows([[other]]), [other])
     }
 }

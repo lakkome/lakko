@@ -227,6 +227,27 @@ public enum ReachRules {
         ].joined(separator: "|")
     }
 
+    /// Whether the Everyone step sends `PUT /discovery/visibility`.
+    /// In Everyone: unless this device already published exactly
+    /// `publishKey`. Outside it: unless THIS device already withdrew for the
+    /// very setting in force (`settingMs`). Whether this device ever published
+    /// does not matter: the record at discovery is the account's, and another
+    /// device of the account (offline, lost or removed), or this device before
+    /// its note was lost, may have published it. The setting's stamp changes
+    /// with every choice made on any device, so a device withdraws once per
+    /// choice that leaves Everyone, not on every sync.
+    public static func everyoneNeedsSending(
+        wantPublic: Bool,
+        published: Bool?,
+        publishedFor: String?,
+        publishKey: String,
+        withdrawnForSettingMs: UInt64?,
+        settingMs: UInt64
+    ) -> Bool {
+        if wantPublic { return !(published == true && publishedFor == publishKey) }
+        return !(published == false && withdrawnForSettingMs == settingMs)
+    }
+
     /// The counter slots among `specs` that `state` holds no version for and
     /// that were not checked against the DS yet (`checked`): what must be
     /// recovered before anything is registered.

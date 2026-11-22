@@ -347,6 +347,42 @@ public class ReachManager internal constructor(
     /** The bound account's signature public key, or `null`. */
     public fun ownAccountKey(): ByteArray? = binding.get()?.accountKey?.copyOf()
 
+    /**
+     * Base scenario 9 - every account key that is this account's own: the
+     * current key and the own predecessors this device holds (ADR-0074
+     * 3.5a), standard base64. The key the account's chats are bound to is
+     * one of them, or else read from the own conversation-key record by
+     * the caller. Empty without a bound account. A search never
+     * lists any of them.
+     */
+    public fun ownAccountKeysB64(): Set<String> {
+        val b = binding.get() ?: return emptySet()
+        val enc = java.util.Base64.getEncoder()
+        val out = linkedSetOf(enc.encodeToString(b.accountKey))
+        try {
+            ownPredecessorKeys(b.accountIdB64).forEach { (key, seed) ->
+                out += enc.encodeToString(key)
+                seed.fill(0)
+            }
+        } catch (_: Throwable) {
+            // An unreadable predecessor slot leaves the current key alone.
+        }
+        return out
+    }
+
+    /** The bound account's id as stored (standard base64), or `null`. */
+    public fun ownAccountIdB64(): String? = binding.get()?.accountIdB64
+
+    /** The bound account's 16-byte account id as lower-case hex, or `null`. */
+    public fun ownAccountIdHex(): String? = binding.get()?.accountIdB64?.let { b64 ->
+        try {
+            val bytes = java.util.Base64.getDecoder().decode(b64)
+            bytes.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+    }
+
     /** ADR-0078 - the bound account's 97-byte mailbox binding, or `null`. */
     public fun ownMailboxBinding(): ByteArray? = binding.get()?.mailboxBinding?.copyOf()
 
@@ -1423,6 +1459,9 @@ public class ReachManager internal constructor(
      *  which [everyonePublishKey] (ADR-0060 §5). */
     public fun publishedEveryone(): Pair<Boolean?, String?> = doc.publishedPublic to doc.publishedKey
 
+    /** The stamp of the setting the last withdraw was sent for, or `null`. */
+    public fun everyoneWithdrawnForSettingMs(): Long? = doc.withdrawnForSettingMs
+
     /** Record what the Everyone publication now holds ([key] is `null` when
      *  not public). */
     /**
@@ -1494,12 +1533,18 @@ public class ReachManager internal constructor(
         mutableStatus.value = ReachApplyStatus.FAILED
     }
 
-    public fun notePublishedEveryone(public: Boolean, key: String?) {
+    public fun notePublishedEveryone(public: Boolean, key: String?, withdrawnForSettingMs: Long? = null) {
         val b = binding.get() ?: return
         // ADR-0099 step 5 — an Everyone record that landed ends the
         // moderators' hiding; withdrawing says nothing about it.
         val hidden = if (public) false else doc.hiddenFromSearch
-        doc = doc.copy(publishedPublic = public, publishedKey = key, hiddenFromSearch = hidden)
+        val withdrawnFor = if (public) null else withdrawnForSettingMs
+        doc = doc.copy(
+            publishedPublic = public,
+            publishedKey = key,
+            withdrawnForSettingMs = withdrawnFor,
+            hiddenFromSearch = hidden,
+        )
         mutableHiddenFromSearch.value = hidden
         if (everyoneStuck) {
             everyoneStuck = false
@@ -1508,7 +1553,12 @@ public class ReachManager internal constructor(
         scope.launch {
             lock.withLock {
                 if (binding.get() !== b) return@withLock
-                doc = doc.copy(publishedPublic = public, publishedKey = key, hiddenFromSearch = hidden)
+                doc = doc.copy(
+                    publishedPublic = public,
+                    publishedKey = key,
+                    withdrawnForSettingMs = withdrawnFor,
+                    hiddenFromSearch = hidden,
+                )
                 store.save(b.accountIdB64, doc)
             }
         }
@@ -1987,6 +2037,33 @@ public class ReachManager internal constructor(
             )
             store.save(b.accountIdB64, doc)
         }
+    }
+
+    /**
+     * Forget what the person known by [accountKey] offered and relayed, under
+     * every key they have had (ADR-0060 section 4): a removed contact's record
+     * is no longer relayed, and the records they relayed are no longer
+     * searched. Returns whether anything was dropped.
+     */
+    public suspend fun dropIntroductions(accountKey: ByteArray): Boolean {
+        val b = binding.get() ?: return false
+        val keys = personKeys(accountKey).toSet()
+        var dropped = false
+        lock.withLock {
+            if (binding.get() !== b) return@withLock
+            val next = withoutIntroductionsFrom(doc, keys) ?: return@withLock
+            doc = next
+            store.save(b.accountIdB64, doc)
+            dropped = true
+        }
+        if (dropped) {
+            // The host JVM tests have no android.util.Log.
+            try {
+                Log.i(LOG_TAG, "a removed contact's introductions were dropped")
+            } catch (_: RuntimeException) {
+            }
+        }
+        return dropped
     }
 
     /** Every relayed bundle wire this device keeps. */

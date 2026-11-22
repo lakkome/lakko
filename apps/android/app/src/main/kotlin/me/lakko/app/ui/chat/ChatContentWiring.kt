@@ -232,7 +232,7 @@ internal fun AttachmentSurfaces(
     }
     if (cameraOpen) {
         CameraCaptureScreen(
-            onCaptured = { uri -> viewModel.addToTray(listOf(uri), filesOnly = false) },
+            onCaptured = { take -> viewModel.addToTray(listOf(take.uri), filesOnly = false, mimeHints = listOf(take.mime)) },
             onClose = { cameraOpen = false },
         )
     }

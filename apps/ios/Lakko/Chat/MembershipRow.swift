@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 
 /// The named membership row of a group (`docs/ux/second-device.md` section 4,
 /// "Membership rows", decided 2026-10-29).
@@ -75,6 +76,58 @@ public struct MembershipRow: Equatable {
         public let row: MembershipRow?
         /// The device-swap memory to keep (``ResetRepair/deviceSwapAcrossCommits``).
         public let awaited: [String: Int64]
+    }
+
+    /// The distinct people of a roster (ADR-0050 person keys, base64), in
+    /// first-leaf order.
+    public static func personKeysB64(_ members: [GroupMember]) -> [String] {
+        PersonKey.people(members).map { base64Encode($0) }
+    }
+
+    /// What the commits of one receive batch record, each on its own row.
+    public struct CommitsVerdict: Equatable {
+        /// The row to write on each commit, by DS message id; a commit with
+        /// no row is absent.
+        public let rows: [Int64: MembershipRow]
+        /// The device-swap memory to keep.
+        public let awaited: [String: Int64]
+    }
+
+    /// Decide what each commit of a batch records, judged commit by commit:
+    /// the people after the previous commit (`personKeysBefore` for the first)
+    /// against the people right after this one.
+    ///
+    /// Judging the batch as a whole loses a change that a later commit of the
+    /// same batch undoes: a person removed and added back between two polls
+    /// is the same set of people before and after, and nothing was recorded
+    /// (seen live 2026-11-22: the committer drew both lines, a member that
+    /// received both commits in one poll drew none). `commits` is in DS
+    /// order; a `nil` roster (a torn read) records nothing for that commit or
+    /// the next one, whose "before" is then unknown.
+    public static func forCommits(
+        isGroup: Bool,
+        personKeysBefore: [String]?,
+        commits: [(messageId: Int64, personKeysAfter: [String]?)],
+        ownPersonKeyB64: String?,
+        accountOfKey: (String) -> String?,
+        isSuperseded: (String) -> Bool,
+        awaited: [String: Int64],
+        nowMs: Int64
+    ) -> CommitsVerdict {
+        var rows: [Int64: MembershipRow] = [:]
+        var memory = awaited
+        var before = personKeysBefore
+        for commit in commits {
+            let verdict = forBatch(
+                isGroup: isGroup, hadCommit: true,
+                personKeysBefore: before, personKeysAfter: commit.personKeysAfter,
+                ownPersonKeyB64: ownPersonKeyB64, accountOfKey: accountOfKey,
+                isSuperseded: isSuperseded, awaited: memory, nowMs: nowMs)
+            memory = verdict.awaited
+            if let row = verdict.row { rows[commit.messageId] = row }
+            before = commit.personKeysAfter
+        }
+        return CommitsVerdict(rows: rows, awaited: memory)
     }
 
     /// Decide what a batch records.

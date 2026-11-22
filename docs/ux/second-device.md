@@ -197,9 +197,9 @@ gives the same answer). Unbuilt.
 - **Membership rows (decided 2026-10-29).** There is no generic "Members
   changed" row on any client, in any conversation, stored or new (web was
   the only client that drew one; seen live with nine of them in a day, all
-  device changes). In a **group**, when a batch of commits changes the
-  people (person keys before and after differ, ADR-0050), the device writes
-  one row at the batch's last commit naming each person: "VG3 joined",
+  device changes). In a **group**, when a commit changes the people
+  (person keys before and after it differ, ADR-0050), the device writes
+  one row at that commit naming each person: "VG3 joined",
   "VG2 is no longer in the group" (several people: one sentence each, in one row). The row stores
   the person keys, never names; the name is resolved when drawn, through the
   one display resolver ("Member" when unknown). It does not say who
@@ -207,7 +207,14 @@ gives the same answer). Unbuilt.
   asked. In a **one-to-one** the people cannot change (ADR-0062), so there
   is never such a row. This device's own joining or removal has its own
   surfaces and writes no row here. A chat-list preview never shows a
-  membership row.
+  membership row, and a membership row is never unread. **Amended
+  2026-11-22:** each commit of a received batch is judged on its own (the
+  people right after it against the people after the commit before it);
+  judged per batch, a person removed and added back between two polls was
+  the same set of people before and after, and a member that received both
+  commits in one poll drew neither line (seen live on iOS; web, iOS and
+  Android all judged per batch). This device's own merged sweep still writes
+  one row on its own commit.
 
 ## 4a. Channels on another device of the account (2026-11-13)
 

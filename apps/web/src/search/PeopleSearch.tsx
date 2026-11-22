@@ -31,7 +31,7 @@ import { createEffect, createMemo, createSignal, For, on, onCleanup, Show, type 
 import { A } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
-import { base64UrlEncodeNoPad, base64Decode } from "../auth/account-id";
+import { base64UrlEncodeNoPad, base64Decode, base64Encode } from "../auth/account-id";
 import { useChats } from "../chat/ChatContext";
 import { contactBackState, type ContactBackState } from "../chat/info-navigation";
 import { ContactsClient } from "../contacts/client";
@@ -45,16 +45,18 @@ import { Avatar } from "../ui/Avatar";
 import { loadWasm, type Wasm } from "../wasm";
 import { AutoSearch, networkQueryOf, SearchMemory, type NetworkQuery, type NetworkView } from "./auto-search";
 import {
-  asContacts,
   canAddContact,
   localPeople,
-  mergePeople,
   namesFormerContact,
-  peopleRows,
+  searchPeopleRows,
+  toHex,
   type ContactSet,
   type LocalCandidate,
   type PersonResult,
+  type SearchContact,
+  type SearchIdentity,
 } from "./people";
+import { ownAccountKeys, personResolverB64 } from "../contacts/address-resolver";
 import { searchPeople } from "./people-search";
 import { candidatesMatching, ReachVerdicts } from "./reach-verdicts";
 import {
@@ -96,6 +98,13 @@ const sessionMemory = new SearchMemory();
  *  types, and moving between Chats and Contacts. "Request sent" is not here:
  *  it comes from the Sent list. */
 const [rowStates, setRowStates] = createSignal<ReadonlyMap<string, RowSendState>>(new Map());
+/** Bytes of a lower-case hex string. */
+function hexBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
 const rowKeyOf = (keyHex: string): string => `${reachSession()?.accountIdB64 ?? ""}\u0000${keyHex}`;
 const rowStateOf = (keyHex: string): RowSendState => rowStates().get(rowKeyOf(keyHex)) ?? "idle";
 function setRowState(keyHex: string, state: RowSendState): void {
@@ -116,8 +125,8 @@ export function PeopleSearch(props: {
    *  added through their link. They leave People whatever their reach. */
   readonly listedB64?: () => ReadonlySet<string>;
   /** The people whose one-to-one is among the matching conversations (Chats).
-   *  A contact among them is not listed twice; anyone else keeps the way to
-   *  add them. */
+   *  None of them is listed again (base scenario 9): someone who is no
+   *  contact is added from that conversation's info. */
   readonly standingAboveB64?: () => ReadonlySet<string>;
   /** The line that nothing matches; `null` for none. Chats' line when absent. */
   readonly noMatchLine?: () => string | null;
@@ -265,18 +274,59 @@ export function PeopleSearch(props: {
     ),
   );
 
-  /** Everyone found, a person who became a contact since read as one. */
-  const merged = (): PersonResult[] =>
-    asContacts(mergePeople([local(), network().outcome?.people ?? []], ownKeyHex()), contactSet());
-  const people = (): PersonResult[] => {
-    const all = merged();
+  // Base scenario 9 - who this account is (every own key, its id) and its
+  // contacts, as the rows match a person: by account key across proven
+  // rotations, or by account id.
+  const searchContacts = createMemo((): SearchContact[] => {
+    contactsChanged();
+    return loadAccepted().map((c) => {
+      let keyHex = "";
+      try {
+        keyHex = toHex(base64Decode(c.signaturePubkeyB64));
+      } catch {
+        // A damaged row keeps its base64 key alone.
+      }
+      return { keyB64: c.signaturePubkeyB64, keyHex, accountIdHex: c.accountIdHex ?? null };
+    });
+  });
+  const searchIdentity = (): SearchIdentity => {
+    contactsChanged();
+    const own = new Set<string>();
+    const keys = ownAccountKeys();
+    if (keys !== null) {
+      own.add(keys.currentKeyB64);
+      for (const k of keys.provenPredecessorsB64) own.add(k);
+    }
+    const person = ownPersonKeyB64(chats.identity());
+    if (person !== null) own.add(person);
+    const session = reachSession();
+    if (session !== null) {
+      try {
+        own.add(base64Encode(hexBytes(session.accountKeyHex)));
+      } catch {
+        // No key to add.
+      }
+    }
+    let ownAccountIdHex: string | null = null;
+    try {
+      if (session !== null) ownAccountIdHex = toHex(base64Decode(session.accountIdB64));
+    } catch {
+      ownAccountIdHex = null;
+    }
+    return { ownKeysB64: [...own], ownAccountIdHex, personOf: personResolverB64() };
+  };
+  const people = createMemo((): PersonResult[] => {
+    const all = searchPeopleRows(
+      [local(), network().outcome?.people ?? []],
+      searchIdentity(),
+      searchContacts(),
+      props.listedB64?.() ?? new Set(),
+      props.standingAboveB64?.() ?? new Set(),
+    );
     // ADR-0099 step 4, UX 3 - search lists no suspended account. Rows show
     // at once; one drops out when the log confirms its suspension.
-    return withoutSuspended(
-      peopleRows(all, props.listedB64?.() ?? new Set(), props.standingAboveB64?.() ?? new Set()),
-      isSuspendedKeyB64,
-    );
-  };
+    return withoutSuspended(all, isSuspendedKeyB64);
+  });
 
   const channel = () => (inContacts ? null : (network().outcome?.channel ?? null));
   /** ADR-0087 section 5 — public groups and channels, under People. */

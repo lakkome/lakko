@@ -28,6 +28,10 @@ public struct ReachRecord: Codable, Equatable {
     public var held: [String: [ReachRules.HeldGrant]] = [:]
     /// Whether this account's name terms are published in discovery (Everyone).
     public var publishedEveryone: Bool?
+    /// The stamp of the "who can find me" setting the last withdraw from
+    /// Everyone was sent for (``ReachRules/everyoneNeedsSending``); `nil` when
+    /// none was sent.
+    public var everyoneWithdrawnForSettingMs: UInt64?
     /// This account's discovery-signed username certificate (ADR-0060 section
     /// 5), carried in every profile v3 that names the username. Public.
     public var ownUsernameCertificateB64: String?

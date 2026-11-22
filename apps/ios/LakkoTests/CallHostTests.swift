@@ -55,6 +55,9 @@ final class CallHostTests: XCTestCase {
         var mutedGroups: Set<String> = []
         /// The repository refuses the publish (a closed one-to-one).
         var publishFails = false
+        /// How long each publish takes, standing in for a Delivery Service
+        /// round trip.
+        var publishDelayNs: UInt64 = 0
         /// ADR-0091 — this device is behind in the chat.
         var behind = false
         init(nowMs: Int64) { self.nowMs = nowMs }
@@ -70,6 +73,7 @@ final class CallHostTests: XCTestCase {
     private func makeHost(_ h: Harness) -> CallHost {
         CallHost(ports: CallHost.Ports(
             publish: { group, bytes, wake in
+                if h.publishDelayNs > 0 { try? await Task.sleep(nanoseconds: h.publishDelayNs) }
                 if h.publishFails { return false }
                 if let body = try? parseCallSignaling(plaintext: bytes) {
                     h.published.append((group, body))
@@ -134,6 +138,77 @@ final class CallHostTests: XCTestCase {
             if case .end(let cid, let reason) = entry.body { return (entry.group, cid, reason) }
             return nil
         }
+    }
+
+    // MARK: - Decline on the system call screen (CallKit)
+
+    /// Seen live 2026-11-22: a call declined on the lock screen with the app in
+    /// the background reached the caller only when the app next ran, so the
+    /// caller rang out its whole window. The bridge's end handler now returns
+    /// only after the `End` is published, which is what the provider fulfils
+    /// the action and releases the background task on.
+    func testASystemDeclineReturnsOnlyOnceTheDeclineIsPublished() async throws {
+        let h = Harness(nowMs: t0)
+        h.publishDelayNs = 100_000_000
+        let host = makeHost(h)
+        let provider = CallKitProvider()
+        let registry = CallKitCallRegistry()
+        let bridge = CallKitBridge(
+            provider: provider, registry: registry, host: host, appIsActive: { true })
+        host.receive(row(offer(callA), group: groupA, id: 1, atMs: t0))
+        XCTAssertEqual(host.activeCall?.state, .ringing)
+        let uuid = try XCTUnwrap(registry.uuid(forCallId: callA))
+
+        await provider.onEnd?(uuid)
+
+        XCTAssertEqual(endReasons(h).map(\.2), [.declined],
+                       "the End{declined} is on the wire when the handler returns")
+        XCTAssertEqual(endReasons(h).first?.0, groupA)
+        withExtendedLifetime(bridge) {}
+    }
+
+    /// Declined while the system screen still showed the VoIP placeholder: the
+    /// offer read afterwards is declined at once and never reported again.
+    func testADeclineBeforeTheOfferIsReadDeclinesTheCallWhenItLands() async throws {
+        let h = Harness(nowMs: t0)
+        let host = makeHost(h)
+        let provider = CallKitProvider()
+        let registry = CallKitCallRegistry()
+        let bridge = CallKitBridge(
+            provider: provider, registry: registry, host: host, appIsActive: { false },
+            placeholderPollNs: 10_000_000)
+        let placeholder = UUID()
+        registry.placeholderReported(placeholder)
+
+        let ended = Task { @MainActor in await provider.onEnd?(placeholder) }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertTrue(h.published.isEmpty, "nothing to end before the offer is read")
+
+        host.receive(row(offer(callA), group: groupA, id: 1, atMs: t0))
+        await ended.value
+
+        XCTAssertEqual(endReasons(h).map(\.2), [.declined])
+        XCTAssertFalse(provider.isReported(placeholder), "never reported to the system again")
+        try await waitUntil { host.activeCall == nil }
+        XCTAssertEqual(h.recorded.first?.row.text, "Declined", "filed as declined")
+        withExtendedLifetime(bridge) {}
+    }
+
+    /// A placeholder declined for a wake that never brings a call does not
+    /// hold the process past the wait.
+    func testADeclinedPlaceholderWithNoCallStopsWaiting() async throws {
+        let h = Harness(nowMs: t0)
+        let host = makeHost(h)
+        let provider = CallKitProvider()
+        let registry = CallKitCallRegistry()
+        let bridge = CallKitBridge(
+            provider: provider, registry: registry, host: host, appIsActive: { false },
+            placeholderPollNs: 10_000_000, placeholderWaitMs: 50)
+        let placeholder = UUID()
+        registry.placeholderReported(placeholder)
+        await provider.onEnd?(placeholder)
+        XCTAssertTrue(h.published.isEmpty)
+        withExtendedLifetime(bridge) {}
     }
 
     // MARK: - Ringing from any chat

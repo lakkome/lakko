@@ -51,6 +51,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.repeatOnLifecycle
@@ -73,9 +74,11 @@ import me.lakko.app.channels.ChannelsComposer
 import me.lakko.app.channels.ChannelsComposerException
 import me.lakko.app.channels.ChannelsUiState
 import me.lakko.app.channels.CollapsedMore
+import me.lakko.app.channels.CommentRefresh
 import me.lakko.app.channels.channelHeaderLineKey
 import me.lakko.app.channels.channelIsOrphaned
 import me.lakko.app.channels.collapsedMore
+import me.lakko.app.channels.commentRefresh
 import me.lakko.app.channels.fullRecord
 import me.lakko.app.channels.sharedMeta
 import me.lakko.app.channels.subscriberBand
@@ -676,7 +679,7 @@ private fun ChannelTimelineView(
         },
         onPickFiles = { pickFiles.launch(arrayOf("*/*")) },
         onPickAudio = { pickAudio.launch(arrayOf("audio/*")) },
-        onCaptured = { uri -> addToTray(listOf(uri), filesOnly = false) },
+        onCaptured = { take -> addToTray(listOf(take.uri), filesOnly = false, mimeHints = listOf(take.mime)) },
         onPublish = ::publishContent,
         draftKey = channelId,
     )
@@ -1327,7 +1330,15 @@ private fun CommentsBlock(
     // Each comment's rectangle on screen, for the message action menu.
     val commentBounds = remember(post.cursor) { mutableStateMapOf<Long, androidx.compose.ui.geometry.Rect>() }
     var sendFailed by remember(post.cursor) { mutableStateOf(false) }
-    var arrived by remember(post.cursor) { mutableIntStateOf(0) }
+    // Section 13.2 — comments that arrived while the thread is open wait
+    // behind `{n} new comments` until it is pressed.
+    var arrived by remember(post.cursor) { mutableStateOf<List<ChannelFeedback.Comment>>(emptyList()) }
+    // The service's count when the thread was last read: what the open
+    // channel's tick compares a new count with ([commentRefresh]).
+    var countAtRead by remember(post.cursor) { mutableStateOf<Long?>(null) }
+    val currentCount by rememberUpdatedState(count)
+    // A tick's read in flight (no progress line: the thread does not move).
+    var refreshing by remember(post.cursor) { mutableStateOf(false) }
     // Section 13a (phase B) — reactions on comments, as on posts.
     val commentChips = remember(post.cursor) { mutableStateMapOf<Long, List<ChannelFeedback.Chip>>() }
     var reactingTo by remember(post.cursor) { mutableStateOf<ChannelFeedback.Comment?>(null) }
@@ -1361,15 +1372,13 @@ private fun CommentsBlock(
         failed = false
         try {
             val page = feedback.comments(post.cursor, 0)
-            if (open && loaded.isNotEmpty()) {
-                arrived = (page.comments.size - loaded.size).coerceAtLeast(0)
-            } else {
-                loaded = page.comments
-                rowsRead = page.rowsRead
-            }
+            loaded = page.comments
+            arrived = emptyList()
+            rowsRead = page.rowsRead
             firstRead = true
             nextAfter = page.nextAfter
             more = page.more
+            countAtRead = currentCount
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (_: Throwable) {
@@ -1381,6 +1390,59 @@ private fun CommentsBlock(
     LaunchedEffect(post.cursor) {
         loadFirst()
         loadChips(loaded)
+    }
+
+    /** Read the rows after the last one read: into the thread when it is
+     *  collapsed, behind `{n} new comments` when it is open (this account's
+     *  own comments join at once). A failure keeps what is shown. */
+    suspend fun readNewer(seenCount: Long?) {
+        refreshing = true
+        try {
+            val page = feedback.comments(post.cursor, nextAfter)
+            val known = (loaded + arrived).map { it.cursor }.toSet()
+            val fresh = page.comments.filter { it.cursor !in known }
+            if (open) {
+                loaded = (loaded + fresh.filter { it.own }).sortedBy { it.cursor }
+                arrived = (arrived + fresh.filterNot { it.own }).sortedBy { it.cursor }
+            } else {
+                loaded = (loaded + fresh).sortedBy { it.cursor }
+            }
+            rowsRead += page.rowsRead
+            nextAfter = maxOf(nextAfter, page.nextAfter)
+            more = page.more
+            countAtRead = seenCount
+            loadChips(fresh)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            // The next tick tries again.
+        } finally {
+            refreshing = false
+        }
+    }
+
+    /** One step of keeping the thread current: what the service's count,
+     *  read on the open channel's tick, says since the last read. */
+    suspend fun refresh() {
+        if (loading || refreshing) return
+        val n = currentCount
+        when (commentRefresh(firstRead, open, more, rowsRead, countAtRead, n)) {
+            CommentRefresh.NONE -> Unit
+            CommentRefresh.REBASE -> countAtRead = n
+            CommentRefresh.REREAD -> loadFirst()
+            CommentRefresh.NEWER -> readNewer(n)
+        }
+    }
+    // The count moves on the channel's 10 s read (`readNow`): act on it.
+    LaunchedEffect(post.cursor, count) { refresh() }
+    // With no count from the service (an older one), an open thread reads on
+    // at the channel's own cadence.
+    LaunchedEffect(post.cursor, open) {
+        if (!open) return@LaunchedEffect
+        while (true) {
+            delay(READ_INTERVAL_MS)
+            if (currentCount == null) refresh()
+        }
     }
 
     val shown = if (open) loaded else loaded.take(2)
@@ -1482,12 +1544,11 @@ private fun CommentsBlock(
                     }
                 }) { Text(t("channels.comments.more")) }
             }
-            if (arrived > 0) {
+            if (arrived.isNotEmpty()) {
                 TextButton(onClick = {
-                    arrived = 0
-                    loaded = emptyList()
-                    scope.launch { loadFirst() }
-                }) { Text(strings.format("channels.comments.new", emptyMap(), mapOf("count" to arrived.toULong()))) }
+                    loaded = (loaded + arrived.filter { a -> loaded.none { it.cursor == a.cursor } }).sortedBy { it.cursor }
+                    arrived = emptyList()
+                }) { Text(strings.format("channels.comments.new", emptyMap(), mapOf("count" to arrived.size.toULong()))) }
             }
             replyTo?.let { r ->
                 Text("${r.name}: ${r.text}", style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1538,7 +1599,11 @@ private fun CommentsBlock(
                 }
             }
             if (sendFailed) Text(t("channels.publish.error.generic"), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-            TextButton(onClick = { open = false }) { Text(t("channels.comments.hide")) }
+            TextButton(onClick = {
+                loaded = (loaded + arrived.filter { a -> loaded.none { it.cursor == a.cursor } }).sortedBy { it.cursor }
+                arrived = emptyList()
+                open = false
+            }) { Text(t("channels.comments.hide")) }
         }
     }
 

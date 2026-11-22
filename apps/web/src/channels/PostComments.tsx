@@ -24,7 +24,7 @@
  */
 import { accountSuspended } from "../auth/suspension-state";
 import { SuspendedComposerLine } from "../auth/SuspendedReadOnly";
-import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack, type JSX } from "solid-js";
 
 import { base64Encode } from "../auth/account-id";
 import { useAuth } from "../auth/AuthContext";
@@ -54,6 +54,7 @@ import { postCommentCount, requestReactionCounts } from "./post-feedback";
 import {
   COMMENT_PAGE,
   collapsedView,
+  commentRefresh,
   needsFirstRead,
   EMPTY_THREAD,
   openView,
@@ -75,11 +76,9 @@ import {
   type CommentRow,
 } from "./feedback-api";
 import { ownCommentNoncesOn, ownFeedbackPort } from "./own-feedback-register";
+import { OPEN_CHANNEL_POLL_MS } from "./open-channel-poll";
 
 type Identity = InstanceType<Wasm["Identity"]>;
-
-/** Between reads of an open thread for new comments (chosen). */
-const OPEN_POLL_MS = 15_000;
 
 /** A comment this device is sending, or failed to send. */
 interface OutgoingComment {
@@ -197,7 +196,9 @@ export function PostComments(props: {
     return out;
   });
 
-  async function read(after: number, mode: "page" | "poll"): Promise<void> {
+  /** Read a page after `after`. `fresh`: the page replaces what the thread
+   *  held (a collapsed thread that lost comments). */
+  async function read(after: number, mode: "page" | "poll", fresh = false): Promise<void> {
     const s = seed();
     if (s === undefined) return;
     const w = await loadWasm();
@@ -208,13 +209,15 @@ export function PostComments(props: {
       if (v !== null) opened.push(v);
     }
     // The page length decides `done`, so rows that did not open still count.
-    setThread(withPage(thread(), opened, page.nextAfter, mode, page.comments.length));
+    const base = fresh ? { ...EMPTY_THREAD, expanded: thread().expanded, shownCount: thread().shownCount } : thread();
+    setThread(withPage(base, opened, page.nextAfter, mode, page.comments.length));
   }
 
   async function loadFirst(): Promise<void> {
     setStatus("loading");
     try {
       await read(0, "page");
+      setThread({ ...thread(), countAtRead: untrack(serverCount) ?? null });
       setStatus("ready");
     } catch {
       setStatus("failed");
@@ -242,26 +245,53 @@ export function PostComments(props: {
     const n = serverCount();
     if (n === undefined || seed() === undefined) return;
     if (needsFirstRead(n)) {
-      // A count above what was read (someone commented since): read on.
+      // A count that moved (the open channel's tick reads it): see
+      // `commentRefresh`.
       if (!started) start();
-      else if (status() === "ready" && !thread().expanded && thread().done && n > thread().rowsRead) {
-        void read(thread().nextAfter, "page").catch(() => undefined);
-      }
+      else void refresh();
       return;
     }
     if (!started) {
       started = true;
-      setThread({ ...thread(), done: true });
+      setThread({ ...thread(), done: true, countAtRead: 0 });
       setStatus("ready");
+    } else {
+      void refresh();
     }
   });
 
-  // An open thread looks for new comments while the page is visible.
+  /** One step of keeping the thread current (UX 13.2): what the service's
+   *  comment count says since the last read. One at a time. */
+  let refreshing = false;
+  async function refresh(): Promise<void> {
+    if (refreshing || untrack(status) !== "ready" || untrack(seed) === undefined) return;
+    const st = untrack(thread);
+    const n = untrack(serverCount);
+    const action = commentRefresh(st.firstRead || st.done, st.expanded, !st.done, st.rowsRead, st.countAtRead, n);
+    if (action === "none") return;
+    if (action === "rebase") {
+      setThread({ ...st, countAtRead: n ?? null });
+      return;
+    }
+    refreshing = true;
+    try {
+      if (action === "reread") await read(0, "page", true);
+      else await read(st.nextAfter, st.expanded ? "poll" : "page");
+      setThread({ ...thread(), countAtRead: n ?? null });
+    } catch {
+      // The next tick tries again.
+    } finally {
+      refreshing = false;
+    }
+  }
+
+  // With no count from the service (an older one), an open thread reads on
+  // at the channel's own cadence while the page is visible.
   onMount(() => {
     const timer = setInterval(() => {
-      if (!thread().expanded || document.visibilityState !== "visible" || status() !== "ready") return;
-      void read(thread().nextAfter, "poll").catch(() => undefined);
-    }, OPEN_POLL_MS);
+      if (document.visibilityState !== "visible" || untrack(serverCount) !== undefined) return;
+      void refresh();
+    }, OPEN_CHANNEL_POLL_MS);
     onCleanup(() => clearInterval(timer));
   });
 

@@ -55,3 +55,50 @@ public fun collapsedMoreOf(answer: uniffi.lakko_ffi_uniffi.CollapsedComments): C
     is uniffi.lakko_ffi_uniffi.CollapsedComments.Unknown -> CollapsedMore.Unknown
     is uniffi.lakko_ffi_uniffi.CollapsedComments.Comment -> CollapsedMore.Comment
 }
+
+/**
+ * Section 13.2 — what the open channel's tick does for one post's thread, so
+ * a comment written on another device reaches a channel on screen, collapsed
+ * or open. The rule written three times: web `commentRefresh` in
+ * `comment-thread.ts`, iOS `ChannelConversationModel.commentRefresh`, the
+ * same table in each client's tests.
+ */
+public enum class CommentRefresh {
+    /** Nothing to read. */
+    NONE,
+
+    /** Read after the last row read: into a collapsed thread (the first two
+     *  and the count follow), behind `{n} new comments` in an open one. */
+    NEWER,
+
+    /** A collapsed thread lost comments (a removal): its first page is read
+     *  again in place of what it held. */
+    REREAD,
+
+    /** An open thread lost comments: nothing is read (the open thread does
+     *  not move); the count is the new base. */
+    REBASE,
+}
+
+/** The rule behind [CommentRefresh], driven by the service's comment count
+ *  the tick reads with the reaction counts ([countAtRead] is that count when
+ *  the thread was last read, `null` before a read that knew it); with no
+ *  count (an older service) an open thread reads on every tick. Pure. */
+public fun commentRefresh(
+    firstRead: Boolean,
+    expanded: Boolean,
+    morePages: Boolean,
+    rowsRead: Int,
+    countAtRead: Long?,
+    serverCount: Long?,
+): CommentRefresh {
+    if (!firstRead) return CommentRefresh.NONE
+    if (serverCount == null) return if (expanded && !morePages) CommentRefresh.NEWER else CommentRefresh.NONE
+    val seen = countAtRead ?: rowsRead.coerceAtLeast(0).toLong()
+    return when {
+        serverCount == seen -> CommentRefresh.NONE
+        serverCount > seen -> if (morePages) CommentRefresh.NONE else CommentRefresh.NEWER
+        expanded -> CommentRefresh.REBASE
+        else -> CommentRefresh.REREAD
+    }
+}

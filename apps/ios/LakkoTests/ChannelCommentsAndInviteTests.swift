@@ -69,3 +69,49 @@ final class ChannelCommentsAndInviteTests: XCTestCase {
         XCTAssertEqual(ChannelInvitePeopleScreen.candidates(all, inChannel: []).count, 1)
     }
 }
+
+/// UX `group-and-channel-privacy.md` 13.2 (defect seen live 2026-11-22: a
+/// comment written on another device did not reach a channel open on
+/// screen) — what the open channel's tick does for one post's thread. The
+/// same table as web `comment-thread.test.ts` and Android
+/// `CommentRefreshTest`.
+@MainActor
+final class ChannelCommentRefreshTests: XCTestCase {
+    typealias Refresh = ChannelConversationModel.CommentRefresh
+
+    private func refresh(
+        _ firstRead: Bool, _ expanded: Bool, _ morePages: Bool, _ rowsRead: Int,
+        _ countAtRead: UInt64?, _ server: UInt64?
+    ) -> Refresh {
+        ChannelConversationModel.commentRefresh(
+            firstRead: firstRead, expanded: expanded, morePages: morePages, rowsRead: rowsRead,
+            countAtRead: countAtRead, serverCount: server)
+    }
+
+    func testTheSharedTable() {
+        XCTAssertEqual(refresh(false, false, false, 0, nil, 3), .none, "nothing before the first read")
+        XCTAssertEqual(refresh(true, true, false, 2, nil, nil), .newer, "no count, open, read to the end")
+        XCTAssertEqual(refresh(true, false, false, 2, nil, nil), .none, "no count, collapsed")
+        XCTAssertEqual(refresh(true, true, true, 20, nil, nil), .none, "no count, open, pages unread")
+        XCTAssertEqual(refresh(true, false, false, 2, 2, 2), .none, "count as read")
+        XCTAssertEqual(refresh(true, false, false, 1, 1, 2), .newer, "count up, collapsed")
+        XCTAssertEqual(refresh(true, true, false, 1, 1, 2), .newer, "count up, open")
+        XCTAssertEqual(refresh(true, true, true, 20, 25, 26), .none, "count up, pages unread")
+        XCTAssertEqual(refresh(true, false, false, 3, 3, 2), .reread, "count down, collapsed")
+        XCTAssertEqual(refresh(true, true, false, 3, 3, 2), .rebase, "count down, open")
+        XCTAssertEqual(refresh(true, false, false, 2, nil, 2), .none, "the rows read stand in")
+        XCTAssertEqual(refresh(true, false, false, 2, nil, 3), .newer, "one more than the rows read")
+    }
+
+    private func comment(_ cursor: UInt64) -> ChannelConversationModel.Comment {
+        ChannelConversationModel.Comment(
+            cursor: cursor, writerKey: Data(), authorKey: Data([1]), name: "n", text: "t\(cursor)",
+            replyTo: nil, serverTsMs: cursor, own: false)
+    }
+
+    func testArrivedCommentsJoinTheThreadInOrderWithoutRepeats() {
+        let merged = ChannelConversationModel.merged(
+            [comment(1), comment(3)], [comment(2), comment(3), comment(4)])
+        XCTAssertEqual(merged.map(\.cursor), [1, 2, 3, 4])
+    }
+}

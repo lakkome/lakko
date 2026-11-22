@@ -4,6 +4,7 @@
 package me.lakko.app.calls
 
 import java.time.Instant
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -97,6 +98,7 @@ class OneToOneCallHostTest {
 
         override fun declineCall() {
             declined = true
+            outbound?.invoke("end:session-declined:${callIdHexOf(callId)}".toByteArray(), endWake)
             mutableState.value = CallSession.WebCallState.Done
         }
 
@@ -151,7 +153,11 @@ class OneToOneCallHostTest {
             return if (keyAvailable) OneToOneCallKey(ByteArray(32) { 7 }, 1) else null
         }
 
+        /** When set, every publish waits for it: a Delivery Service round trip. */
+        var publishGate: CompletableDeferred<Unit>? = null
+
         override suspend fun publish(groupIdHex: String, bytes: ByteArray, wake: CallSignalingWake) {
+            publishGate?.await()
             published += groupIdHex to String(bytes)
             publishedWakes += wake
         }
@@ -942,6 +948,59 @@ class OneToOneCallHostTest {
         h.host.setForeground(true)
         runCurrent()
         assertNull(h.host.active.value)
+    }
+
+    @Test
+    fun `a notification decline reports done only once its End is published`() = runTest {
+        val h = harness(foreground = false)
+        h.host.deliver(groupA, 1, offer(call1), iso(t0))
+        runCurrent()
+        val gate = CompletableDeferred<Unit>()
+        h.port.publishGate = gate
+        val published = h.host.declineRingingPublished(groupA, callIdHexOf(call1))
+        runCurrent()
+        // The receiver holds the process on this; it must not let go while the
+        // End is still on its way to the Delivery Service.
+        assertFalse(published.isCompleted)
+        assertTrue(h.port.published.isEmpty())
+
+        gate.complete(Unit)
+        runCurrent()
+        assertTrue(published.isCompleted)
+        assertEquals(listOf(groupA to "end:DECLINED:${callIdHexOf(call1)}"), h.port.published)
+    }
+
+    @Test
+    fun `a notification decline of a live session waits for the session's End`() = runTest {
+        val h = harness()
+        h.port.sessionsShipEnd = true
+        h.host.deliver(groupA, 1, offer(call1), iso(t0))
+        runCurrent()
+        val session = h.session()
+        val gate = CompletableDeferred<Unit>()
+        h.port.publishGate = gate
+        val published = h.host.declineRingingPublished(groupA, callIdHexOf(call1))
+        runCurrent()
+        assertTrue(session?.declined == true)
+        assertFalse(published.isCompleted)
+
+        gate.complete(Unit)
+        runCurrent()
+        assertTrue(published.isCompleted)
+        assertEquals(
+            listOf(groupA to "end:session-declined:${callIdHexOf(call1)}"),
+            h.port.published,
+        )
+    }
+
+    @Test
+    fun `a notification decline with nothing to send still reports done`() = runTest {
+        val h = harness(foreground = false)
+        // No call by that id and an unreadable call id: nothing is published.
+        val published = h.host.declineRingingPublished(groupA, "not-hex")
+        runCurrent()
+        assertTrue(published.isCompleted)
+        assertTrue(h.port.published.isEmpty())
     }
 
     @Test

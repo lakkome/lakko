@@ -627,6 +627,16 @@ public class ContactsRepository(
     /** The key conversation leaves and the contact row of the person behind
      *  [keyB64] are under: the earliest key of its proven chain. */
     public fun conversationKeyOf(keyB64: String): String = earliestKeyOf(keyB64, provenLinks())
+
+    /**
+     * Base scenario 9 (one person, one row) - who a key names: the CURRENT
+     * key of its proven chain (the key itself when nothing proved it
+     * superseded), with the steps read once. Standard base64 keys.
+     */
+    public fun personKeyResolver(): (String) -> String {
+        val links = provenLinks()
+        return { key -> currentKeyOf(key, links) }
+    }
     /**
      * Build a [DiscoveryClient] pre-stamped with the current
      * session's bearer token (Phase 1.5b). Every protected
@@ -2800,6 +2810,10 @@ public class ContactsRepository(
         reachScope.launchBound(sessionBinding) {
             try {
                 removedKey?.let { manager.forgetHeld(it) }
+                // ADR-0060 §4 — what they offered and relayed is forgotten,
+                // so their record stops being relayed: the republish below
+                // runs the relay, which replaces the bundle other contacts hold.
+                removedKey?.let { manager.dropIntroductions(it) }
                 // UX who-can-find-me 4.1: adding them back brings them in off.
                 removedAccountId?.let { manager.forgetChosenContact(it) }
                 manager.rotate(me.lakko.app.reach.ReachKind.CONTACT)

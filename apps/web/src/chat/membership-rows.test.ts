@@ -8,12 +8,14 @@ import type { IncomingChatEvent } from "./client";
 import {
   isDrawnMembershipRow,
   membershipChangeOfBatch,
+  membershipChangesByCommit,
   membershipFromPersisted,
   membershipSentences,
   persistedFromMembership,
   sweepBatchWithOwnCommit,
   withDrawnMembershipRows,
   withMembershipChange,
+  withMembershipChanges,
   type MembershipChange,
 } from "./membership-rows";
 import type { PersistedMessage } from "./message-log-store";
@@ -278,5 +280,56 @@ describe("this device's own commit (the sweep)", () => {
     expect(
       isDrawnMembershipRow({ kind: "incoming", event: devicesOnly[0] as IncomingChatEvent }, "group"),
     ).toBe(false);
+  });
+});
+
+describe("each commit of a batch on its own (seen live 2026-11-22)", () => {
+  const after = (messageId: number, people: string[] | null): SystemEvent => ({
+    ...commit(messageId),
+    personKeysAfter: people,
+  });
+  const plain = (b: readonly string[] | null, a: readonly string[] | null) =>
+    judge(b === null ? null : [...b], a === null ? null : [...a]).change;
+
+  it("names a removal and a re-add in one batch, each on its own commit row", () => {
+    // Judged as one batch the people are the same before and after.
+    expect(judge(["ME", "A", "B"], ["ME", "A", "B"]).change).toBeNull();
+    const events: IncomingChatEvent[] = [after(2, ["ME", "A"]), message(3), after(4, ["ME", "A", "B"])];
+    const changes = membershipChangesByCommit(events, ["ME", "A", "B"], ["ME", "A", "B"], plain);
+    expect(changes.get(2)).toEqual({ joined: [], left: ["B"] });
+    expect(changes.get(4)).toEqual({ joined: ["B"], left: [] });
+    const rows = withMembershipChanges(events, changes, "group");
+    expect(rows.map((e) => (e.kind === "system" ? e.membership : undefined))).toEqual([
+      { joined: [], left: ["B"] },
+      undefined,
+      { joined: ["B"], left: [] },
+    ]);
+    // A one-to-one records nothing.
+    expect(withMembershipChanges(events, changes, "chat")).toEqual(events);
+  });
+
+  it("records nothing for a torn read and the commit after it", () => {
+    const events = [after(2, null), after(3, ["ME", "A", "B"]), after(4, ["ME", "A"])];
+    const changes = membershipChangesByCommit(events, ["ME", "A"], ["ME", "A"], plain);
+    expect([...changes.keys()]).toEqual([4]);
+    expect(changes.get(4)).toEqual({ joined: [], left: ["B"] });
+  });
+
+  it("merges a commit nobody read into the next one, and the last into the live roster", () => {
+    // A sweep's own commit carries no reading: judged against `liveAfter`.
+    const changes = membershipChangesByCommit([commit(2), commit(5)], ["ME", "A"], ["ME", "A", "B"], plain);
+    expect([...changes.entries()]).toEqual([[5, { joined: ["B"], left: [] }]]);
+  });
+
+  it("asks the judge once per commit, in order, with the previous commit's roster", () => {
+    const asked: Array<[readonly string[] | null, readonly string[] | null]> = [];
+    membershipChangesByCommit([after(2, ["ME"]), message(3), after(4, ["ME", "A"])], ["ME", "A"], null, (b, a) => {
+      asked.push([b, a]);
+      return null;
+    });
+    expect(asked).toEqual([
+      [["ME", "A"], ["ME"]],
+      [["ME"], ["ME", "A"]],
+    ]);
   });
 });

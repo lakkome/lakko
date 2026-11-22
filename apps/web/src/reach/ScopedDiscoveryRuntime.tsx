@@ -220,7 +220,8 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
             certificate === null ? null : base64Encode(certificate),
             session.accountKeyHex,
           );
-          const action = everyoneAction(state.everyone, everyone, pubKey);
+          const settingMs = setting.updatedAtMs.toString();
+          const action = everyoneAction(state.everyone, everyone, pubKey, settingMs);
           if (action.kind === "publish") {
             const names = nameTerms(name);
             const all = [...names, ...usernameTerms(username)];
@@ -263,11 +264,15 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
                 throw err;
               }
               noteEveryonePublished(account);
-              await save({ ...state, everyone: { public: true, key: pubKey } });
+              // eslint-disable-next-line no-console
+              console.info("[reach] Everyone published at discovery");
+              await save({ ...state, everyone: { public: true, key: pubKey, settingMs } });
             }
           } else if (action.kind === "withdraw") {
             await scoped.putVisibility({ public: false });
-            await save({ ...state, everyone: { public: false, key: null } });
+            // eslint-disable-next-line no-console
+            console.info("[reach] Everyone withdrawn at discovery");
+            await save({ ...state, everyone: { public: false, key: null, settingMs } });
           }
           },
         },
@@ -341,9 +346,11 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
           // 4. Relay the records our contacts offered, as one padded bundle, to
           //    every contact (a contact may receive its own record back; it is
           //    harmless and hides nothing the bundle size does not).
+          // An empty set still replaces a bundle sent before (`bundleTargets`):
+          // a removed contact's record stops being relayed.
           const intros = await loadIntroductions(account);
           const records = Object.values(intros.offers).map((o) => o.recordB64);
-          if (records.length > 0) {
+          {
             const digest = recordsDigest(records);
             const targets = bundleTargets(state, digest, [...byId.keys()]);
             if (targets.length > 0) {

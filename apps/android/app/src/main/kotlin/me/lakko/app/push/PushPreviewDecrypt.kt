@@ -365,6 +365,18 @@ public interface PushDecryptDeps {
     public fun heldRow(accountIdB64: String, groupHex: String, messageId: Long): me.lakko.app.chat.HeldRow? = null
 
     /**
+     * The row `(group, message id)` of the app's own stored message log, read
+     * FRESH on every call (never cached: the running app may write it while
+     * this read is under way), or `null` when the log holds no such row. A
+     * READ; this path never writes the log.
+     */
+    public fun storedMessage(accountIdB64: String, groupHex: String, messageId: Long): StoredWakeMessage? = null
+
+    /** The name this device stores for the person [personKeyB64] (an account
+     *  key), or `null`. A READ. */
+    public fun personName(accountIdB64: String, personKeyB64: String): String? = null
+
+    /**
      * ADR-0099 section 6 — whether [senderAccountB64] is blocked by the
      * account, read from the persisted synced state (a READ, C-59).
      */
@@ -492,6 +504,22 @@ public data class PushWakeOutcome(
      *  decrypt but IS held is this device's own message coming back (a
      *  sender cannot open its own message) and is not counted. */
     val unreadableRows: Int = 0,
+    /**
+     * A preview built from the app's own stored message log, for a message
+     * from someone else that the running app had already applied before this
+     * background read (the app's poll and this read share one journal, and a
+     * message the app applied cannot be decrypted a second time). Shown only
+     * when the app is not on screen: on screen the app shows the message
+     * itself. `null` when no such row exists.
+     */
+    val storedPreview: PushPreview? = null,
+    /** Why this wake would show the generic "New message" banner, for one
+     *  plain log line (no identifiers). `null` when it has a real preview, a
+     *  ring, or posts nothing. */
+    val fallbackReason: WakeFallbackReason? = null,
+    /** A short detail for [fallbackReason] (an HTTP status, an exception
+     *  class), never an identifier ([fetchFailureDetail]). */
+    val fallbackDetail: String? = null,
 ) {
     /**
      * Whether a wake that showed no preview and rang for nothing still posts
@@ -503,19 +531,129 @@ public data class PushWakeOutcome(
      * posts nothing. The generic banner is kept for what cannot be told
      * apart: a read that did not run, or a row that did not decrypt and is
      * not ours, and only while the app is not on screen (on screen the app
-     * shows the conversation itself).
+     * shows the conversation itself). A message the app's stored log already
+     * holds ([storedPreview]) is never the generic banner: off screen it is
+     * shown with its text, on screen the app shows it.
      */
     public fun genericBannerWanted(appOnScreen: Boolean): Boolean =
-        preview == null && ring == null &&
+        preview == null && ring == null && storedPreview == null &&
             (!readRan || (!appOnScreen && unreadableRows > 0))
 
 
+    /**
+     * The preview the notification shows: the decrypted one, else the stored
+     * one when the app is not on screen.
+     */
+    public fun shownPreview(appOnScreen: Boolean): PushPreview? =
+        preview ?: storedPreview?.takeIf { !appOnScreen }
+
     internal companion object {
         val EMPTY = PushWakeOutcome(preview = null, ring = null, cancelledCallIds = emptyList())
+
+        /** [EMPTY] with the reason it is empty. */
+        fun emptyBecause(reason: WakeFallbackReason, storedPreview: PushPreview? = null): PushWakeOutcome =
+            EMPTY.copy(fallbackReason = reason, storedPreview = storedPreview)
         val SUPPRESSED =
             PushWakeOutcome(preview = null, ring = null, cancelledCallIds = emptyList(), suppressed = true)
     }
 }
+
+/**
+ * Why a wake falls back to the generic "New message" banner. Each value is
+ * logged as one plain line with no identifier, so a generic banner is never
+ * silent: a defect report can say which step failed.
+ */
+public enum class WakeFallbackReason(public val logText: String) {
+    /** The wake named no group or no message pointer. */
+    NO_POINTER("the wake carries no message pointer"),
+
+    /** The wake's group field is not a 64-hex id. */
+    BAD_GROUP_ID("the wake's group field is malformed"),
+
+    /** The wake is bound to no account. */
+    NO_ACCOUNT("the wake is bound to no account"),
+
+    /** The local route index holds no group for the wake's routing id. */
+    NO_ROUTE("no local route for the wake's routing id"),
+
+    /** No device identity seed is stored for the account. */
+    NO_SEED("no device identity seed stored"),
+
+    /** No usable MLS snapshot (absent, unreadable, or taken under another
+     *  identity). */
+    NO_SNAPSHOT("no usable MLS snapshot"),
+
+    /** The snapshot holds no such group, or it would not open. */
+    GROUP_NOT_OPENED("the group did not open from the snapshot"),
+
+    /** The Delivery Service read failed. */
+    FETCH_FAILED("the journal read failed"),
+
+    /** A row did not decrypt and the app's log does not hold it. */
+    UNREADABLE_ROWS("a row did not decrypt and the app does not hold it"),
+
+    /** A message decrypted but its sender has no name on this device. */
+    UNNAMED_SENDER("the sender has no name on this device"),
+
+    /** The background read ran out of its time budget. */
+    TIMEOUT("the background read timed out"),
+
+    /** The background read threw. */
+    READ_FAILED("the background read failed"),
+
+    /** The read ran and found nothing it could explain. */
+    NOTHING_FOUND("the read found no message to show"),
+}
+
+/**
+ * The pause before a background journal read is tried a second time after a
+ * network failure. Chosen, not measured; with the stored-log retry it stays
+ * well inside the FCM budget.
+ */
+internal const val FETCH_RETRY_DELAY_MS: Long = 1_000L
+
+/** Whether a failed journal read is worth one more try: a network failure,
+ *  never an HTTP answer. */
+internal fun isTransientFetchFailure(cause: Throwable): Boolean =
+    cause is me.lakko.app.ds.DsNetworkError || cause is java.io.IOException
+
+/**
+ * What a failed journal read looked like, for the log: the HTTP status and,
+ * for a refused proof, whether the device clock was off; else the class of
+ * the network failure or of the exception. Never a message text, which can
+ * carry an endpoint.
+ */
+public fun fetchFailureDetail(cause: Throwable): String = when (cause) {
+    is me.lakko.app.ds.DsProofRefusedError ->
+        if (cause.clockSkewed) "http 401, proof refused, device clock off" else "http 401, proof refused"
+    is me.lakko.app.ds.DsHttpError -> "http ${cause.status}"
+    is me.lakko.app.ds.DsNetworkError -> "network ${cause.cause?.javaClass?.simpleName ?: "unknown"}"
+    else -> cause.javaClass.simpleName.ifEmpty { "unknown" }
+}
+
+/**
+ * A message row of the app's own stored message log, as a background preview
+ * needs it ([PushDecryptDeps.storedMessage]).
+ */
+public data class StoredWakeMessage(
+    /** `true` for a message from someone else; own-account rows (this device
+     *  or another device of the account) and system rows are `false`. */
+    val incoming: Boolean,
+    /** The author's account key (standard base64) as resolved at receipt. */
+    val authorKeyB64: String?,
+    val text: String,
+    val attachments: List<me.lakko.app.ui.chat.PreviewAttachment>,
+    val deleted: Boolean,
+)
+
+/**
+ * How long a background read waits before reading the app's message log a
+ * second time, when a row did not decrypt and the log did not hold it yet:
+ * the running app writes its MLS snapshot just before its message log, so a
+ * read that falls between the two finds the row in neither. Chosen, not
+ * measured; well inside the FCM budget.
+ */
+internal const val STORED_LOG_RETRY_MS: Long = 1_500L
 
 /**
  * | a preview | a ring | rows not acted on | the wake posts nothing |
@@ -549,10 +687,12 @@ public suspend fun decryptPushWake(
 ): PushWakeOutcome {
     // 1. Only GroupMessage wakes carry a 64-hex group + a pointer. A
     //    Wakeup / MailboxMessage wake is not handled in this slice.
-    val rawGroupHex = wake?.groupHex ?: return PushWakeOutcome.EMPTY
-    val pointer = wake.pointer ?: return PushWakeOutcome.EMPTY
+    val rawGroupHex = wake?.groupHex ?: return PushWakeOutcome.emptyBecause(WakeFallbackReason.NO_POINTER)
+    val pointer = wake.pointer ?: return PushWakeOutcome.emptyBecause(WakeFallbackReason.NO_POINTER)
     val groupHex = rawGroupHex.lowercase()
-    if (groupHex.length != GROUP_HEX_LEN || !isLowerHex(groupHex)) return PushWakeOutcome.EMPTY
+    if (groupHex.length != GROUP_HEX_LEN || !isLowerHex(groupHex)) {
+        return PushWakeOutcome.emptyBecause(WakeFallbackReason.BAD_GROUP_ID)
+    }
 
     // 2. Resolve the wake's `g` to the REAL DS group_id, for the bound
     //    account ONLY (ADR-0042, amended 2026-09-30 — the wake gate has
@@ -566,14 +706,16 @@ public suspend fun decryptPushWake(
     //    a malformed stored row is the generic notification (the raw
     //    group_id fallback of the pre-ADR-0042 wake is gone).
     val accountIdB64 = wake.accountIdB64
-    if (accountIdB64.isEmpty()) return PushWakeOutcome.EMPTY
+    if (accountIdB64.isEmpty()) return PushWakeOutcome.emptyBecause(WakeFallbackReason.NO_ACCOUNT)
     val routedHex = try {
         deps.lookupRoute(accountIdB64, groupHex, wake.subscriptionIdHex)?.lowercase()
     } catch (_: Throwable) {
         null
-    } ?: return PushWakeOutcome.EMPTY
-    if (routedHex.length != GROUP_HEX_LEN || !isLowerHex(routedHex)) return PushWakeOutcome.EMPTY
-    val routedBytes = hexToBytes(routedHex) ?: return PushWakeOutcome.EMPTY
+    } ?: return PushWakeOutcome.emptyBecause(WakeFallbackReason.NO_ROUTE)
+    if (routedHex.length != GROUP_HEX_LEN || !isLowerHex(routedHex)) {
+        return PushWakeOutcome.emptyBecause(WakeFallbackReason.NO_ROUTE)
+    }
+    val routedBytes = hexToBytes(routedHex) ?: return PushWakeOutcome.emptyBecause(WakeFallbackReason.NO_ROUTE)
     val account = ResolvedPushAccount(accountIdB64 = accountIdB64, groupIdBytes = routedBytes)
     val realGroupHex = routedHex
 
@@ -588,12 +730,26 @@ public suspend fun decryptPushWake(
     }
     if (closedOneToOne) return PushWakeOutcome.SUPPRESSED
 
+    // From here on the group is known. A read that cannot run past this
+    // point still looks in the app's own stored log for the wake's message:
+    // the running app may have applied it already, and its snapshot is then
+    // past what a second decrypt could open, or mid-write.
+    val stored = StoredFallback(deps, account.accountIdB64, realGroupHex)
+    suspend fun emptyWithStored(reason: WakeFallbackReason): PushWakeOutcome {
+        val fromLog = stored.preview(listOf(pointer), kind = null)
+        val shownReason = if (fromLog != null && stored.unnamed) WakeFallbackReason.UNNAMED_SENDER else reason
+        return PushWakeOutcome.emptyBecause(shownReason, fromLog)
+    }
+
     // 3. The AccountIdentity seed → the throwaway Identity.
-    val seed = deps.loadIdentitySeed(account.accountIdB64) ?: return PushWakeOutcome.EMPTY
+    val seed = deps.loadIdentitySeed(account.accountIdB64) ?: return emptyWithStored(WakeFallbackReason.NO_SEED)
 
     // 4. The last-persisted MLS provider snapshot (the ratchet state
     //    the foreground app relies on — we only READ it).
-    val snapshot = deps.loadSnapshot(account.accountIdB64) ?: return PushWakeOutcome.EMPTY
+    val snapshot = deps.loadSnapshot(account.accountIdB64) ?: run {
+        seed.fill(0)
+        return emptyWithStored(WakeFallbackReason.NO_SNAPSHOT)
+    }
 
     // 5. Build a TEMPORARY, in-memory group from the snapshot.
     //    Everything from here is throwaway — never snapshotted back.
@@ -605,7 +761,7 @@ public suspend fun decryptPushWake(
         // The throwaway Identity has copied the seed; zero our view of
         // it (mirrors the seed-store caller contract).
         seed.fill(0)
-    } ?: return PushWakeOutcome.EMPTY
+    } ?: return emptyWithStored(WakeFallbackReason.GROUP_NOT_OPENED)
 
     try {
         // 6. Fetch DS rows after a READ-ONLY start cursor. Prefer the
@@ -624,10 +780,23 @@ public suspend fun decryptPushWake(
         }
         if (after < 0) after = 0
 
+        // A network failure is read once more after a short pause: a wake
+        // that starts a backgrounded process can find the app's network
+        // still being restored (seen on a Pixel 2026-11-22: one read failed
+        // right after its connection opened, the next wake's read succeeded
+        // and the DS refused nothing). A refusal (4xx) is not retried.
         val rows = try {
-            deps.dsFetch(account.groupIdBytes, after, group.dsSigner())
-        } catch (_: Throwable) {
-            return PushWakeOutcome.EMPTY
+            try {
+                deps.dsFetch(account.groupIdBytes, after, group.dsSigner())
+            } catch (first: Throwable) {
+                if (first is kotlinx.coroutines.CancellationException || !isTransientFetchFailure(first)) throw first
+                kotlinx.coroutines.delay(FETCH_RETRY_DELAY_MS)
+                deps.dsFetch(account.groupIdBytes, after, group.dsSigner())
+            }
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (cause: Throwable) {
+            return emptyWithStored(WakeFallbackReason.FETCH_FAILED).copy(fallbackDetail = fetchFailureDetail(cause))
         }
 
         // 7. Process each row through the TEMP group and keep the
@@ -674,6 +843,11 @@ public suspend fun decryptPushWake(
         val conversationKind by lazy { runCatching { group.facts()?.kind }.getOrNull() }
         val groupName by lazy { runCatching { deps.groupName(account.accountIdB64, realGroupHex) }.getOrNull() }
         var unreadableRows = 0
+        // The wake's own rows (the pointer and after) that did not decrypt and
+        // are not this device's own message: the running app may have applied
+        // them first, in which case its stored log holds the text.
+        val failedWakeRows = ArrayList<Long>()
+        var latestUnnamed = false
         for (row in rows) {
             val processed = try {
                 group.process(row.payload)
@@ -682,6 +856,7 @@ public suspend fun decryptPushWake(
                 // row it sent (or one it already received), so a held id is
                 // quiet; anything else is a message this device cannot read.
                 if (isOwnMessageEcho(cause)) continue
+                if (row.id >= pointer) failedWakeRows += row.id
                 val held = try {
                     deps.heldRow(account.accountIdB64, realGroupHex, row.id) != null
                 } catch (_: Throwable) {
@@ -741,6 +916,7 @@ public suspend fun decryptPushWake(
             if (reactionBody != null) {
                 // The reaction line names the reactor itself: no prefix.
                 val shape = notificationShape(conversationKind, groupName, processed?.senderName, reactionBody, prefixSender = false)
+                latestUnnamed = shape == null
                 latest = shape?.let { PushPreview(title = it.first, body = it.second, tag = realGroupHex) }
                     ?: unnamedSenderPreview(realGroupHex)
                 continue
@@ -749,6 +925,7 @@ public suspend fun decryptPushWake(
             // The conversation's name as the title; in a group the sender's
             // name before the text.
             val shape = notificationShape(conversationKind, groupName, processed?.senderName, body)
+            latestUnnamed = shape == null
             // ADR-0047 section 6 — the picture rides only a preview that shows
             // the text; the unnamed-sender fallback shows neither.
             latest = shape?.let {
@@ -782,6 +959,21 @@ public suspend fun decryptPushWake(
             windowMs = ringWindowMs,
             muted = muted,
         )
+        // Nothing decrypted to a preview, but rows of this wake did not
+        // decrypt: read them from the app's own log (the app applied them).
+        val storedPreview = if (latest == null && calls.ring == null && failedWakeRows.isNotEmpty()) {
+            stored.preview(failedWakeRows, kind = conversationKind)
+        } else {
+            null
+        }
+        val postsNothing = wakePostsNothing(latest != null, calls.ring != null, suppressedRows) && storedPreview == null
+        val fallbackReason = when {
+            postsNothing || calls.ring != null -> null
+            latest != null -> if (latestUnnamed) WakeFallbackReason.UNNAMED_SENDER else null
+            storedPreview != null -> if (stored.unnamed) WakeFallbackReason.UNNAMED_SENDER else null
+            unreadableRows > 0 -> WakeFallbackReason.UNREADABLE_ROWS
+            else -> WakeFallbackReason.NOTHING_FOUND
+        }
         return PushWakeOutcome(
             preview = latest,
             ring = calls.ring,
@@ -789,9 +981,12 @@ public suspend fun decryptPushWake(
             // ADR-0073 — the wake carried only what is not acted on (a row
             // of a retired key, or a re-send this device holds the original
             // of): nothing is posted for it, not even the generic banner.
-            suppressed = wakePostsNothing(latest != null, calls.ring != null, suppressedRows),
+            suppressed = postsNothing,
             readRan = true,
-            unreadableRows = unreadableRows,
+            // A row the stored log explained is not unreadable any more.
+            unreadableRows = if (storedPreview != null) 0 else unreadableRows,
+            storedPreview = storedPreview,
+            fallbackReason = fallbackReason,
         )
     } finally {
         // Discard the throwaway MLS state. We NEVER snapshot it back —
@@ -803,6 +998,108 @@ public suspend fun decryptPushWake(
         }
     }
 }
+
+/**
+ * The preview of a wake's message from the app's own stored message log
+ * ([PushDecryptDeps.storedMessage]), for a message from someone else that the
+ * running app applied before the background read got to it.
+ *
+ * Why it is needed: the app's open chat (or its receive sweep) and the
+ * background read fetch the same journal rows. A message the app applied has
+ * its key consumed (forward secrecy), so the background decrypt of it fails;
+ * before this, such a row read as "this device's own message" and the wake
+ * posted nothing, or, while the app was still writing, the generic banner.
+ *
+ * Only an INCOMING row is used (the log stores this device's and the
+ * account's other devices' messages as outgoing), never a deleted one, never
+ * one from a blocked sender or a key a reset retired. The newest such row
+ * among [ids] wins. When a row is in the log under none of these ids, the log
+ * is read once more after [STORED_LOG_RETRY_MS]: the app writes its snapshot
+ * just before its log. All reads (C-59).
+ */
+internal class StoredFallback(
+    private val deps: PushDecryptDeps,
+    private val accountIdB64: String,
+    private val groupHex: String,
+    private val retryDelayMs: Long = STORED_LOG_RETRY_MS,
+) {
+    /** `true` when the last [preview] found a message but no name for its
+     *  sender (the generic banner, logged as such). */
+    var unnamed: Boolean = false
+        private set
+
+    suspend fun preview(ids: List<Long>, kind: me.lakko.app.chat.ConversationKind?): PushPreview? {
+        val wanted = ids.distinct().sortedDescending()
+        if (wanted.isEmpty()) return null
+        val first = scan(wanted, kind)
+        if (first.preview != null || !first.missing) return first.preview
+        kotlinx.coroutines.delay(retryDelayMs)
+        return scan(wanted, kind).preview
+    }
+
+    private class Scan(val preview: PushPreview?, val missing: Boolean)
+
+    private fun scan(ids: List<Long>, kind: me.lakko.app.chat.ConversationKind?): Scan {
+        var missing = false
+        for (id in ids) {
+            val row = try {
+                deps.storedMessage(accountIdB64, groupHex, id)
+            } catch (_: Throwable) {
+                null
+            }
+            if (row == null) {
+                missing = true
+                continue
+            }
+            if (!row.incoming || row.deleted) continue
+            val author = row.authorKeyB64?.takeIf { it.isNotEmpty() }
+            val blocked = runCatching { deps.isBlocked(accountIdB64, author) }.getOrDefault(false)
+            if (blocked) continue
+            val superseded = runCatching { deps.supersededKeys(accountIdB64) }.getOrDefault(emptySet())
+            if (me.lakko.app.chat.dropsSupersededSender(author, superseded)) continue
+            val body = storedPreviewBody(row) ?: continue
+            val name = author?.let { runCatching { deps.personName(accountIdB64, it) }.getOrNull() }
+            val groupName = runCatching { deps.groupName(accountIdB64, groupHex) }.getOrNull()
+            val shape = notificationShape(kind, groupName, name, body)
+            unnamed = shape == null
+            val preview = shape?.let { PushPreview(title = it.first, body = it.second, tag = groupHex) }
+                ?: unnamedSenderPreview(groupHex)
+            return Scan(preview, missing)
+        }
+        return Scan(null, missing)
+    }
+}
+
+/**
+ * The row `(group, message id)` of a stored message log as a background
+ * preview reads it, or `null` when the log holds no such row. Pure.
+ */
+internal fun storedWakeMessageIn(
+    log: me.lakko.app.chat.MessageLogPayload?,
+    groupHex: String,
+    messageId: Long,
+): StoredWakeMessage? {
+    if (log == null || messageId <= 0) return null
+    val key = groupHex.lowercase()
+    val group = log.groups[key] ?: log.groups.entries.firstOrNull { it.key.lowercase() == key }?.value ?: return null
+    val row = group.messages.firstOrNull { it.messageId == messageId } ?: return null
+    return StoredWakeMessage(
+        incoming = me.lakko.app.chat.heldRowDirectionOf(row.direction) == me.lakko.app.chat.HeldRowDirection.INCOMING,
+        authorKeyB64 = row.authorKeyB64,
+        text = row.text,
+        attachments = row.attachments.map { me.lakko.app.ui.chat.PreviewAttachment(it.kind, it.mime) },
+        deleted = row.deleted,
+    )
+}
+
+/** The body line of a stored message, the same words a decrypted one gets. */
+private fun storedPreviewBody(row: StoredWakeMessage): String? =
+    if (row.attachments.isNotEmpty()) {
+        me.lakko.app.ui.chat.messagePreviewBody(row.text, row.attachments)
+            .takeIf { it.isNotEmpty() }?.let(::truncate)
+    } else {
+        row.text.trim().takeIf { it.isNotEmpty() }?.let(::truncate)
+    }
 
 /**
  * Extract a user-visible preview string from a processed row, or

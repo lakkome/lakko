@@ -6,6 +6,7 @@ import CallKit
 import Foundation
 import WebRTC
 import os
+import UIKit
 
 /// The app's one `CXProvider`: the object that makes an incoming Lakko call a
 /// call as far as the phone is concerned (`docs/ux/calls.md` section 2.1).
@@ -50,7 +51,13 @@ final class CallKitProvider: NSObject, @unchecked Sendable {
     /// The system answered a call. The bridge accepts it on ``CallHost``.
     @MainActor var onAnswer: ((UUID) -> Void)?
     /// The system ended a call (Decline, End, or the system tearing it down).
-    @MainActor var onEnd: ((UUID) -> Void)?
+    ///
+    /// Async: the action is fulfilled only once this returns (or after
+    /// ``SystemCallEnd/fulfilBound(timeoutDate:now:)``), and a background task
+    /// holds the process until it returns. That is what gets the `End` frame of
+    /// a call declined on the lock screen to the caller while this app sits in
+    /// the background, instead of at its next launch.
+    @MainActor var onEnd: ((UUID) async -> Void)?
     /// The system's mute switch moved.
     @MainActor var onSetMuted: ((UUID, Bool) -> Void)?
     /// CallKit reset — every call is gone and the app must drop its own.
@@ -58,13 +65,17 @@ final class CallKitProvider: NSObject, @unchecked Sendable {
 
     private let provider: CXProvider
     private let callController = CXCallController()
+    /// Keeps the process running while the `End` of a call the system ended is
+    /// published. A parameter only so a test can watch it.
+    private let backgroundTasks: BackgroundTaskRunning
 
     /// The calls this provider has reported and not yet ended. It is what makes
     /// "already reported" answerable, so a call that arrived as a VoIP push and
     /// then again as a signaling row rings exactly once.
     @MainActor private var liveCalls: Set<UUID> = []
 
-    override init() {
+    init(backgroundTasks: BackgroundTaskRunning = UIApplicationBackgroundTasks()) {
+        self.backgroundTasks = backgroundTasks
         let configuration = CXProviderConfiguration()
         configuration.supportsVideo = true
         // One call at a time, matching ``CallSlot`` — the app has one call
@@ -255,13 +266,38 @@ extension CallKitProvider: CXProviderDelegate {
         action.fulfill()
     }
 
+    /// Decline on the incoming-call screen, End on the in-call screen, or the
+    /// system ending the call itself.
+    ///
+    /// The action is NOT fulfilled at once. The app's half of an end is a
+    /// frame to the other person (`End{declined}` / `End{hung_up}`), and with
+    /// the app in the background — the ordinary case for a call that rang on
+    /// the lock screen — iOS suspends the process moments after the last call
+    /// is over. Fulfilling first left that publish in flight, so the caller
+    /// kept ringing for its whole window and filed the call as unanswered,
+    /// while the frame went out only when the app next ran (seen live
+    /// 2026-11-22: decline at 15:54:40, the caller saw the end at 15:55:03).
+    /// So the handler runs under a background task, and the action is
+    /// fulfilled once it has returned or after a bounded wait, whichever is
+    /// first (``SystemCallEnd``).
     func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
-        NSLog("CallKitProvider: system performed CXEndCallAction")
+        let uuid = action.callUUID
+        let bound = SystemCallEnd.fulfilBound(timeoutDate: action.timeoutDate, now: Date())
+        NSLog("CallKitProvider: system performed CXEndCallAction (fulfil within %.1f s)", bound)
         MainActor.assumeIsolated {
-            liveCalls.remove(action.callUUID)
-            onEnd?(action.callUUID)
+            liveCalls.remove(uuid)
+            let handler = onEnd
+            SystemCallEnd.run(
+                name: "lakko.call.end",
+                background: backgroundTasks,
+                fulfilWithin: bound,
+                work: { await handler?(uuid) },
+                fulfil: { action.fulfill() })
         }
-        action.fulfill()
+    }
+
+    func provider(_ provider: CXProvider, timedOutPerforming action: CXAction) {
+        NSLog("CallKitProvider: a CallKit action timed out before it was fulfilled")
     }
 
     func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
@@ -292,5 +328,119 @@ extension CallKitProvider: CXProviderDelegate {
 
     func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
         RTCAudioSession.sharedInstance().audioSessionDidDeactivate(audioSession)
+    }
+}
+
+// MARK: - Finishing a system-ended call in the background
+
+/// A handle on a running background task (``BackgroundTaskRunning``).
+struct BackgroundTaskToken: Hashable {
+    let raw: Int
+}
+
+/// Something that keeps the process running for a while after the app has
+/// left the screen. `UIApplication` in the app, a recorder in a test.
+protocol BackgroundTaskRunning {
+    /// Start a task. `expiration` runs on the main thread when the system is
+    /// about to suspend the process anyway; the task must be ended there.
+    /// `nil` when the system grants none.
+    @MainActor func begin(
+        name: String, expiration: @escaping @MainActor () -> Void) -> BackgroundTaskToken?
+    @MainActor func end(_ token: BackgroundTaskToken)
+}
+
+/// The app's background tasks, through `UIApplication`.
+struct UIApplicationBackgroundTasks: BackgroundTaskRunning {
+    @MainActor func begin(
+        name: String, expiration: @escaping @MainActor () -> Void
+    ) -> BackgroundTaskToken? {
+        // UIKit calls the expiration handler synchronously on the main thread.
+        let id = UIApplication.shared.beginBackgroundTask(withName: name) {
+            MainActor.assumeIsolated { expiration() }
+        }
+        return id == .invalid ? nil : BackgroundTaskToken(raw: id.rawValue)
+    }
+
+    @MainActor func end(_ token: BackgroundTaskToken) {
+        UIApplication.shared.endBackgroundTask(UIBackgroundTaskIdentifier(rawValue: token.raw))
+    }
+}
+
+/// How the app finishes a call the SYSTEM ended (Decline on the lock screen,
+/// End on the system call screen): the app's own work — publishing the `End`
+/// frame that stops the caller ringing — runs under a background task, and the
+/// CallKit action is fulfilled when that work is done or after a bounded wait,
+/// whichever comes first.
+///
+/// Two separate clocks on purpose. The action has a deadline of its own
+/// (`CXAction.timeoutDate`), after which CallKit fails it; the background task
+/// has the system's, announced by its expiration handler. The action is
+/// fulfilled well inside the first; the background task is held until the work
+/// returns, so a slow network gets the time the system grants rather than the
+/// action's few seconds.
+@MainActor
+enum SystemCallEnd {
+
+    /// The longest the action waits for the app's work. Chosen, not measured:
+    /// long enough for one Delivery Service publish on a normal connection,
+    /// short against any action deadline seen in documentation.
+    nonisolated static let maxFulfilWait: TimeInterval = 5
+
+    /// How far ahead of the action's own deadline it is fulfilled at the latest.
+    nonisolated static let actionDeadlineMargin: TimeInterval = 1
+
+    /// The wait before the action is fulfilled even though the work has not
+    /// returned: at most ``maxFulfilWait``, at least a margin before the
+    /// action's deadline, never negative.
+    nonisolated static func fulfilBound(timeoutDate: Date, now: Date) -> TimeInterval {
+        let beforeDeadline = timeoutDate.timeIntervalSince(now) - actionDeadlineMargin
+        return max(0, min(maxFulfilWait, beforeDeadline))
+    }
+
+    private final class State {
+        var fulfilled = false
+        var token: BackgroundTaskToken?
+        var timeout: Task<Void, Never>?
+    }
+
+    /// Run `work` under a background task named `name`; call `fulfil` exactly
+    /// once, when `work` returns or `fulfilWithin` seconds have passed or the
+    /// background task expires, whichever is first; end the background task
+    /// when `work` returns or it expires.
+    static func run(
+        name: String,
+        background: BackgroundTaskRunning,
+        fulfilWithin: TimeInterval,
+        work: @escaping @MainActor () async -> Void,
+        fulfil: @escaping @MainActor () -> Void
+    ) {
+        let state = State()
+        let finish: @MainActor () -> Void = {
+            guard !state.fulfilled else { return }
+            state.fulfilled = true
+            state.timeout?.cancel()
+            state.timeout = nil
+            fulfil()
+        }
+        let release: @MainActor () -> Void = {
+            guard let token = state.token else { return }
+            state.token = nil
+            background.end(token)
+        }
+        state.token = background.begin(name: name) {
+            finish()
+            release()
+        }
+        let nanos = UInt64(max(0, fulfilWithin) * 1_000_000_000)
+        state.timeout = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: nanos)
+            guard !Task.isCancelled else { return }
+            finish()
+        }
+        Task { @MainActor in
+            await work()
+            finish()
+            release()
+        }
     }
 }

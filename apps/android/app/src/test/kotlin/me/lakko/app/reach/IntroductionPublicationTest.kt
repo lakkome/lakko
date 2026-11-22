@@ -220,6 +220,37 @@ class IntroductionPublicationTest {
         assertTrue(again.sent.isEmpty())
     }
 
+    @Test
+    fun `a relayed set that became empty replaces the bundle sent before, and only there`() = runTest {
+        val offered = listOf(reachHex("a".toByteArray()))
+        val first = Recorder()
+        val state = publishIntroductions(
+            IntroPublicationState(),
+            inputs(fofOn = false, offered = offered, groups = listOf("g1")),
+            ops(first),
+        )
+        assertEquals(listOf("g1" to "bundle"), first.sent)
+        // The only contact who offered a record was removed: g1 still holds a
+        // bundle carrying it, g2 was never sent one.
+        val emptied = Recorder()
+        val after = publishIntroductions(
+            state,
+            inputs(fofOn = false, offered = emptyList(), groups = listOf("g1", "g2")),
+            ops(emptied),
+        )
+        assertEquals(listOf("g1" to "bundle"), emptied.sent)
+        assertTrue(emptied.bundleRecords.isEmpty())
+        val again = Recorder()
+        publishIntroductions(after, inputs(fofOn = false, offered = emptyList(), groups = listOf("g1", "g2")), ops(again))
+        assertTrue(again.sent.isEmpty())
+    }
+
+    @Test
+    fun `an empty set goes only where a bundle was sent before`() {
+        val sent = mapOf("g1" to recordsDigest(listOf("aa")), "g2" to EMPTY_RECORDS_DIGEST)
+        assertEquals(listOf("g1"), bundleTargets(sent, EMPTY_RECORDS_DIGEST, listOf("g1", "g2", "g3")))
+    }
+
     private val nothing = IntroductionsHeld(offer = false, bundle = false, contactGrant = false)
 
     @Test

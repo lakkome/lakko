@@ -366,20 +366,41 @@ async function handlePush(wake) {
   }
   if (admission === null) return;
 
-  // (a) Notify open tabs + detect whether one is visible.
+  // (a) Notify open tabs + detect whether one is visible. A visible tab
+  //     hears of the wake at once. A HIDDEN tab hears of it only after the
+  //     background read below: the wake un-parks its receive sweep, which
+  //     fetches the same rows, and a row the tab applied first cannot be
+  //     decrypted a second time by the read (its key is gone), so the
+  //     message would notify nothing (seen on Android 2026-11-22, the same
+  //     race; see `hiddenTabsLater`).
   let hasVisibleTab = false;
+  /** @type {Array<{ postMessage: (m: unknown) => void }>} */
+  const hiddenTabsLater = [];
   try {
     // A visible tab that is not running Lakko (docs/ux/one-tab.md) shows a
     // notice and nothing else: it does not count as a visible tab.
     const running = await runningWindows();
     for (const c of running) {
-      c.postMessage({ type: "LAKKO_PUSH_WAKE", wake });
-      if (c.visibilityState === "visible") hasVisibleTab = true;
+      if (c.visibilityState === "visible") {
+        hasVisibleTab = true;
+        c.postMessage({ type: "LAKKO_PUSH_WAKE", wake });
+      } else {
+        hiddenTabsLater.push(c);
+      }
     }
   } catch {
     // Best effort — a closed tab is the common case (and the exact
     // case the background decrypt below exists for).
   }
+  const tellHiddenTabs = () => {
+    for (const c of hiddenTabsLater.splice(0)) {
+      try {
+        c.postMessage({ type: "LAKKO_PUSH_WAKE", wake });
+      } catch {
+        // The client went away meanwhile.
+      }
+    }
+  };
 
   // (b) Background decrypt. A message wake is read with a tab visible too:
   //     the read is what tells a message from someone else (a notification)
@@ -394,6 +415,8 @@ async function handlePush(wake) {
       background = null; // Belt-and-suspenders — degrade to generic.
     }
   }
+  // The read is done: a hidden tab may now catch up.
+  tellHiddenTabs();
   const preview = background?.preview ?? null;
 
   // (c) The REAL group_id for the TAP deep-link (ADR-0042), already
@@ -447,6 +470,11 @@ async function handlePush(wake) {
   //     Accept / Decline: without the decrypt there is no call id to
   //     address, so the honest offer is to open the app, where the
   //     full-screen incoming call is waiting.
+  // Every generic notification says why in the worker's console, one plain
+  // line with no identifier, so a "New message" is never silent.
+  if (preview === null) {
+    console.info(`[push] generic notification: ${genericReasonLine(wake, background)}`);
+  }
   const title = preview?.title ?? "Lakko";
   const body =
     preview?.body ??
@@ -482,6 +510,24 @@ async function handlePush(wake) {
     // from a push event under certain conditions — best-effort, don't
     // throw past `waitUntil`.
   }
+}
+
+/**
+ * The reason a wake shows the generic notification, in plain words with no
+ * identifier: the read could not run, it did not reach the end, or a row did
+ * not decrypt and the message log does not hold it.
+ *
+ * @param {unknown} wake
+ * @param {{ preview: unknown, showGeneric: boolean, reason?: string } | null} background
+ * @returns {string}
+ */
+function genericReasonLine(wake, background) {
+  if (background === null) {
+    return wake === null || typeof wake?.groupHex !== "string" || typeof wake?.pointer !== "number"
+      ? "the wake carries no message pointer"
+      : "the background read could not run";
+  }
+  return typeof background.reason === "string" ? background.reason : "the read found no message to show";
 }
 
 /**
@@ -742,6 +788,11 @@ async function backgroundPreview(wake) {
   return {
     preview: outcome.preview,
     showGeneric: core.genericNotificationWanted(outcome),
+    reason: outcome.readRan !== true
+      ? "the read did not reach the end"
+      : outcome.unreadableRows > 0
+        ? "a row did not decrypt and the app does not hold it"
+        : "the read found no message to show",
   };
 }
 

@@ -33,6 +33,17 @@ export function personKeyOf(m: {
     : m.signaturePublicKey;
 }
 
+/** {@link personKeysOf}, or `null` when the roster cannot be read (a torn
+ *  read decides nothing). */
+export function personKeysOrNull(group: WasmGroup): string[] | null {
+  try {
+    group.members();
+  } catch {
+    return null;
+  }
+  return personKeysOf(group);
+}
+
 /** The distinct people in a roster, base64 account keys in first-leaf order.
  *  A torn group reads as empty. */
 export function personKeysOf(group: WasmGroup): string[] {

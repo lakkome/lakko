@@ -179,6 +179,12 @@ state gives way to what the search finds, the people half included
 ([`who-can-find-me.md`](who-can-find-me.md) section 6.1). The folder bar
 stays hidden with an empty list.
 
+**One person, one row (base scenario 9, 2026-11-22).** A person stands once in
+what the field shows: a conversation or contact row above, else one row of what
+the network found, matched by account key (across proven rotations) or account
+id, never by name; the searching account itself never appears
+([`who-can-find-me.md`](who-can-find-me.md) section 6.1).
+
 The LOCAL half is settled and built: fuzzy over the titles and previews of
 what this device already holds. **How the whole field should present itself
 once it covers messages as well is still open** - that part is deferred.

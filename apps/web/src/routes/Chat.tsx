@@ -600,11 +600,13 @@ import {
 import {
   isCommitEvent,
   membershipChangeOfBatch,
+  membershipChangesByCommit,
   sweepBatchWithOwnCommit,
   membershipFromPersisted,
   persistedFromMembership,
   withDrawnMembershipRows,
   withMembershipChange,
+  withMembershipChanges,
   type MembershipChange,
 } from "../chat/membership-rows";
 import { MembersCanFindMeSwitch } from "../settings/MembersCanFindMeSwitch";
@@ -4827,19 +4829,21 @@ function ChatView(props: {
       // ADR-0087 section 9 — the batch that ended this conversation: nothing
       // it carried may land in a store behind the wipe. The view closes.
       if (membershipEnd.isEnding(props.entry.groupIdB64)) return "membership-ended";
-      // docs/ux/second-device.md section 4 — the people this batch added and
-      // removed go on its last commit row, judged on the roster right after
-      // the apply, before anything else can move it.
-      const membershipChange = judgeMembershipChange(
+      // docs/ux/second-device.md section 4 — each commit of this batch names
+      // the people it added and removed on its own row, judged on the roster
+      // read right after it, so a removal and a re-add in one batch do not
+      // cancel out.
+      const membershipChanges = membershipChangesByCommit(
+        result.events,
         personsBeforePoll,
         personKeysOrNull(props.entry.group),
-        result.events.some(isCommitEvent),
+        (before, after) => judgeMembershipChange(before, after, true),
       );
       // ADR-0045 — the shared consumer; see `consumeEvents`.
       consumeEvents(
-        withMembershipChange(
+        withMembershipChanges(
           result.events.filter((e) => !(e.kind === "application" && resendHeld(e))),
-          membershipChange,
+          membershipChanges,
           conversationKindOf(props.entry.group),
         ),
       );

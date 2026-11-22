@@ -1728,6 +1728,30 @@ private final class SessionModels: ObservableObject {
                     $0.request.fromPubkey == person.accountKey
                         || (person.accountId != nil && $0.request.fromAccountId == person.accountId)
                 }
+            },
+            searchIdentity: {
+                // Base scenario 9 — every key of this account: the current
+                // one, its own predecessors, the key its chats are bound to.
+                let resolver = ReachCenter.shared.keyResolver
+                var own: [Data] = resolver.ownPredecessorKeys
+                for key in [
+                    resolver.ownCurrentKey, ReachCenter.shared.ownAccountKey,
+                    chatRepository.accountIdentity?.signaturePublicKey(),
+                    chatRepository.conversationAccountIdentity?.signaturePublicKey(),
+                ] {
+                    if let key { own.append(key) }
+                }
+                let idB64 = AcceptedContactsStore.boundAccountIdB64
+                if let idB64,
+                   let bound = KeychainOwnConversationKeyStore().load(accountIdB64: idB64)?.conversationKey {
+                    own.append(bound)
+                }
+                return PeopleSearch.SearchIdentity(
+                    ownKeys: own, ownAccountId: idB64.flatMap { Data(base64Encoded: $0) },
+                    personOf: { resolver.current(of: $0) })
+            },
+            searchContacts: {
+                contactPairs().map { PeopleSearch.SearchContact(accountKey: $0.accountKey, accountId: $0.accountId) }
             })
     }
 

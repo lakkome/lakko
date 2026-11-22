@@ -272,10 +272,18 @@ field is open, so nothing a row says may need an app restart to become correct:
 - **Request sent** is read from the Sent list, and from the people added through
   their invite link who have not answered: declined, dismissed or accepted, the
   row goes back to what the check says.
-- One person, one row (2026-10-31). A person the list above already shows, a
-  contact or someone added through their link, is not repeated under **People**,
-  in Contacts and in Chats. A person with a conversation who is no contact keeps
-  their row under **People**, and with it the way to add them.
+- One person, one row (2026-10-31; amended 2026-11-22, base scenario 9). A
+  person the list above already shows, a contact or someone added through their
+  link, is not repeated under **People**, in Contacts and in Chats. A person
+  whose one-to-one matched above is not repeated either, contact or not: someone
+  who is no contact is added from that conversation's info (**Add to
+  contacts**). A person is matched by account key, across the rotations this
+  device holds proof of, or by account id; never by name. So a contact found by
+  the directory under their new key, or by their account id, is their contact
+  row (Open), never a second row with **Add contact**.
+- The searching account never appears in its own results, under its current
+  key, any of its earlier keys or the key its chats are bound to, nor by its
+  account id.
 - A contact the list cannot match yet, because their name has not arrived, stands
   under **People** until it can, so the field is never blank.
 - The name a person was found under is theirs until their own profile arrives, so

@@ -48,6 +48,10 @@ export interface ThreadState {
   readonly rowsRead: number;
   /** The first page was read (or there was nothing to read). */
   readonly firstRead: boolean;
+  /** The service's comment count when this device last read the thread
+   *  (`null` before a read that knew it): what a new count is compared
+   *  with on the open channel's tick. */
+  readonly countAtRead: number | null;
 }
 
 export const EMPTY_THREAD: ThreadState = {
@@ -59,6 +63,7 @@ export const EMPTY_THREAD: ThreadState = {
   arrived: [],
   rowsRead: 0,
   firstRead: false,
+  countAtRead: null,
 };
 
 /** `existing` with `incoming` added, by cursor, no repeats. Pure. */
@@ -93,9 +98,13 @@ export function withPage(
       firstRead: true,
     };
   }
+  // A comment read into the thread no longer waits behind the line (the own
+  // comment read after a send, raced by the tick's read).
+  const read = new Set(page.map((c) => c.cursor));
   return {
     ...state,
     rows: mergeComments(state.rows, page),
+    arrived: state.arrived.filter((c) => !read.has(c.cursor)),
     nextAfter: Math.max(state.nextAfter, nextAfter),
     done,
     rowsRead,
@@ -209,4 +218,41 @@ export function showMorePage(state: ThreadState): ThreadState {
 export function quotedComment(rows: readonly CommentView[], replyTo: number | null): CommentView | null {
   if (replyTo === null) return null;
   return rows.find((c) => c.cursor === replyTo) ?? null;
+}
+
+/**
+ * What an open channel does for one post's thread on its tick (UX
+ * `group-and-channel-privacy.md` 13.2: new comments reach a channel on
+ * screen, collapsed or open). The written-three-times rule: web here, iOS
+ * `ChannelConversationModel.commentRefresh`, Android `commentRefresh` in
+ * `CommentCount.kt`, the same table in each client's tests.
+ *
+ * - `none`: nothing to read;
+ * - `newer`: read after the last row read (collapsed: into the thread, so the
+ *   first two and the count follow; open: behind `{n} new comments`);
+ * - `reread`: a collapsed thread lost comments (a removal): read its first
+ *   page again in place of what it held;
+ * - `rebase`: an open thread lost comments: nothing is read (the open thread
+ *   does not move), the count read is taken as the new base.
+ *
+ * Driven by the service's comment count, which the tick reads for the posts
+ * in view with the reaction counts; with no count (an older service) an
+ * open thread reads after its last row on every tick. Pure.
+ */
+export type CommentRefresh = "none" | "newer" | "reread" | "rebase";
+
+export function commentRefresh(
+  firstRead: boolean,
+  expanded: boolean,
+  morePages: boolean,
+  rowsRead: number,
+  countAtRead: number | null,
+  serverCount: number | undefined,
+): CommentRefresh {
+  if (!firstRead) return "none";
+  if (serverCount === undefined) return expanded && !morePages ? "newer" : "none";
+  const seen = countAtRead ?? rowsRead;
+  if (serverCount === seen) return "none";
+  if (serverCount > seen) return morePages ? "none" : "newer";
+  return expanded ? "rebase" : "reread";
 }

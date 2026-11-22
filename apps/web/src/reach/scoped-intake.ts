@@ -163,6 +163,50 @@ async function updateIntroductions(
 }
 
 /**
+ * The row without what the person known by `keysHex` (every key they have
+ * had, account key hex) offered or relayed, or `null` when it holds nothing
+ * of theirs. A removed contact's record is no longer relayed, and the records
+ * they relayed are no longer searched.
+ */
+export function withoutIntroductionsFrom(
+  row: IntroductionsRow,
+  keysHex: readonly string[],
+): IntroductionsRow | null {
+  const drop = new Set(keysHex);
+  const offers = Object.fromEntries(Object.entries(row.offers).filter(([k]) => !drop.has(k)));
+  const bundles = Object.fromEntries(Object.entries(row.bundles).filter(([k]) => !drop.has(k)));
+  const acks =
+    row.acks === undefined ? undefined : Object.fromEntries(Object.entries(row.acks).filter(([k]) => !drop.has(k)));
+  const same =
+    Object.keys(offers).length === Object.keys(row.offers).length &&
+    Object.keys(bundles).length === Object.keys(row.bundles).length &&
+    (row.acks === undefined || Object.keys(acks ?? {}).length === Object.keys(row.acks).length);
+  if (same) return null;
+  return { ...row, offers, bundles, ...(acks === undefined ? {} : { acks }) };
+}
+
+/**
+ * Forget what a removed contact offered and relayed (ADR-0060 section 4),
+ * under every key they have had. The relay runs again, so the bundle this
+ * account's other contacts hold is replaced. Never throws.
+ */
+export async function dropIntroductionsFrom(keysHex: readonly string[]): Promise<void> {
+  const session = reachSession();
+  if (session === null || keysHex.length === 0) return;
+  try {
+    const changed = await updateIntroductions(session.accountIdB64, (row) => withoutIntroductionsFrom(row, keysHex));
+    if (changed) {
+      // eslint-disable-next-line no-console
+      console.info("[reach] a removed contact's introductions were dropped");
+      setOffersTick((n) => n + 1);
+    }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("[reach] dropping a removed contact's introductions failed", err instanceof Error ? err.name : "");
+  }
+}
+
+/**
  * Handle one envelope. `oneToOne` is whether the conversation holds exactly
  * two people. Never throws.
  */

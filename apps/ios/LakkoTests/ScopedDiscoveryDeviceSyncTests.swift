@@ -134,6 +134,85 @@ final class ScopedDiscoveryDeviceSyncTests: XCTestCase {
         XCTAssertNotEqual(key(1, 1), key(1, 2))
     }
 
+    /// Leaving Everyone withdraws once per setting, also on a device that
+    /// never published: another device of the account (offline, lost or
+    /// removed) may have put the record at discovery.
+    func testLeavingEveryoneWithdrawsOncePerSettingWhoeverPublished() {
+        func sends(_ published: Bool?, _ withdrawnFor: UInt64?, _ setting: UInt64) -> Bool {
+            ReachRules.everyoneNeedsSending(
+                wantPublic: false, published: published, publishedFor: nil, publishKey: "k",
+                withdrawnForSettingMs: withdrawnFor, settingMs: setting)
+        }
+        XCTAssertTrue(sends(nil, nil, 5))
+        XCTAssertTrue(sends(true, nil, 5))
+        // A note from before notes carried the setting's stamp.
+        XCTAssertTrue(sends(false, nil, 5))
+        // Already withdrawn for this setting: nothing is sent again.
+        XCTAssertFalse(sends(false, 5, 5))
+        // A newer setting, chosen here or on another device.
+        XCTAssertTrue(sends(false, 5, 6))
+    }
+
+    func testEveryonePublishesUnlessThisDevicePublishedTheSameRecord() {
+        func sends(_ published: Bool?, _ publishedFor: String?) -> Bool {
+            ReachRules.everyoneNeedsSending(
+                wantPublic: true, published: published, publishedFor: publishedFor, publishKey: "k",
+                withdrawnForSettingMs: 5, settingMs: 6)
+        }
+        XCTAssertFalse(sends(true, "k"))
+        XCTAssertTrue(sends(true, "old"))
+        XCTAssertTrue(sends(false, nil))
+        XCTAssertTrue(sends(nil, nil))
+    }
+
+    func testARestoreAlsoDropsTheWithdrawNote() throws {
+        let persistence = InMemoryReachPersistence()
+        var held = ReachRecord()
+        held.publishedEveryone = false
+        held.everyoneWithdrawnForSettingMs = 7
+        persistence.save(held, accountIdB64: "other")
+        let idle = ReachCenter(persistence: persistence, ds: Offline.ds())
+        idle.forgetPublishedEveryone(accountIdB64: "other")
+        XCTAssertNil(persistence.load(accountIdB64: "other")?.publishedEveryone)
+        XCTAssertNil(persistence.load(accountIdB64: "other")?.everyoneWithdrawnForSettingMs)
+    }
+
+    /// ADR-0060 section 4 — removing a contact forgets what they offered and
+    /// relayed under every key they have had, and keeps everyone else's.
+    func testRemovingAContactDropsTheirIntroductionsUnderEveryKey() throws {
+        let old = Data(repeating: 0x41, count: 32), now = Data(repeating: 0x42, count: 32)
+        let other = Data(repeating: 0x43, count: 32)
+        var record = ReachRecord()
+        record.offers[old.base64EncodedString()] = "AQ=="
+        record.bundles[now.base64EncodedString()] = ReachRecord.StoredBundle(updatedAtMs: 1, recordsB64: ["Ag=="])
+        record.offers[other.base64EncodedString()] = "Aw=="
+        let persistence = InMemoryReachPersistence()
+        persistence.save(record, accountIdB64: "acct")
+        let c = ReachCenter(persistence: persistence, ds: Offline.ds())
+        var proven = ProvenPredecessors()
+        XCTAssertTrue(proven.record(
+            oldKeyB64: old.base64EncodedString(), newKeyB64: now.base64EncodedString(), evidence: .verifiedProof))
+        c.keyResolverProvider = { _, own in AccountKeyResolver(proven: proven, ownCurrentKey: own) }
+        c.activate(accountIdB64: "acct", accountIdentity: try Identity.fromSeed(seed: Data(repeating: 0x31, count: 32)))
+
+        XCTAssertTrue(c.dropIntroductions(fromAccountKeyB64: now.base64EncodedString()))
+        XCTAssertEqual(c.offeredRecords(), [Data([3])])
+        XCTAssertTrue(c.relayedRecords().isEmpty)
+        XCTAssertFalse(c.dropIntroductions(fromAccountKeyB64: now.base64EncodedString()))
+    }
+
+    /// A relayed set that became empty replaces a bundle sent before, and
+    /// goes nowhere a bundle never went.
+    func testAnEmptyRelayedSetReplacesOnlyABundleSentBefore() throws {
+        let c = try center()
+        c.markBundleSent(groupIdHex: "g1", digest: "with-a-record")
+        let empty = ChatRepository.introductionsBundleDigest([])
+        XCTAssertTrue(c.bundleNeedsSending(groupIdHex: "g1", digest: empty, isEmpty: true))
+        XCTAssertFalse(c.bundleNeedsSending(groupIdHex: "g2", digest: empty, isEmpty: true))
+        c.markBundleSent(groupIdHex: "g1", digest: empty)
+        XCTAssertFalse(c.bundleNeedsSending(groupIdHex: "g1", digest: empty, isEmpty: true))
+    }
+
     func testChoosingASettingAsksForABackup() throws {
         let c = ReachCenter(persistence: InMemoryReachPersistence(), ds: Offline.ds())
         let account = base64Encode(Data((0..<16).map { _ in UInt8.random(in: 0...255) }))

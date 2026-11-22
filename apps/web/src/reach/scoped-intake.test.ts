@@ -30,7 +30,8 @@ vi.mock("../contacts/address-resolver", () => ({
   resolveAccountKeyHex: () => "ab".repeat(32),
 }));
 
-const { intakeScopedEnvelope, introductionOffersTick } = await import("./scoped-intake");
+const { intakeScopedEnvelope, introductionOffersTick, dropIntroductionsFrom, withoutIntroductionsFrom } =
+  await import("./scoped-intake");
 
 function offer(bytes: number[]): Promise<void> {
   return intakeScopedEnvelope({
@@ -79,5 +80,43 @@ describe("introduction offer intake", () => {
       oneToOne: false,
     });
     expect(introductionOffersTick()).toBe(start);
+  });
+});
+
+describe("removing a contact drops what they offered and relayed", () => {
+  beforeEach(() => rows.clear());
+  const sender = "q83vq83vq83vq83vq83vq83vq83vq83vq83vq83vq80=";
+  const senderHex = "ab".repeat(32);
+
+  it("forgets their offer and bundle and runs the relay again", async () => {
+    await intakeScopedEnvelope({ kind: "introduction-offer", payload: new Uint8Array([9]), senderKeyB64: sender, oneToOne: true });
+    await intakeScopedEnvelope({ kind: "introductions", payload: new Uint8Array([8]), senderKeyB64: sender, oneToOne: true });
+    const start = introductionOffersTick();
+    await dropIntroductionsFrom(["cd".repeat(32), senderHex]);
+    const saved = JSON.parse(rows.get("acct/introductions") ?? "{}") as {
+      offers?: Record<string, unknown>;
+      bundles?: Record<string, unknown>;
+    };
+    expect(saved.offers).toEqual({});
+    expect(saved.bundles).toEqual({});
+    // The relay re-runs, so the bundle other contacts hold is replaced.
+    expect(introductionOffersTick()).toBe(start + 1);
+    // Nothing left of theirs: nothing written, no second run.
+    await dropIntroductionsFrom([senderHex]);
+    expect(introductionOffersTick()).toBe(start + 1);
+  });
+
+  it("keeps everyone else's", () => {
+    const row = {
+      offers: { a: { recordB64: "A", receivedAtMs: 1 }, b: { recordB64: "B", receivedAtMs: 1 } },
+      bundles: { a: { bundleB64: "X", updatedAtMs: "1" }, c: { bundleB64: "Y", updatedAtMs: "1" } },
+      acks: { a: 1, c: 2 },
+    };
+    expect(withoutIntroductionsFrom(row, ["a"])).toEqual({
+      offers: { b: { recordB64: "B", receivedAtMs: 1 } },
+      bundles: { c: { bundleB64: "Y", updatedAtMs: "1" } },
+      acks: { c: 2 },
+    });
+    expect(withoutIntroductionsFrom(row, ["z"])).toBeNull();
   });
 });

@@ -325,35 +325,88 @@ public fun searchStateMessage(state: PeopleSearchState): UiText? = when (state) 
     else -> null
 }
 
-/**
- * The rows under People. [listedKeysB64] are shown above already (the Contacts
- * list). [chatPeersB64] are the people whose one-to-one is among the matching
- * conversations above: a contact among them stands there, so they are not
- * listed twice. A person who is no contact keeps their row, and with it the way
- * to add them.
- */
-public fun peopleRows(
-    merged: List<PersonResult>,
-    listedKeysB64: Set<String>,
-    chatPeersB64: Set<String>,
-): List<PersonResult> = merged.filter { p ->
-    p.keyB64 !in listedKeysB64 && !(p.reach == PersonReach.CONTACT && p.keyB64 in chatPeersB64)
-}
+/** A contact as the search rows match them: the key their row is under and
+ *  the account id they asked from, when known. */
+public data class SearchContact(
+    /** The account key the contact row is under, standard base64. */
+    val keyB64: String,
+    /** The same key as lower-case hex. */
+    val keyHex: String,
+    /** The 16-byte account id as lower-case hex, `null` when not known. */
+    val accountIdHex: String?,
+)
+
+/** Who the searching account is, and how a key is matched to a person. */
+public class SearchIdentity(
+    /** Every key of this account: the current one and its own predecessors,
+     *  standard base64. */
+    public val ownKeysB64: Set<String>,
+    /** This account's id as lower-case hex, `null` when not known. */
+    public val ownAccountIdHex: String?,
+    /** The current key of the person a key names, across PROVEN rotations
+     *  only (ADR-0074 3.5); the key itself when nothing proved it superseded. */
+    public val personOf: (String) -> String = { it },
+)
 
 /**
- * [merged] with whoever is a contact NOW shown as one. A remembered answer is up
- * to [SEARCH_ANSWER_KEPT_MS] old, and a person who just accepted may not match
- * the local half yet, because their name arrives after the Welcome: their row
- * must not offer a second request.
+ * Base scenario 9, `docs/ux/who-can-find-me.md` section 6.1 "One person, one
+ * row": the people rows of the search field, from the result lists (local
+ * first). A person is matched by account key across proven rotations, or by
+ * account id; never by name.
+ *
+ * - The own account never appears, under any of its keys.
+ * - A contact found under another key of theirs (a rotation) or by their
+ *   account id is their contact row: under the key the contact is stored
+ *   with, reach [PersonReach.CONTACT], no **Add contact**.
+ * - Results naming one person are merged into one row ([mergePeople]).
+ * - A person the list above already shows leaves: [listedKeysB64] (a contact
+ *   or someone added through their link) and [chatPeersB64] (a one-to-one
+ *   that matched), whether or not they are a contact. Someone who is no
+ *   contact is added from that conversation's info.
  */
-public fun withCurrentContacts(merged: List<PersonResult>, contactKeysB64: Set<String>): List<PersonResult> =
-    merged.map { p ->
-        if (p.reach == PersonReach.CONTACT || p.keyB64 !in contactKeysB64) {
-            p
-        } else {
-            p.copy(reach = PersonReach.CONTACT, grantWireB64 = null, grantChecked = false)
+public fun searchPeopleRows(
+    lists: List<List<PersonResult>>,
+    identity: SearchIdentity,
+    contacts: List<SearchContact>,
+    listedKeysB64: Set<String>,
+    chatPeersB64: Set<String>,
+): List<PersonResult> {
+    val personOf = identity.personOf
+    val ownPersons = identity.ownKeysB64.mapTo(HashSet(), personOf)
+    val ownAccount = identity.ownAccountIdHex?.lowercase()
+    val contactByPerson = HashMap<String, SearchContact>()
+    val contactByAccount = HashMap<String, SearchContact>()
+    for (c in contacts) {
+        contactByPerson.putIfAbsent(personOf(c.keyB64), c)
+        c.accountIdHex?.lowercase()?.let { contactByAccount.putIfAbsent(it, c) }
+    }
+    val rewritten = lists.map { list ->
+        list.mapNotNull { p ->
+            val person = personOf(p.keyB64)
+            val account = p.accountIdHex?.lowercase()
+            if (person in ownPersons || (account != null && account == ownAccount)) return@mapNotNull null
+            val c = contactByPerson[person] ?: account?.let { contactByAccount[it] }
+            if (c == null) {
+                p
+            } else {
+                p.copy(
+                    keyB64 = c.keyB64,
+                    keyHex = c.keyHex,
+                    accountIdHex = p.accountIdHex ?: c.accountIdHex,
+                    reach = PersonReach.CONTACT,
+                    username = shownUsername(p.username, PersonReach.CONTACT),
+                    grantWireB64 = null,
+                    mailboxBindingB64 = null,
+                    grantChecked = false,
+                )
+            }
         }
     }
+    val shownAbove = HashSet<String>()
+    listedKeysB64.mapTo(shownAbove, personOf)
+    chatPeersB64.mapTo(shownAbove, personOf)
+    return mergePeople(rewritten, null).filter { personOf(it.keyB64) !in shownAbove }
+}
 
 /**
  * Whether an answer names as a contact someone who is no longer one. Such a row

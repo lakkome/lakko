@@ -105,6 +105,15 @@ class UnreadCountTest {
     }
 
     @Test
+    fun `a system row past the cursor is not unread`() {
+        // Two commit rows the timeline does not draw put "2" on a chat whose
+        // timeline showed nothing new (seen live 2026-11-22).
+        val system = { id: Long -> ChatMessage(id, Direction.System, "[mls commit]", createdAt = "t") }
+        assertEquals(0, unreadCount(thread(listOf(system(3), system(4))), cursorAt(2)))
+        assertEquals(1, unreadCount(thread(listOf(system(3), incoming(4))), cursorAt(2)))
+    }
+
+    @Test
     fun `once shown here, a stale cursor does not resurrect read messages`() {
         // The DeviceGroup broadcast of this device's read cursor failed, so the
         // cursor still says three unread; this device showed the chat since.

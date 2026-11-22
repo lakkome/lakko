@@ -144,6 +144,20 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
         return Set(messages.lazy.map(\.messageId).filter { $0 > 0 })
     }
 
+    /// The app's stored row when it is a message from someone else, read
+    /// fresh from the log the app wrote. READ-ONLY (C-59).
+    func storedIncomingMessage(accountIdB64: String, groupIdHex: String, messageId: Int64) -> NseStoredMessage? {
+        guard let row = messageLog.getLog(accountIdB64: accountIdB64)?
+            .groups[groupIdHex.lowercased()]?.messages.first(where: { $0.messageId == messageId }),
+              row.direction == "incoming", !row.deleted else { return nil }
+        return NseStoredMessage(text: row.text, attachmentCount: row.attachments.count, authorKeyB64: row.authorKeyB64)
+    }
+
+    func storedRowExists(accountIdB64: String, groupIdHex: String, messageId: Int64) -> Bool {
+        messageLog.getLog(accountIdB64: accountIdB64)?
+            .groups[groupIdHex.lowercased()]?.messages.contains(where: { $0.messageId == messageId }) ?? false
+    }
+
     /// This account's own person key, from the App Group mirror the APP
     /// writes (``ContinuityMirror``). READ-ONLY.
     func ownPersonKeyB64(accountIdB64: String) -> String? {

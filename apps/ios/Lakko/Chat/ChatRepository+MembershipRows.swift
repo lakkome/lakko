@@ -15,7 +15,40 @@ extension ChatRepository {
     /// base64), or `nil` when the roster cannot be read.
     static func personKeysB64(of group: Group) -> [String]? {
         guard let members = try? group.members() else { return nil }
-        return PersonKey.people(members).map { base64Encode($0) }
+        return MembershipRow.personKeysB64(members)
+    }
+
+    /// The poll's batch: each commit it applied names the people it changed
+    /// on its own row, judged against the roster right after the commit
+    /// before it (``MembershipRow/forCommits(isGroup:personKeysBefore:commits:ownPersonKeyB64:accountOfKey:isSuperseded:awaited:nowMs:)``).
+    /// `personKeysAfterCommit` is what the apply read after each commit.
+    func noteMembershipChanges(
+        groupIdHex: String,
+        record: GroupRecord,
+        events: [IncomingChatEvent],
+        personKeysBefore: [String]?,
+        personKeysAfterCommit: [Int64: [String]],
+        firstNewRow: Int
+    ) {
+        let commitIds: [Int64] = events.compactMap {
+            if case .system(let messageId, .commit, _) = $0 { return messageId }
+            return nil
+        }
+        guard !commitIds.isEmpty, conversationKind(groupIdHex: groupIdHex) == .group else { return }
+        let context = membershipContext(groupIdHex: groupIdHex)
+        let verdict = MembershipRow.forCommits(
+            isGroup: true,
+            personKeysBefore: personKeysBefore,
+            commits: commitIds.map { ($0, personKeysAfterCommit[$0]) },
+            ownPersonKeyB64: AuthorIdentity.own(group: record.group),
+            accountOfKey: context.accountOfKey,
+            isSuperseded: context.isSuperseded,
+            awaited: context.awaited,
+            nowMs: Self.nowMs())
+        context.keep(verdict.awaited)
+        for (messageId, row) in verdict.rows {
+            record.recordMembershipChange(row, messageId: messageId, fromIndex: firstNewRow)
+        }
     }
 
     func noteMembershipChange(
@@ -62,8 +95,31 @@ extension ChatRepository {
     private func membershipRow(
         groupIdHex: String, record: GroupRecord, personKeysBefore: [String]?
     ) -> MembershipRow? {
-        let isGroup = conversationKind(groupIdHex: groupIdHex) == .group
-        guard isGroup else { return nil }
+        guard conversationKind(groupIdHex: groupIdHex) == .group else { return nil }
+        let context = membershipContext(groupIdHex: groupIdHex)
+        let verdict = MembershipRow.forBatch(
+            isGroup: true,
+            hadCommit: true,
+            personKeysBefore: personKeysBefore,
+            personKeysAfter: Self.personKeysB64(of: record.group),
+            ownPersonKeyB64: AuthorIdentity.own(group: record.group),
+            accountOfKey: context.accountOfKey,
+            isSuperseded: context.isSuperseded,
+            awaited: context.awaited,
+            nowMs: Self.nowMs())
+        context.keep(verdict.awaited)
+        return verdict.row
+    }
+
+    /// What naming the people of a group's change reads: who a key belongs
+    /// to, which keys an accepted reset retired, and the device-swap memory
+    /// (read now, kept by `keep`).
+    private func membershipContext(groupIdHex: String) -> (
+        accountOfKey: (String) -> String?,
+        isSuperseded: (String) -> Bool,
+        awaited: [String: Int64],
+        keep: ([String: Int64]) -> Void
+    ) {
         // A key an accepted reset retired names its account; so does a pinned
         // current key: the reset's two keys are then one person.
         let superseded = supersededKeyMap()
@@ -73,17 +129,13 @@ extension ChatRepository {
         }
         let groupIdB64 = groupIdB64(ofHex: groupIdHex)
         let store = continuityStore
-        let verdict = MembershipRow.forBatch(
-            isGroup: isGroup,
-            hadCommit: true,
-            personKeysBefore: personKeysBefore,
-            personKeysAfter: Self.personKeysB64(of: record.group),
-            ownPersonKeyB64: AuthorIdentity.own(group: record.group),
+        return (
             accountOfKey: { superseded[$0] ?? accountByPinnedKey[$0] },
             isSuperseded: { superseded[$0] != nil },
             awaited: groupIdB64.map { store.awaitedSwaps(groupIdB64: $0) } ?? [:],
-            nowMs: Self.nowMs())
-        if let groupIdB64 { store.setAwaitedSwaps(groupIdB64: groupIdB64, verdict.awaited) }
-        return verdict.row
+            keep: { awaited in
+                if let groupIdB64 { store.setAwaitedSwaps(groupIdB64: groupIdB64, awaited) }
+            }
+        )
     }
 }

@@ -51,7 +51,7 @@ internal fun ChannelAttachSurfaces(
     onPickVisual: () -> Unit,
     onPickFiles: () -> Unit,
     onPickAudio: () -> Unit,
-    onCaptured: (Uri) -> Unit,
+    onCaptured: (me.lakko.app.ui.chat.CameraTake) -> Unit,
     onPublish: (MessageContent, List<AttachmentRef>) -> Unit,
     /** The channel, which names its article draft. */
     draftKey: String = "channel",

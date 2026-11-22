@@ -97,6 +97,7 @@ import {
 import { attachReceiveHook } from "../attach/receive-hook";
 import type { IdentitySecrets } from "../auth/AuthContext";
 import type { MembershipChange } from "./membership-rows";
+import { personKeysOrNull } from "./person-key";
 import {
   parseBodyEnvelope,
   type AttachmentRefBytes,
@@ -331,11 +332,16 @@ export type IncomingChatEvent =
        *  that happened to the group. */
       systemKind: "commit" | "external-join-proposal";
       createdAt: string;
-      /** `docs/ux/second-device.md` section 4 — on the LAST commit row of a
-       *  received batch that changed the people of a group, the person keys
-       *  that joined and left (`chat/membership-rows.ts`). Absent on every
-       *  other row; the receive paths add it after the batch is applied. */
+      /** `docs/ux/second-device.md` section 4 — on a commit row that changed
+       *  the people of a group, the person keys that joined and left
+       *  (`chat/membership-rows.ts`). Absent on every other row; the receive
+       *  paths add it after the batch is applied. */
       membership?: MembershipChange;
+      /** `docs/ux/second-device.md` section 4 — for a received commit, the
+       *  people of the group (base64 person keys) read right after it was
+       *  applied; `null` on a torn read. Absent where the producer read none
+       *  (this device's own commit, older paths). */
+      personKeysAfter?: readonly string[] | null;
     }
   | {
       /** ADR-0045 — a membership PROPOSAL: a member asked for an add, a
@@ -2006,6 +2012,16 @@ export class ChatClient {
       }
       if (event.kind === "application" && event.content !== undefined) {
         await attachReceiveHook().content(group, groupIdB64, event);
+      }
+      if (processed.kind === "Commit" && event.kind === "system") {
+        // docs/ux/second-device.md section 4 — the people right after THIS
+        // commit, read before anything else can move the roster, so each
+        // commit of a batch names the people it changed on its own row (a
+        // removal and a re-add in one batch must not cancel out).
+        const personKeysAfter = personKeysOrNull(group);
+        await attachReceiveHook().commit(group, groupIdB64);
+        events.push({ ...event, personKeysAfter });
+        continue;
       }
       if (processed.kind === "Commit") {
         await attachReceiveHook().commit(group, groupIdB64);

@@ -46,6 +46,10 @@ final class CallKitCallRegistry {
 
     /// A call reported from a VoIP push whose call id is not known yet.
     private(set) var pendingPlaceholder: UUID?
+    /// The person declined a placeholder on the system screen before its offer
+    /// was decrypted. The call id that adopts it is declined the moment it
+    /// rings, rather than reported to the system a second time.
+    private(set) var declinedPlaceholder: UUID?
     /// Call id (lowercase hex) -> the UUID the system knows that call by.
     private var adopted: [String: UUID] = [:]
 
@@ -61,6 +65,7 @@ final class CallKitCallRegistry {
     func placeholderReported(_ uuid: UUID) -> UUID? {
         let superseded = pendingPlaceholder
         pendingPlaceholder = uuid
+        if declinedPlaceholder != uuid { declinedPlaceholder = nil }
         return superseded == uuid ? nil : superseded
     }
 
@@ -84,6 +89,30 @@ final class CallKitCallRegistry {
         return derived
     }
 
+    /// The system ended `uuid` while it was still the pending placeholder: the
+    /// person declined a call whose offer this device has not read yet. `true`
+    /// when `uuid` is that placeholder; it stays pending, so the call id that
+    /// arrives next still adopts it, and ``takeDeclined(_:)`` then answers yes.
+    @discardableResult
+    func declinePlaceholder(_ uuid: UUID) -> Bool {
+        guard pendingPlaceholder == uuid else { return false }
+        declinedPlaceholder = uuid
+        return true
+    }
+
+    /// Is a decline of `uuid` still waiting for its offer?
+    func isDeclineWaiting(_ uuid: UUID) -> Bool {
+        declinedPlaceholder == uuid
+    }
+
+    /// The call that adopted `uuid` was declined before it was known: consume
+    /// that decline. `true` once.
+    func takeDeclined(_ uuid: UUID) -> Bool {
+        guard declinedPlaceholder == uuid else { return false }
+        declinedPlaceholder = nil
+        return true
+    }
+
     /// Forget a finished call, by its id.
     func release(callId: Data) {
         adopted.removeValue(forKey: IncomingCallReport.hex(callId))
@@ -92,17 +121,20 @@ final class CallKitCallRegistry {
     /// Forget a finished call, by the UUID the system named.
     func release(uuid: UUID) {
         if pendingPlaceholder == uuid { pendingPlaceholder = nil }
+        if declinedPlaceholder == uuid { declinedPlaceholder = nil }
         adopted = adopted.filter { $0.value != uuid }
     }
 
     /// Drop the pending placeholder — the wake never produced a call.
     func releasePlaceholder() {
+        if declinedPlaceholder == pendingPlaceholder { declinedPlaceholder = nil }
         pendingPlaceholder = nil
     }
 
     /// Logout / account switch.
     func reset() {
         pendingPlaceholder = nil
+        declinedPlaceholder = nil
         adopted.removeAll()
     }
 }

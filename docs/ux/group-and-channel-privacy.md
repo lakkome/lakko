@@ -760,7 +760,18 @@ Show 16 more comments
   screen does not claim it is a contact: no `@username`, no link to a profile.
 - A comment that fails to send stays in the thread with Retry.
 - Newly arrived comments do not move the thread while it is open: a line `{n} new comments`
-  appears at its end.
+  appears at its end. Pressing it shows them; closing the thread does too. This person's own
+  comments join the thread at once.
+- A channel on screen keeps its comments current at the cadence it already reads its posts
+  (every 10 s while the screen is visible, chosen, not measured; 2026-11-22): on that tick
+  the comment counts of the posts in view are read with their reaction counts, and a
+  thread whose count went up reads the comments after the last one it holds. Collapsed,
+  they join the first two and the `Show {n} more comments` line; open, they wait behind
+  `{n} new comments`. A count that went down (a removal) re-reads a collapsed thread's
+  first page and leaves an open thread as it is. No other request is made. The rule is
+  written once per client (web `comment-thread.ts` `commentRefresh`, iOS
+  `ChannelConversationModel.commentRefresh`, Android `CommentCount.kt` `commentRefresh`)
+  with the same table in each client's tests.
 
 | State | What it shows |
 |---|---|

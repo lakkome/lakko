@@ -202,4 +202,98 @@ final class MembershipRowTests: XCTestCase {
         XCTAssertEqual(ChatTimeline.membershipRow(restored), row)
         XCTAssertTrue(HistoryBundleCodec.isBookkeepingSystemRow(persisted))
     }
+
+    // MARK: - Each commit of a batch on its own (seen live 2026-11-22)
+
+    private func commits(
+        before: [String]?,
+        _ commits: [(Int64, [String]?)],
+        isSuperseded: @escaping (String) -> Bool = { _ in false },
+        accountOfKey: @escaping (String) -> String? = { _ in nil }
+    ) -> MembershipRow.CommitsVerdict {
+        MembershipRow.forCommits(
+            isGroup: true,
+            personKeysBefore: before,
+            commits: commits.map { (messageId: $0.0, personKeysAfter: $0.1) },
+            ownPersonKeyB64: own,
+            accountOfKey: accountOfKey, isSuperseded: isSuperseded,
+            awaited: [:], nowMs: 1_000_000)
+    }
+
+    /// The live defect: the owner removed a person and added them back, and a
+    /// member received both commits in one poll. Judged as one batch the
+    /// people were the same before and after, so nothing was drawn; judged
+    /// commit by commit each row names its own change.
+    func testARemovalAndAReAddInOneBatchNameBothOnTheirOwnRows() throws {
+        XCTAssertNil(
+            verdict(before: [own, anna, bob], after: [own, anna, bob]).row,
+            "the batch-wide rule sees no change at all")
+
+        let result = commits(before: [own, anna, bob], [(2, [own, anna]), (3, [own, anna, bob])])
+        XCTAssertEqual(result.rows[2], MembershipRow(joinedKeysB64: [], leftKeysB64: [bob]))
+        XCTAssertEqual(result.rows[3], MembershipRow(joinedKeysB64: [bob], leftKeysB64: []))
+
+        let (record, firstNewRow) = try recordWithBatch()
+        for (id, row) in result.rows {
+            XCTAssertTrue(record.recordMembershipChange(row, messageId: id, fromIndex: firstNewRow))
+        }
+        let shown = drawn(record.messages, isGroup: true)
+        XCTAssertEqual(shown.map(\.messageId), [2, 3], "both lines are drawn, in journal order")
+        XCTAssertEqual(
+            shown.compactMap(ChatTimeline.membershipRow).flatMap { $0.sentences(name: names) },
+            [
+                Localization.text("chat.system.member_left", texts: ["name": "Bob"]),
+                Localization.text("chat.system.member_joined", texts: ["name": "Bob"]),
+            ])
+    }
+
+    func testOneCommitPerBatchIsJudgedAsBefore() {
+        let result = commits(before: [own, bob], [(7, [own, bob, anna])])
+        XCTAssertEqual(result.rows, [7: MembershipRow(joinedKeysB64: [anna], leftKeysB64: [])!])
+    }
+
+    /// A torn roster read after a commit records nothing for it, nor for the
+    /// next commit, whose "before" is then unknown; the one after that is
+    /// judged again.
+    func testATornReadRecordsNothingForThatCommitAndTheNext() {
+        let result = commits(
+            before: [own, bob], [(2, nil), (3, [own, bob, anna]), (4, [own, anna])])
+        XCTAssertNil(result.rows[2])
+        XCTAssertNil(result.rows[3])
+        XCTAssertEqual(result.rows[4], MembershipRow(joinedKeysB64: [], leftKeysB64: [bob]))
+    }
+
+    /// A commit that only admitted another device of a person already there
+    /// names nobody, and does not hide the person change of the next commit.
+    func testADeviceOnlyCommitNamesNobody() {
+        let result = commits(before: [own, bob], [(2, [own, bob]), (3, [own])])
+        XCTAssertNil(result.rows[2])
+        XCTAssertEqual(result.rows[3], MembershipRow(joinedKeysB64: [], leftKeysB64: [bob]))
+    }
+
+    /// A reset's device swap across two commits of one batch is still one
+    /// person: the memory carries from the first commit to the second.
+    func testAResetSwapAcrossTwoCommitsOfOneBatchStaysSilent() {
+        let old = key(0x0C)
+        let new = key(0x0D)
+        let result = commits(
+            before: [own, old], [(2, [own]), (3, [own, new])],
+            isSuperseded: { $0 == old },
+            accountOfKey: { [old: "acct", new: "acct"][$0] })
+        XCTAssertTrue(result.rows.isEmpty)
+    }
+
+    /// The row goes on the commit with that DS id, not on the batch's last.
+    func testTheRowIsWrittenOnTheCommitOfItsId() throws {
+        let (record, firstNewRow) = try recordWithBatch()
+        let row = try XCTUnwrap(MembershipRow(joinedKeysB64: [anna], leftKeysB64: []))
+        XCTAssertTrue(record.recordMembershipChange(row, messageId: 2, fromIndex: firstNewRow))
+        XCTAssertEqual(record.messages.map(\.text), [
+            MembershipRow.plainCommitText, row.marker, MembershipRow.plainCommitText,
+        ])
+        XCTAssertFalse(
+            record.recordMembershipChange(row, messageId: 1, fromIndex: firstNewRow),
+            "a row before the batch is not touched")
+        XCTAssertFalse(record.recordMembershipChange(row, messageId: 9, fromIndex: firstNewRow))
+    }
 }

@@ -92,14 +92,19 @@ class HiddenFromSearchTest {
         awaitSaved(store, true)
 
         // Withdrawing says nothing about the hiding.
-        reach.notePublishedEveryone(false, null)
+        reach.notePublishedEveryone(false, null, withdrawnForSettingMs = 7L)
         assertTrue(reach.hiddenFromSearch.value)
         awaitDoc(store) { it.publishedPublic == false }
         assertTrue(store.docs[account]!!.hiddenFromSearch)
+        // The withdraw is noted for the setting it was sent for.
+        assertEquals(7L, store.docs[account]!!.withdrawnForSettingMs)
+        assertEquals(7L, reach.everyoneWithdrawnForSettingMs())
 
         reach.notePublishedEveryone(true, "key")
         assertFalse(reach.hiddenFromSearch.value)
         awaitSaved(store, false)
+        // Publishing clears the withdraw note: the next leave withdraws again.
+        assertEquals(null, reach.everyoneWithdrawnForSettingMs())
         assertFalse(manager(store).hiddenFromSearch.value)
     }
 

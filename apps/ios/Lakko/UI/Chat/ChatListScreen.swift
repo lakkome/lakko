@@ -964,7 +964,11 @@ public struct ChatListScreen: View {
         case .upTo(let id): cursorId = id
         }
         return thread.messages.reduce(0) { acc, msg in
-            if msg.direction == .outgoing { return acc }
+            // Only a message someone else wrote is unread: a system row (a
+            // commit, a membership line, a call row) is not a message, and a
+            // plain commit row is not even drawn. Counting them put "2" on a
+            // group whose timeline showed nothing new (2026-11-22).
+            if msg.direction != .incoming { return acc }
             if msg.messageId <= 0 { return acc }
             if PairingHistory.isHistory(messageId: msg.messageId, floor: thread.syncedThroughMessageId) {
                 return acc

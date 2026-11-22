@@ -1126,3 +1126,136 @@ final class NsePushDecryptTests: XCTestCase {
         XCTAssertEqual(nseWithoutGroupLinkSecret("hello"), "hello")
     }
 }
+
+// MARK: - A wake whose message the app had already applied
+
+/// A wake whose message the running app had already applied.
+///
+/// Seen on Android (2026-11-22): the open chat's poll and the push read fetch
+/// the same rows, and a row the app applied cannot be decrypted a second time.
+/// The extension treated such a row as "held", i.e. this device's own, and
+/// posted nothing; when the app's cursor was already past the wake's message
+/// it did not even fetch it. These tests pin the preview taken from the app's
+/// stored log instead.
+final class NseAppAppliedWakeTests: XCTestCase {
+
+    private let groupHex = String(repeating: "d", count: 64)
+    private let peerKey = "peer-person=="
+
+    private final class Group: NseThrowawayGroup {
+        let failing: Bool
+        let isGroupConversation: Bool
+        init(failing: Bool, isGroup: Bool = true) {
+            self.failing = failing
+            self.isGroupConversation = isGroup
+        }
+        func process(_ payload: Data) throws -> NseProcessedRow? {
+            // The key of a row the app already applied is gone.
+            if failing { throw NSError(domain: "process_message: SecretReuseError", code: 1) }
+            return nil
+        }
+        func dsProofHeader(method: String, path: String, query: String, body: Data) -> String? { nil }
+        func close() {}
+    }
+
+    private final class Deps: NsePushDecryptDeps {
+        let rows: [NseFetchedRow]
+        let group: NseThrowawayGroup
+        let cursor: Int64?
+        /// The n-th read of a stored row (n from 1).
+        let stored: (Int64, Int) -> NseStoredMessage?
+        let exists: (Int64) -> Bool
+        let names: [String: String]
+        var reads: [Int64: Int] = [:]
+
+        init(
+            rows: [NseFetchedRow], group: NseThrowawayGroup, cursor: Int64? = nil,
+            stored: @escaping (Int64, Int) -> NseStoredMessage?, exists: @escaping (Int64) -> Bool = { _ in false },
+            names: [String: String] = ["peer-person==": "Mira"]
+        ) {
+            self.rows = rows
+            self.group = group
+            self.cursor = cursor
+            self.stored = stored
+            self.exists = exists
+            self.names = names
+        }
+
+        func personName(accountIdB64: String, keyB64: String) -> String? { names[keyB64] }
+        func reactionNotificationsOn() -> Bool { true }
+        func boundAccount(wakeSubscriptionIdHex: String?) -> String? { "acct" }
+        func lookupRoute(accountIdB64: String, pushGidHex: String, subscriptionIdHex: String?) -> String? { pushGidHex }
+        func accountKnowsGroup(accountIdB64: String, groupHex: String) -> Bool { true }
+        func loadIdentitySeed(accountIdB64: String) -> Data? { Data(repeating: 1, count: 64) }
+        func loadSnapshot(accountIdB64: String) -> Data? { Data(repeating: 2, count: 8) }
+        func openThrowawayGroup(seed: Data, snapshot: Data, groupIdBytes: Data) throws -> NseThrowawayGroup? { group }
+        func dsFetch(groupIdBytes: Data, afterId: Int64, group: NseThrowawayGroup) async throws -> [NseFetchedRow] {
+            rows.filter { $0.id > afterId }
+        }
+        func startCursor(accountIdB64: String, groupHex: String) -> Int64? { cursor }
+        func isAntiCensorshipArmed() -> Bool { false }
+        func callerName(accountIdB64: String, groupIdHex: String) -> String? { "Call walk" }
+        func heldMessageIds(accountIdB64: String, groupIdHex: String) -> Set<Int64> {
+            Set(rows.map(\.id).filter { stored($0, 1) != nil || exists($0) })
+        }
+        func storedIncomingMessage(accountIdB64: String, groupIdHex: String, messageId: Int64) -> NseStoredMessage? {
+            let n = (reads[messageId] ?? 0) + 1
+            reads[messageId] = n
+            return stored(messageId, n)
+        }
+        func storedRowExists(accountIdB64: String, groupIdHex: String, messageId: Int64) -> Bool { exists(messageId) }
+    }
+
+    private func message(_ text: String) -> NseStoredMessage {
+        NseStoredMessage(text: text, attachmentCount: 0, authorKeyB64: peerKey)
+    }
+
+    func testAMessageTheAppAppliedIsPreviewedFromItsStoredLog() async {
+        let deps = Deps(
+            rows: [NseFetchedRow(id: 20, payload: Data([1]))], group: Group(failing: true),
+            stored: { id, _ in id == 20 ? self.message("push test from iphone") : nil })
+        let outcome = await decryptPushOutcome(NsePushWake(groupHex: groupHex, pointer: 20), deps)
+        guard case .preview(let preview) = outcome else { return XCTFail("expected a preview, got \(outcome)") }
+        XCTAssertEqual(preview.title, "Call walk")
+        XCTAssertEqual(preview.body, "Mira: push test from iphone")
+    }
+
+    func testACursorPastThePointerStillPreviewsTheStoredMessage() async {
+        // The app's cursor is past the wake's message: the read fetches
+        // nothing, and the log holds the message.
+        let deps = Deps(
+            rows: [], group: Group(failing: false), cursor: 20,
+            stored: { id, _ in id == 20 ? self.message("already read by the app") : nil })
+        let outcome = await decryptPushOutcome(NsePushWake(groupHex: groupHex, pointer: 20), deps)
+        guard case .preview(let preview) = outcome else { return XCTFail("expected a preview, got \(outcome)") }
+        XCTAssertEqual(preview.body, "Mira: already read by the app")
+    }
+
+    func testTheLogIsReadAgainWhenTheAppHadNotWrittenItYet() async {
+        let deps = Deps(
+            rows: [NseFetchedRow(id: 20, payload: Data([1]))], group: Group(failing: true),
+            stored: { _, n in n >= 2 ? self.message("late") : nil })
+        let outcome = await decryptPushOutcome(NsePushWake(groupHex: groupHex, pointer: 20), deps)
+        guard case .preview(let preview) = outcome else { return XCTFail("expected a preview, got \(outcome)") }
+        XCTAssertEqual(preview.body, "Mira: late")
+        XCTAssertEqual(deps.reads[20], 2)
+    }
+
+    func testAnOwnRowInTheLogStaysQuiet() async {
+        // In the log but not a message from someone else (this device's own).
+        let deps = Deps(
+            rows: [NseFetchedRow(id: 20, payload: Data([1]))], group: Group(failing: true),
+            stored: { _, _ in nil }, exists: { $0 == 20 })
+        let outcome = await decryptPushOutcome(NsePushWake(groupHex: groupHex, pointer: 20), deps)
+        guard case .quiet = outcome else { return XCTFail("expected quiet, got \(outcome)") }
+        XCTAssertEqual(deps.reads[20], 1, "the row is in the log: nothing to wait for")
+    }
+
+    func testAStoredGroupMessageFromSomeoneUnnamedIsTheGenericLine() async {
+        let deps = Deps(
+            rows: [NseFetchedRow(id: 20, payload: Data([1]))], group: Group(failing: true),
+            stored: { _, _ in self.message("hello") }, names: [:])
+        let outcome = await decryptPushOutcome(NsePushWake(groupHex: groupHex, pointer: 20), deps)
+        guard case .none = outcome else { return XCTFail("expected the generic line, got \(outcome)") }
+    }
+}

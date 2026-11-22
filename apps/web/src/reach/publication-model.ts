@@ -29,9 +29,15 @@ import type { ProfileRequestRule } from "../profile/profile-request";
 
 /** What this device last published, persisted per account. */
 export interface PublicationState {
-  /** The Everyone publication in effect (`key` = `everyoneKey` of the inputs
-   *  it was built from): `null` = never published. */
-  readonly everyone: { readonly public: boolean; readonly key: string | null } | null;
+  /** The Everyone publication this device last sent (`key` = `everyoneKey` of
+   *  the inputs it was built from; `settingMs` = the stamp of the "who can find
+   *  me" setting it was sent for, as a decimal string): `null` = this device
+   *  never sent one. */
+  readonly everyone: {
+    readonly public: boolean;
+    readonly key: string | null;
+    readonly settingMs?: string | null;
+  } | null;
   /** The OPRF OUTPUT of each term already evaluated (term -> base64). Never
    *  sent anywhere: the lookup key discovery gets is derived from it with
    *  `discoveryLookupKey`, and records are sealed under it (ADR-0060 §5). */
@@ -80,21 +86,33 @@ export function everyoneKey(
  *  as published, and no key matches it, so the next pass sends it again. */
 export function staleEveryoneNote(state: PublicationState): PublicationState {
   if (state.everyone === null || state.everyone.key === null) return state;
-  return { ...state, everyone: { public: state.everyone.public, key: null } };
+  return { ...state, everyone: { ...state.everyone, key: null } };
 }
 
+/**
+ * What the Everyone step sends. `settingMs` is the stamp of the setting in
+ * force (decimal string).
+ *
+ * Outside Everyone the withdraw is sent unless THIS device already withdrew
+ * for this very setting. It does not matter whether this device ever
+ * published: the record at discovery is the account's, and another device of
+ * the account (one that is offline, lost or removed) or this device before its
+ * note was lost may have published it. The setting's stamp changes on every
+ * choice made on any device, so each device withdraws once per choice that
+ * leaves Everyone, not on every pass.
+ */
 export function everyoneAction(
   held: PublicationState["everyone"],
   everyone: boolean,
   key: string,
+  settingMs: string,
 ): EveryoneAction {
   if (everyone) {
     if (held !== null && held.public && held.key === key) return { kind: "none" };
     return { kind: "publish" };
   }
-  // Leaving Everyone (or never in it): withdraw only what was published.
-  if (held !== null && held.public) return { kind: "withdraw" };
-  return { kind: "none" };
+  if (held !== null && !held.public && (held.settingMs ?? null) === settingMs) return { kind: "none" };
+  return { kind: "withdraw" };
 }
 
 /** The inputs an introduction record is built from, as one key. The mailbox
@@ -164,12 +182,24 @@ export function recordsDigest(recordsB64: readonly string[]): string {
   return JSON.stringify([...recordsB64].sort());
 }
 
-/** The conversations the relayed bundle (of `digest`) must go to. */
+/** The digest of a relayed set with no record in it. */
+export const EMPTY_RECORDS_DIGEST = recordsDigest([]);
+
+/**
+ * The conversations the relayed bundle (of `digest`) must go to. A set that
+ * became empty (the last contact who offered a record was removed) goes, as a
+ * bundle of padding only, to the conversations that were sent a bundle
+ * before: it replaces theirs, so the removed person's record stops being
+ * relayed. A conversation never sent a bundle gets no empty one.
+ */
 export function bundleTargets(
   state: PublicationState,
   digest: string,
   oneToOneGroups: readonly string[],
 ): string[] {
+  if (digest === EMPTY_RECORDS_DIGEST) {
+    return oneToOneGroups.filter((g) => state.bundleSentTo[g] !== undefined && state.bundleSentTo[g] !== digest);
+  }
   return oneToOneGroups.filter((g) => state.bundleSentTo[g] !== digest);
 }
 

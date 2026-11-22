@@ -90,9 +90,22 @@ internal fun withoutChosenContact(setting: FfiVisibilitySetting, accountId: Byte
 /** A stable digest of a set of record wires (order-independent). */
 internal fun recordsDigest(recordsHex: Collection<String>): String = recordsHex.sorted().joinToString(",")
 
-/** The conversations the relayed bundle (of [digest]) must go to. */
+/** The digest of a relayed set with no record in it. */
+internal val EMPTY_RECORDS_DIGEST: String = recordsDigest(emptyList())
+
+/**
+ * The conversations the relayed bundle (of [digest]) must go to. A set that
+ * became empty (the last contact who offered a record was removed) goes, as a
+ * bundle of padding only, to the conversations that were sent a bundle
+ * before: it replaces theirs, so the removed person's record stops being
+ * relayed. A conversation never sent a bundle gets no empty one.
+ */
 internal fun bundleTargets(sentTo: Map<String, String>, digest: String, oneToOneGroups: List<String>): List<String> =
-    oneToOneGroups.filter { sentTo[it] != digest }
+    if (digest == EMPTY_RECORDS_DIGEST) {
+        oneToOneGroups.filter { sentTo[it] != null && sentTo[it] != digest }
+    } else {
+        oneToOneGroups.filter { sentTo[it] != digest }
+    }
 
 /** The terms still to evaluate (not in the cache). */
 internal fun termsToEvaluate(cached: Set<String>, terms: List<String>): List<String> =
@@ -281,8 +294,10 @@ internal suspend fun publishIntroductions(
     // 4. Relay the records our contacts offered, as one padded bundle, to
     //    every contact (a contact may receive its own record back; it is
     //    harmless and hides nothing the bundle size does not).
+    // An empty set still replaces a bundle sent before ([bundleTargets]): a
+    // removed contact's record stops being relayed.
     val records = inputs.offeredRecordsHex
-    if (records.isNotEmpty()) {
+    run {
         val digest = recordsDigest(records)
         val targets = bundleTargets(state.bundleSentTo, digest, inputs.oneToOneGroups)
         if (targets.isNotEmpty()) {

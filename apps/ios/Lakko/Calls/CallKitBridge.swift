@@ -45,6 +45,14 @@ final class CallKitBridge {
     /// The UUID of the call currently reported for this host, so an end can be
     /// reported after ``CallHost`` has already cleared its slot.
     private var reportedUuid: UUID?
+    /// Declines of calls that were declined on the system screen before their
+    /// offer was read, each finishing once its `End` is published.
+    private var placeholderDeclines: [UUID: Task<Void, Never>] = [:]
+    /// How often a decline that waits for its offer looks again.
+    private let placeholderPollNs: UInt64
+    /// How long it waits at most: the ring window, after which the caller has
+    /// stopped ringing anyway.
+    private let placeholderWaitMs: Int64
 
     /// The two shared objects and the app-state probe arrive as `nil`-defaulted
     /// parameters rather than as `= .shared` defaults, because a default
@@ -55,8 +63,12 @@ final class CallKitBridge {
         provider: CallKitProvider = .shared,
         registry: CallKitCallRegistry? = nil,
         host: CallHost,
-        appIsActive: (@MainActor () -> Bool)? = nil
+        appIsActive: (@MainActor () -> Bool)? = nil,
+        placeholderPollNs: UInt64 = 200_000_000,
+        placeholderWaitMs: Int64 = Int64(CallHostRouting.ringWindowMs)
     ) {
+        self.placeholderPollNs = placeholderPollNs
+        self.placeholderWaitMs = placeholderWaitMs
         self.provider = provider
         self.registry = registry ?? .shared
         self.host = host
@@ -77,10 +89,26 @@ final class CallKitBridge {
             self.clearCallNotifications(for: uuid)
         }
         provider.onEnd = { [weak self] uuid in
-            guard let self, self.matchesActiveCall(uuid) else { return }
-            self.host.endCurrentCall()
-            self.registry.release(uuid: uuid)
+            guard let self else { return }
+            if self.matchesActiveCall(uuid) {
+                self.host.endCurrentCall()
+                self.registry.release(uuid: uuid)
+                self.clearCallNotifications(for: uuid)
+                // The provider fulfils the action and lets the process go once
+                // this returns, so it returns only after the `End` this decline
+                // or hang-up produced has been published (or has failed).
+                await self.host.whenPublishesSettle()
+                return
+            }
+            // Declined while the system screen still showed the VoIP push's
+            // placeholder: the offer has not been read, so there is no call
+            // to end yet. Decline it the moment it rings (`apply`), and keep
+            // the process here until that `End` is out, or the ring window,
+            // after which the caller has given up on its own.
+            guard self.registry.declinePlaceholder(uuid) else { return }
+            NSLog("CallKitBridge: declined before the offer was read; declining it when it lands")
             self.clearCallNotifications(for: uuid)
+            await self.awaitPlaceholderDecline(uuid)
         }
         provider.onSetMuted = { [weak self] uuid, muted in
             guard let self, self.matchesActiveCall(uuid) else { return }
@@ -92,6 +120,21 @@ final class CallKitBridge {
             self?.reportedUuid = nil
             self?.registry.reset()
             self?.host.endCurrentCall()
+        }
+    }
+
+    /// Wait until the placeholder declined as `uuid` has been adopted by its
+    /// call and that call's `End` published, or until the wait runs out or the
+    /// placeholder is dropped (superseded, timed out, not a call here).
+    private func awaitPlaceholderDecline(_ uuid: UUID) async {
+        var waitedMs: Int64 = 0
+        let stepMs = Int64(placeholderPollNs / 1_000_000)
+        while registry.isDeclineWaiting(uuid), waitedMs < placeholderWaitMs {
+            try? await Task.sleep(nanoseconds: placeholderPollNs)
+            waitedMs += max(1, stepMs)
+        }
+        if let decline = placeholderDeclines.removeValue(forKey: uuid) {
+            await decline.value
         }
     }
 
@@ -132,6 +175,19 @@ final class CallKitBridge {
         }
         switch state {
         case .ringing:
+            if registry.takeDeclined(uuid) {
+                // Already declined on the system screen, before this offer was
+                // read. Not reported again (the person said no); the decline
+                // runs on the next turn, because this sink fires inside the
+                // session's own `.ringing` transition and ending the session
+                // here would be overwritten by it.
+                let host = host
+                placeholderDeclines[uuid] = Task { @MainActor in
+                    host.declineIncomingCall()
+                    await host.whenPublishesSettle()
+                }
+                return
+            }
             reportIncoming(uuid: uuid)
         case .outgoing:
             reportOutgoing(uuid: uuid)

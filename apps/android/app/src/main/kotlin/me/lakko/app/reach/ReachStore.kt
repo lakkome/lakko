@@ -176,6 +176,9 @@ internal data class ReachDoc(
     /** What the Everyone publication was last sent for
      *  ([everyonePublishKey]: name, username and certificate). */
     val publishedKey: String? = null,
+    /** The stamp of the "who can find me" setting the last withdraw was
+     *  sent for ([everyoneAction]); `null` when none was sent. */
+    val withdrawnForSettingMs: Long? = null,
     /** The ReachState envelope (`composeReachStateEnvelope`) in force, hex:
      *  composed here on a rotation, or accepted verbatim from another of the
      *  account's devices. Carries its stamp, so a re-send keeps it. */
@@ -285,6 +288,17 @@ internal class EncryptedReachDocStore(context: Context) : ReachDocStore {
     }
 }
 
+/** The document without what the person known by [keysHex] (every key they
+ *  have had, hex) offered or relayed, or `null` when it holds nothing of
+ *  theirs (ADR-0060 section 4). */
+internal fun withoutIntroductionsFrom(doc: ReachDoc, keysHex: Set<String>): ReachDoc? {
+    val offers = doc.introOffers.filterKeys { it !in keysHex }
+    val bundles = doc.introBundles.filterKeys { it !in keysHex }
+    if (offers.size == doc.introOffers.size && bundles.size == doc.introBundles.size) return null
+    return doc.copy(introOffers = offers, introBundles = bundles)
+}
+
 /** The document once nothing is known about the Everyone publication: `true`
  *  with no key sends, in or out of Everyone ([everyoneAction]). */
-internal fun ReachDoc.withUnknownEveryoneNote(): ReachDoc = copy(publishedPublic = true, publishedKey = null)
+internal fun ReachDoc.withUnknownEveryoneNote(): ReachDoc =
+    copy(publishedPublic = true, publishedKey = null, withdrawnForSettingMs = null)

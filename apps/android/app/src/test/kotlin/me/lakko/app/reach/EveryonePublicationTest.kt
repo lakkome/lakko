@@ -190,36 +190,51 @@ class EveryonePublicationTest {
     fun `the action keys on the whole publication, not the name alone`() {
         val before = everyonePublishKey("Anna", "anna", null)
         val after = everyonePublishKey("Anna", "anna", certificate)
-        assertEquals(EveryoneAction.NONE, everyoneAction(true, true, before, before))
-        assertEquals(EveryoneAction.PUT, everyoneAction(true, true, before, after))
-        assertEquals(EveryoneAction.PUT, everyoneAction(true, false, null, after))
-        assertEquals(EveryoneAction.PUT, everyoneAction(true, null, null, after))
-        assertEquals(EveryoneAction.PUT, everyoneAction(false, true, before, before))
-        assertEquals(EveryoneAction.NONE, everyoneAction(false, false, null, before))
-        assertEquals(EveryoneAction.NOTE_WITHDRAWN, everyoneAction(false, null, null, before))
+        assertEquals(EveryoneAction.NONE, everyoneAction(true, true, before, before, null, 1L))
+        assertEquals(EveryoneAction.PUT, everyoneAction(true, true, before, after, null, 1L))
+        assertEquals(EveryoneAction.PUT, everyoneAction(true, false, null, after, null, 1L))
+        assertEquals(EveryoneAction.PUT, everyoneAction(true, null, null, after, null, 1L))
+        // A withdraw noted for one setting never stops a later publish.
+        assertEquals(EveryoneAction.PUT, everyoneAction(true, false, null, after, 1L, 2L))
+        assertEquals(EveryoneAction.PUT, everyoneAction(false, true, before, before, null, 2L))
+    }
+
+    @Test
+    fun `leaving Everyone withdraws once per setting, even on a device that never published`() {
+        val key = everyonePublishKey("Anna", "anna", certificate)
+        // Another device of the account (offline, lost or removed) may hold
+        // the record at discovery: this device withdraws it anyway.
+        assertEquals(EveryoneAction.PUT, everyoneAction(false, null, null, key, null, 5L))
+        // A note from before notes carried the setting's stamp.
+        assertEquals(EveryoneAction.PUT, everyoneAction(false, false, null, key, null, 5L))
+        // Already withdrawn for this setting: nothing is sent again.
+        assertEquals(EveryoneAction.NONE, everyoneAction(false, false, null, key, 5L, 5L))
+        // A newer setting (chosen here or adopted from another device).
+        assertEquals(EveryoneAction.PUT, everyoneAction(false, false, null, key, 5L, 6L))
     }
 
     @Test
     fun `a rotation changes the publish key, so the record naming the old mailbox is replaced`() {
         val before = everyonePublishKey("Anna", "anna", certificate, ByteArray(97) { 1 })
         val after = everyonePublishKey("Anna", "anna", certificate, ByteArray(97) { 2 })
-        assertEquals(EveryoneAction.PUT, everyoneAction(true, true, before, after))
+        assertEquals(EveryoneAction.PUT, everyoneAction(true, true, before, after, null, 1L))
     }
 
     @Test
     fun `the first refresh of a session in Everyone sends even with a matching note`() {
         val key = everyonePublishKey("Anna", "anna", certificate)
-        assertEquals(EveryoneAction.PUT, everyoneActionForRefresh(true, true, key, key, firstOfSession = true))
-        assertEquals(EveryoneAction.NONE, everyoneActionForRefresh(true, true, key, key, firstOfSession = false))
-        // Outside Everyone nothing is forced: the note decides.
-        assertEquals(EveryoneAction.NONE, everyoneActionForRefresh(false, false, null, key, firstOfSession = true))
+        assertEquals(EveryoneAction.PUT, everyoneActionForRefresh(true, true, key, key, null, 1L, firstOfSession = true))
+        assertEquals(EveryoneAction.NONE, everyoneActionForRefresh(true, true, key, key, null, 1L, firstOfSession = false))
+        // Outside Everyone nothing is forced: the note for this setting decides.
+        assertEquals(EveryoneAction.NONE, everyoneActionForRefresh(false, false, null, key, 3L, 3L, firstOfSession = true))
     }
 
     @Test
     fun `an Everyone note after a restore sends whatever the setting says`() {
-        val restored = ReachDoc(publishedPublic = true, publishedKey = "old").withUnknownEveryoneNote()
-        assertEquals(EveryoneAction.PUT, everyoneAction(true, restored.publishedPublic, restored.publishedKey, "k"))
-        assertEquals(EveryoneAction.PUT, everyoneAction(false, restored.publishedPublic, restored.publishedKey, "k"))
+        val restored = ReachDoc(publishedPublic = false, publishedKey = null, withdrawnForSettingMs = 4L)
+            .withUnknownEveryoneNote()
+        assertEquals(EveryoneAction.PUT, everyoneAction(true, restored.publishedPublic, restored.publishedKey, "k", restored.withdrawnForSettingMs, 4L))
+        assertEquals(EveryoneAction.PUT, everyoneAction(false, restored.publishedPublic, restored.publishedKey, "k", restored.withdrawnForSettingMs, 4L))
     }
 
     @Test

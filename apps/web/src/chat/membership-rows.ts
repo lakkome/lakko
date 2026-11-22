@@ -134,6 +134,75 @@ export function withMembershipChange<E extends MembershipEventShape>(
   return events.map((e) => (e === target ? { ...e, membership: change } : e));
 }
 
+/** The part of a received commit event the per-commit rule reads. */
+export interface CommitPeopleShape {
+  readonly kind: string;
+  readonly messageId?: number;
+  readonly systemKind?: string;
+  readonly personKeysAfter?: readonly string[] | null;
+}
+
+/**
+ * Each commit of a batch judged on its own: the people after the previous
+ * commit (`personKeysBefore` for the first) against the people right after
+ * this one (`personKeysAfter`, read by the apply), in DS order. Returns the
+ * change to name on each commit row, by DS id.
+ *
+ * Judging the batch as a whole lost a change a later commit of the same batch
+ * undid: a person removed and added back between two polls is the same set of
+ * people before and after, and nothing was recorded (seen live 2026-11-22: the
+ * committer drew both lines, a member that received both commits in one poll
+ * drew none). A commit whose roster was not read (`personKeysAfter` absent)
+ * is merged into the next one that was, or takes `liveAfter` as the batch's
+ * last commit; a torn read (`null`) records nothing for that commit or the
+ * next one, whose "before" is then unknown.
+ *
+ * `judge` is called once per commit, in order, so the device-swap memory it
+ * keeps (`membershipChangeOfBatch`) advances commit by commit.
+ */
+export function membershipChangesByCommit(
+  events: readonly CommitPeopleShape[],
+  personKeysBefore: readonly string[] | null,
+  liveAfter: readonly string[] | null,
+  judge: (before: readonly string[] | null, after: readonly string[] | null) => MembershipChange | null,
+): Map<number, MembershipChange> {
+  const commits = events.filter(
+    (e): e is CommitPeopleShape & { readonly messageId: number } => isCommitEvent(e) && e.messageId !== undefined,
+  );
+  const out = new Map<number, MembershipChange>();
+  let before = personKeysBefore;
+  commits.forEach((e, i) => {
+    const last = i === commits.length - 1;
+    // A commit whose roster nobody read (a sweep's rows, this device's own
+    // commit) is judged together with the next commit that was read, or with
+    // `liveAfter` as the batch's last: its change is not lost, only merged.
+    if (e.personKeysAfter === undefined && !last) return;
+    const after = e.personKeysAfter !== undefined ? e.personKeysAfter : liveAfter;
+    const change = judge(before, after);
+    if (namesAnyone(change ?? undefined) && change !== null) out.set(e.messageId, change);
+    before = after;
+  });
+  return out;
+}
+
+/**
+ * The batch with each change of `changes` recorded on the commit row of its
+ * DS id. Every other event is returned as it was; a one-to-one records
+ * nothing.
+ */
+export function withMembershipChanges<E extends MembershipEventShape>(
+  events: readonly E[],
+  changes: ReadonlyMap<number, MembershipChange>,
+  kind: ConversationKind,
+): E[] {
+  if (kind !== "group" || changes.size === 0) return [...events];
+  return events.map((e) => {
+    if (!isCommitEvent(e) || e.messageId === undefined) return e;
+    const change = changes.get(e.messageId);
+    return change === undefined || !namesAnyone(change) ? e : { ...e, membership: change };
+  });
+}
+
 /**
  * The events of a sweep as one batch: the rows the verdict applied below this
  * device's own commit, then, when the sweep merged, the own commit itself at

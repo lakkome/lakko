@@ -625,6 +625,17 @@ public protocol NsePushDecryptDeps {
     /// does not decrypt counts as unreadable, and the generic banner stands.
     func heldMessageIds(accountIdB64: String, groupIdHex: String) -> Set<Int64>
 
+    /// The app's stored row `(group, message id)` when it is a message from
+    /// someone else that is not deleted, read FRESH on every call (the app
+    /// may be writing its log while this read runs), or `nil`. What a wake
+    /// shows when the app had already applied the message: a row the app
+    /// applied cannot be decrypted a second time. READ-ONLY (C-59).
+    func storedIncomingMessage(accountIdB64: String, groupIdHex: String, messageId: Int64) -> NseStoredMessage?
+
+    /// Whether the app's log holds the row `(group, message id)` at all, read
+    /// fresh. READ-ONLY.
+    func storedRowExists(accountIdB64: String, groupIdHex: String, messageId: Int64) -> Bool
+
     /// This account's own person key (standard base64, the form of
     /// ``NseProcessedRow/senderKeyB64``): a message from it was sent by
     /// another device of the same person and is not a notification.
@@ -663,8 +674,32 @@ public extension NsePushDecryptDeps {
     func isMuted(accountIdB64: String, groupIdHex: String) -> Bool { false }
     func conversationHex(accountIdB64: String, groupIdHex: String) -> String { groupIdHex }
     func heldMessageIds(accountIdB64: String, groupIdHex: String) -> Set<Int64> { [] }
+    func storedIncomingMessage(accountIdB64: String, groupIdHex: String, messageId: Int64) -> NseStoredMessage? { nil }
+    func storedRowExists(accountIdB64: String, groupIdHex: String, messageId: Int64) -> Bool { false }
     func ownPersonKeyB64(accountIdB64: String) -> String? { nil }
 }
+
+/// A message from someone else as the app stored it, for a wake whose message
+/// the app had already applied
+/// (``NsePushDecryptDeps/storedIncomingMessage(accountIdB64:groupIdHex:messageId:)``).
+public struct NseStoredMessage: Equatable {
+    public let text: String
+    public let attachmentCount: Int
+    /// The author's account key (standard base64) as resolved at receipt.
+    public let authorKeyB64: String?
+
+    public init(text: String, attachmentCount: Int, authorKeyB64: String?) {
+        self.text = text
+        self.attachmentCount = attachmentCount
+        self.authorKeyB64 = authorKeyB64
+    }
+}
+
+/// How long the read waits before reading the app's log a second time, when a
+/// wake's row was in neither the decrypt nor the log: the app writes its MLS
+/// snapshot just before its message log. Chosen, not measured; well inside
+/// the extension's budget.
+let nseStoredLogRetryNanos: UInt64 = 1_500_000_000
 
 /// Produce a real decrypted notification preview for a GroupMessage wake, or
 /// `nil` when the background path cannot (safely) yield one — in which case
@@ -860,6 +895,11 @@ public func decryptPushOutcome(
     // Both read once, and only when a row asks.
     lazy var heldIds = deps.heldMessageIds(accountIdB64: account.accountIdB64, groupIdHex: realGroupHex)
     lazy var ownPersonKey = deps.ownPersonKeyB64(accountIdB64: account.accountIdB64)
+    // The wake's own rows (the pointer and after) that did not decrypt and
+    // are not this device's own message: the app may have applied them
+    // first. When the app's cursor is already at or past the pointer the
+    // message was not even fetched; the app applied it.
+    var storedCandidates: [Int64] = after >= pointer ? [pointer] : []
     for row in rows {
         let decoded: NseProcessedRow?
         do {
@@ -870,6 +910,7 @@ public func decryptPushOutcome(
             // decrypt. The app's log holds that row (or one it already
             // received): a held id is quiet, anything else is unreadable.
             if nseIsOwnMessageEcho(error) { nseTrace("row \(row.id): own echo"); continue }
+            if row.id >= pointer { storedCandidates.append(row.id) }
             if !heldIds.contains(row.id) { unreadableRows += 1 }
             nseTrace("row \(row.id): process failed \(type(of: error)) held=\(heldIds.contains(row.id))")
             continue
@@ -1001,6 +1042,26 @@ public func decryptPushOutcome(
         }
     }
     if let latest { nseTrace("result: preview (title from conversation=\(latest.title != "Lakko"))"); return .preview(latest) }
+    // A message from someone else the app had already applied: its stored
+    // text, as the app shows it. Never on top of a reaction withdrawal.
+    if reactionRemovals.isEmpty, !storedCandidates.isEmpty {
+        let fromLog = await nseStoredPreview(
+            candidates: storedCandidates, accountIdB64: account.accountIdB64, groupIdHex: realGroupHex,
+            isGroup: group.isGroupConversation, tag: conversationTag,
+            movedConversation: conversationTag.caseInsensitiveCompare(realGroupHex) != .orderedSame,
+            deps: deps, nameOf: nameOf)
+        switch fromLog {
+        case .preview(let preview):
+            nseTrace("result: preview from the app's stored log")
+            return .preview(preview)
+        case .nameless:
+            nseLogMissingSenderName()
+            nseTrace("result: generic (stored message, sender not named)")
+            return .none
+        case .none:
+            break
+        }
+    }
     if !reactionRemovals.isEmpty { nseTrace("result: withdraw reactions"); return .withdrawReactions(keys: reactionRemovals, tag: conversationTag) }
     // The read ran to the end and found no message from someone else. A row
     // this device could not read may be one, so it keeps the generic line.
@@ -1166,6 +1227,61 @@ func nseWord(_ key: String, english: String) -> String {
 /// stored the word).
 public func nseUnsupportedMessageLine() -> String {
     nseWord("chat.message.unsupported", english: "This message needs a newer version of Lakko.")
+}
+
+/// What the app's stored log gave a wake.
+enum NseStoredPreviewResult: Equatable {
+    case preview(NsePushPreview)
+    /// A stored message from someone this device holds no name for.
+    case nameless
+    case none
+}
+
+/// The preview of a wake's message the app had already applied, from its
+/// stored log: the newest of `candidates` that the log holds as a message
+/// from someone else (not deleted, not from a blocked or superseded sender).
+/// When a candidate is not in the log at all, the log is read once more after
+/// ``nseStoredLogRetryNanos``. READ-ONLY (C-59).
+func nseStoredPreview(
+    candidates: [Int64], accountIdB64: String, groupIdHex: String, isGroup: Bool, tag: String,
+    movedConversation: Bool, deps: NsePushDecryptDeps, nameOf: (String) -> String?
+) async -> NseStoredPreviewResult {
+    let ids = Array(Set(candidates)).sorted(by: >)
+    func scan() -> (result: NseStoredPreviewResult, missing: Bool) {
+        var missing = false
+        for id in ids {
+            guard let row = deps.storedIncomingMessage(accountIdB64: accountIdB64, groupIdHex: groupIdHex, messageId: id) else {
+                if !deps.storedRowExists(accountIdB64: accountIdB64, groupIdHex: groupIdHex, messageId: id) {
+                    missing = true
+                }
+                continue
+            }
+            if deps.isBlockedSender(accountIdB64: accountIdB64, senderKeyB64: row.authorKeyB64) { continue }
+            if deps.isSupersededSender(accountIdB64: accountIdB64, senderKeyB64: row.authorKeyB64) { continue }
+            let text: String
+            if !row.text.isEmpty {
+                text = truncate(row.text)
+            } else if row.attachmentCount > 0 {
+                text = nseAttachmentsLine(count: row.attachmentCount)
+            } else {
+                continue
+            }
+            let senderName = row.authorKeyB64.flatMap { nameOf($0) }
+            if isGroup && senderName == nil { return (.nameless, missing) }
+            let shown = nseMessageNotification(
+                conversationName: deps.callerName(accountIdB64: accountIdB64, groupIdHex: groupIdHex),
+                senderName: senderName, isGroup: isGroup, text: text)
+            return (.preview(NsePushPreview(
+                title: shown.title, body: shown.body, tag: tag, movedConversation: movedConversation)), missing)
+        }
+        return (.none, missing)
+    }
+    let first = scan()
+    if case .none = first.result, first.missing {
+        try? await Task.sleep(nanoseconds: nseStoredLogRetryNanos)
+        return scan().result
+    }
+    return first.result
 }
 
 /// "Sent an attachment" / "Sent N attachments" in the interface language.

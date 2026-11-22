@@ -7,6 +7,11 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * `Decline` from the incoming-call notification.
@@ -30,6 +35,15 @@ import android.util.Log
  * instead. Publishing from that process is not a matter of wiring: the
  * background path is read-only by construction (C-59), and encrypting a message
  * advances the ratchet it must not touch.
+ *
+ * ## Holding the process until the End is out
+ *
+ * The publish runs on the call host's own coroutines, after [onReceive] has
+ * returned. With the app in the background, a process whose receiver has
+ * finished is cached again and may be frozen before that publish completes,
+ * and the caller then rings out its whole window (the iOS twin of this was seen
+ * live on 2026-11-22). So the receiver uses [goAsync] and finishes only once
+ * the host reports the `End` published, or after [DECLINE_PUBLISH_WAIT_MS].
  */
 public class IncomingCallActionReceiver : BroadcastReceiver() {
 
@@ -42,14 +56,35 @@ public class IncomingCallActionReceiver : BroadcastReceiver() {
         if (command.action != CallRingAction.DECLINE) return
         IncomingCallRinger.attach(context)
         IncomingCallRinger.stopRinging(command.callIdHex)
-        try {
-            AppCallHost.instance.declineRinging(command.groupIdHex, command.callIdHex)
+        val pending = goAsync()
+        val published = try {
+            AppCallHost.instance.declineRingingPublished(command.groupIdHex, command.callIdHex)
         } catch (cause: Throwable) {
             Log.w(TAG, "decline could not reach the call host", cause)
+            pending.finish()
+            return
+        }
+        receiverScope.launch {
+            try {
+                if (withTimeoutOrNull(DECLINE_PUBLISH_WAIT_MS) { published.await() } == null) {
+                    Log.w(TAG, "decline: the End was not published within the wait")
+                }
+            } finally {
+                pending.finish()
+            }
         }
     }
 
-    private companion object {
+    internal companion object {
         const val TAG = "lakko-call-ring"
+
+        /**
+         * The longest the receiver holds the process for the `End`. Chosen,
+         * not measured: inside the ten seconds a receiver may stay pending
+         * before the system treats it as unresponsive.
+         */
+        const val DECLINE_PUBLISH_WAIT_MS: Long = 8_000L
+
+        private val receiverScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     }
 }

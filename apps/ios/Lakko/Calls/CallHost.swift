@@ -559,7 +559,13 @@ final class CallHost: ObservableObject {
             callerKey: activePeerKey)
     }
 
-    /// Resolves once every publish queued so far has been attempted. Tests.
+    /// Resolves once every publish queued so far has been attempted.
+    ///
+    /// ``CallKitBridge`` awaits it after the system's Decline or End, so the
+    /// `End` is on the Delivery Service before the action is fulfilled and the
+    /// process is let go: with the app in the background the process is
+    /// suspended moments after the call ends, and a publish still in flight
+    /// then reaches the caller only when the app next runs.
     func whenPublishesSettle() async {
         await publishTail?.value
     }

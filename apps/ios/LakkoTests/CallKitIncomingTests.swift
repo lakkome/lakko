@@ -238,6 +238,146 @@ final class CallKitIncomingTests: XCTestCase {
         )
     }
 
+    // MARK: - A placeholder declined before its offer was read
+
+    func testADeclinedPlaceholderIsDeclinedOnceWhenItsCallAdoptsIt() {
+        let registry = CallKitCallRegistry()
+        let placeholder = UUID()
+        registry.placeholderReported(placeholder)
+        XCTAssertTrue(registry.declinePlaceholder(placeholder))
+        XCTAssertTrue(registry.isDeclineWaiting(placeholder))
+        // Still pending, so the offer that arrives next keeps the UUID the
+        // person already declined instead of ringing under a new one.
+        XCTAssertEqual(registry.uuid(forCallId: callId), placeholder)
+        XCTAssertTrue(registry.takeDeclined(placeholder))
+        XCTAssertFalse(registry.takeDeclined(placeholder), "consumed once")
+        XCTAssertFalse(registry.isDeclineWaiting(placeholder))
+    }
+
+    func testOnlyThePendingPlaceholderCanBeDeclinedAhead() {
+        let registry = CallKitCallRegistry()
+        XCTAssertFalse(registry.declinePlaceholder(UUID()), "no placeholder at all")
+        let placeholder = UUID()
+        registry.placeholderReported(placeholder)
+        XCTAssertFalse(registry.declinePlaceholder(UUID()), "another uuid")
+        XCTAssertFalse(registry.isDeclineWaiting(placeholder))
+    }
+
+    func testADroppedOrSupersededPlaceholderTakesItsDeclineAlong() {
+        let registry = CallKitCallRegistry()
+        let first = UUID()
+        registry.placeholderReported(first)
+        registry.declinePlaceholder(first)
+        registry.placeholderReported(UUID())
+        XCTAssertFalse(registry.isDeclineWaiting(first), "a later wake supersedes it")
+
+        let second = UUID()
+        registry.placeholderReported(second)
+        registry.declinePlaceholder(second)
+        registry.releasePlaceholder()
+        XCTAssertFalse(registry.isDeclineWaiting(second), "the wake rang nothing here")
+        // A later, unrelated call is never declined by it.
+        let uuid = registry.uuid(forCallId: callId)!
+        XCTAssertFalse(registry.takeDeclined(uuid))
+    }
+
+    // MARK: - Finishing a system-ended call in the background
+
+    private final class FakeBackgroundTasks: BackgroundTaskRunning {
+        var begun: [String] = []
+        var ended: [BackgroundTaskToken] = []
+        var expiration: (@MainActor () -> Void)?
+        private var next = 1
+        func begin(
+            name: String, expiration: @escaping @MainActor () -> Void
+        ) -> BackgroundTaskToken? {
+            begun.append(name)
+            self.expiration = expiration
+            defer { next += 1 }
+            return BackgroundTaskToken(raw: next)
+        }
+        func end(_ token: BackgroundTaskToken) { ended.append(token) }
+    }
+
+    /// A gate the test opens, standing in for a Delivery Service publish.
+    private final class Gate {
+        private var waiter: CheckedContinuation<Void, Never>?
+        private var opened = false
+        func wait() async {
+            if opened { return }
+            await withCheckedContinuation { waiter = $0 }
+        }
+        func open() {
+            opened = true
+            waiter?.resume()
+            waiter = nil
+        }
+    }
+
+    func testTheActionIsFulfilledOnlyAfterTheWorkAndTheProcessIsHeldMeanwhile() async throws {
+        let background = FakeBackgroundTasks()
+        let gate = Gate()
+        var fulfilled = 0
+        SystemCallEnd.run(
+            name: "end", background: background, fulfilWithin: 10,
+            work: { await gate.wait() }, fulfil: { fulfilled += 1 })
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(background.begun, ["end"], "a background task holds the process")
+        XCTAssertEqual(fulfilled, 0, "not fulfilled while the End is still being published")
+        XCTAssertTrue(background.ended.isEmpty)
+
+        gate.open()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(fulfilled, 1)
+        XCTAssertEqual(background.ended.count, 1, "the process is let go once the work is done")
+    }
+
+    func testASlowPublishStillFulfilsTheActionInTimeAndKeepsTheProcess() async throws {
+        let background = FakeBackgroundTasks()
+        let gate = Gate()
+        var fulfilled = 0
+        SystemCallEnd.run(
+            name: "end", background: background, fulfilWithin: 0.05,
+            work: { await gate.wait() }, fulfil: { fulfilled += 1 })
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(fulfilled, 1, "fulfilled at the bound, before the action times out")
+        XCTAssertTrue(background.ended.isEmpty, "the publish keeps its background time")
+
+        gate.open()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(fulfilled, 1, "never fulfilled twice")
+        XCTAssertEqual(background.ended.count, 1)
+    }
+
+    func testAnExpiringBackgroundTaskFulfilsAndEndsAtOnce() async throws {
+        let background = FakeBackgroundTasks()
+        let gate = Gate()
+        var fulfilled = 0
+        SystemCallEnd.run(
+            name: "end", background: background, fulfilWithin: 10,
+            work: { await gate.wait() }, fulfil: { fulfilled += 1 })
+        background.expiration?()
+        XCTAssertEqual(fulfilled, 1)
+        XCTAssertEqual(background.ended.count, 1)
+        gate.open()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(fulfilled, 1)
+        XCTAssertEqual(background.ended.count, 1, "ended once")
+    }
+
+    func testTheFulfilBoundStaysInsideTheActionDeadline() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(
+            SystemCallEnd.fulfilBound(timeoutDate: now.addingTimeInterval(60), now: now),
+            SystemCallEnd.maxFulfilWait)
+        XCTAssertEqual(
+            SystemCallEnd.fulfilBound(timeoutDate: now.addingTimeInterval(3), now: now), 2,
+            accuracy: 0.001)
+        XCTAssertEqual(
+            SystemCallEnd.fulfilBound(timeoutDate: now.addingTimeInterval(0.5), now: now), 0)
+        XCTAssertEqual(SystemCallEnd.fulfilBound(timeoutDate: now, now: now), 0)
+    }
+
     // MARK: - What the call history says (section 6)
 
     func testEndReasonsMapToWhatActuallyHappened() {

@@ -7,7 +7,9 @@ import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -573,6 +575,22 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         send(Event.DeclineRinging(groupIdHex, callIdHex))
 
     /**
+     * [declineRinging], returning a [Deferred] that completes once the `End`
+     * the decline produced has been published (or the publish failed, or there
+     * was nothing to send).
+     *
+     * For a decline from the notification while the app is in the background:
+     * the receiver holds the process ([android.content.BroadcastReceiver.goAsync])
+     * until this completes, so the caller stops ringing at once rather than
+     * whenever this process next runs.
+     */
+    public fun declineRingingPublished(groupIdHex: String, callIdHex: String): Deferred<Unit> {
+        val published = CompletableDeferred<Unit>()
+        send(Event.DeclineRinging(groupIdHex, callIdHex, published))
+        return published
+    }
+
+    /**
      * The ring window ran out for [callIdHex]. Forget a held offer for it, so
      * that bringing the app to the foreground later cannot ring for a call the
      * user has already watched time out.
@@ -680,7 +698,11 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         data class Accept(val withVideo: Boolean) : Event
         data object Decline : Event
         data class AcceptRinging(val callIdHex: String, val withVideo: Boolean) : Event
-        data class DeclineRinging(val groupIdHex: String, val callIdHex: String) : Event
+        data class DeclineRinging(
+            val groupIdHex: String,
+            val callIdHex: String,
+            val published: CompletableDeferred<Unit>? = null,
+        ) : Event
         data class DismissRinging(val callIdHex: String) : Event
         data object HangUp : Event
         data object ClearFinished : Event
@@ -692,7 +714,21 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         class ScreenShare(val groupIdHex: String, val callIdHex: String, val share: VerifiedCallScreenShare) : Event
     }
 
-    private class Outbound(val groupIdHex: String, val bytes: ByteArray, val wake: CallSignalingWake)
+    /**
+     * One frame to publish, or (with [flushed]) a marker that completes once
+     * every frame queued before it has been attempted.
+     */
+    private class Outbound(
+        val groupIdHex: String,
+        val bytes: ByteArray,
+        val wake: CallSignalingWake,
+        val flushed: CompletableDeferred<Unit>? = null,
+    ) {
+        companion object {
+            fun marker(flushed: CompletableDeferred<Unit>): Outbound =
+                Outbound("", ByteArray(0), CallSignalingWake.NONE, flushed)
+        }
+    }
 
     private enum class TimerKind { RING, ESTABLISH }
 
@@ -785,6 +821,13 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         }
         scope.launch {
             for (item in outbound) {
+                // A marker publishes nothing: everything queued before it has
+                // been attempted by the time it is read.
+                val flushed = item.flushed
+                if (flushed != null) {
+                    flushed.complete(Unit)
+                    continue
+                }
                 val p = port ?: continue
                 // 16.4 — a closed one-to-one publishes nothing, a call's `End`
                 // included; the call has already ended locally.
@@ -951,6 +994,15 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
     }
 
     private fun onDeclineRinging(event: Event.DeclineRinging) {
+        try {
+            declineRingingNow(event)
+        } finally {
+            // Behind the `End` this decline queued, whichever path queued it.
+            event.published?.let { outbound.trySend(Outbound.marker(it)) }
+        }
+    }
+
+    private fun declineRingingNow(event: Event.DeclineRinging) {
         stopRinging(event.callIdHex)
         pendingAccept = null
         val live = liveSlot()

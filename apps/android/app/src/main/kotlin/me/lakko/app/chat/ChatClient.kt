@@ -570,6 +570,11 @@ public class ChatClient(
                         systemKind = SystemKind.Commit,
                         createdAt = message.createdAt,
                         rosterAccountKeys = rosterAccountKeysOf(group),
+                        personKeysAfter = try {
+                            personKeysOf(group.members())
+                        } catch (_: Throwable) {
+                            null
+                        },
                     )
                 } else {
                     event
@@ -1681,6 +1686,12 @@ public sealed interface IncomingChatEvent {
          *  keys of the roster it produced: open anonymous polls extend their
          *  rings with the accounts it added. */
         val rosterAccountKeys: List<ByteArray>? = null,
+        /** `docs/ux/second-device.md` section 4 — for a merged commit, the
+         *  PEOPLE of the group right after it (base64 person keys, first-leaf
+         *  order), `null` when the roster could not be read. Each commit of a
+         *  batch names the people it changed against the commit before it, so
+         *  a removal and a re-add in one batch do not cancel out. */
+        val personKeysAfter: List<MemberIdentity>? = null,
     ) : IncomingChatEvent
 
     /** Phase 3a10 — call-signaling event lifted out of an

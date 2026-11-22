@@ -175,29 +175,42 @@ public class LakkoMessagingService : FirebaseMessagingService() {
         // `isAppForegrounded` fails toward `false` (background), so a probe
         // error never suppresses the generic banner.
         val appOnScreen = isAppForegrounded(applicationContext)
-        val outcome: PushWakeOutcome? =
+        val outcome: PushWakeOutcome =
             if (wake.groupHex != null && wake.pointer != null) {
                 backgroundPreviewBlocking(wake, accountIdB64)
             } else {
-                null
+                PushWakeOutcome.emptyBecause(WakeFallbackReason.NO_POINTER)
             }
         // ADR-0073 phase 2 / UX 16.4 — a wake for a closed one-to-one posts
         // nothing at all: no banner, no ring.
-        if (outcome?.suppressed == true) {
+        if (outcome.suppressed) {
             Log.i(TAG, "wake dropped: the conversation moved")
             return
         }
-        if (outcome != null && handledAsCall(outcome)) return
-        if (outcome != null && outcome.preview == null && !outcome.genericBannerWanted(appOnScreen)) {
-            Log.i(TAG, "wake posts nothing: no message from someone else")
+        if (handledAsCall(outcome)) return
+        val shown = outcome.shownPreview(appOnScreen)
+        if (shown == null && !outcome.genericBannerWanted(appOnScreen)) {
+            Log.i(
+                TAG,
+                if (outcome.storedPreview != null) {
+                    "wake posts nothing: the app on screen already shows the message"
+                } else {
+                    "wake posts nothing: no message from someone else"
+                },
+            )
             return
         }
+        // Every generic banner says why, in one plain line (no identifier):
+        // a "New message" with no reason in the log is a defect report nobody
+        // can act on.
+        val reason = wakeBannerLogLine(outcome, shown)
+        if (reason != null) Log.i(TAG, reason)
         // docs/ux/media-messages.md section 11, ADR-0047 section 6 — the
         // first photo or video's micro thumbnail, carried inside the message,
         // as the notification's picture: decoded in memory, nothing fetched,
         // so a process this wake started shows it too.
-        val picture = me.lakko.app.media.decodeInlineThumb(notificationPictureBytes(outcome?.preview))
-        showWakeNotification(wake, accountIdB64, outcome?.preview, picture)
+        val picture = me.lakko.app.media.decodeInlineThumb(notificationPictureBytes(shown))
+        showWakeNotification(wake, accountIdB64, shown, picture)
     }
 
     /**
@@ -243,7 +256,7 @@ public class LakkoMessagingService : FirebaseMessagingService() {
      * keeps us well inside the FMS window; a timeout or ANY failure
      * degrades to the generic notification (returns `null`).
      */
-    private fun backgroundPreviewBlocking(wake: WakeBody, accountIdB64: String): PushWakeOutcome? {
+    private fun backgroundPreviewBlocking(wake: WakeBody, accountIdB64: String): PushWakeOutcome {
         return try {
             runBlocking {
                 withTimeoutOrNull(BACKGROUND_DECRYPT_BUDGET_MS) {
@@ -264,11 +277,13 @@ public class LakkoMessagingService : FirebaseMessagingService() {
                             ringWindowMs = uniffi.lakko_ffi_uniffi.callRingWindowMs().toLong(),
                         )
                     }
-                }
+                } ?: PushWakeOutcome.emptyBecause(WakeFallbackReason.TIMEOUT)
             }
         } catch (cause: Throwable) {
-            Log.w(TAG, "background decrypt failed; showing generic notification", cause)
-            null
+            // The class only: a message text could carry an identifier.
+            Log.w(TAG, "background decrypt failed (${cause.javaClass.simpleName})")
+            PushWakeOutcome.emptyBecause(WakeFallbackReason.READ_FAILED)
+                .copy(fallbackDetail = cause.javaClass.simpleName)
         }
     }
 
@@ -438,6 +453,24 @@ public class LakkoMessagingService : FirebaseMessagingService() {
         public const val EXTRA_WAKE_GROUP: String = "me.lakko.push.wake_group"
         public const val EXTRA_WAKE_POINTER: String = "me.lakko.push.wake_pointer"
     }
+}
+
+/**
+ * The one log line a posted wake banner gets, or `null` for a real preview
+ * decrypted on this wake. A banner from the app's stored log and every generic
+ * "New message" banner say which it is and why, with no identifier.
+ */
+internal fun wakeBannerLogLine(outcome: PushWakeOutcome, shown: PushPreview?): String? {
+    val generic = shown == null || outcome.fallbackReason == WakeFallbackReason.UNNAMED_SENDER
+    if (generic) {
+        val why = outcome.fallbackReason ?: WakeFallbackReason.NOTHING_FOUND
+        val detail = outcome.fallbackDetail?.let { " ($it)" } ?: ""
+        return "wake shows the generic banner: ${why.logText}$detail"
+    }
+    if (outcome.preview == null && shown === outcome.storedPreview) {
+        return "wake shows the stored message: the app had already read it"
+    }
+    return null
 }
 
 /**

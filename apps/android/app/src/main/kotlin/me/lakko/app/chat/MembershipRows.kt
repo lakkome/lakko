@@ -72,6 +72,51 @@ public fun membershipRowIndex(
 }
 
 /**
+ * What the commits of one receive batch record, each on its own row: the
+ * change named on each commit row by DS message id, and the commit rows the
+ * device-swap verdict suppressed.
+ */
+public data class CommitMembership(
+    val changes: Map<Long, MembershipChange>,
+    val suppressed: Set<Long>,
+)
+
+/**
+ * Judge each commit of a batch on its own: the people after the previous
+ * commit ([personKeysBefore] for the first) against the people right after
+ * this one ([IncomingChatEvent.System.personKeysAfter]), in DS order.
+ *
+ * Judging the batch as a whole lost a change a later commit of the same
+ * batch undid: a person removed and added back between two polls is the same
+ * set of people before and after, and nothing was recorded (seen live
+ * 2026-11-22: the committer drew both lines, a member that received both
+ * commits in one poll drew none). A torn roster read records nothing for that
+ * commit or the next one, whose "before" is then unknown.
+ *
+ * @param judge the device-swap verdict and the change for one commit:
+ *   `(suppressed, change)`. Called once per commit, in order, so the swap
+ *   memory it keeps advances commit by commit.
+ */
+public fun membershipOfCommits(
+    events: List<IncomingChatEvent>,
+    personKeysBefore: List<String>?,
+    judge: (before: List<String>?, after: List<String>?) -> Pair<Boolean, MembershipChange?>,
+): CommitMembership {
+    val changes = LinkedHashMap<Long, MembershipChange>()
+    val suppressed = LinkedHashSet<Long>()
+    var before = personKeysBefore
+    for (event in events) {
+        if (event !is IncomingChatEvent.System || event.systemKind != SystemKind.Commit) continue
+        val after = event.personKeysAfter
+        val (isSuppressed, change) = judge(before, after)
+        if (isSuppressed) suppressed += event.messageId
+        if (change != null) changes[event.messageId] = change
+        before = after
+    }
+    return CommitMembership(changes = changes, suppressed = suppressed)
+}
+
+/**
  * This device's own merged commit, as the row a receiver would have written
  * from it: a commit row at the commit's DS message id naming [change].
  */

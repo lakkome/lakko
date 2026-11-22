@@ -10,6 +10,7 @@ import initWasm, * as wasm from "../../wasm/lakko_ffi_wasm";
 
 import {
   collapsedView,
+  commentRefresh,
   COMMENT_PAGE,
   needsFirstRead,
   EMPTY_THREAD,
@@ -173,5 +174,37 @@ describe("collapsed with the service's comment count (ADR-0087 phase B)", () => 
   it("never goes below zero on a stale count", () => {
     const st = withPage(EMPTY_THREAD, [comment(1), comment(2)], 2, "page", COMMENT_PAGE);
     expect(collapsedView(st, none, 1, rules).more).toBeNull();
+  });
+});
+
+// The open channel's tick (UX 13.2): the same table as iOS
+// `ChannelCommentRefreshTests` and Android `CommentRefreshTest`.
+describe("commentRefresh", () => {
+  const cases: ReadonlyArray<[string, Parameters<typeof commentRefresh>, string]> = [
+    ["nothing before the first read", [false, false, false, 0, null, 3], "none"],
+    ["no count, open, read to the end", [true, true, false, 2, null, undefined], "newer"],
+    ["no count, collapsed", [true, false, false, 2, null, undefined], "none"],
+    ["no count, open, pages unread", [true, true, true, 20, null, undefined], "none"],
+    ["count as read", [true, false, false, 2, 2, 2], "none"],
+    ["count up, collapsed", [true, false, false, 1, 1, 2], "newer"],
+    ["count up, open", [true, true, false, 1, 1, 2], "newer"],
+    ["count up, pages unread", [true, true, true, 20, 25, 26], "none"],
+    ["count down, collapsed", [true, false, false, 3, 3, 2], "reread"],
+    ["count down, open", [true, true, false, 3, 3, 2], "rebase"],
+    ["no count at the read: the rows read stand in", [true, false, false, 2, null, 2], "none"],
+    ["no count at the read, one more now", [true, false, false, 2, null, 3], "newer"],
+  ];
+  for (const [name, args, want] of cases) {
+    it(name, () => expect(commentRefresh(...args)).toBe(want));
+  }
+
+  it("a comment read into the thread no longer waits behind the new line", () => {
+    let st = withPage(EMPTY_THREAD, [comment(1)], 1, "page");
+    st = { ...st, expanded: true };
+    st = withPage(st, [comment(2)], 2, "poll");
+    expect(openView(st, none).arrived).toBe(1);
+    st = withPage(st, [comment(2)], 2, "page");
+    expect(openView(st, none).arrived).toBe(0);
+    expect(st.rows.map((c) => c.cursor)).toEqual([1, 2]);
   });
 });

@@ -253,6 +253,16 @@ export function resolveAccountKey(accountKey: Uint8Array): Uint8Array {
   return current === b64 ? accountKey : base64Decode(current);
 }
 
+/**
+ * Base scenario 9 (one person, one row) - who a key names: the CURRENT key
+ * of the person, across PROVEN rotations only, with the pin store read once.
+ * Standard base64 keys.
+ */
+export function personResolverB64(): (keyB64: string) => string {
+  const table = buildPredecessorTable(everyAccount(pinnedNow(), ownKeys));
+  return (keyB64) => currentKeyOf(keyB64, table);
+}
+
 /** {@link resolveAccountKey} over the hex the grant store keys on. */
 export function resolveAccountKeyHex(accountKeyHex: string): string {
   try {

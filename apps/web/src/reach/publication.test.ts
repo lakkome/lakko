@@ -24,8 +24,8 @@ import { keepsScopedEnvelope } from "./scoped-intake";
 describe("the Everyone publication", () => {
   const anna = everyoneKey("Anna", "anna", "c", "k1");
   it("publishes on entering Everyone and whenever the name, username or certificate moved, and only then", () => {
-    expect(everyoneAction(null, true, anna)).toEqual({ kind: "publish" });
-    expect(everyoneAction({ public: true, key: anna }, true, anna)).toEqual({ kind: "none" });
+    expect(everyoneAction(null, true, anna, "1")).toEqual({ kind: "publish" });
+    expect(everyoneAction({ public: true, key: anna }, true, anna, "1")).toEqual({ kind: "none" });
     for (const moved of [
       everyoneKey("Anna W", "anna", "c", "k1"),
       everyoneKey("Anna", null, null, "k1"),
@@ -34,7 +34,7 @@ describe("the Everyone publication", () => {
       // serves, so the one already published finds nobody.
       everyoneKey("Anna", "anna", "c", "k2"),
     ]) {
-      expect(everyoneAction({ public: true, key: anna }, true, moved)).toEqual({ kind: "publish" });
+      expect(everyoneAction({ public: true, key: anna }, true, moved, "1")).toEqual({ kind: "publish" });
     }
   });
 
@@ -42,15 +42,29 @@ describe("the Everyone publication", () => {
     const state = { ...EMPTY_PUBLICATION, everyone: { public: true, key: anna } };
     const stale = staleEveryoneNote(state);
     expect(stale.everyone).toEqual({ public: true, key: null });
-    expect(everyoneAction(stale.everyone, true, anna)).toEqual({ kind: "publish" });
-    expect(everyoneAction(stale.everyone, false, anna)).toEqual({ kind: "withdraw" });
+    expect(everyoneAction(stale.everyone, true, anna, "1")).toEqual({ kind: "publish" });
+    expect(everyoneAction(stale.everyone, false, anna, "1")).toEqual({ kind: "withdraw" });
     expect(staleEveryoneNote(EMPTY_PUBLICATION)).toBe(EMPTY_PUBLICATION);
   });
 
-  it("withdraws on leaving, and never withdraws what was never published", () => {
-    expect(everyoneAction({ public: true, key: anna }, false, anna)).toEqual({ kind: "withdraw" });
-    expect(everyoneAction(null, false, anna)).toEqual({ kind: "none" });
-    expect(everyoneAction({ public: false, key: null }, false, anna)).toEqual({ kind: "none" });
+  it("withdraws on leaving", () => {
+    expect(everyoneAction({ public: true, key: anna }, false, anna, "2")).toEqual({ kind: "withdraw" });
+  });
+
+  it("withdraws once per setting that leaves Everyone, even when this device never published", () => {
+    // Another device of the account (offline, lost or removed) may have
+    // published the record: a device that never did still withdraws it.
+    expect(everyoneAction(null, false, anna, "5")).toEqual({ kind: "withdraw" });
+    // A note written before notes carried the setting's stamp.
+    expect(everyoneAction({ public: false, key: null }, false, anna, "5")).toEqual({ kind: "withdraw" });
+    // Already withdrawn for this setting: nothing is sent again.
+    expect(everyoneAction({ public: false, key: null, settingMs: "5" }, false, anna, "5")).toEqual({ kind: "none" });
+    // A newer setting (chosen here or on another device): withdrawn again.
+    expect(everyoneAction({ public: false, key: null, settingMs: "5" }, false, anna, "6")).toEqual({ kind: "withdraw" });
+  });
+
+  it("a withdrawal noted for one setting never stops a later publish", () => {
+    expect(everyoneAction({ public: false, key: null, settingMs: "5" }, true, anna, "6")).toEqual({ kind: "publish" });
   });
 });
 
@@ -89,13 +103,21 @@ describe("the introduction record", () => {
     expect(bundleTargets(state, d, ["g1", "g2"])).toEqual(["g2"]);
   });
 
+  it("replaces a sent bundle with an empty one once the relayed set is empty, and sends no empty one elsewhere", () => {
+    const empty = recordsDigest([]);
+    const state = { ...EMPTY_PUBLICATION, bundleSentTo: { g1: recordsDigest(["a"]), g2: empty } };
+    // g1 still holds a bundle naming a removed contact: it is replaced. g2
+    // already has the empty one; g3 was never sent a bundle.
+    expect(bundleTargets(state, empty, ["g1", "g2", "g3"])).toEqual(["g1"]);
+  });
+
   it("spends a token only for a term not evaluated before", () => {
     const state = { ...EMPTY_PUBLICATION, termOutputs: { "n:ann": "x" } };
     expect(termsToEvaluate(state, ["n:ann", "n:anna", "n:anna"])).toEqual(["n:anna"]);
   });
 
   it("round-trips", () => {
-    const state = { ...EMPTY_PUBLICATION, everyone: { public: true, key: "k" }, termOutputs: { t: "h" } };
+    const state = { ...EMPTY_PUBLICATION, everyone: { public: false, key: null, settingMs: "7" }, termOutputs: { t: "h" } };
     expect(decodePublication(encodePublication(state))).toEqual(state);
     expect(decodePublication("[")).toEqual(EMPTY_PUBLICATION);
   });

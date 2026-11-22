@@ -202,8 +202,9 @@ import {
 import { conversationKindOf } from "./conversation-kind";
 import {
   membershipChangeOfBatch,
+  membershipChangesByCommit,
   sweepBatchWithOwnCommit,
-  withMembershipChange,
+  withMembershipChanges,
   type MembershipChange,
 } from "./membership-rows";
 import type { ProposalRecordView } from "./pending-requests";
@@ -1917,25 +1918,36 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     // view. A batch that only swapped devices, or a reset person's keys
     // (ADR-0073 R.7 case 2 / UX 16.5, across one batch or two), records
     // nothing, and neither does a one-to-one or this device's own removal.
-    let membershipChange: MembershipChange | null = null;
+    // Each commit is judged on its own (the roster read right after it
+    // against the one after the commit before it), so a removal and a re-add
+    // in one batch do not cancel out.
+    let membershipChanges = new Map<number, MembershipChange>();
     if (planned.sawCommit) {
-      const judged = membershipChangeOfBatch({
-        personKeysBefore: peopleBefore ?? null,
-        personKeysAfter: personKeysOrNull(entry),
-        accountOfKey: (k) => superseded.get(k) ?? accountIdB64OfKey(k),
-        isSuperseded: (k) => superseded.has(k),
-        awaited: awaitedSwaps(account, groupIdB64),
-        nowMs: Date.now(),
-        ownPersonKeyB64: ownPersonKeyB64(chats.identity()) ?? null,
-      });
-      setAwaitedSwaps(account, groupIdB64, judged.awaited);
-      if (readIsActive(entry.group) !== false) membershipChange = judged.change;
+      const active = readIsActive(entry.group) !== false;
+      membershipChanges = membershipChangesByCommit(
+        events,
+        peopleBefore ?? null,
+        personKeysOrNull(entry),
+        (before, after) => {
+          const judged = membershipChangeOfBatch({
+            personKeysBefore: before,
+            personKeysAfter: after,
+            accountOfKey: (k) => superseded.get(k) ?? accountIdB64OfKey(k),
+            isSuperseded: (k) => superseded.has(k),
+            awaited: awaitedSwaps(account, groupIdB64),
+            nowMs: Date.now(),
+            ownPersonKeyB64: ownPersonKeyB64(chats.identity()) ?? null,
+          });
+          setAwaitedSwaps(account, groupIdB64, judged.awaited);
+          return active ? judged.change : null;
+        },
+      );
     }
     const kind = conversationKindOf(entry.group);
     const plan = {
       ...planned,
-      timeline: withMembershipChange(planned.timeline, membershipChange, kind),
-      toView: withMembershipChange(planned.toView, membershipChange, kind),
+      timeline: withMembershipChanges(planned.timeline, membershipChanges, kind),
+      toView: withMembershipChanges(planned.toView, membershipChanges, kind),
     };
 
     if (!scope.current()) {

@@ -321,8 +321,16 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
     return inFlight;
   }
   onMount(() => void load());
-  // Nothing pushes a post to an open channel: it is read again while visible.
-  onCleanup(pollWhileVisible(() => load()));
+  // Nothing pushes a post (or a comment) to an open channel: it is read again
+  // while visible, and the counts of the posts in view with it, which is how
+  // a comment written elsewhere reaches the threads on screen (UX
+  // `group-and-channel-privacy.md` 13.2).
+  onCleanup(
+    pollWhileVisible(async () => {
+      await load();
+      requestCountsInView();
+    }),
+  );
   // A seed that arrives later (a reseal, being let in) opens what it covers:
   // the held posts are decoded again, the unreadable ones included. Keyed on
   // the read state's VALUE, so the catch-up's own epoch write does not start
@@ -375,14 +383,16 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
     enabled: () => !canPublish() && readerRole() === null && channelReadStateOf(id) === "reading",
   });
 
-  // Reactions in view, one batched read (ADR-0087 section 13a).
-  createEffect(() => {
+  // Reactions in view, one batched read (ADR-0087 section 13a). The comment
+  // counts come with them.
+  function requestCountsInView(): void {
     const cursors = timeline()
       .posts.filter((p) => p.state === "ok")
       .map((p) => p.cursor)
       .slice(-50);
     if (cursors.length > 0 && reading() && !removed()) requestReactionCounts(id, cursors);
-  });
+  }
+  createEffect(requestCountsInView);
 
   // ----- the list scrolls to its end and the newest post shown is read -----
   let scroller: HTMLDivElement | undefined;

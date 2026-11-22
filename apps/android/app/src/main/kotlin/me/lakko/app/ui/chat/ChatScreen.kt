@@ -138,6 +138,8 @@ import kotlinx.coroutines.Dispatchers
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -525,6 +527,10 @@ public fun ChatScreen(
     var attachMenuOpen by remember { mutableStateOf(false) }
     var contentScreen by remember { mutableStateOf<ContentScreen?>(null) }
 
+    // The screen's poll runs while the app is started or a call is up
+    // ([me.lakko.app.chat.screenPollRuns]); in the background the push wake
+    // reads the group instead.
+    val pollLifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(Unit) {
         // Claimed for this effect's lifetime, FIRST, so the app-level
         // all-groups poll hands this group to this screen (and stops holding
@@ -543,30 +549,44 @@ public fun ChatScreen(
             viewModel.pollNow()
             // Subsequent ticks: continuous long-poll. Cancels when
             // the composable leaves composition (back navigation,
-            // logout). Errors back off via [POLL_RETRY_BACKOFF_MS]
-            // so we don't tight-loop against a 503.
-            while (isActive) {
-                // ADR-0045 UX §6.2.8 item 1 — the poll STOPS for a group this
-                // device is no longer in. The repository gates `pollGroup` too,
-                // which is the authority; this loop must break as well because that
-                // gate makes the call return IMMEDIATELY, and a `while (isActive)`
-                // around an instant return is a spin, not a poll. Checked at the
-                // top so a membership that ends mid-window exits on the next pass.
-                if (viewModel.membershipEnded.value) break
-                try {
-                    // A poll that finds another poll of this group in flight
-                    // JOINS it (waits for its apply) instead of returning at
-                    // once, so calling straight back in neither spins on the
-                    // latch nor sleeps a blind interval. Only an UNAVAILABLE
-                    // answer (no session / no record) would return instantly
-                    // again, so that one backs off.
-                    if (viewModel.pollOnceLongPoll() == GroupPollOutcome.UNAVAILABLE) {
+            // logout), and pauses while the app is in the background with
+            // no call up ([me.lakko.app.chat.screenPollRuns]): the running
+            // long poll is cancelled then, and starts again on return.
+            // Errors back off via [POLL_RETRY_BACKOFF_MS] so we don't
+            // tight-loop against a 503.
+            kotlinx.coroutines.flow.combine(
+                pollLifecycle.currentStateFlow,
+                viewModel.callOccupant,
+            ) { lifecycleState, call ->
+                me.lakko.app.chat.screenPollRuns(
+                    appStarted = lifecycleState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED),
+                    callUp = call != null,
+                )
+            }.distinctUntilChanged().collectLatest { runs ->
+                if (!runs) return@collectLatest
+                while (kotlinx.coroutines.currentCoroutineContext().isActive) {
+                    // ADR-0045 UX §6.2.8 item 1 — the poll STOPS for a group this
+                    // device is no longer in. The repository gates `pollGroup` too,
+                    // which is the authority; this loop must break as well because that
+                    // gate makes the call return IMMEDIATELY, and a `while (isActive)`
+                    // around an instant return is a spin, not a poll. Checked at the
+                    // top so a membership that ends mid-window exits on the next pass.
+                    if (viewModel.membershipEnded.value) break
+                    try {
+                        // A poll that finds another poll of this group in flight
+                        // JOINS it (waits for its apply) instead of returning at
+                        // once, so calling straight back in neither spins on the
+                        // latch nor sleeps a blind interval. Only an UNAVAILABLE
+                        // answer (no session / no record) would return instantly
+                        // again, so that one backs off.
+                        if (viewModel.pollOnceLongPoll() == GroupPollOutcome.UNAVAILABLE) {
+                            delay(POLL_RETRY_BACKOFF_MS)
+                        }
+                    } catch (cancel: kotlinx.coroutines.CancellationException) {
+                        throw cancel
+                    } catch (_: Throwable) {
                         delay(POLL_RETRY_BACKOFF_MS)
                     }
-                } catch (cancel: kotlinx.coroutines.CancellationException) {
-                    throw cancel
-                } catch (_: Throwable) {
-                    delay(POLL_RETRY_BACKOFF_MS)
                 }
             }
         } finally {

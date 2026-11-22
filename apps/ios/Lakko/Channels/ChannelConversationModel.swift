@@ -616,9 +616,11 @@ final class ChannelConversationModel: ObservableObject {
     }
 
     /// One batched read of the counts of the posts in the timeline (50 a
-    /// call). A failure keeps the counts shown.
-    func refreshCounts() async {
-        let items = timeline.items
+    /// call), or of the posts at `only` (the newest 50 of them). A failure
+    /// keeps the counts shown.
+    func refreshCounts(only: Set<UInt64>? = nil) async {
+        var items = timeline.items
+        if let only { items = Array(items.filter { only.contains($0.cursor) }.suffix(50)) }
         guard !items.isEmpty else { return }
         var next = countsByPost
         var comments = commentCountByPost
@@ -970,8 +972,13 @@ final class ChannelConversationModel: ObservableObject {
         var expanded = false
         var loading = false
         var failedToLoad = false
-        /// Comments that arrived while the thread was open (section 13.2).
-        var newSinceOpen = 0
+        /// Comments that arrived while the thread was open (section 13.2):
+        /// shown behind `{n} new comments` until it is pressed.
+        var arrived: [Comment] = []
+        /// The service's comment count when this device last read the
+        /// thread (nil before a read that knew it): what the open channel's
+        /// tick compares a new count with (``commentRefresh``).
+        var countAtRead: UInt64?
         var failedSends: [Comment] = []
         /// Rows the service returned so far, opened or not: a row that did
         /// not open and a banned author's row are still rows read.
@@ -1052,6 +1059,8 @@ final class ChannelConversationModel: ObservableObject {
             thread.firstRead = true
             thread.nextAfter = page.nextAfter
             thread.mayHaveMore = page.rows.count >= 20
+            thread.countAtRead = commentCountByPost[item.cursor]
+            if !more { thread.arrived = [] }
             if more { thread.expanded = true }
         } catch {
             thread.failedToLoad = true
@@ -1076,11 +1085,127 @@ final class ChannelConversationModel: ObservableObject {
 
     func expandComments(_ item: ChannelTimelineItem) {
         threads[item.cursor, default: CommentThread()].expanded = true
-        threads[item.cursor]?.newSinceOpen = 0
+        showArrived(item)
     }
 
     func collapseComments(_ item: ChannelTimelineItem) {
+        showArrived(item)
         threads[item.cursor]?.expanded = false
+    }
+
+    /// How many comments wait behind `{n} new comments`: never one this
+    /// reader hides.
+    func arrivedCount(_ cursor: UInt64) -> Int {
+        let banned = Set(state.extras(channelId).bannedAuthors)
+        return (threads[cursor]?.arrived ?? []).filter { !banned.contains($0.authorKey) }.count
+    }
+
+    /// `{n} new comments` was pressed: they join the thread.
+    func showArrived(_ item: ChannelTimelineItem) {
+        guard var thread = threads[item.cursor], !thread.arrived.isEmpty else { return }
+        thread.comments = Self.merged(thread.comments, thread.arrived)
+        thread.arrived = []
+        threads[item.cursor] = thread
+    }
+
+    /// `existing` with `incoming` added, by cursor, oldest first. Pure.
+    nonisolated static func merged(_ existing: [Comment], _ incoming: [Comment]) -> [Comment] {
+        var byCursor: [UInt64: Comment] = [:]
+        for comment in existing { byCursor[comment.cursor] = comment }
+        for comment in incoming { byCursor[comment.cursor] = comment }
+        return byCursor.values.sorted { $0.cursor < $1.cursor }
+    }
+
+    // MARK: - Keeping the threads on screen current (section 13.2)
+
+    /// What the open channel's tick does for one post's thread. The rule
+    /// written three times: web `commentRefresh` in `comment-thread.ts`,
+    /// Android `commentRefresh` in `CommentCount.kt`, the same table in each
+    /// client's tests.
+    enum CommentRefresh: Equatable {
+        /// Nothing to read.
+        case none
+        /// Read after the last row read: into a collapsed thread (the first
+        /// two and the count follow), behind `{n} new comments` in an open
+        /// one.
+        case newer
+        /// A collapsed thread lost comments (a removal): its first page is
+        /// read again in place of what it held.
+        case reread
+        /// An open thread lost comments: nothing is read (the open thread
+        /// does not move); the count is the new base.
+        case rebase
+    }
+
+    /// The rule behind ``CommentRefresh``, driven by the service's comment
+    /// count the tick reads with the reaction counts; with no count (an
+    /// older service) an open thread reads on every tick. Pure.
+    nonisolated static func commentRefresh(
+        firstRead: Bool, expanded: Bool, morePages: Bool, rowsRead: Int,
+        countAtRead: UInt64?, serverCount: UInt64?
+    ) -> CommentRefresh {
+        guard firstRead else { return .none }
+        guard let serverCount else { return expanded && !morePages ? .newer : .none }
+        let seen = countAtRead ?? UInt64(max(rowsRead, 0))
+        if serverCount == seen { return .none }
+        if serverCount > seen { return morePages ? .none : .newer }
+        return expanded ? .rebase : .reread
+    }
+
+    /// One pass over the threads of the posts at `cursors` (those on
+    /// screen), after the tick read their counts: a comment written
+    /// elsewhere reaches a channel on screen within a tick.
+    func refreshComments(_ cursors: Set<UInt64>) async {
+        guard writable else { return }
+        for item in timeline.items where cursors.contains(item.cursor) {
+            guard let thread = threads[item.cursor], !thread.loading else { continue }
+            let count = commentCountByPost[item.cursor]
+            switch Self.commentRefresh(
+                firstRead: thread.firstRead, expanded: thread.expanded, morePages: thread.mayHaveMore,
+                rowsRead: thread.rowsRead, countAtRead: thread.countAtRead, serverCount: count)
+            {
+            case .none:
+                continue
+            case .rebase:
+                threads[item.cursor]?.countAtRead = count
+            case .reread:
+                threads[item.cursor]?.comments = []
+                await loadComments(item)
+            case .newer:
+                await readNewer(item, count: count)
+            }
+        }
+    }
+
+    /// Read the rows after the last one read: into the thread when it is
+    /// collapsed, behind `{n} new comments` when it is open. A failure keeps
+    /// what is shown; the next tick tries again.
+    private func readNewer(_ item: ChannelTimelineItem, count: UInt64?) async {
+        guard var thread = threads[item.cursor], !thread.loading else { return }
+        thread.loading = true
+        threads[item.cursor] = thread
+        defer { threads[item.cursor]?.loading = false }
+        guard let page = try? await client.listComments(
+            channelIdHex: channelId, postCursor: item.cursor, after: thread.nextAfter) else { return }
+        guard var current = threads[item.cursor] else { return }
+        var fresh: [Comment] = []
+        let known = Set(current.comments.map(\.cursor)).union(current.arrived.map(\.cursor))
+        for row in page.rows where !known.contains(row.cursor) {
+            if let comment = open(row, item: item) { fresh.append(comment) }
+        }
+        if current.expanded {
+            // This account's own comments join the thread at once.
+            current.comments = Self.merged(current.comments, fresh.filter(\.own))
+            current.arrived = Self.merged(current.arrived, fresh.filter { !$0.own })
+        } else {
+            current.comments = Self.merged(current.comments, fresh)
+        }
+        current.rowsRead += page.rows.count
+        current.nextAfter = max(current.nextAfter, page.nextAfter)
+        current.mayHaveMore = page.rows.count >= 20
+        current.countAtRead = count
+        threads[item.cursor] = current
+        await refreshCommentCounts(item)
     }
 
     /// Write a comment under a post (section 13.2): text and emoji only.

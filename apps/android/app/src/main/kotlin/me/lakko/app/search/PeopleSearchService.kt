@@ -52,6 +52,38 @@ public class PeopleSearchService(
     /** This account's key hex, `null` without a reach session. */
     public fun ownKeyHex(): String? = reach().ownAccountKey()?.let(::searchHex)
 
+    /** Base scenario 9 - this account's keys and id, and who a key names
+     *  across proven rotations, for [searchPeopleRows]. */
+    public fun searchIdentity(): SearchIdentity {
+        val reach = reach()
+        val own = reach.ownAccountKeysB64().toMutableSet()
+        // G-56 - the key this account's chats are bound to, when a pairing
+        // or restore brought it without its seed.
+        reach.ownAccountIdB64()?.let { id ->
+            try {
+                me.lakko.app.auth.OwnConversationKeyStore.onDevice(appContext).load(id)?.conversationKey
+                    ?.let { own += Base64.getEncoder().encodeToString(it) }
+            } catch (_: Throwable) {
+                // An unreadable record adds nothing.
+            }
+        }
+        return SearchIdentity(
+            ownKeysB64 = own,
+            ownAccountIdHex = reach.ownAccountIdHex(),
+            personOf = contacts.personKeyResolver(),
+        )
+    }
+
+    /** Base scenario 9 - the address book as the search rows match it. */
+    public fun searchContacts(): List<SearchContact> =
+        contacts.state.value.accepted.map { c ->
+            SearchContact(
+                keyB64 = Base64.getEncoder().encodeToString(c.request.fromPubkey),
+                keyHex = searchHex(c.request.fromPubkey),
+                accountIdHex = c.request.fromAccountId?.takeIf { it.size == ACCOUNT_ID_LEN }?.let(::searchHex),
+            )
+        }
+
     /** What the field remembers for this session (the texts answered, the
      *  requests sent from rows), shared by the Chats and the Contacts field. */
     public val memory: PeopleSearchMemory = PeopleSearchMemory()

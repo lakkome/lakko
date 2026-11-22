@@ -39,13 +39,11 @@ import me.lakko.app.search.RowAction
 import me.lakko.app.search.RowSendState
 import me.lakko.app.search.channelResultLabel
 import me.lakko.app.search.keptGrantsToCheck
-import me.lakko.app.search.mergePeople
-import me.lakko.app.search.peopleRows
+import me.lakko.app.search.searchPeopleRows
 import me.lakko.app.search.personRowView
 import me.lakko.app.search.rowSendState
 import me.lakko.app.search.searchEndLine
 import me.lakko.app.search.searchShowsNothingFound
-import me.lakko.app.search.withCurrentContacts
 import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.R
 import me.lakko.app.ui.components.LkIcon
@@ -82,7 +80,8 @@ internal fun PeopleSearchSection(
     /** People already listed above (standard base64 account keys), left out. */
     excludeKeysB64: Set<String> = emptySet(),
     /** The people whose one-to-one is among the conversations above (standard
-     *  base64 account keys): a contact among them is left out. */
+     *  base64 account keys): none of them is listed again (base scenario 9);
+     *  someone who is no contact is added from that conversation's info. */
     chatPeersB64: Set<String> = emptySet(),
     /** ADR-0087 section 5 — the ids (hex) of the groups and channels already
      *  shown as rows of the list above: no card or handle row for them. */
@@ -116,9 +115,18 @@ internal fun PeopleSearchSection(
         contactsState.accepted.mapTo(HashSet()) { java.util.Base64.getEncoder().encodeToString(it.request.fromPubkey) }
     }
     LaunchedEffect(contactKeys) { session.onContacts(contactKeys) }
-    val foundPeople = remember(local, shown, ownKeyHex, excludeKeysB64, chatPeersB64, contactKeys) {
-        val merged = mergePeople(listOf(local, shown?.people.orEmpty()), ownKeyHex)
-        peopleRows(withCurrentContacts(merged, contactKeys), excludeKeysB64, chatPeersB64)
+    // Base scenario 9 - who this account is and who its contacts are, by
+    // account key across proven rotations and by account id.
+    val identity = remember(profileVersion, contactsState.accepted) { service.searchIdentity() }
+    val searchContacts = remember(contactsState.accepted) { service.searchContacts() }
+    val foundPeople = remember(local, shown, identity, excludeKeysB64, chatPeersB64, searchContacts) {
+        searchPeopleRows(
+            listOf(local, shown?.people.orEmpty()),
+            identity,
+            searchContacts,
+            excludeKeysB64,
+            chatPeersB64,
+        )
     }
     // ADR-0099 step 4 / UX 3 — search does not list a suspended account. The
     // rows show at once; a row leaves as soon as the moderation log confirms
