@@ -22,7 +22,11 @@ import {
   type PersistedAttachment,
   type PersistedMessage,
 } from "../chat/message-log-store";
-import { attachmentRefFromPersisted, b64UrlEncode } from "../chat/persisted-attachment";
+import {
+  attachmentRefFromPersisted,
+  b64UrlEncode,
+  persistedFromAttachmentRef,
+} from "../chat/persisted-attachment";
 import { FakeIndexedDb, MemoryStorage } from "../test/fake-storage";
 import {
   applyGapHistoryBundle,
@@ -498,5 +502,73 @@ describe("a bundled message keeps its author (ADR-0091 live walk 3)", () => {
     await applyHistoryBundleToLog({ accountIdB64: JOINER, deviceKey: key2, secret: SECRET, sealedBytes: sealed });
     const got = (await loadMessageLog(JOINER, key2))?.groups[GROUP_HEX]?.messages[0];
     expect(got).toMatchObject({ direction: "incoming", authorKeyB64: THIRD });
+  });
+});
+
+describe("a live row's attachments travel (seen live 2026-11-23)", () => {
+  // A device added from web got no history at all: a live row stores its
+  // attachment ids as base64url, the bundle encoder read them with `atob`,
+  // which throws on `-` and `_`, and the throw dropped the whole bundle.
+  const urlHeavy = (n: number): Uint8Array => new Uint8Array(n).fill(0xfb);
+
+  it("a live-stored attachment with - and _ in its ids is carried", async () => {
+    const key = await deviceKey();
+    const file: PersistedMessage = {
+      ...row(2, "outgoing", ""),
+      attachments: [
+        persistedFromAttachmentRef({
+          blobId: urlHeavy(32),
+          key: urlHeavy(32),
+          nonce: urlHeavy(12),
+          mime: "application/pdf",
+          size: 1234,
+          name: "notes.pdf",
+        }),
+      ],
+    };
+    expect(file.attachments[0]?.blobIdB64).toMatch(/[-_]/);
+    await saveMessageLog(SENDER, key, {
+      version: 1,
+      groups: { [GROUP_HEX]: { cursor: "2", messages: [row(1, "incoming", "hi"), file] } },
+    });
+    const sealed = await buildHistoryBundleFromLog({ accountIdB64: SENDER, deviceKey: key, secret: SECRET });
+    if (sealed === null) throw new Error("no bundle");
+    const joinerKey = await deviceKey();
+    expect(
+      await applyHistoryBundleToLog({ accountIdB64: JOINER, deviceKey: joinerKey, secret: SECRET, sealedBytes: sealed }),
+    ).toBe(2);
+    const carried = (await loadMessageLog(JOINER, joinerKey))?.groups[GROUP_HEX]?.messages.find(
+      (m) => m.messageId === "2",
+    );
+    const ref = attachmentRefFromPersisted(carried?.attachments[0] as PersistedAttachment).ref;
+    expect(Array.from(ref.blobId)).toEqual(Array.from(urlHeavy(32)));
+    expect(ref.name).toBe("notes.pdf");
+  });
+
+  it("a row that cannot be encoded is left out and the rest still goes", async () => {
+    const key = await deviceKey();
+    const broken: PersistedMessage = {
+      ...row(2, "incoming", "broken"),
+      attachments: [
+        {
+          blobIdB64: "not base64 at all!",
+          keyB64: "x",
+          nonceB64: "y",
+          mime: null,
+          sizeStr: "1",
+          name: null,
+        },
+      ],
+    };
+    await saveMessageLog(SENDER, key, {
+      version: 1,
+      groups: { [GROUP_HEX]: { cursor: "3", messages: [row(1, "incoming", "one"), broken, row(3, "outgoing", "three")] } },
+    });
+    const sealed = await buildHistoryBundleFromLog({ accountIdB64: SENDER, deviceKey: key, secret: SECRET });
+    if (sealed === null) throw new Error("no bundle");
+    const joinerKey = await deviceKey();
+    await applyHistoryBundleToLog({ accountIdB64: JOINER, deviceKey: joinerKey, secret: SECRET, sealedBytes: sealed });
+    const log = await loadMessageLog(JOINER, joinerKey);
+    expect(texts(log?.groups[GROUP_HEX]?.messages)).toEqual(["incoming:one", "outgoing:three"]);
   });
 });

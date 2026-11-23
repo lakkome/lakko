@@ -593,7 +593,12 @@ public struct ChatListScreen: View {
                     case .card:
                         restoredCard
                     case .none:
-                        emptyState
+                        // Navigation 2.4 — no empty state before the
+                        // conversations were read: an account with chats
+                        // read "No chats" for a moment on a cold start.
+                        if viewModel.loaded {
+                            emptyState
+                        }
                     }
                 } else {
                     VStack(spacing: 12) {
@@ -1241,6 +1246,11 @@ struct ConversationRowView: View {
 public final class ChatListViewModel: ObservableObject {
 
     @Published public private(set) var threads: [ChatThread] = []
+    /// `docs/ux/navigation.md` section 2.4 — whether the chat layer has read
+    /// this device's conversations (groups, names and stored messages are
+    /// read together in the bootstrap). Until then the list draws nothing,
+    /// not even its empty state.
+    @Published public private(set) var loaded = false
 
     let repository: ChatRepository
     private var cancellables: Set<AnyCancellable> = []
@@ -1248,11 +1258,12 @@ public final class ChatListViewModel: ObservableObject {
     public init(repository: ChatRepository) {
         self.repository = repository
         self.threads = repository.state.threads
+        self.loaded = repository.state.bootstrapped
         repository.$state
-            .map(\.threads)
             .receive(on: RunLoop.main)
-            .sink { [weak self] threads in
-                self?.threads = threads
+            .sink { [weak self] state in
+                self?.threads = state.threads
+                self?.loaded = state.bootstrapped
             }
             .store(in: &cancellables)
         // ADR-0048 — a profile or a verdict arriving renames rows in place.

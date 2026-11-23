@@ -465,6 +465,15 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     return oneToOneGroupWith(keyB64) !== null;
   }
 
+  /** A listed request from a contact whose chat this device now holds:
+   *  the chat is the answer (a sibling device admitted this one). */
+  function chatAskHeldHere(request: IncomingContactRequest): boolean {
+    const account = activeAccount;
+    if (account === null) return false;
+    const keyB64 = base64Encode(request.fromPubkey);
+    return loadAccepted(account).some((c) => c.signaturePubkeyB64 === keyB64) && holdsOneToOneWith(keyB64);
+  }
+
   // ADR-0074 section 3.5a rule 5 - what was granted before a rotation of
   // this account's keys is spent. The two owed steps of the rotation record
   // (`devices/key-rotation.ts`: `links`, `requests`) run here, where the
@@ -1872,8 +1881,15 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   const api: MailboxApi = {
     // ADR-0099 section 6 - a request from a blocked account is never listed,
     // also one that was held before the block was written.
+    // A contact's request listed for want of a chat (base scenario 7)
+    // leaves once the chat is here: nothing is asked twice.
     pending: () =>
-      pending().filter((r) => !requestBlocked(r) && !isSuspendedKeyB64(base64Encode(r.fromPubkey))),
+      pending().filter(
+        (r) =>
+          !requestBlocked(r) &&
+          !isSuspendedKeyB64(base64Encode(r.fromPubkey)) &&
+          !chatAskHeldHere(r),
+      ),
     busy,
     error,
     acceptedVersion,

@@ -29,6 +29,7 @@ import { DEFAULT_BASE_URL } from "../discovery/client";
 import { isDesktop } from "../platform";
 import { getHostTunnel, tunnelRoutesThroughHost } from "../platform/host";
 import {
+  acceptCarriedDeviceCards,
   adoptPairingCard,
   cardGrowthDelayMs,
   ownDeviceFacts,
@@ -518,6 +519,72 @@ export function adoptPairedDeviceCard(keyHex: string, card: StoredDeviceCard): b
   setCards(next);
   persistCards();
   return true;
+}
+
+/** The received cards and own card stored for `accountIdB64`: the live
+ *  signals when the runtime is bound to it, else the persisted row. */
+function cardsRowFor(accountIdB64: string): { cards: DeviceCardMap; own: StoredDeviceCard | null } {
+  if (account === accountIdB64) return { cards: cards(), own: ownCard() };
+  const row = readJson<PersistedCards>(cardsStorageKey(accountIdB64));
+  return { cards: row?.cards ?? {}, own: row?.own ?? null };
+}
+
+/**
+ * ADR-0080 amendment (2026-11-23), confirming device: the cards to hand to a
+ * device being added in the pairing state bundle. Every stored card of a leaf
+ * in `rosterKeysHex` (the DeviceGroup after the add), plus this device's own:
+ * its last card as sent, stamps verbatim, or, before its first card, its
+ * current fields at the lowest stamp so any card it sends later replaces it.
+ * Keys are lower-case hex here; the bundle carries standard base64. A card
+ * that does not compose is left out. Never throws.
+ */
+export async function deviceCardsForStateBundle(
+  accountIdB64: string,
+  ownKeyHex: string,
+  rosterKeysHex: readonly string[],
+  nowMs: number = Date.now(),
+): Promise<{ readonly keyHex: string; readonly envelope: Uint8Array }[]> {
+  const row = cardsRowFor(accountIdB64);
+  const own = row.own ?? { ...currentOwnFields(), updatedAtMs: 0, lastActiveMs: nowMs };
+  const picked: [string, StoredDeviceCard][] = [
+    [ownKeyHex, own],
+    ...Object.entries(row.cards).filter(([key]) => key !== ownKeyHex && rosterKeysHex.includes(key)),
+  ];
+  const out: { keyHex: string; envelope: Uint8Array }[] = [];
+  for (const [keyHex, card] of picked) {
+    try {
+      out.push({ keyHex, envelope: await composeCardEnvelope(card) });
+    } catch {
+      // A stored card the codec refuses is not handed over.
+    }
+  }
+  return out;
+}
+
+/**
+ * ADR-0080 amendment (2026-11-23), new device: store the cards the confirming
+ * device handed over (`acceptCarriedDeviceCards`). Works before the runtime
+ * is bound to the account (a restore route lands the session later): the
+ * persisted row is updated and read at the bind. Returns how many were kept.
+ */
+export function storeCarriedDeviceCards(
+  accountIdB64: string,
+  entries: readonly { readonly keyHex: string; readonly card: StoredDeviceCard }[],
+  rosterKeysHex: readonly string[],
+  ownKeyHex: string,
+): number {
+  const row = cardsRowFor(accountIdB64);
+  const next = acceptCarriedDeviceCards(row.cards, entries, rosterKeysHex, ownKeyHex);
+  if (next === null) return 0;
+  const kept = Object.keys(next).filter((k) => next[k] !== row.cards[k]).length;
+  if (account === accountIdB64) {
+    setCards(next);
+    persistCards();
+  } else {
+    const stored = readJson<PersistedCards>(cardsStorageKey(accountIdB64));
+    writeJson(cardsStorageKey(accountIdB64), { ...(stored ?? { own: null }), cards: next });
+  }
+  return kept;
 }
 
 /** A fresh own card, sent now (the city wait is bounded). */

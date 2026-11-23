@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import {
   clearInboxForAccount,
   createPendingInbox,
+  laterRequestSupersedes,
   loadInbox,
   MAX_WAITING_REQUESTS,
   saveInbox,
@@ -166,5 +167,62 @@ describe("a request answering an invite link (ADR-0079, reworked 2026-10-17)", (
     inbox.remove(5);
     expect(open(st).undecidedLinkRequests()).toEqual([]);
     expect(loadInbox(CARA, st).pending).toEqual([]);
+  });
+});
+
+describe("one card per person (seen live 2026-11-23 as two identical cards)", () => {
+  const open = (st: ReturnType<typeof memory>) =>
+    createPendingInbox({ accountIdB64: CARA, isAccepted: () => false, onChange: () => undefined, storage: st });
+  const request = (messageId: number, sender: number) =>
+    ({
+      messageId,
+      fromPubkey: new Uint8Array(32).fill(sender),
+      linkAnswer: null,
+    }) as unknown as Parameters<ReturnType<typeof open>["addFetched"]>[0][number]["request"];
+  const fetched = (messageId: number, sender: number) => ({
+    request: request(messageId, sender),
+    row: { messageId, payload: new Uint8Array([messageId]), createdAt: "2026-11-23T00:00:00Z" },
+  });
+
+  it("a later request from the same key replaces the listed one, in a batch and across batches", () => {
+    const inbox = open(memory());
+    inbox.addFetched([fetched(5, 1), fetched(6, 2), fetched(7, 1)]);
+    expect(inbox.pending().map((r) => r.messageId)).toEqual([6, 7]);
+    inbox.addFetched([fetched(9, 2)]);
+    expect(inbox.pending().map((r) => r.messageId)).toEqual([7, 9]);
+  });
+
+  it("duplicates kept from before the fold read as one after a reload", async () => {
+    const st = memory();
+    saveInbox(
+      CARA,
+      {
+        cursor: 10,
+        pending: [5, 6, 7].map((messageId) => ({ messageId, payloadB64: "AQID", createdAt: "2026-11-23T00:00:00Z" })),
+      },
+      st,
+    );
+    const reloaded = open(st);
+    const senders = new Map([
+      [5, 1],
+      [6, 2],
+      [7, 1],
+    ]);
+    await reloaded.restore((rows) => Promise.resolve(rows.map((r) => request(r.messageId, senders.get(r.messageId) ?? 0))));
+    expect(reloaded.pending().map((r) => r.messageId)).toEqual([6, 7]);
+    expect(loadInbox(CARA, st).pending.map((r) => r.messageId)).toEqual([6, 7]);
+  });
+
+  it("laterRequestSupersedes keeps the last request of each key", () => {
+    const k = (b: number) => new Uint8Array(32).fill(b);
+    expect([
+      ...laterRequestSupersedes(
+        [{ messageId: 1, fromPubkey: k(1) }],
+        [
+          { messageId: 2, fromPubkey: k(2) },
+          { messageId: 3, fromPubkey: k(1) },
+        ],
+      ),
+    ]).toEqual([1]);
   });
 });

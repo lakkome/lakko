@@ -541,4 +541,119 @@ final class DeviceCardsTests: XCTestCase {
         XCTAssertEqual(later, 1, "sent once")
         center.unbind()
     }
+
+    // MARK: ADR-0080 amendment (2026-11-23): cards in the pairing state bundle
+
+    /// The shared vector: byte for byte the same JSON text the web
+    /// (`state-bundle-device-cards.test.ts`) and Android
+    /// (`StateBundleDeviceCardsTest.kt`) suites decode.
+    private static let keyOne = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+    private static let keyTwo = "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+    private static let envelopeIos =
+        "bGFra28vZGV2aWNlLWNhcmQvdjEAAQAAAYvP5WgAAAABi8/la+gBCmlQaG9uZTE4LDQDMS4wCGlPUyAyNi40AAA="
+    private static let envelopeWeb =
+        "bGFra28vZGV2aWNlLWNhcmQvdjEAAQAAAYvP5W/QAAABi8/lc7gFD0Nocm9tZSBvbiBtYWNPUwN3ZWIFbWFjT1MGQWxtZXJlAk5M"
+    private static let sharedVector =
+        "{\"v\":4,\"contacts\":[],\"pins\":[],\"knownGroupIdsB64\":[],\"ownPredecessors\":[],\"groupNames\":[],"
+        + "\"profiles\":[],\"pendingContacts\":[],\"channelSeeds\":[],\"deviceCards\":["
+        + "{\"leafKeyB64\":\"\(keyOne)\",\"envelopeB64\":\"\(envelopeIos)\"},"
+        + "{\"leafKeyB64\":\"\(keyTwo)\",\"envelopeB64\":\"\(envelopeWeb)\"}]}"
+    private static let hexOne = String(repeating: "01", count: 32)
+    private static let hexTwo = String(repeating: "02", count: 32)
+    private static let hexOwn = String(repeating: "03", count: 32)
+    private static let expectedIos = StoredDeviceCard(
+        platform: .ios, model: "iPhone18,4", appVersion: "1.0", os: "iOS 26.4", city: "", country: "",
+        updatedAtMs: 1_700_000_000_000, lastActiveMs: 1_700_000_001_000)
+    private static let expectedWeb = StoredDeviceCard(
+        platform: .web, model: "Chrome on macOS", appVersion: "web", os: "macOS", city: "Almere", country: "NL",
+        updatedAtMs: 1_700_000_002_000, lastActiveMs: 1_700_000_003_000)
+
+    func testTheSharedVectorDecodesToTheTwoCards() throws {
+        let bundle = try XCTUnwrap(StateBundle.decode(Data(Self.sharedVector.utf8)))
+        XCTAssertEqual(bundle.deviceCards, [
+            StateBundle.CarriedDeviceCard(leafKeyB64: Self.keyOne, envelopeB64: Self.envelopeIos),
+            StateBundle.CarriedDeviceCard(leafKeyB64: Self.keyTwo, envelopeB64: Self.envelopeWeb),
+        ])
+        let decoded = StateBundle.decodedDeviceCards(bundle.deviceCards ?? [])
+        XCTAssertEqual(decoded.map { $0.keyHex }, [Self.hexOne, Self.hexTwo])
+        XCTAssertEqual(decoded.map { $0.card }, [Self.expectedIos, Self.expectedWeb])
+        // The vector's envelope is what the core composes.
+        let composed = try composeDeviceCardEnvelope(card: DeviceCardCenter.ffi(Self.expectedIos))
+        XCTAssertEqual(composed.base64EncodedString(), Self.envelopeIos)
+    }
+
+    func testTheNewDeviceStoresCarriedCardsForItsRosterOnly() throws {
+        let suite = "lakko.tests.device-cards.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let center = DeviceCardCenter(defaults: defaults)
+        let bundle = try XCTUnwrap(StateBundle.decode(Data(Self.sharedVector.utf8)))
+        let entries = StateBundle.decodedDeviceCards(bundle.deviceCards ?? [])
+        // Unbound (a restore route lands the session later): persisted.
+        XCTAssertEqual(center.storeCarried(
+            accountIdB64: "acct", entries: entries,
+            rosterKeysHex: [Self.hexOne, Self.hexTwo, Self.hexOwn], ownKeyHex: Self.hexOwn), 2)
+        center.bind(accountIdB64: "acct") { _ in }
+        XCTAssertEqual(center.cards, [Self.hexOne: Self.expectedIos, Self.hexTwo: Self.expectedWeb])
+        center.unbind()
+        // A key not in the roster is dropped, and never this device's own.
+        XCTAssertEqual(center.storeCarried(
+            accountIdB64: "acct2", entries: entries,
+            rosterKeysHex: [Self.hexOne, Self.hexTwo], ownKeyHex: Self.hexTwo), 1)
+        center.bind(accountIdB64: "acct2") { _ in }
+        XCTAssertEqual(Array(center.cards.keys), [Self.hexOne])
+        // Bound: a card that is not strictly newer changes nothing.
+        XCTAssertEqual(center.storeCarried(
+            accountIdB64: "acct2", entries: entries,
+            rosterKeysHex: [Self.hexOne, Self.hexTwo], ownKeyHex: Self.hexTwo), 0)
+        center.unbind()
+    }
+
+    func testOnlyAStrictlyNewerCarriedCardReplacesAHeldOne() {
+        var newer = Self.expectedIos
+        newer.updatedAtMs += 1
+        newer.model = "newer"
+        XCTAssertNil(DeviceCards.acceptCarried(
+            [Self.hexOne: newer], entries: [(Self.hexOne, Self.expectedIos)],
+            rosterKeysHex: [Self.hexOne], ownKeyHex: Self.hexOwn))
+        var seeded = Self.expectedIos
+        seeded.updatedAtMs = 0
+        XCTAssertEqual(DeviceCards.acceptCarried(
+            [Self.hexOne: seeded], entries: [(Self.hexOne, Self.expectedIos)],
+            rosterKeysHex: [Self.hexOne], ownKeyHex: Self.hexOwn), [Self.hexOne: Self.expectedIos])
+    }
+
+    func testTheBundleCodecForDeviceCards() throws {
+        // No cards: the field is not written, and a bundle without it decodes.
+        let empty = StateBundle.V4(contacts: [], pins: [], knownGroupIdsB64: [])
+        let text = String(decoding: StateBundle.encode(empty), as: UTF8.self)
+        XCTAssertFalse(text.contains("deviceCards"))
+        XCTAssertNil(try XCTUnwrap(StateBundle.decode(StateBundle.encode(empty))).deviceCards)
+        // The sender's list: by key bytes, the first per key, at most 8.
+        let keys = (0..<10).map { Data(repeating: UInt8(10 - $0), count: 32).base64EncodedString() }
+        let entries = (keys + [keys[0]]).map {
+            StateBundle.CarriedDeviceCard(leafKeyB64: $0, envelopeB64: Self.envelopeWeb)
+        }
+        let carried = StateBundle.carriedDeviceCards(entries)
+        XCTAssertEqual(carried.count, StateBundle.maxDeviceCards)
+        XCTAssertEqual(carried.first?.leafKeyB64, Data(repeating: 1, count: 32).base64EncodedString())
+        // The decoder refuses the whole bundle on a bad entry, a repeated key
+        // or too many.
+        func withCards(_ cards: String) -> Data {
+            let head = Self.sharedVector.components(separatedBy: "\"deviceCards\":")[0]
+            return Data((head + "\"deviceCards\":" + cards + "}").utf8)
+        }
+        XCTAssertNotNil(StateBundle.decode(withCards("[]")))
+        XCTAssertNil(StateBundle.decode(withCards("\"x\"")))
+        XCTAssertNil(StateBundle.decode(withCards("[{\"leafKeyB64\":\"AQ==\",\"envelopeB64\":\"\(Self.envelopeIos)\"}]")))
+        XCTAssertNil(StateBundle.decode(withCards("[{\"leafKeyB64\":\"\(Self.keyOne)\",\"envelopeB64\":\"AAAA\"}]")))
+        XCTAssertNil(StateBundle.decode(withCards(
+            "[{\"leafKeyB64\":\"\(Self.keyOne)\",\"envelopeB64\":\"\(Self.envelopeIos)\"},"
+                + "{\"leafKeyB64\":\"\(Self.keyOne)\",\"envelopeB64\":\"\(Self.envelopeWeb)\"}]")))
+        let nine = (1...9).map {
+            "{\"leafKeyB64\":\"\(Data(repeating: UInt8($0), count: 32).base64EncodedString())\","
+                + "\"envelopeB64\":\"\(Self.envelopeWeb)\"}"
+        }
+        XCTAssertNil(StateBundle.decode(withCards("[" + nine.joined(separator: ",") + "]")))
+    }
 }

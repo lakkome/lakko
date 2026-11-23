@@ -340,6 +340,11 @@ public data class FetchedRequestsMerge(
  * key some pending row's key already superseded is dropped; and a request
  * from the successor of an accepted contact's key is that contact's. An
  * unproven key change is two people and two rows.
+ *
+ * One card per person (2026-11-23): a later request under the key of a
+ * pending row REPLACES that row in place (a person who asked again is still
+ * one request; the newer one carries the reply grant and profile in force).
+ * Two rows from one key were seen live as two identical cards.
  */
 public fun mergeFetchedRequests(
     pending: List<IncomingContactRequest>,
@@ -369,6 +374,13 @@ public fun mergeFetchedRequests(
         if (rows.any { !it.fromPubkey.contentEquals(req.fromPubkey) && supersedes(it.fromPubkey, req.fromPubkey) }) {
             // The person already asked from a later key.
             dropped.add(req)
+            continue
+        }
+        val sameSender = rows.indexOfFirst { it.fromPubkey.contentEquals(req.fromPubkey) }
+        if (sameSender >= 0) {
+            dropped.add(rows[sameSender])
+            rows[sameSender] = req
+            changed = true
             continue
         }
         val replaced = rows.indexOfFirst {
@@ -459,6 +471,18 @@ public fun asksForChat(request: IncomingContactRequest, accepted: List<AcceptedC
     val row = accepted.firstOrNull { it.request.fromPubkey.contentEquals(request.fromPubkey) } ?: return true
     return row.groupIdHex == null || row.groupIdHex == request.asksPastChatHex
 }
+
+/**
+ * The ids of the listed requests that asked for a chat
+ * ([IncomingContactRequest.asksForChat], base scenario 7) from people this
+ * device now holds a live one-to-one with ([holdsChat]): the chat is the
+ * answer, so the card goes (a sibling device that admitted this one answered
+ * the request already).
+ */
+public fun chatAsksHeldHere(
+    pending: List<IncomingContactRequest>,
+    holdsChat: (ByteArray) -> Boolean,
+): Set<Long> = pending.filter { it.asksForChat && holdsChat(it.fromPubkey) }.mapTo(HashSet()) { it.messageId }
 
 /**
  * The Sent list once these people answered with a Welcome: a Welcome from the

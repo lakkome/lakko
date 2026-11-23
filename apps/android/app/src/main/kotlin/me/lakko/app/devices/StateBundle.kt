@@ -164,6 +164,16 @@ public object StateBundle {
         val seeds: List<CarriedChannelSeed>,
     )
 
+    /** ADR-0080 amendment (2026-11-23): one device card the confirming
+     *  device holds, for the DeviceGroup leaf it is keyed on (standard
+     *  base64 of the 32-byte leaf key, and of the 44..=270-byte envelope).
+     *  Display-only; attributed by the confirming device, an own device of
+     *  the account. */
+    public data class CarriedDeviceCard(
+        val leafKeyB64: String,
+        val envelopeB64: String,
+    )
+
     /** The bundle; `v` is always [VERSION]. */
     public data class Bundle(
         val contacts: List<CarriedContact>,
@@ -182,11 +192,22 @@ public object StateBundle {
         /** v4: at most [MAX_CHANNEL_SEED_ENTRIES], one per channel id,
          *  ascending by channel id bytes. */
         val channelSeeds: List<CarriedChannelSeeds> = emptyList(),
+        /** ADR-0080 amendment (2026-11-23), additive inside v4: written only
+         *  when non-empty; at most [MAX_DEVICE_CARDS], one per leaf key,
+         *  ascending by key bytes. */
+        val deviceCards: List<CarriedDeviceCard> = emptyList(),
     )
 
     /** The one bundle version this build writes and reads (flag day: a
      *  bundle of any other version is refused). */
     public const val VERSION: Long = 4L
+
+    /** ADR-0080 amendment: at most this many device cards
+     *  (`MAX_LEAVES_PER_ACCOUNT`), and the envelope bounds
+     *  (`lakko-contacts::device_card`). */
+    public const val MAX_DEVICE_CARDS: Int = 8
+    private const val DEVICE_CARD_ENVELOPE_MIN_LEN: Int = 44
+    private const val DEVICE_CARD_ENVELOPE_MAX_LEN: Int = 270
 
     /** v4 decode bounds: channels in `channelSeeds`, seeds per channel. */
     public const val MAX_CHANNEL_SEED_ENTRIES: Int = 1000
@@ -356,6 +377,21 @@ public object StateBundle {
                     }
                 },
             )
+            if (bundle.deviceCards.isNotEmpty()) {
+                put(
+                    "deviceCards",
+                    buildJsonArray {
+                        for (c in bundle.deviceCards) {
+                            add(
+                                buildJsonObject {
+                                    put("leafKeyB64", c.leafKeyB64)
+                                    put("envelopeB64", c.envelopeB64)
+                                },
+                            )
+                        }
+                    },
+                )
+            }
         }
         return obj.toString().toByteArray(Charsets.UTF_8)
     }
@@ -425,7 +461,103 @@ public object StateBundle {
         val profiles = decodeProfiles(root["profiles"] as? JsonArray ?: return null) ?: return null
         val pending = decodePendingContacts(root["pendingContacts"] as? JsonArray ?: return null) ?: return null
         val channelSeeds = decodeChannelSeeds(root["channelSeeds"] as? JsonArray ?: return null) ?: return null
-        return Bundle(contacts, pins, groups, own, groupNames, profiles, pending, channelSeeds)
+        val deviceCardsEl = root["deviceCards"]
+        val deviceCards = if (deviceCardsEl == null) {
+            emptyList()
+        } else {
+            decodeDeviceCards(deviceCardsEl as? JsonArray ?: return null) ?: return null
+        }
+        return Bundle(contacts, pins, groups, own, groupNames, profiles, pending, channelSeeds, deviceCards)
+    }
+
+    /** ADR-0080 amendment: whether one carried device-card entry is
+     *  well-formed (a 32-byte key, an envelope of 44 to 270 bytes); the key
+     *  bytes, or `null`. */
+    private fun deviceCardKey(c: CarriedDeviceCard): ByteArray? {
+        val key = standardBase64OfLength(c.leafKeyB64, KEY_LEN) ?: return null
+        val envelope = nonEmptyStandardBase64(c.envelopeB64) ?: return null
+        return if (envelope.size in DEVICE_CARD_ENVELOPE_MIN_LEN..DEVICE_CARD_ENVELOPE_MAX_LEN) key else null
+    }
+
+    /** ADR-0080 amendment, fail closed: more than [MAX_DEVICE_CARDS], a
+     *  malformed entry or a leaf key twice refuses the bundle. */
+    private fun decodeDeviceCards(arr: JsonArray): List<CarriedDeviceCard>? {
+        if (arr.size > MAX_DEVICE_CARDS) return null
+        val out = ArrayList<CarriedDeviceCard>(arr.size)
+        val seen = HashSet<String>()
+        for (el in arr) {
+            val r = el as? JsonObject ?: return null
+            val entry = CarriedDeviceCard(
+                leafKeyB64 = r.string("leafKeyB64") ?: return null,
+                envelopeB64 = r.string("envelopeB64") ?: return null,
+            )
+            val key = deviceCardKey(entry) ?: return null
+            if (!seen.add(hexOf(key))) return null
+            out += entry
+        }
+        return out
+    }
+
+    /** ADR-0080 amendment, sending device: well-formed entries only, the
+     *  first per leaf key, ascending by key bytes, at most
+     *  [MAX_DEVICE_CARDS]. [cards] are (leaf key hex, envelope). */
+    public fun carriedDeviceCards(cards: List<Pair<String, ByteArray>>): List<CarriedDeviceCard> {
+        val byKey = LinkedHashMap<String, CarriedDeviceCard>()
+        for ((keyHex, envelope) in cards) {
+            val key = hexBytes(keyHex) ?: continue
+            val entry = CarriedDeviceCard(
+                Base64.getEncoder().encodeToString(key),
+                Base64.getEncoder().encodeToString(envelope),
+            )
+            if (deviceCardKey(entry) == null) continue
+            byKey.putIfAbsent(hexOf(key), entry)
+        }
+        return byKey.entries.sortedBy { it.key }.take(MAX_DEVICE_CARDS).map { it.value }
+    }
+
+    private fun hexBytes(hex: String): ByteArray? {
+        if (hex.length % 2 != 0 || !hex.all { it in '0'..'9' || it in 'a'..'f' }) return null
+        return ByteArray(hex.length / 2) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+    }
+
+    /** ADR-0080 amendment, new device: the carried entries that decode with
+     *  [decode] (the core codec by default; the host suite passes its own),
+     *  keyed by lower-case hex. */
+    public fun decodedDeviceCards(
+        entries: List<CarriedDeviceCard>,
+        decode: (ByteArray) -> StoredDeviceCard? = { bytes ->
+            runCatching { DeviceCardCenter.fromFfi(uniffi.lakko_ffi_uniffi.decodeDeviceCardEnvelope(bytes)) }.getOrNull()
+        },
+    ): List<Pair<String, StoredDeviceCard>> = entries.mapNotNull { e ->
+        val key = standardBase64OfLength(e.leafKeyB64, KEY_LEN) ?: return@mapNotNull null
+        val envelope = nonEmptyStandardBase64(e.envelopeB64) ?: return@mapNotNull null
+        decode(envelope)?.let { hexOf(key) to it }
+    }
+
+    /** The roster's leaf keys (lower-case hex) and this device's own, or
+     *  `null` when the handle cannot be read or does not hold this device. */
+    public fun rosterOf(group: uniffi.lakko_ffi_uniffi.DeviceGroup): Pair<List<String>, String>? = try {
+        val own = group.ownLeafIndex()
+        val members = group.devices()
+        val mine = members.firstOrNull { it.leafIndex == own }
+        if (mine == null) null else members.map { hexOf(it.signaturePublicKey) } to hexOf(mine.signaturePublicKey)
+    } catch (_: Throwable) {
+        null
+    }
+
+    /** ADR-0080 amendment (2026-11-23), new device: store the device cards
+     *  the confirming device handed over. Returns how many were kept. */
+    public fun applyDeviceCards(
+        context: Context,
+        accountIdB64: String,
+        bundle: Bundle,
+        group: uniffi.lakko_ffi_uniffi.DeviceGroup,
+    ): Int {
+        if (bundle.deviceCards.isEmpty()) return 0
+        val (rosterHex, ownHex) = rosterOf(group) ?: return 0
+        val entries = decodedDeviceCards(bundle.deviceCards)
+        if (entries.isEmpty()) return 0
+        return DeviceCardCenter.storeCarried(context, accountIdB64, entries, rosterHex, ownHex)
     }
 
     /** v4 — `channelSeeds`, fail closed: any violation refuses the bundle. */
@@ -1495,7 +1627,13 @@ public object StateBundle {
                     fromPseudonym = ByteArray(32),
                     validAfterMs = c.acceptedAtMs.coerceAtLeast(0L).toULong(),
                     intro = null,
-                    createdAt = "",
+                    // A contact here only since it arrived: a request that was
+                    // already in the account's mailbox was handled by the
+                    // device that held the contact then (never asked twice).
+                    createdAt = me.lakko.app.contacts.carriedContactSince(
+                        c.acceptedAtMs,
+                        System.currentTimeMillis(),
+                    ),
                 ),
                 groupIdHex = c.groupIdB64?.let {
                     try {

@@ -3262,6 +3262,7 @@ public class ChatViewModel(
             // still works (sendMessage will throw with a clear
             // error which we surface as `sendError`).
             threadKnown = thread != null,
+            messagesKnown = repoState.bootstrapped,
         )
     }
 
@@ -4297,6 +4298,11 @@ public data class ChatScreenUiState(
      *  handles. The UI still renders the composer (sendMessage
      *  surfaces a clear error if the handle is missing). */
     val threadKnown: Boolean,
+    /** `docs/ux/navigation.md` section 2.4 — whether this device's
+     *  conversations (their groups, names and stored messages) were read. Until
+     *  then the screen draws nothing of the conversation: no title, no
+     *  "No messages yet", no "being set up" line. */
+    val messagesKnown: Boolean = true,
     /** ADR-0024 — the typing-indicator line ("<name> is typing…" /
      *  "typing…" / "Several people are typing…"), or `null` when
      *  nobody is typing. Rendered just above the input bar. */

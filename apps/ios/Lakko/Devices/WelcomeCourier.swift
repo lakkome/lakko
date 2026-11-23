@@ -46,6 +46,18 @@ public enum WelcomeCourier {
         case cancelled
     }
 
+    /// The plain log line for a history poll that ended without a bundle,
+    /// or `nil` for a received one (its apply logs the row count). No
+    /// identifiers. Before 2026-11-23 a timeout logged nothing, so a scanner
+    /// that never sent its bundle looked like a join that never asked.
+    static func historyOutcomeLogLine(_ outcome: HistoryBundleOutcome) -> String? {
+        switch outcome {
+        case .received: return nil
+        case .timeout: return "history catch-up: no bundle arrived before the timeout"
+        case .cancelled: return "history catch-up: cancelled"
+        }
+    }
+
     /// Soft timeout for the joiner-side history poll (Phase
     /// 2a3d8-ui). Short — bundle is supposed to arrive within
     /// seconds of the Welcome; a longer wait stalls the UX.

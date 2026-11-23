@@ -260,3 +260,20 @@ final class HistoryBundleMediaTests: XCTestCase {
         XCTAssertEqual(back.first { $0.messageId == 1 }?.direction, "outgoing")
     }
 }
+
+/// A history poll that ends without a bundle says so in one plain line (seen
+/// live 2026-11-23: a device added from web got no history and the log showed
+/// nothing about it).
+final class HistoryOutcomeLogTests: XCTestCase {
+    func testATimeoutIsLoggedAsAPlainLine() {
+        XCTAssertEqual(
+            WelcomeCourier.historyOutcomeLogLine(.timeout),
+            "history catch-up: no bundle arrived before the timeout"
+        )
+        XCTAssertEqual(WelcomeCourier.historyOutcomeLogLine(.cancelled), "history catch-up: cancelled")
+    }
+
+    func testAReceivedBundleLogsNothingHere() {
+        XCTAssertNil(WelcomeCourier.historyOutcomeLogLine(.received(Data([1, 2, 3]))))
+    }
+}

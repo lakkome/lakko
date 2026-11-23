@@ -478,9 +478,12 @@ internal fun holdsTitle(threadKnown: Boolean, ending: Boolean): Boolean = thread
 /**
  * "This conversation is still being set up on this device." The list drops a
  * conversation the moment its end is recorded, which reads exactly like one not
- * loaded yet, and for that person the sentence would be false.
+ * loaded yet, and for that person the sentence would be false. Nor before this
+ * device's conversations were read ([loaded]): until then every conversation
+ * is unknown, and the pane stays empty (`docs/ux/navigation.md` section 2.4).
  */
-internal fun showsSettingUpLine(threadKnown: Boolean, ending: Boolean): Boolean = !threadKnown && !ending
+internal fun showsSettingUpLine(threadKnown: Boolean, ending: Boolean, loaded: Boolean = true): Boolean =
+    loaded && !threadKnown && !ending
 
 /**
  * The terminal row under the timeline. It says the messages already received

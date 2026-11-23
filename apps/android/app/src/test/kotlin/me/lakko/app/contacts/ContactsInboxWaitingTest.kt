@@ -120,6 +120,35 @@ class ContactsInboxWaitingTest {
     }
 
     @Test
+    fun `a contact carried to this device is one only since it arrived`() {
+        // Seen live 2026-11-23: a device added to an account listed old
+        // requests the account's other device had answered long before.
+        val acceptedElsewhere = java.time.Instant.parse("2026-11-01T09:00:00Z").toEpochMilli()
+        val arrived = java.time.Instant.parse("2026-11-23T08:54:58Z").toEpochMilli()
+        val since = carriedContactSince(acceptedElsewhere, arrived)
+        assertEquals("2026-11-23T08:54:58Z", since)
+        // Re-add requests answered by the other device before this one joined.
+        assertTrue(requestPredatesContact("2026-11-20T10:00:00Z", since))
+        assertTrue(requestPredatesContact("2026-11-22T18:30:00Z", since))
+        // A request that arrives after this device holds the contact is new.
+        assertFalse(requestPredatesContact("2026-11-23T09:10:00Z", since))
+        val key = "KEY"
+        assertEquals(
+            KnownRequestVerdict.DROP,
+            knownContactRequestVerdict(
+                true,
+                KnownRequestCheck.CURRENT,
+                key,
+                key,
+                holdsOneToOne = false,
+                predatesContact = requestPredatesContact("2026-11-22T18:30:00Z", since),
+            ),
+        )
+        // A clock behind the other device's acceptance never moves it back.
+        assertEquals("2026-11-01T09:00:00Z", carriedContactSince(acceptedElsewhere, 0L))
+    }
+
+    @Test
     fun `base scenario 7 - answered silently only while a one-to-one is held, else listed`() {
         val key = "KEY"
         assertEquals(

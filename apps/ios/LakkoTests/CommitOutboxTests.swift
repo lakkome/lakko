@@ -293,7 +293,8 @@ final class CommitOutboxCommitPathAbortTests: XCTestCase {
         let promotableKey: Data
     }
 
-    /// A real single-member founder group (its role table seeded by
+    /// A real founder group with one other member, the person the role change
+    /// names admin (C-100) (its role table seeded by
     /// `Group.create`, so this device is the ADR-0022 owner and therefore
     /// committer rank 0) rehydrated into a repo whose outbox is `outboxDir`.
     /// `nil` makes every durable write fail closed.
@@ -301,6 +302,10 @@ final class CommitOutboxCommitPathAbortTests: XCTestCase {
         let seed = Data(repeating: 0x11, count: 32)
         let founder = try Identity.fromSeed(seed: seed)
         let group = try Group.create(identity: founder, kind: .group)
+        // C-100: the person a role change names admin must be a member.
+        _ = try group.addMemberFromWire(
+            identity: founder,
+            keyPackage: try Identity.fromSeed(seed: Data(repeating: 0x33, count: 32)).createKeyPackage())
         let groupIdHex = DsClient.pseudonymHex(try group.groupId())
         let snapshotBlob = try founder.snapshotStorage()
 
@@ -344,7 +349,7 @@ final class CommitOutboxCommitPathAbortTests: XCTestCase {
             )
         )
         XCTAssertEqual(
-            repo.memberCount(groupIdHex: groupIdHex), 1,
+            repo.memberCount(groupIdHex: groupIdHex), 2,
             "founder group must rehydrate for the sweep to reach the record gate"
         )
         XCTAssertEqual(

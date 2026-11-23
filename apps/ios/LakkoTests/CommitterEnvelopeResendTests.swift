@@ -478,6 +478,8 @@ final class CommitterEnvelopeResendTests: XCTestCase {
         let seed = Data(repeating: 0x30, count: 32)
         let founder = try Identity.fromSeed(seed: seed)
         let group = try Group.create(identity: founder, kind: .group)
+        // C-100: an admin is a current member, so the admin joins first.
+        _ = try group.addMemberFromWire(identity: founder, keyPackage: try identity(0x77).createKeyPackage())
         let admin = try key(0x77)
         _ = try group.setGroupRoles(
             identity: founder, owner: try founder.signaturePublicKey(), admins: [admin])

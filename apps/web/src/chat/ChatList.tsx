@@ -193,6 +193,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
   const copy = (): (typeof COPY)["chat"] => COPY.chat;
 
   const {
+    ready,
     accountId,
     kindOf,
     chatLabel,
@@ -585,349 +586,353 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           onMenu={(id, x, y) => setTabMenu({ id, x, y })}
         />
       </Show>
-      {/* The empty state stands only while nothing is typed; once something
-          is, it gives way to what the search finds, the people half
-          included (`docs/ux/who-can-find-me.md` section 6.1). */}
-      <Show
-        when={!showsEmptyState(orderedRows().length + invitedRows().length, query())}
-        fallback={
-          <Show when={restoredList() !== "card"} fallback={<RestoredNotice />}>
-            <div class="lk-empty">
-              <Icon name="bubbles" size={48} />
-              <strong>{copy().emptyTitle()}</strong>
-              {/* The SAME menu the compose button opens, not a different set
-                  of choices in a different place. */}
-              <button
-                type="button"
-                class="primary"
-                aria-haspopup="menu"
-                aria-expanded={createOpen()}
-                onClick={() => setCreateOpen((open) => !open)}
-              >
-                {copy().emptyAction()}
-              </button>
-            </div>
-          </Show>
-        }
-      >
-        <div class="lk-pane-body">
-          {/* ADR-0087 UX 6.2 — the Requests sent row, at the top, while one is open. */}
-          <Show when={currentFolder() === null && !searching() && requestsSent().length > 0}>
-            <button type="button" class="lk-row" onClick={() => setRequestsOpen(true)}>
-              <span class="lk-avatar" aria-hidden="true">
-                <Icon name="send" size={20} />
-              </span>
-              <div class="lk-row-body">
-                <div class="lk-row-line">
-                  <span class="lk-row-title">{t("requests_sent.title")}</span>
-                </div>
+      {/* `docs/ux/navigation.md` section 2.4 - nothing (no row, no empty
+          state) until the names and the order are read from this device. */}
+      <Show when={ready()}>
+        {/* The empty state stands only while nothing is typed; once something
+            is, it gives way to what the search finds, the people half
+            included (`docs/ux/who-can-find-me.md` section 6.1). */}
+        <Show
+          when={!showsEmptyState(orderedRows().length + invitedRows().length, query())}
+          fallback={
+            <Show when={restoredList() !== "card"} fallback={<RestoredNotice />}>
+              <div class="lk-empty">
+                <Icon name="bubbles" size={48} />
+                <strong>{copy().emptyTitle()}</strong>
+                {/* The SAME menu the compose button opens, not a different set
+                    of choices in a different place. */}
+                <button
+                  type="button"
+                  class="primary"
+                  aria-haspopup="menu"
+                  aria-expanded={createOpen()}
+                  onClick={() => setCreateOpen((open) => !open)}
+                >
+                  {copy().emptyAction()}
+                </button>
               </div>
-              <span class="lk-row-trail">
-                <span class="lk-badge muted">{requestsSent().length}</span>
-              </span>
-            </button>
-          </Show>
-          <RequestsSentScreen open={requestsOpen()} onBack={() => setRequestsOpen(false)} />
-          {/* UX 2.4 - one sentence whatever the filter; the person made it. */}
-          <Show when={visibleRows().length === 0 && !searching() && currentFolder() !== null}>
-            <div class="lk-folder-empty">
-              <p>{t("folders.empty")}</p>
-              <button
-                type="button"
-                class="secondary"
-                onClick={() => {
-                  const f = currentFolder();
-                  if (f !== null) openFolderEditor({ mode: "edit", folderIdHex: f.idHex });
-                }}
-              >
-                {t("folders.edit")}
-              </button>
-            </div>
-          </Show>
-          <Show when={currentFolder() === null || searching()}>
-            <For each={invitedRows()}>
-              {(p) => (
-                <A href={paths.pendingChat(p.accountIdHex)} class="lk-row" activeClass="" inactiveClass="">
-                  <Avatar label={invitedName(p)} id={p.signaturePubkeyB64} personKey={p.signaturePubkeyB64} />
-                  <div class="lk-row-body">
-                    <div class="lk-row-line">
-                      <span class="lk-row-title">
-                        <span class="lk-ellipsis">{invitedName(p)}</span>
-                      </span>
-                    </div>
-                    <div class="lk-row-line">
-                      <span class="lk-row-sub">{lastPendingMessageText(p)}</span>
-                    </div>
+            </Show>
+          }
+        >
+          <div class="lk-pane-body">
+            {/* ADR-0087 UX 6.2 — the Requests sent row, at the top, while one is open. */}
+            <Show when={currentFolder() === null && !searching() && requestsSent().length > 0}>
+              <button type="button" class="lk-row" onClick={() => setRequestsOpen(true)}>
+                <span class="lk-avatar" aria-hidden="true">
+                  <Icon name="send" size={20} />
+                </span>
+                <div class="lk-row-body">
+                  <div class="lk-row-line">
+                    <span class="lk-row-title">{t("requests_sent.title")}</span>
                   </div>
-                </A>
-              )}
-            </For>
-          </Show>
-          <For each={visibleRows()}>
-            {(row) => {
-              // A channel is not the MLS-group shape the rest of this row is
-              // written against - no roster, no unread summary - so it draws
-              // its own short row; its pin, mute and archive are the synced
-              // flags keyed on the channel id (`channels/channel-flags.ts`).
-              if (row.kind === "channel") {
-                const cf = () => channelFlagsOf(sync.flags(), row.id);
-                return (
-                  <ChannelRow
-                    row={row}
-                    time={channelRowTime(row.postedAtMs, clock(), displayLocale())}
-                    pinned={pinnedHere(row)}
-                    muted={cf().muted}
-                    archived={cf().archived}
-                    pinBlocked={pinBlocked(row)}
-                    selected={props.activeGroupIdB64 === row.id}
-                    onMenu={(x, y) => setMenu({ row, g: null, x, y })}
-                    onToggle={(field) => void toggleFlag(row, null, field)}
-                  />
-                );
-              }
-              const g = groupById().get(row.id);
-              if (g === undefined) return null;
-              const key = syncGroupIdHex(conversationIdOf(g));
-              const flags = (): { pinned: boolean; muted: boolean; archived: boolean } => {
-                const f = sync.flags()[key];
-                return {
-                  pinned: f?.pinned === true,
-                  muted: f?.muted === true,
-                  archived: f?.archived === true,
-                };
-              };
-              const summary = (): ChatListSummary => summaryFor(g.group.groupId);
-              const unread = (): number => (endedLine(g) === null ? summary().unread : 0);
-              const label = (): string => chatLabel(g);
-              const sub = (): string => subOf(g);
-              const time = (): string => formatListTime(summary().lastAt, clock(), displayLocale());
-              /**
-               * A call from this conversation, arriving while it is muted
-               * (`docs/ux/calls.md` section 2.1.1, second surface).
-               *
-               * The row is where the person already looks to see what is
-               * happening, and answering from it needs no navigation. Whether
-               * the call is this row's, and whether it is still inside the ring
-               * window, are `calls/quiet-call-offer.ts`'s to say — the same
-               * question the muted conversation's own panel asks, asked once.
-               */
-              const quietCall = () =>
-                quietCallOfferFor(callHost.quietIncomingCall(), g.groupIdB64, Date.now());
-              const press = createLongPress((x, y) => setMenu({ row, g, x, y }));
-              return (
-                <A
-                  href={hrefOf(g)}
-                  class="lk-row"
-                  classList={{
-                    selected: props.activeGroupIdB64 === g.groupIdB64,
-                    ended: endedLine(g) !== null,
-                    archived: flags().archived,
-                  }}
-                  activeClass=""
-                  inactiveClass=""
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    setMenu({ row, g, x: e.clientX, y: e.clientY });
-                  }}
-                  onPointerDown={press.onPointerDown}
-                  onPointerMove={press.onPointerMove}
-                  onPointerUp={press.onPointerUp}
-                  onPointerCancel={press.onPointerCancel}
-                  onPointerLeave={press.onPointerLeave}
-                  onClick={(e) => {
-                    press.swallowClick(e);
+                </div>
+                <span class="lk-row-trail">
+                  <span class="lk-badge muted">{requestsSent().length}</span>
+                </span>
+              </button>
+            </Show>
+            <RequestsSentScreen open={requestsOpen()} onBack={() => setRequestsOpen(false)} />
+            {/* UX 2.4 - one sentence whatever the filter; the person made it. */}
+            <Show when={visibleRows().length === 0 && !searching() && currentFolder() !== null}>
+              <div class="lk-folder-empty">
+                <p>{t("folders.empty")}</p>
+                <button
+                  type="button"
+                  class="secondary"
+                  onClick={() => {
+                    const f = currentFolder();
+                    if (f !== null) openFolderEditor({ mode: "edit", folderIdHex: f.idHex });
                   }}
                 >
-                  <Avatar
-                    label={label()}
-                    id={conversationIdB64Of(g)}
-                    personKey={row.personKey}
-                    conversationKey={row.personKey === undefined ? g.groupIdB64 : undefined}
-                    playVideo="hover"
-                  />
-                  <div class="lk-row-body">
-                    <div class="lk-row-line">
-                      <span class="lk-row-title" classList={{ unread: unread() > 0 }}>
-                        <span class="lk-ellipsis">{label()}</span>
-                      </span>
-                      <Show when={time().length > 0}>
-                        <span class="lk-row-time" classList={{ unread: unread() > 0 }}>
-                          {time()}
+                  {t("folders.edit")}
+                </button>
+              </div>
+            </Show>
+            <Show when={currentFolder() === null || searching()}>
+              <For each={invitedRows()}>
+                {(p) => (
+                  <A href={paths.pendingChat(p.accountIdHex)} class="lk-row" activeClass="" inactiveClass="">
+                    <Avatar label={invitedName(p)} id={p.signaturePubkeyB64} personKey={p.signaturePubkeyB64} />
+                    <div class="lk-row-body">
+                      <div class="lk-row-line">
+                        <span class="lk-row-title">
+                          <span class="lk-ellipsis">{invitedName(p)}</span>
                         </span>
+                      </div>
+                      <div class="lk-row-line">
+                        <span class="lk-row-sub">{lastPendingMessageText(p)}</span>
+                      </div>
+                    </div>
+                  </A>
+                )}
+              </For>
+            </Show>
+            <For each={visibleRows()}>
+              {(row) => {
+                // A channel is not the MLS-group shape the rest of this row is
+                // written against - no roster, no unread summary - so it draws
+                // its own short row; its pin, mute and archive are the synced
+                // flags keyed on the channel id (`channels/channel-flags.ts`).
+                if (row.kind === "channel") {
+                  const cf = () => channelFlagsOf(sync.flags(), row.id);
+                  return (
+                    <ChannelRow
+                      row={row}
+                      time={channelRowTime(row.postedAtMs, clock(), displayLocale())}
+                      pinned={pinnedHere(row)}
+                      muted={cf().muted}
+                      archived={cf().archived}
+                      pinBlocked={pinBlocked(row)}
+                      selected={props.activeGroupIdB64 === row.id}
+                      onMenu={(x, y) => setMenu({ row, g: null, x, y })}
+                      onToggle={(field) => void toggleFlag(row, null, field)}
+                    />
+                  );
+                }
+                const g = groupById().get(row.id);
+                if (g === undefined) return null;
+                const key = syncGroupIdHex(conversationIdOf(g));
+                const flags = (): { pinned: boolean; muted: boolean; archived: boolean } => {
+                  const f = sync.flags()[key];
+                  return {
+                    pinned: f?.pinned === true,
+                    muted: f?.muted === true,
+                    archived: f?.archived === true,
+                  };
+                };
+                const summary = (): ChatListSummary => summaryFor(g.group.groupId);
+                const unread = (): number => (endedLine(g) === null ? summary().unread : 0);
+                const label = (): string => chatLabel(g);
+                const sub = (): string => subOf(g);
+                const time = (): string => formatListTime(summary().lastAt, clock(), displayLocale());
+                /**
+                 * A call from this conversation, arriving while it is muted
+                 * (`docs/ux/calls.md` section 2.1.1, second surface).
+                 *
+                 * The row is where the person already looks to see what is
+                 * happening, and answering from it needs no navigation. Whether
+                 * the call is this row's, and whether it is still inside the ring
+                 * window, are `calls/quiet-call-offer.ts`'s to say — the same
+                 * question the muted conversation's own panel asks, asked once.
+                 */
+                const quietCall = () =>
+                  quietCallOfferFor(callHost.quietIncomingCall(), g.groupIdB64, Date.now());
+                const press = createLongPress((x, y) => setMenu({ row, g, x, y }));
+                return (
+                  <A
+                    href={hrefOf(g)}
+                    class="lk-row"
+                    classList={{
+                      selected: props.activeGroupIdB64 === g.groupIdB64,
+                      ended: endedLine(g) !== null,
+                      archived: flags().archived,
+                    }}
+                    activeClass=""
+                    inactiveClass=""
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setMenu({ row, g, x: e.clientX, y: e.clientY });
+                    }}
+                    onPointerDown={press.onPointerDown}
+                    onPointerMove={press.onPointerMove}
+                    onPointerUp={press.onPointerUp}
+                    onPointerCancel={press.onPointerCancel}
+                    onPointerLeave={press.onPointerLeave}
+                    onClick={(e) => {
+                      press.swallowClick(e);
+                    }}
+                  >
+                    <Avatar
+                      label={label()}
+                      id={conversationIdB64Of(g)}
+                      personKey={row.personKey}
+                      conversationKey={row.personKey === undefined ? g.groupIdB64 : undefined}
+                      playVideo="hover"
+                    />
+                    <div class="lk-row-body">
+                      <div class="lk-row-line">
+                        <span class="lk-row-title" classList={{ unread: unread() > 0 }}>
+                          <span class="lk-ellipsis">{label()}</span>
+                        </span>
+                        <Show when={time().length > 0}>
+                          <span class="lk-row-time" classList={{ unread: unread() > 0 }}>
+                            {time()}
+                          </span>
+                        </Show>
+                      </div>
+                      <div class="lk-row-line">
+                        <span class="lk-row-sub" data-testid="chat-preview">
+                          {/* Section 11 of media-messages — the last message's
+                              first photo or video, at the start of the line. */}
+                          <Show when={previewMediaFor(g)}>{(m) => <ListThumb media={m()} />}</Show>
+                          {/* An empty line while the previews are read still
+                              takes a line's height, so no row moves. */}
+                          {sub().length > 0 ? sub() : "\u00a0"}
+                        </span>
+                        <span class="lk-row-trail">
+                          <Show when={flags().muted}>
+                            <Icon name="bell-slash-fill" size={14} title={t("chats.row.muted")} />
+                          </Show>
+                          <Show when={pinnedHere(row)}>
+                            <Icon name="pin-fill" size={14} title={t("chats.row.pinned")} />
+                          </Show>
+                          <Show when={flags().archived}>
+                            <Icon name="archive-fill" size={14} />
+                          </Show>
+                          {/* Reactions section 12 — a small heart beside the
+                              badge while others' reactions to the person's
+                              own messages here are unseen. */}
+                          <Show when={unseenReactionIds(accountId(), g.groupIdB64).length > 0}>
+                            <span class="lk-list-unseen-reactions" title={t("chats.row.unseen_reactions")}>
+                              <Icon name="heart-fill" size={14} />
+                            </span>
+                          </Show>
+                          <Show when={unread() > 0}>
+                            <span
+                              class="lk-badge"
+                              classList={{ muted: flags().muted }}
+                              title={t("chats.row.unread", { count: unread() })}
+                            >
+                              {unread() >= 100 ? t("chats.row.unread_overflow") : unread().toLocaleString(displayLocale())}
+                            </span>
+                          </Show>
+                        </span>
+                        <span class="lk-row-actions" role="group" aria-label={t("chats.row.actions")}>
+                          <button
+                            type="button"
+                            title={pinnedHere(row) ? t("chats.action.unpin") : t("chats.action.pin")}
+                            aria-label={pinnedHere(row) ? t("chats.action.unpin") : t("chats.action.pin")}
+                            aria-pressed={pinnedHere(row)}
+                            disabled={pinBlocked(row)}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              void toggleFlag(row, g, "pinned");
+                            }}
+                          >
+                            <Icon name={pinnedHere(row) ? "pin-slash" : "pin"} size={20} />
+                          </button>
+                          <button
+                            type="button"
+                            title={flags().muted ? t("chats.action.unmute") : t("chats.action.mute")}
+                            aria-label={flags().muted ? t("chats.action.unmute") : t("chats.action.mute")}
+                            aria-pressed={flags().muted}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              void toggleFlag(row, g, "muted");
+                            }}
+                          >
+                            <Icon name={flags().muted ? "bell" : "bell-slash"} size={20} />
+                          </button>
+                          <button
+                            type="button"
+                            title={flags().archived ? t("chats.action.unarchive") : t("chats.action.archive")}
+                            aria-label={flags().archived ? t("chats.action.unarchive") : t("chats.action.archive")}
+                            aria-pressed={flags().archived}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              void toggleFlag(row, g, "archived");
+                            }}
+                          >
+                            <Icon name={flags().archived ? "unarchive" : "archive"} size={20} />
+                          </button>
+                        </span>
+                      </div>
+                      {/* `docs/ux/calls.md` section 2.1.1 — "that chat's own row
+                          carries Accept and Decline while the call is ringing".
+                          Its own line rather than squeezed onto the preview's,
+                          and NOT behind the hover gate the pin / mute / archive
+                          actions sit behind: a call has seconds, and a control
+                          that appears only under a pointer is no control at all
+                          on a touch screen.
+
+                          Both buttons stop the click reaching the row, which is a
+                          link: answering a call is not navigation, and section
+                          2.1.1 is explicit that this surface "needs no navigation
+                          to answer from". The in-call screen is the call host's
+                          and comes up over whatever is on screen anyway.
+
+                          Two actions here, not three: section 2.1.1 names Accept
+                          and Decline for the row, and `Accept without video`
+                          would be a third control on a line that also carries the
+                          kind of call, inside a list row. It is on the muted
+                          conversation's own panel, which is where a person who
+                          cares which way they answer is one tap away. */}
+                      <Show when={quietCall()}>
+                        {(offer) => (
+                          <div
+                            class="lk-row-call"
+                            role="group"
+                            aria-label={t("chats.row.call.label", { kind: quietCallKindLabel(offer().video), name: label() })}
+                            /* The row arms a long press that opens its pin /
+                               mute / archive menu. A thumb held on Accept for
+                               half a second must answer the call, not open that
+                               menu, so the press never reaches the row: the
+                               detector only arms on pointerdown, so stopping it
+                               here leaves nothing armed and nothing to cancel. */
+                            onPointerDown={(e) => e.stopPropagation()}
+                          >
+                            <span class="lk-row-call-kind">
+                              {quietCallKindLabel(offer().video)}
+                            </span>
+                            <button
+                              type="button"
+                              class="danger"
+                              aria-label={t("call.incoming.decline_from", { name: label() })}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                void callHost.declineIncomingCall();
+                              }}
+                            >
+                              {t("call.incoming.decline")}
+                            </button>
+                            <button
+                              type="button"
+                              class="primary"
+                              aria-label={t("call.incoming.accept_from", { name: label() })}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                void callHost.acceptIncomingCall(offer().video);
+                              }}
+                            >
+                              {t("call.incoming.accept")}
+                            </button>
+                          </div>
+                        )}
                       </Show>
                     </div>
-                    <div class="lk-row-line">
-                      <span class="lk-row-sub" data-testid="chat-preview">
-                        {/* Section 11 of media-messages — the last message's
-                            first photo or video, at the start of the line. */}
-                        <Show when={previewMediaFor(g)}>{(m) => <ListThumb media={m()} />}</Show>
-                        {/* An empty line while the previews are read still
-                            takes a line's height, so no row moves. */}
-                        {sub().length > 0 ? sub() : "\u00a0"}
-                      </span>
-                      <span class="lk-row-trail">
-                        <Show when={flags().muted}>
-                          <Icon name="bell-slash-fill" size={14} title={t("chats.row.muted")} />
-                        </Show>
-                        <Show when={pinnedHere(row)}>
-                          <Icon name="pin-fill" size={14} title={t("chats.row.pinned")} />
-                        </Show>
-                        <Show when={flags().archived}>
-                          <Icon name="archive-fill" size={14} />
-                        </Show>
-                        {/* Reactions section 12 — a small heart beside the
-                            badge while others' reactions to the person's
-                            own messages here are unseen. */}
-                        <Show when={unseenReactionIds(accountId(), g.groupIdB64).length > 0}>
-                          <span class="lk-list-unseen-reactions" title={t("chats.row.unseen_reactions")}>
-                            <Icon name="heart-fill" size={14} />
-                          </span>
-                        </Show>
-                        <Show when={unread() > 0}>
-                          <span
-                            class="lk-badge"
-                            classList={{ muted: flags().muted }}
-                            title={t("chats.row.unread", { count: unread() })}
-                          >
-                            {unread() >= 100 ? t("chats.row.unread_overflow") : unread().toLocaleString(displayLocale())}
-                          </span>
-                        </Show>
-                      </span>
-                      <span class="lk-row-actions" role="group" aria-label={t("chats.row.actions")}>
-                        <button
-                          type="button"
-                          title={pinnedHere(row) ? t("chats.action.unpin") : t("chats.action.pin")}
-                          aria-label={pinnedHere(row) ? t("chats.action.unpin") : t("chats.action.pin")}
-                          aria-pressed={pinnedHere(row)}
-                          disabled={pinBlocked(row)}
-                          onClick={(e) => {
-                            e.preventDefault();
-                            void toggleFlag(row, g, "pinned");
-                          }}
-                        >
-                          <Icon name={pinnedHere(row) ? "pin-slash" : "pin"} size={20} />
-                        </button>
-                        <button
-                          type="button"
-                          title={flags().muted ? t("chats.action.unmute") : t("chats.action.mute")}
-                          aria-label={flags().muted ? t("chats.action.unmute") : t("chats.action.mute")}
-                          aria-pressed={flags().muted}
-                          onClick={(e) => {
-                            e.preventDefault();
-                            void toggleFlag(row, g, "muted");
-                          }}
-                        >
-                          <Icon name={flags().muted ? "bell" : "bell-slash"} size={20} />
-                        </button>
-                        <button
-                          type="button"
-                          title={flags().archived ? t("chats.action.unarchive") : t("chats.action.archive")}
-                          aria-label={flags().archived ? t("chats.action.unarchive") : t("chats.action.archive")}
-                          aria-pressed={flags().archived}
-                          onClick={(e) => {
-                            e.preventDefault();
-                            void toggleFlag(row, g, "archived");
-                          }}
-                        >
-                          <Icon name={flags().archived ? "unarchive" : "archive"} size={20} />
-                        </button>
-                      </span>
-                    </div>
-                    {/* `docs/ux/calls.md` section 2.1.1 — "that chat's own row
-                        carries Accept and Decline while the call is ringing".
-                        Its own line rather than squeezed onto the preview's,
-                        and NOT behind the hover gate the pin / mute / archive
-                        actions sit behind: a call has seconds, and a control
-                        that appears only under a pointer is no control at all
-                        on a touch screen.
-
-                        Both buttons stop the click reaching the row, which is a
-                        link: answering a call is not navigation, and section
-                        2.1.1 is explicit that this surface "needs no navigation
-                        to answer from". The in-call screen is the call host's
-                        and comes up over whatever is on screen anyway.
-
-                        Two actions here, not three: section 2.1.1 names Accept
-                        and Decline for the row, and `Accept without video`
-                        would be a third control on a line that also carries the
-                        kind of call, inside a list row. It is on the muted
-                        conversation's own panel, which is where a person who
-                        cares which way they answer is one tap away. */}
-                    <Show when={quietCall()}>
-                      {(offer) => (
-                        <div
-                          class="lk-row-call"
-                          role="group"
-                          aria-label={t("chats.row.call.label", { kind: quietCallKindLabel(offer().video), name: label() })}
-                          /* The row arms a long press that opens its pin /
-                             mute / archive menu. A thumb held on Accept for
-                             half a second must answer the call, not open that
-                             menu, so the press never reaches the row: the
-                             detector only arms on pointerdown, so stopping it
-                             here leaves nothing armed and nothing to cancel. */
-                          onPointerDown={(e) => e.stopPropagation()}
-                        >
-                          <span class="lk-row-call-kind">
-                            {quietCallKindLabel(offer().video)}
-                          </span>
-                          <button
-                            type="button"
-                            class="danger"
-                            aria-label={t("call.incoming.decline_from", { name: label() })}
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              void callHost.declineIncomingCall();
-                            }}
-                          >
-                            {t("call.incoming.decline")}
-                          </button>
-                          <button
-                            type="button"
-                            class="primary"
-                            aria-label={t("call.incoming.accept_from", { name: label() })}
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              void callHost.acceptIncomingCall(offer().video);
-                            }}
-                          >
-                            {t("call.incoming.accept")}
-                          </button>
-                        </div>
-                      )}
-                    </Show>
-                  </div>
-                </A>
-              );
-            }}
-          </For>
-          {/* `docs/ux/who-can-find-me.md` section 6.1 - the people half of
-              the field: the people this device knows, matched as the person
-              types, and, from three characters with nothing to press, what
-              the network finds by username, name and channel handle, in the
-              same list under People. */}
-          <Show when={query().trim().length > 0}>
-            <PeopleSearch
-              scope="chats"
-              query={query}
-              conversationMatches={() => visibleRows().length}
-              groupPeopleKeys={groupPeopleKeys}
-              onOpenChannel={openFoundChannel}
-              listedB64={listedInvited}
-              standingAboveB64={visibleChatPeers}
-              standingConversationIds={visibleRowIds}
-              chatHrefOf={chatHrefOf}
-              channelNameOf={channelNameOf}
-              onOpenConversation={(idB64) => {
-                const g = chats.get(idB64) ?? lineageView.resolve(idB64)?.head;
-                if (g === undefined) return;
-                setQuery("");
-                navigate(paths.groupChat(base64UrlEncodeNoPad(g.group.groupId)));
+                  </A>
+                );
               }}
-            />
-          </Show>
-        </div>
+            </For>
+            {/* `docs/ux/who-can-find-me.md` section 6.1 - the people half of
+                the field: the people this device knows, matched as the person
+                types, and, from three characters with nothing to press, what
+                the network finds by username, name and channel handle, in the
+                same list under People. */}
+            <Show when={query().trim().length > 0}>
+              <PeopleSearch
+                scope="chats"
+                query={query}
+                conversationMatches={() => visibleRows().length}
+                groupPeopleKeys={groupPeopleKeys}
+                onOpenChannel={openFoundChannel}
+                listedB64={listedInvited}
+                standingAboveB64={visibleChatPeers}
+                standingConversationIds={visibleRowIds}
+                chatHrefOf={chatHrefOf}
+                channelNameOf={channelNameOf}
+                onOpenConversation={(idB64) => {
+                  const g = chats.get(idB64) ?? lineageView.resolve(idB64)?.head;
+                  if (g === undefined) return;
+                  setQuery("");
+                  navigate(paths.groupChat(base64UrlEncodeNoPad(g.group.groupId)));
+                }}
+              />
+            </Show>
+          </div>
+        </Show>
       </Show>
       <Show when={menu()}>
         {(m) => {

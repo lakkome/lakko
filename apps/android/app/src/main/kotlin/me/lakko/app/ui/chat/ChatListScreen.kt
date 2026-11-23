@@ -459,9 +459,12 @@ public fun ChatListScreen(
                 }
                 when {
                     // Cold start: the MLS restore that populates the list runs
-                    // off the main thread after the first frame, so an empty
-                    // list before it finishes is "loading", not "no chats".
-                    rows.isEmpty() && !state.bootstrapped -> Box(
+                    // off the main thread after the first frame, so the list
+                    // before it finishes is "loading", not "no chats". Rows are
+                    // not drawn either: the threads are published before the
+                    // message log is seeded, so they would stand in no order
+                    // with no second line and then jump (navigation.md 2.4).
+                    !state.bootstrapped -> Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center,
                     ) {

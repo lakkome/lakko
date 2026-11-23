@@ -118,6 +118,12 @@ export interface ProfileApi {
   /** Bumped on any change a resolved name may depend on. `resolve` reads it,
    *  so a reactive caller re-renders on its own. */
   readonly version: Accessor<number>;
+  /** The account whose stored profiles have been read, or `null` before
+   *  that (and with no session). Until it is the signed-in account,
+   *  `resolve` cannot name anybody who is named on this device, so a list
+   *  or a conversation header waits for it rather than drawing a
+   *  placeholder or a key fingerprint (docs/ux/navigation.md section 2.4). */
+  readonly loadedFor: Accessor<string | null>;
   /** The viewer's own saved profile. */
   readonly ownProfile: Accessor<OwnProfile>;
   /** The viewer's registered username, `null` for a guest account. */
@@ -217,6 +223,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     setVersion((v) => v + 1);
     avatarLookupChanged();
   };
+  const [loadedFor, setLoadedFor] = createSignal<string | null>(null);
 
   // Derived synchronously from the signed-in account, not set by an effect:
   // a route rendered on a cold load reads it before any effect of this
@@ -604,6 +611,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       // The previous account's username certificate, held or on its way.
       ownCertSlot.rebind(account);
       bindAvatarRuntime(account);
+      setLoadedFor(null);
       if (account === null) {
         unbindOwnProfileSync();
         scheduler.stop();
@@ -613,12 +621,19 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       // ADR-0079 — the pending contacts name the inviters a link added
       // before any profile of theirs arrived (`resolve`). Loaded here too, so
       // a group screen opened first still names them.
-      void loadPendingContacts(account);
+      const pendingRead = loadPendingContacts(account);
       // ADR-0048 section 4a — the own name between this account's devices.
       bindOwnProfileSync(account, ownAccountIdBytes());
       void applyHeldServiceEnvelopes();
       scheduler.start();
-      void store.open(account).then(() => {
+      const opened = store.open(account);
+      // The stored names are in (received profiles, and the inviters a link
+      // added): rows and headers may be drawn now. A store that could not be
+      // read is an answer too (neither read rejects).
+      void Promise.all([opened, pendingRead]).then(() => {
+        if (boundAccount === account) setLoadedFor(account);
+      });
+      void opened.then(() => {
         // Verify every held claim that has no fresh verdict yet.
         for (const [keyB64, p] of store.entries()) verifyIfClaimed(keyB64, p.username);
       });
@@ -860,6 +875,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
 
   const api: ProfileApi = {
     version,
+    loadedFor,
     ownProfile,
     ownUsername,
     async saveOwnDisplayName(name) {

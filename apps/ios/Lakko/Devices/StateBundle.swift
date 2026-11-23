@@ -272,6 +272,27 @@ public enum StateBundle {
         }
     }
 
+    /// ADR-0080 amendment (2026-11-23) — one device card the confirming
+    /// device holds, for the DeviceGroup leaf it is keyed on. Display-only;
+    /// attributed by the confirming device, an own device of the account.
+    public struct CarriedDeviceCard: Codable, Equatable, Sendable {
+        /// Standard base64 of the 32-byte leaf signature key.
+        public let leafKeyB64: String
+        /// Standard base64 of the device-card envelope (44 to 270 bytes).
+        public let envelopeB64: String
+
+        public init(leafKeyB64: String, envelopeB64: String) {
+            self.leafKeyB64 = leafKeyB64
+            self.envelopeB64 = envelopeB64
+        }
+    }
+
+    /// At most this many device cards (`MAX_LEAVES_PER_ACCOUNT`), and the
+    /// envelope bounds (`lakko-contacts::device_card`).
+    public static let maxDeviceCards = 8
+    static let deviceCardEnvelopeMinLength = 44
+    static let deviceCardEnvelopeMaxLength = 270
+
     /// The bundle's format version. A bundle with any other `v` is refused.
     public static let version = 4
     /// At most this many channels carry seeds, and this many seeds each.
@@ -318,6 +339,10 @@ public enum StateBundle {
         /// Bundle v4 — the newest epoch seeds of the subscribed channels,
         /// ascending by channel id bytes.
         public let channelSeeds: [CarriedChannelSeeds]
+        /// ADR-0080 amendment (2026-11-23), additive inside v4: absent (nil)
+        /// when empty; at most ``StateBundle/maxDeviceCards``, one per leaf
+        /// key, ascending by key bytes.
+        public var deviceCards: [CarriedDeviceCard]?
 
         public init(
             contacts: [CarriedContact], pins: [CarriedPin], knownGroupIdsB64: [String],
@@ -325,7 +350,8 @@ public enum StateBundle {
             groupNames: [CarriedGroupName] = [],
             profiles: [CarriedProfile] = [],
             pendingContacts: [CarriedPendingContact] = [],
-            channelSeeds: [CarriedChannelSeeds] = []
+            channelSeeds: [CarriedChannelSeeds] = [],
+            deviceCards: [CarriedDeviceCard]? = nil
         ) {
             self.v = StateBundle.version
             self.contacts = contacts
@@ -336,6 +362,7 @@ public enum StateBundle {
             self.profiles = profiles
             self.pendingContacts = pendingContacts
             self.channelSeeds = channelSeeds
+            self.deviceCards = deviceCards
         }
     }
 
@@ -361,7 +388,8 @@ public enum StateBundle {
               bundle.groupNames.count <= maxGroupNames,
               bundle.profiles.count <= maxProfiles,
               bundle.pendingContacts.count <= maxPendingContacts,
-              validChannelSeeds(bundle.channelSeeds)
+              validChannelSeeds(bundle.channelSeeds),
+              validDeviceCards(bundle.deviceCards ?? [])
         else { return nil }
         var groupIds = Set<String>()
         for entry in bundle.groupNames {
@@ -417,7 +445,18 @@ public enum StateBundle {
     /// signature key does not decode. The synthesised request carries a stable
     /// negative `messageId` derived from the key, so it never collides with a
     /// real mailbox row id.
-    public static func accepted(_ carried: CarriedContact) -> AcceptedContact? {
+    ///
+    /// `arrivedAtMs` (2026-11-23): on this device the person is a contact only
+    /// since the bundle arrived, so the row's `createdAt` (its "contact
+    /// since") is the later of the carried acceptance and that time. A request
+    /// that was already in the account's mailbox then predates the contact
+    /// here (``KnownContactRequest/requestPredatesContact(requestCreatedAt:contactSince:)``):
+    /// the device that held the contact handled it, and this one never asks
+    /// again. Mirror of Android `carriedContactSince`, web `carriedContactSinceMs`.
+    public static func accepted(
+        _ carried: CarriedContact,
+        arrivedAtMs: Double = Date().timeIntervalSince1970 * 1000
+    ) -> AcceptedContact? {
         guard let pubkey = base64Decode(carried.signaturePubkeyB64), pubkey.count == 32 else {
             return nil
         }
@@ -429,7 +468,7 @@ public enum StateBundle {
         var id: UInt64 = 0
         for byte in pubkey.prefix(7) { id = (id << 8) | UInt64(byte) }
         let createdAt = ISO8601DateFormatter().string(
-            from: Date(timeIntervalSince1970: max(0, carried.acceptedAtMs) / 1000))
+            from: Date(timeIntervalSince1970: max(0, carried.acceptedAtMs, arrivedAtMs) / 1000))
         let request = IncomingContactRequest(
             messageId: -Int64(id) - 1,
             fromPubkey: pubkey,
@@ -633,6 +672,7 @@ public enum StateBundle {
         pendingDefaults: UserDefaults = .standard,
         heldMessages: ((PendingContact) -> [CarriedHeldMessage])? = nil,
         channelSeeds: [CarriedChannelSeeds] = [],
+        deviceCards: [CarriedDeviceCard] = [],
         nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)
     ) -> V4 {
         let pinStore = pinStore ?? PeerPinStore(ownerAccountIdB64: accountIdB64)
@@ -671,7 +711,79 @@ public enum StateBundle {
             groupNames: names,
             profiles: carriedProfiles(profiles, ownKeysB64: ownKeysB64),
             pendingContacts: pending))
-        return withChannelSeeds(fitted, channelSeeds)
+        var bundle = withChannelSeeds(fitted, channelSeeds)
+        let cards = carriedDeviceCards(deviceCards)
+        bundle.deviceCards = cards.isEmpty ? nil : cards
+        return bundle
+    }
+
+    /// ADR-0080 amendment — whether one carried device-card entry is
+    /// well-formed: a 32-byte key, an envelope of 44 to 270 bytes.
+    static func deviceCardEntryValid(_ entry: CarriedDeviceCard) -> Bool {
+        guard Data(base64Encoded: entry.leafKeyB64)?.count == signatureKeyLength,
+              let envelope = Data(base64Encoded: entry.envelopeB64) else { return false }
+        return (deviceCardEnvelopeMinLength...deviceCardEnvelopeMaxLength).contains(envelope.count)
+    }
+
+    /// The sender's list: well-formed entries only, the first per leaf key,
+    /// ascending by key bytes, at most ``maxDeviceCards``.
+    static func carriedDeviceCards(_ entries: [CarriedDeviceCard]) -> [CarriedDeviceCard] {
+        var byKey: [Data: CarriedDeviceCard] = [:]
+        for entry in entries where deviceCardEntryValid(entry) {
+            guard let key = Data(base64Encoded: entry.leafKeyB64), byKey[key] == nil else { continue }
+            byKey[key] = entry
+        }
+        return byKey
+            .sorted { $0.key.lexicographicallyPrecedes($1.key) }
+            .prefix(maxDeviceCards)
+            .map(\.value)
+    }
+
+    /// The decoder's rule for `deviceCards` (the whole bundle is refused on
+    /// any violation): at most ``maxDeviceCards`` well-formed entries, no
+    /// leaf key twice.
+    static func validDeviceCards(_ entries: [CarriedDeviceCard]) -> Bool {
+        guard entries.count <= maxDeviceCards else { return false }
+        var keys = Set<Data>()
+        for entry in entries {
+            guard deviceCardEntryValid(entry), let key = Data(base64Encoded: entry.leafKeyB64),
+                  keys.insert(key).inserted else { return false }
+        }
+        return true
+    }
+
+    /// The carried entries that decode with the core codec, keyed by
+    /// lower-case hex.
+    static func decodedDeviceCards(_ entries: [CarriedDeviceCard]) -> [(keyHex: String, card: StoredDeviceCard)] {
+        entries.compactMap { entry in
+            guard let key = Data(base64Encoded: entry.leafKeyB64),
+                  let envelope = Data(base64Encoded: entry.envelopeB64),
+                  let ffi = try? decodeDeviceCardEnvelope(plaintext: envelope) else { return nil }
+            return (hexEncode(key), DeviceCardCenter.stored(ffi))
+        }
+    }
+
+    /// The roster's leaf keys (lower-case hex) and this device's own, or
+    /// `nil` when the handle cannot be read or does not hold this device.
+    static func roster(of group: DeviceGroup) -> (keysHex: [String], ownHex: String)? {
+        guard let own = try? group.ownLeafIndex(), let members = try? group.devices(),
+              let mine = members.first(where: { $0.leafIndex == own }) else { return nil }
+        return (members.map { hexEncode($0.signaturePublicKey) }, hexEncode(mine.signaturePublicKey))
+    }
+
+    /// ADR-0080 amendment (2026-11-23), new device — store the device cards
+    /// the confirming device handed over: decoded here, kept on the main
+    /// actor by ``DeviceCardCenter``. Returns how many were kept.
+    static func applyDeviceCards(_ bundle: V4, accountIdB64: String, group: DeviceGroup) async -> Int {
+        guard let carried = bundle.deviceCards, !carried.isEmpty,
+              let roster = roster(of: group) else { return 0 }
+        let entries = decodedDeviceCards(carried)
+        guard !entries.isEmpty else { return 0 }
+        return await MainActor.run {
+            DeviceCardCenter.shared.storeCarried(
+                accountIdB64: accountIdB64, entries: entries,
+                rosterKeysHex: roster.keysHex, ownKeyHex: roster.ownHex)
+        }
     }
 
     /// Bundle v4 — `bundle` (already fitted) with `seeds` added at

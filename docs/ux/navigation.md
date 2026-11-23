@@ -128,9 +128,53 @@ kind at a time.
   section 3. Not a different set of choices in a different place.
 - **Empty after search**: "No results", plus the single "Look up @name" row
   of section 4.3 when the text could be a name.
-- **Loading**: the list is local, so it is drawn from disk immediately and
-  there is no spinner. A conversation whose content has not arrived yet shows
-  its title and no second line rather than a placeholder shimmer.
+- **Loading**: the list is local, so it is drawn as soon as this device's
+  stores have been read (section 2.4). Until then the list area is empty: no
+  row, no empty state; where a platform already has a loading treatment for
+  the list (Android's progress indicator during its off-thread restore) it
+  stays. Amended 2026-11-23, see 2.4.
+
+### 2.4 Nothing is drawn before it is read (2026-11-23, maintainer decision)
+
+Seen after a reload of the web client (Safari, test stack): for two to three
+seconds the list showed rows named "Member" with no second line and no time,
+in creation order; then the names arrived and the rows jumped into their
+order. The open one-to-one showed a key fingerprint ("594c d437") as its
+title and "No messages yet. Say hi." over a long history, then switched to
+the person's name and the messages.
+
+The rule, on every client (web and desktop, iOS, Android):
+
+1. **A row is drawn only once its name is known.** Names come from this
+   device's stores (received profiles, renames, invite-link statements,
+   group names and `@name`s); no row is drawn before they were read. A row
+   then shows the real name, or the same final fallback the steady state
+   would show - never a transient placeholder word, never a key fingerprint.
+2. **The list is drawn only once its order is known.** The message log
+   (last message, time) and the subscribed channels decide the order, so the
+   list waits for them too, and then draws every row at once. It never draws
+   rows first and re-sorts them when their data arrives. Until then: nothing
+   (or the platform's existing list loading treatment); never the empty
+   state, which would say "no conversations" to someone who has some.
+3. **An open conversation draws nothing of itself until it is read**: its
+   title, avatar and subtitle, and its timeline, wait for the same name
+   stores and for its stored messages. The pane stays empty meanwhile (on
+   web it is laid out but not shown, so the scroll position and the draft
+   survive). "No messages yet" is shown only when the stored log was read and
+   holds nothing for this conversation.
+4. **Contacts** follows rule 1: no contact row, and no empty state, before
+   the name stores were read.
+5. A store that cannot be read is an answer too (it counts as read and
+   empty), so a broken store never leaves a list blank for good.
+
+Platform notes as built: web gates on the profile store and the group-name
+stores having been read for the signed-in account, the message log read,
+and the channels hydrated (`apps/web/src/chat/view-ready.ts`). iOS and
+Android read their name stores synchronously before the conversations are
+built, so they gate on the chat layer's bootstrap (`bootstrapped`): iOS
+draws no empty state before it; Android draws its progress indicator instead
+of rows before it, and its conversation screen shows no title, no "No
+messages yet" and no "being set up" line before it.
 
 ## 3. The create menu
 

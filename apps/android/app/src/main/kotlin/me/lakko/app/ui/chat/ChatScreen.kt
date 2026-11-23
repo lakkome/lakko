@@ -828,10 +828,12 @@ public fun ChatScreen(
         }
     }
 
-    val headerTitle = if (isGroupChat) {
-        shownGroupTitle ?: peerName ?: t("chat.group.fallback_name")
-    } else {
-        peerName ?: shownGroupTitle ?: t("chat.group.fallback_name")
+    // `docs/ux/navigation.md` section 2.4 — no title before this device's
+    // conversations were read: it would be the fallback word, then the name.
+    val headerTitle = when {
+        !state.messagesKnown -> ""
+        isGroupChat -> shownGroupTitle ?: peerName ?: t("chat.group.fallback_name")
+        else -> peerName ?: shownGroupTitle ?: t("chat.group.fallback_name")
     }
     // ADR-0050 — people, not leaves: this device's other phone is not a member.
     val peopleCount by viewModel.peopleCount.collectAsStateWithLifecycle()
@@ -840,6 +842,7 @@ public fun ChatScreen(
     // a dead group), else "@username" in a 1x1, else "N members" in a group.
     val typingLine = state.typingText?.text()
     val headerSubtitle = when {
+        !state.messagesKnown -> null
         typingLine != null && !membershipEnded -> typingLine
         isGroupChat -> t("chat.members.count", emptyMap(), mapOf("count" to (peopleCount ?: (otherMembers.size + 1)).toULong()))
         // A contact with no display name already reads "@username" as the
@@ -1107,7 +1110,7 @@ public fun ChatScreen(
         // are mounted app-wide by `MainActivity`, so leaving this chat never
         // hides or ends a call and returning to it shows the live call.
 
-        if (me.lakko.app.chat.showsSettingUpLine(state.threadKnown, ending)) {
+        if (me.lakko.app.chat.showsSettingUpLine(state.threadKnown, ending, state.messagesKnown)) {
             // The chat list opened this screen for a group that
             // the repository doesn't know about yet (post-restart
             // before snapshot rehydrate built the handle, or a
@@ -1126,7 +1129,7 @@ public fun ChatScreen(
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp),
         ) {
-            if (showsEmptyTimeline(timeline, state.messages.isEmpty(), pendingMedia.isEmpty())) {
+            if (showsEmptyTimeline(timeline, state.messages.isEmpty(), pendingMedia.isEmpty(), state.messagesKnown)) {
                 // ADR-0045 UX §6.2 — the empty-timeline copy invites a send,
                 // and once the membership has ended that is an invitation the
                 // bar below can no longer accept. The terminal row carries the
@@ -1712,7 +1715,9 @@ private fun Header(
             // The name and the avatar together are the entry point: tapping
             // them opens info about this conversation, and which info that is
             // depends on what the conversation is.
-            Row(
+            // `docs/ux/navigation.md` section 2.4 — an empty title is a
+            // conversation not read yet: nothing of it is drawn.
+            if (title.isNotEmpty()) Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.clickable(onClick = onShowInfo),
             ) {

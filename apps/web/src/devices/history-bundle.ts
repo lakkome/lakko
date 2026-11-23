@@ -50,7 +50,7 @@ import type {
 } from "../../wasm/lakko_ffi_wasm";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { historyMediaFromPersisted, persistedMediaFromOpened } from "./history-media";
-import { b64UrlEncode, inlineThumbFromPersisted } from "../chat/persisted-attachment";
+import { b64UrlDecode, b64UrlEncode, inlineThumbFromPersisted } from "../chat/persisted-attachment";
 import { isInlineThumbJpeg } from "../media/visual-media";
 import { fileHistoryRows } from "../chat/background-log";
 import {
@@ -123,6 +123,7 @@ export async function buildHistoryBundleFromLog(args: {
 
   const groupInputs: HistoryGroupInput[] = [];
   let maxHlc = 0n;
+  let skipped = 0;
 
   for (const hex of groupHexes) {
     const slot = log.groups[hex];
@@ -141,7 +142,11 @@ export async function buildHistoryBundleFromLog(args: {
       // is the 8-byte big-endian u64 (the native convention),
       // replacing the old web-only UTF-8-of-decimal encoding so
       // a web-scanner -> native-joiner pairing interoperates.
-      const placeholder = encodeMessagePlaceholder(wasm, m, base64Encode(groupIdBytes));
+      const placeholder = placeholderOrNull(wasm, m, base64Encode(groupIdBytes));
+      if (placeholder === null) {
+        skipped += 1;
+        continue;
+      }
       const createdMs = (() => {
         if (m.createdAt === undefined || m.createdAt === null) return 0;
         const v = Date.parse(m.createdAt);
@@ -161,6 +166,10 @@ export async function buildHistoryBundleFromLog(args: {
     groupInputs.push(new wasm.HistoryGroupInput(groupIdBytes, messages, capped));
   }
 
+  if (skipped > 0) {
+    // eslint-disable-next-line no-console
+    console.warn(`history bundle: ${skipped} messages could not be carried`);
+  }
   if (groupInputs.length === 0) return null;
 
   return wasm.sealHistoryBundleStructured(
@@ -306,11 +315,17 @@ export async function buildGapHistoryBundle(args: {
   const groupIdB64 = base64Encode(groupIdBytes);
   let maxHlc = 0n;
   const messages: HistoryMessageInput[] = [];
+  let skipped = 0;
   for (const m of trimmed) {
     const t = rowMs(m);
+    const placeholder = placeholderOrNull(wasm, m, groupIdB64, args.ownAuthorKeyB64);
+    if (placeholder === null) {
+      skipped += 1;
+      continue;
+    }
     messages.push(
       new wasm.HistoryMessageInput(
-        encodeMessagePlaceholder(wasm, m, groupIdB64, args.ownAuthorKeyB64),
+        placeholder,
         0,
         messageIdToBeBytes(m.messageId),
         BigInt(Number.isFinite(t) && t > 0 ? t : 0),
@@ -319,6 +334,11 @@ export async function buildGapHistoryBundle(args: {
     const cur = safeBigInt(m.messageId);
     if (cur !== null && cur > maxHlc) maxHlc = cur;
   }
+  if (skipped > 0) {
+    // eslint-disable-next-line no-console
+    console.warn(`gap history: ${skipped} messages could not be carried`);
+  }
+  if (messages.length === 0) return null;
   return wasm.sealGapHistoryStructured(
     args.readmitter,
     args.gapKey,
@@ -465,9 +485,14 @@ export function encodeMessagePlaceholder(
   const attachments: HistoryAttachmentInput[] = m.attachments.map((a) => {
     const size = safeBigInt(a.sizeStr) ?? 0n;
     const input = new wasm.HistoryAttachmentInput(
-      base64Decode(a.blobIdB64),
-      base64Decode(a.keyB64),
-      base64Decode(a.nonceB64),
+      // A live row stores these as base64url (`persistedFromAttachmentRef`),
+      // a row a bundle filed as standard base64: `b64UrlDecode` reads both.
+      // `base64Decode` (atob) threw on the first `-` or `_`, and one such
+      // attachment took the whole bundle with it (seen live 2026-11-23: a
+      // device added from web got no history).
+      b64UrlDecode(a.blobIdB64),
+      b64UrlDecode(a.keyB64),
+      b64UrlDecode(a.nonceB64),
       size,
       a.mime ?? undefined,
       a.name ?? undefined,
@@ -521,6 +546,24 @@ export function encodeMessagePlaceholder(
     // Placeholder version 6 (live walk 3): who wrote it.
     keyBytesOrUndefined(placeholderAuthorKeyB64(m, ownAuthorKeyB64)),
   );
+}
+
+/**
+ * {@link encodeMessagePlaceholder}, or `null` when this one row cannot be
+ * encoded. A row that cannot be carried is left out and the rest of the
+ * bundle still goes, as on iOS and Android.
+ */
+function placeholderOrNull(
+  wasm: Wasm,
+  m: PersistedMessage,
+  groupIdB64: string,
+  ownAuthorKeyB64?: string | null,
+): Uint8Array | null {
+  try {
+    return encodeMessagePlaceholder(wasm, m, groupIdB64, ownAuthorKeyB64);
+  } catch {
+    return null;
+  }
 }
 
 /** A standard-base64 32-byte key, else `undefined`. */

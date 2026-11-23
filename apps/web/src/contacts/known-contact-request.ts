@@ -125,6 +125,22 @@ export function requestPredatesContact(requestCreatedAt: string, contactSinceMs:
   return at <= contactSinceMs;
 }
 
+/**
+ * The `acceptedAtMs` a contact carried to this device by the pairing state
+ * bundle is stored with: the later of the time another device of the account
+ * accepted them and the time the bundle arrived. On this device the person is
+ * a contact only since then, so a request that was already in the account's
+ * mailbox predates the contact here ({@link requestPredatesContact}): the
+ * device that held the contact when it arrived handled it (answered silently,
+ * or listed it there) and this one never asks again (seen live 2026-11-23).
+ * Mirror of Android `carriedContactSince` and iOS `StateBundle.accepted`.
+ */
+export function carriedContactSinceMs(carriedAcceptedAtMs: number, arrivedAtMs: number): number {
+  const carried = Number.isFinite(carriedAcceptedAtMs) ? carriedAcceptedAtMs : 0;
+  const arrived = Number.isFinite(arrivedAtMs) ? arrivedAtMs : 0;
+  return Math.max(carried, arrived, 0);
+}
+
 /** The slice of a contact row this reads. */
 export interface ContactAccountRow {
   readonly signaturePubkeyB64: string;

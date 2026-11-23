@@ -52,6 +52,7 @@ import { decodeReadPosition, encodeReadPosition, readUpToInSegment } from "./lin
 import { base64Encode } from "../auth/account-id";
 import { blockVerdictForSender } from "../moderation/block-rules";
 import { wasmSync } from "../wasm";
+import { chatListReady } from "./view-ready";
 
 // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
 export function createConversationRows() {
@@ -152,11 +153,21 @@ export function createConversationRows() {
     const s = auth.state();
     if (s.kind !== "session") return;
     const accountIdB64 = s.account.accountId;
-    const deviceKey = await getDeviceKey(accountIdB64);
-    if (deviceKey === null) return;
-    const log = await loadMessageLog(accountIdB64, deviceKey);
-    // No log stored is an answer too: nothing was said in any conversation
-    // (and nothing of another account's log may stay on the rows).
+    let log: Awaited<ReturnType<typeof loadMessageLog>> = null;
+    try {
+      const deviceKey = await getDeviceKey(accountIdB64);
+      if (deviceKey !== null) log = await loadMessageLog(accountIdB64, deviceKey);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[chats] message log unreadable", err instanceof Error ? err.name : "unknown");
+    }
+    // A session that moved on while the log was read takes none of it.
+    const now = auth.state();
+    if (now.kind !== "session" || now.account.accountId !== accountIdB64) return;
+    // No log stored (or none readable, or no device key) is an answer too:
+    // nothing is known to have been said, and the list must not stay blank
+    // waiting for a read that cannot happen (navigation.md 2.4). Nothing of
+    // another account's log may stay on the rows.
     setLogSlots(log?.groups ?? {});
     setLogReadFor(accountIdB64);
   }
@@ -365,7 +376,22 @@ export function createConversationRows() {
     });
   };
 
+  /** `docs/ux/navigation.md` section 2.4 - no row is drawn before what
+   *  names it (received profiles, group names) and what orders it (the
+   *  message log) has been read: drawn earlier, a one-to-one read `Member`
+   *  and every row jumped when the log arrived. Until then the list is
+   *  empty and `ChatList` shows neither rows nor its empty state. */
+  const ready = (): boolean =>
+    chatListReady({
+      account: accountId(),
+      profilesLoadedFor: profiles.loadedFor(),
+      groupNamesLoadedFor: groupNames.loadedFor(),
+      logRead: logKnown(),
+      channelsRead: channelsState.hydrated(),
+    });
+
   const orderedRows = createMemo((): readonly ConversationRow[] => {
+    if (!ready()) return [];
     const flagsMap = sync.flags();
     // The order is the shared rule, so the list waits for it rather than
     // falling back to a second, drifting copy. In the running app the rules
@@ -431,6 +457,7 @@ export function createConversationRows() {
     newestMessageId(logSlots()[syncGroupIdHex(groupIdBytes)]);
 
   return {
+    ready,
     conversationIdOf,
     conversationIdB64Of,
     readPositionBytes,

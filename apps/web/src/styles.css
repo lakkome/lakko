@@ -1885,6 +1885,11 @@ a.ghost.small.lk-wide-only {
   display: flex;
   flex-direction: column;
 }
+/* docs/ux/navigation.md 2.4 - an open conversation is laid out but not shown
+   until its title and its stored messages are read: the pane stays empty. */
+.lk-chat-pending {
+  visibility: hidden;
+}
 .lk-chat-scroll {
   flex: 1;
   min-height: 0;

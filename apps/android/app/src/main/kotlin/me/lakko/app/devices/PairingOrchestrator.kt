@@ -396,6 +396,7 @@ public object PairingOrchestrator {
         private suspend fun fetchCatchUpBundles(joined: DeviceGroup, welcomeCursor: Long): FetchedBundles {
             val history = try {
                 val outcome = pollHistoryBundleThatOpens(joined, welcomeCursor)
+                WelcomeCourier.historyOutcomeLogLine(outcome)?.let { android.util.Log.i("PairingOrchestrator", it) }
                 (outcome as? WelcomeCourier.HistoryBundleOutcome.Received)?.sealedBytes
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
@@ -457,6 +458,9 @@ public object PairingOrchestrator {
                     // ADR-0074: a chat layer already loaded under the current
                     // key is rebuilt under the conversation key.
                     StateBundle.afterApply(accountIdB64, applied)
+                    // ADR-0080 amendment: the account's other devices are named at once.
+                    val cards = StateBundle.applyDeviceCards(context, accountIdB64, bundle, joined)
+                    android.util.Log.i("PairingOrchestrator", "state bundle: $cards device cards stored")
                 } catch (cause: kotlinx.coroutines.CancellationException) {
                     throw cause
                 } catch (cause: Throwable) {
@@ -474,6 +478,7 @@ public object PairingOrchestrator {
         ) {
             try {
                 val outcome = pollHistoryBundleThatOpens(joined, welcomeCursor)
+                WelcomeCourier.historyOutcomeLogLine(outcome)?.let { android.util.Log.i("PairingOrchestrator", it) }
                 if (outcome is WelcomeCourier.HistoryBundleOutcome.Received) {
                     val secret = joined.historyBundleSecret(identity)
                     val applied = HistoryBundleCodec.applyToMessageLog(
@@ -514,6 +519,9 @@ public object PairingOrchestrator {
                         // ADR-0074: a chat layer already loaded under the
                         // current key is rebuilt under the conversation key.
                         StateBundle.afterApply(accountIdB64, applied)
+                        // ADR-0080 amendment: the account's other devices are named at once.
+                        val cards = StateBundle.applyDeviceCards(context, accountIdB64, bundle, joined)
+                        android.util.Log.i("PairingOrchestrator", "state bundle: $cards device cards stored")
                     }
                 }
             } catch (cause: kotlinx.coroutines.CancellationException) {
@@ -1110,7 +1118,14 @@ public object PairingOrchestrator {
                 var key: ByteArray? = null
                 try {
                     val known = me.lakko.app.chat.KnownGroupsStore(context).load(accountIdB64)
-                    val bundle = StateBundle.build(context, accountIdB64, known)
+                    // ADR-0080 amendment: the device cards this device holds,
+                    // its own too, for the DeviceGroup after the add.
+                    val deviceCards = StateBundle.rosterOf(ensured.group)?.let { (rosterHex, ownHex) ->
+                        StateBundle.carriedDeviceCards(
+                            DeviceCardCenter.cardsForStateBundle(context, accountIdB64, ownHex, rosterHex),
+                        )
+                    } ?: emptyList()
+                    val bundle = StateBundle.build(context, accountIdB64, known).copy(deviceCards = deviceCards)
                     key = ensured.group.exportSecret(
                         ensured.identity,
                         StateBundle.EXPORTER_LABEL,

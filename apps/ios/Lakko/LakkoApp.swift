@@ -5,7 +5,7 @@ import Combine
 import LakkoCore
 import SwiftUI
 
-/// `@main` entry point for the iOS / iPadOS app.
+/// The iOS / iPadOS app (started by ``LakkoMain``).
 ///
 /// Mirror of:
 ///
@@ -22,7 +22,9 @@ import SwiftUI
 ///     `NavigationStack` rooted at the Welcome screen with Log in, Create
 ///     account and Recover pushed on it.
 ///   * ``AuthState/session(_:)`` — ``SessionRoot`` (the tab shell).
-@main
+///
+/// The process entry is ``LakkoMain``, which runs this app everywhere except
+/// as the host of the unit tests.
 struct LakkoApp: App {
     /// 1.20c — `UIApplicationDelegate` adaptor that catches APNs
     /// registration callbacks the SwiftUI `App` protocol doesn't
@@ -3214,3 +3216,58 @@ private struct SettingsTabAttention<Content: View>: View {
             .badge(attention ? Text(verbatim: "!") : nil)
     }
 }
+
+/// The process entry point.
+///
+/// `LakkoTests` is app-hosted: XCTest injects the test bundle into a launch
+/// of this app. Launched as ``LakkoApp`` that process restored the
+/// simulator's signed-in account from the Keychain and started the session
+/// runtime (token refresh, the foreground receive, the device-link poll,
+/// device cards, KeyPackage publish), whose requests the test bundle's
+/// network guard then charged to whichever test was running. As a test host
+/// the process runs ``LakkoTestHostApp`` instead: one empty window scene and
+/// nothing else, so a test sees only what it set up itself. The simulator's
+/// stored account is left as it is. Debug builds only; a Release build always
+/// runs ``LakkoApp``.
+@main
+enum LakkoMain {
+    static func main() {
+#if DEBUG
+        if LakkoTestHost.isActive {
+            LakkoTestHostApp.main()
+            return
+        }
+#endif
+        LakkoApp.main()
+    }
+}
+
+#if DEBUG
+/// Whether this process was launched by XCTest to host the unit tests.
+enum LakkoTestHost {
+    /// XCTest sets these in the environment of the process it injects a test
+    /// bundle into. A UI test's target app is an ordinary launch and has none.
+    static var isActive: Bool {
+        let environment = ProcessInfo.processInfo.environment
+        return environment["XCTestConfigurationFilePath"] != nil
+            || environment["XCTestBundlePath"] != nil
+            || environment["XCTestSessionIdentifier"] != nil
+    }
+}
+
+/// The app a unit-test run is hosted in: a window scene (some tests attach
+/// views to it) and the two process-wide steps ``LakkoApp`` takes before
+/// anything touches WebRTC. No repository, no session, no network.
+struct LakkoTestHostApp: App {
+    init() {
+        WebRTCFieldTrials.installOnce()
+        SFrameAvailability.shared.runBootProbe()
+    }
+
+    var body: some Scene {
+        WindowGroup {
+            Color.clear
+        }
+    }
+}
+#endif

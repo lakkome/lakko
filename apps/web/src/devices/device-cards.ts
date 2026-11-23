@@ -69,6 +69,32 @@ export function receiveDeviceCard(
   return { ...cards, [senderKeyHex]: card };
 }
 
+/**
+ * ADR-0080 amendment (2026-11-23): the cards a confirming device handed over
+ * in the pairing state bundle, each already decoded and keyed by its leaf
+ * (lower-case hex). Kept per entry only for a current leaf of this device's
+ * DeviceGroup roster other than `ownKeyHex`, and only when strictly newer
+ * than the card held for that key (`receiveDeviceCard`), so the device's own
+ * later card wins. Returns the new map, or `null` when nothing changes.
+ */
+export function acceptCarriedDeviceCards(
+  cards: DeviceCardMap,
+  entries: readonly { readonly keyHex: string; readonly card: StoredDeviceCard }[],
+  rosterKeysHex: readonly string[],
+  ownKeyHex: string,
+): DeviceCardMap | null {
+  let next: DeviceCardMap = cards;
+  let changed = false;
+  for (const e of entries) {
+    if (e.keyHex === ownKeyHex) continue;
+    const kept = receiveDeviceCard(next, e.keyHex, e.card, rosterKeysHex);
+    if (kept === null) continue;
+    next = kept;
+    changed = true;
+  }
+  return changed ? next : null;
+}
+
 /** Drop the card of every leaf that left the DeviceGroup. `null` when none. */
 export function pruneDeviceCards(
   cards: DeviceCardMap,

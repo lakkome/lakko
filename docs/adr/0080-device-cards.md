@@ -251,3 +251,47 @@ iPhone after 22 s. UX `docs/ux/second-device.md` section 2.1.
   send goes when it binds (in memory).
 - **The growth re-send delay** of the devices already there is 0-300 ms (was
   0-30 s).
+
+## Amendment (2026-11-23): the confirming device hands its cards to the new device
+
+Seen live: a new Android device listed the account's iOS simulator (not open
+at the time) only as "Device", while the web device, which had been open when
+the iPhone last re-sent its card, showed "iPhone18,4 · Lakko 1.0 · iOS 26.4".
+Until now a device learnt another device's card only from that device itself
+(its growth re-send runs only while it is in the foreground), so a device that
+was not open at the add stayed nameless on the new device. Decided by the
+maintainer the same day; UX `docs/ux/second-device.md` section 3.
+
+- **The pairing state bundle carries device cards.** The ADR-0050 section 2.9
+  state bundle, sent by the confirming device after either add route (QR or
+  six-digit code), gains `deviceCards`: the cards the confirming device holds
+  for leaves of the DeviceGroup as it stands after the add, plus its own, each
+  `{"leafKeyB64": <standard base64, 32-byte leaf signature key>,
+  "envelopeB64": <standard base64, the device-card envelope, 44..=270 bytes>}`.
+  The envelope is composed from the stored card, stamps verbatim (the encoding
+  is canonical, so it is the envelope as received). The confirming device's
+  own card is its last card as sent, or, before its first one, its current
+  fields at stamp 0, so any card it sends later replaces it.
+- **Bounds.** At most 8 entries (`MAX_LEAVES_PER_ACCOUNT`), one per leaf key,
+  ascending by key bytes. A list over 8, a malformed key or envelope, or a key
+  twice refuses the whole bundle, like the other arrays. The field is
+  additive inside bundle v4: written only when non-empty; a bundle without it
+  decodes (nothing is deployed, so no version bump was needed either way).
+- **The receiver.** Each envelope is decoded with the core codec
+  (`decode_device_card`); one that does not decode is dropped alone. A card is
+  kept only for a current leaf of the new device's DeviceGroup roster other
+  than its own, and only when strictly newer than the card it holds for that
+  key (`device_card_is_newer`), so the device's own later card, received over
+  the DeviceGroup, wins. When the card store is not yet bound to the account
+  (a restore route lands the session after the join), the persisted row of
+  that account is updated and read at the bind.
+- **Attribution.** A card delivered this way is attributed by the confirming
+  device, an own device of the account, under the DeviceGroup exporter, not
+  by the device it describes. That is acceptable for display-only data: a
+  device of the account can already show anything on its own screens, and the
+  card decides nothing (no admission, no key, no removal reads it).
+- **Built 2026-11-23** on web (incl. desktop), iOS and Android: web
+  `state-bundle.ts` / `carried-device-cards.ts` / `device-card-runtime.ts`,
+  iOS `StateBundle.swift` / `DeviceCardCenter.swift`, Android `StateBundle.kt`
+  / `DeviceCardCenter.kt`; one shared JSON vector with two real envelopes is
+  decoded by the three suites. Host-tested only; not walked on devices.

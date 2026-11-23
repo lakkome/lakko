@@ -208,9 +208,10 @@ class GroupContactRequestTest {
         assertEquals(listOf(mailbox), merged.pending)
         val both = mergeFetchedRequests(pending = emptyList(), accepted = emptyList(), fetched = listOf(group, mailbox))
         assertEquals(1, both.pending.size)
-        // A later request of the same person is a new row, as from the mailbox.
+        // A later request of the same person replaces the row: one card per
+        // person (2026-11-23).
         val later = request(messageId = 42L, validAfterMs = 1_700_000_000_001uL)
-        assertEquals(2, mergeFetchedRequests(listOf(mailbox), emptyList(), listOf(later)).pending.size)
+        assertEquals(listOf(42L), mergeFetchedRequests(listOf(mailbox), emptyList(), listOf(later)).pending.map { it.messageId })
     }
 
     @Test

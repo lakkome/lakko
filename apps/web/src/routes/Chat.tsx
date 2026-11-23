@@ -36,6 +36,7 @@ import { SuspendedComposerLine } from "../auth/SuspendedReadOnly";
 import { contentFromPersisted } from "../attach/preview";
 import { Portal } from "solid-js/web";
 import { openMessageMenu } from "../chat/message-menu-registry";
+import { conversationReady } from "../chat/view-ready";
 import { AttachComposer, type AttachEditRequest } from "../attach/AttachComposer";
 import { checkWhenVisible, isDeletedAccount, personOnScreen } from "../people/person-status";
 import { deletedConversationSurface, type ConversationSurface } from "../people/deleted-surface";
@@ -137,7 +138,8 @@ import { opsFromPersisted, persistedWithOps } from "../chat/message-ops-store";
 import { channelInviteRowPreview } from "../chat/channel-invite-preview";
 import { screenAnchor } from "../ui/screen-anchor";
 import { sendFailureNotice, withSendAck } from "../chat/send-failure";
-import { memberKeysOf, peerName } from "../chat/peer-name";
+import { memberKeysOf } from "../chat/peer-name";
+import { conversationTitle } from "../chat/conversation-title";
 import {
   ownPersonKeyB64,
   peopleCountOf,
@@ -206,6 +208,7 @@ import {
   loadAccepted,
   loadKeyAliases,
   loadSupersededKeys,
+  peerContactByMemberPubkeys,
   subscribeAcceptedChanged,
 } from "../contacts/local-store";
 import { useGroupClosed } from "../chat/GroupClosedContext";
@@ -1589,6 +1592,9 @@ function ChatView(props: {
   };
   const groupIdHexForLog = (): string => hexOf(props.entry.group.groupId);
   let didHydrateFromLog = false;
+  // `docs/ux/navigation.md` section 2.4 - the stored messages were read (or
+  // there were none to read), so an empty timeline means nothing was said.
+  const [logHydrated, setLogHydrated] = createSignal(false);
   let pendingPersistTimer: ReturnType<typeof setTimeout> | null = null;
   const PERSIST_DEBOUNCE_MS = 500;
   const [input, setInput] = createSignal("");
@@ -1773,25 +1779,29 @@ function ChatView(props: {
     setSearchParams({ info: back === null ? undefined : infoParamOf(back) }, { replace: true });
   }
 
+  /** The conversation's title: the same rule the chat list names its row
+   *  by (`chat/conversation-title.ts`), so the header and the row never
+   *  disagree, and a person this device cannot name is never shown as a key
+   *  fingerprint (`docs/ux/navigation.md` section 2.4). */
   const resolvePeerName = (): string => {
     const ownKeyB64 = ownPersonKeyB64(chats.identity());
     const memberKeysB64 = memberKeysOf(props.entry.group);
-    // An unnamed group is titled from its members, never from an id.
-    const others = memberKeysB64.filter((k) => k !== ownKeyB64);
-    return peerName({
-      ownKeyB64,
+    const accepted = loadAccepted();
+    return conversationTitle({
+      // The conversation kind (ADR-0062) decides, not the size: a
+      // two-person group is titled as a group, the way the list files it.
+      kind: isGroupChat() ? "group" : "chat",
       memberKeysB64,
-      resolveName: (k) => profiles.resolve(k).name,
-      linkedContactName: loadAccepted().find((c) => c.groupIdB64 === props.entry.groupIdB64)
-        ?.displayName,
+      ownKeyB64,
+      fallbackLabel: props.entry.label,
       // ADR-0051 §5 — the shared name first, then the member-derived title.
-      label: groupTitle(
-        groupNames.nameOf(props.entry.groupIdB64) ?? props.entry.label,
-        others.map((k) => memberNameOf(profiles.resolve(k), "the typing line")),
-      ),
-      // The conversation kind (ADR-0062) decides, not the size: a two-person group is
-      // titled as a group, the same way the list files it.
-      isGroup: isGroupChat(),
+      sharedName: groupNames.nameOf(props.entry.groupIdB64),
+      contactNameById: accepted.find((c) => c.groupIdB64 === props.entry.groupIdB64)?.displayName,
+      contactNameByMember: peerContactByMemberPubkeys(memberKeysB64, ownKeyB64, accepted, loadKeyAliases())
+        ?.displayName,
+      nameOf: (k) => memberNameOf(profiles.resolve(k), "the conversation header"),
+      groupTitle,
+      handle: groupNames.handleOf(props.entry.groupIdB64)?.handle ?? null,
     });
   };
 
@@ -7907,6 +7917,7 @@ function ChatView(props: {
       console.warn("hydrateFromLog failed", err);
       didHydrateFromLog = true;
     } finally {
+      setLogHydrated(true);
       // The view closed while its log was being read: what was just seeded is
       // what the log already holds, so it is the baseline a later write of
       // this closed view is compared against.
@@ -8233,8 +8244,27 @@ function ChatView(props: {
     });
   });
 
+  /** `docs/ux/navigation.md` section 2.4 - nothing of the conversation is
+   *  drawn before its title can be named and its stored messages were read:
+   *  drawn earlier, a one-to-one's header showed a key fingerprint and a
+   *  long chat said `No messages yet` (2026-11-23). The view stays mounted
+   *  and laid out meanwhile (its refs, scroll and receive loop need it), it
+   *  is only not shown. */
+  const viewReady = (): boolean =>
+    conversationReady({
+      account: accountIdB64ForLog(),
+      profilesLoadedFor: profiles.loadedFor(),
+      groupNamesLoadedFor: groupNames.loadedFor(),
+      logRead: logHydrated(),
+    });
+
   return (
-    <div class="lk-chat-body" style={{ position: "relative" }}>
+    <div
+      class="lk-chat-body"
+      classList={{ "lk-chat-pending": !viewReady() }}
+      aria-busy={!viewReady()}
+      style={{ position: "relative" }}
+    >
     {/* `docs/ux/conversation-info.md` section 3 — the conversation stays
         mounted (and laid out, so its scroll position and draft are kept)
         while an info screen covers it; `inert` takes it out of focus and the

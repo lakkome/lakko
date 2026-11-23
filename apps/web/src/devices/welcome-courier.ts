@@ -243,6 +243,24 @@ export type HistoryBundleOutcome =
   | { readonly kind: "cancelled" };
 
 /**
+ * The plain log line for a history poll that ended without a bundle, or
+ * `null` for a received one (its apply logs the row count). No identifiers.
+ * Before 2026-11-23 a timeout logged nothing, so a scanner that never sent
+ * its bundle looked like a join that never asked. Same line on iOS and
+ * Android.
+ */
+export function historyOutcomeLogLine(outcome: HistoryBundleOutcome): string | null {
+  switch (outcome.kind) {
+    case "received":
+      return null;
+    case "timeout":
+      return "history catch-up: no bundle arrived before the timeout";
+    case "cancelled":
+      return "history catch-up: cancelled";
+  }
+}
+
+/**
  * Joining side: poll the rendezvous mailbox past the Welcome
  * cursor for the sealed history bundle. Soft timeout 10 s —
  * the scanner side either publishes within that window or never

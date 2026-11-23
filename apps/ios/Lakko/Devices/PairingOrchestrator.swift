@@ -440,6 +440,7 @@ public enum PairingOrchestrator {
                     welcomeCursor: cursor,
                     opens: { HistoryBundleCodec.opens(secret: secret, sealedBytes: $0) }
                 )
+                if let line = WelcomeCourier.historyOutcomeLogLine(sealed) { NSLog("%@", line) }
                 if case .received(let sealedBytes) = sealed {
                     pending.historySealed = sealedBytes
                 }
@@ -468,6 +469,7 @@ public enum PairingOrchestrator {
                     welcomeCursor: cursor,
                     opens: { HistoryBundleCodec.opens(secret: secret, sealedBytes: $0) }
                 )
+                if let line = WelcomeCourier.historyOutcomeLogLine(sealed) { NSLog("%@", line) }
                 if case .received(let sealedBytes) = sealed {
                     let applied = try HistoryBundleCodec.applyToMessageLog(
                         accountIdB64: accountIdB64,
@@ -488,6 +490,9 @@ public enum PairingOrchestrator {
             ) {
                 let applied = StateBundle.apply(bundle, accountIdB64: accountIdB64)
                 NSLog("state bundle: %d contacts, %d pins", applied.contacts, applied.pins)
+                // ADR-0080 amendment: the account's other devices are named at once.
+                let cards = await StateBundle.applyDeviceCards(bundle, accountIdB64: accountIdB64, group: joined)
+                NSLog("state bundle: %d device cards stored", cards)
             }
         }
 
@@ -692,6 +697,20 @@ public enum PairingOrchestrator {
                 stateBundle = nil
                 let applied = StateBundle.apply(bundle, accountIdB64: accountIdB64)
                 NSLog("state bundle: %d contacts, %d pins", applied.contacts, applied.pins)
+                // ADR-0080 amendment: the account's other devices are named at
+                // once. Decoded here, kept on the main actor (stored for the
+                // account, read when the card center binds).
+                if let carried = bundle.deviceCards, !carried.isEmpty,
+                   let roster = StateBundle.roster(of: joined) {
+                    let entries = StateBundle.decodedDeviceCards(carried)
+                    let account = accountIdB64
+                    Task { @MainActor in
+                        let kept = DeviceCardCenter.shared.storeCarried(
+                            accountIdB64: account, entries: entries,
+                            rosterKeysHex: roster.keysHex, ownKeyHex: roster.ownHex)
+                        NSLog("state bundle: %d device cards stored", kept)
+                    }
+                }
             }
         }
 
@@ -1245,7 +1264,13 @@ public enum PairingOrchestrator {
                 profiles: ProfileDirectory.shared.profilesForBundle(accountIdB64: accountIdB64),
                 ownKeysB64: StateBundle.ownKeysB64(accountIdB64: accountIdB64),
                 // Bundle v4 — the newest epoch seeds of the subscribed channels.
-                channelSeeds: ChannelSubscriptionSync.shared.carriedSeedsForBundle())
+                channelSeeds: ChannelSubscriptionSync.shared.carriedSeedsForBundle(),
+                // ADR-0080 amendment — the device cards this device holds, its
+                // own too, for the DeviceGroup after the add.
+                deviceCards: StateBundle.roster(of: ensured.group).map {
+                    DeviceCardCenter.shared.cardsForStateBundle(
+                        accountIdB64: accountIdB64, ownKeyHex: $0.ownHex, rosterKeysHex: $0.keysHex)
+                } ?? [])
             try await StateBundle.publish(
                 bundle: bundle,
                 group: ensured.group,

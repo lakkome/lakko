@@ -56,6 +56,18 @@
  * channels service keeps only the newest four per subscriber key; with
  * them the new device opens the older posts the confirming device could.
  * A receiver never replaces a seed it holds for an epoch.
+ *
+ * `deviceCards` (2026-11-23, ADR-0080 amendment; additive inside v4: absent
+ * when empty, an older bundle without it still decodes): the ADR-0080 device
+ * cards the confirming device holds for the account's other devices, plus
+ * its own, each as `{leafKeyB64, envelopeB64}` (the 32-byte DeviceGroup leaf
+ * signature key and the card envelope exactly as composed from the stored
+ * card, stamps verbatim). At most 8, one per key, ascending by key bytes.
+ * The receiver keeps one only for a current leaf of its DeviceGroup roster
+ * other than itself, when the envelope decodes, and only when strictly
+ * newer than the card it holds for that key, so the device's own later card
+ * wins. Display-only data, attributed by the confirming device (an own
+ * device of the account), not by the card's subject.
  */
 import type { DeviceCipher } from "../auth/device-cipher";
 import { DsClient, DsHttpError, DsNetworkError } from "../ds/client";
@@ -73,6 +85,7 @@ import {
   stampPredecessorAdoption,
 } from "../contacts/address-resolver";
 import { base64Decode, base64Encode } from "../auth/account-id";
+import { carriedContactSinceMs } from "../contacts/known-contact-request";
 import {
   getKeyRotationState,
   updateKeyRotationState,
@@ -197,6 +210,23 @@ export interface CarriedChannelSeeds {
   readonly seeds: readonly CarriedEpochSeed[];
 }
 
+/** ADR-0080 amendment (2026-11-23): one device card the confirming device
+ *  holds, for the leaf it is keyed on. */
+export interface CarriedDeviceCard {
+  /** Standard base64 of the 32-byte DeviceGroup leaf signature key. */
+  readonly leafKeyB64: string;
+  /** Standard base64 of the device-card envelope (44..=270 bytes). */
+  readonly envelopeB64: string;
+}
+
+/** At most this many device cards (`MAX_LEAVES_PER_ACCOUNT`); one more
+ *  refuses the whole bundle. */
+export const MAX_CARRIED_DEVICE_CARDS = 8;
+/** The device-card envelope bounds (`lakko-contacts::device_card`
+ *  `DEVICE_CARD_ENVELOPE_MIN_LEN` / `_MAX_LEN`). */
+export const DEVICE_CARD_ENVELOPE_MIN_BYTES = 44;
+export const DEVICE_CARD_ENVELOPE_MAX_BYTES = 270;
+
 /** The bundle. `v` is the only version there is. */
 export interface StateBundle {
   readonly v: 4;
@@ -216,6 +246,10 @@ export interface StateBundle {
   readonly pendingContacts: readonly CarriedPendingContact[];
   /** v4: at most one entry per channel, ascending by channel-id bytes. */
   readonly channelSeeds: readonly CarriedChannelSeeds[];
+  /** ADR-0080 amendment: present only when non-empty; at most
+   *  {@link MAX_CARRIED_DEVICE_CARDS}, one per leaf key, ascending by key
+   *  bytes. */
+  readonly deviceCards?: readonly CarriedDeviceCard[];
 }
 
 /** What the sending device adds beside the localStorage state (read from its
@@ -227,6 +261,9 @@ export interface CarriedExtras {
   /** v4: every epoch seed this device holds, per channel (hex id ->
    *  epoch -> seed), for the channels with a LIVE register; trimmed here. */
   readonly channelSeeds?: ReadonlyMap<string, ReadonlyMap<number, Uint8Array>>;
+  /** ADR-0080 amendment: the device cards this device holds, its own
+   *  included; bounded and ordered here. */
+  readonly deviceCards?: readonly CarriedDeviceCard[];
 }
 
 /** Read the account's contacts, pins and the given group ids into a bundle.
@@ -256,6 +293,7 @@ export function buildStateBundle(
     });
   }
   const seedsByChannel = extras.channelSeeds ?? new Map<string, ReadonlyMap<number, Uint8Array>>();
+  const deviceCards = carriedDeviceCards(extras.deviceCards ?? []);
   return fitToSizeCap({
     v: 4,
     contacts,
@@ -266,7 +304,56 @@ export function buildStateBundle(
     profiles: carriedProfiles(extras.profiles ?? []),
     pendingContacts: carriedPending(extras.pendingContacts ?? []),
     channelSeeds: carriedChannelSeeds(seedsByChannel, MAX_CARRIED_SEEDS_PER_CHANNEL),
+    ...(deviceCards.length > 0 ? { deviceCards } : {}),
   }, seedsByChannel);
+}
+
+/** ADR-0080 amendment: well-formed entries only, the first per leaf key,
+ *  ascending by key bytes, at most {@link MAX_CARRIED_DEVICE_CARDS}. Pure. */
+export function carriedDeviceCards(cards: readonly CarriedDeviceCard[]): CarriedDeviceCard[] {
+  const byKey = new Map<string, CarriedDeviceCard>();
+  for (const c of cards) {
+    if (!deviceCardEntryValid(c)) continue;
+    const keyHex = bytesHex(base64Decode(c.leafKeyB64));
+    if (!byKey.has(keyHex)) byKey.set(keyHex, { leafKeyB64: c.leafKeyB64, envelopeB64: c.envelopeB64 });
+  }
+  return [...byKey.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .slice(0, MAX_CARRIED_DEVICE_CARDS)
+    .map(([, c]) => c);
+}
+
+function deviceCardEntryValid(c: unknown): c is CarriedDeviceCard {
+  if (typeof c !== "object" || c === null) return false;
+  const r = c as Record<string, unknown>;
+  const key = r["leafKeyB64"];
+  const envelope = r["envelopeB64"];
+  if (typeof key !== "string" || !decodesTo(key, SIGNATURE_KEY_LENGTH)) return false;
+  if (typeof envelope !== "string") return false;
+  try {
+    const n = base64Decode(envelope).length;
+    return n >= DEVICE_CARD_ENVELOPE_MIN_BYTES && n <= DEVICE_CARD_ENVELOPE_MAX_BYTES;
+  } catch {
+    return false;
+  }
+}
+
+/** The decoder's rule for `deviceCards`: absent is none; otherwise an array
+ *  of at most {@link MAX_CARRIED_DEVICE_CARDS} well-formed entries with no
+ *  leaf key twice, else `null` (the whole bundle is refused). */
+function decodeDeviceCards(raw: unknown): CarriedDeviceCard[] | null {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw) || raw.length > MAX_CARRIED_DEVICE_CARDS) return null;
+  const out: CarriedDeviceCard[] = [];
+  const seen = new Set<string>();
+  for (const e of raw as unknown[]) {
+    if (!deviceCardEntryValid(e)) return null;
+    const keyHex = bytesHex(base64Decode(e.leafKeyB64));
+    if (seen.has(keyHex)) return null;
+    seen.add(keyHex);
+    out.push({ leafKeyB64: e.leafKeyB64, envelopeB64: e.envelopeB64 });
+  }
+  return out;
 }
 
 /** v4: per channel the newest `perChannel` seeds held, ascending by epoch;
@@ -595,6 +682,8 @@ export function decodeStateBundle(bytes: Uint8Array): StateBundle | null {
   }
   const channelSeeds = decodeChannelSeeds(o["channelSeeds"] as unknown[]);
   if (channelSeeds === null) return null;
+  const deviceCards = decodeDeviceCards(o["deviceCards"]);
+  if (deviceCards === null) return null;
   return {
     v: 4,
     contacts,
@@ -605,6 +694,7 @@ export function decodeStateBundle(bytes: Uint8Array): StateBundle | null {
     profiles,
     pendingContacts,
     channelSeeds,
+    ...(deviceCards.length > 0 ? { deviceCards } : {}),
   };
 }
 
@@ -670,12 +760,15 @@ export function carriedSeedsOf(bundle: Pick<StateBundle, "channelSeeds">): Map<s
 export function applyStateBundle(
   bundle: StateBundle,
   ownerAccountIdB64: string,
+  nowMs: number = Date.now(),
 ): { contacts: number; pins: number } {
   const have = new Set(loadAccepted(ownerAccountIdB64).map((c) => c.signaturePubkeyB64));
   let contacts = 0;
   for (const c of bundle.contacts) {
     if (have.has(c.signaturePubkeyB64)) continue;
-    upsertAccepted(c, ownerAccountIdB64);
+    // A contact here only since it arrived: a request already in the
+    // account's mailbox was handled by the device that held the contact.
+    upsertAccepted({ ...c, acceptedAtMs: carriedContactSinceMs(c.acceptedAtMs, nowMs) }, ownerAccountIdB64);
     contacts += 1;
   }
   let pins = 0;

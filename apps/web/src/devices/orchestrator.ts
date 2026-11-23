@@ -58,6 +58,8 @@ import {
   joinFirstWelcome,
   publishHistoryBundle,
   pollForHistoryBundle,
+  historyOutcomeLogLine,
+  type HistoryBundleOutcome,
   type WelcomeOutcome,
 } from "./welcome-courier";
 import {
@@ -74,6 +76,7 @@ import {
   type RecoveredPredecessor,
 } from "./recovery-payload";
 import { applyCarriedExtras, collectCarriedExtras } from "./carried-state-io";
+import { applyStateBundleDeviceCards, collectStateBundleDeviceCards } from "./carried-device-cards";
 import {
   STATE_EXPORTER_KEY_LENGTH,
   STATE_EXPORTER_LABEL,
@@ -391,6 +394,7 @@ export async function prepareJoinFlow(args: {
             const sealed = await pollForHistoryBundle(rendezvous, welcomeCursor, {
               accept: historyBundleOpens(wasm, secret),
             });
+            logHistoryOutcome(sealed);
             if (sealed.kind === "received") {
               const applied = await applyHistoryBundleToLog({
                 accountIdB64: args.accountIdB64,
@@ -431,6 +435,10 @@ export async function prepareJoinFlow(args: {
               const applied = applyStateBundle(bundle, args.accountIdB64);
               // v3: group names, profiles, pending contacts.
               const extras = await applyCarriedExtras(bundle, args.accountIdB64, await loadWasm());
+              // ADR-0080 amendment: the account's other devices are named at once.
+              const cardsKept = applyStateBundleDeviceCards(await loadWasm(), bundle, args.accountIdB64, liveGroup);
+              // eslint-disable-next-line no-console
+              console.info(`state bundle: ${cardsKept} device cards stored`);
               // eslint-disable-next-line no-console
               console.info(
                 `state bundle: ${applied.contacts} contacts, ${applied.pins} pins, ` +
@@ -970,6 +978,7 @@ export async function prepareAnonymousJoinFlow(args: {
           const sealed = await pollForHistoryBundle(rendezvous, welcomeCursor, {
             accept: historyBundleOpens(wasm, secret),
           });
+          logHistoryOutcome(sealed);
           if (sealed.kind === "received") {
             pendingHistory = { secret, sealedBytes: sealed.sealedBytes };
           } else {
@@ -1050,6 +1059,13 @@ export async function prepareAnonymousJoinFlow(args: {
         // v3: group names, profiles, pending contacts. The names wait for the
         // session stores of this account, which bind when the session lands.
         const extras = await applyCarriedExtras(state, account.b64, await loadWasm());
+        // ADR-0080 amendment: the account's other devices are named at once
+        // (stored for the account; read when the card runtime binds).
+        if (group !== null) {
+          const cardsKept = applyStateBundleDeviceCards(await loadWasm(), state, account.b64, group);
+          // eslint-disable-next-line no-console
+          console.info(`state bundle: ${cardsKept} device cards stored`);
+        }
         // eslint-disable-next-line no-console
         console.info(
           `state bundle: ${applied.contacts} contacts, ${applied.pins} pins, ` +
@@ -1076,6 +1092,13 @@ export async function prepareAnonymousJoinFlow(args: {
 }
 
 // ---- Scanner side ------------------------------------------------
+
+/** One plain line when the history poll ended without a bundle. */
+function logHistoryOutcome(outcome: HistoryBundleOutcome): void {
+  const line = historyOutcomeLogLine(outcome);
+  // eslint-disable-next-line no-console
+  if (line !== null) console.info(line);
+}
 
 /** Result of [`runScanFlow`]. Empty success — the UI just
  *  needs to know the round-trip landed without throwing. */
@@ -1301,7 +1324,12 @@ async function finishScan(
         knownGroupIdsB64: knownGroupIds,
         ownKeysB64: args.ownKeysB64 ?? [],
       });
-      const bundle = buildStateBundle(knownGroupIds, args.accountIdB64, ownPredecessors, extras);
+      // ADR-0080 amendment: the device cards this device holds, its own too.
+      const deviceCards = await collectStateBundleDeviceCards(ensured.group, args.accountIdB64);
+      const bundle = buildStateBundle(knownGroupIds, args.accountIdB64, ownPredecessors, {
+        ...extras,
+        deviceCards,
+      });
       key = ensured.group.exportSecret(
         ensured.identity,
         STATE_EXPORTER_LABEL,

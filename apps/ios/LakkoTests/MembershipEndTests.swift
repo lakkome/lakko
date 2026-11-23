@@ -1382,6 +1382,17 @@ final class MembershipEndTests: XCTestCase {
             ChatListViewModel(repository: f.repo).activityMs(thread: thread), thread.arrivedAtMs)
     }
 
+    /// `docs/ux/navigation.md` section 2.4 — the list draws nothing (not even
+    /// its empty state) until the chat layer has read this device's
+    /// conversations, and then their rows at once.
+    func testTheChatListIsLoadedOnlyOnceTheConversationsWereRead() throws {
+        XCTAssertFalse(ChatListViewModel(repository: ChatRepository()).loaded)
+        let f = try fixture()
+        let model = ChatListViewModel(repository: f.repo)
+        XCTAssertTrue(model.loaded)
+        XCTAssertTrue(model.threads.contains { $0.groupIdHex == f.groupIdHex })
+    }
+
     func testAConversationNotOnScreenLeavesItToTheBanner() async throws {
         let f = try fixture()
         let model = ChatViewModel(repository: f.repo, groupIdHex: f.groupIdHex)

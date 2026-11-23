@@ -510,6 +510,92 @@ public object DeviceCardCenter {
         log("device card received and stored ($word)")
     }
 
+    /** The received cards and own card stored for [account] in [p]: the
+     *  live state when bound to it, else the persisted row. */
+    private fun rowFor(p: SharedPreferences?, account: String): Persisted {
+        if (accountIdB64 == account) return Persisted(mutableCards.value, own)
+        return p?.getString(DeviceCards.cardsKey(account), null)
+            ?.let { runCatching { json.decodeFromString(Persisted.serializer(), it) }.getOrNull() }
+            ?: Persisted()
+    }
+
+    /**
+     * ADR-0080 amendment (2026-11-23), confirming device: the cards to hand a
+     * device being added, in the pairing state bundle, as (leaf key hex,
+     * envelope). Every stored card of a leaf in [rosterKeysHex] (the
+     * DeviceGroup after the add), plus this device's own: its last card as
+     * sent (stamps verbatim) or, before its first one, its current fields at
+     * the lowest stamp so any card it sends later replaces it. A card that
+     * does not compose is left out.
+     */
+    public fun cardsForStateBundle(
+        context: Context,
+        accountIdB64: String,
+        ownKeyHex: String,
+        rosterKeysHex: Collection<String>,
+        nowMs: Long = System.currentTimeMillis(),
+    ): List<Pair<String, ByteArray>> = cardsForStateBundle(
+        prefs ?: context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE),
+        accountIdB64, ownKeyHex, rosterKeysHex, nowMs,
+    )
+
+    @Synchronized
+    internal fun cardsForStateBundle(
+        p: SharedPreferences?,
+        accountIdB64: String,
+        ownKeyHex: String,
+        rosterKeysHex: Collection<String>,
+        nowMs: Long,
+    ): List<Pair<String, ByteArray>> {
+        val row = rowFor(p, accountIdB64)
+        val ownCard = row.own ?: currentFields(nowMs).copy(updatedAtMs = 0L)
+        val picked = listOf(ownKeyHex to ownCard) +
+            row.cards.filter { (key, _) -> key != ownKeyHex && key in rosterKeysHex }.toList()
+        return picked.mapNotNull { (key, card) -> composeEnvelope(card)?.let { key to it } }
+    }
+
+    /**
+     * ADR-0080 amendment (2026-11-23), new device: store the cards the
+     * confirming device handed over ([DeviceCards.acceptCarried]). Works
+     * before the center is bound to the account (a restore route lands the
+     * session later): the persisted row is updated and read at the bind.
+     * Returns how many were kept.
+     */
+    public fun storeCarried(
+        context: Context,
+        accountIdB64: String,
+        entries: List<Pair<String, StoredDeviceCard>>,
+        rosterKeysHex: Collection<String>,
+        ownKeyHex: String,
+    ): Int = storeCarried(
+        prefs ?: context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE),
+        accountIdB64, entries, rosterKeysHex, ownKeyHex,
+    )
+
+    @Synchronized
+    internal fun storeCarried(
+        p: SharedPreferences,
+        accountIdB64: String,
+        entries: List<Pair<String, StoredDeviceCard>>,
+        rosterKeysHex: Collection<String>,
+        ownKeyHex: String,
+    ): Int {
+        val row = rowFor(p, accountIdB64)
+        val next = DeviceCards.acceptCarried(row.cards, entries, rosterKeysHex, ownKeyHex) ?: return 0
+        val kept = next.count { (key, card) -> row.cards[key] != card }
+        if (this.accountIdB64 == accountIdB64) {
+            mutableCards.value = next
+            persist(accountIdB64)
+        } else {
+            val text = json.encodeToString(Persisted.serializer(), Persisted(next, row.own))
+            AccountStoreGate.write(accountIdB64) {
+                p.edit().putString(DeviceCards.cardsKey(accountIdB64), text).apply()
+            }
+        }
+        log("device cards from the state bundle: $kept stored")
+        return kept
+    }
+
     /** A card arrived that could not be bound to a device of the roster. */
     public fun noteRefused(reason: String) {
         log("device card received and refused ($reason)")

@@ -392,69 +392,74 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
           </Show>
         </Show>
 
-        <Show
-          when={!nothingAtAll() || searching()}
-          fallback={
-            <div class="lk-empty">
-              <Icon name="person-circle-plus" size={48} />
-              <strong>{t("contacts.list.empty.title")}</strong>
-              <span>{t("contacts.list.empty.body")}</span>
-              {/* Finding someone is the search field above (UX who-can-find-me
-                  6.1); the button is the other way in, the invite link. */}
-              <Show when={!accountSuspended()}>
-                <button type="button" class="primary" onClick={() => props.onAdd("invite")}>
-                  {t("contacts.add.share_invite")}
-                </button>
-              </Show>
-            </div>
-          }
-        >
-          <Show when={groups().length > 0}>
-            <For each={groups()}>
-              {(group) => (
-                <>
-                  <div class="lk-letter" aria-hidden="true">
-                    {group.letter}
-                  </div>
-                  <For each={group.items}>
-                    {(row) => {
-                      const key = row.kind === "contact" ? row.c.signaturePubkeyB64 : row.p.signaturePubkeyB64;
-                      const open = (): void => {
-                        if (row.kind === "contact") select(row.c.signaturePubkeyB64);
-                        else props.onOpenInvited(row.p);
-                      };
-                      return (
-                        <div
-                          ref={(el) => {
-                            // ADR-0098 section 2: a visible row is on screen.
-                            onCleanup(checkWhenVisible(el, () => key));
-                          }}
-                          class="lk-row"
-                          role="button"
-                          tabIndex={0}
-                          classList={{ selected: props.selectedKey() === key }}
-                          onClick={open}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter" || e.key === " ") {
-                              e.preventDefault();
-                              open();
-                            }
-                          }}
-                        >
-                          <Avatar label={row.name} id={key} personKey={key} playVideo="hover" />
-                          <div class="lk-row-body">
-                            <span class="lk-row-title">{row.name}</span>
-                            <Show when={row.username}>
-                              {(u) => <span class="lk-row-sub">{u()}</span>}
-                            </Show>
+        {/* `docs/ux/navigation.md` section 2.4 - no contact row (and no
+            empty state) before the stored names are read: drawn earlier, a
+            contact read `Member` for a moment. */}
+        <Show when={profiles.loadedFor() !== null}>
+          <Show
+            when={!nothingAtAll() || searching()}
+            fallback={
+              <div class="lk-empty">
+                <Icon name="person-circle-plus" size={48} />
+                <strong>{t("contacts.list.empty.title")}</strong>
+                <span>{t("contacts.list.empty.body")}</span>
+                {/* Finding someone is the search field above (UX who-can-find-me
+                    6.1); the button is the other way in, the invite link. */}
+                <Show when={!accountSuspended()}>
+                  <button type="button" class="primary" onClick={() => props.onAdd("invite")}>
+                    {t("contacts.add.share_invite")}
+                  </button>
+                </Show>
+              </div>
+            }
+          >
+            <Show when={groups().length > 0}>
+              <For each={groups()}>
+                {(group) => (
+                  <>
+                    <div class="lk-letter" aria-hidden="true">
+                      {group.letter}
+                    </div>
+                    <For each={group.items}>
+                      {(row) => {
+                        const key = row.kind === "contact" ? row.c.signaturePubkeyB64 : row.p.signaturePubkeyB64;
+                        const open = (): void => {
+                          if (row.kind === "contact") select(row.c.signaturePubkeyB64);
+                          else props.onOpenInvited(row.p);
+                        };
+                        return (
+                          <div
+                            ref={(el) => {
+                              // ADR-0098 section 2: a visible row is on screen.
+                              onCleanup(checkWhenVisible(el, () => key));
+                            }}
+                            class="lk-row"
+                            role="button"
+                            tabIndex={0}
+                            classList={{ selected: props.selectedKey() === key }}
+                            onClick={open}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault();
+                                open();
+                              }
+                            }}
+                          >
+                            <Avatar label={row.name} id={key} personKey={key} playVideo="hover" />
+                            <div class="lk-row-body">
+                              <span class="lk-row-title">{row.name}</span>
+                              <Show when={row.username}>
+                                {(u) => <span class="lk-row-sub">{u()}</span>}
+                              </Show>
+                            </div>
                           </div>
-                        </div>
-                      );
-                    }}
-                  </For>
-                </>
-              )}
-            </For>
+                        );
+                      }}
+                    </For>
+                  </>
+                )}
+              </For>
+            </Show>
           </Show>
         </Show>
         <Show when={searching()}>{props.people(listedKeysB64, () => rows().length > 0)}</Show>

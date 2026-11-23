@@ -64,6 +64,31 @@ public object DeviceCards {
         return cards + (senderKeyHex to card)
     }
 
+    /**
+     * ADR-0080 amendment (2026-11-23): the cards a confirming device handed
+     * over in the pairing state bundle, decoded and keyed by leaf (hex). Each
+     * is kept only for a current leaf of [rosterKeysHex] other than
+     * [ownKeyHex], and only when strictly newer than the card held for that
+     * key ([receive]), so the device's own later card wins. `null` when
+     * nothing changes.
+     */
+    public fun acceptCarried(
+        cards: Map<String, StoredDeviceCard>,
+        entries: List<Pair<String, StoredDeviceCard>>,
+        rosterKeysHex: Collection<String>,
+        ownKeyHex: String,
+    ): Map<String, StoredDeviceCard>? {
+        var next = cards
+        var changed = false
+        for ((keyHex, card) in entries) {
+            if (keyHex == ownKeyHex) continue
+            val kept = receive(next, keyHex, card, rosterKeysHex) ?: continue
+            next = kept
+            changed = true
+        }
+        return if (changed) next else null
+    }
+
     /** Drop the card of every leaf that left. `null` when none did. */
     public fun prune(
         cards: Map<String, StoredDeviceCard>,

@@ -221,9 +221,16 @@ final class CommitSerializationTests: XCTestCase {
         var memberLeaves: [UInt32] = []
         for _ in 0..<groupCount {
             let group = try Group.create(identity: founder, kind: .group)
-            _ = try group.addMemberFromWire(
+            // C-100: the two people the role changes below name admin are
+            // members too. One commit, so the fixture still leaves the group at
+            // epoch 1, and `other` first, so its leaf is the first non-owner.
+            _ = try group.addMembersFromWire(
                 identity: founder,
-                keyPackage: try other.createKeyPackage()
+                keyPackages: [
+                    try other.createKeyPackage(),
+                    try Identity.fromSeed(seed: Data(repeating: 0x33, count: 32)).createKeyPackage(),
+                    try Identity.fromSeed(seed: Data(repeating: 0x44, count: 32)).createKeyPackage(),
+                ]
             )
             hexes.append(DsClient.pseudonymHex(try group.groupId()))
             let ownerKey = try XCTUnwrap(try group.groupRoles()).owner
@@ -277,7 +284,7 @@ final class CommitSerializationTests: XCTestCase {
         )
         for hex in hexes {
             XCTAssertEqual(
-                repo.memberCount(groupIdHex: hex), 2,
+                repo.memberCount(groupIdHex: hex), 4,
                 "founder group \(hex) must rehydrate for the membership path to reach the publish"
             )
             XCTAssertTrue(

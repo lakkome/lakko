@@ -278,6 +278,15 @@ final class SplitPollSerializationTests: XCTestCase {
         var hexes: [String] = []
         for _ in 0..<groupCount {
             let group = try Group.create(identity: founder, kind: .group)
+            // C-100: the two people the role changes below name admin are
+            // members.
+            _ = try group.addMembersFromWire(
+                identity: founder,
+                keyPackages: [
+                    try Identity.fromSeed(seed: Data(repeating: 0x53, count: 32)).createKeyPackage(),
+                    try Identity.fromSeed(seed: Data(repeating: 0x54, count: 32)).createKeyPackage(),
+                ]
+            )
             hexes.append(DsClient.pseudonymHex(try group.groupId()))
         }
         let snapshotBlob = try founder.snapshotStorage()
@@ -327,7 +336,7 @@ final class SplitPollSerializationTests: XCTestCase {
         )
         for hex in hexes {
             XCTAssertEqual(
-                repo.memberCount(groupIdHex: hex), 1,
+                repo.memberCount(groupIdHex: hex), 3,
                 "founder group \(hex) must rehydrate for the commit path to reach the publish"
             )
         }
@@ -385,6 +394,7 @@ final class SplitPollSerializationTests: XCTestCase {
         // the cursor where it is, so this test measures ordering only.
         SplitPollURLProtocol.fetchScript = [0: .init(delay: 0, rowIds: [])]
         await settle(fx, groupIdHexes: [hex])
+        let epochBefore = try XCTUnwrap(fx.repo.epoch(groupIdHex: hex))
 
         let commitTask = Task { @MainActor in
             _ = try? await fx.repo.setMemberAdmin(
@@ -432,7 +442,7 @@ final class SplitPollSerializationTests: XCTestCase {
             + "commit publish is G-37's defect at a per-group blast radius. log: \(log)"
         )
         XCTAssertEqual(
-            fx.repo.epoch(groupIdHex: hex), 1,
+            fx.repo.epoch(groupIdHex: hex), epochBefore + 1,
             "serializing must not lose the commit"
         )
     }

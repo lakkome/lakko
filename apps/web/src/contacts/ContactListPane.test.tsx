@@ -9,14 +9,18 @@
  * contacts - on an empty list too.
  */
 import { createSignal } from "solid-js";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { all, one, present, renderUi } from "../test/ui";
 import { t } from "../l10n";
 
+/** `docs/ux/navigation.md` 2.4 — the account whose stored names were read. */
+let profilesLoadedFor: string | null = "acct";
+
 vi.mock("../profile/ProfileContext", () => ({
   useProfiles: () => ({
     version: () => 0,
+    loadedFor: () => profilesLoadedFor,
     resolve: (k: Uint8Array | string) => ({ name: typeof k === "string" ? k : "Member", username: null }),
   }),
 }));
@@ -151,5 +155,29 @@ describe("Contacts list pane: one person, one row", () => {
     type("zzz");
     expect(present(".lk-pane-nomatch")).toBe(false);
     expect(present('[data-testid="people"]')).toBe(true);
+  });
+});
+
+describe("Contacts list pane: before the stored names are read (navigation.md 2.4)", () => {
+  const contact = {
+    signaturePubkeyB64: "Anna",
+    displayName: "",
+    groupIdB64: "g1",
+  } as never;
+
+  afterEach(() => {
+    profilesLoadedFor = "acct";
+  });
+
+  it("draws no contact row and no empty state", () => {
+    profilesLoadedFor = null;
+    mount({ contacts: () => [contact] });
+    expect(document.body.textContent).not.toContain("Anna");
+    expect(present(".lk-empty")).toBe(false);
+  });
+
+  it("draws the contact once they are read", () => {
+    mount({ contacts: () => [contact] });
+    expect(document.body.textContent).toContain("Anna");
   });
 });

@@ -217,6 +217,35 @@ final class DeviceLeavesTests: XCTestCase {
         XCTAssertEqual(row.prefix(26), Data("lakko/state-bundle-row/v1\u{0}".utf8))
     }
 
+    /// Seen live 2026-11-23: a device added to an account listed, as cards,
+    /// re-add requests the account's other device had answered long before.
+    /// A carried contact is one here only since the bundle arrived.
+    func testACarriedContactIsAContactHereOnlySinceItArrived() {
+        let acceptedElsewhere = 1_761_987_600_000.0 // 2025-11-01T09:00:00Z
+        let arrived = 1_763_888_098_000.0 // 2025-11-23T08:54:58Z
+        let carried = StateBundle.CarriedContact(
+            signaturePubkeyB64: base64Encode(Data(repeating: 0x12, count: 32)),
+            displayName: "",
+            acceptedAtMs: acceptedElsewhere,
+            accountIdHex: "00112233445566778899aabbccddeeff")
+        let since = StateBundle.accepted(carried, arrivedAtMs: arrived)?.request.createdAt
+        XCTAssertEqual(since, "2025-11-23T08:54:58Z")
+        XCTAssertTrue(KnownContactRequest.requestPredatesContact(
+            requestCreatedAt: "2025-11-22T18:30:00Z", contactSince: since))
+        XCTAssertFalse(KnownContactRequest.requestPredatesContact(
+            requestCreatedAt: "2025-11-23T09:10:00Z", contactSince: since))
+        XCTAssertEqual(
+            KnownContactRequest.verdict(
+                senderIsContact: true, check: .current, requestKeyB64: "K", trustedKeyB64: "K",
+                holdsOneToOne: false,
+                predatesContact: KnownContactRequest.requestPredatesContact(
+                    requestCreatedAt: "2025-11-22T18:30:00Z", contactSince: since)),
+            .drop)
+        // A clock behind the other device's acceptance never moves it back.
+        XCTAssertEqual(
+            StateBundle.accepted(carried, arrivedAtMs: 0)?.request.createdAt, "2025-11-01T09:00:00Z")
+    }
+
     func testCarriedContactMapsBackToAnAcceptedContact() {
         let key = Data(repeating: 0x11, count: 32)
         let carried = StateBundle.CarriedContact(

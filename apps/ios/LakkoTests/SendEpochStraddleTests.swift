@@ -372,7 +372,8 @@ final class SendEpochStraddleTests: XCTestCase {
             outboxDir: outboxDir,
             peer: peer,
             peerIdentity: other,
-            promotableKey: try Identity.fromSeed(seed: Data(repeating: 0x33, count: 32))
+            // C-100: only a current member can be named admin; `other` is one.
+            promotableKey: try Identity.fromSeed(seed: Data(repeating: 0x55, count: 32))
                 .signaturePublicKey()
         )
     }

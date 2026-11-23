@@ -125,6 +125,20 @@ public fun requestPredatesContact(requestCreatedAt: String, contactSince: String
 }
 
 /**
+ * The "contact since" a contact carried to this device by the pairing state
+ * bundle gets here (ISO-8601): the later of the time another device of the
+ * account accepted them ([carriedAcceptedAtMs]) and the time the bundle
+ * arrived ([arrivedAtMs]). On this device the person is a contact only since
+ * then, so a request that was already in the account's mailbox predates the
+ * contact here ([requestPredatesContact]): the device that held the contact
+ * when it arrived handled it (answered silently, or listed it there), and this
+ * one never asks again. Mirror of web `carriedContactSinceMs` and iOS
+ * `StateBundle.accepted(_:arrivedAtMs:)`.
+ */
+public fun carriedContactSince(carriedAcceptedAtMs: Long, arrivedAtMs: Long): String =
+    java.time.Instant.ofEpochMilli(maxOf(carriedAcceptedAtMs, arrivedAtMs, 0L)).toString()
+
+/**
  * The contact row this device has ESTABLISHED for an account id, or `null`.
  *
  * A contact row can carry an account id that came only from the peer's own

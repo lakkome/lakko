@@ -289,6 +289,25 @@ export function pendingAfterArrival(
   return dropIncoming ? { replaces: [], dropIncoming } : { replaces, dropIncoming };
 }
 
+/**
+ * One card per person (2026-11-23, seen live as two identical cards): the
+ * message ids of the listed requests a later request under the same signature
+ * key supersedes. `held` are listed already, `incoming` arrive in order after
+ * them; of each key only the last request survives. Pure.
+ */
+export function laterRequestSupersedes(
+  held: readonly Pick<IncomingContactRequest, "messageId" | "fromPubkey">[],
+  incoming: readonly Pick<IncomingContactRequest, "messageId" | "fromPubkey">[],
+): Set<number> {
+  const last = new Map<string, number>();
+  for (const r of [...held, ...incoming]) last.set(base64Encode(r.fromPubkey), r.messageId);
+  const out = new Set<number>();
+  for (const r of [...held, ...incoming]) {
+    if (last.get(base64Encode(r.fromPubkey)) !== r.messageId) out.add(r.messageId);
+  }
+  return out;
+}
+
 export interface PendingInboxDeps {
   readonly accountIdB64: string;
   /** Whether a sender (base64 signature key) is already an accepted contact. */
@@ -401,14 +420,25 @@ export function createPendingInbox(deps: PendingInboxDeps): PendingInbox {
       const replaced = new Set<number>();
       for (const f of added) for (const id of f.replaces ?? []) replaced.add(id);
       for (const f of added) replaced.delete(f.request.messageId);
+      // One card per person (2026-11-23): a later listed request under the
+      // same key replaces an earlier one, held or in this batch.
+      const superseded = laterRequestSupersedes(
+        rows.flatMap((r) => {
+          const req = decoded.get(r.messageId);
+          return r.link === "undecided" || req === undefined ? [] : [req];
+        }),
+        added.filter((f) => f.undecidedLink !== true).map((f) => f.request),
+      );
+      for (const id of superseded) replaced.add(id);
+      const kept = added.filter((f) => !superseded.has(f.request.messageId));
       const nextRows = [
         ...rows.filter((r) => !replaced.has(r.messageId)),
-        ...added.map((f) => toStoredRow(f.row, f.undecidedLink === true ? "undecided" : undefined)),
+        ...kept.map((f) => toStoredRow(f.row, f.undecidedLink === true ? "undecided" : undefined)),
       ];
       write(cursor, nextRows);
       rows = nextRows;
       for (const id of replaced) decoded.delete(id);
-      for (const f of added) decoded.set(f.request.messageId, f.request);
+      for (const f of kept) decoded.set(f.request.messageId, f.request);
       deps.onChange();
     },
     advanceCursor(next) {
@@ -439,6 +469,7 @@ export function createPendingInbox(deps: PendingInboxDeps): PendingInbox {
       const results = await decode(toDecode.map(fromStoredRow));
       if (disposed) return;
       const drop = new Set<number>();
+      const restored: IncomingContactRequest[] = [];
       toDecode.forEach((row, i) => {
         const req = results[i] ?? null;
         if (
@@ -448,8 +479,18 @@ export function createPendingInbox(deps: PendingInboxDeps): PendingInbox {
           drop.add(row.messageId);
         } else if (rows.some((r) => r.messageId === row.messageId)) {
           decoded.set(row.messageId, req);
+          if (row.link !== "undecided") restored.push(req);
         }
       });
+      // One card per person: rows kept from before the fold read as one.
+      const listed = rows.flatMap((r) => {
+        const req = decoded.get(r.messageId);
+        return r.link === "undecided" || req === undefined || restored.includes(req) ? [] : [req];
+      });
+      for (const id of laterRequestSupersedes(listed, restored)) {
+        drop.add(id);
+        decoded.delete(id);
+      }
       if (drop.size > 0) {
         rows = rows.filter((r) => !drop.has(r.messageId));
         try {

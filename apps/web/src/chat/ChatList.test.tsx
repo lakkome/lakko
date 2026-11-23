@@ -40,7 +40,9 @@
  * answers a constant. The auth state is deliberately `anon`, which is what
  * keeps the persisted message log out of the frame: `reloadLog` returns before
  * it touches the device key, so every row's `lastActivityMs` is the
- * `createdAtMs` this file sets — the sort key, in the test's own hand.
+ * `createdAtMs` this file sets — the sort key, in the test's own hand. With no
+ * session the stores would never count as read, so the readiness rule
+ * (`view-ready.ts`, tested on its own) answers what this file says.
  *
  * Not stood in for: `ChatList` itself, `conversation-list.ts`, `ui-rules.ts`,
  * the wasm core, and the router. The rows really do travel out of the component
@@ -62,6 +64,9 @@ import type { ActiveGroup } from "./ChatContext";
 // conversations before the component is rendered.
 
 let groups: ActiveGroup[] = [];
+/** `docs/ux/navigation.md` 2.4 — whether the stores that name and order the
+ *  rows have been read; `false` keeps the list from drawing anything. */
+let listReady = true;
 let flags: Record<string, { pinned?: boolean; muted?: boolean; archived?: boolean }> = {};
 
 vi.mock("./ChatContext", () => ({
@@ -75,6 +80,7 @@ vi.mock("./ChatContext", () => ({
 vi.mock("../profile/ProfileContext", () => ({
   useProfiles: () => ({
     version: () => 0,
+    loadedFor: () => null,
     resolve: (k: Uint8Array | string) => ({
       name: typeof k === "string" ? k : "Member",
       // `ResolvedName.username` is `string | null`; `undefined` is not a value
@@ -91,7 +97,12 @@ vi.mock("../profile/ProfileContext", () => ({
 }));
 vi.mock("./GroupNameContext", () => ({
   // No shared name, so a group is titled by the label this file gives it.
-  useGroupNames: () => ({ nameOf: () => null, handleOf: () => undefined, version: () => 0 }),
+  useGroupNames: () => ({
+    nameOf: () => null,
+    handleOf: () => undefined,
+    version: () => 0,
+    loadedFor: () => null,
+  }),
 }));
 vi.mock("../devices/sync/DeviceGroupSyncContext", () => ({
   useDeviceGroupSync: () => ({
@@ -110,6 +121,10 @@ vi.mock("../auth/AuthContext", () => ({
   // `anon` keeps the persisted log out: `reloadLog` returns before the device
   // key, so the sort key is the `createdAtMs` below and nothing else.
   useAuth: () => ({ state: () => ({ kind: "anon" }), recallDone: () => false }),
+}));
+vi.mock("./view-ready", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./view-ready")>()),
+  chatListReady: () => listReady,
 }));
 vi.mock("../calls/CallHostContext", () => ({
   useCallHost: () => ({
@@ -146,6 +161,7 @@ beforeEach(() => {
   installLocalStorage();
   groups = [];
   flags = {};
+  listReady = true;
 });
 
 /**
@@ -302,3 +318,29 @@ describe("the order of the one list", () => {
  * held `null`, which this file cannot do while it also needs the real rule for
  * everything else.
  */
+
+describe("before the stores are read (navigation.md 2.4)", () => {
+  it("draws no row and no empty state", () => {
+    groups = [conversation("Oldest", 1, 1_000), conversation("Newest", 2, 3_000)];
+    listReady = false;
+
+    mountList();
+
+    expect(renderedOrder()).toEqual([]);
+    expect(all(".lk-empty")).toHaveLength(0);
+  });
+
+  it("with nothing to list, the empty state waits for the read too", () => {
+    groups = [];
+    listReady = false;
+    mountList();
+    expect(all(".lk-empty")).toHaveLength(0);
+  });
+
+  it("once read, an empty list shows its empty state (the selector above is real)", () => {
+    groups = [];
+    listReady = true;
+    mountList();
+    expect(all(".lk-empty")).toHaveLength(1);
+  });
+});

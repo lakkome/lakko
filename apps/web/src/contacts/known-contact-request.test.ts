@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  carriedContactSinceMs,
   contactSignedBy,
   establishedContactOfAccount,
   knownContactRequestVerdict,
@@ -71,6 +72,29 @@ describe("knownContactRequestVerdict", () => {
     expect(requestPredatesContact("not a date", since)).toBe(false);
     expect(requestPredatesContact("2026-11-21T09:00:00Z", undefined)).toBe(false);
     expect(requestPredatesContact("2026-11-21T09:00:00Z", 0)).toBe(false);
+  });
+  it("a contact carried to this device is one only since it arrived (seen live 2026-11-23)", () => {
+    const acceptedElsewhere = Date.parse("2026-11-01T09:00:00Z");
+    const arrived = Date.parse("2026-11-23T08:54:58Z");
+    const since = carriedContactSinceMs(acceptedElsewhere, arrived);
+    expect(since).toBe(arrived);
+    // Re-add requests the account's other device answered before this one joined.
+    expect(requestPredatesContact("2026-11-22T18:30:00Z", since)).toBe(true);
+    expect(
+      knownContactRequestVerdict({
+        senderIsContact: true,
+        check: "current",
+        requestKeyB64: "K",
+        trustedKeyB64: "K",
+        holdsOneToOne: false,
+        predatesContact: requestPredatesContact("2026-11-22T18:30:00Z", since),
+        siblingMayAdmit: false,
+      }),
+    ).toBe("drop");
+    // A request after the contact arrived here is a new one.
+    expect(requestPredatesContact("2026-11-23T09:10:00Z", since)).toBe(false);
+    // A clock behind the other device's acceptance never moves it back.
+    expect(carriedContactSinceMs(acceptedElsewhere, 0)).toBe(acceptedElsewhere);
   });
   it("a request from any other key of a contact's account is dropped", () => {
     expect(knownContactRequestVerdict({ ...base, requestKeyB64: "old" })).toBe("drop");

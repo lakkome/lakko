@@ -116,6 +116,17 @@ A device whose card has not arrived yet (it was added before this change, or
 its card is still on the way) shows its platform icon, "Device" and the date
 it was added, until the card arrives.
 
+**A new device knows the others at once (2026-11-23).** When a device of the
+account confirms a new one (code scanned or six-digit code), it hands the new
+device the cards it holds for the account's other devices, and its own, with
+the contacts and names it already hands over. The new device's Devices screen
+names every device the confirming device could name, including devices that
+are not open at the time, instead of "Device" until each of them is next
+opened. A card a device sends about itself later replaces the handed-over one.
+Seen live: the new Android device listed an iPhone that was not open only as
+"Device", while the web device showed "iPhone18,4 · Lakko 1.0 · iOS 26.4".
+ADR-0080 amendment of 2026-11-23.
+
 **The list follows the account (2026-10-30).** A device that joins or leaves
 appears or goes from an open Devices screen at once, on every route, without
 leaving the screen. Seen live: after the code route the new device showed only

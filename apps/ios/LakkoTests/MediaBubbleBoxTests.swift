@@ -47,11 +47,6 @@ final class MediaBubbleBoxTests: XCTestCase {
     /// reports an obviously wrong number instead of an unreadable one.
     private let proposal = CGSize(width: 400, height: 10_000)
 
-    /// `MediaBubbles.swift` — the `VStack(spacing: 4)` between a video note's
-    /// circle and its duration row. Duplicated from the view on purpose: there
-    /// is no constant to import, and changing either side has to fail.
-    private let videoNoteRowSpacing: CGFloat = 4
-
     private var controller: ChatMediaController!
     private var defaultsSuite: UserDefaults!
 
@@ -177,37 +172,35 @@ final class MediaBubbleBoxTests: XCTestCase {
 
     // MARK: - Round video note
 
-    /// Section 3 — *"A **circle** (about 240 pt), no bubble chrome"*, with the
-    /// duration beneath it.
+    /// Section 3 (amended 2026-11-22) — *"A **circle** (about 240 pt), no
+    /// bubble chrome"*, the duration and the time on pills INSIDE it, `Aa`
+    /// beside it 6 pt away with its space reserved in every state, and nothing
+    /// on a line under it.
     ///
-    /// The arithmetic is the same shape as the voice bubble's: the circle, the
-    /// row spacing, and one caption line. Its value is that all three ways of
-    /// breaking it fail here — a circle sized to something other than 240, a
-    /// second row added under the duration, and padding added around the
-    /// circle (which section 3's "no bubble chrome" forbids).
-    func testVideoNoteBubbleIsTwoHundredAndFortyWideWithItsDurationBeneath() throws {
+    /// All the ways of breaking it fail here: a circle sized to something
+    /// other than 240, a row put back under the circle, `Aa` moved off the
+    /// side or its space no longer reserved, and padding added around the
+    /// circle (which "no bubble chrome" forbids).
+    func testVideoNoteIsItsCircleWithAaBesideItAndNothingBeneath() throws {
         try assertTheMeasurementTechniqueMeasures()
 
-        // `incoming: false` on purpose: an unplayed incoming note carries an
-        // extra dot in the duration row, and the row is what is being measured.
-        let size = measure(videoNoteBubble(incoming: false))
-        let caption = captionLineHeight()
-
-        XCTAssertGreaterThan(caption, 0, "the caption line measured as nothing")
-        XCTAssertEqual(
-            size.width, VideoNoteBubble.diameter, accuracy: 0.5,
-            "a video note is no longer \(VideoNoteBubble.diameter) pt wide (measured \(size.width))")
-        XCTAssertEqual(
-            size.height,
-            VideoNoteBubble.diameter + videoNoteRowSpacing + caption,
-            accuracy: 1,
-            """
-            a video note is no longer its circle plus one caption line (measured \
-            \(size.height), expected \(VideoNoteBubble.diameter + videoNoteRowSpacing + caption)), \
-            so either the circle is not \(VideoNoteBubble.diameter) pt or something \
-            was added around it
-            """
-        )
+        for incoming in [false, true] {
+            let size = measure(videoNoteBubble(incoming: incoming))
+            let expectedWidth = VideoNoteBubble.diameter + VideoNoteLayout.asideGap + TranscriptButton.size.width
+            XCTAssertEqual(
+                size.width, expectedWidth, accuracy: 0.5,
+                """
+                a video note is no longer its \(VideoNoteBubble.diameter) pt circle with Aa beside it \
+                (incoming \(incoming), measured \(size.width), expected \(expectedWidth))
+                """)
+            XCTAssertEqual(
+                size.height, VideoNoteBubble.diameter, accuracy: 0.5,
+                """
+                a video note is no longer its circle alone (incoming \(incoming), measured \
+                \(size.height)), so the circle is not \(VideoNoteBubble.diameter) pt or a line \
+                was put back under it
+                """)
+        }
     }
 
     /// Section 3 — the bubble is *a circle*, and the state table's *"a neutral
@@ -456,12 +449,6 @@ final class MediaBubbleBoxTests: XCTestCase {
         XCTAssertTrue(
             bitmap.isBackdrop(5, 5),
             "ImageRenderer did not draw a plain colour where one was asked for; nothing rendered below means what it says")
-    }
-
-    private func captionLineHeight() -> CGFloat {
-        UIHostingController(rootView: Text("0:14").font(.caption2.monospacedDigit()))
-            .sizeThatFits(in: proposal)
-            .height
     }
 
     /// Render a production bubble at scale 1, so a pixel is a point and the

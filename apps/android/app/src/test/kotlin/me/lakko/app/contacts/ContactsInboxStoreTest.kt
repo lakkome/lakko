@@ -197,6 +197,39 @@ class ContactsInboxStoreTest {
     // -----------------------------------------------------------------
 
     @Test
+    fun `two requests from one person fold into one row, the later one`() {
+        // Seen live 2026-11-23: a person who asked twice was two identical cards.
+        val merge = mergeFetchedRequests(
+            pending = listOf(request(5L, 0x0B)),
+            accepted = emptyList(),
+            fetched = listOf(request(24L, 0x0A), request(31L, 0x0A)),
+        )
+        assertEquals(listOf(5L, 31L), merge.pending.map { it.messageId })
+        assertEquals(listOf(24L), merge.dropped.map { it.messageId })
+    }
+
+    @Test
+    fun `stored duplicates from one person fold into one row on load`() {
+        // The bind path merges the stored pending list as a fetched batch.
+        val merge = mergeFetchedRequests(
+            pending = emptyList(),
+            accepted = emptyList(),
+            fetched = listOf(request(24L, 0x0A), request(31L, 0x0A), request(32L, 0x0C)),
+        )
+        assertEquals(listOf(31L, 32L), merge.pending.map { it.messageId })
+    }
+
+    @Test
+    fun `a request that asked for a chat leaves once the chat is here`() {
+        val asks = request(40L, 0x0A).copy(asksForChat = true)
+        val ordinary = request(41L, 0x0B)
+        val stillAsks = request(42L, 0x0C).copy(asksForChat = true)
+        val held = setOf(0x0A, 0x0B)
+        val drop = chatAsksHeldHere(listOf(asks, ordinary, stillAsks)) { it[0].toInt() in held }
+        assertEquals(setOf(40L), drop)
+    }
+
+    @Test
     fun `withoutAcceptedSenders drops only the rows of people now accepted`() {
         val pending = listOf(request(1L, 0x01), request(2L, 0x02), request(3L, 0x03))
         val result = withoutAcceptedSenders(pending, listOf(accepted(0x02)))

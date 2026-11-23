@@ -92,6 +92,10 @@ export interface GroupNameApi {
   /** Bumped on any change a title may depend on. `nameOf` reads it, so a
    *  reactive caller re-renders on its own. */
   readonly version: Accessor<number>;
+  /** The account whose stored group names, photos and `@name`s have been
+   *  read, or `null` before that. A conversation title drawn earlier would
+   *  be the stand-in rather than the name (docs/ux/navigation.md 2.4). */
+  readonly loadedFor: Accessor<string | null>;
   /** The shared name to show for a group, `null` when none / cleared.
    *  Reactive. */
   nameOf(groupIdB64: string): string | null;
@@ -154,6 +158,7 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
   const bump = (): void => {
     setVersion((v) => v + 1);
   };
+  const [loadedFor, setLoadedFor] = createSignal<string | null>(null);
 
   const accountId = (): string | null => {
     const s = auth.state();
@@ -308,6 +313,7 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
     untrack(() => {
       if (account === boundAccount) return;
       boundAccount = account;
+      setLoadedFor(null);
       if (account === null) {
         scheduler.stop();
         store.close();
@@ -324,6 +330,10 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
       settingsOpened = Promise.all([photos.open(account), reactionSettings.open(account), handles.open(account)]).then(
         (r) => r.every((x) => x),
       );
+      // Neither read rejects: an unreadable row is an answer too.
+      void Promise.all([opened, settingsOpened]).then(() => {
+        if (boundAccount === account) setLoadedFor(account);
+      });
       void takeCarried(account);
     });
   });
@@ -398,6 +408,7 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
 
   const api: GroupNameApi = {
     version,
+    loadedFor,
     nameOf(groupIdB64) {
       version();
       return store.nameOf(groupIdB64);

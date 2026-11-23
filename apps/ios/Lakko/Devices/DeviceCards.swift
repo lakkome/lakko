@@ -81,6 +81,29 @@ public enum DeviceCards {
         return next
     }
 
+    /// ADR-0080 amendment (2026-11-23) — the cards a confirming device handed
+    /// over in the pairing state bundle, decoded and keyed by leaf (hex).
+    /// Each is kept only for a current leaf of `rosterKeysHex` other than
+    /// `ownKeyHex`, and only when strictly newer than the card held for that
+    /// key (``receive(_:senderKeyHex:card:rosterKeysHex:)``), so the device's
+    /// own later card wins. `nil` when nothing changes.
+    public static func acceptCarried(
+        _ cards: [String: StoredDeviceCard],
+        entries: [(keyHex: String, card: StoredDeviceCard)],
+        rosterKeysHex: [String],
+        ownKeyHex: String
+    ) -> [String: StoredDeviceCard]? {
+        var next = cards
+        var changed = false
+        for entry in entries where entry.keyHex != ownKeyHex {
+            guard let kept = receive(next, senderKeyHex: entry.keyHex, card: entry.card,
+                                     rosterKeysHex: rosterKeysHex) else { continue }
+            next = kept
+            changed = true
+        }
+        return changed ? next : nil
+    }
+
     /// Drop the card of every leaf that left. `nil` when none did.
     public static func prune(
         _ cards: [String: StoredDeviceCard], rosterKeysHex: [String]

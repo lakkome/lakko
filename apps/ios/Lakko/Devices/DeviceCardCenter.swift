@@ -385,6 +385,66 @@ final class DeviceCardCenter: ObservableObject {
         NSLog("device card: the new %@ device's card from its pairing payload stored", card.platform.rawValue)
     }
 
+    /// The received cards and own card stored for `account`: the live state
+    /// when bound to it, else the persisted row.
+    private func row(for account: String) -> Persisted {
+        if accountIdB64 == account { return Persisted(cards: cards, own: own) }
+        guard let data = defaults.data(forKey: DeviceCards.cardsKey(accountIdB64: account)),
+              let row = try? JSONDecoder().decode(Persisted.self, from: data) else {
+            return Persisted(cards: [:], own: nil)
+        }
+        return row
+    }
+
+    /// ADR-0080 amendment (2026-11-23), confirming device — the cards handed
+    /// to a device being added, in the pairing state bundle: every stored
+    /// card of a leaf in `rosterKeysHex` (the DeviceGroup after the add),
+    /// plus this device's own, its last card as sent (stamps verbatim) or,
+    /// before its first one, its current fields at the lowest stamp so any
+    /// card it sends later replaces it. A card that does not compose is left
+    /// out.
+    func cardsForStateBundle(
+        accountIdB64 account: String, ownKeyHex: String, rosterKeysHex: [String],
+        nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)
+    ) -> [StateBundle.CarriedDeviceCard] {
+        let stored = row(for: account)
+        var ownCard = stored.own ?? currentFields(nowMs: nowMs)
+        if stored.own == nil { ownCard.updatedAtMs = 0 }
+        var picked: [(String, StoredDeviceCard)] = [(ownKeyHex, ownCard)]
+        for (key, card) in stored.cards where key != ownKeyHex && rosterKeysHex.contains(key) {
+            picked.append((key, card))
+        }
+        return picked.compactMap { key, card in
+            guard let keyBytes = StateBundle.hexDecode(key),
+                  let envelope = try? composeDeviceCardEnvelope(card: Self.ffi(card)) else { return nil }
+            return StateBundle.CarriedDeviceCard(
+                leafKeyB64: keyBytes.base64EncodedString(), envelopeB64: envelope.base64EncodedString())
+        }
+    }
+
+    /// ADR-0080 amendment (2026-11-23), new device — store the cards the
+    /// confirming device handed over (``DeviceCards/acceptCarried(_:entries:rosterKeysHex:ownKeyHex:)``).
+    /// Works before the center is bound to the account (a restore route
+    /// lands the session later): the persisted row is updated and read at
+    /// the bind. Returns how many were kept.
+    @discardableResult
+    func storeCarried(
+        accountIdB64 account: String, entries: [(keyHex: String, card: StoredDeviceCard)],
+        rosterKeysHex: [String], ownKeyHex: String
+    ) -> Int {
+        let stored = row(for: account)
+        guard let next = DeviceCards.acceptCarried(
+            stored.cards, entries: entries, rosterKeysHex: rosterKeysHex, ownKeyHex: ownKeyHex) else { return 0 }
+        let kept = next.filter { stored.cards[$0.key] != $0.value }.count
+        if accountIdB64 == account {
+            cards = next
+            persist()
+        } else if let data = try? JSONEncoder().encode(Persisted(cards: next, own: stored.own)) {
+            defaults.set(data, forKey: DeviceCards.cardsKey(accountIdB64: account))
+        }
+        return kept
+    }
+
     /// The roster changed: drop cards of leaves that left.
     func prune(rosterKeysHex: [String]) {
         guard accountIdB64 != nil,
@@ -395,7 +455,7 @@ final class DeviceCardCenter: ObservableObject {
 
     // MARK: Conversions and platform facts
 
-    static func ffi(_ card: StoredDeviceCard) -> FfiDeviceCard {
+    nonisolated static func ffi(_ card: StoredDeviceCard) -> FfiDeviceCard {
         let platform: FfiDevicePlatform
         switch card.platform {
         case .ios: platform = .ios
@@ -412,7 +472,7 @@ final class DeviceCardCenter: ObservableObject {
             os: card.os, city: card.city, country: card.country)
     }
 
-    static func stored(_ card: FfiDeviceCard) -> StoredDeviceCard {
+    nonisolated static func stored(_ card: FfiDeviceCard) -> StoredDeviceCard {
         let platform: DeviceCardPlatform
         switch card.platform {
         case .ios: platform = .ios

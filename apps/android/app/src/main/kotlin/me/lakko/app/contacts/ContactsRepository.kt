@@ -965,6 +965,17 @@ public class ContactsRepository(
         return true
     }
 
+    /** The listed requests from contacts that asked for a chat
+     *  ([IncomingContactRequest.asksForChat]) whose chat this device now
+     *  holds: removed, nothing sent. */
+    private fun dropChatAsksHeldHere() {
+        val chat = chatRepo ?: return
+        val drop = chatAsksHeldHere(mutableState.value.pending) { chat.liveOneToOneWith(it) != null }
+        if (drop.isEmpty()) return
+        mutableState.update { s -> s.copy(pending = s.pending.filterNot { it.messageId in drop }) }
+        persistInboxPending()
+    }
+
     /** Judge again the requests that were waiting for a verdict. A sender who
      *  is no longer a contact by then is an ordinary request and is returned
      *  to be listed. */
@@ -2428,6 +2439,10 @@ public class ContactsRepository(
                     // An answered request leaves the durable Sent list.
                     if (acks.isNotEmpty() || answeredBy.isNotEmpty()) persistSent()
                     persistInboxCursor()
+                    // A contact's request listed for want of a chat leaves
+                    // once the chat is here (a Welcome of this pass, or a
+                    // sibling device admitted this one): nothing is asked twice.
+                    dropChatAsksHeldHere()
                     // Base scenario 7 — a silent answer from a person this
                     // device holds no one-to-one with: founded now, unless a
                     // Welcome of this pass was kept for later (it may be
