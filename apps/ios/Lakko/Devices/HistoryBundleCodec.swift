@@ -189,13 +189,15 @@ public enum HistoryBundleCodec {
         secret: Data,
         sealedBytes: Data,
         store: MessageLogStore = MessageLogStore(),
-        cards: ChannelInviteCardStore = .shared
+        cards: ChannelInviteCardStore = .shared,
+        callIndex: CallHistoryBacking = SealedCallHistoryBacking()
     ) throws -> Int {
         let opened = try openHistoryBundleStructured(
             secret: secret,
             sealedBytes: sealedBytes
         )
-        return applyOpened(opened, accountIdB64: accountIdB64, store: store, cards: cards, gap: nil)
+        return applyOpened(
+            opened, accountIdB64: accountIdB64, store: store, cards: cards, callIndex: callIndex, gap: nil)
     }
 
     /// ADR-0091 section 7 — what a filed gap history tells the gap line.
@@ -224,11 +226,12 @@ public enum HistoryBundleCodec {
         ownKey: Data? = nil,
         route: String? = nil,
         store: MessageLogStore = MessageLogStore(),
-        cards: ChannelInviteCardStore = .shared
+        cards: ChannelInviteCardStore = .shared,
+        callIndex: CallHistoryBacking = SealedCallHistoryBacking()
     ) -> GapApplied {
         let summary = gapSummary(opened)
         let applied = applyOpened(
-            opened, accountIdB64: accountIdB64, store: store, cards: cards,
+            opened, accountIdB64: accountIdB64, store: store, cards: cards, callIndex: callIndex,
             gap: GapContext(ownKey: ownKey, route: route))
         return GapApplied(applied: applied, complete: summary.complete, earliestMs: summary.earliestMs)
     }
@@ -259,6 +262,7 @@ public enum HistoryBundleCodec {
         accountIdB64: String,
         store: MessageLogStore,
         cards: ChannelInviteCardStore,
+        callIndex: CallHistoryBacking,
         gap: GapContext?
     ) -> Int {
         let existing = store.getLog(accountIdB64: accountIdB64)
@@ -273,9 +277,14 @@ public enum HistoryBundleCodec {
             let hex = Self.bytesToHex(g.groupId)
             for opened in g.messages.compactMap({ Self.decodeOpenedPlaceholder($0.payloadBytes) }) {
                 if Self.isBookkeepingSystemRow(opened.message) { continue }
+                var bundled = opened.message
+                if let gap, let call = CallTranscriptRow.parse(bundled.text), bundled.direction == "system" {
+                    guard let mine = Self.gapCallRow(call, route: gap.route) else { continue }
+                    bundled = Self.withText(bundled, mine.marker)
+                }
                 let row = gap.map {
-                    Self.gapRow(opened.message, author: opened.authorKey, ownKey: $0.ownKey, route: $0.route)
-                } ?? Self.pairingRow(opened.message, author: opened.authorKey)
+                    Self.gapRow(bundled, author: opened.authorKey, ownKey: $0.ownKey, route: $0.route)
+                } ?? Self.pairingRow(bundled, author: opened.authorKey)
                 decoded[hex, default: []].append(row)
                 // ADR-0087 section 14 — the card goes where this client keeps
                 // cards, so the bubble and the Chats row draw it. A card this
@@ -298,6 +307,20 @@ public enum HistoryBundleCodec {
                 groups: merged.groups
             )
         )
+        // The call rows just written go into the Calls index in the same step,
+        // whether or not the chat repository runs (`docs/ux/navigation.md`
+        // section 6.2). The kind is not known here: a group until the index or
+        // the conversation says otherwise.
+        let calls = decoded.flatMap { hex, rows in
+            rows.filter { $0.direction == "system" }.compactMap {
+                CallHistoryEntry.fromLogRow(
+                    conversationId: hex, kind: .group, text: $0.text, createdAt: $0.createdAt)
+            }
+        }
+        let filed = CallHistoryStore.fileFromLog(calls, accountIdB64: accountIdB64, backing: callIndex)
+        if !filed.isEmpty {
+            Task { @MainActor in CallHistoryStore.shared.absorbFiled(filed, accountIdB64: accountIdB64) }
+        }
         // A repository already running on this account keeps the whole log in
         // memory and rewrites it from there, so it is told what just landed.
         NotificationCenter.default.post(
@@ -416,19 +439,105 @@ public enum HistoryBundleCodec {
                 originMessageId: origin == nil ? nil : f.originMessageId
             )
         }
+        // Placeholder version 7 — a call row travels as its call record, not
+        // as this client's stored marker, which no other client reads. A row
+        // that claims to be a call and does not parse is not drawn here and is
+        // not carried.
+        let call: HistoryCall?
+        if m.direction == "system", CallTranscriptRow.isCallRow(m.text) {
+            guard let row = CallTranscriptRow.parse(m.text) else {
+                throw HistoryBundleCodecError.unreadableCallRow
+            }
+            call = Self.historyCall(from: row)
+        } else {
+            call = nil
+        }
         let placeholder = HistoryPlaceholder(
             messageId: UInt64(bitPattern: m.messageId),
             direction: Self.directionFromString(m.direction),
             createdAt: m.createdAt,
-            text: m.text,
+            text: call == nil ? m.text : "",
             attachments: attachments,
             content: content,
             channelInvite: channelInvite,
             reply: m.reply.map { HistoryReply(target: $0.target, author: $0.author, excerpt: $0.excerpt) },
             forward: forward,
-            authorKey: authorKey
+            authorKey: authorKey,
+            call: call
         )
         return try encodeHistoryPlaceholder(placeholder: placeholder)
+    }
+
+    /// Why a row cannot be carried.
+    enum HistoryBundleCodecError: Error {
+        /// A call row whose marker this build cannot read.
+        case unreadableCallRow
+    }
+
+    // MARK: - Call rows (placeholder version 7)
+
+    /// The wire record of a call row. A duration travels in whole seconds and
+    /// only when media flowed; an outgoing call nobody answered is an
+    /// `outgoing` record with no duration. A declined or failed call carries
+    /// no direction.
+    static func historyCall(from row: CallTranscriptRow) -> HistoryCall {
+        switch (row.direction, row.outcome) {
+        case (.outgoing, .answered(let durationMs)):
+            return HistoryCall(outcome: .outgoing, video: row.video, durationSecs: Self.wholeSeconds(durationMs))
+        case (.incoming, .answered(let durationMs)):
+            return HistoryCall(outcome: .incoming, video: row.video, durationSecs: Self.wholeSeconds(durationMs))
+        case (.incoming, .missed):
+            return HistoryCall(outcome: .missed, video: row.video)
+        case (.outgoing, .missed):
+            return HistoryCall(outcome: .outgoing, video: row.video)
+        case (_, .declined):
+            return HistoryCall(outcome: .declined, video: row.video)
+        case (_, .failed):
+            return HistoryCall(outcome: .failed, video: row.video)
+        }
+    }
+
+    /// The call row a wire record names, drawn exactly as the live row is.
+    ///
+    /// A declined or failed call carries no direction; it reads as incoming,
+    /// which renders the same row: the conversation's row, its glyph and its
+    /// spoken label, and the Calls tab's glyph and label, read the direction
+    /// only of an answered call. An incoming record with no duration (a
+    /// sender whose clock moved backwards; this client always writes one)
+    /// reads as an answered call of no length.
+    static func transcriptRow(from call: HistoryCall) -> CallTranscriptRow {
+        switch call.outcome {
+        case .outgoing:
+            if let secs = call.durationSecs {
+                return CallTranscriptRow(
+                    direction: .outgoing, outcome: .answered(durationMs: Int64(secs) * 1000), video: call.video)
+            }
+            return CallTranscriptRow(direction: .outgoing, outcome: .missed, video: call.video)
+        case .incoming:
+            return CallTranscriptRow(
+                direction: .incoming, outcome: .answered(durationMs: Int64(call.durationSecs ?? 0) * 1000),
+                video: call.video)
+        case .missed:
+            return CallTranscriptRow(direction: .incoming, outcome: .missed, video: call.video)
+        case .declined:
+            return CallTranscriptRow(direction: .incoming, outcome: .declined, video: call.video)
+        case .failed:
+            return CallTranscriptRow(direction: .incoming, outcome: .failed, video: call.video)
+        }
+    }
+
+    private static func wholeSeconds(_ ms: Int64) -> UInt32 {
+        UInt32(clamping: max(0, ms) / 1000)
+    }
+
+    /// A call row of a gap bundle (ADR-0091) on the device that came back. A
+    /// call row is the call from the seat of the account that recorded it
+    /// (`Outgoing call` / `Incoming call`), so it is filed only when the
+    /// request was answered by one of this account's own devices
+    /// (`own-device`); from anyone else it is that person's call and is
+    /// dropped. The web client applies the same rule.
+    static func gapCallRow(_ row: CallTranscriptRow, route: String?) -> CallTranscriptRow? {
+        route == "own-device" ? row : nil
     }
 
     /// A decoded placeholder: the log row and the invitation card, which this
@@ -484,10 +593,13 @@ public enum HistoryBundleCodec {
         let restored = placeholder.content.flatMap { content in
             ContentModel.restored(content, attachments: attachments.compactMap { $0.toAttachmentRef() })
         }
+        // Placeholder version 7 — a call record becomes this client's call
+        // row: a system row whose text is the marker the live row stores.
+        let callRow = placeholder.call.map(Self.transcriptRow(from:))
         let message = PersistedMessage(
             messageId: Int64(bitPattern: placeholder.messageId),
-            direction: Self.directionToString(placeholder.direction),
-            text: placeholder.text,
+            direction: callRow == nil ? Self.directionToString(placeholder.direction) : "system",
+            text: callRow?.marker ?? placeholder.text,
             attachments: attachments,
             createdAt: placeholder.createdAt,
             reply: placeholder.reply.map { PersistedReply(target: $0.target, author: $0.author, excerpt: $0.excerpt) },
@@ -544,6 +656,14 @@ public enum HistoryBundleCodec {
     static func pairingRow(_ m: PersistedMessage, author: Data?) -> PersistedMessage {
         guard m.direction == "incoming", let author else { return m }
         return reauthored(m, authorKeyB64: base64Encode(author), direction: m.direction)
+    }
+
+    private static func withText(_ m: PersistedMessage, _ text: String) -> PersistedMessage {
+        PersistedMessage(
+            messageId: m.messageId, direction: m.direction, text: text, attachments: m.attachments,
+            createdAt: m.createdAt, authorKeyB64: m.authorKeyB64, edited: m.edited, deleted: m.deleted,
+            reactions: m.reactions, reply: m.reply, forward: m.forward,
+            unsupportedVersion: m.unsupportedVersion, lastOpId: m.lastOpId, content: m.content)
     }
 
     private static func reauthored(_ m: PersistedMessage, authorKeyB64: String?, direction: String) -> PersistedMessage {

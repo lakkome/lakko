@@ -39,7 +39,7 @@
 //! ambiguity, no floating-point, no map iteration order):
 //!
 //! ```text
-//! version:           u8  == HISTORY_PLACEHOLDER_VERSION (6)
+//! version:           u8  == HISTORY_PLACEHOLDER_VERSION (7)
 //! message_id:        u64 (big-endian)
 //! direction:         u8  (0 = outgoing, 1 = incoming, 2 = system)
 //! created_at_len:    u16 (big-endian)   + created_at UTF-8 bytes
@@ -83,6 +83,10 @@
 //!     payload_len:   u32 (big-endian, 1..=MAX_CONTENT_PAYLOAD_BYTES) + payload
 //!     state_len:     u16 (big-endian, 0..=MAX_CONTENT_STATE_BYTES) + state ]
 //! author_present:    u8 (0 | 1)  [ + author_key: 32 bytes ]
+//! call_present:      u8 (0 | 1)
+//!   [ outcome:       u8 (CallRecordOutcome, 1..=5)
+//!     video:         u8 (0 | 1)
+//!     duration_present: u8 (0 | 1)  [ + duration_secs: u32 (big-endian) ] ]
 //! ```
 //!
 //! ## Version 3: the channel invitation card, the reply, the forward
@@ -142,6 +146,26 @@
 //! it is the sending device's claim (that device could write any text under
 //! any author already). Flag day: versions 1 to 5 are refused.
 //!
+//! ## Version 7: call rows
+//!
+//! Version 7 appends, after the author, the record of a call row: how the
+//! call ended ([`CallRecordOutcome`]), whether it was a video call, and how
+//! long media flowed, in whole seconds. Before it a call row ("Missed call",
+//! "Declined", "Outgoing call, 0:42") was not carried at all, so a device
+//! added to the account showed none of the calls its conversations had.
+//!
+//! The outcome is numbered here, once, for every client (and for the
+//! conversation vault, `lakko_vault::record::VaultCallOutcome`, whose bytes
+//! the FFI crates pin equal): 1 outgoing, 2 incoming, 3 missed, 4 declined,
+//! 5 failed; 0 and 6..=255 are refused. A duration is carried only when media
+//! flowed, so it is refused on a missed, declined or failed call, and an
+//! absent duration (the call never connected, or the clock moved backwards)
+//! is distinct from a duration of 0 (it connected and ended within the
+//! second). Direction is part of the outcome only where a client draws it
+//! (`Outgoing call` / `Incoming call`); a declined or failed call reads the
+//! same from either seat on every client, so it carries none. Flag day:
+//! versions 1 to 6 are refused.
+//!
 //! This codec enforces **structure** only (lengths, caps, presence bytes).
 //! The **semantic** ADR-0047 bounds (a duration only for a voice or video
 //! note and within its limit, a dimension within 1..=4096, a thumb within
@@ -169,7 +193,7 @@ use crate::error::{Error, Result};
 /// Wire-format version byte. Bump on any layout change; the
 /// decoder refuses any other value so an older binary fails
 /// loudly rather than mis-parsing a newer placeholder.
-pub const HISTORY_PLACEHOLDER_VERSION: u8 = 6;
+pub const HISTORY_PLACEHOLDER_VERSION: u8 = 7;
 
 /// Hard cap on the message text, in UTF-8 bytes (1 MiB). Larger
 /// inputs are refused at encode time and rejected at decode.
@@ -378,6 +402,93 @@ pub struct HistoryContentPlaceholder {
     pub state: Vec<u8>,
 }
 
+/// How a call row ended (version 7): the one numbering every client and the
+/// conversation vault use for a finished call.
+///
+/// The wire byte of each variant is frozen ([`Self::tag`]). The vault's
+/// `lakko_vault::record::VaultCallOutcome` carries the same bytes; the FFI
+/// crates, which depend on both, pin the two equal.
+///
+/// | Byte | Variant | Meaning | Duration |
+/// |---|---|---|---|
+/// | 1 | [`Self::Outgoing`] | This device's account placed the call. | When media flowed |
+/// | 2 | [`Self::Incoming`] | This device's account answered the call and media flowed. | When media flowed |
+/// | 3 | [`Self::Missed`] | An incoming call nobody answered: it rang out, the caller gave up, or the device was busy. | Never |
+/// | 4 | [`Self::Declined`] | Refused on purpose, by this side or by the other. | Never |
+/// | 5 | [`Self::Failed`] | Answered and media never flowed. | Never |
+///
+/// An outgoing call that never connected and was not refused is
+/// [`Self::Outgoing`] with no duration (web and Android draw it as
+/// `Outgoing call`; iOS keeps it as an outgoing `missed` row).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CallRecordOutcome {
+    /// This account placed the call (byte 1).
+    Outgoing,
+    /// This account answered the call (byte 2).
+    Incoming,
+    /// An incoming call nobody answered (byte 3).
+    Missed,
+    /// Refused on purpose by either side (byte 4).
+    Declined,
+    /// Answered, and media never flowed (byte 5).
+    Failed,
+}
+
+impl CallRecordOutcome {
+    /// Every outcome, in wire-byte order.
+    pub const ALL: [Self; 5] = [
+        Self::Outgoing,
+        Self::Incoming,
+        Self::Missed,
+        Self::Declined,
+        Self::Failed,
+    ];
+
+    /// The frozen wire byte.
+    #[must_use]
+    pub const fn tag(self) -> u8 {
+        match self {
+            Self::Outgoing => 1,
+            Self::Incoming => 2,
+            Self::Missed => 3,
+            Self::Declined => 4,
+            Self::Failed => 5,
+        }
+    }
+
+    /// The outcome a wire byte names, or `None` for any other byte.
+    #[must_use]
+    pub const fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            1 => Some(Self::Outgoing),
+            2 => Some(Self::Incoming),
+            3 => Some(Self::Missed),
+            4 => Some(Self::Declined),
+            5 => Some(Self::Failed),
+            _ => None,
+        }
+    }
+
+    /// Whether a call with this outcome may carry a duration: only one
+    /// where media could have flowed.
+    #[must_use]
+    pub const fn may_carry_duration(self) -> bool {
+        matches!(self, Self::Outgoing | Self::Incoming)
+    }
+}
+
+/// The call a [`HistoryMessagePlaceholder`] records (version 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryCallPlaceholder {
+    /// How the call ended.
+    pub outcome: CallRecordOutcome,
+    /// The call was a video call.
+    pub video: bool,
+    /// How long media flowed, in whole seconds; `None` when it never did.
+    /// Only [`CallRecordOutcome::may_carry_duration`] outcomes carry one.
+    pub duration_secs: Option<u32>,
+}
+
 /// The decoded display projection of one history-bundle message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryMessagePlaceholder {
@@ -409,6 +520,8 @@ pub struct HistoryMessagePlaceholder {
     /// `None` for this account's own messages and system rows when the
     /// sender held none.
     pub author_key: Option<[u8; AUTHOR_KEY_LEN]>,
+    /// Version 7 — the call this row records, for a call row.
+    pub call: Option<HistoryCallPlaceholder>,
 }
 
 impl HistoryMessagePlaceholder {
@@ -523,6 +636,7 @@ impl HistoryMessagePlaceholder {
                 out.extend_from_slice(key);
             },
         }
+        encode_call(&mut out, self.call.as_ref())?;
         Ok(out)
     }
 
@@ -676,6 +790,7 @@ impl HistoryMessagePlaceholder {
         } else {
             None
         };
+        let call = decode_call(&mut r)?;
 
         if !r.is_empty() {
             return Err(Error::Codec(format!(
@@ -695,6 +810,7 @@ impl HistoryMessagePlaceholder {
             reply,
             forward,
             author_key,
+            call,
         })
     }
 }
@@ -807,6 +923,48 @@ fn decode_content(r: &mut Reader<'_>) -> Result<Option<HistoryContentPlaceholder
         None
     };
     Ok(content)
+}
+
+/// Encode the optional version-7 call record.
+fn encode_call(out: &mut Vec<u8>, call: Option<&HistoryCallPlaceholder>) -> Result<()> {
+    match call {
+        None => out.push(0),
+        Some(call) => {
+            if call.duration_secs.is_some() && !call.outcome.may_carry_duration() {
+                return Err(Error::Codec(format!(
+                    "history placeholder: a {:?} call carries no duration",
+                    call.outcome
+                )));
+            }
+            out.push(1);
+            out.push(call.outcome.tag());
+            out.push(u8::from(call.video));
+            encode_opt_u32(out, call.duration_secs);
+        },
+    }
+    Ok(())
+}
+
+/// Decode the optional version-7 call record.
+fn decode_call(r: &mut Reader<'_>) -> Result<Option<HistoryCallPlaceholder>> {
+    if !r.presence("call")? {
+        return Ok(None);
+    }
+    let tag = r.u8()?;
+    let outcome = CallRecordOutcome::from_tag(tag)
+        .ok_or_else(|| Error::Codec(format!("history placeholder: unknown call outcome {tag}")))?;
+    let video = r.presence("call video")?;
+    let duration_secs = r.opt_u32("call duration")?;
+    if duration_secs.is_some() && !outcome.may_carry_duration() {
+        return Err(Error::Codec(format!(
+            "history placeholder: a {outcome:?} call carries no duration"
+        )));
+    }
+    Ok(Some(HistoryCallPlaceholder {
+        outcome,
+        video,
+        duration_secs,
+    }))
 }
 
 /// Encode an optional string as `present:u8 [+ len:u16 + utf8]`.
@@ -1080,6 +1238,7 @@ mod tests {
             reply: None,
             forward: None,
             author_key: None,
+            call: None,
         }
     }
 
@@ -1104,6 +1263,7 @@ mod tests {
             reply: None,
             forward: None,
             author_key: None,
+            call: None,
         };
         let bytes = msg.encode().expect("encode");
         assert_eq!(
@@ -1165,19 +1325,134 @@ mod tests {
         let back = HistoryMessagePlaceholder::decode(&bytes).expect("decode");
         assert_eq!(back.author_key, Some([0x7E; AUTHOR_KEY_LEN]));
         assert_eq!(back, msg);
-        // The key is the last field: 1 presence byte + 32 key bytes.
-        assert_eq!(bytes[bytes.len() - AUTHOR_KEY_LEN - 1], 1);
-        assert!(HistoryMessagePlaceholder::decode(&bytes[..bytes.len() - 1]).is_err());
+        // The key is followed only by the call presence byte: 1 presence
+        // byte + 32 key bytes + 1.
+        assert_eq!(bytes[bytes.len() - AUTHOR_KEY_LEN - 2], 1);
+        assert!(HistoryMessagePlaceholder::decode(&bytes[..bytes.len() - 2]).is_err());
         // An unknown presence byte is refused.
         let mut bad = bytes.clone();
-        let at = bad.len() - AUTHOR_KEY_LEN - 1;
+        let at = bad.len() - AUTHOR_KEY_LEN - 2;
         bad[at] = 2;
         assert!(HistoryMessagePlaceholder::decode(&bad).is_err());
     }
 
     #[test]
-    fn versions_1_to_5_are_refused() {
-        for old in [1u8, 2, 3, 4, 5] {
+    fn a_call_row_round_trips_and_keeps_no_duration_apart_from_zero() {
+        for outcome in CallRecordOutcome::ALL {
+            for video in [false, true] {
+                let durations: &[Option<u32>] = if outcome.may_carry_duration() {
+                    &[None, Some(0), Some(42), Some(u32::MAX)]
+                } else {
+                    &[None]
+                };
+                for &duration_secs in durations {
+                    let mut msg = sample();
+                    msg.direction = HistoryDirection::System;
+                    msg.text = String::new();
+                    msg.attachments = vec![];
+                    msg.call = Some(HistoryCallPlaceholder {
+                        outcome,
+                        video,
+                        duration_secs,
+                    });
+                    let bytes = msg.encode().expect("encode");
+                    let back = HistoryMessagePlaceholder::decode(&bytes).expect("decode");
+                    assert_eq!(back, msg);
+                    assert_eq!(back.call.and_then(|c| c.duration_secs), duration_secs);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_outcome_bytes_are_frozen() {
+        let bytes: Vec<u8> = CallRecordOutcome::ALL.iter().map(|o| o.tag()).collect();
+        assert_eq!(bytes, [1, 2, 3, 4, 5]);
+        for o in CallRecordOutcome::ALL {
+            assert_eq!(CallRecordOutcome::from_tag(o.tag()), Some(o));
+        }
+        assert_eq!(CallRecordOutcome::from_tag(0), None);
+        assert_eq!(CallRecordOutcome::from_tag(6), None);
+        assert!(CallRecordOutcome::Outgoing.may_carry_duration());
+        assert!(CallRecordOutcome::Incoming.may_carry_duration());
+        assert!(!CallRecordOutcome::Missed.may_carry_duration());
+        assert!(!CallRecordOutcome::Declined.may_carry_duration());
+        assert!(!CallRecordOutcome::Failed.may_carry_duration());
+    }
+
+    #[test]
+    fn the_call_wire_is_the_documented_layout() {
+        let mut msg = sample();
+        msg.attachments = vec![];
+        msg.call = Some(HistoryCallPlaceholder {
+            outcome: CallRecordOutcome::Outgoing,
+            video: true,
+            duration_secs: Some(0x0102_0304),
+        });
+        let bytes = msg.encode().expect("encode");
+        assert_eq!(&bytes[bytes.len() - 8..], &[1, 1, 1, 1, 1, 2, 3, 4]);
+        msg.call = Some(HistoryCallPlaceholder {
+            outcome: CallRecordOutcome::Declined,
+            video: false,
+            duration_secs: None,
+        });
+        let bytes = msg.encode().expect("encode");
+        assert_eq!(&bytes[bytes.len() - 4..], &[1, 4, 0, 0]);
+    }
+
+    #[test]
+    fn a_duration_on_a_call_where_media_never_flowed_is_refused_both_ways() {
+        for outcome in [
+            CallRecordOutcome::Missed,
+            CallRecordOutcome::Declined,
+            CallRecordOutcome::Failed,
+        ] {
+            let mut msg = sample();
+            msg.call = Some(HistoryCallPlaceholder {
+                outcome,
+                video: false,
+                duration_secs: Some(5),
+            });
+            assert!(msg.encode().is_err());
+            // Hand-build the same bytes and decode them.
+            msg.call = Some(HistoryCallPlaceholder {
+                outcome,
+                video: false,
+                duration_secs: None,
+            });
+            let mut bytes = msg.encode().expect("encode");
+            assert_eq!(bytes.pop(), Some(0)); // duration_present
+            bytes.push(1);
+            bytes.extend_from_slice(&5u32.to_be_bytes());
+            assert!(HistoryMessagePlaceholder::decode(&bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn a_bad_call_byte_is_refused() {
+        let mut msg = sample();
+        msg.call = Some(HistoryCallPlaceholder {
+            outcome: CallRecordOutcome::Incoming,
+            video: false,
+            duration_secs: Some(3),
+        });
+        let good = msg.encode().expect("encode");
+        // Layout tail: call_present, outcome, video, duration_present, u32.
+        let at = good.len() - 8;
+        for (offset, value) in [(0usize, 2u8), (1, 0), (1, 6), (2, 2), (3, 2)] {
+            let mut bad = good.clone();
+            bad[at + offset] = value;
+            assert!(
+                HistoryMessagePlaceholder::decode(&bad).is_err(),
+                "offset {offset} value {value} must be refused"
+            );
+        }
+        assert!(HistoryMessagePlaceholder::decode(&good[..good.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn versions_1_to_6_are_refused() {
+        for old in [1u8, 2, 3, 4, 5, 6] {
             let mut bytes = sample().encode().expect("encode");
             bytes[0] = old;
             let err = HistoryMessagePlaceholder::decode(&bytes).expect_err("old version refused");
@@ -1240,8 +1515,8 @@ mod tests {
         });
         let mut bytes = msg.encode().expect("encode");
         // content_present, kind, payload_len(4), payload(1), state_len(2),
-        // then the author presence byte.
-        let kind_at = bytes.len() - (1 + 4 + 1 + 2 + 1);
+        // then the author and call presence bytes.
+        let kind_at = bytes.len() - (1 + 4 + 1 + 2 + 2);
         assert_eq!(bytes[kind_at], 5);
         bytes[kind_at] = 9;
         assert!(HistoryMessagePlaceholder::decode(&bytes).is_err());
@@ -1337,7 +1612,7 @@ mod tests {
         // A declared card length over the cap, or an empty present card, is
         // refused on decode.
         let mut bytes = sample().encode().expect("encode");
-        let card_presence_at = bytes.len() - 5;
+        let card_presence_at = bytes.len() - 6;
         assert_eq!(bytes[card_presence_at], 0);
         bytes.truncate(card_presence_at);
         let mut over = bytes.clone();
@@ -1348,10 +1623,10 @@ mod tests {
                 .to_be_bytes(),
         );
         over.extend(std::iter::repeat_n(0u8, MAX_CHANNEL_INVITE_BYTES + 1));
-        over.extend_from_slice(&[0, 0, 0, 0]);
+        over.extend_from_slice(&[0, 0, 0, 0, 0]);
         assert!(HistoryMessagePlaceholder::decode(&over).is_err());
         let mut empty = bytes;
-        empty.extend_from_slice(&[1, 0, 0, 0, 0, 0, 0]);
+        empty.extend_from_slice(&[1, 0, 0, 0, 0, 0, 0, 0]);
         assert!(HistoryMessagePlaceholder::decode(&empty).is_err());
     }
 
@@ -1433,10 +1708,10 @@ mod tests {
         att.inline_thumb = None;
         msg.attachments = vec![att];
         let mut bytes = msg.encode().expect("encode");
-        // From the end: the author, content, forward, reply and card
+        // From the end: the call, author, content, forward, reply and card
         // presence bytes, then the inline thumb, artist, title, thumb, height
         // and width presence bytes, the 3 waveform bytes, then its u16 length.
-        let waveform_len_at = bytes.len() - (5 + 6 + 3 + 2);
+        let waveform_len_at = bytes.len() - (6 + 6 + 3 + 2);
         assert_eq!(
             &bytes[waveform_len_at..waveform_len_at + 2],
             &3u16.to_be_bytes()
@@ -1469,9 +1744,9 @@ mod tests {
         let mut msg = sample();
         msg.attachments[0].inline_thumb = Some(vec![0xFF, 0xD8, 0xFF]);
         let mut bytes = msg.encode().expect("encode");
-        // From the end: the author, content, forward, reply and card
+        // From the end: the call, author, content, forward, reply and card
         // presence bytes, the 3 thumbnail bytes, then its u16 length.
-        let len_at = bytes.len() - (5 + 3 + 2);
+        let len_at = bytes.len() - (6 + 3 + 2);
         assert_eq!(&bytes[len_at..len_at + 2], &3u16.to_be_bytes());
         bytes[len_at..len_at + 2].copy_from_slice(
             &u16::try_from(MAX_INLINE_THUMB_BYTES + 1)
@@ -1487,11 +1762,11 @@ mod tests {
         msg.attachments = vec![voice_note_attachment()];
         let bytes = msg.encode().expect("encode");
         // In a voice attachment without a thumb, title, artist or inline
-        // thumb, the thumb presence byte is ninth from the end: title,
-        // artist, inline thumb, card, reply, forward, content and author
-        // presence bytes follow.
+        // thumb, the thumb presence byte is tenth from the end: title,
+        // artist, inline thumb, card, reply, forward, content, author and
+        // call presence bytes follow.
         let mut bad = bytes;
-        let last = bad.len() - 9;
+        let last = bad.len() - 10;
         assert_eq!(bad[last], 0);
         bad[last] = 2;
         let err = HistoryMessagePlaceholder::decode(&bad).expect_err("must reject");
@@ -1619,6 +1894,21 @@ mod tests {
                 })
         }
 
+        /// A call record the codec accepts: a duration only on an outcome
+        /// that may carry one.
+        fn call() -> impl Strategy<Value = HistoryCallPlaceholder> {
+            (0usize..5, any::<bool>(), any::<Option<u32>>()).prop_map(
+                |(i, video, duration_secs)| {
+                    let outcome = CallRecordOutcome::ALL[i];
+                    HistoryCallPlaceholder {
+                        outcome,
+                        video,
+                        duration_secs: duration_secs.filter(|_| outcome.may_carry_duration()),
+                    }
+                },
+            )
+        }
+
         proptest! {
             /// Any placeholder within the caps encodes, decodes to an equal
             /// value, and re-encodes to identical bytes.
@@ -1644,6 +1934,7 @@ mod tests {
                 reply in proptest::option::of(reply()),
                 forward in proptest::option::of(forward()),
                 author_key in proptest::option::of(any::<[u8; AUTHOR_KEY_LEN]>()),
+                call in proptest::option::of(call()),
             ) {
                 let msg = HistoryMessagePlaceholder {
                     message_id,
@@ -1660,11 +1951,35 @@ mod tests {
                     reply,
                     forward,
                     author_key,
+                    call,
                 };
                 let bytes = msg.encode().expect("within caps");
                 let back = HistoryMessagePlaceholder::decode(&bytes).expect("decodes");
                 prop_assert_eq!(&back, &msg);
                 prop_assert_eq!(back.encode().expect("re-encodes"), bytes);
+            }
+
+            /// A call record that is not one of the five outcomes, or that
+            /// gives a duration to a call where media never flowed, never
+            /// decodes; every other byte in that slot is refused.
+            #[test]
+            fn only_the_five_outcomes_decode(tag in any::<u8>(), video in 0u8..=1, secs in any::<u32>()) {
+                let mut base = super::sample();
+                base.attachments = vec![];
+                let mut bytes = base.encode().expect("encode");
+                // Replace the trailing absent-call byte with a present call.
+                prop_assert_eq!(bytes.pop(), Some(0));
+                bytes.extend_from_slice(&[1, tag, video, 1]);
+                bytes.extend_from_slice(&secs.to_be_bytes());
+                let decoded = HistoryMessagePlaceholder::decode(&bytes);
+                match CallRecordOutcome::from_tag(tag) {
+                    Some(o) if o.may_carry_duration() => {
+                        let call = decoded.expect("decodes").call.expect("call");
+                        prop_assert_eq!(call.outcome, o);
+                        prop_assert_eq!(call.duration_secs, Some(secs));
+                    },
+                    _ => prop_assert!(decoded.is_err()),
+                }
             }
         }
     }
@@ -1755,6 +2070,7 @@ mod tests {
             reply: None,
             forward: None,
             author_key: None,
+            call: None,
         };
         assert!(msg.encode().is_err());
     }
@@ -1772,6 +2088,7 @@ mod tests {
             reply: None,
             forward: None,
             author_key: None,
+            call: None,
         };
         assert!(msg.encode().is_err());
     }

@@ -390,9 +390,9 @@ public class ChatRepositoryCallPort(
      * conversation it happened in. Local to this device: the repository appends
      * it to that group's timeline and persists it with the transcript.
      */
-    override fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?) {
+    override fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?, callIdHex: String?) {
         try {
-            repository.recordCallRow(groupIdHex, entry, startedAtMs)
+            repository.recordCallRow(groupIdHex, entry, startedAtMs, callIdHex)
         } catch (error: Throwable) {
             android.util.Log.w("ChatRepositoryCallPort", "recording the call row failed", error)
         }
@@ -450,9 +450,9 @@ internal class ChatRepositoryGroupCallPort(
 
     override fun behindHeld(groupIdHex: String): Boolean = repository.callHeldWhileBehind(groupIdHex)
 
-    override fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?) {
+    override fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?, callIdHex: String?) {
         try {
-            repository.recordCallRow(groupIdHex, entry, startedAtMs)
+            repository.recordCallRow(groupIdHex, entry, startedAtMs, callIdHex)
         } catch (error: Throwable) {
             android.util.Log.w("ChatRepositoryGroupCallPort", "recording the call row failed", error)
         }

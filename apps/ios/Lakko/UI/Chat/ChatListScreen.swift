@@ -1346,6 +1346,13 @@ public final class ChatListViewModel: ObservableObject {
     /// GroupContext). Routes a tap, splits Chats from Groups and picks the
     /// preview's sender prefix. A two-person group is a group here, on every
     /// member's device.
+    /// The kind the creator fixed for a conversation this device holds
+    /// (ADR-0062), as the Calls index names it; `nil` when it holds none. A
+    /// call a history bundle filed carries no kind of its own.
+    func callHistoryKind(groupIdHex: String) -> CallHistoryKind? {
+        repository.groupKind(groupIdHex: groupIdHex).map { $0 == .oneToOne ? .chat : .group }
+    }
+
     func kind(of groupIdHex: String) -> ConversationKind {
         repository.conversationKind(groupIdHex: groupIdHex)
     }

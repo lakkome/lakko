@@ -57,8 +57,8 @@ pub use proof::{ProofError, StorageProof};
 pub use record::{
     ChunkEntry, ConversationHead, ConversationKind, DevicesHead, Direction, HistoryChunk,
     IndexEntry, Membership, PersonalPin, RecordError, ReentryEpoch, RegistrarSeed, Role, SharedPin,
-    VaultAttachment, VaultCall, VaultForward, VaultForwardOrigin, VaultIndex, VaultMessage,
-    VaultPerson, VaultReaction, VaultReply, VaultThumb,
+    VaultAttachment, VaultCall, VaultCallOutcome, VaultForward, VaultForwardOrigin, VaultIndex,
+    VaultMessage, VaultPerson, VaultReaction, VaultReply, VaultThumb,
 };
 pub use seal::{open_object, seal_object, ObjectKind, SealError};
 

@@ -14,8 +14,8 @@
 //!
 //! All integers are big-endian. `opt<T>` is `0x00`, or `0x01` followed by
 //! `T`; a `bool` is `0x00` or `0x01`; any other byte in either is refused.
-//! Each of the four containers starts with `version(1) = 0x03` (versions 1
-//! and 2, before ADR-0047 section 6, are refused).
+//! Each of the four containers starts with `version(1) = 0x04` (versions 1
+//! to 3 are refused).
 //!
 //! ```text
 //! chunk := version || count u16 (<= 512) || message*
@@ -46,7 +46,8 @@
 //! forward := author_len u16 (<= 255) || author || opt<origin>
 //! origin := group_id_len u8 (1..=128) || group_id || message_id u64
 //! reaction := reactor(32) || emoji_len u8 (1..=64) || emoji
-//! call := outcome u8 || video bool || duration_secs u32
+//! call := outcome u8 (1..=5, VaultCallOutcome) || video bool
+//!   || opt<duration_secs u32> (only on outcomes 1 and 2)
 //! content := kind u8 (1..=5) || payload_len u32 (1..=196608) || payload
 //!   || state_len u16 (<= 8192) || state
 //!
@@ -142,8 +143,10 @@ use crate::seal::MAX_PLAINTEXT_BYTES;
 /// The one version byte the four containers carry. Version 2 (ADR-0092):
 /// audio title and artist on an attachment, and the content block on a
 /// message. Version 3 (ADR-0047 section 6): the micro thumbnail on an
-/// attachment. Flag day: versions 1 and 2 are refused.
-pub const RECORD_VERSION_V3: u8 = 0x03;
+/// attachment. Version 4: a call row's outcome is the numbered
+/// [`VaultCallOutcome`] (the history bundle's numbering) and its duration is
+/// optional. Flag day: versions 1 to 3 are refused.
+pub const RECORD_VERSION_V4: u8 = 0x04;
 
 /// Largest encoded record, in bytes: what one sealed object carries.
 pub const MAX_RECORD_BYTES: usize = MAX_PLAINTEXT_BYTES;
@@ -301,6 +304,9 @@ pub enum RecordError {
     /// or an over-long state (ADR-0092).
     #[error("a content block is not admissible")]
     Content,
+    /// A call row that gives a duration to a call where media never flowed.
+    #[error("a call row is not admissible")]
+    Call,
 }
 
 impl RecordError {
@@ -331,6 +337,7 @@ impl RecordError {
             Self::Entries => "entries",
             Self::RepeatedRef => "repeatedRef",
             Self::Content => "content",
+            Self::Call => "call",
         }
     }
 }
@@ -377,6 +384,43 @@ wire_enum! {
         Incoming = 1,
         /// A system row (a membership change, a call).
         System = 2,
+    }
+}
+
+wire_enum! {
+    /// How a call row ended. The same frozen bytes as
+    /// `lakko_mls::history_placeholder::CallRecordOutcome` (the FFI crates,
+    /// which depend on both, pin them equal), so a call row restored from the
+    /// vault and one carried by a history bundle read alike.
+    VaultCallOutcome {
+        /// This account placed the call.
+        Outgoing = 1,
+        /// This account answered the call.
+        Incoming = 2,
+        /// An incoming call nobody answered.
+        Missed = 3,
+        /// Refused on purpose by either side.
+        Declined = 4,
+        /// Answered, and media never flowed.
+        Failed = 5,
+    }
+}
+
+impl VaultCallOutcome {
+    /// Every outcome, in wire-byte order.
+    pub const ALL: [Self; 5] = [
+        Self::Outgoing,
+        Self::Incoming,
+        Self::Missed,
+        Self::Declined,
+        Self::Failed,
+    ];
+
+    /// Whether a call with this outcome may carry a duration: only one
+    /// where media could have flowed.
+    #[must_use]
+    pub const fn may_carry_duration(self) -> bool {
+        matches!(self, Self::Outgoing | Self::Incoming)
     }
 }
 
@@ -551,12 +595,13 @@ pub struct VaultReaction {
 /// How a call row ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct VaultCall {
-    /// The outcome, as the clients number it. Opaque here.
-    pub outcome: u8,
+    /// How the call ended.
+    pub outcome: VaultCallOutcome,
     /// Whether it was a video call.
     pub video: bool,
-    /// How long it lasted, in seconds.
-    pub duration_secs: u32,
+    /// How long media flowed, in whole seconds; `None` when it never did.
+    /// Only a [`VaultCallOutcome::may_carry_duration`] outcome carries one.
+    pub duration_secs: Option<u32>,
 }
 
 /// An ADR-0092 content message: kind, payload and state snapshot, opaque
@@ -854,6 +899,11 @@ impl VaultMessage {
                 RecordError::Reactions,
             )?;
         }
+        if let Some(call) = &self.call {
+            if call.duration_secs.is_some() && !call.outcome.may_carry_duration() {
+                return Err(RecordError::Call);
+            }
+        }
         if let Some(content) = &self.content {
             if !CONTENT_KINDS.contains(&content.kind) || content.payload.is_empty() {
                 return Err(RecordError::Content);
@@ -1104,9 +1154,9 @@ fn put_message(out: &mut Vec<u8>, message: &VaultMessage) {
     }
     put_bool(out, message.call.is_some());
     if let Some(call) = &message.call {
-        out.push(call.outcome);
+        out.push(call.outcome.to_wire());
         put_bool(out, call.video);
-        out.extend_from_slice(&call.duration_secs.to_be_bytes());
+        put_opt_u32(out, call.duration_secs);
     }
     put_opt_u32(out, message.unsupported_version);
     put_bool(out, message.content.is_some());
@@ -1159,7 +1209,7 @@ impl HistoryChunk {
     /// Separate so the tests can hand the decoder an encoding that is one
     /// past a bound.
     fn write(&self) -> Result<Vec<u8>, RecordError> {
-        let mut out = vec![RECORD_VERSION_V3];
+        let mut out = vec![RECORD_VERSION_V4];
         put_messages(&mut out, &self.messages)?;
         check_size(&out)?;
         Ok(out)
@@ -1182,7 +1232,7 @@ impl ConversationHead {
     /// Separate so the tests can hand the decoder an encoding that is one
     /// past a bound.
     fn write(&self) -> Result<Vec<u8>, RecordError> {
-        let mut out = vec![RECORD_VERSION_V3];
+        let mut out = vec![RECORD_VERSION_V4];
         self.conversation.write_to(&mut out);
         out.push(self.kind.to_wire());
         put_bytes_u16(&mut out, self.title.as_bytes());
@@ -1242,7 +1292,7 @@ impl DevicesHead {
     /// Separate so the tests can hand the decoder an encoding that is one
     /// past a bound.
     fn write(&self) -> Result<Vec<u8>, RecordError> {
-        let mut out = vec![RECORD_VERSION_V3];
+        let mut out = vec![RECORD_VERSION_V4];
         put_reentry(&mut out, &self.reentry)?;
         check_size(&out)?;
         Ok(out)
@@ -1265,7 +1315,7 @@ impl VaultIndex {
     /// Separate so the tests can hand the decoder an encoding that is one
     /// past a bound.
     fn write(&self) -> Result<Vec<u8>, RecordError> {
-        let mut out = vec![RECORD_VERSION_V3];
+        let mut out = vec![RECORD_VERSION_V4];
         put_len_u32(&mut out, self.entries.len());
         for entry in &self.entries {
             entry.conversation.write_to(&mut out);
@@ -1290,7 +1340,7 @@ impl<'a> Reader<'a> {
             return Err(RecordError::TooLarge);
         }
         let mut reader = Self { rest: bytes };
-        if reader.u8()? != RECORD_VERSION_V3 {
+        if reader.u8()? != RECORD_VERSION_V4 {
             return Err(RecordError::UnknownVersion);
         }
         Ok(reader)
@@ -1588,9 +1638,9 @@ fn read_message(r: &mut Reader<'_>) -> Result<VaultMessage, RecordError> {
     let reactions = read_reactions(r)?;
     let call = if r.bool()? {
         Some(VaultCall {
-            outcome: r.u8()?,
+            outcome: VaultCallOutcome::from_wire(r.u8()?).ok_or(RecordError::UnknownOption)?,
             video: r.bool()?,
-            duration_secs: r.u32()?,
+            duration_secs: r.opt_u32()?,
         })
     } else {
         None

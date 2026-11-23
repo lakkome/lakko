@@ -111,6 +111,59 @@ public object CallHistoryStore {
         }
     }
 
+    /**
+     * File call rows of the transcripts: rows a history bundle brought from
+     * another device of this account (placeholder version 7), or rows a
+     * chat held at start. Each is filed once, by its conversation and row
+     * message id ([callRowFiledKey]; a call row's id is its call's,
+     * [callRowMessageId]): a row already filed here files nothing, and [callHistoryWithRestored] also keeps a call
+     * the one-time fill already listed from being listed twice. Best-effort
+     * and never throwing, like [record].
+     */
+    public fun fileCallRows(context: Context, accountIdB64: String?, rows: List<Pair<String, CallHistoryEntry>>) {
+        if (accountIdB64.isNullOrEmpty() || rows.isEmpty()) return
+        val store = prefs(context) ?: return
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            try {
+                val filed = loadFiled(store, accountIdB64)
+                val held = load(context, accountIdB64)
+                var next = held
+                var newIds = false
+                for ((rowKey, entry) in rows) {
+                    if (!filed.add(rowKey)) continue
+                    newIds = true
+                    next = callHistoryWithRestored(next, entry)
+                }
+                if (!newIds) return@write
+                val edit = store.edit().putString(filedKey(accountIdB64), encodeFiled(filed))
+                if (next != held) {
+                    edit.putString(key(accountIdB64), next.joinToString("\n", transform = ::encodeCallHistoryEntry))
+                }
+                edit.apply()
+                if (next != held) changed.value += 1
+            } catch (cause: Throwable) {
+                android.util.Log.w(TAG, "filing call rows failed", cause)
+            }
+        }
+    }
+
+    /** Note call rows as filed without filing them: a live call this device
+     *  just filed through [record], or rows the one-time fill filed. */
+    public fun markCallRowsFiled(context: Context, accountIdB64: String?, rowKeys: Collection<String>) {
+        if (accountIdB64.isNullOrEmpty() || rowKeys.isEmpty()) return
+        val store = prefs(context) ?: return
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            try {
+                val filed = loadFiled(store, accountIdB64)
+                if (filed.addAll(rowKeys)) {
+                    store.edit().putString(filedKey(accountIdB64), encodeFiled(filed)).apply()
+                }
+            } catch (cause: Throwable) {
+                android.util.Log.w(TAG, "noting filed call rows failed", cause)
+            }
+        }
+    }
+
     /** Take one conversation out of the list (ADR-0087 section 9). */
     public fun deleteConversation(context: Context, accountIdB64: String?, conversationIdHex: String) {
         if (accountIdB64.isNullOrEmpty()) return
@@ -156,25 +209,31 @@ public object CallHistoryStore {
     public fun backfillOnce(
         context: Context,
         accountIdB64: String?,
-        entries: () -> List<CallHistoryEntry>,
+        entries: () -> List<Pair<String, CallHistoryEntry>>,
     ) {
         if (accountIdB64.isNullOrEmpty()) return
         val store = prefs(context) ?: return
         if (store.getBoolean(backfilledKey(accountIdB64), false)) return
         try {
-            val found = entries()
+            val rows = entries()
+            val found = rows.map { it.second }
+            // The rows filed here are not filed again by [fileCallRows].
+            val filed = loadFiled(store, accountIdB64).apply { addAll(rows.map { it.first }) }
             if (found.isNotEmpty()) {
                 // Fold one at a time through the same ordering and cap the
                 // live path uses, so a backfilled index is indistinguishable
                 // from one that was written call by call.
                 var next = load(context, accountIdB64)
-                for (entry in found) next = callHistoryWith(next, entry)
+                // [callHistoryWithRestored]: a call a history bundle already
+                // filed ([fileCallRows]) is not filed a second time.
+                for (entry in found) next = callHistoryWithRestored(next, entry)
                 store.edit()
                     .putString(
                         key(accountIdB64),
                         next.joinToString("\n", transform = ::encodeCallHistoryEntry),
                     )
                     .putBoolean(backfilledKey(accountIdB64), true)
+                    .putString(filedKey(accountIdB64), encodeFiled(filed))
                     .apply()
                 changed.value += 1
                 return
@@ -196,6 +255,7 @@ public object CallHistoryStore {
             store.edit()
                 .remove(key(accountIdB64))
                 .remove(backfilledKey(accountIdB64))
+                .remove(filedKey(accountIdB64))
                 .apply()
             changed.value += 1
         } catch (cause: Throwable) {
@@ -207,6 +267,15 @@ public object CallHistoryStore {
 
     private fun backfilledKey(accountIdB64: String): String =
         KEY_PREFIX + "backfilled." + accountIdB64
+
+    private fun filedKey(accountIdB64: String): String =
+        KEY_PREFIX + "filed-rows." + accountIdB64
+
+    /** The call row ids already filed for [accountIdB64], oldest first. */
+    private fun loadFiled(store: SharedPreferences, accountIdB64: String): LinkedHashSet<String> =
+        decodeCallRowsFiled(store.getString(filedKey(accountIdB64), null))
+
+    private fun encodeFiled(filed: LinkedHashSet<String>): String = encodeCallRowsFiled(filed)
 
     @Volatile
     private var opened: SharedPreferences? = null

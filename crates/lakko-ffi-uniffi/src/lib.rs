@@ -4845,6 +4845,133 @@ impl From<lakko_mls::history_placeholder::HistoryDirection> for HistoryMessageDi
     }
 }
 
+/// How a call row ended: the one numbering every client and the
+/// conversation vault use (`lakko_mls::history_placeholder::CallRecordOutcome`,
+/// frozen wire bytes 1 to 5). Map a client's own call outcome onto this enum,
+/// never onto hand-copied numbers.
+///
+/// An outgoing call that never connected and was not refused is `Outgoing`
+/// with no duration. A declined or failed call carries no direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum CallRecordOutcome {
+    /// This account placed the call (wire byte 1). A duration when media
+    /// flowed.
+    Outgoing,
+    /// This account answered the call and media flowed (wire byte 2).
+    Incoming,
+    /// An incoming call nobody answered (wire byte 3). Never a duration.
+    Missed,
+    /// Refused on purpose by either side (wire byte 4). Never a duration.
+    Declined,
+    /// Answered, and media never flowed (wire byte 5). Never a duration.
+    Failed,
+}
+
+impl From<CallRecordOutcome> for lakko_mls::history_placeholder::CallRecordOutcome {
+    fn from(o: CallRecordOutcome) -> Self {
+        match o {
+            CallRecordOutcome::Outgoing => Self::Outgoing,
+            CallRecordOutcome::Incoming => Self::Incoming,
+            CallRecordOutcome::Missed => Self::Missed,
+            CallRecordOutcome::Declined => Self::Declined,
+            CallRecordOutcome::Failed => Self::Failed,
+        }
+    }
+}
+
+impl From<lakko_mls::history_placeholder::CallRecordOutcome> for CallRecordOutcome {
+    fn from(o: lakko_mls::history_placeholder::CallRecordOutcome) -> Self {
+        use lakko_mls::history_placeholder::CallRecordOutcome as O;
+        match o {
+            O::Outgoing => Self::Outgoing,
+            O::Incoming => Self::Incoming,
+            O::Missed => Self::Missed,
+            O::Declined => Self::Declined,
+            O::Failed => Self::Failed,
+        }
+    }
+}
+
+impl From<CallRecordOutcome> for lakko_vault::record::VaultCallOutcome {
+    fn from(o: CallRecordOutcome) -> Self {
+        match o {
+            CallRecordOutcome::Outgoing => Self::Outgoing,
+            CallRecordOutcome::Incoming => Self::Incoming,
+            CallRecordOutcome::Missed => Self::Missed,
+            CallRecordOutcome::Declined => Self::Declined,
+            CallRecordOutcome::Failed => Self::Failed,
+        }
+    }
+}
+
+impl From<lakko_vault::record::VaultCallOutcome> for CallRecordOutcome {
+    fn from(o: lakko_vault::record::VaultCallOutcome) -> Self {
+        use lakko_vault::record::VaultCallOutcome as O;
+        match o {
+            O::Outgoing => Self::Outgoing,
+            O::Incoming => Self::Incoming,
+            O::Missed => Self::Missed,
+            O::Declined => Self::Declined,
+            O::Failed => Self::Failed,
+        }
+    }
+}
+
+/// The wire byte of a [`CallRecordOutcome`] (1 to 5). For logs and tests;
+/// clients store and compare the enum.
+#[uniffi::export]
+#[must_use]
+pub fn call_record_outcome_byte(outcome: CallRecordOutcome) -> u8 {
+    lakko_mls::history_placeholder::CallRecordOutcome::from(outcome).tag()
+}
+
+/// The call a [`HistoryPlaceholder`] records (version 7).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct HistoryCall {
+    /// How the call ended.
+    pub outcome: CallRecordOutcome,
+    /// The call was a video call.
+    #[uniffi(default = false)]
+    pub video: bool,
+    /// How long media flowed, in whole seconds; `None` when it never did.
+    /// Kept only on an `Outgoing` or `Incoming` call: on any other outcome
+    /// it is dropped on encode.
+    #[uniffi(default = None)]
+    pub duration_secs: Option<u32>,
+}
+
+impl From<HistoryCall> for lakko_mls::history_placeholder::HistoryCallPlaceholder {
+    fn from(c: HistoryCall) -> Self {
+        let outcome = lakko_mls::history_placeholder::CallRecordOutcome::from(c.outcome);
+        Self {
+            outcome,
+            video: c.video,
+            duration_secs: c.duration_secs.filter(|_| outcome.may_carry_duration()),
+        }
+    }
+}
+
+impl From<lakko_mls::history_placeholder::HistoryCallPlaceholder> for HistoryCall {
+    fn from(c: lakko_mls::history_placeholder::HistoryCallPlaceholder) -> Self {
+        Self {
+            outcome: c.outcome.into(),
+            video: c.video,
+            duration_secs: c.duration_secs,
+        }
+    }
+}
+
+// The history bundle and the vault number a call's outcome alike.
+const _: () = {
+    use lakko_mls::history_placeholder::CallRecordOutcome as H;
+    use lakko_vault::record::VaultCallOutcome as V;
+    assert!(H::Outgoing.tag() == V::Outgoing.to_wire());
+    assert!(H::Incoming.tag() == V::Incoming.to_wire());
+    assert!(H::Missed.tag() == V::Missed.to_wire());
+    assert!(H::Declined.tag() == V::Declined.to_wire());
+    assert!(H::Failed.tag() == V::Failed.to_wire());
+};
+
 /// One attachment reference inside a [`HistoryPlaceholder`].
 /// `blob_id` / `key` MUST be 32 bytes, `nonce` 12 bytes.
 #[derive(uniffi::Record)]
@@ -5012,6 +5139,10 @@ pub struct HistoryPlaceholder {
     /// receipt). A key of any other length is dropped on encode.
     #[uniffi(default = None)]
     pub author_key: Option<Vec<u8>>,
+    /// Version 7 — the call this row records, for a call row ("Missed
+    /// call", "Declined", "Outgoing call, 0:42").
+    #[uniffi(default = None)]
+    pub call: Option<HistoryCall>,
 }
 
 /// The reply a [`HistoryPlaceholder`] carries (ADR-0052). An author or
@@ -5178,6 +5309,7 @@ pub fn encode_history_placeholder(placeholder: HistoryPlaceholder) -> Result<Vec
         author_key: placeholder
             .author_key
             .and_then(|k| <[u8; 32]>::try_from(k.as_slice()).ok()),
+        call: placeholder.call.map(Into::into),
     };
     Ok(msg.encode()?)
 }
@@ -5211,6 +5343,7 @@ pub fn decode_history_placeholder(bytes: Vec<u8>) -> Result<HistoryPlaceholder, 
     );
     Ok(HistoryPlaceholder {
         author_key: msg.author_key.map(|k| k.to_vec()),
+        call: msg.call.map(Into::into),
         channel_invite,
         reply: reply.map(|r| HistoryReply {
             target: r.target,
@@ -5332,6 +5465,7 @@ mod history_placeholder_media_tests {
             reply: None,
             forward: None,
             author_key: None,
+            call: None,
         })
         .expect("encodes");
         decode_history_placeholder(bytes)
@@ -5356,6 +5490,7 @@ mod history_placeholder_media_tests {
             reply: None,
             forward: None,
             author_key,
+            call: None,
         };
         let back = decode_history_placeholder(
             encode_history_placeholder(make(Some(vec![0x33; 32]))).expect("encodes"),
@@ -5367,6 +5502,78 @@ mod history_placeholder_media_tests {
         )
         .expect("decodes");
         assert_eq!(short.author_key, None);
+    }
+
+    /// Version 7 — a call row survives the history bundle; a duration on a
+    /// call where media never flowed is dropped, not an error.
+    #[test]
+    fn a_call_row_survives_the_history_bundle() {
+        let make = |call: Option<HistoryCall>| HistoryPlaceholder {
+            message_id: 11,
+            direction: HistoryMessageDirection::System,
+            created_at: "2026-11-23T10:00:00Z".into(),
+            text: String::new(),
+            attachments: vec![],
+            content: None,
+            channel_invite: None,
+            reply: None,
+            forward: None,
+            author_key: None,
+            call,
+        };
+        let round = |call: HistoryCall| {
+            decode_history_placeholder(
+                encode_history_placeholder(make(Some(call))).expect("encodes"),
+            )
+            .expect("decodes")
+            .call
+        };
+        let outgoing = HistoryCall {
+            outcome: CallRecordOutcome::Outgoing,
+            video: true,
+            duration_secs: Some(42),
+        };
+        assert_eq!(round(outgoing.clone()), Some(outgoing));
+        let unanswered = HistoryCall {
+            outcome: CallRecordOutcome::Outgoing,
+            video: false,
+            duration_secs: None,
+        };
+        assert_eq!(round(unanswered.clone()), Some(unanswered));
+        let zero = HistoryCall {
+            outcome: CallRecordOutcome::Incoming,
+            video: false,
+            duration_secs: Some(0),
+        };
+        assert_eq!(round(zero.clone()), Some(zero));
+        let declined = round(HistoryCall {
+            outcome: CallRecordOutcome::Declined,
+            video: false,
+            duration_secs: Some(9),
+        });
+        assert_eq!(
+            declined,
+            Some(HistoryCall {
+                outcome: CallRecordOutcome::Declined,
+                video: false,
+                duration_secs: None,
+            })
+        );
+        let none =
+            decode_history_placeholder(encode_history_placeholder(make(None)).expect("encodes"))
+                .expect("decodes");
+        assert_eq!(none.call, None);
+        let bytes: Vec<u8> = [
+            CallRecordOutcome::Outgoing,
+            CallRecordOutcome::Incoming,
+            CallRecordOutcome::Missed,
+            CallRecordOutcome::Declined,
+            CallRecordOutcome::Failed,
+        ]
+        .into_iter()
+        .map(call_record_outcome_byte)
+        .collect();
+        assert_eq!(bytes, [1, 2, 3, 4, 5]);
     }
 
     #[test]
@@ -5410,6 +5617,7 @@ mod history_placeholder_media_tests {
             reply: None,
             forward: None,
             author_key: None,
+            call: None,
         })
         .expect("encodes");
         let back = decode_history_placeholder(bytes).expect("decodes");
@@ -5476,6 +5684,7 @@ mod history_placeholder_media_tests {
                 origin_message_id: Some(11),
             }),
             author_key: None,
+            call: None,
         })
         .expect("encodes");
         let back = decode_history_placeholder(bytes).expect("decodes");
@@ -5509,6 +5718,7 @@ mod history_placeholder_media_tests {
                 origin_message_id: None,
             }),
             author_key: None,
+            call: None,
         })
         .expect("encodes");
         let back = decode_history_placeholder(bytes).expect("decodes");

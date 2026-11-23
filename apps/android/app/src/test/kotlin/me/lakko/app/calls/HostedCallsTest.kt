@@ -93,9 +93,13 @@ class HostedCallsTest {
         /** When each recorded call started, in the order of [rows]. */
         val rowStarts = mutableListOf<Long?>()
 
-        override fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?) {
+        /** The call each recorded row names, in the order of [rows]. */
+        val rowCallIds = mutableListOf<String?>()
+
+        override fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?, callIdHex: String?) {
             rows += groupIdHex to entry
             rowStarts += startedAtMs
+            rowCallIds += callIdHex
         }
 
         override fun sfuBaseUrl(): String = "wss://sfu.test"
@@ -1045,6 +1049,8 @@ class HostedCallsTest {
             CallTranscriptEntry(outcome = CallOutcome.OUTGOING, video = false, durationSecs = 0L),
             h.port.rows.single().second,
         )
+        // The row names its call (16 bytes, hex), from which its id is derived.
+        assertEquals(32, h.port.rowCallIds.single()?.length)
     }
 
     @Test

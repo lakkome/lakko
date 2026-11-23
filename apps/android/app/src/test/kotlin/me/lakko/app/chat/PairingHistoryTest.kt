@@ -155,11 +155,50 @@ class PairingHistoryTest {
     }
 
     @Test
-    fun `a row held is kept as held and a local row of the bundle goes first`() {
+    fun `a row held is kept as held and a local row of the bundle with no time goes first`() {
         val held = listOf(chat(10).copy(text = "polled"))
         val merged = mergeHistoryRows(held, listOf(chat(-1), chat(10)))
         assertEquals(listOf(-1L, 10L), merged.map { it.messageId })
         assertEquals("polled", merged.last().text)
+    }
+
+    private val callAt0901 = Long.MIN_VALUE or 0x0102_0304_0506_0708L
+
+    @Test
+    fun `a call row of the bundle sits at its time among the messages`() {
+        val held = listOf(
+            chat(1).copy(createdAt = "2026-11-23T09:00:00Z"),
+            chat(2).copy(createdAt = "2026-11-23T09:02:00Z"),
+        )
+        val call = ChatMessage(callAt0901, Direction.System, "Declined", createdAt = "2026-11-23T09:01:00Z")
+        val merged = mergeHistoryRows(held, listOf(call))
+        assertEquals(listOf(1L, callAt0901, 2L), merged.map { it.messageId })
+        // Applied again: one row.
+        assertEquals(merged, mergeHistoryRows(merged, listOf(call)))
+    }
+
+    @Test
+    fun `the log on disk places a call row at its time too`() {
+        val held = listOf(
+            row(1).copy(createdAt = "2026-11-23T09:00:00Z"),
+            row(2).copy(createdAt = "2026-11-23T09:02:00Z"),
+        )
+        val call = PersistedMessage(callAt0901, "system", "", emptyList(), "2026-11-23T09:01:00Z")
+            .copy(call = PersistedCall(outcome = "declined"))
+        val (merged, added) = HistoryBundleCodec.mergeRows(held, listOf(call, row(3).copy(createdAt = "2026-11-23T09:03:00Z")))
+        assertEquals(listOf(1L, callAt0901, 2L, 3L), merged.map { it.messageId })
+        assertEquals(2, added)
+        val (again, none) = HistoryBundleCodec.mergeRows(merged, listOf(call))
+        assertEquals(merged, again)
+        assertEquals(0, none)
+    }
+
+    @Test
+    fun `a call row never lands after a row still being sent`() {
+        val sending = chat(0, ack = Ack.PENDING).copy(createdAt = "2026-11-23T09:05:00Z")
+        val held = listOf(chat(1).copy(createdAt = "2026-11-23T09:00:00Z"), sending)
+        val call = ChatMessage(callAt0901, Direction.System, "Declined", createdAt = "2026-11-23T09:10:00Z")
+        assertEquals(listOf(1L, callAt0901, 0L), mergeHistoryRows(held, listOf(call)).map { it.messageId })
     }
 
     @Test

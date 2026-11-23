@@ -170,8 +170,10 @@ public interface OneToOneCallPort<S : OneToOneCallSession> {
      * fake sessions has no conversation to write into. [startedAtMs] is when
      * the call began ringing or was dialled (`docs/ux/navigation.md` section
      * 6.2 lists calls by it); `null` when this host never saw it start.
+     * [callIdHex] names the call, from which the row's id is derived (the
+     * same call recorded twice keeps one row).
      */
-    public fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?) {
+    public fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?, callIdHex: String?) {
         // No conversation store attached.
     }
 }
@@ -1363,13 +1365,14 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
                 durationSecs = callDurationSecs(s.connectedAtMs, clock()),
             ),
             startedAtMs = s.startedAtMs,
+            callIdHex = s.callIdHex,
         )
     }
 
     /** Write one row, never letting a transcript failure break a call teardown. */
-    private fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?) {
+    private fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?, callIdHex: String?) {
         try {
-            port?.recordCall(groupIdHex, entry, startedAtMs)
+            port?.recordCall(groupIdHex, entry, startedAtMs, callIdHex)
         } catch (error: Throwable) {
             warn("call host: recording the call row failed", error)
         }
@@ -1387,6 +1390,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
             entry = CallTranscriptEntry(outcome = outcome, video = offer.media.video),
             // When the offer was held is not kept; the row's time stands in.
             startedAtMs = null,
+            callIdHex = callIdHexOf(offer.callId),
         )
     }
 

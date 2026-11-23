@@ -488,10 +488,17 @@ public class ChatRepository(
         adoptHistoryBundle(account, slots)
     }
 
+    /** The kind a history bundle's calls are filed under: the group's when
+     *  this device holds it ([groupKind]), else none. */
+    private val historyKindOf: (String) -> ConversationKind? = { hex ->
+        groupKind(hex)?.let(::conversationKindOf)
+    }
+
     init {
         // After the property above: a history bundle landing while this
         // repository runs comes here.
         me.lakko.app.devices.HistoryBundleCodec.liveLogSink = historyBundleSink
+        me.lakko.app.devices.HistoryBundleCodec.conversationKindOf = historyKindOf
         // ADR-0091 phase 2 route 1 — another device of this account asks to
         // be brought back into a conversation.
         me.lakko.app.devices.sync.DeviceGroupSyncRepository.conversationReentrySink = { envelope, _ ->
@@ -12854,6 +12861,9 @@ public class ChatRepository(
         if (me.lakko.app.devices.HistoryBundleCodec.liveLogSink === historyBundleSink) {
             me.lakko.app.devices.HistoryBundleCodec.liveLogSink = null
         }
+        if (me.lakko.app.devices.HistoryBundleCodec.conversationKindOf === historyKindOf) {
+            me.lakko.app.devices.HistoryBundleCodec.conversationKindOf = null
+        }
         if (chatClientLazy.isInitialized()) chatClient.close()
         if (dsClientLazy.isInitialized()) dsClient.close()
         if (discoveryLazy.isInitialized()) discovery.close()
@@ -16912,7 +16922,9 @@ public class ChatRepository(
                         accountIdB64,
                         kept,
                         hex,
-                    ) { row, author -> reentryBundleRow(row, author, ownKey, route) }
+                    ) { row, author ->
+                        if (reentryBundleKeepsRow(row, route)) reentryBundleRow(row, author, ownKey, route) else null
+                    }
                 },
                 received = { record, applied ->
                     // From the store, not the in-memory flow: after a
@@ -18208,9 +18220,20 @@ public class ChatRepository(
         groupIdHex: String,
         entry: me.lakko.app.calls.CallTranscriptEntry,
         startedAtMs: Long? = null,
+        callIdHex: String? = null,
     ) {
         val record = groups[groupIdHex] ?: return
         val accountIdB64 = currentAccountIdB64.get()
+        val now = java.time.Instant.now()
+        // The row's id is the call's, as on web: a device the row reaches by
+        // a history bundle names it alike, and recording one call twice keeps
+        // one row. No call id: a stable hash, never the small counter.
+        val rowId = me.lakko.app.calls.callRowMessageId(callIdHex)
+            ?: me.lakko.app.calls.fallbackCallRowMessageId(
+                groupIdHex,
+                startedAtMs?.toString() ?: now.toString(),
+            )
+        if (record.holdsMessage(rowId)) return
         // The one-time fill from past calls must see the transcripts as they
         // were BEFORE this call's row: it files each row it finds and the index
         // keeps no ids, so a fill that runs after a live record (the first
@@ -18219,8 +18242,7 @@ public class ChatRepository(
         // twice. The snapshot is taken here, before the append; the disk work
         // stays off this thread.
         val pastBeforeThisCall = takeCallHistoryFillSnapshot(accountIdB64)
-        val now = java.time.Instant.now()
-        record.appendCallRow(entry, createdAt = now.toString())
+        if (!record.appendCallRow(entry, createdAt = now.toString(), messageId = rowId)) return
         publishThreadList()
         // docs/ux/navigation.md section 6.2 — the Calls screen reads an index
         // written when the row is, never a walk of every transcript. Written on
@@ -18238,6 +18260,13 @@ public class ChatRepository(
                 ) { pastBeforeThisCall }
             }
             recordCallHistoryEntry(accountIdB64, groupIdHex, entry, filedAtMs)
+            // Filed now: a history bundle that carries this row back
+            // ([me.lakko.app.calls.CallHistoryStore.fileCallRows]) files nothing more.
+            me.lakko.app.calls.CallHistoryStore.markCallRowsFiled(
+                applicationContext,
+                accountIdB64,
+                listOf(me.lakko.app.calls.callRowFiledKey(groupIdHex, rowId)),
+            )
         }
     }
 
@@ -18311,7 +18340,9 @@ public class ChatRepository(
      * taken. [me.lakko.app.calls.CallHistoryStore.backfillOnce] still runs the
      * fill once per account ever.
      */
-    private fun takeCallHistoryFillSnapshot(accountIdB64: String?): List<me.lakko.app.calls.CallHistoryEntry>? {
+    private fun takeCallHistoryFillSnapshot(
+        accountIdB64: String?,
+    ): List<Pair<String, me.lakko.app.calls.CallHistoryEntry>>? {
         if (accountIdB64 == null || !callHistoryFillSnapshotTaken.add(accountIdB64)) return null
         return pastCallEntries()
     }
@@ -18320,11 +18351,11 @@ public class ChatRepository(
      * Every finished call this device still holds a transcript row for,
      * oldest first so the fold that files them keeps the newest.
      */
-    private fun pastCallEntries(): List<me.lakko.app.calls.CallHistoryEntry> {
+    private fun pastCallEntries(): List<Pair<String, me.lakko.app.calls.CallHistoryEntry>> {
         val snapshot: List<Pair<String, List<ChatMessage>>> = synchronized(groups) {
             groups.map { (hex, record) -> hex to record.snapshot() }
         }
-        val found = mutableListOf<me.lakko.app.calls.CallHistoryEntry>()
+        val found = mutableListOf<Pair<String, me.lakko.app.calls.CallHistoryEntry>>()
         for ((hex, messages) in snapshot) {
             val kind = conversationKind(hex)
             for (message in messages) {
@@ -18332,7 +18363,7 @@ public class ChatRepository(
                 // A row whose time cannot be read has no place in a list whose
                 // whole order is time, so it is left where it already is.
                 val at = me.lakko.app.ui.chat.parseMessageTimeMs(message.createdAt) ?: continue
-                found += me.lakko.app.calls.CallHistoryEntry(
+                found += me.lakko.app.calls.callRowFiledKey(hex, message.messageId) to me.lakko.app.calls.CallHistoryEntry(
                     conversationIdHex = hex.lowercase(),
                     kind = kind,
                     outcome = call.outcome,
@@ -18342,7 +18373,7 @@ public class ChatRepository(
                 )
             }
         }
-        return found.sortedBy { it.startedAtMs }
+        return found.sortedBy { it.second.startedAtMs }
     }
 
     /** Capture `(cursor, messages)` per known group + write
@@ -18422,6 +18453,8 @@ public class ChatRepository(
      * bundle reached the disk cost nothing.
      */
     private fun adoptHistoryBundle(accountIdB64: String, slots: Map<String, PersistedGroup>) {
+        // The bundle's call rows were filed in the Calls list when the bundle
+        // was written to the log ([me.lakko.app.devices.HistoryBundleCodec.writeBundleTo]).
         synchronized(groups) {
             if (messageLogAccount != accountIdB64) return
             for ((groupIdHex, slot) in slots) {
@@ -18938,7 +18971,15 @@ public enum class Direction { Outgoing, Incoming, System }
  * one key bring the timeline down.
  */
 internal fun nextLocalRowId(messages: List<ChatMessage>): Long =
-    minOf(0L, messages.minOfOrNull { it.rowId } ?: 0L) - 1
+    // A call row's id is derived from its call id ([me.lakko.app.calls.callRowMessageId])
+    // and lies far below the counter: counting below it would run the counter
+    // into those ids and, from [Long.MIN_VALUE], wrap to a positive one.
+    minOf(
+        0L,
+        messages.asSequence().map { it.rowId }
+            .filter { it >= me.lakko.app.calls.LOCAL_COUNTER_FLOOR }
+            .minOrNull() ?: 0L,
+    ) - 1
 
 /** Internal per-group record holding the live MLS handle +
  *  the timeline mutations the StateFlow surfaces.
@@ -20049,6 +20090,9 @@ private class GroupRecord(
     /** Read-only snapshot for the persistence layer. */
     fun snapshot(): List<ChatMessage> = messages.toList()
 
+    /** A row with [messageId] is in the timeline. */
+    fun holdsMessage(messageId: Long): Boolean = synchronized(messages) { messages.any { it.messageId == messageId } }
+
     /** ADR-0087 section 9 — the record stays a little longer than what it
      *  showed: a log persist of another group writes this one from here. */
     fun wipeTimeline() {
@@ -20118,30 +20162,35 @@ private class GroupRecord(
      * finished call to the end of the timeline.
      *
      * The row is local, so it needs an id no DS row will ever take. The DS
-     * assigns strictly positive message ids, so local rows count **downwards
-     * from zero**: a call row can therefore never collide with a journal row,
-     * can never be the target of a peer's edit or delete op (nothing addresses a
-     * negative id, and the row carries no author so the ADR-0023 gate would
-     * refuse anyway), and stays unique across a relaunch because the counter is
-     * re-derived from the lowest id already in the restored transcript.
+     * assigns strictly positive message ids, and [messageId] is the call's
+     * ([me.lakko.app.calls.callRowMessageId]: the top bit and the call id's
+     * first eight bytes, as on web), so it is negative: a call row never
+     * collides with a journal row, is never the target of a peer's edit or
+     * delete op (nothing addresses a negative id, and the row carries no
+     * author so the ADR-0023 gate would refuse anyway), is named alike by
+     * every device a history bundle carries it to, and is written once
+     * however often the call is recorded (`false` when it is already here).
      *
      * Appended rather than inserted by time: a call that has just ended is the
      * newest thing in the conversation, which is where the DS journal order puts
      * it too.
      */
-    fun appendCallRow(entry: me.lakko.app.calls.CallTranscriptEntry, createdAt: String) {
+    fun appendCallRow(entry: me.lakko.app.calls.CallTranscriptEntry, createdAt: String, messageId: Long): Boolean =
         synchronized(messages) {
+            // The id is the call's ([me.lakko.app.calls.callRowMessageId]): the
+            // same call recorded twice keeps one row.
+            if (messages.any { it.messageId == messageId }) return@synchronized false
             messages.add(
                 ChatMessage(
-                    messageId = nextLocalId(),
+                    messageId = messageId,
                     direction = Direction.System,
                     text = me.lakko.app.calls.callRowText(entry),
                     createdAt = createdAt,
                     call = entry,
                 ),
             )
+            true
         }
-    }
 
     /**
      * ADR-0073 phase 2 / UX 16.3 — append a local system row ("{name} reset

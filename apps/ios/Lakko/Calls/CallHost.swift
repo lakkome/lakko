@@ -672,7 +672,8 @@ final class CallHost: ObservableObject {
             groupIdHex: groupIdHex,
             row: row,
             video: video,
-            startedAtMs: callStartedAtMs ?? ports.nowMs()))
+            startedAtMs: callStartedAtMs ?? ports.nowMs(),
+            callId: session.callId))
     }
 
     /// The session's end reason as the transcript's own vocabulary. `error`

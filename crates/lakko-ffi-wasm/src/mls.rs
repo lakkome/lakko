@@ -4443,6 +4443,95 @@ pub(crate) fn build_history_bundle_proto(
 // web TS layer already maps these onto its string union).
 // ============================================================================
 
+/// How a call row ended: the one numbering every client and the
+/// conversation vault use (`lakko_mls::history_placeholder::CallRecordOutcome`).
+/// The JS values ARE the frozen wire bytes. Map a client's own call outcome
+/// onto this enum, never onto hand-copied numbers.
+///
+/// An outgoing call that never connected and was not refused is `Outgoing`
+/// with no duration. A declined or failed call carries no direction.
+#[wasm_bindgen]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallRecordOutcome {
+    /// This account placed the call. A duration when media flowed.
+    Outgoing = 1,
+    /// This account answered the call and media flowed.
+    Incoming = 2,
+    /// An incoming call nobody answered. Never a duration.
+    Missed = 3,
+    /// Refused on purpose by either side. Never a duration.
+    Declined = 4,
+    /// Answered, and media never flowed. Never a duration.
+    Failed = 5,
+}
+
+impl From<CallRecordOutcome> for lakko_mls::history_placeholder::CallRecordOutcome {
+    fn from(o: CallRecordOutcome) -> Self {
+        match o {
+            CallRecordOutcome::Outgoing => Self::Outgoing,
+            CallRecordOutcome::Incoming => Self::Incoming,
+            CallRecordOutcome::Missed => Self::Missed,
+            CallRecordOutcome::Declined => Self::Declined,
+            CallRecordOutcome::Failed => Self::Failed,
+        }
+    }
+}
+
+impl From<lakko_mls::history_placeholder::CallRecordOutcome> for CallRecordOutcome {
+    fn from(o: lakko_mls::history_placeholder::CallRecordOutcome) -> Self {
+        use lakko_mls::history_placeholder::CallRecordOutcome as O;
+        match o {
+            O::Outgoing => Self::Outgoing,
+            O::Incoming => Self::Incoming,
+            O::Missed => Self::Missed,
+            O::Declined => Self::Declined,
+            O::Failed => Self::Failed,
+        }
+    }
+}
+
+impl From<CallRecordOutcome> for lakko_vault::record::VaultCallOutcome {
+    fn from(o: CallRecordOutcome) -> Self {
+        match o {
+            CallRecordOutcome::Outgoing => Self::Outgoing,
+            CallRecordOutcome::Incoming => Self::Incoming,
+            CallRecordOutcome::Missed => Self::Missed,
+            CallRecordOutcome::Declined => Self::Declined,
+            CallRecordOutcome::Failed => Self::Failed,
+        }
+    }
+}
+
+impl From<lakko_vault::record::VaultCallOutcome> for CallRecordOutcome {
+    fn from(o: lakko_vault::record::VaultCallOutcome) -> Self {
+        use lakko_vault::record::VaultCallOutcome as O;
+        match o {
+            O::Outgoing => Self::Outgoing,
+            O::Incoming => Self::Incoming,
+            O::Missed => Self::Missed,
+            O::Declined => Self::Declined,
+            O::Failed => Self::Failed,
+        }
+    }
+}
+
+// The JS values are the wire bytes, and the history bundle and the vault
+// number a call's outcome alike.
+const _: () = {
+    use lakko_mls::history_placeholder::CallRecordOutcome as H;
+    use lakko_vault::record::VaultCallOutcome as V;
+    assert!(H::Outgoing.tag() == CallRecordOutcome::Outgoing as u8);
+    assert!(H::Incoming.tag() == CallRecordOutcome::Incoming as u8);
+    assert!(H::Missed.tag() == CallRecordOutcome::Missed as u8);
+    assert!(H::Declined.tag() == CallRecordOutcome::Declined as u8);
+    assert!(H::Failed.tag() == CallRecordOutcome::Failed as u8);
+    assert!(H::Outgoing.tag() == V::Outgoing.to_wire());
+    assert!(H::Incoming.tag() == V::Incoming.to_wire());
+    assert!(H::Missed.tag() == V::Missed.to_wire());
+    assert!(H::Declined.tag() == V::Declined.to_wire());
+    assert!(H::Failed.tag() == V::Failed.to_wire());
+};
+
 fn direction_from_u8(tag: u8) -> Result<lakko_mls::history_placeholder::HistoryDirection, JsValue> {
     use lakko_mls::history_placeholder::HistoryDirection as D;
     match tag {
@@ -4682,9 +4771,15 @@ fn bounded_history_extras(
 /// `content` (ADR-0092) is the `ContentMessage` of a poll / checklist /
 /// location / contact card / article message, or `undefined`.
 ///
-/// `authorKey` (version 6, ADR-0091 live walk 3), the last argument, is the
-/// author's 32-byte key as this device stored it, or `undefined`; a key of
-/// any other length is dropped.
+/// `authorKey` (version 6, ADR-0091 live walk 3) is the author's 32-byte
+/// key as this device stored it, or `undefined`; a key of any other length
+/// is dropped.
+///
+/// `callOutcome` / `callVideo` / `callDurationSecs` (version 7), the last
+/// three arguments, record a call row: present when `callOutcome` is;
+/// `callVideo` defaults to `false`; `callDurationSecs` is whole seconds of
+/// media, `undefined` when none flowed, and is dropped on any outcome other
+/// than `Outgoing` or `Incoming`.
 #[wasm_bindgen(js_name = encodeHistoryPlaceholder)]
 #[allow(clippy::too_many_arguments)]
 pub fn encode_history_placeholder(
@@ -4702,6 +4797,9 @@ pub fn encode_history_placeholder(
     forward_origin_message: Option<i64>,
     content: Option<crate::content::JsContentMessage>,
     author_key: Option<Vec<u8>>,
+    call_outcome: Option<CallRecordOutcome>,
+    call_video: Option<bool>,
+    call_duration_secs: Option<u32>,
 ) -> Result<Vec<u8>, JsValue> {
     use lakko_mls::history_placeholder::{
         HistoryAttachmentPlaceholder, HistoryMessagePlaceholder, HistoryThumbPlaceholder,
@@ -4771,6 +4869,14 @@ pub fn encode_history_placeholder(
         forward,
         content,
         author_key: author_key.and_then(|k| <[u8; 32]>::try_from(k.as_slice()).ok()),
+        call: call_outcome.map(|o| {
+            let outcome = lakko_mls::history_placeholder::CallRecordOutcome::from(o);
+            lakko_mls::history_placeholder::HistoryCallPlaceholder {
+                outcome,
+                video: call_video.unwrap_or(false),
+                duration_secs: call_duration_secs.filter(|_| outcome.may_carry_duration()),
+            }
+        }),
     };
     msg.encode().map_err(mls_err)
 }
@@ -4929,6 +5035,7 @@ pub struct OpenedHistoryPlaceholder {
     forward_val: Option<lakko_mls::history_placeholder::HistoryForwardPlaceholder>,
     content_val: JsValue,
     author_key_val: Option<Vec<u8>>,
+    call_val: Option<lakko_mls::history_placeholder::HistoryCallPlaceholder>,
 }
 
 #[wasm_bindgen]
@@ -5009,6 +5116,27 @@ impl OpenedHistoryPlaceholder {
     pub fn author_key(&self) -> Option<Vec<u8>> {
         self.author_key_val.clone()
     }
+
+    /// Version 7 — how a call row ended, or `undefined` for any other row.
+    #[wasm_bindgen(getter, js_name = callOutcome)]
+    pub fn call_outcome(&self) -> Option<CallRecordOutcome> {
+        self.call_val.map(|c| c.outcome.into())
+    }
+
+    /// Version 7 — whether a call row was a video call; `undefined` for any
+    /// other row.
+    #[wasm_bindgen(getter, js_name = callVideo)]
+    pub fn call_video(&self) -> Option<bool> {
+        self.call_val.map(|c| c.video)
+    }
+
+    /// Version 7 — how long media flowed in a call row, whole seconds;
+    /// `undefined` when none flowed or for any other row (read
+    /// `callOutcome` first).
+    #[wasm_bindgen(getter, js_name = callDurationSecs)]
+    pub fn call_duration_secs(&self) -> Option<u32> {
+        self.call_val.and_then(|c| c.duration_secs)
+    }
 }
 
 /// Decode canonical `payload_bytes` (produced by
@@ -5035,6 +5163,7 @@ pub fn decode_history_placeholder(bytes: &[u8]) -> Result<OpenedHistoryPlacehold
     });
     Ok(OpenedHistoryPlaceholder {
         author_key_val: msg.author_key.map(|k| k.to_vec()),
+        call_val: msg.call,
         channel_invite_val,
         reply_val,
         forward_val,
@@ -6418,6 +6547,9 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
+            None,
         )
         .expect("encodes");
         let back = super::decode_history_placeholder(&bytes).expect("decodes");
@@ -6448,6 +6580,9 @@ mod tests {
                 None,
                 None,
                 key,
+                None,
+                None,
+                None,
             )
             .expect("encodes")
         };
@@ -6457,6 +6592,62 @@ mod tests {
         let none =
             super::decode_history_placeholder(&encode(Some(vec![0x44; 5]))).expect("decodes");
         assert_eq!(none.author_key(), None);
+    }
+
+    /// Version 7 — a call row survives the history bundle; a duration on a
+    /// call where media never flowed is dropped.
+    #[test]
+    fn a_call_row_survives_the_history_bundle() {
+        use super::CallRecordOutcome as O;
+        let encode = |outcome: Option<O>, video: Option<bool>, secs: Option<u32>| {
+            super::encode_history_placeholder(
+                11,
+                2,
+                "2026-11-23T10:00:00Z",
+                "",
+                Vec::new(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                outcome,
+                video,
+                secs,
+            )
+            .expect("encodes")
+        };
+        let read = |bytes: Vec<u8>| {
+            let back = super::decode_history_placeholder(&bytes).expect("decodes");
+            (
+                back.call_outcome(),
+                back.call_video(),
+                back.call_duration_secs(),
+            )
+        };
+        assert_eq!(
+            read(encode(Some(O::Outgoing), Some(true), Some(42))),
+            (Some(O::Outgoing), Some(true), Some(42))
+        );
+        assert_eq!(
+            read(encode(Some(O::Incoming), None, Some(0))),
+            (Some(O::Incoming), Some(false), Some(0))
+        );
+        assert_eq!(
+            read(encode(Some(O::Outgoing), None, None)),
+            (Some(O::Outgoing), Some(false), None)
+        );
+        assert_eq!(
+            read(encode(Some(O::Missed), Some(false), Some(9))),
+            (Some(O::Missed), Some(false), None)
+        );
+        assert_eq!(read(encode(None, Some(true), Some(9))), (None, None, None));
+        assert_eq!(O::Outgoing as u8, 1);
+        assert_eq!(O::Failed as u8, 5);
     }
 
     #[test]

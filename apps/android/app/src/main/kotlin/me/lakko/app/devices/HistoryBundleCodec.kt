@@ -10,6 +10,7 @@ import android.util.Log
 import me.lakko.app.chat.MessageLogPayload
 import me.lakko.app.chat.MessageLogStore
 import me.lakko.app.chat.PersistedAttachment
+import me.lakko.app.chat.PersistedCall
 import me.lakko.app.chat.PersistedForward
 import me.lakko.app.chat.PersistedGroup
 import me.lakko.app.chat.PersistedMessage
@@ -17,7 +18,10 @@ import me.lakko.app.chat.PersistedReply
 import me.lakko.app.chat.PersistedThumb
 import me.lakko.app.chat.bundleFloor
 import me.lakko.app.chat.higherFloor
+import me.lakko.app.chat.toTranscriptEntry
+import uniffi.lakko_ffi_uniffi.CallRecordOutcome
 import uniffi.lakko_ffi_uniffi.HistoryAttachment
+import uniffi.lakko_ffi_uniffi.HistoryCall
 import uniffi.lakko_ffi_uniffi.HistoryForward
 import uniffi.lakko_ffi_uniffi.HistoryMessageDirection
 import uniffi.lakko_ffi_uniffi.HistoryPlaceholder
@@ -222,14 +226,15 @@ public object HistoryBundleCodec {
      * device's: given the decoded row (the SENDER's direction) and the
      * author the placeholder names (walk 3, W3-R3; base64, `null` when it
      * names none), it sets the author and the direction
-     * ([me.lakko.app.chat.reentryBundleRow]).
+     * ([me.lakko.app.chat.reentryBundleRow]), or returns `null` to leave the
+     * row out ([me.lakko.app.chat.reentryBundleKeepsRow]).
      */
     public fun applyReentryBundle(
         context: Context,
         accountIdB64: String,
         opened: uniffi.lakko_ffi_uniffi.StructuredHistoryBundle,
         groupIdHex: String,
-        adapt: (row: PersistedMessage, authorKeyB64: String?) -> PersistedMessage,
+        adapt: (row: PersistedMessage, authorKeyB64: String?) -> PersistedMessage?,
     ): ReentryBundleApplied {
         val group = opened.groups.firstOrNull { bytesToHex(it.groupId).equals(groupIdHex, ignoreCase = true) }
             ?: return ReentryBundleApplied(0, emptyList(), false)
@@ -242,14 +247,7 @@ public object HistoryBundleCodec {
                 null
             }
         }
-        val existing = MessageLogStore.getLog(context, accountIdB64)
-            ?: MessageLogPayload(version = 1, groups = emptyMap())
-        val merged = mergeBundle(existing.groups, mapOf(groupIdHex.lowercase() to rows))
-        MessageLogStore.putLog(
-            context = context,
-            accountIdB64 = accountIdB64,
-            payload = MessageLogPayload(version = existing.version, groups = merged.groups),
-        )
+        val merged = writeBundle(context, accountIdB64, mapOf(groupIdHex.lowercase() to rows))
         liveLogSink?.invoke(accountIdB64, merged.opened)
         return ReentryBundleApplied(
             applied = merged.applied,
@@ -273,9 +271,6 @@ public object HistoryBundleCodec {
             secret = secret,
             sealedBytes = sealedBytes,
         )
-        val existing = MessageLogStore.getLog(context, accountIdB64)
-            ?: MessageLogPayload(version = 1, groups = emptyMap())
-
         val decoded = opened.groups.associate { g ->
             bytesToHex(g.groupId) to g.messages.mapNotNull { m ->
                 // G-6 step 2: decode the canonical cross-platform
@@ -289,21 +284,89 @@ public object HistoryBundleCodec {
                 }
             }
         }
-        val merged = mergeBundle(existing.groups, decoded)
-
-        MessageLogStore.putLog(
-            context = context,
-            accountIdB64 = accountIdB64,
-            payload = MessageLogPayload(
-                version = existing.version,
-                groups = merged.groups,
-            ),
-        )
+        val merged = writeBundle(context, accountIdB64, decoded)
         // A chat layer already running keeps the whole log in memory and
         // rewrites it from there, so it has to be told what just landed.
         liveLogSink?.invoke(accountIdB64, merged.opened)
         return merged.applied
     }
+
+    /**
+     * Write a bundle's [decoded] rows into the account's message log, and the
+     * call rows among them into the Calls list at the same moment
+     * (`docs/ux/navigation.md` section 6.2: the list is an index written when
+     * the call row is). Whether or not a chat layer runs: a bundle that
+     * reaches only the disk still files its calls.
+     */
+    private fun writeBundle(
+        context: Context,
+        accountIdB64: String,
+        decoded: Map<String, List<PersistedMessage>>,
+    ): MergedBundle = writeBundleTo(
+        existing = MessageLogStore.getLog(context, accountIdB64),
+        decoded = decoded,
+        putLog = { MessageLogStore.putLog(context = context, accountIdB64 = accountIdB64, payload = it) },
+        fileCalls = { me.lakko.app.calls.CallHistoryStore.fileCallRows(context, accountIdB64, it) },
+        kindOf = { hex -> conversationKindOf?.invoke(hex) },
+    )
+
+    /** [writeBundle] with its two stores passed in. The log is written
+     *  first, then the bundle's call rows are filed ([bundleCallEntries]);
+     *  the store files each key once, so a bundle written twice files
+     *  nothing more. */
+    internal fun writeBundleTo(
+        existing: MessageLogPayload?,
+        decoded: Map<String, List<PersistedMessage>>,
+        putLog: (MessageLogPayload) -> Unit,
+        fileCalls: (List<Pair<String, me.lakko.app.calls.CallHistoryEntry>>) -> Unit,
+        kindOf: (String) -> me.lakko.app.chat.ConversationKind?,
+    ): MergedBundle {
+        val held = existing ?: MessageLogPayload(version = 1, groups = emptyMap())
+        val merged = mergeBundle(held.groups, decoded)
+        putLog(MessageLogPayload(version = held.version, groups = merged.groups))
+        val calls = bundleCallEntries(merged.opened.mapValues { it.value.messages }, kindOf)
+        if (calls.isNotEmpty()) fileCalls(calls)
+        return merged
+    }
+
+    /**
+     * The Calls list entries for the call rows of a bundle, each keyed by its
+     * conversation and row id ([me.lakko.app.calls.callRowFiledKey]) so it is
+     * filed once. Its time is the row's; its kind the group's when this
+     * device holds the group, else a group (the Calls screen reads the kind
+     * from the group itself once it is held).
+     */
+    internal fun bundleCallEntries(
+        rowsByGroup: Map<String, List<PersistedMessage>>,
+        kindOf: (String) -> me.lakko.app.chat.ConversationKind?,
+    ): List<Pair<String, me.lakko.app.calls.CallHistoryEntry>> {
+        val out = mutableListOf<Pair<String, me.lakko.app.calls.CallHistoryEntry>>()
+        for ((hex, rows) in rowsByGroup) {
+            val calls = rows.mapNotNull { row ->
+                val call = row.call?.toTranscriptEntry() ?: return@mapNotNull null
+                val at = me.lakko.app.ui.chat.parseMessageTimeMs(row.createdAt) ?: return@mapNotNull null
+                Triple(row.messageId, call, at)
+            }
+            if (calls.isEmpty()) continue
+            val kind = kindOf(hex) ?: me.lakko.app.chat.ConversationKind.Group
+            for ((rowId, call, at) in calls) {
+                out += me.lakko.app.calls.callRowFiledKey(hex, rowId) to me.lakko.app.calls.CallHistoryEntry(
+                    conversationIdHex = hex.lowercase(),
+                    kind = kind,
+                    outcome = call.outcome,
+                    video = call.video,
+                    startedAtMs = at,
+                    durationSecs = call.durationSecs,
+                )
+            }
+        }
+        return out
+    }
+
+    /** The kind of a conversation this device holds (set by the running chat
+     *  layer), `null` when none runs or it does not hold the group. */
+    @Volatile
+    public var conversationKindOf: ((groupIdHex: String) -> me.lakko.app.chat.ConversationKind?)? = null
 
     /**
      * Where a bundle goes when the chat layer of its account is running
@@ -358,23 +421,30 @@ public object HistoryBundleCodec {
 
     /**
      * The rows of one group after a bundle's [incoming] rows are merged into
-     * the [held] ones, sorted by message id, and how many were added. A
+     * the [held] ones ([me.lakko.app.chat.placeBundleRows]: server rows by
+     * id, call rows by time), and how many were added. A
      * bookkeeping row from a sender that still carries them is dropped (it is
      * nothing the person reads), and a message id already held is kept as
      * held.
      */
     internal fun mergeRows(held: List<PersistedMessage>, incoming: List<PersistedMessage>): Pair<List<PersistedMessage>, Int> {
         val ids = held.map { it.messageId }.toMutableSet()
-        val merged = held.toMutableList()
-        var added = 0
+        val fresh = mutableListOf<PersistedMessage>()
         for (row in incoming) {
             if (isBookkeepingSystemRow(row)) continue
             if (!ids.add(row.messageId)) continue
-            merged += row
-            added += 1
+            fresh += row
         }
-        merged.sortBy { it.messageId }
-        return merged to added
+        // The same placement as the rows in memory ([me.lakko.app.chat.mergeHistoryRows]):
+        // a call row lands at its time, not first by its negative id.
+        val merged = me.lakko.app.chat.placeBundleRows(
+            held = held,
+            fresh = fresh,
+            idOf = { it.messageId },
+            timeOf = { me.lakko.app.ui.chat.parseMessageTimeMs(it.createdAt) },
+            settled = { true },
+        )
+        return merged to fresh.size
     }
 
     /** A system row the receive loop files for an MLS commit or an
@@ -483,8 +553,35 @@ public object HistoryBundleCodec {
             // folded state, so the new device draws the card, not a blank.
             content = me.lakko.app.chat.historyContentOf(m),
             authorKey = bundleAuthorKey(m, ownAuthorKeyB64),
+            // Placeholder version 7 — a finished call travels as itself, so
+            // the new device draws the same call row (and files it in the
+            // Calls list). Before this the row reached the new device as its
+            // bare text, or not at all.
+            call = m.call?.let(::historyCallOf),
         )
     }
+
+    /**
+     * A stored call record as the placeholder's call; `null` for an outcome
+     * this build does not know (the row then travels as its text alone).
+     * A duration outside `UInt` is dropped rather than wrapped; the core
+     * drops it too on any outcome but outgoing and incoming.
+     */
+    internal fun historyCallOf(c: PersistedCall): HistoryCall? {
+        val outcome = CallRecordOutcome.entries.firstOrNull { it.name.equals(c.outcome, ignoreCase = true) }
+            ?: return null
+        val duration = c.durationSecs?.takeIf { it in 0L..UInt.MAX_VALUE.toLong() }?.toUInt()
+        return HistoryCall(outcome = outcome, video = c.video, durationSecs = duration)
+    }
+
+    /** A placeholder's call as the stored record: the outcome by its name,
+     *  as [me.lakko.app.chat.PersistedCall.outcome] stores a
+     *  [me.lakko.app.calls.CallOutcome]. */
+    internal fun persistedCallOf(c: HistoryCall): PersistedCall = PersistedCall(
+        outcome = c.outcome.name.lowercase(java.util.Locale.ROOT),
+        video = c.video,
+        durationSecs = c.durationSecs?.toLong(),
+    )
 
     /** Decode canonical placeholder bytes (from any platform) back
      *  into a local-store message row. Throws on malformed input;
@@ -494,6 +591,7 @@ public object HistoryBundleCodec {
     /** A decoded placeholder as the local-store row, the invitation card and
      *  the reply and forward included. */
     internal fun persistedOf(placeholder: HistoryPlaceholder): PersistedMessage {
+        placeholder.call?.let { return callRowOf(placeholder, it) }
         val attachments = placeholder.attachments.map { a ->
             PersistedAttachment(
                 blobIdB64 = Base64.encodeToString(a.blobId, Base64.NO_WRAP),
@@ -549,6 +647,28 @@ public object HistoryBundleCodec {
             } else {
                 null
             },
+        )
+    }
+
+    /**
+     * A placeholder that carries a call record is a call row, whatever its
+     * text and direction say: web sends one with empty text, and another
+     * build may say anything. The row is rebuilt from the record alone, as
+     * [me.lakko.app.chat.ChatRepository.recordCallRow] writes a live one: a
+     * system row naming nobody, its words in this device's interface
+     * language, nothing else carried. The message id stays the sender's, so a
+     * bundle applied twice adds the row once ([mergeRows]).
+     */
+    private fun callRowOf(placeholder: HistoryPlaceholder, call: HistoryCall): PersistedMessage {
+        val stored = persistedCallOf(call)
+        val text = stored.toTranscriptEntry()?.let { me.lakko.app.calls.callRowText(it) } ?: ""
+        return PersistedMessage(
+            messageId = placeholder.messageId.toLong(),
+            direction = "system",
+            text = text,
+            attachments = emptyList(),
+            createdAt = placeholder.createdAt,
+            call = stored,
         )
     }
 

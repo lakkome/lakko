@@ -53,6 +53,16 @@ import { historyMediaFromPersisted, persistedMediaFromOpened } from "./history-m
 import { b64UrlDecode, b64UrlEncode, inlineThumbFromPersisted } from "../chat/persisted-attachment";
 import { isInlineThumbJpeg } from "../media/visual-media";
 import { fileHistoryRows } from "../chat/background-log";
+import type { CallLogEntry } from "../calls/call-log";
+import {
+  callDurationSecsForBundle,
+  callEntryFromHistory,
+  callHistoryMessageId,
+  callRecordOutcomeOf,
+  fileHistoryCallEntries,
+  loadCallLogForBundle,
+} from "../calls/call-log-history";
+import type { CallLogData } from "../calls/call-log-store";
 import {
   loadMessageLog,
   MESSAGE_LOG_VERSION,
@@ -106,8 +116,16 @@ export async function buildHistoryBundleFromLog(args: {
   readonly secret: Uint8Array;
 }): Promise<Uint8Array | null> {
   const log = await loadMessageLog(args.accountIdB64, args.deviceKey);
-  if (log === null) return null;
-  const groupHexes = Object.keys(log.groups);
+  // `docs/ux/calls.md` section 6 — this account's call rows travel too
+  // (placeholder version 7). They live in their own log on web.
+  let callLog: CallLogData | null = null;
+  try {
+    callLog = await loadCallLogForBundle(args.accountIdB64, args.deviceKey);
+  } catch {
+    callLog = null;
+  }
+  const callsByHex = callRowsByGroupHex(callLog);
+  const groupHexes = [...new Set([...Object.keys(log?.groups ?? {}), ...callsByHex.keys()])];
   if (groupHexes.length === 0) return null;
 
   const wasm = await loadWasm();
@@ -126,15 +144,35 @@ export async function buildHistoryBundleFromLog(args: {
   let skipped = 0;
 
   for (const hex of groupHexes) {
-    const slot = log.groups[hex];
-    if (slot === undefined) continue;
+    const slot = log?.groups[hex];
     const groupIdBytes = hexToBytes(hex);
     if (groupIdBytes === null) continue;
-    const carried = slot.messages.filter((m) => !isBookkeepingSystemRow(m));
-    const trimmed = carried.slice(-perGroupCap);
-    const capped = trimmed.length < carried.length;
+    const carried = (slot?.messages ?? []).filter((m) => !isBookkeepingSystemRow(m));
+    // Messages and calls compete for the group's share by time, newest kept.
+    const merged = mergeRowsAndCalls(carried, callsByHex.get(hex) ?? []);
+    const trimmed = merged.slice(-perGroupCap);
+    const capped = trimmed.length < merged.length;
     const messages: HistoryMessageInput[] = [];
-    for (const m of trimmed) {
+    for (const item of trimmed) {
+      if (item.kind === "call") {
+        const call = callPlaceholderOrNull(wasm, item.call);
+        if (call === null) {
+          skipped += 1;
+          continue;
+        }
+        // A call row's id is not a Delivery Service id: it never moves the
+        // bundle's high-water mark.
+        messages.push(
+          new wasm.HistoryMessageInput(
+            call.placeholder,
+            /* sender_leaf */ 0,
+            bigIntToBeBytes(call.messageId),
+            BigInt(Math.max(0, Math.floor(item.call.startedAtMs))),
+          ),
+        );
+        continue;
+      }
+      const m = item.row;
       // G-6 step 2: `payload_bytes` is now the canonical
       // cross-platform placeholder produced by the shared Rust
       // core (`encodeHistoryPlaceholder`), identical bytes to
@@ -209,7 +247,9 @@ export async function applyHistoryBundleToLog(args: {
 }): Promise<number> {
   const wasm = await loadWasm();
   const opened = wasm.openHistoryBundleStructured(args.secret, args.sealedBytes);
-  return fileOpenedHistoryBundle(wasm, opened, args);
+  // A pairing bundle comes from a device of this same account, so its call
+  // rows are from this account's seat and go to the call log.
+  return fileOpenedHistoryBundle(wasm, opened, { ...args, calls: "file" });
 }
 
 /** File an already-opened bundle into the log (the body of
@@ -221,6 +261,10 @@ async function fileOpenedHistoryBundle(
     readonly accountIdB64: string;
     readonly deviceKey: DeviceCipher;
     readonly adapt?: (row: PersistedMessage) => PersistedMessage;
+    /** What to do with call rows: `file` them into the call log (a bundle
+     *  from a device of this account) or `drop` them (a bundle from another
+     *  account's seat). */
+    readonly calls: "file" | "drop";
   },
 ): Promise<number> {
   const openedGroups = opened.groups() as unknown[];
@@ -229,34 +273,67 @@ async function fileOpenedHistoryBundle(
     readonly hex: string;
     readonly rows: readonly PersistedMessage[];
     readonly newest: bigint | null;
+    /** The group carried call rows and nothing else: no message slot is
+     *  made for it. */
+    readonly callsOnly: boolean;
   }[] = [];
+  const callsByGroup = new Map<string, CallLogEntry[]>();
   for (const g of openedGroups) {
     const group = g as OpenedHistoryGroup;
     const rows: PersistedMessage[] = [];
     let newest: bigint | null = null;
+    let sawCall = false;
+    let sawMessage = false;
+    const groupIdB64 = base64Encode(group.groupId);
     for (const m of group.messages() as unknown[]) {
-      const decoded = decodeMessagePlaceholder(wasm, m as OpenedHistoryMessage);
+      const decoded = decodeHistoryRow(wasm, m as OpenedHistoryMessage);
       if (decoded === null) continue;
-      const id = safeBigInt(decoded.messageId);
+      if (decoded.kind === "call") {
+        // A call row's id is not a Delivery Service id: it never sets the
+        // history floor and never enters the message log.
+        sawCall = true;
+        if (args.calls === "file") {
+          const list = callsByGroup.get(groupIdB64) ?? [];
+          list.push(decoded.entry);
+          callsByGroup.set(groupIdB64, list);
+        }
+        continue;
+      }
+      sawMessage = true;
+      const row = decoded.row;
+      const id = safeBigInt(row.messageId);
       if (id !== null && (newest === null || id > newest)) newest = id;
       // A sender older than this rule (or another client) may carry them.
-      if (isBookkeepingSystemRow(decoded)) continue;
-      rows.push(args.adapt === undefined ? decoded : args.adapt(decoded));
+      if (isBookkeepingSystemRow(row)) continue;
+      rows.push(args.adapt === undefined ? row : args.adapt(row));
     }
-    bundled.push({ hex: bytesToHex(group.groupId), rows, newest });
+    bundled.push({ hex: bytesToHex(group.groupId), rows, newest, callsOnly: sawCall && !sawMessage });
   }
 
   let applied = 0;
-  await updateMessageLog(args.accountIdB64, args.deviceKey, (current) => {
-    const groups: { [hex: string]: PersistedGroup } = { ...(current?.groups ?? {}) };
-    applied = 0;
-    for (const { hex, rows, newest } of bundled) {
-      const filed = fileHistoryRows(groups[hex], rows, newest);
-      groups[hex] = filed.slot;
-      applied += filed.added;
+  if (bundled.some((b) => !b.callsOnly)) {
+    await updateMessageLog(args.accountIdB64, args.deviceKey, (current) => {
+      const groups: { [hex: string]: PersistedGroup } = { ...(current?.groups ?? {}) };
+      applied = 0;
+      for (const { hex, rows, newest, callsOnly } of bundled) {
+        if (callsOnly) continue;
+        const filed = fileHistoryRows(groups[hex], rows, newest);
+        groups[hex] = filed.slot;
+        applied += filed.added;
+      }
+      return { version: current?.version ?? MESSAGE_LOG_VERSION, groups };
+    });
+  }
+  if (callsByGroup.size > 0) {
+    try {
+      applied += await fileHistoryCallEntries(args.accountIdB64, args.deviceKey, callsByGroup);
+    } catch (err) {
+      // The messages are filed; a call log that cannot be written costs the
+      // call rows only.
+      // eslint-disable-next-line no-console
+      console.warn("history bundle: call rows could not be filed", err);
     }
-    return { version: current?.version ?? MESSAGE_LOG_VERSION, groups };
-  });
+  }
   return applied;
 }
 
@@ -408,6 +485,7 @@ export async function applyGapHistoryBundle(args: {
     const group = g as OpenedHistoryGroup;
     if (group.countCapped) complete = false;
     for (const m of group.messages() as unknown[]) {
+      // A call row is not a message of the gap (and never shown as one).
       const decoded = decodeMessagePlaceholder(wasm, m as OpenedHistoryMessage);
       if (decoded === null) continue;
       const t = rowMs(decoded);
@@ -415,7 +493,13 @@ export async function applyGapHistoryBundle(args: {
       if (!isBookkeepingSystemRow(decoded)) rows.push(adapt(decoded));
     }
   }
-  const applied = await fileOpenedHistoryBundle(wasm, opened, { ...args, adapt });
+  // Call rows are from the sending account's seat: filed only when this
+  // account's own device sent the bundle. Web never puts them in one.
+  const applied = await fileOpenedHistoryBundle(wasm, opened, {
+    ...args,
+    adapt,
+    calls: args.route === "own-device" ? "file" : "drop",
+  });
   return { applied, complete, earliestMs, rows };
 }
 
@@ -670,18 +754,49 @@ function contentMessageForBundle(
 }
 
 /** Decode canonical placeholder bytes back into a local-store
- *  message row. Returns `null` on any malformed payload. Exported for the
+ *  message row. Returns `null` on any malformed payload, and for a call row
+ *  (which is not a message: {@link decodeHistoryRow}). Exported for the
  *  tests. */
 export function decodeMessagePlaceholder(
   wasm: Wasm,
   m: OpenedHistoryMessage,
 ): PersistedMessage | null {
+  const decoded = decodeHistoryRow(wasm, m);
+  return decoded?.kind === "message" ? decoded.row : null;
+}
+
+/** One bundled row: a message for the message log, or a call for the call
+ *  log (placeholder version 7). */
+export type DecodedHistoryRow =
+  | { readonly kind: "message"; readonly row: PersistedMessage }
+  | { readonly kind: "call"; readonly entry: CallLogEntry };
+
+/** Decode one bundled row. `null` on any malformed payload, and for a call
+ *  row this build cannot use. Exported for the tests. */
+export function decodeHistoryRow(wasm: Wasm, m: OpenedHistoryMessage): DecodedHistoryRow | null {
   let opened: OpenedHistoryPlaceholder;
   try {
     opened = wasm.decodeHistoryPlaceholder(m.payloadBytes);
   } catch {
     return null;
   }
+  const callOutcome = opened.callOutcome;
+  if (callOutcome !== undefined) {
+    const entry = callEntryFromHistory(
+      wasm,
+      opened.messageId,
+      opened.createdAt,
+      callOutcome,
+      opened.callVideo,
+      opened.callDurationSecs,
+    );
+    return entry === null ? null : { kind: "call", entry };
+  }
+  const row = messageRowOf(opened);
+  return row === null ? null : { kind: "message", row };
+}
+
+function messageRowOf(opened: OpenedHistoryPlaceholder): PersistedMessage | null {
   const attachments: PersistedAttachment[] = (
     opened.attachments as unknown as OpenedHistoryAttachment[]
   ).map((a) => ({
@@ -741,6 +856,109 @@ export function decodeMessagePlaceholder(
     ...(content === undefined ? {} : { content }),
     ...(contentState === undefined || contentState === null ? {} : { contentState }),
   };
+}
+
+// ---- call rows (docs/ux/calls.md section 6, placeholder version 7) ----
+
+/** The call log's groups keyed by group hex (the message log's key). */
+function callRowsByGroupHex(log: CallLogData | null): Map<string, readonly CallLogEntry[]> {
+  const out = new Map<string, readonly CallLogEntry[]>();
+  if (log === null) return out;
+  for (const [groupIdB64, list] of log.groups) {
+    if (list.length === 0) continue;
+    let bytes: Uint8Array;
+    try {
+      bytes = base64Decode(groupIdB64);
+    } catch {
+      continue;
+    }
+    if (bytes.length === 0) continue;
+    out.set(bytesToHex(bytes), list);
+  }
+  return out;
+}
+
+type BundleItem =
+  | { readonly kind: "message"; readonly row: PersistedMessage }
+  | { readonly kind: "call"; readonly call: CallLogEntry };
+
+/**
+ * A group's messages (oldest first, the log's order) and its calls (any
+ * order) in one list, oldest first. A message keeps its place among messages;
+ * a message with no time takes the previous one's; a call that ties with a
+ * message goes after it (the timeline's own rule, `chat/call-timeline.ts`).
+ * Pure; exported for the tests.
+ */
+export function mergeRowsAndCalls(
+  messages: readonly PersistedMessage[],
+  calls: readonly CallLogEntry[],
+): BundleItem[] {
+  const pending = [...calls].sort((a, b) => a.startedAtMs - b.startedAtMs);
+  const out: BundleItem[] = [];
+  let last = Number.NEGATIVE_INFINITY;
+  let next = 0;
+  for (const row of messages) {
+    const t = rowMs(row);
+    if (Number.isFinite(t)) last = t;
+    while (next < pending.length && (pending[next] as CallLogEntry).startedAtMs < last) {
+      out.push({ kind: "call", call: pending[next] as CallLogEntry });
+      next += 1;
+    }
+    out.push({ kind: "message", row });
+  }
+  for (; next < pending.length; next += 1) out.push({ kind: "call", call: pending[next] as CallLogEntry });
+  return out;
+}
+
+/** The placeholder bytes of one call row and the id it is carried under. */
+export function encodeCallPlaceholder(
+  wasm: Wasm,
+  entry: CallLogEntry,
+): { readonly placeholder: Uint8Array; readonly messageId: bigint } {
+  const messageId = callHistoryMessageId(entry.id);
+  const placeholder = wasm.encodeHistoryPlaceholder(
+    messageId,
+    DIRECTION_SYSTEM,
+    new Date(entry.startedAtMs).toISOString(),
+    "",
+    [],
+    undefined, // channel invitation
+    undefined, // reply target
+    undefined, // reply author
+    undefined, // reply excerpt
+    undefined, // forwarded from
+    undefined, // forward origin group
+    undefined, // forward origin message
+    undefined, // content
+    undefined, // author: a call row names nobody
+    callRecordOutcomeOf(wasm, entry.outcome),
+    entry.video,
+    callDurationSecsForBundle(entry),
+  );
+  return { placeholder, messageId };
+}
+
+function callPlaceholderOrNull(
+  wasm: Wasm,
+  entry: CallLogEntry,
+): { readonly placeholder: Uint8Array; readonly messageId: bigint } | null {
+  if (!Number.isFinite(entry.startedAtMs) || entry.startedAtMs < 0) return null;
+  try {
+    return encodeCallPlaceholder(wasm, entry);
+  } catch {
+    return null;
+  }
+}
+
+/** A u64 as the 8 big-endian bytes `HistoryMessage.message_id` carries. */
+function bigIntToBeBytes(value: bigint): Uint8Array {
+  const out = new Uint8Array(8);
+  let v = value & 0xff_ff_ff_ff_ff_ff_ff_ffn;
+  for (let i = 7; i >= 0; i -= 1) {
+    out[i] = Number(v & 0xffn);
+    v >>= 8n;
+  }
+  return out;
 }
 
 /** Serialize a decimal message-id string as the 8-byte

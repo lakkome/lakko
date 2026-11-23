@@ -90,9 +90,9 @@ fn full(id: u64) -> VaultMessage {
             emoji: "+".into(),
         }],
         call: Some(VaultCall {
-            outcome: 2,
+            outcome: VaultCallOutcome::Incoming,
             video: true,
-            duration_secs: 60,
+            duration_secs: Some(60),
         }),
         unsupported_version: Some(9),
         content: Some(VaultContent {
@@ -211,7 +211,7 @@ fn minimal_message_bytes(id: u64) -> Vec<u8> {
 
 #[test]
 fn a_minimal_chunk_is_pinned() {
-    let mut expected = vec![0x03, 0x00, 0x01];
+    let mut expected = vec![0x04, 0x00, 0x01];
     expected.extend_from_slice(&minimal_message_bytes(12));
     assert_eq!(minimal_message_bytes(12).len(), MIN_MESSAGE_LEN);
     let chunk = chunk_of(minimal(12));
@@ -221,8 +221,8 @@ fn a_minimal_chunk_is_pinned() {
     let empty = HistoryChunk {
         messages: Vec::new(),
     };
-    assert_eq!(empty.encode().unwrap(), [0x03, 0x00, 0x00]);
-    assert_eq!(HistoryChunk::decode(&[0x03, 0x00, 0x00]).unwrap(), empty);
+    assert_eq!(empty.encode().unwrap(), [0x04, 0x00, 0x00]);
+    assert_eq!(HistoryChunk::decode(&[0x04, 0x00, 0x00]).unwrap(), empty);
 }
 
 fn full_attachment_bytes() -> Vec<u8> {
@@ -297,6 +297,7 @@ fn full_message_bytes(id: u64) -> Vec<u8> {
     b.push(1); // call present
     b.push(2); // outcome
     b.push(1); // video
+    b.push(1); // duration present
     b.extend_from_slice(&60u32.to_be_bytes()); // duration_secs
     b.push(1); // unsupported_version present
     b.extend_from_slice(&9u32.to_be_bytes());
@@ -311,7 +312,7 @@ fn full_message_bytes(id: u64) -> Vec<u8> {
 
 #[test]
 fn a_full_message_is_pinned() {
-    let mut expected = vec![0x03, 0x00, 0x01];
+    let mut expected = vec![0x04, 0x00, 0x01];
     expected.extend_from_slice(&full_message_bytes(40));
     let chunk = chunk_of(full(40));
     assert_eq!(chunk.encode().unwrap(), expected);
@@ -321,7 +322,7 @@ fn a_full_message_is_pinned() {
 
 #[test]
 fn a_head_is_pinned() {
-    let mut e = vec![0x03]; // version
+    let mut e = vec![0x04]; // version
     e.extend_from_slice(&[0x01, 0x02, 0x02, 0xC1, 0xC1]); // ref: group, 2-byte id
     e.push(2); // kind: group
     e.extend_from_slice(&[0, 1]); // title_len
@@ -378,7 +379,7 @@ fn a_devices_head_and_an_index_are_pinned() {
             },
         ],
     };
-    let mut e = vec![0x03, 0x02];
+    let mut e = vec![0x04, 0x02];
     e.extend_from_slice(&4u64.to_be_bytes());
     e.extend_from_slice(&[0x44; 32]);
     e.extend_from_slice(&1u32.to_be_bytes());
@@ -392,10 +393,10 @@ fn a_devices_head_and_an_index_are_pinned() {
     let none = DevicesHead {
         reentry: Vec::new(),
     };
-    assert_eq!(none.encode().unwrap(), [0x03, 0x00]);
-    assert_eq!(DevicesHead::decode(&[0x03, 0x00]).unwrap(), none);
+    assert_eq!(none.encode().unwrap(), [0x04, 0x00]);
+    assert_eq!(DevicesHead::decode(&[0x04, 0x00]).unwrap(), none);
 
-    let mut e = vec![0x03];
+    let mut e = vec![0x04];
     e.extend_from_slice(&2u32.to_be_bytes()); // entry_count
     e.extend_from_slice(&[0x01, 0x02, 0x02, 0xC1, 0xC1]); // ref: group
     e.extend_from_slice(&7u64.to_be_bytes());
@@ -408,7 +409,7 @@ fn a_devices_head_and_an_index_are_pinned() {
     let empty = VaultIndex {
         entries: Vec::new(),
     };
-    assert_eq!(empty.encode().unwrap(), [0x03, 0, 0, 0, 0]);
+    assert_eq!(empty.encode().unwrap(), [0x04, 0, 0, 0, 0]);
 }
 
 // --- round trips ------------------------------------------------------
@@ -976,7 +977,7 @@ fn versions_trailing_bytes_and_truncation() {
         assert_eq!(decode(good), Ok(()));
         assert_eq!(decode(&[]), Err(RecordError::Truncated));
 
-        for version in [0x00, 0x01, 0x02, 0x04, 0xFF] {
+        for version in [0x00, 0x01, 0x02, 0x03, 0xFF] {
             let mut bytes = good.clone();
             bytes[0] = version;
             assert_eq!(decode(&bytes), Err(RecordError::UnknownVersion));
@@ -1110,27 +1111,27 @@ fn a_count_larger_than_the_input_is_refused_before_allocation() {
     // 512 messages declared, none present.
     let declared = u16::try_from(MAX_CHUNK_MESSAGES).unwrap().to_be_bytes();
     assert_eq!(
-        HistoryChunk::decode(&[0x03, declared[0], declared[1]]),
+        HistoryChunk::decode(&[0x04, declared[0], declared[1]]),
         Err(RecordError::Truncated)
     );
     // One past the bound reports the bound, with or without the bytes.
     let declared = u16::try_from(MAX_CHUNK_MESSAGES + 1).unwrap().to_be_bytes();
     assert_eq!(
-        HistoryChunk::decode(&[0x03, declared[0], declared[1]]),
+        HistoryChunk::decode(&[0x04, declared[0], declared[1]]),
         Err(RecordError::Messages)
     );
     assert_eq!(
-        HistoryChunk::decode(&[0x03, 0xFF, 0xFF]),
+        HistoryChunk::decode(&[0x04, 0xFF, 0xFF]),
         Err(RecordError::Messages)
     );
 
     // An index declaring 65536 entries in five bytes.
     let declared = u32::try_from(MAX_INDEX_ENTRIES).unwrap().to_be_bytes();
-    let mut bytes = vec![0x03];
+    let mut bytes = vec![0x04];
     bytes.extend_from_slice(&declared);
     assert_eq!(VaultIndex::decode(&bytes), Err(RecordError::Truncated));
     assert_eq!(
-        VaultIndex::decode(&[0x03, 0xFF, 0xFF, 0xFF, 0xFF]),
+        VaultIndex::decode(&[0x04, 0xFF, 0xFF, 0xFF, 0xFF]),
         Err(RecordError::Entries)
     );
 
@@ -1319,4 +1320,67 @@ fn a_reentry_epoch_keeps_its_access_seed_out_of_debug() {
     };
     let shown = format!("{epoch:?}");
     assert!(!shown.contains("a7") && !shown.contains("A7") && !shown.contains("167"));
+}
+
+#[test]
+fn a_call_row_keeps_no_duration_apart_from_zero_and_refuses_a_duration_without_media() {
+    for outcome in VaultCallOutcome::ALL {
+        let durations: &[Option<u32>] = if outcome.may_carry_duration() {
+            &[None, Some(0), Some(u32::MAX)]
+        } else {
+            &[None]
+        };
+        for &duration_secs in durations {
+            let mut m = minimal(5);
+            m.call = Some(VaultCall {
+                outcome,
+                video: false,
+                duration_secs,
+            });
+            let chunk = chunk_of(m);
+            let bytes = chunk.encode().unwrap();
+            assert_eq!(HistoryChunk::decode(&bytes).unwrap(), chunk);
+        }
+        if !outcome.may_carry_duration() {
+            let mut m = minimal(5);
+            m.call = Some(VaultCall {
+                outcome,
+                video: false,
+                duration_secs: Some(1),
+            });
+            assert_eq!(m.validate(), Err(RecordError::Call));
+            assert_eq!(chunk_of(m).encode(), Err(RecordError::Call));
+        }
+    }
+}
+
+#[test]
+fn a_call_outcome_byte_outside_one_to_five_is_refused() {
+    let mut m = minimal(5);
+    m.call = Some(VaultCall {
+        outcome: VaultCallOutcome::Missed,
+        video: false,
+        duration_secs: None,
+    });
+    let good = chunk_of(m).encode().unwrap();
+    // From the end: no content, no unsupported_version, the duration
+    // presence byte, video, then the outcome byte.
+    let at = good.len() - 5;
+    assert_eq!(good[at], 3);
+    for byte in [0u8, 6, 0xFF] {
+        let mut bad = good.clone();
+        bad[at] = byte;
+        assert_eq!(HistoryChunk::decode(&bad), Err(RecordError::UnknownOption));
+    }
+    // A duration on a missed call is refused on decode.
+    let mut bad = good;
+    bad[at + 2] = 1;
+    bad.splice(at + 3..at + 3, 7u32.to_be_bytes());
+    assert_eq!(HistoryChunk::decode(&bad), Err(RecordError::Call));
+}
+
+#[test]
+fn the_call_outcome_bytes_are_frozen() {
+    let bytes: Vec<u8> = VaultCallOutcome::ALL.iter().map(|o| o.to_wire()).collect();
+    assert_eq!(bytes, [1, 2, 3, 4, 5]);
 }

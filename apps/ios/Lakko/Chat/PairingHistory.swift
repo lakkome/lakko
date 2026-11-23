@@ -31,34 +31,64 @@ enum PairingHistory {
         [a, b].compactMap { $0 }.max()
     }
 
-    /// `rows` taken into the log rows `held`, in id order: a row already held
-    /// stays as held. Returns how many were added.
+    /// `rows` taken into the log rows `held`: a row already held stays as
+    /// held. Rows the server numbered go in id order; a row a device made
+    /// locally (a call row, its id not the server's) goes where its time puts
+    /// it (``placeLocalRows(_:into:time:stopsAt:)``). Returns how many were
+    /// added.
     static func mergeLogRows(
         _ held: [PersistedMessage], _ rows: [PersistedMessage]
     ) -> (rows: [PersistedMessage], added: Int) {
         var ids = Set(held.map(\.messageId))
         let fresh = rows.filter { ids.insert($0.messageId).inserted }
-        return ((held + fresh).sorted { $0.messageId < $1.messageId }, fresh.count)
+        let all = held + fresh
+        var out = all.filter { $0.messageId > 0 }.sorted { $0.messageId < $1.messageId }
+        placeLocalRows(all.filter { $0.messageId <= 0 }, into: &out, time: \.createdAt, stopsAt: { _ in false })
+        return (out, fresh.count)
     }
 
     /// `held`, the rows of a live record, with a bundle's `bundle` rows taken
     /// in: a row already held stays as held, each new row goes before the
     /// first held row with a higher id (and before a row the server has not
     /// named yet), and a row the sender made locally (a call row, its id not
-    /// the server's) goes first, as the log's order by id keeps it.
+    /// the server's) goes where its time puts it, as a live call row does.
     static func mergeLiveRows(held: [ChatMessage], bundle: [ChatMessage]) -> [ChatMessage] {
         var ids = Set(held.map(\.messageId))
         let fresh = bundle.filter { ids.insert($0.messageId).inserted }
-        var out = fresh.filter { $0.messageId <= 0 }
-        var from = out.count
-        out += held
+        var out = held
+        var from = 0
         for row in fresh.filter({ $0.messageId > 0 }).sorted(by: { $0.messageId < $1.messageId }) {
             var at = from
             while at < out.count, out[at].messageId <= row.messageId, out[at].ack == .sent { at += 1 }
             out.insert(row, at: at)
             from = at + 1
         }
+        placeLocalRows(
+            fresh.filter { $0.messageId <= 0 }, into: &out, time: \.createdAt, stopsAt: { $0.ack != .sent })
         return out
+    }
+
+    /// Put `locals` into `out` by time, oldest first: each before the first
+    /// row of `out` at its time or later, and before the first row `stopsAt`
+    /// names (a row the server has not named yet). A row whose time cannot be
+    /// read goes first, in the order given.
+    static func placeLocalRows<Row>(
+        _ locals: [Row], into out: inout [Row], time: KeyPath<Row, String>, stopsAt: (Row) -> Bool
+    ) {
+        let timed = locals.map { (row: $0, ms: DsTimestamp.parseMs($0[keyPath: time])) }
+        var unknown = 0
+        for entry in timed where entry.ms == nil {
+            out.insert(entry.row, at: unknown)
+            unknown += 1
+        }
+        let known = timed.compactMap { e in e.ms.map { (row: e.row, ms: $0) } }
+        for entry in known.enumerated().sorted(by: { ($0.element.ms, $0.offset) < ($1.element.ms, $1.offset) }) {
+            let at = out.indices.first { i in
+                i >= unknown && (stopsAt(out[i])
+                    || (DsTimestamp.parseMs(out[i][keyPath: time]).map { $0 >= entry.element.ms } ?? false))
+            } ?? out.count
+            out.insert(entry.element.row, at: at)
+        }
     }
 
     /// A polled row that is already held from a bundle: the same row came

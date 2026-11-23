@@ -22,6 +22,11 @@ import Foundation
 /// to agree on and nothing for a server to carry (the two rows differ by
 /// design — one is outgoing, the other incoming).
 ///
+/// The one exception is the history bundle a device added to the account
+/// receives: there a row travels as the placeholder's call record (version 7,
+/// ``HistoryBundleCodec/historyCall(from:)``), never as this marker, and is
+/// numbered from the call id (``logMessageId(callId:)``) as on every client.
+///
 /// It is stored as an ordinary system row in the chat timeline, which means it
 /// is persisted by the encrypted message log along with every other message
 /// and survives a relaunch by exactly the same route. The row's `text` is the
@@ -194,6 +199,31 @@ public struct CallTranscriptRow: Equatable, Sendable {
     }
 
     // MARK: - Storage
+
+    /// The message id of a call's row: the top bit set over the low 63 bits
+    /// of the call id's first 8 bytes (big-endian), read as a signed number,
+    /// so negative like every row a device makes locally. Every client
+    /// numbers a call's row this way (web `callHistoryMessageId`), so the
+    /// same call carried by two history bundles is one row, and it never
+    /// meets an id the Delivery Service assigned (positive). `nil` for an id
+    /// shorter than 8 bytes.
+    public static func logMessageId(callId: Data) -> Int64? {
+        guard callId.count >= 8 else { return nil }
+        let high = callId.prefix(8).reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+        return Int64(bitPattern: high | 0x8000_0000_0000_0000)
+    }
+
+    /// The message id of a call's row when the call id is unknown: the same
+    /// shape over a 64-bit FNV-1a of `stableKey` (the web client's fallback),
+    /// so the same call recorded twice gets one id and no counter is used.
+    public static func logMessageId(stableKey: String) -> Int64 {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for unit in stableKey.utf16 {
+            hash ^= UInt64(unit)
+            hash = hash &* 0x0000_0100_0000_01b3
+        }
+        return Int64(bitPattern: hash | 0x8000_0000_0000_0000)
+    }
 
     /// The prefix every call row's stored text starts with. Nothing else in
     /// the timeline may begin with it.

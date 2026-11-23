@@ -238,6 +238,48 @@ public fun callHistoryWith(
     return callHistoryOrdered(existing + entry, max)
 }
 
+/**
+ * The list after a call that came from another device of this account (a
+ * history bundle, placeholder version 7) is added. A transcript row carries
+ * no call id, so the same call is recognised by its conversation, outcome,
+ * mode and time: a bundle that lands twice, or a bundle row the one-time
+ * fill already filed, files nothing more.
+ */
+public fun callHistoryWithRestored(
+    existing: List<CallHistoryEntry>,
+    entry: CallHistoryEntry,
+    max: Int = CALL_HISTORY_MAX,
+): List<CallHistoryEntry> {
+    val held = existing.any {
+        it.callIdHex == null &&
+            it.conversationIdHex.equals(entry.conversationIdHex, ignoreCase = true) &&
+            it.outcome == entry.outcome &&
+            it.video == entry.video &&
+            it.startedAtMs == entry.startedAtMs
+    }
+    if (held) return callHistoryOrdered(existing, max)
+    return callHistoryWith(existing, entry, max)
+}
+
+/** The key a call row is filed under: its conversation and its message id
+ *  (an old row's small local id is unique only inside its conversation). */
+public fun callRowFiledKey(conversationIdHex: String, messageId: Long): String =
+    "${conversationIdHex.lowercase()}:$messageId"
+
+/** How many filed call row ids are kept; the oldest go first (chosen, not
+ *  measured: far above [CALL_HISTORY_MAX], so a row still in the list is
+ *  never forgotten). */
+public const val CALL_ROWS_FILED_MAX: Int = 10_000
+
+/** The filed call row ids as stored: comma-separated, oldest first, the
+ *  newest [CALL_ROWS_FILED_MAX] kept. */
+public fun encodeCallRowsFiled(filed: Collection<String>): String =
+    filed.toList().takeLast(CALL_ROWS_FILED_MAX).joinToString(",")
+
+/** [encodeCallRowsFiled] read back; an empty item is skipped. */
+public fun decodeCallRowsFiled(raw: String?): LinkedHashSet<String> =
+    raw.orEmpty().split(',').mapNotNullTo(LinkedHashSet()) { k -> k.trim().takeIf { it.isNotEmpty() } }
+
 /** [entries] in display order, capped at [max]. */
 public fun callHistoryOrdered(
     entries: List<CallHistoryEntry>,

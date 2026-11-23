@@ -77,24 +77,58 @@ internal fun composeMessageLog(
 /**
  * [held] with a bundle's [bundle] rows taken in: a row already held stays as
  * held, each new row goes before the first held row with a higher id (and
- * before a row the server has not named yet), and a row the sender made
- * locally (a call row, its id not the server's) goes first, as the log's
- * order by id keeps it.
+ * before a row the server has not named yet). A row the sender made locally
+ * (a call row: its id is not the server's) goes at its time among the rows,
+ * so a call at 09:01 sits between messages of 09:00 and 09:02; a local row
+ * whose time cannot be read goes first, as before.
  */
 internal fun mergeHistoryRows(held: List<ChatMessage>, bundle: List<ChatMessage>): List<ChatMessage> {
     val ids = held.mapTo(HashSet()) { it.messageId }
     val fresh = bundle.filter { ids.add(it.messageId) }
-    val (journal, local) = fresh.partition { it.messageId > 0 }
-    val out = ArrayList<ChatMessage>(held.size + fresh.size)
-    out += local
+    return placeBundleRows(
+        held = held,
+        fresh = fresh,
+        idOf = { it.messageId },
+        timeOf = { me.lakko.app.ui.chat.parseMessageTimeMs(it.createdAt) },
+        settled = { it.ack == Ack.SENT },
+    )
+}
+
+/**
+ * The one placement rule for rows a history bundle brings ([fresh], none of
+ * them already in [held]); [held] keeps its order.
+ *
+ *  - A server row (id above zero) goes, in id order, before the first held
+ *    row with a higher id or one not [settled] (still being sent).
+ *  - A local row (id zero or below: a call row) with a time goes, in time
+ *    order, before the first row with a later time or one not settled.
+ *  - A local row with no time goes first.
+ */
+internal fun <T> placeBundleRows(
+    held: List<T>,
+    fresh: List<T>,
+    idOf: (T) -> Long,
+    timeOf: (T) -> Long?,
+    settled: (T) -> Boolean,
+): List<T> {
+    val (journal, local) = fresh.partition { idOf(it) > 0 }
+    val (timed, timeless) = local.partition { timeOf(it) != null }
+    val out = ArrayList<T>(held.size + fresh.size)
+    out += timeless
     val base = out.size
     out += held
     var from = base
-    for (row in journal.sortedBy { it.messageId }) {
+    for (row in journal.sortedBy(idOf)) {
         var at = from
-        while (at < out.size && out[at].messageId <= row.messageId && out[at].ack == Ack.SENT) at += 1
+        while (at < out.size && idOf(out[at]) <= idOf(row) && settled(out[at])) at += 1
         out.add(at, row)
         from = at + 1
+    }
+    for (row in timed.sortedBy { timeOf(it) }) {
+        val t = timeOf(row) ?: continue
+        var at = base
+        while (at < out.size && settled(out[at]) && (timeOf(out[at])?.let { it <= t } ?: true)) at += 1
+        out.add(at, row)
     }
     return out
 }

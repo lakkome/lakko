@@ -181,8 +181,9 @@ public interface GroupCallPort {
     public fun createSession(request: GroupCallSessionRequest, ui: CallUiState): GroupCallSessionHandle
 
     /** `docs/ux/calls.md` section 6 - file the finished call's row in the conversation it happened in.
-     *  [startedAtMs] is when this device started or joined the call. */
-    public fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?)
+     *  [startedAtMs] is when this device started or joined the call; [callIdHex]
+     *  names the call, from which the row's id is derived. */
+    public fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?, callIdHex: String?)
 }
 
 /** The group call in the host's slot. */
@@ -905,7 +906,7 @@ public class GroupCallHost(
         release()
         val endedAtMs = callEndedAtMs(clock(), lastInbound)
         groupCallTranscriptEntry(a.initiator, a.video, a.connectedAtMs, endedAtMs)?.let { entry ->
-            p?.recordCall(a.groupIdHex, entry, a.startedAtMs)
+            p?.recordCall(a.groupIdHex, entry, a.startedAtMs, a.callIdHex)
         }
         val plan = planGroupCallLeave(
             reason = reason,

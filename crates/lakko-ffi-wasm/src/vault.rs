@@ -1075,13 +1075,19 @@ impl VaultMessage {
         Ok(self.try_add_reaction(reactor, emoji)?)
     }
 
-    /// The outcome of a call row: `outcome` as the clients number it (opaque
-    /// to the codec), whether it was a video call, and its length in
-    /// seconds.
+    /// The outcome of a call row: how it ended (numbered as in the history
+    /// bundle), whether it was a video call, and how long media flowed in
+    /// whole seconds (`undefined` when none did). A duration on a `Missed`,
+    /// `Declined` or `Failed` call is refused on encode (`call`).
     #[wasm_bindgen(js_name = setCall)]
-    pub fn set_call(&mut self, outcome: u8, video: bool, duration_secs: u32) {
+    pub fn set_call(
+        &mut self,
+        outcome: crate::mls::CallRecordOutcome,
+        video: bool,
+        duration_secs: Option<u32>,
+    ) {
         self.inner.call = Some(rec::VaultCall {
-            outcome,
+            outcome: outcome.into(),
             video,
             duration_secs,
         });
@@ -1255,8 +1261,8 @@ impl VaultMessage {
 
     /// The outcome of a call row; `undefined` for any other row.
     #[wasm_bindgen(getter, js_name = callOutcome)]
-    pub fn call_outcome(&self) -> Option<u8> {
-        self.inner.call.map(|c| c.outcome)
+    pub fn call_outcome(&self) -> Option<crate::mls::CallRecordOutcome> {
+        self.inner.call.map(|c| c.outcome.into())
     }
 
     /// Whether a call row was a video call.
@@ -1265,10 +1271,11 @@ impl VaultMessage {
         self.inner.call.map(|c| c.video)
     }
 
-    /// How long a call row lasted, in seconds.
+    /// How long media flowed in a call row, whole seconds; `undefined` when
+    /// none did or for any other row.
     #[wasm_bindgen(getter, js_name = callDurationSecs)]
     pub fn call_duration_secs(&self) -> Option<u32> {
-        self.inner.call.map(|c| c.duration_secs)
+        self.inner.call.and_then(|c| c.duration_secs)
     }
 
     /// The wire version the saving device could not read, when that is why
@@ -2099,7 +2106,7 @@ mod tests {
         m.set_reply(3, "Ann", "earlier");
         m.set_forward("Bob", Some(vec![0xF0; 32]), Some(9));
         m.try_add_reaction(&[0xB2; 32], "+1").unwrap();
-        m.set_call(2, true, 61);
+        m.set_call(crate::mls::CallRecordOutcome::Incoming, true, Some(61));
         m.set_unsupported_version(7);
         m
     }
@@ -2366,7 +2373,11 @@ mod tests {
         );
         assert_eq!(
             (m.call_outcome(), m.call_video(), m.call_duration_secs()),
-            (Some(2), Some(true), Some(61))
+            (
+                Some(crate::mls::CallRecordOutcome::Incoming),
+                Some(true),
+                Some(61)
+            )
         );
         assert_eq!(m.unsupported_version(), Some(7));
 

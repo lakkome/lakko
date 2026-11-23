@@ -130,12 +130,15 @@ class OneToOneCallHostTest {
         val recorded = mutableListOf<Pair<String, CallTranscriptEntry>>()
         /** When each recorded call started, in the order of [recorded]. */
         val recordedStarts = mutableListOf<Long?>()
+        /** The call each recorded row names, in the order of [recorded]. */
+        val recordedCallIds = mutableListOf<String?>()
         var keyDelayMs = 0L
         var keyAvailable = true
 
-        override fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?) {
+        override fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?, callIdHex: String?) {
             recorded += groupIdHex to entry
             recordedStarts += startedAtMs
+            recordedCallIds += callIdHex
         }
 
         override fun createSession(
@@ -1066,6 +1069,8 @@ class OneToOneCallHostTest {
         runCurrent()
 
         assertEquals(listOf<Long?>(t0), h.port.recordedStarts)
+        // The row names its call, so its id is the call's on every device.
+        assertEquals(listOf<String?>(callIdHexOf(call1)), h.port.recordedCallIds)
     }
 
     @Test
@@ -1137,6 +1142,8 @@ class OneToOneCallHostTest {
             listOf(groupA to CallTranscriptEntry(CallOutcome.MISSED, video = false, durationSecs = null)),
             h.port.recorded,
         )
+        // A held offer names its call too: the row has no session behind it.
+        assertEquals(listOf<String?>(callIdHexOf(call1)), h.port.recordedCallIds)
     }
 
     @Test

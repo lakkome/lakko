@@ -23,11 +23,15 @@
 //!
 //! Version 6 (ADR-0091 live walk 3): the author key (fixed 32 bytes) is the
 //! last field and round-trips with the rest.
+//!
+//! Version 7: the call record. Whatever decodes names one of the five
+//! frozen outcomes and carries a duration only on an outgoing or incoming
+//! call.
 
 #![no_main]
 
 use lakko_mls::history_placeholder::{
-    HistoryMessagePlaceholder, CONTENT_KINDS, MAX_AUDIO_TAG_BYTES, MAX_CHANNEL_INVITE_BYTES,
+    CallRecordOutcome, HistoryMessagePlaceholder, CONTENT_KINDS, MAX_AUDIO_TAG_BYTES, MAX_CHANNEL_INVITE_BYTES,
     MAX_CONTENT_PAYLOAD_BYTES, MAX_CONTENT_STATE_BYTES, MAX_ORIGIN_GROUP_BYTES,
     MAX_REPLY_EXCERPT_BYTES, MAX_SNAPSHOT_AUTHOR_BYTES,
 };
@@ -51,6 +55,10 @@ fuzz_target!(|data: &[u8]| {
             if let Some(origin) = &forward.origin {
                 assert!(!origin.group_id.is_empty() && origin.group_id.len() <= MAX_ORIGIN_GROUP_BYTES);
             }
+        }
+        if let Some(call) = &msg.call {
+            assert!(CallRecordOutcome::from_tag(call.outcome.tag()) == Some(call.outcome));
+            assert!(call.duration_secs.is_none() || call.outcome.may_carry_duration());
         }
         if let Some(c) = &msg.content {
             assert!(CONTENT_KINDS.contains(&c.kind));

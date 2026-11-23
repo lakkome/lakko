@@ -1114,6 +1114,17 @@ internal fun reentryBundleDirection(route: ReentryRouteKind, senderDirection: St
 }
 
 /**
+ * Whether a gap bundle row is taken in at all. A call row (placeholder
+ * version 7 carries the call) records the SENDER's own call: from a device of
+ * this account ([ReentryRouteKind.OWN_DEVICE]) it is this account's call and
+ * is kept; from anyone else's device it describes their call, not this
+ * person's ("Outgoing call" for a call this person never placed, with a call
+ * back button), so it is left out. Every other row is kept.
+ */
+internal fun reentryBundleKeepsRow(row: PersistedMessage, route: ReentryRouteKind): Boolean =
+    row.call == null || route == ReentryRouteKind.OWN_DEVICE
+
+/**
  * Walk 3, W3-R3 — a gap bundle row as this device keeps it. A placeholder
  * that names its author ([authorKeyB64], base64) gives the row that author
  * and the direction it has here: outgoing when the author is this account's

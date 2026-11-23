@@ -207,7 +207,15 @@ public fun CallsScreen(
                                 "${row.conversationIdHex ?: "call:" + row.callIdHex}-${row.startedAtMs}-$i"
                             },
                         ) { i ->
-                            val row = day.rows[i]
+                            // The kind is read from the group itself when this
+                            // device holds it: a call a history bundle filed
+                            // before its chat was joined carries none of its own.
+                            val row = day.rows[i].let { r ->
+                                val held = r.conversationIdHex?.let { c ->
+                                    runCatching { repository.groupKind(c) }.getOrNull()
+                                }
+                                if (held == null) r else r.copy(kind = me.lakko.app.chat.conversationKindOf(held))
+                            }
                             val conversation = row.conversationIdHex
                             val time = formatClockTime(row.startedAtMs, zone, use24h, locale)
                             if (conversation == null) {

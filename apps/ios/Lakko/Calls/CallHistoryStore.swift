@@ -136,6 +136,48 @@ public final class CallHistoryStore: ObservableObject {
         Self.save(backing: backing, accountIdB64: accountIdB64, entries: self.entries)
     }
 
+    /// File the call rows a history bundle has just written into the message
+    /// log, in the same step (`docs/ux/navigation.md` section 6.2: the index
+    /// is written when the row is, never found by a scan). Runs wherever the
+    /// bundle is filed, the chat repository running or not, so it writes the
+    /// stored index directly. An id already filed stays as it is, so a bundle
+    /// applied twice files each call once. A conversation the index already
+    /// knows keeps the kind it was filed under; otherwise the entry carries
+    /// `kind`, and the Calls screen reads the live kind of a conversation
+    /// this device holds. Returns what it added.
+    @discardableResult
+    nonisolated static func fileFromLog(
+        _ entries: [CallHistoryEntry],
+        accountIdB64: String,
+        backing: CallHistoryBacking = SealedCallHistoryBacking()
+    ) -> [CallHistoryEntry] {
+        guard !entries.isEmpty else { return [] }
+        let held = load(backing: backing, accountIdB64: accountIdB64)
+        var ids = Set(held.map(\.id))
+        var known: [String: CallHistoryKind] = [:]
+        for entry in held { if let c = entry.conversationId { known[c] = entry.kind } }
+        let added = entries.compactMap { entry -> CallHistoryEntry? in
+            guard ids.insert(entry.id).inserted, let conversation = entry.conversationId else { return nil }
+            return CallHistoryEntry(
+                id: entry.id, conversationId: conversation, kind: known[conversation] ?? entry.kind,
+                direction: entry.direction, outcome: entry.outcome, video: entry.video,
+                startedAtMs: entry.startedAtMs, durationMs: entry.durationMs)
+        }
+        guard !added.isEmpty else { return [] }
+        save(backing: backing, accountIdB64: accountIdB64, entries: CallHistory.ordered(held + added))
+        return added
+    }
+
+    /// Take in what ``fileFromLog(_:accountIdB64:backing:)`` filed behind
+    /// this store, so its next save does not write it away. Only for the
+    /// bound account; an id already here stays as it is.
+    func absorbFiled(_ filed: [CallHistoryEntry], accountIdB64: String) {
+        guard boundAccountIdB64 == accountIdB64, !filed.isEmpty else { return }
+        var next = entries
+        for entry in filed where !next.contains(where: { $0.id == entry.id }) { next.append(entry) }
+        entries = CallHistory.ordered(next)
+    }
+
     /// Forget the calls of one conversation this account is no longer in
     /// (ADR-0087 section 9).
     public func forget(conversationId: String) {
@@ -182,7 +224,7 @@ public final class CallHistoryStore: ObservableObject {
     /// An undecodable blob reads as no calls rather than as a failure: the
     /// index is a convenience over history that also lives in the
     /// conversations, so losing it costs a screen, never a record.
-    static func load(backing: CallHistoryBacking, accountIdB64: String) -> [CallHistoryEntry] {
+    nonisolated static func load(backing: CallHistoryBacking, accountIdB64: String) -> [CallHistoryEntry] {
         guard let data = backing.load(accountIdB64: accountIdB64),
               let decoded = try? JSONDecoder().decode([CallHistoryEntry].self, from: data)
         else { return [] }
@@ -208,7 +250,7 @@ public final class CallHistoryStore: ObservableObject {
     /// Not written once the account's session has ended
     /// (``AccountStoreGate``): a call that finishes after Forget device must
     /// not file a row back.
-    static func save(
+    nonisolated static func save(
         backing: CallHistoryBacking,
         accountIdB64: String,
         entries: [CallHistoryEntry]

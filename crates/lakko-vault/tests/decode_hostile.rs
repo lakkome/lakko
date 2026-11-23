@@ -12,8 +12,8 @@ use lakko_vault::keys::{ConversationRef, VaultRef, VaultRoot};
 use lakko_vault::record::{
     ChunkEntry, ConversationHead, ConversationKind, DevicesHead, Direction, HistoryChunk,
     IndexEntry, Membership, PersonalPin, ReentryEpoch, RegistrarSeed, Role, SharedPin,
-    VaultAttachment, VaultCall, VaultContent, VaultForward, VaultForwardOrigin, VaultIndex,
-    VaultMessage, VaultPerson, VaultReaction, VaultReply, VaultThumb,
+    VaultAttachment, VaultCall, VaultCallOutcome, VaultContent, VaultForward, VaultForwardOrigin,
+    VaultIndex, VaultMessage, VaultPerson, VaultReaction, VaultReply, VaultThumb,
 };
 use lakko_vault::seal::{open_object, seal_object, ObjectKind};
 use lakko_vault::{fuzz_api, proof, SecretBytes};
@@ -144,7 +144,7 @@ fn message() -> impl Strategy<Value = VaultMessage> {
         prop::collection::vec(attachment(), 0..3),
         (prop::option::of(reply()), prop::option::of(forward())),
         prop::collection::vec(reaction(), 0..4),
-        prop::option::of((any::<u8>(), any::<bool>(), any::<u32>())),
+        prop::option::of((0usize..5, any::<bool>(), any::<Option<u32>>())),
         (any::<Option<u32>>(), prop::option::of(content())),
     )
         .prop_map(
@@ -170,10 +170,13 @@ fn message() -> impl Strategy<Value = VaultMessage> {
                 reply,
                 forward,
                 reactions,
-                call: call.map(|(outcome, video, duration_secs)| VaultCall {
-                    outcome,
-                    video,
-                    duration_secs,
+                call: call.map(|(i, video, duration_secs)| {
+                    let outcome = VaultCallOutcome::ALL[i];
+                    VaultCall {
+                        outcome,
+                        video,
+                        duration_secs: duration_secs.filter(|_| outcome.may_carry_duration()),
+                    }
                 }),
                 unsupported_version,
                 content,

@@ -169,6 +169,32 @@ public struct CallHistoryEntry: Codable, Equatable, Identifiable, Sendable {
         }
     }
 
+    /// A call row of a conversation's log, as the index files it: keyed on
+    /// the conversation, the row's time (when the call ended) and the
+    /// direction. `nil` for a row that is not a readable call row or whose
+    /// time cannot be read: a list ordered by time has no place for it.
+    ///
+    /// Used by the one-time fill from past calls and for the call rows a
+    /// history bundle brings, which arrive after that fill has run; both key
+    /// a row the same way, so a row filed by one is replaced, not duplicated,
+    /// by the other.
+    static func fromLogRow(
+        conversationId: String, kind: CallHistoryKind, text: String, createdAt: String
+    ) -> CallHistoryEntry? {
+        guard let row = CallTranscriptRow.parse(text),
+              let at = ChatRepository.parseDsTimestampMs(createdAt) else { return nil }
+        let (outcome, durationMs) = Self.outcome(of: row)
+        return CallHistoryEntry(
+            id: "\(conversationId).\(at).\(row.direction.rawValue)",
+            conversationId: conversationId,
+            kind: kind,
+            direction: row.direction,
+            outcome: outcome,
+            video: row.video,
+            startedAtMs: at,
+            durationMs: durationMs)
+    }
+
     /// A missed or declined call is the one outcome the reader may want to act
     /// on, so the row carries the danger tint — the same rule the conversation
     /// already applies.
@@ -403,11 +429,17 @@ public struct FinishedCall: Equatable, Sendable {
     /// when media connected. A missed call has no connect time and still
     /// belongs on the list at the moment it happened.
     public let startedAtMs: Int64
+    /// The call's 16-byte id, which numbers the conversation's row
+    /// (``CallTranscriptRow/logMessageId(callId:)``); `nil` when unknown.
+    public let callId: Data?
 
-    public init(groupIdHex: String, row: CallTranscriptRow, video: Bool, startedAtMs: Int64) {
+    public init(
+        groupIdHex: String, row: CallTranscriptRow, video: Bool, startedAtMs: Int64, callId: Data? = nil
+    ) {
         self.groupIdHex = groupIdHex
         self.row = row
         self.video = video
         self.startedAtMs = startedAtMs
+        self.callId = callId
     }
 }

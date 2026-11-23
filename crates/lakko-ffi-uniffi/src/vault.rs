@@ -655,12 +655,14 @@ pub struct VaultReaction {
 /// How a call row ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
 pub struct VaultCall {
-    /// The outcome, as the clients number it. Opaque to the codec.
-    pub outcome: u8,
+    /// How the call ended, numbered as in the history bundle.
+    pub outcome: crate::CallRecordOutcome,
     /// Whether it was a video call.
     pub video: bool,
-    /// How long it lasted, in seconds.
-    pub duration_secs: u32,
+    /// How long media flowed, in whole seconds; `None` when it never did.
+    /// A duration on a `Missed`, `Declined` or `Failed` call is refused on
+    /// encode (`call`).
+    pub duration_secs: Option<u32>,
 }
 
 /// One saved message: the row shape of a head's tail and of every chunk.
@@ -1058,7 +1060,7 @@ fn message_to_core(m: VaultMessage) -> Result<rec::VaultMessage, FfiError> {
         }),
         reactions,
         call: m.call.map(|c| rec::VaultCall {
-            outcome: c.outcome,
+            outcome: c.outcome.into(),
             video: c.video,
             duration_secs: c.duration_secs,
         }),
@@ -1115,7 +1117,7 @@ fn message_from_core(m: rec::VaultMessage) -> VaultMessage {
             })
             .collect(),
         call: m.call.map(|c| VaultCall {
-            outcome: c.outcome,
+            outcome: c.outcome.into(),
             video: c.video,
             duration_secs: c.duration_secs,
         }),
@@ -1524,9 +1526,9 @@ mod tests {
                 emoji: "+1".into(),
             }],
             call: Some(VaultCall {
-                outcome: 2,
+                outcome: crate::CallRecordOutcome::Incoming,
                 video: true,
-                duration_secs: 61,
+                duration_secs: Some(61),
             }),
             unsupported_version: Some(7),
             content: None,

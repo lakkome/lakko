@@ -559,7 +559,8 @@ final class GroupCallHost: ObservableObject {
                 groupIdHex: call.groupIdHex,
                 row: row,
                 video: call.video,
-                startedAtMs: call.startedAtMs))
+                startedAtMs: call.startedAtMs,
+                callId: call.callId))
         }
         // A device that neither joined nor announced the call has nothing to
         // say about it (see `planLeave`), so it need not read the journal.

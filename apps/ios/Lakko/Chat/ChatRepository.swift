@@ -2314,17 +2314,24 @@ public final class ChatRepository: ObservableObject {
     /// survive a relaunch — the encrypted message log persists it with every
     /// other message, by the same route and with no new store.
     ///
-    /// Its id is **negative**, below every id already in this group. DS ids are
-    /// positive and monotone, so a local row can never collide with one, can
-    /// never be the target of an edit / delete / reaction arriving from the
-    /// wire, and cannot move the journal cursor.
-    public func appendCallRow(groupIdHex: String, row: CallTranscriptRow, atMs: Int64? = nil) {
+    /// Its id is **negative**: the top bit set over 63 bits of the call id
+    /// (``CallTranscriptRow/logMessageId(callId:)``), as on every client. DS
+    /// ids are positive and monotone, so a call row can never collide with
+    /// one, can never be the target of an edit / delete / reaction arriving
+    /// from the wire, and cannot move the journal cursor.
+    public func appendCallRow(
+        groupIdHex: String, row: CallTranscriptRow, atMs: Int64? = nil, callId: Data? = nil
+    ) {
         guard let record = groups[groupIdHex] else { return }
-        let lowest = record.messages.map(\.id).min() ?? 0
-        record.appendLocalRow(
-            text: row.marker,
-            messageId: min(0, lowest) - 1,
-            createdAt: Self.isoTimestamp(ms: atMs ?? Self.nowMs()))
+        // Numbered from the call id, as every client numbers a call's row, so
+        // two devices never give two calls one id and a history bundle
+        // carrying a call twice files it once. Without a call id, a hash of
+        // the row's conversation, time and direction, never a counter. The
+        // same call recorded again replaces its row.
+        let at = atMs ?? Self.nowMs()
+        let messageId = callId.flatMap(CallTranscriptRow.logMessageId(callId:))
+            ?? CallTranscriptRow.logMessageId(stableKey: "\(groupIdHex).\(at).\(row.direction.rawValue)")
+        record.putCallRow(text: row.marker, messageId: messageId, createdAt: Self.isoTimestamp(ms: at))
         persistMessageLogBestEffort()
         state = state.with(threads: buildThreadList())
     }
@@ -2340,14 +2347,18 @@ public final class ChatRepository: ObservableObject {
     /// without anything failing.
     public func recordFinishedCall(_ call: FinishedCall) {
         // The one-time fill from past calls runs BEFORE this call's row
-        // exists. It keys a call on the row's time, which is when the call
-        // ended, while this entry keys it on when it started; run after a
-        // live record (the first opening of the Calls screen used to be what
-        // ran it), it filed every call already recorded a second time. Seen
-        // in the simulator on 2026-10-23: each call listed twice, a minute
-        // apart. Run first, it only ever sees calls from before the index.
+        // exists. It keys a call on the row's time; rows written before
+        // 2026-11-23 carry when the call ended, while this entry keys it on
+        // when it started, so run after a live record (the first opening of
+        // the Calls screen used to be what ran it), it filed every call
+        // already recorded a second time. Seen in the simulator on
+        // 2026-10-23: each call listed twice, a minute apart. Run first, it
+        // only ever sees calls from before the index.
         backfillCallHistory()
-        appendCallRow(groupIdHex: call.groupIdHex, row: call.row)
+        // The row's time is when the call started, as on every client: the
+        // conversation shows the call where it happened, and the one-time fill
+        // of the Calls index keys it on the same time as the entry below.
+        appendCallRow(groupIdHex: call.groupIdHex, row: call.row, atMs: call.startedAtMs, callId: call.callId)
         guard let accountIdB64 = currentAccountIdB64 else { return }
         let (outcome, durationMs) = CallHistoryEntry.outcome(of: call.row)
         CallHistoryStore.shared.bind(accountIdB64: accountIdB64)
@@ -2382,10 +2393,8 @@ public final class ChatRepository: ObservableObject {
     /// it reads is a machine marker (``CallTranscriptRow/parse(_:)``), never
     /// the sentence a reader sees, so nothing is recovered out of words.
     ///
-    /// One thing is genuinely lost and is not guessed at: the marker never
-    /// carried whether the call had video, so a backfilled row calls back by
-    /// voice. Inventing a camera the record does not mention would be worse
-    /// than the row being modest about what it knows.
+    /// Whether the call had video comes from the marker; a row written before
+    /// the marker carried it reads as a voice call, so it calls back by voice.
     public func backfillCallHistory() {
         guard let accountIdB64 = currentAccountIdB64 else { return }
         CallHistoryStore.shared.bind(accountIdB64: accountIdB64)
@@ -2395,20 +2404,12 @@ public final class ChatRepository: ObservableObject {
                 let kind: CallHistoryKind =
                     conversationKind(groupIdHex: hex) == .group ? .group : .chat
                 for message in record.messages {
-                    guard let row = CallTranscriptRow.parse(message.text) else { continue }
                     // A row whose time cannot be read has no place in a list
                     // whose whole order is time, so it stays where it is.
-                    guard let at = Self.parseDsTimestampMs(message.createdAt) else { continue }
-                    let (outcome, durationMs) = CallHistoryEntry.outcome(of: row)
-                    found.append(CallHistoryEntry(
-                        id: "\(hex).\(at).\(row.direction.rawValue)",
-                        conversationId: hex,
-                        kind: kind,
-                        direction: row.direction,
-                        outcome: outcome,
-                        video: false,
-                        startedAtMs: at,
-                        durationMs: durationMs))
+                    guard let entry = CallHistoryEntry.fromLogRow(
+                        conversationId: hex, kind: kind, text: message.text, createdAt: message.createdAt)
+                    else { continue }
+                    found.append(entry)
                 }
             }
             return found.sorted { $0.startedAtMs < $1.startedAtMs }
@@ -11335,7 +11336,14 @@ final class GroupRecord {
     /// field for a row that has not landed yet - a call row and an unsent
     /// message both live down here.
     func nextLocalId() -> Int64 {
-        min(0, messages.map(\.id).min() ?? 0) - 1
+        let below = min(0, messages.map(\.id).min() ?? 0).subtractingReportingOverflow(1)
+        guard below.overflow else { return below.partialValue }
+        // A call row's id (top bit over 63 bits of a call id) can be the
+        // lowest Int64 itself: take the highest negative id not in use.
+        let used = Set(messages.map(\.id))
+        var next: Int64 = -1
+        while used.contains(next) { next -= 1 }
+        return next
     }
 
     /// Put a message the user just wrote into the conversation, before it has
@@ -11520,6 +11528,16 @@ final class GroupRecord {
             text: ConversationReentryRules.gapMarker(fromMs: fromMs, toMs: max(fromMs, toMs)),
             createdAt: ChatRepository.isoTimestamp(ms: Int64(clamping: fromMs)))
         messages.insert(line, at: ConversationReentryRules.gapLineIndex(messages, fromMs: fromMs))
+    }
+
+    /// A call row: appended, or, when a row with its id is already here (the
+    /// same call recorded again), that row takes its text.
+    func putCallRow(text: String, messageId: Int64, createdAt: String) {
+        if let idx = messages.firstIndex(where: { $0.messageId == messageId && $0.direction == .system }) {
+            messages[idx].text = text
+            return
+        }
+        appendLocalRow(text: text, messageId: messageId, createdAt: createdAt)
     }
 
     func appendLocalRow(text: String, messageId: Int64, createdAt: String) {

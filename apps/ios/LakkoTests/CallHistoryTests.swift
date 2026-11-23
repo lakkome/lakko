@@ -274,6 +274,38 @@ final class CallHistoryTests: XCTestCase {
         XCTAssertEqual(filed.map(\.startedAtMs).sorted(), [nowMs - 120_000, nowMs - 60_000])
     }
 
+    /// A call's row is numbered from its call id (the web scheme), and the
+    /// same call recorded twice keeps one row.
+    @MainActor
+    func testACallRowIsNumberedFromItsCallIdAndRecordedOnce() throws {
+        let f = try makeGroupInviteRepo(
+            discoveryScope: GroupInviteDiscoveryURLProtocol.freshScope(.ok), token: "t")
+        addTeardownBlock { try? FileManager.default.removeItem(at: f.outboxDir) }
+        let callId = Data((0..<16).map { UInt8(0xF0 &+ $0) })
+        let startedAtMs = Int64(Date().timeIntervalSince1970 * 1000) - 60_000
+        for outcome: CallTranscriptRow.Outcome in [.missed, .answered(durationMs: 3_000)] {
+            f.repo.recordFinishedCall(FinishedCall(
+                groupIdHex: f.groupIdHex,
+                row: CallTranscriptRow(direction: .outgoing, outcome: outcome),
+                video: false, startedAtMs: startedAtMs, callId: callId))
+        }
+        let expected = try XCTUnwrap(CallTranscriptRow.logMessageId(callId: callId))
+        XCTAssertEqual(UInt64(bitPattern: expected), 0xF0F1_F2F3_F4F5_F6F7)
+        let rows = f.repo.state.threads.first { $0.groupIdHex == f.groupIdHex }?.messages
+            .filter { CallTranscriptRow.isCallRow($0.text) } ?? []
+        XCTAssertEqual(rows.map(\.messageId), [expected])
+        XCTAssertEqual(CallTranscriptRow.parse(rows.first?.text ?? "")?.outcome, .answered(durationMs: 3_000))
+        let rowMs = try XCTUnwrap(rows.first.flatMap { ChatRepository.parseDsTimestampMs($0.createdAt) })
+        XCTAssertLessThanOrEqual(abs(rowMs - startedAtMs), 1, "the row's time is the call start")
+    }
+
+    func testACallRowWithoutCallIdIsNumberedByAStableHashWithTheTopBit() {
+        let a = CallTranscriptRow.logMessageId(stableKey: "cd.1000.outgoing")
+        XCTAssertEqual(a, CallTranscriptRow.logMessageId(stableKey: "cd.1000.outgoing"))
+        XCTAssertNotEqual(a, CallTranscriptRow.logMessageId(stableKey: "cd.1001.outgoing"))
+        XCTAssertLessThan(a, 0)
+    }
+
     /// Two accounts on one device do not see each other's calls.
     @MainActor
     func testOneAccountsCallsAreNotAnothers() {

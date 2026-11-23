@@ -134,7 +134,11 @@ struct CallsScreen: View {
     private func row(_ entry: CallHistoryEntry) -> some View {
         switch CallHistory.rowShape(entry) {
         case .conversation(let groupIdHex, let kind):
-            conversationRow(entry, groupIdHex: groupIdHex, kind: kind)
+            // The live kind of a conversation this device holds wins: a call
+            // a history bundle filed was filed without one.
+            conversationRow(
+                entry, groupIdHex: groupIdHex,
+                kind: conversations.callHistoryKind(groupIdHex: groupIdHex) ?? kind)
         case .noConversation(let title):
             noConversationRow(entry, title: title)
         }

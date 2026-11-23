@@ -28,6 +28,7 @@ import {
 import { useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
 import type { CallLogEntry, StandaloneCallEntry } from "./call-log";
+import { registerLiveCallLogStore } from "./call-log-history";
 import { IdbCallLogBackend } from "./call-log-idb";
 import { CallLogStore, type CallLogRows } from "./call-log-store";
 
@@ -67,6 +68,9 @@ export function CallLogProvider(props: { children: JSX.Element }): JSX.Element {
     console.warn("[call-log] store persist failed", err);
   });
   const unsubscribe = store.subscribe(() => setVersion((v) => v + 1));
+  // A history bundle applied while this store is bound writes through it
+  // (`call-log-history.ts`), never past it.
+  const unregister = registerLiveCallLogStore(store);
 
   createEffect(() => {
     const account = accountId();
@@ -79,7 +83,10 @@ export function CallLogProvider(props: { children: JSX.Element }): JSX.Element {
       void store.open(account);
     });
   });
-  onCleanup(unsubscribe);
+  onCleanup(() => {
+    unsubscribe();
+    unregister();
+  });
 
   const api: CallLogApi = {
     version,

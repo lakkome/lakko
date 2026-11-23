@@ -193,6 +193,43 @@ final class PairingHistoryTests: XCTestCase {
         XCTAssertEqual(d.rows(invited.hex), [4, 5])
     }
 
+    /// Placeholder version 7: a call row the bundle brings shows in the
+    /// conversation and in the Calls tab, where a live call row is filed,
+    /// although the one-time fill of that tab ran before the bundle came.
+    func testACallRowABundleBringsIsInTheConversationAndTheCallsTab() async throws {
+        let d = try device()
+        defer {
+            d.cleanUp()
+            CallHistoryStore.shared.forget(accountIdB64: d.accountIdB64)
+            CallHistoryStore.shared.unbind()
+        }
+        let invited = try invite(d.identity, founder: 0x5E)
+        d.repo.bootstrap(secrets: d.secrets)
+        try await d.join(invited)
+        d.repo.backfillCallHistory()
+
+        let call = CallTranscriptRow(direction: .outgoing, outcome: .answered(durationMs: 42_000), video: true)
+        let row = PersistedMessage(
+            messageId: -1, direction: "system", text: call.marker, attachments: [],
+            createdAt: "2026-11-23T10:00:00Z")
+        try file([(invited.id, [row, self.row(4)])], on: d)
+        await settle()
+
+        XCTAssertEqual(d.shown(invited.hex), [4, -1], "the call (2026-11-23) after the message (2026-10-30)")
+        let shownCall = d.thread(invited.hex)?.messages.first { $0.messageId == -1 }
+        XCTAssertEqual(shownCall.flatMap { CallTranscriptRow.parse($0.text) }, call)
+        var entries = CallHistoryStore.shared.entries.filter { $0.conversationId == invited.hex }
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries.first?.transcriptRow.text, call.text)
+        XCTAssertEqual(entries.first?.video, true)
+
+        // The same bundle again files nothing twice.
+        try file([(invited.id, [row])], on: d)
+        await settle()
+        entries = CallHistoryStore.shared.entries.filter { $0.conversationId == invited.hex }
+        XCTAssertEqual(entries.count, 1)
+    }
+
     func testAPersistBeforeAnyJoinKeepsTheBundle() async throws {
         let d = try device()
         defer { d.cleanUp() }
@@ -220,6 +257,68 @@ final class PairingHistoryTests: XCTestCase {
         ])
 
         XCTAssertEqual(record.messages.map(\.messageId), [4, 5, 3, 6], "3 is not in the bundle, 6 is new")
+    }
+
+    /// A call row a bundle brings sits at its time: a call at 09:01 between
+    /// the 09:00 and 09:02 messages, in the live record and in the log.
+    func testABundleCallRowSitsAtItsTime() throws {
+        func at(_ id: Int64, _ time: String, ack: ChatMessage.Ack = .sent) -> ChatMessage {
+            ChatMessage(
+                messageId: id, direction: id > 0 ? .incoming : .system, text: "m",
+                createdAt: "2026-11-23T\(time):00Z", ack: ack, localId: ack == .sent ? 0 : -9)
+        }
+        let callId = try XCTUnwrap(CallTranscriptRow.logMessageId(callId: Data(repeating: 0x21, count: 16)))
+        let live = PairingHistory.mergeLiveRows(
+            held: [at(10, "09:00"), at(12, "09:02")], bundle: [at(callId, "09:01")])
+        XCTAssertEqual(live.map(\.messageId), [10, callId, 12])
+        let fresh = PairingHistory.mergeLiveRows(
+            held: [], bundle: [at(12, "09:02"), at(callId, "09:01"), at(10, "09:00")])
+        XCTAssertEqual(fresh.map(\.messageId), [10, callId, 12])
+        // Never past a row the server has not numbered yet.
+        let pending = PairingHistory.mergeLiveRows(
+            held: [at(10, "09:00"), at(0, "09:05", ack: .pending)], bundle: [at(callId, "09:07")])
+        XCTAssertEqual(pending.map(\.messageId), [10, callId, 0])
+
+        func logRow(_ id: Int64, _ time: String) -> PersistedMessage {
+            PersistedMessage(
+                messageId: id, direction: id > 0 ? "incoming" : "system", text: "m", attachments: [],
+                createdAt: "2026-11-23T\(time):00Z")
+        }
+        let log = PairingHistory.mergeLogRows(
+            [logRow(12, "09:02"), logRow(10, "09:00")], [logRow(callId, "09:01")])
+        XCTAssertEqual(log.rows.map(\.messageId), [10, callId, 12])
+        XCTAssertEqual(log.added, 1)
+    }
+
+    /// A call row of a bundle that landed before the chat was joined is in
+    /// the Calls tab from the moment the bundle is filed, and stays there
+    /// once through the join and a second copy of the bundle.
+    func testABundleCallRowOfAChatJoinedLaterIsInTheCallsTabOnce() async throws {
+        let d = try device()
+        defer {
+            d.cleanUp()
+            CallHistoryStore.shared.forget(accountIdB64: d.accountIdB64)
+            CallHistoryStore.shared.unbind()
+        }
+        let invited = try invite(d.identity, founder: 0x5F)
+        d.repo.bootstrap(secrets: d.secrets)
+        d.repo.backfillCallHistory()
+        let call = CallTranscriptRow(direction: .incoming, outcome: .missed)
+        let row = PersistedMessage(
+            messageId: try XCTUnwrap(CallTranscriptRow.logMessageId(callId: Data(repeating: 0x7A, count: 16))),
+            direction: "system", text: call.marker, attachments: [], createdAt: "2026-11-23T09:01:00Z")
+        try file([(invited.id, [row])], on: d)
+        await settle()
+        XCTAssertEqual(CallHistoryStore.shared.entries.filter { $0.conversationId == invited.hex }.count, 1)
+
+        try await d.join(invited)
+        try file([(invited.id, [row])], on: d)
+        await settle()
+
+        let entries = CallHistoryStore.shared.entries.filter { $0.conversationId == invited.hex }
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries.first?.outcome, .missed)
+        XCTAssertEqual(d.shown(invited.hex), [row.messageId])
     }
 
     func testBundleRowsGoInOrderAroundWhatIsHeld() {
