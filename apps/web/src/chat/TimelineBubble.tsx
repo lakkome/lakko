@@ -941,7 +941,7 @@ function ChatBubbleBody(
   // Kept apart from `mediaOnly` on this client: `.lk-bubble.media-only` draws
   // its own surface and `.lk-bubble.chromeless` removes one, so unlike the
   // natives' single flag these two are exclusive here.
-  const chromeless = (): boolean => metaSlot() === "below-bubble";
+  const chromeless = (): boolean => metaSlot() === "note-pill";
   const keyFor = (ref: AttachmentRefBytes): string =>
     ref.blobId.length === 0 && props.mediaLocalKey !== undefined
       ? props.mediaLocalKey
@@ -1244,11 +1244,12 @@ function ChatBubbleBody(
                           upload={props.mediaUpload}
                           onRetry={props.onRetrySend}
                           // UX spec §2 — a voice message alone in its bubble
-                          // carries the time on its own quiet line. The slot
-                          // decides; `VoiceBubble` is the only bubble that
-                          // reads it, and the branch above is what keeps the
-                          // row from being drawn twice.
-                          meta={metaSlot() === "voice-line" ? metaLine : undefined}
+                          // carries the time on its own quiet line; §3 — a lone
+                          // video note carries it on a pill inside its circle.
+                          // The slot decides; the voice and video-note bubbles
+                          // are the only ones that read it, and the branch
+                          // below is what keeps the row from being drawn twice.
+                          meta={metaSlot() === "voice-line" || metaSlot() === "note-pill" ? metaLine : undefined}
                           transcript={transcriptHost(ref())}
                         />
                       )}
@@ -1548,7 +1549,7 @@ function ChatBubbleBody(
             says: here as the bubble's own row, or handed to the voice bubble
             to draw on its quiet line. Two spellings of it would be two things
             to keep in step. */}
-        <Show when={metaSlot() !== "voice-line"}>{metaLine()}</Show>
+        <Show when={metaSlot() !== "voice-line" && metaSlot() !== "note-pill"}>{metaLine()}</Show>
 
         {/* The action menu, opened by the gestures wired above and rendered
             in a portal OUTSIDE this bubble (`MessageMenu.tsx`). It carries

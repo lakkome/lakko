@@ -156,10 +156,12 @@ export function onlyVisualMedia(
  *    facts.
  *  * `media-pill` — a translucent pill over the media (UX spec §10), because a
  *    lone photo or video is drawn edge to edge with no chrome to carry a row.
- *  * `below-bubble` — under the bubble, for the chromeless video-note circle
- *    (UX spec §3), which has no surface to carry the line and no pill.
+ *  * `note-pill` — a translucent pill inside the chromeless video-note circle,
+ *    bottom trailing (UX spec §3, amended 2026-11-22): the circle has no
+ *    surface to carry a row, and a line under it read as loose text floating
+ *    under the video.
  */
-export type BubbleMetaSlot = "bubble-row" | "voice-line" | "media-pill" | "below-bubble";
+export type BubbleMetaSlot = "bubble-row" | "voice-line" | "media-pill" | "note-pill";
 
 /** The meta slot for a message whose sole media bubble is `sole`
  *  (`soleMediaBubble`, `null` for every other message). */
@@ -171,7 +173,7 @@ export function bubbleMetaSlot(sole: MediaBubble | null): BubbleMetaSlot {
     case "video":
       return "media-pill";
     case "video_note":
-      return "below-bubble";
+      return "note-pill";
     // A GIF keeps the row: it is a bubble with chrome, and a pill over an
     // animation that may be 40px tall would cover it.
     default:

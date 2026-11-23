@@ -130,17 +130,19 @@ public fun soleMediaBubble(
  *    facts.
  *  * [MEDIA_PILL] — a translucent pill over the media (UX spec §10), because a
  *    lone photo or video is drawn edge to edge with no chrome to carry a row.
- *  * [BELOW_BUBBLE] — under the bubble, for the chromeless video-note circle
- *    (UX spec §3), which has no surface to carry the line and no pill.
+ *  * [NOTE_PILL] — a translucent pill inside the chromeless video-note circle,
+ *    bottom trailing (UX spec §3, amended 2026-11-22): the circle has no
+ *    surface to carry a row, and a line under it read as loose text floating
+ *    under the video.
  */
-public enum class BubbleMetaSlot { BUBBLE_ROW, VOICE_LINE, MEDIA_PILL, BELOW_BUBBLE }
+public enum class BubbleMetaSlot { BUBBLE_ROW, VOICE_LINE, MEDIA_PILL, NOTE_PILL }
 
 /** The meta slot for a message whose sole media bubble is [sole]
  *  ([soleMediaBubble], `null` for every other message). */
 public fun bubbleMetaSlot(sole: MediaBubble?): BubbleMetaSlot = when (sole) {
     MediaBubble.VOICE -> BubbleMetaSlot.VOICE_LINE
     MediaBubble.PHOTO, MediaBubble.VIDEO -> BubbleMetaSlot.MEDIA_PILL
-    MediaBubble.VIDEO_NOTE -> BubbleMetaSlot.BELOW_BUBBLE
+    MediaBubble.VIDEO_NOTE -> BubbleMetaSlot.NOTE_PILL
     // A GIF keeps the row: it is a bubble with chrome, and a pill over an
     // animation that may be 40dp tall would cover it.
     MediaBubble.GIF, MediaBubble.FILE, MediaBubble.AUDIO, null -> BubbleMetaSlot.BUBBLE_ROW

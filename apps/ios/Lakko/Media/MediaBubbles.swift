@@ -50,6 +50,10 @@ struct MediaAttachmentView: View {
     /// ADR-0082 section 4 — the stored message a transcript belongs to;
     /// `nil` for a take still being sent (the button's space stays empty).
     var transcript: TranscriptTarget? = nil
+    /// `docs/ux/media-messages.md` section 3 (2026-11-22) — the message's own
+    /// time and ticks, drawn on a pill inside a lone video note's circle.
+    /// `nil` everywhere else: the caller draws the line itself.
+    var noteMeta: AnyView? = nil
 
     var body: some View {
         switch bubble {
@@ -60,7 +64,7 @@ struct MediaAttachmentView: View {
         case .videoNote:
             VideoNoteBubble(
                 ref: ref, mediaKey: mediaKey, incoming: incoming, upload: upload, onRetry: onRetry,
-                transcript: transcript)
+                transcript: transcript, meta: noteMeta)
         case .gif:
             GifBubble(ref: ref, mediaKey: mediaKey, upload: upload, localReady: localReady, onRetry: onRetry)
         case .photo:
@@ -562,6 +566,10 @@ struct VideoNoteBubble: View {
     let upload: MediaUploadState?
     let onRetry: () -> Void
     var transcript: TranscriptTarget? = nil
+    /// Section 3 (2026-11-22) — the message's time and ticks, on a pill inside
+    /// the circle, bottom trailing; `nil` when the caller draws them itself
+    /// (a note in a bubble with chrome, a take still being sent).
+    var meta: AnyView? = nil
 
     @EnvironmentObject private var media: ChatMediaController
     @StateObject private var model = VideoNotePlayerModel()
@@ -569,12 +577,58 @@ struct VideoNoteBubble: View {
     @Environment(\.mediaColumnWidth) private var columnWidth
 
     private var busy: Bool { model.starting || media.loadingKeys.contains(mediaKey) }
+    /// The circle fits the column with the `Aa` control beside it.
     private var side: CGFloat {
-        InlineMedia.fit(CGSize(width: Self.diameter, height: Self.diameter), within: columnWidth).width
+        let aside = TranscriptButton.size.width + VideoNoteLayout.asideGap
+        return InlineMedia.fit(
+            CGSize(width: Self.diameter, height: Self.diameter),
+            within: columnWidth.map { max(0, $0 - aside) }
+        ).width
+    }
+
+    /// Section 3 / translation UX 4.1 — `Aa` beside the circle, vertically
+    /// centred, its space reserved in every state.
+    private var aside: some View {
+        TranscriptButton(target: transcript, ref: ref, mediaKey: mediaKey, tint: Color.lakkoTextMuted)
+    }
+
+    /// Section 3 (2026-11-22) — the photo bubble's translucent pill.
+    private func pill<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        content()
+            .foregroundStyle(Color.white)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(Color.black.opacity(0.5)))
+    }
+
+    @ViewBuilder
+    private var durationPill: some View {
+        if let label = VideoNoteLayout.durationLabel(
+            playingWithSound: model.mode == .sound, progress: model.progress,
+            durationMs: ref.durationMs.map { Int64($0) }) {
+            pill {
+                HStack(spacing: 4) {
+                    switch label {
+                    case .elapsed(let ms):
+                        Text(RecordingMachine.formatClock(ms: ms))
+                    case .total(let ms):
+                        Text(RecordingMachine.formatTotalClock(ms: ms))
+                    }
+                    if incoming, !media.isPlayed(mediaKey), case .total = label {
+                        Circle().fill(Color.lakkoAccent).frame(width: 6, height: 6)
+                    }
+                }
+                .font(.caption2.monospacedDigit())
+            }
+            .accessibilityHidden(true)
+            .allowsHitTesting(false)
+        }
     }
 
     var body: some View {
         VStack(alignment: incoming ? .leading : .trailing, spacing: 4) {
+            HStack(alignment: .center, spacing: VideoNoteLayout.asideGap) {
+            if VideoNoteLayout.asideFirst(incoming: incoming) { aside }
             Button {
                 Task { await model.tap(ref: ref, key: mediaKey, pending: upload != nil, media: media) }
             } label: {
@@ -605,12 +659,14 @@ struct VideoNoteBubble: View {
                                 .background(Circle().fill(Color.black.opacity(0.45)))
                         }
                         if model.mode == .muted {
+                            // Section 3 (2026-11-22) — top trailing, clear of
+                            // the time pill at the bottom.
                             LkIconView(.speakerSlashFill, size: 14, relativeTo: .caption)
                                 .foregroundStyle(.white)
                                 .padding(6)
                                 .background(Circle().fill(Color.black.opacity(0.45)))
-                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                                .padding(16)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                                .padding(side * VideoNoteLayout.pillBottom)
                         }
                         if model.mode == .sound {
                             ProgressRing(fraction: model.progress, lineWidth: 4, color: Color.lakkoAccent)
@@ -626,21 +682,23 @@ struct VideoNoteBubble: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(accessibilityLabel)
-            HStack(spacing: 6) {
-                if let d = ref.durationMs {
-                    Text(RecordingMachine.formatTotalClock(ms: Int64(d)))
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-                if incoming, !media.isPlayed(mediaKey) {
-                    Circle().fill(Color.lakkoAccent).frame(width: 6, height: 6)
-                }
-                Spacer(minLength: 0)
-                // ADR-0082 / UX 4.1 — on the bubble's trailing bottom edge;
-                // its space is reserved in every state.
-                TranscriptButton(target: transcript, ref: ref, mediaKey: mediaKey, tint: Color.secondary)
+            // Section 3 (2026-11-22) — the duration bottom leading and the
+            // time with its ticks bottom trailing, inside the circle; nothing
+            // on a line under it but the reactions row.
+            .overlay(alignment: .bottomLeading) {
+                durationPill
+                    .padding(.leading, side * VideoNoteLayout.pillInset)
+                    .padding(.bottom, side * VideoNoteLayout.pillBottom)
             }
-            .frame(width: side)
+            .overlay(alignment: .bottomTrailing) {
+                if let meta {
+                    pill { meta }
+                        .padding(.trailing, side * VideoNoteLayout.pillInset)
+                        .padding(.bottom, side * VideoNoteLayout.pillBottom)
+                }
+            }
+            if !VideoNoteLayout.asideFirst(incoming: incoming) { aside }
+            }
             TranscriptBlock(target: transcript, ref: ref, outgoing: false, width: side)
             if upload == .failed {
                 NotSentButton(onRetry: onRetry).foregroundStyle(.red)

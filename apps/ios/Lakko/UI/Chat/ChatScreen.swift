@@ -2570,8 +2570,11 @@ struct MessageRow: View {
         menuTarget(MediaMosaicView(refs: refs, rounded: true, overlay: AnyView(mediaMetaPill)))
     }
 
-    /// The bare video note plus its time, which is the whole bubble for that
-    /// kind of message.
+    /// The bare video note, which is the whole bubble for that kind of
+    /// message: its time and ticks ride a pill inside the circle
+    /// (`docs/ux/media-messages.md` section 3, 2026-11-22 — under the circle
+    /// they read as loose text floating under a video, seen on an iPhone and
+    /// a Pixel).
     ///
     /// One definition for both directions: it used to be written out twice, once
     /// in each arm of ``body``, and the menu now has to be attached to it — so a
@@ -2579,13 +2582,14 @@ struct MessageRow: View {
     private func videoNoteColumn(alignment: HorizontalAlignment) -> some View {
         VStack(alignment: alignment, spacing: 2) {
             bareVideoNote
-            // No bubble behind it: the bubble's own text colour on an outgoing
-            // note is dark on the dark screen, and the time and ticks of an own
-            // note could not be seen (seen on an iPhone 2026-11-10).
-            metaContent
-                .foregroundStyle(Color.lakkoTextMuted)
-                .padding(.bottom, 1)
         }
+    }
+
+    /// Section 3 (2026-11-22) — the time, ticks, saved mark and edited marker
+    /// handed to the video note for its pill; the circle draws the pill. Only
+    /// a Retry in it takes a touch; the rest lets a tap reach the circle.
+    private var noteMetaContent: AnyView {
+        AnyView(metaContent.allowsHitTesting(message.ack == .failed))
     }
 
     /// Edit / Delete are offered only on our own outgoing
@@ -3363,7 +3367,8 @@ struct MessageRow: View {
                 bubble: .videoNote,
                 mediaKey: ChatMediaController.key(for: ref),
                 incoming: message.direction == .incoming,
-                transcript: transcriptTarget
+                transcript: transcriptTarget,
+                noteMeta: noteMetaContent
             )
         }
     }

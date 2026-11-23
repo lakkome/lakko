@@ -156,6 +156,38 @@ A **circle** (about 240 pt / dp / px), no bubble chrome. Incoming clips autoplay
 poster frame with a play glyph. Tap → plays with sound from the start, the ring shows
 progress; tap again pauses. A mute glyph shows while playing muted.
 
+**What sits on and beside the circle** (2026-11-22, maintainer: on a real iPhone and a
+real Pixel the duration, the time with its ticks and the `Aa` control stood under the
+circle on two or three loose lines and read as text floating under a video). The note is
+drawn like a photo (section 10): what describes it sits on it.
+
+- **Duration**, bottom leading, inside the circle, on the same small translucent pill the
+  photo bubble uses for its time (white text on black at about half opacity, so it reads
+  on a dark and a light frame alike), digits in the monospaced face: the **elapsed** time
+  while this note is the one playing with sound, the **total** otherwise. On an incoming
+  note not yet played, the small accent dot of the voice line follows the number inside
+  the pill. While a muted loop was refused sound (web), the pill says `Tap for sound`
+  instead.
+- **Time and ticks**, bottom trailing, inside the circle, on the same pill: exactly what
+  the photo pill carries (the saved mark, the edited marker, the time, and on an own
+  message the delivery ticks).
+- The two pills sit 14% of the diameter above the circle's bottom and 16% of it in from
+  its sides, so both lie wholly inside the circle at any diameter. The mute glyph of a
+  muted loop moves to the top trailing area, clear of them.
+- **`Aa`** (the transcript control, translation spec section 4.1) sits **beside** the
+  circle, 6 pt / dp / px from it, vertically centred, on the side away from the screen
+  edge: after the circle on an incoming note, before it on an own note. No surface behind
+  it: it stands on the chat background in the muted text colour, like the voice row's.
+  Its space is reserved in every state, so the circle never moves when it appears.
+- **Nothing stays on a line under the circle** but the reactions row, when the message has
+  reactions (the same row every other bubble has). The lines that appear only when
+  something happens keep their place under it: `Not sent · Retry`, `Couldn't play this
+  message`, and a transcript the person opened. The upload ring and the play ring stay on
+  the circle's edge.
+- A video note sent as a reply, forwarded, or beside text or another attachment sits in a
+  bubble with chrome (the quote or the `Forwarded from` line needs a surface); there the
+  duration pill and `Aa` are drawn the same way and the time is the bubble's own row.
+
 ### States
 
 Same table as voice (uploading ring, not-sent retry, spinner on first play, couldn't-play,

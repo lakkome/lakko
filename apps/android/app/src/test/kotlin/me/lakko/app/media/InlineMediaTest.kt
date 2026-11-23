@@ -188,7 +188,7 @@ class InlineMediaTest {
         // under it; everything else keeps the row inside the bubble.
         assertEquals(BubbleMetaSlot.MEDIA_PILL, bubbleMetaSlot(MediaBubble.PHOTO))
         assertEquals(BubbleMetaSlot.MEDIA_PILL, bubbleMetaSlot(MediaBubble.VIDEO))
-        assertEquals(BubbleMetaSlot.BELOW_BUBBLE, bubbleMetaSlot(MediaBubble.VIDEO_NOTE))
+        assertEquals(BubbleMetaSlot.NOTE_PILL, bubbleMetaSlot(MediaBubble.VIDEO_NOTE))
         assertEquals(BubbleMetaSlot.BUBBLE_ROW, bubbleMetaSlot(MediaBubble.GIF))
         assertEquals(BubbleMetaSlot.BUBBLE_ROW, bubbleMetaSlot(MediaBubble.FILE))
         assertEquals(BubbleMetaSlot.BUBBLE_ROW, bubbleMetaSlot(null))

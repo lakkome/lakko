@@ -163,12 +163,18 @@ internal fun AttachmentView(
      *  [me.lakko.app.media.BubbleMetaSlot.VOICE_LINE]; `null` everywhere else,
      *  and ignored by every bubble but the voice one. */
     voiceMeta: (@Composable () -> Unit)? = null,
+    /** UX spec §3 (2026-11-22) — the message's own time, edited marker and
+     *  delivery ticks, drawn on a pill inside a lone video note's circle.
+     *  Passed only when [me.lakko.app.media.bubbleMetaSlot] says
+     *  [me.lakko.app.media.BubbleMetaSlot.NOTE_PILL]; ignored by every bubble
+     *  but the video note. */
+    noteMeta: (@Composable () -> Unit)? = null,
     fileChip: @Composable () -> Unit,
 ) {
     val decision = remember(ref.kind, ref.mime) { renderDecision(ref, hub.allowlist) }
     when (decision.bubble) {
         MediaBubble.VOICE -> VoiceBubble(ref, hub, isOwn, contentColor, bubbleColor, voiceMeta, onLongPress)
-        MediaBubble.VIDEO_NOTE -> VideoNoteBubble(ref, hub, onLongPress)
+        MediaBubble.VIDEO_NOTE -> VideoNoteBubble(ref, hub, isOwn, noteMeta, onLongPress)
         MediaBubble.GIF -> GifBubble(ref, hub, decision.inline, onLongPress)
         MediaBubble.PHOTO -> PhotoBubble(ref, hub, onSave, onLongPress, mediaOverlay)
         MediaBubble.VIDEO -> VideoBubble(ref, hub, onSave, onLongPress, mediaOverlay)
@@ -674,9 +680,27 @@ private fun VoiceRate(text: String, color: Color, modifier: Modifier = Modifier)
     )
 }
 
-/** §3 timeline bubble — a circle, no bubble chrome. */
+/** Test tags of the video note's circle, its two pills and the `Aa` beside it. */
+internal const val VIDEO_NOTE_CIRCLE_TAG: String = "video-note-circle"
+internal const val VIDEO_NOTE_DURATION_TAG: String = "video-note-duration"
+internal const val VIDEO_NOTE_META_TAG: String = "video-note-meta"
+internal const val VIDEO_NOTE_ASIDE_TAG: String = "video-note-aside"
+
+/** The diameter of a video note's circle. */
+internal val VIDEO_NOTE_DIAMETER = 240.dp
+
+/** §3 timeline bubble — a circle, no bubble chrome. The duration (bottom
+ *  leading) and the message's time and ticks ([meta], bottom trailing) ride
+ *  the photo bubble's translucent pill inside the circle, and `Aa` sits beside
+ *  it on the side away from the screen edge (section 3, 2026-11-22). */
 @Composable
-internal fun VideoNoteBubble(ref: AttachmentRef, hub: ChatMediaHub, onLongPress: (() -> Unit)? = null) {
+internal fun VideoNoteBubble(
+    ref: AttachmentRef,
+    hub: ChatMediaHub,
+    isOwn: Boolean = false,
+    meta: (@Composable () -> Unit)? = null,
+    onLongPress: (() -> Unit)? = null,
+) {
     val scope = rememberCoroutineScope()
     val key = remember(ref.blobId) { ChatMediaHub.mediaKey(ref.blobId) }
     var poster by remember(key) { mutableStateOf<File?>(null) }
@@ -718,12 +742,29 @@ internal fun VideoNoteBubble(ref: AttachmentRef, hub: ChatMediaHub, onLongPress:
         }
     }
 
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Box {
+    val playedVersion by hub.playedChanges.collectAsStateWithLifecycle()
+    val unplayed = remember(playedVersion, key) { !isOwn && !hub.isPlayed(key) }
+    val inset = VIDEO_NOTE_DIAMETER * me.lakko.app.media.VideoNoteLayout.PILL_INSET
+    val lift = VIDEO_NOTE_DIAMETER * me.lakko.app.media.VideoNoteLayout.PILL_BOTTOM
+    // Translation UX 4.1 / media UX §3 — beside the circle, vertically
+    // centred, on the chat background with no surface behind it.
+    val aside: @Composable () -> Unit = {
+        Box(Modifier.testTag(VIDEO_NOTE_ASIDE_TAG)) {
+            me.lakko.app.ui.translation.TranscriptSlot(ref, hub, MaterialTheme.colorScheme.onSurfaceVariant, onLongPress)
+        }
+    }
+    Column(horizontalAlignment = if (isOwn) Alignment.End else Alignment.Start) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(me.lakko.app.media.VideoNoteLayout.ASIDE_GAP_DP.dp),
+        ) {
+        if (me.lakko.app.media.VideoNoteLayout.asideFirst(isOwn)) aside()
+        Box(Modifier.size(VIDEO_NOTE_DIAMETER)) {
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
-                .size(240.dp)
+                .testTag(VIDEO_NOTE_CIRCLE_TAG)
+                .size(VIDEO_NOTE_DIAMETER)
                 .clip(CircleShape)
                 .background(MaterialTheme.colorScheme.surfaceVariant)
                 .bubbleControl(
@@ -803,25 +844,53 @@ internal fun VideoNoteBubble(ref: AttachmentRef, hub: ChatMediaHub, onLongPress:
                 )
             }
         }
-            // ADR-0082 / translation UX 4.1 — on the bubble's trailing bottom
-            // edge, outside the circle, so the circle never moves.
-            Box(
-                Modifier
-                    .align(Alignment.BottomEnd)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.85f)),
-            ) {
-                me.lakko.app.ui.translation.TranscriptSlot(ref, hub, MaterialTheme.colorScheme.onSurface, onLongPress)
+            // Section 3 (2026-11-22) — the duration, bottom leading, inside the
+            // circle. It used to stand under the circle, with the time on a
+            // line of its own further down (seen on a Pixel, 2026-11-22).
+            val label = me.lakko.app.media.VideoNoteLayout.durationLabel(
+                playingWithSound = playingWithSound,
+                progress = progress,
+                durationMs = ref.durationMs?.toLong(),
+            )
+            if (label != null) {
+                VideoNotePill(
+                    Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = inset, bottom = lift)
+                        .testTag(VIDEO_NOTE_DURATION_TAG)
+                        .clearAndSetSemantics {},
+                ) {
+                    Text(
+                        when (label) {
+                            is me.lakko.app.media.VideoNoteLayout.DurationLabel.Elapsed -> formatClock(label.ms)
+                            is me.lakko.app.media.VideoNoteLayout.DurationLabel.Total -> formatTotalClock(label.ms)
+                        },
+                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                        color = Color.White,
+                    )
+                    if (unplayed && label is me.lakko.app.media.VideoNoteLayout.DurationLabel.Total) {
+                        Box(
+                            Modifier
+                                .padding(start = 4.dp)
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.primary),
+                        )
+                    }
+                }
+            }
+            // The message's time, edited marker and ticks, bottom trailing.
+            if (meta != null) {
+                VideoNotePill(
+                    Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = inset, bottom = lift)
+                        .testTag(VIDEO_NOTE_META_TAG),
+                ) { meta() }
             }
         }
-        // Outside any bubble colour: under the sender's own note the inherited
-        // content colour was the bubble's white, unreadable on the chat
-        // background (seen on a Pixel 7a, 2026-11-12).
-        Text(
-            formatTotalClock(duration),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        if (!me.lakko.app.media.VideoNoteLayout.asideFirst(isOwn)) aside()
+        }
         val failures by hub.failures.collectAsStateWithLifecycle()
         val failure = failures[key]
         if (failed || failure == me.lakko.app.media.MediaFailure.GONE) {
@@ -831,6 +900,18 @@ internal fun VideoNoteBubble(ref: AttachmentRef, hub: ChatMediaHub, onLongPress:
             me.lakko.app.ui.translation.TranscriptUnder(ref, hub, MaterialTheme.colorScheme.onSurface)
         }
     }
+}
+
+/** UX spec §3 / §10 — the photo bubble's small translucent pill, on a video
+ *  note's circle. The same fill as `MediaMetaPill`. */
+@Composable
+private fun VideoNotePill(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
+            .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(percent = 50))
+            .padding(horizontal = 7.dp, vertical = 1.dp),
+    ) { content() }
 }
 
 /** Test tags of the GIF picture and of its label. */

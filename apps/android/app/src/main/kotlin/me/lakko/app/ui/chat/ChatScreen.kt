@@ -2762,6 +2762,30 @@ internal fun Bubble(
                                         } else {
                                             null
                                         },
+                                        // UX spec §3 (2026-11-22) — a lone video
+                                        // note carries its time, edited marker and
+                                        // ticks on a pill inside the circle; under
+                                        // it they read as loose text floating under
+                                        // the video (seen on a Pixel).
+                                        noteMeta = if (metaSlot == me.lakko.app.media.BubbleMetaSlot.NOTE_PILL) {
+                                            {
+                                                BubbleMeta(
+                                                    edited = msg.edited,
+                                                    saved = savedMessage,
+                                                    time = time,
+                                                    readState = if (isOwn) readState else OwnReadState.None,
+                                                    contentColor = Color.White,
+                                                    fillWidth = false,
+                                                    onRetry = if (msg.ack == Ack.FAILED) {
+                                                        { onRetrySend(msg.localId) }
+                                                    } else {
+                                                        null
+                                                    },
+                                                )
+                                            }
+                                        } else {
+                                            null
+                                        },
                                     ) {
                                         AttachmentChipRow(
                                             ref = ref,
@@ -2979,19 +3003,6 @@ internal fun Bubble(
             )
         }
 
-        // A chromeless (video note) bubble has no surface to carry the meta
-        // line, so it sits under the circle. A photo or video carries it in
-        // the pill on the media (UX spec §10), so nothing is drawn here.
-        if (metaSlot == me.lakko.app.media.BubbleMetaSlot.BELOW_BUBBLE) {
-            BubbleMeta(
-                edited = msg.edited,
-                saved = savedMessage,
-                time = time,
-                readState = if (isOwn) readState else OwnReadState.None,
-                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 4.dp),
-            )
-        }
     }
     }
 }

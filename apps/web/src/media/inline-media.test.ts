@@ -151,7 +151,7 @@ describe("where the meta line goes", () => {
   it("the other sole bubbles keep the slots they already had", () => {
     expect(bubbleMetaSlot(sole({ attachments: [photo] }))).toBe("media-pill");
     expect(bubbleMetaSlot(sole({ attachments: [{ mime: "video/mp4" }] }))).toBe("media-pill");
-    expect(bubbleMetaSlot(sole({ attachments: [note] }))).toBe("below-bubble");
+    expect(bubbleMetaSlot(sole({ attachments: [note] }))).toBe("note-pill");
     // A GIF is a bubble WITH chrome, so a pill over it would cover an
     // animation that may be 40px tall; a file chip is an ordinary bubble.
     expect(bubbleMetaSlot(sole({ attachments: [gif] }))).toBe("bubble-row");

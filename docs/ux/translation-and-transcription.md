@@ -274,8 +274,10 @@ question 1).
 
 On the voice-message row, a transcript button sits at the trailing end of the
 row, beside the speed control's reserved space: a small `Aa` glyph button,
-accessibility label `Show transcript`. On a video message it sits on the
-bubble's trailing bottom edge.
+accessibility label `Show transcript`. On a video message it sits beside the
+circle, vertically centred, on the side away from the screen edge
+([`media-messages.md`](media-messages.md) section 3, amended 2026-11-22; it
+used to sit on the bubble's trailing bottom edge).
 
 The row geometry rule of [`media-messages.md`](media-messages.md) section 2
 holds: the button's space is part of the row in every state, so the row does not

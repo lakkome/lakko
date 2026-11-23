@@ -264,6 +264,69 @@ final class MediaBubbleLayoutTests: XCTestCase {
 
     /// One `AttachmentRef` for a received voice message, with the waveform and
     /// duration a real sender would carry.
+    // MARK: - A video note carries its lines on and beside the circle
+
+    /// `docs/ux/media-messages.md` section 3 (2026-11-22) — seen on a real
+    /// iPhone: the duration, the `Aa` control and the time stood under the
+    /// circle on loose lines. Now the duration and the time ride pills inside
+    /// the circle and `Aa` sits beside it, so the bubble is exactly as tall as
+    /// the circle and as wide as the circle plus the `Aa` column.
+    func testVideoNoteIsNoTallerThanItsCircle() throws {
+        let ref = AttachmentRef(
+            blobId: Data(repeating: 0xB1, count: 32),
+            key: Data(repeating: 0xB2, count: 32),
+            nonce: Data(repeating: 0xB3, count: 12),
+            mime: "video/mp4",
+            size: 16_384,
+            name: "note.mp4",
+            kind: "video_note",
+            durationMs: 3_400
+        )
+        let key = ChatMediaController.key(for: ref)
+        for incoming in [true, false] {
+            let host = UIHostingController(
+                rootView: VideoNoteBubble(
+                    ref: ref, mediaKey: key, incoming: incoming, upload: nil, onRetry: {},
+                    transcript: nil, meta: AnyView(Text("22:56").font(.caption2)))
+                    .environmentObject(controller)
+                    .environmentObject(controller.live)
+            )
+            let size = host.sizeThatFits(in: proposal)
+            XCTAssertEqual(
+                size.height, VideoNoteBubble.diameter, accuracy: 0.5,
+                "something is drawn under the circle (incoming \(incoming)): \(size.height)")
+            XCTAssertEqual(
+                size.width,
+                VideoNoteBubble.diameter + VideoNoteLayout.asideGap + TranscriptButton.size.width,
+                accuracy: 0.5,
+                "Aa is not beside the circle (incoming \(incoming)): \(size.width)")
+        }
+    }
+
+    func testVideoNotePillsStayInsideTheCircle() {
+        for d: CGFloat in [96, 160, 200, 240, 320] {
+            XCTAssertTrue(VideoNoteLayout.pillCornerInside(diameter: d), "pill corner outside at \(d)")
+        }
+    }
+
+    func testVideoNoteAsideIsAwayFromTheScreenEdge() {
+        XCTAssertFalse(VideoNoteLayout.asideFirst(incoming: true))
+        XCTAssertTrue(VideoNoteLayout.asideFirst(incoming: false))
+    }
+
+    func testVideoNoteDurationIsTheTotalUntilItPlaysWithSound() {
+        XCTAssertEqual(
+            VideoNoteLayout.durationLabel(playingWithSound: false, progress: 0.5, durationMs: 3_400),
+            .total(ms: 3_400))
+        XCTAssertEqual(
+            VideoNoteLayout.durationLabel(playingWithSound: true, progress: 0.5, durationMs: 3_400),
+            .elapsed(ms: 1_700))
+        XCTAssertEqual(
+            VideoNoteLayout.durationLabel(playingWithSound: true, progress: 2, durationMs: 3_400),
+            .elapsed(ms: 3_400))
+        XCTAssertNil(VideoNoteLayout.durationLabel(playingWithSound: false, progress: 0, durationMs: nil))
+    }
+
     private func voiceRef() -> AttachmentRef {
         AttachmentRef(
             blobId: Data(repeating: 0xA1, count: 32),

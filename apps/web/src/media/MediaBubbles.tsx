@@ -29,6 +29,7 @@ import { TranscriptBlock, TranscriptButton, type TranscriptHost } from "../trans
 import { voicePress } from "./voice-press";
 import { barIsPlayed, waveformBars } from "./waveform";
 import { paintVideoBehind } from "./video-overlay";
+import { videoNoteAsideFirst, videoNoteDurationLabel } from "./video-note-layout";
 
 /** Upload state of an outgoing media message: a completed fraction while
  *  uploading, `"failed"` when nothing reached the other side, `undefined`
@@ -49,12 +50,15 @@ export interface MediaBubbleProps {
   /**
    * UX spec §2 — the message's own meta line (the time, the edited marker,
    * the delivery ticks) drawn at the trailing end of the voice row's quiet
-   * line instead of on a row of its own below the bubble.
+   * line instead of on a row of its own below the bubble. UX spec §3
+   * (2026-11-22) — on a lone video note, the same line on a pill inside the
+   * circle, bottom trailing.
    *
    * A function rather than an element: Solid's JSX creates the DOM node where
    * it is evaluated, so an element built by the caller would be created in
    * ITS reactive scope and go stale. Absent — which is every bubble but a
-   * lone voice message — means the caller is drawing the line itself.
+   * lone voice message or video note — means the caller is drawing the line
+   * itself.
    */
   meta?: (() => JSX.Element) | undefined;
   /**
@@ -526,6 +530,9 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
   const [mode, setMode] = createSignal<"poster" | "muted" | "sound">("poster");
   const [paused, setPaused] = createSignal(true);
   const [progress, setProgress] = createSignal(0);
+  // Section 3 — the duration pill shows the elapsed time while this note is
+  // the one playing with sound.
+  const [positionMs, setPositionMs] = createSignal(0);
   const [videoUrl, setVideoUrl] = createSignal<string | null>(null);
   // Once playback has been started the <video> stays mounted — through pause,
   // end and the return to the poster — so a later tap plays an element that
@@ -607,6 +614,7 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
     props.hub.release(props.mediaKey);
     setSoundHint(false);
     setProgress(0);
+    setPositionMs(0);
     setMode("poster");
   }
 
@@ -729,9 +737,28 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
     return t("chat.video_note.play", { duration: d });
   };
 
+  const unplayed = (): boolean => props.incoming && !props.hub.isPlayed(props.mediaKey);
+  const durationLabel = () =>
+    videoNoteDurationLabel({
+      mode: mode(),
+      soundHint: soundHint(),
+      positionMs: positionMs(),
+      durationMs: props.attachment.durationMs,
+    });
+  /** UX section 3 / translation UX 4.1 — `Aa` beside the circle, on the side
+   *  away from the screen edge, vertically centred. A sibling of the circle,
+   *  not inside it: a button cannot hold a button. */
+  const aside = (): JSX.Element => (
+    <span class="lakko-vn-transcript">
+      <TranscriptButton host={props.transcript} />
+    </span>
+  );
+
   return (
-    <div style={{ display: "flex", "flex-direction": "column", "align-items": "center", gap: "0.2rem" }}>
+    <div class="lakko-vn" classList={{ incoming: props.incoming, outgoing: !props.incoming }}>
       <div class="lakko-vn-frame">
+      <Show when={videoNoteAsideFirst(props.incoming)}>{aside()}</Show>
+      <div class="lakko-vn-disc">
       <button ref={root} type="button" class="lakko-vn-bubble" aria-label={label()} onClick={onTap}>
         <Show when={mounted() && videoUrl() !== null}>
           <video
@@ -749,6 +776,7 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
             onTimeUpdate={(e) => {
               const v = e.currentTarget;
               if (Number.isFinite(v.duration) && v.duration > 0) setProgress(v.currentTime / v.duration);
+              setPositionMs(v.currentTime * 1000);
             }}
             onEnded={(e) => {
               if (mode() !== "sound") return;
@@ -810,22 +838,32 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
             <span style={{ position: "absolute", top: "1rem", right: "2.2rem", "font-size": "1rem" }}>🔇</span>
           </Show>
         </span>
-        <Show
-          when={soundHint() && mode() === "muted"}
-          fallback={
-            <Show when={props.attachment.durationMs !== undefined && mode() !== "sound"}>
-              <span class="lakko-vn-corner">{formatTotalClock(props.attachment.durationMs ?? 0)}</span>
-            </Show>
-          }
-        >
-          <span class="lakko-vn-corner">{t("chat.video_note.sound_on")}</span>
-        </Show>
       </button>
-      {/* UX section 4.1 — on the bubble's trailing bottom edge. A sibling of
-          the circle, not inside it: a button cannot hold a button. */}
-      <span class="lakko-vn-transcript">
-        <TranscriptButton host={props.transcript} />
-      </span>
+      {/* UX section 3 (2026-11-22) — the duration, bottom leading, and the
+          message's time and ticks, bottom trailing, on the photo bubble's
+          translucent pill, inside the circle. Siblings of the circle's
+          button, not children: the meta line may carry controls of its own. */}
+      <Show when={durationLabel()}>
+        {(d) => (
+          <span class="lakko-vn-pill lakko-vn-pill-duration">
+            <span aria-hidden="true">
+              {(() => {
+                const l = d();
+                if (l.kind === "sound-hint") return t("chat.video_note.sound_on");
+                return l.kind === "elapsed" ? formatClock(l.ms) : formatTotalClock(l.ms);
+              })()}
+            </span>
+            <Show when={unplayed() && d().kind === "total"}>
+              <span class="lakko-unplayed" aria-label={t("chat.voice.not_played")} />
+            </Show>
+          </span>
+        )}
+      </Show>
+      <Show when={props.meta}>
+        {(meta) => <span class="lakko-vn-pill lakko-vn-pill-meta">{meta()()}</span>}
+      </Show>
+      </div>
+      <Show when={!videoNoteAsideFirst(props.incoming)}>{aside()}</Show>
       </div>
       <TranscriptBlock host={props.transcript} />
       <Show when={status() === "error"}>

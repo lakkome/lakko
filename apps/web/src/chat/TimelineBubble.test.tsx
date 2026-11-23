@@ -369,6 +369,74 @@ describe("where a message's time is drawn", () => {
 });
 
 // ---------------------------------------------------------------------------
+// `media-messages.md` section 3 (2026-11-22) — a lone video note carries its
+// duration and its time on pills INSIDE the circle and `Aa` beside it; seen
+// on two real phones, the three stood on loose lines under the circle.
+// ---------------------------------------------------------------------------
+
+const NOTE_BLOB_ID = new Uint8Array(32).fill(0xcd);
+
+function noteRef(): AttachmentRefBytes {
+  return {
+    blobId: NOTE_BLOB_ID,
+    key: new Uint8Array(32),
+    nonce: new Uint8Array(12),
+    mime: "video/mp4",
+    size: 8192,
+    name: undefined,
+    kind: "video_note",
+    durationMs: 3400,
+  };
+}
+
+describe("a lone video note", () => {
+  it("draws the time and the duration on pills inside the circle, nothing under it", () => {
+    const bubble = mount(incoming("", [noteRef()]));
+    expect(bubble.classList.contains("chromeless")).toBe(true);
+    const metas = all(".lk-bubble-meta");
+    expect(metas.length).toBe(1);
+    const disc = one(".lakko-vn-disc");
+    const metaPill = one(".lakko-vn-pill-meta", disc);
+    expect(metaPill.contains(metas[0] as Node)).toBe(true);
+    expect(metas[0]?.textContent).toContain(shortTime(SENT_AT));
+    // The total, rounded up as the composer shows it.
+    expect(one(".lakko-vn-pill-duration", disc).textContent).toContain("0:04");
+    // Not the bubble's own row under the circle.
+    expect(present(":scope > .lk-bubble-meta", bubble)).toBe(false);
+  });
+
+  it("puts Aa beside the circle, after it on an incoming note", () => {
+    mount(incoming("", [noteRef()]));
+    const frame = one(".lakko-vn-frame");
+    const kids = Array.from(frame.children).map((c) => c.className);
+    expect(kids).toEqual(["lakko-vn-disc", "lakko-vn-transcript"]);
+  });
+
+  it("puts Aa before the circle on an own note", () => {
+    mount(ownMessage("", [noteRef()]));
+    const frame = one(".lakko-vn-frame");
+    const kids = Array.from(frame.children).map((c) => c.className);
+    expect(kids).toEqual(["lakko-vn-transcript", "lakko-vn-disc"]);
+    const metas = all(".lk-bubble-meta");
+    expect(metas.length).toBe(1);
+    expect(one(".lakko-vn-pill-meta").contains(metas[0] as Node)).toBe(true);
+    // An own acked message carries its tick inside the pill.
+    expect(present(".lakko-vn-pill-meta .lk-bubble-ack")).toBe(true);
+  });
+
+  it("sent as a reply keeps the bubble's own row; the circle keeps its duration", () => {
+    const row = incoming("", [noteRef()]);
+    if (row.kind !== "incoming" || row.event.kind !== "application") throw new Error("fixture");
+    const bubble = mount({ ...row, event: { ...row.event, reply: { target: 41, author: "A", excerpt: "x" } } });
+    expect(present(".lk-reply-quote", bubble)).toBe(true);
+    expect(bubble.classList.contains("chromeless")).toBe(false);
+    expect(present(".lakko-vn-pill-meta")).toBe(false);
+    expect(present(":scope > .lk-bubble-meta", bubble)).toBe(true);
+    expect(present(".lakko-vn-pill-duration")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Defect 3 — the action card is a separate surface from the reaction row.
 // `message-actions.md` section 2.
 // ---------------------------------------------------------------------------
