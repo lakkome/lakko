@@ -217,6 +217,10 @@ final class ChannelPublisherLoops {
         if let current = (try? context.open())?.group {
             await ChannelDeviceAdmission.sendMarkIfOwed(
                 channelId: channelId, state: channels, identity: identity, group: current, ds: ds)
+            // UX 15.1 (2026-11-24) — this account's reader key, to every
+            // other publisher (again when the group grew).
+            await PublisherReaderKeys.sendIfDue(
+                channelId: channelId, state: channels, identity: identity, group: current, ds: ds)
         }
     }
 
@@ -755,6 +759,8 @@ final class ChannelPublisherLoops {
             }
             if let channels = channelsRef {
                 ChannelDeviceAdmission.receiveMarks(
+                    outcome.applications, channelId: channelId, group: group, state: channels)
+                PublisherReaderKeys.receive(
                     outcome.applications, channelId: channelId, group: group, state: channels)
             }
             if owner {

@@ -30,6 +30,7 @@
  * Unlike the post sync it does not stop in a hidden tab: someone may be
  * waiting to be let in. A pass is skipped while the previous one runs.
  */
+import { sendPublisherReaderKey, takePublisherReaderKey } from "./publisher-reader-keys";
 import { accountSuspended } from "../auth/suspension-state";
 import { createEffect, onCleanup, onMount, type Component } from "solid-js";
 
@@ -1010,6 +1011,11 @@ export const ChannelPublisherLoops: Component = () => {
     if (group !== undefined && device !== undefined && takeDeviceRequest(wasm, idHex, group, device, plaintext, sender)) {
       return;
     }
+    // UX 15.1 (2026-11-24): another publishing account's reader key, left
+    // out of the subscriber list and count.
+    if (await takePublisherReaderKey(wasm, idHex, plaintext, sender, memberKeys)) {
+      return;
+    }
     // ADR-0090 section 6: the admission mark, kept as the maximum.
     if (await takeAdmissionMark(wasm, idHex, ownerKeyB64 === null ? null : hexOf(b64ToBytes(ownerKeyB64)), plaintext, sender)) {
       return;
@@ -1643,6 +1649,9 @@ export const ChannelPublisherLoops: Component = () => {
         await refreshCoPublisherSeed(lineage, idHex);
         // ADR-0090 section 6: the admission mark, to every publishing device.
         if (channelsActions.accessOf(idHex).visibility === "private") await sendAdmissionMark(lineage, idHex);
+        // UX 15.1 (2026-11-24): this account's reader key, to every other
+        // publisher (again when the group grew).
+        await sendPublisherReaderKey(lineage, idHex);
         await withPublisherGroup(lineage, idHex, async (g) => {
           notePublisherGroupMembers(idHex, g);
         });

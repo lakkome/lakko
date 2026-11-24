@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import LakkoCore
 import XCTest
 @testable import Lakko
 
@@ -113,5 +114,91 @@ final class ChannelSubscriberListTests: XCTestCase {
         XCTAssertEqual(
             ChannelReseal.resealKeys(rows: rows, throughSeq: 8),
             [ChannelsComposer.bytesToHex(iphonePk), ChannelsComposer.bytesToHex(pixelPk)])
+    }
+
+    /// Live walk 2026-11-24: two people subscribed to the owner's private
+    /// channel and the owner read "Subscribers (3)", the third a "From an
+    /// invitation" row with `Remove`: the owner's own account reader key.
+    func testThePublishingViewersOwnReaderKeyIsNotASubscriber() {
+        let readerPk = Data(repeating: 0xEE, count: 32)
+        let readerHex = ChannelsComposer.bytesToHex(readerPk)
+        let excluded = SubscriberCount.ownPublisherKeys(publishes: true, keys: [readerHex.uppercased(), nil, ""])
+        XCTAssertEqual(excluded, [readerHex.lowercased()])
+        var you = member(readerPk, account: 9, name: nil)
+        you.isSelf = true
+        let count = SubscriberCount.shown(serviceCount: 3, publisherReaderRows: 1)
+        XCTAssertEqual(count, 2)
+        let list = SubscriberList.build(
+            members: [you, member(pixelPk, account: 2, name: "Nineteen Droid"),
+                      member(iphonePk, account: 1, name: "Eighteen iOS")],
+            rows: [row(iphonePk, seq: 1), row(pixelPk, seq: 2), row(readerPk, seq: 3)],
+            count: count, canRemove: true, excludedKeys: excluded)
+        XCTAssertEqual(list.people.map(\.member.claim.displayName), ["Nineteen Droid", "Eighteen iOS"])
+        XCTAssertFalse(list.people.contains { $0.member.isSelf })
+        XCTAssertTrue(list.others.isEmpty)
+        XCTAssertEqual(list.othersCount, 0)
+    }
+
+    func testASubscriberViewerLeavesNothingOutAndTheCountFollowsARemoval() {
+        XCTAssertTrue(SubscriberCount.ownPublisherKeys(publishes: false, keys: ["aa"]).isEmpty)
+        XCTAssertEqual(SubscriberCount.shown(serviceCount: 3, publisherReaderRows: 0), 3)
+        XCTAssertEqual(SubscriberCount.shown(serviceCount: 0, publisherReaderRows: 1), 0)
+        XCTAssertEqual(SubscriberCount.afterRemoval(3, removed: 1), 2)
+        XCTAssertEqual(SubscriberCount.afterRemoval(1, removed: 4), 0)
+    }
+
+    /// Live walk 2026-11-24, "Night walk": web owner, iOS publisher; each saw
+    /// the other's reader key as "From an invitation" with `Remove`, counted.
+    func testAnotherPublishersAnnouncedReaderKeyIsNotASubscriber() {
+        let ownReader = Data(repeating: 0xDD, count: 32)
+        let theirReader = Data(repeating: 0xEE, count: 32)
+        let theirHex = ChannelsComposer.bytesToHex(theirReader)
+        let rows = SubscriberCount.publisherReaderRows(
+            ownRegisteredHex: ChannelsComposer.bytesToHex(ownReader), otherKeys: [theirHex.uppercased(), theirHex])
+        XCTAssertEqual(rows, 2)
+        let count = SubscriberCount.shown(serviceCount: 3, publisherReaderRows: rows)
+        XCTAssertEqual(count, 1)
+        let list = SubscriberList.build(
+            members: [member(pixelPk, account: 2, name: "Nineteen Droid")],
+            rows: [row(pixelPk, seq: 1), row(ownReader, seq: 2), row(theirReader, seq: 3)],
+            count: count, canRemove: true,
+            excludedKeys: SubscriberCount.ownPublisherKeys(
+                publishes: true, keys: [ChannelsComposer.bytesToHex(ownReader), theirHex]))
+        XCTAssertEqual(list.people.map(\.member.claim.displayName), ["Nineteen Droid"])
+        XCTAssertTrue(list.others.isEmpty)
+        XCTAssertEqual(list.othersCount, 0)
+    }
+
+    /// The receiver's rule, the pruning and the send schedule, through the
+    /// real envelope codec.
+    func testPublisherReaderKeyRules() throws {
+        let channel = Data(repeating: 0x0C, count: 16)
+        let owner = Data(repeating: 0x0A, count: 32)
+        let publisher = Data(repeating: 0x0B, count: 32)
+        let stranger = Data(repeating: 0x0E, count: 32)
+        let reader = Data(repeating: 0xD7, count: 32)
+        let env = try composePublisherReaderKeyEnvelope(channelId: channel, readerKey: reader)
+        XCTAssertEqual(env.count, Int(publisherReaderKeyEnvelopeLen()))
+        XCTAssertEqual(try dispatchIncomingEnvelope(plaintext: env).kind, .publisherReaderKey)
+        let decoded = try decodePublisherReaderKeyEnvelope(plaintext: env)
+        let accounts: Set<Data> = [owner, publisher]
+        let kept = PublisherReaderKeys.verdict(
+            channelId: channel, envelopeChannelId: decoded.channelId, readerKey: decoded.readerKey,
+            sender: publisher, publisherAccounts: accounts)
+        XCTAssertEqual(kept?.account, publisher.base64EncodedString())
+        XCTAssertEqual(kept?.readerHex, String(repeating: "d7", count: 32))
+        XCTAssertNil(PublisherReaderKeys.verdict(
+            channelId: channel, envelopeChannelId: decoded.channelId, readerKey: decoded.readerKey,
+            sender: stranger, publisherAccounts: accounts))
+        XCTAssertNil(PublisherReaderKeys.verdict(
+            channelId: Data(repeating: 1, count: 16), envelopeChannelId: decoded.channelId,
+            readerKey: decoded.readerKey, sender: publisher, publisherAccounts: accounts))
+        let stored = [owner.base64EncodedString(): "aa", publisher.base64EncodedString(): "bb"]
+        XCTAssertEqual(PublisherReaderKeys.pruned(stored, publisherAccounts: [owner]), [owner.base64EncodedString(): "aa"])
+        XCTAssertNil(PublisherReaderKeys.sendDue(registeredHex: nil, leaves: 2, lastSent: nil))
+        let first = PublisherReaderKeys.sendDue(registeredHex: "AB", leaves: 2, lastSent: nil)
+        XCTAssertNotNil(first)
+        XCTAssertNil(PublisherReaderKeys.sendDue(registeredHex: "ab", leaves: 2, lastSent: first))
+        XCTAssertNotNil(PublisherReaderKeys.sendDue(registeredHex: "ab", leaves: 3, lastSent: first))
     }
 }

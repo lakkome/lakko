@@ -116,7 +116,18 @@
 //! u8   channel_name_len ‖ channel_name — the channel-name rule, 1..=255 bytes
 //! u16be description_len ‖ description  — the channel-description rule, 0..=1024
 //! u8   avatar_len      ‖ avatar        — crate::avatar, 0 | 84 | 170
+//! [optional, 2026-11-24]
+//! u8   inviter_len     ‖ inviter_name  — the display-name rule, 1..=255;
+//!                                        absent (no bytes at all) = none
 //! ```
+//!
+//! A subscriber invitation's inviter name (section 7.2 of
+//! `docs/ux/group-and-channel-privacy.md`: "Anna invites you to") is the one
+//! optional trailing field: absent when the link names nobody, never an
+//! empty length, so the encoding stays canonical and a link minted before
+//! the field still opens. It is carried only when the whole preview stays
+//! within [`MAX_SEALED_PREVIEW_LEN`]
+//! ([`GroupInvitePreview::with_subscriber_inviter`]), so no bound grew.
 //!
 //! The trailing `avatar` (ADR-0087 section 18.4) is the photo of the group or
 //! channel the link was made with, in the codec a person's profile uses: the
@@ -367,8 +378,9 @@ pub struct GroupInvitePreview {
     pub channel_id: Option<[u8; PREVIEW_CHANNEL_ID_LEN]>,
     /// ADR-0087 section 7: set on a channel subscriber invitation (preview
     /// kind 3). Then `channel_id` is set, `group_name` is the channel's name
-    /// (required, the channel-name rule), `inviter_name` is `None` and
-    /// `member_count` 0.
+    /// (required, the channel-name rule), `member_count` 0, and
+    /// `inviter_name` the inviter's display name or `None` (2026-11-24; set
+    /// it through [`Self::with_subscriber_inviter`]).
     pub subscriber: Option<SubscriberInvite>,
     /// ADR-0087 section 18.4: the photo of the group or channel when the
     /// link was made, or `None`. Its keys are readable by whoever holds the
@@ -377,6 +389,31 @@ pub struct GroupInvitePreview {
 }
 
 impl GroupInvitePreview {
+    /// A subscriber invitation (`subscriber` set) carrying `inviter` as its
+    /// inviter's name when it can (section 7.2 of
+    /// `docs/ux/group-and-channel-privacy.md`): trimmed, and kept only when
+    /// it passes the display-name rule and the whole preview stays within
+    /// [`MAX_SEALED_PREVIEW_LEN`]; otherwise the link names nobody and the
+    /// page says "You are invited to". Any other preview is returned as is.
+    #[must_use]
+    pub fn with_subscriber_inviter(mut self, inviter: Option<&str>) -> Self {
+        if self.subscriber.is_none() {
+            return self;
+        }
+        self.inviter_name = None;
+        let Some(name) = inviter.map(str::trim).filter(|n| !n.is_empty()) else {
+            return self;
+        };
+        if name.len() > MAX_PREVIEW_NAME_BYTES || check_display_name(name).is_err() {
+            return self;
+        }
+        self.inviter_name = Some(name.to_string());
+        if self.encode().len() > MAX_PREVIEW_PLAINTEXT_LEN {
+            self.inviter_name = None;
+        }
+        self
+    }
+
     /// Refuse a preview that the decoder would refuse, before sealing it.
     fn validate(&self) -> Result<()> {
         if let Some(avatar) = &self.avatar {
@@ -389,14 +426,26 @@ impl GroupInvitePreview {
                 "a channel group-invite preview carries no member count".into(),
             ));
         }
-        // A subscriber invitation names no inviter (the card rides the
-        // inviter's one-to-one); a co-publisher invitation may (2026-11-05).
-        if self.subscriber.is_some() && self.inviter_name.is_some() {
-            return Err(ContactError::InvalidArgument(
-                "a subscriber invitation carries no inviter name".into(),
-            ));
-        }
         if let Some(sub) = &self.subscriber {
+            // The inviter's name (2026-11-24): the display-name rule, and the
+            // whole preview within the sealed bound.
+            if let Some(n) = &self.inviter_name {
+                if n.is_empty() || n.len() > MAX_PREVIEW_NAME_BYTES {
+                    return Err(ContactError::InvalidArgument(format!(
+                        "subscriber invitation inviter name must be 1..={MAX_PREVIEW_NAME_BYTES} bytes",
+                    )));
+                }
+                check_display_name(n).map_err(|e| {
+                    ContactError::InvalidArgument(format!(
+                        "subscriber invitation inviter name: {e}"
+                    ))
+                })?;
+                if self.encode().len() > MAX_PREVIEW_PLAINTEXT_LEN {
+                    return Err(ContactError::InvalidArgument(
+                        "subscriber invitation too long to carry the inviter name".into(),
+                    ));
+                }
+            }
             if self.channel_id.is_none() {
                 return Err(ContactError::InvalidArgument(
                     "a subscriber invitation names its channel".into(),
@@ -463,6 +512,13 @@ impl GroupInvitePreview {
             out.extend_from_slice(&description_len.to_be_bytes());
             out.extend_from_slice(&description[..usize::from(description_len)]);
             encode_avatar_field(self.avatar.as_ref(), &mut out);
+            // Optional, trailing, never empty (module docs).
+            if let Some(inviter) = self.inviter_name.as_deref().filter(|n| !n.is_empty()) {
+                let bytes = inviter.as_bytes();
+                let len = u8::try_from(bytes.len()).unwrap_or(u8::MAX);
+                out.push(len);
+                out.extend_from_slice(&bytes[..usize::from(len)]);
+            }
             return out;
         }
         if let Some(channel_id) = &self.channel_id {
@@ -497,6 +553,13 @@ impl GroupInvitePreview {
             return Self::decode_channel(cur);
         }
         if version == PREVIEW_KIND_SUBSCRIBER {
+            // The sealed bound holds on the plaintext too, so what decodes
+            // also validates (the optional inviter name cannot grow it).
+            if plain.len() > MAX_PREVIEW_PLAINTEXT_LEN {
+                return Err(ContactError::InvalidEncoding(
+                    "subscriber invitation longer than the preview bound".into(),
+                ));
+            }
             return Self::decode_subscriber(cur);
         }
         if version != PREVIEW_VERSION {
@@ -629,6 +692,29 @@ impl GroupInvitePreview {
             ))
         })?;
         let avatar = take_avatar(&mut cur)?;
+        // The optional inviter name (2026-11-24): absent, or 1..=255 bytes
+        // under the display-name rule; an empty length is not canonical.
+        let inviter_name = if cur.is_empty() {
+            None
+        } else {
+            let len = usize::from(take_u8(&mut cur)?);
+            if len == 0 {
+                return Err(ContactError::InvalidEncoding(
+                    "subscriber invitation inviter name is empty".into(),
+                ));
+            }
+            let text = core::str::from_utf8(take_n(&mut cur, len)?).map_err(|_| {
+                ContactError::InvalidEncoding(
+                    "subscriber invitation inviter name is not UTF-8".into(),
+                )
+            })?;
+            check_display_name(text).map_err(|e| {
+                ContactError::InvalidEncoding(format!(
+                    "subscriber invitation inviter name refused: {e}"
+                ))
+            })?;
+            Some(text.to_string())
+        };
         if !cur.is_empty() {
             return Err(ContactError::InvalidEncoding(format!(
                 "trailing {} bytes after group-invite preview",
@@ -637,7 +723,7 @@ impl GroupInvitePreview {
         }
         Ok(Self {
             group_name: Some(name.to_string()),
-            inviter_name: None,
+            inviter_name,
             member_count: 0,
             channel_id: Some(channel_id),
             subscriber: Some(SubscriberInvite {
@@ -2290,8 +2376,14 @@ mod tests {
             ..preview.clone()
         };
         assert!(counted.validate().is_err());
+        // A subscriber invitation may name its inviter (2026-11-24), under
+        // the display-name rule.
         let mut subscriber = subscriber_preview(private_access());
         subscriber.inviter_name = Some("Anna".into());
+        assert!(subscriber.validate().is_ok());
+        subscriber.inviter_name = Some("a\nb".into());
+        assert!(subscriber.validate().is_err());
+        subscriber.inviter_name = Some(String::new());
         assert!(subscriber.validate().is_err());
         // A maximal publisher invitation stays within the preview bound.
         let maximal = GroupInvitePreview {
@@ -2326,6 +2418,91 @@ mod tests {
             avatar: Some(test_photo()),
         };
         assert_eq!(preview.encode().len(), MAX_PREVIEW_PLAINTEXT_LEN);
+    }
+
+    /// Section 7.2 of `docs/ux/group-and-channel-privacy.md` (2026-11-24):
+    /// a subscriber invitation names its inviter when it can, the field is
+    /// optional and trailing, and an invitation without it still opens.
+    #[test]
+    fn a_subscriber_invitation_carries_its_inviter_when_it_fits() {
+        let channel = [0xC7; PREVIEW_CHANNEL_ID_LEN];
+        let secret = generate_link_key();
+        for access in [
+            private_access(),
+            ChannelAccess::Public {
+                read_key: [3; SUBSCRIBER_KEY_LEN],
+            },
+        ] {
+            let named =
+                subscriber_preview(access.clone()).with_subscriber_inviter(Some("  Anna Weber "));
+            assert_eq!(named.inviter_name.as_deref(), Some("Anna Weber"));
+            let wire = compose_with_preview(&fixture_signing(), &channel, 0, None, &named, &secret)
+                .unwrap();
+            let cap = decode_and_verify(&wire).unwrap();
+            let opened = cap.open_preview(&secret).unwrap().unwrap();
+            assert_eq!(opened, named);
+
+            // Without the field: the encoding ends at the photo, as before.
+            let plain = subscriber_preview(access).with_subscriber_inviter(None);
+            assert_eq!(plain.inviter_name, None);
+            assert_eq!(
+                plain.encode().len() + 1 + "Anna Weber".len(),
+                named.encode().len()
+            );
+            assert_eq!(GroupInvitePreview::decode(&plain.encode()).unwrap(), plain);
+        }
+        // A name the display-name rule refuses, or a blank one, is left out.
+        for bad in ["", "   ", "a\nb"] {
+            let p = subscriber_preview(private_access()).with_subscriber_inviter(Some(bad));
+            assert_eq!(p.inviter_name, None, "{bad:?}");
+        }
+        // Another preview kind is returned untouched.
+        let group = fixture_preview();
+        assert_eq!(group.clone().with_subscriber_inviter(Some("Zed")), group);
+        // An empty trailing length is not canonical.
+        let mut empty = subscriber_preview(private_access()).encode();
+        empty.push(0);
+        assert!(GroupInvitePreview::decode(&empty).is_err());
+        // Trailing bytes after the name still refuse.
+        let mut extra = subscriber_preview(private_access())
+            .with_subscriber_inviter(Some("Anna"))
+            .encode();
+        extra.push(b'x');
+        assert!(GroupInvitePreview::decode(&extra).is_err());
+    }
+
+    /// A maximal subscriber invitation already fills the bound: the inviter
+    /// name is left out rather than growing any limit.
+    #[test]
+    fn a_maximal_subscriber_invitation_drops_the_inviter() {
+        let preview = GroupInvitePreview {
+            group_name: Some(format!("{}\u{20AC}", "\u{1F600}".repeat(63))),
+            inviter_name: None,
+            member_count: 0,
+            channel_id: Some([0xC7; PREVIEW_CHANNEL_ID_LEN]),
+            subscriber: Some(SubscriberInvite {
+                access: private_access(),
+                description: "\u{1F600}".repeat(256),
+            }),
+            avatar: Some(test_photo()),
+        };
+        let kept = preview.clone().with_subscriber_inviter(Some("Anna"));
+        assert_eq!(kept.inviter_name, None);
+        assert!(kept.validate().is_ok());
+        let mut forced = preview;
+        forced.inviter_name = Some("Anna".into());
+        assert!(
+            forced.validate().is_err(),
+            "over the bound is refused, never sealed"
+        );
+        assert!(
+            GroupInvitePreview::decode(&forced.encode()).is_err(),
+            "and never opened"
+        );
+        assert_eq!(
+            crate::fuzz_api::group_invite_preview_plaintext(&forced.encode()),
+            None
+        );
     }
 
     #[test]

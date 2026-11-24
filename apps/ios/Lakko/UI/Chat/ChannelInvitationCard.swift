@@ -311,6 +311,14 @@ enum ChannelInviteCardFacts {
 final class ChannelInviteActions {
     static let shared = ChannelInviteActions()
     var isHeld: (String) -> Bool = { _ in false }
+
+    /// Section 14.1 / 7.2 — whether this device holds the channel: listed,
+    /// and subscribed (a subscriber key) or publishing (publisher keys).
+    /// The card and the link page then read `Open`.
+    static func holds(_ state: ChannelsUiState, channelId: String) -> Bool {
+        state.channels.contains { $0.id == channelId }
+            && (state.subscriberKeysByChannel[channelId] != nil || state.keysByChannel[channelId] != nil)
+    }
     var subscribe: (ChannelLinkFacts) -> Void = { _ in }
 }
 

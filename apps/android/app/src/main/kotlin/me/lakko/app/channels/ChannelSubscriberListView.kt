@@ -47,15 +47,29 @@ public object ChannelSubscriberListView {
      * viewer's own ("You"), card or not, so it is never an anonymous row to
      * remove.
      */
-    public fun input(members: List<ChannelMemberRow>, ownKeyHex: String? = null): Input {
-        val own = ownKeyHex?.lowercase()
-        @Suppress("NAME_SHADOWING")
-        val members = if (own != null && members.none { m -> m.subscriberPksHex.any { it.lowercase() == own } }) {
-            val selfRow = members.firstOrNull { it.isSelf }
-            val you = selfRow ?: ChannelMemberRow(key = "self", name = "", username = null, isSelf = true, named = true)
-            listOf(you.copy(subscriberPksHex = you.subscriberPksHex + own)) + members.filter { it !== selfRow }
-        } else {
+    public fun input(
+        members: List<ChannelMemberRow>,
+        ownKeyHex: String? = null,
+        /** Keys that are not subscribers ([SubscriberCount.ownPublisherKeys]):
+         *  left out of every card. */
+        excludedKeys: Set<String> = emptySet(),
+    ): Input {
+        val own = ownKeyHex?.lowercase()?.takeUnless { it in excludedKeys }
+        val notExcluded = if (excludedKeys.isEmpty()) {
             members
+        } else {
+            members.mapNotNull { m ->
+                val kept = m.subscriberPksHex.filterNot { it.lowercase() in excludedKeys }
+                if (kept.isEmpty()) null else m.copy(subscriberPksHex = kept)
+            }
+        }
+        @Suppress("NAME_SHADOWING")
+        val members = if (own != null && notExcluded.none { m -> m.subscriberPksHex.any { it.lowercase() == own } }) {
+            val selfRow = notExcluded.firstOrNull { it.isSelf }
+            val you = selfRow ?: ChannelMemberRow(key = "self", name = "", username = null, isSelf = true, named = true)
+            listOf(you.copy(subscriberPksHex = you.subscriberPksHex + own)) + notExcluded.filter { it !== selfRow }
+        } else {
+            notExcluded
         }
         val cards = ArrayList<ChannelSubscriberCard>()
         val cardRows = ArrayList<ChannelMemberRow>()
@@ -72,6 +86,10 @@ public object ChannelSubscriberListView {
         }
         return Input(cards, cardRows)
     }
+
+    /** [listed] less the rows of [excludedKeys] (lower-case hex). */
+    public fun withoutKeys(listed: List<ChannelSubscriberRows.Row>, excludedKeys: Set<String>): List<ChannelSubscriberRows.Row> =
+        if (excludedKeys.isEmpty()) listed else listed.filterNot { it.pubkeyHex.lowercase() in excludedKeys }
 
     /** Map the rule's answer back onto the rows. */
     public fun view(input: Input, listed: List<ChannelSubscriberRows.Row>, out: ChannelSubscriberList): View {
@@ -96,15 +114,20 @@ public object ChannelSubscriberListView {
         count: Long?,
         canRemove: Boolean,
         ownKeyHex: String? = null,
+        /** Keys that are not subscribers: the publishing viewer's own
+         *  ([SubscriberCount.ownPublisherKeys]). [count] must already leave
+         *  them out ([SubscriberCount.shown]). */
+        excludedKeys: Set<String> = emptySet(),
     ): View {
-        val input = input(members, ownKeyHex)
+        val input = input(members, ownKeyHex, excludedKeys)
+        val kept = withoutKeys(listed, excludedKeys)
         val out = uniffi.lakko_ffi_uniffi.channelSubscriberList(
             cards = input.cards,
-            listedKeys = listed.map { it.pubkeyHex.lowercase() },
+            listedKeys = kept.map { it.pubkeyHex.lowercase() },
             count = count?.coerceAtLeast(0L)?.toULong(),
             canRemove = canRemove,
         )
-        return view(input, listed, out)
+        return view(input, kept, out)
     }
 
     /**

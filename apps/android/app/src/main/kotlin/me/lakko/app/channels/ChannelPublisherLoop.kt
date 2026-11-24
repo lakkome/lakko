@@ -82,6 +82,16 @@ public class ChannelPublisherLoop private constructor(
      *  the last pass read it. */
     public val subscriberCounts: StateFlow<Map<String, Long>> = _subscriberCounts.asStateFlow()
 
+    /** Section 15.1 — [removed] subscriber keys of [channelId] were removed
+     *  on this device: the count follows the list at once, before the next
+     *  pass reads it again (live walk 2026-11-24). */
+    public fun noteSubscribersRemoved(channelId: String, removed: Int) {
+        _subscriberCounts.update { counts ->
+            val now = counts[channelId] ?: return@update counts
+            counts + (channelId to SubscriberCount.afterRemoval(now, removed))
+        }
+    }
+
     /** One publisher of a channel as the PublisherGroup names it. */
     public data class Publisher(val accountKey: ByteArray, val owner: Boolean, val self: Boolean)
 
@@ -330,6 +340,34 @@ public class ChannelPublisherLoop private constructor(
     /** The admission mark last sent on each channel (section 6). */
     private val markSent = HashMap<String, Long>()
 
+    /** What this device last announced of its reader key, per channel (in
+     *  memory: after a restart it is announced once more). */
+    private val readerKeySent = HashMap<String, String>()
+
+    private suspend fun sendReaderKeyIfDue(
+        pub: ChannelPublisherIdentity,
+        channelId: String,
+        pg: PublisherGroup,
+        account: String,
+    ) {
+        val registered = ChannelAccountReaderKey.registeredKeyHex(context, account, channelId) ?: return
+        try {
+            val leaves = pub.withChannel { ids -> ids.mls { pg.members().size } }
+            if (leaves == 0) return
+            val due = PublisherReaderKeys.sendDue(registered, leaves, readerKeySent[channelId]) ?: return
+            val envelope = uniffi.lakko_ffi_uniffi.composePublisherReaderKeyEnvelope(
+                ChannelsComposer.channelIdFromHex(channelId),
+                ByteArray(registered.length / 2) { i -> registered.substring(i * 2, i * 2 + 2).toInt(16).toByte() },
+            )
+            pub.withChannel { ids -> CoPublisher.publishApplication(ds, ids, pg, envelope) }
+            readerKeySent[channelId] = due
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Log.w(TAG, "the reader key was not announced yet: ${e.javaClass.simpleName}")
+        }
+    }
+
     /** Device requests read this pass, applied after the read (owner). */
     private class DeviceRequest(val sender: ByteArray, val plaintext: ByteArray, val decoded: uniffi.lakko_ffi_uniffi.FfiPublisherDeviceRequest)
 
@@ -412,6 +450,9 @@ public class ChannelPublisherLoop private constructor(
         val ownKey = pub.withIdentity(persist = false) { it.signaturePublicKey() }
         val ownerKey = pub.withChannel { ids -> ids.mls { pg.ownerAccountKey() } }
         val publisherAccounts = _publishers.value[channelId].orEmpty().map { it.accountKey }
+        // UX 15.1 (2026-11-24) — the other publishers' reader keys, left out
+        // of the subscriber list and count.
+        PublisherReaderKeys.receive(context, account, channelId, poll.applications, poll.senders, publisherAccounts)
         val deviceRequests = ArrayList<DeviceRequest>()
         poll.applications.forEachIndexed { i, plaintext ->
             val sender = poll.senders.getOrNull(i)
@@ -555,6 +596,9 @@ public class ChannelPublisherLoop private constructor(
         // Section 6 — the admission mark this device advanced goes to every
         // publishing device (only an owner device's mark is counted).
         if (owner) sendAdmissionMarkIfAdvanced(pub, channelId, pg, account)
+        // UX 15.1 (2026-11-24) — this account's reader key, to every other
+        // publisher (again when the group grew).
+        sendReaderKeyIfDue(pub, channelId, pg, account)
         // 2026-11-20 — an owned channel whose owner proof was refused moves
         // its owner key to the current key first ([ChannelOwnerRepair]); each
         // channel is tried at most once per process.
@@ -626,7 +670,16 @@ public class ChannelPublisherLoop private constructor(
         if (System.currentTimeMillis() - (lastCountMs[channelId] ?: 0L) >= COUNT_INTERVAL_MS) {
             lastCountMs[channelId] = System.currentTimeMillis()
             try {
-                val count = ChannelPublisherSigners.derive(pub, channelId).use { client.subscriberCount(channelId, it) }
+                val raw = ChannelPublisherSigners.derive(pub, channelId).use { client.subscriberCount(channelId, it) }
+                // The account's own reader key is a row there, not a
+                // subscriber (section 15.1; live walk 2026-11-24).
+                val count = SubscriberCount.shown(
+                    raw,
+                    SubscriberCount.publisherReaderRows(
+                        ChannelAccountReaderKey.registeredKeyHex(context, account, channelId),
+                        PublisherReaderKeys.stored(context, account, channelId).values.toList(),
+                    ),
+                )
                 _subscriberCounts.update { it + (channelId to count) }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e

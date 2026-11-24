@@ -169,6 +169,7 @@ pub mod profile;
 pub mod profile_request;
 pub mod pseudonym;
 pub mod publisher_device_request;
+pub mod publisher_reader_key;
 pub mod push_routing;
 pub mod push_wake;
 pub mod reach;
@@ -448,6 +449,11 @@ pub use publisher_device_request::{
     try_unwrap_publisher_device_request, PublisherDeviceAction, PublisherDeviceRequest,
     PublisherDeviceRequestError, PUBLISHER_DEVICE_REQUEST_ENVELOPE_DOMAIN_V1,
     PUBLISHER_DEVICE_REQUEST_ENVELOPE_MAX_LEN, PUBLISHER_DEVICE_REQUEST_ENVELOPE_MIN_LEN,
+};
+pub use publisher_reader_key::{
+    compose_publisher_reader_key, decode_publisher_reader_key, try_unwrap_publisher_reader_key,
+    PublisherReaderKey, PublisherReaderKeyError, PUBLISHER_READER_KEY_ENVELOPE_DOMAIN_V1,
+    PUBLISHER_READER_KEY_ENVELOPE_LEN,
 };
 pub use push_routing::{
     compose_push_routing_secret, decode_push_routing_secret, derive_push_gid,
@@ -876,6 +882,21 @@ pub mod fuzz_api {
         let dispatched = matches!(
             crate::incoming_envelope::dispatch_incoming_envelope(bytes),
             Ok(crate::incoming_envelope::IncomingEnvelope::ChannelAdmissionMark(m)) if m == mark
+        );
+        Some(ok && dispatched)
+    }
+
+    /// Decode `bytes` as a publisher reader-key envelope (UX 15.1, live walk
+    /// 2026-11-24) and check the dispatcher agrees. `None` when the decoder
+    /// refuses; `Some(true)` when it re-composes to the same bytes at the
+    /// fixed length and dispatches as the same key.
+    #[must_use]
+    pub fn publisher_reader_key_decode(bytes: &[u8]) -> Option<bool> {
+        let ok = crate::publisher_reader_key::fuzz_decode(bytes)?;
+        let key = crate::publisher_reader_key::decode_publisher_reader_key(bytes).ok()?;
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::PublisherReaderKey(k)) if k == key
         );
         Some(ok && dispatched)
     }

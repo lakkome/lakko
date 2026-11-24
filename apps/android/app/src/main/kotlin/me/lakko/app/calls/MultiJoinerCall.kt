@@ -816,6 +816,8 @@ class MultiJoinerCall private constructor(
             // ride the PublisherGroup journal too. Dropped.
             FfiIncomingEnvelopeKind.PUBLISHER_DEVICE_REQUEST,
             FfiIncomingEnvelopeKind.CHANNEL_ADMISSION_MARK,
+            // UX 15.1 (2026-11-24) - a publisher's reader key too.
+            FfiIncomingEnvelopeKind.PUBLISHER_READER_KEY,
             -> Unit
             // ADR-0059 - a shared-channels list rides the GROUP JOURNAL and
             // speaks for its MLS sender, never the SFU signal-relay; dropped.

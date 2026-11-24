@@ -22,6 +22,11 @@ use lakko_contacts::publisher_device_request::{
     PublisherDeviceRequest, PublisherDeviceRequestError, PUBLISHER_DEVICE_REQUEST_ENVELOPE_MAX_LEN,
     PUBLISHER_DEVICE_REQUEST_ENVELOPE_MIN_LEN,
 };
+use lakko_contacts::publisher_reader_key::{
+    compose_publisher_reader_key as rust_compose_reader_key,
+    decode_publisher_reader_key as rust_decode_reader_key, PublisherReaderKey,
+    PublisherReaderKeyError, PUBLISHER_READER_KEY_ENVELOPE_LEN,
+};
 
 use crate::scoped_discovery::FfiCommitterDelegationEnvelope;
 use crate::FfiError;
@@ -262,6 +267,69 @@ pub fn channel_admission_mark_envelope_len() -> u32 {
     len_u32(CHANNEL_ADMISSION_MARK_ENVELOPE_LEN)
 }
 
+fn reader_key_error(e: PublisherReaderKeyError) -> FfiError {
+    FfiError::Contacts(format!("publisherReaderKey.{}: {e}", e.code()))
+}
+
+/// A decoded publisher reader key (UX 15.1, live walk 2026-11-24).
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct FfiPublisherReaderKey {
+    /// The 16-byte channel id.
+    pub channel_id: Vec<u8>,
+    /// The sending account's 32-byte reader key, as the channels service
+    /// holds it.
+    pub reader_key: Vec<u8>,
+}
+
+/// Compose the envelope a publishing device sends on the PublisherGroup
+/// after registering its account's reader key, and again on growth. Every
+/// publishing device keeps the newest per current publisher account and
+/// leaves those keys out of the subscriber list and count.
+///
+/// # Errors
+///
+/// [`FfiError::Contacts`] `publisherReaderKey.badLength` for a channel id
+/// not 16 bytes or a key not 32 bytes.
+#[uniffi::export]
+pub fn compose_publisher_reader_key_envelope(
+    channel_id: Vec<u8>,
+    reader_key: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    let channel_id = channel16(&channel_id, "publisherReaderKey")?;
+    let reader_key: [u8; 32] = reader_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| reader_key_error(PublisherReaderKeyError::BadLength))?;
+    Ok(rust_compose_reader_key(&PublisherReaderKey {
+        channel_id,
+        reader_key,
+    }))
+}
+
+/// Strictly decode a publisher reader-key envelope.
+///
+/// # Errors
+///
+/// [`FfiError::Contacts`] with `publisherReaderKey.<code>` first.
+#[uniffi::export]
+pub fn decode_publisher_reader_key_envelope(
+    plaintext: Vec<u8>,
+) -> Result<FfiPublisherReaderKey, FfiError> {
+    rust_decode_reader_key(&plaintext)
+        .map(|k| FfiPublisherReaderKey {
+            channel_id: k.channel_id.to_vec(),
+            reader_key: k.reader_key.to_vec(),
+        })
+        .map_err(reader_key_error)
+}
+
+/// The one well-formed publisher reader-key length (79).
+#[uniffi::export]
+#[must_use]
+pub fn publisher_reader_key_envelope_len() -> u32 {
+    len_u32(PUBLISHER_READER_KEY_ENVELOPE_LEN)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,5 +386,23 @@ mod tests {
             crate::contacts::FfiIncomingEnvelopeKind::ChannelAdmissionMark
         );
         assert!(compose_publisher_device_admit(vec![7; 15], vec![1], binding, vec![]).is_err());
+
+        let reader =
+            compose_publisher_reader_key_envelope(vec![7; 16], vec![0xD7; 32]).expect("reader");
+        assert_eq!(reader.len(), publisher_reader_key_envelope_len() as usize);
+        assert_eq!(publisher_reader_key_envelope_len(), 79);
+        assert_eq!(
+            decode_publisher_reader_key_envelope(reader.clone())
+                .expect("decode")
+                .reader_key,
+            vec![0xD7; 32]
+        );
+        assert_eq!(
+            crate::contacts::dispatch_incoming_envelope(reader)
+                .expect("dispatch")
+                .kind,
+            crate::contacts::FfiIncomingEnvelopeKind::PublisherReaderKey
+        );
+        assert!(compose_publisher_reader_key_envelope(vec![7; 16], vec![1; 31]).is_err());
     }
 }

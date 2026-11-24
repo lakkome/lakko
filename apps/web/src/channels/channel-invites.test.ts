@@ -102,3 +102,48 @@ describe("openChannelLink, publisher invitation", () => {
     expect(groupInviteRouteLink("AbCdEfGh", "")).toBe("/g/AbCdEfGh");
   });
 });
+
+function mintSubscriberLink(inviterName: string | undefined): string {
+  const w = wasmNs;
+  const ownerSeed = new Uint8Array(32).fill(7);
+  const channelId = new Uint8Array(16).fill(4);
+  const access = w.ChannelAccess.publicChannel(new Uint8Array(32).fill(6));
+  const m = w.composeChannelSubscriberInviteCapability(
+    ownerSeed,
+    channelId,
+    0n,
+    "Quiet walk",
+    "",
+    access,
+    undefined,
+    inviterName,
+  );
+  access.free();
+  ledgerRow = m.sealed;
+  const widths = inviteLinkWidths(w);
+  const url = composeSealedInviteLink({
+    origin: "https://test.lakko.me",
+    prefix: "/g/",
+    blobId: new Uint8Array(widths.blobIdLen).fill(5),
+    secret: m.linkSecret,
+    widths,
+  });
+  m.free();
+  return url;
+}
+
+// UX 7.2 (live walk 2026-11-24): a channel's link page says who invites.
+describe("openChannelLink, subscriber invitation", () => {
+  it("carries the inviter's name to the page", async () => {
+    const opened = await openChannelLink(mintSubscriberLink("Seventeen A"));
+    expect(opened?.publisherInvite).toBe(false);
+    expect(opened?.name).toBe("Quiet walk");
+    expect(opened?.inviterName).toBe("Seventeen A");
+  });
+
+  it("opens without a name when the link carries none", async () => {
+    const opened = await openChannelLink(mintSubscriberLink(undefined));
+    expect(opened?.name).toBe("Quiet walk");
+    expect(opened?.inviterName).toBeUndefined();
+  });
+});

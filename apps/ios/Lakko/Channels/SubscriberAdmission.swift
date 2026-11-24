@@ -167,7 +167,12 @@ final class SubscriberAdmission: ObservableObject {
         }
         // Owner-signed, with the co-publisher fallback inside the client.
         let list = try await client.listSubscribers(channelIdHex: channelId, accountIdentity: identity)
-        state.setSubscriberCount(channelId: channelId, count: list.count)
+        // The account's own reader key is a row there, not a subscriber
+        // (section 15.1).
+        var publisherRows = Set((state.extras(channelId).publisherReaderKeys ?? [:]).values.map { $0.lowercased() })
+        if let own = state.extras(channelId).readerKeyRegisteredHex { publisherRows.insert(own.lowercased()) }
+        state.setSubscriberCount(
+            channelId: channelId, count: list.filter { !publisherRows.contains($0.lowercased()) }.count)
         var a = byChannel[channelId] ?? ChannelAdmission()
         a.subscribers = list
         byChannel[channelId] = a

@@ -11,6 +11,7 @@
  * through `chat/conversation-info.ts`); this file draws what it is told. The
  * rows open pushed screens (`ChannelInfoScreens.tsx`).
  */
+import { knownSubscriberCount } from "./ui-cache";
 import { accountSuspended } from "../auth/suspension-state";
 import { sectionsWhileRemoved, sectionsWhileSuspended } from "../chat/conversation-info";
 import { channelRemovalLine, channelRemovalLineKey } from "../moderation/channel-removal";
@@ -124,6 +125,13 @@ export function ChannelInfo(props: {
       }
     },
   );
+
+  /** The count shown: the cached one, which a removal on the subscribers
+   *  screen lowers at once (UX 15.1, live walk 2026-11-24). */
+  const shownCount = (): number | null => {
+    const fetched = count();
+    return knownSubscriberCount(props.id) ?? fetched ?? null;
+  };
 
   const setScreen = (s: Screen): void => props.onOpenScreen(s);
 
@@ -410,7 +418,7 @@ export function ChannelInfo(props: {
         </Show>
 
         <p class="lk-info-header-line">
-          {channelHeaderLine(channelVisibilityOf(props.id), publishes() ? (count() ?? null) : null)}
+          {channelHeaderLine(channelVisibilityOf(props.id), publishes() ? shownCount() : null)}
         </p>
         <Show when={removalLine()}>
           {(line) => (
@@ -475,7 +483,7 @@ export function ChannelInfo(props: {
           <InfoRow
             icon="person-2"
             title={t("channels.subscribers.title")}
-            value={publishes() && typeof count() === "number" ? (count() ?? 0).toLocaleString() : undefined}
+            value={publishes() && shownCount() !== null ? (shownCount() ?? 0).toLocaleString() : undefined}
             onOpen={() => setScreen("subscribers")}
           />
         </Show>

@@ -59,6 +59,7 @@ import {
   type ChannelVisibility,
 } from "./channel-access";
 import type { Wasm } from "../wasm";
+import { ownInviterName } from "./copublisher";
 
 /** Service sentinel: one use (the ledger's rule too). */
 const ONE_USE = 0;
@@ -230,6 +231,8 @@ async function mint(
     }
   }
   const facts = previewFacts(idHex);
+  // Section 7.2: the link page reads "Anna invites you to".
+  const inviterName = await ownInviterName(wasm);
   const avatar = channelAvatarOf(idHex);
   const wasmAvatar =
     avatar === null ? undefined : avatarToWasm<Wasm["ProfileAvatar"]["prototype"]>(wasm, avatar);
@@ -244,6 +247,7 @@ async function mint(
       facts.description,
       access,
       wasmAvatar,
+      inviterName,
     );
     sealed = m.sealed;
     linkSecret = m.linkSecret;
@@ -430,7 +434,9 @@ export interface OpenedChannelInvite {
   readonly avatar: AvatarData | null;
   /** Kind 2: invites to be a publisher. */
   readonly publisherInvite: boolean;
-  /** Kind 2: the inviting owner's display name, when the link carries it. */
+  /** The inviter's display name, when the link carries it: the publisher
+   *  who made a publisher invitation (kind 2), or whoever made a subscriber
+   *  invitation (kind 3, section 7.2). */
   readonly inviterName?: string;
   /** The link this came from (a publisher invitation is accepted through it). */
   readonly link?: string;
@@ -472,6 +478,8 @@ function fromSubscriberPreview(
         access,
         avatar: avatarFromWasm(preview.avatar),
         publisherInvite: false,
+        // Section 7.2: "Anna invites you to" when the link names the inviter.
+        ...inviterOf(preview.inviterName),
         link,
       };
     } finally {

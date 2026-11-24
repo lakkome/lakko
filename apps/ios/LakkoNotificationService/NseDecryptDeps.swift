@@ -421,6 +421,9 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
                     // admission mark ride PublisherGroup journals too.
                     || isPublisherDeviceRequestEnvelope(plaintext: bytes)
                     || isChannelAdmissionMarkEnvelope(plaintext: bytes)
+                    // UX 15.1 (2026-11-24) — a publisher's reader key rides
+                    // PublisherGroup journals too.
+                    || isPublisherReaderKeyEnvelope(plaintext: bytes)
                     // ADR-0091 phase 2 — the group's knock key (group
                     // journal) and a re-entry request: never shown, never
                     // acted on here (C-59).

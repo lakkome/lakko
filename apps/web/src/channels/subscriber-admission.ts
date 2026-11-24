@@ -33,6 +33,7 @@ import { letInVerdict, rowsToAdmit, ticketKeyAdmits, withRowsRead } from "./chan
 import { loadWasm } from "../wasm";
 import { sealSubscriberSeedEnvelope, type WasmIdentity } from "./composer";
 import { rememberSubscriberCount } from "./ui-cache";
+import { otherPublisherReaderKeys } from "./publisher-reader-keys";
 import { composerSeedFor } from "./publisher-seed";
 import { channelsActions, channelsState } from "../state/channels-state";
 
@@ -161,7 +162,14 @@ export async function admitNewSubscribers(channelIdHex: string, identity: WasmId
  *  delivered at the current epoch (or whose last delivery failed). */
 async function admitEveryRow(channelIdHex: string, identity: WasmIdentity): Promise<void> {
   const list = await listSubscribers(channelIdHex, identity);
-  rememberSubscriberCount(channelIdHex, list.subscribers.length);
+  {
+    // The account's own reader key is a row there, not a subscriber (UX 15.1).
+    const publisherRows = new Set([
+      (channelsActions.accessOf(channelIdHex).readerKeyRegisteredHex ?? "").toLowerCase(),
+      ...otherPublisherReaderKeys(channelIdHex),
+    ]);
+    rememberSubscriberCount(channelIdHex, list.subscribers.filter((pk) => !publisherRows.has(pk.toLowerCase())).length);
+  }
   update(channelIdHex, (a) => ({ ...a, subscribers: list.subscribers }));
   const epoch = await currentEpoch(channelIdHex);
   for (const pk of list.subscribers) {

@@ -211,7 +211,10 @@ enum ChannelInvites {
         let mint = try composeChannelSubscriberInviteCapability(
             issuerSigningSeed: identity.ed25519Seed(), channelId: channelId, expiryMs: expiryMs,
             channelName: channel?.title ?? "", description: channel?.displayDescription ?? "",
-            access: access, avatar: extras.avatar?.ffi)
+            access: access, avatar: extras.avatar?.ffi,
+            // Section 7.2: the link page reads "Anna invites you to"; the core
+            // leaves out a name that is not valid or does not fit.
+            inviterName: ProfileDirectory.shared.ownProfile?.displayName)
         let revocation = try LinkRevocationKey.fresh()
         let discovery = DiscoveryClient(sessionToken: AmbientSessionToken.shared.current)
         let blobId = try await discovery.uploadGroupInvite(

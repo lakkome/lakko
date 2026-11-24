@@ -133,7 +133,7 @@ final class ChannelConversationModel: ObservableObject {
         guard isPublisher, let identity = currentIdentity,
               let exact = try? await client.subscriberCount(channelIdHex: channelId, accountIdentity: identity)
         else { return }
-        state.setSubscriberCount(channelId: channelId, count: Int(clamping: exact))
+        state.setServiceSubscriberCount(channelId: channelId, serviceCount: exact)
     }
 
     /// The identity a subscriber's per-write keys and comment author key

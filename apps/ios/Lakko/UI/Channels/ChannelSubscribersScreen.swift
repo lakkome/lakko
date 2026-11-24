@@ -34,7 +34,14 @@ struct ChannelSubscribersScreen: View {
     /// count, so the owner can always tell whom `Remove` takes.
     private var list: SubscriberList {
         SubscriberList.build(
-            members: members, rows: rows, count: count, canRemove: isPrivate && isPublisher)
+            members: members, rows: rows, count: count, canRemove: isPrivate && isPublisher,
+            excludedKeys: SubscriberCount.ownPublisherKeys(publishes: isPublisher, keys: [
+                state.extras(channelId).readerKeyRegisteredHex,
+                ChannelAccountReaderKey.keyHex(channelId: channelId),
+                state.subscriberKeysByChannel[channelId]
+                    .flatMap { try? ChannelSubscriberKeypair.fromSecret(secret: $0.secret).`public`() }
+                    .map { ChannelsComposer.bytesToHex($0) },
+            ] + PublisherReaderKeys.otherKeys(channelId: channelId, state: state).map { Optional($0) }))
     }
 
     var body: some View {
@@ -153,7 +160,7 @@ struct ChannelSubscribersScreen: View {
         let identity = try? Identity.fromSeed(seed: accountIdentitySeed)
         if isPublisher, let identity,
            let exact = try? await client.subscriberCount(channelIdHex: channelId, accountIdentity: identity) {
-            state.setSubscriberCount(channelId: channelId, count: Int(clamping: exact))
+            state.setServiceSubscriberCount(channelId: channelId, serviceCount: exact)
         }
         members = await ChannelMemberCards.refreshMembers(
             state: state, channelId: channelId, includeSelf: true,
@@ -211,7 +218,9 @@ struct ChannelSubscribersScreen: View {
             kept.subscriberPks.removeAll { gone.contains(ChannelsComposer.bytesToHex($0).lowercased()) }
             return kept.subscriberPks.isEmpty && !kept.isSelf ? nil : kept
         }
-        if let count { state.setSubscriberCount(channelId: channelId, count: max(0, count - gone.count)) }
+        if let count {
+            state.setSubscriberCount(channelId: channelId, count: SubscriberCount.afterRemoval(count, removed: gone.count))
+        }
         // Only the owner rotates; a publisher's removal asks the owner's
         // device to (ADR-0087 section 15, the rotate request).
         await ChannelPublisherLoops.shared.rotateAfterSubscriberRemoval(
@@ -239,10 +248,15 @@ struct SubscriberList {
     /// The number in "{n} others."; `0` says nothing.
     let othersCount: Int
 
+    /// `excludedKeys`: keys that are not subscribers, the publishing
+    /// viewer's own (``SubscriberCount/ownPublisherKeys(publishes:keys:)``),
+    /// left out of the cards and the listed rows; `count` must already leave
+    /// them out (``SubscriberCount/shown(serviceCount:publisherReaderRows:)``).
     static func build(
         members: [ChannelMemberCards.Member], rows: [ChannelsClient.SubscriberRow],
-        count: Int?, canRemove: Bool
+        count: Int?, canRemove: Bool, excludedKeys: Set<String> = []
     ) -> SubscriberList {
+        let rows = rows.filter { !excludedKeys.contains($0.pubkeyHex.lowercased()) }
         var cardMembers: [ChannelMemberCards.Member] = []
         var cardKeys: [String] = []
         var cards: [ChannelSubscriberCard] = []
@@ -250,6 +264,7 @@ struct SubscriberList {
             let pks = member.subscriberPks.isEmpty ? [member.subscriberPk] : member.subscriberPks
             for pk in pks {
                 let hex = ChannelsComposer.bytesToHex(pk).lowercased()
+                if excludedKeys.contains(hex) { continue }
                 cardMembers.append(member)
                 cardKeys.append(hex)
                 cards.append(ChannelSubscriberCard(

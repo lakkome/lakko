@@ -418,3 +418,10 @@ path = "fuzz_targets/x25519_binding_verify.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "publisher_reader_key_decode"
+path = "fuzz_targets/publisher_reader_key_decode.rs"
+test = false
+doc = false
+bench = false

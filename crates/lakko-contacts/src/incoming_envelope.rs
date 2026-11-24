@@ -174,6 +174,9 @@ use crate::profile_request::{try_unwrap_profile_request, ProfileRequestError};
 use crate::publisher_device_request::{
     try_unwrap_publisher_device_request, PublisherDeviceRequest, PublisherDeviceRequestError,
 };
+use crate::publisher_reader_key::{
+    try_unwrap_publisher_reader_key, PublisherReaderKey, PublisherReaderKeyError,
+};
 use crate::push_routing::{try_unwrap_push_routing_secret, PushRoutingSecretError};
 use crate::registrar_seed::{try_unwrap_registrar_seed, RegistrarSeedEnvelope, RegistrarSeedError};
 use crate::shared_channels::{try_unwrap_shared_channels, SharedChannels, SharedChannelsError};
@@ -487,6 +490,12 @@ pub enum IncomingEnvelope<'a> {
     /// largest mark from a current publisher, under the rule in
     /// [`crate::channel_admission_mark`].
     ChannelAdmissionMark(ChannelAdmissionMark),
+    /// A publishing account's reader key at the channels service (UX
+    /// 15.1, live walk 2026-11-24). Never a chat bubble. Every publishing
+    /// device keeps the newest one per current publisher account and leaves
+    /// it out of the subscriber list and count, under the rule in
+    /// [`crate::publisher_reader_key`].
+    PublisherReaderKey(PublisherReaderKey),
     /// An open-items hand-over (ADR-0092 section 3.9): the open polls and
     /// checklists of the group, sent by the committer of an admission. Never
     /// a chat bubble. A device that already holds an item ignores it; a
@@ -636,6 +645,9 @@ pub enum DispatchError {
     /// The channel admission-mark domain (ADR-0090) with a malformed payload.
     #[error(transparent)]
     ChannelAdmissionMark(#[from] ChannelAdmissionMarkError),
+    /// The publisher reader-key domain with a malformed payload.
+    #[error(transparent)]
+    PublisherReaderKey(#[from] PublisherReaderKeyError),
     /// The open-items domain (ADR-0092 section 3.9) with a malformed payload.
     #[error(transparent)]
     OpenItems(#[from] OpenItemsError),
@@ -794,6 +806,10 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     // 7n6. A publishing device's admission mark — ADR-0090 section 6.
     if let Some(mark) = try_unwrap_channel_admission_mark(plaintext)? {
         return Ok(IncomingEnvelope::ChannelAdmissionMark(mark));
+    }
+    // 7n6b. A publishing account's reader key — UX 15.1, 2026-11-24.
+    if let Some(key) = try_unwrap_publisher_reader_key(plaintext)? {
+        return Ok(IncomingEnvelope::PublisherReaderKey(key));
     }
     // 7n7. A device asks to come back — ADR-0091 phase 2.
     if let Some(request) = try_unwrap_conversation_reentry(plaintext)? {

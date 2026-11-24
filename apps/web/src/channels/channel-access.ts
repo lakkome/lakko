@@ -82,6 +82,8 @@ import { publishChannelMeta } from "./channel-meta";
 import { settleOwedRecord } from "./owed-record";
 import type { ChannelSharedMeta } from "./channel-log-codec";
 import { rememberSubscriberCount } from "./ui-cache";
+import { publisherReaderRows, shownSubscriberCount } from "./subscriber-count";
+import { otherPublisherReaderKeys } from "./publisher-reader-keys";
 import { loadRotationState, saveRotationState } from "./rotation-state-store";
 import { ticketInviteKeyHex } from "./subscriber-admission";
 import { channelIdForHandle, forgetClaimedHandle } from "./claimed-handles";
@@ -1086,7 +1088,12 @@ export async function publishChannelPost(identity: WasmIdentity, idHex: string, 
 
 export async function channelSubscriberCount(identity: WasmIdentity, idHex: string): Promise<number> {
   try {
-    const n = await fetchSubscriberCount(idHex, identity);
+    const raw = await fetchSubscriberCount(idHex, identity);
+    // The account's own reader key is a row there, not a subscriber (UX 15.1).
+    const n = shownSubscriberCount(
+      raw,
+      publisherReaderRows(channelsActions.accessOf(idHex).readerKeyRegisteredHex, otherPublisherReaderKeys(idHex)),
+    );
     rememberSubscriberCount(idHex, n);
     return n;
   } catch (err) {

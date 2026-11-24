@@ -396,6 +396,8 @@ public fun ChannelInfoScreen(
                     client = client,
                     count = count,
                     canRemove = publisher && !public,
+                    publishes = publisher,
+                    onRemoved = { n -> loop?.noteSubscribersRemoved(channelId, n) },
                 )
                 InfoPage.Reactions -> Unit
                 InfoPage.InviteLink -> InviteLinkPage(
@@ -1285,6 +1287,11 @@ private fun SubscribersPage(
     client: ChannelsClient,
     count: Long?,
     canRemove: Boolean,
+    /** The viewer is the owner or a publisher: its own account's keys are
+     *  not subscribers (section 15.1, [me.lakko.app.channels.SubscriberCount]). */
+    publishes: Boolean = canRemove,
+    /** Keys removed here: the count follows at once. */
+    onRemoved: (Int) -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1324,13 +1331,25 @@ private fun SubscribersPage(
         }
         loaded == null -> androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
         else -> {
-            val list = remember(loaded, rows, count, canRemove) {
+            val list = remember(loaded, rows, count, canRemove, publishes) {
+                val ownKeyHex = state.subscriberKeysByChannel.value[channelId]?.publicKey?.let(::reachHex)
                 me.lakko.app.channels.ChannelSubscriberListView.build(
                     loaded,
                     rows,
                     count,
                     canRemove,
-                    state.subscriberKeysByChannel.value[channelId]?.publicKey?.let(::reachHex),
+                    ownKeyHex,
+                    me.lakko.app.channels.SubscriberCount.ownPublisherKeys(
+                        publishes,
+                        listOf(
+                            state.boundAccount?.let {
+                                me.lakko.app.channels.ChannelAccountReaderKey.registeredKeyHex(context, it, channelId)
+                            },
+                            ownKeyHex,
+                        ) + state.boundAccount?.let {
+                            me.lakko.app.channels.PublisherReaderKeys.stored(context, it, channelId).values.toList()
+                        }.orEmpty(),
+                    ),
                 )
             }
             if (list.people.isEmpty() && list.others.isEmpty() && (count ?: 0L) == 0L) {
@@ -1403,6 +1422,7 @@ private fun SubscribersPage(
                         error = UiText("group_handle.error.failed")
                     } finally {
                         if (gone.isNotEmpty()) {
+                            onRemoved(gone.size)
                             rows = rows.filterNot { it.pubkeyHex.lowercase() in gone }
                             members = members?.mapNotNull { m ->
                                 val kept = m.subscriberPksHex.filterNot { it.lowercase() in gone }

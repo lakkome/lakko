@@ -360,7 +360,7 @@ export function installOwnProfileEnvelopeSource(fn: (() => Promise<Uint8Array | 
 /** ADR-0087 phase B — this account's display name for a co-publisher link's
  *  preview (`inviterName`), read off the own profile envelope; `undefined`
  *  when there is none or it does not decode. Never throws. */
-async function ownInviterName(wasm: Wasm): Promise<string | undefined> {
+export async function ownInviterName(wasm: Wasm): Promise<string | undefined> {
   try {
     const envelope = await ownProfileEnvelopeSource?.();
     if (envelope === null || envelope === undefined) return undefined;

@@ -103,6 +103,15 @@ public struct ChannelExtras: Codable, Equatable, Sendable {
     /// the account's reader devices keep reading a private channel
     /// (``ChannelAccountReaderKey``). The web `readerKeyRegisteredHex`.
     public var readerKeyRegisteredHex: String?
+    /// UX 15.1 (live walk 2026-11-24) — the reader keys the channel's other
+    /// publishing accounts announced on the PublisherGroup
+    /// (``PublisherReaderKeys``): publisher account key (base64) to reader
+    /// key (lower-case hex). Pruned to the current publishers each pass;
+    /// left out of the subscriber list and count. The web
+    /// `publisherReaderKeys`.
+    public var publisherReaderKeys: [String: String]?
+    /// What this device last announced (``PublisherReaderKeys/sendDue``).
+    public var publisherReaderKeySent: String?
 
     public init() {}
 

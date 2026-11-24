@@ -415,6 +415,12 @@ public fun JoinGroupLandingScreen(
     publisherRequestSentAtMs: (channelIdHex: String) -> Long? = { null },
     /** This account already publishes in the channel: `Open`. */
     isPublisherOf: (channelIdHex: String) -> Boolean = { false },
+    /** Section 14.1 / 7.2 — this device already follows the channel (a
+     *  subscriber, waiting or admitted, or a publisher): the page shows
+     *  `Open`, as the card in a chat does, never a second `Subscribe`. */
+    isFollowed: (channelIdHex: String) -> Boolean = { false },
+    /** Opens a channel this device follows. */
+    onOpenChannel: (channelIdHex: String) -> Unit = {},
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val card by viewModel.card.collectAsStateWithLifecycle()
@@ -501,7 +507,12 @@ public fun JoinGroupLandingScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(16.dp))
-                    Button(onClick = { onSubscribeChannel(preview) }) { Text(t("channels.subscribe.action")) }
+                    val followedHex = followedChannelHex(preview.channelId, isFollowed)
+                    if (followedHex != null) {
+                        Button(onClick = { onOpenChannel(followedHex) }) { Text(t("search.conversation.open")) }
+                    } else {
+                        Button(onClick = { onSubscribeChannel(preview) }) { Text(t("channels.subscribe.action")) }
+                    }
                 } else if (preview?.coPublisher == true) {
                     InviteHeadline(card)
                     Spacer(Modifier.height(16.dp))
@@ -678,3 +689,11 @@ private fun PublisherAccept(
         Text(line.text(), color = MaterialTheme.colorScheme.error)
     }
 }
+
+/**
+ * Section 14.1 / 7.2 — the channel a link page shows `Open` for: the
+ * channel's id (hex) when this device already follows it, else `null`
+ * (the page shows `Subscribe`).
+ */
+internal fun followedChannelHex(channelId: ByteArray?, isFollowed: (String) -> Boolean): String? =
+    channelId?.let { me.lakko.app.channels.ChannelsComposer.bytesToHex(it) }?.takeIf(isFollowed)

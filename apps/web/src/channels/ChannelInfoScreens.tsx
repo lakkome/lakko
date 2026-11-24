@@ -21,7 +21,7 @@ import { topicLabel } from "../discover/topic-names";
 import { HANDLE_CHECK_DEBOUNCE_MS, handleTaken as askHandleTaken } from "../discovery/handle-check";
 import { memberNameOf } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
-import { channelsState } from "../state/channels-state";
+import { channelsActions, channelsState } from "../state/channels-state";
 import { currentLanguage, joinList, t } from "../l10n";
 import { Avatar } from "../ui/Avatar";
 import { requestConfirm } from "../ui/confirm-dialog";
@@ -66,6 +66,10 @@ import { channelInviteCandidates, inChannelKeys } from "./invite-candidates";
 import { useChannelInviteSender } from "./invite-contacts";
 import { loadChannelMembers, type ChannelMembersResult } from "./member-cards";
 import { subscriberListView, type SubscriberListView } from "./subscriber-list";
+import { countAfterRemoval, ownPublisherKeys } from "./subscriber-count";
+import { knownSubscriberCount, rememberSubscriberCount } from "./ui-cache";
+import { accountReaderKeyHex } from "./account-reader-key";
+import { otherPublisherReaderKeys } from "./publisher-reader-keys";
 
 // ---------------------------------------------------------------------------
 // Channel type (UX 4.1)
@@ -284,6 +288,15 @@ export function ChannelSubscribersScreen(props: { readonly id: string; readonly 
   const publishes = (): boolean => role() === "owner" || role() === "publisher";
   const isPrivate = (): boolean => channelVisibilityOf(props.id) === "private";
 
+  // The account's reader key: a publishing viewer's own row, never a
+  // subscriber (`subscriber-count.ts`).
+  const [accountReaderHex] = createResource(
+    () => (publishes() ? props.id : null),
+    (id) => accountReaderKeyHex(id),
+  );
+  /** The count shown: the cached count, which a removal here lowers at once. */
+  const shownCount = (): number | null => knownSubscriberCount(props.id) ?? props.count;
+
   const [members, { refetch }] = createResource(
     () => props.id,
     (id): Promise<ChannelMembersResult> => {
@@ -350,6 +363,10 @@ export function ChannelSubscribersScreen(props: { readonly id: string; readonly 
       if (gone.size > 0) {
         setRows(rows().filter((r) => !gone.has(r.pkHex)));
         setRemovedKeys(new Set([...removedKeys(), ...gone]));
+        // The count follows the list at once: the title, the info row and
+        // the header line all read it (live walk 2026-11-24).
+        const after = countAfterRemoval(knownSubscriberCount(props.id) ?? props.count, gone.size);
+        if (after !== null) rememberSubscriberCount(props.id, after);
       }
       setRemoving(null);
     }
@@ -379,9 +396,15 @@ export function ChannelSubscribersScreen(props: { readonly id: string; readonly 
         wasm,
         kept,
         rows(),
-        props.count,
+        shownCount(),
         publishes() && isPrivate(),
         ownKeys === undefined ? null : bytesToHex(ownKeys.public),
+        ownPublisherKeys(publishes(), [
+          channelsActions.accessOf(props.id).readerKeyRegisteredHex,
+          accountReaderHex() ?? null,
+          ownKeys === undefined ? null : bytesToHex(ownKeys.public),
+          ...otherPublisherReaderKeys(props.id),
+        ]),
       );
     } catch {
       // The module is not loaded yet: the memo runs again once it is.
@@ -393,8 +416,8 @@ export function ChannelSubscribersScreen(props: { readonly id: string; readonly 
     <div class="lk-stack" style={{ padding: "16px" }}>
       <section class="lk-card" aria-label={t("channels.subscribers.title")}>
         <h2>
-          <Show when={props.count !== null} fallback={t("channels.subscribers.title")}>
-            {t("channels.subscribers.title_count", { count: props.count ?? 0 })}
+          <Show when={shownCount() !== null} fallback={t("channels.subscribers.title")}>
+            {t("channels.subscribers.title_count", { count: shownCount() ?? 0 })}
           </Show>
         </h2>
         <Show when={members.loading}>
@@ -418,7 +441,7 @@ export function ChannelSubscribersScreen(props: { readonly id: string; readonly 
         <Show when={!members.loading && members.error === undefined ? view() : undefined}>
           {(v) => (
             <>
-              <Show when={v().people.length === 0 && v().others.length === 0 && (props.count === null || props.count === 0)}>
+              <Show when={v().people.length === 0 && v().others.length === 0 && (shownCount() ?? 0) === 0}>
                 <p class="lk-meta">{t("channels.subscribers.none")}</p>
               </Show>
               <ul class="lk-member-list" style={{ "list-style": "none", margin: 0, padding: 0 }}>

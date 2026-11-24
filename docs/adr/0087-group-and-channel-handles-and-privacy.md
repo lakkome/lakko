@@ -951,6 +951,28 @@ For the owner and admins, public and private, from one row, `Invite people`.
   rule (`compose_co_publisher_invite_capability(..., inviter_name)`), and the channel
   invitation card opens kind 2 as well as kind 3, so `Add publisher` can send the card
   in the one-to-one. A channel preview carries no member count.
+- **The inviter on a subscriber link (2026-11-24, live walk).** A subscriber
+  invitation (preview kind 3) may carry the inviter's display name as one optional
+  trailing field (`inviter_len(1..=255) ‖ inviter_name`, absent when none, never an
+  empty length), so the link page reads "Anna invites you to" (UX 7.2). It is carried
+  only when the whole preview stays within the existing preview bound
+  (`GroupInvitePreview::with_subscriber_inviter`), so no limit grew and a link minted
+  before the field still opens. `composeChannelSubscriberInviteCapability` takes it as a
+  last optional argument on both FFI surfaces.
+- **What the subscriber count counts (2026-11-24, live walk).** The device holding the
+  PublisherGroup registers the account's own reader key at the channels service as a
+  subscriber row (so the account's other devices read); the service counts it and
+  cannot tell it apart. The owner's or a publisher's client leaves its own account's
+  keys out of the list and subtracts its registered reader key from the count, so the
+  count is one per subscribing account. Every publishing device also announces its
+  account's reader key on the PublisherGroup (`lakko-contacts::publisher_reader_key`,
+  `lakko/publisher-reader-key/v1\0 ‖ 0x01 ‖ channel_id(16) ‖ reader_key(32)`, 79 bytes,
+  once registered and again when the group grows); every publishing device keeps the
+  newest per current publisher account (sender resolved at receipt, C-68), prunes it
+  when that account stops publishing, and leaves those keys out of the list and count
+  too. A publisher that names another subscriber's key only hides a row it could
+  remove anyway. Dispatch kind `PublisherReaderKey` appended on both FFI surfaces;
+  the NSE surface recognises it; fuzz `publisher_reader_key_decode`.
 
 ### 15. Subscribers and admins
 

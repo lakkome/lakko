@@ -69,8 +69,21 @@ export function subscriberListView<T extends ListedSubscriber>(
   /** This device's own registered subscriber key: always the viewer's own
    *  ("You"), card or not, so it is never an anonymous row to remove. */
   ownKeyHex: string | null = null,
+  /** Keys that are not subscribers: the publishing viewer's own account
+   *  reader key (`subscriber-count.ts` `ownPublisherKeys`). Left out of the
+   *  cards and the listed rows; the count passed must already leave them
+   *  out (`shownSubscriberCount`). */
+  excludedKeysHex: readonly string[] = [],
 ): SubscriberListView<T> {
-  const own = ownKeyHex?.toLowerCase() ?? null;
+  const excluded = new Set(excludedKeysHex.map((k) => k.toLowerCase()));
+  if (excluded.size > 0) {
+    members = members
+      .map((m) => ({ ...m, subscriberPksHex: m.subscriberPksHex.filter((k) => !excluded.has(k.toLowerCase())) }))
+      .filter((m) => m.subscriberPksHex.length > 0);
+    listed = listed.filter((l) => !excluded.has(l.pkHex.toLowerCase()));
+  }
+  const ownLower = ownKeyHex?.toLowerCase() ?? null;
+  const own = ownLower !== null && excluded.has(ownLower) ? null : ownLower;
   if (own !== null && !members.some((m) => m.subscriberPksHex.some((k) => k.toLowerCase() === own))) {
     const selfRow = members.find((m) => m.isSelf);
     const youRow: ChannelMemberRow = selfRow ?? {

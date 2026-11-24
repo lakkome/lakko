@@ -472,6 +472,10 @@ Private channel
 [ Subscribe ]
 ```
 
+When the link carries no inviter name (made before the name was carried), the first line
+reads "You are invited to". A person who already follows the channel sees `Open`, which
+opens it, never a second `Subscribe` (as the card, section 14.1).
+
 | State | What it shows |
 |---|---|
 | Subscribing | Button reads "Subscribing...". |
@@ -946,6 +950,9 @@ Opening it shows the group's member screen, with the title `Subscribers (12,408)
   each, labelled by the link they came through: `From link "Friends"`, with `Remove`. A
   person who came by a contact invitation shows `From an invitation`.
 - **Public channels:** no `Remove`.
+
+The owner and publishers are not subscribers: their own account is never a row and never
+in the number, and the number follows a `Remove` at once (live walk 2026-11-24).
 
 What it never shows: "Subscriber 1", "Ready", "Setting up", a retry, a key, or anything
 about how a device got its access. A person kept waiting sees it on their own device

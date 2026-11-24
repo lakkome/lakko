@@ -231,7 +231,7 @@ struct ChannelInfoSheet: View {
             guard isPublisher, removal == nil, let identity = try? Identity.fromSeed(seed: accountIdentitySeed),
                   let exact = try? await client.subscriberCount(channelIdHex: channelId, accountIdentity: identity)
             else { return }
-            state.setSubscriberCount(channelId: channelId, count: Int(clamping: exact))
+            state.setServiceSubscriberCount(channelId: channelId, serviceCount: exact)
         }
     }
 

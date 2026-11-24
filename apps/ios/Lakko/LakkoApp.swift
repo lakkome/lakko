@@ -2193,8 +2193,7 @@ private struct SessionRoot: View, Equatable {
                 // ADR-0087 section 14 — a channel invitation card in a chat:
                 // `Open` when this device holds the channel, else `Subscribe`.
                 ChannelInviteActions.shared.isHeld = { [channelsState] id in
-                    channelsState.channels.contains { $0.id == id }
-                        && (channelsState.subscriberKeysByChannel[id] != nil || channelsState.keysByChannel[id] != nil)
+                    ChannelInviteActions.holds(channelsState, channelId: id)
                 }
                 // An invitation that carries no channel name reads by the
                 // name this device holds for it (``HeldChannelNames``).
@@ -2896,6 +2895,12 @@ private struct SessionRoot: View, Equatable {
                 // ADR-0087 section 7.2 — a channel's link page: Subscribe
                 // opens the channel subscribing, with what the link carried.
                 onSubscribeChannel: { channel in
+                    // Already subscribed (or publishing): the page's button
+                    // read `Open`, and nothing the link carries is used.
+                    if ChannelInviteActions.shared.isHeld(channel.channelIdHex) {
+                        replaceTop(route, with: .channel(channelId: channel.channelIdHex), in: tab)
+                        return
+                    }
                     switch channel.access {
                     case .public(let readKey):
                         FoundChannelReadKeys.put(channel.channelIdHex, readKey)

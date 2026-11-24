@@ -2599,6 +2599,12 @@ pub enum FfiIncomingEnvelopeKind {
     /// conversation's group id, then mark that person deleted for good.
     /// Never render it. Appended last.
     AccountDeleted,
+    /// UX 15.1 (live walk 2026-11-24) — a publishing account's reader key
+    /// at the channels service. `payload` is the whole envelope; decode it
+    /// with `decodePublisherReaderKeyEnvelope`, keep the newest per current
+    /// publisher account resolved at receipt (C-68), and leave those keys
+    /// out of the subscriber list and count. Never render it. Appended last.
+    PublisherReaderKey,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -2856,6 +2862,10 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
         IncomingEnvelope::ChannelAdmissionMark(_) => FfiIncomingEnvelope {
             payload: plaintext.clone(),
             ..FfiIncomingEnvelope::of(K::ChannelAdmissionMark)
+        },
+        IncomingEnvelope::PublisherReaderKey(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::PublisherReaderKey)
         },
         IncomingEnvelope::ConversationReentry(_) => FfiIncomingEnvelope {
             payload: plaintext.clone(),
@@ -3627,7 +3637,8 @@ pub struct GroupInvitePreview {
     pub avatar: Option<FfiAvatar>,
     /// ADR-0087 sections 7 and 14: set on a channel subscriber invitation
     /// (then `channel_id` is set, `group_name` is the channel's name,
-    /// `inviter_name` is `None` and `member_count` 0). `None` otherwise.
+    /// `inviter_name` the inviter's name or `None` (section 7.2, 2026-11-24)
+    /// and `member_count` 0). `None` otherwise.
     #[uniffi(default = None)]
     pub subscriber: Option<FfiSubscriberInvite>,
 }
@@ -4004,13 +4015,14 @@ impl GroupInviteCapability {
 /// `/g/` capability over the 16-byte `channel_id` (it is the capability's
 /// group id) with no knock key, whose sealed preview (kind 3) carries the
 /// channel's name (required, the channel-name rule), its description, its
-/// photo and the access keys. Returns the [`InviteLinkMint`].
+/// photo and the access keys, and the inviter's display name when it is
+/// valid and fits (`inviter_name`, section 7.2). Returns the [`InviteLinkMint`].
 ///
 /// # Errors
 ///
 /// [`FfiError::Contacts`] for a bad seed, channel id or key, a name or
 /// description the channel rules refuse, or a photo out of bounds.
-#[uniffi::export(default(avatar = None))]
+#[uniffi::export(default(avatar = None, inviter_name = None))]
 pub fn compose_channel_subscriber_invite_capability(
     issuer_signing_seed: Vec<u8>,
     channel_id: Vec<u8>,
@@ -4019,6 +4031,7 @@ pub fn compose_channel_subscriber_invite_capability(
     description: String,
     access: FfiChannelAccess,
     avatar: Option<FfiAvatar>,
+    inviter_name: Option<String>,
 ) -> Result<InviteLinkMint, FfiError> {
     let seed = key32("issuerSigningSeed", &issuer_signing_seed)?;
     let signing = SigningKey::from_seed(&seed);
@@ -4036,7 +4049,9 @@ pub fn compose_channel_subscriber_invite_capability(
             description,
         }),
         avatar: avatar.map(TryInto::try_into).transpose()?,
-    };
+    }
+    // Section 7.2: "Anna invites you to", when the name is valid and fits.
+    .with_subscriber_inviter(inviter_name.as_deref());
     let link_key = rust_generate_link_key();
     let wire = rust_group_invite_compose_with_preview(
         &signing, &channel, expiry_ms, None, &preview, &link_key,
@@ -5846,6 +5861,7 @@ mod tests {
             "One note a day".to_string(),
             access.clone(),
             Some(avatar.clone()),
+            Some("Anna".to_string()),
         )
         .expect("mint");
         let cap = GroupInviteCapability::open_link(mint.sealed.clone(), mint.link_secret.clone())
@@ -5858,6 +5874,8 @@ mod tests {
         assert_eq!(opened.ledger_id, vec![9; 6]);
         assert_eq!(opened.capability_wire, cap.wire());
         assert_eq!(opened.preview.avatar, Some(avatar));
+        // Section 7.2: the subscriber invitation names its inviter.
+        assert_eq!(opened.preview.inviter_name.as_deref(), Some("Anna"));
         let sub = opened.preview.subscriber.expect("subscriber");
         assert_eq!(sub.access, access);
         assert_eq!(sub.description, "One note a day");

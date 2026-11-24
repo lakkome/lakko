@@ -237,6 +237,47 @@ final class InviteLinkShapeTests: XCTestCase {
         XCTAssertEqual(plain(unnamed.inviteLine), "You are invited to be a publisher of Channel.")
     }
 
+    /// UX 7.2 (live walk 2026-11-24): a channel's link page reads "Anna
+    /// invites you to" — the subscriber invitation carries its inviter.
+    func testAChannelLinkNamesItsInviter() throws {
+        let channelId = Data(repeating: 0x44, count: 16)
+        let plain = { (s: String) in s.replacingOccurrences(of: "\u{2068}", with: "").replacingOccurrences(of: "\u{2069}", with: "") }
+        for (inviter, lead) in [("Seventeen A", "Seventeen A invites you to"), (nil, "You are invited to")] as [(String?, String)] {
+            let mint = try composeChannelSubscriberInviteCapability(
+                issuerSigningSeed: issuerSeed, channelId: channelId, expiryMs: 0,
+                channelName: "Quiet walk", description: "",
+                access: .public(readKey: Data(repeating: 6, count: 32)), avatar: nil, inviterName: inviter)
+            let cap = try GroupInviteCapability.openLink(sealed: mint.sealed, linkSecret: mint.linkSecret)
+            guard case .channel(let facts, let channel) = JoinGroupLandingViewModel.previewOutcome(
+                of: cap, secret: mint.linkSecret) else {
+                return XCTFail("a subscriber link must open as a channel's link page")
+            }
+            XCTAssertEqual(channel.name, "Quiet walk")
+            XCTAssertEqual(facts.inviterName, inviter)
+            XCTAssertEqual(plain(GroupInviteHeadline.derive(from: facts).lead), lead)
+        }
+    }
+
+    /// UX 14.1 / 7.2 (live walk 2026-11-24): an admitted subscriber opening
+    /// the channel's link again sees `Open`, never a second `Subscribe`.
+    @MainActor
+    func testAChannelLinkPageOpensAChannelAlreadyFollowed() throws {
+        let id = String(repeating: "0c", count: 16)
+        let channels = ChannelsUiState()
+        let held = { (state: ChannelsUiState) in
+            JoinGroupLandingViewModel.channelLinkOpens(
+                channelIdHex: id, isHeld: { ChannelInviteActions.holds(state, channelId: $0) })
+        }
+        XCTAssertFalse(held(channels), "a channel this device does not hold: Subscribe")
+        channels.addChannel(ChannelHandle(id: id, localName: "Quiet walk", localDescription: "", addedAtMs: 1))
+        XCTAssertFalse(held(channels), "listed but never subscribed: Subscribe")
+        let kp = ChannelSubscriberKeypair.generate()
+        channels.setSubscriberKeys(
+            channelId: id, keys: ChannelSubscriberKeys(secret: kp.secret(), publicKey: kp.`public`()))
+        XCTAssertTrue(held(channels), "subscribed (waiting or admitted): Open")
+        channels.clearSubscriberKeys(id)
+    }
+
     // MARK: - The landing, end to end
 
     func testTheLandingRefusesAWrongSecret() async throws {

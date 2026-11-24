@@ -252,6 +252,13 @@ public final class JoinGroupLandingViewModel: ObservableObject {
         RequestsSentStore.mayAskAgain(sentAtMs: sentAtMs, nowMs: nowMs) ? .noAnswer : .waiting
     }
 
+    /// Section 14.1 / 7.2 — whether a channel's link page shows `Open`
+    /// (this device already follows the channel) instead of `Subscribe`.
+    /// Live walk 2026-11-24: an admitted subscriber saw `Subscribe` again.
+    nonisolated static func channelLinkOpens(channelIdHex: String, isHeld: (String) -> Bool) -> Bool {
+        isHeld(channelIdHex)
+    }
+
     /// The chat the page hands over to: set once the join landed.
     nonisolated static func chatToOpen(_ state: State) -> String? {
         if case .joined(let groupIdHex) = state { return groupIdHex }
@@ -505,7 +512,11 @@ public struct JoinGroupLandingScreen: View {
             case .ready where viewModel.channel != nil:
                 if let channel = viewModel.channel {
                     channelBlock(channel)
-                    Button(l10n.t("channels.subscribe.action")) {
+                    // Section 14.1 / 7.2: `Open` once subscribed, on the page
+                    // as on the card.
+                    let held = JoinGroupLandingViewModel.channelLinkOpens(
+                        channelIdHex: channel.channelIdHex, isHeld: ChannelInviteActions.shared.isHeld)
+                    Button(l10n.t(held ? "search.conversation.open" : "channels.subscribe.action")) {
                         viewModel.dismiss()
                         onSubscribeChannel(channel)
                     }

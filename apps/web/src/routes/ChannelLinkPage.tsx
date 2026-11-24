@@ -18,6 +18,7 @@ import { useChats } from "../chat/ChatContext";
 import { channelRoleOf, subscribeToChannel } from "../channels/channel-access";
 import { channelErrorText } from "../channels/channel-error-copy";
 import { channelHeaderLine } from "../channels/channel-facts";
+import { channelLinkLead } from "../channels/channel-link-lead";
 import type { OpenedChannelInvite } from "../channels/channel-invites";
 import { acceptPublisherInvite } from "../channels/channel-publishers";
 import {
@@ -108,6 +109,7 @@ export function ChannelLinkPage(props: { readonly slug: string; readonly opened:
       {/* A photo is downloaded only by a signed-in device (UX 4.5.4): the
           page shows the initials. */}
       <Avatar label={props.opened.name} id={props.opened.channelIdHex} size="profile" media={null} />
+      <Show when={channelLinkLead(props.opened)}>{(lead) => <p style={{ margin: 0 }}>{lead()}</p>}</Show>
       <h1 style={{ margin: 0 }}>{props.opened.name}</h1>
       <p class="lk-card-desc">{channelHeaderLine(props.opened.visibility, null)}</p>
       <Show when={props.opened.description.length > 0}>

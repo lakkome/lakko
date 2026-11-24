@@ -120,6 +120,9 @@ public object ChannelInviteLinks {
                     description,
                     access,
                     avatar,
+                    // Section 7.2: the link page reads "Anna invites you to";
+                    // the core leaves out a name that is not valid or does not fit.
+                    ownDisplayName(context),
                 )
             }
             val discovery = me.lakko.app.discovery.DiscoveryClient()
@@ -199,6 +202,21 @@ public object ChannelInviteLinks {
                 addedAtMs = System.currentTimeMillis().toULong(),
             ),
         )
+    }
+
+    /** This account's own display name, or `null` (section 7.2). */
+    private fun ownDisplayName(context: Context): String? {
+        val b64 = me.lakko.app.contacts.AcceptedContactsStore.boundAccountB64 ?: return null
+        val id = try {
+            java.util.Base64.getDecoder().decode(b64)
+        } catch (_: IllegalArgumentException) {
+            return null
+        }
+        return try {
+            me.lakko.app.profile.OwnProfileStore.load(context, id)?.displayName?.trim()?.takeIf { it.isNotEmpty() }
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     /** The discovery ledger's "no use limit". */

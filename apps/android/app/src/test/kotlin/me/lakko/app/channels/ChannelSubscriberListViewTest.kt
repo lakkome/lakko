@@ -152,4 +152,52 @@ class ChannelSubscriberListViewTest {
         assertFalse(publisherMayRegisterCardKey(false))
         assertFalse(publisherMayRegisterCardKey(null))
     }
+
+    /**
+     * Live walk 2026-11-24: two people subscribed to the owner's private
+     * channel and the owner read "Subscribers (3)" with "From an invitation"
+     * and `Remove`: the owner's own account reader key. The publishing
+     * viewer's own keys are left out of the cards, the rows and the count.
+     */
+    @Test
+    fun thePublishingViewersOwnKeysAreNotSubscribers() {
+        val readerPk = "ee".repeat(32)
+        val excluded = SubscriberCount.ownPublisherKeys(true, listOf(readerPk.uppercase(), null, ""))
+        assertEquals(setOf(readerPk), excluded)
+        val input = ChannelSubscriberListView.input(
+            listOf(
+                member("self", "You", listOf(readerPk), named = true, isSelf = true),
+                member("pixel", "Nineteen Droid", listOf(pixelPk), named = true),
+            ),
+            ownKeyHex = readerPk,
+            excludedKeys = excluded,
+        )
+        assertEquals(listOf(pixelPk), input.cards.map { it.subscriberKey })
+        assertFalse(input.cards.any { it.isSelf })
+        val listed = listOf(
+            ChannelSubscriberRows.Row(pixelPk, null),
+            ChannelSubscriberRows.Row(readerPk.uppercase(), null),
+        )
+        assertEquals(listOf(pixelPk), ChannelSubscriberListView.withoutKeys(listed, excluded).map { it.pubkeyHex })
+        assertEquals(2L, SubscriberCount.shown(3L, SubscriberCount.publisherReaderRows(readerPk, emptyList())))
+        assertEquals(3L, SubscriberCount.shown(3L, SubscriberCount.publisherReaderRows(null, emptyList())))
+        assertEquals(0L, SubscriberCount.shown(0L, 1))
+        // Night walk (2026-11-24): owner + one publisher, one real subscriber.
+        assertEquals(1L, SubscriberCount.shown(3L, SubscriberCount.publisherReaderRows(readerPk, listOf("FF".repeat(32)))))
+        assertEquals(1, SubscriberCount.publisherReaderRows(readerPk, listOf(readerPk.uppercase())))
+    }
+
+    @Test
+    fun aSubscriberViewerKeepsItsOwnKey() {
+        assertTrue(SubscriberCount.ownPublisherKeys(false, listOf("aa")).isEmpty())
+        val input = ChannelSubscriberListView.input(emptyList(), ownKeyHex = iphonePk)
+        assertEquals(listOf(iphonePk), input.cards.map { it.subscriberKey })
+        assertTrue(input.cards.single().isSelf)
+    }
+
+    @Test
+    fun theCountFollowsARemoval() {
+        assertEquals(2L, SubscriberCount.afterRemoval(3L, 1))
+        assertEquals(0L, SubscriberCount.afterRemoval(1L, 4))
+    }
 }

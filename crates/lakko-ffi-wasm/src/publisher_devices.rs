@@ -20,6 +20,11 @@ use lakko_contacts::publisher_device_request::{
     PublisherDeviceRequest as RustRequest, PublisherDeviceRequestError,
     PUBLISHER_DEVICE_REQUEST_ENVELOPE_MAX_LEN, PUBLISHER_DEVICE_REQUEST_ENVELOPE_MIN_LEN,
 };
+use lakko_contacts::publisher_reader_key::{
+    compose_publisher_reader_key as rust_compose_reader_key,
+    decode_publisher_reader_key as rust_decode_reader_key, PublisherReaderKey as RustReaderKey,
+    PublisherReaderKeyError, PUBLISHER_READER_KEY_ENVELOPE_LEN,
+};
 use wasm_bindgen::prelude::*;
 
 use crate::scoped_discovery::CommitterDelegationEnvelope;
@@ -254,6 +259,76 @@ pub fn decode_channel_admission_mark_envelope(
 #[must_use]
 pub fn channel_admission_mark_envelope_len() -> u32 {
     len_u32(CHANNEL_ADMISSION_MARK_ENVELOPE_LEN)
+}
+
+fn reader_key_error(e: PublisherReaderKeyError) -> String {
+    format!("publisherReaderKey.{}: {e}", e.code())
+}
+
+/// A decoded publisher reader key (UX 15.1, live walk 2026-11-24).
+#[wasm_bindgen]
+pub struct PublisherReaderKey {
+    inner: RustReaderKey,
+}
+
+#[wasm_bindgen]
+impl PublisherReaderKey {
+    /// The 16-byte channel id.
+    #[wasm_bindgen(getter, js_name = channelId)]
+    #[must_use]
+    pub fn channel_id(&self) -> Vec<u8> {
+        self.inner.channel_id.to_vec()
+    }
+
+    /// The sending account's 32-byte reader key.
+    #[wasm_bindgen(getter, js_name = readerKey)]
+    #[must_use]
+    pub fn reader_key(&self) -> Vec<u8> {
+        self.inner.reader_key.to_vec()
+    }
+}
+
+/// Compose the envelope a publishing device sends on the PublisherGroup
+/// after registering its account's reader key, and again on growth.
+///
+/// # Errors
+///
+/// Throws `publisherReaderKey.badLength: ...` for a channel id not 16 bytes
+/// or a key not 32 bytes.
+#[wasm_bindgen(js_name = composePublisherReaderKeyEnvelope)]
+pub fn compose_publisher_reader_key_envelope(
+    channel_id: &[u8],
+    reader_key: &[u8],
+) -> Result<Vec<u8>, String> {
+    let channel_id = channel16(channel_id, "publisherReaderKey")?;
+    let reader_key: [u8; 32] = reader_key
+        .try_into()
+        .map_err(|_| reader_key_error(PublisherReaderKeyError::BadLength))?;
+    Ok(rust_compose_reader_key(&RustReaderKey {
+        channel_id,
+        reader_key,
+    }))
+}
+
+/// Strictly decode a publisher reader-key envelope.
+///
+/// # Errors
+///
+/// Throws `publisherReaderKey.<code>: ...`.
+#[wasm_bindgen(js_name = decodePublisherReaderKeyEnvelope)]
+pub fn decode_publisher_reader_key_envelope(
+    plaintext: &[u8],
+) -> Result<PublisherReaderKey, String> {
+    rust_decode_reader_key(plaintext)
+        .map(|inner| PublisherReaderKey { inner })
+        .map_err(reader_key_error)
+}
+
+/// The one well-formed publisher reader-key length (79).
+#[wasm_bindgen(js_name = publisherReaderKeyEnvelopeLen)]
+#[must_use]
+pub fn publisher_reader_key_envelope_len() -> u32 {
+    len_u32(PUBLISHER_READER_KEY_ENVELOPE_LEN)
 }
 
 #[cfg(test)]

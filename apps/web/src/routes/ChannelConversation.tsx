@@ -16,6 +16,7 @@
  * are gone. The machinery that kept a channel alive while the Manage page was
  * mounted runs app-wide (`channels/ChannelPublisherLoops.tsx`).
  */
+import { knownSubscriberCount } from "../channels/ui-cache";
 import { accountSuspended } from "../auth/suspension-state";
 import { SuspendedComposerLine } from "../auth/SuspendedReadOnly";
 import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show, untrack, type JSX } from "solid-js";
@@ -696,7 +697,8 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
     if (connection !== null) return connection;
     if (role() === null) return "";
     if (!canPublish() && channelReadStateOf(id) === "waiting") return t("channels.subscribe.status.waiting");
-    return channelHeaderLine(channelVisibilityOf(id), canPublish() ? (subscriberCount() ?? null) : null);
+    const fetched = subscriberCount();
+    return channelHeaderLine(channelVisibilityOf(id), canPublish() ? (knownSubscriberCount(id) ?? fetched ?? null) : null);
   };
 
   return (

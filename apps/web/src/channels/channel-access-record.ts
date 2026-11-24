@@ -117,6 +117,14 @@ export interface ChannelAccessRecord {
    * says, so the account's reader devices keep reading a private channel.
    */
   readonly readerKeyRegisteredHex?: string;
+  /**
+   * The reader keys the channel's other publishing accounts sent on the
+   * PublisherGroup (`lakko-contacts::publisher_reader_key`, UX 15.1, live
+   * walk 2026-11-24): publisher account key (standard base64) to its reader
+   * key (lower-case hex). Left out of the subscriber list and count while
+   * that account still publishes.
+   */
+  readonly publisherReaderKeys?: Readonly<Record<string, string>>;
   /** ADR-0090 section 6: what this owner device handed its OWN account's
    *  devices (the epoch seeds and admission seeds), per device like the
    *  publishers' records; cleared when an admission adds an own device. */
@@ -454,6 +462,15 @@ export function decodeAccessRecord(raw: unknown): ChannelAccessRecord | null {
     ...(typeof r.readerKeyRegisteredHex === "string" && /^[0-9a-f]{64}$/.test(r.readerKeyRegisteredHex)
       ? { readerKeyRegisteredHex: r.readerKeyRegisteredHex }
       : {}),
+    ...((): { publisherReaderKeys?: Record<string, string> } => {
+      const raw: unknown = r.publisherReaderKeys;
+      if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return {};
+      const out: Record<string, string> = {};
+      for (const [k, v] of Object.entries(raw as Record<string, unknown>).slice(0, 64)) {
+        if (isB64(k) && k.length === KEY_B64_LEN && typeof v === "string" && /^[0-9a-f]{64}$/.test(v)) out[k] = v;
+      }
+      return Object.keys(out).length > 0 ? { publisherReaderKeys: out } : {};
+    })(),
     publisherKeys: (Array.isArray(r.publisherKeys) ? r.publisherKeys : []).flatMap((e: unknown) => {
       const d = decodePublisherEntry(e);
       return d === null ? [] : [d];

@@ -174,4 +174,13 @@ describe("admission seeds to publishers (ADR-0087 section 7)", () => {
     });
     expect(d?.publisherKeys).toEqual([{ accountKeyB64: KEY, copublisherKeyB64: "", accountIdHex: "", sentVersions: [1] }]);
   });
+
+  // UX 15.1 (2026-11-24): the other publishers' reader keys are kept.
+  it("keeps the other publishers' reader keys, and drops malformed ones", () => {
+    const reader = "ee".repeat(32);
+    const r = { ...emptyAccessRecord(), publisherReaderKeys: { [KEY]: reader } };
+    expect(decodeAccessRecord(JSON.parse(JSON.stringify(r)))?.publisherReaderKeys).toEqual({ [KEY]: reader });
+    const d = decodeAccessRecord({ ...emptyAccessRecord(), publisherReaderKeys: { [KEY]: "zz", short: reader } });
+    expect(d?.publisherReaderKeys).toBeUndefined();
+  });
 });

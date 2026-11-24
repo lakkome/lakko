@@ -62,6 +62,9 @@ use lakko_contacts::publisher_device_request::{
     decode_publisher_device_request, PUBLISHER_DEVICE_REQUEST_ENVELOPE_MAX_LEN,
     PUBLISHER_DEVICE_REQUEST_ENVELOPE_MIN_LEN,
 };
+use lakko_contacts::publisher_reader_key::{
+    decode_publisher_reader_key, PUBLISHER_READER_KEY_ENVELOPE_LEN,
+};
 
 fn len_u32(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
@@ -264,6 +267,22 @@ pub fn channel_admission_mark_envelope_len() -> u32 {
     len_u32(CHANNEL_ADMISSION_MARK_ENVELOPE_LEN)
 }
 
+/// Whether `plaintext` is a publishing account's reader-key envelope (UX
+/// 15.1, live walk 2026-11-24, any channel): recognised only, so a
+/// background preview never renders it.
+#[uniffi::export]
+#[must_use]
+pub fn is_publisher_reader_key_envelope(plaintext: Vec<u8>) -> bool {
+    decode_publisher_reader_key(&plaintext).is_ok()
+}
+
+/// The one length of a publisher reader-key envelope.
+#[uniffi::export]
+#[must_use]
+pub fn publisher_reader_key_envelope_len() -> u32 {
+    len_u32(PUBLISHER_READER_KEY_ENVELOPE_LEN)
+}
+
 /// Whether `plaintext` is a request to be brought back into a conversation
 /// (ADR-0091 phase 2, any conversation).
 #[uniffi::export]
@@ -391,6 +410,15 @@ mod tests {
         )
     }
 
+    fn reader_key() -> Vec<u8> {
+        lakko_contacts::publisher_reader_key::compose_publisher_reader_key(
+            &lakko_contacts::publisher_reader_key::PublisherReaderKey {
+                channel_id: [0x0C; 16],
+                reader_key: [0xD7; 32],
+            },
+        )
+    }
+
     fn reentry() -> Vec<u8> {
         lakko_contacts::conversation_reentry::compose_conversation_reentry(
             &lakko_contacts::conversation_reentry::ConversationReentry {
@@ -426,6 +454,7 @@ mod tests {
         assert!(is_publisher_step_down_envelope(step_down()));
         assert!(is_publisher_device_request_envelope(device_request()));
         assert!(is_channel_admission_mark_envelope(admission_mark()));
+        assert!(is_publisher_reader_key_envelope(reader_key()));
         let chat = lakko_attachments::compose("hello", Vec::new()).unwrap();
         assert!(!is_group_photo_envelope(chat.clone()));
         assert!(!is_group_reactions_envelope(chat.clone()));
@@ -437,6 +466,7 @@ mod tests {
         assert!(!is_channel_rotate_request_envelope(chat.clone()));
         assert!(!is_publisher_device_request_envelope(chat.clone()));
         assert!(!is_channel_admission_mark_envelope(chat.clone()));
+        assert!(!is_publisher_reader_key_envelope(chat.clone()));
         assert!(!is_conversation_reentry_envelope(chat.clone()));
         assert!(!is_knock_key_envelope(chat.clone()));
         assert!(!is_publisher_step_down_envelope(chat));
@@ -458,6 +488,7 @@ mod tests {
             admission_mark(),
             reentry(),
             knock_key(),
+            reader_key(),
         ] {
             assert_eq!(
                 lakko_attachments::parse_body(&w),
@@ -487,6 +518,7 @@ mod tests {
         assert_eq!(publisher_device_request_envelope_min_len(), 84);
         assert_eq!(publisher_device_request_envelope_max_len(), 7208);
         assert_eq!(channel_admission_mark_envelope_len(), 57);
+        assert_eq!(publisher_reader_key_envelope_len(), 79);
         // Version 2 carries the 32-byte gap key (security review 2026-11-21).
         assert_eq!(conversation_reentry_envelope_min_len(), 114);
         assert_eq!(conversation_reentry_envelope_max_len(), 4209);
@@ -533,7 +565,10 @@ mod tests {
         let m = admission_mark();
         assert_eq!(&m[..32], b"lakko/channel-admission-mark/v1\x00");
         assert_eq!(m.len(), 57);
-        for w in [p, r, h, k, a, c, e, q, d, v, m] {
+        let rk = reader_key();
+        assert_eq!(&rk[..30], b"lakko/publisher-reader-key/v1\x00");
+        assert_eq!(rk.len(), 79);
+        for w in [p, r, h, k, a, c, e, q, d, v, m, rk] {
             assert_eq!(w[0], 0x6c);
         }
     }
@@ -554,8 +589,9 @@ mod tests {
             admission_mark(),
             reentry(),
             knock_key(),
+            reader_key(),
         ];
-        let tests: [fn(Vec<u8>) -> bool; 13] = [
+        let tests: [fn(Vec<u8>) -> bool; 14] = [
             is_group_photo_envelope,
             is_group_reactions_envelope,
             is_conversation_handle_envelope,
@@ -569,6 +605,7 @@ mod tests {
             is_channel_admission_mark_envelope,
             is_conversation_reentry_envelope,
             is_knock_key_envelope,
+            is_publisher_reader_key_envelope,
         ];
         for (i, w) in all.iter().enumerate() {
             for (j, t) in tests.iter().enumerate() {

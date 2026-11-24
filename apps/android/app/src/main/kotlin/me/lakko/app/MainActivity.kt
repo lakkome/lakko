@@ -3730,6 +3730,13 @@ private fun SessionRoot(
                             }
                         },
                         isPublisherOf = { channelIdHex -> channelsState.keysByChannel.value.containsKey(channelIdHex) },
+                        isFollowed = { channelIdHex -> channelsState.channels.value.any { it.id == channelIdHex } },
+                        onOpenChannel = { channelIdHex ->
+                            navController.navigate(Routes.channel(channelIdHex)) {
+                                popUpTo(Routes.GROUP_JOIN) { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        },
                         onOpenChat = { hex ->
                             // Replace the landing with the chat, so Back from
                             // the chat does not return to a finished join.

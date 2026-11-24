@@ -2629,6 +2629,12 @@ pub enum WasmIncomingEnvelopeKind {
     /// conversation's group id, then mark that person deleted for good.
     /// Never render it.
     AccountDeleted = 37,
+    /// UX 15.1 (live walk 2026-11-24) — a publishing account's reader key
+    /// at the channels service. `payload` is the whole envelope; decode it
+    /// with `decodePublisherReaderKeyEnvelope`, keep the newest per current
+    /// publisher account resolved at receipt, and leave those keys out of
+    /// the subscriber list and count. Never render it.
+    PublisherReaderKey = 38,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -3046,6 +3052,10 @@ fn dispatch_incoming_envelope_inner(plaintext: &[u8]) -> Result<WasmIncomingEnve
         IncomingEnvelope::ChannelAdmissionMark(_) => WasmIncomingEnvelope {
             payload: plaintext.to_vec(),
             ..WasmIncomingEnvelope::of(K::ChannelAdmissionMark)
+        },
+        IncomingEnvelope::PublisherReaderKey(_) => WasmIncomingEnvelope {
+            payload: plaintext.to_vec(),
+            ..WasmIncomingEnvelope::of(K::PublisherReaderKey)
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             payload: p.to_vec(),
@@ -4345,8 +4355,9 @@ impl GroupInviteCapability {
 
 /// ADR-0087 sections 7 and 14 — mint a channel SUBSCRIBER invitation over
 /// the 16-byte `channelId` (no knock key): its sealed preview carries the
-/// channel's name (required), description, photo and access keys. Returns
-/// an `InviteLinkMint`.
+/// channel's name (required), description, photo and access keys, and
+/// `inviterName` when it is valid and fits (section 7.2). Returns an
+/// `InviteLinkMint`.
 ///
 /// # Errors
 ///
@@ -4361,6 +4372,7 @@ pub fn compose_channel_subscriber_invite_capability(
     description: String,
     access: &WasmChannelAccess,
     avatar: Option<ProfileAvatar>,
+    inviter_name: Option<String>,
 ) -> Result<WasmInviteLinkMint, JsError> {
     let seed: [u8; 32] = issuer_signing_seed
         .try_into()
@@ -4379,7 +4391,9 @@ pub fn compose_channel_subscriber_invite_capability(
             description,
         }),
         avatar: avatar.map(|a| a.inner),
-    };
+    }
+    // Section 7.2: "Anna invites you to", when the name is valid and fits.
+    .with_subscriber_inviter(inviter_name.as_deref());
     let link_key = rust_generate_link_key();
     let wire = rust_group_invite_compose_with_preview(
         &signing, &channel, expiry_ms, None, &preview, &link_key,
