@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -1272,6 +1273,9 @@ public class ChatRepository(
             synchronized(liveEndNotices) { liveEndNotices.clear() }
             loadOwedEndsBestEffort(newAccountIdB64)
             mutableState.update { it.copy(bootstrapped = true) }
+            // docs/ux/connection-state.md section 7.3 — the messages that had
+            // not reached the server when the process ended.
+            outbox.restore(newAccountIdB64)
             // ADR-0073 R.7 case 1 — the messages held when the process died.
             restoreHeldSends()
             // State bundle v3 — the display copies already in a one-to-one.
@@ -5091,6 +5095,9 @@ public class ChatRepository(
         channelInvite: ByteArray? = null,
         /** ADR-0092 — a poll, checklist, location, contact card or article. */
         content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
+        /** docs/ux/media-messages.md section 11 — tray items whose upload had
+         *  not finished: uploaded as part of this send, from the outbox. */
+        pendingFiles: List<PendingAttachment> = emptyList(),
     ): Unit =
         forSession {
             sendMessageOnMlsThread(
@@ -5102,6 +5109,7 @@ public class ChatRepository(
                 onRowShown = onRowShown,
                 channelInvite = channelInvite,
                 content = content,
+                pendingFiles = pendingFiles,
             )
         }
 
@@ -5114,6 +5122,7 @@ public class ChatRepository(
         onRowShown: () -> Unit = {},
         channelInvite: ByteArray? = null,
         content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
+        pendingFiles: List<PendingAttachment> = emptyList(),
     ): Unit {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped")
@@ -5121,7 +5130,9 @@ public class ChatRepository(
         // one-to-one: it would reach only removed devices. It is HELD: the
         // row shows the ordinary sending state and goes out when the
         // conversation's successor exists on this device.
-        if (deadOneToOne(groupIdHex)) {
+        // A message with tray files still to upload goes through the outbox
+        // first (it uploads them, then holds the message for the successor).
+        if (deadOneToOne(groupIdHex) && pendingFiles.isEmpty()) {
             holdForSuccessor(groupIdHex, plaintext, attachments, reply, forward, content)
             return
         }
@@ -5149,6 +5160,9 @@ public class ChatRepository(
             forward = forward,
             channelInvite = channelInvite,
             content = content,
+            localMedia = trayPendingPreview(plaintext, attachments, pendingFiles.firstOrNull()?.let {
+                Triple(it.mime, it.name, it.thumbBytes)
+            }, pendingFiles.size),
         )
         // ADR-0092 section 3.4 — an own anonymous poll's ring version 0 is
         // the roster it is sealed under, which is the current one.
@@ -5158,34 +5172,36 @@ public class ChatRepository(
         }
         publishThreadList()
         onRowShown()
-        try {
-            // ADR-0091 phase 2 section 2 — once confirmed behind, nothing is
-            // sent. The row stays in the conversation in the ordinary
-            // "Not sent" state with Retry (maintainer, 2026-11-20).
-            requireMessageSendAllowed(groupIdHex)
-            sendLocked(
-                groupIdHex = groupIdHex,
-                record = record,
-                identity = identity,
-                localId = localId,
-                plaintext = plaintext,
-                attachments = attachments,
-                reply = reply,
-                forward = forward,
-                channelInvite = channelInvite,
-                content = content,
-            )
-        } catch (e: Throwable) {
-            record.markFailed(localId)
+        // docs/ux/connection-state.md section 7.3 — the entry is written
+        // before the first attempt, so the message survives quitting the app.
+        val stored = pendingFiles.map { it.toOutbox() }
+        outbox.add(
+            files = stored.fold(HashMap()) { acc, (_, bytes) -> acc.apply { putAll(bytes) } },
+            entry = outbox.newEntry(groupIdHex, localId).copy(
+                files = stored.map { it.first },
+                text = plaintext,
+                attachments = attachments.map(PersistedAttachment.Companion::from),
+                reply = reply?.let { PersistedReply(target = it.target, author = it.author, excerpt = it.excerpt) },
+                forward = forward?.let {
+                    PersistedForward(author = it.author, originGroupIdHex = it.originGroupIdHex, originMessageId = it.originMessageId)
+                },
+                contentEnvelopeB64 = content?.let { c ->
+                    composeContentBytes(c, attachments)?.let { java.util.Base64.getEncoder().encodeToString(it) }
+                },
+                channelInviteB64 = channelInvite?.let { java.util.Base64.getEncoder().encodeToString(it) },
+            ),
+        )
+        // Section 7.2 — a message written while earlier ones of this
+        // conversation wait for the network (or while their pass runs) is
+        // never published ahead of them: it joins the end of the queue, shown
+        // waiting, and goes in turn.
+        if (outbox.queueBehindIfWaiting(groupIdHex, localId)) {
             publishThreadList()
-            // ADR-0091 phase 2 section 1 — a refused publish is evidence.
-            if (proofRefusedWithClockOk(e)) conversationBehind.notePublishRefused(groupIdHex)
-            // Deliberately NOT persisted: an unsent row is not written to the
-            // message log, so a relaunch is where a failed send stops being
-            // retryable. Making that survive is a durable outbox, which no
-            // client has.
-            throw e
+            return
         }
+        // Sent, or left waiting (no answer from the network: not a failure
+        // the caller reports), or "Not sent" with the refusal thrown.
+        outbox.sendNow(groupIdHex, localId)
     }
 
     /**
@@ -5208,31 +5224,345 @@ public class ChatRepository(
         forSession { retrySendOnMlsThread(groupIdHex, localId) }
 
     private suspend fun retrySendOnMlsThread(groupIdHex: String, localId: Long) {
+        // docs/ux/connection-state.md section 7 — an outbox entry: a waiting
+        // row starts its conversation's pass, a "Not sent" one goes again
+        // behind the waiting ones.
+        if (outbox.retry(groupIdHex, localId)) return
         // ADR-0073 R.7 case 1 — the ordinary Retry of a message that gave up
         // while held: held again, never sent into the dead one-to-one.
-        if (deadOneToOne(groupIdHex)) {
-            retryHeld(groupIdHex, localId)
+        if (deadOneToOne(groupIdHex)) retryHeld(groupIdHex, localId)
+    }
+
+    /**
+     * `docs/ux/connection-state.md` section 7 — delete an own row that never
+     * reached the server: its outbox entry and prepared files go with it.
+     * Nothing was sent, so there is nothing to undo elsewhere.
+     */
+    public suspend fun deleteUnsent(groupIdHex: String, localId: Long): Unit =
+        forSession {
+            if (outbox.delete(groupIdHex, localId)) {
+                publishThreadList()
+                return@forSession
+            }
+            val record = groups[groupIdHex] ?: return@forSession
+            val row = record.snapshot().firstOrNull { it.localId == localId } ?: return@forSession
+            if (row.ack != Ack.FAILED) return@forSession
+            record.removeLocal(localId)
+            publishThreadList()
+        }
+
+    /**
+     * ADR-0047 / section 7.3 — send a voice message, video note or GIF. Its
+     * row enters the conversation at once with an upload ring; its prepared
+     * file goes into the outbox, so the message is uploaded and sent from
+     * here, in the conversation's order, whether or not its screen is open,
+     * and after a restart.
+     */
+    public suspend fun sendMedia(
+        groupIdHex: String,
+        media: PreparedMedia,
+        reply: ReplyRef? = null,
+        onRowShown: () -> Unit = {},
+    ) {
+        val fileId = media.bytes?.let { java.util.UUID.randomUUID().toString() }
+        val posterId = media.poster?.let { java.util.UUID.randomUUID().toString() }
+        val localId = forSession {
+            val record = groups[groupIdHex]
+                ?: throw ChatError("no live Group handle for $groupIdHex", IllegalStateException("unknown group"))
+            val id = record.nextLocalId()
+            record.appendPending(
+                localId = id,
+                text = "",
+                attachments = emptyList(),
+                createdAt = java.time.Instant.now().toString(),
+                authorKey = null,
+                reply = reply,
+                localMedia = media.preview(),
+            )
+            publishThreadList()
+            id
+        }
+        onRowShown()
+        withContext(Dispatchers.IO) {
+            outbox.add(
+                outbox.newEntry(groupIdHex, localId).copy(
+                    reply = reply?.let { PersistedReply(target = it.target, author = it.author, excerpt = it.excerpt) },
+                    media = OutboxMedia(
+                        kind = media.kind,
+                        mime = media.mime,
+                        name = media.name,
+                        durationMs = media.durationMs,
+                        waveformB64 = media.waveform?.let { java.util.Base64.getEncoder().encodeToString(it) },
+                        width = media.width,
+                        height = media.height,
+                        fileId = fileId,
+                        sourceUrl = media.sourceUrl,
+                        posterFileId = posterId,
+                        posterMime = media.poster?.mime,
+                        posterWidth = media.poster?.width,
+                        posterHeight = media.poster?.height,
+                    ),
+                ),
+                file = media.bytes,
+                poster = media.poster?.bytes,
+            )
+        }
+        if (outbox.queueBehindIfWaiting(groupIdHex, localId)) {
+            publishThreadList()
             return
         }
-        val identity = canonicalIdentity.get()
-            ?: throw IllegalStateException("ChatRepository not bootstrapped")
-        val record = groups[groupIdHex]
-            ?: throw ChatError(
-                "no live Group handle for $groupIdHex",
-                IllegalStateException("unknown group"),
-            )
-        val row = record.snapshot().firstOrNull { it.localId == localId } ?: return
-        if (row.ack != Ack.FAILED) return
-        // ADR-0092 section 3.4 — an anonymous poll sealed under a roster that
-        // has since changed cannot go as it is: the row stays failed and the
-        // retry is refused, never sent without its content.
-        if (!retryableAsIs(row.content) { hash -> ringBytesIfMatches(rosterAccountKeysOf(record.group), hash) != null }) {
-            throw anonymousPollResendRefused()
+        outbox.launch(groupIdHex, localId)
+    }
+
+    /**
+     * [sendMedia] on the repository's own scope, so a screen that closes
+     * right after the person sent a take does not lose it. [prepare] reads
+     * the take (off the main thread); `null` sends nothing.
+     */
+    public fun enqueueMedia(
+        groupIdHex: String,
+        reply: ReplyRef?,
+        prepare: suspend () -> PreparedMedia?,
+    ) {
+        pushScope.launchSession {
+            val media = try {
+                prepare()
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "media not prepared: ${cause.javaClass.simpleName}")
+                null
+            } ?: return@launchSession
+            try {
+                sendMedia(groupIdHex, media, reply)
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "media send not started: ${cause.javaClass.simpleName}")
+            }
         }
-        record.markPending(localId)
-        publishThreadList()
+    }
+
+    /** Upload progress of the session's media rows in flight
+     *  ([OutboxQueue.progressKey]). */
+    public val outboxProgress: StateFlow<Map<String, Float>> get() = outbox.progress
+
+    /**
+     * `docs/ux/connection-state.md` section 7.3 — the messages of this device
+     * that have not reached the server, stored, and the passes that send
+     * them, per conversation, oldest first. Owned here, not by a screen.
+     */
+    private val outbox: OutboxQueue = OutboxQueue(
+        scope = pushScope,
+        backend = FileOutboxStore.onDevice(applicationContext),
+        rows = object : OutboxRows {
+            override fun isHeld(groupIdHex: String): Boolean = groups[groupIdHex] != null
+
+            override fun show(entry: OutboxEntry, ack: Ack, posterBytes: ByteArray?): Long? =
+                showOutboxEntry(entry, ack, posterBytes)
+
+            override fun setAck(
+                groupIdHex: String,
+                localId: Long,
+                ack: Ack,
+                refusal: me.lakko.app.media.UploadRefusal?,
+            ) {
+                val record = groups[groupIdHex] ?: return
+                when (ack) {
+                    Ack.PENDING -> record.markPending(localId)
+                    Ack.WAITING -> record.markWaiting(localId)
+                    Ack.FAILED -> {
+                        record.markFailed(localId)
+                        record.setRefusal(localId, refusal)
+                    }
+                    Ack.SENT -> Unit
+                }
+                publishThreadList()
+            }
+
+            override fun setUploaded(
+                groupIdHex: String,
+                localId: Long,
+                refs: List<uniffi.lakko_ffi_uniffi.AttachmentRef>,
+            ) {
+                groups[groupIdHex]?.setUploaded(localId, refs) ?: return
+                publishThreadList()
+            }
+
+            override fun remove(groupIdHex: String, localId: Long) {
+                groups[groupIdHex]?.removeLocal(localId) ?: return
+                publishThreadList()
+            }
+        },
+        deliver = { entry, automatic -> forSession { deliverOnMlsThread(entry, automatic) } },
+        uploader = object : OutboxUploader {
+            override suspend fun fetchSource(url: String): Pair<ByteArray, String> =
+                when (val r = outboxGifClient.media(url, me.lakko.app.media.MAX_GIF_FULL_BYTES)) {
+                    is me.lakko.app.media.GifResult.Ok -> r.value.bytes to r.value.mime
+                    // No answer (or a gateway error): the GIF waits like any
+                    // message whose request got no answer.
+                    me.lakko.app.media.GifResult.Unavailable -> throw java.io.IOException("gif fetch unavailable")
+                    else -> throw OutboxFileMissing()
+                }
+
+            override suspend fun uploadThumb(
+                bytes: ByteArray,
+                mime: String,
+                width: Int,
+                height: Int,
+            ): uniffi.lakko_ffi_uniffi.ThumbRef =
+                AttachmentBridge.encryptAndUploadThumb(bytes, mime, width.toUInt(), height.toUInt())
+
+            override suspend fun uploadMain(
+                bytes: ByteArray,
+                mime: String,
+                name: String,
+                meta: AttachmentMediaMeta?,
+                onProgress: (Float) -> Unit,
+            ): uniffi.lakko_ffi_uniffi.AttachmentRef =
+                AttachmentBridge.encryptAndUpload(
+                    bytes = bytes,
+                    mime = mime,
+                    name = name,
+                    media = meta,
+                    onProgress = onProgress,
+                )
+        },
+        isOnline = { me.lakko.app.transport.ConnectionState.phase.value == me.lakko.app.transport.ConnectionPhase.ONLINE },
+        awaitOnline = {
+            me.lakko.app.transport.ConnectionState.phase.first { it == me.lakko.app.transport.ConnectionPhase.ONLINE }
+        },
+        onLog = { line -> android.util.Log.i("ChatRepository", line) },
+        deleteBlobs = { ids -> me.lakko.app.storage.BlobLifetime.delete(applicationContext, ids) },
+        finishAttachments = { refs -> me.lakko.app.media.keepInlineThumbOnCarrier(refs, me.lakko.app.media.coreAllowlist) },
+    )
+
+    /** The GIF proxy for a GIF waiting in the outbox (its bytes are fetched
+     *  at upload). */
+    private val outboxGifClient: me.lakko.app.media.GifClient by lazy {
+        me.lakko.app.media.GifClient(sessionToken = { keyPackageAccount.get()?.sessionToken })
+    }
+
+    /** Section 7.2 — every return to Online runs the pass of each
+     *  conversation with waiting messages. */
+    @Suppress("unused")
+    private val outboxOnlineWatch: kotlinx.coroutines.Job = pushScope.launch {
+        me.lakko.app.transport.ConnectionState.networkReturned.collect { outbox.requestAllWaiting() }
+    }
+
+    /** An entry read back at a session landing, shown as a row at the end of
+     *  its conversation. */
+    private fun showOutboxEntry(entry: OutboxEntry, ack: Ack, posterBytes: ByteArray?): Long? {
+        val record = groups[entry.groupIdHex] ?: return null
+        val attachments = entry.attachments.mapNotNull { it.toAttachmentRef() }
+        val content = entry.contentEnvelopeB64
+            ?.let { runCatching { java.util.Base64.getDecoder().decode(it) }.getOrNull() }
+            ?.let(::parseContentBytes)
+        val media = entry.media
+        if (entry.text.isEmpty() && attachments.isEmpty() && content == null && media == null && entry.files.isEmpty()) {
+            return null
+        }
+        val localId = record.nextLocalId()
+        record.appendPending(
+            localId = localId,
+            text = entry.text,
+            attachments = attachments,
+            createdAt = java.time.Instant.ofEpochMilli(entry.writtenAtMs).toString(),
+            authorKey = null,
+            reply = entry.reply?.let { ReplyRef(target = it.target, author = it.author, excerpt = it.excerpt) },
+            forward = entry.forward?.let {
+                ForwardRef(author = it.author, originGroupIdHex = it.originGroupIdHex, originMessageId = it.originMessageId)
+            },
+            channelInvite = entry.channelInviteB64?.let { runCatching { java.util.Base64.getDecoder().decode(it) }.getOrNull() },
+            content = content,
+            localMedia = if (media == null) {
+                trayPendingPreview(
+                    entry.text,
+                    attachments,
+                    entry.files.firstOrNull()?.let { Triple(it.mime, it.name, posterBytes) },
+                    entry.files.size,
+                )
+            } else {
+                media.let {
+                LocalMediaPreview(
+                    kind = it.kind,
+                    mime = it.mime,
+                    name = it.name,
+                    durationMs = it.durationMs,
+                    waveform = it.waveformB64?.let { w -> runCatching { java.util.Base64.getDecoder().decode(w) }.getOrNull() },
+                    width = it.width,
+                    height = it.height,
+                    posterBytes = posterBytes,
+                    refusal = it.refusal?.let { r ->
+                        runCatching { me.lakko.app.media.UploadRefusal.valueOf(r) }.getOrNull()
+                    },
+                )
+                }
+            },
+            ack = ack,
+        )
+        return localId
+    }
+
+    /**
+     * docs/ux/media-messages.md section 11 — a message whose only content is
+     * tray files still to upload is drawn as a pending bubble with the first
+     * one's thumbnail and the upload ring; one with text or uploaded items is
+     * drawn as it is, with its sending state.
+     */
+    private fun trayPendingPreview(
+        text: String,
+        attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef>,
+        first: Triple<String?, String?, ByteArray?>?,
+        pendingCount: Int,
+    ): LocalMediaPreview? {
+        if (first == null || pendingCount == 0 || text.isNotEmpty() || attachments.isNotEmpty()) return null
+        return LocalMediaPreview(
+            kind = TRAY_PENDING_KIND,
+            mime = first.first ?: "application/octet-stream",
+            name = first.second ?: "",
+            durationMs = null,
+            waveform = null,
+            width = null,
+            height = null,
+            posterBytes = first.third,
+        )
+    }
+
+    /**
+     * One publish of an outbox entry (its attachments uploaded): from the
+     * row, as a Retry always did, so the words that go are the words written.
+     *
+     * **It can deliver the message twice.** A publish that reached the server
+     * and lost its answer is indistinguishable here from one that never
+     * arrived: the send is not idempotent, there is no key to de-duplicate
+     * on, and our own message is one the MLS ratchet will not decrypt a
+     * second time, so the journal cannot be consulted either. Losing the
+     * message is the worse failure.
+     */
+    private suspend fun deliverOnMlsThread(entry: OutboxEntry, automatic: Boolean): DeliverOutcome {
+        val identity = canonicalIdentity.get() ?: return DeliverOutcome.Dropped
+        val groupIdHex = entry.groupIdHex
+        val localId = entry.localId
+        val record = groups[groupIdHex] ?: return DeliverOutcome.Dropped
+        val row = record.snapshot().firstOrNull { it.localId == localId } ?: return DeliverOutcome.Dropped
+        // ADR-0073 R.7 case 1 — never into a dead one-to-one. An automatic
+        // send leaves it "Not sent"; the person's Retry holds it for the
+        // successor (the held queue owns it from there).
+        if (deadOneToOne(groupIdHex)) {
+            if (automatic) return DeliverOutcome.Refused(null)
+            record.markFailed(localId)
+            retryHeld(groupIdHex, localId)
+            return DeliverOutcome.Handed
+        }
+        // ADR-0092 section 3.4 — an anonymous poll sealed under a roster that
+        // has since changed cannot go as it is.
+        if (!retryableAsIs(row.content) { hash -> ringBytesIfMatches(rosterAccountKeysOf(record.group), hash) != null }) {
+            return DeliverOutcome.Refused(anonymousPollResendRefused())
+        }
         try {
-            // A Retry while still behind fails again the same way.
+            // ADR-0091 phase 2 section 2 — once confirmed behind, nothing is
+            // sent; the row reads "Not sent" with Retry.
             requireMessageSendAllowed(groupIdHex)
             sendLocked(
                 groupIdHex = groupIdHex,
@@ -5241,18 +5571,19 @@ public class ChatRepository(
                 localId = localId,
                 plaintext = row.text,
                 attachments = row.attachments,
-                // The quote goes again with the words: the row is the only
-                // place either was ever kept. The forward attribution too.
                 reply = row.reply,
                 forward = row.forward,
                 channelInvite = row.channelInvite,
                 content = row.content,
             )
         } catch (e: Throwable) {
-            record.markFailed(localId)
-            publishThreadList()
+            // ADR-0091 phase 2 section 1 — a refused publish is evidence.
+            if (e !is kotlinx.coroutines.CancellationException && proofRefusedWithClockOk(e)) {
+                conversationBehind.notePublishRefused(groupIdHex)
+            }
             throw e
         }
+        return DeliverOutcome.Sent
     }
 
     /** The publish itself, under this group's lock. */
@@ -13137,6 +13468,7 @@ public class ChatRepository(
             for (g in preparedGroups.values) runCatching { g.close() }
             preparedGroups.clear()
             heldSends.clear()
+            outbox.clear()
             pendingInvitedHeld.clear()
             heldCopyRows.clear()
         }
@@ -19142,6 +19474,13 @@ public data class ChatMessage(
     val content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
     /** ADR-0092 — the ops, ballots and ring the row's content collected. */
     val contentExtras: ContentExtras = ContentExtras(),
+    /**
+     * ADR-0047 / `docs/ux/connection-state.md` section 7.3 — an own voice
+     * message, video note or GIF that has not reached the server: what its
+     * pending bubble draws (the upload ring, `Waiting for network`,
+     * `Not sent`). `null` for every other row, and once the message is sent.
+     */
+    val localMedia: LocalMediaPreview? = null,
 ) {
     /** Whether this is a read-only row of an older segment. */
     val isHistory: Boolean get() = historyOf != null
@@ -19158,6 +19497,31 @@ public data class ChatMessage(
      * tear the row down and rebuild it mid-send.
      */
     val rowId: Long get() = if (localId != 0L) localId else messageId
+}
+
+/** What a pending media bubble draws for a row still in the outbox. */
+public data class LocalMediaPreview(
+    val kind: String,
+    val mime: String,
+    val name: String,
+    val durationMs: Long?,
+    val waveform: ByteArray?,
+    val width: Int?,
+    val height: Int?,
+    val posterBytes: ByteArray?,
+    /** The told refusal behind a "Not sent", `null` for any other. */
+    val refusal: me.lakko.app.media.UploadRefusal? = null,
+) {
+    override fun equals(other: Any?): Boolean =
+        other is LocalMediaPreview && kind == other.kind && mime == other.mime && name == other.name &&
+            durationMs == other.durationMs && width == other.width && height == other.height &&
+            refusal == other.refusal &&
+            (waveform?.contentEquals(other.waveform) ?: (other.waveform == null)) &&
+            (posterBytes?.contentEquals(other.posterBytes) ?: (other.posterBytes == null))
+
+    override fun hashCode(): Int =
+        listOf(kind, mime, name, durationMs, width, height, refusal).hashCode() * 31 +
+            (waveform?.contentHashCode() ?: 0) * 7 + (posterBytes?.contentHashCode() ?: 0)
 }
 
 /**
@@ -19208,6 +19572,14 @@ public enum class Ack {
      * "Not sent" and keeps the text, with a Retry beside it.
      */
     FAILED,
+
+    /**
+     * `docs/ux/connection-state.md` section 7 — it did not get there because
+     * a request got no answer (a network failure), and it goes by itself when
+     * the servers answer again ([WaitingSendPasses]). The row reads "Waiting
+     * for network" with a clock. Never persisted, like every unsent row.
+     */
+    WAITING,
 }
 
 /** ADR-0023 — one reaction on a [ChatMessage], attributed to its sender's
@@ -19410,17 +19782,21 @@ private class GroupRecord(
         /** ADR-0087 section 14 — a channel invitation card, likewise. */
         channelInvite: ByteArray? = null,
         content: uniffi.lakko_ffi_uniffi.MessageContent? = null,
+        /** Section 7.3 — a media message before its upload. */
+        localMedia: LocalMediaPreview? = null,
+        ack: Ack = Ack.PENDING,
     ) {
         messages.add(
             ChatMessage(
                 content = content,
+                localMedia = localMedia,
                 messageId = 0,
                 direction = Direction.Outgoing,
                 text = text,
                 attachments = attachments,
                 createdAt = createdAt,
                 authorKey = authorKey,
-                ack = Ack.PENDING,
+                ack = ack,
                 localId = localId,
                 reply = reply,
                 forward = forward,
@@ -19454,7 +19830,25 @@ private class GroupRecord(
             createdAt = createdAt,
             authorKey = authorKey,
             ack = Ack.SENT,
+            localMedia = null,
         )
+    }
+
+    /** Section 7.3 — a media row's file is uploaded: the row carries its
+     *  reference (the pending bubble stays until the message is sent). */
+    fun setUploaded(localId: Long, refs: List<uniffi.lakko_ffi_uniffi.AttachmentRef>) {
+        val idx = messages.indexOfFirst { it.localId == localId }
+        if (idx < 0) return
+        messages[idx] = messages[idx].copy(attachments = refs)
+    }
+
+    /** A media row's told refusal (the sending limit, a full server). */
+    fun setRefusal(localId: Long, refusal: me.lakko.app.media.UploadRefusal?) {
+        val idx = messages.indexOfFirst { it.localId == localId }
+        if (idx < 0) return
+        val m = messages[idx]
+        if (m.localMedia == null) return
+        messages[idx] = m.copy(localMedia = m.localMedia.copy(refusal = refusal))
     }
 
     /** ADR-0073 R.7 case 1 — a held row whose message went out in the
@@ -19478,6 +19872,14 @@ private class GroupRecord(
         val idx = messages.indexOfFirst { it.localId == localId }
         if (idx < 0) return
         messages[idx] = messages[idx].copy(ack = Ack.FAILED)
+    }
+
+    /** Section 7 of `docs/ux/connection-state.md` — the send did not get
+     *  there for a network reason: the row waits and goes by itself. */
+    fun markWaiting(localId: Long) {
+        val idx = messages.indexOfFirst { it.localId == localId }
+        if (idx < 0) return
+        messages[idx] = messages[idx].copy(ack = Ack.WAITING)
     }
 
     fun appendOutgoing(

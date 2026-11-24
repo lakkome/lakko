@@ -144,13 +144,22 @@ export interface SweepDeps {
  * request every sweep. A success clears it.
  */
 export class GroupBackoff {
-  private readonly state = new Map<string, { failures: number; until: number }>();
+  private readonly state = new Map<string, { failures: number; until: number; kind: "network" | "other" }>();
 
   failed(groupId: string, nowMs: number, kind: "network" | "other"): number {
     const failures = (this.state.get(groupId)?.failures ?? 0) + 1;
     const delay = backoffFor(kind, failures);
-    this.state.set(groupId, { failures, until: nowMs + delay });
+    this.state.set(groupId, { failures, until: nowMs + delay, kind });
     return delay;
+  }
+
+  /** The network came back (`docs/ux/connection-state.md` section 3): every
+   *  group backed off for a NETWORK failure is polled at the next sweep. A
+   *  group backed off for a server error keeps its backoff. */
+  networkReturned(): void {
+    for (const [groupId, s] of [...this.state.entries()]) {
+      if (s.kind === "network") this.state.delete(groupId);
+    }
   }
 
   succeeded(groupId: string): void {

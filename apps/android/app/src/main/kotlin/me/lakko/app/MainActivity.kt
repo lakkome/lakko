@@ -1889,7 +1889,7 @@ private fun SessionRoot(
                         // not this loop ending.
                         endPassUnlessCancelled(cancel)
                     } catch (_: Throwable) {
-                        kotlinx.coroutines.delay(APP_POLL_RETRY_BACKOFF_MS)
+                        me.lakko.app.transport.ConnectionState.delayUnlessNetworkReturns(APP_POLL_RETRY_BACKOFF_MS)
                     }
                     // The pause before the next sweep: short while a push
                     // wake's window is open or a call is up, long otherwise; a
@@ -1998,7 +1998,7 @@ private fun SessionRoot(
                     // A failure outside the inbox's own error handling stopped
                     // this pass: said once per pass, by kind only.
                     android.util.Log.w("MainActivity", "inbox pass failed: ${cause.javaClass.simpleName}")
-                    kotlinx.coroutines.delay(APP_POLL_RETRY_BACKOFF_MS)
+                    me.lakko.app.transport.ConnectionState.delayUnlessNetworkReturns(APP_POLL_RETRY_BACKOFF_MS)
                 }
                 // A poll that returns at once (no session yet, a refused
                 // request) must not become a busy loop.
@@ -2040,7 +2040,7 @@ private fun SessionRoot(
                         // not this loop ending.
                         endPassUnlessCancelled(cancel)
                     } catch (_: Throwable) {
-                        kotlinx.coroutines.delay(APP_POLL_RETRY_BACKOFF_MS)
+                        me.lakko.app.transport.ConnectionState.delayUnlessNetworkReturns(APP_POLL_RETRY_BACKOFF_MS)
                     }
                     val elapsed = android.os.SystemClock.elapsedRealtime() - startedAt
                     if (elapsed < APP_POLL_MIN_ITERATION_MS) {
@@ -2898,7 +2898,13 @@ private fun SessionRoot(
                         client = channelsClient,
                         chatRepository = chatRepository,
                         contactsRepository = contactsRepository,
-                        onBack = { navController.popBackStack() },
+                        // Only while this info is the screen on top: the info
+                        // also goes back by itself once the channel is gone,
+                        // and after Unsubscribe that runs while it is still
+                        // composed on its way out, over Chats. A plain pop
+                        // then removed Chats too and left an empty screen
+                        // under the tab bar (seen 2026-11-24).
+                        onBack = { navController.popBackStackIfCurrent(entry) },
                         onLeft = {
                             // Section 9.5 — the row and its posts are gone:
                             // Chats, with nothing of the channel left under
@@ -3894,6 +3900,13 @@ private val Tabs: List<TabSpec> = listOf(
 private fun NavHostController.navigateToChatsClearing() {
     navigateClearingTo(Routes.CHATS)
 }
+
+/** Back from [entry] only while it is the screen on top. A screen that goes
+ *  back by itself (its subject is gone) can still be composed after another
+ *  navigation replaced it, during the exit transition; popping then would
+ *  remove whatever is on top instead, down to an empty back stack. */
+internal fun NavHostController.popBackStackIfCurrent(entry: androidx.navigation.NavBackStackEntry): Boolean =
+    if (currentBackStackEntry?.id == entry.id) popBackStack() else false
 
 /** [route] (the start destination's tab) with every pushed screen above the
  *  start destination removed, whatever route opened them. */

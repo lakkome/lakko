@@ -335,6 +335,8 @@ public fun statusLabel(ack: Ack, time: String?, strings: Strings = Localization.
     when (ack) {
         Ack.PENDING -> strings["chat.message.sending"]
         Ack.FAILED -> strings["chat.message.not_sent"]
+        // docs/ux/connection-state.md section 7.1 — beside a clock.
+        Ack.WAITING -> strings["chat.message.waiting_network"]
         Ack.SENT -> time
     }
 

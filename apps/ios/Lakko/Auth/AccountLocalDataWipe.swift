@@ -378,6 +378,9 @@ enum AccountLocalDataWipe {
         step("group-closed") { GroupClosedStore.clear(ownerAccountIdB64: accountIdB64) }
         step("continuity-store") { ContinuityStore.clear(ownerAccountIdB64: accountIdB64) }
         step("held-sends") { HeldSendQueue.clearAccount(ownerAccountId: accountIdB64) }
+        // `docs/ux/connection-state.md` section 7.3 — the outbox and its
+        // prepared files.
+        step("send-outbox") { SendOutbox.clearAccount(ownerAccountId: accountIdB64) }
         step("pending-display-copies") { PendingDisplayCopies.clearAccount(ownerAccountIdB64: accountIdB64) }
         step("lineage-unsent") {
             standard.removeObject(

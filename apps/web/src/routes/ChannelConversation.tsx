@@ -121,6 +121,8 @@ import { requestConfirm } from "../ui/confirm-dialog";
 import { displayLocale } from "../l10n/display-locale";
 import type { Article, MessageContent } from "../../wasm/lakko_ffi_wasm";
 import type { AttachEditRequest } from "../attach/AttachComposer";
+import { connectionPhase } from "../net/connection-state";
+import { connectionHeaderText } from "../net/connection-copy";
 
 /** What a search card or a link page may hand the route: how to subscribe
  *  when the person has not yet. */
@@ -689,6 +691,9 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
     },
   );
   const headerLine = (): string => {
+    // docs/ux/connection-state.md: the connection state replaces the line.
+    const connection = connectionHeaderText(connectionPhase());
+    if (connection !== null) return connection;
     if (role() === null) return "";
     if (!canPublish() && channelReadStateOf(id) === "waiting") return t("channels.subscribe.status.waiting");
     return channelHeaderLine(channelVisibilityOf(id), canPublish() ? (subscriberCount() ?? null) : null);

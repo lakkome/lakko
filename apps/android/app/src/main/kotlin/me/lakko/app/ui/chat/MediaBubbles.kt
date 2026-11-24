@@ -1007,6 +1007,34 @@ private fun GifContent(file: File, inline: InlineKind?, modifier: Modifier, onFa
 }
 
 /**
+ * `docs/ux/connection-state.md` section 7.3 — the pending bubble of an own
+ * media row still in the outbox: in flight (an upload ring at [progress]),
+ * waiting for the network, or "Not sent".
+ */
+internal fun pendingMediaRowOf(
+    msg: me.lakko.app.chat.ChatMessage,
+    preview: me.lakko.app.chat.LocalMediaPreview,
+    progress: Float?,
+): PendingMediaRow = PendingMediaRow(
+    tempId = msg.localId,
+    kind = preview.kind,
+    mime = preview.mime,
+    name = preview.name,
+    durationMs = preview.durationMs,
+    waveform = preview.waveform,
+    width = preview.width,
+    height = preview.height,
+    posterBytes = preview.posterBytes,
+    // A tray message's pending bubble shows its first item's thumbnail.
+    previewBytes = if (preview.kind == me.lakko.app.chat.TRAY_PENDING_KIND) preview.posterBytes else null,
+    progress = if (msg.ack == me.lakko.app.chat.Ack.PENDING) (progress ?: 0.02f) else 0f,
+    failed = msg.ack == me.lakko.app.chat.Ack.FAILED || msg.ack == me.lakko.app.chat.Ack.WAITING,
+    limited = preview.refusal == me.lakko.app.media.UploadRefusal.LIMIT,
+    refusal = preview.refusal,
+    waiting = msg.ack == me.lakko.app.chat.Ack.WAITING,
+)
+
+/**
  * An outgoing voice message, video note or GIF that has not reached the DS
  * yet: the bubble enters the timeline at once with a determinate upload ring
  * (§2 states "Uploading"), and a failure leaves it as `Not sent · Retry` —
@@ -1040,17 +1068,23 @@ internal fun PendingMediaBubble(
                             "duration" to spokenDuration(row.durationMs ?: 0L, strings),
                         ),
                     )
+                    me.lakko.app.chat.TRAY_PENDING_KIND -> row.name
                     else -> strings["chat.media.gif"]
                 }
-                contentDescription = strings.format(
-                    if (row.failed) "chat.media.row_not_sent" else "chat.media.row_sending",
-                    mapOf("label" to kind),
-                )
+                // A waiting row says so in its own line below, read next.
+                contentDescription = if (row.waiting) {
+                    kind
+                } else {
+                    strings.format(
+                        if (row.failed) "chat.media.row_not_sent" else "chat.media.row_sending",
+                        mapOf("label" to kind),
+                    )
+                }
             },
         ) {
             val inner = when (row.kind) {
                 KIND_VIDEO_NOTE -> Modifier.size(240.dp)
-                KIND_GIF -> Modifier.size(width = 200.dp, height = 140.dp)
+                KIND_GIF, me.lakko.app.chat.TRAY_PENDING_KIND -> Modifier.size(width = 200.dp, height = 140.dp)
                 // No fixed width: the voice row sizes itself exactly as the
                 // delivered bubble's does, so nothing shifts when it lands.
                 else -> Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
@@ -1123,7 +1157,7 @@ internal fun PendingMediaBubble(
                     }
                     else -> {
                         row.previewBytes?.let { bytes ->
-                            if (row.mime != "video/mp4") {
+                            if (row.kind == me.lakko.app.chat.TRAY_PENDING_KIND || row.mime != "video/mp4") {
                                 AnimatedImage(
                                     source = AnimatedSource.OfBytes("gif-${row.tempId}", bytes),
                                     contentDescription = t("chat.media.gif"),
@@ -1152,11 +1186,33 @@ internal fun PendingMediaBubble(
                     Text(t("common.delete"), style = MaterialTheme.typography.labelSmall)
                 }
                 TextButton(onClick = onRetry) {
-                    Text(
-                        t(NOT_SENT_RETRY),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
+                    if (row.waiting) {
+                        // docs/ux/connection-state.md section 7.1 — a clock and
+                        // "Waiting for network" where "Not sent · Retry" goes;
+                        // a tap sends it now.
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            me.lakko.app.ui.components.LkIcon(
+                                icon = me.lakko.app.R.drawable.ic_lk_clock,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                size = me.lakko.app.ui.components.LkIconSize.Mark,
+                            )
+                            Text(
+                                t("chat.message.waiting_network"),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    } else {
+                        Text(
+                            t(NOT_SENT_RETRY),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
                 }
             }
         }

@@ -41,14 +41,19 @@ class ComposerTrayTest {
     }
 
     @Test
-    fun `send needs text or an item and every item uploaded`() {
+    fun `send needs text or an item and no item being prepared or refused`() {
         assertFalse(ComposerTray().canSend("  "))
         assertTrue(ComposerTray().canSend("hi"))
         val ready = ComposerTray(listOf(item(1, TrayKind.PHOTO), item(2, TrayKind.FILE)))
         assertTrue(ready.canSend(""))
         assertFalse(ready.busy)
+        // Section 11 (2026-11-24) — an upload still running, or one that got
+        // no answer, does not stop Send.
         val uploading = ready.copy(items = ready.items + item(3, TrayKind.VIDEO, TrayStatus.Uploading(0.5f)))
-        assertFalse(uploading.canSend("text"))
+        assertTrue(uploading.canSend("text"))
+        assertTrue(uploading.canSend(""))
+        val waiting = ready.copy(items = ready.items + item(3, TrayKind.VIDEO, TrayStatus.Waiting))
+        assertTrue(waiting.canSend(""))
         val failed = ready.copy(items = ready.items + item(3, TrayKind.VIDEO, TrayStatus.Failed))
         assertFalse(failed.canSend("text"))
         assertTrue(failed.without(3).canSend(""))

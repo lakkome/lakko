@@ -31,6 +31,8 @@ import { ownAvatarLabel } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
 import { Icon, type IconName } from "./icons";
 import { t } from "../l10n";
+import { connectionAnnouncement } from "../net/connection-state";
+import { connectionAnnouncementText } from "../net/connection-copy";
 
 /**
  * `docs/ux/navigation.md` section 1 - four destinations, not five.
@@ -144,6 +146,15 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
       {/* docs/ux/identity-recovery.md 17.5: watches the account's device
           list for a device this one has not acknowledged. */}
       <DeviceAddedWatcher />
+      {/* docs/ux/connection-state.md section 5: each change of the
+          connection state is spoken once, politely. Empty until the first
+          change, so nothing is read at start. */}
+      <div class="lk-visually-hidden" aria-live="polite" role="status">
+        {(() => {
+          const entered = connectionAnnouncement();
+          return entered === null ? "" : connectionAnnouncementText(entered);
+        })()}
+      </div>
       {/* The call UI (`CallHostView`) is mounted by the router's root layout in
           `App.tsx`, not here: a call from a `/c/` link runs on a public route
           outside this shell, and must show the same overlay there. */}

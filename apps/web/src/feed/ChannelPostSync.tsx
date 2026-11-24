@@ -30,6 +30,7 @@
  * older one without a seed is past the retained window and is passed over.
  */
 
+import { onNetworkReturned } from "../net/connection-state";
 import { createEffect, onCleanup, onMount, type Component } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
@@ -326,7 +327,11 @@ export const ChannelPostSync: Component = () => {
     };
     document.addEventListener("visibilitychange", onVisible);
     syncRequests.add(run);
+    // docs/ux/connection-state.md section 3: the network coming back syncs
+    // at once rather than at the next tick.
+    const stopNetworkReturn = onNetworkReturned(run);
     onCleanup(() => {
+      stopNetworkReturn();
       syncRequests.delete(run);
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);

@@ -8,6 +8,8 @@ import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -50,9 +52,16 @@ public fun requestChannelPostSync() {
     syncRequests.trySend(Unit)
 }
 
-/** Wait until the next sync is due: the interval passes or a sync is requested. */
+/** Wait until the next sync is due: the interval passes, a sync is
+ *  requested, or the network comes back (`docs/ux/connection-state.md`
+ *  section 3: every receive loop retries at once then). */
 public suspend fun awaitChannelPostSyncTick() {
-    withTimeoutOrNull(CHANNEL_POST_SYNC_INTERVAL_MS) { syncRequests.receive() }
+    withTimeoutOrNull(CHANNEL_POST_SYNC_INTERVAL_MS) {
+        kotlinx.coroutines.flow.merge(
+            syncRequests.receiveAsFlow(),
+            me.lakko.app.transport.ConnectionState.networkReturned,
+        ).first()
+    }
 }
 
 /** A listener of [subscribeChannelReads]. */

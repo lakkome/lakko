@@ -55,6 +55,7 @@
  * wake. The client never calls push-gw to wake.
  */
 import { accountSuspended } from "../auth/suspension-state";
+import { observeRequest } from "../net/connection-state";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import {
   DS_PROOF_HEADER,
@@ -487,7 +488,9 @@ export class DsClient implements StatementSender, CommitSender {
     }
     if (req.signal !== undefined) init.signal = req.signal;
     try {
-      return await this.fetchImpl(url, init);
+      // docs/ux/connection-state.md: every DS round trip says whether this
+      // device can reach the servers.
+      return await observeRequest(this.fetchImpl(url, init), req.signal);
     } catch (err) {
       throw new DsNetworkError(endpoint, err);
     }
@@ -593,11 +596,13 @@ export class DsClient implements StatementSender, CommitSender {
     headers[DS_PROOF_HEADER] = proof.sign(req.method, req.path, req.query, req.body);
     let response: Response;
     try {
-      response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-        method: "POST",
-        headers,
-        body: req.body.slice(),
-      });
+      response = await observeRequest(
+        this.fetchImpl(`${this.baseUrl}${path}`, {
+          method: "POST",
+          headers,
+          body: req.body.slice(),
+        }),
+      );
     } catch (err) {
       throw new DsNetworkError(path, err);
     }

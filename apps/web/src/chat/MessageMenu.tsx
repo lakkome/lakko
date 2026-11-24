@@ -201,6 +201,10 @@ export interface MessageMenuProps {
    *  is the pin row alone (`pin-bar.ts` `historyRowOffersUnpin`). No
    *  reaction row and no other action: nothing else can name that row. */
   pinOnly?: boolean;
+  /** `docs/ux/connection-state.md` section 7.3 — an unsent message (waiting
+   *  or `Not sent`): the menu is the Delete row alone. Nothing else can name
+   *  a message that has no id yet. */
+  deleteOnly?: boolean;
 }
 
 export function MessageMenu(props: MessageMenuProps): JSX.Element {
@@ -283,7 +287,13 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
    *  the conversation takes no reactions. Without it the card takes the
    *  row's single-surface slot. */
   const hasRow = (): boolean =>
-    props.pinOnly !== true && props.reactionRow.length > 0 && !accountSuspended();
+    props.pinOnly !== true &&
+    props.deleteOnly !== true &&
+    props.reactionRow.length > 0 &&
+    !accountSuspended();
+  /** Only the restricted rows: an older segment's pin row, or an unsent
+   *  message's Delete. */
+  const restricted = (): boolean => props.pinOnly === true || props.deleteOnly === true;
 
   const copyable = (): string | null =>
     props.copyText !== null && props.copyText.length > 0 ? props.copyText : null;
@@ -389,7 +399,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
             {/* ADR-0099 step 3: the content actions (a poll's Close, a
                 checklist's Edit), React, Reply, Forward, Edit and Delete each
                 send; a suspended account's menu does not offer them. */}
-            <Show when={props.pinOnly !== true && !accountSuspended()}>
+            <Show when={!restricted() && !accountSuspended()}>
               <For each={props.extraActions ?? []}>
                 {(a) => (
                   <button type="button" role="menuitem" onClick={() => run(() => a.onClick())}>
@@ -399,7 +409,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                 )}
               </For>
             </Show>
-            <Show when={props.pinOnly !== true && props.canReply !== false && !accountSuspended()}>
+            <Show when={!restricted() && props.canReply !== false && !accountSuspended()}>
             <button
               ref={(el) => {
                 if (!hasRow()) firstItem = el;
@@ -412,13 +422,13 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
               <span>{t("chat.message.reply")}</span>
             </button>
             </Show>
-            <Show when={props.pinOnly !== true && props.canForward && !accountSuspended()}>
+            <Show when={!restricted() && props.canForward && !accountSuspended()}>
               <button type="button" role="menuitem" onClick={() => run(() => props.onForward())}>
                 <Icon name="forward" size={20} />
                 <span>{t("chat.message.forward")}</span>
               </button>
             </Show>
-            <Show when={props.pinOnly === true ? null : copyable()}>
+            <Show when={restricted() ? null : copyable()}>
               {(text) => (
                 <button
                   type="button"
@@ -430,7 +440,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                 </button>
               )}
             </Show>
-            <Show when={props.pinOnly === true ? null : (props.translateLabel ?? null)}>
+            <Show when={restricted() ? null : (props.translateLabel ?? null)}>
               {(label) => (
                 <button type="button" role="menuitem" onClick={() => run(() => props.onTranslate?.())}>
                   <Icon name={label() === "show-original" ? "text-bubble" : "translate"} size={20} />
@@ -442,13 +452,13 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                 </button>
               )}
             </Show>
-            <Show when={props.pinOnly !== true && props.canSelect}>
+            <Show when={!restricted() && props.canSelect}>
               <button type="button" role="menuitem" onClick={() => run(() => props.onSelect())}>
                 <Icon name="checkmark-circle" size={20} />
                 <span>{t("chat.message.select")}</span>
               </button>
             </Show>
-            <Show when={props.pinLabel}>
+            <Show when={props.deleteOnly === true ? null : props.pinLabel}>
               {(label) => (
                 <button
                   ref={(el) => {
@@ -463,7 +473,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                 </button>
               )}
             </Show>
-            <Show when={props.saveLabel}>
+            <Show when={props.deleteOnly === true ? null : props.saveLabel}>
               {(label) => (
                 <button
                   ref={(el) => {
@@ -479,7 +489,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                 </button>
               )}
             </Show>
-            <Show when={props.pinOnly !== true && props.canEditDelete && !accountSuspended()}>
+            <Show when={!restricted() && props.canEditDelete && !accountSuspended()}>
               <Show when={props.canEdit !== false}>
                 <button type="button" role="menuitem" onClick={() => run(() => props.onEdit())}>
                   <Icon name="pencil" size={20} />
@@ -498,7 +508,23 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                 </button>
               </div>
             </Show>
-            <Show when={props.pinOnly !== true && (props.extraDestructive?.length ?? 0) > 0}>
+            <Show when={props.deleteOnly === true}>
+              <div class="lk-msg-menu-destructive">
+                <button
+                  ref={(el) => {
+                    firstItem = el;
+                  }}
+                  type="button"
+                  role="menuitem"
+                  class="danger"
+                  onClick={() => run(() => props.onDelete())}
+                >
+                  <Icon name="trash" size={20} />
+                  <span>{t("common.delete")}</span>
+                </button>
+              </div>
+            </Show>
+            <Show when={!restricted() && (props.extraDestructive?.length ?? 0) > 0}>
               <div class="lk-msg-menu-destructive">
                 <For each={props.extraDestructive ?? []}>
                   {(a) => (

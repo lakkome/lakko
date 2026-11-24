@@ -133,6 +133,7 @@ final class ForegroundReceiveScheduler {
     private var foregroundWaiters: [CheckedContinuation<Void, Never>] = []
     private let backoff = GroupBackoff()
     private var nudged = false
+    private var networkObserver: NSObjectProtocol?
     private var wakeWindowUntilMs: Int64 = 0
     /// The groups the last sweep started with; `nil` before the first one.
     private var lastSweepGroups: Set<String>?
@@ -151,6 +152,15 @@ final class ForegroundReceiveScheduler {
 
     func start() {
         Self.active = self
+        // `docs/ux/connection-state.md` section 3 — when the network comes
+        // back, every group is retried at once rather than after its backoff.
+        if networkObserver == nil {
+            networkObserver = NotificationCenter.default.addObserver(
+                forName: ConnectionState.networkReturned, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.noteNetworkReturned() }
+            }
+        }
         if sweepLoop == nil {
             sweepLoop = Task { @MainActor [weak self] in await self?.runSweepLoop() }
         }
@@ -163,6 +173,8 @@ final class ForegroundReceiveScheduler {
     /// throws on its own.
     func stop() {
         if Self.active === self { Self.active = nil }
+        if let networkObserver { NotificationCenter.default.removeObserver(networkObserver) }
+        networkObserver = nil
         sweepLoop?.cancel()
         callLoop?.cancel()
         sweepLoop = nil
@@ -184,6 +196,14 @@ final class ForegroundReceiveScheduler {
     /// short interval for ``Config/wakeWindowMs``.
     func nudge() {
         wakeWindowUntilMs = ports.nowMs() &+ config.wakeWindowMs
+        nudged = true
+    }
+
+    /// The network came back: forget every group's failure backoff and end
+    /// the pause, so the next sweep polls every group at once. Unlike
+    /// ``nudge()`` it does not keep the short interval afterwards.
+    func noteNetworkReturned() {
+        backoff.clear()
         nudged = true
     }
 
@@ -406,8 +426,10 @@ extension ForegroundReceiveScheduler {
                 // key promptly (G-18 / ADR-0029) while its chat is closed.
                 return groupCallHost?.liveGroupIdHex
             },
+            // Every wait here (the call loop's failure backoff, the pause
+            // slices) ends when the network comes back.
             sleepMs: { ms in
-                try? await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
+                await ConnectionState.sleepUnlessNetworkReturns(ms: UInt64(max(0, ms)))
             },
             random: { Double.random(in: 0..<1) },
             nowMs: { ChatRepository.nowMs() },

@@ -78,6 +78,8 @@ public enum ChatTimeline {
         switch ack {
         case .pending: return Localization.text("chat.message.sending")
         case .failed: return Localization.text("chat.message.not_sent")
+        // `docs/ux/connection-state.md` section 7.1 — drawn after a clock.
+        case .waiting: return Localization.text("chat.message.waiting_network")
         case .sent: return time
         }
     }

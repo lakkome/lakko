@@ -35,6 +35,9 @@ extension EnvironmentValues {
 public enum MediaUploadState: Equatable {
     case uploading(Double)
     case failed
+    /// `docs/ux/connection-state.md` section 7 — no answer from the servers;
+    /// it goes by itself when they answer again.
+    case waiting
 }
 
 struct MediaAttachmentView: View {
@@ -74,6 +77,24 @@ struct MediaAttachmentView: View {
         case .file:
             EmptyView()
         }
+    }
+}
+
+/// `docs/ux/connection-state.md` section 7.1 — where a failed send shows
+/// `Not sent · Retry`, a waiting one shows a clock and `Waiting for network`;
+/// a tap sends the chat's waiting media now.
+private struct WaitingNetworkButton: View {
+    let onRetry: () -> Void
+
+    var body: some View {
+        Button(action: onRetry) {
+            HStack(spacing: 3) {
+                LkIconView(.clock, size: 12, relativeTo: .caption, label: nil)
+                Text(Localization.text("chat.message.waiting_network"))
+                    .font(.caption)
+            }
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -186,6 +207,8 @@ struct VoiceBubble: View {
             TranscriptBlock(target: transcript, ref: ref, outgoing: !incoming, width: rowWidth)
             if upload == .failed {
                 NotSentButton(onRetry: onRetry)
+            } else if upload == .waiting {
+                WaitingNetworkButton(onRetry: onRetry)
             } else if media.failedKeys.contains(mediaKey) {
                 MediaFailureLine(failure: media.failure(mediaKey), onRetry: toggle) {
                     CouldNotPlay { toggle() }
@@ -702,6 +725,8 @@ struct VideoNoteBubble: View {
             TranscriptBlock(target: transcript, ref: ref, outgoing: false, width: side)
             if upload == .failed {
                 NotSentButton(onRetry: onRetry).foregroundStyle(.red)
+            } else if upload == .waiting {
+                WaitingNetworkButton(onRetry: onRetry)
             } else if model.failed {
                 let retry: () -> Void = {
                     Task { await model.tap(ref: ref, key: mediaKey, pending: upload != nil, media: media) }
@@ -789,6 +814,8 @@ struct GifBubble: View {
             .accessibilityLabel(Localization.text("chat.gif.open_full"))
             if upload == .failed {
                 NotSentButton(onRetry: onRetry)
+            } else if upload == .waiting {
+                WaitingNetworkButton(onRetry: onRetry)
             } else if failed {
                 MediaFailureLine(failure: failure, onRetry: { Task { await load() } }) {
                     CouldNotPlay { Task { await load() } }

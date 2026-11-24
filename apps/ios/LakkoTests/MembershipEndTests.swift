@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import Combine
 import LakkoCore
 import XCTest
 @testable import Lakko
@@ -1198,6 +1199,58 @@ final class MembershipEndTests: XCTestCase {
         XCTAssertTrue(grown.members.contains(PushGroupRouting.hex(newcomer.signaturePublicKey())))
     }
 
+    /// Seen on the iOS simulator 2026-11-24: with no network, every long poll
+    /// of an open conversation failed at once and the screen's loop went
+    /// straight into the next one (about 26 000 requests in a minute). A failed
+    /// poll now waits a backoff that doubles while the failures last; a poll
+    /// that works again resets it, and a poll that returns at once without
+    /// failing still waits out the shortest spacing.
+    func testAnOpenChatWithNoNetworkBacksOffInsteadOfSpinning() async throws {
+        let f = try fixture()
+        let model = ChatViewModel(repository: f.repo, groupIdHex: f.groupIdHex)
+        var clock: UInt64 = 1_000
+        var slept: [UInt64] = []
+        model.pollClockMs = { clock }
+        model.pollSleep = { ms in slept.append(ms); clock += ms }
+
+        ScriptedDsURLProtocol.setOffline(true, scope: f.scope)
+        for _ in 0..<6 { await model.pollOnceLongPoll(waitSecs: 0) }
+        XCTAssertEqual(slept, [2_000, 4_000, 8_000, 16_000, 30_000, 30_000],
+                       "a network failure backs off, doubling up to half a minute")
+
+        ScriptedDsURLProtocol.setOffline(false, scope: f.scope)
+        slept.removeAll()
+        await model.pollOnceLongPoll(waitSecs: 0)
+        XCTAssertEqual(slept, [ScreenPollPacer.minTickSpacingMs],
+                       "back online, the next poll waits only the shortest spacing")
+
+        ScriptedDsURLProtocol.setOffline(true, scope: f.scope)
+        slept.removeAll()
+        await model.pollOnceLongPoll(waitSecs: 0)
+        XCTAssertEqual(slept, [2_000], "a success reset the backoff")
+        ScriptedDsURLProtocol.setOffline(false, scope: f.scope)
+    }
+
+    /// The poll pacing rule on its own: which failures count as the network,
+    /// and the wait after any other failure.
+    func testScreenPollPacerClassifiesFailures() {
+        let offline = DsClientError.network(endpoint: "/ds/group/:id/messages",
+                                            underlying: URLError(.notConnectedToInternet))
+        XCTAssertTrue(ScreenPollPacer.isNetworkFailure(offline))
+        XCTAssertTrue(ScreenPollPacer.isNetworkFailure(ChatError.wrapped("poll", underlying: offline)))
+        XCTAssertTrue(ScreenPollPacer.isNetworkFailure(URLError(.networkConnectionLost)))
+        let refused = DsClientError.http(status: 500, endpoint: "/ds/group/:id/messages", body: "")
+        XCTAssertFalse(ScreenPollPacer.isNetworkFailure(refused))
+
+        var pacer = ScreenPollPacer()
+        XCTAssertEqual(pacer.delayMs(after: .failed(network: false), elapsedMs: 3), 5_000)
+        XCTAssertEqual(pacer.delayMs(after: .failed(network: false), elapsedMs: 3), 10_000)
+        XCTAssertEqual(pacer.delayMs(after: .succeeded, elapsedMs: 30_000), 0,
+                       "a poll that parked goes again at once")
+        XCTAssertEqual(pacer.delayMs(after: .succeeded, elapsedMs: 120), 380)
+        XCTAssertEqual(ScreenPollPacer.backoffMs(network: true, consecutiveFailures: 1_000), 30_000)
+    }
+
     /// Maintainer 2026-11-20 — a chat this device is behind in looks as
     /// always: the composer stays, a message sent meanwhile is kept in the
     /// conversation in the ordinary "Not sent" state with the ordinary send
@@ -1456,5 +1509,621 @@ final class MembershipEndTests: XCTestCase {
         await waitUntil { model.conversationGone }
         XCTAssertTrue(model.conversationGone)
         XCTAssertNil(model.endDialog)
+    }
+}
+
+// MARK: - Waiting for network (`docs/ux/connection-state.md` sections 3 and 7)
+
+extension MembershipEndTests {
+
+    /// The repository's connection feed replaced by one the test drives, and
+    /// the state "now" set, so nothing another test does to
+    /// ``ConnectionState/shared`` starts a pass here.
+    private func driveConnection(
+        _ f: Fixture, now: ConnectionPhase = .waiting
+    ) -> PassthroughSubject<ConnectionPhase, Never> {
+        let phases = PassthroughSubject<ConnectionPhase, Never>()
+        f.repo.connectionWatch?.cancel()
+        f.repo.connectionPhaseNow = { now }
+        f.repo.watchConnection(phases.eraseToAnyPublisher())
+        return phases
+    }
+
+    private func row(_ f: Fixture, _ text: String) -> ChatMessage? {
+        f.repo.groups[f.groupIdHex]?.messages.last { $0.text == text }
+    }
+
+    /// Section 7.1 + 7.2 — two messages that got no answer wait (no error to
+    /// the composer, nothing published), and go once each, oldest first, when
+    /// the connection state enters online; another online transition sends
+    /// nothing more.
+    func testWaitingMessagesGoOnceInOrderWhenTheServersAnswerAgain() async throws {
+        let f = try fixture()
+        let phases = driveConnection(f)
+        let start = ScriptedDsURLProtocol.rowCount(scope: f.scope)
+        ScriptedDsURLProtocol.setOffline(true, scope: f.scope)
+        try await f.repo.sendMessage(groupIdHex: f.groupIdHex, plaintext: "one")
+        try await f.repo.sendMessage(groupIdHex: f.groupIdHex, plaintext: "two")
+        XCTAssertEqual(row(f, "one")?.ack, .waiting)
+        XCTAssertEqual(row(f, "two")?.ack, .waiting)
+        XCTAssertEqual(ScriptedDsURLProtocol.rowCount(scope: f.scope), start)
+
+        ScriptedDsURLProtocol.setOffline(false, scope: f.scope)
+        phases.send(.waiting)
+        phases.send(.online)
+        await waitUntil { self.row(f, "two")?.ack == .sent }
+        let one = try XCTUnwrap(row(f, "one"))
+        let two = try XCTUnwrap(row(f, "two"))
+        XCTAssertEqual(one.ack, .sent)
+        XCTAssertEqual(two.ack, .sent)
+        XCTAssertLessThan(one.messageId, two.messageId, "oldest first")
+        let afterPass = ScriptedDsURLProtocol.rowCount(scope: f.scope)
+        XCTAssertEqual(afterPass, start + 2, "each went once")
+
+        phases.send(.waiting)
+        phases.send(.online)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(ScriptedDsURLProtocol.rowCount(scope: f.scope), afterPass, "nothing is sent twice")
+    }
+
+    /// Section 7.2 — a pass stops at the first message that fails again for
+    /// the network; the ones after it keep waiting and spend no attempt.
+    func testAPassStopsAtANetworkFailureWithoutSpendingLaterAttempts() async throws {
+        let f = try fixture()
+        _ = driveConnection(f)
+        ScriptedDsURLProtocol.setOffline(true, scope: f.scope)
+        defer { ScriptedDsURLProtocol.setOffline(false, scope: f.scope) }
+        for text in ["a", "b", "c"] {
+            try await f.repo.sendMessage(groupIdHex: f.groupIdHex, plaintext: text)
+        }
+        let pass = try XCTUnwrap(f.repo.runAllWaitingSends().first)
+        await pass.value
+        XCTAssertEqual(row(f, "a")?.ack, .waiting)
+        XCTAssertEqual(row(f, "a")?.autoSendAttempts, 1)
+        XCTAssertEqual(row(f, "b")?.autoSendAttempts, 0, "not tried")
+        XCTAssertEqual(row(f, "c")?.autoSendAttempts, 0, "not tried")
+        XCTAssertEqual(row(f, "b")?.ack, .waiting)
+    }
+
+    /// Section 7.1 — a message the server or the client refused is `Not
+    /// sent` and nothing sends it by itself.
+    func testARefusedMessageIsNotSentByItself() async throws {
+        let f = try fixture()
+        let phases = driveConnection(f)
+        var behind = ConversationReentryRecord()
+        behind.behind = .confirmed(sinceMs: 1)
+        XCTAssertTrue(f.repo.reentryStore.save(behind, accountIdB64: f.accountIdB64, groupIdHex: f.groupIdHex))
+        do {
+            try await f.repo.sendMessage(groupIdHex: f.groupIdHex, plaintext: "refused")
+            XCTFail("a refused send throws")
+        } catch {}
+        XCTAssertEqual(row(f, "refused")?.ack, .failed)
+        f.repo.reentryStore.remove(accountIdB64: f.accountIdB64, groupIdHex: f.groupIdHex)
+        let start = ScriptedDsURLProtocol.rowCount(scope: f.scope)
+        phases.send(.waiting)
+        phases.send(.online)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(row(f, "refused")?.ack, .failed)
+        XCTAssertEqual(ScriptedDsURLProtocol.rowCount(scope: f.scope), start)
+    }
+
+    /// Section 7.2 — at most five automatic sends; after the fifth network
+    /// failure the message shows `Not sent` and passes leave it alone.
+    func testAWaitingMessageGetsAtMostFiveAutomaticSends() async throws {
+        let f = try fixture()
+        _ = driveConnection(f)
+        ScriptedDsURLProtocol.setOffline(true, scope: f.scope)
+        defer { ScriptedDsURLProtocol.setOffline(false, scope: f.scope) }
+        try await f.repo.sendMessage(groupIdHex: f.groupIdHex, plaintext: "bound")
+        for attempt in 1...WaitingSends.maxAutoAttempts {
+            XCTAssertEqual(row(f, "bound")?.ack, .waiting, "before attempt \(attempt)")
+            let pass = try XCTUnwrap(f.repo.runWaitingSends(groupIdHex: f.groupIdHex))
+            await pass.value
+            XCTAssertEqual(row(f, "bound")?.autoSendAttempts, attempt)
+        }
+        XCTAssertEqual(row(f, "bound")?.ack, .failed, "after the fifth it is Not sent")
+        await f.repo.runWaitingSends(groupIdHex: f.groupIdHex)?.value
+        XCTAssertEqual(row(f, "bound")?.autoSendAttempts, WaitingSends.maxAutoAttempts, "no sixth")
+    }
+
+    /// Section 7.2 — a message sent while the conversation has a waiting one
+    /// joins the end of the queue and is not published ahead of it.
+    func testANewMessageQueuesBehindAWaitingOne() async throws {
+        let f = try fixture()
+        _ = driveConnection(f)
+        ScriptedDsURLProtocol.setOffline(true, scope: f.scope)
+        try await f.repo.sendMessage(groupIdHex: f.groupIdHex, plaintext: "first")
+        ScriptedDsURLProtocol.setOffline(false, scope: f.scope)
+        let start = ScriptedDsURLProtocol.rowCount(scope: f.scope)
+        // The network is back but the servers are not known to answer: the
+        // new message waits behind, nothing is published.
+        try await f.repo.sendMessage(groupIdHex: f.groupIdHex, plaintext: "second")
+        XCTAssertEqual(row(f, "second")?.ack, .waiting)
+        XCTAssertEqual(ScriptedDsURLProtocol.rowCount(scope: f.scope), start)
+        // Online: the next one also queues, and starts the pass.
+        f.repo.connectionPhaseNow = { .online }
+        try await f.repo.sendMessage(groupIdHex: f.groupIdHex, plaintext: "third")
+        await waitUntil { self.row(f, "third")?.ack == .sent }
+        let ids = try ["first", "second", "third"].map { try XCTUnwrap(row(f, $0)).messageId }
+        XCTAssertTrue(ids.allSatisfy { $0 > 0 })
+        XCTAssertEqual(ids, ids.sorted(), "in the order they were sent")
+        XCTAssertEqual(ScriptedDsURLProtocol.rowCount(scope: f.scope), start + 3)
+    }
+
+    /// Section 3 — the open chat's failure backoff ends when the network
+    /// comes back, and the next failure starts from the beginning again.
+    func testTheOpenChatBackoffStartsAgainWhenTheNetworkReturns() async throws {
+        let f = try fixture()
+        let model = ChatViewModel(repository: f.repo, groupIdHex: f.groupIdHex)
+        var clock: UInt64 = 1_000
+        var slept: [UInt64] = []
+        model.pollClockMs = { clock }
+        model.pollSleep = { ms in
+            slept.append(ms)
+            clock += ms
+            if slept.count == 3 { NetworkReturnSignal.shared.fire() }
+        }
+        ScriptedDsURLProtocol.setOffline(true, scope: f.scope)
+        defer { ScriptedDsURLProtocol.setOffline(false, scope: f.scope) }
+        for _ in 0..<4 { await model.pollOnceLongPoll(waitSecs: 0) }
+        XCTAssertEqual(slept, [2_000, 4_000, 8_000, 2_000])
+    }
+
+    /// The pure rules: what counts as the network, and the state after an
+    /// automatic send.
+    func testWhatCountsAsANetworkFailureForASend() {
+        let offline = DsClientError.network(endpoint: "/ds/group/:id/messages",
+                                            underlying: URLError(.notConnectedToInternet))
+        XCTAssertTrue(WaitingSends.isNetworkFailure(offline))
+        XCTAssertTrue(WaitingSends.isNetworkFailure(ChatError.wrapped("send", underlying: offline)))
+        XCTAssertTrue(WaitingSends.isNetworkFailure(
+            AttachmentBridgeError.upload(StorageClientError.network(endpoint: "/blob", underlying: URLError(.timedOut)))))
+        XCTAssertFalse(WaitingSends.isNetworkFailure(
+            DsClientError.network(endpoint: "/ds", underlying: URLError(.cancelled))), "a cancellation is not")
+        XCTAssertFalse(WaitingSends.isNetworkFailure(
+            ChatError.wrapped("send", underlying: DsClientError.http(status: 403, endpoint: "/ds", body: ""))))
+        XCTAssertFalse(WaitingSends.isNetworkFailure(ContentSendError.pollRingChanged))
+        XCTAssertFalse(WaitingSends.isNetworkFailure(AttachmentBridgeError.uploadLimited))
+
+        XCTAssertEqual(WaitingSends.ackAfterAutomaticFailure(network: true, attempts: 4), .waiting)
+        XCTAssertEqual(WaitingSends.ackAfterAutomaticFailure(network: true, attempts: 5), .failed)
+        XCTAssertEqual(WaitingSends.ackAfterAutomaticFailure(network: false, attempts: 1), .failed)
+        XCTAssertTrue(WaitingSends.mustQueueBehind(waitingLocalIds: [-1], excluding: -2, passRunning: false))
+        XCTAssertFalse(WaitingSends.mustQueueBehind(waitingLocalIds: [-2], excluding: -2, passRunning: false))
+        XCTAssertTrue(WaitingSends.mustQueueBehind(waitingLocalIds: [], excluding: -2, passRunning: true))
+    }
+
+    /// One pass per conversation at a time, and a message is tried once per
+    /// pass even when its attempt leaves it waiting.
+    func testOnePassPerConversationAndEachMessageTriedOncePerPass() async {
+        var attempts: [Int64] = []
+        var gate: CheckedContinuation<Void, Never>?
+        let runner = WaitingSendRunner(ports: .init(
+            nextWaiting: { _, excluding in [-1, -2].first { !excluding.contains($0) } },
+            attempt: { _, id in
+                attempts.append(id)
+                if id == -1 { await withCheckedContinuation { gate = $0 } }
+                return .refused
+            }))
+        let pass = runner.run("c")
+        XCTAssertNotNil(pass)
+        await waitUntil { gate != nil }
+        XCTAssertNil(runner.run("c"), "a second pass while one runs is not started")
+        XCTAssertTrue(runner.isRunning("c"))
+        gate?.resume()
+        await pass?.value
+        XCTAssertEqual(attempts, [-1, -2])
+        XCTAssertFalse(runner.isRunning("c"))
+    }
+
+    /// Section 3 — a backoff sleep ends when the network comes back; one
+    /// that runs out says so.
+    func testABackoffSleepEndsWhenTheNetworkReturns() async {
+        let signal = NetworkReturnSignal()
+        let started = Date()
+        let sleeper = Task { await ConnectionState.sleepUnlessNetworkReturns(ms: 60_000, signal: signal) }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        signal.fire()
+        let returned = await sleeper.value
+        XCTAssertTrue(returned)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+        let ranOut = await ConnectionState.sleepUnlessNetworkReturns(ms: 10, signal: signal)
+        XCTAssertFalse(ranOut)
+    }
+}
+
+// MARK: - `docs/ux/connection-state.md` section 7.3: the outbox
+
+/// The media upload stage of the repository, replaced: an upload that can be
+/// made to get no answer, and that records what it was asked to send.
+@MainActor
+private final class FakeOutboxUploads {
+    var offline = false
+    /// The preview's upload answers apart from the file's when set.
+    var posterOffline: Bool?
+    var posters = 0
+    var uploaded: [String] = []
+    var onUpload: (() -> Void)?
+
+    private static func random(_ count: Int) -> Data {
+        Data((0..<count).map { _ in UInt8.random(in: 0...255) })
+    }
+
+    private static let noAnswer = AttachmentBridgeError.upload(
+        StorageClientError.network(endpoint: "/blob", underlying: URLError(.notConnectedToInternet)))
+
+    var ports: OutboxMediaPorts {
+        OutboxMediaPorts(
+            upload: { [unowned self] bytes, mime, name, media, _ in
+                self.onUpload?()
+                if self.offline { throw Self.noAnswer }
+                self.uploaded.append(name)
+                return AttachmentRef(
+                    blobId: Self.random(32), key: Self.random(32), nonce: Self.random(12), mime: mime,
+                    size: UInt64(bytes.count), name: name, kind: media.kind, durationMs: media.durationMs,
+                    waveform: media.waveform, width: media.width, height: media.height, thumb: media.thumb)
+            },
+            uploadPoster: { [unowned self] bytes, width, height in
+                if self.posterOffline ?? self.offline { throw Self.noAnswer }
+                self.posters += 1
+                return ThumbRef(
+                    blobId: Self.random(32), key: Self.random(32), nonce: Self.random(12), mime: "image/jpeg",
+                    size: UInt64(bytes.count), width: width, height: height)
+            },
+            fetchGif: { _ in throw OutboxGifFetchError(failure: .unavailable) })
+    }
+}
+
+extension MembershipEndTests {
+
+    private func outboxBase() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("outbox-\(UUID().uuidString)", isDirectory: true)
+    }
+
+    /// The fixture's repository writing its outbox under `base`, with the
+    /// upload stage replaced.
+    private func outboxFixture(base: URL, uploads: FakeOutboxUploads) throws -> Fixture {
+        let f = try fixture()
+        f.repo.sendOutboxBaseDirectory = base
+        f.repo.outboxMediaPorts = uploads.ports
+        return f
+    }
+
+    /// The account's outbox as the disk holds it (the real store, the real
+    /// device-key wrap).
+    private func diskOutbox(_ f: Fixture, base: URL) -> SendOutbox {
+        SendOutbox(ownerAccountId: f.accountIdB64, sealer: f.repo.heldSendSealer, baseDirectory: base)
+    }
+
+    private func voice() -> OutboxMediaInput {
+        OutboxMediaInput(
+            bytes: Data("a voice take".utf8), name: "voice-test.m4a", mime: "audio/mp4",
+            meta: MediaAttachmentMeta(kind: "voice", durationMs: 1_200, waveform: Data([3, 5, 7])))
+    }
+
+    private func unsent(_ repo: ChatRepository, _ hex: String) -> [ChatMessage] {
+        repo.groups[hex]?.messages.filter { $0.messageId <= 0 && $0.localId != 0 } ?? []
+    }
+
+    /// The app quit and started again: a second repository over the same
+    /// stores (MLS snapshot, message log, known groups, outbox), the first
+    /// one cleared.
+    private func restart(
+        _ f: Fixture, base: URL, uploads: FakeOutboxUploads
+    ) throws -> ChatRepository {
+        f.repo.clear()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [ScriptedDsURLProtocol.self]
+        let ds = DsClient(baseURL: ScriptedDsURLProtocol.baseURL(f.scope), session: URLSession(configuration: config))
+        let repo = ChatRepository(
+            chatClient: ChatClient(ds: ds),
+            dsClient: ds,
+            discovery: Offline.discovery(),
+            snapshotStore: IdentitySnapshotStore(),
+            knownGroupsStore: f.knownGroups,
+            messageLogStore: MessageLogStore(),
+            commitOutbox: CommitOutboxStore(rootDir: FileManager.default.temporaryDirectory
+                .appendingPathComponent("membership-end-\(UUID().uuidString)")),
+            pushRouting: Offline.pushRouting(),
+            beaconStore: BeaconObservationStore(defaults: try suite()),
+            pendingRequestStore: PendingRequestStore(defaults: try suite()),
+            lastObservedOwnerStore: LastObservedOwnerStore(defaults: try suite()),
+            leaveRequestStore: LeaveRequestStore(defaults: try suite()),
+            membershipEndStore: f.endStore,
+            groupNameStore: GroupNameStore(defaults: try suite()),
+            sharedPinStore: SharedPinStore(defaults: try suite()),
+            personalPinStore: PersonalPinStore(defaults: try suite()),
+            readWatermarkStore: ReadWatermarkStore(defaults: try suite()),
+            groupCallStore: GroupCallStore(defaults: try suite()),
+            registrarSeeds: RegistrarSeedStore(defaults: try suite()),
+            groupArrivalStore: try GroupArrivalStore(defaults: suite()))
+        repo.restoredGroupsDefaults = try suite()
+        repo.deviceIdentityInstaller = { _, _ in nil }
+        repo.membershipEndMayRun = { true }
+        repo.conversationEndSync = FakeEndSync()
+        repo.sendOutboxBaseDirectory = base
+        repo.outboxMediaPorts = uploads.ports
+        repo.connectionWatch?.cancel()
+        repo.connectionPhaseNow = { .waiting }
+        repo.bootstrap(secrets: IdentitySecrets(
+            accountId: try XCTUnwrap(Data(base64Encoded: f.accountIdB64)),
+            exportKey: Data(repeating: 0x22, count: 32),
+            accountIdentitySeed: Data(repeating: 0x55, count: 32),
+            sessionToken: "",
+            sessionExpiresAtMs: 0))
+        return repo
+    }
+
+    /// Section 7.3 "Written before the first send attempt" — a text message's
+    /// entry is on disk when its publish starts, and a media message's entry
+    /// and prepared file are on disk when its upload starts. Real store.
+    func testAnUnsentMessageIsInTheOutboxBeforeItsFirstAttempt() async throws {
+        let base = outboxBase()
+        let uploads = FakeOutboxUploads()
+        let f = try outboxFixture(base: base, uploads: uploads)
+        _ = driveConnection(f, now: .online)
+        let disk = diskOutbox(f, base: base)
+        let hex = f.groupIdHex
+        let seen = NSLock()
+        var atPublish: [String] = []
+        ScriptedDsURLProtocol.observeRequests(scope: f.scope) { request in
+            guard request.httpMethod == "POST", request.url?.path.hasSuffix("/messages") == true else { return }
+            let texts = disk.list(conversationHex: hex).map(\.row.text)
+            seen.withLock { atPublish.append(contentsOf: texts) }
+        }
+        defer { ScriptedDsURLProtocol.observeRequests(scope: f.scope, nil) }
+        try await f.repo.sendMessage(groupIdHex: hex, plaintext: "early")
+        XCTAssertTrue(seen.withLock { atPublish.contains("early") }, "the entry existed when the publish started")
+        XCTAssertTrue(disk.list(conversationHex: hex).isEmpty, "a published message leaves the outbox")
+
+        var atUpload: (entries: Int, file: Data?)?
+        uploads.onUpload = {
+            let entry = disk.list(conversationHex: hex).first
+            atUpload = (disk.list(conversationHex: hex).count, entry?.media.first.flatMap { disk.readFile(id: $0.fileId) })
+        }
+        let localId = try XCTUnwrap(f.repo.sendMedia(groupIdHex: hex, media: voice(), reply: nil))
+        await waitUntil { f.repo.groups[hex]?.messages.first { $0.localId == localId }?.ack == .sent }
+        XCTAssertEqual(atUpload?.entries, 1)
+        XCTAssertEqual(atUpload?.file, Data("a voice take".utf8), "the prepared file was on disk")
+        XCTAssertTrue(disk.list(conversationHex: hex).isEmpty)
+        disk.removeOrphanFiles()
+        let files = base.appendingPathComponent("SendOutbox/\(HeldSendQueue.accountDirectoryName(f.accountIdB64))/files")
+        XCTAssertTrue(((try? FileManager.default.contentsOfDirectory(atPath: files.path)) ?? []).isEmpty,
+                      "the prepared file is gone once the upload finished")
+    }
+
+    /// Section 7.3 "Read back" + "Who sends" + "Media and text share one
+    /// order" — a waiting text, a waiting voice message and a text sent after
+    /// it survive a restart, come back in the order they were written, and
+    /// go in that order when the servers answer. Real store; the upload is a
+    /// fake, the DS a scripted stub.
+    func testWaitingTextAndMediaSurviveARestartAndGoInOrder() async throws {
+        let base = outboxBase()
+        let uploads = FakeOutboxUploads()
+        let f = try outboxFixture(base: base, uploads: uploads)
+        _ = driveConnection(f)
+        let hex = f.groupIdHex
+        ScriptedDsURLProtocol.setOffline(true, scope: f.scope)
+        uploads.offline = true
+        try await f.repo.sendMessage(groupIdHex: hex, plaintext: "before")
+        f.repo.sendMedia(groupIdHex: hex, media: voice(), reply: nil)
+        try await f.repo.sendMessage(groupIdHex: hex, plaintext: "after")
+        XCTAssertEqual(unsent(f.repo, hex).map(\.ack), [.waiting, .waiting, .waiting])
+        let disk = diskOutbox(f, base: base)
+        let stored = disk.list(conversationHex: hex)
+        XCTAssertEqual(stored.map(\.row.text), ["before", "", "after"])
+        XCTAssertFalse(stored[1].media.isEmpty)
+        XCTAssertTrue(uploads.uploaded.isEmpty)
+        let start = ScriptedDsURLProtocol.rowCount(scope: f.scope)
+
+        let uploads2 = FakeOutboxUploads()
+        uploads2.offline = true
+        let repo = try restart(f, base: base, uploads: uploads2)
+        let back = unsent(repo, hex)
+        XCTAssertEqual(back.map(\.text), ["before", "", "after"])
+        XCTAssertEqual(back.map(\.ack), [.waiting, .waiting, .waiting])
+        XCTAssertFalse(back[1].outboxMedia.isEmpty, "the voice message is back with its prepared file")
+        XCTAssertNotNil(repo.outboxLocalFile(key: ChatRepository.outboxKey(groupIdHex: hex, localId: back[1].localId)))
+
+        let phases = PassthroughSubject<ConnectionPhase, Never>()
+        repo.watchConnection(phases.eraseToAnyPublisher())
+        ScriptedDsURLProtocol.setOffline(false, scope: f.scope)
+        uploads2.offline = false
+        repo.connectionPhaseNow = { .online }
+        phases.send(.waiting)
+        phases.send(.online)
+        await waitUntil { self.unsent(repo, hex).isEmpty }
+        let rows: [ChatMessage] = (repo.groups[hex]?.messages ?? [])
+            .filter { $0.direction == .outgoing && $0.messageId > 0 }
+        let before = try XCTUnwrap(rows.first { $0.text == "before" })
+        let media = try XCTUnwrap(rows.first { $0.attachments.first?.kind == "voice" })
+        let after = try XCTUnwrap(rows.first { $0.text == "after" })
+        XCTAssertLessThan(before.messageId, media.messageId)
+        XCTAssertLessThan(media.messageId, after.messageId)
+        XCTAssertEqual(uploads2.uploaded.count, 1)
+        XCTAssertEqual(ScriptedDsURLProtocol.rowCount(scope: f.scope), start + 3, "each went once")
+        XCTAssertTrue(diskOutbox(f, base: base).list(conversationHex: hex).isEmpty)
+    }
+
+    /// Section 7.3 "Media and text share one order" — with the servers
+    /// answering, a text sent after a voice message whose upload got no
+    /// answer waits behind it, and goes after it.
+    func testATextSentAfterWaitingMediaGoesAfterIt() async throws {
+        let base = outboxBase()
+        let uploads = FakeOutboxUploads()
+        let f = try outboxFixture(base: base, uploads: uploads)
+        _ = driveConnection(f, now: .online)
+        let hex = f.groupIdHex
+        uploads.offline = true
+        let mediaId = try XCTUnwrap(f.repo.sendMedia(groupIdHex: hex, media: voice(), reply: nil))
+        await waitUntil { f.repo.groups[hex]?.messages.first { $0.localId == mediaId }?.ack == .waiting }
+        let start = ScriptedDsURLProtocol.rowCount(scope: f.scope)
+        try await f.repo.sendMessage(groupIdHex: hex, plaintext: "later")
+        // The pass it started stops at the media, which still gets no answer.
+        await waitUntil { !f.repo.waitingSends.isRunning(hex) }
+        XCTAssertEqual(row(f, "later")?.ack, .waiting)
+        XCTAssertEqual(ScriptedDsURLProtocol.rowCount(scope: f.scope), start, "nothing went ahead of the media")
+
+        uploads.offline = false
+        await f.repo.runWaitingSends(groupIdHex: hex)?.value
+        await waitUntil { self.row(f, "later")?.ack == .sent }
+        let media = try XCTUnwrap(f.repo.groups[hex]?.messages.first { $0.localId == mediaId })
+        XCTAssertEqual(media.ack, .sent)
+        XCTAssertLessThan(media.messageId, try XCTUnwrap(row(f, "later")).messageId)
+    }
+
+    /// Section 7.3 — a refused message stays `Not sent` in the outbox,
+    /// comes back so after a restart, and nothing sends it by itself.
+    func testARefusedEntryStaysNotSentAcrossARestart() async throws {
+        let base = outboxBase()
+        let uploads = FakeOutboxUploads()
+        let f = try outboxFixture(base: base, uploads: uploads)
+        _ = driveConnection(f)
+        let hex = f.groupIdHex
+        var behind = ConversationReentryRecord()
+        behind.behind = .confirmed(sinceMs: 1)
+        XCTAssertTrue(f.repo.reentryStore.save(behind, accountIdB64: f.accountIdB64, groupIdHex: hex))
+        do {
+            try await f.repo.sendMessage(groupIdHex: hex, plaintext: "refused")
+            XCTFail("a refused send throws")
+        } catch {}
+        f.repo.reentryStore.remove(accountIdB64: f.accountIdB64, groupIdHex: hex)
+        XCTAssertEqual(diskOutbox(f, base: base).list(conversationHex: hex).map(\.state), [.notSent])
+
+        let repo = try restart(f, base: base, uploads: uploads)
+        XCTAssertEqual(unsent(repo, hex).map(\.ack), [.failed])
+        XCTAssertEqual(unsent(repo, hex).map(\.text), ["refused"])
+        let start = ScriptedDsURLProtocol.rowCount(scope: f.scope)
+        let phases = PassthroughSubject<ConnectionPhase, Never>()
+        repo.watchConnection(phases.eraseToAnyPublisher())
+        repo.connectionPhaseNow = { .online }
+        phases.send(.waiting)
+        phases.send(.online)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(unsent(repo, hex).map(\.ack), [.failed])
+        XCTAssertEqual(ScriptedDsURLProtocol.rowCount(scope: f.scope), start)
+        XCTAssertEqual(diskOutbox(f, base: base).list(conversationHex: hex).map(\.state), [.notSent])
+    }
+
+    /// Section 7.3 "Deleted ... when the person deletes the unsent row" —
+    /// the row, its entry and its prepared file go. Real store.
+    func testDeletingAnUnsentRowRemovesItsEntryAndFile() async throws {
+        let base = outboxBase()
+        let uploads = FakeOutboxUploads()
+        let f = try outboxFixture(base: base, uploads: uploads)
+        _ = driveConnection(f)
+        let hex = f.groupIdHex
+        uploads.offline = true
+        let localId = try XCTUnwrap(f.repo.sendMedia(groupIdHex: hex, media: voice(), reply: nil))
+        await waitUntil { f.repo.groups[hex]?.messages.first { $0.localId == localId }?.ack == .waiting }
+        let disk = diskOutbox(f, base: base)
+        let fileId = try XCTUnwrap(disk.list(conversationHex: hex).first?.media.first?.fileId)
+        XCTAssertTrue(disk.hasFile(id: fileId))
+
+        XCTAssertTrue(f.repo.deleteUnsentRow(groupIdHex: hex, localId: localId))
+        XCTAssertTrue(unsent(f.repo, hex).isEmpty)
+        XCTAssertTrue(disk.list(conversationHex: hex).isEmpty)
+        XCTAssertFalse(disk.hasFile(id: fileId))
+        XCTAssertFalse(f.repo.deleteUnsentRow(groupIdHex: hex, localId: localId), "nothing left to delete")
+    }
+}
+
+extension MembershipEndTests {
+
+    /// Section 7.3 and `docs/ux/media-messages.md` section 11 (2026-11-24) —
+    /// a composer-tray photo whose upload got no answer does not stop Send:
+    /// the message takes its prepared file, waits, survives a restart, and
+    /// goes in order on Online, its photo uploaded once as part of its send.
+    /// Real tray store (fake worker), real outbox store, real repository; the
+    /// uploads are fakes, the DS the scripted stub.
+    func testATrayPhotoWithNoAnswerIsSentWaitsSurvivesARestartAndGoesInOrder() async throws {
+        let base = outboxBase()
+        let uploads = FakeOutboxUploads()
+        let f = try outboxFixture(base: base, uploads: uploads)
+        _ = driveConnection(f)
+        let hex = f.groupIdHex
+        let photo = Data("prepared jpeg".utf8)
+        let tray = ComposerTrayStore(worker: { _, _, report in
+            report(.payload(ComposerTrayPayload(
+                input: OutboxMediaInput(
+                    bytes: photo, name: "photo.jpg", mime: "image/jpeg",
+                    meta: MediaAttachmentMeta(kind: nil, width: 4, height: 3),
+                    poster: Data("thumb".utf8), posterWidth: 4, posterHeight: 3),
+                fileURL: nil)))
+            report(.prepared(kind: .photo, name: nil, size: UInt64(photo.count), durationMs: nil, thumbnail: nil))
+            throw AttachmentBridgeError.upload(
+                StorageClientError.network(endpoint: "/blob", underlying: URLError(.notConnectedToInternet)))
+        })
+        tray.add([.photo(Data([1]))])
+        await waitUntil { tray.tray.items.first?.status == .noAnswer }
+        XCTAssertTrue(tray.tray.canSend(hasText: true, sendsUnfinished: true), "no answer does not stop Send")
+        XCTAssertFalse(tray.tray.canSend(hasText: true), "a channel keeps the old rule")
+        let parts = try XCTUnwrap(tray.takeForSendWithUploads())
+        XCTAssertTrue(tray.tray.isEmpty)
+        guard case .pending(let input)? = parts.first else { return XCTFail("the photo goes as its prepared file") }
+        XCTAssertEqual(input.bytes, photo)
+
+        ScriptedDsURLProtocol.setOffline(true, scope: f.scope)
+        uploads.offline = true
+        let localId = try XCTUnwrap(f.repo.sendMessageWithUploads(
+            groupIdHex: hex, text: "look", parts: parts, reply: nil))
+        await waitUntil { f.repo.groups[hex]?.messages.first { $0.localId == localId }?.ack == .waiting }
+        try await f.repo.sendMessage(groupIdHex: hex, plaintext: "and this")
+        XCTAssertEqual(unsent(f.repo, hex).map(\.text), ["look", "and this"])
+        let stored = diskOutbox(f, base: base).list(conversationHex: hex)
+        XCTAssertEqual(stored.first?.media.count, 1)
+        XCTAssertEqual(stored.first?.media.first?.slot, 0)
+        let start = ScriptedDsURLProtocol.rowCount(scope: f.scope)
+
+        let uploads2 = FakeOutboxUploads()
+        let repo = try restart(f, base: base, uploads: uploads2)
+        XCTAssertEqual(unsent(repo, hex).map(\.text), ["look", "and this"])
+        XCTAssertEqual(unsent(repo, hex).map(\.ack), [.waiting, .waiting])
+        let phases = PassthroughSubject<ConnectionPhase, Never>()
+        repo.watchConnection(phases.eraseToAnyPublisher())
+        ScriptedDsURLProtocol.setOffline(false, scope: f.scope)
+        repo.connectionPhaseNow = { .online }
+        phases.send(.waiting)
+        phases.send(.online)
+        await waitUntil { self.unsent(repo, hex).isEmpty }
+        let rows: [ChatMessage] = (repo.groups[hex]?.messages ?? []).filter { $0.messageId > 0 && $0.direction == .outgoing }
+        let withPhoto = try XCTUnwrap(rows.first { $0.text == "look" })
+        let after = try XCTUnwrap(rows.first { $0.text == "and this" })
+        XCTAssertLessThan(withPhoto.messageId, after.messageId)
+        XCTAssertEqual(withPhoto.attachments.first?.blobId.count, 32, "it went with the reference of its upload")
+        XCTAssertNotNil(withPhoto.attachments.first?.thumb, "with its preview")
+        XCTAssertEqual(uploads2.uploaded, ["photo.jpg"], "uploaded once, as part of the send")
+        XCTAssertEqual(ScriptedDsURLProtocol.rowCount(scope: f.scope), start + 2)
+    }
+
+    /// Section 7.3 — a video note whose poster went up and whose file did
+    /// not keeps the poster's reference in its entry: after a restart the
+    /// poster is not uploaded again and the note goes with it.
+    func testAnUploadedPosterIsKeptAcrossARestart() async throws {
+        let base = outboxBase()
+        let uploads = FakeOutboxUploads()
+        uploads.offline = true
+        uploads.posterOffline = false
+        let f = try outboxFixture(base: base, uploads: uploads)
+        _ = driveConnection(f)
+        let hex = f.groupIdHex
+        let note = OutboxMediaInput(
+            bytes: Data("a video note".utf8), name: "video-test.mp4", mime: "video/mp4",
+            meta: MediaAttachmentMeta(kind: "video_note", durationMs: 2_000, width: 240, height: 240),
+            poster: Data("poster".utf8), posterWidth: 240, posterHeight: 240)
+        let localId = try XCTUnwrap(f.repo.sendMedia(groupIdHex: hex, media: note, reply: nil))
+        await waitUntil { f.repo.groups[hex]?.messages.first { $0.localId == localId }?.ack == .waiting }
+        XCTAssertEqual(uploads.posters, 1)
+        let kept = try XCTUnwrap(diskOutbox(f, base: base).list(conversationHex: hex).first?.media.first?.uploadedPoster)
+
+        let uploads2 = FakeOutboxUploads()
+        let repo = try restart(f, base: base, uploads: uploads2)
+        repo.connectionPhaseNow = { .online }
+        await repo.runWaitingSends(groupIdHex: hex)?.value
+        await waitUntil { self.unsent(repo, hex).isEmpty }
+        XCTAssertEqual(uploads2.posters, 0, "not uploaded again")
+        let sent = try XCTUnwrap(repo.groups[hex]?.messages.first { $0.attachments.first?.kind == "video_note" })
+        XCTAssertEqual(sent.attachments.first?.thumb.map(PersistedThumb.init(from:)), kept)
     }
 }

@@ -7,6 +7,8 @@
  * person can see it: one request per open, visible channel.
  */
 
+import { onNetworkReturned } from "../net/connection-state";
+
 /** Chosen, not measured: a post appears within this long. */
 export const OPEN_CHANNEL_POLL_MS = 10_000;
 
@@ -19,7 +21,7 @@ export function pollWhileVisible(
   everyMs: number = OPEN_CHANNEL_POLL_MS,
 ): () => void {
   let running = false;
-  const timer = setInterval(() => {
+  const tick = (): void => {
     if (running || !visible()) return;
     running = true;
     void load()
@@ -27,8 +29,15 @@ export function pollWhileVisible(
       .finally(() => {
         running = false;
       });
-  }, everyMs);
-  return () => clearInterval(timer);
+  };
+  const timer = setInterval(tick, everyMs);
+  // docs/ux/connection-state.md section 3: the network coming back loads at
+  // once rather than at the next tick.
+  const stopNetworkReturn = onNetworkReturned(tick);
+  return () => {
+    clearInterval(timer);
+    stopNetworkReturn();
+  };
 }
 
 /** Whether two pages hold the same posts, by cursor: an unchanged page decodes

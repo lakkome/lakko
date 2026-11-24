@@ -66,8 +66,31 @@ extension ChatRepository {
             createdAt: Self.isoTimestamp(ms: Self.nowMs()), authorKeyB64: ownKey, forward: forward)
         record.mutateLocalRow(localId: localId) { $0.content = previewStored }
         state = state.with(threads: buildThreadList())
+        // `docs/ux/connection-state.md` section 7.2 — behind a waiting
+        // message of the conversation, it joins the queue. It is composed
+        // now as it would be under the lock (an anonymous poll's first ring
+        // is the roster now); the pass's send re-checks that ring under the
+        // lock, and a group that changed meanwhile leaves it `Not sent`.
+        if WaitingSends.mustQueueBehind(
+            waitingLocalIds: record.waitingLocalIds, excluding: localId,
+            passRunning: waitingSends.isRunning(groupIdHex)) {
+            let ringKeys = draft.isAnonymousPoll ? ContentRing.accountKeys(of: record.group) : nil
+            if let composed = try? draft.compose(groupId: groupId, authorSeed: author.ed25519Seed(), ringKeys: ringKeys),
+               let bytes = try? composeContentEnvelope(
+                content: composed.content, attachments: attachments, parts: parts) {
+                var stored = PersistedContent(envelopeB64: bytes.base64EncodedString())
+                if let ringKeys, case .poll(let poll) = composed.content,
+                   case .ring(let encoded) = ContentRing.ring0(poll: poll, keys: ringKeys) {
+                    stored.ops.ringB64 = encoded.base64EncodedString()
+                }
+                record.mutateLocalRow(localId: localId) { $0.content = stored }
+            }
+            _ = queueBehindWaiting(groupIdHex: groupIdHex, record: record, localId: localId)
+            return
+        }
         let result: SendMessageResult
         var sentStored = previewStored
+        var composedUnderLock = false
         do {
             result = try await withCommitLock(groupIdHex: groupIdHex) { [self] in
                 guard let live = groups[groupIdHex] else { throw ContentSendError.notReady }
@@ -83,6 +106,7 @@ extension ChatRepository {
                     stored.ops.ringB64 = encoded.base64EncodedString()
                 }
                 sentStored = stored
+                composedUnderLock = true
                 // ADR-0099 section 1 — a content message is signed by this
                 // device's leaf like a chat message, so it can be reported.
                 return try await sealAndPublishLocked(
@@ -95,6 +119,16 @@ extension ChatRepository {
             let failed = groups[groupIdHex] ?? record
             if sentStored != previewStored {
                 failed.mutateLocalRow(localId: localId) { $0.content = sentStored }
+            }
+            // `docs/ux/connection-state.md` section 7.1 — no answer from the
+            // server: it waits and goes by itself when the connection is
+            // back. Only once its envelope was composed under the lock: a
+            // preview is not what the pass may send.
+            if composedUnderLock, WaitingSends.isNetworkFailure(error) {
+                failed.markWaiting(localId: localId, resetAttempts: true)
+                state = state.with(threads: buildThreadList())
+                recheckWaitingIfOnline(groupIdHex: groupIdHex)
+                return
             }
             failed.markFailed(localId: localId)
             state = state.with(threads: buildThreadList())

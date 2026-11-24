@@ -16,6 +16,7 @@
 import { render } from "solid-js/web";
 import "./styles.css";
 import { registerServiceWorker } from "./sw/register";
+import { installConnectionListeners } from "./net/connection-state";
 import { runBootUpdateCheck } from "./update/release-check";
 import { refreshSupportersList } from "./supporters/Supporters";
 import { bootstrapTheme } from "./ui/theme";
@@ -183,6 +184,9 @@ if (likelyNonEnglish()) {
 // Skipped in dev builds (Vite HMR + SW conflict) and in browsers
 // without `navigator.serviceWorker`.
 void registerServiceWorker();
+
+// docs/ux/connection-state.md: the browser's own online / offline signal.
+installConnectionListeners();
 
 // ADR-0038 S5 — the shared "update available" verify core. Fetches +
 // verifies the signed release manifest and, if a newer release exists,

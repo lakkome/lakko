@@ -344,6 +344,16 @@ export interface MessageLogPayload {
    * across their writes. Absent = none held.
    */
   readonly held?: readonly PersistedHeldSend[];
+  /**
+   * `docs/ux/connection-state.md` section 7.3 — the account's outbox on this
+   * device: every unsent message (waiting or `Not sent`), so a reload, a
+   * restart or leaving the conversation does not lose it. Written only
+   * through {@link setOutboxInMessageLog} (`unsent-outbox.ts` owns the
+   * shape); every other writer carries it across untouched, as `held`.
+   * A media message's prepared file is NOT here: it is a record of its own
+   * in `unsent-files.ts`. Absent = nothing unsent.
+   */
+  readonly outbox?: readonly unknown[];
 }
 
 /** One held message, as stored. Never sent anywhere in this form. */
@@ -365,20 +375,32 @@ export interface PersistedHeldSend {
 }
 
 /**
- * What a write of the log keeps of the held list: the writer's own, when it
- * names one (`held` present, even empty); what is on disk otherwise. Pure.
+ * What a write of the log keeps of the held list and of the outbox: the
+ * writer's own, when it names one (the field present, even empty); what is on
+ * disk otherwise. Pure.
  */
 export function carryHeld(
   current: MessageLogPayload | null,
   next: MessageLogPayload,
 ): MessageLogPayload {
-  if (Object.prototype.hasOwnProperty.call(next, "held")) {
-    if (next.held !== undefined && next.held.length > 0) return next;
-    const { held: _empty, ...rest } = next;
-    return rest;
+  return carryList(current, carryList(current, next, "held"), "outbox");
+}
+
+/** {@link carryHeld} for one of the two side lists. Pure. */
+function carryList(
+  current: MessageLogPayload | null,
+  next: MessageLogPayload,
+  field: "held" | "outbox",
+): MessageLogPayload {
+  if (Object.prototype.hasOwnProperty.call(next, field)) {
+    const own = next[field];
+    if (own !== undefined && own.length > 0) return next;
+    const rest: { -readonly [K in keyof MessageLogPayload]?: MessageLogPayload[K] } = { ...next };
+    delete rest[field];
+    return rest as MessageLogPayload;
   }
-  const held = current?.held;
-  return held === undefined || held.length === 0 ? next : { ...next, held };
+  const kept = current?.[field];
+  return kept === undefined || kept.length === 0 ? next : { ...next, [field]: kept };
 }
 
 // ----- IDB plumbing ----------------------------------------------
@@ -674,6 +696,27 @@ export function setHeldInMessageLog(
       version: current?.version ?? MESSAGE_LOG_VERSION,
       groups: current?.groups ?? {},
       held,
+    };
+  });
+}
+
+/**
+ * Replace the outbox kept in the log (`docs/ux/connection-state.md` section
+ * 7.3). Serialized with every other write of the log; creates the payload
+ * when none exists. The rows are `unsent-outbox.ts`'s stored form.
+ */
+export function setOutboxInMessageLog(
+  accountIdB64: string,
+  deviceKey: DeviceCipher,
+  outbox: readonly unknown[],
+): Promise<void> {
+  return updateMessageLog(accountIdB64, deviceKey, (current) => {
+    const before = current?.outbox ?? [];
+    if (before.length === 0 && outbox.length === 0) return null;
+    return {
+      version: current?.version ?? MESSAGE_LOG_VERSION,
+      groups: current?.groups ?? {},
+      outbox,
     };
   });
 }

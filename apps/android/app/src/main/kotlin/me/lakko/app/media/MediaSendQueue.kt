@@ -220,4 +220,9 @@ public data class PendingMediaRow(
     /** The told refusal behind the failure (the limit, or the server has no
      *  room for new files), `null` for any other. */
     val refusal: UploadRefusal? = null,
+    /** `docs/ux/connection-state.md` section 7 — [failed] for a network
+     *  reason: the bubble reads "Waiting for network" and the message goes by
+     *  itself when the servers answer again (a chat row in the outbox; a
+     *  channel post never waits). */
+    val waiting: Boolean = false,
 )

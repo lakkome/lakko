@@ -41,7 +41,8 @@ vi.mock("../media/visual-thumb", () => {
 
 import { encryptAndUploadBytes } from "./attachments";
 import { messageRefs } from "./compose-tray";
-import { createTrayStore, trayFor, type TrayDeps } from "./tray-store";
+import { adoptTrayUpload, createTrayStore, trayFor, type TrayDeps } from "./tray-store";
+import { noteConnectionEvent, resetConnectionStateForTest } from "../net/connection-state";
 import type { StorageClient } from "../storage/client";
 
 function deps(over: Partial<TrayDeps> = {}): TrayDeps {
@@ -59,10 +60,13 @@ function file(name: string, size = 3): File {
 }
 
 async function settled(store: ReturnType<typeof createTrayStore>): Promise<void> {
-  await vi.waitFor(() => expect(store.items().every((i) => i.status === "ready" || i.status === "failed")).toBe(true));
+  await vi.waitFor(() =>
+    expect(store.items().every((i) => i.status === "ready" || i.status === "failed" || i.status === "waiting")).toBe(true),
+  );
 }
 
 afterEach(() => {
+  resetConnectionStateForTest();
   vi.useRealTimers();
   vi.mocked(encryptAndUploadBytes).mockClear();
 });
@@ -114,6 +118,88 @@ describe("tray store", () => {
     store.retry(store.items()[0]!.id);
     await settled(store);
     expect(store.items()[0]?.status).toBe("ready");
+  });
+
+  it("an upload with no answer waits (Send stays on); a refusal fails", async () => {
+    vi.mocked(encryptAndUploadBytes).mockRejectedValueOnce(new TypeError("fetch failed"));
+    const store = createTrayStore(deps());
+    store.add([file("a.pdf")], "file");
+    await settled(store);
+    expect(store.items()[0]?.status).toBe("waiting");
+    store.retry(store.items()[0]!.id);
+    await settled(store);
+    expect(store.items()[0]?.status).toBe("ready");
+  });
+
+  it("hands an item still uploading to a send, which adopts its upload (never run twice)", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    vi.mocked(encryptAndUploadBytes).mockImplementationOnce(async (bytes, f) => {
+      await gate;
+      return { blobId: new Uint8Array(32).fill(9), key: new Uint8Array(32), nonce: new Uint8Array(12), mime: f.mime, size: bytes.length, name: f.name };
+    });
+    const store = createTrayStore(deps());
+    store.add([file("slow.pdf", 4)], "file");
+    await vi.waitFor(() => expect(store.items()[0]?.status).toBe("uploading"));
+    const [taken] = store.takeForSend();
+    expect(store.items()).toEqual([]);
+    expect(taken?.ref).toBeNull();
+    expect(taken?.adoptionId).not.toBeNull();
+    const part = await taken!.part!();
+    expect(part.bytes).toHaveLength(4);
+    const adopted = adoptTrayUpload(taken!.adoptionId!);
+    expect(adopted).not.toBeNull();
+    release();
+    expect((await adopted)?.blobId[0]).toBe(9);
+    // One use: nothing left to adopt, and the bytes went up once.
+    expect(adoptTrayUpload(taken!.adoptionId!)).toBeNull();
+    expect(vi.mocked(encryptAndUploadBytes)).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands an item whose upload got no answer to a send with its bytes and nothing to adopt", async () => {
+    vi.mocked(encryptAndUploadBytes).mockRejectedValueOnce(new TypeError("fetch failed"));
+    const store = createTrayStore(deps());
+    store.add([file("a.pdf", 6)], "file");
+    await settled(store);
+    const [taken] = store.takeForSend();
+    expect(taken?.adoptionId).toBeNull();
+    expect((await taken!.part!()).bytes).toHaveLength(6);
+  });
+
+  it("uploads a waiting item again when the servers answer again, once per return", async () => {
+    vi.mocked(encryptAndUploadBytes).mockRejectedValueOnce(new TypeError("fetch failed"));
+    vi.mocked(encryptAndUploadBytes).mockRejectedValueOnce(new TypeError("fetch failed"));
+    const store = createTrayStore(deps());
+    store.add([file("a.pdf")], "file");
+    await settled(store);
+    expect(store.items()[0]?.status).toBe("waiting");
+    // Another answer while already Online is not a return.
+    noteConnectionEvent("answered");
+    expect(vi.mocked(encryptAndUploadBytes)).toHaveBeenCalledTimes(1);
+    noteConnectionEvent("network-failure");
+    noteConnectionEvent("answered");
+    await settled(store);
+    expect(vi.mocked(encryptAndUploadBytes)).toHaveBeenCalledTimes(2);
+    expect(store.items()[0]?.status).toBe("waiting");
+    noteConnectionEvent("network-failure");
+    noteConnectionEvent("answered");
+    await settled(store);
+    expect(vi.mocked(encryptAndUploadBytes)).toHaveBeenCalledTimes(3);
+    expect(store.items()[0]?.status).toBe("ready");
+  });
+
+  it("does not upload an item Send already took when the servers answer again", async () => {
+    vi.mocked(encryptAndUploadBytes).mockRejectedValueOnce(new TypeError("fetch failed"));
+    const store = createTrayStore(deps());
+    store.add([file("a.pdf")], "file");
+    await settled(store);
+    store.takeForSend();
+    noteConnectionEvent("network-failure");
+    noteConnectionEvent("answered");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(vi.mocked(encryptAndUploadBytes)).toHaveBeenCalledTimes(1);
   });
 
   it("refuses a file over the cap and says so", () => {

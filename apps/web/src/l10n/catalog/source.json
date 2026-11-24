@@ -5251,6 +5251,18 @@
       "text": "unknown",
       "comment": "Shown in place of a date or value that could not be read."
     },
+    "connection.waiting": {
+      "text": "Waiting for network...",
+      "comment": "Chats list title and the line under a conversation's or channel's name while this device cannot reach the Lakko servers (docs/ux/connection-state.md)."
+    },
+    "connection.connecting": {
+      "text": "Connecting...",
+      "comment": "Chats list title and the line under a conversation's or channel's name after the network came back, until the first answer from the servers."
+    },
+    "connection.restored_a11y": {
+      "text": "Connected.",
+      "comment": "Spoken by the screen reader only, once, when the device reaches the servers again after Waiting for network."
+    },
     "contact.add": {
       "text": "Add contact",
       "comment": "Button on a shared contact card."
@@ -11979,6 +11991,10 @@
     "tab.other.opening": {
       "text": "Opening here...",
       "comment": "The 'Use here' button while this tab waits for the other tab to stop (a few seconds at most)."
+    },
+    "chat.message.waiting_network": {
+      "text": "Waiting for network",
+      "comment": "In place of the time under the reader's message, with a clock, while it waits to be sent until the network returns (docs/ux/connection-state.md section 7)."
     }
   }
 }

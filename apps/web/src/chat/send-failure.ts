@@ -68,7 +68,7 @@ export function sendFailureNotice(refusal: CuratedRefusal | null): string {
 export function withSendAck(
   rows: readonly TimelineRow[],
   tempId: number,
-  ack: "pending" | "sent" | "failed",
+  ack: "pending" | "sent" | "failed" | "waiting",
 ): readonly TimelineRow[] {
   let found = false;
   const next = rows.map((r) => {

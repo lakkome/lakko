@@ -93,7 +93,9 @@ final class ChannelPublisherLoops {
                 await pass(channels: channels, client: client, seed: seed)
             }
             let wait = identityNotReady ? Self.notReadyIntervalSeconds : Self.intervalSeconds
-            try? await Task.sleep(nanoseconds: wait * 1_000_000_000)
+            // `docs/ux/connection-state.md` section 3 — a pass runs at once
+            // when the network comes back.
+            await ConnectionState.sleepUnlessNetworkReturns(ms: wait * 1_000)
         }
     }
 

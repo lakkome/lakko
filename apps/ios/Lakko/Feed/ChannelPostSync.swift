@@ -121,6 +121,13 @@ final class ChannelPostSync: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in self?.syncNow() }
         })
+        // `docs/ux/connection-state.md` section 3 — retried at once when the
+        // network comes back.
+        observers.append(center.addObserver(
+            forName: ConnectionState.networkReturned, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.syncNow() }
+        })
         loop = Task { [weak self] in
             while !Task.isCancelled {
                 // The session root owns this object; once it is gone, so is

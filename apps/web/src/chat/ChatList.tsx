@@ -17,6 +17,8 @@
  * message log, which the open chat and the background receive both write.
  */
 import { accountSuspended } from "../auth/suspension-state";
+import { connectionPhase } from "../net/connection-state";
+import { connectionHeaderText } from "../net/connection-copy";
 import { SuspendedBanner } from "../auth/SuspendedReadOnly";
 import { isDeletedAccount } from "../people/person-status";
 import { dropRequestSent, requestsSent } from "./requests-sent";
@@ -116,7 +118,9 @@ type Flag = "pinned" | "muted" | "archived";
 /** The pane's copy, rendered in the current language on every read. */
 const COPY = {
   chat: {
-    title: (): string => t("nav.chats"),
+    /** "Chats", or the connection state while this device cannot reach the
+     *  servers (docs/ux/connection-state.md). */
+    title: (): string => connectionHeaderText(connectionPhase()) ?? t("nav.chats"),
     compose: (): string => t("chats.compose"),
     emptyTitle: (): string => t("chats.empty.title"),
     emptyAction: (): string => t("chats.empty.action"),

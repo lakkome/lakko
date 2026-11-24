@@ -2549,6 +2549,18 @@
       "text": "Revisar",
       "status": "machine"
     },
+    "connection.waiting": {
+      "text": "Aguardando rede...",
+      "status": "machine"
+    },
+    "connection.connecting": {
+      "text": "Conectando...",
+      "status": "machine"
+    },
+    "connection.restored_a11y": {
+      "text": "Conectado.",
+      "status": "machine"
+    },
     "notification.join_request.title": {
       "text": "Pedido para entrar",
       "status": "machine"
@@ -10147,6 +10159,10 @@
     },
     "tab.other.opening": {
       "text": "Abrindo aqui...",
+      "status": "machine"
+    },
+    "chat.message.waiting_network": {
+      "text": "Aguardando rede",
       "status": "machine"
     }
   },

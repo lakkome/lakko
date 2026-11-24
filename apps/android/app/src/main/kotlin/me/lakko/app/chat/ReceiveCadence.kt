@@ -69,16 +69,24 @@ public object ReceiveCadence {
      * [wakeBefore], or a group in [groups] that [swept] did not hold. A new
      * group opens the wake window like a wake does, so it is swept at once
      * and the sweep stays short for [WAKE_WINDOW_MS].
+     *
+     * Also the network coming back ([networkReturned]):
+     * `docs/ux/connection-state.md` section 3 - every receive loop retries
+     * at once rather than finishing its pause, so "Connecting..." lasts until
+     * the first answer. It fires only on Waiting -> Connecting, so a working
+     * network's pacing is unchanged.
      */
     public suspend fun awaitWakeOrNewGroup(
         wakeBefore: Long,
         swept: Set<String>,
         groups: Flow<List<String>>,
         nowMs: () -> Long = System::currentTimeMillis,
+        networkReturned: Flow<Unit> = me.lakko.app.transport.ConnectionState.networkReturned,
     ) {
         merge(
             lastWakeAtMs.filter { it > wakeBefore }.map { },
             groups.filter { groupsAppeared(swept, it) }.map { noteWake(nowMs()) },
+            networkReturned,
         ).first()
     }
 

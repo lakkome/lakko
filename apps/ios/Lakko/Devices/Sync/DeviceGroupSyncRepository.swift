@@ -1385,7 +1385,9 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 continue
             } catch let err as DsClientError {
                 if case .network = err {
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    // `docs/ux/connection-state.md` section 3 — read again at
+                    // once when the network comes back.
+                    await ConnectionState.sleepUnlessNetworkReturns(ms: 2_000)
                     continue
                 }
                 if case .clockSkew = err {
@@ -1428,11 +1430,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                     }
                 }
                 NSLog("DeviceGroupSync poll fetch failed %@", DeviceGroupRejoin.errorLabel(err))
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                await ConnectionState.sleepUnlessNetworkReturns(ms: 5_000)
                 continue
             } catch {
                 NSLog("DeviceGroupSync poll fetch unexpected %@", error.localizedDescription)
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                await ConnectionState.sleepUnlessNetworkReturns(ms: 5_000)
                 continue
             }
 
@@ -1773,7 +1775,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             } catch {
                 NSLog("DeviceGroupSync rejoin attempt failed; trying again in %llu s (%@)",
                       backoffSecs, DeviceGroupRejoin.errorLabel(error))
-                try? await Task.sleep(nanoseconds: backoffSecs * 1_000_000_000)
+                if await ConnectionState.sleepUnlessNetworkReturns(ms: backoffSecs * 1_000) {
+                    backoffSecs = 5
+                    continue
+                }
                 backoffSecs = min(backoffSecs * 2, 60)
             }
         }
@@ -2048,10 +2053,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             } catch {
                 guard !Task.isCancelled, bound.isCurrent else { return }
                 if let ds = error as? DsClientError, case .network = ds {
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    await ConnectionState.sleepUnlessNetworkReturns(ms: 2_000)
                 } else {
                     NSLog("DeviceGroupSync knock read failed: %@", DeviceGroupRejoin.errorLabel(error))
-                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    await ConnectionState.sleepUnlessNetworkReturns(ms: 5_000)
                 }
                 continue
             }

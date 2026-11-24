@@ -97,8 +97,28 @@ public class AntiCensorshipEngine(
     override val supportedCapabilities: Set<HttpClientEngineCapability<*>>
         get() = delegate.supportedCapabilities
 
+    /**
+     * Every request of the app, recorded for the connection state
+     * (`docs/ux/connection-state.md`): an HTTP answer of any status says the
+     * servers are reachable, a failure with no answer says they are not, and
+     * a request this device cancelled says nothing.
+     */
     @OptIn(InternalAPI::class)
     override suspend fun execute(data: HttpRequestData): HttpResponseData {
+        val response = try {
+            executeOnWire(data)
+        } catch (cause: Throwable) {
+            if (kotlin.coroutines.coroutineContext[kotlinx.coroutines.Job]?.isActive != false) {
+                ConnectionState.noteFailure(cause)
+            }
+            throw cause
+        }
+        ConnectionState.noteAnswered()
+        return response
+    }
+
+    @OptIn(InternalAPI::class)
+    private suspend fun executeOnWire(data: HttpRequestData): HttpResponseData {
         // Ambient config, read per-request so arming-after-construction works.
         val tunnelConfig = AntiCensorshipConfig.current
         if (!tunnelConfig.armed) {

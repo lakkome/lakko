@@ -4,13 +4,21 @@
 package me.lakko.app.ui.channels
 
 import androidx.activity.ComponentActivity
+import androidx.compose.material3.Button
 import androidx.compose.material3.Text
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import me.lakko.app.navigateClearingTo
+import me.lakko.app.popBackStackIfCurrent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -80,6 +88,65 @@ class ChannelUnsubscribeFromSearchTest {
             assertEquals("chats", nav.currentDestination?.route)
             assertTrue(nav.currentBackStack.value.none { it.destination.route?.startsWith("channel/") == true })
         }
+    }
+
+    /**
+     * The info screen in the app goes back by itself once the channel is gone
+     * (`ChannelInfoScreen`: `channel == null` -> `onBack()`). After
+     * Unsubscribe that runs while the info is still composed on its way out,
+     * over Chats. Seen 2026-11-24 on the emulator: the bottom bar with Chats
+     * selected over an empty screen. [guardedBack] is what the app's info
+     * route now passes as `onBack`.
+     */
+    private fun leaveFromInfo(guardedBack: Boolean): NavHostController {
+        val held = mutableStateOf(true)
+        lateinit var nav: NavHostController
+        rule.setContent {
+            nav = rememberNavController()
+            NavHost(nav, startDestination = "chats") {
+                composable("chats") { Text("Chats list") }
+                composable("channel/{channelId}/subscribe?handle={handle}&pressed={pressed}") { Text("Channel (search)") }
+                composable("channel/{channelId}/info") { entry: NavBackStackEntry ->
+                    val back = {
+                        if (guardedBack) nav.popBackStackIfCurrent(entry) else nav.popBackStack()
+                    }
+                    if (!held.value) {
+                        LaunchedEffect(Unit) { back() }
+                    } else {
+                        Button(onClick = {
+                            // ChannelUnsubscribe.leave, then onLeft.
+                            held.value = false
+                            nav.navigateClearingTo("chats")
+                        }) { Text("Unsubscribe") }
+                    }
+                }
+            }
+        }
+        rule.runOnIdle {
+            nav.navigate("channel/$id/subscribe?handle=night_walk&pressed=true")
+            nav.navigate("channel/$id/info")
+        }
+        rule.onNodeWithText("Unsubscribe").performClick()
+        rule.waitForIdle()
+        return nav
+    }
+
+    @Test
+    fun `after Unsubscribe the Chats list is on screen`() {
+        val nav = leaveFromInfo(guardedBack = true)
+        rule.onNodeWithText("Chats list").assertIsDisplayed()
+        rule.runOnIdle {
+            assertEquals("chats", nav.currentDestination?.route)
+            assertEquals(listOf("chats"), nav.currentBackStack.value.mapNotNull { it.destination.route })
+        }
+    }
+
+    @Test
+    fun `an unguarded back from the leaving info empties the screen`() {
+        // The defect this suite pins: the plain pop removes Chats as well.
+        val nav = leaveFromInfo(guardedBack = false)
+        rule.onNodeWithText("Chats list").assertDoesNotExist()
+        rule.runOnIdle { assertEquals(null, nav.currentDestination?.route) }
     }
 
     @Test

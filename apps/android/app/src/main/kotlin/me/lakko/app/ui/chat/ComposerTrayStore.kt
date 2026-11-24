@@ -10,6 +10,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -69,6 +70,15 @@ public object ComposerTrays {
     private val jobs = ConcurrentHashMap<Long, Job>()
     private val owners = ConcurrentHashMap<Long, String>()
 
+    /** Items taken out of a tray by Send whose hand-off is not finished. An
+     *  upload of such an item that lands keeps its reference here
+     *  ([lateRefs]) for the message, so nothing is uploaded twice. */
+    private val handing: MutableSet<Long> = ConcurrentHashMap.newKeySet()
+    private val lateRefs = ConcurrentHashMap<Long, uniffi.lakko_ffi_uniffi.AttachmentRef>()
+
+    @Volatile
+    private var networkWatch: Job? = null
+
     @Volatile
     private var appContext: Context? = null
 
@@ -88,6 +98,17 @@ public object ComposerTrays {
             swept = true
             // A process that died with items in a tray left their bytes here.
             runCatching { File(app.cacheDir, TRAY_DIR).deleteRecursively() }
+        }
+        if (networkWatch == null) {
+            synchronized(this) {
+                if (networkWatch == null) {
+                    // connection-state section 2 — an upload that got no answer
+                    // goes again when the servers answer.
+                    networkWatch = scope.launch {
+                        me.lakko.app.transport.ConnectionState.networkReturned.collect { retryWaiting() }
+                    }
+                }
+            }
         }
         return app
     }
@@ -341,26 +362,56 @@ public object ComposerTrays {
                 // message; [ComposerTray.refs] keeps it on the first photo or
                 // video only.
                 me.lakko.app.media.inlineThumbOrNull(p.visual?.inlineThumb ?: p.fileInlineThumb)?.let { ref = ref.copy(inlineThumb = it) }
-                if (tray(key).item(id) == null) {
-                    // Removed while the upload ran: the file was never sent.
-                    appContext?.let { me.lakko.app.storage.BlobLifetime.delete(it, listOfNotNull(ref.blobId, ref.thumb?.blobId)) }
-                    return
+                // One atomic step with Send's take ([takeForSend]): either the
+                // item is still in the tray and becomes Ready (Send then sees
+                // its reference), or Send took it and the reference goes with
+                // the message ([lateRefs]), or it was removed and the blob is
+                // deleted.
+                val landed = ref
+                var applied = false
+                mutable.update { all ->
+                    val t = all[key]
+                    if (t?.item(id) != null) {
+                        applied = true
+                        all + (key to t.update(id) { it.copy(status = TrayStatus.Ready, ref = landed) })
+                    } else {
+                        applied = false
+                        all
+                    }
                 }
-                change(key) { t -> t.update(id) { it.copy(status = TrayStatus.Ready, ref = ref) } }
+                if (!applied) {
+                    if (id in handing) {
+                        lateRefs[id] = landed
+                    } else {
+                        // Removed while the upload ran: the file was never sent.
+                        appContext?.let { me.lakko.app.storage.BlobLifetime.delete(it, listOfNotNull(landed.blobId, landed.thumb?.blobId)) }
+                    }
+                }
             }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Throwable) {
             Log.w(TAG, "tray upload failed: ${e.javaClass.simpleName}")
-            change(key) { t -> t.update(id) { it.copy(status = TrayStatus.Failed) } }
+            // Section 11 (2026-11-24) — no answer from the network: the item
+            // waits (it does not stop Send); a refusal shows the retry glyph.
+            val waits = me.lakko.app.media.uploadRefusalOf(e) == null &&
+                me.lakko.app.transport.causedByNetworkFailure(e)
+            change(key) { t -> t.update(id) { it.copy(status = if (waits) TrayStatus.Waiting else TrayStatus.Failed) } }
             if (me.lakko.app.media.isUploadLimit(e)) notice(key, UiText("chat.attachment.limit.send"))
         }
     }
 
-    /** Section 11 — upload a failed item again. */
+    /** Every item whose upload got no answer goes again (the servers answer). */
+    private fun retryWaiting() {
+        for ((key, t) in mutable.value) {
+            for (item in t.items) if (item.status == TrayStatus.Waiting) retry(key, item.id)
+        }
+    }
+
+    /** Section 11 — upload a failed (or waiting) item again. */
     public fun retry(key: String, id: Long) {
         val item = tray(key).item(id) ?: return
-        if (item.status != TrayStatus.Failed) return
+        if (item.status != TrayStatus.Failed && item.status != TrayStatus.Waiting) return
         if (prepared[id] == null) {
             remove(key, id)
             return
@@ -381,6 +432,87 @@ public object ComposerTrays {
             appContext?.let { me.lakko.app.storage.BlobLifetime.delete(it, listOfNotNull(ref.blobId, ref.thumb?.blobId)) }
         }
         forget(id)
+    }
+
+    /**
+     * Section 11 Send (2026-11-24) — take every item out of the tray of
+     * [key] for the message being sent: the field and the tray clear
+     * together. The items are handed over by [collectForSend].
+     */
+    public fun takeForSend(key: String): List<TrayItem> {
+        val ids = tray(key).items.map { it.id }.toSet()
+        if (ids.isEmpty()) return emptyList()
+        handing.addAll(ids)
+        var taken: List<TrayItem> = emptyList()
+        mutable.update { all ->
+            val t = all[key] ?: ComposerTray()
+            taken = t.items.filter { it.id in ids }
+            val rest = t.copy(items = t.items.filterNot { it.id in ids }, notice = null)
+            if (rest.items.isEmpty()) all - key else all + (key to rest)
+        }
+        // An id that left the tray before the take is not handed over.
+        handing.removeAll(ids - taken.map { it.id }.toSet())
+        return taken
+    }
+
+    /** What a tray item goes with the message as. */
+    public sealed interface SendPart {
+        /** Uploaded: its reference. */
+        public class Ready(public val ref: uniffi.lakko_ffi_uniffi.AttachmentRef) : SendPart
+
+        /** Not uploaded: its prepared bytes, uploaded by the message's send. */
+        public class Pending(public val attachment: me.lakko.app.chat.PendingAttachment) : SendPart
+    }
+
+    /**
+     * Hand over the [items] [takeForSend] took, in order. An upload still
+     * running is cancelled and, if it landed first, its reference is used:
+     * no item is ever uploaded twice. An item with neither a reference nor a
+     * prepared file (its read failed) is left out.
+     */
+    public suspend fun collectForSend(items: List<TrayItem>): List<SendPart> {
+        val out = ArrayList<SendPart>(items.size)
+        for (item in items) {
+            val id = item.id
+            try {
+                val ready = item.ref?.takeIf { item.status == TrayStatus.Ready }
+                if (ready != null) {
+                    out += SendPart.Ready(ready)
+                    continue
+                }
+                jobs[id]?.cancelAndJoin()
+                val late = lateRefs.remove(id)
+                if (late != null) {
+                    out += SendPart.Ready(late)
+                    continue
+                }
+                val p = prepared[id] ?: continue
+                val bytes = withContext(Dispatchers.IO) { p.file.readBytes() }
+                out += SendPart.Pending(
+                    me.lakko.app.chat.PendingAttachment(
+                        index = out.size,
+                        bytes = bytes,
+                        mime = p.mime,
+                        name = p.name,
+                        width = p.visual?.size?.width,
+                        height = p.visual?.size?.height,
+                        thumbBytes = p.visual?.thumb ?: p.audio?.cover?.bytes,
+                        thumbWidth = p.visual?.thumbSize?.width ?: p.audio?.cover?.width,
+                        thumbHeight = p.visual?.thumbSize?.height ?: p.audio?.cover?.height,
+                        inlineThumb = me.lakko.app.media.inlineThumbOrNull(p.visual?.inlineThumb ?: p.fileInlineThumb),
+                        audio = p.audio != null,
+                        audioDurationMs = p.audio?.durationMs?.toLong(),
+                        title = p.audio?.title,
+                        artist = p.audio?.artist,
+                    ),
+                )
+            } finally {
+                handing.remove(id)
+                lateRefs.remove(id)
+                forget(id)
+            }
+        }
+        return out
     }
 
     /** The message went with these items: clear the tray, keep the files. */

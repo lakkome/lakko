@@ -199,6 +199,9 @@ struct MosaicTileView: View {
         if full == nil, thumb == nil, inline == nil, let bytes = InlineThumb.bounded(ref.inlineThumb) {
             inline = UIImage(data: bytes)
         }
+        // `docs/ux/connection-state.md` section 7.3 — an attachment of an
+        // unsent message not uploaded yet: its micro thumbnail is all there is.
+        guard !ref.blobId.isEmpty else { return }
         if full == nil, thumb == nil, let thumbRef = ref.thumb, let bytes = await cache.thumbData(thumbRef) {
             thumb = await cache.displayImage(
                 key: MediaSessionCache.key(for: thumbRef), bytes: bytes, maxPixel: PhotoVideoPrep.thumbMaxPixel)

@@ -599,7 +599,9 @@ public fun ChatScreen(
                     ended = viewModel.membershipEnded,
                     claim = pollClaim,
                     poll = { viewModel.pollOnceLongPoll() },
-                    backoff = { delay(POLL_RETRY_BACKOFF_MS) },
+                    // docs/ux/connection-state.md section 3: the network
+                    // coming back ends the backoff at once.
+                    backoff = { me.lakko.app.transport.ConnectionState.delayUnlessNetworkReturns(POLL_RETRY_BACKOFF_MS) },
                 )
             }
         } finally {
@@ -718,7 +720,9 @@ public fun ChatScreen(
             )
         }
     }
-    val pendingMedia by viewModel.pendingMedia.collectAsStateWithLifecycle()
+    // docs/ux/connection-state.md section 7.3 — upload progress of the
+    // conversation's media rows in flight (they are rows of the timeline).
+    val outboxProgress by viewModel.outboxProgress.collectAsStateWithLifecycle()
     val recorder = rememberRecordController(mediaHub) { take -> viewModel.sendRecordedTake(take) }
     // `docs/ux/media-messages.md` — the recorder stands aside while a call
     // HOLDS the microphone and camera. This used to be `callOccupant != null`
@@ -818,11 +822,11 @@ public fun ChatScreen(
     // its history. `scrollToItem` sets the position directly and survives
     // the first layout.
     var positionedOnce by remember { mutableStateOf(false) }
-    LaunchedEffect(timeline.size, pendingMedia.size) {
+    LaunchedEffect(timeline.size) {
         // Auto-scroll to the latest row on every new message
         // (Outgoing send + Incoming poll both bump the count, and so does an
         // outgoing media bubble entering the timeline).
-        val total = timeline.size + pendingMedia.size
+        val total = timeline.size
         if (total > 0) {
             if (positionedOnce) {
                 listState.animateScrollToItem(total - 1)
@@ -846,7 +850,11 @@ public fun ChatScreen(
     // UX 5.2 — "typing..." while a typing indicator is live (ADR-0024; never on
     // a dead group), else "@username" in a 1x1, else "N members" in a group.
     val typingLine = state.typingText?.text()
+    // docs/ux/connection-state.md: while this device cannot reach the servers
+    // the line says so, ahead of a (stale) typing indicator.
+    val connectionLine = me.lakko.app.ui.connectionHeaderText()
     val headerSubtitle = when {
+        connectionLine != null -> connectionLine
         !state.messagesKnown -> null
         typingLine != null && !membershipEnded -> typingLine
         isGroupChat -> t("chat.members.count", emptyMap(), mapOf("count" to (peopleCount ?: (otherMembers.size + 1)).toULong()))
@@ -903,6 +911,7 @@ public fun ChatScreen(
                 onCancel = viewModel::onCancelSelection,
             )
         } else {
+        me.lakko.app.ui.ConnectionAnnouncer()
         Header(
             title = headerTitle,
             subtitle = headerSubtitle,
@@ -1145,7 +1154,7 @@ public fun ChatScreen(
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp),
         ) {
-            if (showsEmptyTimeline(timeline, state.messages.isEmpty(), pendingMedia.isEmpty(), state.messagesKnown)) {
+            if (showsEmptyTimeline(timeline, state.messages.isEmpty(), true, state.messagesKnown)) {
                 // ADR-0045 UX §6.2 — the empty-timeline copy invites a send,
                 // and once the membership has ended that is an invitation the
                 // bar below can no longer accept. The terminal row carries the
@@ -1197,6 +1206,32 @@ public fun ChatScreen(
                     items(items = timeline, key = { it.key }) { item ->
                         if (item is TimelineItem.DateSeparator) {
                             DateSeparatorPill(item.label)
+                            return@items
+                        }
+                        // ADR-0047 / connection-state section 7.3 — an own
+                        // voice message, video note or GIF not sent yet is a
+                        // row of the timeline in its place, drawn as a pending
+                        // bubble (upload ring, waiting, Not sent).
+                        val pendingMediaMsg = (item as TimelineItem.Row).message
+                        val pendingPreview = pendingMediaMsg.localMedia
+                        if (pendingPreview != null && pendingMediaMsg.ack != Ack.SENT) {
+                            val pendingRow = pendingMediaRowOf(
+                                msg = pendingMediaMsg,
+                                preview = pendingPreview,
+                                progress = outboxProgress[
+                                    me.lakko.app.chat.OutboxQueue.progressKey(viewModel.groupIdHex, pendingMediaMsg.localId),
+                                ],
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End,
+                            ) {
+                                PendingMediaBubble(
+                                    row = pendingRow,
+                                    onRetry = { viewModel.onRetrySend(pendingMediaMsg.localId) },
+                                    onDiscard = { viewModel.deleteUnsent(pendingMediaMsg.localId) },
+                                )
+                            }
                             return@items
                         }
                         androidx.compose.runtime.CompositionLocalProvider(
@@ -1327,7 +1362,15 @@ public fun ChatScreen(
                                 viewModel.onEditStarted()
                                 editTarget = msg
                             },
-                            onDelete = { viewModel.onDeleteMessage(msg.messageId) },
+                            onDelete = {
+                                // Section 7.3 — an unsent row is deleted here
+                                // only: nothing reached anyone.
+                                if (msg.messageId == 0L && msg.localId != 0L && msg.ack != Ack.SENT) {
+                                    viewModel.deleteUnsent(msg.localId)
+                                } else {
+                                    viewModel.onDeleteMessage(msg.messageId)
+                                }
+                            },
                             // ADR-0052 / UX 3.1 — Reply ends an open edit
                             // (its draft is discarded, as Cancel would) and
                             // arms the strip. The name is what the timeline
@@ -1418,19 +1461,6 @@ public fun ChatScreen(
                         )
                         }
                         }
-                        }
-                    }
-                    // ADR-0047 — outgoing media still uploading or not sent.
-                    items(items = pendingMedia, key = { "pending-${it.tempId}" }) { row ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End,
-                        ) {
-                            PendingMediaBubble(
-                                row = row,
-                                onRetry = { viewModel.retryMediaSend(row.tempId) },
-                                onDiscard = { viewModel.discardMediaSend(row.tempId) },
-                            )
                         }
                     }
                 }
@@ -2497,8 +2527,15 @@ internal fun Bubble(
         // can read, so nothing to copy, edit, quote or forward: no menu.
         // ADR-0073 R.5 — a row of an older segment is read-only history: its
         // card exists only to undo a pin.
+        // docs/ux/connection-state.md section 7.3 — an own row that never
+        // reached the server (waiting, or "Not sent") has a menu too: Copy
+        // and Delete, nothing that needs a server id.
+        val unsentOwnRow = !msg.isHistory && msg.localId != 0L && msg.messageId == 0L &&
+            (msg.ack == Ack.FAILED || msg.ack == Ack.WAITING)
         val menuAvailable = if (msg.isHistory) {
             actionsAvailable && pinUndoes
+        } else if (unsentOwnRow) {
+            actionsAvailable
         } else {
             actionsAvailable && hasId && !msg.deleted && msg.unsupportedVersion == null
         }
@@ -2635,7 +2672,7 @@ internal fun Bubble(
                             onSave = onSave,
                             onPreview = onPreview,
                             openMenu = openMenu,
-                            onRetry = if (msg.ack == Ack.FAILED) {
+                            onRetry = if (msg.ack == Ack.FAILED || msg.ack == Ack.WAITING) {
                                 { onRetrySend(msg.localId) }
                             } else {
                                 null
@@ -2815,11 +2852,12 @@ internal fun Bubble(
                                                     readState = if (isOwn) readState else OwnReadState.None,
                                                     contentColor = contentColor,
                                                     fillWidth = false,
-                                                    onRetry = if (msg.ack == Ack.FAILED) {
+                                                    onRetry = if (msg.ack == Ack.FAILED || msg.ack == Ack.WAITING) {
                                                         { onRetrySend(msg.localId) }
                                                     } else {
                                                         null
                                                     },
+                                                    waiting = msg.ack == Ack.WAITING,
                                                 )
                                             }
                                         } else {
@@ -2839,11 +2877,12 @@ internal fun Bubble(
                                                     readState = if (isOwn) readState else OwnReadState.None,
                                                     contentColor = Color.White,
                                                     fillWidth = false,
-                                                    onRetry = if (msg.ack == Ack.FAILED) {
+                                                    onRetry = if (msg.ack == Ack.FAILED || msg.ack == Ack.WAITING) {
                                                         { onRetrySend(msg.localId) }
                                                     } else {
                                                         null
                                                     },
+                                                    waiting = msg.ack == Ack.WAITING,
                                                 )
                                             }
                                         } else {
@@ -2874,11 +2913,12 @@ internal fun Bubble(
                             time = time,
                             readState = if (isOwn) readState else OwnReadState.None,
                             contentColor = contentColor,
-                            onRetry = if (msg.ack == Ack.FAILED) {
+                            onRetry = if (msg.ack == Ack.FAILED || msg.ack == Ack.WAITING) {
                                 { onRetrySend(msg.localId) }
                             } else {
                                 null
                             },
+                            waiting = msg.ack == Ack.WAITING,
                         )
                     }
                 }
@@ -2896,7 +2936,9 @@ internal fun Bubble(
                 MessageActionMenuOverlay(
                     bubbleBounds = bounds,
                     alignEnd = isOwn,
-                    actions = if (msg.isHistory) {
+                    actions = if (unsentOwnRow) {
+                        unsentRowActions(text = if (textHidden || msg.content != null) "" else tr.copyText)
+                    } else if (msg.isHistory) {
                         // ADR-0073 R.5 — a row of an older segment is
                         // read-only: `Unpin` alone, when it is pinned; Save,
                         // which sends nothing to the chat, stays.
@@ -2981,7 +3023,7 @@ internal fun Bubble(
                     ownReactions = ownEmoji,
                     capReached = ownEmoji.size >= MAX_OWN_REACTIONS,
                     showExpand = reactionCtx?.showExpand ?: true,
-                    showRow = !msg.isHistory && reactionCtx?.allowed != me.lakko.app.chat.AllowedReactions.Off &&
+                    showRow = !msg.isHistory && !unsentOwnRow && reactionCtx?.allowed != me.lakko.app.chat.AllowedReactions.Off &&
                         !bubbleSuspended && channelPost?.canReact != false,
                     onReact = { emoji ->
                         menuOpen = false
@@ -3288,6 +3330,11 @@ private fun BubbleMeta(
      *  sits next to the message it belongs to, which is the only place that
      *  can say WHICH message failed. */
     onRetry: (() -> Unit)? = null,
+    /** `docs/ux/connection-state.md` section 7.1 — the row waits for the
+     *  network: a clock before [time] (which then reads "Waiting for
+     *  network"), no Retry word, and a tap on the two sends it now
+     *  ([onRetry]). */
+    waiting: Boolean = false,
 ) {
     if (!edited && time == null && readState == OwnReadState.None && onRetry == null && !saved) return
     Row(
@@ -3312,14 +3359,34 @@ private fun BubbleMeta(
                 size = LkIconSize.Mark,
             )
         }
-        if (time != null) {
+        if (waiting && time != null) {
+            val waitingLine: @Composable () -> Unit = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    LkIcon(
+                        icon = R.drawable.ic_lk_clock,
+                        contentDescription = null,
+                        tint = contentColor.copy(alpha = 0.7f),
+                        size = LkIconSize.Mark,
+                    )
+                    Text(
+                        text = time,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = contentColor.copy(alpha = 0.7f),
+                    )
+                }
+            }
+            if (onRetry != null) TextAction(onClick = onRetry) { waitingLine() } else waitingLine()
+        } else if (time != null) {
             Text(
                 text = time,
                 style = MaterialTheme.typography.labelSmall,
                 color = contentColor.copy(alpha = 0.7f),
             )
         }
-        if (onRetry != null) {
+        if (onRetry != null && !waiting) {
             val sendAgain = t("common.retry")
             // A 48dp target around the small word, drawn as before.
             TextAction(onClick = onRetry) {
@@ -3353,6 +3420,10 @@ private fun MediaMetaPill(
     readState: OwnReadState,
     modifier: Modifier = Modifier,
     saved: Boolean = false,
+    /** `docs/ux/connection-state.md` section 7.1 — the clock and "Waiting for
+     *  network" in place of the time; [onWaitingTap] sends it now. */
+    waiting: Boolean = false,
+    onWaitingTap: (() -> Unit)? = null,
 ) {
     if (!edited && time == null && readState == OwnReadState.None && !saved) return
     Box(
@@ -3367,6 +3438,8 @@ private fun MediaMetaPill(
             contentColor = Color.White,
             fillWidth = false,
             saved = saved,
+            onRetry = onWaitingTap,
+            waiting = waiting,
         )
     }
 }
@@ -3444,6 +3517,8 @@ private fun MosaicMessageBody(
                         time = time,
                         readState = if (isOwn) readState else OwnReadState.None,
                         modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
+                        waiting = msg.ack == Ack.WAITING,
+                        onWaitingTap = onRetry.takeIf { msg.ack == Ack.WAITING },
                     )
                 }
             } else {
@@ -3483,10 +3558,12 @@ private fun MosaicMessageBody(
                     readState = if (isOwn) readState else OwnReadState.None,
                     contentColor = contentColor,
                     onRetry = onRetry,
+                    waiting = msg.ack == Ack.WAITING,
                 )
             }
-        } else if (onRetry != null) {
-            // A failed send still offers Retry next to the message.
+        } else if (onRetry != null && msg.ack != Ack.WAITING) {
+            // A failed send still offers Retry next to the message. A waiting
+            // one says so on the pill over the mosaic.
             BubbleMeta(
                 edited = false,
                 time = null,
@@ -4017,6 +4094,9 @@ internal fun Composer(
     onRetryTrayItem: (Long) -> Unit = {},
     /** Section 11 — the prepared bytes of a tray photo or video, for the viewer. */
     trayLocalFile: (Long) -> java.io.File? = { null },
+    /** Section 11 Send — whether the tray lets Send go (a channel post needs
+     *  every item uploaded; a chat message does not). */
+    trayCanSend: (ComposerTray, String) -> Boolean = { t, text -> t.canSend(text) },
     /** ADR-0052 / UX 3.1 — the armed reply the strip shows, or `null`. */
     replyStrip: ReplyArmed? = null,
     /** The armed reply quotes this account's own message ("You" here). */
@@ -4256,7 +4336,7 @@ internal fun Composer(
                         // Enter stays a new line.
                         .submitOnHardwareEnter {
                             flushDraft()
-                            if (!sending && tray.canSend(fieldState.text.toString())) {
+                            if (!sending && trayCanSend(tray, fieldState.text.toString())) {
                                 onSendClicked()
                             }
                         }
@@ -4283,7 +4363,7 @@ internal fun Composer(
                         flushDraft()
                         onSendClicked()
                     },
-                    enabled = !sending && tray.canSend(draft),
+                    enabled = !sending && trayCanSend(tray, draft),
                     colors = IconButtonDefaults.filledIconButtonColors(
                         containerColor = MaterialTheme.colorScheme.primary,
                         contentColor = MaterialTheme.colorScheme.onPrimary,

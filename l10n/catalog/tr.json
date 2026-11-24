@@ -2549,6 +2549,18 @@
       "text": "İncele",
       "status": "machine"
     },
+    "connection.waiting": {
+      "text": "Ağ bekleniyor...",
+      "status": "machine"
+    },
+    "connection.connecting": {
+      "text": "Bağlanıyor...",
+      "status": "machine"
+    },
+    "connection.restored_a11y": {
+      "text": "Bağlandı.",
+      "status": "machine"
+    },
     "notification.join_request.title": {
       "text": "Katılma isteği",
       "status": "machine"
@@ -10147,6 +10159,10 @@
     },
     "tab.other.opening": {
       "text": "Burada açılıyor...",
+      "status": "machine"
+    },
+    "chat.message.waiting_network": {
+      "text": "Ağ bekleniyor",
       "status": "machine"
     }
   },

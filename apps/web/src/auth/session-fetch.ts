@@ -11,7 +11,10 @@
  * routes, so the one rule lives in `session-token-provider.ts`.
  */
 import { sessionTokens } from "./session-token-provider";
+import { observeRequest } from "../net/connection-state";
 
 export function sessionFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  return sessionTokens.fetch(input, init);
+  // docs/ux/connection-state.md: every bearer request says whether this
+  // device can reach the servers.
+  return observeRequest(sessionTokens.fetch(input, init), init?.signal);
 }

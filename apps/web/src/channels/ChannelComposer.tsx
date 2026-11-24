@@ -186,7 +186,7 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
   const empty = (): boolean => text().trim().length === 0 && (editing() !== null || tray.items().length === 0);
   /** Every tray item is uploaded (section 11: Send waits for them). */
   const sendable = (): boolean =>
-    editing() !== null ? text().trim().length > 0 : traySendable(text().trim(), tray.items().map((i) => i.status));
+    editing() !== null ? text().trim().length > 0 : traySendable(text().trim(), tray.items().map((i) => i.status), { allReady: true });
 
   async function onSend(): Promise<void> {
     if (busy() || empty() || !sendable()) return;

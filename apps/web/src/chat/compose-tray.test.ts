@@ -76,10 +76,21 @@ describe("traySendable", () => {
     expect(traySendable("", ["ready"])).toBe(true);
   });
 
-  it("waits for every upload and refuses while one failed", () => {
-    expect(traySendable("hi", ["ready", "uploading"])).toBe(false);
-    expect(traySendable("hi", ["preparing"])).toBe(false);
+  it("does not wait for an upload still running or with no answer (2026-11-24)", () => {
+    expect(traySendable("hi", ["ready", "uploading"])).toBe(true);
+    expect(traySendable("", ["preparing"])).toBe(true);
+    expect(traySendable("", ["waiting"])).toBe(true);
+  });
+
+  it("is off while an item was refused by the server", () => {
     expect(traySendable("", ["ready", "failed"])).toBe(false);
+    expect(traySendable("hi", ["uploading", "failed"])).toBe(false);
+  });
+
+  it("a composer with no outbox (channel posts) still waits for every upload", () => {
+    expect(traySendable("hi", ["ready", "uploading"], { allReady: true })).toBe(false);
+    expect(traySendable("hi", ["waiting"], { allReady: true })).toBe(false);
+    expect(traySendable("hi", ["ready"], { allReady: true })).toBe(true);
   });
 });
 

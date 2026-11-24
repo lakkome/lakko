@@ -41,8 +41,22 @@ import { AttachComposer, type AttachEditRequest } from "../attach/AttachComposer
 import { checkWhenVisible, isDeletedAccount, personOnScreen } from "../people/person-status";
 import { deletedConversationSurface, type ConversationSurface } from "../people/deleted-surface";
 import { ComposerTray } from "../chat/ComposerTray";
-import { backspaceRemovesLast, messageRefs, traySendable, type TrayStatus } from "../chat/compose-tray";
-import { release as releaseTrayItem, trayFor, type TrayStore } from "../chat/tray-store";
+import {
+  backspaceRemovesLast,
+  carrierIndexOf,
+  messageRefs,
+  traySendable,
+  withoutInlineThumb,
+  type TrayStatus,
+} from "../chat/compose-tray";
+import {
+  abandonTrayUpload,
+  adoptTrayUpload,
+  release as releaseTrayItem,
+  trayFor,
+  type TakenTrayItem,
+  type TrayStore,
+} from "../chat/tray-store";
 import type { ContentHost } from "../attach/ContentBubble";
 import { ArticleReader } from "../attach/ArticleReader";
 import { checklistContentOf, contentRetryAllowed, pollContentOf } from "../attach/actions";
@@ -228,15 +242,13 @@ import {
   HELD_SEND_GIVE_UP_MS,
   REPLY_NO_JUMP_TARGET,
   flushedRowsToShow,
-  heldVerdict,
-  identityCheckDue,
   opRoute,
   replyForSend,
-  sendRoute,
   type OpRoute,
 } from "../chat/held-send";
 import {
   heldSends,
+  notifyHeldFlushed,
   persistHeldSends,
   restoreHeldSends,
   subscribeHeldFlushed,
@@ -250,7 +262,6 @@ import {
 } from "../contacts/carried-copies";
 import { heldResendPredicate } from "../chat/resend-receive";
 import { unrepairableBy } from "../chat/successor-claim";
-import { READMISSION_INTERVAL_MS } from "../chat/device-readmission";
 import {
   encodeReadPosition,
   historyRowId,
@@ -651,6 +662,30 @@ import { chatErrorsHidden, conversationBehind } from "../chat/conversation-behin
 import { gapLines, gapLinesVersion, type GapLine } from "../chat/reentry-store";
 import { insertByMessageId, placeGapLines } from "../chat/gap-line";
 import { onGapHistoryFiled, requestGapHistoryLook } from "../chat/reentry-history";
+import { connectionPhase } from "../net/connection-state";
+import {
+  WAITING_WHILE_ONLINE_RECHECK_MS,
+  ackAfterAutoNetworkFailure,
+  mustQueueBehind,
+  sendOutcomeOf,
+  type SendMode,
+  type SendOutcome,
+} from "../chat/waiting-sends";
+import { useUnsentOutbox } from "../chat/UnsentOutboxContext";
+import { checkPeerIdentityIfDue, oneToOneSendVerdict } from "../chat/one-to-one-send-gate";
+import {
+  allocateUnsentTempId,
+  attachmentsOfParts,
+  placeholderAttachment,
+  type PreparedFile,
+  type UnsentEntry,
+  type UnsentMedia,
+  type UnsentPart,
+  type UnsentState,
+} from "../chat/unsent-outbox";
+import { finishUnsentParts } from "../chat/unsent-runner";
+import { uploadTrayPart, type TrayPart } from "../chat/tray-upload";
+import { connectionHeaderText } from "../net/connection-copy";
 
 /**
  * `/chat/:id` (from the Chats list) and `/groups/:id` (from the Groups list)
@@ -661,14 +696,9 @@ import { onGapHistoryFiled, requestGapHistoryLook } from "../chat/reentry-histor
  *  across remounts of the chat view (ADR-0053, `chat/join-attribution-gate.ts`). */
 const joinAttributionGate = new JoinAttributionGate();
 
-/** When this page last ran the identity check of a one-to-one's peer, by
- *  conversation id (R.2 "Triggers": opening a one-to-one, and a send whose
- *  last check is older than the re-admission interval). */
-const lastPeerIdentityCheckAtMs = new Map<string, number>();
-/** How long a send waits for that check before it goes ahead. Chosen: long
- *  enough for one directory fetch, short enough to be unnoticed. A check that
- *  answers later still takes effect (the re-send covers what slipped by). */
-const SEND_IDENTITY_CHECK_WAIT_MS = 3000;
+// The peer identity check's last time per conversation, and how long a send
+// waits for it, live in `chat/one-to-one-send-gate.ts`: the outbox runner
+// sends into a one-to-one with no view open and runs the same check.
 
 export default function Chat(props: { backTo?: string }): JSX.Element {
   const auth = useAuth();
@@ -880,6 +910,9 @@ function ChatView(props: {
   const historySegments = createMemo(
     (): readonly ActiveGroup[] => lineageView.resolve(props.entry.groupIdB64)?.history ?? [],
   );
+  // docs/ux/connection-state.md section 7.3 — the account's outbox and the
+  // app-level runner whose pass for this conversation this view shares.
+  const outboxApi = useUnsentOutbox();
   const chat = new ChatClient(undefined, {
     identityProvider: () => chats.identity(),
     onPersist: durableSnapshotHook(chats, () => sessionAccountOf(auth.state())),
@@ -1486,7 +1519,7 @@ function ChatView(props: {
         ...rows(),
         {
           kind: "outgoing",
-          tempId: nextTempId++,
+          tempId: allocateUnsentTempId(),
           plaintext: payload.text,
           attachments: fresh,
           ack: "sent",
@@ -1705,6 +1738,10 @@ function ChatView(props: {
    *  said "N people" here until 2026-11-10). Which of the two follows the
    *  conversation kind, so a two-person group says "2 members". */
   const headerSub = (): string => {
+    // docs/ux/connection-state.md: while this device cannot reach the
+    // servers the line says so, ahead of a (stale) typing indicator.
+    const connection = connectionHeaderText(connectionPhase());
+    if (connection !== null) return connection;
     const typing = typingIndicator();
     if (typing !== null && !membershipEnded()) return typing;
     const peer = isGroupChat() ? null : peerKeyB64();
@@ -3946,7 +3983,9 @@ function ChatView(props: {
     })();
   });
 
-  let nextTempId = 1;
+  // docs/ux/connection-state.md section 7.3 — row ids come from the outbox's
+  // allocator: unique for the account's whole outbox on this device and
+  // growing with send order, across mounts of this view and reloads.
 
   // Our own MLS leaf in this group. A POSITION, not an identity:
   // it is the input `ownSignatureKeyB64` resolves through, and the
@@ -5261,9 +5300,15 @@ function ChatView(props: {
     e.preventDefault();
     const text = input();
     // `docs/ux/media-messages.md` section 11 — one message carries the text
-    // and every item of the tray; Send waits until each item is uploaded.
+    // and every item of the tray. Only an item the server refused stops Send;
+    // one still uploading or with no answer is uploaded as part of the send.
     if (!traySendable(text, trayStatuses())) return;
-    const items = tray.take();
+    const taken = tray.takeForSend();
+    if (taken.some((t) => t.ref === null)) {
+      await sendWithUnfinishedItems(text, taken);
+      return;
+    }
+    const items = taken.map((t) => t.item);
     // ADR-0047 section 6 — the micro thumbnail stays on the first photo or
     // video (by type, however it was added) only.
     const attached: AttachmentRefBytes[] = messageRefs(items, (mime) => hub.inlineType(mime));
@@ -5293,7 +5338,7 @@ function ChatView(props: {
     // strip clears with the send.
     const reply = takeArmedReply();
     // Optimistic outbound bubble.
-    const tempId = nextTempId++;
+    const tempId = allocateUnsentTempId();
     setRows([
       ...rows(),
       {
@@ -5311,6 +5356,116 @@ function ChatView(props: {
     ]);
     setInput("");
     await publishOutgoing(tempId, text, attached, reply);
+  }
+
+  /**
+   * Section 11, Send — a message whose tray had items still uploading or with
+   * no answer. The row goes into the timeline at once, each such item drawn
+   * from its local bytes under a stand-in id; once the items are prepared
+   * (the re-encode, the thumb), the message enters the outbox with their
+   * bytes and is sent in the conversation's order, each item's upload part
+   * of the send (`docs/ux/connection-state.md` section 7.3).
+   */
+  async function sendWithUnfinishedItems(text: string, taken: readonly TakenTrayItem[]): Promise<void> {
+    const localIds = taken.map(() => crypto.getRandomValues(new Uint8Array(32)));
+    const firstShown: AttachmentRefBytes[] = taken.map((t, i) => {
+      const item = t.item;
+      if (t.ref !== null) {
+        if (item.kind !== "file") {
+          hub.fileLocal(mediaKey(t.ref.blobId), item.file, t.ref.mime);
+          const thumb = t.ref.thumb;
+          if (thumb !== undefined && item.thumbBlob !== null) {
+            hub.fileLocal(`thumb:${mediaKey(thumb.blobId)}`, item.thumbBlob, "image/jpeg");
+          }
+        }
+        return t.ref;
+      }
+      const localId = localIds[i] as Uint8Array;
+      const mime = item.file.type.length > 0 ? item.file.type : undefined;
+      if (item.kind !== "file") hub.fileLocal(mediaKey(localId), item.file, mime);
+      return {
+        blobId: localId,
+        key: new Uint8Array(0),
+        nonce: new Uint8Array(0),
+        mime,
+        size: item.size,
+        name: item.name.length > 0 ? item.name : undefined,
+      };
+    });
+    for (const t of taken) releaseTrayItem(t.item);
+    setError(null);
+    draftSeed.touched();
+    sendTypingStop();
+    const reply = takeArmedReply();
+    const tempId = allocateUnsentTempId();
+    setRows([
+      ...rows(),
+      {
+        kind: "outgoing",
+        tempId,
+        plaintext: text,
+        attachments: firstShown,
+        ack: "pending",
+        authorKey: ownSignatureKeyB64(),
+        ...(reply === undefined ? {} : { reply }),
+      },
+    ]);
+    setInput("");
+    let prepared: (TrayPart | null)[];
+    try {
+      prepared = await Promise.all(taken.map((t) => (t.part === null ? Promise.resolve(null) : t.part())));
+    } catch (err) {
+      console.warn("[outbox] a tray item could not be prepared", err instanceof Error ? err.name : "");
+      for (const t of taken) if (t.adoptionId !== null) abandonTrayUpload(t.adoptionId);
+      setRows([...withSendAck(rows(), tempId, "failed")]);
+      setError(() => sendFailureNotice(null));
+      return;
+    }
+    // ADR-0047 section 6 — the micro thumbnail on the carrier only.
+    const carrier = carrierIndexOf(
+      taken.map((t, i) => (t.ref !== null ? t.ref.mime : prepared[i]?.mime)),
+      (mime) => hub.inlineType(mime),
+    );
+    const parts: UnsentPart[] = taken.map((t, i): UnsentPart => {
+      if (t.ref !== null) return { kind: "ref", ref: i === carrier ? t.ref : withoutInlineThumb(t.ref) };
+      const p = prepared[i] as TrayPart;
+      return {
+        kind: "upload",
+        localId: localIds[i] as Uint8Array,
+        name: p.name,
+        mime: p.mime,
+        size: p.bytes.length,
+        source: t.item.source,
+        ...(p.meta.size === undefined ? {} : { dimensions: p.meta.size }),
+        ...(p.meta.thumb === undefined ? {} : { thumbSize: { width: p.meta.thumb.width, height: p.meta.thumb.height } }),
+        ...(i === carrier && p.meta.inline !== undefined ? { inline: p.meta.inline } : {}),
+        ...(p.meta.audio === undefined
+          ? {}
+          : {
+              audio: {
+                title: p.meta.audio.title,
+                ...(p.meta.audio.artist === undefined ? {} : { artist: p.meta.audio.artist }),
+                ...(p.meta.audio.durationMs === undefined ? {} : { durationMs: p.meta.audio.durationMs }),
+              },
+            }),
+        ...(t.adoptionId === null ? {} : { trayItemId: t.adoptionId }),
+      };
+    });
+    const file: PreparedFile = {
+      parts: taken.map((t, i) => {
+        const p = prepared[i];
+        if (t.ref !== null || p === null || p === undefined) return null;
+        return {
+          bytes: p.bytes,
+          ...(p.meta.thumb === undefined ? {} : { thumb: p.meta.thumb.bytes }),
+          ...(p.meta.audio?.cover === undefined ? {} : { cover: p.meta.audio.cover }),
+        };
+      }),
+    };
+    composedParts.set(tempId, { parts, file });
+    const shown = attachmentsOfParts(parts);
+    setRows(rows().map((r) => (r.kind === "outgoing" && r.tempId === tempId ? { ...r, attachments: shown } : r)));
+    await publishOutgoing(tempId, text, shown, reply);
   }
 
   /**
@@ -5336,24 +5491,82 @@ function ChatView(props: {
     /** ADR-0052 — the forward attribution of a held forward into this
      *  conversation; `undefined` for everything typed here. */
     forward: ForwardRef | undefined = undefined,
-  ): Promise<void> {
+    /** `docs/ux/connection-state.md` section 7 — the first send, a tap on
+     *  the row, or the waiting pass. */
+    mode: SendMode = "first",
+  ): Promise<SendOutcome> {
+    // Section 7 — a message never overtakes the conversation's waiting ones:
+    // it joins the end of the queue and goes in turn.
+    if (mode !== "automatic" && mustQueueBehindWaiting(tempId)) {
+      await queueAsWaiting(tempId);
+      return "network";
+    }
+    // Section 7.3 — the outbox entry is written before the attempt.
+    await noteSendStarting(tempId);
+    try {
+      const outcome = await publishOutgoingOnce(tempId, text, attached, reply, heldAtMs, forward, mode);
+      await noteSendEnded(tempId, outcome);
+      return outcome;
+    } finally {
+      sendingHere.delete(tempId);
+    }
+  }
+
+  /** One attempt of {@link publishOutgoing}: settles the row's ack. A held
+   *  message reads `"sent"` (the held queue keeps it from here). */
+  async function publishOutgoingOnce(
+    tempId: number,
+    text: string,
+    attached: AttachmentRefBytes[],
+    reply: ReplyRef | undefined,
+    heldAtMs: number,
+    forward: ForwardRef | undefined,
+    mode: SendMode,
+  ): Promise<SendOutcome> {
     setRows([...withSendAck(rows(), tempId, "pending")]);
+    // Section 11 / 7.3 — a tray message's items still to upload go first, in
+    // this message's turn.
+    const withParts = outbox.get(groupKey(), tempId);
+    if (withParts?.parts !== undefined) {
+      try {
+        attached = await finishRowParts(withParts);
+      } catch (err) {
+        setMediaUpload(tempId, null);
+        if (sendOutcomeOf(err) === "network") {
+          settleNetworkFailure(tempId, mode);
+          return "network";
+        }
+        setRows([...withSendAck(rows(), tempId, "failed")]);
+        if (err instanceof AttachmentSizeError) {
+          const { got, max } = err;
+          setError(() =>
+            t("chat.attachment.error.too_large", {
+              size: formatAttachmentSize(got),
+              limit: formatAttachmentSize(max),
+            }),
+          );
+        } else {
+          setError(() => sendRefusalText(err) ?? sendFailureNotice(null));
+        }
+        return "refused";
+      }
+    }
     // ADR-0073 R.2 / R.7 case 1 — a one-to-one: the peer's identity is
     // checked when the last check is old (an accepted reset re-pins and the
     // route below then holds), and a message is NEVER sent into a session
     // only removed devices can read. It is held, in the ordinary sending
     // state, until the conversation's successor exists on this device.
     if (!isGroupChat()) {
-      await Promise.race([
-        checkPeerIdentity(false),
-        new Promise<void>((resolve) => setTimeout(resolve, SEND_IDENTITY_CHECK_WAIT_MS)),
-      ]);
-      const route = sendRoute({ kind: "chat", unrepairableKeyB64: unrepairableKeyNow() });
-      const verdict = heldVerdict({ route, heldAtMs, nowMs: Date.now() });
+      // One rule with the outbox runner (`chat/one-to-one-send-gate.ts`).
+      const verdict = await oneToOneSendVerdict({
+        check: () => checkPeerIdentity(false),
+        unrepairableKey: unrepairableKeyNow,
+        heldAtMs,
+      });
       if (verdict === "give-up") {
         setRows([...withSendAck(rows(), tempId, "failed")]);
         setError(() => sendFailureNotice(null));
-        return;
+        return "refused";
       }
       if (verdict === "wait") {
         holdOutgoing(
@@ -5361,7 +5574,7 @@ function ChatView(props: {
           { text, attached, reply, replyGroupIdB64: props.entry.groupIdB64, forward },
           heldAtMs,
         );
-        return;
+        return "sent";
       }
     }
     try {
@@ -5412,6 +5625,7 @@ function ChatView(props: {
       if (content !== undefined && own !== undefined) {
         await receiveContent(props.entry.group, props.entry.groupIdB64, result.messageId, result.createdAt, own, content);
       }
+      return "sent";
     } catch (err) {
       // The publish itself refused the superseded session (a reset accepted
       // between the route above and the send): held, exactly as if the
@@ -5422,7 +5636,13 @@ function ChatView(props: {
           { text, attached, reply, replyGroupIdB64: props.entry.groupIdB64, forward },
           heldAtMs,
         );
-        return;
+        return "sent";
+      }
+      // Section 7 — no answer: the row waits and goes when the network
+      // returns; the row says so, so no notice.
+      if (sendOutcomeOf(err) === "network") {
+        settleNetworkFailure(tempId, mode);
+        return "network";
       }
       setRows([...withSendAck(rows(), tempId, "failed")]);
       // ADR-0053 contract point 5 — a proof refused because this device's
@@ -5432,8 +5652,386 @@ function ChatView(props: {
           dsClockSkewNotice(err) ??
           sendFailureNotice(membershipRefusalOf(err, membershipRetryMaySucceed)),
       );
+      return "refused";
     }
   }
+
+  // ----- docs/ux/connection-state.md section 7: waiting messages ------
+  //
+  // Section 7.3 — the waiting and `Not sent` rows are the account's outbox
+  // (`chat/unsent-outbox.ts`), read and sent by the app-level runner
+  // (`chat/unsent-runner.ts`) whether this view is open or not. This view
+  // shows the entries of its conversation as rows, keeps each entry in step
+  // with its row, and takes the sends of its rows while mounted, through the
+  // runner's one pass for the conversation.
+
+  const outbox = outboxApi.outbox;
+  const groupKey = (): string => props.entry.groupIdB64;
+  /** The conversation's one pass, shared with the app. */
+  const waitingPass = outboxApi.runner.pass(props.entry.groupIdB64);
+  /** Rows a send of THIS view is running for (an outbox event about one of
+   *  them is this view's own and is not mirrored back). */
+  const sendingHere = new Set<number>();
+
+  /** The conversation's waiting rows, oldest first (temp ids grow). */
+  function waitingInOrder(): number[] {
+    return outbox.waitingIds(groupKey());
+  }
+
+  /** Whether a send of `tempId` must wait behind the conversation's queue. */
+  function mustQueueBehindWaiting(tempId: number): boolean {
+    return mustQueueBehind(waitingInOrder(), tempId, waitingPass.isRunning);
+  }
+
+  /** A tray message's items as Send composed them, until its outbox entry is
+   *  written (section 11). */
+  const composedParts = new Map<number, { parts: UnsentPart[]; file: PreparedFile }>();
+
+  /** Upload a tray message's remaining items (`finishUnsentParts`), the row
+   *  drawing each one from its uploaded reference as it lands. */
+  async function finishRowParts(entry: UnsentEntry): Promise<AttachmentRefBytes[]> {
+    const tempId = entry.tempId;
+    const refs = await finishUnsentParts(entry, {
+      preparedFile: (e) => outbox.preparedFile(e.groupIdB64, e.tempId),
+      adoptTrayUpload: (id) => adoptTrayUpload(id),
+      uploadPart: (part) => uploadTrayPart(part, undefined, (fraction) => setMediaUpload(tempId, fraction)),
+      partUploaded: async (e, index, ref) => {
+        await outbox.partUploaded(e.groupIdB64, e.tempId, index, ref);
+        const stand = e.parts?.[index];
+        if (stand?.kind === "upload") {
+          // The local bytes move to the real id, so the bubble does not
+          // download its own upload.
+          hub.adopt(mediaKey(stand.localId), mediaKey(ref.blobId));
+        }
+        setRows(
+          rows().map((r) =>
+            r.kind === "outgoing" && r.tempId === tempId
+              ? { ...r, attachments: r.attachments.map((a, i) => (i === index ? ref : a)) }
+              : r,
+          ),
+        );
+      },
+    });
+    await outbox.partsDone(entry.groupIdB64, tempId, refs);
+    setMediaUpload(tempId, null);
+    return refs;
+  }
+
+  /** What a media job's upload still needs, for the outbox. */
+  function mediaOfJob(job: MediaSendJob): UnsentMedia {
+    return {
+      name: job.name,
+      mime: job.mime,
+      meta: job.meta,
+      ...(job.bytes === undefined && job.gifUrl !== undefined ? { gifUrl: job.gifUrl } : {}),
+      ...(job.poster === undefined
+        ? {}
+        : { poster: { mime: job.poster.mime, width: job.poster.width, height: job.poster.height } }),
+      ...(job.thumb === undefined ? {} : { thumb: job.thumb }),
+    };
+  }
+
+  /** A media job's prepared file (the bytes and the poster frame). */
+  async function preparedOfJob(job: MediaSendJob): Promise<PreparedFile> {
+    let posterBytes: Uint8Array | undefined;
+    if (job.poster !== undefined && job.thumb === undefined) {
+      try {
+        posterBytes = new Uint8Array(await job.poster.blob.arrayBuffer());
+      } catch {
+        posterBytes = undefined;
+      }
+    }
+    return {
+      ...(job.bytes === undefined ? {} : { bytes: job.bytes }),
+      ...(posterBytes === undefined ? {} : { posterBytes }),
+    };
+  }
+
+  /** The outbox entry of an outgoing row, built from the row (and its media
+   *  job). `null` when the view holds no such row. */
+  function unsentEntryOfRow(tempId: number, state: UnsentState): UnsentEntry | null {
+    const row = rows().find((r) => r.kind === "outgoing" && r.tempId === tempId);
+    if (row === undefined || row.kind !== "outgoing") return null;
+    const job = mediaJobs.get(tempId);
+    const pendingUpload = job !== undefined && job.uploaded === undefined;
+    const composed = composedParts.get(tempId);
+    const attachments: readonly AttachmentRefBytes[] =
+      composed !== undefined ? [] : job === undefined ? row.attachments : job.uploaded === undefined ? [] : [job.uploaded];
+    return {
+      groupIdB64: groupKey(),
+      tempId,
+      writtenAtMs: outbox.get(groupKey(), tempId)?.writtenAtMs ?? Date.now(),
+      state,
+      autoSends: row.autoSends ?? 0,
+      text: row.plaintext,
+      attachments,
+      ...(row.reply === undefined ? {} : { reply: row.reply }),
+      ...(row.forward === undefined ? {} : { forward: row.forward }),
+      ...(row.content === undefined ? {} : { content: row.content }),
+      ...(pendingUpload ? { media: mediaOfJob(job) } : {}),
+      ...(composed === undefined ? {} : { parts: composed.parts }),
+    };
+  }
+
+  /** The row has an outbox entry in `state` (written when it had none). */
+  async function ensureUnsentEntry(tempId: number, state: UnsentState): Promise<void> {
+    if (outbox.has(groupKey(), tempId)) {
+      await outbox.update(groupKey(), tempId, { state });
+      return;
+    }
+    const entry = unsentEntryOfRow(tempId, state);
+    if (entry === null) return;
+    const job = mediaJobs.get(tempId);
+    const composed = composedParts.get(tempId);
+    const file =
+      composed !== undefined
+        ? composed.file
+        : entry.media !== undefined && job !== undefined
+          ? await preparedOfJob(job)
+          : undefined;
+    composedParts.delete(tempId);
+    await outbox.put(entry, file);
+  }
+
+  /** Before an attempt: the entry exists and reads as being sent. */
+  async function noteSendStarting(tempId: number): Promise<void> {
+    sendingHere.add(tempId);
+    await ensureUnsentEntry(tempId, "pending");
+  }
+
+  /**
+   * After an attempt: a sent (or held) message leaves the outbox, a refused
+   * one reads `Not sent` there too (a network failure was settled by
+   * `settleNetworkFailure`). A view that closed while the send ran tells a
+   * view opened since what went out.
+   */
+  async function noteSendEnded(tempId: number, outcome: SendOutcome): Promise<void> {
+    if (outcome === "sent") {
+      if (viewIsClosed) {
+        const row = rows().find((r) => r.kind === "outgoing" && r.tempId === tempId);
+        const stored = row === undefined || row.kind !== "outgoing" || row.ack !== "sent" ? null : timelineRowToPersisted(row);
+        if (stored !== null) notifyHeldFlushed({ groupIdB64: groupKey(), messages: [stored] });
+      }
+      await outbox.remove(groupKey(), tempId);
+      return;
+    }
+    if (outcome === "refused") {
+      const row = rows().find((r) => r.kind === "outgoing" && r.tempId === tempId);
+      await outbox.update(groupKey(), tempId, {
+        state: "failed",
+        autoSends: row?.kind === "outgoing" ? (row.autoSends ?? 0) : 0,
+      });
+    }
+  }
+
+  function setOutgoingState(tempId: number, ack: "waiting" | "failed", autoSends: number): void {
+    setRows(
+      rows().map((r) => (r.kind === "outgoing" && r.tempId === tempId ? { ...r, ack, autoSends } : r)),
+    );
+    if (mediaJobs.has(tempId)) setMediaUpload(tempId, ack);
+    void outbox.update(groupKey(), tempId, { state: ack, autoSends });
+  }
+
+  /** Put a new message at the end of the queue; go now if the servers answer. */
+  async function queueAsWaiting(tempId: number): Promise<void> {
+    await ensureUnsentEntry(tempId, "waiting");
+    setOutgoingState(tempId, "waiting", 0);
+    if (connectionPhase() === "online") void waitingPass.run();
+  }
+
+  /**
+   * A send that got no answer. The first send and a tap start a fresh
+   * budget; an automatic send counts, and the fifth reads "Not sent".
+   */
+  function settleNetworkFailure(tempId: number, mode: SendMode): void {
+    const row = rows().find((r) => r.kind === "outgoing" && r.tempId === tempId);
+    const before = row?.kind === "outgoing" ? (row.autoSends ?? 0) : 0;
+    const spent = mode === "automatic" ? before + 1 : 0;
+    const ack = mode === "automatic" ? ackAfterAutoNetworkFailure(spent) : "waiting";
+    setOutgoingState(tempId, ack, spent);
+    if (ack === "failed") {
+      setError(() => sendFailureNotice(null));
+      return;
+    }
+    // The failure normally turns the state to Waiting, and the pass runs on
+    // the way back to Online. If another request got an answer in between,
+    // the state reads Online already: look again shortly. Chosen, not measured.
+    if (mode !== "automatic" && connectionPhase() === "online") {
+      setTimeout(() => {
+        if (connectionPhase() === "online") void waitingPass.run();
+      }, WAITING_WHILE_ONLINE_RECHECK_MS);
+    }
+  }
+
+  /** One automatic send of a waiting row, for the pass. `undefined`: this
+   *  view holds no such row, and the app sends it. */
+  async function resendWaiting(tempId: number): Promise<SendOutcome | undefined> {
+    const job = mediaJobs.get(tempId);
+    if (job !== undefined) return runMediaJob(job, "automatic");
+    const row = rows().find((r) => r.kind === "outgoing" && r.tempId === tempId);
+    if (row === undefined || row.kind !== "outgoing") return undefined;
+    if (!(await contentRetryAllowed(row.content, rosterAccountKeysNow()))) {
+      setOutgoingState(tempId, "failed", row.autoSends ?? 0);
+      setError(() => t("poll.resend_refused"));
+      return "refused";
+    }
+    return publishOutgoing(tempId, row.plaintext, row.attachments, row.reply, Date.now(), row.forward, "automatic");
+  }
+
+  /** The row an outbox entry is drawn as (it has no message id yet). */
+  function rowOfUnsent(e: UnsentEntry): TimelineRow {
+    const media = e.media;
+    return {
+      kind: "outgoing",
+      tempId: e.tempId,
+      plaintext: e.text,
+      attachments:
+        media !== undefined
+          ? [placeholderAttachment(media, 0)]
+          : e.parts !== undefined
+            ? attachmentsOfParts(e.parts)
+            : [...e.attachments],
+      ack: e.state,
+      autoSends: e.autoSends,
+      authorKey: ownSignatureKeyB64(),
+      ...(media === undefined ? {} : { mediaLocalKey: `local:${e.tempId}` }),
+      ...(e.reply === undefined ? {} : { reply: e.reply }),
+      ...(e.forward === undefined ? {} : { forward: e.forward }),
+      ...(e.content === undefined ? {} : { content: e.content }),
+    };
+  }
+
+  /** The media job of an entry whose upload has not finished, rebuilt from
+   *  the outbox (a reload, or an entry this view did not start). */
+  function jobOfUnsent(e: UnsentEntry, media: UnsentMedia): MediaSendJob {
+    const job: MediaSendJob = {
+      tempId: e.tempId,
+      localKey: `local:${e.tempId}`,
+      name: media.name,
+      meta: media.meta,
+      mime: media.mime,
+      ...(media.gifUrl === undefined ? {} : { gifUrl: media.gifUrl }),
+      ...(media.thumb === undefined ? {} : { thumb: media.thumb, posterTried: true }),
+      ...(e.reply === undefined ? {} : { reply: e.reply }),
+      loadBytes: async () => {
+        const file = await outbox.preparedFile(e.groupIdB64, e.tempId);
+        if (file?.posterBytes !== undefined && media.poster !== undefined && job.thumb === undefined) {
+          job.poster = {
+            blob: new Blob([file.posterBytes.slice()], { type: media.poster.mime }),
+            ...media.poster,
+          };
+        }
+        if (file?.bytes !== undefined) return { bytes: file.bytes, mime: media.mime };
+        if (media.gifUrl !== undefined) return loadGifBytes(media.gifUrl);
+        throw new Error("the prepared file of an unsent message is gone");
+      },
+    };
+    return job;
+  }
+
+  /** Show an outbox entry this view does not hold yet as a row. */
+  function showUnsentEntry(e: UnsentEntry): void {
+    if (rows().some((r) => r.kind === "outgoing" && r.tempId === e.tempId)) return;
+    if (e.media !== undefined && !mediaJobs.has(e.tempId)) {
+      const job = jobOfUnsent(e, e.media);
+      mediaJobs.set(e.tempId, job);
+      // The local bytes, so the bubble can show and play the take before it
+      // is sent.
+      void outbox.preparedFile(e.groupIdB64, e.tempId).then((file) => {
+        if (file?.bytes === undefined || job.bytes !== undefined || !mediaJobs.has(e.tempId)) return;
+        job.bytes = file.bytes;
+        hub.fileLocal(job.localKey, new Blob([file.bytes.slice()]), job.mime);
+      });
+    }
+    if (e.parts !== undefined) {
+      const parts = e.parts;
+      void outbox.preparedFile(e.groupIdB64, e.tempId).then((file) => {
+        parts.forEach((p, i) => {
+          const bytes = file?.parts?.[i];
+          if (p.kind !== "upload" || bytes === null || bytes === undefined) return;
+          hub.fileLocal(mediaKey(p.localId), new Blob([bytes.bytes.slice()], p.mime === undefined ? {} : { type: p.mime }), p.mime);
+        });
+      });
+    }
+    setRows([...rows(), rowOfUnsent(e)]);
+    if (e.state !== "pending" && mediaJobs.has(e.tempId)) setMediaUpload(e.tempId, e.state);
+  }
+
+  /** Section 7.3 — the conversation's unsent messages, at the end of the
+   *  timeline in the order they were written. */
+  async function showUnsentEntries(): Promise<void> {
+    const account = accountIdB64ForLog();
+    if (account !== null) await outbox.restore(account);
+    for (const e of outbox.entries(groupKey())) showUnsentEntry(e);
+  }
+
+  /** The person deleted an unsent row: it goes, and nothing sends it. */
+  function deleteUnsentRow(tempId: number): void {
+    if (sendingHere.has(tempId) || waitingPass.isInFlight(tempId)) return;
+    const row = rows().find((r) => r.kind === "outgoing" && r.tempId === tempId);
+    if (row === undefined || row.kind !== "outgoing" || row.ack === "sent" || row.ack === "pending") return;
+    const job = mediaJobs.get(tempId);
+    mediaJobs.delete(tempId);
+    setMediaUpload(tempId, null);
+    const entry = outbox.get(groupKey(), tempId);
+    // A tray upload still running for it is deleted when it lands.
+    for (const p of entry?.parts ?? []) {
+      if (p.kind === "upload" && p.trayItemId !== undefined) abandonTrayUpload(p.trayItemId);
+    }
+    // ADR-0065 section 6 — what was uploaded for it and never sent is deleted.
+    const uploaded = (
+      entry?.parts !== undefined
+        ? entry.parts.flatMap((p) => (p.kind === "ref" ? [p.ref] : []))
+        : job === undefined
+          ? row.attachments
+          : job.uploaded === undefined
+            ? []
+            : [job.uploaded]
+    ).filter((a) => a.blobId.length > 0);
+    if (uploaded.length > 0) deleteUnsent(uploaded);
+    setRows(rows().filter((r) => !(r.kind === "outgoing" && r.tempId === tempId)));
+    void outbox.remove(groupKey(), tempId);
+  }
+
+  /** The rows of the outbox were shown (events may add rows from then on). */
+  let unsentShown = false;
+  let detachUnsentView: (() => void) | null = null;
+  onCleanup(() => {
+    detachUnsentView?.();
+    detachUnsentView = null;
+  });
+
+  // An entry another sender changed (the app's pass while this view was
+  // mounting): the row follows; one that left the outbox (sent by the app,
+  // its conversation gone) leaves the timeline, the sent message reaching
+  // this view through `subscribeHeldFlushed`.
+  onCleanup(
+    outbox.subscribe((ev) => {
+      if (ev.groupIdB64 !== groupKey() || sendingHere.has(ev.tempId)) return;
+      const row = rows().find((r) => r.kind === "outgoing" && r.tempId === ev.tempId);
+      if (ev.kind === "remove") {
+        if (row === undefined || row.kind !== "outgoing" || row.ack === "sent") return;
+        mediaJobs.delete(ev.tempId);
+        setMediaUpload(ev.tempId, null);
+        setRows(rows().filter((r) => !(r.kind === "outgoing" && r.tempId === ev.tempId)));
+        return;
+      }
+      const entry = outbox.get(ev.groupIdB64, ev.tempId);
+      if (entry === undefined) return;
+      if (row === undefined) {
+        if (didHydrateFromLog && unsentShown) showUnsentEntry(entry);
+        return;
+      }
+      if (row.kind !== "outgoing" || row.ack === "sent") return;
+      if (row.ack === entry.state && (row.autoSends ?? 0) === entry.autoSends) return;
+      setRows(
+        rows().map((r) =>
+          r.kind === "outgoing" && r.tempId === ev.tempId ? { ...r, ack: entry.state, autoSends: entry.autoSends } : r,
+        ),
+      );
+      if (mediaJobs.has(ev.tempId) && entry.state !== "pending") setMediaUpload(ev.tempId, entry.state);
+    }),
+  );
 
   // ----- ADR-0023 edit / delete / reaction send handlers -------
   //
@@ -6116,7 +6714,7 @@ function ChatView(props: {
   async function sendContentMessage(content: MessageContent, refs: AttachmentRefBytes[] = []): Promise<void> {
     setError(null);
     const reply = takeArmedReply();
-    const tempId = nextTempId++;
+    const tempId = allocateUnsentTempId();
     setRows([
       ...rows(),
       {
@@ -6400,6 +6998,9 @@ function ChatView(props: {
     /** ADR-0052 — the take was sent as a reply: the reference the row and
      *  the envelope carry. */
     reply?: ReplyRef;
+    /** A GIF: the proxy path its bytes are fetched from (kept in the outbox
+     *  while they were not fetched yet, section 7.3). */
+    gifUrl?: string;
   }
   const mediaJobs = new Map<number, MediaSendJob>();
   // ADR-0065 section 6 — leaving the chat abandons what was uploaded and not
@@ -6410,12 +7011,15 @@ function ChatView(props: {
     const unsent: AttachmentRefBytes[] = [];
     for (const job of mediaJobs.values()) {
       if (job.uploaded === undefined) continue;
+      // docs/ux/connection-state.md section 7.3 — an unsent message is kept
+      // in the outbox and goes later: its upload is not abandoned.
+      if (outbox.has(props.entry.groupIdB64, job.tempId)) continue;
       unsent.push(job.uploaded);
     }
     if (unsent.length > 0) deleteUnsent(unsent);
   });
-  const [mediaUploads, setMediaUploads] = createSignal<ReadonlyMap<number, number | "failed">>(new Map());
-  function setMediaUpload(tempId: number, value: number | "failed" | null): void {
+  const [mediaUploads, setMediaUploads] = createSignal<ReadonlyMap<number, number | "failed" | "waiting">>(new Map());
+  function setMediaUpload(tempId: number, value: number | "failed" | "waiting" | null): void {
     const next = new Map(mediaUploads());
     if (value === null) next.delete(tempId);
     else next.set(tempId, value);
@@ -6424,7 +7028,7 @@ function ChatView(props: {
   function mediaUploadFor(row: TimelineRow): MediaUpload {
     if (row.kind !== "outgoing" || row.ack === "sent") return undefined;
     const u = mediaUploads().get(row.tempId);
-    return u ?? (row.ack === "failed" ? "failed" : 0);
+    return u ?? (row.ack === "failed" ? "failed" : row.ack === "waiting" ? "waiting" : 0);
   }
   onCleanup(() => mediaJobs.clear());
 
@@ -6456,10 +7060,25 @@ function ChatView(props: {
         ...(job.reply === undefined ? {} : { reply: job.reply }),
       },
     ]);
-    void runMediaJob(job);
+    void (async (): Promise<void> => {
+      // Section 7.3 — the outbox keeps the bytes the upload sends, so they are
+      // read now (a recording is local; a GIF is fetched by the send).
+      if (job.bytes === undefined && job.gifUrl === undefined) {
+        try {
+          const loaded = await job.loadBytes();
+          job.bytes = loaded.bytes;
+          job.mime = loaded.mime;
+          hub.fileLocal(job.localKey, new Blob([loaded.bytes.slice()]), loaded.mime);
+        } catch {
+          // The send reads them again and reports what failed.
+        }
+      }
+      // Section 7 — behind the waiting messages, else now.
+      await runMediaJob(job);
+    })();
   }
 
-  function setMediaRowAck(tempId: number, ack: "pending" | "failed"): void {
+  function setMediaRowAck(tempId: number, ack: "pending" | "failed" | "waiting"): void {
     setRows(
       rows().map((r) =>
         r.kind === "outgoing" && r.tempId === tempId && r.ack !== ack ? { ...r, ack } : r,
@@ -6467,7 +7086,25 @@ function ChatView(props: {
     );
   }
 
-  async function runMediaJob(job: MediaSendJob): Promise<void> {
+  async function runMediaJob(job: MediaSendJob, mode: SendMode = "first"): Promise<SendOutcome> {
+    if (mode !== "automatic" && mustQueueBehindWaiting(job.tempId)) {
+      await queueAsWaiting(job.tempId);
+      return "network";
+    }
+    // Section 7.3 — the outbox entry (with the prepared file) is written
+    // before the attempt.
+    await noteSendStarting(job.tempId);
+    try {
+      const outcome = await runMediaJobOnce(job, mode);
+      await noteSendEnded(job.tempId, outcome);
+      return outcome;
+    } finally {
+      sendingHere.delete(job.tempId);
+    }
+  }
+
+  /** One attempt of {@link runMediaJob}: upload (unless done) and publish. */
+  async function runMediaJobOnce(job: MediaSendJob, mode: SendMode): Promise<SendOutcome> {
     setMediaUpload(job.tempId, 0);
     setMediaRowAck(job.tempId, "pending");
     try {
@@ -6512,6 +7149,11 @@ function ChatView(props: {
           undefined,
           (fraction) => setMediaUpload(job.tempId, fraction),
         );
+        // Section 7.3 — the references are kept; the prepared file goes.
+        await outbox.update(props.entry.groupIdB64, job.tempId, {
+          attachments: [job.uploaded],
+          endMedia: true,
+        });
       }
       const uploaded = job.uploaded;
       const envelopeBytes =
@@ -6550,6 +7192,7 @@ function ChatView(props: {
       );
       mediaJobs.delete(job.tempId);
       setMediaUpload(job.tempId, null);
+      return "sent";
     } catch (err) {
       // ADR-0073 R.7 case 1 — the bytes are uploaded and the session is
       // superseded: the message is held for the successor like a typed one,
@@ -6574,7 +7217,13 @@ function ChatView(props: {
           ),
         );
         holdOutgoing(job.tempId, { text: "", attached: [uploaded], reply: job.reply }, Date.now());
-        return;
+        return "sent";
+      }
+      // docs/ux/connection-state.md section 7 — an upload or publish with no
+      // answer waits for the network.
+      if (sendOutcomeOf(err) === "network") {
+        settleNetworkFailure(job.tempId, mode);
+        return "network";
       }
       setMediaUpload(job.tempId, "failed");
       setMediaRowAck(job.tempId, "failed");
@@ -6589,6 +7238,7 @@ function ChatView(props: {
         );
       }
       console.warn("media message not sent", err);
+      return "refused";
     }
   }
 
@@ -6613,9 +7263,17 @@ function ChatView(props: {
    * the message is the worse failure.
    */
   function retrySend(tempId: number): void {
+    // docs/ux/connection-state.md section 7 — a tap on a waiting message runs
+    // the conversation's queue now, earlier waiting messages first.
+    const tapped = rows().find((r) => r.kind === "outgoing" && r.tempId === tempId);
+    if (tapped?.kind === "outgoing" && tapped.ack === "waiting") {
+      void waitingPass.run();
+      return;
+    }
+    if (waitingPass.isInFlight(tempId)) return;
     const job = mediaJobs.get(tempId);
     if (job !== undefined) {
-      void runMediaJob(job);
+      void runMediaJob(job, "tap");
       return;
     }
     const row = rows().find((r) => r.kind === "outgoing" && r.tempId === tempId);
@@ -6630,13 +7288,13 @@ function ChatView(props: {
         setError(() => t("poll.resend_refused"));
         return;
       }
-      await publishOutgoing(tempId, row.plaintext, row.attachments, row.reply, Date.now(), row.forward);
+      await publishOutgoing(tempId, row.plaintext, row.attachments, row.reply, Date.now(), row.forward, "tap");
     })();
   }
 
   /** A finished recording the user chose to send. */
   function sendCapturedTake(take: CaptureResult): void {
-    const tempId = nextTempId++;
+    const tempId = allocateUnsentTempId();
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const isVoice = take.kind === "voice";
     // ADR-0052 — a take recorded with a reply armed is sent as the reply, and
@@ -6664,7 +7322,7 @@ function ChatView(props: {
    *  fetched through the proxy, encrypted and uploaded like any file, so a
    *  recipient only ever fetches the encrypted blob from Lakko storage. */
   function sendGif(item: GifItem): void {
-    const tempId = nextTempId++;
+    const tempId = allocateUnsentTempId();
     // ADR-0052 — a GIF is a sent message like any other: it carries the armed
     // reply and clears the strip.
     const reply = takeArmedReply();
@@ -6675,14 +7333,18 @@ function ChatView(props: {
       name: `gif-${item.id}.gif`,
       mime: "image/gif",
       meta: { kind: "gif", width: item.width, height: item.height },
-      loadBytes: async () => {
-        const token = auth.identitySecrets()?.sessionToken ?? null;
-        if (token === null) throw new Error("no session for the GIF proxy");
-        const r = await fetchGifMedia(item.fullUrl, token, MAX_GIF_FULL_BYTES);
-        if (r.kind !== "ok") throw new Error(`GIF download failed: ${r.kind}`);
-        return { bytes: r.value.bytes, mime: r.value.mime };
-      },
+      gifUrl: item.fullUrl,
+      loadBytes: () => loadGifBytes(item.fullUrl),
     });
+  }
+
+  /** A GIF's full rendition, through the proxy. */
+  async function loadGifBytes(url: string): Promise<{ bytes: Uint8Array; mime: string }> {
+    const token = auth.identitySecrets()?.sessionToken ?? null;
+    if (token === null) throw new Error("no session for the GIF proxy");
+    const r = await fetchGifMedia(url, token, MAX_GIF_FULL_BYTES);
+    if (r.kind !== "ok") throw new Error(`GIF download failed: ${r.kind}`);
+    return { bytes: r.value.bytes, mime: r.value.mime };
   }
 
   const recorder = createRecorder({
@@ -7448,6 +8110,14 @@ function ChatView(props: {
       if (heldAccount !== null) await restoreHeldSends(heldAccount);
       // What the background flush sent while this view was mounting.
       showFlushedHeldSends();
+      // docs/ux/connection-state.md section 7.3 — the conversation's unsent
+      // messages, then this view takes the sends of its rows (after the rows
+      // exist, so the pass never asks it for one it does not hold).
+      await showUnsentEntries();
+      unsentShown = true;
+      if (!viewIsClosed) {
+        detachUnsentView = outboxApi.runner.attachView(props.entry.groupIdB64, resendWaiting);
+      }
       resumeHeldSends();
       void checkPeerIdentity(false);
       // Attached only once the timeline is seeded from the log: the consumer
@@ -7790,21 +8460,12 @@ function ChatView(props: {
    */
   async function checkPeerIdentity(force: boolean): Promise<void> {
     if (isGroupChat()) return;
-    const key = conversationHex();
-    const now = Date.now();
-    if (!force && !identityCheckDue(lastPeerIdentityCheckAtMs.get(key), now, READMISSION_INTERVAL_MS)) {
-      return;
-    }
-    const peer = peerKeyB64();
-    if (peer === null) return;
-    const accountIdB64 = accountIdB64OfKey(peer);
-    if (accountIdB64 === null) return;
-    lastPeerIdentityCheckAtMs.set(key, now);
-    try {
-      await contacts.checkContactIdentity(base64Decode(accountIdB64), peer);
-    } catch {
-      // Refused, inconclusive or offline: nothing changes, nothing is shown.
-    }
+    await checkPeerIdentityIfDue({
+      conversationHex: conversationHex(),
+      peerKeyB64: peerKeyB64(),
+      check: (accountId, peer) => contacts.checkContactIdentity(accountId, peer),
+      force,
+    });
   }
 
   /** Give-up timers of the messages this view holds, by row. */
@@ -7841,6 +8502,9 @@ function ChatView(props: {
         if (!found) return;
         void persistHeldSends(accountIdB64ForLog());
         setRows([...withSendAck(rows(), tempId, "failed")]);
+        // docs/ux/connection-state.md section 7.3 — a `Not sent` row is an
+        // outbox entry.
+        void ensureUnsentEntry(tempId, "failed");
         setError(() => sendFailureNotice(null));
       }, wait),
     );
@@ -7855,7 +8519,7 @@ function ChatView(props: {
     // reload in between still finds it.
     const taken = heldSends.take(conversationHex());
     for (const held of taken) {
-      const tempId = nextTempId++;
+      const tempId = allocateUnsentTempId();
       // R.7 case 1 — a reply composed in another segment keeps its quote and
       // loses its jump target: the id belongs to that segment's journal.
       const reply = replyForSend(
@@ -8469,7 +9133,7 @@ function ChatView(props: {
             {/* ADR-0021 follow-up: show the linked contact's user-chosen
                 name in the chat header (falls back to the chat label). */}
             <h1>{resolvePeerName()}</h1>
-            <div class="lk-chat-sub" classList={{ typing: typingIndicator() !== null && !membershipEnded() }}>
+            <div class="lk-chat-sub" classList={{ typing: typingIndicator() !== null && !membershipEnded() && connectionPhase() === "online" }}>
               {headerSub()}
             </div>
           </div>
@@ -8922,6 +9586,10 @@ function ChatView(props: {
                 onRetrySend={() => {
                   const r = row();
                   if (r.kind === "outgoing") retrySend(r.tempId);
+                }}
+                onDeleteUnsent={() => {
+                  const r = row();
+                  if (r.kind === "outgoing") deleteUnsentRow(r.tempId);
                 }}
                 fullReactPickerId={fullReactPickerId()}
                 onOpenFullReactPicker={(id) => {
@@ -11220,7 +11888,8 @@ function timelineRowToPersisted(
  * live read answers with the LAST row under an identity, so a chat with N
  * restored own messages drew the newest one N times and the others not at
  * all. Seen live on 2026-09-26 with messages forwarded into a chat. Negative
- * and counting down, so no restored id can meet a live `nextTempId`.
+ * and counting down, so no restored id can meet a live id from
+ * `allocateUnsentTempId` (always positive).
  */
 let restoredTempId = -1;
 

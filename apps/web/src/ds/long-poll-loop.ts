@@ -27,6 +27,8 @@
  * prevented here.
  */
 
+import { onNetworkReturned } from "../net/connection-state";
+
 /** Long-poll budget handed to the DS. Below the server's 60 s cap, and below
  *  the 30 s worst-case poll the ADR-0045 beacon freshness window is sized
  *  against, so a web observer meets the same constraint the natives do. */
@@ -98,47 +100,70 @@ export async function runLongPollLoop(
   deps: LongPollLoopDeps,
 ): Promise<void> {
   let consecutiveFailures = 0;
-  while (!signal.aborted && deps.shouldContinue()) {
-    if (deps.isPaused()) {
-      await deps.waitUntilResumed(signal);
-      continue;
-    }
-    const startedAt = deps.now();
-    let delayMs: number;
-    try {
-      delayMs = Math.max(0, await deps.tick(signal));
-      consecutiveFailures = 0;
-      const elapsed = deps.now() - startedAt;
-      if (elapsed < MIN_TICK_SPACING_MS) {
-        delayMs = Math.max(delayMs, MIN_TICK_SPACING_MS - elapsed);
+  // docs/ux/connection-state.md section 3: the network coming back starts
+  // the backoff again from its first step (the sleep itself already ends).
+  let returned = false;
+  const stopListening = onNetworkReturned(() => {
+    returned = true;
+  });
+  signal.addEventListener("abort", stopListening, { once: true });
+  try {
+    while (!signal.aborted && deps.shouldContinue()) {
+      if (deps.isPaused()) {
+        await deps.waitUntilResumed(signal);
+        continue;
       }
-    } catch (err) {
+      const startedAt = deps.now();
+      let delayMs: number;
+      try {
+        delayMs = Math.max(0, await deps.tick(signal));
+        consecutiveFailures = 0;
+        const elapsed = deps.now() - startedAt;
+        if (elapsed < MIN_TICK_SPACING_MS) {
+          delayMs = Math.max(delayMs, MIN_TICK_SPACING_MS - elapsed);
+        }
+      } catch (err) {
+        if (signal.aborted) return;
+        if (returned) {
+          returned = false;
+          consecutiveFailures = 0;
+        }
+        consecutiveFailures += 1;
+        delayMs = backoffFor(deps.classifyFailure(err), consecutiveFailures);
+        deps.onFailure?.(err, delayMs);
+      }
       if (signal.aborted) return;
-      consecutiveFailures += 1;
-      delayMs = backoffFor(deps.classifyFailure(err), consecutiveFailures);
-      deps.onFailure?.(err, delayMs);
+      if (delayMs > 0) await deps.sleep(delayMs, signal);
     }
-    if (signal.aborted) return;
-    if (delayMs > 0) await deps.sleep(delayMs, signal);
+  } finally {
+    stopListening();
   }
 }
 
-/** A `setTimeout` sleep that resolves early (never rejects) on abort. */
-export function sleepCancellable(ms: number, signal: AbortSignal): Promise<void> {
+/**
+ * A `setTimeout` sleep that resolves early (never rejects) on abort, and when
+ * the network comes back (`docs/ux/connection-state.md` section 3: the
+ * receive loops retry at once rather than finishing their backoff, so
+ * "Connecting..." is short).
+ */
+export function sleepCancellable(
+  ms: number,
+  signal: AbortSignal,
+): Promise<void> {
   return new Promise((resolve) => {
     if (signal.aborted) {
       resolve();
       return;
     }
-    const onAbort = (): void => {
+    const done = (): void => {
       clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      stopListening();
       resolve();
     };
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    signal.addEventListener("abort", onAbort, { once: true });
+    const timer = setTimeout(done, ms);
+    const stopListening = onNetworkReturned(done);
+    signal.addEventListener("abort", done, { once: true });
   });
 }
 

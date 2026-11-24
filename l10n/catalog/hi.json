@@ -2549,6 +2549,18 @@
       "text": "देखें",
       "status": "machine"
     },
+    "connection.waiting": {
+      "text": "नेटवर्क की प्रतीक्षा...",
+      "status": "machine"
+    },
+    "connection.connecting": {
+      "text": "कनेक्ट हो रहा है...",
+      "status": "machine"
+    },
+    "connection.restored_a11y": {
+      "text": "कनेक्ट हो गया।",
+      "status": "machine"
+    },
     "notification.join_request.title": {
       "text": "शामिल होने का अनुरोध",
       "status": "machine"
@@ -10147,6 +10159,10 @@
     },
     "tab.other.opening": {
       "text": "यहाँ खुल रहा है...",
+      "status": "machine"
+    },
+    "chat.message.waiting_network": {
+      "text": "नेटवर्क की प्रतीक्षा",
       "status": "machine"
     }
   },

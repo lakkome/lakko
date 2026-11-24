@@ -106,7 +106,27 @@ public enum AntiCensorshipTransport {
     }
 
     /// `perform` below the token provider: the tunnel or the direct path.
+    ///
+    /// Every request is recorded for the connection state
+    /// (`docs/ux/connection-state.md`): an HTTP answer of any status says the
+    /// servers are reachable, a transport failure says they are not, and a
+    /// cancelled request says nothing.
     static func performOnWire(
+        _ request: URLRequest,
+        session: URLSession,
+        config: AntiCensorshipConfig
+    ) async throws -> (Data, URLResponse) {
+        do {
+            let result = try await performOnWireUnobserved(request, session: session, config: config)
+            if result.1 is HTTPURLResponse { ConnectionState.reportAnswered() }
+            return result
+        } catch {
+            if !Task.isCancelled { ConnectionState.reportFailure(error) }
+            throw error
+        }
+    }
+
+    private static func performOnWireUnobserved(
         _ request: URLRequest,
         session: URLSession,
         config: AntiCensorshipConfig

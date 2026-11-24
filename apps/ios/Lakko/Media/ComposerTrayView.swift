@@ -80,7 +80,7 @@ struct ComposerTrayView: View {
 
     private func mediaCell(_ item: ComposerTrayItem) -> some View {
         Button {
-            if item.status == .failed {
+            if item.isRetryable {
                 store.retry(item.id)
             } else {
                 open(item)
@@ -111,18 +111,18 @@ struct ComposerTrayView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(
-            item.status == .failed
+            item.isRetryable
                 ? l10n.t("chat.tray.retry", texts: ["name": displayName(item)])
                 : displayName(item))
     }
 
     private func fileCell(_ item: ComposerTrayItem) -> some View {
         Button {
-            if item.status == .failed { store.retry(item.id) }
+            if item.isRetryable { store.retry(item.id) }
         } label: {
             HStack(spacing: 8) {
                 ZStack {
-                    if item.isBusy || item.status == .failed {
+                    if item.isBusy || item.isRetryable {
                         statusMark(item, onSurface: true)
                     } else {
                         LkIconView(.doc, size: 22, relativeTo: nil)
@@ -151,9 +151,9 @@ struct ComposerTrayView: View {
         .buttonStyle(.plain)
         // Only a failed file does something on a tap; the rest keep their
         // full colours rather than the dimmed look of a disabled button.
-        .allowsHitTesting(item.status == .failed)
+        .allowsHitTesting(item.isRetryable)
         .accessibilityLabel(
-            item.status == .failed
+            item.isRetryable
                 ? l10n.t("chat.tray.retry", texts: ["name": displayName(item)])
                 : displayName(item))
     }
@@ -180,6 +180,13 @@ struct ComposerTrayView: View {
                 .foregroundStyle(onSurface ? Color.lakkoDanger : Color.white)
                 .frame(width: 30, height: 30)
                 .background(Circle().fill(onSurface ? Color.clear : Color.lakkoDanger.opacity(0.85)))
+        case .noAnswer:
+            // `docs/ux/connection-state.md` section 2 — no answer, not a
+            // refusal: a clock, not the danger colour; a tap retries.
+            LkIconView(.clock, size: 18, relativeTo: nil)
+                .foregroundStyle(onSurface ? Color.lakkoTextMuted : Color.white)
+                .frame(width: 30, height: 30)
+                .background(Circle().fill(onSurface ? Color.clear : Color.black.opacity(0.45)))
         case .ready:
             EmptyView()
         }

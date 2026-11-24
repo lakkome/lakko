@@ -1025,7 +1025,7 @@ extension ChatRepository {
             for hex in plan.heldSegments.prefix(headAt) {
                 guard let record = groups[hex] else { continue }
                 for row in record.unsentRows
-                where row.ack == .failed && !tracked.contains("\(hex):\(row.localId)") {
+                where (row.ack == .failed || row.ack == .waiting) && !tracked.contains("\(hex):\(row.localId)") {
                     let reply = Self.replyRef(HeldSend.replyForSend(
                         Self.heldReply(row.reply),
                         composedInGroupIdB64: base64Encode(record.groupId),

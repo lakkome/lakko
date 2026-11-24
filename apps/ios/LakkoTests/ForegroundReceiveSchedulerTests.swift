@@ -365,3 +365,25 @@ final class UnreadCountingTests: XCTestCase {
         XCTAssertNil(repo.journalCursor(groupIdHex: "g"))
     }
 }
+
+extension ForegroundReceiveSchedulerTests {
+    /// `docs/ux/connection-state.md` section 3 — when the network comes back,
+    /// a group inside its failure backoff is polled in the next sweep.
+    func testTheNetworkReturningEndsEveryGroupsBackoff() async {
+        let fake = Fake()
+        fake.groups = ["a", "b"]
+        fake.failing = ["a"]
+        let scheduler = makeScheduler(fake)
+        scheduler.setForeground(true)
+        await scheduler.runSweep()
+        fake.polls.removeAll()
+        fake.failing = []
+        await scheduler.runSweep()
+        XCTAssertEqual(fake.polls.map(\.group), ["b"], "backed off")
+
+        fake.polls.removeAll()
+        scheduler.noteNetworkReturned()
+        await scheduler.runSweep()
+        XCTAssertEqual(fake.polls.map(\.group), ["a", "b"], "retried at once")
+    }
+}

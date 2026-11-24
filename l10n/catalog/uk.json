@@ -2549,6 +2549,18 @@
       "text": "Переглянути",
       "status": "machine"
     },
+    "connection.waiting": {
+      "text": "Очікування мережі...",
+      "status": "machine"
+    },
+    "connection.connecting": {
+      "text": "Підключення...",
+      "status": "machine"
+    },
+    "connection.restored_a11y": {
+      "text": "Підключено.",
+      "status": "machine"
+    },
     "notification.join_request.title": {
       "text": "Запит на приєднання",
       "status": "machine"
@@ -10147,6 +10159,10 @@
     },
     "tab.other.opening": {
       "text": "Відкриваємо тут...",
+      "status": "machine"
+    },
+    "chat.message.waiting_network": {
+      "text": "Очікування мережі",
       "status": "machine"
     }
   },

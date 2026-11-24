@@ -265,6 +265,17 @@ internal fun historyRowActions(rowIsPinned: Boolean, pinLabel: String): MessageA
     pinLabel = pinLabel,
 )
 
+/**
+ * `docs/ux/connection-state.md` section 7.3 — the menu of an own row that never
+ * reached the server (waiting, or "Not sent"): Copy when it has text, and
+ * Delete, which removes it from the outbox. Nothing that needs a server id.
+ */
+internal fun unsentRowActions(text: String): MessageActions = MessageActions(
+    canCopy = text.isNotEmpty(),
+    canEdit = false,
+    canDelete = true,
+)
+
 internal fun copyMessageText(context: Context, text: String) {
     val clipboard =
         context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager

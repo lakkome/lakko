@@ -1083,3 +1083,46 @@ describe("the inline edit field and the keyboard (base scenario 10)", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// docs/ux/connection-state.md section 7.3 — an unsent row's menu is Delete.
+// ---------------------------------------------------------------------------
+
+describe("an unsent row's menu", () => {
+  const MENU = "[role='menu']";
+  function unsent(ack: "waiting" | "failed" | "pending"): TimelineRow {
+    return {
+      kind: "outgoing",
+      tempId: 1_700_000_000_000_000,
+      plaintext: "not out yet",
+      attachments: [],
+      ack,
+      authorKey: "own-key",
+    };
+  }
+
+  for (const ack of ["waiting", "failed"] as const) {
+    it(`offers Delete alone on a ${ack} row, and Delete deletes it`, () => {
+      const onDeleteUnsent = vi.fn();
+      const bubble = mount(unsent(ack), { onDeleteUnsent });
+      mouse(bubble, "contextmenu", { clientX: 20, clientY: 20 });
+      expect(present(MENU)).toBe(true);
+      const items = all(MENU + " [role='menuitem']");
+      expect(items.map((b) => b.textContent?.trim())).toEqual(["Delete"]);
+      (items[0] as HTMLButtonElement).click();
+      expect(onDeleteUnsent).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  it("opens nothing on a row that is being sent", () => {
+    const bubble = mount(unsent("pending"), { onDeleteUnsent: () => {} });
+    mouse(bubble, "contextmenu", { clientX: 20, clientY: 20 });
+    expect(present(MENU)).toBe(false);
+  });
+
+  it("opens nothing when the view offers no delete", () => {
+    const bubble = mount(unsent("failed"));
+    mouse(bubble, "contextmenu", { clientX: 20, clientY: 20 });
+    expect(present(MENU)).toBe(false);
+  });
+});

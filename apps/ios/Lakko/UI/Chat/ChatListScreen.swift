@@ -51,6 +51,9 @@ public struct ChatListScreen: View {
     @ObservedObject var feedReading: FeedReadingModel
     /// ADR-0061 — the title follows the interface language.
     @ObservedObject private var l10n = Localization.shared
+    /// docs/ux/connection-state.md — "Waiting for network..." /
+    /// "Connecting..." while this device cannot reach the servers.
+    @ObservedObject private var connection = ConnectionState.shared
     /// ADR-0099 step 3 — the read-only app of a suspended account.
     @Environment(\.accountSuspended) private var accountSuspended
     /// The ledger openings of bare `/g/` links a row's second line reads
@@ -214,7 +217,7 @@ public struct ChatListScreen: View {
                     ])
             }
             .lakkoActionSheet(isPresented: $createMenuOpen) { createMenuItems(includeSaved: createMenuWithSaved) }
-            .navigationTitle(l10n.t("nav.chats"))
+            .navigationTitle(connection.phase.headerKey.map { l10n.t($0) } ?? l10n.t("nav.chats"))
             .navigationBarTitleDisplayMode(.large)
             // Always shown: with the folder bar inset above the list the system
             // collapsed the field and never brought it back, so Chats had no

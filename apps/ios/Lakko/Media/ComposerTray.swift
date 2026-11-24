@@ -32,9 +32,14 @@ public struct ComposerTrayItem: Identifiable, Equatable {
         case uploading(Double)
         /// Uploaded: ``ComposerTrayItem/ref`` is what the message carries.
         case ready
-        /// The upload did not finish. Send stays off until it is retried or
-        /// removed.
+        /// The server refused the upload (too large, over the limit, storage
+        /// full, or anything else that is not a missing answer). Send stays
+        /// off until it is retried or removed.
         case failed
+        /// `docs/ux/connection-state.md` section 2 — the upload got no answer.
+        /// In a chat it does not stop Send: the message takes it along and
+        /// uploads it as part of its send (section 7.3). A tap retries.
+        case noAnswer
     }
 
     public let id: UUID
@@ -71,9 +76,12 @@ public struct ComposerTrayItem: Identifiable, Equatable {
     public var isBusy: Bool {
         switch status {
         case .preparing, .uploading: return true
-        case .ready, .failed: return false
+        case .ready, .failed, .noAnswer: return false
         }
     }
+
+    /// A tap on it uploads it again.
+    public var isRetryable: Bool { status == .failed || status == .noAnswer }
 }
 
 /// The tray's state and its rules (pure).
@@ -137,12 +145,20 @@ public struct ComposerTray: Equatable {
     /// Something is still being prepared or uploaded.
     public var isBusy: Bool { items.contains(where: \.isBusy) }
 
-    public var hasFailed: Bool { items.contains { $0.status == .failed } }
+    public var hasFailed: Bool { items.contains(where: \.isRetryable) }
 
     /// Send is on when there is text or at least one item, and no item is
     /// still uploading or failed.
-    public func canSend(hasText: Bool) -> Bool {
-        (hasText || !items.isEmpty) && !isBusy && !hasFailed
+    ///
+    /// `sendsUnfinished` (a chat, `docs/ux/media-messages.md` section 11,
+    /// 2026-11-24): an item still uploading, or whose upload got no answer,
+    /// no longer stops Send; the message uploads it as part of its send.
+    /// Only an item the server refused does, and one still being prepared
+    /// (its file does not exist yet).
+    public func canSend(hasText: Bool, sendsUnfinished: Bool = false) -> Bool {
+        guard hasText || !items.isEmpty else { return false }
+        guard sendsUnfinished else { return !isBusy && !hasFailed }
+        return !items.contains { $0.status == .failed || $0.status == .preparing }
     }
 
     /// What the message carries, in the order the items were added. The
@@ -195,6 +211,19 @@ public enum ComposerTrayEvent {
     case prepared(kind: ComposerTrayItem.Kind, name: String?, size: UInt64, durationMs: UInt32?, thumbnail: Data?)
     /// Fraction of the upload sent.
     case progress(Double)
+    /// Section 7.3 — the prepared form the upload is about to send, so a
+    /// message sent before the upload finished can upload it itself.
+    case payload(ComposerTrayPayload)
+}
+
+/// What an item's upload sends, prepared (`docs/ux/connection-state.md`
+/// section 7.3): the bytes, or the prepared file they are in, and what the
+/// reference carries.
+public struct ComposerTrayPayload {
+    public var input: OutboxMediaInput
+    /// A prepared video the upload reads from; read into ``input`` when the
+    /// message takes the item.
+    public var fileURL: URL?
 }
 
 /// A problem that leaves an item out of the tray (said in the composer).
@@ -225,6 +254,7 @@ public final class ComposerTrayStore: ObservableObject {
     private let worker: Worker
     private var sources: [UUID: ComposerTraySource] = [:]
     private var tasks: [UUID: Task<Void, Never>] = [:]
+    private var payloads: [UUID: ComposerTrayPayload] = [:]
     private var noticeTask: Task<Void, Never>?
 
     public init(idleDays: UInt8? = nil, worker: Worker? = nil) {
@@ -253,6 +283,7 @@ public final class ComposerTrayStore: ObservableObject {
     public func remove(_ id: UUID) {
         tasks[id]?.cancel()
         tasks[id] = nil
+        payloads[id] = nil
         if let source = sources.removeValue(forKey: id) { Self.discard(source) }
         if let removed = tray.remove(id), let ref = removed.ref {
             // ADR-0065 section 6 — uploaded, never sent: deleted at once.
@@ -261,7 +292,7 @@ public final class ComposerTrayStore: ObservableObject {
     }
 
     public func retry(_ id: UUID) {
-        guard tray.item(id)?.status == .failed, sources[id] != nil else { return }
+        guard tray.item(id)?.isRetryable == true, sources[id] != nil else { return }
         start(id)
     }
 
@@ -272,9 +303,64 @@ public final class ComposerTrayStore: ObservableObject {
         for source in sources.values { Self.discard(source) }
         sources = [:]
         tasks = [:]
+        payloads = [:]
         tray.clear()
         problem = nil
         return refs
+    }
+
+    /// Section 11 / `docs/ux/connection-state.md` section 7.3 — everything
+    /// the message carries, in order, when some uploads have not finished:
+    /// an uploaded item as its reference, any other as its prepared form,
+    /// which the message uploads as part of its send. The item's own upload
+    /// is cancelled (a result that still arrives is deleted, never sent).
+    /// The tray clears. `nil`, and nothing changes, when an item has no
+    /// prepared form (still being prepared or refused): Send is off then.
+    public func takeForSendWithUploads() -> [OutboxPart]? {
+        var parts: [OutboxPart] = []
+        for item in tray.items {
+            if let ref = item.ref {
+                parts.append(.ready(ref))
+                continue
+            }
+            guard item.status != .failed, var payload = payloads[item.id] else { return nil }
+            if payload.input.bytes == nil, let file = payload.fileURL {
+                // Read now, before the cancelled upload removes its file.
+                guard let bytes = try? Data(contentsOf: file, options: .mappedIfSafe) else { return nil }
+                payload.input.bytes = Data(bytes)
+            }
+            parts.append(.pending(payload.input))
+        }
+        for task in tasks.values { task.cancel() }
+        tasks = [:]
+        payloads = [:]
+        for source in sources.values { Self.discard(source) }
+        sources = [:]
+        tray.clear()
+        problem = nil
+        // ADR-0047 section 6 — the micro thumbnail on the first photo or
+        // video only, as ``ComposerTray/refs`` keeps it.
+        let firstMedia = parts.firstIndex { part in
+            let mime: String?
+            switch part {
+            case .ready(let ref): mime = ref.mime
+            case .pending(let input): mime = input.mime
+            }
+            switch InlineMedia.inlineType(mime: mime) {
+            case .image?, .video?: return true
+            default: return false
+            }
+        }
+        return parts.enumerated().map { index, part in
+            switch part {
+            case .ready(var ref):
+                ref.inlineThumb = index == firstMedia ? InlineThumb.bounded(ref.inlineThumb) : nil
+                return .ready(ref)
+            case .pending(var input):
+                input.inlineThumb = index == firstMedia ? InlineThumb.bounded(input.inlineThumb) : nil
+                return .pending(input)
+            }
+        }
     }
 
     /// Forget device / Delete account: drop everything, deleting nothing on
@@ -282,6 +368,7 @@ public final class ComposerTrayStore: ObservableObject {
     public func reset() {
         for task in tasks.values { task.cancel() }
         tasks = [:]
+        payloads = [:]
         for source in sources.values { Self.discard(source) }
         sources = [:]
         tray.clear()
@@ -332,6 +419,8 @@ public final class ComposerTrayStore: ObservableObject {
                         self.tray.update(id) {
                             if case .uploading = $0.status { $0.status = .uploading(fraction) }
                         }
+                    case .payload(let payload):
+                        self.payloads[id] = payload
                     }
                 }
                 guard let self else { return }
@@ -346,6 +435,7 @@ public final class ComposerTrayStore: ObservableObject {
                     $0.status = .ready
                 }
                 self.tasks[id] = nil
+                self.payloads[id] = nil
                 // Uploaded: the source is no longer needed for a retry.
                 if let source = self.sources.removeValue(forKey: id) { Self.discard(source) }
             } catch let refusal as ComposerTrayRefusal {
@@ -359,7 +449,10 @@ public final class ComposerTrayStore: ObservableObject {
             } catch {
                 guard let self, !Task.isCancelled else { return }
                 self.tasks[id] = nil
-                self.tray.update(id) { $0.status = .failed }
+                // `docs/ux/connection-state.md` section 2 — no answer is not
+                // a refusal: a chat's Send stays on.
+                let noAnswer = WaitingSends.isNetworkFailure(error)
+                self.tray.update(id) { $0.status = noAnswer ? .noAnswer : .failed }
                 if let bridge = error as? AttachmentBridgeError, case .uploadLimited = bridge {
                     self.problem = bridge.userText(fileName: nil)
                 }
@@ -561,6 +654,15 @@ enum ComposerTrayUpload {
         } else {
             size = 0
         }
+        // Section 7.3 — what a message sent before this upload finishes
+        // uploads itself.
+        report(.payload(ComposerTrayPayload(
+            input: OutboxMediaInput(
+                bytes: prepared.bytes, name: prepared.name, mime: prepared.mime,
+                meta: MediaAttachmentMeta(kind: nil, width: prepared.width, height: prepared.height),
+                poster: prepared.thumb, posterWidth: prepared.thumbWidth, posterHeight: prepared.thumbHeight,
+                inlineThumb: InlineThumb.bounded(prepared.inlineThumb)),
+            fileURL: prepared.bytes == nil ? prepared.fileURL : nil)))
         report(.prepared(kind: kind, name: nil, size: size, durationMs: durationMs, thumbnail: prepared.thumb))
         var thumbRef: ThumbRef?
         if let thumb = prepared.thumb {
@@ -610,17 +712,23 @@ enum ComposerTrayUpload {
         guard data.count <= AttachmentBridge.maxAttachmentBytes else {
             throw ComposerTrayRefusal(text: .key("attach.preview.file_too_big"))
         }
+        // ADR-0047 section 6 — the core keeps the micro thumbnail on the
+        // first ref whose MIME is an inline image or video, however it was
+        // added: a JPEG or MP4 picked through File, pasted or dropped can
+        // be that ref, so it gets one too.
+        let inline = await inlineThumb(forFile: data, mime: mime, fileURL: fileURL)
+        report(.payload(ComposerTrayPayload(
+            input: OutboxMediaInput(
+                bytes: data, name: name, mime: mime ?? "application/octet-stream",
+                meta: MediaAttachmentMeta(kind: nil), inlineThumb: inline),
+            fileURL: nil)))
         report(.prepared(kind: .file, name: name, size: UInt64(data.count), durationMs: nil, thumbnail: nil))
         var ref = try await AttachmentBridge.encryptAndUpload(
             bytes: data, mime: mime, name: name, idleDays: idleDays, onProgress: progress)
         if InlineMedia.decision(for: ref).bubble != .file {
             MediaSessionCache.shared.store(data, key: MediaSessionCache.key(for: ref))
         }
-        // ADR-0047 section 6 — the core keeps the micro thumbnail on the
-        // first ref whose MIME is an inline image or video, however it was
-        // added: a JPEG or MP4 picked through File, pasted or dropped can
-        // be that ref, so it gets one too.
-        ref.inlineThumb = await inlineThumb(forFile: data, mime: ref.mime, fileURL: fileURL)
+        ref.inlineThumb = inline
         return ref
     }
 
@@ -665,9 +773,20 @@ enum ComposerTrayUpload {
         guard bytes.count <= AttachmentBridge.maxAttachmentBytes else {
             throw ComposerTrayRefusal(text: .key("attach.preview.file_too_big"))
         }
-        report(.prepared(kind: .file, name: url.lastPathComponent, size: UInt64(bytes.count), durationMs: nil, thumbnail: nil))
         let tags = await AudioTags.read(url: url)
         let limits = contentLimits()
+        let durationMs = tags.durationMs.map { min($0, limits.maxAudioDurationMs) }
+        let title = AudioTags.bounded(tags.title ?? url.deletingPathExtension().lastPathComponent, limits)
+        let artist = tags.artist.flatMap { AudioTags.bounded($0, limits) }
+        report(.payload(ComposerTrayPayload(
+            input: OutboxMediaInput(
+                bytes: bytes, name: url.lastPathComponent,
+                mime: UTTypeMime.of(url) ?? "application/octet-stream",
+                meta: MediaAttachmentMeta(kind: "audio", durationMs: durationMs),
+                poster: tags.cover?.data, posterWidth: tags.cover?.width, posterHeight: tags.cover?.height,
+                title: title, artist: artist),
+            fileURL: nil)))
+        report(.prepared(kind: .file, name: url.lastPathComponent, size: UInt64(bytes.count), durationMs: nil, thumbnail: nil))
         var thumb: ThumbRef?
         if let cover = tags.cover {
             thumb = try? await AttachmentBridge.encryptAndUploadThumb(
@@ -677,11 +796,11 @@ enum ComposerTrayUpload {
             bytes: bytes, mime: UTTypeMime.of(url), name: url.lastPathComponent,
             media: MediaAttachmentMeta(
                 kind: "audio",
-                durationMs: tags.durationMs.map { min($0, limits.maxAudioDurationMs) },
+                durationMs: durationMs,
                 width: nil, height: nil, thumb: thumb),
             idleDays: idleDays, onProgress: progress)
-        ref.title = AudioTags.bounded(tags.title ?? url.deletingPathExtension().lastPathComponent, limits)
-        ref.artist = tags.artist.flatMap { AudioTags.bounded($0, limits) }
+        ref.title = title
+        ref.artist = artist
         MediaSessionCache.shared.store(bytes, key: MediaSessionCache.key(for: ref))
         return ref
     }

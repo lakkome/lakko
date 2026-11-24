@@ -154,12 +154,28 @@ final class ComposerTrayTests: XCTestCase {
         store.add([.photo(Data([9]))])
         await settle(store)
         let id = store.tray.items[0].id
-        XCTAssertEqual(store.tray.items[0].status, .failed)
+        // `docs/ux/connection-state.md` section 2 — no answer, not a refusal:
+        // a chat's Send stays on (the message uploads it itself); a
+        // channel's does not.
+        XCTAssertEqual(store.tray.items[0].status, .noAnswer)
         XCTAssertFalse(store.tray.canSend(hasText: true))
+        XCTAssertTrue(store.tray.canSend(hasText: true, sendsUnfinished: true))
         fail = false
         store.retry(id)
         await settle(store)
         XCTAssertEqual(store.tray.item(id)?.status, .ready)
+        XCTAssertEqual(store.tray.items.count, 1)
+    }
+
+    /// `docs/ux/media-messages.md` section 11 — an upload the server refused
+    /// keeps Send off, in a chat too.
+    func testARefusedUploadKeepsSendOffEvenInAChat() async {
+        let store = store { _ in .failure(AttachmentBridgeError.uploadLimited) }
+        store.add([.photo(Data([9]))])
+        await settle(store)
+        XCTAssertEqual(store.tray.items[0].status, .failed)
+        XCTAssertFalse(store.tray.canSend(hasText: true, sendsUnfinished: true))
+        XCTAssertNil(store.takeForSendWithUploads(), "nothing is taken")
         XCTAssertEqual(store.tray.items.count, 1)
     }
 

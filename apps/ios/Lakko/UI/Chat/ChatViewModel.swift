@@ -385,6 +385,11 @@ public final class ChatViewModel: ObservableObject {
         self.groupCallHost.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
+        // Section 7.3 of `docs/ux/connection-state.md` — the upload rings of
+        // the unsent media rows.
+        repository.outboxUploadProgress.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
         // Group-call record — kept by the repository (so it is fed whichever
         // chat is open); this screen only mirrors its own chat's entry.
         repository.$groupCalls
@@ -2986,8 +2991,20 @@ public final class ChatViewModel: ObservableObject {
         guard !sending else { return }
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         // `docs/ux/media-messages.md` section 11 — one message: the text and
-        // every item in the tray, once no item is still uploading or failed.
-        guard tray.tray.canSend(hasText: !trimmed.isEmpty) else { return }
+        // every item in the tray. An item still uploading, or whose upload
+        // got no answer, goes with it and is uploaded as part of its send
+        // (2026-11-24, `docs/ux/connection-state.md` section 7.3); one the
+        // server refused keeps Send off.
+        guard tray.tray.canSend(hasText: !trimmed.isEmpty, sendsUnfinished: true) else { return }
+        if tray.tray.items.contains(where: { $0.ref == nil }) {
+            guard let parts = tray.takeForSendWithUploads() else { return }
+            sendError = nil
+            stopTyping()
+            draft = ""
+            let reply = takeArmedReply()
+            repository.sendMessageWithUploads(groupIdHex: groupIdHex, text: trimmed, parts: parts, reply: reply)
+            return
+        }
         let stagedAttachments = tray.takeForSend()
 
         sending = true
@@ -3630,6 +3647,12 @@ public final class ChatViewModel: ObservableObject {
 
     /// Delete (tombstone) own message `message`.
     func deleteMessage(_ message: ChatMessage) {
+        // Section 7.3 — a message that never went is deleted here only: its
+        // row, its outbox entry and its files.
+        if message.messageId <= 0, message.localId != 0 {
+            repository.deleteUnsentRow(groupIdHex: groupIdHex, localId: message.localId)
+            return
+        }
         guard message.messageId > 0 else { return }
         Task { @MainActor in
             do {
@@ -4070,8 +4093,25 @@ public final class ChatViewModel: ObservableObject {
             // ADR-0052 — a take recorded with a reply armed is sent as the
             // reply. Weak: the controller must hold nothing that keeps this
             // view model alive, and a screen that is gone has no strip.
-            takeArmedReply: { [weak self] in self?.takeArmedReply() }
+            takeArmedReply: { [weak self] in self?.takeArmedReply() },
+            // `docs/ux/connection-state.md` section 7.3 — voice messages,
+            // video notes and GIFs go in the conversation's order, kept in
+            // the outbox, sent by the repository (also after this screen is
+            // gone).
+            sendMedia: { input, reply in
+                repository.sendMedia(groupIdHex: groupIdHex, media: input, reply: reply)
+            },
+            outboxFile: { key in repository.outboxLocalFile(key: key) },
+            uploadRefusals: repository.outboxUploadProgress.$refusal.eraseToAnyPublisher()
         )
+    }
+
+    /// Section 7.3 — the upload ring of an unsent media row whose upload is
+    /// running, or `nil`.
+    func outboxProgress(_ message: ChatMessage) -> Double? {
+        guard !message.outboxMedia.isEmpty else { return nil }
+        return repository.outboxUploadProgress.fractions[
+            ChatRepository.outboxKey(groupIdHex: groupIdHex, localId: message.localId)]
     }
 
     /// ADR-0047 §4 — react with any single emoji grapheme from the picker.
@@ -4109,14 +4149,22 @@ public final class ChatViewModel: ObservableObject {
     }
 
     public func pollOnceLongPoll(waitSecs: Int = ChatViewModel.defaultLongPollSecs) async {
+        let startedAt = pollClockMs()
+        let outcome: ScreenPollPacer.Outcome
         do {
             try await repository.pollGroup(
                 groupIdHex: groupIdHex,
                 waitSecs: waitSecs
             )
+            outcome = .succeeded
         } catch {
-            // best-effort
+            // Best-effort, but never at once again: a poll that failed without
+            // parking (no network) would otherwise be repeated as fast as the
+            // runtime allows (``ScreenPollPacer``).
+            outcome = .failed(network: ScreenPollPacer.isNetworkFailure(error))
         }
+        let elapsed = pollClockMs() &- startedAt
+        let delay = pollPacer.delayMs(after: outcome, elapsedMs: elapsed)
         // G-18 / ADR-0029 — the mid-call rekey no longer runs here: the
         // app-level ``GroupCallHost`` rekeys when the group's MLS chain drains,
         // which covers this poll and every other path an epoch can move on,
@@ -4125,6 +4173,25 @@ public final class ChatViewModel: ObservableObject {
         // membership change, and the batch may have carried a peer's proposal.
         // Either way the sheet's roster + pending set are stale.
         if conversationInfoOpen { refreshMembers() }
+        if delay > 0 {
+            // `docs/ux/connection-state.md` section 3 — the wait ends when the
+            // network comes back, and the next poll starts a fresh backoff.
+            let since = NetworkReturnSignal.shared.current
+            await pollSleep(delay)
+            if NetworkReturnSignal.shared.current != since { pollPacer.noteNetworkReturned() }
+        }
+    }
+
+    /// The pacing of this screen's receive loop (``ScreenPollPacer``).
+    private var pollPacer = ScreenPollPacer()
+    /// Waits `ms` milliseconds; returns early, without throwing, when the
+    /// calling task is cancelled or the network comes back. Replaced by tests.
+    var pollSleep: (UInt64) async -> Void = { ms in
+        await ConnectionState.sleepUnlessNetworkReturns(ms: ms)
+    }
+    /// A monotonic clock in milliseconds. Replaced by tests.
+    var pollClockMs: () -> UInt64 = {
+        DispatchTime.now().uptimeNanoseconds / 1_000_000
     }
 
     /// DS long-poll budget — same value as

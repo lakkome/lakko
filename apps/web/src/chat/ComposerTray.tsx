@@ -80,7 +80,9 @@ export function ComposerTray(props: {
             <Index each={props.tray.items()}>
               {(slot) => {
                 const item = slot;
-                const failed = (): boolean => item().status === "failed";
+                // A refused upload and one with no answer both show the retry
+                // glyph (a tap retries); only the refused one stops Send.
+                const failed = (): boolean => item().status === "failed" || item().status === "waiting";
                 const name = (): string => itemName(item());
                 const open = (): void => {
                   if (failed()) {

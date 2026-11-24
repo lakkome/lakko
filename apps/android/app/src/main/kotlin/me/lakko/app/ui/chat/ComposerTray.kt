@@ -23,8 +23,15 @@ public sealed interface TrayStatus {
     /** Encrypting and uploading; [progress] 0..1 once bytes are moving. */
     public data class Uploading(val progress: Float?) : TrayStatus
 
-    /** The upload failed: the item shows a retry glyph and Send stays off. */
+    /** The server refused the upload (too large, over the limit, storage
+     *  full): the item shows a retry glyph and Send stays off. */
     public data object Failed : TrayStatus
+
+    /** The upload got no answer (a network failure): the item keeps its
+     *  ring and is uploaded again when the servers answer. It does not stop
+     *  Send (section 11, 2026-11-24): the message carries its prepared file
+     *  and uploads it as part of its send. */
+    public data object Waiting : TrayStatus
 
     /** Uploaded; the reference is ready to go with the message. */
     public data object Ready : TrayStatus
@@ -97,11 +104,27 @@ public data class ComposerTray(
     /** Files in the tray. */
     public val fileCount: Int get() = items.count { !it.isMedia }
 
-    /** Some item is still being prepared, uploaded, or failed. */
-    public val busy: Boolean get() = items.any { it.status != TrayStatus.Ready || it.ref == null }
+    /**
+     * Section 11 Send (2026-11-24) — some item stops Send: still being read
+     * and prepared (its prepared file does not exist yet), or refused by the
+     * server. An upload still running, or one that got no answer, does not:
+     * the message uploads it as part of its send.
+     */
+    public val busy: Boolean
+        get() = items.any {
+            it.status == TrayStatus.Preparing || it.status == TrayStatus.Failed ||
+                (it.status == TrayStatus.Ready && it.ref == null)
+        }
 
-    /** Section 11 Send — text or at least one item, and every item uploaded. */
+    /** Section 11 Send — text or at least one item, and no item that stops it. */
     public fun canSend(text: String): Boolean = (text.isNotBlank() || items.isNotEmpty()) && !busy
+
+    /**
+     * A channel post (section 11 before 2026-11-24, posts are not in the
+     * outbox): every item must be uploaded before Send.
+     */
+    public fun canSendAllUploaded(text: String): Boolean =
+        (text.isNotBlank() || items.isNotEmpty()) && items.all { it.status == TrayStatus.Ready && it.ref != null }
 
     /** The references that go with the message, in the order added; the
      *  micro thumbnail (ADR-0047 section 6) only on the first photo or video. */

@@ -13,6 +13,7 @@
  */
 
 import { t } from "../l10n";
+import { Icon } from "../ui/icons";
 import { AttachmentFailureNote } from "./AttachmentFailureNote";
 import { openFailureOf, type AttachmentFailure } from "../chat/attachment-failure";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show, type JSX } from "solid-js";
@@ -34,7 +35,7 @@ import { videoNoteAsideFirst, videoNoteDurationLabel } from "./video-note-layout
 /** Upload state of an outgoing media message: a completed fraction while
  *  uploading, `"failed"` when nothing reached the other side, `undefined`
  *  once sent (or for a received message). */
-export type MediaUpload = number | "failed" | undefined;
+export type MediaUpload = number | "failed" | "waiting" | undefined;
 
 export interface MediaBubbleProps {
   /** Not named `ref`: Solid's compiler turns a `ref` prop on a component
@@ -76,6 +77,35 @@ const SEEK_STEP_MS = 5000;
  *  and offers the one action, in the place the message is. Exported so the
  *  text bubble shows the SAME thing a failed media bubble does - two spellings
  *  of "this did not send" is one of them being wrong. */
+/**
+ * A message waiting for the network (`docs/ux/connection-state.md` section 7):
+ * a clock and "Waiting for network" where "Not sent · Retry" would be. A tap
+ * sends now (the conversation's earlier waiting messages go first).
+ */
+export function WaitingForNetwork(props: { onTap: () => void }): JSX.Element {
+  return (
+    <button
+      type="button"
+      class="lk-waiting-network"
+      onClick={() => props.onTap()}
+      style={{
+        border: "none",
+        background: "transparent",
+        color: "inherit",
+        padding: 0,
+        "min-height": 0,
+        "font-size": "0.78rem",
+        display: "inline-flex",
+        "align-items": "center",
+        gap: "4px",
+      }}
+    >
+      <Icon name="clock" size={12} />
+      <span>{t("chat.message.waiting_network")}</span>
+    </button>
+  );
+}
+
 export function NotSent(props: { onRetry: () => void }): JSX.Element {
   return (
     <button
@@ -509,6 +539,9 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
       <Show when={props.upload === "failed"}>
         <NotSent onRetry={props.onRetry} />
       </Show>
+      <Show when={props.upload === "waiting"}>
+        <WaitingForNetwork onTap={props.onRetry} />
+      </Show>
     </div>
   );
 }
@@ -889,6 +922,9 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
       <Show when={props.upload === "failed"}>
         <NotSent onRetry={props.onRetry} />
       </Show>
+      <Show when={props.upload === "waiting"}>
+        <WaitingForNetwork onTap={props.onRetry} />
+      </Show>
     </div>
   );
 }
@@ -1003,6 +1039,9 @@ export function GifBubble(props: MediaBubbleProps): JSX.Element {
       </Show>
       <Show when={props.upload === "failed"}>
         <NotSent onRetry={props.onRetry} />
+      </Show>
+      <Show when={props.upload === "waiting"}>
+        <WaitingForNetwork onTap={props.onRetry} />
       </Show>
       <Show when={fullScreen()}>
         <div class="lakko-lightbox" role="dialog" aria-label={t("chat.media.gif")} onClick={() => setFullScreen(false)}>

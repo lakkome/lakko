@@ -36,6 +36,9 @@ struct ChannelConversationScreen: View {
     @EnvironmentObject private var sync: DeviceGroupSyncRepository
     @EnvironmentObject private var inviteIntake: InviteIntake
     @ObservedObject private var l10n = Localization.shared
+    /// docs/ux/connection-state.md — "Waiting for network..." /
+    /// "Connecting..." while this device cannot reach the servers.
+    @ObservedObject private var connection = ConnectionState.shared
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -125,7 +128,9 @@ struct ChannelConversationScreen: View {
 
     /// Section 12 — "Public channel · 10k+ subscribers" / "Private channel".
     private var headerLine: String? {
-        ChannelHeaderLine.text(
+        // docs/ux/connection-state.md — the connection state replaces the line.
+        if let key = connection.phase.headerKey { return l10n.t(key) }
+        return ChannelHeaderLine.text(
             isPublic: state.extras(channelId).isPublic,
             subscriberCount: state.subscriberCountByChannel[channelId])
     }
@@ -175,7 +180,9 @@ struct ChannelConversationScreen: View {
                 // not measured; the web and Android clients use the same.
                 var ticks = 0
                 while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: 10_000_000_000)
+                    // `docs/ux/connection-state.md` section 3 — the next pass
+                    // runs at once when the network comes back.
+                    await ConnectionState.sleepUnlessNetworkReturns(ms: 10_000)
                     if Task.isCancelled { return }
                     ticks += 1
                     if model.access == .waiting || ticks % 6 == 0 { await model.catchUp() }

@@ -78,7 +78,7 @@ import { bubbleSenderLabelOf, realNameOf, reportUnnamedPerson } from "../profile
 import { ownPersonKeyB64 } from "./person-key";
 import { replyQuoteLabel, replyQuoteLines } from "./reply-snapshot";
 import { canSelectRow, selectionMarkName } from "./selection";
-import { NotSent } from "../media/MediaBubbles";
+import { NotSent, WaitingForNetwork } from "../media/MediaBubbles";
 import { shortTime } from "./timeline-layout";
 import type { TimelineRow } from "./timeline-row";
 import { EmojiPicker } from "../media/EmojiPicker";
@@ -226,6 +226,10 @@ export interface BubbleHost {
    *  the bubble a failed take and a failed composer message are the same
    *  gesture, and the person cannot tell them apart. */
   onRetrySend: () => void;
+  /** `docs/ux/connection-state.md` section 7.3 — delete this unsent row
+   *  (waiting or `Not sent`): its menu offers Delete alone. Absent: no menu
+   *  on an unsent row. */
+  onDeleteUnsent?: () => void;
   /** ADR-0047 — the menu's "+" opens the full picker for this id. */
   fullReactPickerId: number | null;
   onOpenFullReactPicker: (messageId: number) => void;
@@ -451,6 +455,8 @@ export function TimelineBubble(
           ? t("chat.message.sending")
           : live().ack === "failed"
             ? t("chat.message.not_sent")
+            : live().ack === "waiting"
+              ? t("chat.message.waiting_network")
             : shortTime(live().createdAt, displayLocale())
       }
       senderName={null}
@@ -523,7 +529,7 @@ function ChatBubbleBody(
   props: BubbleHost & {
     messageId: number | undefined;
     isOwn: boolean;
-    ack: "pending" | "sent" | "failed";
+    ack: "pending" | "sent" | "failed" | "waiting";
     originalText: string;
     attachments: AttachmentRefBytes[];
     /** ADR-0047 — an outgoing media message's local key before upload. */
@@ -786,8 +792,16 @@ function ChatBubbleBody(
     if (rowSelectable() && props.messageId !== undefined) props.onToggleSelect(props.messageId);
   };
 
+  /** Section 7.3 — an own unsent row opens a menu with Delete alone. */
+  const unsentMenu = (): boolean =>
+    props.isOwn &&
+    (props.ack === "waiting" || props.ack === "failed") &&
+    props.onDeleteUnsent !== undefined &&
+    !props.selecting;
+  const menuOpenable = (): boolean => menuAvailable() || unsentMenu();
+
   function openMenu(x: number, y: number): void {
-    if (!menuAvailable() || bubbleEl === undefined) return;
+    if (!menuOpenable() || bubbleEl === undefined) return;
     const rect = bubbleEl.getBoundingClientRect();
     setMenuAnchor({
       bubble: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom },
@@ -973,7 +987,16 @@ function ChatBubbleBody(
           words "Not sent" and no way to act on them. */}
       <Show
         when={props.ack === "failed" && otherMediaRefs().length === 0}
-        fallback={<span>{props.time}</span>}
+        fallback={
+          <Show
+            when={props.ack === "waiting" && otherMediaRefs().length === 0}
+            fallback={<span>{props.time}</span>}
+          >
+            {/* docs/ux/connection-state.md section 7 — a clock and the words,
+                not "Not sent"; a tap sends now. */}
+            <WaitingForNetwork onTap={() => props.onRetrySend()} />
+          </Show>
+        }
       >
         <NotSent onRetry={() => props.onRetrySend()} />
       </Show>
@@ -1098,9 +1121,9 @@ function ChatBubbleBody(
            message and buys the first keyboard path there has ever been to
            these actions on a plain text message: `:focus-within` only ever
            fired for a bubble that happened to contain a focusable control. */
-        tabindex={menuAvailable() ? 0 : undefined}
+        tabindex={menuOpenable() ? 0 : undefined}
         onContextMenu={(e) => {
-          if (!menuAvailable()) return;
+          if (!menuOpenable()) return;
           // Both the mouse's right-click and the keyboard's context-menu key /
           // Shift+F10 arrive here in the browsers that synthesise them; the
           // keydown handler below covers the ones that do not.
@@ -1108,14 +1131,14 @@ function ChatBubbleBody(
           openMenu(e.clientX, e.clientY);
         }}
         onKeyDown={(e) => {
-          if (!menuAvailable()) return;
+          if (!menuOpenable()) return;
           if (e.key !== "ContextMenu" && !(e.key === "F10" && e.shiftKey)) return;
           e.preventDefault();
           const rect = bubbleEl?.getBoundingClientRect();
           openMenu(rect?.left ?? 0, rect?.top ?? 0);
         }}
         onPointerDown={(e) => {
-          if (e.pointerType !== "touch" || !menuAvailable()) return;
+          if (e.pointerType !== "touch" || !menuOpenable()) return;
           // A long press that STARTS on one of the bubble's own controls
           // belongs to that control, not to the message: holding the
           // waveform is a scrub, holding play is still play. This is the
@@ -1558,11 +1581,12 @@ function ChatBubbleBody(
             at open AND here, so a menu left open when an eviction commit
             lands mid-poll closes with the affordance rather than floating
             over a dead group. */}
-        <Show when={menuAvailable() ? menuAnchor() : null}>
+        <Show when={menuOpenable() ? menuAnchor() : null}>
           {(anchor) => (
             <MessageMenu
               anchor={anchor()}
               pinOnly={pinOnlyMenu()}
+              deleteOnly={!menuAvailable() && unsentMenu()}
               canEditDelete={props.isOwn}
               canReply={props.replyAllowed !== false}
               /* `message-actions.md` section 3 — offered on "any message with
@@ -1643,6 +1667,10 @@ function ChatBubbleBody(
               }}
               onEdit={() => props.onStartEdit(props.messageId as number, displayText())}
               onDelete={() => {
+                if (!menuAvailable() && unsentMenu()) {
+                  props.onDeleteUnsent?.();
+                  return;
+                }
                 if (props.messageId !== undefined) void props.onDeleteMessage(props.messageId);
               }}
               extraDestructive={

@@ -28,8 +28,10 @@ export type TrayKind = "photo" | "video" | "file";
  *  camera, a paste, a drop) is sent as media when it can be. */
 export type TraySource = "media" | "file" | "audio";
 
-/** What one item of an upload is doing. */
-export type TrayStatus = "preparing" | "uploading" | "ready" | "failed";
+/** What one item of an upload is doing. `waiting`: the upload got no answer
+ *  (a network failure); `failed`: the server refused it (too large, over the
+ *  limit, storage full). */
+export type TrayStatus = "preparing" | "uploading" | "ready" | "waiting" | "failed";
 
 /**
  * The shape a file takes in the tray, or `"too-big"` when it cannot be sent at
@@ -95,12 +97,39 @@ export function fitIntoTray(
 }
 
 /**
- * Whether Send runs: the field has text or the tray holds an item, and no item
- * is still on its way up or failed (section 11, Send).
+ * Whether Send runs (section 11, Send, as of 2026-11-24): the field has text
+ * or the tray holds an item, and no item was refused by the server. An item
+ * still preparing, still uploading or with no answer does not stop Send: its
+ * upload becomes part of the message's send (`docs/ux/connection-state.md`
+ * section 7.3).
+ *
+ * `allReady`: a composer whose sends have no outbox (channel posts, section
+ * 7.3 "What is unchanged") still waits for every upload.
  */
-export function traySendable(text: string, statuses: readonly TrayStatus[]): boolean {
-  if (statuses.some((s) => s !== "ready")) return false;
+export function traySendable(
+  text: string,
+  statuses: readonly TrayStatus[],
+  options: { readonly allReady?: boolean } = {},
+): boolean {
+  if (options.allReady === true ? statuses.some((s) => s !== "ready") : statuses.some((s) => s === "failed")) {
+    return false;
+  }
   return text.length > 0 || statuses.length > 0;
+}
+
+/**
+ * The index of the message's carrier of the micro thumbnail (ADR-0047
+ * section 6): the first item, in tray order, whose type shows inline as an
+ * image or a video; `-1` when none does. The rule `messageRefs` applies.
+ */
+export function carrierIndexOf(
+  mimes: readonly (string | undefined)[],
+  inlineType: (mime: string | undefined) => "image" | "audio" | "video" | null,
+): number {
+  return mimes.findIndex((m) => {
+    const inline = inlineType(m);
+    return inline === "image" || inline === "video";
+  });
 }
 
 /**
@@ -125,6 +154,14 @@ export function trayDurationLabel(ms: number | undefined): string | null {
   const m = Math.floor(total / 60);
   const s = total % 60;
   return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+/** A reference without the micro thumbnail (it rides on the carrier only). */
+export function withoutInlineThumb(ref: AttachmentRefBytes): AttachmentRefBytes {
+  if (ref.inlineThumb === undefined) return ref;
+  const rest: { -readonly [K in keyof AttachmentRefBytes]: AttachmentRefBytes[K] } = { ...ref };
+  delete rest.inlineThumb;
+  return rest;
 }
 
 /**

@@ -2549,6 +2549,18 @@
       "text": "查看",
       "status": "machine"
     },
+    "connection.waiting": {
+      "text": "等待网络...",
+      "status": "machine"
+    },
+    "connection.connecting": {
+      "text": "正在连接...",
+      "status": "machine"
+    },
+    "connection.restored_a11y": {
+      "text": "已连接。",
+      "status": "machine"
+    },
     "notification.join_request.title": {
       "text": "加入请求",
       "status": "machine"
@@ -10147,6 +10159,10 @@
     },
     "tab.other.opening": {
       "text": "正在此处打开...",
+      "status": "machine"
+    },
+    "chat.message.waiting_network": {
+      "text": "等待网络",
       "status": "machine"
     }
   },

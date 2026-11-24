@@ -61,6 +61,24 @@ final class ScriptedDsURLProtocol: URLProtocol {
         knockEpochs[scope] = epoch
     }
 
+    /// Scopes whose every request fails as a device with no network fails:
+    /// at once, with `URLError(.notConnectedToInternet)`.
+    private static var offlineScopes: Set<String> = []
+
+    static func setOffline(_ offline: Bool, scope: String) {
+        lock.lock(); defer { lock.unlock() }
+        if offline { offlineScopes.insert(scope) } else { offlineScopes.remove(scope) }
+    }
+
+    /// Called with every request of a scope as it starts, before it is
+    /// answered (on the loading thread).
+    private static var observers: [String: (URLRequest) -> Void] = [:]
+
+    static func observeRequests(scope: String, _ observer: ((URLRequest) -> Void)?) {
+        lock.lock(); defer { lock.unlock() }
+        observers[scope] = observer
+    }
+
     static func knockPayloadCounts(scope: String) -> [Int] {
         lock.lock(); defer { lock.unlock() }
         return knocks[scope] ?? []
@@ -119,6 +137,11 @@ final class ScriptedDsURLProtocol: URLProtocol {
             return
         }
         let scope = Self.scope(of: url)
+        if let observer = Self.lock.withLock({ Self.observers[scope] }) { observer(request) }
+        if Self.lock.withLock({ Self.offlineScopes.contains(scope) }) {
+            client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
+            return
+        }
         // ADR-0053 — the access registration and the knock queue are separate
         // DS routes; a registration is accepted (204, nothing stored) and the
         // knock queue is empty, so neither leaks into the journal this stub

@@ -2013,9 +2013,11 @@ private struct SessionRoot: View, Equatable {
                 await contactsRepository.refreshInbox(
                     waitSecs: ContactsViewModel.defaultLongPollSecs)
                 // A long-poll holds the connection itself; a poll that returned
-                // at once (no secrets yet, a refused request) must not spin.
+                // at once (no secrets yet, a refused request, no network) must
+                // not spin. The wait ends when the network comes back
+                // (`docs/ux/connection-state.md` section 3).
                 if Date().timeIntervalSince(started) < 1 {
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    await ConnectionState.sleepUnlessNetworkReturns(ms: 2_000)
                 }
                 await Task.yield()
             }

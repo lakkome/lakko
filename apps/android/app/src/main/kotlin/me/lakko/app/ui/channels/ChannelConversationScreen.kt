@@ -188,6 +188,9 @@ public fun ChannelConversationScreen(
         ?: kotlinx.coroutines.flow.MutableStateFlow(emptyMap())).collectAsState()
     val band = counts[channelId]?.let(::subscriberBand)
     val headerLine = channelHeaderLineKey(knownPublic, band)?.let { (key, args) -> strings.format(key, args) }
+    // docs/ux/connection-state.md: the connection state replaces the line in
+    // the header (not on the subscribe card, which shows what the channel is).
+    val headerSubLine = me.lakko.app.ui.connectionHeaderText() ?: headerLine
     val title = channel?.let { channelTitle(it, strings) }
         ?: name?.trim()?.takeIf { it.isNotEmpty() }
         ?: handle?.trim()?.removePrefix("@")?.takeIf { it.isNotEmpty() }?.let { "@$it" }
@@ -266,7 +269,8 @@ public fun ChannelConversationScreen(
                         Spacer(Modifier.width(10.dp))
                         Column {
                             Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            headerLine?.let {
+                            me.lakko.app.ui.ConnectionAnnouncer()
+                            headerSubLine?.let {
                                 Text(
                                     it,
                                     style = MaterialTheme.typography.bodySmall,
@@ -585,7 +589,11 @@ private fun ChannelTimelineView(
         }
         var ticks = 0
         while (true) {
-            delay(if (phase == ReaderPhase.Active) READ_INTERVAL_MS else SEED_WAIT_MS)
+            // docs/ux/connection-state.md section 3 — the network coming back
+            // reads at once.
+            me.lakko.app.transport.ConnectionState.delayUnlessNetworkReturns(
+                if (phase == ReaderPhase.Active) READ_INTERVAL_MS else SEED_WAIT_MS,
+            )
             ticks += 1
             if (!isPublisher && !me.lakko.app.channels.RemovedChannels.isRemoved(channelId) &&
                 (phase != ReaderPhase.Active || ticks % ENVELOPE_RECHECK_EVERY == 0)
@@ -1090,12 +1098,13 @@ private fun ChannelTimelineView(
                     sending = sending,
                     sendError = sendError,
                     tray = tray,
+                    trayCanSend = { t, text -> t.canSendAllUploaded(text) },
                     onDraftChange = { draft = it },
                     onSendClicked = {
                         val text = draft.trim()
                         // Section 11 — one post: the text and every item.
                         val sentTray = me.lakko.app.ui.chat.ComposerTrays.tray(trayKey)
-                        if (sending || !sentTray.canSend(text)) return@Composer
+                        if (sending || !sentTray.canSendAllUploaded(text)) return@Composer
                         val refs = sentTray.refs()
                         sending = true
                         sendError = null

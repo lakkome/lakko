@@ -195,7 +195,7 @@ fn forwards_well_known(path: &str, method: &Method) -> bool {
 async fn forward(config: &ProxyConfig, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
     match config.tunnel.route() {
         Route::Direct => {},
-        Route::Refused => return tunnel::refused(),
+        Route::Refused => return unreachable(tunnel::refused()),
         Route::Tunnel(dialer) => return forward_tunnelled(config, &dialer, request).await,
     }
     let (parts, body) = request.into_parts();
@@ -222,7 +222,7 @@ async fn forward(config: &ProxyConfig, request: Request<Vec<u8>>) -> Response<Ve
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "forward failed");
-            return plain(StatusCode::BAD_GATEWAY, "upstream unreachable");
+            return unreachable(plain(StatusCode::BAD_GATEWAY, "upstream unreachable"));
         },
     };
     let status = upstream.status();
@@ -236,7 +236,7 @@ async fn forward(config: &ProxyConfig, request: Request<Vec<u8>>) -> Response<Ve
         Ok(b) => b.to_vec(),
         Err(e) => {
             warn!(error = %e, "upstream body failed");
-            return plain(StatusCode::BAD_GATEWAY, "upstream body");
+            return unreachable(plain(StatusCode::BAD_GATEWAY, "upstream body"));
         },
     };
     response
@@ -272,7 +272,7 @@ async fn forward_tunnelled(
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "tunnelled request failed");
-            return tunnel::refused();
+            return unreachable(tunnel::refused());
         },
     };
     let mut response = Response::builder().status(upstream.status);
@@ -313,6 +313,21 @@ fn asset<R: Runtime>(app: &AppHandle<R>, path: &str) -> Response<Vec<u8>> {
     }
 }
 
+/// Header on an answer the host gave itself because it could not reach the
+/// server (no route, DNS, refused, TLS, timeout, the tunnel unavailable). The
+/// page counts such an answer as a network failure rather than as the
+/// server's own answer (`docs/ux/connection-state.md` section 2).
+pub const UNREACHABLE_HEADER: &str = "x-lakko-unreachable";
+
+/// Mark `response` as given by the host because the server was unreachable.
+pub fn unreachable(mut response: Response<Vec<u8>>) -> Response<Vec<u8>> {
+    response.headers_mut().insert(
+        http::HeaderName::from_static(UNREACHABLE_HEADER),
+        http::HeaderValue::from_static("1"),
+    );
+    response
+}
+
 /// A short plain-text response.
 pub fn plain(status: StatusCode, text: &str) -> Response<Vec<u8>> {
     let mut r = Response::new(text.as_bytes().to_vec());
@@ -336,6 +351,19 @@ mod tests {
         assert!(!forwards_well_known("/.well-known/lakko-supporters", &Method::POST));
         assert!(!forwards_well_known("/.well-known/other", &Method::GET));
         assert!(!forwards_well_known("/.well-known/lakko-supporters/x", &Method::GET));
+    }
+
+    #[test]
+    fn an_answer_the_host_gave_itself_is_marked_unreachable() {
+        let r = super::unreachable(super::plain(http::StatusCode::BAD_GATEWAY, "upstream unreachable"));
+        assert_eq!(
+            r.headers().get(super::UNREACHABLE_HEADER).and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
+        assert!(super::plain(http::StatusCode::BAD_GATEWAY, "x")
+            .headers()
+            .get(super::UNREACHABLE_HEADER)
+            .is_none());
     }
 
     #[test]

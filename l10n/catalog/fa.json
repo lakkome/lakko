@@ -2549,6 +2549,18 @@
       "text": "بررسی",
       "status": "machine"
     },
+    "connection.waiting": {
+      "text": "در انتظار شبکه...",
+      "status": "machine"
+    },
+    "connection.connecting": {
+      "text": "در حال اتصال...",
+      "status": "machine"
+    },
+    "connection.restored_a11y": {
+      "text": "متصل شد.",
+      "status": "machine"
+    },
     "notification.join_request.title": {
       "text": "درخواست عضویت",
       "status": "machine"
@@ -10147,6 +10159,10 @@
     },
     "tab.other.opening": {
       "text": "در حال باز شدن در اینجا...",
+      "status": "machine"
+    },
+    "chat.message.waiting_network": {
+      "text": "در انتظار شبکه",
       "status": "machine"
     }
   },

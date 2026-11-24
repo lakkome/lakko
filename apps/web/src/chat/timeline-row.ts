@@ -38,8 +38,13 @@ export type TimelineRow =
        *  It began as a media-only state (ADR-0047) and now covers every
        *  outgoing row. A composer message used to be DELETED on failure -
        *  and since the composer had already been cleared, the words went
-       *  with it. */
-      ack: "pending" | "sent" | "failed";
+       *  with it.
+       *
+       *  `"waiting"` failed for the network and goes by itself when the
+       *  connection returns (`docs/ux/connection-state.md` section 7). */
+      ack: "pending" | "sent" | "failed" | "waiting";
+      /** Section 7 — automatic sends spent on this row so far. */
+      autoSends?: number;
       /** ADR-0047 — set on an outgoing media message: the key its local
        *  bytes are filed under in the media hub until the upload lands. */
       mediaLocalKey?: string;

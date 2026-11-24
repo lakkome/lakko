@@ -2445,12 +2445,14 @@ public class DeviceGroupSyncRepository(
                     Log.w(LOG_TAG, "poll fetch http ${http.status}")
                     delay(5000)
                     continue
-                } catch (_: DsNetworkError) {
-                    delay(2000)
+                } catch (network: DsNetworkError) {
+                    // docs/ux/connection-state.md section 3 — the network
+                    // coming back ends the wait.
+                    me.lakko.app.transport.backoffAfterFailure(network, 2000)
                     continue
                 } catch (cause: Throwable) {
                     Log.w(LOG_TAG, "poll fetch failed", cause)
-                    delay(5000)
+                    me.lakko.app.transport.backoffAfterFailure(cause, 5000)
                     continue
                 }
 
@@ -2896,7 +2898,7 @@ public class DeviceGroupSyncRepository(
                         throw cancellation
                     } catch (cause: Throwable) {
                         Log.w(LOG_TAG, "the directory could not be read; founding nothing (${cause.javaClass.simpleName})")
-                        delay(5000)
+                        me.lakko.app.transport.backoffAfterFailure(cause, 5000)
                         null
                     }
                 }
@@ -2986,7 +2988,7 @@ public class DeviceGroupSyncRepository(
                 throw cancellation
             } catch (cause: Throwable) {
                 Log.w(LOG_TAG, "DeviceGroup rejoin attempt failed; trying again (${rejoinFailureCode(cause)})")
-                delay(5000)
+                me.lakko.app.transport.backoffAfterFailure(cause, 5000)
             }
         }
         if (!bound.isCurrent || activeAccountIdB64.get() != accountIdB64) return
@@ -3409,7 +3411,7 @@ public class DeviceGroupSyncRepository(
                     throw cancellation
                 } catch (cause: Throwable) {
                     Log.w(LOG_TAG, "DeviceGroup knock listen failed (${rejoinFailureCode(cause)})")
-                    delay(5000)
+                    me.lakko.app.transport.backoffAfterFailure(cause, 5000)
                     continue
                 } ?: continue
                 if (!bound.isCurrent) return

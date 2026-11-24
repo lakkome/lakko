@@ -17,12 +17,10 @@
  */
 import { createSignal, type Accessor } from "solid-js";
 
-import {
-  AttachmentSizeError,
-  encryptAndUploadBytes,
-  type AttachmentRefBytes,
-  type ThumbRefBytes,
-} from "./attachments";
+import { AttachmentSizeError, type AttachmentRefBytes } from "./attachments";
+import { uploadTrayPart, type TrayPart, type TrayPartMeta } from "./tray-upload";
+import { isNetworkSendFailure } from "./waiting-sends";
+import { onConnectionPhaseChange } from "../net/connection-state";
 import { sendRefusalText } from "./attachment-failure";
 import {
   fitIntoTray,
@@ -90,12 +88,96 @@ export interface TrayStore {
   /** Hand every item to a send and empty the tray. The items' object URLs
    *  are released by {@link release} once the caller has filed their bytes. */
   take(): readonly TrayItem[];
+  /**
+   * `docs/ux/media-messages.md` section 11, Send — hand every item to a send
+   * and empty the tray, including items whose upload has not finished (still
+   * running, or with no answer). Such an item's upload becomes part of the
+   * message's send: {@link TakenTrayItem.part} gives the prepared bytes, and
+   * an upload the tray had running is adopted through
+   * {@link adoptTrayUpload} rather than run twice.
+   */
+  takeForSend(): readonly TakenTrayItem[];
   /** Update the conversation-side callbacks (the view that shows the tray
    *  may have been mounted anew). */
   bind(deps: TrayDeps): void;
   /** Empty the tray for good: items released, nothing more uploaded, no
    *  callback called again. */
   drop(): void;
+}
+
+/** One item handed to a send. */
+export interface TakenTrayItem {
+  readonly item: TrayItem;
+  /** The uploaded reference of an item that was ready, else `null`. */
+  readonly ref: AttachmentRefBytes | null;
+  /** An unfinished item: its prepared part (waits for the re-encode). */
+  readonly part: (() => Promise<TrayPart>) | null;
+  /** An unfinished item whose upload the tray had running: the id to adopt
+   *  it by ({@link adoptTrayUpload}). */
+  readonly adoptionId: number | null;
+}
+
+// ----- uploads handed over to a send -----------------------------------------
+
+interface Adoption {
+  readonly result: Promise<AttachmentRefBytes | null>;
+  readonly resolve: (ref: AttachmentRefBytes | null) => void;
+  settled: AttachmentRefBytes | null | undefined;
+  abandoned: boolean;
+  consumed: boolean;
+  discard: (refs: readonly AttachmentRefBytes[]) => void;
+}
+
+const adoptions = new Map<number, Adoption>();
+
+function openAdoption(id: number, discard: (refs: readonly AttachmentRefBytes[]) => void): void {
+  let resolve: (ref: AttachmentRefBytes | null) => void = () => {};
+  const result = new Promise<AttachmentRefBytes | null>((r) => {
+    resolve = r;
+  });
+  adoptions.set(id, { result, resolve, settled: undefined, abandoned: false, consumed: false, discard });
+}
+
+function settleAdoption(id: number, ref: AttachmentRefBytes | null): void {
+  const a = adoptions.get(id);
+  if (a === undefined) {
+    return;
+  }
+  a.settled = ref;
+  a.resolve(ref);
+  if (a.abandoned) {
+    adoptions.delete(id);
+    if (ref !== null) a.discard([ref]);
+  } else if (a.consumed) {
+    adoptions.delete(id);
+  }
+}
+
+/**
+ * The tray's upload of a taken item, for the send that took it: resolves with
+ * the uploaded reference, or `null` when that upload failed (the send then
+ * uploads from the prepared bytes). `null` itself when there is nothing to
+ * adopt (no upload was running, or it was adopted already). One use.
+ */
+export function adoptTrayUpload(id: number): Promise<AttachmentRefBytes | null> | null {
+  const a = adoptions.get(id);
+  if (a === undefined || a.consumed || a.abandoned) return null;
+  a.consumed = true;
+  if (a.settled !== undefined) adoptions.delete(id);
+  return a.result;
+}
+
+/** The message carrying a taken item was deleted: whatever its upload
+ *  produces is deleted (ADR-0065 section 6). */
+export function abandonTrayUpload(id: number): void {
+  const a = adoptions.get(id);
+  if (a === undefined || a.consumed) return;
+  if (a.settled !== undefined) {
+    adoptions.delete(id);
+    if (a.settled !== null) a.discard([a.settled]);
+    return;
+  }
+  a.abandoned = true;
 }
 
 const trays = new Map<string, TrayStore>();
@@ -163,11 +245,77 @@ export function createTrayStore(initial: TrayDeps): TrayStore {
   let dropped = false;
   const queue: number[] = [];
   let running = 0;
+  /** Items handed to a send whose upload was running: they finish here. */
+  const taken = new Map<number, TrayItem>();
+  /** Items whose upload is running now. */
+  const runningIds = new Set<number>();
+  /** Preparations under way, so a send and the upload share one. */
+  const preparing = new Map<number, Promise<TrayItem | undefined>>();
 
-  const find = (id: number): TrayItem | undefined => items().find((i) => i.id === id);
+  const find = (id: number): TrayItem | undefined => items().find((i) => i.id === id) ?? taken.get(id);
   const patch = (id: number, change: Partial<TrayItem>): void => {
+    const t = taken.get(id);
+    if (t !== undefined) {
+      taken.set(id, { ...t, ...change });
+      return;
+    }
     setItems(items().map((i) => (i.id === id ? { ...i, ...change } : i)));
   };
+
+  /** The item once prepared (re-encode, thumb, tags); one preparation per
+   *  item whoever asks. `undefined` when the item is gone. */
+  function ensurePrepared(id: number): Promise<TrayItem | undefined> {
+    const item = find(id);
+    if (item === undefined) return Promise.resolve(undefined);
+    if (item.status !== "preparing" || metaOf.has(id)) return Promise.resolve(item);
+    const running = preparing.get(id);
+    if (running !== undefined) return running;
+    const p = (async (): Promise<TrayItem | undefined> => {
+      const prepared = await prepare(item);
+      if (find(id) === undefined) return undefined;
+      patch(id, prepared);
+      return find(id);
+    })().finally(() => preparing.delete(id));
+    preparing.set(id, p);
+    return p;
+  }
+
+  /** The part an item uploads as. */
+  async function partOf(item: TrayItem): Promise<TrayPart> {
+    const meta = metaOf.get(item.id);
+    const thumbBytes =
+      item.thumbBlob !== null && meta?.thumbSize !== undefined
+        ? new Uint8Array(await item.thumbBlob.arrayBuffer())
+        : undefined;
+    const cover =
+      item.source === "audio" && meta?.audio?.cover !== undefined
+        ? new Uint8Array(await meta.audio.cover.arrayBuffer())
+        : undefined;
+    const partMeta: TrayPartMeta = {
+      source: item.source,
+      ...(meta?.size === undefined ? {} : { size: meta.size }),
+      ...(thumbBytes === undefined || meta?.thumbSize === undefined
+        ? {}
+        : { thumb: { bytes: thumbBytes, width: meta.thumbSize.width, height: meta.thumbSize.height } }),
+      ...(meta?.inline === undefined ? {} : { inline: meta.inline }),
+      ...(item.source === "audio" && meta?.audio !== undefined
+        ? {
+            audio: {
+              title: meta.audio.title,
+              ...(meta.audio.artist === undefined ? {} : { artist: meta.audio.artist }),
+              ...(meta.audio.durationMs === undefined ? {} : { durationMs: meta.audio.durationMs }),
+              ...(cover === undefined ? {} : { cover }),
+            },
+          }
+        : {}),
+    };
+    return {
+      bytes: new Uint8Array(await item.file.arrayBuffer()),
+      mime: item.file.type.length > 0 ? item.file.type : undefined,
+      name: item.file.name.length > 0 ? item.file.name : undefined,
+      meta: partMeta,
+    };
+  }
 
   function showNotice(n: TrayLimitNotice): void {
     if (n === null) return;
@@ -185,8 +333,10 @@ export function createTrayStore(initial: TrayDeps): TrayStore {
       if (id === undefined) break;
       if (find(id) === undefined) continue;
       running += 1;
+      runningIds.add(id);
       void upload(id).finally(() => {
         running -= 1;
+        runningIds.delete(id);
         pump();
       });
     }
@@ -197,42 +347,34 @@ export function createTrayStore(initial: TrayDeps): TrayStore {
     if (item === undefined) return;
     try {
       if (item.status === "preparing") {
-        const prepared = await prepare(item);
-        item = find(id);
+        item = await ensurePrepared(id);
         if (item === undefined) return;
-        patch(id, { ...prepared, status: "uploading", progress: 0 });
-        item = find(id);
-        if (item === undefined) return;
-      } else {
-        patch(id, { status: "uploading", progress: 0 });
       }
-      const storage = deps.storage();
-      const bytes = new Uint8Array(await item.file.arrayBuffer());
-      let ref = await encryptAndUploadBytes(
-        bytes,
-        {
-          mime: item.file.type.length > 0 ? item.file.type : undefined,
-          name: item.file.name.length > 0 ? item.file.name : undefined,
-        },
-        {},
-        storage,
-        (fraction) => {
-          if (find(id) !== undefined) patch(id, { progress: Math.max(0, Math.min(1, fraction)) });
-        },
-      );
-      const current = find(id);
-      if (current === undefined) {
-        // Removed while uploading: the blob was never going to be sent.
-        if (!dropped) deps.discard([ref]);
+      patch(id, { status: "uploading", progress: 0 });
+      item = find(id);
+      if (item === undefined) return;
+      const part = await partOf(item);
+      const ref = await uploadTrayPart(part, deps.storage(), (fraction) => {
+        if (find(id) !== undefined) patch(id, { progress: Math.max(0, Math.min(1, fraction)) });
+      });
+      if (taken.has(id)) {
+        // Handed to a send meanwhile: the send adopts it.
+        taken.delete(id);
+        settleAdoption(id, ref);
         return;
       }
-      ref = await withMeta(ref, current, storage);
       if (find(id) === undefined) {
+        // Removed while uploading: the blob was never going to be sent.
         if (!dropped) deps.discard([ref]);
         return;
       }
       patch(id, { status: "ready", progress: 1, ref });
     } catch (err) {
+      if (taken.has(id)) {
+        taken.delete(id);
+        settleAdoption(id, null);
+        return;
+      }
       if (find(id) === undefined) return;
       if (err instanceof AttachmentSizeError) {
         deps.onError(t("attach.preview.file_too_big"));
@@ -242,65 +384,9 @@ export function createTrayStore(initial: TrayDeps): TrayStore {
       } else {
         console.warn("[tray] upload failed", err instanceof Error ? err.name : "unknown");
       }
-      patch(id, { status: "failed" });
+      // Section 11 — no answer does not stop Send; a refusal does.
+      patch(id, { status: isNetworkSendFailure(err) ? "waiting" : "failed" });
     }
-  }
-
-  /** The thumb, dimensions and tags the sender attaches (section 10), the
-   *  thumb uploaded as its own blob. A failed thumb sends without one. */
-  async function withMeta(ref: AttachmentRefBytes, item: TrayItem, storage: StorageClient): Promise<AttachmentRefBytes> {
-    const meta = metaOf.get(item.id);
-    let out: AttachmentRefBytes = ref;
-    if (meta?.size !== undefined && meta.size !== null) {
-      out = { ...out, width: meta.size.width, height: meta.size.height };
-    }
-    // ADR-0047 section 6 — the micro thumbnail rides inside the message;
-    // `messageRefs` keeps it on the message's first image or video by type
-    // (a JPEG picked through File included).
-    if (meta?.inline !== undefined) {
-      out = { ...out, inlineThumb: meta.inline };
-    }
-    if (item.thumbBlob !== null && meta?.thumbSize !== undefined) {
-      try {
-        const bytes = new Uint8Array(await item.thumbBlob.arrayBuffer());
-        const up = await encryptAndUploadBytes(bytes, { mime: "image/jpeg", name: undefined }, {}, storage);
-        const thumb: ThumbRefBytes = {
-          blobId: up.blobId,
-          key: up.key,
-          nonce: up.nonce,
-          mime: "image/jpeg",
-          size: bytes.length,
-          width: meta.thumbSize.width,
-          height: meta.thumbSize.height,
-        };
-        out = { ...out, thumb };
-      } catch {
-        // Sent without a thumb; the receiver lays it out from the dimensions.
-      }
-    }
-    if (item.source === "audio" && meta?.audio !== undefined) {
-      const a = meta.audio;
-      out = {
-        ...out,
-        kind: "audio",
-        title: a.title,
-        ...(a.artist === undefined ? {} : { artist: a.artist }),
-        ...(a.durationMs === undefined ? {} : { durationMs: a.durationMs }),
-      };
-      if (a.cover !== undefined) {
-        try {
-          const bytes = new Uint8Array(await a.cover.arrayBuffer());
-          const up = await encryptAndUploadBytes(bytes, { mime: "image/jpeg", name: undefined }, {}, storage);
-          out = {
-            ...out,
-            thumb: { blobId: up.blobId, key: up.key, nonce: up.nonce, mime: "image/jpeg", size: bytes.length, width: undefined, height: undefined },
-          };
-        } catch {
-          // Sent without a cover.
-        }
-      }
-    }
-    return out;
   }
 
   const metaOf = new Map<number, PreparedMeta>();
@@ -310,6 +396,15 @@ export function createTrayStore(initial: TrayDeps): TrayStore {
     metaOf.set(item.id, prepared.meta);
     return prepared.patch;
   }
+
+  // docs/ux/connection-state.md section 7, as Android's tray does: an item
+  // whose upload got no answer is uploaded again when the servers answer
+  // again (the state entering Online), once per return. An item Send took is
+  // no longer in the tray, so it is never uploaded a second time here.
+  const stopOnline = onConnectionPhaseChange((now, before) => {
+    if (dropped || now !== "online" || before === "online") return;
+    for (const item of items()) if (item.status === "waiting") store.retry(item.id);
+  });
 
   const store: TrayStore = {
     items,
@@ -370,8 +465,8 @@ export function createTrayStore(initial: TrayDeps): TrayStore {
       if (last !== undefined) store.remove(last.id);
     },
     retry(id) {
-      const item = find(id);
-      if (item === undefined || item.status !== "failed") return;
+      const item = items().find((i) => i.id === id);
+      if (item === undefined || (item.status !== "failed" && item.status !== "waiting")) return;
       patch(id, { status: metaOf.has(id) ? "uploading" : "preparing", progress: 0 });
       queue.push(id);
       pump();
@@ -382,12 +477,55 @@ export function createTrayStore(initial: TrayDeps): TrayStore {
       for (const i of all) metaOf.delete(i.id);
       return all;
     },
+    takeForSend() {
+      const all = items();
+      setItems([]);
+      const out: TakenTrayItem[] = [];
+      for (const item of all) {
+        if (item.status === "ready" && item.ref !== null) {
+          metaOf.delete(item.id);
+          out.push({ item, ref: item.ref, part: null, adoptionId: null });
+          continue;
+        }
+        // Not started yet: the send uploads it, in the message's order.
+        const queued = queue.indexOf(item.id);
+        if (queued >= 0) queue.splice(queued, 1);
+        const runningNow = runningIds.has(item.id);
+        let adoptionId: number | null = null;
+        if (runningNow) {
+          taken.set(item.id, item);
+          openAdoption(item.id, (refs) => deps.discard(refs));
+          adoptionId = item.id;
+        }
+        const id = item.id;
+        const snapshot = item;
+        out.push({
+          item,
+          ref: null,
+          adoptionId,
+          part: async () => {
+            if (!taken.has(id)) taken.set(id, snapshot);
+            const prepared = (await ensurePrepared(id)) ?? find(id) ?? snapshot;
+            const part = await partOf(prepared);
+            if (!runningIds.has(id)) {
+              // No upload of the tray is left running for it.
+              taken.delete(id);
+              metaOf.delete(id);
+            }
+            return part;
+          },
+        });
+      }
+      return out;
+    },
     bind(next) {
       deps = next;
     },
     drop() {
       dropped = true;
+      stopOnline();
       queue.length = 0;
+      taken.clear();
       if (noticeTimer !== null) clearTimeout(noticeTimer);
       noticeTimer = null;
       setNotice(null);

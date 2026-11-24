@@ -29,6 +29,9 @@ public struct ChatScreen: View {
     @ObservedObject public var contacts: ContactsViewModel
     /// ADR-0061 — observed so a language switch re-renders the screen.
     @ObservedObject private var l10n = Localization.shared
+    /// docs/ux/connection-state.md — "Waiting for network..." /
+    /// "Connecting..." while this device cannot reach the servers.
+    @ObservedObject private var connection = ConnectionState.shared
     /// ADR-0065 — the account's saved messages (the Save rows and marks).
     @ObservedObject private var saved = SavedMessagesCenter.shared
     /// ADR-0098 — a person learned deleted re-draws the screen (composer,
@@ -871,6 +874,9 @@ public struct ChatScreen: View {
     /// typing signal can arrive, so what would render is whatever was in
     /// flight at the moment of the eviction.
     private var subtitle: String? {
+        // docs/ux/connection-state.md — the connection state replaces the
+        // line, ahead of a (stale) typing indicator.
+        if let key = connection.phase.headerKey { return l10n.t(key) }
         if let typing = viewModel.typingIndicatorText, !viewModel.membershipHasEnded {
             return typing
         }
@@ -1001,7 +1007,7 @@ public struct ChatScreen: View {
                         if !viewModel.isAloneInGroup { emptyHint }
                     } else {
                         let entries = timelineEntries
-                        ForEach(entries, id: \.message.messageId) { entry in
+                        ForEach(entries, id: \.message.id) { entry in
                             if let dateLabel = entry.dateLabel {
                                 DateSeparator(label: dateLabel)
                             }
@@ -1059,6 +1065,7 @@ public struct ChatScreen: View {
                                 // read watermarks.
                                 readState: viewModel.readState(of: entry.message),
                                 onRetrySend: { viewModel.onRetrySend(localId: $0) },
+                                outboxProgress: viewModel.outboxProgress(entry.message),
                                 onPreview: openAttachmentPreview,
                                 onEdit: {
                                     if entry.message.content != nil {
@@ -1990,7 +1997,7 @@ public struct ChatScreen: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .disabled(viewModel.sending || !viewModel.tray.tray.canSend(hasText: draftHasText))
+                .disabled(viewModel.sending || !viewModel.tray.tray.canSend(hasText: draftHasText, sendsUnfinished: true))
                 .accessibilityLabel(l10n.t("chat.composer.send"))
             } else {
                 RecordButton(media: media)
@@ -2307,6 +2314,8 @@ public struct ChatScreen: View {
     }
 
     fileprivate func openAttachmentPreview(_ ref: AttachmentRef) {
+        // `docs/ux/connection-state.md` section 7.3 — not uploaded yet.
+        guard !ref.blobId.isEmpty else { return }
         Task {
             do {
                 let bytes = try await AttachmentBridge.downloadAndDecrypt(
@@ -2484,6 +2493,9 @@ struct MessageRow: View {
     /// Send this row again, by its client-side id. Only ever reached from a
     /// row whose send failed.
     var onRetrySend: (Int64) -> Void = { _ in }
+    /// `docs/ux/connection-state.md` section 7.3 — the upload ring of this
+    /// row while its upload runs (a media row not uploaded yet).
+    var outboxProgress: Double? = nil
     /// 1.19c3 — bubble taps on attachment chips call into the
     /// screen's preview helper. `onPreview` opens the inline
     /// image sheet; Save is wired inline on the chip.
@@ -2648,14 +2660,22 @@ struct MessageRow: View {
     /// handed to the video note for its pill; the circle draws the pill. Only
     /// a Retry in it takes a touch; the rest lets a tap reach the circle.
     private var noteMetaContent: AnyView {
-        AnyView(metaContent.allowsHitTesting(message.ack == .failed))
+        AnyView(metaContent.allowsHitTesting(message.ack == .failed || message.ack == .waiting))
     }
 
     /// Edit / Delete are offered only on our own outgoing
     /// messages that carry a server-assigned id and are not
     /// already deleted (the receive-side author gate is the real
     /// enforcement — this is just the affordance).
+    /// `docs/ux/connection-state.md` section 7.3 — an own message that never
+    /// went (waiting or `Not sent`) can be deleted; it is never edited.
+    private var unsentDeletable: Bool {
+        channelPost == nil && message.direction == .outgoing && message.messageId <= 0
+            && message.localId != 0 && (message.ack == .failed || message.ack == .waiting)
+    }
+
     private var canEditOrDelete: Bool {
+        if unsentDeletable { return true }
         if let channelPost {
             return actionsAvailable && channelPost == .publisher && message.messageId > 0 && !message.deleted
         }
@@ -2956,7 +2976,7 @@ struct MessageRow: View {
             // An older segment's row may be saved too (round-6 rule).
             save: saveState,
             translate: translateState,
-            canEdit: message.invitationLine(conversationIdHex: conversationIdHex) == nil,
+            canEdit: message.invitationLine(conversationIdHex: conversationIdHex) == nil && !unsentDeletable,
             canReport: canReport)
         // ADR-0092 / UX 7.3 — `Edit` is offered on an article only; a
         // checklist has `Edit checklist`, a poll none. The content rows sit
@@ -3354,13 +3374,29 @@ struct MessageRow: View {
                 Text(l10n.t("chat.message.edited"))
                     .chatFont(.caption2)
             }
-            if let timeLabel {
+            if outboxMediaKey != nil {
+                // Section 7.3 — the bubble itself shows the state.
+                EmptyView()
+            } else if message.ack == .waiting, let timeLabel {
+                // `docs/ux/connection-state.md` section 7.1 — a clock and
+                // "Waiting for network" where the time goes; a tap sends the
+                // conversation's waiting messages now (section 7.2).
+                Button { onRetrySend(message.localId) } label: {
+                    HStack(spacing: 3) {
+                        LkIconView(.clock, size: 12, relativeTo: .caption2, label: nil)
+                        Text(timeLabel)
+                            .chatFont(.caption2)
+                    }
+                    .lakkoTouchTarget()
+                }
+                .buttonStyle(.plain)
+            } else if let timeLabel {
                 Text(timeLabel)
                     .chatFont(.caption2, monospacedDigit: true)
             }
             // The action sits next to the message it belongs to, which is the
             // only place that can say WHICH message failed.
-            if message.ack == .failed {
+            if message.ack == .failed, outboxMediaKey == nil {
                 Button { onRetrySend(message.localId) } label: {
                     Text(l10n.t("common.retry")).lakkoTouchTarget()
                 }
@@ -3398,6 +3434,18 @@ struct MessageRow: View {
                         direction: message.direction,
                         onPreview: { onPreview(ref) }
                     )
+                } else if let outbox = outboxMediaKey {
+                    // Section 7.3 — not uploaded yet: it plays from its
+                    // prepared file and shows how far its send got.
+                    MediaAttachmentView(
+                        ref: ref,
+                        bubble: decision.bubble,
+                        mediaKey: outbox,
+                        incoming: false,
+                        upload: outboxUploadState,
+                        localReady: message.outboxMedia.first?.fileId.isEmpty == false,
+                        onRetry: { onRetrySend(message.localId) }
+                    )
                 } else {
                     MediaAttachmentView(
                         ref: ref,
@@ -3418,9 +3466,39 @@ struct MessageRow: View {
             ? TranscriptTarget(messageId: message.messageId, lastOpId: message.lastOpId ?? 0) : nil
     }
 
+    /// Section 7.3 — the local key of a voice message, video note or GIF
+    /// whose upload has not finished (its bubble plays the prepared file and
+    /// shows the send's state itself), or `nil`. A message from the composer
+    /// tray shows its state on the meta line instead.
+    private var outboxMediaKey: String? {
+        guard message.outboxMedia.count == 1, message.attachments.count == 1,
+              let kind = message.outboxMedia.first?.kind, ["voice", "video_note", "gif"].contains(kind),
+              let conversationIdHex else { return nil }
+        return ChatRepository.outboxKey(groupIdHex: conversationIdHex, localId: message.localId)
+    }
+
+    /// Section 7.3 — what such a row's bubble shows: its upload ring while
+    /// it is being sent, else waiting or `Not sent · Retry`.
+    private var outboxUploadState: MediaUploadState {
+        switch message.ack {
+        case .failed: return .failed
+        case .waiting: return .waiting
+        default: return .uploading(outboxProgress ?? 0)
+        }
+    }
+
     @ViewBuilder
     private var bareVideoNote: some View {
-        if let ref = message.attachments.first {
+        if let ref = message.attachments.first, let outbox = outboxMediaKey {
+            MediaAttachmentView(
+                ref: ref,
+                bubble: .videoNote,
+                mediaKey: outbox,
+                incoming: false,
+                upload: outboxUploadState,
+                onRetry: { onRetrySend(message.localId) }
+            )
+        } else if let ref = message.attachments.first {
             MediaAttachmentView(
                 ref: ref,
                 bubble: .videoNote,
@@ -3563,7 +3641,8 @@ private struct PendingMediaRow: View {
 
     var body: some View {
         let bubble = InlineMedia.decision(for: pending.ref).bubble
-        let upload: MediaUploadState = pending.failed ? .failed : .uploading(pending.progress)
+        let upload: MediaUploadState = pending.failed
+            ? .failed : pending.waiting ? .waiting : .uploading(pending.progress)
         HStack {
             Spacer(minLength: 48)
             if bubble == .videoNote {

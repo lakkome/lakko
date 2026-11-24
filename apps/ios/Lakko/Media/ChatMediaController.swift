@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import AVFoundation
+import Combine
 import Foundation
 import LakkoCore
 import os
@@ -35,17 +36,33 @@ public final class ChatMediaController: ObservableObject {
         /// ADR-0087 section 13 — the idle life of the uploads (a channel's
         /// 45 days); `nil` for a chat.
         public let idleDays: UInt8?
+        /// `docs/ux/connection-state.md` section 7.3 — a chat hands a take or
+        /// a GIF to the repository, which sends it in the conversation's
+        /// order (the upload is part of the send) and keeps it in the outbox.
+        /// `nil` (a channel): this controller uploads and sends it itself.
+        public let sendMedia: ((OutboxMediaInput, ReplyRef?) -> Void)?
+        /// The bytes and name of a media row still being uploaded, by its
+        /// outbox key.
+        public let outboxFile: (String) -> (bytes: Data, name: String)?
+        /// The repository's upload refusals the composer speaks about.
+        public let uploadRefusals: AnyPublisher<OutboxUploadProgress.Refusal?, Never>?
 
         public init(
             sendAttachment: @escaping (AttachmentRef, ReplyRef?) async throws -> Void,
             sessionToken: @escaping () -> String?,
             takeArmedReply: @escaping () -> ReplyRef? = { nil },
-            idleDays: UInt8? = nil
+            idleDays: UInt8? = nil,
+            sendMedia: ((OutboxMediaInput, ReplyRef?) -> Void)? = nil,
+            outboxFile: @escaping (String) -> (bytes: Data, name: String)? = { _ in nil },
+            uploadRefusals: AnyPublisher<OutboxUploadProgress.Refusal?, Never>? = nil
         ) {
             self.sendAttachment = sendAttachment
             self.sessionToken = sessionToken
             self.takeArmedReply = takeArmedReply
             self.idleDays = idleDays
+            self.sendMedia = sendMedia
+            self.outboxFile = outboxFile
+            self.uploadRefusals = uploadRefusals
         }
     }
 
@@ -143,6 +160,10 @@ public final class ChatMediaController: ObservableObject {
         public var ref: AttachmentRef
         public var progress: Double
         public var failed: Bool
+        /// `docs/ux/connection-state.md` section 7 — the upload or the send
+        /// got no answer from the servers: it goes by itself when they answer
+        /// again. Exclusive with ``failed``.
+        public var waiting: Bool = false
         /// Whether the local bytes are on disk yet (a GIF's arrive only after
         /// the proxy download), so the bubble knows to (re)load them.
         public var localReady: Bool
@@ -207,6 +228,58 @@ public final class ChatMediaController: ObservableObject {
         self.playedAccountIdB64 = prefs.boundAccountIdB64
         self.hasCamera = VideoNoteRecorder.hasFrontCamera
         if recordMode == .videoNote, !hasCamera { recordMode = .voice }
+        watchConnection(ConnectionState.shared.$phase.eraseToAnyPublisher())
+        refusalWatch = port.uploadRefusals?
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] refusal in
+                MainActor.assumeIsolated {
+                    self?.sendLimited = refusal == .limited
+                    self?.sendStorageFull = refusal == .storageFull
+                }
+            }
+    }
+
+    private var refusalWatch: AnyCancellable?
+
+    // MARK: - Waiting for network (`docs/ux/connection-state.md` section 7)
+
+    private var connectionWatch: AnyCancellable?
+    private var waitingPassRunning = false
+
+    /// Entering online from Waiting or Connecting sends the waiting media of
+    /// this chat, oldest first. Replaceable for tests.
+    func watchConnection(_ phases: AnyPublisher<ConnectionPhase, Never>) {
+        var previous: ConnectionPhase?
+        connectionWatch = phases
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] phase in
+                MainActor.assumeIsolated {
+                    defer { previous = phase }
+                    guard phase == .online, let before = previous, before != .online else { return }
+                    self?.runWaitingPass()
+                }
+            }
+    }
+
+    /// One pass over this chat's waiting media sends, oldest first, one at a
+    /// time; it stops at the first that fails again for the network. Returns
+    /// the pass, for tests.
+    @discardableResult
+    func runWaitingPass() -> Task<Void, Never>? {
+        guard !waitingPassRunning else { return nil }
+        waitingPassRunning = true
+        return Task { @MainActor [weak self] in
+            var tried: Set<Int> = []
+            while let controller = self,
+                  let next = controller.pendingSends.first(where: { $0.waiting && !tried.contains($0.id) }),
+                  let job = controller.jobs[next.id] {
+                tried.insert(next.id)
+                job.autoAttempts += 1
+                let outcome = await controller.run(job, automatic: true)
+                if outcome == .network { break }
+            }
+            self?.waitingPassRunning = false
+        }
     }
 
     deinit {
@@ -590,6 +663,8 @@ public final class ChatMediaController: ObservableObject {
         /// ADR-0052 — the reply this media message answers, taken from the
         /// composer when the job was committed.
         var reply: ReplyRef?
+        /// Automatic sends while waiting for the network (section 7.2).
+        var autoAttempts = 0
 
         init(id: Int, localKey: String, name: String, mime: String, meta: MediaAttachmentMeta) {
             self.id = id
@@ -626,6 +701,23 @@ public final class ChatMediaController: ObservableObject {
             mime: take.mime,
             meta: meta
         )
+        // Section 7.3 — a chat sends it through the repository, in order.
+        if let sendMedia = port.sendMedia {
+            guard let bytes = try? Data(contentsOf: take.fileURL) else {
+                Self.log.warning("media take not readable; not sent")
+                flashHint(RecordingHint.holdToRecord.copy)
+                return
+            }
+            try? FileManager.default.removeItem(at: take.fileURL)
+            sendMedia(
+                OutboxMediaInput(
+                    bytes: bytes, name: job.name, mime: job.mime, meta: meta,
+                    poster: isVoice ? nil : take.poster,
+                    posterWidth: take.posterSide.map { UInt32($0) },
+                    posterHeight: take.posterSide.map { UInt32($0) }),
+                port.takeArmedReply())
+            return
+        }
         job.take = take
         do {
             job.fileURL = try temp.adopt(take.fileURL, key: job.localKey, name: job.name, fallback: job.name)
@@ -639,6 +731,17 @@ public final class ChatMediaController: ObservableObject {
     /// fetched through the proxy, encrypted and uploaded like any file, so a
     /// recipient only ever fetches the encrypted blob from Lakko storage.
     public func sendGif(_ item: GifItem) {
+        // Section 7.3 — a chat sends it through the repository, in order; the
+        // fetch through the proxy is the first part of its upload.
+        if let sendMedia = port.sendMedia {
+            sendMedia(
+                OutboxMediaInput(
+                    bytes: nil, gifSourceURL: item.fullURL, name: "gif-\(item.id).gif", mime: "image/gif",
+                    meta: MediaAttachmentMeta(
+                        kind: "gif", width: UInt32(item.width), height: UInt32(item.height))),
+                port.takeArmedReply())
+            return
+        }
         let id = nextSendId
         nextSendId += 1
         let job = SendJob(
@@ -672,6 +775,11 @@ public final class ChatMediaController: ObservableObject {
 
     public func retry(sendId: Int) {
         guard let job = jobs[sendId] else { return }
+        // Section 7.2 — a tap on a waiting send starts the pass now.
+        if pendingSends.first(where: { $0.id == sendId })?.waiting == true {
+            runWaitingPass()
+            return
+        }
         Task { await run(job) }
     }
 
@@ -697,9 +805,15 @@ public final class ChatMediaController: ObservableObject {
         change(&pendingSends[i])
     }
 
-    private func run(_ job: SendJob) async {
+    /// What one run of a send job came to.
+    enum RunOutcome: Equatable { case sent, network, refused }
+
+    @discardableResult
+    private func run(_ job: SendJob, automatic: Bool = false) async -> RunOutcome {
+        if !automatic { job.autoAttempts = 0 }
         updatePending(job.id) {
             $0.failed = false
+            $0.waiting = false
             $0.progress = 0
         }
         sendLimited = false
@@ -760,7 +874,7 @@ public final class ChatMediaController: ObservableObject {
                     }
                 )
             }
-            guard let uploaded = job.uploaded else { return }
+            guard let uploaded = job.uploaded else { return .refused }
             if !(unsentBlobIds[job.id]?.contains(uploaded.blobId) ?? false) {
                 unsentBlobIds[job.id, default: []].append(uploaded.blobId)
             }
@@ -771,11 +885,20 @@ public final class ChatMediaController: ObservableObject {
             temp.alias(Self.key(for: uploaded), to: job.localKey)
             jobs.removeValue(forKey: job.id)
             pendingSends.removeAll { $0.id == job.id }
+            return .sent
         } catch {
             Self.log.warning("media message not sent")
             if case AttachmentBridgeError.uploadLimited = error { sendLimited = true }
             if case AttachmentBridgeError.storageFull = error { sendStorageFull = true }
-            updatePending(job.id) { $0.failed = true }
+            // Section 7.1 — no answer from the servers: it waits, at most
+            // ``WaitingSends/maxAutoAttempts`` automatic sends.
+            let network = WaitingSends.isNetworkFailure(error)
+            let waits = network && (!automatic || job.autoAttempts < WaitingSends.maxAutoAttempts)
+            updatePending(job.id) {
+                $0.waiting = waits
+                $0.failed = !waits
+            }
+            return network ? .network : .refused
         }
     }
 
@@ -811,6 +934,11 @@ public final class ChatMediaController: ObservableObject {
         let key = Self.key(for: ref)
         if let url = temp.url(for: key) { return url }
         if let url = MediaSessionCache.shared.videoFile(key) { return url }
+        // Section 7.3 — a file this device uploaded for an unsent message.
+        if let bytes = MediaSessionCache.shared.cachedData(key),
+           let url = try? temp.write(bytes, key: key, name: ref.name, fallback: "media-\(key.prefix(8))") {
+            return url
+        }
         guard InlineMedia.decision(for: ref).bubble != .file else { throw MediaCaptureError.startFailed }
         return try await single(key) { [temp] in
             let bytes = try await AttachmentBridge.downloadAndDecrypt(ref: ref)
@@ -830,6 +958,10 @@ public final class ChatMediaController: ObservableObject {
         guard InlineMedia.isImageThumb(thumb) else { return nil }
         let key = Self.thumbKey(for: thumb)
         if let url = temp.url(for: key) { return url }
+        if let bytes = MediaSessionCache.shared.cachedData(key),
+           let url = try? temp.write(bytes, key: key, name: "poster.jpg", fallback: "poster.jpg") {
+            return url
+        }
         return try? await single(key) { [temp] in
             let bytes = try await AttachmentBridge.downloadAndDecrypt(thumb: thumb)
             return try temp.write(bytes, key: key, name: "poster.jpg", fallback: "poster.jpg")
@@ -866,7 +998,13 @@ public final class ChatMediaController: ObservableObject {
     }
 
     /// A local key (an outgoing take not yet uploaded) resolves to its file.
-    public func localFile(for key: String) -> URL? { temp.url(for: key) }
+    public func localFile(for key: String) -> URL? {
+        if let url = temp.url(for: key) { return url }
+        // Section 7.3 — a media row the repository has not uploaded yet plays
+        // from its prepared file.
+        guard key.hasPrefix("outbox-"), let file = port.outboxFile(key) else { return nil }
+        return try? temp.write(file.bytes, key: key, name: file.name, fallback: file.name)
+    }
 
     /// Fetch and decrypt a received voice message's audio ahead of the press.
     ///

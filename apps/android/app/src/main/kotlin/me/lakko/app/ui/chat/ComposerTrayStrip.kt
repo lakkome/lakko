@@ -230,7 +230,7 @@ private fun TrayProgress(item: TrayItem, modifier: Modifier, onSurface: Boolean 
                 size = LkIconSize.Row,
             )
         }
-        TrayStatus.Preparing -> CircularProgressIndicator(
+        TrayStatus.Preparing, TrayStatus.Waiting -> CircularProgressIndicator(
             modifier = modifier.then(disc).size(20.dp),
             strokeWidth = 2.dp,
             color = color,

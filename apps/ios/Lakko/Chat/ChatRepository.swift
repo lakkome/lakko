@@ -145,6 +145,28 @@ public final class ChatRepository: ObservableObject {
     weak var conversationEndSync: ConversationEndSync?
     /// The subscription that feeds ``applyHeardEnds()``.
     var conversationEndsWatch: AnyCancellable?
+    /// `docs/ux/connection-state.md` section 7 — the passes that send waiting
+    /// messages, one per conversation at a time.
+    lazy var waitingSends = WaitingSendRunner(ports: waitingSendPorts())
+    /// Section 7.3 — where the account's outbox is kept; `nil` is the app's
+    /// Application Support. A test points it at a directory of its own.
+    var sendOutboxBaseDirectory: URL?
+    /// Section 7.3 — how a media message's upload stage reaches the network.
+    /// Replaceable for tests.
+    lazy var outboxMediaPorts = OutboxMediaPorts.live(sessionToken: { [weak self] in self?.currentSessionToken })
+    /// Section 7.3 — the upload progress of the media rows being uploaded.
+    let outboxUploadProgress = OutboxUploadProgress()
+    /// Prepared media bytes the outbox could not write, kept while the app
+    /// runs (section 7.3: a failed write never stops the send), by file id.
+    var outboxFallbackFiles: [String: Data] = [:]
+    /// Set while the in-memory session is torn down.
+    var outboxWritesPaused = false
+    /// Section 7.2 — the connection state's transitions to online start the
+    /// passes. Replaced by tests.
+    var connectionWatch: AnyCancellable?
+    /// The connection state now; a new message only starts a pass while the
+    /// servers answer. Replaced by tests.
+    var connectionPhaseNow: () -> ConnectionPhase = { ConnectionState.shared.phase }
     /// Whether the end may run now. A VoIP wake only records it: the wipe
     /// waits for the app to be in front. Tests inject their own.
     var membershipEndMayRun: @MainActor () -> Bool = { CommitterEnvelopeForeground.isOnScreen() }
@@ -314,6 +336,9 @@ public final class ChatRepository: ObservableObject {
     /// wait.
     var groups: [String: GroupRecord] = [:] {
         didSet {
+            // Section 7.3 of `docs/ux/connection-state.md` — every record
+            // keeps the account's outbox current.
+            installOutboxHooks()
             // One person, one one-to-one row: the held set moved, so a
             // duplicate may have landed (``foldDuplicateOneToOnes()``). Run
             // once the current turn has settled, never mid-mutation.
@@ -359,7 +384,15 @@ public final class ChatRepository: ObservableObject {
     var heldFlushRunning = false
     /// ADR-0073 R.7 case 1 — where the pending row of each held message is
     /// drawn: queue entry id -> (group, the row's local id).
-    var heldRows: [String: (groupIdHex: String, localId: Int64)] = [:]
+    var heldRows: [String: (groupIdHex: String, localId: Int64)] = [:] {
+        didSet {
+            // A held row is kept by the held queue, not the outbox: the
+            // conversations whose held set moved are written again.
+            let before = Set(oldValue.values.map(\.groupIdHex))
+            let after = Set(heldRows.values.map(\.groupIdHex))
+            for hex in before.union(after) { syncOutbox(groupIdHex: hex) }
+        }
+    }
     /// Pairing state bundle v3 — the display-only copies of what another
     /// device of this account wrote to a pending contact, by key, as last
     /// read from ``PendingDisplayCopies``; `nil` until read (and after every
@@ -978,6 +1011,9 @@ public final class ChatRepository: ObservableObject {
         observeStateBundleNames()
         // ADR-0098 — a verified account-deleted statement.
         observeDeletedAccounts()
+        // `docs/ux/connection-state.md` section 7.2 — waiting messages go
+        // when the servers answer again.
+        watchConnection(ConnectionState.shared.$phase.eraseToAnyPublisher())
         historyBundleObserver = NotificationCenter.default.addObserver(
             forName: .lakkoHistoryBundleFiled, object: nil, queue: .main
         ) { [weak self] note in
@@ -1174,6 +1210,10 @@ public final class ChatRepository: ObservableObject {
             threads: buildThreadList(),
             bootstrapped: true
         )
+        // `docs/ux/connection-state.md` section 7.3 — the unsent messages the
+        // outbox kept, back in their conversations; their passes start once
+        // the servers answer.
+        restoreOutbox()
         // ADR-0073 — the dead-session publish guard, the reset-accepted
         // trigger, the held messages a restart left on disk, and one
         // continuity pass.
@@ -1201,6 +1241,10 @@ public final class ChatRepository: ObservableObject {
 
     private func wipeInMemoryState() {
         binding.advance()
+        // Section 7.3 — tearing the session down rewrites no outbox file (a
+        // held row must not land in it as the held map is cleared).
+        outboxWritesPaused = true
+        defer { outboxWritesPaused = false }
         accountIdentity = nil
         predecessorAccountIdentity = nil
         clearHeldSends()
@@ -3405,6 +3449,9 @@ public final class ChatRepository: ObservableObject {
         _ = messageLogStore.deleteGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         MessageEvidenceStore.shared.deleteConversation(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         _ = waitingLogSlots.take(groupIdHex)
+        // `docs/ux/connection-state.md` section 7.3 — its unsent messages go
+        // with it.
+        if accountIdB64 == currentAccountIdB64 { forgetOutbox(groupIdHex: groupIdHex) }
         if let groupIdB64 {
             // ADR-0073 R.6 — the claim state of a group that is gone from here.
             groupClosedStore.drop(groupIdB64: groupIdB64)
@@ -4636,12 +4683,19 @@ public final class ChatRepository: ObservableObject {
         guard let record = groups[groupIdHex] else {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
-        guard let row = record.messages.first(where: { $0.localId == localId }),
-              row.ack == .failed
-        else { return }
+        guard let row = record.messages.first(where: { $0.localId == localId }) else { return }
+        // `docs/ux/connection-state.md` section 7.2 — a tap on a waiting
+        // message starts its conversation's pass now (the earlier waiting
+        // messages go first).
+        if row.ack == .waiting {
+            runWaitingSends(groupIdHex: groupIdHex)
+            return
+        }
+        guard row.ack == .failed else { return }
         // ADR-0073 R.7 case 1 — a retry in a dead one-to-one holds the
-        // message again: the ordinary retry of the ordinary failed state.
-        if sendRoute(groupIdHex: groupIdHex) == .hold {
+        // message again: the ordinary retry of the ordinary failed state. A
+        // media row uploads first (``sendUnsentNow``).
+        if row.outboxMedia.isEmpty, sendRoute(groupIdHex: groupIdHex) == .hold {
             guard holdMessage(
                 groupIdHex: groupIdHex, text: row.text, attachments: row.attachments,
                 reply: row.reply, forward: row.forward,
@@ -4649,6 +4703,23 @@ public final class ChatRepository: ObservableObject {
             else { throw ChatError.argument("the message could not be kept for sending") }
             return
         }
+        // Section 7.2 — never ahead of a waiting message of the conversation.
+        if queueBehindWaiting(groupIdHex: groupIdHex, record: record, localId: localId) { return }
+        do {
+            try await sendUnsentNow(groupIdHex: groupIdHex, localId: localId)
+        } catch {
+            // Section 7.1 — no answer from the server: the message waits.
+            settleManualFailure(groupIdHex: groupIdHex, localId: localId, error: error)
+            if WaitingSends.isNetworkFailure(error) { return }
+            throw error
+        }
+    }
+
+    /// Publish an unsent row (failed or waiting) now, from the row itself.
+    /// On success the row is sent; on failure it is left "Sending..." and the
+    /// error is thrown for the caller to settle the row (failed or waiting).
+    func publishUnsentRow(groupIdHex: String, record: GroupRecord, row: ChatMessage) async throws {
+        let localId = row.localId
         record.markPending(localId: localId)
         state = state.with(threads: buildThreadList())
         // ADR-0087 section 14 — a channel invitation goes out again with its
@@ -4659,29 +4730,25 @@ public final class ChatRepository: ObservableObject {
         do {
             envelopeBytes = try Self.retryEnvelope(row: row, channelInviteCard: card)
         } catch {
-            record.markFailed(localId: localId)
-            state = state.with(threads: buildThreadList())
             throw ChatError.wrapped("envelope compose failed", underlying: error)
         }
-        let result: SendMessageResult
-        do {
-            let retried = row.content.flatMap(ContentModel.content)
-            result = try await withCommitLock(groupIdHex: groupIdHex) { [self] in
-                // ADR-0092 — an anonymous poll goes again only while the
-                // roster is the one its first ring was hashed over, read
-                // under the lock its seal runs in.
-                if let live = groups[groupIdHex],
-                   !ContentRing.retryAllowed(content: retried, rosterKeys: ContentRing.accountKeys(of: live.group)) {
-                    throw ContentSendError.pollRingChanged
-                }
-                return try await sealAndPublishLocked(
-                    groupIdHex: groupIdHex, plaintextBytes: envelopeBytes, wake: .message,
-                    attest: true)
+        // Section 7.3 — a media row goes only with the references of a
+        // finished upload (``uploadOutboxMediaIfNeeded``).
+        if !row.outboxMedia.isEmpty || row.attachments.contains(where: { $0.blobId.isEmpty }) {
+            throw OutboxMediaError.fileMissing
+        }
+        let retried = row.content.flatMap(ContentModel.content)
+        let result: SendMessageResult = try await withCommitLock(groupIdHex: groupIdHex) { [self] in
+            // ADR-0092 — an anonymous poll goes again only while the
+            // roster is the one its first ring was hashed over, read
+            // under the lock its seal runs in.
+            if let live = groups[groupIdHex],
+               !ContentRing.retryAllowed(content: retried, rosterKeys: ContentRing.accountKeys(of: live.group)) {
+                throw ContentSendError.pollRingChanged
             }
-        } catch {
-            record.markFailed(localId: localId)
-            state = state.with(threads: buildThreadList())
-            throw error
+            return try await sealAndPublishLocked(
+                groupIdHex: groupIdHex, plaintextBytes: envelopeBytes, wake: .message,
+                attest: true)
         }
         record.markSent(
             localId: localId, messageId: result.messageId, createdAt: result.createdAt)
@@ -4847,6 +4914,10 @@ public final class ChatRepository: ObservableObject {
                 accountIdB64: currentAccountIdB64)
         }
         state = state.with(threads: buildThreadList())
+        // `docs/ux/connection-state.md` section 7.2 — a message sent while
+        // the conversation has waiting messages (or while its pass runs)
+        // joins the end of the queue and goes in turn.
+        if queueBehindWaiting(groupIdHex: groupIdHex, record: record, localId: localId) { return }
         // ADR-0045 — the seal and the publish are SERIALIZED against the
         // regions that move this group's epoch. See ``sealAndPublishLocked``.
         let result: SendMessageResult
@@ -4859,6 +4930,15 @@ public final class ChatRepository: ObservableObject {
                     attest: true)
             }
         } catch {
+            // Section 7.1 — no answer from the server: the message waits and
+            // goes by itself when the connection is back. Not an error for
+            // the composer: the bubble says what happened.
+            if WaitingSends.isNetworkFailure(error) {
+                record.markWaiting(localId: localId, resetAttempts: true)
+                state = state.with(threads: buildThreadList())
+                recheckWaitingIfOnline(groupIdHex: groupIdHex)
+                return
+            }
             record.markFailed(localId: localId)
             state = state.with(threads: buildThreadList())
             // Deliberately NOT persisted: an unsent row is not written to the
@@ -11024,7 +11104,24 @@ public struct ChatMessage: Equatable, Identifiable {
         /// It did not get there and nothing reached the other side. The
         /// bubble reads "Not sent - Retry" and keeps the text.
         case failed
+        /// `docs/ux/connection-state.md` section 7 — it did not get there
+        /// because a request got no answer (the network), and it goes by
+        /// itself when the connection is back. The bubble shows a clock and
+        /// "Waiting for network" in place of the time.
+        case waiting
     }
+
+    /// `docs/ux/connection-state.md` section 7.2 — how many automatic sends
+    /// this waiting row has had (at most ``WaitingSends/maxAutoAttempts``).
+    /// Reset by the person's own send or Retry. Kept in the outbox entry of
+    /// the row (section 7.3), never in the message log.
+    public internal(set) var autoSendAttempts: Int = 0
+    /// Section 7.3 — the attachments of an unsent message whose upload has
+    /// not finished: the prepared files the uploads send (in the account's
+    /// ``SendOutbox``), each naming its slot, which holds a placeholder with
+    /// an empty blob id until then. Empty once every reference exists, and on
+    /// every other row.
+    public internal(set) var outboxMedia: [SendOutbox.PreparedMedia] = []
 
     public init(
         messageId: Int64,
@@ -11298,6 +11395,14 @@ final class GroupRecord {
         self.groupId = groupId
     }
 
+    /// `docs/ux/connection-state.md` section 7.3 — told whenever an unsent
+    /// row this device wrote is added, changes state or count, or goes, so
+    /// the account's outbox is rewritten (``ChatRepository/syncOutbox``).
+    /// Installed by the repository for every record it holds.
+    var onUnsentChange: (() -> Void)?
+
+    private func unsentChanged() { onUnsentChange?() }
+
     /// Phase 2a3f1 — seed the in-memory timeline + cursor from
     /// a persistent snapshot. Called from `ChatRepository.bootstrap`
     /// after the live `Group` handle has been rehydrated; the
@@ -11429,11 +11534,32 @@ final class GroupRecord {
     @discardableResult
     func adoptUnsentRow(_ row: ChatMessage, reply: ReplyRef?) -> Int64 {
         let localId = nextLocalId()
-        messages.append(
-            ChatMessage(
-                messageId: 0, direction: .outgoing, text: row.text, attachments: row.attachments,
-                createdAt: row.createdAt, authorKeyB64: row.authorKeyB64, ack: row.ack,
-                localId: localId, reply: reply, forward: row.forward))
+        var adopted = ChatMessage(
+            messageId: 0, direction: .outgoing, text: row.text, attachments: row.attachments,
+            createdAt: row.createdAt, authorKeyB64: row.authorKeyB64, ack: row.ack,
+            localId: localId, reply: reply, forward: row.forward)
+        adopted.autoSendAttempts = row.autoSendAttempts
+        adopted.outboxMedia = row.outboxMedia
+        messages.append(adopted)
+        unsentChanged()
+        return localId
+    }
+
+    /// Section 7.3 — put back an unsent row the outbox kept, at the end of
+    /// the timeline, under its own local id unless that id is taken here.
+    /// Returns the local id it got.
+    @discardableResult
+    func restoreUnsentRow(_ row: ChatMessage) -> Int64 {
+        let free = row.localId < 0 && !messages.contains { $0.id == row.localId }
+        let localId = free ? row.localId : nextLocalId()
+        var restored = ChatMessage(
+            messageId: 0, direction: .outgoing, text: row.text, attachments: row.attachments,
+            createdAt: row.createdAt, authorKeyB64: row.authorKeyB64, ack: row.ack,
+            localId: localId, reply: row.reply, forward: row.forward, content: row.content)
+        restored.autoSendAttempts = row.autoSendAttempts
+        restored.outboxMedia = row.outboxMedia
+        messages.append(restored)
+        unsentChanged()
         return localId
     }
 
@@ -11442,6 +11568,7 @@ final class GroupRecord {
     /// the successor).
     func removeLocalRow(localId: Int64) {
         messages.removeAll { $0.localId == localId && $0.messageId <= 0 }
+        unsentChanged()
     }
 
     func appendPending(
@@ -11467,12 +11594,14 @@ final class GroupRecord {
                 forward: forward
             )
         )
+        unsentChanged()
     }
 
     /// The send landed: take the server's id and time, and stop saying
     /// "Sending...". The identity does not move, so the bubble is not rebuilt.
     func markSent(localId: Int64, messageId: Int64, createdAt: String) {
         guard let idx = messages.firstIndex(where: { $0.localId == localId }) else { return }
+        defer { unsentChanged() }
         let old = messages[idx]
         messages[idx] = ChatMessage(
             messageId: messageId,
@@ -11506,6 +11635,7 @@ final class GroupRecord {
     func mutateLocalRow(localId: Int64, _ change: (inout ChatMessage) -> Void) {
         guard let idx = messages.firstIndex(where: { $0.localId == localId }) else { return }
         change(&messages[idx])
+        if messages[idx].messageId <= 0 { unsentChanged() }
     }
 
     /// ADR-0092 — append a content message (received, or this device's own
@@ -11514,6 +11644,7 @@ final class GroupRecord {
         if message.messageId > 0, heldFromBundle(message.messageId) { return }
         if message.messageId > 0, messages.contains(where: { $0.messageId == message.messageId }) { return }
         messages.append(message)
+        if message.messageId <= 0, message.localId != 0 { unsentChanged() }
     }
 
     /// ADR-0092 section 3.9 — a handed-over open item, at its place: before
@@ -11524,9 +11655,34 @@ final class GroupRecord {
         messages.insert(message, at: at)
     }
 
+    /// `docs/ux/connection-state.md` section 7 — the send got no answer: the
+    /// row waits for the network. `resetAttempts` when the send was the
+    /// person's own (a first send or a tap on Retry), which starts a fresh
+    /// budget of automatic sends.
+    func markWaiting(localId: Int64, resetAttempts: Bool) {
+        guard let idx = messages.firstIndex(where: { $0.localId == localId }) else { return }
+        defer { unsentChanged() }
+        messages[idx].ack = .waiting
+        if resetAttempts { messages[idx].autoSendAttempts = 0 }
+    }
+
+    /// One automatic send of a waiting row is starting.
+    func noteAutoSendAttempt(localId: Int64) {
+        guard let idx = messages.firstIndex(where: { $0.localId == localId }) else { return }
+        defer { unsentChanged() }
+        messages[idx].autoSendAttempts += 1
+    }
+
+    /// The conversation's waiting rows, oldest first (the order they were
+    /// put into the conversation).
+    var waitingLocalIds: [Int64] {
+        messages.filter { $0.ack == .waiting && $0.localId != 0 && $0.messageId <= 0 }.map(\.localId)
+    }
+
     /// Trying again: back to "Sending...".
     func markPending(localId: Int64) {
         guard let idx = messages.firstIndex(where: { $0.localId == localId }) else { return }
+        defer { unsentChanged() }
         messages[idx].ack = .pending
     }
 
@@ -11534,6 +11690,7 @@ final class GroupRecord {
     /// whole point of appending it before the publish.
     func markFailed(localId: Int64) {
         guard let idx = messages.firstIndex(where: { $0.localId == localId }) else { return }
+        defer { unsentChanged() }
         messages[idx].ack = .failed
     }
 

@@ -106,6 +106,7 @@ continues to the next consecutive unplayed voice message from the same sender.
 | Preview | Player + Delete / Send |
 | Uploading | The bubble appears in the timeline immediately with a determinate ring over the play button; the message is not yet sent |
 | Upload failed | The bubble shows `Not sent · Retry`; nothing reached the other side |
+| Upload or send failed for a network reason | `Waiting for network`; sent by itself when the connection returns ([`connection-state.md`](connection-state.md) section 7) |
 | Received, downloading | Play button shows a spinner on first tap; the file is fetched and decrypted, then plays |
 | Download or decrypt failed | `Couldn't play this message` inline; a retry on tap. Never plays partial or unauthenticated bytes |
 | Recording format unsupported (web only) | Mic button disabled with tooltip `Voice messages can't be recorded in this browser`. Receiving still works |
@@ -511,14 +512,20 @@ receiver sees the message as it was composed.
   10) on that item, with the tray's other photos and videos to swipe or arrow through.
   Closing returns to the composer with the text and the tray unchanged.
 - **Upload starts at once** when an item is added: each thumbnail shows a thin progress
-  ring; a failed upload shows a retry glyph on the thumbnail (tap retries) and Send stays
-  off until it is retried or removed.
+  ring. An upload refused by the server (too large, over the limit, storage full) shows a
+  retry glyph on the thumbnail (tap retries) and Send stays off until it is retried or
+  removed. An upload that is still running, or that got no answer (a network failure,
+  `docs/ux/connection-state.md` section 2), does not stop Send (2026-11-24).
 - **Limits:** at most 10 photos and videos, and at most 10 files, per message (chosen, not
   measured). Adding past a limit adds what fits and shows, under the strip, `Up to 10
   photos and videos in one message.` / `Up to 10 files in one message.` for 4 s.
 - **Send:** enabled when the field has text or the tray has at least one item, and no item
-  is still uploading or failed. Sends ONE message: the text and every item. The field and
-  the tray clear together. Editing a sent message changes its text only.
+  was refused. Sends ONE message: the text and every item. The field and the tray clear
+  together. An item whose upload had not finished is uploaded as part of the message's send
+  from its prepared file: the message sits in the timeline with its upload ring and, if the
+  network is gone, waits like any other message (`docs/ux/connection-state.md` section 7,
+  kept in the outbox, sent in its conversation's order). Editing a sent message changes its
+  text only.
 - **Draft:** the tray belongs to the conversation's draft on this device: leaving the
   conversation and coming back keeps it while the app runs (the uploaded items are kept;
   ones still uploading continue).

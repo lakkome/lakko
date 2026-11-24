@@ -81,6 +81,7 @@ import { deleteCarriedCopiesForAccount } from "../contacts/carried-copies";
 import { deleteMlsSnapshot } from "../chat/mls-store";
 import { deleteOutboxForAccount } from "../chat/commit-outbox";
 import { deleteMessageLog } from "../chat/message-log-store";
+import { deleteUnsentFilesForAccount } from "../chat/unsent-files";
 import { clearObservationsForAccount } from "../chat/pending-requests";
 import { clearUnappliedForAccount } from "../chat/unapplied-requests";
 import { clearOwnRequestsForAccount } from "../chat/membership-retry";
@@ -219,7 +220,10 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // --- IndexedDB, one row (or row set) per account ----------------------
     { name: "mls-snapshot", run: () => deleteMlsSnapshot(accountIdB64) },
     { name: "commit-outbox", run: () => deleteOutboxForAccount(accountIdB64) },
+    // The outbox's message fields are in the message log row; its prepared
+    // media files are records of their own (docs/ux/connection-state.md 7.3).
     { name: "message-log", run: () => deleteMessageLog(accountIdB64) },
+    { name: "unsent-files", run: () => deleteUnsentFilesForAccount(accountIdB64) },
     // The channel log (it holds the publisher signing seeds) and then the
     // account's channel publish counters, plus the retired device-wide
     // counter rows: a counter goes only with the key it protects, so it is

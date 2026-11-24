@@ -422,24 +422,29 @@ class ConversationReentryTest {
             chatErrorText(personActionHeldError(), "chat.send.failed", { false }).key,
         )
         val source = java.io.File("src/main/kotlin/me/lakko/app/chat/ChatRepository.kt").readText()
-        // The first send: the row is in the conversation first, the check is
-        // inside the try whose catch marks it failed, before any publish.
+        // The first send: the row is in the conversation first, then its
+        // outbox entry, then the attempt (connection-state section 7.3).
         val send = source.substringAfter("    private suspend fun sendMessageOnMlsThread(")
             .substringBefore("\n    }\n")
         val pending = send.indexOf("record.appendPending(")
-        val check = send.indexOf("requireMessageSendAllowed(groupIdHex)")
-        val publish = send.indexOf("sendLocked(")
-        val failed = send.indexOf("record.markFailed(localId)")
-        assertTrue(pending in 0 until check)
-        assertTrue(check in 0 until publish)
-        assertTrue(publish in 0 until failed)
+        val entry = send.indexOf("outbox.add(")
+        val attempt = send.indexOf("outbox.sendNow(groupIdHex, localId)")
+        assertTrue(pending in 0 until entry)
+        assertTrue(entry in 0 until attempt)
         assertFalse("no waiting-note text", "chat.reentry" in send)
-        // Retry fails again the same way while still behind.
+        // Every publish of an entry (the first send, an automatic send, a
+        // Retry) checks before it publishes; a refusal there is "Not sent"
+        // (the outbox engine files any non-network failure as FAILED, see
+        // OutboxTest.a_refused_entry_stays_not_sent_and_survives_a_restart).
+        val deliver = source.substringAfter("    private suspend fun deliverOnMlsThread(")
+            .substringBefore("\n    }\n")
+        val check = deliver.indexOf("requireMessageSendAllowed(groupIdHex)")
+        assertTrue(check >= 0)
+        assertTrue(check < deliver.indexOf("sendLocked("))
+        // Retry goes through the outbox, so it fails again the same way.
         val retry = source.substringAfter("    private suspend fun retrySendOnMlsThread(")
             .substringBefore("\n    }\n")
-        val retryCheck = retry.indexOf("requireMessageSendAllowed(groupIdHex)")
-        assertTrue(retryCheck in 0 until retry.indexOf("sendLocked("))
-        assertTrue(retry.indexOf("record.markFailed(localId)") > retryCheck)
+        assertTrue("outbox.retry(groupIdHex, localId)" in retry)
     }
 
     @Test

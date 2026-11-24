@@ -2549,6 +2549,18 @@
       "text": "בדיקה",
       "status": "machine"
     },
+    "connection.waiting": {
+      "text": "ממתין לרשת...",
+      "status": "machine"
+    },
+    "connection.connecting": {
+      "text": "מתחבר...",
+      "status": "machine"
+    },
+    "connection.restored_a11y": {
+      "text": "מחובר.",
+      "status": "machine"
+    },
     "notification.join_request.title": {
       "text": "בקשת הצטרפות",
       "status": "machine"
@@ -10147,6 +10159,10 @@
     },
     "tab.other.opening": {
       "text": "נפתח כאן...",
+      "status": "machine"
+    },
+    "chat.message.waiting_network": {
+      "text": "ממתין לרשת",
       "status": "machine"
     }
   },

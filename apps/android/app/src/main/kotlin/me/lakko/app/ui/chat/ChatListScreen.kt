@@ -370,7 +370,15 @@ public fun ChatListScreen(
         modifier = modifier,
         topBar = {
             TopAppBar(
-                title = { Text(t("nav.chats")) },
+                // docs/ux/connection-state.md: "Waiting for network..." /
+                // "Connecting..." in place of "Chats" while this device cannot
+                // reach the servers.
+                title = {
+                    Box {
+                        Text(me.lakko.app.ui.connectionHeaderText() ?: t("nav.chats"))
+                        me.lakko.app.ui.ConnectionAnnouncer()
+                    }
+                },
                 actions = {
                     Box {
                         IconButton(onClick = { createMenuOpen = true }) {
@@ -1196,7 +1204,14 @@ internal fun rowPreview(
     }
     val line = previewLine(
         text = contentText ?: inviteText ?: bareLinkText ?: last.text,
-        attachments = if (contentText != null) emptyList() else last.attachments.map { PreviewAttachment(it.kind, it.mime) },
+        attachments = when {
+            contentText != null -> emptyList()
+            // connection-state section 7.3 — a voice message, video note or
+            // GIF not uploaded yet reads as its kind.
+            last.attachments.isEmpty() && last.localMedia != null ->
+                listOf(PreviewAttachment(last.localMedia.kind, last.localMedia.mime))
+            else -> last.attachments.map { PreviewAttachment(it.kind, it.mime) }
+        },
         deleted = last.deleted,
         author = previewPrefix(last.direction, isGroup, senderName),
         strings = strings,

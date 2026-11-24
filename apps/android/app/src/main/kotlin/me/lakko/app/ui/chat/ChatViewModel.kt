@@ -3382,11 +3382,12 @@ public class ChatViewModel(
         if (snapshot.sending) return
         val trimmed = snapshot.draft.trim()
         // docs/ux/media-messages.md section 11 — ONE message: the text and
-        // every item of the tray, once every item is uploaded.
+        // every item of the tray. An item still uploading, or whose upload got
+        // no answer, goes with its prepared file and is uploaded as part of
+        // the send (2026-11-24); only a refused item stops Send.
         val key = trayKey()
         val sentTray = ComposerTrays.tray(key)
         if (!sentTray.canSend(trimmed)) return
-        val stagedAttachments = sentTray.refs()
 
         // ADR-0024 — sending a message clears any outstanding
         // typing signal (`typing:false` once).
@@ -3412,14 +3413,33 @@ public class ChatViewModel(
             )
         }
         // The field and the tray clear together.
-        ComposerTrays.sent(key, sentTray.items.map { it.id })
+        val taken = ComposerTrays.takeForSend(key)
         viewModelScope.launch {
             try {
+                // The hand-over deletes the tray's copies of the files once
+                // read; it is not cut short by the screen closing.
+                val parts = kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                    ComposerTrays.collectForSend(taken)
+                }
+                val ready = parts.mapNotNull { (it as? ComposerTrays.SendPart.Ready)?.ref }
+                val pending = parts.mapNotNull { (it as? ComposerTrays.SendPart.Pending)?.attachment }
+                if (trimmed.isEmpty() && parts.isEmpty()) {
+                    composer.update { it.copy(sending = false) }
+                    return@launch
+                }
                 repo.sendMessage(
                     groupIdHex = groupIdHex,
                     plaintext = trimmed,
-                    attachments = stagedAttachments,
+                    // ADR-0047 section 6 — the micro thumbnail stays on its
+                    // carrier; with files still to upload the outbox decides
+                    // that once every reference exists.
+                    attachments = if (pending.isEmpty()) {
+                        me.lakko.app.media.keepInlineThumbOnCarrier(ready, me.lakko.app.media.coreAllowlist)
+                    } else {
+                        ready
+                    },
                     reply = reply,
+                    pendingFiles = pending,
                 )
                 composer.update { it.copy(sending = false, sendError = null) }
             } catch (err: Throwable) {
@@ -4056,45 +4076,11 @@ public class ChatViewModel(
     // -------------------------------------------------------------
 
     /**
-     * Outgoing media still in flight. Each is its own message, sent the moment
-     * it is finished; the bubble shows an upload ring and, on failure,
-     * `Not sent · Retry`. Held by the view model so a rotation does not lose a
-     * take mid-upload.
+     * `docs/ux/connection-state.md` section 7.3 — upload progress of this
+     * conversation's media rows in flight (the repository's outbox sends
+     * them, with or without this screen).
      */
-    private val mediaQueue: me.lakko.app.media.MediaSendQueue =
-        me.lakko.app.media.MediaSendQueue(
-            scope = viewModelScope,
-            uploadThumb = { poster ->
-                AttachmentBridge.encryptAndUploadThumb(
-                    bytes = poster.bytes,
-                    mime = poster.mime,
-                    width = poster.width.toUInt(),
-                    height = poster.height.toUInt(),
-                )
-            },
-            uploadMain = { bytes, mime, name, meta, onProgress ->
-                AttachmentBridge.encryptAndUpload(
-                    bytes = bytes,
-                    mime = mime,
-                    name = name,
-                    media = meta,
-                    onProgress = onProgress,
-                )
-            },
-            publish = { ref, reply, onRowShown ->
-                repo.sendMessage(
-                    groupIdHex = groupIdHex,
-                    plaintext = "",
-                    attachments = listOf(ref),
-                    reply = reply,
-                    onRowShown = onRowShown,
-                )
-            },
-            onLog = { line -> android.util.Log.w("ChatViewModel", line) },
-            deleteUnsent = { ids -> me.lakko.app.storage.BlobLifetime.delete(repo.context, ids) },
-        )
-
-    public val pendingMedia: StateFlow<List<me.lakko.app.media.PendingMediaRow>> = mediaQueue.rows
+    public val outboxProgress: StateFlow<Map<String, Float>> = repo.outboxProgress
 
     /** A finished voice message or video note the user chose to send. */
     public fun sendRecordedTake(take: me.lakko.app.media.RecordedTake) {
@@ -4106,77 +4092,72 @@ public class ChatViewModel(
         }
         val name = if (kind == me.lakko.app.media.KIND_VOICE) "voice-$stamp.m4a" else "video-note-$stamp.mp4"
         // The take was recorded inside the chat screen's media cache, which is
-        // deleted when the screen closes — possibly before the upload reads it.
-        // A rename (same filesystem, no copy) moves it out of that lifetime;
-        // the upload reads it once and deletes it.
+        // deleted when the screen closes. A rename (same filesystem, no copy)
+        // moves it out of that lifetime; the repository reads it once into the
+        // outbox and deletes it.
         val outbox = java.io.File(repo.context.cacheDir, MEDIA_OUTBOX_DIR).apply { mkdirs() }
         val moved = java.io.File(outbox, java.util.UUID.randomUUID().toString())
         val file = if (take.file.renameTo(moved)) moved else take.file
-        mediaQueue.enqueue(
-            me.lakko.app.media.MediaSendQueue.Job(
-                tempId = mediaQueue.newTempId(),
-                kind = kind,
-                mime = take.mime,
-                name = name,
-                durationMs = take.durationMs,
-                waveform = take.waveform,
-                width = take.width,
-                height = take.height,
-                poster = take.poster,
-                // Section 3.1 — "Recording a voice message with a reply armed
-                // sends the take as the reply; the strip clears the same way."
-                reply = takeArmedReply(),
-                loadBytes = {
-                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                        try {
-                            if (file.length() > AttachmentBridge.MAX_ATTACHMENT_BYTES) {
-                                null
-                            } else {
-                                file.readBytes() to take.mime
-                            }
-                        } catch (_: java.io.IOException) {
-                            null
-                        } finally {
-                            // Read once: the job keeps the bytes for a retry.
-                            file.delete()
-                        }
-                    }
-                },
-            ),
-        )
+        repo.enqueueMedia(
+            groupIdHex = groupIdHex,
+            // Section 3.1 — "Recording a voice message with a reply armed
+            // sends the take as the reply; the strip clears the same way."
+            reply = takeArmedReply(),
+        ) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    // An over-limit file is refused at upload and reads
+                    // "Not sent", like any other refusal.
+                    me.lakko.app.chat.PreparedMedia(
+                        kind = kind,
+                        mime = take.mime,
+                        name = name,
+                        durationMs = take.durationMs,
+                        waveform = take.waveform,
+                        width = take.width,
+                        height = take.height,
+                        bytes = file.readBytes(),
+                        poster = take.poster,
+                    )
+                } catch (_: java.io.IOException) {
+                    null
+                } finally {
+                    file.delete()
+                }
+            }
+        }
     }
 
     /** UX spec §5 — a tapped GIF is sent immediately: downloaded through the
      *  proxy, encrypted, uploaded like any file. Recipients never contact the
      *  proxy or GIPHY. */
     public fun sendGif(item: me.lakko.app.media.GifItem) {
-        mediaQueue.enqueue(
-            me.lakko.app.media.MediaSendQueue.Job(
-                tempId = mediaQueue.newTempId(),
-                kind = me.lakko.app.media.KIND_GIF,
-                mime = "image/gif",
-                name = "gif-${System.currentTimeMillis()}.gif",
-                durationMs = null,
-                waveform = null,
-                width = item.width,
-                height = item.height,
-                poster = null,
-                // A tapped GIF is a sent message like a take; it goes as the
-                // reply and clears the strip the same way.
-                reply = takeArmedReply(),
-                loadBytes = {
-                    when (val r = gifClient.media(item.fullUrl, me.lakko.app.media.MAX_GIF_FULL_BYTES)) {
-                        is me.lakko.app.media.GifResult.Ok -> r.value.bytes to r.value.mime
-                        else -> null
-                    }
-                },
-            ),
+        val media = me.lakko.app.chat.PreparedMedia(
+            kind = me.lakko.app.media.KIND_GIF,
+            mime = "image/gif",
+            name = "gif-${System.currentTimeMillis()}.gif",
+            width = item.width,
+            height = item.height,
+            sourceUrl = item.fullUrl,
         )
+        // A tapped GIF is a sent message like a take; it goes as the reply
+        // and clears the strip the same way.
+        repo.enqueueMedia(groupIdHex = groupIdHex, reply = takeArmedReply()) { media }
     }
 
-    public fun retryMediaSend(tempId: Long): Unit = mediaQueue.retry(tempId)
-
-    public fun discardMediaSend(tempId: Long): Unit = mediaQueue.discard(tempId)
+    /** `docs/ux/connection-state.md` section 7 — delete an own row that never
+     *  reached the server (its menu's Delete, a failed media bubble's
+     *  Delete). */
+    public fun deleteUnsent(localId: Long) {
+        viewModelScope.launch {
+            try {
+                repo.deleteUnsent(groupIdHex = groupIdHex, localId = localId)
+            } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err)
+                android.util.Log.w("ChatViewModel", "deleteUnsent failed: ${err.javaClass.simpleName}")
+            }
+        }
+    }
 
     /** The GIF proxy client, bound to this account's session token. Built on
      *  first use, so opening a chat that never shows the GIF tab builds none. */

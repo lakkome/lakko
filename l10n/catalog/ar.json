@@ -2549,6 +2549,18 @@
       "text": "مراجعة",
       "status": "machine"
     },
+    "connection.waiting": {
+      "text": "في انتظار الشبكة...",
+      "status": "machine"
+    },
+    "connection.connecting": {
+      "text": "جارٍ الاتصال...",
+      "status": "machine"
+    },
+    "connection.restored_a11y": {
+      "text": "تم الاتصال.",
+      "status": "machine"
+    },
     "notification.join_request.title": {
       "text": "طلب انضمام",
       "status": "machine"
@@ -10147,6 +10159,10 @@
     },
     "tab.other.opening": {
       "text": "جارٍ الفتح هنا...",
+      "status": "machine"
+    },
+    "chat.message.waiting_network": {
+      "text": "في انتظار الشبكة",
       "status": "machine"
     }
   },

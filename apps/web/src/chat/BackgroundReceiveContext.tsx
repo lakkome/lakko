@@ -219,6 +219,7 @@ import { BindingEpoch, StaleBindingError } from "../auth/binding-epoch";
 import type { SweepOutcome } from "./sweep";
 import { durableSnapshotHook, sessionAccountOf } from "./persist-hooks";
 import { errorLogTag } from "./log-tag";
+import { onNetworkReturned } from "../net/connection-state";
 
 export interface BackgroundReceiveApi {
   /** Shared with the chat view — see `receive-coordinator.ts`. */
@@ -2304,6 +2305,11 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     void restoreHeldSends(accountIdB64);
     const controller = new AbortController();
     loopAbort = controller;
+    // docs/ux/connection-state.md section 3: the network coming back clears
+    // the network backoffs (the sweep's own pause already ends, through
+    // `sleepCancellable`).
+    const stopNetworkReturn = onNetworkReturned(() => backoff.networkReturned());
+    controller.signal.addEventListener("abort", stopNetworkReturn, { once: true });
     const sweepDeps: SweepDeps = {
       groups: () => chats.groups().map((g) => g.groupIdB64),
       isExcluded,

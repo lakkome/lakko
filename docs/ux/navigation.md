@@ -133,6 +133,11 @@ kind at a time.
   row, no empty state; where a platform already has a loading treatment for
   the list (Android's progress indicator during its off-thread restore) it
   stays. Amended 2026-11-23, see 2.4.
+- **No connection** (added 2026-11-24): while this device cannot reach the
+  Lakko servers the title reads `Waiting for network...` instead of `Chats`,
+  then `Connecting...` until the first answer; the list itself is unchanged.
+  The same line replaces an open conversation's subtitle. Specified in
+  [`connection-state.md`](connection-state.md).
 
 ### 2.4 Nothing is drawn before it is read (2026-11-23, maintainer decision)
 

@@ -38,6 +38,7 @@ import { originHistory } from "./routes/origin-history";
 import { AuthProvider } from "./auth/AuthContext";
 import { ChatProvider } from "./chat/ChatContext";
 import { BackgroundReceiveProvider } from "./chat/BackgroundReceiveContext";
+import { UnsentOutboxProvider } from "./chat/UnsentOutboxContext";
 import { TranslationProvider } from "./translation/TranslationContext";
 import { CallActionListener } from "./calls/CallActionListener";
 import { CallHostProvider, CallHostView } from "./calls/CallHostContext";
@@ -237,6 +238,10 @@ const App: Component = () => (
         <MailboxProvider>
         <CallHostProvider>
         <BackgroundReceiveProvider>
+        {/* docs/ux/connection-state.md section 7.3 — the outbox: unsent
+            messages read back at the landing and sent by the app when the
+            servers answer, open conversation or not. */}
+        <UnsentOutboxProvider>
           {/*
            * The address bar shows the origin only: the router's paths live in
            * `history.state` (`routes/origin-history.ts`), never in the URL.
@@ -352,6 +357,7 @@ const App: Component = () => (
            */}
           <FolderEditorHost />
           <ConfirmDialog />
+        </UnsentOutboxProvider>
         </BackgroundReceiveProvider>
         </CallHostProvider>
         </MailboxProvider>
