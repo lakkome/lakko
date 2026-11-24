@@ -197,8 +197,10 @@ public fun FeedScreen(
     onGoToChats: () -> Unit,
     /** ADR-0059 — the directory routes Discover reads. */
     channelsClient: me.lakko.app.channels.ChannelsClient,
-    /** ADR-0059 — subscribe to a channel a card verified (the subscribe route). */
-    onSubscribeChannel: (channelId: String, handle: String) -> Unit,
+    /** ADR-0059 — subscribe to the public channel a card's handle record
+     *  named: the same Subscribe as a search result's
+     *  ([me.lakko.app.channels.subscribePublicChannel]). */
+    onSubscribeChannel: (me.lakko.app.channels.PublicChannelFound) -> Unit,
     /** UX spec section 5 — the item menu's Forward: open the chat's "Forward
      *  to" picker; the message is already in [me.lakko.app.chat.PendingForward]. */
     onForward: () -> Unit = {},

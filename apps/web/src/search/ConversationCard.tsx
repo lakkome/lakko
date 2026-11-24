@@ -31,7 +31,7 @@ import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { PushedScreen } from "../ui/PushedScreen";
 import type { FoundConversation } from "./people-search";
-import { subscribeToChannel } from "../channels/channel-access";
+import { subscribeToPublicChannel } from "../channels/public-subscribe";
 import { channelErrorText } from "../channels/channel-error-copy";
 
 /** `Public group · 100+ members` / `Public channel · 10k+ subscribers`. */
@@ -141,10 +141,13 @@ export function ConversationCard(props: {
   async function subscribeChannel(f: FoundConversation): Promise<void> {
     setState({ kind: "sending" });
     try {
-      await subscribeToChannel(foundIdHex(f), { kind: "public", readKey: f.key }, {
+      // The same Subscribe as a Discover card's.
+      await subscribeToPublicChannel({
+        idHex: foundIdHex(f),
+        readKey: f.key,
+        handle: f.handle,
         name: f.name,
         description: f.description,
-        handle: f.handle,
         avatar: f.avatar,
       });
       setState({ kind: "idle" });

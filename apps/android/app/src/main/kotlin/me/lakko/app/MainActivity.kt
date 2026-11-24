@@ -2627,6 +2627,16 @@ private fun SessionRoot(
                     banners?.invoke()
                 }
             }
+            // ADR-0087 sections 5.1 and 6 — Subscribe pressed on a public
+            // channel found by its record (a search result, a Discover card):
+            // one path, so both open the channel subscribed, under the
+            // record's name, reading at once under its read key.
+            val openPressedChannelSubscribe: (String, String, String) -> Unit = { id, handle, name ->
+                val held = channelsState.channels.value.any { it.id == id }
+                navController.navigate(
+                    if (held) Routes.channel(id) else Routes.channelSubscribe(id, handle, pressed = true, name = name),
+                )
+            }
             NavHost(
                 navController = navController,
                 startDestination = Routes.CHATS,
@@ -2683,12 +2693,7 @@ private fun SessionRoot(
                         // ADR-0087 section 5.1 — the card's Subscribe: a
                         // press, so the channel opens subscribed, under the
                         // name the card read.
-                        onSubscribeChannelPressed = { id, handle, name ->
-                            val held = channelsState.channels.value.any { it.id == id }
-                            navController.navigate(
-                                if (held) Routes.channel(id) else Routes.channelSubscribe(id, handle, pressed = true, name = name),
-                            )
-                        },
+                        onSubscribeChannelPressed = openPressedChannelSubscribe,
                         // Only the plain lookup row (no people search wired)
                         // reaches this; the people search sends the request
                         // from its own row (who-can-find-me.md section 6.1).
@@ -2755,11 +2760,18 @@ private fun SessionRoot(
                         onOpenChannel = { id -> navController.navigate(Routes.channel(id)) },
                         onGoToChats = { navController.navigateToTab(Routes.CHATS) },
                         channelsClient = channelsClient,
-                        // ADR-0059 — a card whose handle was verified opens the
-                        // ordinary subscribe route under that handle. This is
-                        // the card's Subscribe button: a press.
-                        onSubscribeChannel = { id, handle ->
-                            navController.navigate(Routes.channelSubscribe(id, handle, pressed = true))
+                        // ADR-0059 — a card whose handle was verified: the same
+                        // Subscribe as a search result's (the record's read
+                        // key kept, the record's name shown).
+                        onSubscribeChannel = { found ->
+                            me.lakko.app.channels.subscribePublicChannel(
+                                found,
+                                channelsState.boundAccount,
+                                keepReadKey = { acct, hex, key ->
+                                    me.lakko.app.channels.ChannelReadKeys.put(appContext, acct, hex, key)
+                                },
+                                open = openPressedChannelSubscribe,
+                            )
                         },
                         // UX spec section 5 — the item menu's Forward opens the
                         // chat's own picker.

@@ -907,10 +907,11 @@ public struct ChatListScreen: View {
             openHeld: openHeldConversation,
             subscribe: { idHex, handle, name in
                 searchText = ""
+                guard found.kind == .channel else { onSubscribeFoundChannel(idHex, handle, name); return }
                 // ADR-0087 section 6 — the record's read key opens the
-                // public seed: the channel reads at once.
-                if found.kind == .channel, found.key.count == 32 { FoundChannelReadKeys.put(idHex, found.key) }
-                onSubscribeFoundChannel(idHex, handle, name)
+                // public seed: the channel reads at once. The same Subscribe
+                // as a Discover card's.
+                FoundChannelReadKeys.subscribe(found.asPublicChannel, open: onSubscribeFoundChannel)
             },
             onClose: { foundCard = nil })
     }

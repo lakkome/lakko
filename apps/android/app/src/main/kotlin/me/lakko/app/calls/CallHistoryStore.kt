@@ -125,22 +125,10 @@ public object CallHistoryStore {
         val store = prefs(context) ?: return
         me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
             try {
-                val filed = loadFiled(store, accountIdB64)
-                val held = load(context, accountIdB64)
-                var next = held
-                var newIds = false
-                for ((rowKey, entry) in rows) {
-                    if (!filed.add(rowKey)) continue
-                    newIds = true
-                    next = callHistoryWithRestored(next, entry)
-                }
-                if (!newIds) return@write
-                val edit = store.edit().putString(filedKey(accountIdB64), encodeFiled(filed))
-                if (next != held) {
-                    edit.putString(key(accountIdB64), next.joinToString("\n", transform = ::encodeCallHistoryEntry))
-                }
-                edit.apply()
-                if (next != held) changed.value += 1
+                val held = CallIndexState(load(context, accountIdB64), loadFiled(store, accountIdB64))
+                val next = callIndexFiled(held, rows)
+                if (next.filed == held.filed) return@write
+                writeState(store, accountIdB64, held, next)
             } catch (cause: Throwable) {
                 android.util.Log.w(TAG, "filing call rows failed", cause)
             }
@@ -164,21 +152,20 @@ public object CallHistoryStore {
         }
     }
 
-    /** Take one conversation out of the list (ADR-0087 section 9). */
+    /**
+     * Take one conversation out of the list (ADR-0087 section 9), its filed
+     * call row keys with it ([callIndexWithoutConversation]): a row of it that
+     * comes back is filed again.
+     */
     public fun deleteConversation(context: Context, accountIdB64: String?, conversationIdHex: String) {
         if (accountIdB64.isNullOrEmpty()) return
         val store = prefs(context) ?: return
         val hex = conversationIdHex.lowercase()
         me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
             try {
-                val held = load(context, accountIdB64)
-                val next = callHistoryWithout(held, hex)
-                if (next.size != held.size) {
-                    store.edit()
-                        .putString(key(accountIdB64), next.joinToString("\n", transform = ::encodeCallHistoryEntry))
-                        .apply()
-                    changed.value += 1
-                }
+                val held = CallIndexState(load(context, accountIdB64), loadFiled(store, accountIdB64))
+                val next = callIndexWithoutConversation(held, hex)
+                if (next != held) writeState(store, accountIdB64, held, next)
             } catch (cause: Throwable) {
                 android.util.Log.w(TAG, "removing a conversation's call history failed", cause)
             }
@@ -215,33 +202,66 @@ public object CallHistoryStore {
         val store = prefs(context) ?: return
         if (store.getBoolean(backfilledKey(accountIdB64), false)) return
         try {
-            val rows = entries()
-            val found = rows.map { it.second }
-            // The rows filed here are not filed again by [fileCallRows].
-            val filed = loadFiled(store, accountIdB64).apply { addAll(rows.map { it.first }) }
-            if (found.isNotEmpty()) {
-                // Fold one at a time through the same ordering and cap the
-                // live path uses, so a backfilled index is indistinguishable
-                // from one that was written call by call.
-                var next = load(context, accountIdB64)
-                // [callHistoryWithRestored]: a call a history bundle already
-                // filed ([fileCallRows]) is not filed a second time.
-                for (entry in found) next = callHistoryWithRestored(next, entry)
-                store.edit()
-                    .putString(
-                        key(accountIdB64),
-                        next.joinToString("\n", transform = ::encodeCallHistoryEntry),
-                    )
-                    .putBoolean(backfilledKey(accountIdB64), true)
-                    .putString(filedKey(accountIdB64), encodeFiled(filed))
-                    .apply()
-                changed.value += 1
-                return
+            // Through [callIndexFiled], the fold the live path's bundles use:
+            // a row whose key is filed (a call recorded live, which this
+            // device filed under its start time) is not listed a second time
+            // under its end, whenever the rows were gathered.
+            val held = CallIndexState(load(context, accountIdB64), loadFiled(store, accountIdB64))
+            val next = callIndexFiled(held, entries())
+            val edit = store.edit().putBoolean(backfilledKey(accountIdB64), true)
+            if (next.filed != held.filed) edit.putString(filedKey(accountIdB64), encodeFiled(next.filed))
+            if (next.entries != held.entries) {
+                edit.putString(key(accountIdB64), next.entries.joinToString("\n", transform = ::encodeCallHistoryEntry))
             }
-            store.edit().putBoolean(backfilledKey(accountIdB64), true).apply()
+            edit.apply()
+            if (next.entries != held.entries) changed.value += 1
         } catch (cause: Throwable) {
             android.util.Log.w(TAG, "backfilling the call history failed", cause)
         }
+    }
+
+    /**
+     * Repair, once per account, an index an older build damaged
+     * ([callIndexRepaired]): a group wiped and joined again (ADR-0087 section
+     * 9) lost its calls from this list while their filed keys stayed, so a row
+     * back in the conversation was never listed again. Run after
+     * [backfillOnce], on the same rows. Marked done even when nothing was
+     * lost, for the reason [backfillOnce] gives.
+     */
+    public fun repairOnce(
+        context: Context,
+        accountIdB64: String?,
+        entries: () -> List<Pair<String, CallHistoryEntry>>,
+    ) {
+        if (accountIdB64.isNullOrEmpty()) return
+        val store = prefs(context) ?: return
+        if (store.getBoolean(repairedKey(accountIdB64), false)) return
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            try {
+                val held = CallIndexState(load(context, accountIdB64), loadFiled(store, accountIdB64))
+                val next = callIndexRepaired(held, entries())
+                val edit = store.edit().putBoolean(repairedKey(accountIdB64), true)
+                if (next.filed != held.filed) edit.putString(filedKey(accountIdB64), encodeFiled(next.filed))
+                if (next.entries != held.entries) {
+                    edit.putString(key(accountIdB64), next.entries.joinToString("\n", transform = ::encodeCallHistoryEntry))
+                }
+                edit.apply()
+                if (next.entries != held.entries) changed.value += 1
+            } catch (cause: Throwable) {
+                android.util.Log.w(TAG, "repairing the call history failed", cause)
+            }
+        }
+    }
+
+    /** Write [next] where it differs from [held]; one edit. */
+    private fun writeState(store: SharedPreferences, accountIdB64: String, held: CallIndexState, next: CallIndexState) {
+        val edit = store.edit()
+        if (next.filed != held.filed) edit.putString(filedKey(accountIdB64), encodeFiled(next.filed))
+        if (next.entries != held.entries) {
+            edit.putString(key(accountIdB64), next.entries.joinToString("\n", transform = ::encodeCallHistoryEntry))
+        }
+        edit.apply()
+        if (next.entries != held.entries) changed.value += 1
     }
 
     /** Drop one account's index (forget device, sign out of that account). */
@@ -256,6 +276,7 @@ public object CallHistoryStore {
                 .remove(key(accountIdB64))
                 .remove(backfilledKey(accountIdB64))
                 .remove(filedKey(accountIdB64))
+                .remove(repairedKey(accountIdB64))
                 .apply()
             changed.value += 1
         } catch (cause: Throwable) {
@@ -270,6 +291,9 @@ public object CallHistoryStore {
 
     private fun filedKey(accountIdB64: String): String =
         KEY_PREFIX + "filed-rows." + accountIdB64
+
+    private fun repairedKey(accountIdB64: String): String =
+        KEY_PREFIX + "repaired-filed.v1." + accountIdB64
 
     /** The call row ids already filed for [accountIdB64], oldest first. */
     private fun loadFiled(store: SharedPreferences, accountIdB64: String): LinkedHashSet<String> =

@@ -73,8 +73,9 @@ final class DiscoverModel: ObservableObject {
         var following: @MainActor () -> Set<String>
         /// Channels this device can post to (holds publisher keys).
         var publishing: @MainActor () -> Set<String>
-        /// Resolve a handle through the OPRF channel lookup.
-        var resolveHandle: (_ handle: String) async throws -> String?
+        /// Resolve a handle through the OPRF channel lookup: the channel its
+        /// `@name` record names, with its read key and name, or `nil`.
+        var resolveHandle: (_ handle: String) async throws -> PublicChannelFound?
         /// Conversations hidden from feeds (`docs/ux/feed.md` section 5): a
         /// hidden channel is no suggestion, and a hidden group contributes
         /// no group-shared suggestions.
@@ -88,9 +89,10 @@ final class DiscoverModel: ObservableObject {
     @Published private(set) var search: DiscoverSearchState = .idle
     @Published private(set) var notice: String?
     @Published private(set) var cards: [DirectoryCard] = []
-    /// Opens the subscribe screen for a verified card. Set by the Feed
-    /// screen, which owns the navigation.
-    var onOpen: ((DirectoryCard) -> Void)?
+    /// Subscribes to the public channel a verified card's record named (the
+    /// same Subscribe as a search result's). Set by the Feed screen, which
+    /// owns the navigation.
+    var onOpen: ((PublicChannelFound) -> Void)?
     /// Opens a channel this device already holds. Set by the Feed screen.
     var onOpenChannel: ((String) -> Void)?
 
@@ -369,7 +371,7 @@ final class DiscoverModel: ObservableObject {
     /// Verify the handle, then hand the card to the subscribe screen.
     func subscribe(_ card: DirectoryCard) async {
         notice = nil
-        let resolved: String?
+        let resolved: PublicChannelFound?
         do {
             resolved = try await deps.resolveHandle(card.handle)
         } catch {
@@ -377,7 +379,7 @@ final class DiscoverModel: ObservableObject {
                 ? AnonTokenCopy.searchAllowanceUsed : DiscoverCopy.unavailable
             return
         }
-        guard DiscoverCards.verifyDecision(cardChannelIdHex: card.channelIdHex, resolvedHex: resolved) else {
+        guard let target = DiscoverCards.subscribeTarget(card: card, resolved: resolved) else {
             gone.insert(card.channelIdHex)
             notice = DiscoverCopy.gone
             recompute()
@@ -386,6 +388,6 @@ final class DiscoverModel: ObservableObject {
             }
             return
         }
-        onOpen?(card)
+        onOpen?(target)
     }
 }

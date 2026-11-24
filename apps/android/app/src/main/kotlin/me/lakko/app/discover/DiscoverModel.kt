@@ -34,8 +34,9 @@ public interface DiscoverBackend {
     public suspend fun fetchBucket(topic: Int, language: String): List<DirectoryItemWire>
     public suspend fun fetchListing(channelIdHex: String): DirectoryItemWire?
     public suspend fun search(query: String): List<DirectoryItemWire>
-    /** The OPRF lookup of a handle: its channel id hex, or `null`. */
-    public suspend fun resolveHandle(handle: String): String?
+    /** The OPRF lookup of a handle: the channel its `@name` record names,
+     *  with its read key and name (ADR-0087 sections 4 and 6), or `null`. */
+    public suspend fun resolveHandle(handle: String): me.lakko.app.channels.PublicChannelFound?
     public fun decodeListing(listingB64: String): DecodedListing?
     /** The fixed topic ids (names render through [topicName], ADR-0061). */
     public fun topics(): List<Int>
@@ -278,9 +279,15 @@ public class DiscoverModel(
         }
     }
 
-    /** Verify the handle, then hand the channel to [onVerified] (the subscribe
-     *  screen). A handle that does not lead to this channel removes the card. */
-    public suspend fun subscribe(card: DirectoryCard, onVerified: (channelIdHex: String, handle: String) -> Unit) {
+    /** Verify the handle, then hand the channel its record names to
+     *  [onVerified] (the one public-channel Subscribe,
+     *  [me.lakko.app.channels.subscribePublicChannel]): its read key and its
+     *  name, so it reads at once like a search result. A handle that does not
+     *  lead to this channel removes the card. */
+    public suspend fun subscribe(
+        card: DirectoryCard,
+        onVerified: (me.lakko.app.channels.PublicChannelFound) -> Unit,
+    ) {
         _notice.value = null
         val resolved = try {
             backend.resolveHandle(card.handle)
@@ -290,12 +297,20 @@ public class DiscoverModel(
             _notice.value = backend.lookupErrorText(e)
             return
         }
-        if (verifyDecision(card.channelIdHex, resolved) == VerifyDecision.GONE) {
+        if (resolved == null || verifyDecision(card.channelIdHex, resolved.idHex) == VerifyDecision.GONE) {
             _gone.value = _gone.value + card.channelIdHex
             _notice.value = DiscoverCopy.GONE
             return
         }
-        onVerified(card.channelIdHex, card.handle)
+        onVerified(
+            me.lakko.app.channels.PublicChannelFound(
+                idHex = resolved.idHex,
+                handle = resolved.handle.ifBlank { card.handle },
+                // The record's name; the listing's while a record carries none.
+                name = resolved.name.ifBlank { card.name },
+                readKey = resolved.readKey,
+            ),
+        )
     }
 
     public fun savePicks(topics: List<Int>, language: String) {

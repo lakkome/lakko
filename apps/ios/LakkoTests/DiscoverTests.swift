@@ -277,6 +277,36 @@ final class DiscoverTests: XCTestCase {
         XCTAssertFalse(DiscoverCards.verifyDecision(cardChannelIdHex: hex(1), resolvedHex: nil))
     }
 
+    /// Seen 2026-11-24 on Android, the same fault here: a card's Subscribe
+    /// kept no read key, so the public channel waited for its owner as if it
+    /// were private. It now takes the one public-channel Subscribe a search
+    /// result takes: the record's read key and name.
+    @MainActor
+    func testAPublicChannelSubscribedFromADiscoverCardReadsAtOnceUnderTheRecordsName() {
+        let c = card(1, name: "Books listing")
+        let key = Data(repeating: 7, count: 32)
+        func record(_ b: UInt8, name: String) -> PublicChannelFound {
+            PublicChannelFound(idHex: hex(b), handle: "h1xx", name: name, readKey: key)
+        }
+        XCTAssertNil(DiscoverCards.subscribeTarget(card: c, resolved: record(2, name: "Other")))
+        XCTAssertNil(DiscoverCards.subscribeTarget(card: c, resolved: nil))
+        guard let target = DiscoverCards.subscribeTarget(card: c, resolved: record(1, name: "Walk news")) else {
+            return XCTFail("a handle naming the card's channel subscribes")
+        }
+        XCTAssertEqual(target.name, "Walk news")
+        XCTAssertEqual(target.readKey, key)
+        var opened: (id: String, handle: String, name: String)?
+        FoundChannelReadKeys.subscribe(target) { opened = ($0, $1, $2) }
+        XCTAssertEqual(opened?.id, hex(1))
+        XCTAssertEqual(opened?.handle, "h1xx")
+        XCTAssertEqual(opened?.name, "Walk news")
+        // The screen that subscribes takes the read key: public, read at once.
+        XCTAssertEqual(FoundChannelReadKeys.take(hex(1)), key)
+        XCTAssertNil(FoundChannelReadKeys.take(hex(1)))
+        // A record with no name keeps the listing's.
+        XCTAssertEqual(DiscoverCards.subscribeTarget(card: c, resolved: record(1, name: ""))?.name, "Books listing")
+    }
+
     func testMixesOneCardAfterEveryNItemsNeverFirstOrLast() {
         XCTAssertTrue(DiscoverCards.mix(itemCount: 30, cardCount: 5, rate: .never).allSatisfy {
             if case .item = $0 { return true } else { return false }

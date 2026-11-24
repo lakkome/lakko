@@ -253,6 +253,11 @@ public object ChannelDiscovery {
     public suspend fun resolveChannelHandle(handle: String): String? =
         DiscoveryClient().use { it.lookupChannel(handle) }
 
+    /** The public channel [handle]'s record names, with the record's read key
+     *  and name: what a Subscribe needs to read it at once ([subscribePublicChannel]). */
+    public suspend fun resolvePublicChannel(handle: String): PublicChannelFound? =
+        DiscoveryClient().use { it.lookupChannelRecord(handle) }?.asPublicChannel()
+
     /**
      * Convenience for the subscribe entry point: accept EITHER a
      * pasted 32-char hex `channel_id` OR a typed `@handle`, and

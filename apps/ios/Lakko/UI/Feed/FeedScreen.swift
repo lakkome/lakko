@@ -133,7 +133,11 @@ struct FeedScreen: View {
         .overlay(alignment: .bottom) { toast }
         .onAppear {
             model.start()
-            model.discover.onOpen = { card in onSubscribeFoundChannel(card.channelIdHex, card.handle, card.name) }
+            // A card's Subscribe is a search result's: the record's read key
+            // kept, the record's name shown, the channel read at once.
+            model.discover.onOpen = { found in
+                FoundChannelReadKeys.subscribe(found, open: onSubscribeFoundChannel)
+            }
             model.discover.onOpenChannel = { onOpenChannel($0) }
             media.reloadPlayed()
             media.callActive = callOwnsCapture

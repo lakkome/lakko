@@ -68,6 +68,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import me.lakko.app.calls.quietOffer
 import me.lakko.app.channels.ChannelsUiState
+import me.lakko.app.channels.asPublicChannel
 import me.lakko.app.channels.withChannelFlags
 import me.lakko.app.chat.ChatFolder
 import me.lakko.app.chat.ChatMessage
@@ -214,14 +215,18 @@ public fun ChatListScreen(
                 }
             }
             override fun subscribe(found: me.lakko.app.chat.FoundConversation) {
-                val hex = found.id.joinToString("") { "%02x".format(it) }
                 // ADR-0087 section 6 — a public channel's record carries its
                 // read key: kept, so the posts open at once under its public
-                // seeds with no publisher involved.
-                channels?.boundAccount?.let { acct ->
-                    me.lakko.app.channels.ChannelReadKeys.put(readKeyContext, acct, hex, found.knockOrReadKey)
-                }
-                onSubscribeChannelPressed(hex, found.handle, found.name)
+                // seeds with no publisher involved. The same Subscribe as a
+                // Discover card's.
+                me.lakko.app.channels.subscribePublicChannel(
+                    found.asPublicChannel(),
+                    channels?.boundAccount,
+                    keepReadKey = { acct, hex, key ->
+                        me.lakko.app.channels.ChannelReadKeys.put(readKeyContext, acct, hex, key)
+                    },
+                    open = onSubscribeChannelPressed,
+                )
             }
         }
     }

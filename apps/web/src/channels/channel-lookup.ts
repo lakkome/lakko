@@ -10,6 +10,7 @@
  */
 import { lookupHandle } from "../discovery/handle-lookup";
 import { namePair } from "../discovery/handle-check";
+import { avatarFromWasm, type AvatarData } from "../profile/avatar-model";
 import { loadWasm } from "../wasm";
 import { bytesToHex } from "./composer";
 
@@ -19,6 +20,8 @@ export interface FoundChannel {
   readonly handle: string;
   readonly name: string;
   readonly description: string;
+  /** The channel's photo as the record carries it. */
+  readonly avatar: AvatarData | null;
 }
 
 export async function lookupPublicChannel(handle: string): Promise<FoundChannel | null> {
@@ -44,6 +47,7 @@ export async function lookupPublicChannel(handle: string): Promise<FoundChannel 
         handle: c.handle,
         name: c.name,
         description: c.description,
+        avatar: avatarFromWasm(c.avatar),
       };
     } finally {
       c.free();

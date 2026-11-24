@@ -43,6 +43,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -76,7 +78,7 @@ public fun DiscoverView(
     model: DiscoverModel,
     /** The ranked suggestions (buckets + group-shared), computed by the caller. */
     cards: List<DirectoryCard>,
-    onSubscribe: (channelIdHex: String, handle: String) -> Unit,
+    onSubscribe: (me.lakko.app.channels.PublicChannelFound) -> Unit,
     /** How this device stands to a card's channel (own / followed / neither). */
     relationOf: (channelIdHex: String) -> CardRelation = { CardRelation.NONE },
     /** Open a channel this device already holds. */
@@ -183,7 +185,7 @@ public fun DiscoverView(
 public fun DiscoverCardView(
     card: DirectoryCard,
     model: DiscoverModel,
-    onSubscribe: (channelIdHex: String, handle: String) -> Unit,
+    onSubscribe: (me.lakko.app.channels.PublicChannelFound) -> Unit,
     relation: CardRelation = CardRelation.NONE,
     onOpenChannel: (channelIdHex: String) -> Unit = {},
 ) {
@@ -331,7 +333,11 @@ private fun PickTopicsCard(model: DiscoverModel, first: Boolean, onDone: () -> U
         border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(DiscoverCopy.PICK_TITLE.text(), style = MaterialTheme.typography.titleMedium)
+            Text(
+                DiscoverCopy.PICK_TITLE.text(),
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.semantics { heading() },
+            )
             Text(DiscoverCopy.PICK_BODY.text(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             // Every topic in view, wrapped onto as many lines as it takes, as on
             // iOS and web: rows of four that each scrolled sideways cut the

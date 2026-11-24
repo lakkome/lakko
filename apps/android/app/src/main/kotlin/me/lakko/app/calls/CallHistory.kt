@@ -280,6 +280,76 @@ public fun encodeCallRowsFiled(filed: Collection<String>): String =
 public fun decodeCallRowsFiled(raw: String?): LinkedHashSet<String> =
     raw.orEmpty().split(',').mapNotNullTo(LinkedHashSet()) { k -> k.trim().takeIf { it.isNotEmpty() } }
 
+/**
+ * What [CallHistoryStore] holds for one account: the list, and the call row
+ * keys ([callRowFiledKey]) already offered to it. The two must agree: a key
+ * that stays filed after its row left the list keeps that row out for good,
+ * because every later filing of it ([callIndexFiled]) is skipped as a repeat.
+ */
+public data class CallIndexState(
+    val entries: List<CallHistoryEntry>,
+    val filed: LinkedHashSet<String>,
+)
+
+/** The filed keys of [conversationIdHex] (`"<hex>:<message id>"`). */
+private fun isFiledKeyOf(key: String, conversationIdHex: String): Boolean =
+    key.startsWith(conversationIdHex.lowercase() + ":", ignoreCase = true)
+
+/**
+ * The index after one conversation's calls leave it (ADR-0087 section 9: the
+ * group was wiped on this device). Its filed keys go with them: a row of that
+ * conversation that comes back (a rejoin's history, a bundle) is a new arrival
+ * and is filed again. Found on the emulator 2026-11-24: a membership end and
+ * rejoin emptied the list while the key stayed, so the call row back in the
+ * conversation never reached Calls.
+ */
+public fun callIndexWithoutConversation(state: CallIndexState, conversationIdHex: String): CallIndexState =
+    CallIndexState(
+        entries = callHistoryWithout(state.entries, conversationIdHex),
+        filed = state.filed.filterNotTo(LinkedHashSet()) { isFiledKeyOf(it, conversationIdHex) },
+    )
+
+/**
+ * The index after transcript call [rows] (`filed key -> entry`) are filed: a
+ * row whose key is already filed files nothing (a bundle written twice, a call
+ * this device recorded live, which [ChatRepository][me.lakko.app.chat.ChatRepository]
+ * filed under its start time and marked).
+ */
+public fun callIndexFiled(state: CallIndexState, rows: List<Pair<String, CallHistoryEntry>>): CallIndexState {
+    val filed = LinkedHashSet(state.filed)
+    var next = state.entries
+    for ((key, entry) in rows) {
+        if (!filed.add(key)) continue
+        next = callHistoryWithRestored(next, entry)
+    }
+    return CallIndexState(next, filed)
+}
+
+/**
+ * The one-time repair of an index an older build damaged: a conversation whose
+ * transcript holds call [rows] while the list holds none of its calls lost
+ * them to [callIndexWithoutConversation] without losing its filed keys. Its
+ * keys are dropped and its rows filed. A conversation with any call in the
+ * list is left alone, so a call recorded live (filed under its start time,
+ * while its transcript row carries its end) is never listed twice.
+ */
+public fun callIndexRepaired(state: CallIndexState, rows: List<Pair<String, CallHistoryEntry>>): CallIndexState {
+    val listed = state.entries.mapNotNullTo(HashSet()) { it.conversationIdHex?.lowercase() }
+    val lost = rows.filter { (_, entry) ->
+        val hex = entry.conversationIdHex?.lowercase()
+        hex != null && hex !in listed
+    }
+    if (lost.isEmpty()) return state
+    var cleared = state
+    for (hex in lost.mapNotNullTo(LinkedHashSet()) { it.second.conversationIdHex?.lowercase() }) {
+        cleared = CallIndexState(
+            entries = cleared.entries,
+            filed = cleared.filed.filterNotTo(LinkedHashSet()) { isFiledKeyOf(it, hex) },
+        )
+    }
+    return callIndexFiled(cleared, lost)
+}
+
 /** [entries] in display order, capped at [max]. */
 public fun callHistoryOrdered(
     entries: List<CallHistoryEntry>,

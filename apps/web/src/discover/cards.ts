@@ -19,6 +19,7 @@
  * Pure: the wasm decoder is injected.
  */
 import { t } from "../l10n";
+import type { FoundChannel } from "../channels/channel-lookup";
 
 /** The published subscriber bands, smallest first (ADR-0059 section 4). */
 export const SUBSCRIBER_BANDS = ["<10", "10+", "100+", "1k+", "10k+", "100k+"] as const;
@@ -223,6 +224,21 @@ export function reasonLine(card: DirectoryCard, topicName: (id: number) => strin
 export function verifyDecision(cardChannelIdHex: string, resolvedHex: string | null): "ok" | "gone" {
   if (resolvedHex === null) return "gone";
   return resolvedHex.toLowerCase() === cardChannelIdHex.toLowerCase() ? "ok" : "gone";
+}
+
+/**
+ * What a card's Subscribe subscribes to: the public channel its handle's
+ * record names, with the record's read key and photo, under the record's
+ * name (the listing's when the record carries none); `null` when the handle
+ * does not lead to the card's channel (the card is gone).
+ */
+export function discoverSubscribeTarget(card: DirectoryCard, found: FoundChannel | null): FoundChannel | null {
+  if (found === null || verifyDecision(card.channelIdHex, found.idHex) === "gone") return null;
+  return {
+    ...found,
+    handle: found.handle === "" ? card.handle : found.handle,
+    name: found.name === "" ? card.name : found.name,
+  };
 }
 
 /** How often a suggestion appears in a feed (the rule's `suggestions`). */

@@ -24,7 +24,7 @@ import { useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
 import { apiError, fetchBucket, fetchListing, searchDirectory, type DirectoryItem } from "../channels/api";
 import { lookupPublicChannel } from "../channels/channel-lookup";
-import { subscribeToChannel } from "../channels/channel-access";
+import { subscribeToPublicChannel } from "../channels/public-subscribe";
 import { bytesToHex } from "../channels/composer";
 import { paths } from "../routes/paths";
 import { channelsState } from "../state/channels-state";
@@ -37,7 +37,7 @@ import {
   reasonLine,
   cardRelation,
   type CardRelation,
-  verifyDecision,
+  discoverSubscribeTarget,
   type CardContext,
   type DecodedListing,
   type DirectoryCard,
@@ -429,24 +429,23 @@ export function createDiscoverModel(deps: DiscoverDeps): DiscoverModel {
       else setNotice(COPY.unavailable);
       return;
     }
-    if (verifyDecision(card.channelIdHex, found?.idHex ?? null) === "gone" || found === null) {
+    const target = discoverSubscribeTarget(card, found);
+    if (target === null) {
       setGone(new Set([...gone(), card.channelIdHex]));
       setNotice(COPY.gone);
       return;
     }
     setVerified(new Set([...verified(), card.channelIdHex]));
     try {
-      await subscribeToChannel(found.idHex, { kind: "public", readKey: found.readKey }, {
-        name: found.name,
-        description: found.description,
-        handle: found.handle,
-      });
+      // The same Subscribe as a search result's: the record's read key and
+      // name and photo, so the channel reads at once.
+      await subscribeToPublicChannel(target);
     } catch {
       setNotice(COPY.unavailable);
       return;
     }
     if (!here()) return;
-    navigate(paths.channel(found.idHex));
+    navigate(paths.channel(target.idHex));
   }
 
   return {

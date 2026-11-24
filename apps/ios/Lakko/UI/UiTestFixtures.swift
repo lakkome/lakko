@@ -85,6 +85,10 @@ enum UiTestFixture: String {
     /// two tabs.
     case emojiPicker
 
+    /// `docs/ux/feed.md` Discover — the first-run pick-topics card, so a test
+    /// can read what VoiceOver hears on its heading, picker and buttons.
+    case discoverPickTopics
+
     /// The launch argument that selects a fixture. Passed by the UI test as
     /// `["-LakkoUITestFixture", "voiceBubble"]`.
     static let launchArgument = "-LakkoUITestFixture"
@@ -133,6 +137,8 @@ struct UiTestFixtureRoot: View {
             MediaTrayFixture()
         case .emojiPicker:
             EmojiPickerFixture()
+        case .discoverPickTopics:
+            DiscoverPickTopicsFixture()
         }
     }
 }
@@ -194,6 +200,35 @@ private struct EmojiPickerFixture: View {
 
     var body: some View {
         MediaPickerSheet(mode: .compose, media: media, onEmoji: { _ in }, onClose: {})
+    }
+}
+
+/// The production ``PickTopicsCard`` as Discover shows it on first open,
+/// over a ``DiscoverModel`` whose ports go nowhere. Nothing is loaded or saved:
+/// the card is only read.
+private struct DiscoverPickTopicsFixture: View {
+    @StateObject private var model = DiscoverModel(
+        accountIdB64: "uitest-fixture",
+        client: ChannelsClient(),
+        hub: SharedChannelsHub(ports: SharedChannelsHub.Ports(
+            accountIdB64: { nil },
+            send: { _, _ in },
+            canSend: { _ in false },
+            nowMs: { 0 })),
+        deps: DiscoverModel.Deps(
+            liveGroups: { [] },
+            groupTitle: { _ in "" },
+            contactName: { _ in nil },
+            ownKeyB64: { nil },
+            following: { [] },
+            publishing: { [] },
+            resolveHandle: { _ in nil }))
+
+    var body: some View {
+        ScrollView {
+            PickTopicsCard(model: model, first: true, onDone: {})
+                .padding(16)
+        }
     }
 }
 

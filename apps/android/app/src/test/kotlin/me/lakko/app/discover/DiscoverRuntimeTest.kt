@@ -162,7 +162,7 @@ class DiscoverRuntimeTest {
     private class FakeBackend : DiscoverBackend {
         val asked = mutableListOf<Int>()
         var failAll = false
-        var resolved: String? = null
+        var resolved: me.lakko.app.channels.PublicChannelFound? = null
         var prefs = DiscoverPrefs()
         override suspend fun fetchBucket(topic: Int, language: String): List<DirectoryItemWire> {
             asked += topic
@@ -171,7 +171,7 @@ class DiscoverRuntimeTest {
         }
         override suspend fun fetchListing(channelIdHex: String): DirectoryItemWire? = null
         override suspend fun search(query: String): List<DirectoryItemWire> = emptyList()
-        override suspend fun resolveHandle(handle: String): String? = resolved
+        override suspend fun resolveHandle(handle: String): me.lakko.app.channels.PublicChannelFound? = resolved
         override fun decodeListing(listingB64: String): DecodedListing? {
             val t = listingB64.removePrefix("L").toInt()
             return DecodedListing(t.toString().padStart(32, '0'), "h$t", "N$t", "", t, "en")
@@ -219,15 +219,55 @@ class DiscoverRuntimeTest {
         val m = DiscoverModel(b, { "acct" }, this, "en")
         val card = DirectoryCard(id(1), "books", "Books", "", 1, "en", "10+", CardSource.BUCKET, 0, null)
         var opened: Pair<String, String>? = null
-        b.resolved = id(2)
-        m.subscribe(card) { i, h -> opened = i to h }
+        b.resolved = found(id(2))
+        m.subscribe(card) { f -> opened = f.idHex to f.handle }
         assertEquals(null, opened)
         assertTrue(id(1) in m.gone.value)
         assertEquals(DiscoverCopy.GONE, m.notice.value)
-        b.resolved = id(1)
-        m.subscribe(card) { i, h -> opened = i to h }
+        b.resolved = null
+        m.subscribe(card) { f -> opened = f.idHex to f.handle }
+        assertEquals(null, opened)
+        b.resolved = found(id(1))
+        m.subscribe(card) { f -> opened = f.idHex to f.handle }
         assertEquals(id(1) to "books", opened)
     }
+
+    private fun found(idHex: String, name: String = "Walk news") =
+        me.lakko.app.channels.PublicChannelFound(idHex, "books", name, ByteArray(32) { 7 })
+
+    @Test
+    fun `a public channel subscribed from a Discover card reads at once under the record's name`() =
+        runTest(StandardTestDispatcher()) {
+            // Seen 2026-11-24: the card's Subscribe kept no read key and no
+            // name, so the channel opened titled by its handle and waited for
+            // its owner as if it were private. It now takes the one
+            // public-channel Subscribe a search result takes.
+            val b = FakeBackend()
+            val m = DiscoverModel(b, { "acct" }, this, "en")
+            val card = DirectoryCard(id(1), "books", "Books listing", "", 1, "en", "<10", CardSource.BUCKET, 0, null)
+            b.resolved = found(id(1))
+            val kept = mutableListOf<Triple<String, String, List<Byte>>>()
+            var opened: Triple<String, String, String>? = null
+            m.subscribe(card) { f ->
+                me.lakko.app.channels.subscribePublicChannel(
+                    f,
+                    "acct",
+                    keepReadKey = { a, hex, key -> kept += Triple(a, hex, key.toList()) },
+                    open = { hex, handle, name -> opened = Triple(hex, handle, name) },
+                )
+            }
+            assertEquals(listOf(Triple("acct", id(1), ByteArray(32) { 7 }.toList())), kept)
+            assertEquals(Triple(id(1), "books", "Walk news"), opened)
+            // Holding the read key is what reads the channel as public: no
+            // waiting line, its public seeds open.
+            assertEquals(true, me.lakko.app.channels.channelIsPublic(null, null, holdsReadKey = true))
+            // A record with no name keeps the card's.
+            b.resolved = found(id(1), name = "")
+            m.subscribe(card) { f ->
+                me.lakko.app.channels.subscribePublicChannel(f, "acct", { _, _, _ -> }, { h, _, n -> opened = Triple(h, "", n) })
+            }
+            assertEquals("Books listing", opened?.third)
+        }
 
     @Test
     fun `no picked topics, no download`() = runTest(StandardTestDispatcher()) {

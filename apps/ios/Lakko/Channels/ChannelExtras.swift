@@ -230,6 +230,39 @@ enum FoundChannelReadKeys {
     static func put(_ channelIdHex: String, _ key: Data) { keys[channelIdHex.lowercased()] = key }
 
     static func take(_ channelIdHex: String) -> Data? { keys.removeValue(forKey: channelIdHex.lowercased()) }
+
+    /// The one Subscribe of a public channel found by its `@name` record, from
+    /// a search result or a Discover card alike: keep the record's read key
+    /// for the screen that subscribes, then open the channel subscribing under
+    /// the record's name. With the read key the channel reads at once (its
+    /// public seeds open, no waiting line; `group-and-channel-privacy.md` 7.2).
+    static func subscribe(
+        _ found: PublicChannelFound,
+        open: (_ channelIdHex: String, _ handle: String, _ name: String) -> Void
+    ) {
+        if found.readKey.count == 32 { put(found.idHex, found.readKey) }
+        open(found.idHex, found.handle, found.name)
+    }
+}
+
+/// A public channel as its `@name` record names it (ADR-0087 sections 4 and
+/// 6): what a Subscribe needs to read it at once.
+struct PublicChannelFound: Equatable {
+    /// The 32-char lower-case hex channel id.
+    let idHex: String
+    /// The canonical `@name`, without the `@`.
+    let handle: String
+    /// The channel's name from the record; may be empty.
+    let name: String
+    /// The channel's read key from the record (32 bytes).
+    let readKey: Data
+}
+
+extension ConversationHandles.Found {
+    /// A channel record as ``PublicChannelFound``.
+    var asPublicChannel: PublicChannelFound {
+        PublicChannelFound(idHex: idHex.lowercased(), handle: handle, name: name, readKey: key)
+    }
 }
 
 /// ADR-0087 section 7.2 — a private channel invitation the link page handed

@@ -26,7 +26,8 @@ public class ChannelsDiscoverBackend(
 
     override suspend fun search(query: String): List<DirectoryItemWire> = client.searchDirectory(query)
 
-    override suspend fun resolveHandle(handle: String): String? = ChannelDiscovery.resolveChannelHandle(handle)
+    override suspend fun resolveHandle(handle: String): me.lakko.app.channels.PublicChannelFound? =
+        ChannelDiscovery.resolvePublicChannel(handle)
 
     override fun decodeListing(listingB64: String): DecodedListing? = DiscoverListing.decodeListingB64(listingB64)
 

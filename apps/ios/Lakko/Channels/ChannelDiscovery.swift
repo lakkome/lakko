@@ -86,6 +86,16 @@ public enum ChannelDiscovery {
         return AttachmentBridge.hex(found.id)
     }
 
+    /// The public channel [handle]'s record names, with the record's read
+    /// key and name: what a Subscribe needs to read it at once
+    /// (``FoundChannelReadKeys/subscribe(_:open:)``).
+    static func resolvePublicChannel(_ handle: String) async throws -> PublicChannelFound? {
+        guard let found = try await ConversationHandles.lookupExact(
+            discovery: DiscoveryClient(), handle: handle),
+              found.kind == .channel, found.id.count == 16 else { return nil }
+        return found.asPublicChannel
+    }
+
     /// Convenience for the subscribe entry point: accept EITHER a pasted
     /// 32-char hex `channel_id` OR a typed `@handle`, and return the
     /// resolved channel id hex (or `nil` when a handle does not resolve).

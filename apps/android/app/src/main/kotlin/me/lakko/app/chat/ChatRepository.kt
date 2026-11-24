@@ -18835,12 +18835,7 @@ public class ChatRepository(
         val filedAtMs = startedAtMs ?: now.toEpochMilli()
         callRowScope.launchSession {
             persistMessageLogBestEffort()
-            if (pastBeforeThisCall != null) {
-                me.lakko.app.calls.CallHistoryStore.backfillOnce(
-                    context = applicationContext,
-                    accountIdB64 = accountIdB64,
-                ) { pastBeforeThisCall }
-            }
+            if (pastBeforeThisCall != null) fillCallHistoryOnce(accountIdB64, pastBeforeThisCall)
             recordCallHistoryEntry(accountIdB64, groupIdHex, entry, filedAtMs)
             // Filed now: a history bundle that carries this row back
             // ([me.lakko.app.calls.CallHistoryStore.fileCallRows]) files nothing more.
@@ -18901,12 +18896,27 @@ public class ChatRepository(
     public fun backfillCallHistory() {
         val accountIdB64 = currentAccountIdB64.get() ?: return
         val past = takeCallHistoryFillSnapshot(accountIdB64) ?: return
-        callRowScope.launchSession {
-            me.lakko.app.calls.CallHistoryStore.backfillOnce(
-                context = applicationContext,
-                accountIdB64 = accountIdB64,
-            ) { past }
-        }
+        callRowScope.launchSession { fillCallHistoryOnce(accountIdB64, past) }
+    }
+
+    /**
+     * The two once-per-account fills of the call index, on one snapshot of
+     * the transcripts: calls from before the index existed, then the repair of
+     * conversations an older build emptied from the list while keeping their
+     * filed keys ([me.lakko.app.calls.CallHistoryStore.repairOnce]).
+     */
+    private fun fillCallHistoryOnce(
+        accountIdB64: String?,
+        past: List<Pair<String, me.lakko.app.calls.CallHistoryEntry>>,
+    ) {
+        me.lakko.app.calls.CallHistoryStore.backfillOnce(
+            context = applicationContext,
+            accountIdB64 = accountIdB64,
+        ) { past }
+        me.lakko.app.calls.CallHistoryStore.repairOnce(
+            context = applicationContext,
+            accountIdB64 = accountIdB64,
+        ) { past }
     }
 
     /** Accounts whose fill snapshot this process has taken. */
@@ -18919,13 +18929,18 @@ public class ChatRepository(
      * per process: the first call to finish or the first opening of the Calls
      * screen, whichever comes first, takes it, and nothing later can file a
      * row whose call was already recorded live. `null` when it was already
-     * taken. [me.lakko.app.calls.CallHistoryStore.backfillOnce] still runs the
+     * taken, or the message log is not seeded yet. [me.lakko.app.calls.CallHistoryStore.backfillOnce] still runs the
      * fill once per account ever.
      */
     private fun takeCallHistoryFillSnapshot(
         accountIdB64: String?,
     ): List<Pair<String, me.lakko.app.calls.CallHistoryEntry>>? {
-        if (accountIdB64 == null || !callHistoryFillSnapshotTaken.add(accountIdB64)) return null
+        if (accountIdB64 == null) return null
+        // Not before the log is seeded: a snapshot of half-loaded transcripts
+        // would be filed as the account's whole past and the fill marked done.
+        // Left untaken, the next call or the next opening of Calls takes it.
+        if (synchronized(groups) { messageLogAccount } != accountIdB64) return null
+        if (!callHistoryFillSnapshotTaken.add(accountIdB64)) return null
         return pastCallEntries()
     }
 

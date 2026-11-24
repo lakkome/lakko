@@ -269,7 +269,7 @@ struct DiscoverCardView: View {
 }
 
 /// The pick-topics card (first open, and "Edit topics").
-private struct PickTopicsCard: View {
+struct PickTopicsCard: View {
     @ObservedObject var model: DiscoverModel
     let first: Bool
     let onDone: () -> Void
@@ -282,7 +282,9 @@ private struct PickTopicsCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(DiscoverCopy.pickTitle).font(.headline)
+            Text(DiscoverCopy.pickTitle)
+                .font(.headline)
+                .accessibilityAddTraits(.isHeader)
             Text(DiscoverCopy.pickBody)
                 .font(.subheadline)
                 .foregroundStyle(Color.lakkoTextMuted)
@@ -318,6 +320,11 @@ private struct PickTopicsCard: View {
             chosen = Set(model.prefs.topics)
             language = model.language
         }
+        // The card is a named container: `.contain` keeps the name on the
+        // card alone. Without it SwiftUI hands the card's label to every
+        // child, and VoiceOver read "Pick topics" for the heading, the
+        // language picker, Not now and Save.
+        .accessibilityElement(children: .contain)
         .accessibilityLabel(l10n.t("discover.pick.a11y"))
     }
 }

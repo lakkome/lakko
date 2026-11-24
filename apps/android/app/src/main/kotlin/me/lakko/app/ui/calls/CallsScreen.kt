@@ -120,8 +120,10 @@ public fun CallsScreen(
 
     // Calls placed before the index existed live only in their conversations.
     // Filled once per account, so this screen never opens empty while the
-    // conversation list next to it is visibly showing calls.
-    LaunchedEffect(repository) { repository.backfillCallHistory() }
+    // conversation list next to it is visibly showing calls. Keyed on the
+    // bootstrap too: before the log is seeded the repository takes no
+    // snapshot, and this is the next chance.
+    LaunchedEffect(repository, chatState.bootstrapped) { repository.backfillCallHistory() }
 
     // The index, not a walk of every transcript — `docs/ux/navigation.md`
     // section 6.2. The thread COUNT is read so a conversation arriving after

@@ -979,7 +979,12 @@ public class DiscoveryClient(
      * endpoint: OPRF (one token) → `POST /discovery/channel/lookup`.
      * Unauthenticated (the lookup path is open); anonymous-safe.
      */
-    public suspend fun lookupChannel(handle: String): String? {
+    public suspend fun lookupChannel(handle: String): String? =
+        lookupChannelRecord(handle)?.let { bytesToHexLower(it.id) }
+
+    /** The channel record [handle] names (its id, read key and name), or
+     *  `null` when the name is no channel's. */
+    public suspend fun lookupChannelRecord(handle: String): me.lakko.app.chat.FoundConversation? {
         // ADR-0087 section 1 — one namespace: a channel's @name is a handle,
         // found by its lookup key and opened from its sealed record.
         val name = me.lakko.app.chat.canonicalHandleInput(handle)
@@ -988,7 +993,7 @@ public class DiscoveryClient(
         val record = lookupHandleRecord(pair.lookupKey) ?: return null
         val found = me.lakko.app.chat.openFoundConversation(record, pair.output) ?: return null
         if (found.kind != uniffi.lakko_ffi_uniffi.FfiHandleRecordKind.CHANNEL || found.id.size != CHANNEL_ID_LEN) return null
-        return bytesToHexLower(found.id)
+        return found
     }
 
     /**

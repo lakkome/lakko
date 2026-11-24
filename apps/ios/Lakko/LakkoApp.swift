@@ -1645,7 +1645,7 @@ private final class SessionModels: ObservableObject {
                 ownKeyB64: { chatRepository.ownPersonKeyB64() },
                 following: { Set(channels.channels.map(\.id)) },
                 publishing: { Set(channels.keysByChannel.keys) },
-                resolveHandle: { try await ChannelDiscovery.resolveChannelHandle($0) },
+                resolveHandle: { try await ChannelDiscovery.resolvePublicChannel($0) },
                 hiddenFromFeeds: { [weak reading] in Set(reading?.reading.hidden ?? []) }))
         feedVM = FeedViewModel(
             account: account,

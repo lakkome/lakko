@@ -436,6 +436,20 @@ enum DiscoverCards {
         return resolvedHex.lowercased() == cardChannelIdHex.lowercased()
     }
 
+    /// What a card's Subscribe subscribes to: the public channel its handle's
+    /// record names, with the record's read key, under the record's name (the
+    /// listing's when the record carries none); `nil` when the handle does not
+    /// lead to the card's channel (the card is gone).
+    static func subscribeTarget(card: DirectoryCard, resolved: PublicChannelFound?) -> PublicChannelFound? {
+        guard let resolved,
+              verifyDecision(cardChannelIdHex: card.channelIdHex, resolvedHex: resolved.idHex) else { return nil }
+        return PublicChannelFound(
+            idHex: resolved.idHex,
+            handle: resolved.handle.isEmpty ? card.handle : resolved.handle,
+            name: resolved.name.isEmpty ? card.name : resolved.name,
+            readKey: resolved.readKey)
+    }
+
     /// One card after this many feed items (chosen).
     static func every(_ rate: SuggestionRate) -> Int {
         switch rate {

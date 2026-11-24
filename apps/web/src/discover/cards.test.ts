@@ -10,6 +10,7 @@ import {
   rankCards,
   reasonLine,
   verifyDecision,
+  discoverSubscribeTarget,
   type CardContext,
   type DecodedListing,
   type DirectoryCard,
@@ -150,6 +151,36 @@ describe("the check before subscribing", () => {
     expect(verifyDecision(ID_A, ID_A.toUpperCase())).toBe("ok");
     expect(verifyDecision(ID_A, ID_B)).toBe("gone");
     expect(verifyDecision(ID_A, null)).toBe("gone");
+  });
+
+  it("subscribes a public channel under its record's read key, name and photo", () => {
+    const card: DirectoryCard = {
+      channelIdHex: ID_A,
+      handle: "walknews",
+      name: "Walk news listing",
+      description: "",
+      topic: 3,
+      language: "en",
+      band: "<10",
+      source: "bucket",
+      serverRank: 0,
+      followers: null,
+    };
+    const readKey = new Uint8Array(32).fill(7);
+    const record = (idHex: string, name: string) => ({
+      idHex,
+      readKey,
+      handle: "walknews",
+      name,
+      description: "Posts",
+      avatar: null,
+    });
+    expect(discoverSubscribeTarget(card, null)).toBeNull();
+    expect(discoverSubscribeTarget(card, record(ID_B, "Other"))).toBeNull();
+    const target = discoverSubscribeTarget(card, record(ID_A, "Walk news"));
+    expect(target?.name).toBe("Walk news");
+    expect(target?.readKey).toBe(readKey);
+    expect(discoverSubscribeTarget(card, record(ID_A, ""))?.name).toBe("Walk news listing");
   });
 });
 
