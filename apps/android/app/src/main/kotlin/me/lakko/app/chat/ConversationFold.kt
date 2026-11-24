@@ -76,17 +76,20 @@ public fun foldConversations(threads: List<ChatThread>, lineage: Lineage): List<
         }
         val history = ArrayList<ChatMessage>()
         var unread = head.localUnread
+        var joinUnshown = head.joinRequestsUnshown
         var syncedThrough = head.syncedThrough
         older.forEachIndexed { index, hex ->
             val segment = byHex[hex] ?: return@forEachIndexed
             val distance = older.size - index
             for (m in segment.messages) history += historyRowOf(m, hex, distance)
             unread += segment.localUnread
+            joinUnshown += segment.joinRequestsUnshown
             syncedThrough = syncedThrough + segment.syncedThrough
         }
         head.copy(
             messages = history + head.messages,
             localUnread = unread,
+            joinRequestsUnshown = joinUnshown,
             syncedThrough = syncedThrough,
             conversationHex = plan.conversationHex,
             olderSegments = older,

@@ -183,4 +183,73 @@ class CameraOwnershipTest {
         assertFalse(own.isReleased)
         assertEquals(0, own.boundCount)
     }
+
+    // ----- §3 states: whether camera mode is offered at all -----------------
+
+    private fun h264Aac(name: String) =
+        VideoNoteProfileOption(name, VIDEO_NOTE_VIDEO_CODEC, VIDEO_NOTE_AUDIO_CODEC, 720, 480)
+
+    private fun amrOnly(name: String) =
+        VideoNoteProfileOption(name, VIDEO_NOTE_VIDEO_CODEC, "audio/3gpp", 720, 480)
+
+    @Test
+    fun a_lens_with_an_h264_aac_profile_offers_camera_mode() {
+        assertEquals(
+            VideoNoteAvailability.AVAILABLE,
+            videoNoteAvailability(mapOf(CameraLens.FRONT to listOf(h264Aac("SD")))),
+        )
+    }
+
+    /** The emulator finding: a camera whose only profile is not H.264 + AAC. */
+    @Test
+    fun a_camera_with_no_h264_aac_profile_is_unavailable_up_front() {
+        assertEquals(
+            VideoNoteAvailability.NO_COMPATIBLE_FORMAT,
+            videoNoteAvailability(mapOf(CameraLens.FRONT to listOf(amrOnly("SD")))),
+        )
+        assertEquals(
+            VideoNoteAvailability.NO_COMPATIBLE_FORMAT,
+            videoNoteAvailability(mapOf(CameraLens.BACK to emptyList<VideoNoteProfileOption<String>>())),
+        )
+    }
+
+    /**
+     * The answer given up front is the one a hold would get: `bind` records
+     * on the front camera when there is one, so a usable back camera does not
+     * make camera mode available if the front one has no usable profile.
+     */
+    @Test
+    fun availability_is_judged_on_the_lens_a_take_would_bind() {
+        assertEquals(
+            VideoNoteAvailability.NO_COMPATIBLE_FORMAT,
+            videoNoteAvailability(
+                mapOf(CameraLens.FRONT to listOf(amrOnly("SD")), CameraLens.BACK to listOf(h264Aac("SD"))),
+            ),
+        )
+        assertEquals(
+            VideoNoteAvailability.AVAILABLE,
+            videoNoteAvailability(mapOf(CameraLens.BACK to listOf(h264Aac("SD")))),
+        )
+    }
+
+    @Test
+    fun no_lens_at_all_is_no_camera() {
+        assertEquals(
+            VideoNoteAvailability.NO_CAMERA,
+            videoNoteAvailability(emptyMap<CameraLens, List<VideoNoteProfileOption<String>>>()),
+        )
+    }
+
+    @Test
+    fun camera_mode_refusal_names_the_reason_and_an_unanswered_probe_refuses_nothing() {
+        assertEquals(VideoStartFailure.NO_CAMERA, videoModeRefusal(false, null))
+        assertEquals(VideoStartFailure.NO_CAMERA, videoModeRefusal(false, VideoNoteAvailability.AVAILABLE))
+        assertEquals(VideoStartFailure.NO_CAMERA, videoModeRefusal(true, VideoNoteAvailability.NO_CAMERA))
+        assertEquals(
+            VideoStartFailure.NO_COMPATIBLE_FORMAT,
+            videoModeRefusal(true, VideoNoteAvailability.NO_COMPATIBLE_FORMAT),
+        )
+        assertNull(videoModeRefusal(true, VideoNoteAvailability.AVAILABLE))
+        assertNull(videoModeRefusal(true, null))
+    }
 }

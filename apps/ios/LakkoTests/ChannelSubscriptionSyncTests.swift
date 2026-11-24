@@ -263,6 +263,38 @@ final class ChannelSubscriptionSyncTests: XCTestCase {
         XCTAssertEqual(channels.channels, [])
     }
 
+    /// Seen live on Android 2026-11-24: a channel opened from Chats search
+    /// stayed open and listed after Unsubscribe, because the leave looked for
+    /// the list's route only. Here every route the channel can be opened by
+    /// goes with it, and the list does not get it back.
+    func testAnUnsubscribeFromAChannelOpenedFromSearchClosesItAndTakesItOffTheList() throws {
+        let port = FakePort()
+        let (sync, channels, _) = bound(port)
+        let id = hex(idA)
+        channels.addChannel(ChannelHandle(id: id, localName: "Night walk", localDescription: "", addedAtMs: 1))
+        _ = channels.subscriberKeysForSubscribe(id)
+        sync.reconcileNow()
+
+        let other = TabRoute.chat(groupIdHex: "aa")
+        for opened in [
+            TabRoute.channelFound(channelId: id, handle: "night_walk"),
+            TabRoute.channelSubscribe(channelId: id, handle: "night_walk", name: "Night walk"),
+            TabRoute.channel(channelId: id),
+        ] {
+            let path = [other, opened, TabRoute.channelInfo(channelId: id, foundHandle: "night_walk")]
+            XCTAssertEqual(TabRoute.leavingChannel(path, channelId: id.uppercased()), [other], "\(opened)")
+        }
+
+        // What ``ChannelUnsubscribe/stopFollowing(state:channelId:)`` does
+        // locally, then the shell's end hook.
+        channels.clearSubscriberKeys(id)
+        channels.removeChannel(id)
+        channels.onRelationshipEnded?(id)
+        sync.reconcileNow()
+        XCTAssertEqual(channels.channels, [])
+        XCTAssertEqual(try port.state.isChannelSubscribed(channelId: idA), false)
+    }
+
     func testAnUnsubscribeBeforeTheFoldIsLoadedStaysOwed() throws {
         let port = FakePort()
         XCTAssertTrue(try port.state.setChannelSubscription(

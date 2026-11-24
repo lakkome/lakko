@@ -2081,6 +2081,13 @@ public final class ChatRepository: ObservableObject {
         // group's history bundle away.
         if let waiting = waitingLogSlots.take(groupIdHex) { record.adoptHistory(waiting) }
         groups[groupIdHex] = record
+        // UX 6.2 — the request that led here is answered: its Requests sent
+        // entry goes now, not when the list is next read.
+        if let account = currentAccountIdB64 {
+            RequestsSentStore.forget(
+                accountIdB64: account, groupIdHex: groupIdHex,
+                upToMs: Int64(Date().timeIntervalSince1970 * 1000))
+        }
         persistKnownGroupBestEffort(groupIdHex: groupIdHex)
         // A later join clears a held end (rule 3: a first join writes nothing).
         publishJoinedSoon(groupIdHex: groupIdHex)
@@ -2103,8 +2110,37 @@ public final class ChatRepository: ObservableObject {
         // already in the journal was sealed in an epoch this device cannot
         // open, and only a member whose device notices the growth re-sends.
         requestProfilesAfterJoin(groupIdHex: groupIdHex)
+        // And read the journal to its end now: every row before this join is
+        // one this device cannot open, a group that has lived a while holds
+        // hundreds, and the rows of the new membership (the group's name, the
+        // members' profiles, the first messages) wait behind them.
+        drainJoinedJournalSoon(groupIdHex: groupIdHex)
         return groupIdHex
     }
+
+    /// Pages a just-joined group's journal to its head, one page after
+    /// another with no wait, at most ``joinedDrainMaxPages`` pages. Seen on
+    /// Android 2026-11-23: a person added back to a group read about a
+    /// thousand older rows one page per sweep, and the group's name reached
+    /// the device minutes after the join.
+    func drainJoinedJournalSoon(groupIdHex: String) {
+        let bound = binding.capture()
+        Task { @MainActor [weak self] in
+            for _ in 0..<Self.joinedDrainMaxPages {
+                guard bound.isCurrent, let self, let before = self.groups[groupIdHex]?.cursor else { return }
+                do {
+                    try await self.pollGroup(groupIdHex: groupIdHex, waitSecs: 0)
+                } catch {
+                    NSLog("joined group: journal not read to its end, the receive loop goes on")
+                    return
+                }
+                guard let after = self.groups[groupIdHex]?.cursor, after != before else { return }
+            }
+        }
+    }
+
+    /// At most this many pages are read right after a join (100 rows a page).
+    static let joinedDrainMaxPages = 50
 
     /// ADR-0048 §2 — publish the own profile into `groupIdHex` without making
     /// the caller wait on the network. Fire-and-forget: the send takes the
@@ -2537,12 +2573,15 @@ public final class ChatRepository: ObservableObject {
         updatedAtMs: UInt64,
         senderLeaf: UInt32?
     ) {
-        guard let accountIdB64 = currentAccountIdB64, let record = groups[groupIdHex] else { return }
+        guard let accountIdB64 = currentAccountIdB64, let record = groups[groupIdHex] else {
+            NSLog("ADR-0051 group name dropped: no session or no group")
+            return
+        }
         // ADR-0062 section 7 — a one-to-one has no group name; applying one
         // would retitle the person. Dropped on receipt, read from the group's
         // own kind (the same answer on every member's device).
         guard ConversationKind.acceptsGroupName(groupKind: groupKind(groupIdHex: groupIdHex)) else {
-            NSLog("ADR-0062 group name for \(groupIdHex) dropped: a one-to-one has no group name")
+            NSLog("ADR-0062 group name dropped: a one-to-one has no group name")
             return
         }
         let resolved = PushGroupRouting.resolveSenderAuthority(
@@ -2566,7 +2605,7 @@ public final class ChatRepository: ObservableObject {
             // An admin's rename reaches the owner as this envelope.
             notePublicRecordChanged(groupIdHex: groupIdHex)
         case .rejectNotAuthorized, .rejectStale, .rejectUnverifiable:
-            NSLog("ADR-0051 group name for \(groupIdHex) dropped: \(verdict)")
+            NSLog("ADR-0051 group name dropped: \(verdict)")
         }
     }
 
@@ -3426,6 +3465,8 @@ public final class ChatRepository: ObservableObject {
         // ADR-0053 — the knock cursor.
         UserDefaults.standard.removeObject(
             forKey: "\(AccountLocalDataWipe.knockCursorPrefix)\(accountIdB64).\(groupIdHex)")
+        // UX section 8.1 — the announced and unshown request sets.
+        JoinRequestSignalStore().forgetGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         forgetGroupSessionState(groupIdHex: groupIdHex)
     }
 
@@ -6074,6 +6115,11 @@ public final class ChatRepository: ObservableObject {
             // live group, assemble, adopt what this device does not hold.
             contentHandoverSink: { [weak self] event in
                 self?.receiveContentHandover(groupIdHex: groupIdHex, event: event)
+            },
+            // UX section 8.1 — a retained external-join request read off the
+            // journal is announced like a kept knock row.
+            externalJoinRequestSink: { [weak self] joiner in
+                self?.noteJoinRequestArrived(groupIdHex: groupIdHex, joinerSignatureKey: joiner)
             }
         )
         // Membership rows — before the log is written below. Each commit of
@@ -9672,7 +9718,10 @@ public final class ChatRepository: ObservableObject {
                     joinerKeyB64: base64Encode(kept.joinerSignatureKey),
                     askedAtMs: Self.parseDsTimestampMs(createdAt) ?? Self.nowMs(),
                     inviterKey: linkCap?.issuerSignaturePubkey(),
-                    knockRowId: rowId > 0 ? rowId : nil)
+                    knockRowId: rowId > 0 ? rowId : nil,
+                    // Newly kept: an older record for this joiner is from a
+                    // request that stopped waiting (UX section 8).
+                    replace: kept.outcome == .retained)
             }
             // UX section 8 — the name the request carries, shown unverified.
             if let accountIdB64 = currentAccountIdB64,
@@ -9687,6 +9736,9 @@ public final class ChatRepository: ObservableObject {
             ReachCenter.shared.keep(
                 request.replyGrant, carrier: .request,
                 fromAccountKeyB64: base64Encode(account), scopeHex: nil)
+            // UX section 8.1 — the bar, the unread row, the notification;
+            // announced once per request (an ask again is the same request).
+            noteJoinRequestArrived(groupIdHex: groupIdHex, joinerSignatureKey: kept.joinerSignatureKey)
             return .keep
         case .queueFull:
             return .stop
@@ -10264,6 +10316,10 @@ public final class ChatRepository: ObservableObject {
                 return
             }
             state = state.with(threads: buildThreadList())
+            // UX section 8.1 — the announced and unshown sets follow the
+            // requests still waiting.
+            pruneJoinRequestSignals(
+                groupIdHex: groupIdHex, pending: pendingJoinRequestKeys(groupIdHex: groupIdHex))
             // The account was captured before the fetch: its cursor is not
             // written once its session has ended (``AccountStoreGate``). The
             // snapshot persist above does not cover that: with no account
@@ -10637,6 +10693,9 @@ public final class ChatRepository: ObservableObject {
     /// in front, under history ids.
     func buildThreadList() -> [ChatThread] {
         let arrivals = currentAccountIdB64.map { groupArrivalStore.load(accountIdB64: $0) } ?? [:]
+        // UX section 8.1 — requests to join not yet shown on screen add to
+        // the row's unread count.
+        let joinRequestSignals = loadJoinRequestSignals()
         return conversationPlans().compactMap { plan -> ChatThread? in
             guard let head = groups[plan.headHex] else { return nil }
             // ADR-0087 section 9 — the row leaves the moment the end is known,
@@ -10663,7 +10722,9 @@ public final class ChatRepository: ObservableObject {
                 leaveRequested: leaveRequestedAt(groupIdHex: plan.headHex) != nil,
                 // The conversation's own arrival first: moving into a
                 // successor group is not a new conversation (ADR-0073 R.5).
-                arrivedAtMs: arrivals[plan.conversationHex] ?? arrivals[plan.headHex])
+                arrivedAtMs: arrivals[plan.conversationHex] ?? arrivals[plan.headHex],
+                joinRequestsUnshown: joinRequestSignals.isEmpty
+                    ? 0 : joinRequestUnshownCount(groupIdHex: plan.headHex, loaded: joinRequestSignals))
             // Bundle v3 — what another device of this account wrote to the
             // person before this one-to-one existed, drawn as own waiting
             // rows until the real messages arrive. Display only: not in the
@@ -10788,6 +10849,10 @@ public struct ChatThread: Equatable {
     /// When this device created or joined the conversation, for a list row
     /// with no message yet (``GroupArrival``). `nil` when it is not known.
     public let arrivedAtMs: Int64?
+    /// UX section 8.1 (group-and-channel-privacy) — requests to join this
+    /// device has not shown on screen yet; each adds one to the row's unread
+    /// count. Local, never sent.
+    public let joinRequestsUnshown: Int
 
     public init(
         groupIdHex: String,
@@ -10802,8 +10867,10 @@ public struct ChatThread: Equatable {
         segmentIndex: Int = 0,
         syncedThroughMessageId: Int64? = nil,
         leaveRequested: Bool = false,
-        arrivedAtMs: Int64? = nil
+        arrivedAtMs: Int64? = nil,
+        joinRequestsUnshown: Int = 0
     ) {
+        self.joinRequestsUnshown = joinRequestsUnshown
         self.arrivedAtMs = arrivedAtMs
         self.leaveRequested = leaveRequested
         self.syncedThroughMessageId = syncedThroughMessageId
@@ -10836,7 +10903,8 @@ extension ChatThread {
             segmentIndex: segmentIndex,
             syncedThroughMessageId: syncedThroughMessageId,
             leaveRequested: leaveRequested,
-            arrivedAtMs: arrivedAtMs)
+            arrivedAtMs: arrivedAtMs,
+            joinRequestsUnshown: joinRequestsUnshown)
     }
 }
 
@@ -11623,7 +11691,8 @@ final class GroupRecord {
         groupClosedSink: ((Int64, Data?, UInt32?) -> Void)? = nil,
         groupSettingSink: ((GroupSettingEnvelope, UInt32?) -> Void)? = nil,
         reactionToOwnSink: ((Int64) -> Void)? = nil,
-        contentHandoverSink: ((IncomingChatEvent) -> Void)? = nil
+        contentHandoverSink: ((IncomingChatEvent) -> Void)? = nil,
+        externalJoinRequestSink: ((Data) -> Void)? = nil
     ) {
         for event in events {
             switch event {
@@ -11736,7 +11805,7 @@ final class GroupRecord {
                 // the chat timeline. The DS message id rides along: it is half
                 // of the call host's exactly-once key.
                 callSignalingSink?(messageId, payloadBytes, createdAt, senderLeaf, senderDeviceKey, senderKey)
-            case .externalJoinRequest(_, _, let retained, _):
+            case .externalJoinRequest(_, let joinerSignatureKey, let retained, _):
                 // ADR-0027 (G-3) — a non-member's external Add proposal,
                 // retained pending an owner/admin approval. Not a timeline
                 // row; the members sheet reads the retained set via
@@ -11753,6 +11822,8 @@ final class GroupRecord {
                 // rather than dropped.
                 if case .informational = externalJoinAffordance(retained: retained) {
                     sawUnkeptExternalJoin = true
+                } else {
+                    externalJoinRequestSink?(joinerSignatureKey)
                 }
             case .pushRoutingSecret(_, let secret, let mintEpoch, let senderLeaf, _):
                 // ADR-0042 — a `push_routing_secret` distribution envelope.
@@ -11947,7 +12018,8 @@ final class GroupRecord {
         historyGroupIdHexes: [String] = [],
         segmentIndex: Int = 0,
         leaveRequested: Bool = false,
-        arrivedAtMs: Int64? = nil
+        arrivedAtMs: Int64? = nil,
+        joinRequestsUnshown: Int = 0
     ) -> ChatThread {
         ChatThread(
             groupIdHex: DsClient.pseudonymHex(groupId),
@@ -11965,7 +12037,8 @@ final class GroupRecord {
             segmentIndex: segmentIndex,
             syncedThroughMessageId: syncedThroughMessageId,
             leaveRequested: leaveRequested,
-            arrivedAtMs: arrivedAtMs
+            arrivedAtMs: arrivedAtMs,
+            joinRequestsUnshown: joinRequestsUnshown
         )
     }
 

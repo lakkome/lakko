@@ -148,6 +148,7 @@ import { clearSupersededMirrorForAccount } from "../push/superseded-mirror";
 import { deleteAnonTokensForAccount } from "../tokens/anon-token-store";
 import { clearEmojiPrefsForAccount } from "../media/emoji/emoji-index";
 import { clearChannelNotified } from "../feed/channel-notified-store";
+import { clearJoinNoticesForAccount } from "../chat/join-request-notices-store";
 import { cardsStorageKey, cityStorageKey, showCityStorageKey } from "../devices/device-cards";
 
 /**
@@ -360,6 +361,9 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // docs/ux/channel-notifications.md section 5: the last post notified per
     // channel on this device.
     { name: "channel-notified", run: () => clearChannelNotified(accountIdB64, storage) },
+    // group-and-channel-privacy.md section 8.1: the requests to join already
+    // announced and not yet shown, per group.
+    { name: "join-request-notices", run: () => clearJoinNoticesForAccount(accountIdB64, storage) },
     { name: "guest-account", run: () => clearGuestAccount(storage, accountIdB64) },
     { name: "pending-requests", run: () => clearObservationsForAccount(accountIdB64) },
     { name: "unapplied-requests", run: () => clearUnappliedForAccount(accountIdB64) },

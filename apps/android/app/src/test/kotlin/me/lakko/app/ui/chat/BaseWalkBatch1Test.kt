@@ -8,9 +8,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsFocused
-import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performTextInput
@@ -38,7 +39,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 
-/** Base walk 2026-11-04, batch 1: the GIF label off the picture, the edit
+/** Base walk 2026-11-04, batch 1: no GIF label on a GIF (2026-11-23), the edit
  *  field focused with the caret at the end, the feed card's group photo. */
 @RunWith(RobolectricTestRunner::class)
 class BaseWalkBatch1Test {
@@ -77,16 +78,14 @@ class BaseWalkBatch1Test {
         scope.cancel()
     }
 
+    /** 2026-11-23 — a GIF shows no `GIF` label, on the picture or under it. */
     @Test
-    fun `the GIF label sits under the picture, not on it`() {
+    fun `a GIF bubble draws the picture alone, with no GIF label`() {
         compose.setContent {
             MaterialTheme { Surface { GifBubble(gif, hub, InlineKind.IMAGE) } }
         }
-        val image = compose.onNodeWithTag(GIF_IMAGE_TAG, useUnmergedTree = true).getUnclippedBoundsInRoot()
-        val label = compose.onNodeWithTag(GIF_LABEL_TAG, useUnmergedTree = true).getUnclippedBoundsInRoot()
-        assertTrue("label top ${label.top} is above the picture's bottom ${image.bottom}", label.top >= image.bottom)
-        // At the leading edge.
-        assertEquals(image.left.value, label.left.value, 0.5f)
+        compose.onNodeWithTag(GIF_IMAGE_TAG, useUnmergedTree = true).assertExists()
+        compose.onAllNodesWithText("GIF", useUnmergedTree = true).assertCountEquals(0)
     }
 
     @Test

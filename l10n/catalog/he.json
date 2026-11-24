@@ -2537,6 +2537,30 @@
       "text": "מתחילים…",
       "status": "machine"
     },
+    "chat.join_requests.banner": {
+      "text": "{count, plural, one {בקשת הצטרפות אחת} two {שתי בקשות הצטרפות} other {# בקשות הצטרפות}}",
+      "status": "machine"
+    },
+    "chat.join_requests.banner_full": {
+      "text": "יותר מ-64 בקשות הצטרפות",
+      "status": "machine"
+    },
+    "chat.join_requests.review": {
+      "text": "בדיקה",
+      "status": "machine"
+    },
+    "notification.join_request.title": {
+      "text": "בקשת הצטרפות",
+      "status": "machine"
+    },
+    "notification.join_request.body": {
+      "text": "{name} מבקש/ת להצטרף אל {group}",
+      "status": "machine"
+    },
+    "notification.join_request.body_unnamed": {
+      "text": "מישהו מבקש להצטרף אל {group}",
+      "status": "machine"
+    },
     "chat.call.group_status_e2ee": {
       "text": "{status} · מוצפנת מקצה לקצה",
       "status": "machine"

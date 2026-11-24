@@ -384,6 +384,7 @@ public final class ChatMediaController: ObservableObject {
         case .videoNote:
             let recorder = VideoNoteRecorder()
             recorder.onInterrupted = { [weak self] in self?.captureInterrupted() }
+            recorder.onWriterFailed = { [weak self] in self?.videoWriterFailed() }
             videoRecorder = recorder
             videoCaptureSession = recorder.session
             Task {
@@ -457,6 +458,19 @@ public final class ChatMediaController: ObservableObject {
             || (kind == .videoNote && CameraPermission.systemStatus() == .denied)
         dispatch(revoked ? .revoked : .captureFailed)
     }
+
+    /// UX spec §3 states — the video-note writer could not write H.264 + AAC on
+    /// this device. The take is discarded as any failed capture is, and the
+    /// composer says so: a take that disappears with no word reads as a
+    /// button that does nothing.
+    private func videoWriterFailed() {
+        guard recState.isCapturing else { return }
+        flashHint(Self.writerFailedCopy)
+        captureInterrupted()
+    }
+
+    /// The hint for a video note whose writer failed.
+    static var writerFailedCopy: String { Localization.text("chat.record.start_failed") }
 
     private func finish(_ disposition: FinishDisposition) {
         if let recorder = voiceRecorder {

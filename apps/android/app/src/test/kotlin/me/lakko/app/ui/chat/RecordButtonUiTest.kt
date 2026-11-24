@@ -16,6 +16,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -27,6 +28,7 @@ import me.lakko.app.media.MediaAllowlist
 import me.lakko.app.media.RecState
 import me.lakko.app.media.RecordedTake
 import me.lakko.app.media.TAP_MAX_MS
+import me.lakko.app.media.VideoNoteAvailability
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -54,14 +56,12 @@ import org.robolectric.Shadows.shadowOf
  * real [RecordButton] over a real [RecordController], with real touch input.
  *
  * One limit, stated rather than worked around: camera mode is not a state a JVM
- * test can HOLD. Entering it starts `probeCameras`, which asks CameraX which
- * cameras it can bind; on a JVM device the answer is none, so the controller
- * correctly leaves camera mode again rather than showing a camera UI with no
- * camera behind it. That fallback needs wall-clock time, so a read taken right
- * after the tap sees the switch — but nothing here can assert what the button
- * looks like or does once it is in camera mode, and the camera-mode baseline
- * that `MediaBaselineScreenshotTest` would otherwise hold does not exist for
- * this reason.
+ * test can HOLD. CameraX cannot bind a camera on a JVM device, so nothing here
+ * can assert what a take in camera mode looks like, and the camera-mode
+ * baseline that `MediaBaselineScreenshotTest` would otherwise hold does not
+ * exist for this reason. What the controller asks CameraX up front — can this
+ * device record a video note at all (§3 states) — is a seam, so the tests
+ * below answer it themselves rather than depend on what Robolectric reports.
  */
 @RunWith(RobolectricTestRunner::class)
 class RecordButtonUiTest {
@@ -82,6 +82,9 @@ class RecordButtonUiTest {
     fun setUp() {
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         hub = ChatMediaHub(compose.activity, scope, allowlist)
+        // The mode is remembered per device and outlives a test: a tap that
+        // left the previous test in camera mode must not start this one there.
+        hub.prefs.recordMode = CaptureKind.VOICE
         // Granted, so a hold reaches `PermissionHint.GRANTED` and records rather
         // than stopping at the permission prompt. A denied device is the
         // reducer's business and is covered there.
@@ -100,10 +103,12 @@ class RecordButtonUiTest {
     }
 
     @Composable
-    private fun ButtonUnderTest() {
+    private fun ButtonUnderTest(
+        probe: suspend () -> VideoNoteAvailability? = { VideoNoteAvailability.AVAILABLE },
+    ) {
         MaterialTheme {
             Surface {
-                val c = rememberRecordController(hub) { take -> sent += take }
+                val c = rememberRecordController(hub, probe) { take -> sent += take }
                 controller = c
                 Box(Modifier.testTag(BUTTON)) { RecordButton(c) }
             }
@@ -163,6 +168,58 @@ class RecordButtonUiTest {
 
         compose.onNodeWithTag(BUTTON).performTouchInput { up() }
         compose.waitForIdle()
+    }
+
+    /**
+     * §3 states "Video format unsupported on this device" — the emulator
+     * finding: the tap switched to camera mode, and the hold then did nothing
+     * visible because the camera had no H.264 + AAC profile. Decided up front
+     * now: the tap stays on the mic and the composer's notice says why.
+     */
+    @Test
+    fun aTapOnADeviceThatCannotRecordVideoNotesStaysOnTheMicAndSaysWhy() {
+        compose.setContent { ButtonUnderTest { VideoNoteAvailability.NO_COMPATIBLE_FORMAT } }
+        compose.waitForIdle()
+
+        compose.onNodeWithTag(BUTTON).performClick()
+        compose.waitForIdle()
+
+        assertEquals("camera mode was offered", CaptureKind.VOICE, controller().mode)
+        assertEquals(RecordCopy.NO_COMPATIBLE_FORMAT, controller().notice)
+        assertSame(RecState.Idle, controller().state)
+        assertEquals(emptyList<RecordedTake>(), sent)
+    }
+
+    @Test
+    fun aTapOnADeviceWithNoCameraSaysNoCameraFound() {
+        compose.setContent { ButtonUnderTest { VideoNoteAvailability.NO_CAMERA } }
+        compose.waitForIdle()
+
+        compose.onNodeWithTag(BUTTON).performClick()
+        compose.waitForIdle()
+
+        assertEquals(CaptureKind.VOICE, controller().mode)
+        assertEquals(RecordCopy.NO_CAMERA, controller().notice)
+    }
+
+    /**
+     * A tap that came before the up-front answer switched optimistically; a
+     * "no" arriving afterwards takes the switch back AND says so, never
+     * silently.
+     */
+    @Test
+    fun aSwitchMadeBeforeTheAnswerIsTakenBackAndSaid() {
+        val answer = CompletableDeferred<VideoNoteAvailability?>()
+        compose.setContent { ButtonUnderTest { answer.await() } }
+        compose.waitForIdle()
+
+        compose.onNodeWithTag(BUTTON).performClick()
+        compose.waitForIdle()
+        assertEquals(CaptureKind.VIDEO_NOTE, controller().mode)
+
+        answer.complete(VideoNoteAvailability.NO_COMPATIBLE_FORMAT)
+        compose.waitUntil(WAIT_MS) { controller().mode == CaptureKind.VOICE }
+        assertEquals(RecordCopy.NO_COMPATIBLE_FORMAT, controller().notice)
     }
 
     private companion object {

@@ -2537,6 +2537,30 @@
       "text": "Başlıyor…",
       "status": "machine"
     },
+    "chat.join_requests.banner": {
+      "text": "{count, plural, one {# katılma isteği} other {# katılma isteği}}",
+      "status": "machine"
+    },
+    "chat.join_requests.banner_full": {
+      "text": "64+ katılma isteği",
+      "status": "machine"
+    },
+    "chat.join_requests.review": {
+      "text": "İncele",
+      "status": "machine"
+    },
+    "notification.join_request.title": {
+      "text": "Katılma isteği",
+      "status": "machine"
+    },
+    "notification.join_request.body": {
+      "text": "{name}, {group} grubuna katılmak istiyor",
+      "status": "machine"
+    },
+    "notification.join_request.body_unnamed": {
+      "text": "Biri {group} grubuna katılmak istiyor",
+      "status": "machine"
+    },
     "chat.call.group_status_e2ee": {
       "text": "{status} · uçtan uca şifreli",
       "status": "machine"

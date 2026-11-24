@@ -80,6 +80,11 @@ enum UiTestFixture: String {
     /// with the thumbnail of a message of several photos.
     case mediaTray
 
+    /// `docs/ux/media-messages.md` sections 4 and 5 — the composer's emoji
+    /// and GIF picker sheet, so a test can read what VoiceOver hears on its
+    /// two tabs.
+    case emojiPicker
+
     /// The launch argument that selects a fixture. Passed by the UI test as
     /// `["-LakkoUITestFixture", "voiceBubble"]`.
     static let launchArgument = "-LakkoUITestFixture"
@@ -126,6 +131,8 @@ struct UiTestFixtureRoot: View {
             MediaMosaicFixture()
         case .mediaTray:
             MediaTrayFixture()
+        case .emojiPicker:
+            EmojiPickerFixture()
         }
     }
 }
@@ -177,6 +184,16 @@ private enum FixtureMedia {
         ChatMediaController(
             port: .init(sendAttachment: { _, _ in }, sessionToken: { nil }),
             prefs: MediaPrefs(defaults: UserDefaults(suiteName: "me.lakko.uitest.fixture") ?? .standard))
+    }
+}
+
+/// The production ``MediaPickerSheet`` in compose mode, as the composer's
+/// smiley button presents it.
+private struct EmojiPickerFixture: View {
+    @StateObject private var media = FixtureMedia.controller()
+
+    var body: some View {
+        MediaPickerSheet(mode: .compose, media: media, onEmoji: { _ in }, onClose: {})
     }
 }
 

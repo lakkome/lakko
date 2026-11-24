@@ -564,10 +564,18 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
     },
     async receive(entry, event) {
       const account = accountId();
-      if (account === null) return null;
+      if (account === null) {
+        // eslint-disable-next-line no-console
+        console.info("[group-name] dropped: no session");
+        return null;
+      }
       const incoming = event.groupName;
       // A domain match that failed its bounds: dropped, never stored.
-      if (incoming === undefined) return null;
+      if (incoming === undefined) {
+        // eslint-disable-next-line no-console
+        console.info("[group-name] dropped: malformed");
+        return null;
+      }
       const groupIdB64 = entry.groupIdB64;
       try {
         return await withRoutingRowLock(account, groupIdB64, async () => {
@@ -606,7 +614,7 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
           });
           if (!groupNameVerdictAccepts(verdict)) {
             // eslint-disable-next-line no-console
-            console.warn("group name REFUSED (ADR-0051 role gate / order)", verdict, "senderLeaf", event.senderLeaf);
+            console.warn("[group-name] dropped:", verdict);
             return verdict;
           }
           if (verdict !== "accept-identical") {

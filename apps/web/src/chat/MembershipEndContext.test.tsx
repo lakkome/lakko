@@ -108,6 +108,9 @@ vi.mock("../devices/sync/DeviceGroupSyncContext", () => ({
       log.push(`register ${state} ${epoch}`);
       return true;
     },
+    saveDraft: async (_groupId: Uint8Array, text: string) => {
+      log.push(`draft ${text}`);
+    },
     saved: () => [],
     folders: () => [],
     getFlags: () => undefined,
@@ -172,15 +175,30 @@ vi.mock("../push/group-routing", () => ({
     log.push("retire push");
   },
 }));
-vi.mock("../channels/unsubscribe", () => ({ leaveChannelOnServer: async () => ({ kind: "left" }) }));
+vi.mock("../channels/unsubscribe", () => ({
+  leaveChannelOnServer: async (id: string) => {
+    log.push(`server leave ${id}`);
+    return { kind: "left" };
+  },
+}));
 vi.mock("../channels/member-cards", () => ({ forgetUploadedCard: () => undefined }));
+vi.mock("../channels/channel-subscription-register", () => ({
+  leaveChannelSubscriptionHere: async (_account: string, id: string) => {
+    log.push(`subscription left ${id}`);
+  },
+}));
 vi.mock("../state/channels-state", () => ({
-  channelsActions: { clearSubscriberKeys: () => undefined, removeChannel: () => undefined },
+  channelsActions: {
+    clearSubscriberKeys: (id: string) => log.push(`clear keys ${id}`),
+    removeChannel: (id: string) => log.push(`remove channel ${id}`),
+  },
   channelsState: {
     channels: () => [],
     keysByChannel: () => new Map(),
     metaByChannel: () => new Map(),
-    subscriberKeysByChannel: () => new Map(),
+    orphanedByKeyReset: () => new Set(),
+    subscriberKeysByChannel: () =>
+      new Map([["f0a0c3f1abdc44d9505e4f76fed3f969", { secret: new Uint8Array(32), publicKey: new Uint8Array(32) }]]),
   },
 }));
 vi.mock("../feed/feed-marks-store", () => ({ updateFeedMarks: async () => undefined }));
@@ -191,6 +209,7 @@ vi.mock("../devices/state-bundle", () => ({
 
 import { withGroupMlsLock } from "../mls/group-lock";
 import { MembershipEndProvider, useMembershipEnd, type MembershipEndApi } from "./MembershipEndContext";
+import { draftToRestore } from "./membership-end";
 import { blockGroupInMessageLog, withoutBlockedSlots } from "./message-log-store";
 import type { ActiveGroup } from "./ChatContext";
 
@@ -240,6 +259,27 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe("Unsubscribe from a channel", () => {
+  // Seen live on Android 2026-11-24: a channel opened from Chats search stayed
+  // in the list after Unsubscribe. On web the info's Unsubscribe runs this and
+  // then leaves the route for Chats (`routes/ChannelConversation.tsx`), the
+  // same route whichever way the channel was opened.
+  it("takes the channel out of the list and its posts off this device, and tells the service", async () => {
+    mount([]);
+    // The provider loads its store first.
+    await quiet();
+    const id = "f0a0c3f1abdc44d9505e4f76fed3f969";
+    await api.endChannel(id, "Night walk");
+    await quiet();
+    expect(log).toContain(`remove channel ${id}`);
+    expect(log).toContain(`clear keys ${id}`);
+    expect(log).toContain(`subscription left ${id}`);
+    expect(log).toContain(`server leave ${id}`);
+    // The register is written before the channel goes, so no reconcile adds it back.
+    expect(log.indexOf(`subscription left ${id}`)).toBeLessThan(log.indexOf(`remove channel ${id}`));
+  });
 });
 
 describe("after a commit", () => {
@@ -463,6 +503,28 @@ describe("after a join", () => {
     expect(api.notices().length).toBe(1);
     await api.noteJoined(entry(fakeGroup({ epoch: 8n })));
     expect(api.notices().length).toBe(0);
+  });
+
+  it("added back while the dialog is up: the notice goes and its text returns to the composer", async () => {
+    mount([entry(fakeGroup())]);
+    await quiet();
+    const stop = api.registerOpenDraft(GROUP_ID, () => "half a sentence");
+    world.groups?.([entry(fakeGroup({ isActive: false, epoch: 6n, roster: [keyOf(ids.other)] }))]);
+    await api.settle();
+    expect(api.noticeForRoute(GROUP_ID)?.draft).toBe("half a sentence");
+    stop();
+    await api.noteJoined(entry(fakeGroup({ epoch: 8n })));
+    await quiet();
+    expect(api.noticeForRoute(GROUP_ID)).toBeUndefined();
+    expect(api.isEnding(GROUP_ID)).toBe(false);
+    expect(log).toContain("draft half a sentence");
+  });
+
+  it("puts back only a draft that holds text", () => {
+    expect(draftToRestore({ draft: "kept" })).toBe("kept");
+    expect(draftToRestore({ draft: "  " })).toBeNull();
+    expect(draftToRestore({ draft: null })).toBeNull();
+    expect(draftToRestore(undefined)).toBeNull();
   });
 });
 

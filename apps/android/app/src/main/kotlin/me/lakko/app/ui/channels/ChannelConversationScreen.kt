@@ -44,6 +44,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -170,7 +171,13 @@ public fun ChannelConversationScreen(
     )
     val followed = channel != null && subscriberKeys.containsKey(channelId)
     var pressed by rememberSaveable(channelId) { mutableStateOf(subscribeOnOpen) }
-    val reading = isPublisher || followed || pressed
+    // Section 9.5 — once this screen has seen the channel followed, a
+    // Subscribe pressed before (the search card's, the link page's) no longer
+    // reads it: an Unsubscribe here or on another device must not add the
+    // channel back and register again. A new press does.
+    var seenFollowed by rememberSaveable(channelId) { mutableStateOf(false) }
+    if (followed && !seenFollowed) SideEffect { seenFollowed = true }
+    val reading = channelReads(isPublisher, followed, pressed, leftSincePressed = seenFollowed && !followed)
     val record = remember(channel) { channel?.sharedMeta()?.fullRecord() }
     // Section 12 — unknown visibility shows no line, never "Private channel".
     val knownPublic = remember(channel, channelId) {
@@ -287,7 +294,10 @@ public fun ChannelConversationScreen(
                     description = channel?.let { channelDescription(it) },
                     avatar = avatar,
                     seed = channelId,
-                    onSubscribe = { pressed = true },
+                    onSubscribe = {
+                        pressed = true
+                        seenFollowed = false
+                    },
                 )
                 else -> ChannelTimelineView(
                     contactsRepository = contactsRepository,
@@ -308,6 +318,20 @@ public fun ChannelConversationScreen(
         }
     }
 }
+
+/**
+ * Whether this screen reads the channel (its timeline, registering a
+ * subscriber first) or shows the Subscribe card. A Subscribe pressed before
+ * opening counts only until the channel has been followed and then left
+ * ([leftSincePressed]): after an Unsubscribe the card shows, nothing is added
+ * back to the list and nothing is registered again.
+ */
+internal fun channelReads(
+    isPublisher: Boolean,
+    followed: Boolean,
+    pressed: Boolean,
+    leftSincePressed: Boolean,
+): Boolean = isPublisher || followed || (pressed && !leftSincePressed)
 
 /** Section 5.1 — the card of a channel this account does not read: avatar,
  *  name, `@name`, the line, the description, Subscribe. It registers nothing

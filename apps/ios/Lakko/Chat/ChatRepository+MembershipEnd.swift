@@ -81,6 +81,12 @@ extension ChatRepository {
         guard membershipEndStore.record(end, accountIdB64: accountIdB64) else {
             return
         }
+        // UX 6.2 — a request sent before this end is history: left behind, it
+        // made the invite page show "Request sent." for a request that was
+        // never posted (seen 2026-11-23).
+        RequestsSentStore.forget(
+            accountIdB64: accountIdB64, groupIdHex: groupIdHex,
+            upToMs: Int64(Date().timeIntervalSince1970 * 1000))
         owedEnds[groupIdHex] = end
         if let notice { membershipEndNotices.post(notice) }
         state = state.with(threads: buildThreadList())

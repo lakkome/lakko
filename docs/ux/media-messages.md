@@ -190,13 +190,15 @@ drawn like a photo (section 10): what describes it sits on it.
 
 ### States
 
-Same table as voice (uploading ring, not-sent retry, spinner on first play, couldn't-play,
-recording-unsupported on web), plus:
+Same table as voice (uploading ring, not-sent retry, spinner on first play, couldn't-play),
+plus:
 
 | State | UI |
 |---|---|
 | Camera permission denied | See §6 |
 | No camera present | Camera mode is not offered; the mic/camera toggle does nothing and says `No camera found` |
+| Video format unsupported on this device | Camera mode is not offered: the record button stays on the mic and voice messages record as usual. A tap (or the screen reader's switch action) that would switch to the camera leaves the mic glyph in place and says `Video messages can't be recorded on this device` (web: `... in this browser`) in the composer's notice line, the same line and the same few seconds as `No camera found`. Receiving and playing video messages still works |
+| Recording failed once the camera was open (e.g. the writer refused the format) | The take is discarded and the notice line says `Couldn't start recording`; a take never vanishes without a word |
 | Poster frame missing or failed | A neutral circle with a play glyph — never a broken-image icon |
 
 ### 3.1 One button, and the same one on every client
@@ -320,7 +322,13 @@ The Lakko server sees what is searched for. The picker shows no note about it
 ### Timeline
 
 A GIF message renders as the animation itself, auto-looping and muted, sized to its
-aspect ratio within the bubble width, with a small `GIF` label under the picture, never on it (decided 2026-11-04, a label on the image covered GIF captions): a capsule at the leading edge, sunken surface, muted 11/600 text, the same on every client. Tap opens it full-screen.
+aspect ratio within the bubble width. The picture alone: no `GIF` label on it or
+under it (decided 2026-11-23; the moving picture says what it is, and the label
+under it, added 2026-11-04 after one on the image covered GIF captions, was noise).
+A screen reader still names it a GIF (`Open GIF full screen`, the image's own
+description `GIF`). `GIF` stays as text only where it is the whole description of
+the message: the chat-list preview, a reply quote and a notification. Tap opens it
+full-screen.
 On iOS and Android it must actually animate (not the first frame only).
 
 ### States
@@ -389,7 +397,13 @@ plain file chip:
 Recording formats (one per kind, identical on all three platforms, so every client plays
 every other's messages without transcoding): voice **AAC in MP4** (`audio/mp4`);
 video note **H.264 + AAC in MP4** (`video/mp4`), square. A client that cannot record the
-format disables recording (§2 states) rather than sending one only some clients can play.
+format does not record it (§2 and §3 states) rather than sending one only some clients can
+play. For a video note this is decided before any take: the device asks up front whether
+it can write the format (Android: whether the camera a take would use offers an H.264 + AAC
+camcorder profile; web: whether `MediaRecorder` can write it) and never offers camera mode
+when it cannot; a tap that would switch says why. A device that learns it only after a tap
+already switched (the answer was still pending) switches back and says the same. Never a
+button that silently does nothing.
 
 Inline playback must be gated on the **MIME type from an allowlist**, never on `kind`
 alone — `kind` is sender-chosen, like the file name.

@@ -380,6 +380,7 @@ class MainActivity : ComponentActivity() {
         handleCallRingIntent(intent)
         handleOpenDevicesIntent(intent)
         handleOpenChannelIntent(intent)
+        handleOpenJoinRequestsIntent(intent)
 
         setContent {
             me.lakko.app.l10n.ProvideLocalization {
@@ -515,6 +516,7 @@ class MainActivity : ComponentActivity() {
         handleCallRingIntent(intent)
         handleOpenDevicesIntent(intent)
         handleOpenChannelIntent(intent)
+        handleOpenJoinRequestsIntent(intent)
     }
 
     /**
@@ -606,6 +608,17 @@ class MainActivity : ComponentActivity() {
             ?: return
         intent.removeExtra(me.lakko.app.feed.ChannelNotificationIntake.EXTRA_OPEN_CHANNEL)
         me.lakko.app.feed.ChannelNotificationIntake.request(id)
+    }
+
+    /** Group privacy spec section 8.1 - a tap on a request-to-join
+     *  notification opens that group's Group info at `Join requests`. */
+    private fun handleOpenJoinRequestsIntent(intent: Intent) {
+        val id = intent.getStringExtra(me.lakko.app.chat.JoinRequestsIntake.EXTRA_OPEN_JOIN_REQUESTS)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: return
+        intent.removeExtra(me.lakko.app.chat.JoinRequestsIntake.EXTRA_OPEN_JOIN_REQUESTS)
+        me.lakko.app.chat.JoinRequestsIntake.request(id)
     }
 
     private fun handleWakeIntent(intent: Intent) {
@@ -2116,6 +2129,19 @@ private fun SessionRoot(
             me.lakko.app.feed.ChannelNotificationIntake.consume(id)
         }
     }
+    // Group privacy spec section 8.1 - a tapped request-to-join notification
+    // opens the group's conversation, whose screen then opens its info at
+    // `Join requests` (it takes the info request itself).
+    val openJoinRequestsRequested by me.lakko.app.chat.JoinRequestsIntake.navigateRequested
+        .collectAsStateWithLifecycle()
+    LaunchedEffect(openJoinRequestsRequested, guestShell) {
+        if (guestShell) return@LaunchedEffect
+        val id = openJoinRequestsRequested ?: return@LaunchedEffect
+        me.lakko.app.ui.profile.ProfileLeaveGuard.run {
+            navController.navigate(Routes.chat(id)) { launchSingleTop = true }
+            me.lakko.app.chat.JoinRequestsIntake.consumeNavigate(id)
+        }
+    }
     val channelsBound by channelsState.channels.collectAsStateWithLifecycle()
     LaunchedEffect(lifecycleOwner, channelPostSync, identitySecrets, channelsBound.isNotEmpty()) {
         if (identitySecrets == null) return@LaunchedEffect
@@ -2875,8 +2901,13 @@ private fun SessionRoot(
                         onBack = { navController.popBackStack() },
                         onLeft = {
                             // Section 9.5 — the row and its posts are gone:
-                            // back to the list.
-                            navController.popBackStack(Routes.channel(id), inclusive = true)
+                            // Chats, with nothing of the channel left under
+                            // it. Popping to `channel/{id}` found nothing when
+                            // the channel was opened from search or a link
+                            // (route `channel/{id}/subscribe?...`): Back then
+                            // reached that screen, whose pressed Subscribe
+                            // added the channel back and registered again.
+                            navController.navigateToChatsClearing()
                         },
                     )
                 }
@@ -3861,7 +3892,13 @@ private val Tabs: List<TabSpec> = listOf(
 /** Chats with every pushed screen above it removed (section 9: a
  *  conversation that ended leaves nothing of itself in the back stack). */
 private fun NavHostController.navigateToChatsClearing() {
-    navigate(Routes.CHATS) {
+    navigateClearingTo(Routes.CHATS)
+}
+
+/** [route] (the start destination's tab) with every pushed screen above the
+ *  start destination removed, whatever route opened them. */
+internal fun NavHostController.navigateClearingTo(route: String) {
+    navigate(route) {
         popUpTo(graph.findStartDestination().id) { inclusive = false }
         launchSingleTop = true
     }

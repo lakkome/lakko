@@ -1006,6 +1006,52 @@ public class ChatViewModel(
 
     private val mutableUnkeptJoinRequest: MutableStateFlow<Boolean> = MutableStateFlow(false)
 
+    private val mutableJoinRequestBar: MutableStateFlow<me.lakko.app.chat.JoinRequestBannerText?> =
+        MutableStateFlow(null)
+
+    /** Group privacy spec section 8.1 — the bar at the top of the
+     *  conversation telling the owner or an admin a request to join waits;
+     *  `null` when it is not drawn. Re-read on every repository emission
+     *  (a knock read publishes one). */
+    public val joinRequestBar: StateFlow<me.lakko.app.chat.JoinRequestBannerText?> =
+        mutableJoinRequestBar.asStateFlow()
+
+    private val mutableJoinRequestScroll: MutableStateFlow<Boolean> = MutableStateFlow(false)
+
+    /** Section 8.1 — Group info should scroll to `Join requests` once it is up. */
+    public val joinRequestScrollRequested: StateFlow<Boolean> = mutableJoinRequestScroll.asStateFlow()
+
+    /** `Review` on the bar, or a tapped notification: Group info at `Join requests`. */
+    public fun openJoinRequests() {
+        if (!mutableMembersPanelOpen.value) toggleMembersPanel()
+        mutableJoinRequestScroll.value = true
+    }
+
+    public fun consumeJoinRequestScroll() {
+        mutableJoinRequestScroll.value = false
+    }
+
+    init {
+        // Declared after its state, so the collector never sees it unset. Read
+        // off the main thread: the reads are synchronous Rust calls that take
+        // the group's mutex.
+        viewModelScope.launch {
+            repo.state.collect {
+                mutableJoinRequestBar.value = withContext(kotlinx.coroutines.Dispatchers.Default) {
+                    repo.joinRequestBarFor(groupIdHex)
+                }
+            }
+        }
+    }
+
+    /** Section 8.1 — the bar was drawn (or the requests listed) in front of
+     *  the person: every request of this group is shown. */
+    public fun onJoinRequestsShown() {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.Default) {
+            repo.joinRequestsShown(groupIdHex)
+        }
+    }
+
     /** ADR-0027 / UX §7.1 — an external-join request arrived while the
      *  quarantine was full, so the core did not keep it. It is in
      *  [pendingJoins] for nobody and can be approved by nobody; the only honest
@@ -1671,10 +1717,16 @@ public class ChatViewModel(
             }
             return
         }
-        // The notice turned out not to be owed: this person's own leave landed.
+        // The notice went while its dialog was up: the person was added back
+        // (UX 9.2, the conversation shows live again), or it turned out not to
+        // be owed (their own leave landed, back to Chats).
         if (mutableEndDialog.value != null) {
             mutableEndDialog.value = null
-            mutableConversationGone.value = true
+            if (me.lakko.app.chat.endDialogWhenNoticeGoes(held, repo.isEndOwed(hex)) ==
+                me.lakko.app.chat.EndDialogClose.LEAVE
+            ) {
+                mutableConversationGone.value = true
+            }
             return
         }
         if (!state.bootstrapped) return
@@ -1758,6 +1810,12 @@ public class ChatViewModel(
         // section would be a list of buttons that all fail.
         mutablePendingJoins.value =
             if (ended) emptyList() else repo.pendingExternalJoins(groupIdHex)
+        // Section 8.1 — reading the waiting requests prunes this device's
+        // marks to them.
+        repo.refreshJoinRequestMarks(groupIdHex)
+        // Section 8 — a request no longer waiting gives up its recorded time.
+        // Off the main thread: it reads every stored origin key.
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.Default) { repo.pruneKnockOrigins(groupIdHex) }
         // ADR-0027 / §7.1 — the request the quarantine turned away is in no
         // list, so it can only come from the repository's own observation.
         mutableUnkeptJoinRequest.value = !ended && repo.sawUnkeptExternalJoin(groupIdHex)

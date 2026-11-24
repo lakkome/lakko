@@ -54,6 +54,7 @@ import { clearContinuityStateForGroup } from "./continuity-store";
 import { clearRemovedDevicesForGroup } from "./device-readmission";
 import { heldSends, persistHeldSends } from "./held-send-queue";
 import { clearKnockCursorForGroup } from "./knock-cursor";
+import { clearJoinNoticesForGroup } from "./join-request-notices-store";
 import { clearCursorEpochForGroup } from "./cursor-epoch";
 import { conversationBehind } from "./conversation-behind";
 import { clearReentryRowsForGroup } from "./reentry-store";
@@ -135,6 +136,7 @@ export function groupWipeSteps(target: GroupWipeTarget, contexts: GroupWipeConte
     { name: "last-observed-owner", run: () => clearLastObservedOwnerForGroup(accountIdB64, groupIdB64) },
     { name: "readmission-removed", run: () => clearRemovedDevicesForGroup(accountIdB64, groupIdB64) },
     { name: "knock-cursor", run: () => clearKnockCursorForGroup(groupIdB64, accountIdB64) },
+    { name: "join-request-notices", run: () => clearJoinNoticesForGroup(accountIdB64, groupIdB64) },
     { name: "cursor-epoch", run: () => clearCursorEpochForGroup(groupIdB64, accountIdB64) },
     // ADR-0091 phase 2 - the behind state, the re-entry record, the gap
     // lines and the knock key held for the group.

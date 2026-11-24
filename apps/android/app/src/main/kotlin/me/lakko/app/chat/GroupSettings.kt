@@ -275,11 +275,13 @@ public object GroupSettingsStore {
     private const val OWED_TYPE = "owed-type:"
     private const val KNOCK_VERSION = "knock-version:"
     private const val KNOCK_ADMINS = "knock-admins:"
-    private const val KNOCK_ORIGIN = "knock-origin:"
+    internal const val KNOCK_ORIGIN = "knock-origin:"
     private const val OWED_CHANNEL_RECORD = "owed-channel-record:"
     private const val KNOCK_CURSOR = "knock-cursor:"
     private const val KNOCK_REPLY = "knock-reply:"
     private const val CURSOR_EPOCH = "cursor-epoch:"
+    private const val JOIN_ANNOUNCED = "join-announced:"
+    private const val JOIN_UNSHOWN = "join-unshown:"
 
     private val mutableVersion = MutableStateFlow(0L)
 
@@ -374,11 +376,59 @@ public object GroupSettingsStore {
     public fun knockOrigin(context: Context, accountIdB64: String?, groupIdHex: String, joinerHex: String): KnockOrigin? =
         accountIdB64?.let { decodeKnockOrigin(read(context, key(KNOCK_ORIGIN + joinerHex.lowercase() + ":", it, groupIdHex))) }
 
-    /** Record where a request came from; the first record for a joiner stays. */
-    public fun saveKnockOrigin(context: Context, accountIdB64: String, groupIdHex: String, joinerHex: String, origin: KnockOrigin) {
+    /**
+     * Record where a request came from. The first record of a waiting request
+     * stays (asking again while still waiting is the same request); [fresh]
+     * says the core has just started keeping this request, so a record still
+     * held for the joiner is from an earlier request that stopped waiting
+     * (approved, rejected, joined, gone) and is replaced: a later request is
+     * dated by its own arrival.
+     */
+    public fun saveKnockOrigin(
+        context: Context,
+        accountIdB64: String,
+        groupIdHex: String,
+        joinerHex: String,
+        origin: KnockOrigin,
+        fresh: Boolean = false,
+    ) {
         val k = key(KNOCK_ORIGIN + joinerHex.lowercase() + ":", accountIdB64, groupIdHex)
-        if (read(context, k) != null) return
+        if (!knockOriginWrites(held = read(context, k) != null, fresh = fresh)) return
         write(context, accountIdB64, k, encodeKnockOrigin(origin))
+    }
+
+    /** Section 8 — drop the recorded origin of every request of [groupIdHex]
+     *  that is no longer waiting; [waitingHex] is the group's pending set as
+     *  just read (joiner keys, hex). */
+    public fun pruneKnockOrigins(context: Context, accountIdB64: String, groupIdHex: String, waitingHex: Set<String>) {
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            val p = try {
+                prefs(context)
+            } catch (_: Throwable) {
+                return@write
+            }
+            val drop = knockOriginKeysToDrop(p.all.keys, KNOCK_ORIGIN, accountIdB64, groupIdHex, waitingHex)
+            if (drop.isEmpty()) return@write
+            val e = p.edit()
+            for (k in drop) e.remove(k)
+            e.apply()
+            mutableVersion.value += 1
+        }
+    }
+
+    /** Section 8.1 — this device's marks for the group's requests to join:
+     *  the ones already announced and the ones not yet shown. */
+    public fun joinRequestMarks(context: Context, accountIdB64: String?, groupIdHex: String): JoinRequestMarks {
+        val acct = accountIdB64 ?: return JoinRequestMarks()
+        return JoinRequestMarks(
+            announced = decodeJoinRequestKeys(read(context, key(JOIN_ANNOUNCED, acct, groupIdHex))),
+            unshown = decodeJoinRequestKeys(read(context, key(JOIN_UNSHOWN, acct, groupIdHex))),
+        )
+    }
+
+    public fun saveJoinRequestMarks(context: Context, accountIdB64: String, groupIdHex: String, marks: JoinRequestMarks) {
+        write(context, accountIdB64, key(JOIN_ANNOUNCED, accountIdB64, groupIdHex), encodeJoinRequestKeys(marks.announced))
+        write(context, accountIdB64, key(JOIN_UNSHOWN, accountIdB64, groupIdHex), encodeJoinRequestKeys(marks.unshown))
     }
 
     /** The group's stored photo, or `null`. */
@@ -617,6 +667,28 @@ internal const val HANDLE_CERT_WRITE_KEY_END: Int = 97
  * made from a `/g/` link, who issued the link (the capability's issuer key).
  */
 public data class KnockOrigin(val askedAtMs: Long?, val issuerKeyB64: String?)
+
+/** Section 8 — whether an arriving request writes its origin: always when
+ *  the core newly kept it ([fresh]: any held record is an earlier request's),
+ *  else only when nothing is held (a re-ask keeps the first time). Pure. */
+internal fun knockOriginWrites(held: Boolean, fresh: Boolean): Boolean = fresh || !held
+
+/** The stored origin keys (`<prefix><joinerhex>:<account>:<group>`) of
+ *  [groupIdHex]'s requests whose joiner is not in [waitingHex]. Pure. */
+internal fun knockOriginKeysToDrop(
+    keys: Iterable<String>,
+    prefix: String,
+    accountIdB64: String,
+    groupIdHex: String,
+    waitingHex: Set<String>,
+): List<String> {
+    val suffix = ":" + accountIdB64 + ":" + groupIdHex.lowercase()
+    val waiting = waitingHex.mapTo(HashSet()) { it.lowercase() }
+    return keys.filter { k ->
+        k.startsWith(prefix) && k.endsWith(suffix) &&
+            k.substring(prefix.length, k.length - suffix.length) !in waiting
+    }
+}
 
 internal fun encodeKnockOrigin(o: KnockOrigin): String =
     (o.askedAtMs?.toString() ?: "") + "|" + (o.issuerKeyB64 ?: "")

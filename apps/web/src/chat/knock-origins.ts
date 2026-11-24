@@ -68,17 +68,27 @@ export function openKnockOrigins(accountId: string): Promise<void> {
   return opened;
 }
 
-/** Record where a request came from (the first record for a joiner stays). */
+/**
+ * Record where a request came from. The first record of a waiting request
+ * stays (a person asking again while still waiting is the same request);
+ * `fresh` says the core has just started keeping this request, so any record
+ * still held for the joiner is from an earlier request that stopped waiting
+ * (approved, rejected, joined, gone) and is replaced: a later request is dated
+ * by its own arrival.
+ */
 export async function rememberKnockOrigin(
   groupIdB64: string,
   joinerKeyB64: string,
   origin: KnockOrigin,
+  fresh = false,
 ): Promise<void> {
   await opened;
   const acct = account;
   const key = originKey(groupIdB64, joinerKeyB64);
-  if (acct === null || origins().has(key)) return;
+  if (acct === null || (!fresh && origins().has(key))) return;
   const next = new Map(origins());
+  // Re-inserted at the end, so the bound below drops the oldest.
+  next.delete(key);
   next.set(key, origin);
   // Oldest first in insertion order: drop from the front.
   while (next.size > MAX_ORIGINS) {
@@ -86,6 +96,34 @@ export async function rememberKnockOrigin(
     if (first === undefined) break;
     next.delete(first);
   }
+  await commit(acct, next);
+}
+
+/**
+ * Drop the records of a group's requests that are no longer waiting
+ * (`waitingKeysB64` is the group's pending set as just read; empty drops the
+ * group's records). A later request from the same person then gets its own
+ * time.
+ */
+export async function pruneKnockOrigins(groupIdB64: string, waitingKeysB64: readonly string[]): Promise<void> {
+  await opened;
+  const acct = account;
+  if (acct === null) return;
+  const prefix = `${groupIdB64}|`;
+  const waiting = new Set(waitingKeysB64.map((k) => originKey(groupIdB64, k)));
+  let changed = false;
+  const next = new Map<string, KnockOrigin>();
+  for (const [k, o] of origins()) {
+    if (k.startsWith(prefix) && !waiting.has(k)) {
+      changed = true;
+      continue;
+    }
+    next.set(k, o);
+  }
+  if (changed) await commit(acct, next);
+}
+
+async function commit(acct: string, next: Map<string, KnockOrigin>): Promise<void> {
   setOrigins(next);
   const body = { v: 1, o: [...next].map(([k, o]) => ({ k, a: o.askedAtMs, i: o.issuerKeyB64 })) };
   await saveAccountJson(acct, ROW, body).catch(() => undefined);

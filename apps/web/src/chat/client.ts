@@ -157,6 +157,7 @@ import {
   type MemberIdentity,
   type RosterMember,
 } from "./author-identity";
+import { publishJoinRequestRead, splitPendingJoinKeys } from "./join-request-reads";
 
 /** Result of `sendMessage`. */
 export interface SendMessageResult {
@@ -1549,7 +1550,13 @@ export class ChatClient {
         await this.observeBehind(group, raw, result);
         notifyPollObserver(group);
       }
-      if (knocks === null || result.outcome !== "applied") return result;
+      if (result.outcome !== "applied") return result;
+      if (knocks === null) {
+        // Section 8.1 — no knock read this time: the notices still follow the
+        // role and the pending set (a demoted admin's are dropped).
+        if (knockOwner !== null) announceJoinRequestRead(group, myIdentity, knockOwner, null);
+        return result;
+      }
       const knockEvents = await this.applyKnocks(
         myIdentity,
         group,
@@ -1557,6 +1564,7 @@ export class ChatClient {
         knocks.rows,
         knocks.owner,
       );
+      announceJoinRequestRead(group, myIdentity, knocks.owner, knockEvents);
       return knockEvents.length === 0
         ? result
         : { ...result, events: [...result.events, ...knockEvents] };
@@ -1800,10 +1808,14 @@ export class ChatClient {
         rememberKnockName(base64Encode(joinerKey), name);
         profile.free();
       }
-      await rememberKnockOrigin(groupIdB64, base64Encode(joinerKey), {
-        askedAtMs: rowStampMs(row.createdAt),
-        issuerKeyB64,
-      });
+      await rememberKnockOrigin(
+        groupIdB64,
+        base64Encode(joinerKey),
+        { askedAtMs: rowStampMs(row.createdAt), issuerKeyB64 },
+        // Newly kept: an older record for this joiner belongs to a request
+        // that stopped waiting (UX section 8, the line's time is this one's).
+        outcome === "retained",
+      );
       return {
         kind: "externalJoinRequest",
         messageId: row.id,
@@ -2170,6 +2182,46 @@ function sleepUnlessAborted(ms: number, signal: AbortSignal | undefined): Promis
       resolve();
     }
     signal?.addEventListener("abort", done, { once: true });
+  });
+}
+
+/**
+ * `docs/ux/group-and-channel-privacy.md` section 8.1 - hand one applied poll
+ * of a group to whoever announces join requests (`join-request-reads.ts`):
+ * whether this device is owner or admin (the knock-read gate) and still a
+ * member, the pending set, and, when the knock queue was read in this poll,
+ * the requests in it. Only requests the core kept count; a request the full
+ * queue turned away is not one an admin can answer. Local reads only, no DS
+ * call. Never throws.
+ */
+function announceJoinRequestRead(
+  group: WasmGroup,
+  identity: WasmIdentity,
+  owner: string,
+  knockEvents: readonly IncomingChatEvent[] | null,
+): void {
+  let pending: string[];
+  let active: boolean;
+  try {
+    pending = splitPendingJoinKeys(group.pendingExternalJoins(), base64Encode);
+    active = group.isActive;
+  } catch {
+    return;
+  }
+  const arrived: string[] = [];
+  for (const e of knockEvents ?? []) {
+    if (e.kind !== "externalJoinRequest" || !e.retained) continue;
+    const k = base64Encode(e.joinerSignatureKey);
+    if (!arrived.includes(k)) arrived.push(k);
+  }
+  publishJoinRequestRead({
+    accountIdB64: owner,
+    groupIdB64: base64Encode(group.groupId),
+    arrivedKeysB64: arrived,
+    pendingKeysB64: pending,
+    manages: readsKnocks(group, identity),
+    active,
+    knocksRead: knockEvents !== null,
   });
 }
 

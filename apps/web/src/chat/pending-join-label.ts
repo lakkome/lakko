@@ -18,7 +18,7 @@
  * Pure: the group, the base64 encoder and the name resolver are handed in.
  */
 import type { ResolvedName } from "../profile/resolver";
-import { memberListLabelOf, memberNameOf } from "../profile/member-label";
+import { memberListLabelOf, memberNameOf, realNameOf } from "../profile/member-label";
 import { knockClaimedName } from "../ds/knock-seeds";
 
 /** The part of the wasm `Group` this reads. */
@@ -91,4 +91,16 @@ export function pendingJoinName(
   resolve: (keyB64: string) => ResolvedName,
 ): string {
   return memberNameOf(resolvePendingJoin(group, leafKey, encodeB64, resolve), "a pending join request");
+}
+
+/** The request's name for a notification (section 8.1 of
+ *  `group-and-channel-privacy.md`): the contact name, else the name the
+ *  request carries, else `null`, never a placeholder word. */
+export function pendingJoinRealName(
+  group: PendingJoinGroup,
+  leafKey: Uint8Array,
+  encodeB64: (bytes: Uint8Array) => string,
+  resolve: (keyB64: string) => ResolvedName,
+): string | null {
+  return realNameOf(resolvePendingJoin(group, leafKey, encodeB64, resolve));
 }

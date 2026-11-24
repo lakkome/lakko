@@ -3023,6 +3023,30 @@
       "text": "Starting…",
       "comment": "Under the group call banner while nobody has joined the call yet."
     },
+    "chat.join_requests.banner": {
+      "text": "{count, plural, one {# request to join} other {# requests to join}}",
+      "comment": "Bar at the top of a group's conversation, for the owner and admins only, while people are asking to join the group (group-and-channel-privacy.md section 8.1). Same pattern as the group call bar. {count} is how many requests are waiting."
+    },
+    "chat.join_requests.banner_full": {
+      "text": "64+ requests to join",
+      "comment": "The join requests bar when the list of waiting requests is full (64 or more are waiting)."
+    },
+    "chat.join_requests.review": {
+      "text": "Review",
+      "comment": "Button on the join requests bar. Opens Group info at the list of people asking to join."
+    },
+    "notification.join_request.title": {
+      "text": "Request to join",
+      "comment": "Title of the notification shown to a group's owner and admins when someone asks to join the group."
+    },
+    "notification.join_request.body": {
+      "text": "{name} asks to join {group}",
+      "comment": "Body of the join request notification. {name} is the person asking (their contact name, or the name their request carries); {group} is the group's name."
+    },
+    "notification.join_request.body_unnamed": {
+      "text": "Someone asks to join {group}",
+      "comment": "Body of the join request notification when the request carries no name. {group} is the group's name."
+    },
     "chat.call.group_status_e2ee": {
       "text": "{status} · end-to-end encrypted",
       "comment": "Second line of the group call banner: {status} is how many people are in the call (or that it is starting), followed by the fact that the call is end-to-end encrypted.",
@@ -4218,11 +4242,11 @@
     },
     "chat.record.unsupported_video": {
       "text": "Video messages can't be recorded in this browser",
-      "comment": "Why the record button is disabled: this browser cannot record video messages."
+      "comment": "Short notice when a tap would switch the record button to video messages: this browser cannot record them, so the button stays on voice."
     },
     "chat.record.unsupported_video_device": {
       "text": "Video messages can't be recorded on this device",
-      "comment": "Shown on the record button when this phone has no video format a video message can use."
+      "comment": "Short notice when a tap would switch the record button to video messages: this device has no video format a video message can use, so the button stays on voice."
     },
     "chat.record.unsupported_voice": {
       "text": "Voice messages can't be recorded in this browser",

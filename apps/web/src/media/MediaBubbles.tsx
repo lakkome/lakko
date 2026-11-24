@@ -988,12 +988,8 @@ export function GifBubble(props: MediaBubbleProps): JSX.Element {
           </span>
         </Show>
       </button>
-      {/* Base walk 2026-11-04 — the label sits below the picture on its own
-          pill, never over it: drawn on the image it covered the GIF's own
-          caption. The image's alt text already says "GIF". */}
-      <span class="lakko-gif-label" aria-hidden="true">
-        {t("chat.media.gif")}
-      </span>
+      {/* 2026-11-23 — no visible "GIF" label: the moving picture says what it
+          is. Screen readers get "GIF" from the image's alt text. */}
       <Show when={status() === "error"}>
         <AttachmentFailureNote failure={gifFailure()} onRetry={load}>
           <button

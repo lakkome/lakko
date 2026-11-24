@@ -2685,6 +2685,30 @@
       "text": "Начинается…",
       "status": "machine"
     },
+    "chat.join_requests.banner": {
+      "text": "{count, plural, one {# запрос на вступление} few {# запроса на вступление} many {# запросов на вступление} other {# запроса на вступление}}",
+      "status": "machine"
+    },
+    "chat.join_requests.banner_full": {
+      "text": "64+ запросов на вступление",
+      "status": "machine"
+    },
+    "chat.join_requests.review": {
+      "text": "Посмотреть",
+      "status": "machine"
+    },
+    "notification.join_request.title": {
+      "text": "Запрос на вступление",
+      "status": "machine"
+    },
+    "notification.join_request.body": {
+      "text": "{name} просит добавить в {group}",
+      "status": "machine"
+    },
+    "notification.join_request.body_unnamed": {
+      "text": "Кто-то просит добавить в {group}",
+      "status": "machine"
+    },
     "chat.call.group_status_e2ee": {
       "text": "{status} · сквозное шифрование",
       "status": "machine"

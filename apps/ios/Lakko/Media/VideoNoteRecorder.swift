@@ -61,9 +61,14 @@ public final class VideoNoteRecorder: NSObject, AVCaptureVideoDataOutputSampleBu
         super.init()
     }
 
-    /// Called on the main actor when capture fails mid-take (an interruption,
-    /// a runtime error, a writer failure).
+    /// Called on the main actor when capture fails mid-take (an interruption
+    /// or a runtime error of the capture session).
     public var onInterrupted: (@MainActor () -> Void)?
+
+    /// Called on the main actor when the H.264 + AAC writer refused to start
+    /// or failed: this device produced no video note, and the person has to be
+    /// told so rather than see the take vanish (UX spec §3 states).
+    public var onWriterFailed: (@MainActor () -> Void)?
 
     private var observers: [NSObjectProtocol] = []
 
@@ -331,14 +336,14 @@ public final class VideoNoteRecorder: NSObject, AVCaptureVideoDataOutputSampleBu
         } catch {
             Self.log.warning("video note writer failed to start")
             recording = false
-            Task { @MainActor in self.onInterrupted?() }
+            Task { @MainActor in self.onWriterFailed?() }
         }
     }
 
     private func failIfWriterFailed() {
         guard let writer, writer.status == .failed else { return }
         recording = false
-        Task { @MainActor in self.onInterrupted?() }
+        Task { @MainActor in self.onWriterFailed?() }
     }
 
     /// A centred square JPEG of `posterSide` pixels, at most 256 KiB.

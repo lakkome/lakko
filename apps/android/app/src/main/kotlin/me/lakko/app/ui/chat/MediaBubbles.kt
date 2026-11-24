@@ -914,13 +914,13 @@ private fun VideoNotePill(modifier: Modifier = Modifier, content: @Composable ()
     ) { content() }
 }
 
-/** Test tags of the GIF picture and of its label. */
+/** Test tag of the GIF picture. */
 internal const val GIF_IMAGE_TAG: String = "gif-image"
-internal const val GIF_LABEL_TAG: String = "gif-label"
 
 /** §5 timeline — the animation itself, looping and muted, sized to its aspect
- *  ratio, with a small `GIF` label under it (never on the picture); a tap
- *  opens it full-screen. */
+ *  ratio, with no `GIF` label (2026-11-23: the moving picture says what it
+ *  is; the content description still names it a GIF); a tap opens it
+ *  full-screen. */
 @Composable
 internal fun GifBubble(
     ref: AttachmentRef,
@@ -944,9 +944,6 @@ internal fun GifBubble(
     val w = ref.width?.toInt()?.takeIf { it > 0 }
     val h = ref.height?.toInt()?.takeIf { it > 0 }
     val ratio = if (w != null && h != null) (w.toFloat() / h).coerceIn(0.4f, 2.5f) else 1f
-    // Base walk 2026-11-04 — the `GIF` label sits UNDER the picture, never on
-    // it: drawn on the image it covered the GIF's own caption text.
-    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
     Box(
         contentAlignment = Alignment.Center,
         modifier = Modifier
@@ -975,22 +972,6 @@ internal fun GifBubble(
             f == null -> CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.dp)
             else -> GifContent(f, inline, Modifier.fillMaxSize()) { failed = true }
         }
-    }
-    // media-messages.md §5 — a capsule at the leading edge, sunken surface,
-    // muted 11/600 text.
-    Text(
-        t("chat.media.gif"),
-        style = MaterialTheme.typography.labelSmall.copy(
-            fontSize = 11.sp,
-            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
-        ),
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier
-            .testTag(GIF_LABEL_TAG)
-            .clip(RoundedCornerShape(percent = 50))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .padding(horizontal = 8.dp, vertical = 2.dp),
-    )
     }
     val f = file
     if (fullScreen && f != null) {

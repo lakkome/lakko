@@ -1334,6 +1334,22 @@ enum SessionTab: Hashable {
 /// chat screen is the same destination whether it was reached from Chats,
 /// Groups or Contacts, and back always returns to where it was opened from.
 enum TabRoute: Hashable {
+    /// Section 9.5 — `path` once the channel `channelId` is left: every
+    /// screen of it goes, whichever route opened it (the list's `.channel`,
+    /// search's `.channelFound` / `.channelSubscribe`, its info), so the tab
+    /// is back where the channel was opened from.
+    static func leavingChannel(_ path: [TabRoute], channelId: String) -> [TabRoute] {
+        path.filter {
+            switch $0 {
+            case .channel(let id), .channelInfo(let id, _), .channelFound(let id, _),
+                 .channelSubscribe(let id, _, _):
+                return id.caseInsensitiveCompare(channelId) != .orderedSame
+            default:
+                return true
+            }
+        }
+    }
+
     case chat(groupIdHex: String)
     /// A group's info, pushed over its conversation
     /// (`docs/ux/conversation-info.md` section 3). Keyed on the same id the
@@ -2035,6 +2051,14 @@ private struct SessionRoot: View, Equatable {
             ChannelNotificationTaps.shared.openChannelRequested = nil
             openNotifiedChannel(channelId)
         }
+        // `docs/ux/group-and-channel-privacy.md` section 8.1 — a tap on a
+        // request-to-join notification opens the group's info at `Join
+        // requests`, over its conversation.
+        .onReceive(JoinRequestNotificationTaps.shared.$openGroupInfoRequested) { requested in
+            guard let conversationIdHex = requested else { return }
+            JoinRequestNotificationTaps.shared.openGroupInfoRequested = nil
+            openJoinRequests(conversationIdHex)
+        }
         // ADR-0074 section 3.5 — after a rotation of the account keys the
         // channels this device created follow the new owner key; the
         // session's key generation moves with them, so none reads as
@@ -2622,15 +2646,7 @@ private struct SessionRoot: View, Equatable {
                         // Section 9.5 — the row and its posts are gone: the
                         // info and the conversation under it both go.
                         let binding = path(for: tab)
-                        binding.wrappedValue = binding.wrappedValue.filter {
-                            switch $0 {
-                            case .channel(let id), .channelInfo(let id, _), .channelFound(let id, _),
-                                 .channelSubscribe(let id, _, _):
-                                return id != channelId
-                            default:
-                                return true
-                            }
-                        }
+                        binding.wrappedValue = TabRoute.leavingChannel(binding.wrappedValue, channelId: channelId)
                     })
                 .toolbar(.hidden, for: .tabBar)
             } else {
@@ -3020,6 +3036,20 @@ private struct SessionRoot: View, Equatable {
         if chatsPath.last != .channel(channelId: channelId) {
             push(.channel(channelId: channelId), on: .chats)
         }
+    }
+
+    /// Section 8.1 (group-and-channel-privacy) — a tap on a request-to-join
+    /// notification: the conversation on the Chats stack (returned to when
+    /// already there) and its info over it, scrolled to `Join requests`. A
+    /// conversation this device no longer holds opens nothing.
+    private func openJoinRequests(_ conversationIdHex: String) {
+        let repository = services.chatRepository
+        guard repository.state.threads.contains(where: { $0.conversationIdHex == conversationIdHex })
+        else { return }
+        selectedTab = .chats
+        chatViewModel(for: conversationIdHex).reviewJoinRequests()
+        returnToOrPush(.chat(groupIdHex: conversationIdHex), on: .chats)
+        chatsPath = GroupInfoNavigation.openInfo(chatsPath, groupIdHex: conversationIdHex)
     }
 
     /// UX 17.5 — a tap on the new-device notification: Settings > Devices.

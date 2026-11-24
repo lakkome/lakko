@@ -325,6 +325,12 @@ The members panel gains one notice and one section. Nothing moves; nothing is re
 Requests-to-join stay above pending changes because they need a **decision**; pending
 changes need none.
 
+**Outside the panel (amended 2026-11-23):** a waiting join request is also signalled by a
+bar in the conversation, the chat-list row's unread count and a notification, for the
+owner and admins only. That design is
+[`group-and-channel-privacy.md`](group-and-channel-privacy.md) section 8.1; the panel
+section itself is unchanged.
+
 **One further state governs the whole list, not any item in it.** When the reader's
 own membership has ended (§6.2.7), items 1-4 are gone — every one of them is either
 an action the core now refuses or a queue the reader can no longer act on — item 5

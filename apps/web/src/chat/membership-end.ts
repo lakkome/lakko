@@ -78,6 +78,16 @@ export interface EndRecord {
 
 /** "You are no longer in {name}.": in memory only (UX section 9, 2026-11-06:
  *  nothing is kept for later), until its dialog or notice has been shown. */
+/**
+ * UX `group-and-channel-privacy.md` 9.2 — the text to put back into the
+ * composer when the person is added again while the end's dialog still showed
+ * it: the dialog's draft, if it held one that is not only white space.
+ */
+export function draftToRestore(notice: Pick<EndNotice, "draft"> | undefined): string | null {
+  const draft = notice?.draft ?? null;
+  return draft !== null && draft.trim().length > 0 ? draft : null;
+}
+
 export interface EndNotice {
   readonly key: string;
   readonly title: string;

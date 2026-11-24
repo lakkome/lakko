@@ -680,7 +680,9 @@ pub enum JoinRequestOutcome {
     /// The same joiner (by leaf signature key) was already waiting. Nothing
     /// changed and an approve can still act on the request held.
     AlreadyPending,
-    /// The joiner's leaf is already in the group. Nothing kept.
+    /// The joiner's leaf is already in the group and no removal of it waits
+    /// in the proposal store. Nothing kept. (A member whose removal waits is
+    /// leaving, and their request is [`Self::Retained`].)
     AlreadyMember,
     /// [`MAX_PENDING_JOIN_REQUESTS`] requests are already waiting. Nothing
     /// kept: the reader stops its knock cursor before this row, so the row
@@ -2007,8 +2009,10 @@ impl Group {
     ///    verified), and a leaf the group can carry (the same check the sweep
     ///    runs before it commits an `Add`). Otherwise
     ///    [`JoinRequestOutcome::NotAdmissible`].
-    /// 3. The joiner is not already a member, is not already waiting, and the
-    ///    queue has room ([`MAX_PENDING_JOIN_REQUESTS`]).
+    /// 3. The joiner is not a member staying in the group, is not already
+    ///    waiting, and the queue has room ([`MAX_PENDING_JOIN_REQUESTS`]). A
+    ///    member whose removal waits in the proposal store counts as leaving:
+    ///    their request is kept and listed once the removal lands.
     ///
     /// A kept request goes into the same quarantine an external proposal does,
     /// persisted the same way, so [`Self::approve_external_join`] (ordinary
@@ -2051,10 +2055,17 @@ impl Group {
         }
 
         let before = self.pending_external_joins.len();
-        self.reap_joined_external_joins();
+        self.reap_staying_external_joins();
         let reaped = self.pending_external_joins.len() != before;
 
-        let outcome = if self.joiner_is_already_a_member(&joiner_signature_key) {
+        // A member whose removal already waits in this device's proposal store
+        // (they asked to leave, or an admin proposed it) is on their way out:
+        // a request they send meanwhile is kept, and listed once the removal
+        // lands (`pending_external_joins` hides members). Dropped as
+        // `AlreadyMember` it would be gone for good, because the knock reader
+        // moves its cursor past the row (seen 2026-11-23: leave, then the link
+        // again before an admin swept the leave).
+        let outcome = if self.joiner_is_staying_member(&joiner_signature_key) {
             JoinRequestOutcome::AlreadyMember
         } else if self
             .pending_external_joins
@@ -2100,6 +2111,36 @@ impl Group {
         self.members()
             .iter()
             .any(|m| m.signature_public_key.as_slice() == signature_key)
+    }
+
+    /// `true` when `signature_key` sits in this group's roster and no proposal
+    /// in this device's store removes that leaf (a `Remove` naming it, or the
+    /// member's own `SelfRemove`). A member with a removal waiting is leaving:
+    /// the next merged commit takes them out, or (the removal not swept) the
+    /// merge-time reap treats them as staying.
+    fn joiner_is_staying_member(&self, signature_key: &[u8]) -> bool {
+        let effects = commit_effects(self.inner.pending_proposals());
+        let leaving = effects.removed_leaves();
+        self.members().iter().any(|m| {
+            m.signature_public_key.as_slice() == signature_key && !leaving.contains(&m.leaf_index)
+        })
+    }
+
+    /// The reap run when a request arrives: drop every retained request whose
+    /// joiner is a member staying in the group. A request from a member whose
+    /// removal is waiting stays (see [`Self::retain_join_request`]); the reap
+    /// after the next merge decides it, with the store empty again.
+    fn reap_staying_external_joins(&mut self) {
+        let effects = commit_effects(self.inner.pending_proposals());
+        let leaving = effects.removed_leaves();
+        let staying: Vec<Vec<u8>> = self
+            .members()
+            .into_iter()
+            .filter(|m| !leaving.contains(&m.leaf_index))
+            .map(|m| m.signature_public_key)
+            .collect();
+        self.pending_external_joins
+            .retain(|p| !staying.contains(&p.joiner_signature_key));
     }
 
     /// Drop every retained external-join request whose joiner has since become

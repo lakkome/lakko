@@ -2537,6 +2537,30 @@
       "text": "Починається…",
       "status": "machine"
     },
+    "chat.join_requests.banner": {
+      "text": "{count, plural, one {# запит на приєднання} few {# запити на приєднання} many {# запитів на приєднання} other {# запиту на приєднання}}",
+      "status": "machine"
+    },
+    "chat.join_requests.banner_full": {
+      "text": "64+ запитів на приєднання",
+      "status": "machine"
+    },
+    "chat.join_requests.review": {
+      "text": "Переглянути",
+      "status": "machine"
+    },
+    "notification.join_request.title": {
+      "text": "Запит на приєднання",
+      "status": "machine"
+    },
+    "notification.join_request.body": {
+      "text": "{name} просить додати до {group}",
+      "status": "machine"
+    },
+    "notification.join_request.body_unnamed": {
+      "text": "Хтось просить додати до {group}",
+      "status": "machine"
+    },
     "chat.call.group_status_e2ee": {
       "text": "{status} · наскрізне шифрування",
       "status": "machine"

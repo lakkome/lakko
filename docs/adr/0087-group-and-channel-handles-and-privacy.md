@@ -392,6 +392,16 @@ plain = key_package ‖ reply_grant ‖ profile ‖ capability?
   nothing: the package held first stays, and an approve acts on it (decided
   2026-11-02, `JoinRequestOutcome::AlreadyPending`). What happens to a held package
   that expires before anyone decides is not designed yet.
+  **Amended 2026-11-23 (found live):** a request from a joiner still in the admin's
+  roster was answered `AlreadyMember` and dropped even when that member's removal
+  (a `Remove` naming the leaf, or their own `SelfRemove`) was already waiting in the
+  proposal store, so a person who pressed Leave group and asked again before an
+  admin swept the leave lost the request. `retain_join_request` now keeps it
+  (`Retained`); `pending_external_joins()` still hides current members, so it is
+  listed once the removal lands, and the reap after a merge still drops it if the
+  removal never lands. Test `a_request_from_a_member_whose_leave_waits_is_kept_and_listed_once_they_are_out`
+  in `crates/lakko-mls/tests/join_requests.rs`. Quarantine bookkeeping only; commit
+  validation is unchanged.
 - It closes a class of defects too: a knock row can no longer be a commit, so
   `is_external_join_proposal_for` has nothing left to guard.
 - The co-publisher join moves to the same row. The ADR-0081 rejoin knock keeps its

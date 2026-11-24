@@ -103,6 +103,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.layout.positionOnScreen
 import androidx.compose.ui.unit.toSize
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -550,8 +551,14 @@ public fun ChatScreen(
     LaunchedEffect(Unit) {
         // Claimed for this effect's lifetime, FIRST, so the app-level
         // all-groups poll hands this group to this screen (and stops holding
-        // its in-flight slot) before the refresh below runs.
-        viewModel.claimScreenPoll()
+        // its in-flight slot) before the refresh below runs. Given up while
+        // this device's membership has ended and taken back when it resumes
+        // ([me.lakko.app.chat.runScreenPollLoop]).
+        val pollClaim = me.lakko.app.chat.ScreenPollClaim(
+            claim = { viewModel.claimScreenPoll() },
+            release = { viewModel.releaseScreenPoll() },
+        )
+        pollClaim.ensure()
         // ADR-0092 / UX 7.5 — an anonymous vote left unsent goes again at open.
         viewModel.retryFailedBallots()
         try {
@@ -580,33 +587,23 @@ public fun ChatScreen(
                 )
             }.distinctUntilChanged().collectLatest { runs ->
                 if (!runs) return@collectLatest
-                while (kotlinx.coroutines.currentCoroutineContext().isActive) {
-                    // ADR-0045 UX §6.2.8 item 1 — the poll STOPS for a group this
-                    // device is no longer in. The repository gates `pollGroup` too,
-                    // which is the authority; this loop must break as well because that
-                    // gate makes the call return IMMEDIATELY, and a `while (isActive)`
-                    // around an instant return is a spin, not a poll. Checked at the
-                    // top so a membership that ends mid-window exits on the next pass.
-                    if (viewModel.membershipEnded.value) break
-                    try {
-                        // A poll that finds another poll of this group in flight
-                        // JOINS it (waits for its apply) instead of returning at
-                        // once, so calling straight back in neither spins on the
-                        // latch nor sleeps a blind interval. Only an UNAVAILABLE
-                        // answer (no session / no record) would return instantly
-                        // again, so that one backs off.
-                        if (viewModel.pollOnceLongPoll() == GroupPollOutcome.UNAVAILABLE) {
-                            delay(POLL_RETRY_BACKOFF_MS)
-                        }
-                    } catch (cancel: kotlinx.coroutines.CancellationException) {
-                        throw cancel
-                    } catch (_: Throwable) {
-                        delay(POLL_RETRY_BACKOFF_MS)
-                    }
-                }
+                // ADR-0045 UX §6.2.8 item 1 — no poll for a group this device
+                // is no longer in (the repository refuses it at once, so a loop
+                // around it would spin); the loop waits for the membership to
+                // resume instead of ending, since a person can be added back
+                // while this screen is open. A poll that finds another poll of
+                // this group in flight JOINS it rather than returning at once,
+                // so calling straight back neither spins nor sleeps blindly;
+                // only UNAVAILABLE (no session / no record) and an error back off.
+                me.lakko.app.chat.runScreenPollLoop(
+                    ended = viewModel.membershipEnded,
+                    claim = pollClaim,
+                    poll = { viewModel.pollOnceLongPoll() },
+                    backoff = { delay(POLL_RETRY_BACKOFF_MS) },
+                )
             }
         } finally {
-            viewModel.releaseScreenPoll()
+            pollClaim.giveUp()
         }
     }
     // ADR-0045 S4b — the committer-liveness beacon emitter.
@@ -638,6 +635,14 @@ public fun ChatScreen(
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
             viewModel.setOnScreen(false)
+        }
+    }
+    // Group privacy spec section 8.1 — a tapped request-to-join notification
+    // for this group opens its info at `Join requests`.
+    val joinInfoRequested by me.lakko.app.chat.JoinRequestsIntake.infoRequested.collectAsStateWithLifecycle()
+    LaunchedEffect(joinInfoRequested) {
+        if (joinInfoRequested != null && me.lakko.app.chat.JoinRequestsIntake.takeInfoRequest(viewModel.groupIdHex)) {
+            viewModel.openJoinRequests()
         }
     }
     LaunchedEffect(lifecycleOwner) {
@@ -1010,6 +1015,17 @@ public fun ChatScreen(
                         viewModel.joinGroupCall(video = v)
                     }
                 },
+            )
+        }
+
+        // Group privacy spec section 8.1 — the requests-to-join bar, for the
+        // owner and admins, directly under the group call bar.
+        val joinRequestBar by viewModel.joinRequestBar.collectAsStateWithLifecycle()
+        joinRequestBar?.let { bar ->
+            JoinRequestsBanner(
+                bar = bar,
+                onReview = viewModel::openJoinRequests,
+                onShown = viewModel::onJoinRequestsShown,
             )
         }
 
@@ -1810,6 +1826,48 @@ private fun GroupCallBanner(
             }
             TextButton(onClick = onJoin) { Text(t("chat.call.join_short")) }
             TextButton(onClick = onJoinWithVideo) { Text(t("chat.call.join_video")) }
+        }
+    }
+    HorizontalDivider()
+}
+
+// =============================================================================
+// Requests-to-join bar (group privacy spec section 8.1)
+// =============================================================================
+
+@Composable
+private fun JoinRequestsBanner(
+    bar: me.lakko.app.chat.JoinRequestBannerText,
+    onReview: () -> Unit,
+    /** The bar is drawn in front of the person: its requests are shown. */
+    onShown: () -> Unit,
+) {
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    LaunchedEffect(bar, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.RESUMED) {
+            onShown()
+        }
+    }
+    val text = bar.count?.let { count ->
+        t(bar.key, emptyMap(), mapOf("count" to count.toULong()))
+    } ?: t(bar.key)
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics { liveRegion = LiveRegionMode.Polite },
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+        ) {
+            Text(
+                text = text,
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = onReview) { Text(t("chat.join_requests.review")) }
         }
     }
     HorizontalDivider()
@@ -5040,6 +5098,17 @@ private fun MembersSheet(
     }
 
     BackHandler { viewModel.toggleMembersPanel() }
+    // Group privacy spec section 8.1 — `Review` (or a tapped notification)
+    // opens this screen scrolled to `Join requests`.
+    val infoScroll = rememberScrollState()
+    var joinRequestsTop by remember { mutableStateOf<Int?>(null) }
+    val joinRequestScroll by viewModel.joinRequestScrollRequested.collectAsStateWithLifecycle()
+    LaunchedEffect(joinRequestScroll, joinRequestsTop) {
+        if (!joinRequestScroll) return@LaunchedEffect
+        val top = joinRequestsTop
+        if (top != null) infoScroll.animateScrollTo(top)
+        viewModel.consumeJoinRequestScroll()
+    }
     Scaffold(
         modifier = modifier.fillMaxSize(),
         contentWindowInsets = WindowInsets.safeDrawing,
@@ -5061,7 +5130,7 @@ private fun MembersSheet(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(scaffoldPadding)
-                    .verticalScroll(rememberScrollState())
+                    .verticalScroll(infoScroll)
                     .padding(horizontal = 16.dp, vertical = 8.dp),
             ) {
                 // ADR-0045 (UX §6.1.9) — tell the new owner they are the new
@@ -5313,9 +5382,21 @@ private fun MembersSheet(
                 // Approve drives the role-gated MLS approve + posts the commit &
                 // Welcome rendezvous; Reject drops the retained proposal.
                 val queueFull = remember(pendingJoins, unkeptJoinRequest) { viewModel.knockQueueFull() }
-                if (canManage && (pendingJoins.isNotEmpty() || unkeptJoinRequest || queueFull)) {
+                val joinSectionShown = canManage && (pendingJoins.isNotEmpty() || unkeptJoinRequest || queueFull)
+                if (!joinSectionShown && joinRequestsTop != null) joinRequestsTop = null
+                if (joinSectionShown) {
+                    // Section 8.1 — the requests listed here are shown.
+                    if (pendingJoins.isNotEmpty()) {
+                        LaunchedEffect(pendingJoins.size) { viewModel.onJoinRequestsShown() }
+                    }
                     var confirmRejectAll by remember { mutableStateOf(false) }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.onGloballyPositioned { coords ->
+                            val y = coords.positionInParent().y.toInt()
+                            if (joinRequestsTop != y) joinRequestsTop = y
+                        },
+                    ) {
                         Text(
                             text = if (queueFull || pendingJoins.size >= 64) {
                                 t("chat.members.join.heading_full")

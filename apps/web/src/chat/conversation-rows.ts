@@ -53,6 +53,8 @@ import { base64Encode } from "../auth/account-id";
 import { blockVerdictForSender } from "../moderation/block-rules";
 import { wasmSync } from "../wasm";
 import { chatListReady } from "./view-ready";
+import { rowUnreadWithRequests } from "./join-request-notices";
+import { unshownJoinRequestCount } from "./join-request-notices-store";
 
 // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
 export function createConversationRows() {
@@ -209,6 +211,20 @@ export function createConversationRows() {
   /** Unread count + preview for one row: rows above the later of the
    *  cross-device read cursor and the newest row this device has shown. */
   function summaryFor(groupIdBytes: Uint8Array): ChatListSummary {
+    const summary = messageSummaryFor(groupIdBytes);
+    // docs/ux/group-and-channel-privacy.md section 8.1 — each request to
+    // join this device has not shown yet adds one to the row's unread count.
+    // The preview stays the last message.
+    const requests = requestsUnshownFor(groupIdBytes);
+    return requests === 0 ? summary : { ...summary, unread: rowUnreadWithRequests(summary.unread, requests) };
+  }
+
+  /** Requests to join the group this device has not shown yet (section 8.1). */
+  function requestsUnshownFor(groupIdBytes: Uint8Array): number {
+    return unshownJoinRequestCount(accountId(), base64Encode(groupIdBytes));
+  }
+
+  function messageSummaryFor(groupIdBytes: Uint8Array): ChatListSummary {
     const hex = syncGroupIdHex(groupIdBytes);
     // The read position is the CONVERSATION's (R.5); what it means for this
     // group's own message ids depends on which segment it is in.
@@ -411,6 +427,9 @@ export function createConversationRows() {
           preview: subOf(g),
           lastActivityMs: lastActivityMs(g),
           unread: summaryFor(g.group.groupId).unread,
+          // Section 8.1 — the part of `unread` that is requests to join, not
+          // messages (the desktop's message notification leaves it out).
+          requestsUnshown: requestsUnshownFor(g.group.groupId),
           // The badge's meaning: something unread, or marked unread by hand.
           hasUnread:
             summaryFor(g.group.groupId).unread > 0 || f?.unreadOverride === true,

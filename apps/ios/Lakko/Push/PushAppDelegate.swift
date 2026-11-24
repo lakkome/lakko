@@ -191,6 +191,14 @@ public final class PushAppDelegate: NSObject, UIApplicationDelegate,
            ChannelPostLogPayload.isChannelId(channelId) {
             Task { @MainActor in ChannelNotificationTaps.shared.openChannelRequested = channelId }
         }
+        // `docs/ux/group-and-channel-privacy.md` section 8.1 — a request to
+        // join opens the group's info at `Join requests`.
+        if let conversationIdHex = userInfo[JoinRequestNotificationTaps.routeKey] as? String,
+           !conversationIdHex.isEmpty, conversationIdHex.allSatisfy(\.isHexDigit) {
+            Task { @MainActor in
+                JoinRequestNotificationTaps.shared.openGroupInfoRequested = conversationIdHex
+            }
+        }
         completionHandler()
     }
 }

@@ -378,11 +378,15 @@ public struct ChatListScreen: View {
                     ? waitingToLeaveLine
                     : viewModel.preview(thread: thread, isGroup: kind == .group),
                 lastActivityMs: viewModel.activityMs(thread: thread),
-                unread: UnreadCounting.displayed(
-                    local: thread.unread,
-                    cursorDerived: Self.unreadCount(
-                        thread: thread,
-                        cursor: readCursors[thread.conversationIdHex])),
+                // UX section 8.1 (group-and-channel-privacy) — each request
+                // to join not yet shown on screen adds one.
+                unread: JoinRequestSignals.rowUnread(
+                    messages: UnreadCounting.displayed(
+                        local: thread.unread,
+                        cursorDerived: Self.unreadCount(
+                            thread: thread,
+                            cursor: readCursors[thread.conversationIdHex])),
+                    unshown: thread.joinRequestsUnshown),
                 pinned: flags?.pinned == true,
                 muted: flags?.muted == true,
                 archived: flags?.archived == true,
@@ -1375,6 +1379,13 @@ public final class ChatListViewModel: ObservableObject {
     }
 
     func title(groupIdHex: String) -> String {
+        Self.title(repository: repository, groupIdHex: groupIdHex)
+    }
+
+    /// A conversation's title as its Chats row shows it; also the `{group}`
+    /// of a request-to-join notification (`docs/ux/group-and-channel-privacy.md`
+    /// section 8.1).
+    static func title(repository: ChatRepository, groupIdHex: String) -> String {
         if let shared = repository.groupName(groupIdHex: groupIdHex) {
             return shared
         }

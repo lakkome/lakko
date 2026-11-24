@@ -187,6 +187,7 @@ import { loadWasm, wasmSync, type Wasm } from "../wasm";
 import { blockVerdictForSender } from "../moderation/block-rules";
 import { isSuspendedKeyB64, standingWithin, standingsWithin, suspendedAmong } from "../moderation/suspension-marks";
 import { REQUEST_STANDING_BOUND_MS, dropsRequestFrom } from "../moderation/suspension-rules";
+import { forgetRequestsSent } from "../chat/requests-sent";
 
 /** How often held Welcomes are tried again (chosen). */
 const HELD_WELCOME_RETRY_MS = 30_000;
@@ -1293,6 +1294,9 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           rejoined: true,
         });
         await membershipEnd.startOver(prior);
+        // UX 6.2 — the request that led here is answered: its `Requests sent`
+        // row goes now, not when the chat list next renders.
+        forgetRequestsSent(base64Encode(group.groupId), Date.now());
         return added;
       });
       joinedWelcomeIds.add(messageId);

@@ -2537,6 +2537,30 @@
       "text": "शुरू हो रही है…",
       "status": "machine"
     },
+    "chat.join_requests.banner": {
+      "text": "{count, plural, one {शामिल होने का # अनुरोध} other {शामिल होने के # अनुरोध}}",
+      "status": "machine"
+    },
+    "chat.join_requests.banner_full": {
+      "text": "शामिल होने के 64+ अनुरोध",
+      "status": "machine"
+    },
+    "chat.join_requests.review": {
+      "text": "देखें",
+      "status": "machine"
+    },
+    "notification.join_request.title": {
+      "text": "शामिल होने का अनुरोध",
+      "status": "machine"
+    },
+    "notification.join_request.body": {
+      "text": "{name} {group} में शामिल होना चाहते हैं",
+      "status": "machine"
+    },
+    "notification.join_request.body_unnamed": {
+      "text": "कोई {group} में शामिल होना चाहता है",
+      "status": "machine"
+    },
     "chat.call.group_status_e2ee": {
       "text": "{status} · एंड-टू-एंड एन्क्रिप्टेड",
       "status": "machine"

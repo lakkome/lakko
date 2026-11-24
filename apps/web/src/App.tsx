@@ -45,6 +45,7 @@ import { ChannelsHydration } from "./channels/ChannelsHydration";
 import { ChannelSubscriptionSync } from "./channels/ChannelSubscriptionSync";
 import { ChannelPostSync } from "./feed/ChannelPostSync";
 import { ChannelPostNotifier } from "./feed/ChannelPostNotifier";
+import { JoinRequestNotifier } from "./chat/JoinRequestNotifier";
 import { ChannelPublisherLoops } from "./channels/ChannelPublisherLoops";
 import { ChannelFeedbackRuntime } from "./channels/ChannelFeedbackRuntime";
 import { DeviceGroupSyncProvider } from "./devices/sync/DeviceGroupSyncContext";
@@ -118,6 +119,12 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
      * read raises a notification. Inside the router: a tap opens the channel.
      */}
     <ChannelPostNotifier />
+    {/*
+     * docs/ux/group-and-channel-privacy.md section 8.1 - a request to join a
+     * group this account owns or administers raises a notification. Inside
+     * the router: a tap opens the group's info at Join requests.
+     */}
+    <JoinRequestNotifier />
     {props.children}
     <CallHostView />
     {/*

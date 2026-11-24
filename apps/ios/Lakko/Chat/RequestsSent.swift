@@ -82,6 +82,27 @@ public enum RequestsSentStore {
         return open
     }
 
+    /// The entries left once `groupIdHex`'s requests sent at or before
+    /// `upToMs` are forgotten: the group landed on this device at `upToMs`
+    /// (the request was answered), or this account's membership in it ended
+    /// then. A request sent after `upToMs` is a new one and stays. Pure.
+    ///
+    /// Before 2026-11-23 an entry went only when the Requests sent list was
+    /// read while the group was held, so a joined group's entry could outlive
+    /// the membership: after `Leave group` the invite page opened on the old
+    /// entry, showed "Request sent." and posted nothing.
+    static func entries(_ entries: [Entry], forgetting groupIdHex: String, upToMs: Int64) -> [Entry] {
+        let hex = groupIdHex.lowercased()
+        return entries.filter { !($0.groupIdHex == hex && $0.sentAtMs <= upToMs) }
+    }
+
+    /// ``entries(_:forgetting:upToMs:)`` on the stored entries.
+    public static func forget(accountIdB64: String, groupIdHex: String, upToMs: Int64) {
+        let all = load(accountIdB64)
+        let kept = entries(all, forgetting: groupIdHex, upToMs: upToMs)
+        if kept.count != all.count { save(kept, accountIdB64) }
+    }
+
     /// Section 6.2 — a day or more with no answer: `Ask again` is offered.
     public static func mayAskAgain(_ entry: Entry, nowMs: Int64) -> Bool {
         mayAskAgain(sentAtMs: entry.sentAtMs, nowMs: nowMs)

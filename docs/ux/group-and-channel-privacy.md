@@ -519,8 +519,74 @@ A flood shows here as many strangers. `Reject all` clears it; making the group p
 stops it. `Approve` is otherwise as today: the row reads `Waiting to be added` until the
 change lands.
 
-A request is not pushed: an admin sees it next time the group is read. In a group the
-person is admin of, it shows as the count on the info screen; no notification.
+~~A request is not pushed: an admin sees it next time the group is read. In a group the
+person is admin of, it shows as the count on the info screen; no notification.~~
+Replaced 2026-11-23 (maintainer, after a live walk where an owner with the group open saw
+nothing until opening Group info): section 8.1.
+
+### 8.1 Telling the owner and admins a request is waiting
+
+Amended 2026-11-23 (maintainer). Three signals, all for the owner and admins only: the
+same role gate that shows `Approve` and `Reject`. A member, or a person whose membership
+in the group has ended, sees none of them. All three read the requests this device holds
+(the retained set the `Join requests` section lists); a request the group's queue had no
+room for is not counted.
+
+**1. A bar in the conversation.** At the top of the group's conversation, the same
+pattern and component as the `Group call in progress` bar:
+
+```
+3 requests to join                                   [ Review ]
+```
+
+- Copy: `{n} request to join` / `{n} requests to join`, through the catalog's plural
+  forms. When the `Join requests` heading reads `64+`, the bar reads `64+ requests to join`.
+- `Review` opens Group info scrolled to `Join requests`.
+- The bar is there while at least one request is waiting and goes the moment none is
+  (approved, rejected, or joined through another admin). It has no close button: it is a
+  count of decisions still owed, and answering them is the way to dismiss it.
+- With a group call bar also up, the call bar is on top and this bar directly under it:
+  a call is happening now and ends; a request waits.
+
+**2. The chat-list row.** The group's row in Chats counts as unread while it holds a
+request this device has not yet shown on screen. One rule:
+
+- Each device keeps, per account and group, the requests it has *not shown yet*. A
+  request enters when this device first reads it while the conversation is not open in
+  front of the person (open, the app or tab in the foreground).
+- It leaves when the bar is drawn in the open conversation, or Group info is on screen
+  showing `Join requests` (it sits over the conversation and lists the same requests), or
+  when the request is no longer waiting. Both sets are emptied when this device stops being
+  owner or admin, or the membership ends.
+- While the set is not empty the row has the unread mark, and each request in it adds
+  one to the row's unread count (and so to the Chats total). The row's second line stays
+  the last message: no request is ever written into the timeline or the preview.
+
+**3. A notification.** One per new request:
+
+- Title: `Request to join`. Body: `{name} asks to join {group}`, where `{name}` is the
+  contact name when the person is a contact, else the name the request carries; with no
+  name at all, `Someone asks to join {group}`. `{group}` is the group's title as its
+  Chats row shows it.
+- A tap opens the group's Group info at `Join requests`.
+- Never twice for one request on one device: each device keeps, per account and group,
+  the requests it has already announced (by notification or by the bar), dropped once
+  the request is no longer waiting. A person who asks again the next day (section 6.2)
+  is the same request and is not announced again.
+- Never while that conversation is open in front of the person: the bar is the signal
+  then, and the request counts as shown.
+- It goes the way the platform's other app-raised notifications go (the channel post
+  notification, `channel-notifications.md`), so it obeys the same permission; with
+  notifications off, the bar and the unread row are the signals. A muted group raises
+  no notification, and its row follows the muted row's rule for unread.
+- A notification is not withdrawn when the request is answered on another device.
+
+**When it arrives.** A request reaches an admin's device only when that device reads the
+group's request queue: while Lakko runs (the open conversation, or the background read
+of other conversations). A request does not wake a closed app or a phone in the
+background: the joiner holds nothing that lets it send a wake, and the server sends none
+for a request. So the notification comes when the admin next runs Lakko, which is what
+the joiner's page says ("An admin will see it when they next open Lakko.").
 
 ## 9. When a person's membership ends
 
@@ -558,6 +624,11 @@ The notice's `{name}` is held in memory only, for those 4 seconds.
 
 The group appears as a new conversation: no messages, an ordinary row, "You joined
 {name}" when a notification applies. Nothing from before returns.
+
+Added again while the dialog of 9.1 is still up (2026-11-23, seen on Android): the
+dialog is false now, so it goes by itself, with no `OK`, and the conversation stays
+on screen as the new conversation, live. The text the dialog showed goes back into the
+composer when the composer is empty. The bottom notice goes too.
 
 ### 9.3 Finding it afterwards
 
@@ -982,6 +1053,8 @@ requests to join that a person sent from search.
 | Bad form | 3 to 32 characters: letters a-z, digits and _. |
 | Request sent | Request sent. An admin will see it when they next open Lakko. |
 | Waiting | Waiting for an admin. |
+| Requests bar (section 8.1) | {n} request to join / {n} requests to join / 64+ requests to join · Review |
+| Request notification (section 8.1) | Request to join · {name} asks to join {group} / Someone asks to join {group} |
 | Past a day | No answer yet. |
 | Publisher request, waiting (section 15.2.2) | Waiting for the channel owner to approve... / No answer yet. / Ask again |
 | Removed | You are no longer in {name}. |
@@ -1008,6 +1081,9 @@ privacy.
 - Per device: the list of requests sent (group, name, `@name`, sent at), kept until joined
   or dismissed.
 - Per admin: the retained requests with the carried profile, a count, whether more wait.
+- Per admin device, per account and group (section 8.1, 2026-11-23): the requests already
+  announced and the requests not yet shown, both keyed by the joiner's key and pruned to
+  the requests still waiting. Local, never synced.
 - Per device, per publisher request (section 15.2.2, 2026-11-08): the channel, the link the
   card carries, and when it was last sent; kept until the channel is joined or gone.
 - Per owner device (section 15.2.1, 2026-11-08): which channel key periods it has handed to

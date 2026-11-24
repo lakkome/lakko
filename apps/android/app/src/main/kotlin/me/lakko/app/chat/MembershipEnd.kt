@@ -517,6 +517,24 @@ internal fun infoBehindEnd(ending: Boolean, membershipEnded: Boolean): InfoBehin
         membersCanFindMe = !ending,
     )
 
+/** What the screen does when the end's notice goes while its dialog is up. */
+internal enum class EndDialogClose {
+    /** The person was added back: the dialog closes and the conversation
+     *  stays, live (UX `group-and-channel-privacy.md` 9.2). */
+    STAY,
+
+    /** The notice was not owed (the person's own leave landed): back to Chats. */
+    LEAVE,
+}
+
+/**
+ * Decide it. [held] is whether the thread list holds the conversation again;
+ * [endOwed] whether an end is still owed for it. Only a conversation held with
+ * nothing owed was added back.
+ */
+internal fun endDialogWhenNoticeGoes(held: Boolean, endOwed: Boolean): EndDialogClose =
+    if (held && !endOwed) EndDialogClose.STAY else EndDialogClose.LEAVE
+
 /** The dialog for [notice] over a composer holding [draft]. */
 internal fun endDialogFor(notice: MembershipEndNotice, draft: String): EndDialog =
     EndDialog(notice.name, draft.takeIf { it.isNotBlank() })

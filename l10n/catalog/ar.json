@@ -2537,6 +2537,30 @@
       "text": "جارٍ البدء…",
       "status": "machine"
     },
+    "chat.join_requests.banner": {
+      "text": "{count, plural, zero {لا طلبات انضمام} one {طلب انضمام واحد} two {طلبا انضمام} few {# طلبات انضمام} many {# طلب انضمام} other {# طلب انضمام}}",
+      "status": "machine"
+    },
+    "chat.join_requests.banner_full": {
+      "text": "أكثر من 64 طلب انضمام",
+      "status": "machine"
+    },
+    "chat.join_requests.review": {
+      "text": "مراجعة",
+      "status": "machine"
+    },
+    "notification.join_request.title": {
+      "text": "طلب انضمام",
+      "status": "machine"
+    },
+    "notification.join_request.body": {
+      "text": "{name} يطلب الانضمام إلى {group}",
+      "status": "machine"
+    },
+    "notification.join_request.body_unnamed": {
+      "text": "شخص ما يطلب الانضمام إلى {group}",
+      "status": "machine"
+    },
     "chat.call.group_status_e2ee": {
       "text": "{status} · مشفّرة تشفيرًا تامًا بين الطرفين",
       "status": "machine"

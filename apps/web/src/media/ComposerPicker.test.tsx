@@ -181,6 +181,76 @@ describe("the two ways in", () => {
   });
 });
 
+describe("the tabs to a screen reader", () => {
+  // Seen on iOS: both tabs were read with the picker's own name ("Emoji and
+  // GIFs"). Here each tab is named by its own text, says whether it is
+  // selected, and points at the one panel, which is named by the selected tab.
+  /** The name a screen reader reads for a tab: an aria-label wins, else the text. */
+  const nameOf = (el: Element): string | undefined =>
+    el.getAttribute("aria-label") ?? el.textContent?.trim();
+
+  it("names each tab by what it shows, never by the picker's name", () => {
+    mountPicker();
+
+    const tabs = all('[role="tab"]');
+    expect(tabs.map(nameOf)).toEqual(["Emoji", "GIF"]);
+    expect(tabs.some((t) => nameOf(t) === "Emoji and GIFs")).toBe(false);
+    expect(one('[role="dialog"]').getAttribute("aria-label")).toBe("Emoji and GIFs");
+    expect(one('[role="tablist"]').contains(tab("Emoji"))).toBe(true);
+  });
+
+  it("marks exactly the selected tab and keeps only it in the Tab order", () => {
+    mountPicker();
+
+    expect(tab("Emoji").getAttribute("aria-selected")).toBe("true");
+    expect(tab("GIF").getAttribute("aria-selected")).toBe("false");
+    expect(tab("Emoji").tabIndex).toBe(0);
+    expect(tab("GIF").tabIndex).toBe(-1);
+
+    tab("GIF").click();
+
+    expect(tab("GIF").getAttribute("aria-selected")).toBe("true");
+    expect(tab("Emoji").getAttribute("aria-selected")).toBe("false");
+    expect(tab("GIF").tabIndex).toBe(0);
+    expect(tab("Emoji").tabIndex).toBe(-1);
+  });
+
+  it("links both tabs to the one panel, named by the selected tab", () => {
+    mountPicker();
+
+    const panel = one('[role="tabpanel"]');
+    expect(tab("Emoji").getAttribute("aria-controls")).toBe(panel.id);
+    expect(tab("GIF").getAttribute("aria-controls")).toBe(panel.id);
+    expect(panel.getAttribute("aria-labelledby")).toBe(tab("Emoji").id);
+
+    tab("GIF").click();
+
+    expect(one('[role="tabpanel"]').getAttribute("aria-labelledby")).toBe(tab("GIF").id);
+  });
+
+  it("moves between the tabs with the arrow keys", () => {
+    mountPicker();
+
+    tab("Emoji").focus();
+    tab("Emoji").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    expect(tab("GIF").getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(tab("GIF"));
+
+    tab("GIF").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    expect(tab("Emoji").getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(tab("Emoji"));
+
+    tab("Emoji").dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+    expect(tab("GIF").getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("has no tab panel role when there are no tabs", () => {
+    mountPicker("reaction");
+
+    expect(all('[role="tabpanel"]')).toHaveLength(0);
+  });
+});
+
 describe("picking an emoji", () => {
   it("hands the glyph over and stays open", () => {
     const picked = mountPicker();

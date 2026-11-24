@@ -101,6 +101,33 @@ export function recordRequestSent(r: SentRequest): void {
   persist();
 }
 
+/**
+ * The rows left once `idB64`'s requests sent at or before `upToMs` are
+ * forgotten: the group landed on this device at `upToMs` (the request was
+ * answered), or this account's membership in it ended then. A request sent
+ * after `upToMs` is a new one and stays. Pure.
+ *
+ * Before 2026-11-23 a row went only when the chat list rendered with the group
+ * in it, so a joined group's row could outlive the membership: after `Leave
+ * group` the invite page opened on the old row, showed "Request sent." and
+ * posted nothing.
+ */
+export function sentRequestsAfter(
+  list: readonly SentRequest[],
+  idB64: string,
+  upToMs: number,
+): SentRequest[] {
+  return list.filter((r) => !(r.idB64 === idB64 && r.sentAtMs <= upToMs));
+}
+
+/** `sentRequestsAfter` on the bound account's rows. */
+export function forgetRequestsSent(idB64: string, upToMs: number): void {
+  const kept = sentRequestsAfter(rows(), idB64, upToMs);
+  if (kept.length === rows().length) return;
+  setRows(kept);
+  persist();
+}
+
 /** The group appeared in Chats (joined), or the person dismissed it. */
 export function dropRequestSent(idB64: string): void {
   if (!rows().some((r) => r.idB64 === idB64)) return;

@@ -1186,9 +1186,14 @@ self.addEventListener("notificationclick", (event) => {
 
   // docs/ux/channel-notifications.md: a channel post the page noticed and
   // could only show from here. An open tab is told to open the channel, else
-  // a new one opens on it. Only a channel path is followed.
+  // a new one opens on it. Only a channel path is followed, and (section 8.1
+  // of group-and-channel-privacy.md) a group's info at Join requests.
   const openPath = event.notification.data?.lakkoOpenPath;
-  if (typeof openPath === "string" && /^\/channel\/[0-9a-f]{32}$/.test(openPath)) {
+  if (
+    typeof openPath === "string" &&
+    (/^\/channel\/[0-9a-f]{32}$/.test(openPath) ||
+      /^\/(chat|groups)\/[A-Za-z0-9_-]{1,128}\?info=group&section=join-requests$/.test(openPath))
+  ) {
     event.waitUntil(
       (async () => {
         const clients = await runningWindows();

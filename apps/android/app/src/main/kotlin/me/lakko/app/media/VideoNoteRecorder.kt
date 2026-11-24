@@ -457,6 +457,31 @@ public class VideoNoteRecorder(
                 }
             }
 
+        /** The answer of [probeAvailability], once it has one: a device's
+         *  cameras and their camcorder profiles do not change while the
+         *  process runs. */
+        @Volatile
+        private var availability: VideoNoteAvailability? = null
+
+        /**
+         * UX spec §3 states — can this device record a video note at all?
+         * Asked when the chat opens, so camera mode is never offered on a
+         * device that would refuse the take only after a hold. `null` when
+         * CameraX could not be brought up (unknown, not "no"). Must be called
+         * on the main thread, like [bind].
+         */
+        public suspend fun probeAvailability(context: Context): VideoNoteAvailability? {
+            availability?.let { return it }
+            val p = obtainProvider(context) ?: return null
+            val infos = cameraInfos(p)
+            val result = videoNoteAvailability(infos.mapValues { (_, info) -> videoNoteProfileOptions(info) })
+            if (result == VideoNoteAvailability.NO_COMPATIBLE_FORMAT) {
+                Log.w(TAG, "no H.264 + AAC camcorder profile on this camera: video notes unavailable")
+            }
+            availability = result
+            return result
+        }
+
         /** The cameras CameraX can bind, one per facing (the first wins). */
         public fun cameraInfos(p: ProcessCameraProvider): Map<CameraLens, CameraInfo> {
             val infos = runCatching { p.availableCameraInfos }.getOrElse {

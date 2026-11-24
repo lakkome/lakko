@@ -248,6 +248,15 @@ public final class ChatViewModel: ObservableObject {
     /// open.
     @Published public private(set) var pendingJoins: [Data] = []
 
+    /// `docs/ux/group-and-channel-privacy.md` section 8.1 — the requests bar
+    /// at the top of the conversation, `nil` when there is none. Re-read on
+    /// every state publish (``refreshJoinRequestBar()``).
+    @Published private(set) var joinRequestBanner: JoinRequestSignals.Banner?
+
+    /// Section 8.1 — `Review` (or a notification tap) asked the info screen to
+    /// show `Join requests`; the screen scrolls there and clears it.
+    @Published var scrollToJoinRequests = false
+
     /// ADR-0045 S4a — the membership requests waiting for a committer to sweep
     /// them, already filtered by the UX §10 visibility gate. A pending REMOVAL
     /// leaves its member in ``members`` and annotates the row; a pending ADD is
@@ -485,6 +494,15 @@ public final class ChatViewModel: ObservableObject {
     /// the outgoing typing state.
     @Published var screenVisible: Bool = false {
         didSet {
+            // Section 8.1 (group-and-channel-privacy) — no request
+            // notification while this conversation is in front.
+            if screenVisible != oldValue {
+                if screenVisible {
+                    VisibleGroupConversation.appeared(conversationIdHex)
+                } else {
+                    VisibleGroupConversation.disappeared(conversationIdHex)
+                }
+            }
             if screenVisible {
                 // `docs/ux/feed.md` section 5 — a reply chosen in the feed
                 // arms the strip as this screen comes up.
@@ -500,6 +518,9 @@ public final class ChatViewModel: ObservableObject {
                 requestProfilesIfDue()
                 // UX 9.1 — the group went while another screen was on top.
                 noteConversationEnd(threadPresent: threadKnown)
+                // Section 8.1 (group-and-channel-privacy) — the bar is drawn
+                // now, so its requests count as shown.
+                refreshJoinRequestBar()
             } else {
                 // The read position goes out now rather than 1.5 s later: an
                 // app closed right after reading came back with the badge.
@@ -945,13 +966,16 @@ public final class ChatViewModel: ObservableObject {
     /// The info screen is on top of the stack (pushed, or uncovered by a
     /// back from a screen above it).
     func groupInfoAppeared() {
+        if !conversationInfoOpen { VisibleGroupConversation.appeared(conversationIdHex) }
         conversationInfoOpen = true
         refreshMembers()
     }
 
     /// The info screen is covered or gone.
     func groupInfoDisappeared() {
+        if conversationInfoOpen { VisibleGroupConversation.disappeared(conversationIdHex) }
         conversationInfoOpen = false
+        scrollToJoinRequests = false
     }
 
     // MARK: - Add members (`docs/ux/conversation-info.md` section 2.4)
@@ -2693,6 +2717,34 @@ public final class ChatViewModel: ObservableObject {
         // request. This state publishes whichever poll carried the change (the
         // chat's own, or the app-wide one while the chat is covered).
         if conversationInfoOpen { refreshMembers() }
+        // Section 8.1 (group-and-channel-privacy) — the requests bar follows
+        // every poll, the chat's own and the app-wide one.
+        refreshJoinRequestBar()
+    }
+
+    /// Section 8.1 (group-and-channel-privacy) — read the retained requests
+    /// and the role, publish the bar, prune the announced and unshown sets,
+    /// and mark the requests shown when the bar is in front of the person.
+    func refreshJoinRequestBar() {
+        let applies = !membershipHasEnded && repository.joinRequestSignalsApply(groupIdHex: groupIdHex)
+        let pending = applies ? repository.pendingExternalJoins(groupIdHex: groupIdHex) : []
+        let banner = JoinRequestSignals.banner(
+            role: applies ? repository.ownRole(groupIdHex: groupIdHex) : nil,
+            membershipEnded: membershipHasEnded,
+            pendingCount: pending.count)
+        if banner != joinRequestBanner { joinRequestBanner = banner }
+        guard applies else { return }
+        repository.pruneJoinRequestSignals(
+            groupIdHex: groupIdHex, pending: Set(pending.map { base64Encode($0) }))
+        if banner != nil, isForeground {
+            repository.joinRequestBarShown(groupIdHex: groupIdHex)
+        }
+    }
+
+    /// Section 8.1 — `Review` on the bar: the info screen, at `Join requests`.
+    func reviewJoinRequests() {
+        scrollToJoinRequests = true
+        openConversationInfo()
     }
 
     // MARK: - `docs/ux/message-actions.md` section 9 — a deleted message leaves
@@ -2783,11 +2835,23 @@ public final class ChatViewModel: ObservableObject {
     /// and this runs again if they come back to the route.
     private func noteConversationEnd(threadPresent: Bool) {
         if threadPresent {
+            // UX 9.2 — added back while the dialog was up: it is false now,
+            // so it goes by itself and the conversation shows live, with the
+            // text the composer held put back (seen on Android 2026-11-23).
+            if let dialog = endDialog {
+                endDialog = nil
+                draft = Self.draftAfterReturn(dialogDraft: dialog.draft, composer: draft)
+            }
+            let wasEnded = endedTitle != nil
             sawThread = true
             endAnswered = false
             endedTitle = nil
             conversationGone = false
             draftClosed = false
+            // The membership was held as ended behind the title; read it again
+            // now that it is not, so the screen (and its poll loop, which waits
+            // on it) is live at once rather than at the next state update.
+            if wasEnded { refreshMembership() }
             return
         }
         // No thread alone is not an end: a lineage that arrived can move the
@@ -2810,6 +2874,14 @@ public final class ChatViewModel: ObservableObject {
             // The person left: the row goes with no notice.
             conversationGone = true
         }
+    }
+
+    /// UX 9.2 — what the composer holds when the person is added back while
+    /// the end's dialog was up: the text the dialog showed, unless something
+    /// was typed since.
+    static func draftAfterReturn(dialogDraft: String?, composer: String) -> String {
+        guard composer.isEmpty, let dialogDraft else { return composer }
+        return dialogDraft
     }
 
     /// `OK` on the dialog: back to Chats.
@@ -4024,6 +4096,16 @@ public final class ChatViewModel: ObservableObject {
     /// continuous rather than event-driven. So the screen stops iterating too.
     public var pollLoopShouldContinue: Bool {
         return !membershipHasEnded
+    }
+
+    /// Returns once this device's membership of the group is no longer ended
+    /// (it was added back while the screen stayed up), or when the calling
+    /// task is cancelled. What the screen's poll loop parks on instead of
+    /// ending: a loop that ended never read the new membership.
+    public func waitUntilMembershipResumes() async {
+        for await state in $membership.values where !membershipEnded(state) {
+            return
+        }
     }
 
     public func pollOnceLongPoll(waitSecs: Int = ChatViewModel.defaultLongPollSecs) async {

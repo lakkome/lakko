@@ -2537,6 +2537,30 @@
       "text": "正在开始…",
       "status": "machine"
     },
+    "chat.join_requests.banner": {
+      "text": "{count, plural, other {# 个加入请求}}",
+      "status": "machine"
+    },
+    "chat.join_requests.banner_full": {
+      "text": "64+ 个加入请求",
+      "status": "machine"
+    },
+    "chat.join_requests.review": {
+      "text": "查看",
+      "status": "machine"
+    },
+    "notification.join_request.title": {
+      "text": "加入请求",
+      "status": "machine"
+    },
+    "notification.join_request.body": {
+      "text": "{name} 请求加入 {group}",
+      "status": "machine"
+    },
+    "notification.join_request.body_unnamed": {
+      "text": "有人请求加入 {group}",
+      "status": "machine"
+    },
     "chat.call.group_status_e2ee": {
       "text": "{status} · 端到端加密",
       "status": "machine"

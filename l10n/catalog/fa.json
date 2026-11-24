@@ -2537,6 +2537,30 @@
       "text": "در حال شروع…",
       "status": "machine"
     },
+    "chat.join_requests.banner": {
+      "text": "{count, plural, one {# درخواست عضویت} other {# درخواست عضویت}}",
+      "status": "machine"
+    },
+    "chat.join_requests.banner_full": {
+      "text": "بیش از ۶۴ درخواست عضویت",
+      "status": "machine"
+    },
+    "chat.join_requests.review": {
+      "text": "بررسی",
+      "status": "machine"
+    },
+    "notification.join_request.title": {
+      "text": "درخواست عضویت",
+      "status": "machine"
+    },
+    "notification.join_request.body": {
+      "text": "{name} می‌خواهد به {group} بپیوندد",
+      "status": "machine"
+    },
+    "notification.join_request.body_unnamed": {
+      "text": "کسی می‌خواهد به {group} بپیوندد",
+      "status": "machine"
+    },
     "chat.call.group_status_e2ee": {
       "text": "{status} · رمزگذاری‌شده سرتاسری",
       "status": "machine"

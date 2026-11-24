@@ -52,6 +52,50 @@ final class JoinRequestDurabilityTests: XCTestCase {
         XCTAssertEqual(meta?.askedAtMs, 1_000)
     }
 
+    /// UX section 8 — a request that stopped waiting gives up its recorded
+    /// time, so the person's next request is dated by its own arrival.
+    func testARequestThatStoppedWaitingIsDatedAgainWhenAskedAnew() {
+        let account = "join-durability", group = "ab12", other = "cd34"
+        let store = GroupSettingsStore(defaults: defaults)
+        store.keepRequestMeta(
+            accountIdB64: account, groupIdHex: group, joinerKeyB64: "joiner", askedAtMs: 1_000,
+            inviterKey: Data([1]))
+        store.keepRequestName(accountIdB64: account, groupIdHex: group, joinerKeyB64: "joiner", name: "Droid")
+        // Asked again while still waiting: the same request keeps its time.
+        store.keepRequestMeta(
+            accountIdB64: account, groupIdHex: group, joinerKeyB64: "joiner", askedAtMs: 5_000, inviterKey: nil)
+        XCTAssertEqual(store.requestMeta(accountIdB64: account, groupIdHex: group)["joiner"]?.askedAtMs, 1_000)
+        store.keepRequestMeta(
+            accountIdB64: account, groupIdHex: other, joinerKeyB64: "joiner", askedAtMs: 3_000, inviterKey: nil)
+        // Approved: no longer waiting.
+        store.pruneRequestRecords(accountIdB64: account, groupIdHex: group, waiting: ["someone-else"])
+        XCTAssertNil(store.requestMeta(accountIdB64: account, groupIdHex: group)["joiner"])
+        XCTAssertNil(store.requestNames(accountIdB64: account, groupIdHex: group)["joiner"])
+        XCTAssertEqual(store.requestMeta(accountIdB64: account, groupIdHex: other)["joiner"]?.askedAtMs, 3_000)
+        // Left and asked again.
+        store.keepRequestMeta(
+            accountIdB64: account, groupIdHex: group, joinerKeyB64: "joiner", askedAtMs: 9_000, inviterKey: nil)
+        let again = store.requestMeta(accountIdB64: account, groupIdHex: group)["joiner"]
+        XCTAssertEqual(again?.askedAtMs, 9_000)
+        XCTAssertNil(again?.inviterKey)
+    }
+
+    /// A newly kept request replaces a record no prune removed (approved,
+    /// left and asked again between two reads).
+    func testANewlyKeptRequestReplacesAStaleRecord() {
+        let account = "join-durability", group = "ab12"
+        let store = GroupSettingsStore(defaults: defaults)
+        store.keepRequestMeta(
+            accountIdB64: account, groupIdHex: group, joinerKeyB64: "joiner", askedAtMs: 1_000,
+            inviterKey: Data([1]))
+        store.keepRequestMeta(
+            accountIdB64: account, groupIdHex: group, joinerKeyB64: "joiner", askedAtMs: 7_000,
+            inviterKey: nil, replace: true)
+        let meta = store.requestMeta(accountIdB64: account, groupIdHex: group)["joiner"]
+        XCTAssertEqual(meta?.askedAtMs, 7_000)
+        XCTAssertNil(meta?.inviterKey)
+    }
+
     func testACoPublisherKeyReadBeforeARestartIsStillThereForTheApprove() async {
         let account = "join-durability-\(UUID().uuidString)"
         let groupId = Data(repeating: 9, count: 32), joiner = Data(repeating: 4, count: 32)

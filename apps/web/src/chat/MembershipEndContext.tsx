@@ -69,6 +69,7 @@ import { useGroupClosed } from "./GroupClosedContext";
 import { groupTitle } from "./group-title";
 import { useGroupNames } from "./GroupNameContext";
 import {
+  draftToRestore,
   endKey,
   endTriggered,
   heardRegisterVerdict,
@@ -86,6 +87,7 @@ import { allowGroupInMessageLog, blockGroupInMessageLog } from "./message-log-st
 import { ownPersonKeyB64, personKeyOf, type RosterLeaf } from "./person-key";
 import { usePins } from "./PinContext";
 import { useReadWatermarks } from "./ReadWatermarkContext";
+import { forgetRequestsSent } from "./requests-sent";
 import { chunkSaveEdits, unsaveEdit } from "./saved-messages";
 import { useLineage } from "./use-lineage";
 
@@ -532,12 +534,17 @@ export function MembershipEndProvider(props: { children: JSX.Element }): JSX.Ele
     const key = endKey(end.refKind, end.idHex);
     if (startingKeys.has(key) || store.record(key) !== undefined) return;
     startingKeys.add(key);
+    const recordedAtMs = Date.now();
     // Blocked first: hiding it closes an open view, which writes on its way
     // out.
     for (const g of end.segmentsB64) blockRows(account, g);
     setStarting((s) => new Set([...s, ...end.segmentsB64]));
     try {
       await runtime.begin(end);
+      // UX 6.2 — a request sent before this end is history: left behind, it
+      // made the invite page show "Request sent." for a request that was
+      // never posted (seen 2026-11-23). One sent after the end stays.
+      if (end.refKind === 2) for (const g of end.segmentsB64) forgetRequestsSent(g, recordedAtMs);
     } catch (err) {
       // The record is not on disk, so nothing happened. The trigger is asked
       // again at the next commit and at the next launch.
@@ -822,7 +829,11 @@ export function MembershipEndProvider(props: { children: JSX.Element }): JSX.Ele
       if (account === null) return;
       const hex = groupIdHex(entry.group.groupId);
       const key = endKey(2, hex);
-      // The sentence would be false now: this device is in the group.
+      // The sentence would be false now: this device is in the group. A
+      // dialog showing it over the open conversation goes with it (the route
+      // shows the view again), and the text it held goes back into the
+      // composer (UX `group-and-channel-privacy.md` 9.2).
+      const keptDraft = draftToRestore(notices().find((n) => n.key === key));
       dropNotice(key);
       if (store.record(key) !== undefined) {
         await runtime.run(key);
@@ -833,6 +844,12 @@ export function MembershipEndProvider(props: { children: JSX.Element }): JSX.Ele
         }
       }
       allowRows(account, entry.groupIdB64);
+      if (keptDraft !== null) {
+        // After the end's steps, which clear the conversation's draft.
+        void sync
+          .saveDraft(entry.group.groupId, keptDraft)
+          .catch((err: unknown) => logFailure("the kept draft was not put back", err));
+      }
       const epoch = readEpoch(entry.group);
       if (epoch === undefined) return;
       await sync

@@ -41,6 +41,12 @@ export interface ConversationRow {
   readonly lastActivityMs: number | null;
   readonly unread: number;
   /**
+   * How much of `unread` is requests to join this device has not shown yet
+   * (`docs/ux/group-and-channel-privacy.md` section 8.1), not messages.
+   * Absent means none.
+   */
+  readonly requestsUnshown?: number;
+  /**
    * Something unread, or marked unread by hand - what the unread badge means
    * and what a folder's "Read" toggle reads (`docs/ux/chat-folders.md` 3.2).
    * Absent means `unread > 0`.

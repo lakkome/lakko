@@ -542,3 +542,106 @@ fn a_co_publisher_joins_from_a_retained_request() {
     );
     assert!(alice_pg.pending_external_joins().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// A request sent while leaving
+// ---------------------------------------------------------------------------
+
+/// The owner's group with `dave` admitted through a proposal and a sweep, and
+/// Dave's own handle on it.
+fn group_with_member(owner: &Identity, dave: &Identity) -> (Group, Group) {
+    let mut g = Group::create(owner, GroupKind::Group).expect("create");
+    g.propose_add_member_from_wire(owner, &kp_wire(dave))
+        .expect("owner proposes the add");
+    let sweep = g
+        .commit_pending_proposals(owner)
+        .expect("sweep")
+        .expect("a commit was produced");
+    let welcome = wire(&sweep.welcome.expect("the sweep carries the Welcome"));
+    let dave_g = Group::join_from_welcome(&welcome, dave).expect("dave joins");
+    (g, dave_g)
+}
+
+fn leaf_of(g: &Group, who: &Identity) -> lakko_mls::LeafNodeIndex {
+    let key = pk(who);
+    lakko_mls::LeafNodeIndex::new(
+        g.members()
+            .iter()
+            .find(|m| m.signature_public_key == key)
+            .expect("in the roster")
+            .leaf_index,
+    )
+}
+
+/// Seen live 2026-11-23: a member asks to leave and opens the group's link
+/// again before an admin swept the leave. The request reaches the admin's
+/// device while the member is still in its roster; it must be kept, hidden
+/// while the member is in, listed once the leave lands, and approvable.
+/// Before, it was answered `AlreadyMember`, and the knock reader moved past
+/// the row: the request was gone for good.
+#[test]
+fn a_request_from_a_member_whose_leave_waits_is_kept_and_listed_once_they_are_out() {
+    let owner = Identity::from_seed(&OWNER_SEED).expect("owner");
+    let dave = id(0xD2);
+    let (mut g, mut dave_g) = group_with_member(&owner, &dave);
+
+    let leave = dave_g
+        .propose_remove_member(&dave, leaf_of(&dave_g, &dave))
+        .expect("a member may ask to leave");
+    g.process_incoming_verifying_roles(&owner, &leave)
+        .expect("the owner stores the leave");
+
+    let answer = g
+        .retain_join_request(&owner, &kp_wire(&dave))
+        .expect("retain");
+    assert_eq!(answer.outcome, JoinRequestOutcome::Retained);
+    // Still a member: not listed, so nobody approves an Add of a current leaf.
+    assert!(g.pending_external_joins().is_empty());
+
+    // Another stranger's knock arrives before the sweep: the reap it runs
+    // leaves Dave's request alone.
+    let erin = id(0xE2);
+    let other = g
+        .retain_join_request(&owner, &kp_wire(&erin))
+        .expect("retain");
+    assert_eq!(other.outcome, JoinRequestOutcome::Retained);
+
+    // The owner sweeps the leave: Dave is out, and his request is listed.
+    let sweep = g
+        .commit_pending_proposals(&owner)
+        .expect("sweep")
+        .expect("the leave is swept");
+    // Dave's own device applies its removal, which ends the group there.
+    dave_g
+        .process_incoming_verifying_roles(&dave, &wire(&sweep.commit))
+        .expect("dave applies the commit that removes him");
+    assert!(!dave_g.is_active());
+    assert!(!g
+        .members()
+        .iter()
+        .any(|m| m.signature_public_key == pk(&dave)));
+    let listed = g.pending_external_joins();
+    assert!(listed.contains(&pk(&dave)), "Dave's request is listed");
+    assert!(listed.contains(&pk(&erin)));
+
+    // It survives a restart and is approved like any other.
+    let (owner, mut g) = restart(owner, g);
+    assert!(g.pending_external_joins().contains(&pk(&dave)));
+    approve_sweep_and_join(&owner, &mut g, &dave);
+}
+
+/// The control: a member with no removal waiting is answered `AlreadyMember`
+/// and nothing is kept.
+#[test]
+fn a_request_from_a_staying_member_is_not_kept() {
+    let owner = Identity::from_seed(&OWNER_SEED).expect("owner");
+    let dave = id(0xD3);
+    let (mut g, _dave_g) = group_with_member(&owner, &dave);
+
+    let answer = g
+        .retain_join_request(&owner, &kp_wire(&dave))
+        .expect("retain");
+    assert_eq!(answer.outcome, JoinRequestOutcome::AlreadyMember);
+    assert!(g.pending_external_joins().is_empty());
+    assert_eq!(g.join_request_room(), MAX_PENDING_JOIN_REQUESTS);
+}

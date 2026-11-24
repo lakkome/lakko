@@ -335,6 +335,11 @@ enum AccountLocalDataWipe {
         step("knock-cursors") {
             removeKeys(in: standard, withPrefix: knockCursorPrefix + accountIdB64 + ".")
         }
+        // `docs/ux/group-and-channel-privacy.md` section 8.1 — the announced
+        // and unshown request-to-join sets.
+        step("join-request-signals") {
+            JoinRequestSignalStore(defaults: standard).clear(accountIdB64: accountIdB64)
+        }
         step("message-log") { MessageLogStore().deleteLog(accountIdB64: accountIdB64) }
         // ADR-0099 — the evidence kept for reports, and the reports this
         // device sent (device-only, never synced, never in the backup).

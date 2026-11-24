@@ -1291,6 +1291,40 @@ final class MembershipEndTests: XCTestCase {
         XCTAssertTrue(model.conversationGone)
     }
 
+    /// UX 9.2 — added back while the dialog is up: the dialog is false now, so
+    /// it goes by itself, the conversation shows live, and the text the
+    /// composer held comes back (seen on Android 2026-11-23: the dialog stayed,
+    /// and `OK` led to Chats).
+    func testAddedBackWhileTheDialogIsUpTheDialogGoesAndTheConversationStays() async throws {
+        let f = try fixture()
+        let hex = f.groupIdHex
+        let model = ChatViewModel(repository: f.repo, groupIdHex: hex)
+        model.screenVisible = true
+        model.draft = "see you tomorrow"
+        let record = try XCTUnwrap(f.repo.groups[hex])
+        let steps = try removal(
+            ownerGroup: f.ownerGroup, owner: f.owner, key: f.identity.signaturePublicKey())
+        _ = try record.group.processIncomingVerifyingRoles(identity: f.identity, bytes: steps.proposal)
+        _ = try record.group.processIncomingVerifyingRoles(identity: f.identity, bytes: steps.commit)
+        f.repo.endMembershipIfOut(groupIdHex: hex)
+        await waitUntil { model.endDialog != nil && !f.repo.endsRunning.contains(hex) }
+
+        let again = try f.ownerGroup.addMemberFromWire(
+            identity: f.owner, keyPackage: try f.identity.createKeyPackage())
+        _ = try await f.repo.joinGroupFromWelcome(welcomeBytes: again.welcome)
+        await waitUntil { model.endDialog == nil }
+        XCTAssertNil(model.endDialog)
+        XCTAssertFalse(model.conversationGone, "the conversation stays, live")
+        XCTAssertEqual(model.draft, "see you tomorrow")
+        XCTAssertFalse(model.membershipHasEnded)
+    }
+
+    func testTheDraftComesBackOnlyIntoAnEmptyComposer() {
+        XCTAssertEqual(ChatViewModel.draftAfterReturn(dialogDraft: "kept", composer: ""), "kept")
+        XCTAssertEqual(ChatViewModel.draftAfterReturn(dialogDraft: "kept", composer: "new"), "new")
+        XCTAssertEqual(ChatViewModel.draftAfterReturn(dialogDraft: nil, composer: ""), "")
+    }
+
     /// UX 9.1 — behind the dialog the conversation is still the one that ended:
     /// the wipe takes its name and its handle, and a group this device does not
     /// hold reads as one being set up, with a working composer.

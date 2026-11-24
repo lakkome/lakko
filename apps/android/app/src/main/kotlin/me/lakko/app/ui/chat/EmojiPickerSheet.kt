@@ -138,10 +138,7 @@ internal fun EmojiPickerSheet(
                 .semantics { contentDescription = sheetLabel },
         ) {
             if (gifAvailable) {
-                TabRow(selectedTabIndex = tab) {
-                    Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text(t("chat.emoji.tab")) })
-                    Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text(t("chat.media.gif")) })
-                }
+                EmojiGifTabs(selected = tab, onSelect = { tab = it })
             }
             if (tab == 0 || !gifAvailable) {
                 if (capOwn != null) {
@@ -174,6 +171,19 @@ internal fun EmojiPickerSheet(
                 })
             }
         }
+    }
+}
+
+/**
+ * The picker's two tabs. Each is named by what it shows ("Emoji", "GIF"),
+ * never by the sheet's own label, and carries the tab role and its selected
+ * state, so TalkBack reads "Emoji, tab, selected" and "GIF, tab".
+ */
+@Composable
+internal fun EmojiGifTabs(selected: Int, onSelect: (Int) -> Unit) {
+    TabRow(selectedTabIndex = selected) {
+        Tab(selected = selected == 0, onClick = { onSelect(0) }, text = { Text(t("chat.emoji.tab")) })
+        Tab(selected = selected == 1, onClick = { onSelect(1) }, text = { Text(t("chat.media.gif")) })
     }
 }
 

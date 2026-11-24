@@ -159,6 +159,15 @@ import {
 } from "../profile/member-label";
 import { memberRowActions, rowRoleOf, type MemberRowActions } from "../chat/member-row-actions";
 import { pendingJoinLabel, pendingJoinName, pendingJoinPersonKey } from "../chat/pending-join-label";
+import {
+  JOIN_REQUESTS_SECTION,
+  joinRequestBar,
+  managesJoinRequests,
+  onJoinRequestBarShown,
+  pruneJoinNotices,
+} from "../chat/join-request-notices";
+import { readJoinNotices, updateJoinNotices } from "../chat/join-request-notices-store";
+import { splitPendingJoinKeys } from "../chat/join-request-reads";
 import { JoinAttributionGate } from "../chat/join-attribution-gate";
 import { groupCallsFor } from "../calls/group-call-store";
 import { chatCallAffordance, type ChatCallAffordance } from "../calls/group-call-host";
@@ -1757,6 +1766,19 @@ function ChatView(props: {
     setSearchParams({ info: infoParamOf(screen) }, { state: { lkInfoStep: true } });
   }
 
+  /** The requests bar's `Review` (section 8.1 of
+   *  `group-and-channel-privacy.md`): the group's info, scrolled to `Join
+   *  requests`. A notification's tap opens the same URL. */
+  function openJoinRequests(): void {
+    showNotice(null);
+    setError(null);
+    setMembersVersion(membersVersion() + 1);
+    setSearchParams(
+      { info: infoParamOf("group"), section: JOIN_REQUESTS_SECTION },
+      { state: { lkInfoStep: true } },
+    );
+  }
+
   /**
    * One step back from the info screen shown, shared by the back icon and
    * `Esc`: Add members to the info, the info to the conversation. When this
@@ -1948,7 +1970,7 @@ function ChatView(props: {
   // or `?call=video` (docs/ux/client-redesign.md section 5.3): the same header
   // buttons, pressed once the chat can offer a call. The parameter is dropped
   // from the URL first, so a reload or Back does not place a second call.
-  const [searchParams, setSearchParams] = useSearchParams<{ call?: string; at?: string; reply?: string; info?: string }>();
+  const [searchParams, setSearchParams] = useSearchParams<{ call?: string; at?: string; reply?: string; info?: string; section?: string }>();
   // ADR-0052 decision 2 — `?at=<messageId>`: a forwarded message's "Forwarded
   // from" line in another conversation opened this one at its original. The
   // jump runs once the row is in the loaded timeline (the log hydrates
@@ -2772,6 +2794,82 @@ function ChatView(props: {
     } catch {
       return [];
     }
+  });
+
+  // -------------------------------------------------------------------------
+  // docs/ux/group-and-channel-privacy.md section 8.1 — the requests bar
+  // -------------------------------------------------------------------------
+
+  /** The page is in front of the person: the tab or window visible and
+   *  focused (the rule the join-request notifier uses). */
+  const inFrontNow = (): boolean =>
+    typeof document !== "undefined" && document.visibilityState === "visible" && document.hasFocus();
+  const [pageInFront, setPageInFront] = createSignal(inFrontNow());
+  {
+    const update = (): void => {
+      setPageInFront(inFrontNow());
+    };
+    document.addEventListener("visibilitychange", update);
+    window.addEventListener("focus", update);
+    window.addEventListener("blur", update);
+    onCleanup(() => {
+      document.removeEventListener("visibilitychange", update);
+      window.removeEventListener("focus", update);
+      window.removeEventListener("blur", update);
+    });
+  }
+  /** Owner or admin of this group while the membership lasts: the gate that
+   *  shows Approve and Reject. */
+  const managesJoins = (): boolean => managesJoinRequests(ownRole(), membershipEnded());
+  /** What the bar says, `null` with no bar. */
+  const joinBar = createMemo(() =>
+    joinRequestBar({ manages: managesJoins(), pendingCount: pendingJoins().length }),
+  );
+  // Keep what this device holds about requests to the ones still waiting,
+  // and, while the bar is drawn in this conversation in front of the person,
+  // count every request it shows as shown. The pending set is read afresh
+  // here rather than from the memo: a knock read may have just added a
+  // request the memo does not hold yet, and pruning against the older set
+  // would forget it was announced.
+  createEffect(() => {
+    const s = auth.state();
+    if (s.kind !== "session") return;
+    const account = s.account.accountId;
+    const groupB64 = base64Encode(props.entry.group.groupId);
+    pendingJoins();
+    const manages = managesJoins();
+    const front = pageInFront();
+    readJoinNotices(account, groupB64);
+    untrack(() => {
+      let keys: string[] = [];
+      if (manages && !membershipEnded()) {
+        try {
+          keys = splitPendingJoinKeys(props.entry.group.pendingExternalJoins(), base64Encode);
+        } catch {
+          return;
+        }
+      }
+      const shown = front && joinRequestBar({ manages, pendingCount: keys.length }) !== null;
+      updateJoinNotices(account, groupB64, (cur) => {
+        const pruned = pruneJoinNotices(cur, keys);
+        return shown ? onJoinRequestBarShown(pruned, keys) : pruned;
+      });
+    });
+  });
+
+  /** The `Join requests` section of the group's info, when it is drawn. */
+  let joinRequestsSection: HTMLDivElement | undefined;
+  // Section 8.1 — `?section=join-requests` (the requests bar's Review, or a
+  // join-request notification): once the group's info is on show, scroll to
+  // `Join requests`, then drop the parameter so Back or a reload does not
+  // scroll again.
+  createEffect(() => {
+    if (searchParams.section !== JOIN_REQUESTS_SECTION || infoScreen() !== "group") return;
+    pendingJoins();
+    requestAnimationFrame(() => {
+      joinRequestsSection?.scrollIntoView({ block: "start" });
+      setSearchParams({ section: undefined }, { replace: true, state: location.state });
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -8500,13 +8598,15 @@ function ChatView(props: {
       {/* Group call in progress that this device is not in. Announced by
           the initiator's GroupCallStart and kept current by every
           participant's Join heartbeat / Leave (see calls/group-call-record.ts). */}
+      {/* The two bars at the top of the conversation, held together so they
+          stay pinned as one: the group call bar first, the requests bar
+          (section 8.1 of group-and-channel-privacy.md) directly under it. */}
+      <Show when={callAffordance() === "join-group" || joinBar() !== null}>
+      <div style={{ position: "sticky", top: "0", "z-index": 10 }}>
       <Show when={callAffordance() === "join-group"}>
         <div
           role="status"
           style={{
-            position: "sticky",
-            top: "0",
-            "z-index": 10,
             margin: "0.5rem 0",
             padding: "0.75rem 1rem",
             background: "var(--accent)",
@@ -8572,6 +8672,51 @@ function ChatView(props: {
             </button>
           </div>
         </div>
+      </Show>
+      {/* Section 8.1 — requests to join waiting on this owner or admin. No
+          close button: answering them is how the bar goes. */}
+      <Show when={joinBar()}>
+        {(bar) => (
+          <div
+            role="status"
+            style={{
+              margin: "0.5rem 0",
+              padding: "0.75rem 1rem",
+              background: "var(--accent)",
+              color: "var(--accent-fg)",
+              "border-radius": "var(--radius-md)",
+              display: "flex",
+              "align-items": "center",
+              "justify-content": "space-between",
+              gap: "0.75rem",
+              "flex-wrap": "wrap",
+            }}
+          >
+            <strong>
+              {(() => {
+                const b = bar();
+                return b.key === "chat.join_requests.banner" ? t(b.key, { count: b.count }) : t(b.key);
+              })()}
+            </strong>
+            <button
+              type="button"
+              onClick={() => openJoinRequests()}
+              style={{
+                background: "var(--surface-elevated)",
+                color: "var(--surface-fg)",
+                border: "none",
+                padding: "0.5rem 0.9rem",
+                "border-radius": "var(--radius-sm)",
+                "font-weight": "600",
+                cursor: "pointer",
+              }}
+            >
+              {t("chat.join_requests.review")}
+            </button>
+          </div>
+        )}
+      </Show>
+      </div>
       </Show>
 
       {/* The ringing banner and the 1x1 in-call UI are the call host's
@@ -9623,7 +9768,9 @@ function ChatView(props: {
               when={canManageMembers() && (pendingJoins().length > 0 || unkeptJoinRequest())}
             >
               <div
+                ref={joinRequestsSection}
                 style={{
+                  "scroll-margin-top": "1rem",
                   margin: "0 0 0.6rem 0",
                   padding: "0.4rem 0.5rem",
                   border: "1px dashed var(--surface-border)",

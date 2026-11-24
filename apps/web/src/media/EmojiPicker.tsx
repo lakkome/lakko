@@ -14,7 +14,7 @@
  * from object URLs this component revokes when it closes.
  */
 
-import { createMemo, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
+import { createMemo, createSignal, createUniqueId, For, onCleanup, onMount, Show, type JSX } from "solid-js";
 
 import rawEmoji from "./emoji/emoji-data.json";
 import {
@@ -130,6 +130,32 @@ export interface EmojiPickerProps {
 export function EmojiPicker(props: EmojiPickerProps): JSX.Element {
   const [tab, setTab] = createSignal<"emoji" | "gif">("emoji");
   let root: HTMLDivElement | undefined;
+  // The tabs follow the WAI-ARIA tabs pattern: each tab is named by what it
+  // shows and points at the one panel; only the selected tab is in the Tab
+  // order, and Left / Right / Home / End move between them.
+  const base = createUniqueId();
+  const ids = {
+    emoji: `lakko-picker-${base}-tab-emoji`,
+    gif: `lakko-picker-${base}-tab-gif`,
+    panel: `lakko-picker-${base}-panel`,
+  };
+  const tabButtons: Partial<Record<"emoji" | "gif", HTMLButtonElement>> = {};
+  const selectTab = (next: "emoji" | "gif", focus: boolean): void => {
+    setTab(next);
+    if (focus) tabButtons[next]?.focus();
+  };
+  const onTabKey = (e: KeyboardEvent): void => {
+    const order: ("emoji" | "gif")[] = ["emoji", "gif"];
+    const at = order.indexOf(tab());
+    let next: "emoji" | "gif" | undefined;
+    if (e.key === "ArrowRight") next = order[(at + 1) % order.length];
+    else if (e.key === "ArrowLeft") next = order[(at - 1 + order.length) % order.length];
+    else if (e.key === "Home") next = order[0];
+    else if (e.key === "End") next = order[order.length - 1];
+    if (next === undefined) return;
+    e.preventDefault();
+    selectTab(next, true);
+  };
 
   const onKey = (e: KeyboardEvent): void => {
     if (e.key === "Escape") {
@@ -183,28 +209,56 @@ export function EmojiPicker(props: EmojiPickerProps): JSX.Element {
       }
     >
       <Show when={gifAvailable()}>
-        <div class="lakko-picker-tabs" role="tablist">
-          <button type="button" role="tab" aria-selected={tab() === "emoji"} onClick={() => setTab("emoji")}>
+        <div class="lakko-picker-tabs" role="tablist" onKeyDown={onTabKey}>
+          <button
+            ref={(el) => (tabButtons.emoji = el)}
+            type="button"
+            role="tab"
+            id={ids.emoji}
+            aria-controls={ids.panel}
+            aria-selected={tab() === "emoji"}
+            tabIndex={tab() === "emoji" ? 0 : -1}
+            onClick={() => selectTab("emoji", false)}
+          >
             {t("chat.emoji.tab")}
           </button>
-          <button type="button" role="tab" aria-selected={tab() === "gif"} onClick={() => setTab("gif")}>
+          <button
+            ref={(el) => (tabButtons.gif = el)}
+            type="button"
+            role="tab"
+            id={ids.gif}
+            aria-controls={ids.panel}
+            aria-selected={tab() === "gif"}
+            tabIndex={tab() === "gif" ? 0 : -1}
+            onClick={() => selectTab("gif", false)}
+          >
             {t("chat.media.gif")}
           </button>
         </div>
       </Show>
-      <Show when={tab() === "gif" && gifAvailable()} fallback={<EmojiTab {...props} />}>
-        <GifTab
-          sessionToken={props.sessionToken}
-          onPick={(item) => {
-            props.onGif?.(item);
-            props.onClose();
-          }}
-          onNotConfigured={() => {
-            setGifProviderMissing(true);
-            setTab("emoji");
-          }}
-        />
-      </Show>
+      {/* The one panel both tabs control; without the tab strip (reaction
+          mode, no GIF provider) a plain box. Laid out as the picker's own
+          column so the search and the body keep their places. */}
+      <div
+        id={ids.panel}
+        role={gifAvailable() ? "tabpanel" : undefined}
+        aria-labelledby={gifAvailable() ? (tab() === "gif" ? ids.gif : ids.emoji) : undefined}
+        style={{ display: "flex", "flex-direction": "column", flex: "1", "min-height": "0" }}
+      >
+        <Show when={tab() === "gif" && gifAvailable()} fallback={<EmojiTab {...props} />}>
+          <GifTab
+            sessionToken={props.sessionToken}
+            onPick={(item) => {
+              props.onGif?.(item);
+              props.onClose();
+            }}
+            onNotConfigured={() => {
+              setGifProviderMissing(true);
+              setTab("emoji");
+            }}
+          />
+        </Show>
+      </div>
     </div>
   );
 }

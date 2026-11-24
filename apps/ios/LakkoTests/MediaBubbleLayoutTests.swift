@@ -224,14 +224,12 @@ final class MediaBubbleLayoutTests: XCTestCase {
         )
     }
 
-    // MARK: - The GIF label never covers the picture
+    // MARK: - A GIF is the picture alone
 
-    /// Base walk 2026-11-04 — the `GIF` label drew over the picture's own
-    /// bottom-left corner, over the caption text many GIFs carry. It now sits
-    /// under the picture, so the bubble is the picture plus a line: taller
-    /// than the picture alone. (Drawn on top, the bubble was exactly the
-    /// picture's height.)
-    func testTheGifLabelSitsUnderThePicture() throws {
+    /// 2026-11-23 — a GIF shows no `GIF` label, on the picture or under it:
+    /// the moving picture says what it is. The bubble is exactly the
+    /// picture's height (the label under it made it a line taller).
+    func testAGifBubbleIsThePictureAlone() throws {
         let ref = AttachmentRef(
             blobId: Data(repeating: 0xB1, count: 32),
             key: Data(repeating: 0xB2, count: 32),
@@ -253,11 +251,9 @@ final class MediaBubbleLayoutTests: XCTestCase {
         let size = host.sizeThatFits(in: proposal)
         // A square GIF is drawn `maxWidth` square (the column is wider).
         let picture = GifBubble.maxWidth
-        let label = UIHostingController(rootView: GifLabel()).sizeThatFits(in: proposal).height
-        XCTAssertGreaterThan(label, 8, "the GIF label measured nothing")
         XCTAssertEqual(
-            size.height, picture + GifBubble.lineSpacing + label, accuracy: 0.5,
-            "the GIF bubble measured \(size): the label is not under the picture")
+            size.height, picture, accuracy: 0.5,
+            "the GIF bubble measured \(size): something is drawn beside the picture")
     }
 
     // MARK: - Harness

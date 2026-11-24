@@ -735,21 +735,6 @@ struct VideoNoteBubble: View {
 
 // MARK: - GIF
 
-/// The `GIF` label drawn under a GIF (base walk 2026-11-04: never on the
-/// picture).
-struct GifLabel: View {
-    var body: some View {
-        // `docs/ux/media-messages.md` — muted 11/600 text.
-        Text(Localization.text("chat.media.gif"))
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(Color.lakkoTextMuted)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Capsule().fill(Color.lakkoSurfaceSunken))
-            .accessibilityHidden(true)
-    }
-}
-
 struct GifBubble: View {
     static let maxWidth: CGFloat = 240
     /// Between the picture and the line under it (the column's spacing).
@@ -799,11 +784,9 @@ struct GifBubble: View {
                 .frame(width: size.width, height: size.height)
             }
             .buttonStyle(.plain)
+            // 2026-11-23 — no visible `GIF` label: the moving picture says
+            // what it is. The accessibility label still names it a GIF.
             .accessibilityLabel(Localization.text("chat.gif.open_full"))
-            // Base walk 2026-11-04 — the `GIF` label sits under the picture,
-            // never on it: a GIF often carries its own caption text in the
-            // corner a badge would cover.
-            GifLabel()
             if upload == .failed {
                 NotSentButton(onRetry: onRetry)
             } else if failed {

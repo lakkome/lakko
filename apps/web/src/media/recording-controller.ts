@@ -46,12 +46,16 @@ import {
 const TICK_MS = 100;
 const HINT_MS = 2500;
 
-export type RecorderNotice = RecHint | "no-camera" | "start-failed";
+export type RecorderNotice = RecHint | "no-camera" | "video-unsupported" | "start-failed";
 
 const NOTICE_KEYS: Readonly<Record<RecorderNotice, string>> = {
   "hold-to-record": "chat.record.hint_hold",
   cancelled: "chat.record.cancelled",
   "no-camera": "chat.record.no_camera",
+  // UX spec §3 states "Video format unsupported on this device": this browser's
+  // `MediaRecorder` cannot write H.264 + AAC in MP4. The desktop app reads the
+  // "on this device" wording through `desktop-copy.ts`.
+  "video-unsupported": "chat.record.unsupported_video",
   "start-failed": "chat.record.start_failed",
 };
 
@@ -172,7 +176,17 @@ export function createRecorder(opts: RecorderOptions): Recorder {
   };
   globalThis.addEventListener?.("blur", onWindowBlur);
 
-  const mode = (): CaptureKind => (cameraPresent() === false ? "voice" : recordMode());
+  /** §3 states — why camera mode is not offered, or `null` when it is. A
+   *  browser that cannot write the one video-note format never enters camera
+   *  mode: the record button stays on the mic rather than turning into a
+   *  disabled camera that a tap can no longer switch back from. */
+  const videoRefusal = (): RecorderNotice | null => {
+    if (cameraPresent() === false) return "no-camera";
+    if (!supported.video_note) return "video-unsupported";
+    return null;
+  };
+
+  const mode = (): CaptureKind => (videoRefusal() !== null ? "voice" : recordMode());
 
   const disabledReason = (): string | null => {
     if (opts.inCall()) return IN_CALL_COPY();
@@ -416,8 +430,9 @@ export function createRecorder(opts: RecorderOptions): Recorder {
   }
 
   function toggleMode(): void {
-    if (cameraPresent() === false) {
-      showNotice("no-camera");
+    const refusal = videoRefusal();
+    if (refusal !== null) {
+      showNotice(refusal);
       return;
     }
     setRecordMode(recordMode() === "voice" ? "video_note" : "voice");

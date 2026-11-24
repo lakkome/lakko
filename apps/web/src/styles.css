@@ -3286,25 +3286,6 @@ html[data-open-in-app] .lk-feed-import {
   height: 100%;
   object-fit: cover;
 }
-/* The "GIF" label: a small pill of its own BELOW the picture, at its leading
-   edge, never drawn over the image (base walk 2026-11-04: over the image it
-   covered the GIF's own caption). */
-.lakko-gif-label {
-  align-self: flex-start;
-  display: inline-flex;
-  align-items: center;
-  height: 18px;
-  padding: 0 6px;
-  border-radius: var(--radius-pill);
-  border: 1px solid var(--surface-border);
-  background: var(--surface-elevated);
-  color: var(--surface-muted);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1;
-  letter-spacing: 0.02em;
-  pointer-events: none;
-}
 .lakko-lightbox {
   position: fixed;
   inset: 0;

@@ -512,6 +512,13 @@ struct LakkoInlinePicker<Value: Hashable>: View {
 /// The segmented form of a picker: two to four short values side by side on
 /// a sunken track, the current one raised. Drawn by the app, never the
 /// system segmented control.
+///
+/// For VoiceOver each segment is a button named by its own value, with the
+/// selected trait on the current one; the track is a container. A caller
+/// that names the whole control (`.accessibilityLabel` on the picker) names
+/// the container only: without `.contain` SwiftUI hands that label to every
+/// segment, and the emoji picker's two tabs were both read as "Emoji and
+/// GIFs".
 struct LakkoSegmentedPicker<Value: Hashable>: View {
     @Binding var selection: Value
     let options: [LakkoPickerOption<Value>]
@@ -539,6 +546,7 @@ struct LakkoSegmentedPicker<Value: Hashable>: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(Text(option.label))
                 .accessibilityAddTraits(selected ? .isSelected : [])
             }
         }
@@ -546,5 +554,6 @@ struct LakkoSegmentedPicker<Value: Hashable>: View {
         .background(Color.lakkoSurfaceSunken)
         .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.control))
         .opacity(isEnabled ? 1 : 0.5)
+        .accessibilityElement(children: .contain)
     }
 }

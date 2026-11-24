@@ -73,6 +73,22 @@ internal fun decodeSentRequests(raw: String?): List<SentRequest> = try {
     emptyList()
 }
 
+/**
+ * The rows left once [idHex]'s requests sent at or before [upToMs] are
+ * forgotten: the group landed on this device at [upToMs] (the request was
+ * answered), or this account's membership in it ended then. A request sent
+ * after [upToMs] is a new one and stays. Pure.
+ *
+ * Before 2026-11-23 a row was dropped only when a screen happened to ask
+ * whether the group was held, so a joined group's row could outlive the
+ * membership: after `Leave group` the invite page opened on the old row,
+ * showed "Request sent." and posted nothing.
+ */
+internal fun sentRequestsAfter(rows: List<SentRequest>, idHex: String, upToMs: Long): List<SentRequest> {
+    val hex = idHex.lowercase()
+    return rows.filterNot { it.idHex == hex && it.sentAtMs <= upToMs }
+}
+
 /** The per-account store, newest first through [rows]. */
 public object RequestsSentStore {
     private const val PREFS = "lakko-requests-sent"
@@ -111,6 +127,13 @@ public object RequestsSentStore {
     public fun drop(context: Context, idHex: String) {
         if (mutableRows.value.none { it.idHex == idHex.lowercase() }) return
         save(context, mutableRows.value.filter { it.idHex != idHex.lowercase() })
+    }
+
+    /** [sentRequestsAfter] on the bound account's rows. */
+    public fun forgetUpTo(context: Context, idHex: String, upToMs: Long) {
+        val kept = sentRequestsAfter(mutableRows.value, idHex, upToMs)
+        if (kept.size == mutableRows.value.size) return
+        save(context, kept)
     }
 
     /** Forget device. */

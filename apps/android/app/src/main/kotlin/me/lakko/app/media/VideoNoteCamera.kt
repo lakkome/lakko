@@ -124,6 +124,57 @@ public enum class VideoStartFailure {
     FAILED,
 }
 
+/**
+ * UX spec §3 states — whether this device can record a video note at all,
+ * decided before any take: the lens a take would bind ([chooseVideoNoteLens])
+ * and whether that lens offers an H.264 + AAC profile
+ * ([chooseVideoNoteProfile]). The same two questions `VideoNoteRecorder.bind`
+ * asks, in the same order, so the answer given up front is the answer a hold
+ * would get.
+ */
+public enum class VideoNoteAvailability {
+    /** A camera with an interoperable profile: camera mode is offered. */
+    AVAILABLE,
+
+    /** No camera to bind: `No camera found`. */
+    NO_CAMERA,
+
+    /** A camera, but no H.264 + AAC profile on the lens a take would use:
+     *  `Video messages can't be recorded on this device`. */
+    NO_COMPATIBLE_FORMAT,
+}
+
+/** [VideoNoteAvailability] from each lens's camcorder profiles. */
+public fun <Q> videoNoteAvailability(
+    optionsByLens: Map<CameraLens, List<VideoNoteProfileOption<Q>>>,
+): VideoNoteAvailability {
+    val lens = chooseVideoNoteLens(optionsByLens.keys) ?: return VideoNoteAvailability.NO_CAMERA
+    return if (chooseVideoNoteProfile(optionsByLens[lens].orEmpty()) == null) {
+        VideoNoteAvailability.NO_COMPATIBLE_FORMAT
+    } else {
+        VideoNoteAvailability.AVAILABLE
+    }
+}
+
+/**
+ * UX spec §3 states — why camera mode is not offered, or `null` when it is.
+ *
+ * [cameraFeature] is the package manager's word; [availability] is what the
+ * CameraX probe found, `null` while it has not answered. An unanswered probe
+ * does not refuse: the switch is allowed and taken back, with the notice, the
+ * moment the probe says no (the probe runs when the chat opens, so in practice
+ * it has answered before the first tap).
+ */
+public fun videoModeRefusal(
+    cameraFeature: Boolean,
+    availability: VideoNoteAvailability?,
+): VideoStartFailure? = when {
+    !cameraFeature -> VideoStartFailure.NO_CAMERA
+    availability == VideoNoteAvailability.NO_CAMERA -> VideoStartFailure.NO_CAMERA
+    availability == VideoNoteAvailability.NO_COMPATIBLE_FORMAT -> VideoStartFailure.NO_COMPATIBLE_FORMAT
+    else -> null
+}
+
 /** What a finished (sent or previewed) video-note take becomes. */
 public enum class VideoNoteOutcome {
     /** A usable clip: send it, or show it in preview. */

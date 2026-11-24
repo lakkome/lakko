@@ -69,7 +69,9 @@ function fakeStream(): unknown {
 
 class FakeRecorder {
   static isTypeSupported(mime: string): boolean {
-    return mime.startsWith("audio/mp4");
+    // Both formats, so the mode switch has a camera mode to switch TO; a
+    // browser that cannot write a video note is `RecordButtonVideoUnsupported`.
+    return mime.startsWith("audio/mp4") || mime.startsWith("video/mp4");
   }
   state = "inactive";
   constructor(_stream: unknown, _opts: unknown) {

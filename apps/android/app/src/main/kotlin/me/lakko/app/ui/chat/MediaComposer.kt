@@ -110,7 +110,8 @@ import me.lakko.app.media.SentTakeOutcome
 import me.lakko.app.media.SilenceWatch
 import me.lakko.app.media.TAP_MAX_MS
 import me.lakko.app.media.sentTakeOutcome
-import me.lakko.app.media.CameraLens
+import me.lakko.app.media.VideoNoteAvailability
+import me.lakko.app.media.videoModeRefusal
 import me.lakko.app.media.VideoNoteOutcome
 import me.lakko.app.media.VideoNoteRecorder
 import me.lakko.app.media.VideoStartFailure
@@ -179,6 +180,14 @@ internal class RecordController(
     private val hub: ChatMediaHub,
     private val scope: CoroutineScope,
     private val onSend: (RecordedTake) -> Unit,
+    /**
+     * §3 states — can this device record a video note at all; `null` when
+     * unknown. A seam only so a JVM test can stand in for CameraX, which a
+     * Robolectric device cannot answer for.
+     */
+    private val probeVideo: suspend () -> VideoNoteAvailability? = {
+        VideoNoteRecorder.probeAvailability(context)
+    },
 ) {
     var state by mutableStateOf<RecState>(RecState.Idle)
         private set
@@ -232,11 +241,21 @@ internal class RecordController(
     /** The package manager's view; CameraX may still report fewer cameras. */
     private val cameraFeature: Boolean = VideoNoteRecorder.hasAnyCamera(context)
 
-    /** What CameraX reported, once asked: `null` while unknown. */
-    private var cameraLenses: Set<CameraLens>? = null
+    /** What the CameraX probe found, once it answered: `null` while unknown. */
+    private var videoAvailability: VideoNoteAvailability? = null
     private var cameraProbe: Job? = null
-    private val cameraPresent: Boolean
-        get() = cameraFeature && cameraLenses?.isNotEmpty() != false
+
+    /**
+     * A tap switched to camera mode before the probe had answered. If the
+     * answer then turns out to be no, the switch is taken back AND said; a
+     * remembered camera mode taken back at chat open is taken back quietly,
+     * because the person did nothing that asked for an answer.
+     */
+    private var switchedBeforeProbe = false
+
+    /** §3 states — why camera mode is not offered, or `null` when it is. */
+    private val videoRefusal: VideoStartFailure?
+        get() = videoModeRefusal(cameraFeature, videoAvailability)
     internal var requestPermissions: ((Array<String>) -> Unit)? = null
 
     /** §2 — the run of silence in the take being recorded now. */
@@ -266,27 +285,31 @@ internal class RecordController(
     private var videoStartFailure: VideoStartFailure? = null
 
     init {
-        if (mode == CaptureKind.VIDEO_NOTE && !cameraPresent) mode = CaptureKind.VOICE
-        if (mode == CaptureKind.VIDEO_NOTE) probeCameras()
+        if (mode == CaptureKind.VIDEO_NOTE && videoRefusal != null) mode = CaptureKind.VOICE
+        probeCameras()
     }
 
     /**
-     * §3 "No camera present" — ask CameraX which cameras it can bind, so a
-     * device where it lists none leaves camera mode before a hold rather than
-     * showing a recording UI with no camera behind it. Also warms the CameraX
-     * provider, so the first hold binds sooner.
+     * §3 states "No camera present" / "Video format unsupported on this
+     * device" — ask, when the chat opens, whether a take could bind a camera
+     * with an H.264 + AAC profile, so camera mode is never offered on a device
+     * that would refuse the take only after a hold (seen on the emulator: the
+     * tap switched to camera mode and the hold then did nothing visible).
+     * Also warms the CameraX provider, so the first hold binds sooner.
      */
     private fun probeCameras() {
-        if (cameraLenses != null || cameraProbe?.isActive == true || !cameraFeature) return
+        if (videoAvailability != null || cameraProbe?.isActive == true || !cameraFeature) return
         cameraProbe = scope.launch {
-            val provider = VideoNoteRecorder.obtainProvider(context) ?: return@launch
-            val lenses = VideoNoteRecorder.cameraInfos(provider).keys
-            cameraLenses = lenses
-            if (lenses.isEmpty() && mode == CaptureKind.VIDEO_NOTE && state is RecState.Idle) {
-                Log.w(TAG, "no camera reported; leaving camera mode")
+            val answer = probeVideo() ?: return@launch
+            videoAvailability = answer
+            val refusal = videoRefusal ?: return@launch
+            if (mode == CaptureKind.VIDEO_NOTE && state is RecState.Idle) {
+                Log.w(TAG, "video notes unavailable on this device ($refusal); leaving camera mode")
                 mode = CaptureKind.VOICE
                 hub.prefs.recordMode = mode
+                if (switchedBeforeProbe) showFailure(videoFailureCopy(refusal))
             }
+            switchedBeforeProbe = false
         }
     }
 
@@ -301,7 +324,7 @@ internal class RecordController(
      */
     fun press(pointer: PointerKind, xDp: Float, yDp: Float) {
         if (disabledReason != null) return
-        if (refuseVideoWithoutCamera()) return
+        if (refuseVideoMode()) return
         val kind = mode
         dispatch(RecEvent.Press(kind, pointer, xDp, yDp, now()))
         if (state !is RecState.Pressing) return
@@ -330,12 +353,17 @@ internal class RecordController(
         toggleMode()
     }
 
-    /** Camera mode on a device known to have no camera: say so, record nothing. */
-    private fun refuseVideoWithoutCamera(): Boolean {
-        if (mode != CaptureKind.VIDEO_NOTE || state !is RecState.Idle || cameraPresent) return false
+    /**
+     * Camera mode on a device known to be unable to record a video note (no
+     * camera, or no H.264 + AAC profile): say why, return to the mic, record
+     * nothing.
+     */
+    private fun refuseVideoMode(): Boolean {
+        if (mode != CaptureKind.VIDEO_NOTE || state !is RecState.Idle) return false
+        val refusal = videoRefusal ?: return false
         mode = CaptureKind.VOICE
         hub.prefs.recordMode = mode
-        showFailure(RecordCopy.NO_CAMERA)
+        showFailure(videoFailureCopy(refusal))
         return true
     }
 
@@ -356,7 +384,7 @@ internal class RecordController(
     /** TalkBack / switch access: a single activation starts a LOCKED take. */
     fun activate() {
         if (disabledReason != null) return
-        if (refuseVideoWithoutCamera()) return
+        if (refuseVideoMode()) return
         dispatch(RecEvent.Activate(mode, now(), permissionHint(mode)))
     }
 
@@ -478,11 +506,14 @@ internal class RecordController(
 
     private fun toggleMode() {
         if (mode == CaptureKind.VOICE) {
-            if (!cameraPresent) {
-                showFailure(RecordCopy.NO_CAMERA)
+            // §3 states — camera mode is not offered where a take could not be
+            // recorded: the button stays on the mic and the notice says why.
+            videoRefusal?.let { refusal ->
+                showFailure(videoFailureCopy(refusal))
                 return
             }
             mode = CaptureKind.VIDEO_NOTE
+            switchedBeforeProbe = videoAvailability == null
             probeCameras()
         } else {
             mode = CaptureKind.VOICE
@@ -579,10 +610,12 @@ internal class RecordController(
                     rec.bind(view)
                 }
                 if (!isCapturing(state) || video !== rec) return@launch
-                if (bound == VideoNoteRecorder.BindResult.BOUND) {
-                    cameraLenses = rec.availableLenses
-                } else if (bound == VideoNoteRecorder.BindResult.NO_CAMERA) {
-                    cameraLenses = emptySet()
+                when (bound) {
+                    VideoNoteRecorder.BindResult.BOUND -> videoAvailability = VideoNoteAvailability.AVAILABLE
+                    VideoNoteRecorder.BindResult.NO_CAMERA -> videoAvailability = VideoNoteAvailability.NO_CAMERA
+                    VideoNoteRecorder.BindResult.NO_COMPATIBLE_FORMAT ->
+                        videoAvailability = VideoNoteAvailability.NO_COMPATIBLE_FORMAT
+                    VideoNoteRecorder.BindResult.FAILED -> Unit
                 }
                 val failure = when (bound) {
                     VideoNoteRecorder.BindResult.NO_CAMERA -> VideoStartFailure.NO_CAMERA
@@ -609,6 +642,12 @@ internal class RecordController(
                     videoStartFailure = failure
                     showFailure(videoFailureCopy(failure))
                     dispatch(RecEvent.CaptureFailed)
+                    // A device that cannot record a video note at all leaves
+                    // camera mode, so the next tap is not another dead end.
+                    if (failure != VideoStartFailure.FAILED) {
+                        mode = CaptureKind.VOICE
+                        hub.prefs.recordMode = mode
+                    }
                 } else {
                     captureStartedAt = now()
                     videoLive = true
@@ -809,13 +848,18 @@ internal class RecordController(
 @Composable
 internal fun rememberRecordController(
     hub: ChatMediaHub,
+    probeVideo: (suspend () -> VideoNoteAvailability?)? = null,
     onSend: (RecordedTake) -> Unit,
 ): RecordController {
     val context = LocalContext.current
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val controller = remember(hub) {
-        RecordController(context, lifecycleOwner, hub, scope, onSend)
+        if (probeVideo == null) {
+            RecordController(context, lifecycleOwner, hub, scope, onSend)
+        } else {
+            RecordController(context, lifecycleOwner, hub, scope, onSend, probeVideo)
+        }
     }
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),

@@ -593,6 +593,14 @@ public class ChatRepository(
     /** The chat list's local unread counts; see [LocalUnreadCounter]. */
     private val localUnread = LocalUnreadCounter()
 
+    /** Section 8.1 of the group privacy spec — the groups whose conversation
+     *  is open in front of the person (resumed), from [setThreadOnScreen]. */
+    private val groupsOnScreen: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /** Section 8.1 — this device's join-request marks, cached per
+     *  `account:group` over [GroupSettingsStore]. */
+    private val joinRequestMarksCache = java.util.concurrent.ConcurrentHashMap<String, JoinRequestMarks>()
+
     /**
      * G-37 — PER-GROUP coroutine mutexes for serialising operations on ONE
      * group, replacing the single repository-wide mutex whose own doc comment
@@ -2762,9 +2770,20 @@ public class ChatRepository(
         return groupIdHex
     }
 
+    /**
+     * Read a just-joined group's journal to its end, one page after another
+     * with no wait. A Welcome brings this device in at the group's current
+     * epoch, and every row before it is one it cannot read; a group that has
+     * lived a while holds hundreds of them (about a thousand in the walk of
+     * 2026-11-23). Read three pages and then left to the next sweep, the rows
+     * of the new membership (the group's name, the members' profiles, the
+     * first messages) waited behind them for minutes.
+     */
     private suspend fun pollJoinedGroup(groupIdHex: String) {
         try {
-            repeat(JOINED_GROUP_POLLS) { pollGroup(groupIdHex, waitSecs = JOINED_GROUP_POLL_WAIT_SECS) }
+            if (!journalDrained(groupIdHex)) {
+                android.util.Log.i("ChatRepository", "joined group: journal not read to its end, the sweep goes on")
+            }
         } catch (cancel: kotlinx.coroutines.CancellationException) {
             throw cancel
         } catch (cause: Throwable) {
@@ -4087,6 +4106,159 @@ public class ChatRepository(
         }
     }
 
+    // -----------------------------------------------------------------
+    // docs/ux/group-and-channel-privacy.md section 8.1 — telling the owner
+    // and admins a request to join is waiting. The rules are in
+    // `JoinRequestNotices.kt`; what is here feeds them live group state and
+    // keeps this device's marks.
+    // -----------------------------------------------------------------
+
+    private val joinRequestMarksLock = Any()
+
+    private fun joinRequestMarksKey(accountIdB64: String, groupIdHex: String): String =
+        accountIdB64 + ":" + groupIdHex.lowercase()
+
+    private fun joinRequestMarksFor(accountIdB64: String, groupIdHex: String): JoinRequestMarks {
+        val k = joinRequestMarksKey(accountIdB64, groupIdHex)
+        joinRequestMarksCache[k]?.let { return it }
+        val loaded = try {
+            GroupSettingsStore.joinRequestMarks(applicationContext, accountIdB64, groupIdHex)
+        } catch (_: Throwable) {
+            JoinRequestMarks()
+        }
+        return joinRequestMarksCache.putIfAbsent(k, loaded) ?: loaded
+    }
+
+    /** Store [marks] when they differ from what is held. Under [joinRequestMarksLock]. */
+    private fun storeJoinRequestMarks(accountIdB64: String, groupIdHex: String, marks: JoinRequestMarks): Boolean {
+        val previous = joinRequestMarksCache.put(joinRequestMarksKey(accountIdB64, groupIdHex), marks)
+        if (previous == marks) return false
+        try {
+            GroupSettingsStore.saveJoinRequestMarks(applicationContext, accountIdB64, groupIdHex, marks)
+        } catch (_: Throwable) {
+            // The cache holds them for this run; a restart may announce once more.
+        }
+        return true
+    }
+
+    /** Whether this device is the owner or an admin of [groupIdHex] with its
+     *  membership holding; `null` when a read cannot tell. */
+    private fun joinRequestSignalsFor(groupIdHex: String): Boolean? {
+        val active = isGroupActive(groupIdHex) ?: return null
+        if (!active) return false
+        val role = ownRole(groupIdHex) ?: return null
+        return joinRequestSignalsApply(readsKnocks(role), membershipEnded = false)
+    }
+
+    /**
+     * The bar at the top of [groupIdHex]'s conversation, or `null`. Reading
+     * the waiting requests prunes this device's marks to them.
+     */
+    public fun joinRequestBarFor(groupIdHex: String): JoinRequestBannerText? {
+        refreshJoinRequestMarks(groupIdHex)
+        val applies = joinRequestSignalsFor(groupIdHex) == true
+        val count = if (applies) pendingExternalJoins(groupIdHex).size else 0
+        return joinRequestBanner(applies, count, knockQueueFull(groupIdHex))
+    }
+
+    /** The bar was drawn in the open conversation (or the requests were shown
+     *  in Group info): nothing of [groupIdHex] is unshown any more. */
+    public fun joinRequestsShown(groupIdHex: String) {
+        val acct = currentAccountIdB64.get() ?: return
+        val changed = synchronized(joinRequestMarksLock) {
+            val current = joinRequestMarksFor(acct, groupIdHex)
+            storeJoinRequestMarks(acct, groupIdHex, markJoinRequestsShown(current))
+        }
+        if (changed) publishThreadList()
+    }
+
+    /**
+     * Keep [groupIdHex]'s marks to the requests still waiting, and drop them
+     * all once this device is no longer the owner or an admin there. A read
+     * that cannot tell changes nothing, so a torn read never makes a request
+     * announce twice.
+     */
+    public fun refreshJoinRequestMarks(groupIdHex: String) {
+        val acct = currentAccountIdB64.get() ?: return
+        if (joinRequestMarksFor(acct, groupIdHex).isEmpty) return
+        val pending: Set<String> = when (joinRequestSignalsFor(groupIdHex)) {
+            null -> return
+            false -> emptySet()
+            true -> retainedExternalJoinKeys(groupIdHex)?.mapTo(HashSet(), ::outboxB64) ?: return
+        }
+        val changed = synchronized(joinRequestMarksLock) {
+            val current = joinRequestMarksFor(acct, groupIdHex)
+            storeJoinRequestMarks(acct, groupIdHex, pruneJoinRequestMarks(current, pending))
+        }
+        if (changed) publishThreadList()
+    }
+
+    /** Whether [groupIdHex]'s conversation is muted on this account. */
+    private fun joinRequestGroupMuted(accountIdB64: String, groupIdHex: String): Boolean = try {
+        val conversation = me.lakko.app.push.conversationHexForWake(
+            groupIdHex,
+            LineageMirror.load(applicationContext, accountIdB64),
+        ).lowercase()
+        me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.flags?.value?.get(conversation)?.muted
+            ?: me.lakko.app.devices.sync.ConversationMute.isMuted(applicationContext, accountIdB64, conversation)
+    } catch (_: Throwable) {
+        false
+    }
+
+    /** The name a request is shown by: the contact name, else the name the
+     *  request carries; `null` with none. */
+    private fun joinRequestPersonName(groupIdHex: String, joinerSignatureKey: ByteArray): String? {
+        val key = pendingExternalJoinAccountKey(groupIdHex, joinerSignatureKey) ?: joinerSignatureKey
+        return try {
+            me.lakko.app.profile.ProfileDirectory.get(applicationContext).resolve(key)
+                .takeIf { !it.isPlaceholder }?.primary
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * The knock read kept (or found again) [joinerKeys] in [groupIdHex]:
+     * announce each once. Open in front, the bar is the signal; otherwise the
+     * request counts unshown and, unless the group is muted, notifies.
+     */
+    private fun announceJoinRequests(groupIdHex: String, joinerKeys: List<ByteArray>) {
+        if (joinerKeys.isEmpty()) return
+        val acct = currentAccountIdB64.get() ?: return
+        if (joinRequestSignalsFor(groupIdHex) != true) return
+        val openAndVisible = groupIdHex.lowercase() in groupsOnScreen
+        val muted = if (openAndVisible) true else joinRequestGroupMuted(acct, groupIdHex)
+        val toNotify = ArrayList<ByteArray>()
+        synchronized(joinRequestMarksLock) {
+            var marks = joinRequestMarksFor(acct, groupIdHex)
+            for (key in joinerKeys) {
+                val arrival = onJoinRequestArrived(marks, outboxB64(key), openAndVisible, notificationAllowed = !muted)
+                marks = arrival.marks
+                if (arrival.notify) toNotify += key
+            }
+            storeJoinRequestMarks(acct, groupIdHex, marks)
+        }
+        if (toNotify.isEmpty()) return
+        val title = try {
+            me.lakko.app.ui.chat.conversationTitle(
+                applicationContext,
+                this,
+                me.lakko.app.profile.ProfileDirectory.get(applicationContext),
+                groupIdHex,
+            )
+        } catch (_: Throwable) {
+            ""
+        }
+        for (key in toNotify) {
+            JoinRequestNotificationPoster.show(
+                applicationContext,
+                groupIdHex = groupIdHex,
+                joinerKeyB64 = outboxB64(key),
+                notice = joinRequestNotice(joinRequestPersonName(groupIdHex, key), title),
+            )
+        }
+    }
+
     /**
      * ADR-0045 UX §7 — the same retained set, but with a TORN read reported as
      * `null` rather than folded into an empty list.
@@ -4095,6 +4267,19 @@ public class ChatRepository(
      * does not: "no request retained" is a reason to DROP an armed approve, and
      * a failed read must not be allowed to say that.
      */
+    /** Section 8 — drop the recorded "Asked / Invited ... ago" of every
+     *  request of [groupIdHex] that is no longer waiting, so a later request
+     *  from the same person is dated by its own arrival. */
+    public fun pruneKnockOrigins(groupIdHex: String) {
+        val acct = currentAccountIdB64.get() ?: return
+        val waiting = retainedExternalJoinKeys(groupIdHex)?.mapTo(HashSet()) { me.lakko.app.ds.hexOf(it) } ?: return
+        try {
+            GroupSettingsStore.pruneKnockOrigins(applicationContext, acct, groupIdHex, waiting)
+        } catch (_: Throwable) {
+            // Informative only; the next read prunes again.
+        }
+    }
+
     public fun retainedExternalJoinKeys(groupIdHex: String): List<ByteArray>? {
         val record = groups[groupIdHex] ?: return null
         return try {
@@ -7296,7 +7481,10 @@ public class ChatRepository(
         senderKey: MemberIdentity?,
         incoming: uniffi.lakko_ffi_uniffi.FfiGroupName,
     ) {
-        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val accountIdB64 = currentAccountIdB64.get() ?: run {
+            android.util.Log.i("ChatRepository", "ADR-0051 group name dropped: no session")
+            return
+        }
         // ADR-0062 section 7 — a one-to-one has no group name; applying one
         // would retitle the person. Dropped on receipt, read from the group's
         // own kind (the same answer on every member's device).
@@ -8164,6 +8352,9 @@ public class ChatRepository(
         val replyGrant: uniffi.lakko_ffi_uniffi.FfiReachGrant,
         /** The `/g/` link's issuer key when the request came by a link. */
         val linkIssuer: ByteArray? = null,
+        /** The core has just started keeping this request (not a re-ask of
+         *  one already waiting): an older recorded origin is replaced. */
+        val fresh: Boolean = false,
     )
 
     /**
@@ -8213,7 +8404,13 @@ public class ChatRepository(
         return when (kept.outcome) {
             uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.RETAINED,
             uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.ALREADY_PENDING,
-            -> SealedKnockStep.KEEP to OpenedKnock(kept.joinerSignatureKey, request.keyPackage, request.replyGrant, linkIssuer)
+            -> SealedKnockStep.KEEP to OpenedKnock(
+                kept.joinerSignatureKey,
+                request.keyPackage,
+                request.replyGrant,
+                linkIssuer,
+                fresh = kept.outcome == uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.RETAINED,
+            )
             uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.QUEUE_FULL -> SealedKnockStep.STOP to null
             uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.ALREADY_MEMBER,
             uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.NOT_ADMISSIBLE,
@@ -8451,6 +8648,18 @@ public class ChatRepository(
         val held = groups.containsKey(groupIdHex.lowercase())
         if (held) RequestsSentStore.drop(applicationContext, groupIdHex)
         return held
+    }
+
+    /** Section 6.2 — forget this account's requests to [groupIdHex] sent at
+     *  or before [upToMs] ([sentRequestsAfter]). Best effort. */
+    private fun forgetSentRequests(groupIdHex: String, upToMs: Long) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        try {
+            RequestsSentStore.open(applicationContext, accountIdB64)
+            RequestsSentStore.forgetUpTo(applicationContext, groupIdHex, upToMs)
+        } catch (_: Throwable) {
+            // A row left behind costs a wait line, never a message.
+        }
     }
 
     /** Section 6.2 — the requests this device sent, opened for the bound
@@ -11813,6 +12022,15 @@ public class ChatRepository(
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "ADR-0053 knock poll failed", cause)
         }
+        // Section 8.1 — the marks follow the requests still waiting (approved,
+        // rejected, or joined through another admin) and the role.
+        try {
+            refreshJoinRequestMarks(groupIdHex)
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "join request marks not refreshed: ${cause.javaClass.simpleName}")
+        }
         // ADR-0050 section 2.4 — the scheduled re-admission check, at most once
         // per [DeviceReadmission.INTERVAL_MS] per chat. Best-effort: a failure
         // is not a poll failure.
@@ -11911,6 +12129,9 @@ public class ChatRepository(
                                     askedAtMs = me.lakko.app.ui.chat.parseMessageTimeMs(row.createdAt),
                                     issuerKeyB64 = opened.linkIssuer?.let { java.util.Base64.getEncoder().encodeToString(it) },
                                 ),
+                                // Newly kept: an older record for this joiner
+                                // is from a request that stopped waiting.
+                                fresh = opened.fresh,
                             )
                         } catch (_: Throwable) {
                             // The line is informative; a failed write shows none.
@@ -11946,6 +12167,14 @@ public class ChatRepository(
             }
         }
         savedThrough?.takeIf { grantsKept }?.let { saveKnockCursorBestEffort(groupIdHex, it) }
+        // Section 8.1 — announce what this pass read, once per request.
+        try {
+            announceJoinRequests(groupIdHex, keptKnocks.map { it.joinerSignatureKey })
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "join request notice failed: ${cause.javaClass.simpleName}")
+        }
         publishThreadList()
     }
 
@@ -12791,6 +13020,8 @@ public class ChatRepository(
         committerEnvelopeNothingToSend.forgetAll()
         lastBeaconAtMs.clear()
         localUnread.clear()
+        groupsOnScreen.clear()
+        joinRequestMarksCache.clear()
         // ADR-0091 phase 2 — in-memory state of the session that left.
         me.lakko.app.ds.DsClient.groupRowAcceptedListener = null
         conversationBehind.unbind()
@@ -15481,6 +15712,14 @@ public class ChatRepository(
         }
 
         override suspend fun stop(row: OwedEnd) {
+            // UX 6.2 — a request sent before this end is history: left behind,
+            // it made the invite page show "Request sent." for a request that
+            // was never posted (seen 2026-11-23). A request sent after the end
+            // was recorded is a new one and stays.
+            forgetSentRequests(
+                row.idHex,
+                upToMs = if (row.recordedAtMs > 0L) row.recordedAtMs else System.currentTimeMillis(),
+            )
             for (listener in membershipEndListeners) {
                 try {
                     listener(row.idHex)
@@ -15750,6 +15989,17 @@ public class ChatRepository(
             membershipEnds.remove(accountIdB64, hex)
             endingGroups -= hex
             publishEndState()
+        }
+        // UX 9.2 — "You are no longer in {name}." is false once the person is
+        // back: the notice goes by itself, and a conversation that showed it
+        // as its dialog shows live again. The thread list is published FIRST,
+        // so the screen that sees the notice go also sees the conversation
+        // held ([me.lakko.app.chat.endDialogWhenNoticeGoes]).
+        val noticeUp = synchronized(liveEndNotices) { liveEndNotices.containsKey(hex) }
+        if (noticeUp) {
+            publishThreadList()
+            synchronized(liveEndNotices) { liveEndNotices.remove(hex) }
+            publishLiveEndNotices()
         }
         // A first join finds no register and writes none. Launched: the join
         // of a person back into a group does not wait for the DeviceGroup.
@@ -18428,6 +18678,9 @@ public class ChatRepository(
         val cameBack = groupRefOf(groupIdHex)?.let {
             me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.isConversationEnded(it)
         } == true
+        // UX 6.2 — the request that led here is answered: its `Requests sent`
+        // row goes now, not when a screen next asks.
+        forgetSentRequests(groupIdHex, upToMs = System.currentTimeMillis())
         val replaced = synchronized(groups) {
             val previous = groups.put(groupIdHex, record)
             val slot = waitingLogSlots.take(groupIdHex)
@@ -18500,6 +18753,12 @@ public class ChatRepository(
                 },
                 localUnread = unread.count,
                 unreadViewedThisSession = unread.viewedThisSession,
+                // Section 8.1 — a request this device has not shown on screen.
+                joinRequestsUnshown = if (thread.membershipEnded || leaveAccount == null) {
+                    0
+                } else {
+                    joinRequestMarksFor(leaveAccount, thread.groupIdHex).unshown.size
+                },
             )
         }
         val conversations = try {
@@ -18527,6 +18786,7 @@ public class ChatRepository(
         // segments are on screen with the group it is open on.
         for (hex in olderSegmentsOf(groupIdHex)) localUnread.setOnScreen(hex, onScreen)
         localUnread.setOnScreen(groupIdHex, onScreen)
+        if (onScreen) groupsOnScreen.add(groupIdHex.lowercase()) else groupsOnScreen.remove(groupIdHex.lowercase())
         publishThreadList()
     }
 
@@ -18702,6 +18962,9 @@ public data class ChatThread(
     /** The chat was on screen at some point in this process, so [localUnread]
      *  is an exact count rather than a lower bound. */
     val unreadViewedThisSession: Boolean = false,
+    /** Section 8.1 of the group privacy spec — requests to join this device
+     *  has not yet shown on screen; each adds one to the row's unread count. */
+    val joinRequestsUnshown: Int = 0,
     /** ADR-0063 section 5 — incoming ids the feed showed above the watermark;
      *  the unread count skips them. */
     val feedSeen: Set<Long> = emptySet(),
@@ -19474,7 +19737,11 @@ private class GroupRecord(
                     // no-op; the sink runs the role gate + the stamp order and
                     // writes the store only on accept.
                     val name = event.groupName
-                    if (name != null) groupNameSink?.invoke(event.senderKey, name)
+                    when {
+                        name == null -> android.util.Log.i("ChatRepository", "ADR-0051 group name dropped: malformed")
+                        groupNameSink == null -> android.util.Log.i("ChatRepository", "ADR-0051 group name dropped: no receiver on this path")
+                        else -> groupNameSink.invoke(event.senderKey, name)
+                    }
                 }
                 is IncomingChatEvent.GroupClosed -> {
                     // ADR-0073 R.6 — a successor claim. Never a timeline row and
@@ -20288,8 +20555,6 @@ internal fun nextLastOpId(current: ChatMessage, opId: Long?): Long =
 /** How many long polls a newly joined group gets of its own, and how long each
  *  waits: its first rows are this device's own profile, then the other
  *  person's. Together about one sweep. Chosen, not measured. */
-private const val JOINED_GROUP_POLLS: Int = 3
-private const val JOINED_GROUP_POLL_WAIT_SECS: Int = 10
 
 /** ADR-0087 section 3 — renew a handle with fewer than 90 days left. */
 private const val HANDLE_RENEW_BEFORE_MS: Long = 90L * 24 * 60 * 60 * 1000

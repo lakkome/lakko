@@ -340,3 +340,49 @@ final class UnappliedRequestsTests: XCTestCase {
             true)
     }
 }
+
+/// Seen live 2026-11-23: a member left a group and opened its invite link
+/// again; the page showed "Request sent. An admin will see it..." and nothing
+/// reached the admin, because the Requests sent entry of the request that had
+/// led to the group outlived the membership, and the page took it for a
+/// request waiting. The entry now goes when the group lands and when the
+/// membership ends (``RequestsSentStore/entries(_:forgetting:upToMs:)``).
+final class RequestsSentForgetTests: XCTestCase {
+
+    private let group = String(repeating: "ab", count: 32)
+    private let other = String(repeating: "cd", count: 32)
+
+    private func entry(_ id: String, at: Int64) -> RequestsSentStore.Entry {
+        RequestsSentStore.Entry(
+            groupIdHex: id, name: nil, handle: nil, sentAtMs: at, capabilityB64: "", blobIdB64: "")
+    }
+
+    func testTheOldEntryMadeThePageWaitWithoutARequest() {
+        let state = JoinGroupLandingViewModel.stateOnOpen(
+            groupIdHex: group, requestSentAtMs: 1_000, groupHeld: false, nowMs: 2_000)
+        XCTAssertEqual(state, .waiting)
+    }
+
+    func testAfterTheJoinAndTheLeaveThePageOffersRequestToJoin() {
+        var entries = [entry(group, at: 1_000), entry(other, at: 1_500)]
+        // The group lands at 2 000, then the person leaves at 3 000.
+        entries = RequestsSentStore.entries(entries, forgetting: group, upToMs: 2_000)
+        entries = RequestsSentStore.entries(entries, forgetting: group, upToMs: 3_000)
+        let sent = entries.first { $0.groupIdHex == group }?.sentAtMs
+        XCTAssertEqual(
+            JoinGroupLandingViewModel.stateOnOpen(
+                groupIdHex: group, requestSentAtMs: sent, groupHeld: false, nowMs: 4_000),
+            .ready)
+        XCTAssertEqual(entries, [entry(other, at: 1_500)])
+    }
+
+    func testARequestSentAfterTheCutoffStays() {
+        let entries = [entry(group, at: 5_000)]
+        XCTAssertEqual(RequestsSentStore.entries(entries, forgetting: group, upToMs: 4_000), entries)
+    }
+
+    func testTheIdIsMatchedWithoutCase() {
+        XCTAssertTrue(
+            RequestsSentStore.entries([entry(group, at: 1)], forgetting: group.uppercased(), upToMs: 1).isEmpty)
+    }
+}

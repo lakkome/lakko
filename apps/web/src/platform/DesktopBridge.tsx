@@ -111,7 +111,9 @@ export function DesktopBridge(): JSX.Element {
   createEffect(() => {
     const rows: NotifyRow[] = orderedRows().map((r) => ({
       key: `${r.kind}:${r.id}`,
-      unread: r.unread,
+      // Requests to join raise their own notification (section 8.1 of
+      // group-and-channel-privacy.md), never a "new message" one.
+      unread: r.unread - (r.requestsUnshown ?? 0),
       muted: r.muted,
       title: r.title,
       preview: r.preview,

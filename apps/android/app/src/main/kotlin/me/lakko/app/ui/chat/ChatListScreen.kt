@@ -1244,13 +1244,16 @@ internal fun unreadCount(thread: ChatThread, cursor: ReadCursorState?): Int {
                 (m.isHistory || (m.messageId !in thread.feedSeen && (feedThrough == null || m.messageId > feedThrough)))
         }
     }
-    return me.lakko.app.chat.combinedUnread(
+    val messages = me.lakko.app.chat.combinedUnread(
         cursorCount = cursorCount,
         local = me.lakko.app.chat.LocalUnread(
             count = thread.localUnread,
             viewedThisSession = thread.unreadViewedThisSession,
         ),
     )
+    // Group privacy spec section 8.1 — each request to join this device has
+    // not yet shown adds one, so the row is unread while any waits unshown.
+    return me.lakko.app.chat.joinRequestRowUnread(messages, thread.joinRequestsUnshown)
 }
 
 private fun hexToBytes(hex: String): ByteArray? {

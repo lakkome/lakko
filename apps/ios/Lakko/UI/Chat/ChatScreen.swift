@@ -410,6 +410,15 @@ public struct ChatScreen: View {
                     onJoin: { video in viewModel.joinOngoingGroupCall(video: video) }
                 )
             }
+            // `docs/ux/group-and-channel-privacy.md` section 8.1 — requests to
+            // join waiting for the owner or an admin; directly under the call
+            // bar when both are up. No close: answering them dismisses it.
+            if let banner = viewModel.joinRequestBanner {
+                JoinRequestsBar(banner: banner) {
+                    viewModel.reviewJoinRequests()
+                    onOpenGroupInfo()
+                }
+            }
             messagesList
             Divider()
             // Section 8 — the composer is REPLACED by the action bar while
@@ -687,13 +696,34 @@ public struct ChatScreen: View {
             // as unread. Opened and closed on the same model instance, captured
             // here, so the pair always balances even if the screen's model were
             // ever swapped while the task lives on.
+            //
+            // While the membership has ended the loop does not poll and the
+            // chat stops counting as open, so the app-wide receive covers the
+            // group; it waits for the membership to come back (a person added
+            // again while this screen is up) and polls again. It used to end
+            // for good, and the screen read the new membership only through
+            // the app-wide sweep (seen on Android 2026-11-23, where that left
+            // the group unpolled: same loop, `ScreenPollLoop.kt`).
             let openedModel = viewModel
+            var counted = true
             openedModel.chatScreenOpened()
-            while !Task.isCancelled, viewModel.pollLoopShouldContinue {
+            while !Task.isCancelled {
+                if !viewModel.pollLoopShouldContinue {
+                    if counted {
+                        openedModel.chatScreenClosed()
+                        counted = false
+                    }
+                    await viewModel.waitUntilMembershipResumes()
+                    continue
+                }
+                if !counted {
+                    openedModel.chatScreenOpened()
+                    counted = true
+                }
                 await viewModel.pollOnceLongPoll()
                 await Task.yield()
             }
-            openedModel.chatScreenClosed()
+            if counted { openedModel.chatScreenClosed() }
         }
         // ADR-0092 / `docs/ux/attachments.md` section 2 — the one menu the
         // paperclip opens: rows from the core, an in-app bottom sheet. The
@@ -1386,6 +1416,35 @@ public struct ChatScreen: View {
             default:
                 return Localization.text("chat.call.group_people", counts: ["count": UInt64(max(0, count))])
             }
+        }
+    }
+
+    /// `docs/ux/group-and-channel-privacy.md` section 8.1 — `3 requests to
+    /// join · Review`, the same bar shape as ``GroupCallBanner``.
+    private struct JoinRequestsBar: View {
+        @ObservedObject private var l10n = Localization.shared
+        let banner: JoinRequestSignals.Banner
+        let onReview: () -> Void
+
+        var body: some View {
+            HStack(spacing: 10) {
+                LkIconView(.personFill, size: 20)
+                    .foregroundStyle(Color.lakkoAccent)
+                    .accessibilityHidden(true)
+                Text(banner.text)
+                    .font(.headline)
+                    .foregroundStyle(Color.lakkoText)
+                Spacer()
+                Button(l10n.t("chat.join_requests.review"), action: onReview)
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.lakkoAccent)
+                    .foregroundStyle(Color.lakkoAccentForeground)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.lakkoAccentSoft)
+            .accessibilityElement(children: .contain)
         }
     }
 
@@ -3944,7 +4003,7 @@ struct GroupInfoScreen: View {
         // Once per render, never per row: this crosses the FFI, and the
         // roster below is a `ForEach` that asks about `.roles` on every member.
         let sections = SuspendedInfo.withoutSending(groupSections, suspended: accountSuspended)
-        return List {
+        return ScrollViewReader { joinRequestsProxy in List {
                 // ADR-0087 section 18 / UX 4.5.2 — the header photo.
                 // One row, no separator: as two rows the List drew its row
                 // separator between the photo and the line, a thin grey rule
@@ -4226,6 +4285,7 @@ struct GroupInfoScreen: View {
                     ) {
                         [.danger(l10n.t("chat.members.join.reject_all")) { viewModel.onRejectAllJoins() }, .cancel()]
                     }
+                    .id(Self.joinRequestsAnchor)
                 }
                 // ADR-0045 S4a (UX §5.1) — the pending notice. One line, and it
                 // states INACTION rather than a deadline: decision 2 gives a
@@ -4675,7 +4735,12 @@ struct GroupInfoScreen: View {
             // the chat was opened again (seen on an iPhone 2026-11-10: "2
             // membership changes are waiting to apply" on the owner's device).
             .task {
-                while !Task.isCancelled, viewModel.pollLoopShouldContinue {
+                // Waits while the membership has ended, as the chat's loop does.
+                while !Task.isCancelled {
+                    if !viewModel.pollLoopShouldContinue {
+                        await viewModel.waitUntilMembershipResumes()
+                        continue
+                    }
                     await viewModel.pollOnceLongPoll()
                     await Task.yield()
                 }
@@ -4689,6 +4754,30 @@ struct GroupInfoScreen: View {
             .onChange(of: viewModel.conversationGone) { _, gone in
                 if gone { onDeleted() }
             }
+            // `docs/ux/group-and-channel-privacy.md` section 8.1 — `Review`
+            // on the requests bar, or a request notification, opens this
+            // screen at `Join requests`.
+            .onChange(of: viewModel.scrollToJoinRequests, initial: true) { _, _ in
+                scrollToJoinRequestsIfAsked(joinRequestsProxy)
+            }
+            .onChange(of: viewModel.pendingJoins.count) { _, _ in
+                scrollToJoinRequestsIfAsked(joinRequestsProxy)
+            }
+        }
+    }
+
+    /// The `Join requests` section's scroll id.
+    static let joinRequestsAnchor = "group-info.join-requests"
+
+    /// Section 8.1 — scroll to `Join requests` once it is on screen, then
+    /// drop the request.
+    private func scrollToJoinRequestsIfAsked(_ proxy: ScrollViewProxy) {
+        guard viewModel.scrollToJoinRequests else { return }
+        guard viewModel.canManageMembers, !viewModel.pendingJoins.isEmpty else { return }
+        viewModel.scrollToJoinRequests = false
+        DispatchQueue.main.async {
+            withAnimation { proxy.scrollTo(Self.joinRequestsAnchor, anchor: .top) }
+        }
     }
 
     /// A member's avatar, name and pending annotation. A member who is a

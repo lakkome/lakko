@@ -204,23 +204,43 @@ public final class GroupSettingsStore {
         return out
     }
 
-    /// Keeps the first sighting of a request; a request seen again keeps its
-    /// time.
+    /// Keeps the first sighting of a waiting request; a request seen again
+    /// while still waiting keeps its time. `replace` says the core has just
+    /// started keeping this request, so a record still held for the joiner is
+    /// from an earlier request that stopped waiting and is overwritten: a
+    /// later request is dated by its own arrival.
     public func keepRequestMeta(
         accountIdB64: String, groupIdHex: String, joinerKeyB64: String, askedAtMs: Int64, inviterKey: Data?,
-        knockRowId: Int64? = nil
+        knockRowId: Int64? = nil, replace: Bool = false
     ) {
         guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
         defer { gate.leave() }
         var all = map(accountIdB64, "request_meta")
         var row = all[groupIdHex] as? [String: Any] ?? [:]
-        guard row[joinerKeyB64] == nil else { return }
+        guard replace || row[joinerKeyB64] == nil else { return }
         var entry: [String: Any] = ["at": NSNumber(value: askedAtMs)]
         if let inviterKey { entry["inviter"] = inviterKey.base64EncodedString() }
         if let knockRowId { entry["row"] = NSNumber(value: knockRowId) }
         row[joinerKeyB64] = entry
         all[groupIdHex] = row
         defaults.set(all, forKey: Self.key(accountIdB64, "request_meta"))
+    }
+
+    /// Drops the recorded time and carried name of every request of
+    /// `groupIdHex` that is no longer waiting (approved, rejected, joined,
+    /// gone): `waiting` is the group's pending set as just read, base64
+    /// joiner keys. A later request from the same person gets its own time.
+    public func pruneRequestRecords(accountIdB64: String, groupIdHex: String, waiting: Set<String>) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        for field in ["request_meta", "request_names"] {
+            var all = map(accountIdB64, field)
+            guard let row = all[groupIdHex] as? [String: Any] else { continue }
+            let kept = row.filter { waiting.contains($0.key) }
+            guard kept.count != row.count else { continue }
+            all[groupIdHex] = kept.isEmpty ? nil : kept
+            defaults.set(all, forKey: Self.key(accountIdB64, field))
+        }
     }
 
     // MARK: Rejected requests (UX section 8)
