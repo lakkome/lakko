@@ -1847,8 +1847,8 @@ const ParticipantTile: Component<TileProps> = (props) => {
  * element, so its zoom starts whole. Muted: the share's sound plays through
  * the call host's sink.
  *
- * This device's own share shows no picture (the endless mirror): the glyph
- * and `You're sharing your screen`.
+ * This device's own share is {@link OwnShareTile}: its live picture, or for
+ * the mirror the glyph and one line (section 3).
  */
 /** The own share's line for a mirror, by what is shared (section 3). */
 function ownShareMirrorText(surface: MirrorSurface): string {
@@ -1879,18 +1879,6 @@ const OwnShareTile: Component<{ large: boolean; class?: string | undefined }> = 
     const o = own();
     return o !== null && o.view.kind === "mirror" ? ownShareMirrorText(o.view.surface) : t("call.screen_share.own_tile");
   };
-  let videoEl: HTMLVideoElement | undefined;
-  createEffect(
-    on(pictureStream, (stream) => {
-      if (videoEl === undefined) return;
-      videoEl.srcObject = stream ?? null;
-      if (stream !== undefined) {
-        void videoEl.play().catch(() => {
-          // A muted element may autoplay; a refusal leaves a black tile.
-        });
-      }
-    }),
-  );
   return (
     <Show
       when={pictureStream() !== undefined}
@@ -1906,23 +1894,58 @@ const OwnShareTile: Component<{ large: boolean; class?: string | undefined }> = 
         role="img"
         aria-label={t("call.screen_share.own_strip")}
       >
-        <video
-          ref={(el): void => {
-            videoEl = el;
-            const stream = pictureStream();
-            if (stream !== undefined) {
-              el.srcObject = stream;
-              void el.play().catch(() => undefined);
-            }
-          }}
-          class="lk-call-share-video"
-          muted
-          autoplay
-          playsinline
-          aria-hidden="true"
-        />
+        <OwnShareVideo stream={pictureStream()} />
       </div>
     </Show>
+  );
+};
+
+/**
+ * The picture of this device's own share. Bound the way every other call
+ * picture is: once the element is in the document, to a stream of its own
+ * made from the capture's video track, with `play()` called after the bind
+ * and again while it is paused (`calls/local-preview.ts`), and drawn through
+ * a canvas behind it where the engine plays video without putting it on
+ * screen (`media/video-overlay.ts`: the desktop app on macOS, Safari on a
+ * Mac). Before this the element was given the capture in its `ref`, before
+ * it was in the document, with no canvas: in the desktop app on macOS the
+ * tile stayed black for a whole share whose picture the others saw
+ * (2026-11-24).
+ */
+const OwnShareVideo: Component<{ stream: MediaStream | undefined }> = (props) => {
+  let el: HTMLVideoElement | undefined;
+  const binder = new LocalPreviewBinder<MediaStreamTrack, MediaProvider>(
+    (track) => new MediaStream([track]),
+  );
+  const look = (): void => {
+    if (el === undefined) return;
+    if (!el.muted) el.muted = true;
+    binder.sync(el, props.stream);
+  };
+  onMount(() => {
+    createEffect(() => {
+      void props.stream;
+      look();
+    });
+    const timer = setInterval(look, PREVIEW_CHECK_MS);
+    onCleanup(() => {
+      clearInterval(timer);
+      if (el !== undefined) el.srcObject = null;
+      binder.reset();
+    });
+  });
+  return (
+    <video
+      ref={(v): void => {
+        el = v;
+        paintVideoBehind(v);
+      }}
+      class="lk-call-share-video"
+      muted
+      autoplay
+      playsinline
+      aria-hidden="true"
+    />
   );
 };
 

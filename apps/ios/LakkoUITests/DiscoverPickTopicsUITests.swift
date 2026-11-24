@@ -9,7 +9,7 @@ import XCTest
 /// Seen live: the card's own name, "Pick topics", reached every element in it,
 /// so the heading, the explanation, the language picker, Not now and Save were
 /// all read as "Pick topics". Each element must keep its own name, and the
-/// heading must be marked a heading.
+/// card's name must stay on the card.
 final class DiscoverPickTopicsUITests: XCTestCase {
 
     private var app: XCUIApplication!
@@ -50,10 +50,17 @@ final class DiscoverPickTopicsUITests: XCTestCase {
             "a text carries the card's name:\n\(app.debugDescription)")
     }
 
-    func testTheHeadingIsAHeading() {
+    /// The name stays on the card itself, which holds the elements above:
+    /// VoiceOver announces "Pick topics" on entering the card, not on each
+    /// control. (The heading trait has no public XCUITest reader; it is set
+    /// in `PickTopicsCard` beside the card's `.contain`.)
+    func testTheCardKeepsItsNameAndHoldsItsControls() {
         app.launch()
-        let heading = app.staticTexts["Pick a few topics."]
-        XCTAssertTrue(heading.waitForExistence(timeout: 10), "no heading:\n\(app.debugDescription)")
-        print("TREE-DUMP-BEGIN\n\(app.debugDescription)\nTREE-DUMP-END")
+        let card = app.otherElements["Pick topics"]
+        XCTAssertTrue(card.waitForExistence(timeout: 10), "the card is not named:\n\(app.debugDescription)")
+        XCTAssertTrue(card.buttons["Save"].exists, "Save is not inside the card:\n\(app.debugDescription)")
+        XCTAssertTrue(card.buttons["Not now"].exists, "Not now is not inside the card:\n\(app.debugDescription)")
+        XCTAssertTrue(
+            card.staticTexts["Pick a few topics."].exists, "the heading is not inside the card:\n\(app.debugDescription)")
     }
 }
