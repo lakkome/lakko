@@ -4,6 +4,7 @@
 import Foundation
 import LakkoCore
 import SwiftUI
+import UIKit
 
 /// Links in a message's text (`docs/ux/message-links.md`). Which runs are links
 /// is the core's rule (`splitMessageLinks`); what a tap does is decided here,
@@ -108,6 +109,14 @@ struct MessageText: View {
             .environment(\.openURL, OpenURLAction { url in
                 switch MessageLinks.open(url, ownOrigin: ApiEndpoints.webOrigin) {
                 case .inApp:
+                    // The composer gives up the keyboard before the link's
+                    // screen is pushed. Left as first responder, UIKit put it
+                    // back on the way back and the keyboard rose over the
+                    // composer without the chat moving up for it (seen
+                    // 2026-11-25 after Back from an `/i/` link). Clearing the
+                    // focus binding on disappear came too late for that.
+                    UIApplication.shared.sendAction(
+                        #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                     onOwnLink(url)
                     return .handled
                 case .browser:

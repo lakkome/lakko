@@ -61,6 +61,29 @@ export function opensAppByItself(userAgent: string, mac: boolean): boolean {
   return mac && /\b(?:Chrome|Firefox)\//.test(userAgent);
 }
 
+/**
+ * Whether the screen at `pathname` + `hash` is the link this tab was opened
+ * with (`entryPath`, query ignored). `docs/ux/desktop.md` section 7 offers the
+ * desktop app for a link that came from outside; a Lakko link clicked inside the
+ * app opens its screen in place (`docs/ux/message-links.md`) with no offer and
+ * no attempt to open the app, which in Chrome and Firefox would put the
+ * browser's own "Open Lakko?" question in front of the person.
+ */
+export function isEntryLink(pathname: string, hash: string, entryPath: string): boolean {
+  const q = entryPath.indexOf("?");
+  const h = entryPath.indexOf("#");
+  const entry = q < 0 ? entryPath : entryPath.slice(0, q) + (h > q ? entryPath.slice(h) : "");
+  return `${pathname}${hash}` === entry;
+}
+
+/** Where a link page goes when closed: back to the screen a link clicked in
+ *  the app came from, or Chats for the link the tab was opened with. */
+export type LinkPageExit = "back" | "home";
+
+export function linkPageExit(pathname: string, hash: string, entryPath: string): LinkPageExit {
+  return isEntryLink(pathname, hash, entryPath) ? "home" : "back";
+}
+
 /** Whether this browser could have the desktop app beside it. */
 export function mayHaveDesktopApp(userAgent: string, touchPoints: number): boolean {
   if (/Android|iPhone|iPad|iPod|Mobile/.test(userAgent)) return false;

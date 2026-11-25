@@ -1809,6 +1809,9 @@ function AttachmentChips(props: {
                 />
               </Show>
               <span class="lk-chip" classList={{ outgoing: props.tone === "outgoing" }}>
+                {/* docs/ux/attachments.md section 4 — a file chip is an icon,
+                    the name and the size, as on iOS and Android. */}
+                <Icon name={previewable ? "photo" : "doc"} size={14} />
                 <span class="lk-chip-name" title={ref.name ?? t("chat.attachment.unnamed")}>
                   {ref.name ?? t("chat.attachment.unnamed")}
                 </span>

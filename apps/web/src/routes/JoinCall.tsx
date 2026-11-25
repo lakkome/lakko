@@ -95,6 +95,7 @@ import { sfuBaseUrl } from "../calls/sfu-config";
 import { linkJoinRefusal, showsGuestQuestion } from "../calls/link-join-gate";
 import { isSFrameTransformSupported } from "../calls/sframe-transform";
 import { paths } from "./paths";
+import { useLeaveLinkPage } from "./link-page-leave";
 import { PublicLayout } from "../ui/PublicLayout";
 import { t } from "../l10n";
 import { createLiveText } from "../l10n/live-text";
@@ -510,8 +511,20 @@ export default function JoinCall() {
 
   /** What follows a call that is over: a guest is asked whether to keep the
    *  account; anyone else gets the way into the app. */
+  const { exit: linkExit, leave: leaveLinkPage } = useLeaveLinkPage();
   const AfterCall = (): JSX.Element => (
-    <Show when={auth.isGuest()} fallback={<A href={paths.home}>{t("common.open_lakko")}</A>}>
+    <Show
+      when={auth.isGuest()}
+      fallback={
+        // A link clicked in a message returns to it; a link from outside
+        // opens the app (docs/ux/message-links.md section 2).
+        <Show when={linkExit() === "back"} fallback={<A href={paths.home}>{t("common.open_lakko")}</A>}>
+          <button type="button" onClick={leaveLinkPage}>
+            {t("common.close")}
+          </button>
+        </Show>
+      }
+    >
       <div class="lk-guest-offer-after">
         <GuestAccountOffer />
       </div>
@@ -595,7 +608,7 @@ export default function JoinCall() {
                 field and Join give way to the one line that says so. */}
             <Show when={phase() === "idle" && accountSuspended()}>
               <p class="lk-muted">{t("suspended.self.body")}</p>
-              <button type="button" onClick={() => navigate(paths.home, { replace: true })}>
+              <button type="button" onClick={leaveLinkPage}>
                 {t("common.close")}
               </button>
             </Show>

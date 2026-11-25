@@ -104,6 +104,14 @@ export function entrySearch(): string {
   return h < 0 ? entryPath.slice(q) : entryPath.slice(q, h);
 }
 
+/** The path this page load started on, query and fragment included: the
+ *  address the tab was opened with (or the screen a reload came back to).
+ *  `docs/ux/desktop.md` section 7 offers the desktop app only for that link,
+ *  never for one opened from inside the app. */
+export function entryInternalPath(): string {
+  return entryPath;
+}
+
 /** The path the router is on, query and fragment included. */
 export function currentInternalPath(): string {
   return readEntry().value;

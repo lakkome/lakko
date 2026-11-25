@@ -89,6 +89,7 @@ import { loadWasm } from "../wasm";
 import { isSuspendedKeyB64, standingWithin } from "../moderation/suspension-marks";
 import { REQUEST_STANDING_BOUND_MS, dropsRequestFrom, inviteOffersAdd } from "../moderation/suspension-rules";
 import { paths } from "./paths";
+import { useLeaveLinkPage } from "./link-page-leave";
 import { PublicLayout } from "../ui/PublicLayout";
 
 interface DecodedInvite {
@@ -374,13 +375,13 @@ function SignedOutActions(props: { returnTo: string | null }): JSX.Element {
 }
 
 function DonePanel(props: { title: string; body: string }): JSX.Element {
-  const navigate = useNavigate();
+  const { leave } = useLeaveLinkPage();
   return (
     <section class="lk-stack" style={{ gap: "12px", "align-items": "center", "text-align": "center" }}>
       <h1>{props.title}</h1>
       <p>{props.body}</p>
       <div class="lk-actions">
-        <button class="primary" type="button" onClick={() => navigate(paths.home)}>
+        <button class="primary" type="button" onClick={leave}>
           {t("invite.contact.page.done")}
         </button>
       </div>
@@ -422,6 +423,7 @@ function AddPanel(props: {
 }): JSX.Element {
   const auth = useAuth();
   const navigate = useNavigate();
+  const { leave } = useLeaveLinkPage();
   const chats = useChats();
   const cap = props.invite.cap;
   const [busy, setBusy] = createSignal(false);
@@ -553,7 +555,7 @@ function AddPanel(props: {
               </Show>
             </button>
           </Show>
-          <button type="button" disabled={busy()} onClick={() => navigate(paths.home)}>
+          <button type="button" disabled={busy()} onClick={leave}>
             {t("invite.contact.page.not_now")}
           </button>
         </div>

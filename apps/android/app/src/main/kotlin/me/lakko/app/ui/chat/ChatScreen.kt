@@ -4026,6 +4026,14 @@ private fun AttachmentChipRow(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
         ) {
+            // docs/ux/attachments.md section 4 — a file chip is an icon, the
+            // name and the size; the icon is the one iOS and web draw.
+            LkIcon(
+                icon = if (preview) R.drawable.ic_lk_photo else R.drawable.ic_lk_doc,
+                contentDescription = null,
+                size = 16.dp,
+            )
+            Spacer(modifier = Modifier.width(6.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = ref.name ?: t("chat.attachment.unnamed"),

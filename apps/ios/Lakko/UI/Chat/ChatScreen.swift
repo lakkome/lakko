@@ -1218,6 +1218,20 @@ public struct ChatScreen: View {
                 }
             }
             .coordinateSpace(name: Self.timelineSpace)
+            // Keep the bottom of the content where it is when the content or
+            // the visible frame changes size. Without it the scroll view keeps
+            // its offset from the top, and a lazy stack whose rows it has not
+            // drawn yet are sized by estimate can fail to settle: seen on
+            // 2026-11-25 with the keyboard up (a visible frame of about 337 pt)
+            // over 320 pt GIF and photo rows, where each layout pass changed
+            // which rows were drawn, the estimate of the rows above moved the
+            // content size by about 1300 pt, the drawn rows changed again, and
+            // the app spun at full CPU without drawing a frame. Anchored at the
+            // bottom, a changed estimate above the visible rows no longer moves
+            // them. Not `defaultScrollAnchor(.bottom)` for every role: that
+            // also bottom-aligns a chat shorter than the screen (see the open
+            // at the newest message below).
+            .modifier(TimelineBottomAnchor())
             // The keyboard rising (tapping the composer, or the composer
             // taking focus again after the edit sheet), the pinned bar or any
             // other bar appearing: the scroll view gets shorter and keeps its
@@ -2377,6 +2391,21 @@ private struct AttachmentPayload {
 }
 
 // MARK: - Message row
+
+/// The timeline's scroll anchor for size changes (see its use in
+/// `messagesColumn`). The role-specific anchor exists from iOS 18. iOS 17 has
+/// only the anchor for every role, which also bottom-aligns a chat shorter
+/// than the screen; that is taken there, since without an anchor the same chat
+/// can stop answering.
+private struct TimelineBottomAnchor: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.defaultScrollAnchor(.bottom, for: .sizeChanges)
+        } else {
+            content.defaultScrollAnchor(.bottom)
+        }
+    }
+}
 
 /// A centred capsule opening a day: "Today", "Yesterday", "16 September".
 struct DateSeparator: View {

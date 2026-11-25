@@ -136,7 +136,9 @@ tray thumbnail (media-messages section 11).
 ## 4. File
 
 Picker → the composer tray, as file chips (an icon, the name, the size). The bytes are sent
-unchanged. The receiver's bubble shows the file chip (name, size, `Open`, `Save`). A file
+unchanged. The receiver's bubble shows the file chip (an icon, the name, the size,
+`Save`). There is no `Open`: Lakko cannot show an arbitrary file itself, and the one way
+a file leaves the app is the save the person chooses (maintainer, 2026-11-25). A file
 over the cap: `Files up to 50 MB can be sent.` and it is not added.
 
 ## 5. Camera

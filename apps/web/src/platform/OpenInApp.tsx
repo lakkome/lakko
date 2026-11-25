@@ -18,7 +18,8 @@ import { createEffect, createMemo, Show, type JSX } from "solid-js";
 
 import { t } from "../l10n";
 import { publicOrigin } from "./index";
-import { mayHaveDesktopApp, openInAppUrl, opensAppByItself, parseLakkoLink } from "./lakko-link";
+import { entryInternalPath } from "../routes/origin-history";
+import { isEntryLink, mayHaveDesktopApp, openInAppUrl, opensAppByItself, parseLakkoLink } from "./lakko-link";
 import { isMacPlatform } from "./shortcuts";
 
 /** Links this page already tried by itself: going back to one asks no more.
@@ -47,8 +48,12 @@ export function OpenInApp(): JSX.Element {
 
 function OpenInDesktopApp(): JSX.Element {
   const location = useLocation();
+  // Only the link the tab was opened with: one clicked inside the app opens
+  // its screen in place (docs/ux/message-links.md).
   const link = createMemo(() =>
-    parseLakkoLink(`${publicOrigin()}${location.pathname}${location.hash}`, publicOrigin()),
+    isEntryLink(location.pathname, location.hash, entryInternalPath())
+      ? parseLakkoLink(`${publicOrigin()}${location.pathname}${location.hash}`, publicOrigin())
+      : null,
   );
   const offered = mayHaveDesktopApp(navigator.userAgent, navigator.maxTouchPoints);
 

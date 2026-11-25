@@ -9,6 +9,8 @@ import {
   appPathOf,
   DEFAULT_ANDROID_PACKAGE,
   iosAppUrl,
+  isEntryLink,
+  linkPageExit,
   mayHaveDesktopApp,
   openInAppUrl,
   opensAppByItself,
@@ -179,5 +181,32 @@ describe("iosAppUrl", () => {
   it("is the app's own scheme with the whole link", () => {
     expect(iosAppUrl({ path: `/g/${ID}`, fragment: SECRET })).toBe(`lakko://g/${ID}#${SECRET}`);
     expect(iosAppUrl({ path: "/feed/import", fragment: "AbC" })).toBe("lakko://feed/import#AbC");
+  });
+});
+
+describe("isEntryLink", () => {
+  it("is the link the tab was opened with, query ignored", () => {
+    expect(isEntryLink("/i/DHG3ckIc", "#Eh0S5GFfqDAzpWNy", "/i/DHG3ckIc#Eh0S5GFfqDAzpWNy")).toBe(true);
+    expect(isEntryLink("/i/DHG3ckIc", "#Eh0S5GFfqDAzpWNy", "/i/DHG3ckIc?x=1#Eh0S5GFfqDAzpWNy")).toBe(true);
+    expect(isEntryLink("/g/AbCdEfGh", "", "/g/AbCdEfGh?ref=a")).toBe(true);
+  });
+
+  it("is not a link opened from inside the app", () => {
+    // The tab was opened on a chat; the invite link was clicked in a message.
+    expect(isEntryLink("/i/DHG3ckIc", "#Eh0S5GFfqDAzpWNy", "/chat/abc")).toBe(false);
+    expect(isEntryLink("/i/DHG3ckIc", "#Eh0S5GFfqDAzpWNy", "/")).toBe(false);
+    // Another link than the one the tab was opened with.
+    expect(isEntryLink("/i/DHG3ckIc", "#other", "/i/DHG3ckIc#Eh0S5GFfqDAzpWNy")).toBe(false);
+  });
+});
+
+describe("linkPageExit", () => {
+  it("returns to the conversation for a link clicked inside the app", () => {
+    expect(linkPageExit("/i/DHG3ckIc", "#Eh0S5GFfqDAzpWNy", "/chat/abc")).toBe("back");
+    expect(linkPageExit("/c/YpKURhOP", "#s", "/")).toBe("back");
+  });
+
+  it("goes to Chats for the link the tab was opened with", () => {
+    expect(linkPageExit("/i/DHG3ckIc", "#Eh0S5GFfqDAzpWNy", "/i/DHG3ckIc#Eh0S5GFfqDAzpWNy")).toBe("home");
   });
 });
