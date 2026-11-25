@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   SFU_CALL_STATE_PROBE_MS,
+  fetchSfuRoomState,
   parseSfuCallState,
   sfuRoomStateUrl,
 } from "./sfu-call-state";
@@ -36,5 +37,33 @@ describe("parseSfuCallState", () => {
 
   it("probes slower than the SFU's own grace", () => {
     expect(SFU_CALL_STATE_PROBE_MS).toBe(10_000);
+  });
+});
+
+describe("fetchSfuRoomState", () => {
+  const room = "cd".repeat(32);
+  const answer = (status: number, body: unknown): typeof fetch =>
+    (async () =>
+      new Response(JSON.stringify(body), { status })) as unknown as typeof fetch;
+
+  it("returns the room's state, asked with no credentials", async () => {
+    let seen: { url: string; init: RequestInit | undefined } | null = null;
+    const impl = (async (url: string, init?: RequestInit) => {
+      seen = { url, init };
+      return new Response(JSON.stringify({ state: "ended" }), { status: 200 });
+    }) as unknown as typeof fetch;
+    expect(await fetchSfuRoomState("wss://sfu.test", room, impl)).toBe("ended");
+    expect(seen).not.toBeNull();
+    expect(seen!.url).toBe(`https://sfu.test/v1/rooms/${room}`);
+    expect(seen!.init?.credentials).toBe("omit");
+  });
+
+  it("returns null for a non-2xx answer, an unreadable body or a network failure", async () => {
+    expect(await fetchSfuRoomState("wss://sfu.test", room, answer(502, { state: "ended" }))).toBeNull();
+    expect(await fetchSfuRoomState("wss://sfu.test", room, answer(200, { state: "gone" }))).toBeNull();
+    const failing = (async () => {
+      throw new Error("offline");
+    }) as unknown as typeof fetch;
+    expect(await fetchSfuRoomState("wss://sfu.test", room, failing)).toBeNull();
   });
 });

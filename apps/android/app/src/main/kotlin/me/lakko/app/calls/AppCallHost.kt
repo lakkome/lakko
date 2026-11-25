@@ -492,22 +492,7 @@ internal class ChatRepositoryGroupCallPort(
     override suspend fun publishSignal(groupIdHex: String, body: FfiCallSignalingBody): Boolean =
         repository.publishGroupCallSignal(groupIdHex, body)
 
-    override suspend fun fetchSfuCallState(url: String): String? {
-        val client = io.ktor.client.HttpClient(
-            me.lakko.app.transport.AntiCensorshipEngine(me.lakko.app.transport.BaseHttpEngine.create()),
-        )
-        return try {
-            // No token, no credentials (ADR-0078 section 2).
-            val response = client.get(url)
-            if (response.status.value == 200) response.bodyAsText() else null
-        } catch (cancel: CancellationException) {
-            throw cancel
-        } catch (_: Throwable) {
-            null
-        } finally {
-            client.close()
-        }
-    }
+    override suspend fun fetchSfuCallState(url: String): String? = fetchSfuCallStateOverNetwork(url)
 
     /** The name on the user's own tile (`docs/ux/calls.md` section 4.4): the
      *  profile name, empty when none is set (the tile then draws
@@ -692,6 +677,7 @@ internal class MultiJoinerLinkCallPort(
             onNoCommitter = events.onNoCommitter,
             onError = events.onError,
             onEndedForEveryone = events.onEndedForEveryone,
+            onCallAlreadyEnded = events.onCallAlreadyEnded,
         )
         val call = try {
             if (request.isOwner) MultiJoinerCall.host(options) else MultiJoinerCall.join(options)
@@ -804,4 +790,24 @@ private class MultiJoinerLinkCallHandle(
     override fun setMicrophoneEnabled(on: Boolean) = call.setMicrophoneEnabled(on)
 
     override fun selectCamera(cameraName: String?) = call.selectCamera(cameraName)
+}
+
+/**
+ * `GET` on the SFU's room-state route (`SfuCallState.kt`): the body on a 200,
+ * `null` on anything else. No token, no credentials (ADR-0078 section 2).
+ */
+internal suspend fun fetchSfuCallStateOverNetwork(url: String): String? {
+    val client = io.ktor.client.HttpClient(
+        me.lakko.app.transport.AntiCensorshipEngine(me.lakko.app.transport.BaseHttpEngine.create()),
+    )
+    return try {
+        val response = client.get(url)
+        if (response.status.value == 200) response.bodyAsText() else null
+    } catch (cancel: CancellationException) {
+        throw cancel
+    } catch (_: Throwable) {
+        null
+    } finally {
+        client.close()
+    }
 }

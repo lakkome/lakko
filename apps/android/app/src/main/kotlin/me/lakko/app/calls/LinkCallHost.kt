@@ -103,6 +103,10 @@ public class LinkCallEvents(
      * them. The host ends the call.
      */
     public val onEndedForEveryone: (starterName: String?) -> Unit = {},
+    /** Reported instead of [onEnded] when the SFU refused the join because
+     *  the call had already ended (`ErrorCode::CallEnded`). `null` falls back
+     *  to [onEnded]. */
+    public val onCallAlreadyEnded: (() -> Unit)? = null,
 )
 
 /** What the host needs from a running link call. */
@@ -700,6 +704,7 @@ public class LinkCallHost(
             onNoCommitter = { apply(thisAttempt, LinkCallEvent.NoCommitter) },
             onError = { error -> apply(thisAttempt, LinkCallEvent.Error, callErrorReason(error)) },
             onEndedForEveryone = { name -> endedForEveryone(thisAttempt, name) },
+            onCallAlreadyEnded = { apply(thisAttempt, LinkCallEvent.CallAlreadyEnded) },
         )
         return try {
             // Owner founds + hosts (`onJoined` fires inside); a joiner connects

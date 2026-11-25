@@ -51,8 +51,8 @@
 
 // @vitest-environment jsdom
 
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter, Route } from "@solidjs/router";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import type { Group as WasmGroup } from "../../wasm/lakko_ffi_wasm";
 
 import type { ActiveGroup } from "./ChatContext";
@@ -64,6 +64,9 @@ import type { ActiveGroup } from "./ChatContext";
 // conversations before the component is rendered.
 
 let groups: ActiveGroup[] = [];
+/** When set, the list reads its groups through this accessor, so a test can
+ *  change them under a mounted list. */
+let groupsAccessor: (() => ActiveGroup[]) | null = null;
 /** `docs/ux/navigation.md` 2.4 — whether the stores that name and order the
  *  rows have been read; `false` keeps the list from drawing anything. */
 let listReady = true;
@@ -71,7 +74,7 @@ let flags: Record<string, { pinned?: boolean; muted?: boolean; archived?: boolea
 
 vi.mock("./ChatContext", () => ({
   useChats: () => ({
-    groups: () => groups,
+    groups: () => (groupsAccessor === null ? groups : groupsAccessor()),
     // No identity: with none, no row can be a chat with "us" in it, which is
     // the 1x1 naming path and has nothing to do with the order.
     identity: () => null,
@@ -134,12 +137,17 @@ vi.mock("../calls/CallHostContext", () => ({
   }),
 }));
 
+import { createSignal } from "solid-js";
+import { base64UrlEncodeNoPad } from "../auth/account-id";
+import { channelsState } from "../state/channels-state";
+import { channelRoutePattern, chatRoutePattern, groupChatRoutePattern, paths } from "../routes/paths";
 import { groupIdHex } from "../devices/sync/state";
-import { all, initWasm, installLocalStorage, one, renderUi, settle } from "../test/ui";
+import { all, initWasm, installLocalStorage, installStylesheet, one, renderUi, settle } from "../test/ui";
 import { sortConversations, type ConversationRow } from "./conversation-list";
 import type { UiRules } from "./ui-rules";
 
 let ChatList: typeof import("./ChatList")["ChatList"];
+let ChatsLayout: typeof import("../routes/ChatsLayout")["default"];
 let rules: UiRules;
 
 beforeAll(async () => {
@@ -151,6 +159,7 @@ beforeAll(async () => {
   const wasm = await import("../../wasm/lakko_ffi_wasm");
   rules = wasm as unknown as UiRules;
   ({ ChatList } = await import("./ChatList"));
+  ({ default: ChatsLayout } = await import("../routes/ChatsLayout"));
   await settle();
 });
 
@@ -162,6 +171,7 @@ beforeEach(() => {
   groups = [];
   flags = {};
   listReady = true;
+  groupsAccessor = null;
 });
 
 /**
@@ -270,11 +280,67 @@ describe("the order of the one list", () => {
 
     mountList();
 
-    expect(renderedOrder()).toEqual(["Stale", "Fresh", "Chatty", "Parked"]);
-    expect(renderedOrder()).toEqual(ruleOrder());
+    // The archived one is not in the chats list: it is behind the one
+    // "Archived" bar at the bottom of the panel (navigation.md 2.2 step 3).
+    const chatsShown = renderedOrder();
+    expect(chatsShown).toEqual(["Stale", "Fresh", "Chatty"]);
+    const bar = one<HTMLButtonElement>('[data-testid="archived-bar"]');
+    expect(bar.textContent).toContain("1");
+    // Its chevron points the other way in a right-to-left layout.
+    expect(bar.querySelectorAll("svg.lk-icon-flip-rtl")).toHaveLength(1);
+
+    // The archive opens in the same panel, with a way back.
+    bar.click();
+    expect(all('[data-testid="archive-header"]')).toHaveLength(1);
+    expect(all('[data-testid="archived-bar"]')).toHaveLength(0);
+    const archiveShown = renderedOrder();
+    expect(archiveShown).toEqual(["Parked"]);
+    // Everything here is archived, so nothing is drawn dimmed or marked.
+    expect(all(".lk-row.archived")).toHaveLength(0);
+
+    // The two lists, read in turn, are the rule's order.
+    expect([...chatsShown, ...archiveShown]).toEqual(ruleOrder());
     // And it is not the order a time-only comparator would give, which is what
     // makes the agreement above evidence rather than a coincidence.
-    expect(renderedOrder()).not.toEqual(["Fresh", "Parked", "Chatty", "Stale"]);
+    expect([...chatsShown, ...archiveShown]).not.toEqual(["Fresh", "Parked", "Chatty", "Stale"]);
+
+    one<HTMLButtonElement>('[data-testid="archive-header"] button').click();
+    expect(all('[data-testid="archive-header"]')).toHaveLength(0);
+    expect(renderedOrder()).toEqual(["Stale", "Fresh", "Chatty"]);
+  });
+
+  it("lists archived matches dimmed under the divider in a search", () => {
+    const live = conversation("Live team", 1, 2_000);
+    const parked = conversation("Parked team", 2, 1_000);
+    archive(parked);
+    groups = [live, parked];
+
+    mountList();
+    const search = one<HTMLInputElement>('input[type="search"]');
+    search.value = "team";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+
+    expect(all('[data-testid="archived-bar"]')).toHaveLength(0);
+    expect(all('[data-testid="archived-divider"]')).toHaveLength(1);
+    expect(renderedOrder()).toEqual(["Live team", "Parked team"]);
+    const dimmed = all(".lk-row.archived .lk-row-title").map((el) => el.textContent);
+    expect(dimmed).toEqual(["Parked team"]);
+  });
+
+  it("goes back from the archive on Escape", () => {
+    const live = conversation("Live", 1, 2_000);
+    const parked = conversation("Parked", 2, 1_000);
+    archive(parked);
+    groups = [live, parked];
+
+    mountList();
+    one<HTMLButtonElement>('[data-testid="archived-bar"]').click();
+    expect(renderedOrder()).toEqual(["Parked"]);
+
+    // Escape goes back as the back control does.
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(all('[data-testid="archive-header"]')).toHaveLength(0);
+    expect(renderedOrder()).toEqual(["Live"]);
   });
 
   it("keeps the rule's order when the search field narrows the list", () => {
@@ -342,5 +408,135 @@ describe("before the stores are read (navigation.md 2.4)", () => {
     listReady = true;
     mountList();
     expect(all(".lk-empty")).toHaveLength(1);
+  });
+});
+
+describe("the rows stay the same elements", () => {
+  it("keeps every row's element when the selection changes", () => {
+    const a = conversation("Alpha", 1, 3_000);
+    const b = conversation("Beta", 2, 2_000);
+    const c = conversation("Gamma", 3, 1_000);
+    groups = [a, b, c];
+    const [active, setActive] = createSignal<string | null>(null);
+    renderUi(() => (
+      <MemoryRouter>
+        <Route path="/" component={() => <ChatList activeGroupIdB64={active()} />} />
+      </MemoryRouter>
+    ));
+    const before = all<HTMLElement>(".lk-pane-body > .lk-row");
+    expect(before).toHaveLength(3);
+
+    // The layout hands in the id as the URL carries it: the conversation id,
+    // URL-safe base64 without padding.
+    setActive(base64UrlEncodeNoPad(new Uint8Array(32).fill(2)));
+    const after = all<HTMLElement>(".lk-pane-body > .lk-row");
+    expect(after).toHaveLength(3);
+    after.forEach((el, i) => expect(el).toBe(before[i]));
+    expect(after.map((el) => el.classList.contains("selected"))).toEqual([false, true, false]);
+  });
+
+  it("keeps the other rows' elements when the list changes elsewhere", () => {
+    const a = conversation("Alpha", 1, 3_000);
+    const b = conversation("Beta", 2, 2_000);
+    const [list, setList] = createSignal<ActiveGroup[]>([a, b]);
+    groupsAccessor = list;
+    mountList();
+    const before = all<HTMLElement>(".lk-pane-body > .lk-row");
+    expect(renderedOrder()).toEqual(["Alpha", "Beta"]);
+
+    // Every row object is built again on this change; the elements are not.
+    setList([a, b, conversation("Older", 3, 1_000)]);
+    expect(renderedOrder()).toEqual(["Alpha", "Beta", "Older"]);
+    const after = all<HTMLElement>(".lk-pane-body > .lk-row");
+    expect(after[0]).toBe(before[0]);
+    expect(after[1]).toBe(before[1]);
+  });
+});
+
+describe("hovering a row changes no layout", () => {
+  it("lays the actions over the row in every row, out of its layout", () => {
+    installStylesheet();
+    groups = [conversation("Alpha", 1, 3_000), conversation("Beta", 2, 2_000)];
+    mountList();
+    const rows = all<HTMLElement>(".lk-pane-body > .lk-row");
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      // Present before any hover, so showing it inserts nothing.
+      const actions = one<HTMLElement>(".lk-row-actions", row);
+      expect(getComputedStyle(actions).position).toBe("absolute");
+      expect(getComputedStyle(row).position).toBe("relative");
+    }
+  });
+});
+
+describe("the open conversation's row is selected", () => {
+  // Through the real layout and the real route patterns, at the URL each
+  // kind opens at: the layout reads the id out of the URL, so a row that
+  // compares another form of it (standard base64, padded) is never selected.
+  const CHANNEL_HEX = "0123456789abcdef0123456789abcdef";
+  afterEach(() => vi.restoreAllMocks());
+
+  function mountAt(url: string): void {
+    renderUi(() => (
+      <MemoryRouter
+        root={(props) => <>{props.children}</>}
+        history={(() => {
+          const h = createMemoryHistory();
+          h.set({ value: url, replace: true, scroll: false });
+          return h;
+        })()}
+      >
+        <Route path="/" component={ChatsLayout}>
+          <Route path="/" component={() => null} />
+          <Route path={chatRoutePattern} component={() => null} />
+          <Route path={channelRoutePattern} component={() => null} />
+          <Route path={paths.groups} component={() => null} />
+          <Route path={`${paths.groups}${groupChatRoutePattern}`} component={() => null} />
+        </Route>
+      </MemoryRouter>
+    ));
+  }
+
+  function selectedTitles(): string[] {
+    return all(".lk-pane-body > .lk-row.selected .lk-row-title").map((el) => el.textContent ?? "");
+  }
+
+  function withChannel(): void {
+    vi.spyOn(channelsState, "channels").mockReturnValue([
+      { id: CHANNEL_HEX, localName: "News", localDescription: "", addedAtMs: 500 },
+    ]);
+  }
+
+  it("at /groups/<id>", () => {
+    withChannel();
+    const group = conversation("Team", 1, 3_000);
+    const chat = conversation("Ann", 2, 2_000);
+    groups = [group, chat];
+    const slug = (id: number): string => base64UrlEncodeNoPad(new Uint8Array(32).fill(id));
+
+    mountAt(paths.groupChat(slug(1)));
+    expect(selectedTitles()).toEqual(["Team"]);
+  });
+
+  it("at /chat/<id>", () => {
+    withChannel();
+    groups = [conversation("Team", 1, 3_000), conversation("Ann", 2, 2_000)];
+    mountAt(paths.chat(base64UrlEncodeNoPad(new Uint8Array(32).fill(2))));
+    expect(selectedTitles()).toEqual(["Ann"]);
+  });
+
+  it("at /channel/<id>", () => {
+    withChannel();
+    groups = [conversation("Team", 1, 3_000), conversation("Ann", 2, 2_000)];
+    mountAt(paths.channel(CHANNEL_HEX));
+    expect(all(".lk-pane-body > .lk-row").length).toBe(3);
+    expect(selectedTitles()).toEqual(["News"]);
+  });
+
+  it("nowhere at /", () => {
+    groups = [conversation("Team", 1, 3_000)];
+    mountAt("/");
+    expect(all(".lk-pane-body > .lk-row")).toHaveLength(1);
+    expect(selectedTitles()).toEqual([]);
   });
 });

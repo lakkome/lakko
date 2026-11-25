@@ -4153,6 +4153,14 @@
       "text": "Відкріпити",
       "status": "machine"
     },
+    "chats.archived.row": {
+      "text": "Архів",
+      "status": "machine"
+    },
+    "chats.archived.row_a11y": {
+      "text": "{count, plural, one {Архів, # розмова} few {Архів, # розмови} many {Архів, # розмов} other {Архів, # розмови}}",
+      "status": "machine"
+    },
     "chats.compose": {
       "text": "Створити",
       "status": "machine"

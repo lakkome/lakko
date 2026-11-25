@@ -2699,6 +2699,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       resolvePersonName: callNameOfPerson,
       onJoined: () => applyLinkEvent(attempt, { kind: "joined" }),
       onEnded: () => applyLinkEvent(attempt, { kind: "ended" }),
+      onCallAlreadyEnded: () => applyLinkEvent(attempt, { kind: "call-already-ended" }),
       onNoCommitter: () => applyLinkEvent(attempt, { kind: "no-committer" }),
       onError: (err: unknown) => {
         // An attempt the person already left has nothing to report.

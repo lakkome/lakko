@@ -4153,6 +4153,14 @@
       "text": "अनपिन करें",
       "status": "machine"
     },
+    "chats.archived.row": {
+      "text": "संग्रहीत",
+      "status": "machine"
+    },
+    "chats.archived.row_a11y": {
+      "text": "{count, plural, one {संग्रहीत, # बातचीत} other {संग्रहीत, # बातचीत}}",
+      "status": "machine"
+    },
     "chats.compose": {
       "text": "नया",
       "status": "machine"

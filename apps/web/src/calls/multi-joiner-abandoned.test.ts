@@ -31,6 +31,8 @@ const hooks = vi.hoisted(() => ({
   sessionState: "connecting" as string,
   /** Resolves the JWT mint; `null` for a mint that resolves by itself. */
   mintGate: null as Promise<void> | null,
+  /** The SFU refused the session with `call-ended`. */
+  endedByServer: false,
 }));
 
 vi.mock("./sfu-call-session", () => ({
@@ -48,6 +50,9 @@ vi.mock("./sfu-call-session", () => ({
     }
     getState(): string {
       return hooks.sessionState;
+    }
+    callEndedByServer(): boolean {
+      return hooks.endedByServer;
     }
     rekey(): void {}
     setMicrophoneEnabled(): void {}
@@ -149,6 +154,7 @@ beforeEach(() => {
   hooks.connect = async (): Promise<void> => {};
   hooks.sessionState = "connecting";
   hooks.mintGate = null;
+  hooks.endedByServer = false;
   callActions.reset();
 });
 
@@ -287,5 +293,38 @@ describe("a start that ended in the session's connect", () => {
     };
     await expect(MultiJoinerCall.host(a.opts)).rejects.toThrow();
     expect(a.errors).toHaveLength(1);
+  });
+});
+
+describe("a join the SFU refused because the call had already ended (seen live 2026-11-24)", () => {
+  it("is reported as already ended, not as an ordinary end", async () => {
+    const a = attempt();
+    let alreadyEnded = 0;
+    const call = await MultiJoinerCall.join({
+      ...a.opts,
+      onCallAlreadyEnded: () => {
+        alreadyEnded += 1;
+      },
+    } as MultiJoinerCallOptions);
+    hooks.endedByServer = true;
+    hooks.callbacks?.onStateChange?.("failed");
+    expect(alreadyEnded).toBe(1);
+    expect(a.ended).toBe(0);
+    call.hangUp();
+  });
+
+  it("control: a session that failed for another reason is an ordinary end", async () => {
+    const a = attempt();
+    let alreadyEnded = 0;
+    const call = await MultiJoinerCall.join({
+      ...a.opts,
+      onCallAlreadyEnded: () => {
+        alreadyEnded += 1;
+      },
+    } as MultiJoinerCallOptions);
+    hooks.callbacks?.onStateChange?.("failed");
+    expect(alreadyEnded).toBe(0);
+    expect(a.ended).toBe(1);
+    call.hangUp();
   });
 });

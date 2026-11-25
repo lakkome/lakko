@@ -41,6 +41,15 @@ public enum class LinkCallPhase {
     /** The session closed or failed. */
     ENDED,
 
+    /**
+     * The call had already ended when this device arrived: the SFU answered
+     * `CallEnded` in place of its Welcome, or the room probe said `ended`
+     * before the join. The link is spent (`docs/ux/calls.md`, "A link is one
+     * call"); unlike [ENDED] this device was never in the call, so the page
+     * says `The call has ended.` instead of sending the person back.
+     */
+    SPENT,
+
     /** Joiner: nobody admitted this device within the admission window. */
     DEAD,
 
@@ -55,6 +64,9 @@ public sealed interface LinkCallEvent {
     public data object Joined : LinkCallEvent
 
     public data object Ended : LinkCallEvent
+
+    /** The SFU refused the join because the call had already ended. */
+    public data object CallAlreadyEnded : LinkCallEvent
 
     public data object NoCommitter : LinkCallEvent
 
@@ -71,17 +83,21 @@ public fun linkCallOccupiesSlot(phase: LinkCallPhase): Boolean =
  * `Ended` is a weak terminal: [MultiJoinerCall] tears its session down BEFORE it
  * reports why — an admission timeout closes the session (reported `Ended`) and
  * then reports `NoCommitter`; a refused redirect closes it and then reports
- * `Error`. The later, specific report replaces `Ended`. `DEAD` and `ERROR` are
- * final.
+ * `Error`. The later, specific report replaces `Ended`. `DEAD`, `SPENT` and
+ * `ERROR` are final.
  */
 public fun reduceLinkCallPhase(phase: LinkCallPhase, event: LinkCallEvent): LinkCallPhase {
-    if (phase == LinkCallPhase.DEAD || phase == LinkCallPhase.ERROR) return phase
+    if (phase == LinkCallPhase.DEAD || phase == LinkCallPhase.ERROR || phase == LinkCallPhase.SPENT) return phase
     return when (event) {
         is LinkCallEvent.SignalingOpen ->
             if (phase == LinkCallPhase.STARTING && !event.owner) LinkCallPhase.WAITING else phase
         LinkCallEvent.Joined ->
             if (phase == LinkCallPhase.STARTING || phase == LinkCallPhase.WAITING) LinkCallPhase.LIVE else phase
         LinkCallEvent.Ended -> if (linkCallOccupiesSlot(phase)) LinkCallPhase.ENDED else phase
+        // Sent in place of the Welcome, so never after the call was live; an
+        // `Ended` folded a moment earlier for the same teardown is replaced.
+        LinkCallEvent.CallAlreadyEnded ->
+            if (linkCallOccupiesSlot(phase) || phase == LinkCallPhase.ENDED) LinkCallPhase.SPENT else phase
         LinkCallEvent.NoCommitter -> if (phase == LinkCallPhase.LIVE) phase else LinkCallPhase.DEAD
         LinkCallEvent.Error -> LinkCallPhase.ERROR
     }
@@ -165,7 +181,8 @@ public fun linkCallNotice(
             UiText("call.link.waiting"),
             waitingActions,
         )
-        LinkCallPhase.ENDED -> LinkCallNotice(UiText("call.link.ended"), listOf(LinkCallNoticeAction.DISMISS))
+        LinkCallPhase.ENDED, LinkCallPhase.SPENT ->
+            LinkCallNotice(UiText("call.link.ended"), listOf(LinkCallNoticeAction.DISMISS))
         LinkCallPhase.DEAD -> LinkCallNotice(
             UiText("call.link.dead"),
             listOf(LinkCallNoticeAction.DISMISS),

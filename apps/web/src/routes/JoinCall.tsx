@@ -84,7 +84,14 @@ import {
 import { useCallHost, type CallHostApi } from "../calls/CallHostContext";
 import { callIdHex } from "../calls/call-signaling-dispatch";
 import { hexKey } from "../calls/multi-joiner-election";
-import { linkCallOccupiesSlot, type LinkCallPhase } from "../calls/link-call-host";
+import {
+  linkCallOccupiesSlot,
+  linkCallPagePhase,
+  linkCallPageReturnsToApp,
+  type LinkCallPhase,
+} from "../calls/link-call-host";
+import { fetchSfuRoomState } from "../calls/sfu-call-state";
+import { sfuBaseUrl } from "../calls/sfu-config";
 import { linkJoinRefusal, showsGuestQuestion } from "../calls/link-join-gate";
 import { isSFrameTransformSupported } from "../calls/sframe-transform";
 import { paths } from "./paths";
@@ -276,11 +283,41 @@ export default function JoinCall() {
     return slot.callIdHex === callIdHex(d.callId) ? slot : null;
   });
 
-  const phase = (): Phase => {
-    const slot = hostSlot();
-    if (slot !== null) return slot.phase;
-    return localPhase();
-  };
+  /** The SFU's room state said `ended` for this link's call when the page
+   *  opened: the call is over, so the page says so before anyone presses
+   *  Join (`docs/ux/call-links.md` section 5). Any other answer, or none,
+   *  changes nothing. */
+  const [roomEnded, setRoomEnded] = createSignal(false);
+  createEffect(() => {
+    const d = decoded();
+    setRoomEnded(false);
+    if (d === null || d === undefined || !d.valid) return;
+    const base = sfuBaseUrl();
+    if (base === null) return;
+    const callId = d.callId;
+    void (async () => {
+      try {
+        const wasm = await loadWasm();
+        const state = await fetchSfuRoomState(base, wasm.sfuRoomForCall(callId));
+        // Still the same link?
+        if (decoded() !== d) return;
+        if (state === "ended") {
+          setRoomEnded(true);
+          // A join parked behind the guest sign-up has nothing to resume.
+          setPendingJoin(null);
+        }
+      } catch {
+        // No answer: the page offers Join as before.
+      }
+    })();
+  });
+
+  const phase = (): Phase =>
+    linkCallPagePhase({
+      slotPhase: hostSlot()?.phase ?? null,
+      localPhase: localPhase(),
+      roomEnded: roomEnded(),
+    });
   const shownError = (): string | null => hostSlot()?.errorMessage?.() ?? error();
 
   // While this screen is up it shows the host's state for its call itself, so
@@ -460,7 +497,13 @@ export default function JoinCall() {
   // into the app (`docs/ux/call-links.md` section 5). A guest stays: this page
   // is where they are asked about an account.
   createEffect(() => {
-    if (phase() === "ended" && auth.state().kind === "session" && !auth.isGuest()) {
+    if (
+      linkCallPageReturnsToApp({
+        phase: phase(),
+        signedIn: auth.state().kind === "session",
+        isGuest: auth.isGuest(),
+      })
+    ) {
       navigate(paths.home, { replace: true });
     }
   });
@@ -634,7 +677,7 @@ export default function JoinCall() {
               <p>{t("call.link.dead")}</p>
               <AfterCall />
             </Show>
-            <Show when={phase() === "ended"}>
+            <Show when={phase() === "ended" || phase() === "spent"}>
               <p>{t("call.link.ended")}</p>
               <AfterCall />
             </Show>

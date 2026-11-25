@@ -54,6 +54,12 @@ public final class JoinCallLandingViewModel: ObservableObject {
         case waiting
         case live
         case ended
+        /// The call had already ended when this link was opened or joined:
+        /// the room probe said so up front, or the SFU refused the join with
+        /// `CallEnded`. `The call has ended.` stays on this screen; unlike
+        /// ``ended`` it never sends the person back to the app, which would
+        /// look like a Join that did nothing.
+        case spent
         case dead
         case busy(UiText)
         /// Kept as ``UiText`` so a message on screen follows a live language
@@ -79,7 +85,7 @@ public final class JoinCallLandingViewModel: ObservableObject {
     /// What this screen itself is doing, before the call is the host's — the
     /// guest sign-up, a refusal, a failure before the host held the call.
     @Published private var localPhase: Phase = .idle
-    @Published public private(set) var decoded: Decoded?
+    @Published public internal(set) var decoded: Decoded?
     @Published public private(set) var loading = true
     /// The ledger answered `429` on the link fetch: the link may be fine, so
     /// the screen says "try again later" rather than "invalid".
@@ -130,6 +136,14 @@ public final class JoinCallLandingViewModel: ObservableObject {
     private var linkOpen: UInt64?
     /// Draws a guest name: the shared rule in the app, a test replaces it.
     private let drawGuestName: () -> String
+    /// What the SFU says about the call's room (`SfuCallStateProbe`), asked
+    /// once after the link opens so a call that already ended says so before
+    /// anyone presses Join (`docs/ux/call-links.md` section 5). `nil`: no
+    /// answer, which changes nothing.
+    typealias RoomStateProbe = @MainActor (_ callId: Data) async -> SfuCallState?
+    private let probeRoom: RoomStateProbe
+    /// The room probe answered `ended`: this link's call is over.
+    @Published private var roomEnded = false
     // Synchronous double-tap latches (set BEFORE any await), so a rapid second
     // tap can't mint a SECOND guest account or start a second call (Hardening 3).
     private var mintingGuest = false
@@ -145,8 +159,10 @@ public final class JoinCallLandingViewModel: ObservableObject {
         isGuestSession: (@MainActor () -> Bool)? = nil,
         drawGuestName: @escaping () -> String = {
             LakkoCore.guestName(random: UInt64.random(in: .min ... .max))
-        }
+        },
+        probeRoom: RoomStateProbe? = nil
     ) {
+        self.probeRoom = probeRoom ?? JoinCallLandingViewModel.probeRoomOverNetwork
         self.slug = slug
         self.authRepository = authRepository
         self.hasSession = hasSession ?? { [authRepository] in authRepository.identitySecrets != nil }
@@ -189,6 +205,8 @@ public final class JoinCallLandingViewModel: ObservableObject {
     /// its outcome); this screen's own before that.
     public var phase: Phase {
         guard let decoded, let slot = linkCallHost.slot(forCallIdHex: decoded.callIdHex) else {
+            // The room probe said the call is over: nothing to join.
+            if roomEnded, localPhase == .idle { return .spent }
             return localPhase
         }
         switch slot.phase {
@@ -196,6 +214,7 @@ public final class JoinCallLandingViewModel: ObservableObject {
         case .waiting: return .waiting
         case .live: return .live
         case .ended: return .ended
+        case .spent: return .spent
         case .dead: return .dead
         case .error:
             if let message = slot.errorMessage {
@@ -225,6 +244,12 @@ public final class JoinCallLandingViewModel: ObservableObject {
         // the parked join automatically. The short-circuit means the one-shot
         // flag is only consumed when we actually have a valid, live-session
         // decode.
+        if roomEnded {
+            // The call is over: a join parked by the guest sign-up has
+            // nothing to resume.
+            if intake.consumeCallJoinAutoResume() { _ = intake.takeCallJoinGuestName() }
+            return
+        }
         if let decoded, decoded.valid,
             hasSession(),
             intake.consumeCallJoinAutoResume() {
@@ -509,6 +534,9 @@ public final class JoinCallLandingViewModel: ObservableObject {
                 valid: cap.isValidNow(nowMs: nowMs),
                 isOwner: isOwner
             )
+            // Ask the SFU before showing Join, so a link to a call that is
+            // already over says so up front (no answer changes nothing).
+            if decoded?.valid == true { await checkRoom(callId: cap.callId()) }
             loading = false
         } catch {
             // The screen was left while the link was being fetched. Nothing
@@ -523,6 +551,22 @@ public final class JoinCallLandingViewModel: ObservableObject {
             rateLimited = DiscoveryClientError.isRateLimited(error)
             loading = false
         }
+    }
+
+    /// Ask the SFU whether this link's call is still there; `ended` shows
+    /// `The call has ended.` in place of Join. Any other answer, or none,
+    /// changes nothing (a probe that cannot be read must never hide a call).
+    func checkRoom(callId: Data) async {
+        if await probeRoom(callId) == .ended { roomEnded = true }
+    }
+
+    /// The room probe of the app: `GET /v1/rooms/{room}` on the SFU, the
+    /// room being `sfuRoomForCall(callId)` (no token, ADR-0078 section 2).
+    static func probeRoomOverNetwork(_ callId: Data) async -> SfuCallState? {
+        guard let base = SfuConfig.baseUrl,
+              let room = try? sfuRoomForCall(callId: callId)
+        else { return nil }
+        return await SfuCallStateProbe.fetch(sfuBaseUrl: base, roomHex: room)
     }
 
     // MARK: - Begin
@@ -617,11 +661,20 @@ public struct JoinCallLandingScreen: View {
             // back into the app (`docs/ux/call-links.md` section 5). A guest
             // stays: this screen is where they are asked about an account.
             .onChange(of: viewModel.phase) { _, phase in
-                if phase == .ended && guestOffer == nil {
+                if Self.returnsToApp(phase: phase, isGuest: guestOffer != nil) {
                     viewModel.exit()
                     onDone()
                 }
             }
+    }
+
+    /// Whether this landing closes itself and sends the person back into the
+    /// app (`docs/ux/call-links.md` section 5): only once a call they were in
+    /// has ended, and never for a guest. A call that had already ended when
+    /// they arrived (``JoinCallLandingViewModel/Phase/spent``) stays here and
+    /// says so: closing would look like a Join that did nothing.
+    static func returnsToApp(phase: JoinCallLandingViewModel.Phase, isGuest: Bool) -> Bool {
+        phase == .ended && !isGuest
     }
 
     @ViewBuilder
@@ -763,7 +816,7 @@ public struct JoinCallLandingScreen: View {
             Text(l10n.t("call.link.dead"))
                 .multilineTextAlignment(.center)
             afterCall
-        case .ended:
+        case .ended, .spent:
             Text(l10n.t("call.link.ended"))
                 .multilineTextAlignment(.center)
             afterCall

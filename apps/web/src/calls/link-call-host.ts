@@ -35,6 +35,12 @@ export type LinkCallPhase =
   | "live"
   /** The session closed or failed. */
   | "ended"
+  /** The call had already ended when this device arrived: the SFU answered
+   *  `call-ended` in place of its Welcome, or the room probe said `ended`
+   *  before the join. The link is spent (`docs/ux/calls.md`, "A link is one
+   *  call"); unlike `ended` this device was never in the call, so the page
+   *  says `The call has ended.` instead of sending the person back. */
+  | "spent"
   /** Joiner: nobody admitted this device within the admission window — the
    *  call has no live committer (the owner left, or the call is over). */
   | "dead"
@@ -46,6 +52,8 @@ export type LinkCallEvent =
   | { readonly kind: "signaling-open"; readonly role: "owner" | "joiner" }
   | { readonly kind: "joined" }
   | { readonly kind: "ended" }
+  /** The SFU refused the join because the call had already ended. */
+  | { readonly kind: "call-already-ended" }
   | { readonly kind: "no-committer" }
   | { readonly kind: "error" };
 
@@ -60,11 +68,11 @@ export function linkCallOccupiesSlot(phase: LinkCallPhase): boolean {
  * `ended` is a weak terminal: `MultiJoinerCall` tears its session down BEFORE it
  * reports why — an admission timeout closes the session (reported `ended`) and
  * then reports `no-committer`; a refused redirect closes it and then reports
- * `error`. The later, specific report replaces `ended`. `dead` and `error` are
- * final: nothing after them changes what the user is told.
+ * `error`. The later, specific report replaces `ended`. `dead`, `spent` and
+ * `error` are final: nothing after them changes what the user is told.
  */
 export function reduceLinkCallPhase(phase: LinkCallPhase, event: LinkCallEvent): LinkCallPhase {
-  if (phase === "dead" || phase === "error") return phase;
+  if (phase === "dead" || phase === "error" || phase === "spent") return phase;
   switch (event.kind) {
     case "signaling-open":
       // The owner is live from founding; a joiner that is still starting now
@@ -75,6 +83,10 @@ export function reduceLinkCallPhase(phase: LinkCallPhase, event: LinkCallEvent):
       return phase === "starting" || phase === "waiting" ? "live" : phase;
     case "ended":
       return linkCallOccupiesSlot(phase) ? "ended" : phase;
+    case "call-already-ended":
+      // Sent in place of the Welcome, so never after the call was live; an
+      // `ended` folded a moment earlier for the same teardown is replaced.
+      return linkCallOccupiesSlot(phase) || phase === "ended" ? "spent" : phase;
     case "no-committer":
       return phase === "live" ? phase : "dead";
     case "error":
@@ -106,6 +118,37 @@ export function decideLinkCallStart(input: LinkCallStartInput): LinkCallStartDec
     return { kind: "already-in-this-call" };
   }
   return { kind: "busy", message: callBusyMessage(input.occupant, input.verb) };
+}
+
+/**
+ * Whether the `/c/` page closes itself and sends the person back into the app
+ * (`docs/ux/call-links.md` section 5): only once a call they were in has
+ * ended, and only for a signed-in person who is not a guest. A call that had
+ * already ended when they arrived (`spent`) stays and says so: leaving would
+ * look like a Join that did nothing (seen live 2026-11-24).
+ */
+export function linkCallPageReturnsToApp(input: {
+  readonly phase: string;
+  readonly signedIn: boolean;
+  readonly isGuest: boolean;
+}): boolean {
+  return input.phase === "ended" && input.signedIn && !input.isGuest;
+}
+
+/**
+ * The phase the `/c/` page shows: the host's for this link's call when it
+ * holds one; otherwise `spent` when the room probe said the call already
+ * ended and the page is idle (no Join for a call that is over), else the
+ * page's own phase.
+ */
+export function linkCallPagePhase<L extends string>(input: {
+  readonly slotPhase: LinkCallPhase | null;
+  readonly localPhase: L;
+  readonly roomEnded: boolean;
+}): LinkCallPhase | L {
+  if (input.slotPhase !== null) return input.slotPhase;
+  if (input.roomEnded && input.localPhase === "idle") return "spent";
+  return input.localPhase;
 }
 
 /** A status line for a link call on a screen other than its `/c/` route. */
@@ -164,6 +207,7 @@ export function linkCallNotice(
     case "waiting":
       return { text: t("call.link.waiting"), actions: ["open", "cancel"] };
     case "ended":
+    case "spent":
       return { text: t("call.link.ended"), actions: ["dismiss"] };
     case "dead":
       return { text: t("call.link.dead"), actions: ["dismiss"] };

@@ -9,6 +9,8 @@ import {
   linkCallNotice,
   linkCallOccupiesSlot,
   linkCallOverlayShown,
+  linkCallPagePhase,
+  linkCallPageReturnsToApp,
   reduceLinkCallPhase,
   type LinkCallEvent,
   type LinkCallJournal,
@@ -241,5 +243,45 @@ describe("linkCallHistoryEntry", () => {
 
   it("never reports a negative duration when the clock moved backwards", () => {
     expect(linkCallHistoryEntry(journal(), { ...facts, endedAtMs: 0 })?.durationMs).toBe(0);
+  });
+});
+
+describe("a link to a call that had already ended (seen live 2026-11-24)", () => {
+  it("the SFU's call-ended refusal folds to spent, which is final", () => {
+    expect(fold("waiting", [{ kind: "call-already-ended" }])).toBe("spent");
+    expect(fold("starting", [{ kind: "call-already-ended" }])).toBe("spent");
+    // An `ended` folded a moment earlier for the same teardown is replaced.
+    expect(fold("waiting", [{ kind: "ended" }, { kind: "call-already-ended" }])).toBe("spent");
+    // The admission timer that fires afterwards changes nothing.
+    expect(fold("spent", [{ kind: "no-committer" }, { kind: "ended" }, { kind: "error" }])).toBe("spent");
+    expect(linkCallOccupiesSlot("spent")).toBe(false);
+    expect(linkCallNotice("spent", "joiner", false, null)?.text).toBe(
+      linkCallNotice("ended", "joiner", false, null)?.text,
+    );
+  });
+
+  it("a call-ended answer on join leaves the page showing the ended state, not the app", () => {
+    const phase = linkCallPagePhase({
+      slotPhase: fold("waiting", [{ kind: "call-already-ended" }]),
+      localPhase: "idle",
+      roomEnded: false,
+    });
+    expect(phase).toBe("spent");
+    expect(linkCallPageReturnsToApp({ phase, signedIn: true, isGuest: false })).toBe(false);
+  });
+
+  it("control: a call this device was in that ends still returns a signed-in person to the app", () => {
+    const phase = fold("live", [{ kind: "ended" }]);
+    expect(linkCallPageReturnsToApp({ phase, signedIn: true, isGuest: false })).toBe(true);
+    expect(linkCallPageReturnsToApp({ phase, signedIn: true, isGuest: true })).toBe(false);
+    expect(linkCallPageReturnsToApp({ phase, signedIn: false, isGuest: false })).toBe(false);
+  });
+
+  it("the room probe answering ended shows the ended state up front, only while idle", () => {
+    expect(linkCallPagePhase({ slotPhase: null, localPhase: "idle", roomEnded: true })).toBe("spent");
+    expect(linkCallPagePhase({ slotPhase: null, localPhase: "idle", roomEnded: false })).toBe("idle");
+    expect(linkCallPagePhase({ slotPhase: null, localPhase: "starting", roomEnded: true })).toBe("starting");
+    // The host's own phase for the call wins.
+    expect(linkCallPagePhase({ slotPhase: "live", localPhase: "idle", roomEnded: true })).toBe("live");
   });
 });

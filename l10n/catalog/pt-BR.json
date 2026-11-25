@@ -4153,6 +4153,14 @@
       "text": "Desafixar",
       "status": "machine"
     },
+    "chats.archived.row": {
+      "text": "Arquivadas",
+      "status": "machine"
+    },
+    "chats.archived.row_a11y": {
+      "text": "{count, plural, one {Arquivadas, # conversa} other {Arquivadas, # conversas}}",
+      "status": "machine"
+    },
     "chats.compose": {
       "text": "Novo",
       "status": "machine"

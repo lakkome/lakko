@@ -283,6 +283,75 @@ pub fn avatar_initials(name: String) -> String {
     lakko_ui_rules::initials::avatar_initials(&name)
 }
 
+/// The two flags of one ordered conversation row the archived split reads
+/// (`docs/ux/navigation.md` 2.2 step 3). See
+/// [`lakko_ui_rules::archived_section`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct ArchivedSectionRow {
+    /// The conversation is archived.
+    pub archived: bool,
+    /// Pinned in the view shown: the folder's own pin inside a folder, the
+    /// global pin in All chats and in search.
+    pub pinned: bool,
+}
+
+/// Which of the two lists the conversation panel shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ArchivedView {
+    /// The conversations that are not archived.
+    Chats,
+    /// The archived conversations, opened from the bar.
+    Archive,
+}
+
+/// What the conversation panel draws around its archived conversations, as
+/// counts over the ordered rows: rows `0..topCount` are not archived, rows
+/// `topCount..` are archived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct ArchivedSection {
+    /// The list shown.
+    pub view: ArchivedView,
+    /// Rows that are not archived (with the pins).
+    pub top_count: u32,
+    /// Archived rows, after `top_count`.
+    pub archived_count: u32,
+    /// Chats view, no search: the "Archived" bar at the bottom of the panel.
+    pub bar: bool,
+    /// Chats view, searching: archived matches under a divider.
+    pub divider: bool,
+}
+
+/// Split the ordered conversation list around its archived conversations:
+/// archived conversations always sit behind one "Archived" bar at the bottom
+/// of the panel, which opens them as a list of their own; while searching,
+/// archived matches are listed under a divider instead.
+#[uniffi::export]
+#[must_use]
+pub fn archived_section(
+    rows: Vec<ArchivedSectionRow>,
+    searching: bool,
+    archive_open: bool,
+) -> ArchivedSection {
+    let rows: Vec<lakko_ui_rules::archived_section::ArchivedSectionRow> = rows
+        .into_iter()
+        .map(|r| lakko_ui_rules::archived_section::ArchivedSectionRow {
+            archived: r.archived,
+            pinned: r.pinned,
+        })
+        .collect();
+    let s = lakko_ui_rules::archived_section::archived_section(&rows, searching, archive_open);
+    ArchivedSection {
+        view: match s.view {
+            lakko_ui_rules::archived_section::ArchivedView::Chats => ArchivedView::Chats,
+            lakko_ui_rules::archived_section::ArchivedView::Archive => ArchivedView::Archive,
+        },
+        top_count: s.top_count,
+        archived_count: s.archived_count,
+        bar: s.bar,
+        divider: s.divider,
+    }
+}
+
 /// What follows the first comments under a collapsed channel post
 /// (`docs/ux/group-and-channel-privacy.md` 13.2): never a count of comments
 /// this reader hides. See [`lakko_ui_rules::comments`].
@@ -2936,6 +3005,33 @@ mod tests {
         );
         assert_eq!(list.others, vec![0]);
         assert_eq!(list.others_count, 1);
+    }
+
+    #[test]
+    fn archived_section_reaches_the_shared_rule() {
+        let live = ArchivedSectionRow {
+            archived: false,
+            pinned: false,
+        };
+        let gone = ArchivedSectionRow {
+            archived: true,
+            pinned: false,
+        };
+        let none = archived_section(vec![live, live], false, false);
+        assert!(!none.bar);
+        assert_eq!(none.top_count, 2);
+        let rows = vec![live, gone];
+        let chats = archived_section(rows.clone(), false, false);
+        assert_eq!(chats.view, ArchivedView::Chats);
+        assert_eq!(chats.top_count, 1);
+        assert_eq!(chats.archived_count, 1);
+        assert!(chats.bar);
+        let open = archived_section(rows.clone(), false, true);
+        assert_eq!(open.view, ArchivedView::Archive);
+        assert!(!open.bar);
+        let search = archived_section(rows, true, false);
+        assert!(search.divider);
+        assert!(!search.bar);
     }
 
     #[test]

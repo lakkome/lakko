@@ -348,6 +348,7 @@ final class LinkCallHost: ObservableObject {
             onJoined: { [weak self] in self?.apply(attempt, .joined) },
             onLive: nil,
             onEnded: { [weak self] in self?.apply(attempt, .ended) },
+            onCallAlreadyEnded: { [weak self] in self?.apply(attempt, .callAlreadyEnded) },
             onNoCommitter: { [weak self] in self?.apply(attempt, .noCommitter) },
             onError: { [weak self] error in
                 NSLog("multi-joiner call: failed: %@", String(describing: error))

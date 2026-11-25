@@ -4153,6 +4153,14 @@
       "text": "取消置顶",
       "status": "machine"
     },
+    "chats.archived.row": {
+      "text": "已归档",
+      "status": "machine"
+    },
+    "chats.archived.row_a11y": {
+      "text": "{count, plural, other {已归档，# 个会话}}",
+      "status": "machine"
+    },
     "chats.compose": {
       "text": "新建",
       "status": "machine"

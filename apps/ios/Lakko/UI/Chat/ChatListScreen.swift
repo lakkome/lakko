@@ -168,6 +168,12 @@ public struct ChatListScreen: View {
     /// The folder whose deletion is being confirmed.
     @State private var deleting: FolderView?
     @State private var createMenuOpen = false
+    /// Navigation 2.2 step 3 — the archive opened from the "Archived" bar:
+    /// the tab it was opened in (empty for All chats, else the folder id in
+    /// hex), `nil` while the chats list shows. Kept while the list exists,
+    /// never stored.
+    @State private var archiveTag: String?
+    @Environment(\.layoutDirection) private var layoutDirection
     /// The toolbar's create menu carries Saved; the empty state's does not.
     @State private var createMenuWithSaved = true
 
@@ -175,7 +181,8 @@ public struct ChatListScreen: View {
 #if DEBUG
         let _ = BodyEvaluationCounter.tick("ChatListScreen")
 #endif
-        content
+        let archive = openArchive
+        panel(archive: archive)
             // Section 2.1 — the strip under the navigation title, above the
             // list. Hidden until a folder exists, and while searching, since a
             // search is over everything (section 2.4).
@@ -186,7 +193,7 @@ public struct ChatListScreen: View {
                 if accountSuspended {
                     SuspendedBanner { SuspensionCenter.shared.showScreen() }
                 }
-                if showsFolderBar {
+                if showsFolderBar && archive == nil {
                     FolderBar(
                         folders: deviceGroupSync.folders,
                         selection: selectedTabBinding,
@@ -217,7 +224,13 @@ public struct ChatListScreen: View {
                     ])
             }
             .lakkoActionSheet(isPresented: $createMenuOpen) { createMenuItems(includeSaved: createMenuWithSaved) }
-            .navigationTitle(connection.phase.headerKey.map { l10n.t($0) } ?? l10n.t("nav.chats"))
+            .navigationTitle(
+                connection.phase.headerKey.map { l10n.t($0) }
+                    ?? (archive == nil ? l10n.t("nav.chats") : l10n.t("chats.archived.row")))
+            // Large in both views: the archive list, drawn over the chats list
+            // that stays alive underneath, still drives the title's collapse
+            // (seen on the simulator 2026-11-25). Switching to inline for the
+            // archive left Chats inline after going back.
             .navigationBarTitleDisplayMode(.large)
             // Always shown: with the folder bar inset above the list the system
             // collapsed the field and never brought it back, so Chats had no
@@ -240,12 +253,21 @@ public struct ChatListScreen: View {
                 reloadRestored()
             }
             .onChange(of: allRows.isEmpty && invitedRows.isEmpty) { _, _ in noteConversationIfAny() }
+            // Navigation 2.2 step 3 — the archive closes by itself once it
+            // holds nothing and nothing is typed (unarchiving the last one),
+            // or when the folder it was opened in is gone.
+            .onChange(of: archiveTag != nil && archive == nil) { _, closed in
+                if closed { archiveTag = nil }
+            }
             .toolbar {
+                if archive != nil {
+                    ToolbarItem(placement: .navigationBarLeading) { archiveBackButton }
+                }
                 // ADR-0050 / docs/ux/second-device.md section 2: one label
                 // while this device is still being admitted to the chats a
                 // pairing named. Chats appear as they arrive; never a
                 // counter, never a per-chat row.
-                if viewModel.synchronizing {
+                if viewModel.synchronizing && archive == nil {
                     ToolbarItem(placement: .navigationBarLeading) {
                         Text(l10n.t("chats.synchronizing"))
                             .font(.footnote)
@@ -253,7 +275,7 @@ public struct ChatListScreen: View {
                             .accessibilityAddTraits(.updatesFrequently)
                     }
                 }
-                if let keysUpdatingLabel, !viewModel.synchronizing {
+                if let keysUpdatingLabel, !viewModel.synchronizing, archive == nil {
                     ToolbarItem(placement: .navigationBarLeading) { keysUpdatingLabel }
                 }
                 // ADR-0099 step 3 — a suspended account starts nothing.
@@ -631,6 +653,15 @@ public struct ChatListScreen: View {
             }
         } else {
             let quietCall = callHost.quietIncomingCall
+            // Navigation 2.2 step 3 — archived conversations are never in the
+            // chats list: one bar at the bottom opens them; while searching,
+            // the archived matches follow under a divider.
+            let section = ArchivedListSplit.split(
+                visible,
+                isArchived: { $0.archived },
+                isPinned: { row in folder.map { ChatFolders.isPinned(row, in: $0) } ?? row.pinned },
+                searching: !query.isEmpty,
+                archiveOpen: false)
             List {
                 listNotices
                 ForEach(invited) { contact in
@@ -638,40 +669,25 @@ public struct ChatListScreen: View {
                         .listRowSeparator(.hidden)
                         .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                 }
-                ForEach(visible) { row in
-                    VStack(spacing: 8) {
-                        Button { onOpen(row) } label: {
-                            ConversationRowView(row: row, timeLabel: timeLabel(row), playsVideoOnHover: true)
-                        }
-                        .buttonStyle(.plain)
-                        // `docs/ux/calls.md` section 2.1.1 — a muted
-                        // conversation's ringing call is answerable from its own
-                        // row, with no navigation. Outside the row's own tap
-                        // target on purpose: a button nested in another button's
-                        // label does not reliably receive the tap, and opening
-                        // the chat has to keep working while the offer stands.
-                        if let quietCall, QuietIncomingCallPresentation.showsOnListRow(
-                            // The offer names a GROUP; the row is a
-                            // conversation (ADR-0073 R.5).
-                            quietCall, rowId: viewModel.headGroupIdHex(ofRow: row.id)) {
-                            QuietIncomingCallRowActions(
-                                call: quietCall,
-                                onAccept: {
-                                    callHost.acceptIncomingCall(withVideo: quietCall.video)
-                                },
-                                onDecline: { callHost.declineIncomingCall() }
-                            )
-                        }
+                ForEach(section.top) { row in
+                    conversationListRow(row, folder: folder, quietCall: quietCall)
+                }
+                if section.divider {
+                    // A bare Divider() as a List row lays out vertically and
+                    // takes the 44 pt minimum row height; a 1 pt rule does not.
+                    Rectangle()
+                        .fill(Color.lakkoBorder)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 1)
+                        .padding(.vertical, 6)
+                        .accessibilityHidden(true)
+                        .accessibilityIdentifier("archived-divider")
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                    ForEach(section.archived) { row in
+                        conversationListRow(row, folder: folder, quietCall: quietCall)
                     }
-                    .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
-                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                        rowActions(row: row, folder: folder)
-                    }
-                    // Spec section 2.1, Per platform — the row's own menu is a
-                    // long press on both natives: the swipe's actions plus the
-                    // folder items (`docs/ux/chat-folders.md` section 5).
-                    .lakkoLongPressMenu { rowMenuItems(row: row, folder: folder) }
                 }
                 // ADR-0060 — the people this device knows, then what the
                 // network found, in the same list with no heading (UX section
@@ -694,10 +710,214 @@ public struct ChatListScreen: View {
                 }
             }
             .listStyle(.plain)
+            // The archive divider row is 13 pt tall; every other row is taller
+            // than the default minimum on its own.
+            .environment(\.defaultMinListRowHeight, 1)
             // Rebuilt on a layout-direction flip: a UIKit-backed List keeps the
             // mirroring it was built with (see SettingsScreen).
             .id(l10n.layoutDirection)
+            // Fixed under the scrolling list, above the tab bar: never a row
+            // of the list, so it stays put while the list scrolls.
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if let count = section.barCount {
+                    archivedBar(count: count, tag: folder.map { ChatFolders.hex($0.folderId) } ?? "")
+                }
+            }
         }
+    }
+
+    // MARK: - Archive (navigation 2.2 step 3)
+
+    /// The archive while it is open: the folder it was opened in (`nil` for
+    /// All chats) and its archived rows, filtered by the search typed in it.
+    private struct OpenArchive {
+        let folder: FolderView?
+        let rows: [ConversationListRow]
+    }
+
+    /// The open archive, or `nil` when the chats list shows: never opened,
+    /// gone back, its folder deleted, or emptied with nothing typed (the
+    /// shared rule closes it by itself).
+    private var openArchive: OpenArchive? {
+        guard let tag = archiveTag else { return nil }
+        let folder: FolderView?
+        if tag.isEmpty {
+            folder = nil
+        } else {
+            guard let found = deviceGroupSync.folders.first(where: { ChatFolders.hex($0.folderId) == tag })
+            else { return nil }
+            folder = found
+        }
+        let matches = rows
+        let base = folder.map { ChatFolders.rows(in: $0, from: matches) } ?? matches
+        let section = ArchivedListSplit.split(
+            base,
+            isArchived: { $0.archived },
+            isPinned: { row in folder.map { ChatFolders.isPinned(row, in: $0) } ?? row.pinned },
+            searching: !query.isEmpty,
+            archiveOpen: true)
+        guard section.pane == .archive else { return nil }
+        return OpenArchive(folder: folder, rows: section.archived)
+    }
+
+    /// The chats list, with the archive drawn over it while open. The chats
+    /// list stays alive underneath, so going back finds it where it was.
+    @ViewBuilder
+    private func panel(archive: OpenArchive?) -> some View {
+        ZStack {
+            content
+                .opacity(archive == nil ? 1 : 0)
+                .allowsHitTesting(archive == nil)
+                .accessibilityHidden(archive != nil)
+            // A container that always exists, so the gate below flips the
+            // moment the archive closes: a leaving view keeps the modifiers
+            // it had, and without this a tap during the exit transition
+            // still opened an archived row (seen on the simulator).
+            ZStack {
+                if let archive {
+                    archivePage(archive)
+                        .background(Color.lakkoSurface)
+                        .transition(.move(edge: .trailing))
+                }
+            }
+            .allowsHitTesting(archive != nil)
+        }
+        .animation(.easeInOut(duration: 0.25), value: archive == nil)
+    }
+
+    /// The archived conversations in their order, the same rows and swipe
+    /// actions as the chats list. A search typed here searches the archive
+    /// alone.
+    @ViewBuilder
+    private func archivePage(_ archive: OpenArchive) -> some View {
+        let quietCall = callHost.quietIncomingCall
+        GeometryReader { geo in
+            List {
+                if archive.rows.isEmpty {
+                    Text(l10n.t("search.nothing_found"))
+                        .foregroundStyle(Color.lakkoTextMuted)
+                        .frame(maxWidth: .infinity)
+                        .multilineTextAlignment(.center)
+                        .padding(.top, 80)
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                }
+                ForEach(archive.rows) { row in
+                    conversationListRow(row, folder: archive.folder, quietCall: quietCall, inArchive: true)
+                }
+            }
+            .listStyle(.plain)
+            .id(l10n.layoutDirection)
+            .accessibilityIdentifier("archive-list")
+            // The platform's back gesture: a swipe from the leading edge.
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 24, coordinateSpace: .local)
+                    .onEnded { value in
+                        let fromLeading = layoutDirection == .rightToLeft
+                            ? value.startLocation.x > geo.size.width - 28
+                            : value.startLocation.x < 28
+                        let forward = layoutDirection == .rightToLeft
+                            ? -value.translation.width : value.translation.width
+                        if fromLeading && forward > 80 && abs(value.translation.height) < forward {
+                            archiveTag = nil
+                        }
+                    })
+        }
+    }
+
+    /// The archive's back control, in the navigation bar beside its title.
+    private var archiveBackButton: some View {
+        Button {
+            archiveTag = nil
+        } label: {
+            LkIconView(.chevronBack, size: 22, relativeTo: .body)
+                .foregroundStyle(Color.lakkoAccent)
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(l10n.t("common.back"))
+        .accessibilityIdentifier("archive-header")
+    }
+
+    /// One conversation row of the list, with its swipe and long-press menus.
+    @ViewBuilder
+    private func conversationListRow(
+        _ row: ConversationListRow, folder: FolderView?, quietCall: QuietIncomingCall?,
+        inArchive: Bool = false
+    ) -> some View {
+                VStack(spacing: 8) {
+                    Button { onOpen(row) } label: {
+                        ConversationRowView(
+                            row: row, timeLabel: timeLabel(row), playsVideoOnHover: true,
+                            marksArchived: !inArchive)
+                    }
+                    .buttonStyle(.plain)
+                    // `docs/ux/calls.md` section 2.1.1 — a muted
+                    // conversation's ringing call is answerable from its own
+                    // row, with no navigation. Outside the row's own tap
+                    // target on purpose: a button nested in another button's
+                    // label does not reliably receive the tap, and opening
+                    // the chat has to keep working while the offer stands.
+                    if let quietCall, QuietIncomingCallPresentation.showsOnListRow(
+                        // The offer names a GROUP; the row is a
+                        // conversation (ADR-0073 R.5).
+                        quietCall, rowId: viewModel.headGroupIdHex(ofRow: row.id)) {
+                        QuietIncomingCallRowActions(
+                            call: quietCall,
+                            onAccept: {
+                                callHost.acceptIncomingCall(withVideo: quietCall.video)
+                            },
+                            onDecline: { callHost.declineIncomingCall() }
+                        )
+                    }
+                }
+                .listRowSeparator(.hidden)
+                .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                    rowActions(row: row, folder: folder)
+                }
+                // Spec section 2.1, Per platform — the row's own menu is a
+                // long press on both natives: the swipe's actions plus the
+                // folder items (`docs/ux/chat-folders.md` section 5).
+                .lakkoLongPressMenu { rowMenuItems(row: row, folder: folder) }
+
+    }
+
+    /// Navigation 2.2 step 3 — the "Archived" bar fixed to the bottom of the
+    /// list: a tap opens the archive in place of the chats list.
+    private func archivedBar(count: Int, tag: String) -> some View {
+        Button {
+            archiveTag = tag
+        } label: {
+            HStack(spacing: 12) {
+                LkIconView(.archive, size: 20, relativeTo: .body)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .frame(width: 28)
+                Text(l10n.t("chats.archived.row"))
+                    .font(.body)
+                    .foregroundStyle(Color.lakkoText)
+                Spacer()
+                Text(count.formatted(.number.locale(l10n.locale)))
+                    .foregroundStyle(Color.lakkoTextMuted)
+                LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
+                    .foregroundStyle(Color.lakkoTextMuted)
+            }
+            .padding(.horizontal, 16)
+            .frame(minHeight: 48)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(Color.lakkoSurface)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color.lakkoBorder)
+                .frame(height: 0.5)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(l10n.t("chats.archived.row_a11y", counts: ["count": UInt64(count)]))
+        .accessibilityAddTraits(.isButton)
+        .accessibilityIdentifier("archived-bar")
     }
 
     /// ADR-0079 section 4 — the pending contacts with no one-to-one yet,
@@ -1143,6 +1363,10 @@ struct ConversationRowView: View {
     /// (or group) video while a pointer hovers the row; other lists drawing
     /// this row (Forward to, the folder picker) keep the still.
     var playsVideoOnHover: Bool = false
+    /// Navigation 2.2 step 3 — an archived row is dimmed and carries the
+    /// archive glyph where it stands among other rows (a chats-view search);
+    /// inside the archive view everything is archived, so neither is drawn.
+    var marksArchived: Bool = true
 
     /// A pointer (iPad trackpad or mouse) is over the row. `.onHover` never
     /// fires for a finger, so on a touch-only screen the still stays.
@@ -1189,7 +1413,7 @@ struct ConversationRowView: View {
         .padding(.vertical, 4)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .opacity(row.archived ? 0.6 : 1)
+        .opacity(row.archived && marksArchived ? 0.6 : 1)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityText)
     }
@@ -1207,7 +1431,7 @@ struct ConversationRowView: View {
                 LkIconView(.pinFill, size: 14, relativeTo: .caption2)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
-            if row.archived {
+            if row.archived && marksArchived {
                 LkIconView(.archiveFill, size: 14, relativeTo: .caption2)
                     .foregroundStyle(Color.lakkoTextMuted)
             }

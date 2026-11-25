@@ -120,6 +120,11 @@ final class MultiJoinerCall {
         var onLive: (() -> Void)?
         /// Fired on a terminal (`closed` / `failed`) transition.
         var onEnded: (() -> Void)?
+        /// Fired instead of ``onEnded`` when the session failed because the
+        /// SFU refused this device: the call had already ended
+        /// (`ErrorCode::CallEnded`, sent in place of the Welcome). `nil` falls
+        /// back to ``onEnded``.
+        var onCallAlreadyEnded: (() -> Void)? = nil
         /// Joiner only: no committer admitted this client within the admission
         /// window — the call has no live committer.
         var onNoCommitter: (() -> Void)?
@@ -688,7 +693,11 @@ final class MultiJoinerCall {
             screenTracks.detachAll(ui: ui)
             ui.setScreenShare(nil)
             ui.setPhase(.ended(endedAt: Date()))
-            cbs.onEnded?()
+            if session.endedByServer, let alreadyEnded = cbs.onCallAlreadyEnded {
+                alreadyEnded()
+            } else {
+                cbs.onEnded?()
+            }
         case .idle:
             break
         }

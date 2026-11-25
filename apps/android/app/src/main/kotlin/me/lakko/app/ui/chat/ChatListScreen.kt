@@ -56,6 +56,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -310,6 +314,18 @@ public fun ChatListScreen(
         deviceGroupSync?.let { FolderActions(it, repository) }
     }
     val searching = query.isNotBlank()
+    // docs/ux/navigation.md 2.2, "Archived, as built (2026-11-25)" — whether
+    // the archive is shown in place of the chats list. Kept while the list
+    // exists, never stored or synced; the platform back returns to the chats.
+    var archiveOpen by rememberSaveable { mutableStateOf(false) }
+    androidx.activity.compose.BackHandler(enabled = archiveOpen) { archiveOpen = false }
+    val closeArchive = { archiveOpen = false }
+    val openArchive = { archiveOpen = true }
+    // Unarchiving the last one returns to the chats list by itself; the list
+    // below closes it for the view it shows, this for an emptied list.
+    LaunchedEffect(archiveOpen, searching, allRows) {
+        if (archiveOpen && !searching && allRows.none { it.archived }) archiveOpen = false
+    }
     // docs/ux/navigation.md section 4 / chat-folders.md — no folder bar over an
     // empty list (the web client never showed one), and none while searching.
     val showBar = folders.isNotEmpty() && !searching && rows.isNotEmpty()
@@ -333,6 +349,8 @@ public fun ChatListScreen(
             val id = folders.getOrNull(page - 1)?.idHex
             if (id != selectedFolderId) {
                 selectedFolderId = id
+                // The archive belongs to the tab it was opened in.
+                archiveOpen = false
                 FolderTabPrefs.save(context, id)
             }
         }
@@ -374,7 +392,11 @@ public fun ChatListScreen(
     Scaffold(
         modifier = modifier,
         topBar = {
-            TopAppBar(
+            // docs/ux/navigation.md 2.2 — while the archive is shown, its own
+            // header stands in place of the panel's: back and "Archived".
+            if (archiveOpen) {
+                ArchiveTopBar(onBack = closeArchive)
+            } else TopAppBar(
                 // docs/ux/connection-state.md: "Waiting for network..." /
                 // "Connecting..." in place of "Chats" while this device cannot
                 // reach the servers.
@@ -447,12 +469,12 @@ public fun ChatListScreen(
                 val openRequests = remember(requestsSent, state) {
                     requestsSent.filter { !repository.holdsGroup(it.idHex) }
                 }
-                if (!searching) {
+                if (!searching && !archiveOpen) {
                     RequestsSentRow(requests = openRequests, onAskAgain = { repository.askAgain(it) })
                 }
                 // docs/ux/chat-folders.md 2.1 — the bar exists once one folder
                 // does; a search hides it and searches everything (2.4).
-                if (showBar) {
+                if (showBar && !archiveOpen) {
                     FolderBar(
                         folders = folders,
                         rows = allRows,
@@ -497,7 +519,7 @@ public fun ChatListScreen(
                         }
                     // UX who-can-find-me 6.1 — the people half of the search
                     // field replaces the plain lookup row when it is wired.
-                    searching && foundNoRow && peopleSearch != null && peopleSession != null -> Column(
+                    searching && foundNoRow && !archiveOpen && peopleSearch != null && peopleSession != null -> Column(
                         modifier = Modifier
                             .fillMaxSize()
                             .verticalScroll(rememberScrollState()),
@@ -526,9 +548,14 @@ public fun ChatListScreen(
                         handlers = rowHandlers,
                         invited = visibleInvited,
                         onOpenPendingChat = onOpenPendingChat,
+                        searching = searching,
+                        archiveOpen = archiveOpen,
+                        onOpenArchive = openArchive,
+                        onCloseArchive = closeArchive,
                         // UX who-can-find-me 6.1 — people under the matching
-                        // conversations.
-                        footer = if (searching && peopleSearch != null && peopleSession != null) {
+                        // conversations; a search in the archive searches the
+                        // archive alone.
+                        footer = if (searching && !archiveOpen && peopleSearch != null && peopleSession != null) {
                             {
                                 PeopleSearchSection(
                                     query = query,
@@ -558,9 +585,13 @@ public fun ChatListScreen(
                     else -> HorizontalPager(
                         state = pagerState,
                         modifier = Modifier.fillMaxSize(),
+                        userScrollEnabled = !archiveOpen,
                         key = { page -> if (page == 0) "all" else folders.getOrNull(page - 1)?.idHex ?: "gone-$page" },
                     ) { page ->
                         val folder = folders.getOrNull(page - 1)
+                        // The archive belongs to the page it was opened on; a
+                        // neighbour composed while paging never shows or closes it.
+                        val pageArchiveOpen = archiveOpen && page == pagerState.currentPage
                         if (folder == null) {
                             if (rows.isEmpty() && invited.isEmpty()) {
                                 if (restoredChats == me.lakko.app.backup.RestoredChatsHint.CARD) {
@@ -575,14 +606,25 @@ public fun ChatListScreen(
                                     handlers = rowHandlers,
                                     invited = invited,
                                     onOpenPendingChat = onOpenPendingChat,
+                                    archiveOpen = pageArchiveOpen,
+                                    onOpenArchive = openArchive,
+                                    onCloseArchive = closeArchive,
                                 )
                             }
                         } else {
                             val inFolder = remember(folder, allRows) { folderRows(folder, allRows) }
                             if (inFolder.isEmpty()) {
+                                if (pageArchiveOpen && !searching) LaunchedEffect(Unit) { closeArchive() }
                                 EmptyFolderPanel(onEdit = { onEditFolder(folder.idHex) })
                             } else {
-                                ConversationList(rows = inFolder, folder = folder, handlers = rowHandlers)
+                                ConversationList(
+                                    rows = inFolder,
+                                    folder = folder,
+                                    handlers = rowHandlers,
+                                    archiveOpen = pageArchiveOpen,
+                                    onOpenArchive = openArchive,
+                                    onCloseArchive = closeArchive,
+                                )
                             }
                         }
                     }
@@ -831,14 +873,42 @@ private fun ConversationList(
     /** ADR-0079 — the pending contacts, drawn first like any row. */
     invited: List<me.lakko.app.contacts.PendingContact> = emptyList(),
     onOpenPendingChat: (String) -> Unit = {},
+    /** Something is typed in the search field. */
+    searching: Boolean = false,
+    /** The archive is open (navigation 2.2): shown in place of the chats. */
+    archiveOpen: Boolean = false,
+    onOpenArchive: () -> Unit = {},
+    onCloseArchive: () -> Unit = {},
 ) {
+    // docs/ux/navigation.md 2.2, "Archived, as built (2026-11-25)" — archived
+    // conversations are never in the chats list: one bar at the bottom of the
+    // panel opens them as a list of their own; while searching in the chats
+    // view, archived matches stand under a divider. Inside a folder `pinned`
+    // is the folder's own pin (`folderRows`), so the folder's own rule holds.
+    val section = remember(rows, searching, archiveOpen) {
+        me.lakko.app.chat.ArchivedListSplit.split(
+            rows,
+            searching,
+            archiveOpen,
+            isArchived = { it.archived },
+            isPinned = { it.pinned },
+        )
+    }
+    // Unarchiving the last one returns to the chats list by itself.
+    LaunchedEffect(archiveOpen, section.archiveShown) {
+        if (archiveOpen && !section.archiveShown) onCloseArchive()
+    }
     // The rows are keyed, so a conversation arriving at the top (a group just
     // joined, the groups a cold start loads after the rest) is inserted ABOVE
     // the first visible row and Compose keeps that row where it was: the
     // newest chats sat above the screen's edge after a launch and looked gone
     // (seen on a Pixel 2026-11-10). A list the person left at the top stays at
-    // the top; one they scrolled down keeps its place.
+    // the top; one they scrolled down keeps its place. The chats list keeps
+    // its own position while the archive is shown, so back returns to it.
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    val archiveState = androidx.compose.runtime.key(archiveOpen) {
+        androidx.compose.foundation.lazy.rememberLazyListState()
+    }
     var leftAtTop by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(true) }
     androidx.compose.runtime.LaunchedEffect(listState) {
         androidx.compose.runtime.snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
@@ -847,45 +917,175 @@ private fun ConversationList(
             }
         }
     }
-    val firstKey = invited.firstOrNull()?.let { "invited:${it.accountIdHex}" }
-        ?: rows.firstOrNull()?.let { "${it.kind}:${it.id}" }
+    val chatInvited = if (section.archiveShown) emptyList() else invited
+    val firstKey = chatInvited.firstOrNull()?.let { "invited:${it.accountIdHex}" }
+        ?: section.chatRows.firstOrNull()?.let { "${it.kind}:${it.id}" }
     androidx.compose.runtime.LaunchedEffect(firstKey) {
         if (leftAtTop && firstKey != null) listState.scrollToItem(0)
     }
-    LazyColumn(
-        state = listState,
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(vertical = 4.dp),
-    ) {
-        items(items = invited, key = { "invited:${it.accountIdHex}" }) { contact ->
-            InvitedChatRow(contact = contact, onClick = { onOpenPendingChat(contact.accountIdHex) })
-        }
-        items(items = rows, key = { "${it.kind}:${it.id}" }) { row ->
-            val menu = RowMenuModel(row = row, folder = folder, handlers = handlers)
-            if (row.kind == ConversationRowKind.CHANNEL) {
-                // UX group-and-channel-privacy 12 — the same row as a group's:
-                // the same glyphs, swipes and menu; a tap opens the channel.
-                SwipeableThreadRow(row = row, menu = menu, onClick = { handlers.onOpenChannel(row.id) })
-            } else {
-                SwipeableThreadRow(
-                    row = row,
-                    menu = menu,
-                    onClick = { handlers.onOpenThread(row.id) },
-                    // Section 2.1.1 — the row carries Accept and Decline for
-                    // exactly the conversation the muted call is ringing in,
-                    // and for no other.
-                    quietCallOffer = handlers.quietCallOffer?.takeIf { it.isFor(row.headId) },
-                    // The same two entry points the full-screen ring screen
-                    // drives.
-                    onAcceptCall = handlers.onAcceptCall,
-                    onDeclineCall = handlers.onDeclineCall,
-                )
+    Column(modifier = Modifier.fillMaxSize()) {
+        if (section.archiveShown && searching && section.archivedRows.isEmpty()) {
+            Box(Modifier.weight(1f)) { NoMatchPanel() }
+        } else {
+            androidx.compose.runtime.key(section.archiveShown) {
+                LazyColumn(
+                    state = if (section.archiveShown) archiveState else listState,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentPadding = PaddingValues(vertical = 4.dp),
+                ) {
+                    items(items = chatInvited, key = { "invited:${it.accountIdHex}" }) { contact ->
+                        InvitedChatRow(contact = contact, onClick = { onOpenPendingChat(contact.accountIdHex) })
+                    }
+                    items(items = section.chatRows, key = { "${it.kind}:${it.id}" }) { row ->
+                        ConversationListItem(row = row, folder = folder, handlers = handlers)
+                    }
+                    if (section.divider && !section.archiveShown) {
+                        item(key = "archived-divider") {
+                            androidx.compose.material3.HorizontalDivider(
+                                modifier = Modifier
+                                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                                    .testTag("archived-divider"),
+                                color = MaterialTheme.colorScheme.outlineVariant,
+                            )
+                        }
+                    }
+                    items(items = section.archivedRows, key = { "${it.kind}:${it.id}" }) { row ->
+                        // Full strength inside the archive; dimmed and marked
+                        // as archived under the divider of a chats search.
+                        ConversationListItem(
+                            row = row,
+                            folder = folder,
+                            handlers = handlers,
+                            markArchived = !section.archiveShown,
+                        )
+                    }
+                    if (footer != null) {
+                        item(key = "people-search") { footer() }
+                    }
+                }
             }
         }
-        if (footer != null) {
-            item(key = "people-search") { footer() }
+        section.barCount?.let { count -> ArchivedBar(count = count, onClick = onOpenArchive) }
+    }
+}
+
+/** One conversation row of the list, with its swipes and menu. */
+@Composable
+private fun ConversationListItem(
+    row: ConversationListRow,
+    folder: ChatFolder?,
+    handlers: RowHandlers,
+    /** `false` inside the archive: every row there is archived. */
+    markArchived: Boolean = true,
+) {
+    val menu = RowMenuModel(row = row, folder = folder, handlers = handlers)
+    if (row.kind == ConversationRowKind.CHANNEL) {
+        // UX group-and-channel-privacy 12 — the same row as a group's:
+        // the same glyphs, swipes and menu; a tap opens the channel.
+        SwipeableThreadRow(
+            row = row,
+            menu = menu,
+            onClick = { handlers.onOpenChannel(row.id) },
+            markArchived = markArchived,
+        )
+    } else {
+        SwipeableThreadRow(
+            row = row,
+            menu = menu,
+            onClick = { handlers.onOpenThread(row.id) },
+            // Section 2.1.1 — the row carries Accept and Decline for
+            // exactly the conversation the muted call is ringing in,
+            // and for no other.
+            quietCallOffer = handlers.quietCallOffer?.takeIf { it.isFor(row.headId) },
+            // The same two entry points the full-screen ring screen
+            // drives.
+            onAcceptCall = handlers.onAcceptCall,
+            onDeclineCall = handlers.onDeclineCall,
+            markArchived = markArchived,
+        )
+    }
+}
+
+
+/**
+ * Navigation 2.2, "Archived, as built (2026-11-25)" — the one bar the archived
+ * conversations of the view shown sit behind, fixed to the bottom of the
+ * panel under the scrolling list: archive glyph, the word, their number
+ * (muted), a chevron. A tap opens the archive in place of the chats list.
+ */
+@Composable
+private fun ArchivedBar(count: Int, onClick: () -> Unit) {
+    val label = t("chats.archived.row_a11y", emptyMap(), mapOf("count" to count.toULong()))
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surface),
+    ) {
+        androidx.compose.material3.HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(role = Role.Button, onClick = onClick)
+                .semantics(mergeDescendants = true) { contentDescription = label }
+                .testTag("archived-bar")
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+        ) {
+            LkIcon(
+                R.drawable.ic_lk_archive,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.width(12.dp))
+            Text(
+                text = t("chats.archived.row"),
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = count.toString(),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.width(6.dp))
+            LkIcon(
+                R.drawable.ic_lk_chevron_forward,
+                contentDescription = null,
+                size = 16.dp,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
+}
+
+/**
+ * Navigation 2.2 — the panel's header while the archive is shown in place of
+ * the chats list: a back control and the title "Archived", where "Chats" and
+ * the New button stand otherwise. The search field below it searches the
+ * archive.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ArchiveTopBar(onBack: () -> Unit) {
+    TopAppBar(
+        modifier = Modifier.testTag("archive-header"),
+        navigationIcon = {
+            IconButton(onClick = onBack) {
+                LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
+            }
+        },
+        title = {
+            Box {
+                Text(
+                    text = t("chats.archived.row"),
+                    modifier = Modifier.semantics { heading() },
+                )
+                me.lakko.app.ui.ConnectionAnnouncer()
+            }
+        },
+    )
 }
 
 /**
@@ -1342,6 +1542,7 @@ private fun SwipeableThreadRow(
     quietCallOffer: me.lakko.app.calls.QuietCallOffer? = null,
     onAcceptCall: (withVideo: Boolean) -> Unit = {},
     onDeclineCall: () -> Unit = {},
+    markArchived: Boolean = true,
 ) {
     val dismissState = rememberSwipeToDismissBoxState(
         confirmValueChange = { value ->
@@ -1402,6 +1603,7 @@ private fun SwipeableThreadRow(
                 quietCallOffer = quietCallOffer,
                 onAcceptCall = onAcceptCall,
                 onDeclineCall = onDeclineCall,
+                markArchived = markArchived,
             )
         }
     }
@@ -1416,6 +1618,7 @@ private fun ThreadRow(
     quietCallOffer: me.lakko.app.calls.QuietCallOffer? = null,
     onAcceptCall: (withVideo: Boolean) -> Unit = {},
     onDeclineCall: () -> Unit = {},
+    markArchived: Boolean = true,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     Box {
@@ -1427,6 +1630,7 @@ private fun ThreadRow(
                     onLongClick = { menuOpen = true },
                 ),
                 hoverPlaysVideo = true,
+                markArchived = markArchived,
             )
             // docs/ux/calls.md section 2.1.1 — the muted conversation's call is
             // answerable from the row, which is where the person is already
@@ -1617,6 +1821,9 @@ internal fun ConversationRowBody(
     /** UX profile-screen section 7: in the chat list a profile video plays
      *  while a pointer hovers the row; pickers keep the still. */
     hoverPlaysVideo: Boolean = false,
+    /** Navigation 2.2 — dim an archived row and mark it with the archive
+     *  glyph; `false` inside the archive, where every row is archived. */
+    markArchived: Boolean = true,
 ) {
     val (hover, playVideo) = me.lakko.app.ui.components.rememberRowHoverPlaysVideo(hoverPlaysVideo)
     Row(
@@ -1624,7 +1831,7 @@ internal fun ConversationRowBody(
         modifier = modifier
             .then(hover)
             .fillMaxWidth()
-            .alpha(if (row.archived) 0.6f else 1f)
+            .alpha(if (row.archived && markArchived) 0.6f else 1f)
             .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
         LakkoAvatar(
@@ -1693,7 +1900,7 @@ internal fun ConversationRowBody(
                         size = LkIconSize.Mark,
                     )
                 }
-                if (row.archived) {
+                if (row.archived && markArchived) {
                     Spacer(Modifier.width(6.dp))
                     LkIcon(
                         R.drawable.ic_lk_archive_fill,

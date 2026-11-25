@@ -36,6 +36,10 @@ export function ChannelRow(props: {
   pinned: boolean;
   muted: boolean;
   archived: boolean;
+  /** Draw the row as archived (dimmed, the archive glyph): false inside the
+   *  archive view, where every row is archived (navigation.md 2.2 step 3).
+   *  Defaults to `archived`. */
+  markArchived?: boolean;
   /** Pin is disabled: the open folder already holds its most pins. */
   pinBlocked: boolean;
   /** The channel is the one open beside the list. */
@@ -48,7 +52,7 @@ export function ChannelRow(props: {
     <A
       href={paths.channel(props.row.id)}
       class="lk-row"
-      classList={{ selected: props.selected, archived: props.archived }}
+      classList={{ selected: props.selected, archived: props.markArchived ?? props.archived }}
       activeClass=""
       inactiveClass=""
       onContextMenu={(e) => {
@@ -85,7 +89,7 @@ export function ChannelRow(props: {
             <Show when={props.pinned}>
               <Icon name="pin-fill" size={14} title={t("chats.row.pinned")} />
             </Show>
-            <Show when={props.archived}>
+            <Show when={props.markArchived ?? props.archived}>
               <Icon name="archive-fill" size={14} />
             </Show>
             <Show when={props.row.unread > 0}>

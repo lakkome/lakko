@@ -31,7 +31,7 @@ import Recover from "./Recover";
 import Signup from "./Signup";
 import Home from "./Home";
 import ChatsLayout from "./ChatsLayout";
-import GroupsLayout, { GroupsIndex } from "./GroupsLayout";
+import { GroupsIndex } from "./GroupsLayout";
 import NewGroup from "./NewGroup";
 import Saved from "./Saved";
 import Contacts from "./Contacts";
@@ -126,7 +126,11 @@ export const routes: RouteDefinition[] = [
       </RequireSession>
     ),
     children: [
-      // Chats: the list pane stays mounted across `/` and `/chat/:id`.
+      // Chats: ONE list pane for every conversation, kept mounted while the
+      // person moves between them. Groups open at `/groups/:id` (Back returns
+      // to `/groups`), but under this same layout: as a sibling layout of its
+      // own, every move between a chat and a group unmounted the list and
+      // drew it again from empty (seen on the desktop app, 2026-11-25).
       {
         path: "/",
         component: ChatsLayout,
@@ -139,17 +143,14 @@ export const routes: RouteDefinition[] = [
           // create form too. `/channel/new` precedes the id pattern.
           { path: paths.channelNew, component: NewChannel },
           { path: channelRoutePattern, component: ChannelConversation },
-        ],
-      },
-      // Groups: the same chat view, beside the group list; Back returns to it.
-      {
-        path: paths.groups,
-        component: GroupsLayout,
-        children: [
-          { path: "/", component: GroupsIndex },
-          // `/new` MUST precede `/:id` so the id pattern does not swallow it.
-          { path: "/new", component: NewGroup },
-          { path: groupChatRoutePattern, component: () => <Chat backTo={paths.groups} /> },
+          { path: paths.groups, component: GroupsIndex },
+          // `/groups/new` MUST precede `/groups/:id` so the id pattern does
+          // not swallow it.
+          { path: paths.newGroup, component: NewGroup },
+          {
+            path: `${paths.groups}${groupChatRoutePattern}`,
+            component: () => <Chat backTo={paths.groups} />,
+          },
         ],
       },
       // `/contacts` and `/contacts/:key` are one route: the second is the

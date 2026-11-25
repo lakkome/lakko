@@ -4153,6 +4153,14 @@
       "text": "إلغاء التثبيت",
       "status": "machine"
     },
+    "chats.archived.row": {
+      "text": "المؤرشفة",
+      "status": "machine"
+    },
+    "chats.archived.row_a11y": {
+      "text": "{count, plural, zero {المؤرشفة، # محادثة} one {المؤرشفة، محادثة واحدة} two {المؤرشفة، محادثتان} few {المؤرشفة، # محادثات} many {المؤرشفة، # محادثة} other {المؤرشفة، # محادثة}}",
+      "status": "machine"
+    },
     "chats.compose": {
       "text": "جديد",
       "status": "machine"

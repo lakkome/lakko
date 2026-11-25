@@ -4321,6 +4321,14 @@
       "text": "Открепить",
       "status": "machine"
     },
+    "chats.archived.row": {
+      "text": "Архив",
+      "status": "machine"
+    },
+    "chats.archived.row_a11y": {
+      "text": "{count, plural, one {Архив, # беседа} few {Архив, # беседы} many {Архив, # бесед} other {Архив, # беседы}}",
+      "status": "machine"
+    },
     "chats.compose": {
       "text": "Создать",
       "status": "machine"

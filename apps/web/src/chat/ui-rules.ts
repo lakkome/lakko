@@ -27,6 +27,10 @@ export type UiRules = Pick<
   | "ConversationKind"
   | "ConversationRow"
   | "orderConversations"
+  // Where the archived conversations sit: behind one "Archived" bar at the
+  // bottom of the panel, opened as a list of their own
+  // (`docs/ux/navigation.md` 2.2 step 3).
+  | "archivedSection"
   | "bareName"
   | "looksLikeAName"
   // What a conversation's name opens, and what is on it

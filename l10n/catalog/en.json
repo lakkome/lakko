@@ -4723,6 +4723,14 @@
       "text": "Unpin",
       "comment": "Action on a pinned conversation: stop keeping it at the top of the list."
     },
+    "chats.archived.row": {
+      "text": "Archived",
+      "comment": "Chat list: the bar fixed to the bottom of the list that the archived conversations are kept behind; tapping it opens them as their own list. Also the title of that list. A muted count of archived conversations stands at the end of the bar."
+    },
+    "chats.archived.row_a11y": {
+      "text": "{count, plural, one {Archived, # conversation} other {Archived, # conversations}}",
+      "comment": "Accessible name of the folded Archived row of the chat list; count is the number of archived conversations."
+    },
     "chats.compose": {
       "text": "New",
       "comment": "Button at the top of the conversation list that opens the menu for starting a chat, a group or a channel."

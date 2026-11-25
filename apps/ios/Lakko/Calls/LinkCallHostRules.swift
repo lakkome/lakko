@@ -37,6 +37,13 @@ enum LinkCallHostRules {
         case live
         /// The session closed or failed.
         case ended
+        /// The call had already ended when this device arrived: the SFU
+        /// answered `CallEnded` in place of its Welcome (the room stood empty
+        /// past its grace), or the room probe said `ended` before the join.
+        /// The link is spent (`docs/ux/calls.md`, "A link is one call"), and
+        /// unlike ``ended`` this device was never in the call, so the landing
+        /// says `The call has ended.` instead of sending the person back.
+        case spent
         /// Joiner: nobody admitted this device within the admission window —
         /// the call has no live committer.
         case dead
@@ -49,6 +56,8 @@ enum LinkCallHostRules {
         case signalingOpen(owner: Bool)
         case joined
         case ended
+        /// The SFU refused the join because the call had already ended.
+        case callAlreadyEnded
         case noCommitter
         case error
     }
@@ -64,9 +73,9 @@ enum LinkCallHostRules {
     /// BEFORE it reports why — an admission timeout closes the session
     /// (reported `ended`) and then reports `noCommitter`; a refused redirect
     /// closes it and then reports `error`. The later, specific report replaces
-    /// `ended`. `dead` and `error` are final.
+    /// `ended`. `dead`, `spent` and `error` are final.
     static func reduce(_ phase: Phase, _ event: Event) -> Phase {
-        if phase == .dead || phase == .error { return phase }
+        if phase == .dead || phase == .error || phase == .spent { return phase }
         switch event {
         case .signalingOpen(let owner):
             // The owner is live from founding; a joiner still starting now waits
@@ -77,6 +86,11 @@ enum LinkCallHostRules {
             return phase == .starting || phase == .waiting ? .live : phase
         case .ended:
             return occupiesSlot(phase) ? .ended : phase
+        case .callAlreadyEnded:
+            // Sent in place of the Welcome, so never after the call was live;
+            // an `ended` reported a moment earlier for the same teardown is
+            // replaced, as a later specific report replaces it.
+            return occupiesSlot(phase) || phase == .ended ? .spent : phase
         case .noCommitter:
             return phase == .live ? phase : .dead
         case .error:
@@ -194,7 +208,7 @@ enum LinkCallHostRules {
             return Notice(text: Localization.text("call.link.notice.connecting"), actions: [.open, .cancel])
         case .waiting:
             return Notice(text: Localization.text("call.link.waiting"), actions: [.open, .cancel])
-        case .ended:
+        case .ended, .spent:
             return Notice(text: Localization.text("call.link.ended"), actions: [.dismiss])
         case .dead:
             return Notice(text: Localization.text("call.link.dead"), actions: [.dismiss])

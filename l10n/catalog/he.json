@@ -4153,6 +4153,14 @@
       "text": "ביטול הצמדה",
       "status": "machine"
     },
+    "chats.archived.row": {
+      "text": "בארכיון",
+      "status": "machine"
+    },
+    "chats.archived.row_a11y": {
+      "text": "{count, plural, one {בארכיון, שיחה אחת} two {בארכיון, שתי שיחות} other {בארכיון, # שיחות}}",
+      "status": "machine"
+    },
     "chats.compose": {
       "text": "חדש",
       "status": "machine"

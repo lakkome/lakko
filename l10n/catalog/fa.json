@@ -4153,6 +4153,14 @@
       "text": "برداشتن سنجاق",
       "status": "machine"
     },
+    "chats.archived.row": {
+      "text": "بایگانی‌شده",
+      "status": "machine"
+    },
+    "chats.archived.row_a11y": {
+      "text": "{count, plural, one {بایگانی‌شده، # گفتگو} other {بایگانی‌شده، # گفتگو}}",
+      "status": "machine"
+    },
     "chats.compose": {
       "text": "جدید",
       "status": "machine"

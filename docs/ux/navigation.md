@@ -108,6 +108,32 @@ difference - the row itself is the same row.
 3. Archived, newest first, below a divider - or hidden behind an "Archived"
    row when there are more than five, on the narrow layouts.
 
+**Archived, as built (2026-11-25, all clients; replaces the note of
+2026-11-24, maintainer).** Archived conversations are never in the chats list.
+On every width and for any number of them, one "Archived" bar is fixed to the
+bottom of the conversation panel, under the scrolling list and above nothing
+else of the panel: archive glyph, the word, the number of archived
+conversations (muted), a chevron. It is there only while at least one
+conversation in the view shown is archived. A tap opens the archive in the
+same panel in place of the chats list: a header with a back control and the
+title "Archived", then the archived conversations in their order; back (or the
+platform's back gesture) returns to the chats list at the scroll position it
+had. Unarchiving the last one returns to the chats list by itself. A pinned
+conversation that is also archived stays with the pins, so the archived part
+is the run of archived, unpinned rows at the end of the ordered list. Search
+in the chats view lists archived matches under the list's hairline divider
+after the other matches, with no bar while text is typed; search typed in the
+archive view searches the archive alone. Whether the archive is open is kept
+while the list exists (the web and desktop app: while the app runs) and is not
+stored or synced. A folder view follows the same rule for the archived rows it
+holds, with the folder's own pins; the bar counts that folder's archived rows.
+The order is unchanged (`order_conversations` /
+`order_conversations_in_folder`); the split is written once,
+`archived_section` in `crates/lakko-ui-rules` (`archivedSection` on both FFI
+surfaces: view, top count, archived count, bar, divider), and each client
+slices its ordered rows by the counts it returns (`archived-section.ts`,
+`ArchivedListSplit.swift`, `ArchivedListSplit.kt`).
+
 "Newest" is the last activity the person can see: a message, a post, a call
 row, a system row the timeline draws. A row that draws nothing does not move
 a conversation to the top.

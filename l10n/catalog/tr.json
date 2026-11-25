@@ -4153,6 +4153,14 @@
       "text": "Sabitlemeyi kaldır",
       "status": "machine"
     },
+    "chats.archived.row": {
+      "text": "Arşiv",
+      "status": "machine"
+    },
+    "chats.archived.row_a11y": {
+      "text": "{count, plural, one {Arşiv, # sohbet} other {Arşiv, # sohbet}}",
+      "status": "machine"
+    },
     "chats.compose": {
       "text": "Yeni",
       "status": "machine"

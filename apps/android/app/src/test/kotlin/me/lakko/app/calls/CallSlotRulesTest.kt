@@ -196,6 +196,17 @@ class CallSlotRulesTest {
     }
 
     @Test
+    fun `the SFU's CallEnded refusal is spent, final, and says the call has ended`() {
+        assertEquals(LinkCallPhase.SPENT, reduceLinkCallPhase(LinkCallPhase.WAITING, LinkCallEvent.CallAlreadyEnded))
+        assertEquals(LinkCallPhase.SPENT, reduceLinkCallPhase(LinkCallPhase.STARTING, LinkCallEvent.CallAlreadyEnded))
+        assertEquals(LinkCallPhase.SPENT, reduceLinkCallPhase(LinkCallPhase.ENDED, LinkCallEvent.CallAlreadyEnded))
+        assertEquals(LinkCallPhase.SPENT, reduceLinkCallPhase(LinkCallPhase.SPENT, LinkCallEvent.NoCommitter))
+        assertEquals(LinkCallPhase.SPENT, reduceLinkCallPhase(LinkCallPhase.SPENT, LinkCallEvent.Ended))
+        assertTrue(!linkCallOccupiesSlot(LinkCallPhase.SPENT))
+        assertEquals("The call has ended.", linkCallNotice(LinkCallPhase.SPENT, false, null)?.text?.en)
+    }
+
+    @Test
     fun `a Welcome that arrived before signaling-open reported keeps the call live`() {
         val live = reduceLinkCallPhase(LinkCallPhase.STARTING, LinkCallEvent.Joined)
         assertEquals(LinkCallPhase.LIVE, reduceLinkCallPhase(live, LinkCallEvent.SignalingOpen(owner = false)))

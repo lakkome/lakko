@@ -132,6 +132,7 @@ class JoinCallViewModelTest {
     private fun TestScope.harness(
         decodeLink: suspend (String, me.lakko.app.auth.IdentitySecrets?) -> CallLinkDecode =
             { _, _ -> CallLinkDecode.Opened(call) },
+        probeRoom: suspend (ByteArray) -> me.lakko.app.calls.SfuCallState? = { null },
     ): Harness {
         val auth = FakeAuth()
         val port = HostedCallsTest.FakeLinkPort()
@@ -157,6 +158,7 @@ class JoinCallViewModelTest {
                 typed.trim().ifEmpty { null }
             },
             drawGuestName = { "Guest ${++draws}" },
+            probeRoom = probeRoom,
         )
         advanceUntilIdle()
         return Harness(model, auth, host, port, savedNames)
@@ -385,5 +387,84 @@ class JoinCallViewModelTest {
         h.model.onLinkOpened(3L)
         advanceUntilIdle()
         assertTrue(h.model.uiState.value.guestName != second)
+    }
+
+    // MARK: A link to a call that has already ended (seen live 2026-11-24)
+
+    /** A signed-in person with a real account (not a guest). */
+    private fun signIn(auth: FakeAuth) {
+        auth.identitySecrets.value = IdentitySecrets(
+            accountId = ByteArray(16) { 7 },
+            exportKey = ByteArray(32),
+            accountIdentitySeed = ByteArray(64),
+            session = me.lakko.app.auth.SessionPair("token", Long.MAX_VALUE, "refresh", Long.MAX_VALUE, 1L),
+        )
+        auth.state.value = AuthState.Session(SessionAccount(accountIdB64 = "acct", username = "someone"))
+    }
+
+    @Test
+    fun `a CallEnded answer from the SFU on join leaves the page showing the ended state`() = runTest(dispatcher) {
+        val h = harness()
+        signIn(h.auth)
+        advanceUntilIdle()
+
+        h.model.onStart()
+        advanceUntilIdle()
+        assertEquals(JoinCallPhase.Waiting, h.model.uiState.value.phase)
+
+        // The SFU answered `CallEnded` in place of the Welcome.
+        val alreadyEnded = h.port.events?.onCallAlreadyEnded
+        assertTrue("the host listens for the refusal", alreadyEnded != null)
+        alreadyEnded!!.invoke()
+        advanceUntilIdle()
+
+        val phase = h.model.uiState.value.phase
+        assertEquals(JoinCallPhase.Spent, phase)
+        assertFalse("the page stays, saying the call has ended", joinCallReturnsToApp(phase, guest = false))
+    }
+
+    @Test
+    fun `a call that ends after joining still returns a signed-in person to the app`() = runTest(dispatcher) {
+        val h = harness()
+        signIn(h.auth)
+        advanceUntilIdle()
+
+        h.model.onStart()
+        advanceUntilIdle()
+        h.port.events!!.onJoined()
+        advanceUntilIdle()
+        assertEquals(JoinCallPhase.Live, h.model.uiState.value.phase)
+        h.port.events!!.onEnded()
+        advanceUntilIdle()
+
+        assertEquals(JoinCallPhase.Ended, h.model.uiState.value.phase)
+        assertTrue(joinCallReturnsToApp(JoinCallPhase.Ended, guest = false))
+        assertFalse(joinCallReturnsToApp(JoinCallPhase.Ended, guest = true))
+    }
+
+    @Test
+    fun `a room probe answering ended shows the ended state before Join`() = runTest(dispatcher) {
+        val probed = mutableListOf<ByteArray>()
+        val h = harness(probeRoom = { id ->
+            probed += id
+            me.lakko.app.calls.SfuCallState.ENDED
+        })
+        assertEquals(1, probed.size)
+        assertTrue(probed[0].contentEquals(call.callId))
+        assertEquals(JoinCallPhase.Spent, h.model.uiState.value.phase)
+        assertTrue("nothing was joined", h.port.requests.isEmpty())
+    }
+
+    @Test
+    fun `a room probe that is not ended changes nothing`() = runTest(dispatcher) {
+        for (answer in listOf(
+            null,
+            me.lakko.app.calls.SfuCallState.UNKNOWN,
+            me.lakko.app.calls.SfuCallState.LIVE,
+            me.lakko.app.calls.SfuCallState.CLOSING,
+        )) {
+            val h = harness(probeRoom = { answer })
+            assertEquals("answer $answer", JoinCallPhase.Idle, h.model.uiState.value.phase)
+        }
     }
 }

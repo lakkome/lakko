@@ -156,6 +156,11 @@ class MultiJoinerCall private constructor(
         val onLive: () -> Unit = {},
         /** Fired on a terminal (`closed` / `failed`) transition. */
         val onEnded: () -> Unit = {},
+        /** Fired instead of [onEnded] when the session failed because the SFU
+         *  refused this device: the call had already ended
+         *  (`ErrorCode::CallEnded`, sent in place of the Welcome). `null`
+         *  falls back to [onEnded]. */
+        val onCallAlreadyEnded: (() -> Unit)? = null,
         /** Joiner only: no committer admitted this client within the
          *  admission window — the call has no live committer. */
         val onNoCommitter: () -> Unit = {},
@@ -655,7 +660,8 @@ class MultiJoinerCall private constructor(
                 // The call's tracks are gone with its connection.
                 ui.clearRemoteCopyVideoTracks()
                 ui.setPhase(CallUiState.CallPhase.Ended(System.currentTimeMillis()))
-                opts.onEnded()
+                val alreadyEnded = opts.onCallAlreadyEnded
+                if (session.endedByServer && alreadyEnded != null) alreadyEnded() else opts.onEnded()
             }
             SfuCallSession.State.IDLE -> Unit
         }

@@ -54,3 +54,27 @@ export function parseSfuCallState(body: unknown): SfuCallState | null {
       return null;
   }
 }
+
+/**
+ * One probe of the state route (`sfuRoomStateUrl`): the parsed answer, or
+ * `null` on any failure (network, a non-2xx answer, a body that is not one of
+ * the four words). Never throws. No token, no credentials, no referrer
+ * (ADR-0078 section 2). `fetchImpl` is the browser's `fetch` in the app.
+ */
+export async function fetchSfuRoomState(
+  sfuBaseUrl: string,
+  roomHex: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<SfuCallState | null> {
+  try {
+    const res = await fetchImpl(sfuRoomStateUrl(sfuBaseUrl, roomHex), {
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    return parseSfuCallState((await res.json()) as unknown);
+  } catch {
+    return null;
+  }
+}

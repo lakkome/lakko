@@ -56,6 +56,11 @@ import me.lakko.app.calls.LinkCallRequest
 import me.lakko.app.calls.LinkCallSlot
 import me.lakko.app.calls.LinkCallStartOutcome
 import me.lakko.app.calls.ParsedCallInvite
+import me.lakko.app.calls.SfuCallState
+import me.lakko.app.calls.SfuConfig
+import me.lakko.app.calls.fetchSfuCallStateOverNetwork
+import me.lakko.app.calls.parseSfuCallState
+import me.lakko.app.calls.sfuCallStateUrl
 import me.lakko.app.calls.callIdHexOf
 import me.lakko.app.calls.hexKey
 import me.lakko.app.calls.linkCallOccupiesSlot
@@ -109,8 +114,22 @@ import me.lakko.app.ui.components.LkIcon
  */
 
 /** The landing screen's own state machine. "Waiting" is the ADR-0032
- *  joiner-side pre-admission phase; "Dead" is the no-live-committer timeout. */
-enum class JoinCallPhase { Idle, Starting, Waiting, Live, Ended, Dead, Error }
+ *  joiner-side pre-admission phase; "Dead" is the no-live-committer timeout;
+ *  "Spent" is a call that had already ended when the link was opened or
+ *  joined (the room probe said so, or the SFU refused the join with
+ *  `CallEnded`): `The call has ended.` stays on the page, unlike "Ended",
+ *  which sends a signed-in person back into the app. */
+enum class JoinCallPhase { Idle, Starting, Waiting, Live, Ended, Spent, Dead, Error }
+
+/**
+ * Whether the landing closes itself and sends the person back into the app
+ * (`docs/ux/call-links.md` section 5): only once a call they were in has
+ * ended, and never for a guest. A call that had already ended when they
+ * arrived ([JoinCallPhase.Spent]) stays and says so: closing would look like
+ * a Join that did nothing (seen live 2026-11-24).
+ */
+internal fun joinCallReturnsToApp(phase: JoinCallPhase, guest: Boolean): Boolean =
+    phase == JoinCallPhase.Ended && !guest
 
 /** Decoded + verified capability fields the flow needs. */
 data class DecodedCall(
@@ -182,6 +201,9 @@ data class JoinCallUiState(
     val guest: Boolean = false,
     /** A guest account was deleted from this screen (`No, thanks`). */
     val guestDeleted: Boolean = false,
+    /** The SFU's room state said `ended` when the link opened: the call is
+     *  over, so the page says so before anyone presses Join. */
+    val roomEnded: Boolean = false,
 )
 
 /** The guest name field's prefill: "<adjective> <animal>" from the shared rule
@@ -243,6 +265,9 @@ class JoinCallViewModel internal constructor(
     private val normalizeDisplayName: (String) -> String? = { uniffi.lakko_ffi_uniffi.normalizeDisplayName(it) },
     /** Draws the guest name prefill ([GUEST_NAME_DEFAULT]). */
     private val drawGuestName: () -> String = { GUEST_NAME_DEFAULT },
+    /** What the SFU says about the call's room (`SfuCallState.kt`), asked
+     *  once after the link opens; `null` = no answer, which changes nothing. */
+    private val probeRoom: suspend (callId: ByteArray) -> SfuCallState? = { null },
 ) : ViewModel() {
 
     constructor(
@@ -265,6 +290,7 @@ class JoinCallViewModel internal constructor(
         endCurrentCallAction = endCurrentCallAction,
         decodeLink = { link, secrets -> decodeCallLink(applicationContext, link, secrets) },
         saveGuestName = { accountId, typedName -> saveGuestProfileName(applicationContext, accountId, typedName) },
+        probeRoom = ::probeLinkCallRoom,
         conversationSeed = { secrets ->
             me.lakko.app.auth.SessionSecretWipe.use(secrets.accountIdentitySeed) { seed ->
                 me.lakko.app.auth.conversationAccountSeedOf(
@@ -360,6 +386,29 @@ class JoinCallViewModel internal constructor(
                     openFailed = outcome == CallLinkDecode.OpenFailed,
                 )
             }
+            val opened = (outcome as? CallLinkDecode.Opened)?.call
+            if (opened != null && opened.valid) checkRoom(opened.callId)
+        }
+    }
+
+    /**
+     * Ask the SFU whether this link's call is still there; `ended` shows `The
+     * call has ended.` in place of Join (`docs/ux/call-links.md` section 5).
+     * Any other answer, or none, changes nothing: a probe that cannot be read
+     * must never hide a call.
+     */
+    internal suspend fun checkRoom(callId: ByteArray) {
+        val state = try {
+            probeRoom(callId)
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            null
+        }
+        if (state == SfuCallState.ENDED) {
+            local.update { it.copy(roomEnded = true) }
+            // A join parked behind the guest sign-up has nothing to resume.
+            pendingJoin = null
         }
     }
 
@@ -372,12 +421,16 @@ class JoinCallViewModel internal constructor(
 
     private fun JoinCallUiState.withHostSlot(slot: LinkCallSlot?): JoinCallUiState {
         val d = decoded ?: return this
-        if (slot == null || slot.callIdHex != callIdHexOf(d.callId)) return this
+        if (slot == null || slot.callIdHex != callIdHexOf(d.callId)) {
+            // The room probe said the call is over: nothing to join.
+            return if (roomEnded && phase == JoinCallPhase.Idle) copy(phase = JoinCallPhase.Spent) else this
+        }
         val phase = when (slot.phase) {
             LinkCallPhase.STARTING -> JoinCallPhase.Starting
             LinkCallPhase.WAITING -> JoinCallPhase.Waiting
             LinkCallPhase.LIVE -> JoinCallPhase.Live
             LinkCallPhase.ENDED -> JoinCallPhase.Ended
+            LinkCallPhase.SPENT -> JoinCallPhase.Spent
             LinkCallPhase.DEAD -> JoinCallPhase.Dead
             LinkCallPhase.ERROR -> JoinCallPhase.Error
         }
@@ -839,7 +892,7 @@ fun JoinCallScreen(
     // into the app (`docs/ux/call-links.md` section 5). A guest stays: this
     // screen is where they are asked about an account.
     androidx.compose.runtime.LaunchedEffect(ui.phase, ui.guest) {
-        if (ui.phase == JoinCallPhase.Ended && !ui.guest) onExit()
+        if (joinCallReturnsToApp(ui.phase, ui.guest)) onExit()
     }
 
     Scaffold(
@@ -1036,7 +1089,7 @@ private fun JoinCallPanel(
                     CenteredText(t("call.link.dead"))
                     if (offer != null) offer() else CloseButton(onExit)
                 }
-                JoinCallPhase.Ended -> {
+                JoinCallPhase.Ended, JoinCallPhase.Spent -> {
                     CenteredText(t("call.link.ended"))
                     if (offer != null) offer() else CloseButton(onExit)
                 }
@@ -1123,4 +1176,16 @@ private fun CenteredText(
         textAlign = TextAlign.Center,
         modifier = Modifier.fillMaxWidth(),
     )
+}
+
+/** The room probe of the app: `GET /v1/rooms/{room}` on the SFU, the room
+ *  being `sfuRoomForCall(callId)` (no token, ADR-0078 section 2). */
+private suspend fun probeLinkCallRoom(callId: ByteArray): SfuCallState? {
+    val base = SfuConfig.baseUrl ?: return null
+    val room = try {
+        uniffi.lakko_ffi_uniffi.sfuRoomForCall(callId)
+    } catch (_: Throwable) {
+        return null
+    }
+    return fetchSfuCallStateOverNetwork(sfuCallStateUrl(base, room))?.let(::parseSfuCallState)
 }

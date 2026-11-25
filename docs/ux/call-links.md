@@ -187,6 +187,7 @@ written out three times - the reason [`navigation.md`](navigation.md) section
 | The link could not be fetched (the arriving side; added 2026-10-23) | `Could not reach Lakko. Check your connection and try again.` and `Try again`. Shown when the network failed or the server answered with an error other than "no such link" or 429; never `This call link is invalid or has expired.` |
 | Signed out mid-flow | One sentence: sign in again. |
 | A call joined from a link ends (the arriving side, signed in) | Back in the app where the person was, never the link page with `The call has ended.` (added 2026-10-03). A guest stays on the link page, where section 9 asks about an account. |
+| The link's call had already ended (the arriving side; added 2026-11-24) | `The call has ended.` on the link page, with `Close` (a guest: the question of section 9); no name field and no `Join call`. The page asks the SFU for the room's state (`GET /v1/rooms/{room}`, no token) once the link opens and shows this when it answers `ended`; any other answer, or none, leaves `Join call`. The same state when `Join call` is pressed and the SFU answers `CallEnded` in place of admitting the device. Never the chat list: the row above is for a call the person was in, and sending them back after a refused join looked like a `Join call` that did nothing (seen live on iOS 2026-11-24). A link is one call (`calls.md`), so a spent link is spent for its starter too. |
 
 ### The link's shape (amended 2026-09-28)
 

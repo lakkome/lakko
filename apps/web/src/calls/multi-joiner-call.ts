@@ -194,6 +194,10 @@ export interface MultiJoinerCallOptions {
   readonly onLive?: () => void;
   /** Fired on a terminal (`closed` / `failed`) transition. */
   readonly onEnded?: () => void;
+  /** Fired instead of `onEnded` when the session failed because the SFU
+   *  refused this device: the call had already ended (`call-ended`, sent in
+   *  place of the Welcome). Absent: `onEnded`. */
+  readonly onCallAlreadyEnded?: () => void;
   /** Joiner only: no committer admitted this client within
    *  {@link JOINER_ADMISSION_TIMEOUT_MS} — the call has no live committer
    *  (owner left before anyone joined, or the call ended). The screen
@@ -858,7 +862,11 @@ export class MultiJoinerCall {
         if (current) screenShareActions.reset();
         if (current) callChatActions.reset();
         if (current) callActions.setPhase({ kind: "ended", endedAt: Date.now() });
-        this.opts.onEnded?.();
+        if (this.opts.onCallAlreadyEnded !== undefined && this.session.callEndedByServer()) {
+          this.opts.onCallAlreadyEnded();
+        } else {
+          this.opts.onEnded?.();
+        }
         break;
       default:
         break;

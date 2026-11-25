@@ -8,11 +8,13 @@
  * conversations, channels included. On a
  * narrow screen one pane shows at a time: the list, or the open chat.
  *
- * `GroupsLayout` is the same shell over the group conversations.
+ * Groups open here too (`/groups/:id`, `/groups/new`), so moving between a
+ * chat and a group never unmounts the list.
  */
 import type { JSX } from "solid-js";
 import { useLocation, useParams, type RouteSectionProps } from "@solidjs/router";
 import { ChatList } from "../chat/ChatList";
+import { paths } from "./paths";
 
 export default function ChatsLayout(props: RouteSectionProps): JSX.Element {
   const params = useParams<{ id?: string; hex?: string }>();
@@ -21,7 +23,10 @@ export default function ChatsLayout(props: RouteSectionProps): JSX.Element {
   // `/channel/:id` and `/channel/new` (ADR-0087 section 12) open beside the
   // same list.
   const open = (): boolean =>
-    params.id !== undefined || params.hex !== undefined || location.pathname.startsWith("/channel/");
+    params.id !== undefined ||
+    params.hex !== undefined ||
+    location.pathname.startsWith("/channel/") ||
+    location.pathname === paths.newGroup;
   return (
     <div class="lk-split" data-open={open() ? "true" : "false"}>
       <ChatList activeGroupIdB64={params.id ?? null} />

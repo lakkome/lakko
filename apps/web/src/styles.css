@@ -491,6 +491,10 @@ a:focus-visible {
   flex: 1;
   overflow: auto;
   padding: 0 8px 8px;
+  /* A scrollbar that takes width (a mouse attached on macOS, Windows, most
+     Linux) has its room kept from the start, so the rows never narrow when
+     it appears; an overlay scrollbar keeps nothing. */
+  scrollbar-gutter: stable;
 }
 .lk-main {
   min-width: 0;
@@ -583,6 +587,7 @@ a:focus-visible {
 
 /* List row: 12px padding, no dividers, hover / selected surfaces. */
 .lk-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -591,10 +596,19 @@ a:focus-visible {
   color: inherit;
   text-decoration: none;
   min-width: 0;
+  /* The hover surface follows the pointer at once, with a short fade (chosen,
+     not measured); none with reduced motion. */
+  transition: background-color 120ms ease-out;
 }
 a.lk-row:hover {
   background: var(--surface-hover);
   text-decoration: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lk-row,
+  .lk-row .lk-row-actions {
+    transition: none;
+  }
 }
 /* The one network-lookup row under the conversation search: a whole name,
    never a list of partial matches, because the server answers the blinded
@@ -651,6 +665,50 @@ a.lk-row.active {
 }
 .lk-row.archived {
   opacity: 0.6;
+}
+/* The hairline above the archived conversations (navigation.md 2.2). */
+.lk-list-divider {
+  border: none;
+  border-top: 1px solid var(--surface-border);
+  margin: 6px 12px;
+}
+/* The "Archived" bar fixed to the bottom of the conversation panel, under
+   the scrolling list (navigation.md 2.2, note of 2026-11-25). */
+.lk-archived-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  padding: 0 20px;
+  border: none;
+  border-top: 1px solid var(--surface-border);
+  background: var(--surface-elevated);
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.lk-archived-bar:hover {
+  background: var(--surface-hover);
+}
+.lk-archived-bar-label {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+}
+.lk-archived-bar-count {
+  color: var(--surface-muted);
+  font-variant-numeric: tabular-nums;
+}
+.lk-archived-bar > svg {
+  flex: 0 0 auto;
+  color: var(--surface-muted);
+}
+/* The archive's header takes the pane head's place: back, then the title. */
+.lk-archive-head {
+  justify-content: flex-start;
+  padding-inline-start: 12px;
 }
 .lk-row-body {
   flex: 1;
@@ -754,7 +812,8 @@ a.lk-row.active {
   font-weight: 600;
 }
 /* Trailing on the second line: muted, pinned, the unread badge. Hidden
-   while the hover actions take their place. */
+   while the hover actions stand over it; it keeps its place, so the row
+   never changes size. */
 .lk-row-trail {
   display: flex;
   align-items: center;
@@ -762,19 +821,45 @@ a.lk-row.active {
   flex: 0 0 auto;
   color: var(--surface-faint);
 }
+/* The pin / mute / archive actions: a fixed slot laid over the end of the
+   row, out of the row's layout, so showing them moves nothing - neither the
+   row's own lines nor the rows below it. It carries the row's surface so the
+   text under it does not show through. */
 .lk-row-actions {
   display: none;
+  position: absolute;
+  inset-inline-end: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  align-items: center;
   gap: 2px;
-  flex: 0 0 auto;
+  padding-inline-start: 8px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-elevated);
+  transition: background-color 120ms ease-out;
+}
+.lk-row.selected .lk-row-actions {
+  background: var(--surface-selected);
+}
+a.lk-row:hover .lk-row-actions {
+  background: var(--surface-hover);
 }
 @media (hover: hover) {
-  .lk-row:hover .lk-row-actions,
-  .lk-row:focus-within .lk-row-actions {
+  .lk-row-actions {
     display: flex;
+    visibility: hidden;
   }
-  .lk-row:hover .lk-row-trail,
-  .lk-row:focus-within .lk-row-trail {
-    display: none;
+  .lk-row:hover .lk-row-actions,
+  .lk-row:focus-visible .lk-row-actions,
+  .lk-row:has(:focus-visible) .lk-row-actions {
+    visibility: visible;
+  }
+  /* Only in a row that has actions (a search card's or a saved message's
+     trail stays). */
+  .lk-row:has(.lk-row-actions):hover :is(.lk-row-trail, .lk-row-time),
+  .lk-row:has(.lk-row-actions):focus-visible :is(.lk-row-trail, .lk-row-time),
+  .lk-row:has(.lk-row-actions):has(:focus-visible) :is(.lk-row-trail, .lk-row-time) {
+    visibility: hidden;
   }
 }
 /* A long press opens the menu on touch; no callout, no text selection. */
