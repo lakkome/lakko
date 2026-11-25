@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
   PIN_DETAIL_PERSONAL,
   PIN_DETAIL_SHARED,
+  PIN_DETAIL_SHARED_BOTH,
   PIN_SHEET_TITLE,
   UNPIN_SHEET_TITLE,
   pinRowDecision,
@@ -51,6 +52,9 @@ describe("pinRowDecision — nothing pinned", () => {
 
   it("in a one-to-one the shared row reads Pin for both", () => {
     expect(labels(decide({ oneToOne: true }))).toEqual(["Pin for me", "Pin for both"]);
+    const options = (decide({ oneToOne: true }).action as { options: readonly { detail: string }[] }).options;
+    expect(options.map((o) => o.detail)).toEqual([PIN_DETAIL_PERSONAL(), PIN_DETAIL_SHARED_BOTH()]);
+    expect(PIN_DETAIL_SHARED_BOTH()).toBe("You both see it");
   });
 });
 

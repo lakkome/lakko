@@ -28,8 +28,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -265,19 +263,25 @@ public fun ContactsScreen(
                         IconButton(onClick = { menuOpen = true }) {
                             LkIcon(R.drawable.ic_lk_person_plus, contentDescription = t("contacts.list.add"))
                         }
-                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                            DropdownMenuItem(
-                                text = { Text(t("contacts.add.share_invite")) },
-                                leadingIcon = { LkIcon(R.drawable.ic_lk_link, contentDescription = null, size = LkIconSize.Row) },
-                                onClick = { menuOpen = false; inviteSheetOpen = true },
+                        if (menuOpen) {
+                            me.lakko.app.ui.components.LakkoMenu(
+                                rows = buildList {
+                                    add(
+                                        me.lakko.app.ui.components.LakkoMenuRow(t("contacts.add.share_invite"), R.drawable.ic_lk_link) {
+                                            inviteSheetOpen = true
+                                        },
+                                    )
+                                    if (onScannedLink != null) {
+                                        add(
+                                            me.lakko.app.ui.components.LakkoMenuRow(t("contacts.scan_qr"), R.drawable.ic_lk_qrcode_scan) {
+                                                scanSheetOpen = true
+                                            },
+                                        )
+                                    }
+                                },
+                                onDismissRequest = { menuOpen = false },
+                                separators = false,
                             )
-                            if (onScannedLink != null) {
-                                DropdownMenuItem(
-                                    text = { Text(t("contacts.scan_qr")) },
-                                    leadingIcon = { LkIcon(R.drawable.ic_lk_qrcode_scan, contentDescription = null, size = LkIconSize.Row) },
-                                    onClick = { menuOpen = false; scanSheetOpen = true },
-                                )
-                            }
                         }
                     }
                 },
@@ -649,20 +653,14 @@ private fun RequestRow(
                         contentDescription = t("common.more_options"),
                     )
                 }
-                androidx.compose.material3.DropdownMenu(expanded = overflow, onDismissRequest = { overflow = false }) {
-                    androidx.compose.material3.DropdownMenuItem(
-                        text = { Text(t("report.action"), color = MaterialTheme.colorScheme.error) },
-                        onClick = {
-                            overflow = false
-                            onReport()
-                        },
-                    )
-                    androidx.compose.material3.DropdownMenuItem(
-                        text = { Text(t("block.action"), color = MaterialTheme.colorScheme.error) },
-                        onClick = {
-                            overflow = false
-                            onBlock()
-                        },
+                if (overflow) {
+                    me.lakko.app.ui.components.LakkoMenu(
+                        rows = listOf(
+                            me.lakko.app.ui.components.LakkoMenuRow(t("report.action"), icon = null, danger = true) { onReport() },
+                            me.lakko.app.ui.components.LakkoMenuRow(t("block.action"), icon = null, danger = true) { onBlock() },
+                        ),
+                        onDismissRequest = { overflow = false },
+                        separators = false,
                     )
                 }
             }

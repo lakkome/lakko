@@ -284,8 +284,12 @@ class PinTest {
         assertEquals("Pin for everyone", pinActionLabel(PinAction.PIN_EVERYONE, oneToOne = false).en)
         assertEquals("Unpin for both", pinActionLabel(PinAction.UNPIN_EVERYONE, oneToOne = true).en)
         assertEquals("Pin for me", pinActionLabel(PinAction.PIN_ME, oneToOne = true).en)
-        assertEquals("Only on this device", pinActionSubline(PinAction.PIN_ME).en)
-        assertEquals("Every member sees it", pinActionSubline(PinAction.UNPIN_EVERYONE).en)
+        assertEquals("Only on this device", pinActionSubline(PinAction.PIN_ME, oneToOne = true).en)
+        assertEquals("Only on this device", pinActionSubline(PinAction.PIN_ME, oneToOne = false).en)
+        assertEquals("Every member sees it", pinActionSubline(PinAction.UNPIN_EVERYONE, oneToOne = false).en)
+        assertEquals("Every member sees it", pinActionSubline(PinAction.PIN_EVERYONE, oneToOne = false).en)
+        assertEquals("You both see it", pinActionSubline(PinAction.PIN_EVERYONE, oneToOne = true).en)
+        assertEquals("You both see it", pinActionSubline(PinAction.UNPIN_EVERYONE, oneToOne = true).en)
     }
 
     // --- 6. wire peek, foreground classification, background suppression ----

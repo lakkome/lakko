@@ -196,7 +196,7 @@ pinned in one scope the row reads `Unpin`; on one pinned in both it still reads
   the missing row is the explanation, as it is for `Add members`.
 
 Under each row one line says what it does: "Only on this device" and "Every
-member sees it". `Unpin` on a message pinned in both scopes offers `Unpin for
+member sees it" ("You both see it" under `Pin for both` in a one-to-one). `Unpin` on a message pinned in both scopes offers `Unpin for
 me` and `Unpin for everyone` (`Unpin for both`); in one scope it acts at once.
 Unpinning a shared pin needs the same standing as setting one, so a plain
 member holding a message pinned by an admin sees `Unpin for me` only, and only

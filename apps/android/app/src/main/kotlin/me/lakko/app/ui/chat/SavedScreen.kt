@@ -21,8 +21,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -242,13 +240,10 @@ private fun SavedRowView(
                 }
             }
         }
-        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-            DropdownMenuItem(
-                text = { Text(t("chat.message.unsave")) },
-                onClick = {
-                    menu = false
-                    onRemove()
-                },
+        if (menu) {
+            me.lakko.app.ui.components.LakkoMenu(
+                rows = listOf(me.lakko.app.ui.components.LakkoMenuRow(t("chat.message.unsave"), icon = null) { onRemove() }),
+                onDismissRequest = { menu = false },
             )
         }
     }

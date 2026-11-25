@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -21,10 +20,8 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -133,27 +130,14 @@ internal fun ChannelPhotoHeader(
     }
 
     if (menuOpen) {
-        val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ModalBottomSheet(onDismissRequest = { menuOpen = false }, sheetState = sheet) {
-            Column(Modifier.navigationBarsPadding().padding(bottom = 8.dp)) {
-                MenuRow(R.drawable.ic_lk_photo_stack, t("profile.avatar.menu.library")) {
-                    menuOpen = false
-                    picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
-                }
-                if (hasCamera) {
-                    MenuRow(R.drawable.ic_lk_camera, t("profile.avatar.menu.camera")) {
-                        menuOpen = false
-                        cameraOpen = true
-                    }
-                }
-                if (avatar != null) {
-                    MenuRow(R.drawable.ic_lk_trash, t("profile.avatar.menu.remove"), destructive = true) {
-                        menuOpen = false
-                        confirmRemove = true
-                    }
-                }
-            }
-        }
+        me.lakko.app.ui.components.PhotoMenu(
+            hasCamera = hasCamera,
+            canRemove = avatar != null,
+            onDismiss = { menuOpen = false },
+            onLibrary = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) },
+            onCamera = { cameraOpen = true },
+            onRemove = { confirmRemove = true },
+        )
     }
     if (confirmRemove) {
         LakkoDialog(
@@ -210,24 +194,6 @@ internal fun ChannelPhotoHeader(
                 cropSource = source
             },
         )
-    }
-}
-
-@Composable
-private fun MenuRow(
-    @androidx.annotation.DrawableRes icon: Int,
-    label: String,
-    destructive: Boolean = false,
-    onClick: () -> Unit,
-) {
-    val color = if (destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 24.dp, vertical = 14.dp),
-    ) {
-        LkIcon(icon, contentDescription = null, tint = color, size = LkIconSize.Row)
-        Spacer(Modifier.width(16.dp))
-        Text(label, color = color, style = MaterialTheme.typography.bodyLarge)
     }
 }
 

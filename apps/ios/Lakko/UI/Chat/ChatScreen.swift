@@ -126,6 +126,14 @@ public struct ChatScreen: View {
     /// position the person left.
     @State private var timelineOpenedAtNewest = false
 
+    /// The visible height of the timeline's scroll view and the bottom edge
+    /// of its content in the scroll view's own space (see `TimelineFollow`):
+    /// a keyboard or a bar that takes room keeps a conversation that was at
+    /// its newest message there.
+    @State private var timelineViewportHeight: CGFloat = 0
+    @State private var timelineContentMaxY: CGFloat = 0
+    private static let timelineSpace = "chat-timeline"
+
     /// A quote tap the timeline's `ScrollViewReader` has yet to act on. A
     /// counter rides along so two taps on the same quote both scroll.
     @State private var quoteJump: QuoteJump?
@@ -1199,6 +1207,34 @@ public struct ChatScreen: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
+                // The content's bottom edge in the scroll view's own space,
+                // read on the whole stack (always laid out) rather than on
+                // the bottom anchor, which a lazy stack drops once it is far
+                // off screen and would then report a stale position.
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.frame(in: .named(Self.timelineSpace)).maxY
+                } action: { maxY in
+                    timelineContentMaxY = maxY
+                }
+            }
+            .coordinateSpace(name: Self.timelineSpace)
+            // The keyboard rising (tapping the composer, or the composer
+            // taking focus again after the edit sheet), the pinned bar or any
+            // other bar appearing: the scroll view gets shorter and keeps its
+            // offset from the top, which put the newest rows under the
+            // composer. A conversation that was at its newest message stays
+            // there; one scrolled up keeps its place.
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                proxy.size.height
+            } action: { height in
+                let old = timelineViewportHeight
+                timelineViewportHeight = height
+                guard TimelineFollow.staysAtBottom(
+                    contentMaxY: timelineContentMaxY,
+                    oldViewportHeight: old,
+                    newViewportHeight: height
+                ) else { return }
+                scrollProxy.scrollTo(Self.timelineBottomId, anchor: .bottom)
             }
             .onAppear {
                 // Open at the newest message. The view model is handed the

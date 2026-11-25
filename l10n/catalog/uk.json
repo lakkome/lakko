@@ -3473,6 +3473,10 @@
       "text": "Бачать усі учасники",
       "status": "machine"
     },
+    "chat.pin.detail_shared_both": {
+      "text": "Бачите ви обоє",
+      "status": "machine"
+    },
     "chat.pin.for_both": {
       "text": "Закріпити для обох",
       "status": "machine"

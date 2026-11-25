@@ -3473,6 +3473,10 @@
       "text": "Todos os membros veem",
       "status": "machine"
     },
+    "chat.pin.detail_shared_both": {
+      "text": "Vocês dois veem",
+      "status": "machine"
+    },
     "chat.pin.for_both": {
       "text": "Fixar para os dois",
       "status": "machine"

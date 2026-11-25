@@ -33,8 +33,6 @@ import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -254,15 +252,17 @@ internal fun CallBackgroundSection(
                     onLongClick = { menuOpen = true },
                     actions = listOf(CustomAccessibilityAction(removeLabel) { remove(); true }),
                 ) { PhotoThumb(store, account, id) }
-                DropdownMenu(
-                    expanded = menuOpen,
-                    onDismissRequest = { menuOpen = false },
-                    containerColor = LakkoDark.surface,
-                ) {
-                    DropdownMenuItem(
-                        text = { Text(removeLabel, color = LakkoDark.text) },
-                        onClick = { remove() },
-                    )
+                if (menuOpen) {
+                    // The call surfaces stay dark whatever the app theme.
+                    me.lakko.app.ui.theme.LakkoTheme(dark = true) {
+                        me.lakko.app.ui.components.LakkoMenu(
+                            rows = listOf(
+                                me.lakko.app.ui.components.LakkoMenuRow(removeLabel, icon = null) { remove() },
+                            ),
+                            onDismissRequest = { menuOpen = false },
+                            separators = false,
+                        )
+                    }
                 }
             }
         }

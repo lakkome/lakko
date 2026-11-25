@@ -27,8 +27,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Button
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
@@ -845,21 +843,19 @@ public fun FeedScreen(
                         IconButton(onClick = { feedMenuOpen = true }) {
                             LkIcon(R.drawable.ic_lk_ellipsis_circle, contentDescription = t("feed.menu.a11y"))
                         }
-                        DropdownMenu(expanded = feedMenuOpen, onDismissRequest = { feedMenuOpen = false }) {
-                            DropdownMenuItem(
-                                text = { Text(t("feed.new")) },
-                                onClick = {
-                                    feedMenuOpen = false
-                                    editError = null
-                                    editing = Editing.New
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text(t("feed.hidden.title")) },
-                                onClick = {
-                                    feedMenuOpen = false
-                                    showingHidden = true
-                                },
+                        if (feedMenuOpen) {
+                            me.lakko.app.ui.components.LakkoMenu(
+                                rows = listOf(
+                                    me.lakko.app.ui.components.LakkoMenuRow(t("feed.new"), icon = null) {
+                                        editError = null
+                                        editing = Editing.New
+                                    },
+                                    me.lakko.app.ui.components.LakkoMenuRow(t("feed.hidden.title"), icon = null) {
+                                        showingHidden = true
+                                    },
+                                ),
+                                onDismissRequest = { feedMenuOpen = false },
+                                separators = false,
                             )
                         }
                     }
@@ -1432,43 +1428,33 @@ internal fun FeedItemCard(
                 }
                 // UX spec section 5 — Open, Reply (group messages only), Copy,
                 // Forward, Hide from feeds.
-                DropdownMenu(expanded = menuOpen, onDismissRequest = closeMenu) {
-                    DropdownMenuItem(text = { Text(t("common.open")) }, onClick = {
-                        closeMenu()
-                        menu.open(ref)
-                    })
-                    if (ref.source.kind == FeedSourceKind.GROUP) {
-                        DropdownMenuItem(text = { Text(t("chat.message.reply")) }, onClick = {
-                            closeMenu()
-                            menu.reply(ref)
-                        })
-                    }
-                    DropdownMenuItem(
-                        text = { Text(t("common.copy")) },
-                        enabled = ref.message.text.isNotBlank(),
-                        onClick = {
-                            closeMenu()
-                            menu.copy(ref)
-                        },
-                    )
+                if (menuOpen) {
                     // ADR-0092 / attachments UX 11a — no Forward on a poll or
                     // checklist, nor on a card of a person who does not let
                     // others share it.
                     val context = androidx.compose.ui.platform.LocalContext.current
-                    if (me.lakko.app.chat.isForwardableContent(ref.message.content) { key ->
-                            me.lakko.app.profile.ProfileDirectory.get(context)
-                                .isCardShareable(java.util.Base64.getEncoder().encodeToString(key))
-                        }
-                    ) {
-                        DropdownMenuItem(text = { Text(t("chat.message.forward")) }, onClick = {
-                            closeMenu()
-                            menu.forward(ref)
-                        })
+                    val forwardable = me.lakko.app.chat.isForwardableContent(ref.message.content) { key ->
+                        me.lakko.app.profile.ProfileDirectory.get(context)
+                            .isCardShareable(java.util.Base64.getEncoder().encodeToString(key))
                     }
-                    DropdownMenuItem(text = { Text(t("feed.action.hide")) }, onClick = {
-                        closeMenu()
-                        menu.hide(ref)
-                    })
+                    val copyEnabled = ref.message.text.isNotBlank()
+                    me.lakko.app.ui.components.LakkoMenu(
+                        rows = buildList {
+                            add(me.lakko.app.ui.components.LakkoMenuRow(t("common.open"), icon = null) { menu.open(ref) })
+                            if (ref.source.kind == FeedSourceKind.GROUP) {
+                                add(me.lakko.app.ui.components.LakkoMenuRow(t("chat.message.reply"), icon = null) { menu.reply(ref) })
+                            }
+                            if (copyEnabled) {
+                                add(me.lakko.app.ui.components.LakkoMenuRow(t("common.copy"), icon = null) { menu.copy(ref) })
+                            }
+                            if (forwardable) {
+                                add(me.lakko.app.ui.components.LakkoMenuRow(t("chat.message.forward"), icon = null) { menu.forward(ref) })
+                            }
+                            add(me.lakko.app.ui.components.LakkoMenuRow(t("feed.action.hide"), icon = null) { menu.hide(ref) })
+                        },
+                        onDismissRequest = closeMenu,
+                        separators = false,
+                    )
                 }
             }
             if (media.isNotEmpty()) {

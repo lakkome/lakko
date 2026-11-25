@@ -3637,6 +3637,10 @@
       "text": "Видят все участники",
       "status": "machine"
     },
+    "chat.pin.detail_shared_both": {
+      "text": "Видите вы оба",
+      "status": "machine"
+    },
     "chat.pin.for_both": {
       "text": "Закрепить для обоих",
       "status": "machine"

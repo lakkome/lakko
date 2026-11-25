@@ -29,6 +29,8 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.toggleableState
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -44,6 +46,14 @@ public data class LakkoMenuRow(
     val disabledReason: String? = null,
     val danger: Boolean = false,
     val testTag: String? = null,
+    /** One muted line under the label saying what the row does, or `null`. */
+    val detail: String? = null,
+    /** A row of a set the person ticks (a folder the chat is in): `true`
+     *  draws the trailing check mark; `null` for a plain action. */
+    val checked: Boolean? = null,
+    /** The row leads to a second step of the same sheet instead of acting
+     *  and closing it. */
+    val keepOpen: Boolean = false,
     val onClick: () -> Unit,
 )
 
@@ -109,9 +119,15 @@ public fun LakkoMenu(
                                 disabled()
                                 contentDescription = "${row.label}, ${row.disabledReason}"
                             }
+                            if (row.checked != null) {
+                                toggleableState = ToggleableState(row.checked)
+                            }
                         }
-                        .clickable(enabled = enabled, role = Role.Button) {
-                            onDismissRequest()
+                        .clickable(
+                            enabled = enabled,
+                            role = if (row.checked != null) Role.Checkbox else Role.Button,
+                        ) {
+                            if (!row.keepOpen) onDismissRequest()
                             row.onClick()
                         }
                         .padding(horizontal = 16.dp, vertical = 6.dp),
@@ -119,11 +135,21 @@ public fun LakkoMenu(
                     if (row.icon != null) {
                         LkIcon(row.icon, contentDescription = null, tint = tint, size = LkIconSize.Toolbar)
                     }
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(row.label, fontSize = 16.sp, color = tint)
                         if (row.disabledReason != null) {
                             Text(row.disabledReason, fontSize = 13.sp, color = scheme.onSurfaceVariant)
+                        } else if (row.detail != null) {
+                            Text(row.detail, fontSize = 13.sp, color = scheme.onSurfaceVariant)
                         }
+                    }
+                    if (row.checked == true) {
+                        LkIcon(
+                            me.lakko.app.R.drawable.ic_lk_checkmark,
+                            contentDescription = null,
+                            tint = scheme.primary,
+                            size = LkIconSize.Row,
+                        )
                     }
                 }
             }

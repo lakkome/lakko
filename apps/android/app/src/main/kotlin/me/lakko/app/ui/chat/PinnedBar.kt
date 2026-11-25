@@ -227,26 +227,22 @@ internal fun PinScopeSheet(
     onPick: (PinAction) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
-        for (action in menu.actions) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onPick(action) }
-                    .padding(horizontal = 20.dp, vertical = 12.dp),
-            ) {
-                Text(
-                    text = pinActionLabel(action, oneToOne).text(),
-                    style = MaterialTheme.typography.bodyLarge,
-                )
-                Text(
-                    text = pinActionSubline(action).text(),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-        Spacer(Modifier.height(16.dp))
-    }
+    // The app's own action sheet (design system: Action sheet), each row with
+    // its one line saying what it does; dismissing it is Cancel.
+    me.lakko.app.ui.components.LakkoMenu(
+        rows = menu.actions.map { action ->
+            me.lakko.app.ui.components.LakkoMenuRow(
+                label = pinActionLabel(action, oneToOne).text(),
+                icon = when (action) {
+                    PinAction.PIN_ME, PinAction.PIN_EVERYONE -> R.drawable.ic_lk_pin
+                    PinAction.UNPIN_ME, PinAction.UNPIN_EVERYONE -> R.drawable.ic_lk_pin_slash
+                },
+                detail = pinActionSubline(action, oneToOne).text(),
+                testTag = "pin-scope-${action.name.lowercase()}",
+                onClick = { onPick(action) },
+            )
+        },
+        onDismissRequest = onDismiss,
+        separators = false,
+    )
 }

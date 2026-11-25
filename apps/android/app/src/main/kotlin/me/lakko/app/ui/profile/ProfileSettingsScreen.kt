@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -34,13 +33,11 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -239,32 +236,19 @@ public fun ProfileSettingsScreen(
     }
 
     if (menuOpen) {
-        val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ModalBottomSheet(onDismissRequest = { menuOpen = false }, sheetState = sheet) {
-            Column(Modifier.navigationBarsPadding().padding(bottom = 8.dp)) {
-                MenuItem(R.drawable.ic_lk_photo_stack, t("profile.avatar.menu.library")) {
-                    menuOpen = false
-                    picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
-                }
-                if (hasCamera) {
-                    MenuItem(R.drawable.ic_lk_camera, t("profile.avatar.menu.camera")) {
-                        menuOpen = false
-                        viewModel.cameraOpen = true
-                    }
-                }
-                val photoSet = when (edit.photo) {
-                    is PhotoEdit.New -> true
-                    PhotoEdit.Removed -> false
-                    PhotoEdit.Unchanged -> edit.savedAvatar != null
-                }
-                if (photoSet) {
-                    MenuItem(R.drawable.ic_lk_trash, t("profile.avatar.menu.remove"), destructive = true) {
-                        menuOpen = false
-                        viewModel.removePhoto()
-                    }
-                }
-            }
+        val photoSet = when (edit.photo) {
+            is PhotoEdit.New -> true
+            PhotoEdit.Removed -> false
+            PhotoEdit.Unchanged -> edit.savedAvatar != null
         }
+        me.lakko.app.ui.components.PhotoMenu(
+            hasCamera = hasCamera,
+            canRemove = photoSet,
+            onDismiss = { menuOpen = false },
+            onLibrary = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) },
+            onCamera = { viewModel.cameraOpen = true },
+            onRemove = { viewModel.removePhoto() },
+        )
     }
 
     viewModel.cropSource?.let { source ->
@@ -371,22 +355,6 @@ private fun AvatarBlock(
             LkIcon(R.drawable.ic_lk_pencil, contentDescription = null, size = LkIconSize.Row)
         }
     }
-}
-
-@Composable
-private fun MenuItem(
-    @androidx.annotation.DrawableRes icon: Int,
-    label: String,
-    destructive: Boolean = false,
-    onClick: () -> Unit,
-) {
-    val color = if (destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
-    ListItem(
-        headlineContent = { Text(label, color = color) },
-        leadingContent = { LkIcon(icon, contentDescription = null, tint = color, size = LkIconSize.Row) },
-        colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent),
-        modifier = Modifier.clickable(onClick = onClick),
-    )
 }
 
 /** §3 — the name row. */

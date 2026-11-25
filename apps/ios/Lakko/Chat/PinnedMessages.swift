@@ -450,7 +450,9 @@ public enum PinSheet {
         oneToOne: Bool
     ) -> [PinSheetOption] {
         let onlyHere = Localization.text("chat.pin.detail_personal")
-        let everyoneSees = Localization.text("chat.pin.detail_shared")
+        // In a one-to-one the shared scope is the two people, not "every
+        // member" (UX spec section 4.1).
+        let everyoneSees = Localization.text(oneToOne ? "chat.pin.detail_shared_both" : "chat.pin.detail_shared")
         switch menuState(sharedPinned: sharedPinned, personalPinned: personalPinned, maySetShared: maySetShared) {
         case .pin, .unavailable:
             var rows = [PinSheetOption(choice: .pinForMe, title: Localization.text("chat.pin.for_me"), subtitle: onlyHere)]

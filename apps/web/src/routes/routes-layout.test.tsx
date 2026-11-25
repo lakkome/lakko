@@ -16,10 +16,12 @@ import { initWasm } from "../test/ui";
 
 let routes: RouteDefinition[];
 
+// Importing the route table loads every screen of the app; on a cold disk
+// that alone took about 28 s, so the default 30 s hook limit is too tight.
 beforeAll(async () => {
   await initWasm();
   ({ routes } = await import("./routes"));
-});
+}, 120_000);
 
 const childPaths = (r: RouteDefinition): string[] => {
   const children = r.children;

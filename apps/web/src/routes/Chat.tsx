@@ -383,6 +383,8 @@ import {
   type HeldForPin,
 } from "../chat/pin-bar";
 import { pinRowDecision, type PinOption, type PinState } from "../chat/pin-sheet";
+import { sendEdit, type EditSendPort } from "../chat/edit-send";
+import { attachStickToBottom, type StickToBottom } from "../chat/stick-to-bottom";
 import { PinList, PinnedBar, type PinBarEntry } from "../chat/PinnedBar";
 import { PinSheet } from "../chat/PinSheet";
 import { useReadWatermarks } from "../chat/ReadWatermarkContext";
@@ -6039,13 +6041,41 @@ function ChatView(props: {
   // (the echo is filtered in ChatClient), so each handler BOTH
   // publishes the op AND applies it locally. The op carries a DS
   // `messageId` target; the local apply uses the same overlay
-  // map the receive loop folds into. Failures roll the local
-  // apply back (or never apply, for delete/react where we apply
-  // only after the publish resolves).
+  // map the receive loop folds into. An edit is drawn at once and a
+  // failed send says `Not sent` on the message (`chat/edit-send.ts`);
+  // delete and react apply only after the publish resolves.
+
+  /** Own messages whose latest edit is drawn but did not go out, with the
+   *  edited text (`chat/edit-send.ts`): their line says `Not sent` with a
+   *  retry. In memory for the open conversation. */
+  const [editsNotSent, setEditsNotSent] = createSignal<ReadonlyMap<number, string>>(new Map());
+  const editSendPort: EditSendPort = {
+    apply: (target, text, opId) => setMsgOps(applyOp(msgOps(), { op: "edit", target, text, opId })),
+    drawnText: (target) => msgOps().get(target)?.editedText,
+    publish: async (target, text) => {
+      // ADR-0073 R.7 case 1 — in a superseded one-to-one an op is applied
+      // here and never sent: its target exists only in the old session.
+      // ADR-0082 section 5 — the edit's own DS id is the message's new
+      // version; a local-only edit (no publish) carries none.
+      if (opRouteNow() !== "send") return undefined;
+      const envelopeBytes = await composeEditEnvelope(target, text);
+      return (await publishQuiet(envelopeBytes, true)).messageId;
+    },
+    markNotSent: (target, text) => setEditsNotSent((m) => new Map(m).set(target, text)),
+    clearNotSent: (target) =>
+      setEditsNotSent((m) => {
+        if (!m.has(target)) return m;
+        const next = new Map(m);
+        next.delete(target);
+        return next;
+      }),
+  };
 
   /** Save an inline edit of our own message. Author-gated by the
    *  UI affordance (offered on own messages only) + by the
-   *  receive-side gate every peer runs. */
+   *  receive-side gate every peer runs. The new text is drawn at once
+   *  (the sender never receives its own op back, so this local apply is
+   *  the only one); a failed send says `Not sent` on the message. */
   async function onSaveEdit(messageId: number): Promise<void> {
     const newText = editText();
     // An empty edit is a no-op rather than a silent delete — the
@@ -6056,22 +6086,13 @@ function ChatView(props: {
     }
     setEditingId(null);
     setError(null);
-    try {
-      // ADR-0073 R.7 case 1 — in a superseded one-to-one an op is applied
-      // here and never sent: its target exists only in the old session.
-      // ADR-0082 section 5 — the edit's own DS id is the message's new
-      // version; a local-only edit (no publish) carries none.
-      let opId: number | undefined;
-      if (opRouteNow() === "send") {
-        const envelopeBytes = await composeEditEnvelope(messageId, newText);
-        opId = (await publishQuiet(envelopeBytes, true)).messageId;
-      }
-      // Apply locally (no echo). Author == us, so the gate the
-      // receive loop runs would accept it; we mirror that here.
-      setMsgOps(applyOp(msgOps(), { op: "edit", target: messageId, text: newText, opId }));
-    } catch (err) {
-      setError(errorText(err, "chat.error.edit"));
-    }
+    await sendEdit(editSendPort, messageId, newText);
+  }
+
+  /** Send again an edit that did not go out. */
+  function onRetryEdit(messageId: number): void {
+    const text = editsNotSent().get(messageId);
+    if (text !== undefined) void sendEdit(editSendPort, messageId, text);
   }
 
   /** ONE delete of ONE own message: publish the delete op, tombstone it
@@ -8775,7 +8796,15 @@ function ChatView(props: {
   // is at (or near) the bottom; leave the position alone once they have
   // scrolled up to read.
   let scrollEl: HTMLDivElement | undefined;
-  let stickToBottom = true;
+  /** The newest message stays right above the composer while the person is
+   *  at the bottom (`chat/stick-to-bottom.ts`): the pinned bar, a reply or
+   *  edit strip, a growing draft, the keyboard, an edited bubble, a loaded
+   *  picture. Attached once the scroller exists. */
+  let stick: StickToBottom | null = null;
+  onMount(() => {
+    if (scrollEl !== undefined) stick = attachStickToBottom(scrollEl);
+  });
+  onCleanup(() => stick?.dispose());
   /** ADR-0052 / section 3.1 "Tap to jump" — scroll the timeline to the row
    *  whose DS id is `messageId` and highlight it for about a second and a
    *  half. The row is looked up in what this device holds; when it is not
@@ -8834,7 +8863,7 @@ function ChatView(props: {
     if (target === null) return;
     // The reader is now looking at something older; new rows must not drag
     // them back down while the highlight is still up.
-    stickToBottom = false;
+    stick?.release();
     target.scrollIntoView({ block: "center", behavior: "smooth" });
     for (const el of root.querySelectorAll(".lk-msg-highlight")) {
       el.classList.remove("lk-msg-highlight");
@@ -8997,14 +9026,6 @@ function ChatView(props: {
     jumpToMessage(entry.messageId);
     setPinIndex(nextPinIndex(pinIndex(), entries.length));
   }
-  createEffect(() => {
-    rows().length;
-    const el = scrollEl;
-    if (el === undefined || !stickToBottom) return;
-    requestAnimationFrame(() => {
-      el.scrollTop = el.scrollHeight;
-    });
-  });
 
   /** `docs/ux/navigation.md` section 2.4 - nothing of the conversation is
    *  drawn before its title can be named and its stored messages were read:
@@ -9250,11 +9271,6 @@ function ChatView(props: {
       <div
         class="lk-chat-scroll"
         ref={scrollEl}
-        onScroll={() => {
-          const el = scrollEl;
-          if (el === undefined) return;
-          stickToBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-        }}
       >
       {/* The in-call UI and the remote audio sinks of both call kinds are the
           call host's (`calls/CallHostContext.tsx`), rendered on every screen. */}
@@ -9555,6 +9571,8 @@ function ChatView(props: {
                 onToggleSaved={(id) => void onToggleSaved(id)}
                 onOpenForwardOrigin={onOpenForwardOrigin}
                 onSaveEdit={onSaveEdit}
+                editNotSent={(id) => editsNotSent().has(id)}
+                onRetryEdit={onRetryEdit}
                 onDeleteMessage={onDeleteMessage}
                 onReact={(id, emoji) => onReact(id, emoji)}
                 onQuickReact={(id) => onQuickReact(id)}

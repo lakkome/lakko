@@ -60,6 +60,9 @@ export interface PinRowDecision {
 
 export const PIN_DETAIL_PERSONAL = (): string => t("chat.pin.detail_personal");
 export const PIN_DETAIL_SHARED = (): string => t("chat.pin.detail_shared");
+/** The shared row's line in a one-to-one (`docs/ux/message-actions.md`, the
+ *  pin sheet): there are two people, not members. */
+export const PIN_DETAIL_SHARED_BOTH = (): string => t("chat.pin.detail_shared_both");
 export const PIN_SHEET_TITLE = (): string => t("chat.pin.sheet_title");
 export const UNPIN_SHEET_TITLE = (): string => t("chat.unpin.sheet_title");
 
@@ -74,7 +77,7 @@ function option(scope: PinOption["scope"], pinned: boolean, oneToOne: boolean): 
     scope,
     pinned,
     label: oneToOne ? both : everyone,
-    detail: PIN_DETAIL_SHARED(),
+    detail: oneToOne ? PIN_DETAIL_SHARED_BOTH() : PIN_DETAIL_SHARED(),
   };
 }
 

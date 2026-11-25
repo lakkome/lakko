@@ -3473,6 +3473,10 @@
       "text": "همه اعضا آن را می‌بینند",
       "status": "machine"
     },
+    "chat.pin.detail_shared_both": {
+      "text": "هر دوی شما آن را می‌بینید",
+      "status": "machine"
+    },
     "chat.pin.for_both": {
       "text": "سنجاق برای هر دو نفر",
       "status": "machine"

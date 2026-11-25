@@ -159,6 +159,12 @@ export interface BubbleHost {
   onStartEdit: (messageId: number, current: string) => void;
   onCancelEdit: () => void;
   onSaveEdit: (messageId: number) => void | Promise<void>;
+  /** An own message whose latest edit is drawn but did not go out: its line
+   *  says `Not sent` with a retry in place of the time, as an unsent message
+   *  does (the edited text stays; nothing is silently reverted). */
+  editNotSent?: (messageId: number) => boolean;
+  /** Send that edit again. */
+  onRetryEdit?: (messageId: number) => void;
   onDeleteMessage: (messageId: number) => void | Promise<void>;
   onReact: (messageId: number, emoji: string) => void | Promise<void>;
   /** `docs/ux/reactions-and-emoji.md` section 6 — a double click on the
@@ -986,6 +992,14 @@ function ChatBubbleBody(
           before it, a plain text message that did not send showed the
           words "Not sent" and no way to act on them. */}
       <Show
+        when={
+          props.isOwn &&
+          props.ack === "sent" &&
+          props.messageId !== undefined &&
+          props.editNotSent?.(props.messageId) === true
+        }
+        fallback={
+      <Show
         when={props.ack === "failed" && otherMediaRefs().length === 0}
         fallback={
           <Show
@@ -999,6 +1013,16 @@ function ChatBubbleBody(
         }
       >
         <NotSent onRetry={() => props.onRetrySend()} />
+      </Show>
+        }
+      >
+        <span data-testid="edit-not-sent">
+          <NotSent
+            onRetry={() => {
+              if (props.messageId !== undefined) props.onRetryEdit?.(props.messageId);
+            }}
+          />
+        </span>
       </Show>
       {/* ADR-0024 — read state on our OWN acked messages. A single
           check once published ("Sent"); a double check once

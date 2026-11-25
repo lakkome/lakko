@@ -3473,6 +3473,10 @@
       "text": "所有成员都能看到",
       "status": "machine"
     },
+    "chat.pin.detail_shared_both": {
+      "text": "你们双方都能看到",
+      "status": "machine"
+    },
     "chat.pin.for_both": {
       "text": "为双方置顶",
       "status": "machine"

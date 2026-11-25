@@ -28,8 +28,6 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -1157,32 +1155,20 @@ private fun CreateMenu(
     /** ADR-0099 section 4 - suspended: nothing to create, Saved only. */
     readOnly: Boolean = false,
 ) {
-    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+    if (!expanded) return
+    // The app's own action sheet (design system: Action sheet), never the
+    // stock Material menu; dismissing it is Cancel.
+    val rows = buildList {
         if (!readOnly) {
-            DropdownMenuItem(
-                text = { Text(t("chats.create.chat")) },
-                leadingIcon = { LkIcon(R.drawable.ic_lk_chat, contentDescription = null, size = LkIconSize.Row) },
-                onClick = { onDismiss(); onNewChat() },
-            )
-            DropdownMenuItem(
-                text = { Text(t("chats.create.group")) },
-                leadingIcon = { LkIcon(R.drawable.ic_lk_person_3, contentDescription = null, size = LkIconSize.Row) },
-                onClick = { onDismiss(); onCreateGroup() },
-            )
-            DropdownMenuItem(
-                text = { Text(t("chats.create.channel")) },
-                leadingIcon = { LkIcon(R.drawable.ic_lk_megaphone, contentDescription = null, size = LkIconSize.Row) },
-                onClick = { onDismiss(); onCreateChannel() },
-            )
+            add(me.lakko.app.ui.components.LakkoMenuRow(t("chats.create.chat"), R.drawable.ic_lk_chat) { onNewChat() })
+            add(me.lakko.app.ui.components.LakkoMenuRow(t("chats.create.group"), R.drawable.ic_lk_person_3) { onCreateGroup() })
+            add(me.lakko.app.ui.components.LakkoMenuRow(t("chats.create.channel"), R.drawable.ic_lk_megaphone) { onCreateChannel() })
         }
         if (onOpenSaved != null) {
-            DropdownMenuItem(
-                text = { Text(t("saved.title")) },
-                leadingIcon = { LkIcon(R.drawable.ic_lk_bookmark, contentDescription = null, size = LkIconSize.Row) },
-                onClick = { onDismiss(); onOpenSaved() },
-            )
+            add(me.lakko.app.ui.components.LakkoMenuRow(t("saved.title"), R.drawable.ic_lk_bookmark) { onOpenSaved() })
         }
     }
+    me.lakko.app.ui.components.LakkoMenu(rows = rows, onDismissRequest = onDismiss, separators = false)
 }
 
 /**
@@ -1689,9 +1675,12 @@ internal class RowMenuModel(
     fun isIn(f: ChatFolder): Boolean = handlers.inFolder(f, row)
 
     /** Whether tapping [f] in the list would pass a hand-list limit. */
-    fun blocked(f: ChatFolder): Boolean {
-        val state = membershipToggle(f, row, isIn(f)) ?: return false
-        return membershipToggleBlocked(f, row, state)
+    fun blocked(f: ChatFolder): Boolean = blockedState(f) != null
+
+    /** The hand list tapping [f] would pass the limit of, or `null`. */
+    fun blockedState(f: ChatFolder): uniffi.lakko_ffi_uniffi.FolderMemberState? {
+        val state = membershipToggle(f, row, isIn(f)) ?: return null
+        return state.takeIf { membershipToggleBlocked(f, row, it) }
     }
 
     fun toggle(f: ChatFolder) = handlers.onToggleMembership(f, row, isIn(f))
@@ -1700,7 +1689,7 @@ internal class RowMenuModel(
 }
 
 /**
- * The long-press menu. "Add to folder" is a second step of the same dropdown
+ * The long-press menu. "Add to folder" is a second step of the same sheet
  * on Android (`docs/ux/chat-folders.md` 5): the folders with a checkmark where
  * the chat is in them, then "New folder...".
  */
@@ -1711,100 +1700,100 @@ private fun RowMenu(expanded: Boolean, onDismiss: () -> Unit, model: RowMenuMode
         folderStep = false
         onDismiss()
     }
-    DropdownMenu(expanded = expanded, onDismissRequest = close) {
+    if (!expanded) return
+    // The app's own action sheet (design system: Action sheet). "Add to
+    // folder" keeps it open and shows the folders in the same sheet.
+    val rows = buildList {
         if (!folderStep) {
             if (model.showPin) {
-                DropdownMenuItem(
-                    text = { Text(t(if (model.pinned) "chats.action.unpin" else "chats.action.pin")) },
-                    leadingIcon = { LkIcon(if (model.pinned) R.drawable.ic_lk_pin_slash else R.drawable.ic_lk_pin, contentDescription = null, size = LkIconSize.Row) },
-                    enabled = model.pinEnabled,
-                    onClick = { close(); model.onPin() },
+                add(
+                    me.lakko.app.ui.components.LakkoMenuRow(
+                        label = t(if (model.pinned) "chats.action.unpin" else "chats.action.pin"),
+                        icon = if (model.pinned) R.drawable.ic_lk_pin_slash else R.drawable.ic_lk_pin,
+                        disabledReason = if (model.pinEnabled) {
+                            null
+                        } else {
+                            t("folders.pin_limit", emptyMap(), mapOf("count" to FolderLimits.MAX_PINS.toULong()))
+                        },
+                    ) { model.onPin() },
                 )
-                if (!model.pinEnabled) {
-                    MenuHelperLine(t("folders.pin_limit", emptyMap(), mapOf("count" to FolderLimits.MAX_PINS.toULong())))
-                }
             }
             if (model.showFlags) {
-                DropdownMenuItem(
-                    text = { Text(t(if (model.row.muted) "chats.action.unmute" else "chats.action.mute")) },
-                    leadingIcon = { LkIcon(if (model.row.muted) R.drawable.ic_lk_bell else R.drawable.ic_lk_bell_slash, contentDescription = null, size = LkIconSize.Row) },
-                    onClick = { close(); model.onFlag(FlagField.Mute) },
+                add(
+                    me.lakko.app.ui.components.LakkoMenuRow(
+                        label = t(if (model.row.muted) "chats.action.unmute" else "chats.action.mute"),
+                        icon = if (model.row.muted) R.drawable.ic_lk_bell else R.drawable.ic_lk_bell_slash,
+                    ) { model.onFlag(FlagField.Mute) },
                 )
-                DropdownMenuItem(
-                    text = { Text(t(if (model.row.archived) "chats.action.unarchive" else "chats.action.archive")) },
-                    leadingIcon = {
-                        LkIcon(
-                            if (model.row.archived) R.drawable.ic_lk_unarchive else R.drawable.ic_lk_archive,
-                            contentDescription = null,
-                            size = LkIconSize.Row,
-                        )
-                    },
-                    onClick = { close(); model.onFlag(FlagField.Archive) },
+                add(
+                    me.lakko.app.ui.components.LakkoMenuRow(
+                        label = t(if (model.row.archived) "chats.action.unarchive" else "chats.action.archive"),
+                        icon = if (model.row.archived) R.drawable.ic_lk_unarchive else R.drawable.ic_lk_archive,
+                    ) { model.onFlag(FlagField.Archive) },
                 )
             }
             if (model.showFolderItems) {
-                DropdownMenuItem(
-                    text = { Text(t("folders.add_to_folder")) },
-                    leadingIcon = { LkIcon(R.drawable.ic_lk_folder_plus, contentDescription = null, size = LkIconSize.Row) },
-                    // With no folders yet it goes straight to the editor, as
-                    // "New folder..." would.
-                    enabled = model.folders.isNotEmpty() || model.canCreateFolder,
-                    onClick = {
-                        if (model.folders.isEmpty()) {
-                            close()
-                            model.newFolder()
+                // With no folders yet it goes straight to the editor, as
+                // "New folder..." would.
+                val addEnabled = model.folders.isNotEmpty() || model.canCreateFolder
+                add(
+                    me.lakko.app.ui.components.LakkoMenuRow(
+                        label = t("folders.add_to_folder"),
+                        icon = R.drawable.ic_lk_folder_plus,
+                        disabledReason = if (addEnabled) {
+                            null
                         } else {
-                            folderStep = true
-                        }
+                            t("folders.limit", emptyMap(), mapOf("count" to FolderLimits.MAX_FOLDERS.toULong()))
+                        },
+                        keepOpen = model.folders.isNotEmpty(),
+                    ) {
+                        if (model.folders.isEmpty()) model.newFolder() else folderStep = true
                     },
                 )
                 val tab = model.folder
                 if (tab != null) {
-                    DropdownMenuItem(
-                        text = { Text(t("folders.remove_from_folder")) },
-                        leadingIcon = { LkIcon(R.drawable.ic_lk_folder_minus, contentDescription = null, size = LkIconSize.Row) },
-                        onClick = { close(); model.toggle(tab) },
+                    add(
+                        me.lakko.app.ui.components.LakkoMenuRow(
+                            label = t("folders.remove_from_folder"),
+                            icon = R.drawable.ic_lk_folder_minus,
+                        ) { model.toggle(tab) },
                     )
                 }
             }
         } else {
             for (f in model.folders) {
-                val checked = model.isIn(f)
-                val blocked = model.blocked(f)
-                DropdownMenuItem(
-                    text = { Text(f.name) },
-                    leadingIcon = {
-                        if (checked) {
-                            LkIcon(R.drawable.ic_lk_checkmark, contentDescription = t("folders.in_folder_a11y"), size = LkIconSize.Row)
-                        } else {
-                            Spacer(Modifier.size(LkIconSize.Row))
-                        }
-                    },
-                    enabled = !blocked,
-                    onClick = { close(); model.toggle(f) },
+                add(
+                    me.lakko.app.ui.components.LakkoMenuRow(
+                        label = f.name,
+                        icon = null,
+                        // A folder whose hand list is full says which limit,
+                        // as the folder editor's picker does.
+                        disabledReason = when (model.blockedState(f)) {
+                            uniffi.lakko_ffi_uniffi.FolderMemberState.INCLUDED ->
+                                t("folders.picker.limit_include", emptyMap(), mapOf("count" to FolderLimits.MAX_HAND.toULong()))
+                            uniffi.lakko_ffi_uniffi.FolderMemberState.EXCLUDED ->
+                                t("folders.picker.limit_exclude", emptyMap(), mapOf("count" to FolderLimits.MAX_HAND.toULong()))
+                            else -> null
+                        },
+                        checked = model.isIn(f),
+                    ) { model.toggle(f) },
                 )
             }
-            DropdownMenuItem(
-                text = { Text(t("folders.new_ellipsis")) },
-                leadingIcon = { LkIcon(R.drawable.ic_lk_folder_plus, contentDescription = null, size = LkIconSize.Row) },
-                enabled = model.canCreateFolder,
-                onClick = { close(); model.newFolder() },
+            add(
+                me.lakko.app.ui.components.LakkoMenuRow(
+                    label = t("folders.new_ellipsis"),
+                    icon = R.drawable.ic_lk_folder_plus,
+                    section = 1,
+                    disabledReason = if (model.canCreateFolder) {
+                        null
+                    } else {
+                        t("folders.limit", emptyMap(), mapOf("count" to FolderLimits.MAX_FOLDERS.toULong()))
+                    },
+                ) { model.newFolder() },
             )
-            if (!model.canCreateFolder) {
-                MenuHelperLine(t("folders.limit", emptyMap(), mapOf("count" to FolderLimits.MAX_FOLDERS.toULong())))
-            }
         }
     }
-}
-
-@Composable
-private fun MenuHelperLine(text: String) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp).width(220.dp),
-    )
+    me.lakko.app.ui.components.LakkoMenu(rows = rows, onDismissRequest = close, separators = folderStep)
 }
 
 /**

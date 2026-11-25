@@ -3473,6 +3473,10 @@
       "text": "हर सदस्य को दिखता है",
       "status": "machine"
     },
+    "chat.pin.detail_shared_both": {
+      "text": "आप दोनों इसे देखते हैं",
+      "status": "machine"
+    },
     "chat.pin.for_both": {
       "text": "दोनों के लिए पिन करें",
       "status": "machine"

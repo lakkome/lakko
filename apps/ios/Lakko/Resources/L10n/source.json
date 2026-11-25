@@ -4004,6 +4004,10 @@
       "text": "Every member sees it",
       "comment": "Line under the option that pins a message for everyone in the conversation."
     },
+    "chat.pin.detail_shared_both": {
+      "text": "You both see it",
+      "comment": "Line under Pin for both in a one-to-one conversation: the pin shows for both people."
+    },
     "chat.pin.for_both": {
       "text": "Pin for both",
       "comment": "Option in a one-to-one chat: pin the message for both people."

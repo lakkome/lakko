@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -32,14 +31,12 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -188,27 +185,14 @@ internal fun GroupPhotoHeader(viewModel: ChatViewModel, title: String, canSet: B
     }
 
     if (menuOpen) {
-        val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ModalBottomSheet(onDismissRequest = { menuOpen = false }, sheetState = sheet) {
-            Column(Modifier.navigationBarsPadding().padding(bottom = 8.dp)) {
-                PhotoMenuItem(R.drawable.ic_lk_photo_stack, t("profile.avatar.menu.library")) {
-                    menuOpen = false
-                    picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
-                }
-                if (hasCamera) {
-                    PhotoMenuItem(R.drawable.ic_lk_camera, t("profile.avatar.menu.camera")) {
-                        menuOpen = false
-                        cameraOpen = true
-                    }
-                }
-                if (photo?.avatar != null) {
-                    PhotoMenuItem(R.drawable.ic_lk_trash, t("profile.avatar.menu.remove"), destructive = true) {
-                        menuOpen = false
-                        confirmRemove = true
-                    }
-                }
-            }
-        }
+        me.lakko.app.ui.components.PhotoMenu(
+            hasCamera = hasCamera,
+            canRemove = photo?.avatar != null,
+            onDismiss = { menuOpen = false },
+            onLibrary = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) },
+            onCamera = { cameraOpen = true },
+            onRemove = { confirmRemove = true },
+        )
     }
     if (confirmRemove) {
         LakkoDialog(
@@ -277,27 +261,6 @@ private fun groupPhotoFailure(cause: Throwable): UiText? {
         c = c.cause
     }
     return UiText("group_photo.error.upload")
-}
-
-@Composable
-private fun PhotoMenuItem(
-    @androidx.annotation.DrawableRes icon: Int,
-    label: String,
-    destructive: Boolean = false,
-    onClick: () -> Unit,
-) {
-    val color = if (destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 14.dp),
-    ) {
-        LkIcon(icon, contentDescription = null, tint = color, size = LkIconSize.Row)
-        Spacer(Modifier.width(16.dp))
-        Text(label, color = color)
-    }
 }
 
 /**
@@ -909,27 +872,14 @@ internal fun NewGroupPhotoSlot(
         }
     }
     if (menuOpen) {
-        val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ModalBottomSheet(onDismissRequest = { menuOpen = false }, sheetState = sheet) {
-            Column(Modifier.navigationBarsPadding().padding(bottom = 8.dp)) {
-                PhotoMenuItem(R.drawable.ic_lk_photo_stack, t("profile.avatar.menu.library")) {
-                    menuOpen = false
-                    picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
-                }
-                if (hasCamera) {
-                    PhotoMenuItem(R.drawable.ic_lk_camera, t("profile.avatar.menu.camera")) {
-                        menuOpen = false
-                        cameraOpen = true
-                    }
-                }
-                if (chosen != null) {
-                    PhotoMenuItem(R.drawable.ic_lk_trash, t("profile.avatar.menu.remove"), destructive = true) {
-                        menuOpen = false
-                        onChosen(null)
-                    }
-                }
-            }
-        }
+        me.lakko.app.ui.components.PhotoMenu(
+            hasCamera = hasCamera,
+            canRemove = chosen != null,
+            onDismiss = { menuOpen = false },
+            onLibrary = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) },
+            onCamera = { cameraOpen = true },
+            onRemove = { onChosen(null) },
+        )
     }
     cropSource?.let { source ->
         AvatarCropScreen(

@@ -13,8 +13,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -271,11 +269,10 @@ public fun DiscoverCardView(
                         IconButton(onClick = { overflow = true }) {
                             Icon(Icons.Filled.MoreVert, contentDescription = t("common.more_options"))
                         }
-                        DropdownMenu(expanded = overflow, onDismissRequest = { overflow = false }) {
-                            DropdownMenuItem(
-                                text = { Text(t("report.action"), color = MaterialTheme.colorScheme.error) },
-                                onClick = {
-                                    overflow = false
+                        if (overflow) {
+                            me.lakko.app.ui.components.LakkoMenu(
+                                rows = listOf(
+                                    me.lakko.app.ui.components.LakkoMenuRow(t("report.action"), icon = null, danger = true) {
                                     me.lakko.app.ui.moderation.ModerationRequests.openReport(
                                         me.lakko.app.ui.moderation.ReportRequest(
                                             me.lakko.app.moderation.channelReportSubject(
@@ -295,7 +292,10 @@ public fun DiscoverCardView(
                                             ),
                                         ),
                                     )
-                                },
+                                    },
+                                ),
+                                onDismissRequest = { overflow = false },
+                                separators = false,
                             )
                         }
                     }

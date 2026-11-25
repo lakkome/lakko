@@ -3473,6 +3473,10 @@
       "text": "Todos los miembros lo ven",
       "status": "machine"
     },
+    "chat.pin.detail_shared_both": {
+      "text": "Lo ven los dos",
+      "status": "machine"
+    },
     "chat.pin.for_both": {
       "text": "Fijar para ambos",
       "status": "machine"

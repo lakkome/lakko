@@ -439,11 +439,13 @@ public fun pinActionLabel(action: PinAction, oneToOne: Boolean): UiText = UiText
     },
 )
 
-/** The one line under each sheet row saying what it does. */
-public fun pinActionSubline(action: PinAction): UiText = UiText(
+/** The one line under each sheet row saying what it does. In a one-to-one
+ *  the shared scope reads "You both see it", in a group "Every member sees it". */
+public fun pinActionSubline(action: PinAction, oneToOne: Boolean): UiText = UiText(
     when (action) {
         PinAction.PIN_ME, PinAction.UNPIN_ME -> "chat.pin.detail_personal"
-        PinAction.PIN_EVERYONE, PinAction.UNPIN_EVERYONE -> "chat.pin.detail_shared"
+        PinAction.PIN_EVERYONE, PinAction.UNPIN_EVERYONE ->
+            if (oneToOne) "chat.pin.detail_shared_both" else "chat.pin.detail_shared"
     },
 )
 

@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
@@ -833,6 +834,35 @@ public fun ChatScreen(
             } else {
                 listState.scrollToItem(total - 1)
                 positionedOnce = true
+            }
+        }
+    }
+
+    // The list is top-anchored, so when the space above the composer shrinks
+    // (the keyboard opening, a reply or edit strip, a longer draft, the pinned
+    // bar appearing) or the last bubble grows (a saved edit), the newest rows
+    // would slide under the composer. While the person was at the bottom and
+    // is not scrolling, scroll them back into view (`StickToBottom`).
+    LaunchedEffect(listState) {
+        var stuck = true
+        androidx.compose.runtime.snapshotFlow {
+            val info = listState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()
+            me.lakko.app.chat.StickToBottom.Geometry(
+                totalItems = info.totalItemsCount,
+                lastVisibleIndex = last?.index ?: -1,
+                lastVisibleEnd = last?.let { it.offset + it.size } ?: 0,
+                viewportEnd = info.viewportEndOffset - info.afterContentPadding,
+            ) to listState.isScrollInProgress
+        }.collect { (geometry, scrolling) ->
+            val decision = me.lakko.app.chat.StickToBottom.decide(stuck, scrolling, geometry)
+            stuck = decision.stuck
+            when (val action = decision.action) {
+                is me.lakko.app.chat.StickToBottom.Action.ScrollBy ->
+                    listState.scrollBy(action.px.toFloat())
+                me.lakko.app.chat.StickToBottom.Action.JumpToEnd ->
+                    if (geometry.totalItems > 0) listState.scrollToItem(geometry.totalItems - 1)
+                me.lakko.app.chat.StickToBottom.Action.None -> Unit
             }
         }
     }

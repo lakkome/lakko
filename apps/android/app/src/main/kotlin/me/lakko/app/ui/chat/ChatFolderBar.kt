@@ -14,8 +14,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.ScrollableTabRow
@@ -43,6 +41,8 @@ import me.lakko.app.chat.folderUnreadCount
 import me.lakko.app.chat.hasUnread
 import me.lakko.app.l10n.t
 import me.lakko.app.ui.components.LakkoDialog
+import me.lakko.app.ui.components.LakkoMenu
+import me.lakko.app.ui.components.LakkoMenuRow
 import me.lakko.app.ui.components.LakkoDialogAction
 import me.lakko.app.ui.components.LakkoDialogTone
 
@@ -86,18 +86,14 @@ internal fun FolderBar(
             count = 0,
             selected = selected == 0,
             onClick = { onSelect(0) },
-        ) { dismiss ->
+        ) {
             val unread = rows.filter { !it.membershipEnded && it.hasUnread }
-            if (unread.isNotEmpty()) {
-                DropdownMenuItem(
-                    text = { Text(t("folders.mark_all_read")) },
-                    onClick = { dismiss(); onMarkAllRead(unread) },
-                )
+            buildList {
+                if (unread.isNotEmpty()) {
+                    add(LakkoMenuRow(label = t("folders.mark_all_read"), icon = null) { onMarkAllRead(unread) })
+                }
+                add(LakkoMenuRow(label = t("folders.edit_all"), icon = null) { onEditFolders() })
             }
-            DropdownMenuItem(
-                text = { Text(t("folders.edit_all")) },
-                onClick = { dismiss(); onEditFolders() },
-            )
         }
         folders.forEachIndexed { i, folder ->
             val count = counts.getOrElse(i) { 0 }
@@ -106,28 +102,19 @@ internal fun FolderBar(
                 count = count,
                 selected = selected == i + 1,
                 onClick = { onSelect(i + 1) },
-            ) { dismiss ->
-                DropdownMenuItem(
-                    text = { Text(t("folders.edit")) },
-                    onClick = { dismiss(); onEditFolder(folder) },
-                )
-                if (count > 0) {
-                    DropdownMenuItem(
-                        text = { Text(t("folders.mark_all_read")) },
-                        onClick = {
-                            dismiss()
-                            onMarkAllRead(folderRows(folder, rows).filter { it.hasUnread })
-                        },
-                    )
+            ) {
+                buildList {
+                    add(LakkoMenuRow(label = t("folders.edit"), icon = null) { onEditFolder(folder) })
+                    if (count > 0) {
+                        add(
+                            LakkoMenuRow(label = t("folders.mark_all_read"), icon = null) {
+                                onMarkAllRead(folderRows(folder, rows).filter { it.hasUnread })
+                            },
+                        )
+                    }
+                    add(LakkoMenuRow(label = t("folders.reorder"), icon = null) { onReorder() })
+                    add(LakkoMenuRow(label = t("folders.delete"), icon = null, danger = true) { onDelete(folder) })
                 }
-                DropdownMenuItem(
-                    text = { Text(t("folders.reorder")) },
-                    onClick = { dismiss(); onReorder() },
-                )
-                DropdownMenuItem(
-                    text = { Text(t("folders.delete"), color = MaterialTheme.colorScheme.error) },
-                    onClick = { dismiss(); onDelete(folder) },
-                )
             }
         }
     }
@@ -142,7 +129,8 @@ private fun FolderTab(
     count: Int,
     selected: Boolean,
     onClick: () -> Unit,
-    menuItems: @Composable (dismiss: () -> Unit) -> Unit,
+    /** The tab's long-press menu rows (the app's action sheet). */
+    menuRows: @Composable () -> List<LakkoMenuRow>,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     val spoken = if (count > 0) {
@@ -183,8 +171,8 @@ private fun FolderTab(
                 )
             }
         }
-        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-            menuItems { menuOpen = false }
+        if (menuOpen) {
+            LakkoMenu(rows = menuRows(), onDismissRequest = { menuOpen = false }, separators = false)
         }
     }
 }

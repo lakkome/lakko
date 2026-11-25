@@ -240,6 +240,8 @@ final class PinnedMessagesTests: XCTestCase {
 
         let oneToOne = PinSheet.options(sharedPinned: false, personalPinned: false, maySetShared: true, oneToOne: true)
         XCTAssertEqual(oneToOne.map(\.title), ["Pin for me", "Pin for both"])
+        XCTAssertEqual(oneToOne.map(\.subtitle), ["Only on this device", "You both see it"],
+                       "a one-to-one has two people, not members")
     }
 
     func testUnpinActsAtOnceInOneScopeAndAsksInTwo() {
@@ -253,6 +255,7 @@ final class PinnedMessagesTests: XCTestCase {
         XCTAssertNil(PinSheet.actsAtOnce(both))
         let bothOneToOne = PinSheet.options(sharedPinned: true, personalPinned: true, maySetShared: true, oneToOne: true)
         XCTAssertEqual(bothOneToOne.map(\.title), ["Unpin for me", "Unpin for both"])
+        XCTAssertEqual(bothOneToOne.map(\.subtitle), ["Only on this device", "You both see it"])
     }
 
     /// The sentence the spec writes out: a plain member holding a message an
