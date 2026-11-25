@@ -110,7 +110,8 @@
 html,
 body,
 #root {
-  height: 100%;
+  /* --app-height: the height above an on-screen keyboard (ui/keyboard-viewport.ts). */
+  height: var(--app-height, 100%);
   margin: 0;
 }
 
@@ -447,6 +448,12 @@ a:focus-visible {
     width: auto;
     min-width: 56px;
     padding: 6px 4px;
+  }
+  /* An open conversation fills the phone screen, as on iOS and Android:
+     no destination bar under its composer (it sat between the composer and
+     the keyboard; seen 2026-11-25). Back is the conversation's own. */
+  .app-shell:has(.lk-chats-split[data-open="true"]) > .lk-rail {
+    display: none;
   }
   .app-shell > main > article,
   .lk-main > article {
@@ -10571,5 +10578,21 @@ button.lk-card-row-button {
     bottom: min(0px, calc(50% - 24px));
     left: min(0px, calc(50% - 24px));
     right: min(0px, calc(50% - 24px));
+  }
+}
+
+/* iOS Safari zooms the page in when a field under 16px takes focus, and
+   leaves it zoomed: the right edge of a conversation (send, video call,
+   Settings) went off screen after the first tap on the composer (seen
+   2026-11-25 in Safari on an iPhone). On a touch screen every field is at
+   least 16px. `!important` because many fields set their size by class. */
+@media (pointer: coarse) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  textarea,
+  select {
+    font-size: max(16px, 1em) !important;
+  }
+  .lk-composer-input {
+    font-size: max(16px, calc(15px * var(--lk-text-scale))) !important;
   }
 }

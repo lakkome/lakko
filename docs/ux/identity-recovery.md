@@ -590,7 +590,7 @@ wrong ("Word 7 does not match. Check your notes and try again."). **Back to
 the words** returns to step 1. An acknowledgement ("I understand that losing
 these words means losing access to this account.") gates the step.
 
-**Step 3, offer a passkey** (only where passkeys are supported and the
+**Step 3 is retired** (2026-11-25, removed from web, which still showed it after a key change; the phones never did): section 19 shows no phrase at signup and offers a passkey as its own row of "Protect your account" (19.1a), so no phrase screen ends with a passkey offer. What it said: **Step 3, offer a passkey** (only where passkeys are supported and the
 account has a username): "Add a passkey so you can sign in with your face,
 fingerprint or screen lock." with **Add a passkey** and **Not now**. Adding
 one continues into the choice of section 10.2. This step never blocks
@@ -612,7 +612,11 @@ asked to write it down.
 | Could not finish | "Your account keys were reset, but Lakko could not finish setting up your new recovery phrase. Until that is done the new words would not sign you in, so they are not shown yet. Try again." with **Try again** and **Log out**. Try again never resets the keys a second time; it only repeats the last step. |
 | Rate limited | The shared `429` line with its countdown; Try again is disabled until it reaches zero. |
 | Offline | "Could not finish. Check your connection and try again." |
-| Ready | The new phrase in the grid: "The account keys for @name were reset. These 12 words bring the account back on a new device if you lose access again. Write them down in order and keep them somewhere safe.", "Your contacts will see that your safety number changed and will need to verify you again before messaging you securely.", and the acknowledge gate "I have written down these 12 words and understand that losing them means losing access to this account." |
+| Ready | The new phrase in the grid: "The account keys for @name were reset. These 12 words bring the account back on a new device if you lose access again. Write them down in order and keep them somewhere safe.", and the acknowledge gate "I have written down these 12 words and understand that losing them means losing access to this account." |
+
+Contacts are told nothing about the reset (section 16, silent continuity); the
+line that once said they would see a changed safety number was removed from this
+table on 2026-11-25 (no client showed it).
 
 If the app is closed in the "could not finish" state, the next time it opens
 signed in it retries in the background, and the screen returns until the
@@ -720,8 +724,8 @@ This is a repair, not a choice: there is nothing to turn off.
 Removing a passkey also removes what it stored for restoring keys; the
 existing passkey-confirmation step for removal is unchanged.
 
-The passkey offer at the end of signup follows step 2 and 3: the passkey
-restores keys when it can, with no choice.
+A passkey added from "Protect your account" (19.1a) restores keys when it
+can, with no choice.
 
 Every passkey is registered as discoverable (the server asks for a resident
 key), so a device that holds no account yet finds it with **Use passkey** and

@@ -177,6 +177,53 @@ struct AuthHint: View {
     }
 }
 
+/// A checkbox with its sentence beside it, the whole row one control (the
+/// web `.lk-check`): a square drawn by Lakko, the checkmark from the Lakko
+/// icon set, the sentence as the accessible label, the state as a toggle
+/// trait and an on/off value.
+struct AuthCheckRow: View {
+    let text: String
+    @Binding var isOn: Bool
+    var disabled: Bool = false
+
+    @ObservedObject private var l10n = Localization.shared
+
+    var body: some View {
+        Button {
+            isOn.toggle()
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(isOn ? Color.lakkoAccent : Color.clear)
+                    RoundedRectangle(cornerRadius: 5)
+                        .stroke(isOn ? Color.lakkoAccent : Color.lakkoTextMuted, lineWidth: 1.5)
+                    if isOn {
+                        LkIconView(.checkmark, size: 14)
+                            .foregroundStyle(Color.lakkoAccentForeground)
+                    }
+                }
+                .frame(width: 22, height: 22)
+                .padding(.top, 1)
+                Text(text)
+                    .font(.subheadline)
+                    .foregroundStyle(Color.lakkoText)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .opacity(disabled ? 0.5 : 1)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(text)
+        .accessibilityValue(l10n.t(isOn ? "common.on" : "common.off"))
+        .accessibilityAddTraits(isOn ? [.isToggle, .isSelected] : .isToggle)
+    }
+}
+
 private struct AuthFieldChrome: ViewModifier {
     let focused: Bool
 
@@ -512,10 +559,11 @@ struct PhraseEntryGrid: View {
 
 // MARK: - Guided phrase screen
 
-/// The recovery-phrase step shared by sign-up and the fresh-identity
-/// screen: the grid, Copy, a short explanation, an optional extra section,
-/// then a confirmation step that asks for three words at random positions
-/// before `onDone` fires. The words never leave the device; the check is
+/// The recovery-phrase step of "Save a recovery phrase" (UX 19.5) and of a
+/// key rotation: the grid, Copy, a short explanation, an optional extra
+/// section, then a confirmation step that asks for three words at random
+/// positions and the acknowledgement before `onDone` fires. (The new words
+/// after a key reset, UX 9.1, have no check: `SaveFreshPhraseScreen`.) The words never leave the device; the check is
 /// local. With `totalSteps` the two steps are numbered ("Step 1 of 3").
 struct RecoveryPhraseGuide<Extra: View>: View {
     let phrase: String
@@ -541,6 +589,9 @@ struct RecoveryPhraseGuide<Extra: View>: View {
     @State private var challenge = ThreeWordConfirmation.pick()
     @State private var entries: [String] = Array(repeating: "", count: ThreeWordConfirmation.wordCount)
     @State private var mismatch: String?
+    /// The acknowledgement under the three words (section 9, step 2): the
+    /// step does not finish until it is ticked.
+    @State private var acknowledged = false
     @FocusState private var focusedEntry: Int?
     @ObservedObject private var l10n = Localization.shared
 
@@ -592,6 +643,7 @@ struct RecoveryPhraseGuide<Extra: View>: View {
             challenge = ThreeWordConfirmation.pick()
             entries = Array(repeating: "", count: ThreeWordConfirmation.wordCount)
             mismatch = nil
+            acknowledged = false
             withAnimation { step = .confirm }
         }
     }
@@ -619,7 +671,9 @@ struct RecoveryPhraseGuide<Extra: View>: View {
                             focusedEntry = index + 1
                         } else {
                             focusedEntry = nil
-                            verify()
+                            // The return key is the confirm button: it
+                            // waits for the acknowledgement too.
+                            if canConfirm { verify() }
                         }
                     }
                     .focused($focusedEntry, equals: index)
@@ -632,6 +686,11 @@ struct RecoveryPhraseGuide<Extra: View>: View {
             AuthHint(text: mismatch, isError: true)
         }
 
+        AuthCheckRow(
+            text: l10n.t("recovery_phrase.check.acknowledge"),
+            isOn: $acknowledged,
+            disabled: doneBusy)
+
         if let confirmFooter {
             confirmFooter
         }
@@ -639,9 +698,7 @@ struct RecoveryPhraseGuide<Extra: View>: View {
         AuthPrimaryButton(
             title: doneTitle ?? l10n.t("common.continue"),
             busy: doneBusy,
-            disabled: entries.contains(where: {
-                $0.trimmingCharacters(in: .whitespaces).isEmpty
-            })
+            disabled: !canConfirm
         ) {
             verify()
         }
@@ -652,7 +709,14 @@ struct RecoveryPhraseGuide<Extra: View>: View {
         }
     }
 
+    /// The confirm button and the return key: three words typed and the
+    /// acknowledgement ticked (``ThreeWordConfirmation/canSubmit``).
+    private var canConfirm: Bool {
+        ThreeWordConfirmation.canSubmit(entries: entries, acknowledged: acknowledged)
+    }
+
     private func verify() {
+        guard canConfirm else { return }
         let wrong = ThreeWordConfirmation.mismatches(challenge: challenge, entries: entries, words: words)
         if wrong.isEmpty, !words.isEmpty {
             mismatch = nil

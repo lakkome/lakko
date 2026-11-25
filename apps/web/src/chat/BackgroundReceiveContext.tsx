@@ -132,6 +132,8 @@ import {
   recordRemovedDevices,
   removedDevices,
   takeReadmissionSlot,
+  readmissionRunsHere,
+  type ReadmissionCaller,
   type AccountDevices,
   type RosterLeafKeys,
 } from "./device-readmission";
@@ -264,6 +266,15 @@ export interface BackgroundReceiveApi {
    * be decided while it stays open. Fire-and-forget; never throws.
    */
   continuityPass(groupIdB64: string): void;
+  /**
+   * ADR-0050 section 2.4 — the re-admission check for `groupIdB64`, from the
+   * chat view at the tail of its own poll. The background sweep does not
+   * poll the group a view has open, so without this a device of a person in
+   * the open chat (a phone restored by its phrase, a new device) is never
+   * proposed while the chat stays open. Throttled per chat like the sweep's
+   * own check (`READMISSION_INTERVAL_MS`). Fire-and-forget; never throws.
+   */
+  readmissionPass(groupIdB64: string): void;
 }
 
 /** What a device fan-out did, per chat. */
@@ -1312,6 +1323,15 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     continueAll(false);
   }
 
+  function readmissionPass(groupIdB64: string): void {
+    const entry = chats.get(groupIdB64);
+    if (entry === undefined) return;
+    void readmitFor(entry, "view").catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.warn(`ADR-0050 re-admission check failed: ${errorLogTag(err)}`);
+    });
+  }
+
   // An accepted reset (wherever the identity gate met it) starts the work at
   // once, for every conversation shared with that account.
   /** ADR-0073 R.8 — the service worker's copy of the retired keys
@@ -1461,12 +1481,18 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
    * is. Each chat is checked at most once per
    * `READMISSION_INTERVAL_MS`.
    */
-  async function readmitFor(entry: ActiveGroup): Promise<void> {
+  async function readmitFor(
+    entry: ActiveGroup,
+    caller: ReadmissionCaller = "background",
+  ): Promise<void> {
     const secrets = auth.identitySecrets();
     if (secrets === null) return;
     if (readIsActive(entry.group) === false) return;
     // ADR-0091 section 2 (C-93) — no ADR-0050 arm while this device is behind.
     if (conversationBehind.stopsActing(entry.groupIdB64)) return;
+    // The sweep for a chat no view has open, the view for its own chat; the
+    // slot below is not taken by the caller that does not run it.
+    if (!readmissionRunsHere(caller, coordinator.isForeground(entry.groupIdB64))) return;
     if (!takeReadmissionSlot(entry.groupIdB64, Date.now())) return;
     const s = auth.state();
     if (s.kind !== "session") return;
@@ -2563,7 +2589,14 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
 
   return (
     <BackgroundReceiveContext.Provider
-      value={{ coordinator, syncGroupNow, admitDevice, retireDevice, continuityPass }}
+      value={{
+        coordinator,
+        syncGroupNow,
+        admitDevice,
+        retireDevice,
+        continuityPass,
+        readmissionPass,
+      }}
     >
       {props.children}
     </BackgroundReceiveContext.Provider>

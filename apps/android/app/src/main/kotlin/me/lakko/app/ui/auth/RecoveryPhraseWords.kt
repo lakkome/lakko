@@ -89,6 +89,19 @@ public fun pickConfirmationPositions(
     return chosen.sorted()
 }
 
+/**
+ * The confirm button of the check step is live: every asked position has a
+ * typed word (not only white space) and the acknowledgement is ticked
+ * (docs/ux/identity-recovery.md section 9, step 2; the web
+ * `PhraseCheckForm`). Whether the words match is judged on submit by
+ * [checkConfirmation].
+ */
+public fun confirmationSubmittable(
+    positions: List<Int>,
+    answers: Map<Int, String>,
+    acknowledged: Boolean,
+): Boolean = acknowledged && positions.isNotEmpty() && positions.all { answers[it].orEmpty().isNotBlank() }
+
 /** The verdict of one confirmation attempt. */
 public sealed interface ConfirmationVerdict {
     /** Every asked word matched. */

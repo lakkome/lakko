@@ -146,4 +146,21 @@ final class AuthPhraseHelpersTests: XCTestCase {
             [1, 2])
         XCTAssertFalse(ThreeWordConfirmation.check(challenge: challenge, entries: ["", "", ""], words: []))
     }
+
+    func testTheCheckStepWaitsForTheAcknowledgement() {
+        XCTAssertFalse(ThreeWordConfirmation.canSubmit(entries: ["a", "b", "c"], acknowledged: false))
+        XCTAssertTrue(ThreeWordConfirmation.canSubmit(entries: ["a", "b", "c"], acknowledged: true))
+    }
+
+    func testTheCheckStepWaitsForAllThreeWords() {
+        XCTAssertFalse(ThreeWordConfirmation.canSubmit(entries: ["a", " ", "c"], acknowledged: true))
+        XCTAssertFalse(ThreeWordConfirmation.canSubmit(entries: ["a", "b"], acknowledged: true))
+        XCTAssertFalse(ThreeWordConfirmation.canSubmit(entries: ["", "", ""], acknowledged: true))
+    }
+
+    func testTheNewWordsAfterAResetNeedTheAcknowledgementOnly() {
+        XCTAssertFalse(FreshPhraseAcknowledgement.canFinish(words: phrase, acknowledged: false))
+        XCTAssertTrue(FreshPhraseAcknowledgement.canFinish(words: phrase, acknowledged: true))
+        XCTAssertFalse(FreshPhraseAcknowledgement.canFinish(words: [], acknowledged: true))
+    }
 }

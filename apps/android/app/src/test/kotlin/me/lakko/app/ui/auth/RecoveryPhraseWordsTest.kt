@@ -122,4 +122,25 @@ class RecoveryPhraseWordsTest {
         assertTrue(phraseSlotInvalid("abandom"))
         assertTrue(phraseSlotInvalid("ab"))
     }
+
+    @Test
+    fun `the check step waits for the acknowledgement`() {
+        val answers = mapOf(2 to "w2", 5 to "w5", 9 to "w9")
+        assertFalse(confirmationSubmittable(listOf(2, 5, 9), answers, acknowledged = false))
+        assertTrue(confirmationSubmittable(listOf(2, 5, 9), answers, acknowledged = true))
+    }
+
+    @Test
+    fun `the check step waits for every asked word`() {
+        assertFalse(confirmationSubmittable(listOf(2, 5, 9), mapOf(2 to "w2", 5 to " ", 9 to "w9"), acknowledged = true))
+        assertFalse(confirmationSubmittable(listOf(2, 5, 9), mapOf(2 to "w2", 9 to "w9"), acknowledged = true))
+        assertFalse(confirmationSubmittable(emptyList(), emptyMap(), acknowledged = true))
+    }
+
+    @Test
+    fun `the new words after a reset need the acknowledgement and no word check`() {
+        assertFalse(freshPhraseDoneEnabled(phrase, acknowledged = false))
+        assertTrue(freshPhraseDoneEnabled(phrase, acknowledged = true))
+        assertFalse(freshPhraseDoneEnabled(emptyList(), acknowledged = true))
+    }
 }

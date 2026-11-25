@@ -3,7 +3,12 @@
 
 import { describe, expect, it } from "vitest";
 
-import { planReadmission, type DirectoryDevice } from "./device-readmission";
+import {
+  planReadmission,
+  readmissionRunsHere,
+  type DirectoryDevice,
+  type ReadmissionCaller,
+} from "./device-readmission";
 
 const kp = (tag: string): DirectoryDevice => ({
   deviceKeyB64: tag,
@@ -264,5 +269,45 @@ describe("lookupStanding (ADR-0073 R.2 / R.7 case 2)", () => {
         binding: { keyB64: "mallory" },
       }),
     ).toBe("skip");
+  });
+});
+
+describe("readmissionRunsHere (ADR-0050 section 2.4, the open chat)", () => {
+  it("leaves an open chat to its view and every other chat to the sweep", () => {
+    expect(readmissionRunsHere("view", true)).toBe(true);
+    expect(readmissionRunsHere("background", true)).toBe(false);
+    expect(readmissionRunsHere("background", false)).toBe(true);
+    expect(readmissionRunsHere("view", false)).toBe(false);
+  });
+
+  it("gives every chat exactly one caller, open or not", () => {
+    const callers: ReadmissionCaller[] = ["background", "view"];
+    for (const chatOpen of [true, false]) {
+      expect(callers.filter((c) => readmissionRunsHere(c, chatOpen))).toHaveLength(1);
+    }
+  });
+
+  it("the open one-to-one of a contact whose only phone was restored admits the new phone", () => {
+    // The contact's old leaf stays in the roster (its device forgot itself and
+    // its directory row is gone); the restored phone lists a KeyPackage and
+    // holds no leaf. The view of the open chat is the caller that runs.
+    expect(readmissionRunsHere("view", true)).toBe(true);
+    const restored = kp("w20-new");
+    const plan = planReadmission({
+      roster: [
+        { leafKeyB64: "w17-1", personKeyB64: "w17" },
+        { leafKeyB64: "w20-old", personKeyB64: "w20" },
+      ],
+      ownPersonKeyB64: "w17",
+      accounts: [
+        { personKeyB64: "w17", devices: [kp("w17-1")] },
+        { personKeyB64: "w20", devices: [restored] },
+      ],
+      removed: new Set(),
+      ownDeviceGroup: new Set(["w17-1"]),
+    });
+    expect(plan.admit).toEqual([restored]);
+    // Another account's stale leaf is its own devices' to retire, never ours.
+    expect(plan.retire).toEqual([]);
   });
 });

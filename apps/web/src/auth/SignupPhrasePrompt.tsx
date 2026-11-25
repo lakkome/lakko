@@ -13,16 +13,14 @@
  *   1. the 12 numbered words, reading across the rows (3 x 4 at phone
  *      width, 4 x 3 on a wide screen), Copy and a short explanation;
  *   2. a check: three words at random positions, typed back from the notes,
- *      plus the acknowledgement, before Done;
- *   3. where passkeys are supported, an offer to add one
- *      (docs/ux/identity-recovery.md section 9, step 3): "Add a passkey" or
- *      "Not now". Adding one stores the keys for it with nothing to choose
- *      when the browser can protect them (section 10.2 steps 2 and 3,
- *      `storeKeysForPasskey`). The step never blocks: every outcome, a
- *      failure included, leaves "Not now" available.
+ *      plus the acknowledgement, before Done.
  *
- * The phrase is acknowledged when the last step ends, so a reload in the
- * middle shows the phrase again from step 1.
+ * No passkey offer follows: section 9's step 3 belonged to the phrase at
+ * sign-up, which section 19 (ADR-0075) retired; a passkey is one of the
+ * choices of "Protect your account" (19.1a, `PasskeyOffer` below).
+ *
+ * The phrase is acknowledged when the check ends, so a reload in the middle
+ * shows the phrase again from step 1.
  *
  * It is rendered by the route GUARDS, from `auth.signupPhrase()`, for as long
  * as that phrase is unacknowledged, whichever route the user is on and again
@@ -44,14 +42,13 @@ import { addedPasskeyMessage, storeKeysForPasskey, type StoreKeysOutcome } from 
 import { addNoPrfPasskey } from "./passkey-no-prf";
 import { useWebauthnClient } from "./use-webauthn-client";
 import {
-  WebauthnClient,
   WebauthnCredentialExistsError,
   WebauthnUserCancelledError,
 } from "./webauthn-client";
 
-type Step = "show" | "confirm" | "passkey";
+type Step = "show" | "confirm";
 
-const PASSKEYS_SUPPORTED = WebauthnClient.isWebauthnAvailable();
+const TOTAL_STEPS = 2;
 
 /**
  * Render the pending new words. Acknowledging them clears the phrase; the
@@ -62,33 +59,15 @@ export default function SignupPhrasePrompt(): JSX.Element {
   const auth = useAuth();
   const words = (): string[] => phraseWords(auth.signupPhrase() ?? "");
   const [step, setStep] = createSignal<Step>("show");
-  // The passkey step needs a browser with passkeys and an account with a
-  // username (a passkey is registered under it; a guest account has none).
-  const offerPasskey = (): boolean => {
-    const s = auth.state();
-    return PASSKEYS_SUPPORTED && s.kind === "session" && s.account.username.trim().length > 0;
-  };
-  const totalSteps = (): number => (offerPasskey() ? 3 : 2);
-
-  function onConfirmed(): void {
-    // The words are confirmed. Where passkeys work, offer one before the
-    // app opens; otherwise this was the last step.
-    if (offerPasskey()) {
-      setStep("passkey");
-      return;
-    }
-    auth.acknowledgeSignupPhrase();
-  }
 
   return (
     <AuthLayout>
-      <Show when={step() !== "passkey"} fallback={<PasskeyOffer onDone={() => auth.acknowledgeSignupPhrase()} />}>
       <Show
         when={step() === "confirm"}
         fallback={
           <>
             <h1>{t("recovery_phrase.save.title")}</h1>
-            <p class="lk-auth-step">{t("recovery_phrase.step", { current: 1, total: totalSteps() })}</p>
+            <p class="lk-auth-step">{t("recovery_phrase.step", { current: 1, total: TOTAL_STEPS })}</p>
             <p class="lk-auth-lede">{t("recovery_phrase.save.lede")}</p>
             <PhraseGrid words={words} />
             <p class="form-info">{t("recovery_phrase.save.no_screenshot")}</p>
@@ -101,30 +80,26 @@ export default function SignupPhrasePrompt(): JSX.Element {
         <h1>{t("recovery_phrase.check.title")}</h1>
         <PhraseCheckForm
           words={words()}
-          stepLabel={t("recovery_phrase.step", { current: 2, total: totalSteps() })}
-          submitLabel={offerPasskey() ? t("common.continue") : t("common.done")}
-          onConfirmed={onConfirmed}
+          stepLabel={t("recovery_phrase.step", { current: 2, total: TOTAL_STEPS })}
+          submitLabel={t("common.done")}
+          onConfirmed={() => auth.acknowledgeSignupPhrase()}
           onBack={() => setStep("show")}
         />
-      </Show>
       </Show>
     </AuthLayout>
   );
 }
 
 /**
- * Step 3: "Add a passkey so you can sign in with your face, fingerprint or
- * screen lock." Skippable, and nothing here can fail: the account exists and
- * its phrase is confirmed.
+ * "Create a passkey" of the "Protect your account" step (ADR-0075, UX
+ * 19.1a): "Add a passkey so you can sign in with your face, fingerprint or
+ * screen lock." Back returns to the step; nothing here can fail the account.
  */
 export function PasskeyOffer(props: {
   readonly onDone: () => void;
   /** A passkey now exists for the account (whatever storing its keys
    *  then comes to). */
   readonly onAdded?: () => void;
-  /** The "Protect your account" step (ADR-0075): no "Step 3 of 3" line, and
-   *  the second button reads Back. */
-  readonly standalone?: boolean;
 }): JSX.Element {
   const auth = useAuth();
   const { client, username } = useWebauthnClient();
@@ -226,9 +201,6 @@ export function PasskeyOffer(props: {
   return (
     <>
       <h1>{t("auth.signup.passkey.title")}</h1>
-      <Show when={props.standalone !== true}>
-        <p class="lk-auth-step">{t("recovery_phrase.step", { current: 3, total: 3 })}</p>
-      </Show>
       <Show
         when={result()}
         fallback={
@@ -249,7 +221,7 @@ export function PasskeyOffer(props: {
               {busy() ? t("recovery.passkey.waiting") : t("auth.signup.passkey.add")}
             </button>
             <button type="button" class="ghost" disabled={busy()} onClick={props.onDone}>
-              {props.standalone === true ? t("common.back") : t("common.not_now")}
+              {t("common.back")}
             </button>
           </>
         }

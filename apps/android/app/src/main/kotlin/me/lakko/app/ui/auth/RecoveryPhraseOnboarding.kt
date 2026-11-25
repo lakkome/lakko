@@ -46,16 +46,16 @@ import me.lakko.app.ui.components.LkIconSize
  *      phone, 4 x 3 on a wide screen, read across the rows) with a Copy
  *      button and a short explanation;
  *   2. a check that asks for three words at positions chosen at random on
- *      the device;
+ *      the device, and the acknowledgement that gates it;
  *   3. optionally [thirdStep] (sign-up: the offer to add a passkey), which
  *      is handed the function that ends the flow;
  *
  * then [onDone].
  *
- * Used after sign-up (the phrase the account was created with) and after a
- * lost-everything restore (the fresh identity's phrase); the two differ in
- * [title], [lead] and the third step. The confirmation compares locally and
- * sends nothing.
+ * Used by "Save a recovery phrase" (UX 19.5) and a key rotation; the new
+ * words after a key reset (UX 9.1) have no check and are shown by
+ * [SaveFreshPhraseScreen]. The confirmation compares locally and sends
+ * nothing.
  */
 @Composable
 public fun RecoveryPhraseOnboarding(
@@ -177,8 +177,15 @@ private fun ConfirmPhraseStep(
 ) {
     var answers by remember { mutableStateOf(positions.associateWith { "" }) }
     var mismatch by remember { mutableStateOf<List<Int>>(emptyList()) }
+    // The acknowledgement under the three words (section 9, step 2): the
+    // step does not finish until it is ticked.
+    var acknowledged by remember { mutableStateOf(false) }
+    val submittable = confirmationSubmittable(positions, answers, acknowledged) &&
+        finish?.enabled != false && finish?.busy != true
 
     fun submit() {
+        // The keyboard's Done is the confirm button: it waits for the same.
+        if (!submittable) return
         when (val verdict = checkConfirmation(words, positions, answers)) {
             ConfirmationVerdict.Confirmed -> onConfirmed()
             is ConfirmationVerdict.Mismatch -> mismatch = verdict.positions
@@ -219,6 +226,13 @@ private fun ConfirmPhraseStep(
                 else -> t("recovery_phrase.check.mismatch_many", mapOf("positions" to listPositions(mismatch)))
             },
         )
+        Spacer(Modifier.height(12.dp))
+        AuthCheckRow(
+            text = t("recovery_phrase.check.acknowledge"),
+            checked = acknowledged,
+            onCheckedChange = { acknowledged = it },
+            enabled = finish?.busy != true,
+        )
         finish?.above?.invoke()
         FormError(finish?.failure)
         Spacer(Modifier.height(16.dp))
@@ -229,7 +243,7 @@ private fun ConfirmPhraseStep(
                 else -> t("common.continue")
             },
             busy = finish?.busy == true,
-            enabled = positions.all { answers[it].orEmpty().isNotBlank() } && finish?.enabled != false,
+            enabled = confirmationSubmittable(positions, answers, acknowledged) && finish?.enabled != false,
             onClick = ::submit,
         )
         TextButton(

@@ -5,8 +5,8 @@ import SwiftUI
 
 /// The phrase screen of ``AuthState/saveFreshPhrase(_:)``: after "Reset
 /// account keys" and after taking the account back (not after a sign-up:
-/// ADR-0075 D2, a guest's included). It shows the new 12 words, asks
-/// for three of them back, then lands the session.
+/// ADR-0075 D2, a guest's included). It shows the new 12 words and the
+/// acknowledgement of UX 9.1 (no three-word check), then lands the session.
 ///
 /// One state comes before the words after a reset (UX 15.4): the account
 /// keys were reset in one server step, but telling the directory, this
@@ -32,6 +32,8 @@ public struct SaveFreshPhraseScreen: View {
     @State private var retryBusy = false
     @State private var retryError: UiText?
     @State private var confirmError: UiText?
+    /// "I have written down these 12 words..." (UX 9.1): Done waits for it.
+    @State private var acknowledged = false
     @ObservedObject private var l10n = Localization.shared
 
     public init(authRepository: AuthRepository, username: String = "") {
@@ -50,31 +52,47 @@ public struct SaveFreshPhraseScreen: View {
         }
     }
 
+    /// UX 9.1 "Ready": the grid and the acknowledgement that gates Done,
+    /// with no three-word check (the web `SaveFreshPhrasePrompt`).
     private var phraseGuide: some View {
         let guest = username.isEmpty
-        return RecoveryPhraseGuide(
-            phrase: authRepository.freshPhrase() ?? "",
-            title: l10n.t(guest ? "recovery_phrase.save.title" : "recovery_phrase.fresh.title"),
-            intro: guest
-                ? l10n.t("recovery_phrase.guest.lede")
-                : l10n.t("recovery_phrase.fresh.lede", texts: ["username": "@\(username)"]),
-            extra: {
-                if !guest {
-                    AuthHint(text: l10n.t("recovery_phrase.fresh.safety_note"))
-                    AuthHint(text: l10n.t("recovery_phrase.fresh.devices_signed_out"))
-                }
-                if let confirmError {
-                    AuthHint(text: confirmError.text, isError: true)
-                }
-            },
-            onDone: {
+        let words = PhraseWords.words(of: authRepository.freshPhrase() ?? "")
+        return AuthScreen {
+            AuthTitle(
+                title: l10n.t(guest ? "recovery_phrase.save.title" : "recovery_phrase.fresh.title"),
+                subtitle: guest
+                    ? l10n.t("recovery_phrase.guest.lede")
+                    : l10n.t("recovery_phrase.fresh.lede", texts: ["username": "@\(username)"]))
+            if !guest {
+                AuthHint(text: l10n.t("recovery_phrase.fresh.safety_note"))
+                AuthHint(text: l10n.t("recovery_phrase.fresh.devices_signed_out"))
+            }
+
+            PhraseGrid(words: words)
+
+            AuthHint(text: l10n.t("recovery_phrase.save.no_screenshot"))
+
+            AuthCheckRow(
+                text: l10n.t("recovery_phrase.fresh.acknowledge"),
+                isOn: $acknowledged)
+
+            if let confirmError {
+                AuthHint(text: confirmError.text, isError: true)
+            }
+
+            AuthPrimaryButton(
+                title: l10n.t("common.done"),
+                disabled: !FreshPhraseAcknowledgement.canFinish(words: words, acknowledged: acknowledged)
+            ) {
+                guard FreshPhraseAcknowledgement.canFinish(words: words, acknowledged: acknowledged)
+                else { return }
                 do {
                     try authRepository.confirmFreshPhraseSaved()
                 } catch {
                     confirmError = .key("recovery_phrase.fresh.error.generic")
                 }
             }
-        )
+        }
     }
 
     private var publishPending: some View {

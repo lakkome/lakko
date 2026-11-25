@@ -152,8 +152,29 @@ enum ThreeWordConfirmation {
         }
     }
 
+    /// The confirm button of the check step is live: every asked word is
+    /// typed (not only white space) and the acknowledgement is ticked
+    /// (docs/ux/identity-recovery.md section 9, step 2; the web
+    /// `PhraseCheckForm`). Whether the words match is judged on submit.
+    static func canSubmit(entries: [String], acknowledged: Bool, count: Int = wordCount) -> Bool {
+        acknowledged
+            && entries.count >= count
+            && !entries.prefix(count).contains { normalize($0).isEmpty }
+    }
+
     /// `true` when every entry matches.
     static func check(challenge: Challenge, entries: [String], words: [String]) -> Bool {
         !words.isEmpty && mismatches(challenge: challenge, entries: entries, words: words).isEmpty
+    }
+}
+
+/// The new-words screen after a key reset or taking the account back
+/// (docs/ux/identity-recovery.md section 9.1, "Ready"): the grid and one
+/// acknowledgement, no three-word check.
+enum FreshPhraseAcknowledgement {
+    /// Done is live: there are words to keep and the acknowledgement is
+    /// ticked.
+    static func canFinish(words: [String], acknowledged: Bool) -> Bool {
+        acknowledged && !words.isEmpty
     }
 }

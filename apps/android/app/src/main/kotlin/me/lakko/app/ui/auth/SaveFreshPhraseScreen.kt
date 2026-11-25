@@ -31,9 +31,9 @@ import me.lakko.app.l10n.t
 
 /**
  * A freshly created identity's 12-word phrase (the reset of the account
- * keys, and a guest account made from a call link), shown through the same
- * guided phrase step as sign-up ([RecoveryPhraseOnboarding]: grid, copy,
- * three-word check), then [onConfirm] lands the session.
+ * keys, and a guest account made from a call link): the grid and the
+ * acknowledgement of UX 9.1, no three-word check (the web
+ * `SaveFreshPhrasePrompt`), then [onConfirm] lands the session.
  *
  * While [publishOwed] is non-null the words are NOT shown (UX 15.4): the
  * account keys were reset, but the new keys are not yet published to the
@@ -73,21 +73,62 @@ public fun SaveFreshPhraseScreen(
         )
         return
     }
-    val guest = username.isNullOrBlank()
-    RecoveryPhraseOnboarding(
-        phrase = phrase,
-        onDone = onConfirm,
-        modifier = modifier,
-        title = if (guest) t("recovery_phrase.save.title") else t("recovery_phrase.fresh.title"),
-        lead = if (guest) {
-            t("recovery_phrase.guest.lede")
-        } else {
-            t("recovery_phrase.fresh.lede", mapOf("username" to "@$username")) +
-                "\n\n" + t("recovery_phrase.fresh.safety_note") +
-                "\n\n" + t("recovery_phrase.fresh.devices_signed_out")
-        },
-    )
+    FreshPhraseWords(phrase = phrase, username = username, onConfirm = onConfirm, modifier = modifier)
 }
+
+/**
+ * The words of UX 9.1 "Ready": the grid and the acknowledgement that gates
+ * Done, with no three-word check (the web `SaveFreshPhrasePrompt`).
+ */
+@Composable
+private fun FreshPhraseWords(
+    phrase: String,
+    username: String?,
+    onConfirm: () -> Unit,
+    modifier: Modifier,
+) {
+    val guest = username.isNullOrBlank()
+    val words = remember(phrase) { phraseWords(phrase) }
+    var acknowledged by remember { mutableStateOf(false) }
+    AuthScaffold(
+        title = if (guest) t("recovery_phrase.save.title") else t("recovery_phrase.fresh.title"),
+        onBack = null,
+        modifier = modifier,
+    ) {
+        if (guest) {
+            Lead(t("recovery_phrase.guest.lede"))
+        } else {
+            Lead(t("recovery_phrase.fresh.lede", mapOf("username" to "@$username")))
+            Spacer(Modifier.height(8.dp))
+            Lead(t("recovery_phrase.fresh.safety_note"))
+            Spacer(Modifier.height(8.dp))
+            Lead(t("recovery_phrase.fresh.devices_signed_out"))
+        }
+        Spacer(Modifier.height(16.dp))
+        RecoveryPhraseGrid(words)
+        Spacer(Modifier.height(8.dp))
+        Lead(t("recovery_phrase.save.no_screenshot"))
+        Spacer(Modifier.height(16.dp))
+        AuthCheckRow(
+            text = t("recovery_phrase.fresh.acknowledge"),
+            checked = acknowledged,
+            onCheckedChange = { acknowledged = it },
+        )
+        Spacer(Modifier.height(16.dp))
+        BusyButton(
+            label = t("common.done"),
+            busy = false,
+            enabled = freshPhraseDoneEnabled(words, acknowledged),
+            onClick = { if (freshPhraseDoneEnabled(words, acknowledged)) onConfirm() },
+        )
+        Spacer(Modifier.height(16.dp))
+    }
+}
+
+/** Done on the new-words screen of UX 9.1: there are words and the
+ *  acknowledgement is ticked. */
+public fun freshPhraseDoneEnabled(words: List<String>, acknowledged: Boolean): Boolean =
+    acknowledged && words.isNotEmpty()
 
 /**
  * The catalog keys of the publish-owed screen's text, joined by a blank

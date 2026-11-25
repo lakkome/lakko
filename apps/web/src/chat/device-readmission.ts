@@ -67,6 +67,24 @@ export interface ReadmissionPlan {
 /** How often one chat is re-checked, per account in it. */
 export const READMISSION_INTERVAL_MS = 10 * 60_000;
 
+/** Who runs the arm for a chat: the background sweep, or the chat's open view. */
+export type ReadmissionCaller = "background" | "view";
+
+/**
+ * Whether `caller` runs the arm for a chat whose view is (`chatOpen`) or is
+ * not open. Exactly one of the two callers answers yes for any chat.
+ *
+ * The background sweep does not poll a chat whose view is open (the view
+ * long-polls it), so the arm hung only off the sweep never ran for the open
+ * chat: a contact sitting in the one-to-one never re-admitted the restored
+ * device of the other person, which is the very moment re-admission is for
+ * ("your chats come back as your contacts open Lakko"). The view therefore
+ * runs it at the tail of its own poll, and the sweep only for the rest.
+ */
+export function readmissionRunsHere(caller: ReadmissionCaller, chatOpen: boolean): boolean {
+  return caller === "view" ? chatOpen : !chatOpen;
+}
+
 export function planReadmission(input: {
   readonly roster: readonly RosterLeafKeys[];
   readonly ownPersonKeyB64: string;

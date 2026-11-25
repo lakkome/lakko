@@ -5194,6 +5194,10 @@ function ChatView(props: {
       // of the open chat's own poll (the background sweep leaves this group
       // to this view). Silent; a no-op unless a reset was accepted.
       receive.continuityPass(props.entry.groupIdB64);
+      // ADR-0050 section 2.4 — the re-admission check for this chat, which
+      // the background sweep leaves to this view while it is open: a
+      // restored or new device of a person here is proposed from here.
+      receive.readmissionPass(props.entry.groupIdB64);
       return result.outcome;
     }
   }

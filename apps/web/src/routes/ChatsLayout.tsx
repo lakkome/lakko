@@ -28,7 +28,7 @@ export default function ChatsLayout(props: RouteSectionProps): JSX.Element {
     location.pathname.startsWith("/channel/") ||
     location.pathname === paths.newGroup;
   return (
-    <div class="lk-split" data-open={open() ? "true" : "false"}>
+    <div class="lk-split lk-chats-split" data-open={open() ? "true" : "false"}>
       <ChatList activeGroupIdB64={params.id ?? null} />
       <div class="lk-main">{props.children}</div>
     </div>
