@@ -476,12 +476,29 @@ extension ChatRepository {
         return published.messageId
     }
 
-    /// Step 4a — make the prepared successor a held conversation and deliver
-    /// the Welcomes. Idempotent: `false` when the successor could not be
-    /// brought up (the next pass tries again).
-    func deliverSuccessor(oldGroupIdHex: String, successorGroupIdB64: String) async throws -> Bool {
+    /// Whether a Welcome can reach the new identity's mailbox: the same plan
+    /// the Welcome write runs (``deliverWelcome(welcome:toAccountKey:plan:)``),
+    /// without writing. Any candidate is a way in; none means the write would
+    /// fail with nothing tried (``ContinuityWelcome/reachable(plan:)``).
+    func newIdentityReachable(accountIdB64: String) -> Bool {
+        guard let keyB64 = continuityPins.readPin(accountIdB64: accountIdB64)?.pinnedSignaturePubkeyB64,
+              let key = base64Decode(keyB64) else { return false }
+        return ContinuityWelcome.reachable(plan: ReachCenter.shared.writePlan(toAccountKey: key))
+    }
+
+    /// Step 4a — deliver the Welcomes, THEN make the prepared successor a
+    /// held conversation. Idempotent.
+    ///
+    /// The Welcomes go FIRST, the held successor after (2026-11-25): a
+    /// successor added before its Welcome reached anyone became the
+    /// conversation, a group only this account was in, and every message sent
+    /// there was read by nobody. So the conversation stays the old one until
+    /// the delivery succeeded, and a target this device cannot reach is
+    /// `.unreachable`: nothing is marked delivered, the next pass tries
+    /// again.
+    func deliverSuccessor(oldGroupIdHex: String, successorGroupIdB64: String) async throws -> SuccessorDelivery {
         guard let identity = canonicalIdentity, let old = groups[oldGroupIdHex],
-              let successorGroupId = base64Decode(successorGroupIdB64) else { return false }
+              let successorGroupId = base64Decode(successorGroupIdB64) else { return .notReady }
         let oldB64 = base64Encode(old.groupId)
         let store = groupClosedStore
         let prepared = store.read(groupIdB64: oldB64)?.prepared
@@ -489,43 +506,32 @@ extension ChatRepository {
         // A device of this account that did not create the successor joins it
         // from the Welcome the founder sent to the account's own mailbox.
         guard let prepared, prepared.successorGroupIdB64 == successorGroupIdB64 else {
-            return groups[successorHex] != nil
-        }
-        if groups[successorHex] == nil {
-            let group: Group
-            if let live = preparedSuccessors[successorGroupIdB64] {
-                group = live
-            } else if let loaded = try? loadGroup(identity: identity, groupId: successorGroupId) {
-                // A restart between the claim and the delivery: the
-                // successor is in the MLS snapshot the creation persisted.
-                group = loaded
-            } else {
-                return false
-            }
-            preparedSuccessors[successorGroupIdB64] = nil
-            groups[successorHex] = GroupRecord(group: group, groupId: successorGroupId)
-            mirrorLineage()
-            claimedGroupsThisSession.insert(successorHex)
-            persistKnownGroupBestEffort(groupIdHex: successorHex)
-            persistSnapshotBestEffort()
-            state = state.with(threads: buildThreadList())
-            subscribeGroupUnderPushGid(groupIdHex: successorHex)
-            reconcileJournalRegistrarsSoon(groupIdHex: successorHex)
-            publishOwnProfileSoon(groupIdHex: successorHex)
-            requestProfilesAfterJoin(groupIdHex: successorHex)
+            return groups[successorHex] != nil ? .delivered : .notReady
         }
         if !prepared.delivered {
             guard let welcomeB64 = prepared.welcomeB64, let welcome = base64Decode(welcomeB64) else {
-                return false
+                return .notReady
             }
-            for keyB64 in prepared.targetKeysB64 {
-                guard let key = base64Decode(keyB64) else { continue }
-                switch ContinuityWelcome.decide(plan: ReachCenter.shared.writePlan(toAccountKey: key)) {
-                case .deliver(let plan):
+            // Every target is planned before anything is written: a target
+            // with no carrier (ADR-0078 open question, see
+            // ``ContinuityWelcome``) means nothing is sent this pass.
+            let targets = prepared.targetKeysB64.compactMap { base64Decode($0) }
+            guard let plans = ContinuityWelcome.planAll(
+                targets: targets, plan: { ReachCenter.shared.writePlan(toAccountKey: $0) })
+            else {
+                NSLog("ADR-0073 continuity: a successor Welcome is waiting: no carrier for a target's mailbox")
+                return .unreachable
+            }
+            // FAIL-CLOSED before anything is published: a refused persist (the
+            // session ended, Forget device sealed the stores) means nothing is
+            // published for an account that has left this device.
+            try persistSnapshotDurableOrThrow()
+            for (key, plan) in plans {
+                do {
                     try await deliverWelcome(welcome: welcome, toAccountKey: key, plan: plan)
-                case .skipNoCarrier:
-                    // ADR-0078 open question — see ``ContinuityWelcome``.
-                    NSLog("ADR-0078: a successor Welcome to a reset account was skipped: no carrier for its new mailbox")
+                } catch where ContinuityWelcome.isUnreachable(error) {
+                    NSLog("ADR-0073 continuity: a successor Welcome is waiting: the mailbox was not reached")
+                    return .unreachable
                 }
             }
             // Kept as the mark "this device founded it"; the Welcome is
@@ -539,7 +545,30 @@ extension ChatRepository {
                         successorGroupIdB64: successorGroupIdB64, welcomeB64: nil,
                         targetKeysB64: [], delivered: true)))
         }
-        return true
+        if groups[successorHex] == nil {
+            let group: Group
+            if let live = preparedSuccessors[successorGroupIdB64] {
+                group = live
+            } else if let loaded = try? loadGroup(identity: identity, groupId: successorGroupId) {
+                // A restart between the claim and the delivery: the
+                // successor is in the MLS snapshot the creation persisted.
+                group = loaded
+            } else {
+                return .notReady
+            }
+            preparedSuccessors[successorGroupIdB64] = nil
+            groups[successorHex] = GroupRecord(group: group, groupId: successorGroupId)
+            mirrorLineage()
+            claimedGroupsThisSession.insert(successorHex)
+            persistKnownGroupBestEffort(groupIdHex: successorHex)
+            persistSnapshotBestEffort()
+            state = state.with(threads: buildThreadList())
+            subscribeGroupUnderPushGid(groupIdHex: successorHex)
+            reconcileJournalRegistrarsSoon(groupIdHex: successorHex)
+            publishOwnProfileSoon(groupIdHex: successorHex)
+            requestProfilesAfterJoin(groupIdHex: successorHex)
+        }
+        return .delivered
     }
 
     /// A lost claim: drop the local successor (never announced, no Welcome
@@ -1107,6 +1136,10 @@ final class RepositoryContinuityPort: ContinuityPort {
         return !devices.isEmpty
     }
 
+    func newIdentityReachable(accountIdB64: String) async -> Bool {
+        repository.newIdentityReachable(accountIdB64: accountIdB64)
+    }
+
     func prepareSuccessor(oldGroupIdB64: String, newIdentityAccountIdB64: String) async throws -> String {
         guard let accountId = base64Decode(newIdentityAccountIdB64) else {
             throw ChatError.argument("malformed account id")
@@ -1155,7 +1188,7 @@ final class RepositoryContinuityPort: ContinuityPort {
         _ = await repository.lineageWriter(successor, root)
     }
 
-    func deliverSuccessor(oldGroupIdB64: String, successorGroupIdB64: String) async throws -> Bool {
+    func deliverSuccessor(oldGroupIdB64: String, successorGroupIdB64: String) async throws -> SuccessorDelivery {
         try await repository.deliverSuccessor(
             oldGroupIdHex: try hex(oldGroupIdB64), successorGroupIdB64: successorGroupIdB64)
     }
@@ -1236,17 +1269,47 @@ final class RepositoryContinuityPort: ContinuityPort {
 /// continuity key (derivable from the account id and the key generation). A
 /// mailbox address is no longer derivable from an identity key, and nothing
 /// yet carries the reset account's new mailbox binding to its peers: that is
-/// the open question at the end of ADR-0078 section 1. So the write is a
-/// recorded no-op when this device holds no grant from the new identity
-/// (`skipNoCarrier`): nothing is derived from the account id or the identity
-/// key, and nothing is sent. A grant the new identity itself handed out (in a
-/// conversation it is already in) is an ordinary verified mailbox and the
+/// the open question at the end of ADR-0078 section 1. So a target this
+/// device holds no grant for is `unreachable`: nothing is derived from the
+/// account id or the identity key, nothing is sent, and the conversation
+/// does not move (2026-11-25: it used to be skipped and the successor marked
+/// delivered, so the conversation moved for good into a group nobody else
+/// was in). A grant the new identity itself handed out (its contact request
+/// from the new key, UX 16.6) is an ordinary verified mailbox and the
 /// Welcome goes there.
 enum ContinuityWelcome: Equatable {
     case deliver(MailboxWritePlan)
-    case skipNoCarrier
+    case unreachable
 
     static func decide(plan: MailboxWritePlan?) -> ContinuityWelcome {
-        plan.map { .deliver($0) } ?? .skipNoCarrier
+        plan.map { .deliver($0) } ?? .unreachable
+    }
+
+    /// Whether a plan reaches its mailbox: some candidate to write with.
+    static func reachable(plan: MailboxWritePlan?) -> Bool {
+        guard let plan else { return false }
+        return !plan.candidates.isEmpty
+    }
+
+    /// The plan of every target, in order, or `nil` when any target has
+    /// none (then nothing is written).
+    static func planAll(
+        targets: [Data], plan: (Data) -> MailboxWritePlan?
+    ) -> [(key: Data, plan: MailboxWritePlan)]? {
+        var plans: [(key: Data, plan: MailboxWritePlan)] = []
+        for key in targets {
+            guard case .deliver(let chosen) = decide(plan: plan(key)) else { return nil }
+            plans.append((key, chosen))
+        }
+        return plans
+    }
+
+    /// Whether a failed Welcome write found no way into the mailbox (the
+    /// planner had nothing, ``MailboxUnknown``), as opposed to a write that
+    /// was tried and failed.
+    static func isUnreachable(_ error: Error) -> Bool {
+        if error is MailboxUnknown { return true }
+        if case .wrapped(_, let inner)? = error as? ChatError { return isUnreachable(inner) }
+        return false
     }
 }

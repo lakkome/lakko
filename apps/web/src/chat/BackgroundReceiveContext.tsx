@@ -151,7 +151,8 @@ import {
 } from "../contacts/local-store";
 import { readVerifiedBinding } from "../contacts/verified-binding";
 import { subscribeResetAccepted } from "../contacts/reset-events";
-import { installScopeLineage } from "../reach/mailbox-write";
+import { MailboxUnreachableError, installScopeLineage, planWriteToPerson } from "../reach/mailbox-write";
+import { findInChain } from "../contacts/errors";
 import { installSharedScopes } from "../reach/write-plan";
 import { sharedScopeHexesFor } from "../contacts/shared-groups";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
@@ -880,6 +881,19 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         return false;
       }
     },
+    async newIdentityReachable(accountIdB64) {
+      // The same plan the Welcome write runs (`ContactsClient.sendWelcome`),
+      // without writing: any candidate is a way in, none means the write
+      // would throw `MailboxUnreachableError` with nothing tried.
+      const wanted = readPin(accountIdB64)?.pinnedSignaturePubkeyB64;
+      if (wanted === undefined) return false;
+      try {
+        const plan = await planWriteToPerson(base64Decode(wanted), { allowMember: true, continuity: null });
+        return plan.candidates.length > 0;
+      } catch {
+        return false;
+      }
+    },
     async prepareSuccessor(oldGroupIdB64, newIdentityAccountIdB64) {
       const secrets = auth.identitySecrets();
       const old = chats.get(oldGroupIdB64);
@@ -940,43 +954,35 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       const s = auth.state();
       const secrets = auth.identitySecrets();
       const old = chats.get(oldGroupIdB64);
-      if (s.kind !== "session" || secrets === null || old === undefined) return false;
+      if (s.kind !== "session" || secrets === null || old === undefined) return "not-ready";
       const prepared = groupClosed.stateOf(oldGroupIdB64)?.prepared ?? null;
       const founder = prepared !== null && prepared.successorGroupIdB64 === successorGroupIdB64;
-      let held = chats.get(successorGroupIdB64);
+      const heldNow = chats.get(successorGroupIdB64);
       // A device of this account that did not create the successor joins it
       // from the Welcome the founder sent to the account's own mailbox.
-      if (!founder) return held !== undefined;
-      if (held === undefined) {
-        let group = preparedGroups.get(successorGroupIdB64);
-        if (group === undefined) {
-          const identity = chats.identity();
-          if (identity === null) return false;
-          const wasm = await loadWasm();
-          // A restart between the claim and the delivery: the successor is
-          // in the MLS snapshot the creation persisted.
-          const loaded = wasm.Group.load(identity, base64Decode(successorGroupIdB64));
-          if (loaded === undefined) return false;
-          group = loaded;
-        }
-        preparedGroups.delete(successorGroupIdB64);
-        held = chats.add({ label: old.label, group });
-        profiles.groupJoined(held.groupIdB64);
-        // FAIL-CLOSED before the Welcomes below are published: a refused
-        // persist (the session ended, Forget device sealed the stores)
-        // means nothing is published. The successor's MLS state was
-        // recorded at creation; what this records is the held list, and
-        // the throw is what stops a delivery for an account that has left
-        // this browser.
-        await chats.persistSnapshotDurable(s.account.accountId);
-      }
+      if (!founder) return heldNow !== undefined ? "delivered" : "not-ready";
+      // The Welcomes FIRST, the held successor after (2026-11-25): a
+      // successor added before its Welcome reached anyone became the
+      // conversation, a group only this account was in, and every message
+      // sent there was read by nobody.
       if (!prepared.delivered) {
-        if (prepared.welcomeB64 === null) return false;
-        await contacts.deliverPreparedWelcomes(
-          held.group.groupId,
-          base64Decode(prepared.welcomeB64),
-          prepared.targetKeysB64.map((k) => ({ accountKey: base64Decode(k), isRecipient: false })),
-        );
+        if (prepared.welcomeB64 === null) return "not-ready";
+        // FAIL-CLOSED before anything is published: a refused persist (the
+        // session ended, Forget device sealed the stores) means nothing is
+        // published for an account that has left this browser.
+        await chats.persistSnapshotDurable(s.account.accountId);
+        try {
+          await contacts.deliverPreparedWelcomes(
+            base64Decode(successorGroupIdB64),
+            base64Decode(prepared.welcomeB64),
+            prepared.targetKeysB64.map((k) => ({ accountKey: base64Decode(k), isRecipient: false })),
+          );
+        } catch (err) {
+          if (findInChain(err, (v) => (v instanceof MailboxUnreachableError ? v : null)) !== null) {
+            return "unreachable";
+          }
+          throw err;
+        }
         // Kept as the mark "this device founded it"; the Welcome is dropped.
         await groupClosed.setPrepared(oldGroupIdB64, {
           successorGroupIdB64,
@@ -985,7 +991,24 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
           delivered: true,
         });
       }
-      return true;
+      if (heldNow === undefined) {
+        let group = preparedGroups.get(successorGroupIdB64);
+        if (group === undefined) {
+          const identity = chats.identity();
+          if (identity === null) return "not-ready";
+          const wasm = await loadWasm();
+          // A restart between the claim and the delivery: the successor is
+          // in the MLS snapshot the creation persisted.
+          const loaded = wasm.Group.load(identity, base64Decode(successorGroupIdB64));
+          if (loaded === undefined) return "not-ready";
+          group = loaded;
+        }
+        preparedGroups.delete(successorGroupIdB64);
+        const held = chats.add({ label: old.label, group });
+        profiles.groupJoined(held.groupIdB64);
+        await chats.persistSnapshotDurable(s.account.accountId);
+      }
+      return "delivered";
     },
     async carryName(oldGroupIdB64, successorGroupIdB64) {
       const old = chats.get(oldGroupIdB64);

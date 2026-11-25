@@ -16,6 +16,7 @@ import me.lakko.app.ds.DsJournalSigner
 import me.lakko.app.ds.DsReachAuth
 import me.lakko.app.ds.DsSignerRegistry
 import me.lakko.app.reach.continuityWelcomeDest
+import me.lakko.app.reach.WelcomeDelivery
 import me.lakko.app.reach.deliverSuccessorWelcomes
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -297,20 +298,53 @@ class MailboxRowsTest {
     }
 
     @Test
-    fun `a successor Welcome skips a person with no verified mailbox and never guesses an address`() = runTest {
+    fun `a successor Welcome to a person with no verified mailbox writes nothing and is never delivered`() = runTest {
         val reset = ByteArray(32) { 0x22 }
         val own = ByteArray(32) { 0x33 }
         val ownAddress = ByteArray(32) { 0x44 }
         val published = mutableListOf<ByteArray>()
-        val skipped = deliverSuccessorWelcomes(
-            targets = listOf(reset, own, own),
+        val outcome = deliverSuccessorWelcomes(
+            targets = listOf(own, reset),
             // Only the own account's mailbox is known; the reset person's
             // new mailbox has no carrier (ADR-0078 open question).
             mailboxOf = { key -> if (key.contentEquals(own)) ownAddress else null },
             publish = { published += it },
         )
-        assertEquals(1, skipped)
-        assertEquals(1, published.size)
-        assertArrayEquals(ownAddress, published.single())
+        assertEquals(WelcomeDelivery.UNREACHABLE, outcome)
+        assertTrue(published.isEmpty())
+    }
+
+    @Test
+    fun `a successor Welcome is delivered once per mailbox when every mailbox is known`() = runTest {
+        val reset = ByteArray(32) { 0x22 }
+        val own = ByteArray(32) { 0x33 }
+        val published = mutableListOf<ByteArray>()
+        val outcome = deliverSuccessorWelcomes(
+            targets = listOf(own, reset, own),
+            mailboxOf = { key -> key.map { (it + 1).toByte() }.toByteArray() },
+            publish = { published += it },
+        )
+        assertEquals(WelcomeDelivery.DELIVERED, outcome)
+        assertEquals(2, published.size)
+    }
+
+    @Test
+    fun `a successor Welcome no grant reaches is unreachable, any other failure propagates`() = runTest {
+        val target = ByteArray(32) { 0x22 }
+        val outcome = deliverSuccessorWelcomes(
+            targets = listOf(target),
+            mailboxOf = { it },
+            publish = { throw MailboxUnknown() },
+        )
+        assertEquals(WelcomeDelivery.UNREACHABLE, outcome)
+        assertThrows(IllegalStateException::class.java) {
+            kotlinx.coroutines.runBlocking {
+                deliverSuccessorWelcomes(
+                    targets = listOf(target),
+                    mailboxOf = { it },
+                    publish = { throw IllegalStateException("network") },
+                )
+            }
+        }
     }
 }

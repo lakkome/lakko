@@ -377,10 +377,44 @@ final class SealedMailboxRowTests: XCTestCase {
 
     // MARK: - The continuity Welcome (ADR-0078 open question)
 
-    func testASuccessorWelcomeWithNoCarrierIsARecordedNoOp() throws {
-        XCTAssertEqual(ContinuityWelcome.decide(plan: nil), .skipNoCarrier)
+    func testASuccessorWelcomeWithNoCarrierIsUnreachable() throws {
+        XCTAssertEqual(ContinuityWelcome.decide(plan: nil), .unreachable)
         let plan = MailboxWritePlan(target: try ownTarget(try identity(0x61)), candidates: [])
         XCTAssertEqual(ContinuityWelcome.decide(plan: plan), .deliver(plan))
+    }
+
+    /// 2026-11-25 — a target with no carrier stops the WHOLE delivery before
+    /// anything is written; it is never skipped and marked delivered.
+    func testOneTargetWithNoCarrierPlansNothing() throws {
+        let plan = MailboxWritePlan(target: try ownTarget(try identity(0x62)), candidates: [])
+        let reached = Data([1])
+        let unreached = Data([2])
+        let lookup: (Data) -> MailboxWritePlan? = { $0 == reached ? plan : nil }
+        XCTAssertNil(ContinuityWelcome.planAll(targets: [reached, unreached], plan: lookup))
+        XCTAssertNil(ContinuityWelcome.planAll(targets: [unreached, reached], plan: lookup))
+        let all = ContinuityWelcome.planAll(targets: [reached], plan: lookup)
+        XCTAssertEqual(all?.map(\.key), [reached])
+        XCTAssertEqual(all?.map(\.plan), [plan])
+    }
+
+    /// The reachability gate before prepare and claim: a plan with no
+    /// candidate is no way in.
+    func testTheReachabilityGateWantsACandidate() throws {
+        XCTAssertFalse(ContinuityWelcome.reachable(plan: nil))
+        let target = try ownTarget(try identity(0x63))
+        XCTAssertFalse(ContinuityWelcome.reachable(plan: MailboxWritePlan(target: target, candidates: [])))
+        let seed = try identity(0x64).ed25519Seed()
+        XCTAssertTrue(ContinuityWelcome.reachable(
+            plan: MailboxWritePlan(target: target, candidates: [DsMailboxWriteAuth(reachSeed: seed)])))
+    }
+
+    /// A write the planner found nothing for is "unreachable" (retry later),
+    /// through any wrapping; a write that was tried and failed is not.
+    func testAWelcomeWriteWithNoMailboxReadsAsUnreachable() {
+        XCTAssertTrue(ContinuityWelcome.isUnreachable(MailboxUnknown()))
+        XCTAssertTrue(ContinuityWelcome.isUnreachable(
+            ChatError.wrapped("DS publishMailbox (Welcome) failed", underlying: MailboxUnknown())))
+        XCTAssertFalse(ContinuityWelcome.isUnreachable(ChatError.argument("offline")))
     }
 
     /// The reset account's new key alone (no grant from it) names no mailbox:

@@ -20,6 +20,16 @@
  *      the roles and (decision) the owner, and re-sends what was sent into
  *      the dead session (decision).
  *
+ * The conversation moves to the successor (the lineage, the held
+ * successor) only AFTER its Welcomes were delivered. Moved before, it is a
+ * group only this account is in: the row is drawn from a roster naming a
+ * key that never sent a profile, and every message sent there is read by
+ * nobody (seen live 2026-11-25, when the reset account's new mailbox could
+ * not be reached). And nothing is prepared or claimed while the new
+ * identity cannot be reached at all ({@link ContinuityPort.newIdentityReachable}):
+ * the old one-to-one stays the conversation, and a send into it is held
+ * (`held-send.ts`).
+ *
  * "Nothing is sent before the claim is confirmed" is what keeps a lost
  * claim harmless; a lost claim AFTER Welcomes went out would leave people in
  * a group nobody continues in (R.14), and this order is the only thing that
@@ -71,6 +81,14 @@ export interface ContinuityPort {
   /** Whether the new identity publishes at least one device (R.8). */
   newIdentityHasDevices(accountIdB64: string): Promise<boolean>;
   /**
+   * Whether this device holds anything that lets it write a Welcome to the
+   * new identity's mailbox (a kept grant of the new key, a delegation). A
+   * reset account knows nobody, and since ADR-0078 the continuity key
+   * reaches no mailbox, so this is usually `false` until the person sends
+   * this account a contact request from the new key (UX 16.6).
+   */
+  newIdentityReachable(accountIdB64: string): Promise<boolean>;
+  /**
    * Step 1: create the successor of `oldGroupIdB64` locally, add the new
    * identity's devices and this account's other devices in ONE commit,
    * claim its DS journal, and keep the Welcome for step 4. Sends nothing.
@@ -90,10 +108,12 @@ export interface ContinuityPort {
   /** The lineage register `successor -> conversation of the old group`.
    *  Idempotent (write-once). */
   recordLineage(oldGroupIdB64: string, successorGroupIdB64: string): Promise<void>;
-  /** Step 4a: make the prepared successor a held conversation and deliver
-   *  the Welcomes. Idempotent: resolves `false` when the successor could not
-   *  be brought up (the next pass tries again). */
-  deliverSuccessor(oldGroupIdB64: string, successorGroupIdB64: string): Promise<boolean>;
+  /** Step 4a: deliver the Welcomes, THEN make the successor a held
+   *  conversation (never the other way round: see the module docs).
+   *  Idempotent. `unreachable`: the new identity's mailbox could not be
+   *  written, nothing was made visible; `not-ready`: the successor could not
+   *  be brought up. The next pass tries again either way. */
+  deliverSuccessor(oldGroupIdB64: string, successorGroupIdB64: string): Promise<SuccessorDelivery>;
   /** Step 4b: re-send the group name into the successor with its ORIGINAL
    *  stamp (ADR-0051). Idempotent. */
   carryName(oldGroupIdB64: string, successorGroupIdB64: string): Promise<void>;
@@ -123,6 +143,9 @@ export interface ContinuityPort {
   ): Promise<void>;
 }
 
+/** How step 4a ended. */
+export type SuccessorDelivery = "delivered" | "unreachable" | "not-ready";
+
 /** What one pass did, for the caller's log and the tests. */
 export type ContinuityStep =
   /** Nothing to continue (repairable, no accepted reset, not held). */
@@ -131,6 +154,9 @@ export type ContinuityStep =
   | "adopted"
   /** The new identity publishes no device yet (R.8): retry later. */
   | "waiting-for-devices"
+  /** Nothing this device holds reaches the new identity's mailbox: no
+   *  successor is prepared or moved to, retry later. */
+  | "waiting-for-reach"
   /** This device is not eligible to found. */
   | "not-eligible"
   /** Steps 1 and 2 ran: the claim is posted. */
@@ -213,12 +239,13 @@ async function run(port: ContinuityPort, oldGroupIdB64: string): Promise<Continu
 
   // A claim is held: the conversation's successor is decided.
   if (state.accepted !== null) {
-    await port.recordLineage(oldGroupIdB64, state.accepted.successorGroupIdB64);
     if (own !== null && state.accepted.senderKeyB64 === own) {
       // This account founded it (this device, or another of the person's):
-      // whoever holds the successor keeps building it.
+      // whoever holds the successor keeps building it. The lineage is
+      // recorded by `build`, once the successor was delivered.
       return build(port, oldGroupIdB64, state.accepted, facts, own, accountIdB64, unrepairableKeyB64);
     }
+    await port.recordLineage(oldGroupIdB64, state.accepted.successorGroupIdB64);
     // R.7 case 3 "the completeness re-check": ANY moved admin or owner, not
     // only the founding account, adds whoever of the old roster the
     // successor still lacks, at the re-admission arm's cadence.
@@ -248,6 +275,10 @@ async function run(port: ContinuityPort, oldGroupIdB64: string): Promise<Continu
     return "not-eligible";
   }
   if (!(await port.newIdentityHasDevices(accountIdB64))) return "waiting-for-devices";
+  // Nothing is prepared, claimed or moved to while no Welcome could reach
+  // the new identity (2026-11-25): the old one-to-one stays the
+  // conversation, and a send into it is held.
+  if (!(await port.newIdentityReachable(accountIdB64))) return "waiting-for-reach";
   // The claim state is read again after the awaits above: a claim that
   // landed meanwhile means this device stands down (R.6 "to avoid wasted
   // claims a device re-reads the journal head before step 1").
@@ -319,8 +350,12 @@ async function build(
   unrepairableKeyB64: string,
 ): Promise<ContinuityStep> {
   const successorGroupIdB64 = winner.successorGroupIdB64;
+  // Delivered first, then moved to: a successor nobody else is in must never
+  // become the conversation (module docs).
+  const delivery = await port.deliverSuccessor(oldGroupIdB64, successorGroupIdB64);
+  if (delivery === "unreachable") return "waiting-for-reach";
+  if (delivery !== "delivered") return "failed";
   await port.recordLineage(oldGroupIdB64, successorGroupIdB64);
-  if (!(await port.deliverSuccessor(oldGroupIdB64, successorGroupIdB64))) return "failed";
   const superseded = new Set(port.supersededKeys().keys());
   if (old.kind === "chat") {
     await port.resendOwnMessages(oldGroupIdB64, successorGroupIdB64, accountIdB64);

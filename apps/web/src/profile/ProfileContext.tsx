@@ -113,6 +113,7 @@ import {
 import { durableSnapshotHook } from "../chat/persist-hooks";
 import { ownPersonKeyB64, personKeysOf as groupPeopleOf } from "../chat/person-key";
 import { signalsWithheldFrom } from "../moderation/block-conversation";
+import { profileKeyFor } from "./profile-key";
 
 export interface ProfileApi {
   /** Bumped on any change a resolved name may depend on. `resolve` reads it,
@@ -281,14 +282,16 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     },
   );
   const unsubscribeStore = store.subscribe(bump);
+  /** The held profile's stamp for a key (`profile-key.ts`). */
+  const stampOf = (k: string): bigint | undefined => store.get(k)?.updatedAtMs;
   // ADR-0084 — the one avatar component looks a person's photo up here.
   setAvatarLookup((keyB64) => {
     const own = chats.identity();
     if (keyB64 === OWN_AVATAR_KEY || (own !== null && isOwnKeyB64(own, keyB64))) {
       return untrack(ownProfile).avatar;
     }
-    const canonical = untrack(aliases).get(keyB64) ?? keyB64;
-    return store.avatarOf(keyB64) ?? (canonical === keyB64 ? null : store.avatarOf(canonical));
+    const profileKey = profileKeyFor(keyB64, untrack(aliases), stampOf);
+    return profileKey === undefined ? null : store.avatarOf(profileKey);
   });
   onCleanup(() => setAvatarLookup(null));
 
@@ -948,20 +951,18 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
         });
       }
       // ADR-0073 R.2: an alias (a retired key) resolves through the contact's
-      // row key: its rename, and its profile when the alias key sent none.
+      // row key: its rename, and its profile when the alias key sent none;
+      // and the row key, while its new identity sent no profile yet, through
+      // the profile a retired key sent (`profile-key.ts`, UX 16.3).
       const canonical = aliases().get(keyB64) ?? keyB64;
-      const profile = store.get(keyB64) ?? (canonical === keyB64 ? undefined : store.get(canonical));
+      const profileKey = profileKeyFor(keyB64, aliases(), stampOf);
+      const profile = profileKey === undefined ? undefined : store.get(profileKey);
       // ADR-0079 — with no received profile, a pending contact's invite
       // link states the inviter's name and username (signed by their
       // account key). `resolvePerson` decides the precedence; the username
       // is verified under the key the claim is filed under.
       const pending = profile === undefined ? pendingContactOf(keyB64, canonical) : undefined;
-      const claimKeyB64 =
-        profile !== undefined
-          ? store.get(keyB64) !== undefined
-            ? keyB64
-            : canonical
-          : (pending?.signaturePubkeyB64 ?? keyB64);
+      const claimKeyB64 = profileKey ?? pending?.signaturePubkeyB64 ?? keyB64;
       // ADR-0098: a deleted account reads "Deleted account" everywhere; a
       // username is shown only while the account was recently confirmed.
       const deleted = isDeletedAccount(keyB64) || (canonical !== keyB64 && isDeletedAccount(canonical));
@@ -980,7 +981,8 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       version();
       // A pending contact's link-stated username is a claim like a
       // profile's (ADR-0079), used only when no profile was received.
-      const received = store.get(keyB64);
+      const profileKey = profileKeyFor(keyB64, aliases(), stampOf);
+      const received = profileKey === undefined ? undefined : store.get(profileKey);
       const username =
         received !== undefined
           ? received.username
@@ -991,8 +993,8 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       version();
       // A card names the person by their account key; a profile filed under
       // a retired key of theirs answers for them too (ADR-0073 R.2).
-      const canonical = aliases().get(keyB64) ?? keyB64;
-      return profileCardShareable(store.get(keyB64) ?? store.get(canonical));
+      const profileKey = profileKeyFor(keyB64, aliases(), stampOf);
+      return profileCardShareable(profileKey === undefined ? undefined : store.get(profileKey));
     },
     ingest(senderKeyB64, profile, context) {
       const account = accountId();

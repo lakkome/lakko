@@ -19,6 +19,11 @@ export function appHeightFor(viewport: { readonly height: number; readonly scale
   return Math.round(viewport.height);
 }
 
+/** Whether the focused element belongs to the signed-in shell. */
+function insideAppShell(el: Element | null): boolean {
+  return el !== null && el.closest(".app-shell") !== null;
+}
+
 export function installKeyboardViewport(): void {
   if (typeof window === "undefined") return;
   const vv = window.visualViewport;
@@ -29,7 +34,13 @@ export function installKeyboardViewport(): void {
     const h = appHeightFor(vv);
     if (h === null) root.style.removeProperty("--app-height");
     else root.style.setProperty("--app-height", `${h}px`);
-    if (h !== null && window.scrollY !== 0) window.scrollTo(0, 0);
+    // Only inside the signed-in shell, whose screens scroll their own panes:
+    // a page that scrolls as a whole (sign-in, restore, invite pages) must stay
+    // where Safari moved it, or the focused field sits under the keyboard
+    // (seen 2026-11-25 on "Type RESET to confirm").
+    if (h !== null && window.scrollY !== 0 && insideAppShell(document.activeElement)) {
+      window.scrollTo(0, 0);
+    }
   };
   vv.addEventListener("resize", update);
   vv.addEventListener("scroll", update);

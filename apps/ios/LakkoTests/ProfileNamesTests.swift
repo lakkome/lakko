@@ -1269,4 +1269,91 @@ final class ProfileDirectoryTests: XCTestCase {
         XCTAssertNil(directory.ownProfileForRequest())
     }
 
+
+    // MARK: - The profile key along an alias (ADR-0073 R.2, UX 16.3)
+
+    private func stamps(_ held: [String: UInt64]) -> (String) -> UInt64? { { held[$0] } }
+
+    func testAKeyWithItsOwnProfileIsItsOwnAnswer() {
+        XCTAssertEqual(
+            ProfileDirectory.profileKey(for: "new", aliases: ["old": "new"], stampOf: stamps(["new": 2, "old": 1])),
+            "new")
+    }
+
+    /// Seen live 2026-11-25: the successor's roster named the new key, which
+    /// had sent no profile yet, and the row read "Member".
+    func testTheNewKeyOfAResetContactFallsBackToTheProfileTheirOldKeySent() {
+        XCTAssertEqual(
+            ProfileDirectory.profileKey(for: "new", aliases: ["old": "new"], stampOf: stamps(["old": 1])), "old")
+    }
+
+    func testOfSeveralRetiredKeysTheNewestProfileNamesThePerson() {
+        let aliases = ["first": "new", "second": "new"]
+        XCTAssertEqual(
+            ProfileDirectory.profileKey(for: "new", aliases: aliases, stampOf: stamps(["first": 5, "second": 9])),
+            "second")
+        XCTAssertEqual(
+            ProfileDirectory.profileKey(for: "new", aliases: aliases, stampOf: stamps(["first": 9, "second": 5])),
+            "first")
+    }
+
+    func testARetiredKeyFallsBackToTheCurrentKeyThenToItsSiblingRetiredKeys() {
+        let aliases = ["first": "new", "second": "new"]
+        XCTAssertEqual(
+            ProfileDirectory.profileKey(for: "first", aliases: aliases, stampOf: stamps(["new": 1, "second": 9])),
+            "new")
+        XCTAssertEqual(
+            ProfileDirectory.profileKey(for: "first", aliases: aliases, stampOf: stamps(["second": 9])), "second")
+    }
+
+    func testNeverBorrowsAnotherPersonsProfile() {
+        let aliases = ["old": "new", "bobOld": "bob"]
+        XCTAssertNil(ProfileDirectory.profileKey(for: "new", aliases: aliases, stampOf: stamps(["bobOld": 3, "bob": 4])))
+        XCTAssertNil(ProfileDirectory.profileKey(for: "stranger", aliases: aliases, stampOf: stamps(["old": 1])))
+    }
+
+    /// Through the directory: the reset contact's NEW key reads the name and
+    /// photo their old key's profile carried, until the new key sends its own.
+    func testTheDirectoryNamesTheNewKeyFromTheRetiredKeysProfile() throws {
+        final class Persistence: ProfilePersistence {
+            var blobs: [String: Data] = [:]
+            func load(accountIdB64: String) -> Data? { blobs[accountIdB64] }
+            func save(_ data: Data, accountIdB64: String) { blobs[accountIdB64] = data }
+            func delete(accountIdB64: String) { blobs[accountIdB64] = nil }
+        }
+        let suite = "profile-key-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let directory = ProfileDirectory(
+            received: ReceivedProfileStore(
+                persistence: Persistence(),
+                isNewer: { profileIsNewer(incomingUpdatedAtMs: $0, storedUpdatedAtMs: $1) }),
+            verifier: UsernameVerifier(resolve: { _ in .notRegistered }, defaults: defaults),
+            ownStore: OwnProfileStore(defaults: defaults))
+        directory.verifiesOnResolve = false
+        directory.activate(accountIdB64: suite, username: nil)
+        let oldKey = Data(repeating: 0xA1, count: 32)
+        let newKey = Data(repeating: 0xB2, count: 32)
+        let stranger = Data(repeating: 0xC3, count: 32)
+        directory.acceptReceived(
+            ProfileClaim(displayName: "Anna", username: nil, updatedAtMs: 5),
+            signatureKeyB64: base64Encode(oldKey), accountIdB64: suite)
+        let placeholder = directory.resolve(signatureKey: newKey)
+        XCTAssertTrue(placeholder.isPlaceholder, "no alias yet: the new key is nobody known")
+
+        directory.setRenames(from: [AcceptedContact(
+            request: IncomingContactRequest(
+                messageId: 1, fromPubkey: newKey, fromAccountId: nil, fromPseudonym: Data(repeating: 1, count: 32),
+                validAfterMs: 0, intro: nil, createdAt: "2026-11-25T00:00:00Z"),
+            previousKeysB64: [base64Encode(oldKey)])])
+        XCTAssertEqual(directory.resolve(signatureKey: newKey).name, "Anna")
+        XCTAssertEqual(directory.resolve(signatureKey: oldKey).name, "Anna")
+        XCTAssertTrue(directory.resolve(signatureKey: stranger).isPlaceholder)
+
+        // The new identity's own profile, once sent, wins for its key.
+        directory.acceptReceived(
+            ProfileClaim(displayName: "Anna N", username: nil, updatedAtMs: 7),
+            signatureKeyB64: base64Encode(newKey), accountIdB64: suite)
+        XCTAssertEqual(directory.resolve(signatureKey: newKey).name, "Anna N")
+    }
 }

@@ -10570,7 +10570,17 @@ public class ChatRepository(
         }
         // A decided successor (the pass above recorded its lineage register,
         // which is write-once and synced to this account's other devices).
-        successorClaims.load(account, key)?.accepted?.let { accepted ->
+        successorClaims.load(account, key)?.accepted?.takeIf { accepted ->
+            // A claim of this account moves the conversation only once the
+            // successor is held here, i.e. after its Welcomes were delivered
+            // (2026-11-25): before that the old one-to-one stays the
+            // conversation and its sends stay held.
+            mayRecordAcceptedLineage(
+                acceptedSenderKeyB64 = accepted.senderKeyB64,
+                ownPersonKeyB64 = ownPersonKeyB64(),
+                holdsSuccessor = groups[groupHexOfB64(accepted.successorGroupIdB64)] != null,
+            )
+        }?.let { accepted ->
             // Also when the pass could not read the old group's facts: an
             // accepted claim is the conversation's successor regardless.
             try {
@@ -10970,6 +10980,28 @@ public class ChatRepository(
             }
         }
 
+        override suspend fun newIdentityReachable(accountIdB64: String): Boolean {
+            // The same reach the successor's Welcome write takes
+            // ([deliverSuccessor]: [welcomeMailboxFor], then
+            // [publishWelcomeToMailbox] with a grant required), without
+            // writing: a verified mailbox and at least one planned grant
+            // candidate is a way in; none means the write would be
+            // undeliverable with nothing tried.
+            val wanted = currentKeyOf(accountIdB64) ?: return false
+            return try {
+                val key = java.util.Base64.getDecoder().decode(wanted)
+                val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
+                newIdentityReachableVerdict(
+                    mailboxKnown = reach.welcomeMailboxPkFor(reach.mailboxAccountKey(key), null) != null,
+                    candidates = reach.reachAuthCandidates(key, me.lakko.app.reach.WritePurpose.WELCOME, null).size,
+                )
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (_: Throwable) {
+                false
+            }
+        }
+
         override suspend fun prepareSuccessor(oldGroupIdHex: String, newIdentityAccountIdB64: String): String {
             val identity = canonicalIdentity.get() ?: throw IllegalStateException("no session")
             val kind = groupKind(oldGroupIdHex) ?: throw IllegalStateException("the old group is not held")
@@ -11072,17 +11104,70 @@ public class ChatRepository(
             lineageRecorder?.invoke(successorBytes, rootBytes)
         }
 
-        override suspend fun deliverSuccessor(oldGroupIdHex: String, successorGroupIdHex: String): Boolean {
-            val identity = canonicalIdentity.get() ?: return false
+        override suspend fun deliverSuccessor(
+            oldGroupIdHex: String,
+            successorGroupIdHex: String,
+        ): SuccessorDelivery {
+            val identity = canonicalIdentity.get() ?: return SuccessorDelivery.NOT_READY
             val prepared = claimState(oldGroupIdHex).prepared
             // A device of this account that did not create the successor
             // joins it from the Welcome the founder sent to the account's own
             // mailbox.
             if (prepared == null || prepared.successorGroupIdHex != successorGroupIdHex) {
-                return groups[successorGroupIdHex] != null
+                return if (groups[successorGroupIdHex] != null) SuccessorDelivery.DELIVERED else SuccessorDelivery.NOT_READY
+            }
+            // The Welcomes FIRST, the held successor after (2026-11-25): a
+            // successor held before its Welcome reached anyone became the
+            // conversation, a group only this account was in, and every
+            // message sent there was read by nobody.
+            if (!prepared.delivered) {
+                val welcome = prepared.welcomeB64?.let {
+                    try {
+                        java.util.Base64.getDecoder().decode(it)
+                    } catch (_: IllegalArgumentException) {
+                        null
+                    }
+                } ?: return SuccessorDelivery.NOT_READY
+                val targets = prepared.targetKeysB64.mapNotNull {
+                    try {
+                        java.util.Base64.getDecoder().decode(it)
+                    } catch (_: IllegalArgumentException) {
+                        null
+                    }
+                }
+                // FAIL-CLOSED before anything is published: a refused
+                // persist (the session ended, Forget device sealed the
+                // stores) means nothing is published for an account that has
+                // left this device.
+                providerLock.withLock { persistSnapshotDurableOrThrow() }
+                // One write per PERSON, each with a grant the person accepts
+                // (never the unsigned write a closed mailbox drops as
+                // stored). A person no grant reaches (ADR-0078: the new
+                // identity of an accepted reset, before they hand one out)
+                // leaves the Welcome owed and the conversation where it is.
+                val outcome = me.lakko.app.reach.deliverSuccessorWelcomes(
+                    targets = targets,
+                    mailboxOf = { accountKey ->
+                        try {
+                            welcomeMailboxFor(accountKey)
+                        } catch (_: me.lakko.app.contacts.MailboxUnknown) {
+                            null
+                        }
+                    },
+                    publish = { mailbox ->
+                        publishWelcomeToMailbox(mailbox, welcome, successorGroupIdHex, requireGrant = true)
+                    },
+                    isUnreachable = { it is me.lakko.app.contacts.MailboxUnknown || it is WelcomeUndeliverable },
+                )
+                if (outcome == me.lakko.app.reach.WelcomeDelivery.UNREACHABLE) return SuccessorDelivery.UNREACHABLE
+                // Kept as the mark "this device founded it"; the Welcome is
+                // dropped.
+                updateClaims(oldGroupIdHex) {
+                    it.copy(prepared = PreparedSuccessor(successorGroupIdHex, null, emptyList(), delivered = true))
+                } ?: return SuccessorDelivery.NOT_READY
             }
             if (groups[successorGroupIdHex] == null) {
-                val successorBytes = hexToBytes(successorGroupIdHex) ?: return false
+                val successorBytes = hexToBytes(successorGroupIdHex) ?: return SuccessorDelivery.NOT_READY
                 // A restart between the claim and the delivery: the successor
                 // is in the MLS snapshot the creation persisted.
                 val group = preparedGroups[successorGroupIdHex]
@@ -11093,47 +11178,11 @@ public class ChatRepository(
                             null
                         }
                     }
-                    ?: return false
+                    ?: return SuccessorDelivery.NOT_READY
                 registerFoundedGroup(identity, group, successorBytes)
                 preparedGroups.remove(successorGroupIdHex)
             }
-            if (!prepared.delivered) {
-                val welcome = prepared.welcomeB64?.let {
-                    try {
-                        java.util.Base64.getDecoder().decode(it)
-                    } catch (_: IllegalArgumentException) {
-                        null
-                    }
-                } ?: return false
-                val targets = prepared.targetKeysB64.mapNotNull {
-                    try {
-                        java.util.Base64.getDecoder().decode(it)
-                    } catch (_: IllegalArgumentException) {
-                        null
-                    }
-                }
-                // One write per PERSON. ADR-0078: a person whose mailbox this
-                // device holds no verified binding for (the new identity of
-                // an accepted reset, before they hand one out) is a recorded
-                // no-op - see [me.lakko.app.reach.deliverSuccessorWelcomes].
-                me.lakko.app.reach.deliverSuccessorWelcomes(
-                    targets = targets,
-                    mailboxOf = { accountKey ->
-                        try {
-                            welcomeMailboxFor(accountKey)
-                        } catch (_: me.lakko.app.contacts.MailboxUnknown) {
-                            null
-                        }
-                    },
-                    publish = { mailbox -> publishWelcomeToMailbox(mailbox, welcome, successorGroupIdHex) },
-                )
-                // Kept as the mark "this device founded it"; the Welcome is
-                // dropped.
-                updateClaims(oldGroupIdHex) {
-                    it.copy(prepared = PreparedSuccessor(successorGroupIdHex, null, emptyList(), delivered = true))
-                }
-            }
-            return true
+            return SuccessorDelivery.DELIVERED
         }
 
         override suspend fun carryName(oldGroupIdHex: String, successorGroupIdHex: String) {

@@ -149,7 +149,7 @@ public final class ProfileDirectory: ObservableObject {
     /// link stated (ADR-0079).
     private func knowsSomething(_ keyB64: String) -> Bool {
         renames[keyB64] != nil
-            || received.profile(signatureKeyB64: keyB64) != nil
+            || profileKey(for: keyB64) != nil
             || pendingClaims[keyB64] != nil
     }
 
@@ -564,7 +564,8 @@ public final class ProfileDirectory: ObservableObject {
         let resolved = resolve(signatureKey: signatureKey)
         if resolved.isPlaceholder { return true }
         return resolved.source != .localRename
-            && received.profile(signatureKeyB64: base64Encode(signatureKey))?.isFoundName == true
+            && profileKey(for: base64Encode(signatureKey))
+                .flatMap { received.profile(signatureKeyB64: $0) }?.isFoundName == true
     }
 
     /// ADR-0050 section 2.9, bundle v3 — the profiles a pairing state bundle
@@ -649,6 +650,60 @@ public final class ProfileDirectory: ObservableObject {
     /// reset this device accepted; see ``setRenames(from:)``.
     private var aliases: [String: String] = [:]
 
+    /// The key whose received profile names `keyB64`
+    /// (``profileKey(for:aliases:stampOf:)`` over this device's aliases and
+    /// received profiles), or `nil`.
+    private func profileKey(for keyB64: String) -> String? {
+        Self.profileKey(for: keyB64, aliases: aliases) { [received] in
+            received.profile(signatureKeyB64: $0)?.updatedAtMs
+        }
+    }
+
+    /// ADR-0073 R.2 / UX `identity-recovery.md` 16.3 — under which key the
+    /// profile that names a person is filed. iOS mirror of web
+    /// `profile/profile-key.ts`.
+    ///
+    /// A contact's accepted key change (a reset, or a proven rotation)
+    /// re-keys their contact row; the retired keys stay as aliases of the row
+    /// key (`retired key -> current key`). A profile is filed under the key
+    /// that SENT it, so after the change the person's only profile is, for a
+    /// while, the one their old key sent: their new identity has not sent one
+    /// yet (a reset device knows nobody until a conversation reaches it).
+    ///
+    /// The lookup therefore goes both ways along the alias:
+    ///
+    /// | asked about          | order tried                                              |
+    /// |----------------------|----------------------------------------------------------|
+    /// | the current key      | that key, then the retired keys of the row, newest first |
+    /// | a retired key        | that key, then the current key, then its siblings        |
+    /// | a key with no alias  | that key                                                 |
+    ///
+    /// "Newest" is the profile's own stamp. Before this, a roster naming the
+    /// new key (the successor of a one-to-one) read `Member` while the
+    /// person's name was held under the key they had a minute earlier (seen
+    /// live 2026-11-25). Only keys this device accepted as the same person
+    /// are ever aliased, so this names nobody new. `stampOf` answers the held
+    /// profile's stamp, `nil` when none is held for that key.
+    nonisolated static func profileKey(
+        for keyB64: String, aliases: [String: String], stampOf: (String) -> UInt64?
+    ) -> String? {
+        if stampOf(keyB64) != nil { return keyB64 }
+        let canonical = aliases[keyB64] ?? keyB64
+        if canonical != keyB64, stampOf(canonical) != nil { return canonical }
+        var best: String?
+        var bestStamp: UInt64?
+        // Sorted, so two equal stamps pick the same key on every run.
+        for (retired, current) in aliases.sorted(by: { $0.key < $1.key })
+        where current == canonical && retired != keyB64 {
+            guard let stamp = stampOf(retired) else { continue }
+            if bestStamp.map({ stamp > $0 }) ?? true {
+                best = retired
+                bestStamp = stamp
+            }
+        }
+        return best
+    }
+
     // MARK: - Pending contacts (ADR-0079)
 
     /// base64 account key -> what a pending contact's invite link stated about
@@ -689,12 +744,18 @@ public final class ProfileDirectory: ObservableObject {
     /// The resolved name for the person holding `signatureKey`. Starts a
     /// username verification when the stored claim has no verdict yet.
     public func resolve(signatureKey: Data) -> ResolvedDisplayName {
+        resolve(signatureKey: signatureKey, askedKeyB64: base64Encode(signatureKey))
+    }
+
+    /// ``resolve(signatureKey:)`` with the key first asked about kept: the
+    /// profile is looked up along ITS alias (``profileKey(for:)``).
+    private func resolve(signatureKey: Data, askedKeyB64: String) -> ResolvedDisplayName {
         let keyB64 = base64Encode(signatureKey)
         // A key an accepted reset retired resolves as the contact it
         // belonged to, under the contact's CURRENT key: the same person, the
-        // same name, for the history written under the old key.
+        // same rename, for the history written under the old key.
         if let current = aliases[keyB64], current != keyB64, let currentKey = Data(base64Encoded: current) {
-            return resolve(signatureKey: currentKey)
+            return resolve(signatureKey: currentKey, askedKeyB64: askedKeyB64)
         }
         // ADR-0074 section 3.5 — a key nothing is known under that is the
         // same person as a known key across a PROVEN rotation resolves as
@@ -715,11 +776,17 @@ public final class ProfileDirectory: ObservableObject {
         }
         // Precedence: local rename > received profile > a pending contact's
         // link statement (ADR-0079) > the placeholder.
-        let receivedProfile = received.profile(signatureKeyB64: keyB64)
+        // The profile along the asked key's alias (ADR-0073 R.2, UX 16.3):
+        // the key itself, then the current key, then the newest profile a
+        // retired key of the same person sent. A username is verified under
+        // the key whose profile claims it.
+        let profileKeyB64 = profileKey(for: askedKeyB64)
+        let receivedProfile = profileKeyB64.flatMap { received.profile(signatureKeyB64: $0) }
         let profile = receivedProfile ?? pendingClaims[keyB64]
+        let claimKeyB64 = receivedProfile != nil ? (profileKeyB64 ?? keyB64) : keyB64
         var state: UsernameVerificationState?
         if let username = profile?.username {
-            state = verifier.state(signatureKeyB64: keyB64, username: username)
+            state = verifier.state(signatureKeyB64: claimKeyB64, username: username)
             // A verification is started for a received profile only. The
             // check (ADR-0060 section 5) reads the certificate the received
             // profile carried; a link carries none, so starting one for a
@@ -727,8 +794,8 @@ public final class ProfileDirectory: ObservableObject {
             // that a later profile with a certificate could not undo. A link
             // username is therefore shown only with a verdict already held.
             if receivedProfile != nil,
-               verifier.needsVerification(signatureKeyB64: keyB64, username: username) {
-                startVerification(signatureKeyB64: keyB64, username: username)
+               verifier.needsVerification(signatureKeyB64: claimKeyB64, username: username) {
+                startVerification(signatureKeyB64: claimKeyB64, username: username)
             }
         }
         return resolveDisplayName(
@@ -780,13 +847,15 @@ public final class ProfileDirectory: ObservableObject {
         // ADR-0098 — a deleted account shows no photo.
         if isDeletedAccount(signatureKey: signatureKey) { return nil }
         let keyB64 = base64Encode(signatureKey)
-        if let current = aliases[keyB64], current != keyB64, let currentKey = Data(base64Encoded: current) {
-            return avatar(signatureKey: currentKey)
+        // The same lookup the name uses (``profileKey(for:)``).
+        if let profileKeyB64 = profileKey(for: keyB64) {
+            return received.profile(signatureKeyB64: profileKeyB64)?.avatar
         }
-        if let alias = provenAlias(of: keyB64), let aliasKey = Data(base64Encoded: alias) {
+        let canonical = aliases[keyB64] ?? keyB64
+        if let alias = provenAlias(of: canonical), let aliasKey = Data(base64Encoded: alias) {
             return avatar(signatureKey: aliasKey)
         }
-        return received.profile(signatureKeyB64: keyB64)?.avatar
+        return nil
     }
 
     /// The account id a member's own profile claimed (profile envelope v2), or

@@ -35,6 +35,8 @@ interface World {
   nextClaimId: number;
   postFails: boolean;
   deliverFails: boolean;
+  /** Whether a Welcome can reach the new identity's mailbox. */
+  reachable: boolean;
   unreachable: Set<string>;
   recheckDue: boolean;
 }
@@ -67,6 +69,7 @@ function world(kind: "chat" | "group", over: Partial<ContinuityFacts> = {}): Wor
     nextClaimId: 40,
     postFails: false,
     deliverFails: false,
+    reachable: true,
     unreachable: new Set(),
     recheckDue: true,
   };
@@ -82,6 +85,7 @@ function port(w: World): ContinuityPort {
     claimState: state,
     cursorOf: () => w.cursor,
     newIdentityHasDevices: async () => w.devices,
+    newIdentityReachable: async () => w.reachable,
     prepareSuccessor: async () => {
       w.log.push("prepare");
       return "S-mine";
@@ -109,7 +113,8 @@ function port(w: World): ContinuityPort {
       if (!w.log.includes(`lineage:${s}`)) w.log.push(`lineage:${s}`);
     },
     deliverSuccessor: async (_g, s) => {
-      if (w.deliverFails) return false;
+      if (w.deliverFails) return "not-ready";
+      if (!w.reachable) return "unreachable";
       if (!w.facts.has(s)) {
         w.facts.set(s, {
           kind: w.facts.get(OLD)!.kind,
@@ -120,7 +125,7 @@ function port(w: World): ContinuityPort {
         });
         w.log.push(`deliver:${s}`);
       }
-      return true;
+      return "delivered";
     },
     carryName: async () => {
       if (!w.log.includes("name")) w.log.push("name");
@@ -186,8 +191,8 @@ describe("a one-to-one whose other person reset (R.7 case 1)", () => {
       "prepare",
       "claim:S-mine",
       "settle:S-mine",
-      "lineage:S-mine",
       "deliver:S-mine",
+      "lineage:S-mine",
       "resend:S-mine",
     ]);
     // A one-to-one has no name to carry, nobody to add, no roles.
@@ -225,6 +230,42 @@ describe("a one-to-one whose other person reset (R.7 case 1)", () => {
     const w = world("chat");
     w.devices = false;
     expect(await continueConversation(port(w), OLD)).toBe("waiting-for-devices");
+    expect(w.log).toEqual([]);
+  });
+
+  it("prepares and claims NOTHING while the new identity cannot be reached (2026-11-25)", async () => {
+    const w = world("chat");
+    w.reachable = false;
+    expect(await continueConversation(port(w), OLD)).toBe("waiting-for-reach");
+    expect(w.log).toEqual([]);
+    expect(w.claims.get(OLD)).toBeUndefined();
+    // Once a grant of the new key is held (their contact request, UX 16.6),
+    // the next pass continues from the top.
+    w.reachable = true;
+    expect(await continueConversation(port(w), OLD)).toBe("claimed");
+  });
+
+  it("an own claim that cannot be delivered never moves the conversation", async () => {
+    const w = world("chat");
+    await continueConversation(port(w), OLD);
+    w.cursor = 40;
+    w.reachable = false;
+    expect(await continueConversation(port(w), OLD)).toBe("waiting-for-reach");
+    // Settled, but no lineage and no held successor: the row stays the old
+    // one-to-one and its sends stay held.
+    expect(w.log).toEqual(["prepare", "claim:S-mine", "settle:S-mine"]);
+    expect(await continueConversation(port(w), OLD)).toBe("waiting-for-reach");
+    expect(w.log.some((l) => l.startsWith("lineage") || l.startsWith("deliver"))).toBe(false);
+    w.reachable = true;
+    expect(await continueConversation(port(w), OLD)).toBe("built");
+    expect(w.log.slice(3)).toEqual(["deliver:S-mine", "lineage:S-mine", "resend:S-mine"]);
+  });
+
+  it("a claim of this account's other device records no lineage before this device holds it", async () => {
+    const w = world("chat");
+    w.claims.set(OLD, { accepted: claim(12, "S-sibling"), pending: [], own: null });
+    w.deliverFails = true;
+    expect(await continueConversation(port(w), OLD)).toBe("failed");
     expect(w.log).toEqual([]);
   });
 
@@ -285,8 +326,8 @@ describe("a group whose owner reset (R.7 case 3)", () => {
       "prepare",
       "claim:S-mine",
       "settle:S-mine",
-      "lineage:S-mine",
       "deliver:S-mine",
+      "lineage:S-mine",
       "name",
       "add:bob",
       "add:carol",

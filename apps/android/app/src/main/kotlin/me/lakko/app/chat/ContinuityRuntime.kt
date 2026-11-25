@@ -21,6 +21,15 @@ package me.lakko.app.chat
  *      roles and (decision) the owner, and re-sends what was sent into the
  *      dead session (decision).
  *
+ * The conversation moves to the successor (the lineage, the held successor)
+ * only AFTER its Welcomes were delivered. Moved before, it is a group only
+ * this account is in: the row is drawn from a roster naming a key that never
+ * sent a profile, and every message sent there is read by nobody (seen live
+ * 2026-11-25, when the reset account's new mailbox could not be reached).
+ * And nothing is prepared or claimed while the new identity cannot be
+ * reached at all ([ContinuityPort.newIdentityReachable]): the old one-to-one
+ * stays the conversation, and a send into it is held ([sendRoute]).
+ *
  * "Nothing is sent before the claim is confirmed" is what keeps a lost claim
  * harmless; a lost claim AFTER Welcomes went out would leave people in a
  * group nobody continues in (R.14), and this order is the only thing that
@@ -65,6 +74,15 @@ public interface ContinuityPort {
     public suspend fun newIdentityHasDevices(accountIdB64: String): Boolean
 
     /**
+     * Whether this device holds anything that lets it write a Welcome to the
+     * new identity's mailbox (a kept grant of the new key, a delegation). A
+     * reset account knows nobody, and since ADR-0078 the continuity key
+     * reaches no mailbox, so this is usually `false` until the person sends
+     * this account a contact request from the new key (UX 16.6).
+     */
+    public suspend fun newIdentityReachable(accountIdB64: String): Boolean
+
+    /**
      * Step 1: create the successor of [oldGroupIdHex] locally, add the new
      * identity's devices and this account's other devices in ONE commit,
      * claim its DS journal, and keep the Welcome for step 4. Sends nothing.
@@ -90,10 +108,13 @@ public interface ContinuityPort {
      *  Idempotent (write-once). */
     public suspend fun recordLineage(oldGroupIdHex: String, successorGroupIdHex: String)
 
-    /** Step 4a: make the prepared successor a held conversation and deliver
-     *  the Welcomes. Idempotent: `false` when the successor could not be
-     *  brought up (the next pass tries again). */
-    public suspend fun deliverSuccessor(oldGroupIdHex: String, successorGroupIdHex: String): Boolean
+    /** Step 4a: deliver the Welcomes, THEN make the successor a held
+     *  conversation (never the other way round: see the file docs).
+     *  Idempotent. [SuccessorDelivery.UNREACHABLE]: the new identity's
+     *  mailbox could not be written, nothing was made visible;
+     *  [SuccessorDelivery.NOT_READY]: the successor could not be brought up.
+     *  The next pass tries again either way. */
+    public suspend fun deliverSuccessor(oldGroupIdHex: String, successorGroupIdHex: String): SuccessorDelivery
 
     /** Step 4b: re-send the group name into the successor with its ORIGINAL
      *  stamp (ADR-0051). Idempotent. */
@@ -121,6 +142,18 @@ public interface ContinuityPort {
     public suspend fun resendOwnMessages(oldGroupIdHex: String, successorGroupIdHex: String, accountIdB64: String)
 }
 
+/** How step 4a ended. */
+public enum class SuccessorDelivery {
+    /** The Welcomes are out and the successor is held here. */
+    DELIVERED,
+
+    /** Nothing this device holds reaches the new identity's mailbox. */
+    UNREACHABLE,
+
+    /** The successor could not be brought up here (yet). */
+    NOT_READY,
+}
+
 /** What one pass did, for the caller's log and the tests. */
 public enum class ContinuityStep {
     /** Nothing to continue (repairable, no accepted reset, not held). */
@@ -131,6 +164,10 @@ public enum class ContinuityStep {
 
     /** The new identity publishes no device yet (R.8): retry later. */
     WAITING_FOR_DEVICES,
+
+    /** Nothing this device holds reaches the new identity's mailbox: no
+     *  successor is prepared or moved to, retry later. */
+    WAITING_FOR_REACH,
 
     /** This device is not eligible to found. */
     NOT_ELIGIBLE,
@@ -218,12 +255,14 @@ private suspend fun runContinuity(port: ContinuityPort, oldGroupIdHex: String): 
     val accepted = state.accepted
     if (accepted != null) {
         val successorHex = groupHexOfB64(accepted.successorGroupIdB64)
-        port.recordLineage(oldGroupIdHex, successorHex)
         if (own != null && accepted.senderKeyB64 == own) {
             // This account founded it (this device, or another of the
-            // person's): whoever holds the successor keeps building it.
+            // person's): whoever holds the successor keeps building it. The
+            // lineage is recorded by [buildSuccessor], once the successor was
+            // delivered.
             return buildSuccessor(port, oldGroupIdHex, accepted, facts, own, accountIdB64, unrepairableKeyB64)
         }
+        port.recordLineage(oldGroupIdHex, successorHex)
         // R.7 case 3 "the completeness re-check": ANY moved admin or owner
         // adds whoever of the old roster the successor still lacks.
         if (own != null && facts.kind == ConversationKind.Group) {
@@ -251,6 +290,10 @@ private suspend fun runContinuity(port: ContinuityPort, oldGroupIdHex: String): 
         return ContinuityStep.NOT_ELIGIBLE
     }
     if (!port.newIdentityHasDevices(accountIdB64)) return ContinuityStep.WAITING_FOR_DEVICES
+    // Nothing is prepared, claimed or moved to while no Welcome could reach
+    // the new identity (2026-11-25): the old one-to-one stays the
+    // conversation, and a send into it is held.
+    if (!port.newIdentityReachable(accountIdB64)) return ContinuityStep.WAITING_FOR_REACH
     // The claim state is read again after the suspension above: a claim that
     // landed meanwhile means this device stands down (R.6).
     val again = port.claimState(oldGroupIdHex)
@@ -314,8 +357,14 @@ private suspend fun buildSuccessor(
     unrepairableKeyB64: String,
 ): ContinuityStep {
     val successorGroupIdHex = groupHexOfB64(winner.successorGroupIdB64)
+    // Delivered first, then moved to: a successor nobody else is in must
+    // never become the conversation (file docs).
+    when (port.deliverSuccessor(oldGroupIdHex, successorGroupIdHex)) {
+        SuccessorDelivery.DELIVERED -> Unit
+        SuccessorDelivery.UNREACHABLE -> return ContinuityStep.WAITING_FOR_REACH
+        SuccessorDelivery.NOT_READY -> return ContinuityStep.FAILED
+    }
     port.recordLineage(oldGroupIdHex, successorGroupIdHex)
-    if (!port.deliverSuccessor(oldGroupIdHex, successorGroupIdHex)) return ContinuityStep.FAILED
     val superseded = port.supersededKeys().keys
     if (old.kind == ConversationKind.Chat) {
         port.resendOwnMessages(oldGroupIdHex, successorGroupIdHex, accountIdB64)
@@ -358,6 +407,41 @@ private suspend fun buildSuccessor(
     }
     return ContinuityStep.BUILT
 }
+
+/**
+ * Whether a Welcome could reach the new identity now ([ContinuityPort.newIdentityReachable]):
+ * a verified mailbox for its current key AND at least one grant candidate the
+ * core's plan (G-53) offers for a Welcome. A mailbox with no candidate would
+ * only take the unsigned write a closed mailbox drops as stored.
+ *
+ * | mailbox known | grant candidates | reachable |
+ * |---------------|------------------|-----------|
+ * | no            | any              | no        |
+ * | yes           | 0                | no        |
+ * | yes           | > 0              | yes       |
+ */
+public fun newIdentityReachableVerdict(mailboxKnown: Boolean, candidates: Int): Boolean =
+    mailboxKnown && candidates > 0
+
+/**
+ * Whether a device may record the lineage of an ACCEPTED claim outside the
+ * pass (the repository's tail after each pass). A claim this account posted
+ * (any of its devices) moves the conversation only once this device holds
+ * the successor, which it does only after the Welcomes were delivered (the
+ * founder) or one reached it (another device of the account). A claim of
+ * someone else is recorded as soon as it is accepted.
+ *
+ * | claim by this account | holds the successor | records |
+ * |-----------------------|---------------------|---------|
+ * | no                    | any                 | yes     |
+ * | yes                   | yes                 | yes     |
+ * | yes                   | no                  | no      |
+ */
+public fun mayRecordAcceptedLineage(
+    acceptedSenderKeyB64: String,
+    ownPersonKeyB64: String?,
+    holdsSuccessor: Boolean,
+): Boolean = ownPersonKeyB64 == null || acceptedSenderKeyB64 != ownPersonKeyB64 || holdsSuccessor
 
 /** Standard base64 of a group id given as hex ("" for malformed hex). */
 public fun groupB64OfHex(hex: String): String {

@@ -219,7 +219,9 @@ export function RecallScreen(props: {
       <Switch>
         <Match when={screen().step === "question"}>
           {/* One announcement for the title, the body and the question. */}
-          <div role="group" aria-live="polite">
+          {/* The card's own 20px gap, which `.lk-auth-lede`'s -12px top margin
+              assumes; without it the body slid over a two-line title. */}
+          <div role="group" aria-live="polite" style={{ display: "flex", "flex-direction": "column", gap: "20px" }}>
             <h1>{SIGNED_OUT_COPY.title()}</h1>
             <p class="lk-auth-lede">
               {tRich("devices.recall.body", { name: name() }, { date: resetDate() })}

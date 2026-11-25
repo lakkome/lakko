@@ -44,30 +44,56 @@ public fun continuityWelcomeDest(acceptedResetKnown: Boolean): me.lakko.app.cont
     return null
 }
 
+/** How a successor's Welcomes went ([deliverSuccessorWelcomes]). */
+public enum class WelcomeDelivery {
+    /** Every person's mailbox took the Welcome. */
+    DELIVERED,
+
+    /** At least one person's mailbox could not be written: no verified
+     *  binding is held for them, or no grant they accept (the new identity of
+     *  an accepted reset, ADR-0078 open question). The Welcome stays owed. */
+    UNREACHABLE,
+}
+
 /**
  * Deliver a successor group's Welcome to each person in [targets], once per
- * mailbox. A person whose mailbox [mailboxOf] cannot name (no verified
- * binding is held for them: the new identity of an accepted reset, ADR-0078
- * open question) is skipped and logged without identifiers; nothing is ever
- * addressed to a mailbox derived from the account id or the identity key.
- * Returns how many people were skipped.
+ * mailbox. Every mailbox is named first: when [mailboxOf] cannot name one
+ * (no verified binding is held for that person) NOTHING is written and the
+ * result is [WelcomeDelivery.UNREACHABLE]; nothing is ever addressed to a
+ * mailbox derived from the account id or the identity key. A write that
+ * [isUnreachable] classifies (no grant accepted) stops the loop with the same
+ * result; any other failure propagates. Never "delivered" for a person
+ * nobody wrote to (2026-11-25: a successor counted delivered with its
+ * Welcome skipped became the conversation and every message sent there was
+ * read by nobody). Idempotent on the wire: a second delivery is a duplicate
+ * the recipient's join ignores.
  */
 public suspend fun deliverSuccessorWelcomes(
     targets: List<ByteArray>,
     mailboxOf: (ByteArray) -> ByteArray?,
     publish: suspend (mailbox: ByteArray) -> Unit,
-): Int {
-    val written = HashSet<String>()
-    var skipped = 0
+    isUnreachable: (Throwable) -> Boolean = { it is me.lakko.app.contacts.MailboxUnknown },
+): WelcomeDelivery {
+    val mailboxes = ArrayList<ByteArray>(targets.size)
     for (accountKey in targets) {
         val mailbox = mailboxOf(accountKey)
         if (mailbox == null) {
-            skipped += 1
             continuityWelcomeDest(acceptedResetKnown = true)
-            continue
+            return WelcomeDelivery.UNREACHABLE
         }
-        if (!written.add(mailbox.joinToString("") { "%02x".format(it) })) continue
-        publish(mailbox)
+        mailboxes += mailbox
     }
-    return skipped
+    val written = HashSet<String>()
+    for (mailbox in mailboxes) {
+        if (!written.add(mailbox.joinToString("") { "%02x".format(it) })) continue
+        try {
+            publish(mailbox)
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (cause: Throwable) {
+            if (isUnreachable(cause)) return WelcomeDelivery.UNREACHABLE
+            throw cause
+        }
+    }
+    return WelcomeDelivery.DELIVERED
 }

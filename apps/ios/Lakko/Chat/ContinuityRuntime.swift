@@ -24,6 +24,15 @@ import Foundation
 //      the roles and (decision) the owner, and re-sends what was sent into
 //      the dead session (decision).
 //
+// The conversation moves to the successor (the lineage, the held successor)
+// only AFTER its Welcomes were delivered. Moved before, it is a group only
+// this account is in: the row is drawn from a roster naming a key that never
+// sent a profile, and every message sent there is read by nobody (seen live
+// 2026-11-25, when the reset account's new mailbox could not be reached).
+// And nothing is prepared or claimed while the new identity cannot be
+// reached at all (`ContinuityPort.newIdentityReachable`): the old one-to-one
+// stays the conversation, and a send into it is held (`HeldSend.swift`).
+//
 // "Nothing is sent before the claim is confirmed" is what keeps a lost
 // claim harmless; a lost claim AFTER Welcomes went out would leave people in
 // a group nobody continues in (R.14), and this order is the only thing that
@@ -71,6 +80,12 @@ public protocol ContinuityPort: AnyObject {
     func cursorOf(oldGroupIdB64: String) -> Int64?
     /// Whether the new identity publishes at least one device (R.8).
     func newIdentityHasDevices(accountIdB64: String) async throws -> Bool
+    /// Whether this device holds anything that lets it write a Welcome to the
+    /// new identity's mailbox (a kept grant of the new key, a delegation). A
+    /// reset account knows nobody, and since ADR-0078 the continuity key
+    /// reaches no mailbox, so this is usually `false` until the person sends
+    /// this account a contact request from the new key (UX 16.6).
+    func newIdentityReachable(accountIdB64: String) async -> Bool
     /// Step 1: create the successor of `oldGroupIdB64` locally, add the new
     /// identity's devices and this account's other devices in ONE commit,
     /// claim its DS journal, and keep the Welcome for step 4. Sends nothing.
@@ -89,10 +104,12 @@ public protocol ContinuityPort: AnyObject {
     /// The lineage register `successor -> conversation of the old group`.
     /// Idempotent (write-once).
     func recordLineage(oldGroupIdB64: String, successorGroupIdB64: String) async throws
-    /// Step 4a: make the prepared successor a held conversation and deliver
-    /// the Welcomes. Idempotent: `false` when the successor could not be
-    /// brought up (the next pass tries again).
-    func deliverSuccessor(oldGroupIdB64: String, successorGroupIdB64: String) async throws -> Bool
+    /// Step 4a: deliver the Welcomes, THEN make the successor a held
+    /// conversation (never the other way round: see the file header).
+    /// Idempotent. `.unreachable`: the new identity's mailbox could not be
+    /// written, nothing was made visible; `.notReady`: the successor could
+    /// not be brought up. The next pass tries again either way.
+    func deliverSuccessor(oldGroupIdB64: String, successorGroupIdB64: String) async throws -> SuccessorDelivery
     /// Step 4b: re-send the group name into the successor with its ORIGINAL
     /// stamp (ADR-0051). Idempotent.
     func carryName(oldGroupIdB64: String, successorGroupIdB64: String) async throws
@@ -114,6 +131,13 @@ public protocol ContinuityPort: AnyObject {
     func resendOwnMessages(oldGroupIdB64: String, successorGroupIdB64: String, accountIdB64: String) async throws
 }
 
+/// How step 4a ended.
+public enum SuccessorDelivery: Equatable, Sendable {
+    case delivered
+    case unreachable
+    case notReady
+}
+
 /// What one pass did, for the caller's log and the tests.
 public enum ContinuityStep: Equatable, Sendable {
     /// Nothing to continue (repairable, no accepted reset, not held).
@@ -122,6 +146,9 @@ public enum ContinuityStep: Equatable, Sendable {
     case adopted
     /// The new identity publishes no device yet (R.8): retry later.
     case waitingForDevices
+    /// Nothing this device holds reaches the new identity's mailbox: no
+    /// successor is prepared or moved to, retry later.
+    case waitingForReach
     /// This device is not eligible to found.
     case notEligible
     /// Steps 1 and 2 ran: the claim is posted.
@@ -202,15 +229,17 @@ public enum ContinuityRuntime {
 
         // A claim is held: the conversation's successor is decided.
         if let accepted = state.accepted {
-            try await port.recordLineage(
-                oldGroupIdB64: oldGroupIdB64, successorGroupIdB64: accepted.successorGroupIdB64)
             if let own, accepted.senderKeyB64 == own {
                 // This account founded it (this device, or another of the
                 // person's): whoever holds the successor keeps building it.
+                // The lineage is recorded by `build`, once the successor was
+                // delivered.
                 return try await build(
                     port, oldGroupIdB64: oldGroupIdB64, winner: accepted, old: facts, own: own,
                     accountIdB64: accountIdB64, unrepairableKeyB64: unrepairableKeyB64)
             }
+            try await port.recordLineage(
+                oldGroupIdB64: oldGroupIdB64, successorGroupIdB64: accepted.successorGroupIdB64)
             // R.7 case 3 "the completeness re-check": ANY moved admin or
             // owner, not only the founding account, adds whoever of the old
             // roster the successor still lacks, at the re-admission arm's
@@ -232,6 +261,10 @@ public enum ContinuityRuntime {
             supersededKeys: supersededSet, newIdentityHasDevices: true)
         if !eligible { return .notEligible }
         if !(try await port.newIdentityHasDevices(accountIdB64: accountIdB64)) { return .waitingForDevices }
+        // Nothing is prepared, claimed or moved to while no Welcome could
+        // reach the new identity (2026-11-25): the old one-to-one stays the
+        // conversation, and a send into it is held.
+        if !(await port.newIdentityReachable(accountIdB64: accountIdB64)) { return .waitingForReach }
         // The claim state is read again after the awaits above: a claim that
         // landed meanwhile means this device stands down (R.6 "to avoid
         // wasted claims a device re-reads the journal head before step 1").
@@ -297,11 +330,15 @@ public enum ContinuityRuntime {
         own: String, accountIdB64: String, unrepairableKeyB64: String
     ) async throws -> ContinuityStep {
         let successorGroupIdB64 = winner.successorGroupIdB64
-        try await port.recordLineage(oldGroupIdB64: oldGroupIdB64, successorGroupIdB64: successorGroupIdB64)
-        if !(try await port.deliverSuccessor(
-            oldGroupIdB64: oldGroupIdB64, successorGroupIdB64: successorGroupIdB64)) {
-            return .failed
+        // Delivered first, then moved to: a successor nobody else is in must
+        // never become the conversation (file header).
+        switch try await port.deliverSuccessor(
+            oldGroupIdB64: oldGroupIdB64, successorGroupIdB64: successorGroupIdB64) {
+        case .delivered: break
+        case .unreachable: return .waitingForReach
+        case .notReady: return .failed
         }
+        try await port.recordLineage(oldGroupIdB64: oldGroupIdB64, successorGroupIdB64: successorGroupIdB64)
         let superseded = Set(port.supersededKeys().keys)
         if old.kind == .chat {
             try await port.resendOwnMessages(

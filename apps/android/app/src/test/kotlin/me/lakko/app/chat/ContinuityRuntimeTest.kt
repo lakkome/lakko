@@ -29,6 +29,8 @@ class ContinuityRuntimeTest {
         var devices: Boolean = true,
         var postFails: Boolean = false,
         var deliverOk: Boolean = true,
+        /** Whether a Welcome can reach the new identity's mailbox. */
+        var reachable: Boolean = true,
         val successorId: String,
     ) : ContinuityPort {
         val calls = ArrayList<String>()
@@ -40,6 +42,7 @@ class ContinuityRuntimeTest {
         override fun claimState(oldGroupIdHex: String) = state
         override fun cursorOf(oldGroupIdHex: String) = cursor
         override suspend fun newIdentityHasDevices(accountIdB64: String) = devices
+        override suspend fun newIdentityReachable(accountIdB64: String) = reachable
         override suspend fun prepareSuccessor(oldGroupIdHex: String, newIdentityAccountIdB64: String): String {
             calls += "prepare"
             return successorId
@@ -57,9 +60,11 @@ class ContinuityRuntimeTest {
             state = state.copy(accepted = winner, own = null)
         }
         override suspend fun recordLineage(oldGroupIdHex: String, successorGroupIdHex: String) { calls += "lineage:$successorGroupIdHex" }
-        override suspend fun deliverSuccessor(oldGroupIdHex: String, successorGroupIdHex: String): Boolean {
+        override suspend fun deliverSuccessor(oldGroupIdHex: String, successorGroupIdHex: String): SuccessorDelivery {
+            if (!deliverOk) return SuccessorDelivery.NOT_READY
+            if (!reachable) return SuccessorDelivery.UNREACHABLE
             calls += "deliver"
-            return deliverOk
+            return SuccessorDelivery.DELIVERED
         }
         override suspend fun carryName(oldGroupIdHex: String, successorGroupIdHex: String) { calls += "name" }
         override suspend fun addPerson(successorGroupIdHex: String, personKeyB64: String): Boolean {
@@ -122,7 +127,63 @@ class ContinuityRuntimeTest {
     fun `the winner of a one-to-one delivers and re-sends`() = runTest {
         val p = port().also { it.state = StoredClaims(own = OwnClaim(succ, 10)); it.cursor = 10 }
         assertEquals(ContinuityStep.BUILT, continueConversation(p, old))
-        assertEquals(listOf("settle:$succ", "lineage:$succ", "deliver", "resend"), p.calls)
+        assertEquals(listOf("settle:$succ", "deliver", "lineage:$succ", "resend"), p.calls)
+    }
+
+    @Test
+    fun `prepares and claims NOTHING while the new identity cannot be reached`() = runTest {
+        val p = port().also { it.reachable = false }
+        assertEquals(ContinuityStep.WAITING_FOR_REACH, continueConversation(p, old))
+        assertTrue(p.calls.isEmpty())
+        assertEquals(null, p.state.own)
+        // Once a grant of the new key is held (their contact request, UX
+        // 16.6), the next pass continues from the top.
+        p.reachable = true
+        assertEquals(ContinuityStep.CLAIMED, continueConversation(p, old))
+    }
+
+    @Test
+    fun `an own claim that cannot be delivered never moves the conversation`() = runTest {
+        val p = port()
+        assertEquals(ContinuityStep.CLAIMED, continueConversation(p, old))
+        p.cursor = 10
+        p.reachable = false
+        assertEquals(ContinuityStep.WAITING_FOR_REACH, continueConversation(p, old))
+        // Settled, but no lineage and no held successor: the row stays the
+        // old one-to-one and its sends stay held.
+        assertEquals(listOf("prepare", "post", "settle:$succ"), p.calls)
+        assertEquals(ContinuityStep.WAITING_FOR_REACH, continueConversation(p, old))
+        assertFalse(p.calls.any { it.startsWith("lineage") || it == "deliver" })
+        p.reachable = true
+        assertEquals(ContinuityStep.BUILT, continueConversation(p, old))
+        assertEquals(listOf("deliver", "lineage:$succ", "resend"), p.calls.drop(3))
+    }
+
+    @Test
+    fun `a claim of this account's other device records no lineage before this device holds it`() = runTest {
+        val p = port().also {
+            it.state = StoredClaims(accepted = SuccessorClaim(12, groupB64OfHex(other), "me", false, emptyList()))
+            it.deliverOk = false
+        }
+        assertEquals(ContinuityStep.FAILED, continueConversation(p, old))
+        assertTrue(p.calls.isEmpty())
+    }
+
+    @Test
+    fun `the lineage of an accepted claim outside the pass waits for this account's successor`() {
+        // Someone else's claim: recorded as soon as it is accepted.
+        assertTrue(mayRecordAcceptedLineage("someone", "me", holdsSuccessor = false))
+        // This account's claim: only once the successor is held here.
+        assertFalse(mayRecordAcceptedLineage("me", "me", holdsSuccessor = false))
+        assertTrue(mayRecordAcceptedLineage("me", "me", holdsSuccessor = true))
+        assertTrue(mayRecordAcceptedLineage("me", null, holdsSuccessor = false))
+    }
+
+    @Test
+    fun `the new identity is reachable only through a verified mailbox and a planned grant`() {
+        assertFalse(newIdentityReachableVerdict(mailboxKnown = false, candidates = 2))
+        assertFalse(newIdentityReachableVerdict(mailboxKnown = true, candidates = 0))
+        assertTrue(newIdentityReachableVerdict(mailboxKnown = true, candidates = 1))
     }
 
     @Test
@@ -184,7 +245,7 @@ class ContinuityRuntimeTest {
         }
         assertEquals(ContinuityStep.BUILT, continueConversation(p, old))
         assertEquals(
-            listOf("settle:$succ", "lineage:$succ", "deliver", "name", "add:b", "add:c"),
+            listOf("settle:$succ", "deliver", "lineage:$succ", "name", "add:b", "add:c"),
             p.calls,
         )
         // Next pass: the people are in; one role change, then the transfer.
@@ -192,11 +253,11 @@ class ContinuityRuntimeTest {
         p.facts[succ] = ContinuityFacts(ConversationKind.Group, listOf("me", "new", "b", "c"), "me", emptyList(), true)
         assertEquals(ContinuityStep.BUILT, continueConversation(p, old))
         // The register is write-once: recording it again changes nothing.
-        assertEquals(listOf("lineage:$succ", "lineage:$succ", "deliver", "name", "admins:[b]"), p.calls)
+        assertEquals(listOf("deliver", "lineage:$succ", "name", "admins:[b]"), p.calls)
         p.calls.clear()
         p.facts[succ] = ContinuityFacts(ConversationKind.Group, listOf("me", "new", "b", "c"), "me", listOf("b"), true)
         assertEquals(ContinuityStep.BUILT, continueConversation(p, old))
-        assertEquals(listOf("lineage:$succ", "lineage:$succ", "deliver", "name", "transfer:new:true"), p.calls)
+        assertEquals(listOf("deliver", "lineage:$succ", "name", "transfer:new:true"), p.calls)
     }
 
     @Test

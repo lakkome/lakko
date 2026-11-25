@@ -33,6 +33,8 @@ final class ContinuityRuntimeTests: XCTestCase {
         var nextClaimId: Int64 = 40
         var postFails = false
         var deliverFails = false
+        /// Whether a Welcome can reach the new identity's mailbox.
+        var reachable = true
         var unreachable: Set<String> = []
         var recheckIsDue = true
 
@@ -68,6 +70,7 @@ final class ContinuityRuntimeTests: XCTestCase {
         func claimState(oldGroupIdB64: String) -> StoredGroupClosed { state(oldGroupIdB64) }
         func cursorOf(oldGroupIdB64: String) -> Int64? { cursor }
         func newIdentityHasDevices(accountIdB64: String) async throws -> Bool { devices }
+        func newIdentityReachable(accountIdB64: String) async -> Bool { reachable }
 
         func prepareSuccessor(oldGroupIdB64: String, newIdentityAccountIdB64: String) async throws -> String {
             log.append("prepare")
@@ -103,15 +106,18 @@ final class ContinuityRuntimeTests: XCTestCase {
             if !log.contains("lineage:\(successorGroupIdB64)") { log.append("lineage:\(successorGroupIdB64)") }
         }
 
-        func deliverSuccessor(oldGroupIdB64: String, successorGroupIdB64: String) async throws -> Bool {
-            if deliverFails { return false }
+        func deliverSuccessor(
+            oldGroupIdB64: String, successorGroupIdB64: String
+        ) async throws -> SuccessorDelivery {
+            if deliverFails { return .notReady }
+            if !reachable { return .unreachable }
             if factsByGroup[successorGroupIdB64] == nil {
                 factsByGroup[successorGroupIdB64] = ContinuityFacts(
                     kind: factsByGroup[old]?.kind ?? .group, rosterPersonKeysB64: [me, newAnna],
                     ownerKeyB64: me, adminKeysB64: [], active: true)
                 log.append("deliver:\(successorGroupIdB64)")
             }
-            return true
+            return .delivered
         }
 
         func carryName(oldGroupIdB64: String, successorGroupIdB64: String) async throws {
@@ -205,7 +211,7 @@ final class ContinuityRuntimeTests: XCTestCase {
         XCTAssertEqual(step, .built)
         XCTAssertEqual(
             w.log,
-            ["prepare", "claim:S-mine", "settle:S-mine", "lineage:S-mine", "deliver:S-mine", "resend:S-mine"])
+            ["prepare", "claim:S-mine", "settle:S-mine", "deliver:S-mine", "lineage:S-mine", "resend:S-mine"])
         // A one-to-one has no name to carry, nobody to add, no roles.
         XCTAssertFalse(w.log.contains { $0.hasPrefix("add") || $0 == "name" || $0.hasPrefix("transfer") })
     }
@@ -242,6 +248,48 @@ final class ContinuityRuntimeTests: XCTestCase {
         w.devices = false
         let step = await pass(w)
         XCTAssertEqual(step, .waitingForDevices)
+        XCTAssertEqual(w.log, [])
+    }
+
+    func testPreparesAndClaimsNothingWhileTheNewIdentityCannotBeReached() async {
+        let w = World(.chat)
+        w.reachable = false
+        let waiting = await pass(w)
+        XCTAssertEqual(waiting, .waitingForReach)
+        XCTAssertEqual(w.log, [])
+        XCTAssertNil(w.claims[Self.old])
+        // Once a grant of the new key is held (their contact request, UX
+        // 16.6), the next pass continues from the top.
+        w.reachable = true
+        let claimed = await pass(w)
+        XCTAssertEqual(claimed, .claimed)
+    }
+
+    func testAnOwnClaimThatCannotBeDeliveredNeverMovesTheConversation() async {
+        let w = World(.chat)
+        _ = await pass(w)
+        w.cursor = 40
+        w.reachable = false
+        let first = await pass(w)
+        XCTAssertEqual(first, .waitingForReach)
+        // Settled, but no lineage and no held successor: the row stays the
+        // old one-to-one and its sends stay held.
+        XCTAssertEqual(w.log, ["prepare", "claim:S-mine", "settle:S-mine"])
+        let second = await pass(w)
+        XCTAssertEqual(second, .waitingForReach)
+        XCTAssertFalse(w.log.contains { $0.hasPrefix("lineage") || $0.hasPrefix("deliver") })
+        w.reachable = true
+        let built = await pass(w)
+        XCTAssertEqual(built, .built)
+        XCTAssertEqual(Array(w.log.dropFirst(3)), ["deliver:S-mine", "lineage:S-mine", "resend:S-mine"])
+    }
+
+    func testAClaimOfThisAccountsOtherDeviceRecordsNoLineageBeforeThisDeviceHoldsIt() async {
+        let w = World(.chat)
+        w.claims[Self.old] = StoredGroupClosed(accepted: claim(12, "S-sibling"), pending: [], own: nil)
+        w.deliverFails = true
+        let step = await pass(w)
+        XCTAssertEqual(step, .failed)
         XCTAssertEqual(w.log, [])
     }
 
@@ -319,7 +367,7 @@ final class ContinuityRuntimeTests: XCTestCase {
         XCTAssertEqual(
             w.log,
             [
-                "prepare", "claim:S-mine", "settle:S-mine", "lineage:S-mine", "deliver:S-mine", "name",
+                "prepare", "claim:S-mine", "settle:S-mine", "deliver:S-mine", "lineage:S-mine", "name",
                 "add:bob", "add:carol", "admins:bob",
             ])
         // Pass 2 (one role change per sweep): the owner is restored, and the
