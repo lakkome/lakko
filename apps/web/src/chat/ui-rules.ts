@@ -27,6 +27,13 @@ export type UiRules = Pick<
   | "ConversationKind"
   | "ConversationRow"
   | "orderConversations"
+  // The order of the pins, set by hand (`docs/ux/navigation.md` 2.2.1):
+  // the whole list each pin, unpin and move writes, and whether Move up /
+  // Move down applies. `chat/pin-order.ts` is the adapter.
+  | "pinOrderAfterPin"
+  | "pinOrderAfterUnpin"
+  | "pinOrderAfterMove"
+  | "pinCanMove"
   // Where the archived conversations sit: behind one "Archived" bar at the
   // bottom of the panel, opened as a list of their own
   // (`docs/ux/navigation.md` 2.2 step 3).

@@ -4157,6 +4157,14 @@
       "text": "برداشتن سنجاق",
       "status": "machine"
     },
+    "chats.action.move_up": {
+      "text": "انتقال به بالا",
+      "status": "machine"
+    },
+    "chats.action.move_down": {
+      "text": "انتقال به پایین",
+      "status": "machine"
+    },
     "chats.archived.row": {
       "text": "بایگانی‌شده",
       "status": "machine"

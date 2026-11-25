@@ -280,7 +280,20 @@ public fun ChatListScreen(
     // folder, the folder editor and the picker.
     val allRows = rememberConversationRows(repository, channels, deviceGroupSync)
 
-    val rows = remember(allRows) { orderConversationRows(allRows) }
+    // docs/ux/navigation.md 2.2.1 — the pins in the person's order: the
+    // synced ConversationOrder register as row ids, and the order this device
+    // just wrote, drawn at once until the register reads it back.
+    val noOrder = remember { MutableStateFlow<me.lakko.app.devices.sync.OrderState?>(null) }
+    val orderState by (deviceGroupSync?.order ?: noOrder).collectAsStateWithLifecycle()
+    val storedPinOrder = remember(orderState, allRows) {
+        me.lakko.app.chat.pinOrderIds(orderState?.groupIds.orEmpty(), allRows)
+    }
+    var optimisticPinOrder by remember { mutableStateOf<me.lakko.app.chat.OptimisticPinOrder?>(null) }
+    LaunchedEffect(storedPinOrder) {
+        if (optimisticPinOrder?.base != storedPinOrder) optimisticPinOrder = null
+    }
+    val pinOrder = me.lakko.app.chat.effectivePinOrder(storedPinOrder, optimisticPinOrder)
+    val rows = remember(allRows, pinOrder) { orderConversationRows(allRows, pinOrder) }
     val currentMembers = remember(allRows) { me.lakko.app.chat.searchMemberIds(allRows) }
     androidx.compose.runtime.SideEffect { if (memberIds.value != currentMembers) memberIds.value = currentMembers }
     val visible = remember(rows, query) {
@@ -356,6 +369,96 @@ public fun ChatListScreen(
 
     var deletingFolder by remember { mutableStateOf<ChatFolder?>(null) }
 
+    // Chat folders section 2.3 — a folder's own pin list as this device just
+    // wrote it, per folder, drawn at once until the fold reads it back.
+    var optimisticFolderPins by remember {
+        mutableStateOf<Map<String, me.lakko.app.chat.OptimisticPinOrder>>(emptyMap())
+    }
+    LaunchedEffect(folders) {
+        val kept = optimisticFolderPins.filter { (id, o) ->
+            folders.firstOrNull { it.idHex == id }?.pinnedRowIds == o.base
+        }
+        if (kept.size != optimisticFolderPins.size) optimisticFolderPins = kept
+    }
+    val shownFolder: (ChatFolder) -> ChatFolder = { folder ->
+        val o = optimisticFolderPins[folder.idHex]
+        if (o == null || o.base != folder.pinnedRowIds) {
+            folder
+        } else {
+            folder.copy(pinned = me.lakko.app.chat.folderPinRefs(o.ids, folder, allRows))
+        }
+    }
+    // Write the pins of All chats: optimistic at once, then the register.
+    // The write is folded into the synced state before its first suspension
+    // (the publish follows), so it is started undispatched and the register is
+    // read right after: applied, refused or thrown, the optimistic order is
+    // dropped then and the screen draws the register.
+    val writeAllChatsPins: (List<String>) -> Unit = { next ->
+        val sync = deviceGroupSync
+        if (sync != null) {
+            val ours = me.lakko.app.chat.OptimisticPinOrder(next, storedPinOrder)
+            optimisticPinOrder = ours
+            var threw = false
+            scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                try {
+                    sync.setOrder(me.lakko.app.chat.pinOrderBytes(next))
+                } catch (cause: Throwable) {
+                    me.lakko.app.rethrowIfCancelled(cause)
+                    threw = true
+                    android.util.Log.w("ChatListScreen", "pin order write failed (${cause.javaClass.simpleName})")
+                    optimisticPinOrder = me.lakko.app.chat.settleOptimistic(
+                        optimisticPinOrder,
+                        ours,
+                        me.lakko.app.chat.PinWriteOutcome.Failed,
+                    )
+                }
+            }
+            val registerNow = me.lakko.app.chat.pinOrderIds(sync.order.value?.groupIds.orEmpty(), allRows)
+            val outcome = me.lakko.app.chat.pinWriteOutcome(next, registerNow, threw)
+            if (outcome == me.lakko.app.chat.PinWriteOutcome.NotApplied) {
+                android.util.Log.w("ChatListScreen", "pin order write not applied")
+            }
+            optimisticPinOrder = me.lakko.app.chat.settleOptimistic(optimisticPinOrder, ours, outcome)
+        }
+    }
+    // Write a folder's own pins: optimistic at once, then the change set.
+    val writeFolderPins: (ChatFolder, uniffi.lakko_ffi_uniffi.FolderChangeSet?) -> Unit = { folder, changes ->
+        val register = changes?.pins?.firstOrNull()
+        val sync = deviceGroupSync
+        if (register != null && actions != null && sync != null) {
+            val written = register.pinned.map { me.lakko.app.chat.rowIdOf(it) }
+            val ours = me.lakko.app.chat.OptimisticPinOrder(
+                ids = written,
+                base = folders.firstOrNull { it.idHex == folder.idHex }?.pinnedRowIds ?: folder.pinnedRowIds,
+            )
+            optimisticFolderPins = optimisticFolderPins + (folder.idHex to ours)
+            // As for All chats: the change set is applied before its first
+            // suspension, so the register is read right after.
+            var refused = false
+            scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                if (!actions.applyChanges(changes)) {
+                    refused = true
+                    android.util.Log.w("ChatListScreen", "folder pins write refused")
+                    optimisticFolderPins = me.lakko.app.chat.settleFolderOptimistic(
+                        optimisticFolderPins,
+                        folder.idHex,
+                        ours,
+                        me.lakko.app.chat.PinWriteOutcome.Failed,
+                    )
+                }
+            }
+            val registerNow = sync.folders.value.firstOrNull { it.folderId.contentEquals(folder.id) }
+                ?.pinned?.map { me.lakko.app.chat.rowIdOf(it) }.orEmpty()
+            val outcome = me.lakko.app.chat.pinWriteOutcome(written, registerNow, refused)
+            if (outcome == me.lakko.app.chat.PinWriteOutcome.NotApplied) {
+                android.util.Log.w("ChatListScreen", "folder pins write not applied")
+            }
+            optimisticFolderPins =
+                me.lakko.app.chat.settleFolderOptimistic(optimisticFolderPins, folder.idHex, ours, outcome)
+        }
+    }
+    val folderStamp: me.lakko.app.chat.StampSource = { me.lakko.app.devices.sync.Hlc.mint() }
+
     // One set of row handlers for every tab; [folder] is the tab the row sits
     // in (`null` = All chats), which is the pin set the row menu's Pin acts on.
     val rowHandlers = RowHandlers(
@@ -363,6 +466,12 @@ public fun ChatListScreen(
         foldersEnabled = actions != null,
         inFolder = { folder, row -> rowsMatching(folder.rule, listOf(row)).isNotEmpty() },
         onToggleFlag = { row, field ->
+            // Navigation 2.2.1 — a pin goes on top of the pins, an unpin
+            // leaves the others in their order: the order register is written
+            // beside the flag.
+            if (field == FlagField.Pin) {
+                writeAllChatsPins(me.lakko.app.chat.allChatsPinToggleOrder(pinOrder, rows, row))
+            }
             toggleFlag(
                 sync = deviceGroupSync,
                 groupIdHex = row.id,
@@ -374,7 +483,22 @@ public fun ChatListScreen(
             )
         },
         onToggleFolderPin = { folder, row ->
-            scope.launch { actions?.togglePin(folder, row) }
+            val shown = shownFolder(folder)
+            writeFolderPins(
+                shown,
+                me.lakko.app.chat.folderPinToggleChanges(shown, folderRows(shown, allRows), row, folderStamp),
+            )
+        },
+        onMovePin = { folder, row, toIndex ->
+            if (folder == null) {
+                writeAllChatsPins(me.lakko.app.chat.allChatsMoveOrder(pinOrder, rows, row, toIndex))
+            } else {
+                val shown = shownFolder(folder)
+                writeFolderPins(
+                    shown,
+                    me.lakko.app.chat.folderMoveChanges(shown, folderRows(shown, allRows), row, toIndex, folderStamp),
+                )
+            }
         },
         onToggleMembership = { folder, row, inFolder ->
             scope.launch { actions?.toggleMembership(folder, row, inFolder) }
@@ -610,14 +734,15 @@ public fun ChatListScreen(
                                 )
                             }
                         } else {
-                            val inFolder = remember(folder, allRows) { folderRows(folder, allRows) }
+                            val folderShown = shownFolder(folder)
+                            val inFolder = remember(folderShown, allRows) { folderRows(folderShown, allRows) }
                             if (inFolder.isEmpty()) {
                                 if (pageArchiveOpen && !searching) LaunchedEffect(Unit) { closeArchive() }
                                 EmptyFolderPanel(onEdit = { onEditFolder(folder.idHex) })
                             } else {
                                 ConversationList(
                                     rows = inFolder,
-                                    folder = folder,
+                                    folder = folderShown,
                                     handlers = rowHandlers,
                                     archiveOpen = pageArchiveOpen,
                                     onOpenArchive = openArchive,
@@ -828,6 +953,11 @@ internal class RowHandlers(
     val quietCallOffer: me.lakko.app.calls.QuietCallOffer?,
     val onAcceptCall: (Boolean) -> Unit,
     val onDeclineCall: () -> Unit,
+    /**
+     * Navigation 2.2.1 — a pin dropped (or moved up / down) to [Int] among
+     * the pins of the tab: [ChatFolder] is the tab, `null` = All chats.
+     */
+    val onMovePin: (ChatFolder?, ConversationListRow, Int) -> Unit = { _, _, _ -> },
 )
 
 /** One tab's rows. [folder] is the tab (`null` = All chats). */
@@ -915,6 +1045,40 @@ private fun ConversationList(
             }
         }
     }
+    // docs/ux/navigation.md 2.2.1 — the pins of this tab are dragged to
+    // another place among themselves; Move up / Move down are their TalkBack
+    // equivalent. Never while searching, never in the archive, not with one pin.
+    val dragScope = androidx.compose.runtime.rememberCoroutineScope()
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val dragController = remember(listState, dragScope, density) {
+        PinDragController(
+            listState = listState,
+            scope = dragScope,
+            edgePx = with(density) { 56.dp.toPx() },
+            maxScrollPerFramePx = with(density) { 12.dp.toPx() },
+        )
+    }
+    val pinRows = section.chatRows.filter { it.pinned }
+    dragController.pinKeys = pinRows.map { "${it.kind}:${it.id}" }
+    val shownPinIds = pinRows.map { it.id }
+    val reorderable = !section.archiveShown &&
+        pinRows.isNotEmpty() &&
+        me.lakko.app.chat.pinDragAllowed(pinRows.first(), pinRows.size, searching, section.archiveShown)
+    val reorderFor: (ConversationListRow) -> RowReorder? = { row ->
+        if (!reorderable || !row.pinned) {
+            null
+        } else {
+            val up = me.lakko.app.chat.pinStepTarget(shownPinIds, row.id, up = true)
+            val down = me.lakko.app.chat.pinStepTarget(shownPinIds, row.id, up = false)
+            RowReorder(
+                key = "${row.kind}:${row.id}",
+                controller = dragController,
+                moveUp = up?.let { to -> { handlers.onMovePin(folder, row, to) } },
+                moveDown = down?.let { to -> { handlers.onMovePin(folder, row, to) } },
+                onDrop = { to -> handlers.onMovePin(folder, row, to) },
+            )
+        }
+    }
     val chatInvited = if (section.archiveShown) emptyList() else invited
     val firstKey = chatInvited.firstOrNull()?.let { "invited:${it.accountIdHex}" }
         ?: section.chatRows.firstOrNull()?.let { "${it.kind}:${it.id}" }
@@ -937,7 +1101,14 @@ private fun ConversationList(
                         InvitedChatRow(contact = contact, onClick = { onOpenPendingChat(contact.accountIdHex) })
                     }
                     items(items = section.chatRows, key = { "${it.kind}:${it.id}" }) { row ->
-                        ConversationListItem(row = row, folder = folder, handlers = handlers)
+                        val reorder = reorderFor(row)
+                        if (reorder == null) {
+                            ConversationListItem(row = row, folder = folder, handlers = handlers)
+                        } else {
+                            PinReorderItem(reorder) {
+                                ConversationListItem(row = row, folder = folder, handlers = handlers, reorder = reorder)
+                            }
+                        }
                     }
                     if (section.divider && !section.archiveShown) {
                         item(key = "archived-divider") {
@@ -977,6 +1148,8 @@ private fun ConversationListItem(
     handlers: RowHandlers,
     /** `false` inside the archive: every row there is archived. */
     markArchived: Boolean = true,
+    /** Navigation 2.2.1 — a pin that can be dragged and moved, or `null`. */
+    reorder: RowReorder? = null,
 ) {
     val menu = RowMenuModel(row = row, folder = folder, handlers = handlers)
     if (row.kind == ConversationRowKind.CHANNEL) {
@@ -987,6 +1160,7 @@ private fun ConversationListItem(
             menu = menu,
             onClick = { handlers.onOpenChannel(row.id) },
             markArchived = markArchived,
+            reorder = reorder,
         )
     } else {
         SwipeableThreadRow(
@@ -1002,6 +1176,7 @@ private fun ConversationListItem(
             onAcceptCall = handlers.onAcceptCall,
             onDeclineCall = handlers.onDeclineCall,
             markArchived = markArchived,
+            reorder = reorder,
         )
     }
 }
@@ -1529,6 +1704,7 @@ private fun SwipeableThreadRow(
     onAcceptCall: (withVideo: Boolean) -> Unit = {},
     onDeclineCall: () -> Unit = {},
     markArchived: Boolean = true,
+    reorder: RowReorder? = null,
 ) {
     val dismissState = rememberSwipeToDismissBoxState(
         confirmValueChange = { value ->
@@ -1590,6 +1766,7 @@ private fun SwipeableThreadRow(
                 onAcceptCall = onAcceptCall,
                 onDeclineCall = onDeclineCall,
                 markArchived = markArchived,
+                reorder = reorder,
             )
         }
     }
@@ -1605,16 +1782,27 @@ private fun ThreadRow(
     onAcceptCall: (withVideo: Boolean) -> Unit = {},
     onDeclineCall: () -> Unit = {},
     markArchived: Boolean = true,
+    reorder: RowReorder? = null,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     Box {
         Column {
             ConversationRowBody(
                 row = row,
-                modifier = Modifier.combinedClickable(
-                    onClick = onClick,
-                    onLongClick = { menuOpen = true },
-                ),
+                modifier = if (reorder == null) {
+                    Modifier.combinedClickable(
+                        onClick = onClick,
+                        onLongClick = { menuOpen = true },
+                    )
+                } else {
+                    // Navigation 2.2.1 — a pin: a tap opens, press and hold
+                    // then move drags, press and hold and lift opens the menu.
+                    Modifier.pinReorderable(
+                        reorder = reorder,
+                        onClick = onClick,
+                        onOpenMenu = { menuOpen = true },
+                    )
+                },
                 hoverPlaysVideo = true,
                 markArchived = markArchived,
             )

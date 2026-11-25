@@ -23,7 +23,6 @@ import {
   INCLUDE_CHANNELS,
   INCLUDE_GROUPS,
   INCLUDE_ONE_TO_ONE,
-  MAX_FOLDER_PINS,
   membershipOf,
   newFolderDraft,
   openSuggestions,
@@ -36,7 +35,6 @@ import {
   stampEdits,
   tabAriaLabel,
   toggleMembershipEdit,
-  togglePinEdit,
   unreadConversationCount,
   type ConversationRef,
   type FolderModel,
@@ -223,24 +221,6 @@ describe("Add to folder (UX spec section 5)", () => {
 });
 
 describe("pins and order", () => {
-  it("pinning puts a chat at the top of the folder's own list", () => {
-    const f = folder({ pinned: [G2] });
-    expect(togglePinEdit(f, G1)).toEqual({ t: "pins", folderIdHex: FID, pinned: [G1, G2] });
-  });
-
-  it("unpinning removes it and keeps the rest in order", () => {
-    const f = folder({ pinned: [G1, G2, CH] });
-    expect(togglePinEdit(f, G2)).toEqual({ t: "pins", folderIdHex: FID, pinned: [G1, CH] });
-  });
-
-  it("refuses an eleventh pin", () => {
-    const pinned = Array.from({ length: MAX_FOLDER_PINS }, (_, i) => ({
-      kind: 2 as const,
-      id: new Uint8Array([i]),
-    }));
-    expect(togglePinEdit(folder({ pinned }), G1)).toBeNull();
-  });
-
   it("reorder writes the whole order once", () => {
     const fs = ["01", "02", "03"].map((x) => folder({ idHex: x.repeat(16) }));
     expect(reorderEdit(fs, 2, 0)).toEqual({

@@ -76,8 +76,8 @@ import { KeysRotatedNotice } from "../devices/KeysRotatedNotice";
 import { AddToFolderItems } from "./folders/AddToFolderMenu";
 import {
   deleteFolder,
+  applyFolderPinAction,
   openFolderEditor,
-  togglePinInFolder,
   toggleMembership,
 } from "./folders/folder-actions";
 import {
@@ -113,6 +113,9 @@ import { updateFeedMarks } from "../feed/feed-marks-store";
 import { markChannelsRead } from "../feed/feed-marks";
 import { MenuBackdrop } from "../ui/MenuBackdrop";
 import { shownRows, splitArchived } from "./archived-section";
+import { allChatsOrderAfter, moveByOne, type PinAction } from "./pin-order";
+import { effectivePinOrderKeys, writePinOrder } from "./pin-order-state";
+import { createPinDrag, type DragPin } from "./pin-drag";
 
 /** Whether the archive is open in the conversation panel (UX 2.2 step 3):
  *  kept while the app runs, so coming back from an archived chat finds it as
@@ -439,14 +442,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     // All-chats pin is untouched.
     const folder = currentFolder();
     if (field === "pinned" && folder !== null) {
-      const ref = refOfRow(row.kind, row.id);
-      if (ref === null) return;
-      try {
-        await togglePinInFolder(sync, folder, ref);
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn("folder pin failed", err);
-      }
+      await applyPinAction(row, isPinnedInFolder(row, folder) ? { t: "unpin" } : { t: "pin" });
       return;
     }
     const groupId = flagsKeyOf(row, g);
@@ -460,13 +456,182 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
       unreadOverride: cur?.unreadOverride ?? false,
     };
     next[field] = !next[field];
+    // `docs/ux/navigation.md` 2.2.1 - a pin goes to the top of the pins, an
+    // unpin leaves the others in their order. The list is computed from what
+    // is on screen now, written after the flag, so an unpinned row never
+    // reads as a pin the order does not name (which sits on top).
+    const rules = uiRules();
+    const orderAfter =
+      field === "pinned" && rules !== null
+        ? allChatsOrderAfter(
+            rules,
+            effectivePinOrderKeys(sync.order()),
+            orderedRows(),
+            { t: next.pinned ? "pin" : "unpin", id: row.id },
+          )
+        : null;
     try {
       await sync.setFlags(groupId, next);
+      if (orderAfter !== null) await writePinOrder(sync, orderAfter);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn(`setFlags(${field}) failed`, err);
     }
   }
+
+  /** The pinned rows of the open tab, in the order the list draws them: the
+   *  global pins in All chats, the folder's own pins inside a folder. */
+  const scopePins = createMemo((): readonly ConversationRow[] => {
+    const folder = currentFolder();
+    if (folder === null) return orderedRows().filter((r) => r.pinned);
+    return tabRows().filter((r) => isPinnedInFolder(r, folder));
+  });
+
+  /** Whether the pins of the open tab may be put in order now (UX 2.2.1):
+   *  two or more of them, nothing typed in search, not the archive view. */
+  const pinsReorderable = (): boolean =>
+    !searching() && !inArchive() && scopePins().length >= 2;
+
+  /**
+   * Pin, unpin or move a pin in the open tab's pin order. The new order is on
+   * screen before this returns its first promise: a folder edit is applied
+   * locally at once, and All chats keeps the written list as its order until
+   * the register holds it (`pin-order-state.ts`).
+   */
+  function applyPinAction(
+    row: ConversationRow,
+    action: { readonly t: "pin" } | { readonly t: "unpin" } | { readonly t: "move"; readonly toIndex: number },
+  ): Promise<void> {
+    const rules = uiRules();
+    if (rules === null) return Promise.resolve();
+    const folder = currentFolder();
+    const fail = (err: unknown): void => {
+      // eslint-disable-next-line no-console
+      console.warn(`pin order (${action.t}) failed`, err);
+    };
+    if (folder !== null) {
+      return applyFolderPinAction(sync, rules, folder, scopePins(), row, action).then(() => undefined, fail);
+    }
+    const full: PinAction =
+      action.t === "move" ? { t: "move", id: row.id, toIndex: action.toIndex } : { t: action.t, id: row.id };
+    const keys = allChatsOrderAfter(rules, effectivePinOrderKeys(sync.order()), orderedRows(), full);
+    return writePinOrder(sync, keys).catch(fail);
+  }
+
+  /** Move up / Move down in the row menu (UX 2.2.1), or `null` when it does
+   *  not apply to this row. */
+  const moveAction = (row: ConversationRow, up: boolean): PinAction | null => {
+    const rules = uiRules();
+    if (rules === null || !pinsReorderable() || !pinnedHere(row)) return null;
+    return moveByOne(rules, scopePins().map(rowKey), rowKey(row), up);
+  };
+
+  /** Move a pin by one place and keep the focus on its row. */
+  const moveByOnePlace = (row: ConversationRow, up: boolean): void => {
+    const action = moveAction(row, up);
+    if (action === null || action.t !== "move") return;
+    const key = rowKey(row);
+    void applyPinAction(row, { t: "move", toIndex: action.toIndex });
+    requestAnimationFrame(() => focusRow(key));
+  };
+
+  /** Focus the row element of `key` (after a move, focus stays on the
+   *  moved row; after a keyboard menu closes, it returns there). */
+  const focusRow = (key: string): void => {
+    const body = paneBody;
+    if (body === undefined) return;
+    for (const el of Array.from(body.querySelectorAll<HTMLElement>("[data-row-key]"))) {
+      if (el.getAttribute("data-row-key") === key) {
+        el.focus();
+        return;
+      }
+    }
+  };
+
+  /** Dragging a pin (UX 2.2.1). The pins are the open tab's, in drawn order,
+   *  and only while they may be reordered. */
+  const pinDrag = createPinDrag({
+    container: () => paneBody,
+    pins: (): readonly DragPin[] =>
+      pinsReorderable() ? scopePins().map((r) => ({ key: rowKey(r), id: rowKey(r) })) : [],
+    onDrop: (key, toIndex) => {
+      const row = scopePins().find((r) => rowKey(r) === key);
+      if (row !== undefined) void applyPinAction(row, { t: "move", toIndex });
+    },
+    onHoldMenu: (key, x, y) => {
+      const row = rowByKey().get(key);
+      if (row === undefined) return;
+      setMenu({ row, g: row.kind === "channel" ? null : (groupById().get(row.id) ?? null), x, y });
+    },
+  });
+
+  /** A right click (or the context-menu event the menu key sends) on a row.
+   *  A menu the keyboard opened for this row already stays as it is, so the
+   *  event that may follow the key does not take its focus away. */
+  const openRowMenu = (row: ConversationRow, g: ActiveGroup | null, x: number, y: number): void => {
+    const open = menu();
+    if (open?.kb === true && rowKey(open.row) === rowKey(row)) return;
+    setMenu({ row, g, x, y });
+  };
+
+  /** The keyboard menu key or Shift+F10 on a focused row opens its menu
+   *  under the row, with the focus in it. */
+  const onPaneKeyDown = (e: KeyboardEvent): void => {
+    const menuKey = e.key === "ContextMenu" || (e.shiftKey && e.key === "F10");
+    if (!menuKey || !(e.target instanceof Element)) return;
+    const el = e.target.closest<HTMLElement>("[data-row-key]");
+    const key = el?.getAttribute("data-row-key");
+    if (el === null || el === undefined || key === null || key === undefined) return;
+    const row = rowByKey().get(key);
+    if (row === undefined) return;
+    e.preventDefault();
+    const r = el.getBoundingClientRect();
+    setMenu({
+      row,
+      g: row.kind === "channel" ? null : (groupById().get(row.id) ?? null),
+      x: r.left + 16,
+      y: r.bottom,
+      kb: true,
+    });
+  };
+
+  /** Close the row menu; one the keyboard opened gives the focus back to its
+   *  row. */
+  const closeMenu = (): void => {
+    const open = menu();
+    setMenu(null);
+    if (open?.kb === true) {
+      const key = rowKey(open.row);
+      requestAnimationFrame(() => focusRow(key));
+    }
+  };
+
+  /** Arrow keys, Home and End move the focus through the open row menu. */
+  const onMenuKeyDown = (e: KeyboardEvent): void => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+    const root = e.currentTarget;
+    if (!(root instanceof HTMLElement)) return;
+    const items = Array.from(root.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)'));
+    if (items.length === 0) return;
+    e.preventDefault();
+    const at = items.indexOf(document.activeElement as HTMLElement);
+    const next =
+      e.key === "Home"
+        ? 0
+        : e.key === "End"
+          ? items.length - 1
+          : e.key === "ArrowDown"
+            ? (at + 1) % items.length
+            : (at <= 0 ? items.length : at) - 1;
+    items[next]?.focus();
+  };
+
+  /** A row's long press: the drag takes it when the row is a pin that can
+   *  move (a hold, then moving the finger), else the menu opens at once. */
+  const onRowHold = (row: ConversationRow, g: ActiveGroup | null, x: number, y: number): void => {
+    if (pinDrag.takeHold(rowKey(row), x, y)) return;
+    setMenu({ row, g, x, y });
+  };
 
   // The context menu: one open at a time, anchored where the pointer was.
   // Opened by a right click or by a long press (the touch path).
@@ -475,6 +640,9 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     g: ActiveGroup | null;
     x: number;
     y: number;
+    /** Opened from the keyboard (the menu key / Shift+F10): the first item
+     *  takes the focus, and closing gives it back to the row. */
+    kb?: boolean;
   } | null>(null);
 
   /** Whether the row shows as pinned in the open tab: the folder's own pin
@@ -606,7 +774,9 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           markArchived={cf().archived && !inArchive()}
           pinBlocked={pinBlocked(row())}
           selected={props.activeGroupIdB64 === row().id}
-          onMenu={(x, y) => setMenu({ row: row(), g: null, x, y })}
+          rowKey={rowKey(row())}
+          onMenu={(x, y) => openRowMenu(row(), null, x, y)}
+          onHold={(x, y) => onRowHold(row(), null, x, y)}
           onToggle={(field) => void toggleFlag(row(), null, field)}
         />
       );
@@ -648,10 +818,11 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
      */
     const quietCall = () =>
       quietCallOfferFor(callHost.quietIncomingCall(), g.groupIdB64, Date.now());
-    const press = createLongPress((x, y) => setMenu({ row: row(), g, x, y }));
+    const press = createLongPress((x, y) => onRowHold(row(), g, x, y));
     return (
       <A
         href={hrefOf(g)}
+        data-row-key={rowKey(row())}
         class="lk-row"
         classList={{
           selected: props.activeGroupIdB64 === slug,
@@ -662,7 +833,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
         inactiveClass=""
         onContextMenu={(e) => {
           e.preventDefault();
-          setMenu({ row: row(), g, x: e.clientX, y: e.clientY });
+          openRowMenu(row(), g, e.clientX, e.clientY);
         }}
         onPointerDown={press.onPointerDown}
         onPointerMove={press.onPointerMove}
@@ -975,7 +1146,15 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
             </Show>
           }
         >
-          <div class="lk-pane-body" ref={paneBody}>
+          <div
+            class="lk-pane-body"
+            ref={(el) => {
+              paneBody = el;
+              const detach = pinDrag.attach(el);
+              onCleanup(detach);
+            }}
+            onKeyDown={onPaneKeyDown}
+          >
             {/* ADR-0087 UX 6.2 — the Requests sent row, at the top, while one is open. */}
             <Show when={currentFolder() === null && !searching() && !inArchive() && requestsSent().length > 0}>
               <button type="button" class="lk-row" onClick={() => setRequestsOpen(true)}>
@@ -1106,6 +1285,11 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
             void toggleFlag(row, grp, field);
           };
           const ref = () => refOfRow(m().row.kind, m().row.id);
+          const moveFromMenu = (up: boolean): void => {
+            const row = m().row;
+            setMenu(null);
+            moveByOnePlace(row, up);
+          };
           const canPin = (): boolean => hasFlags() || currentFolder() !== null;
           // Every read of `m()` happens BEFORE `setMenu(null)`: the accessor is
           // stale once the menu's `<Show>` closes.
@@ -1121,12 +1305,19 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           };
           return (
             <>
-              <MenuBackdrop onClose={() => setMenu(null)} closeOnContextMenu />
+              <MenuBackdrop onClose={closeMenu} closeOnContextMenu />
               <div
                 class="lk-menu lk-menu-floating"
                 role="menu"
                 aria-label={m().row.title}
                 style={{ left: `${m().x}px`, top: `${m().y}px` }}
+                ref={(el) => {
+                  // Opened from the keyboard: the first item takes the focus.
+                  if (m().kb === true) {
+                    queueMicrotask(() => el.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus());
+                  }
+                }}
+                onKeyDown={onMenuKeyDown}
               >
                 <Show when={canPin()}>
                   <button
@@ -1140,6 +1331,20 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                   </button>
                   <Show when={pinBlocked(m().row)}>
                     <p class="lk-menu-note">{t("folders.pin_limit", { count: MAX_FOLDER_PINS })}</p>
+                  </Show>
+                  {/* UX 2.2.1 - the non-drag equivalent of dragging a pin,
+                      right after Unpin, each only where it applies. */}
+                  <Show when={moveAction(m().row, true) !== null}>
+                    <button type="button" role="menuitem" onClick={() => moveFromMenu(true)}>
+                      <Icon name="chevron-up" size={20} />
+                      {t("chats.action.move_up")}
+                    </button>
+                  </Show>
+                  <Show when={moveAction(m().row, false) !== null}>
+                    <button type="button" role="menuitem" onClick={() => moveFromMenu(false)}>
+                      <Icon name="chevron-down" size={20} />
+                      {t("chats.action.move_down")}
+                    </button>
                   </Show>
                 </Show>
                 <Show when={hasFlags()}>

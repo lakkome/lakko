@@ -4157,6 +4157,14 @@
       "text": "ביטול הצמדה",
       "status": "machine"
     },
+    "chats.action.move_up": {
+      "text": "הזזה למעלה",
+      "status": "machine"
+    },
+    "chats.action.move_down": {
+      "text": "הזזה למטה",
+      "status": "machine"
+    },
     "chats.archived.row": {
       "text": "בארכיון",
       "status": "machine"

@@ -4157,6 +4157,14 @@
       "text": "Desafixar",
       "status": "machine"
     },
+    "chats.action.move_up": {
+      "text": "Mover para cima",
+      "status": "machine"
+    },
+    "chats.action.move_down": {
+      "text": "Mover para baixo",
+      "status": "machine"
+    },
     "chats.archived.row": {
       "text": "Arquivadas",
       "status": "machine"

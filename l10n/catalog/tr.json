@@ -4157,6 +4157,14 @@
       "text": "Sabitlemeyi kaldır",
       "status": "machine"
     },
+    "chats.action.move_up": {
+      "text": "Yukarı taşı",
+      "status": "machine"
+    },
+    "chats.action.move_down": {
+      "text": "Aşağı taşı",
+      "status": "machine"
+    },
     "chats.archived.row": {
       "text": "Arşiv",
       "status": "machine"

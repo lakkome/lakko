@@ -25,6 +25,8 @@ import { channelsState } from "../state/channels-state";
 import { createChannelRowFeed } from "../feed/channel-unread";
 import { sortConversations, type ConversationRow } from "./conversation-list";
 import { uiRules } from "./ui-rules";
+import { allChatsPinOrderIds } from "./pin-order";
+import { effectivePinOrderKeys } from "./pin-order-state";
 import { groupTitle } from "./group-title";
 import { emptyPreviewLine, previewLine, type PreviewMedia } from "./list-preview";
 import { channelInviteRowPreview } from "./channel-invite-preview";
@@ -414,8 +416,7 @@ export function createConversationRows() {
     // have resolved long before a session exists.
     const rules = uiRules();
     if (rules === null) return [];
-    return sortConversations(
-      [
+    const rows: ConversationRow[] = [
       ...channelRows(),
       ...lineageView.conversations().filter((c) => !membershipEnd.isEnding(c.head.groupIdB64)).map((c) => {
         const g = c.head;
@@ -444,9 +445,11 @@ export function createConversationRows() {
           })(),
         };
       }),
-      ],
-      rules,
-    );
+    ];
+    // `docs/ux/navigation.md` 2.2.1 - the pins in the person's order: the
+    // synced register (or the write of it on its way), as row ids.
+    const pinOrder = allChatsPinOrderIds(effectivePinOrderKeys(sync.order()), rows);
+    return sortConversations(rows, rules, pinOrder);
   });
 
   /** The store entry behind a chat or group row: the conversation's HEAD

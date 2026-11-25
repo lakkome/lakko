@@ -146,11 +146,15 @@ public enum ChatFolders {
     /// The rows `folder` shows, in the folder's order, with each row's pin
     /// mark swapped for the folder's own pin (UX spec 2.3: the All-chats pin
     /// does not carry into a folder).
+    ///
+    /// `pins` replaces the folder's stored pin list (row ids, top first) for
+    /// this one drawing: the order a move just wrote, shown at once while its
+    /// write is on the way (navigation 2.2.1, "applies at once, on drop").
     public static func rows(
-        in folder: FolderView, from all: [ConversationListRow]
+        in folder: FolderView, from all: [ConversationListRow], pins override: [String]? = nil
     ) -> [ConversationListRow] {
         let matching = all.filter { matches(folder, $0) }
-        let pins = folder.pinned.map(rowId)
+        let pins = PinOrder.spelledAsRows(override ?? folder.pinned.map(rowId), rows: matching)
         let pinSet = Set(pins)
         let order = LakkoCore.orderConversationsInFolder(
             rows: matching.map(ffiRow), folderPins: pins)
@@ -258,17 +262,53 @@ public enum ChatFolders {
     }
 
     /// Pin or unpin `row` inside `folder`: the folder's pin list, as one new
-    /// value. A new pin goes to the top. `nil` when pinning would exceed the
-    /// limit (the menu disables the item then, so this is the backstop).
+    /// value, written by the shared helpers (navigation 2.2.1): a new pin goes
+    /// to the top, an unpin keeps the others in their order, and a stored pin
+    /// this device does not show (its chat has not arrived) stays where it
+    /// is. `shown` is the folder's pins in the order the list draws them;
+    /// `nil` reads the stored list instead. `nil` when pinning would exceed
+    /// the limit (the menu disables the item then, so this is the backstop).
     public static func togglePin(
-        folder: FolderView, row: ConversationListRow, hlc: UInt64
+        folder: FolderView, row: ConversationListRow, shown: [String]? = nil, hlc: UInt64
     ) -> FolderChangeSet? {
-        var pins = folder.pinned
-        if let index = pins.firstIndex(where: { rowId($0) == row.id }) {
-            pins.remove(at: index)
-        } else {
-            guard pins.count < maxPins, let ref = ref(for: row, in: folder) else { return nil }
-            pins.insert(ref, at: 0)
+        let stored = folder.pinned.map(rowId)
+        let pinned = isPinned(row, in: folder)
+        if !pinned {
+            guard folder.pinned.count < maxPins, ref(for: row, in: folder) != nil else { return nil }
+        }
+        let ids = PinOrder.next(
+            pinned ? .unpin : .pin, stored: stored, shown: shown ?? stored, id: row.id)
+        return pinsChange(folder: folder, ids: ids, adding: pinned ? nil : row, hlc: hlc)
+    }
+
+    /// Move a pin of `folder` to `toIndex` among the shown pins (a drag, or
+    /// Move up / Move down). `nil` when `id` is not one of the folder's pins
+    /// or the list would not change.
+    public static func movePin(
+        folder: FolderView, shown: [String], id: String, toIndex: Int, hlc: UInt64
+    ) -> FolderChangeSet? {
+        let stored = folder.pinned.map(rowId)
+        guard stored.contains(where: { $0.caseInsensitiveCompare(id) == .orderedSame }) else {
+            return nil
+        }
+        let ids = PinOrder.next(.move(toIndex: toIndex), stored: stored, shown: shown, id: id)
+        guard ids != stored else { return nil }
+        return pinsChange(folder: folder, ids: ids, adding: nil, hlc: hlc)
+    }
+
+    /// The pins register for `ids`, each id mapped back to the reference the
+    /// folder already holds for it (a register is keyed on the whole
+    /// `(kind, id)` pair, see ``ref(for:in:)``), or to a new reference for
+    /// the row being pinned.
+    static func pinsChange(
+        folder: FolderView, ids: [String], adding row: ConversationListRow?, hlc: UInt64
+    ) -> FolderChangeSet {
+        let pins: [FolderConversationRef] = ids.compactMap { id in
+            if let existing = existingRef(id: id.lowercased(), in: folder) { return existing }
+            if let row, row.id.caseInsensitiveCompare(id) == .orderedSame {
+                return ref(for: row, in: folder)
+            }
+            return nil
         }
         return FolderChangeSet(
             metas: [], members: [],

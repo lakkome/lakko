@@ -529,7 +529,8 @@ struct ChatFoldersSettingsScreen: View {
         ChatListScreen.allRows(
             viewModel: viewModel, channels: channels,
             flags: sync.flags, readCursors: sync.readCursors,
-            channelUnread: feedReading.channelUnread)
+            channelUnread: feedReading.channelUnread,
+            pinOrder: PinOrder.storedIds(sync.order))
     }
 
     private var atLimit: Bool { sync.folders.count >= ChatFolders.maxFolders }

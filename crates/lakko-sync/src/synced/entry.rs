@@ -572,10 +572,12 @@ pub struct DraftEntry {
     pub reply_to_id: Vec<u8>,
 }
 
-/// The explicit conversation order (the existing `ConversationOrder`).
+/// The order of the pinned conversations (the existing `ConversationOrder`;
+/// `docs/ux/navigation.md` section 2.2.1). Only pinned conversations are
+/// placed by it; `lakko_ui_rules::conversation::order_conversations` reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationOrderEntry {
-    /// Group ids, top first.
+    /// The flags-register keys of the pinned conversations, top first.
     pub group_ids: Vec<Vec<u8>>,
 }
 

@@ -57,6 +57,7 @@ import { readIsActive } from "./membership-ended";
 import { loadMessageLog, type PersistedGroup } from "./message-log-store";
 import { ownPersonKeyB64, personKeysOf } from "./person-key";
 import { uiRules } from "./ui-rules";
+import { effectivePinOrderKeys } from "./pin-order-state";
 import { t } from "../l10n";
 import { keyedErrorText } from "../l10n/keyed-error";
 import { createLiveText } from "../l10n/live-text";
@@ -167,6 +168,7 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
         muted: f?.muted === true,
         archived: f?.archived === true,
         live: readIsActive(g.group),
+        conversationHex: c.conversationHex,
         ...(kind === "chat"
           ? { personKey: personKeysOf(g.group).find((k) => k !== ownPersonKeyB64(chats.identity())) }
           : {}),
@@ -177,7 +179,11 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
   const rows = createMemo((): readonly ForwardPickerRow[] => {
     const rules = uiRules();
     if (rules === null) return [];
-    return forwardPickerRows(candidates(), rules);
+    return forwardPickerRows(
+      candidates(),
+      rules,
+      effectivePinOrderKeys(sync.order()).map((k) => syncGroupIdHex(k)),
+    );
   });
   const visible = (): readonly ForwardPickerRow[] => filterForwardRows(rows(), query());
 

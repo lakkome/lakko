@@ -106,7 +106,10 @@ with one difference: **pins inside a folder are the folder's own.** Pinning in
 unaffected and does not carry into a folder. (A person who pins the team chat
 in Work and a family chat in All chats wants both, and one global pin cannot
 express that.) The row menu's **Pin** / **Unpin** therefore acts on the pin set
-of the tab it was opened from.
+of the tab it was opened from. A folder's pins are reordered by drag and by
+Move up / Move down exactly as the pins of All chats are
+([`navigation.md`](navigation.md) section 2.2.1, 2026-11-25), and the order
+written is the folder's own pin list; the global pin order is untouched.
 
 Archived conversations appear inside a folder only if the folder says so
 (section 3.2, "Exclude archived" is on by default). When they appear, they sort
@@ -364,6 +367,9 @@ this feature beyond "on all your devices".
   unread chats".
 - Every drag-to-reorder has a non-drag equivalent (Move up / Move down on web,
   the system reorder actions of VoiceOver and TalkBack on the natives).
+  This covers the folder order here and the order of pinned conversations in
+  All chats and inside a folder ([`navigation.md`](navigation.md) section
+  2.2.1).
 - The kind and exclude toggles are real checkable controls, not tinted text.
 
 ## 10. Not in this spec

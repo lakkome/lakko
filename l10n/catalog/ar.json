@@ -4157,6 +4157,14 @@
       "text": "إلغاء التثبيت",
       "status": "machine"
     },
+    "chats.action.move_up": {
+      "text": "نقل لأعلى",
+      "status": "machine"
+    },
+    "chats.action.move_down": {
+      "text": "نقل لأسفل",
+      "status": "machine"
+    },
     "chats.archived.row": {
       "text": "المؤرشفة",
       "status": "machine"

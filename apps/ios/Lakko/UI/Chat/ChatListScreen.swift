@@ -176,6 +176,12 @@ public struct ChatListScreen: View {
     @Environment(\.layoutDirection) private var layoutDirection
     /// The toolbar's create menu carries Saved; the empty state's does not.
     @State private var createMenuWithSaved = true
+    /// Navigation 2.2.1 — the pin order a move just wrote, per tab (empty for
+    /// All chats, else the folder id in hex), drawn until its write has gone
+    /// through. The synced state folds the move before it publishes, but the
+    /// write runs a turn later, and without this the row would jump back to
+    /// where it was for that turn.
+    @State private var pendingPins: [String: [String]] = [:]
 
     public var body: some View {
 #if DEBUG
@@ -357,7 +363,8 @@ public struct ChatListScreen: View {
             flags: deviceGroupSync.flags,
             readCursors: deviceGroupSync.readCursors,
             channelUnread: feedReading.channelUnread,
-            channelLastPosts: feedReading.channelLastPost)
+            channelLastPosts: feedReading.channelLastPost,
+            pinOrder: pendingPins[""] ?? PinOrder.storedIds(deviceGroupSync.order))
     }
 
     /// The merged list, ordered by the shared rule. One definition for the
@@ -368,13 +375,15 @@ public struct ChatListScreen: View {
         flags: [String: FlagsState],
         readCursors: [String: ReadCursorState],
         channelUnread: [String: Int],
-        channelLastPosts: [String: PersistedChannelPost] = [:]
+        channelLastPosts: [String: PersistedChannelPost] = [:],
+        pinOrder: [String]
     ) -> [ConversationListRow] {
         let chatRows = Self.chatRows(viewModel: viewModel, flags: flags, readCursors: readCursors)
         return ConversationList.sorted(
             chatRows + Self.channelRows(
                 channels: channels, channelUnread: channelUnread, lastPosts: channelLastPosts,
-                flags: flags))
+                flags: flags),
+            pinOrder: pinOrder)
     }
 
     /// The chat and group rows, in the shape the ordering takes. One
@@ -520,7 +529,7 @@ public struct ChatListScreen: View {
                 listPage(rows: all, folder: nil)
                     .tag("")
                 ForEach(deviceGroupSync.folders, id: \.folderId) { folder in
-                    listPage(rows: ChatFolders.rows(in: folder, from: all), folder: folder)
+                    listPage(rows: folderRows(folder, from: all), folder: folder)
                         .tag(ChatFolders.hex(folder.folderId))
                 }
             }
@@ -669,9 +678,21 @@ public struct ChatListScreen: View {
                         .listRowSeparator(.hidden)
                         .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                 }
+                // Navigation 2.2.1 — held and moved, a pinned row lifts and
+                // the others move aside (the list's own reorder, no edit
+                // mode); an unpinned row never starts a drag. One run of rows,
+                // so a pin dropped anywhere below the last pin lands last
+                // (`PinOrder.dropTarget` clamps); the place is written through
+                // the shared helper.
+                let pinIds = PinnedRun.split(section.top, isPinned: { $0.pinned }).pinned.map(\.id)
+                let moveHandler = pinMoveHandler(pins: pinIds, folder: folder)
                 ForEach(section.top) { row in
-                    conversationListRow(row, folder: folder, quietCall: quietCall)
+                    conversationListRow(
+                        row, folder: folder, quietCall: quietCall, pinIds: pinIds,
+                        draggable: moveHandler != nil && row.pinned)
+                        .moveDisabled(!row.pinned)
                 }
+                .onMove(perform: moveHandler)
                 if section.divider {
                     // A bare Divider() as a List row lays out vertically and
                     // takes the 44 pt minimum row height; a 1 pt rule does not.
@@ -749,7 +770,7 @@ public struct ChatListScreen: View {
             folder = found
         }
         let matches = rows
-        let base = folder.map { ChatFolders.rows(in: $0, from: matches) } ?? matches
+        let base = folder.map { folderRows($0, from: matches) } ?? matches
         let section = ArchivedListSplit.split(
             base,
             isArchived: { $0.archived },
@@ -844,7 +865,7 @@ public struct ChatListScreen: View {
     @ViewBuilder
     private func conversationListRow(
         _ row: ConversationListRow, folder: FolderView?, quietCall: QuietIncomingCall?,
-        inArchive: Bool = false
+        inArchive: Bool = false, pinIds: [String] = [], draggable: Bool = false
     ) -> some View {
                 VStack(spacing: 8) {
                     Button { onOpen(row) } label: {
@@ -853,6 +874,23 @@ public struct ChatListScreen: View {
                             marksArchived: !inArchive)
                     }
                     .buttonStyle(.plain)
+                    // Navigation 2.2.1 — the drag's equivalent for VoiceOver:
+                    // Move up / Move down on a pinned row, each only where
+                    // the shared rule says it applies. Not while searching.
+                    .accessibilityActions {
+                        if query.isEmpty && !inArchive {
+                            if let up = PinOrder.stepTarget(shown: pinIds, id: row.id, up: true) {
+                                Button(l10n.t("chats.action.move_up")) {
+                                    movePin(id: row.id, toIndex: up, shown: pinIds, folder: folder)
+                                }
+                            }
+                            if let down = PinOrder.stepTarget(shown: pinIds, id: row.id, up: false) {
+                                Button(l10n.t("chats.action.move_down")) {
+                                    movePin(id: row.id, toIndex: down, shown: pinIds, folder: folder)
+                                }
+                            }
+                        }
+                    }
                     // `docs/ux/calls.md` section 2.1.1 — a muted
                     // conversation's ringing call is answerable from its own
                     // row, with no navigation. Outside the row's own tap
@@ -879,8 +917,11 @@ public struct ChatListScreen: View {
                 }
                 // Spec section 2.1, Per platform — the row's own menu is a
                 // long press on both natives: the swipe's actions plus the
-                // folder items (`docs/ux/chat-folders.md` section 5).
-                .lakkoLongPressMenu { rowMenuItems(row: row, folder: folder) }
+                // folder items (`docs/ux/chat-folders.md` section 5). On a
+                // row the list can drag (navigation 2.2.1) it opens when the
+                // finger lifts without having moved, since the drag's lift
+                // takes the ordinary long press.
+                .modifier(ConversationRowMenu(draggable: draggable) { rowMenuItems(row: row, folder: folder) })
 
     }
 
@@ -1051,7 +1092,8 @@ public struct ChatListScreen: View {
 
     private func toggleFolderPin(folder: FolderView, row: ConversationListRow) async {
         guard let changes = ChatFolders.togglePin(
-            folder: folder, row: row, hlc: deviceGroupSync.mintHlc()) else { return }
+            folder: folder, row: row, shown: shownPins(in: folder),
+            hlc: deviceGroupSync.mintHlc()) else { return }
         do {
             try await deviceGroupSync.applyFolderChanges(changes)
         } catch {
@@ -1293,6 +1335,16 @@ public struct ChatListScreen: View {
         case .mute: muted.toggle()
         case .archive: archived.toggle()
         }
+        // Navigation 2.2.1 — a pin goes to the top of the pins, an unpin
+        // leaves the others in their order; read before the flag changes the
+        // list.
+        let pinOrderAfter: [String]? = field == .pin
+            ? PinOrder.next(
+                pinned ? .pin : .unpin,
+                stored: PinOrder.storedIds(deviceGroupSync.order),
+                shown: PinOrder.shownPins(allRows),
+                id: groupIdHex)
+            : nil
         do {
             try await deviceGroupSync.setFlags(
                 groupId: groupId,
@@ -1301,8 +1353,71 @@ public struct ChatListScreen: View {
                 archived: archived,
                 unreadOverride: unreadOverride
             )
+            if let pinOrderAfter {
+                try await deviceGroupSync.setOrder(groupIds: PinOrder.bytes(pinOrderAfter))
+            }
         } catch {
             NSLog("setFlags failed: %@", error.localizedDescription)
+        }
+    }
+
+    /// Navigation 2.2.1 — the folder's rows in its order, with a move that is
+    /// still being written drawn where it was dropped.
+    private func folderRows(_ folder: FolderView, from all: [ConversationListRow]) -> [ConversationListRow] {
+        ChatFolders.rows(in: folder, from: all, pins: pendingPins[ChatFolders.hex(folder.folderId)])
+    }
+
+    /// The pins of a tab as the list draws them, top first.
+    private func shownPins(in folder: FolderView?) -> [String] {
+        let all = allRows
+        return PinOrder.shownPins(folder.map { folderRows($0, from: all) } ?? all)
+    }
+
+    /// Navigation 2.2.1 — what a drop among the pins does, or `nil` where no
+    /// drag may start (fewer than two pins, a search typed).
+    private func pinMoveHandler(pins: [String], folder: FolderView?) -> ((IndexSet, Int) -> Void)? {
+        guard PinOrder.dragEnabled(pinCount: pins.count, searching: !query.isEmpty, inArchive: false)
+        else { return nil }
+        return { source, destination in
+            guard let drop = PinOrder.dropTarget(pins: pins, source: source, destination: destination)
+            else { return }
+            movePin(id: drop.id, toIndex: drop.toIndex, shown: pins, folder: folder)
+        }
+    }
+
+    /// Navigation 2.2.1 — move a pin to `toIndex` among the shown pins: a
+    /// drop, or Move up / Move down. All chats writes the account's order,
+    /// a folder its own pin list. Drawn at once, before the write runs.
+    private func movePin(id: String, toIndex: Int, shown: [String], folder: FolderView?) {
+        if let folder {
+            let tag = ChatFolders.hex(folder.folderId)
+            guard let changes = ChatFolders.movePin(
+                folder: folder, shown: shown, id: id, toIndex: toIndex,
+                hlc: deviceGroupSync.mintHlc()),
+                let written = changes.pins.first else { return }
+            let ids = written.pinned.map(ChatFolders.rowId)
+            pendingPins[tag] = ids
+            Task {
+                do {
+                    try await deviceGroupSync.applyFolderChanges(changes)
+                } catch {
+                    NSLog("folder pin move failed: %@", error.localizedDescription)
+                }
+                if pendingPins[tag] == ids { pendingPins[tag] = nil }
+            }
+        } else {
+            let stored = PinOrder.storedIds(deviceGroupSync.order)
+            let ids = PinOrder.next(.move(toIndex: toIndex), stored: stored, shown: shown, id: id)
+            guard ids != stored else { return }
+            pendingPins[""] = ids
+            Task {
+                do {
+                    try await deviceGroupSync.setOrder(groupIds: PinOrder.bytes(ids))
+                } catch {
+                    NSLog("pin move failed: %@", error.localizedDescription)
+                }
+                if pendingPins[""] == ids { pendingPins[""] = nil }
+            }
         }
     }
 
@@ -1853,5 +1968,21 @@ struct RequestsSentList: View {
             .navigationBarTitleDisplayMode(.inline)
         }
         .presentationDetents([.medium, .large])
+    }
+}
+
+/// The row's long-press menu: the ordinary one, or, on a row the list can
+/// drag, the one that opens on a lift without movement
+/// (``View/lakkoHoldReleaseMenu(_:)``).
+struct ConversationRowMenu: ViewModifier {
+    let draggable: Bool
+    let items: () -> [LakkoMenuItem]
+
+    func body(content: Content) -> some View {
+        if draggable {
+            content.lakkoHoldReleaseMenu(items)
+        } else {
+            content.lakkoLongPressMenu(items)
+        }
     }
 }

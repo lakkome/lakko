@@ -45,12 +45,20 @@ export function ChannelRow(props: {
   /** The channel is the one open beside the list. */
   selected: boolean;
   onMenu: (x: number, y: number) => void;
+  /** The row's key in the list (`data-row-key`), which a pin drag and the
+   *  keyboard menu find it by. */
+  rowKey?: string;
+  /** A long press (touch, pen). Defaults to opening the menu; the list hands
+   *  in its own so a held pin can be dragged instead
+   *  (`docs/ux/navigation.md` 2.2.1). */
+  onHold?: (x: number, y: number) => void;
   onToggle: (field: "pinned" | "muted" | "archived") => void;
 }): JSX.Element {
-  const press = createLongPress((x, y) => props.onMenu(x, y));
+  const press = createLongPress((x, y) => (props.onHold ?? props.onMenu)(x, y));
   return (
     <A
       href={paths.channel(props.row.id)}
+      data-row-key={props.rowKey}
       class="lk-row"
       classList={{ selected: props.selected, archived: props.markArchived ?? props.archived }}
       activeClass=""

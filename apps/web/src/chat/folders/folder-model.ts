@@ -376,21 +376,6 @@ export function toggleMembershipEdit(
   return { t: "member", folderIdHex: folder.idHex, ref: held, state };
 }
 
-/** A pin toggle inside a folder: the whole pin list, as one value. `null`
- *  when pinning would pass the limit. */
-export function togglePinEdit(folder: FolderModel, ref: ConversationRef): RegisterEdit | null {
-  const idx = folder.pinned.findIndex((r) => sameConversation(r, ref));
-  if (idx >= 0) {
-    return {
-      t: "pins",
-      folderIdHex: folder.idHex,
-      pinned: folder.pinned.filter((_, i) => i !== idx),
-    };
-  }
-  if (folder.pinned.length >= MAX_FOLDER_PINS) return null;
-  return { t: "pins", folderIdHex: folder.idHex, pinned: [ref, ...folder.pinned] };
-}
-
 /** Move the folder at `from` to `to` in the bar order. */
 export function reorderEdit(folders: readonly FolderModel[], from: number, to: number): RegisterEdit | null {
   if (from === to || from < 0 || to < 0 || from >= folders.length || to >= folders.length) {

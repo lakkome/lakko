@@ -24,12 +24,17 @@ import {
   reorderEdit,
   suggestionEdit,
   toggleMembershipEdit,
-  togglePinEdit,
   type ConversationRef,
   type FolderModel,
   type Membership,
   type Suggestion,
 } from "./folder-model";
+import {
+  folderPinsAfter,
+  type FolderPinAction,
+  type PinOrderRow,
+  type PinOrderRules,
+} from "../pin-order";
 
 type FolderSync = Pick<DeviceGroupSyncApi, "applyFolderEdits" | "folders">;
 
@@ -113,14 +118,24 @@ export async function toggleMembership(
   await sync.applyFolderEdits([toggleMembershipEdit(folder, ref, membership)]);
 }
 
-/** Pin / Unpin inside a folder. Resolves `false` when the pin limit was hit
- *  (the caller disables the item before that). */
-export async function togglePinInFolder(
+/**
+ * Pin, Unpin, or move a pin inside a folder: the folder's own pin list,
+ * written whole as the shared rule computes it (`docs/ux/chat-folders.md`
+ * 2.3, `docs/ux/navigation.md` 2.2.1) - a new pin on top, a pin whose
+ * conversation is not on this device kept in its place. `shownRows` are the
+ * folder's pinned rows in the order the list draws them. Resolves `false`
+ * when nothing was written (the pin limit; the caller disables the item
+ * before that).
+ */
+export async function applyFolderPinAction(
   sync: FolderSync,
+  rules: PinOrderRules,
   folder: FolderModel,
-  ref: ConversationRef,
+  shownRows: readonly PinOrderRow[],
+  row: PinOrderRow,
+  action: FolderPinAction,
 ): Promise<boolean> {
-  const edit = togglePinEdit(folder, ref);
+  const edit = folderPinsAfter(rules, folder, shownRows, row, action);
   if (edit === null) return false;
   await sync.applyFolderEdits([edit]);
   return true;

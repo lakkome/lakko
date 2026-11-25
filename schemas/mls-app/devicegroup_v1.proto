@@ -157,12 +157,14 @@ message ThreadFlags {
     reserved 6 to 15;
 }
 
-// Explicit display ordering for the conversation list. When
-// present, threads listed here render in the given order at
-// the top of the list. Threads NOT mentioned fall back to the
-// default recency-of-last-message order below the explicit
-// portion. Useful for "Favourites" / starred-row UX without
-// touching `ThreadFlags.pinned`.
+// The order of the PINNED conversations of the list, top first
+// (docs/ux/navigation.md section 2.2.1, 2026-11-25). Only a
+// conversation whose `ThreadFlags.pinned` is set is placed by it; an
+// entry that names an unpinned conversation is ignored, and a pinned
+// conversation it does not name sits above the named ones. Unpinned
+// conversations sort by last activity. A pin, an unpin and every
+// reorder write the whole list of pins. The rule is
+// `order_conversations` in crates/lakko-ui-rules.
 message ConversationOrder {
     // Conversation group_ids in display order, top-to-bottom.
     repeated bytes group_ids = 1;

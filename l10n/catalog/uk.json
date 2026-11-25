@@ -4157,6 +4157,14 @@
       "text": "Відкріпити",
       "status": "machine"
     },
+    "chats.action.move_up": {
+      "text": "Перемістити вище",
+      "status": "machine"
+    },
+    "chats.action.move_down": {
+      "text": "Перемістити нижче",
+      "status": "machine"
+    },
     "chats.archived.row": {
       "text": "Архів",
       "status": "machine"

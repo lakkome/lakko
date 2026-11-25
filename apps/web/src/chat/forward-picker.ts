@@ -20,7 +20,8 @@
  *    message can go.
  *
  * The ORDER is the shared rule (`sortConversations` over
- * `crates/lakko-ui-rules`): pinned first, archived last, newest between — the
+ * `crates/lakko-ui-rules`): pinned first in the person's order, archived
+ * last, newest between — the
  * same order the Chats tab draws, so the row a person expects near the top is
  * near the top here too. The search field filters by title and second line
  * with the list's own predicate.
@@ -51,6 +52,9 @@ export interface ForwardCandidate {
   readonly live: boolean | undefined;
   /** ADR-0084 - the person of a one-to-one, whose photo the row shows. */
   readonly personKey?: string | undefined;
+  /** The conversation id in lower-case hex: the key the synced pin order
+   *  names it by (`docs/ux/navigation.md` 2.2.1). */
+  readonly conversationHex?: string | undefined;
 }
 
 /** One row of the picker. `id` is the group id, standard base64. */
@@ -60,6 +64,9 @@ export type ForwardPickerRow = ConversationRow & { readonly kind: "chat" | "grou
 export function forwardPickerRows(
   candidates: readonly ForwardCandidate[],
   rules: UiRules,
+  /** The synced order of the pins, as the conversation ids in lower-case
+   *  hex, top first: the Chats list's order, so the pins read the same. */
+  pinOrderHex: readonly string[] = [],
 ): readonly ForwardPickerRow[] {
   const rows: ForwardPickerRow[] = candidates
     .filter((c) => c.live === true)
@@ -75,7 +82,14 @@ export function forwardPickerRows(
       archived: c.archived,
       ...(c.personKey === undefined ? {} : { personKey: c.personKey }),
     }));
-  return sortConversations(rows, rules).filter(
+  const idByHex = new Map<string, string>();
+  for (const c of candidates) {
+    if (c.conversationHex !== undefined) idByHex.set(c.conversationHex.toLowerCase(), c.groupIdB64);
+  }
+  const pinOrder = pinOrderHex
+    .map((hex) => idByHex.get(hex.toLowerCase()))
+    .filter((id): id is string => id !== undefined);
+  return sortConversations(rows, rules, pinOrder).filter(
     (r): r is ForwardPickerRow => r.kind !== "channel",
   );
 }

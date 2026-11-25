@@ -3204,11 +3204,13 @@ public final class ChatViewModel: ObservableObject {
     /// and an ended membership cannot receive a send.
     func forwardTargets(
         flags: [String: FlagsState],
-        readCursors: [String: ReadCursorState]
+        readCursors: [String: ReadCursorState],
+        order: OrderState?
     ) -> [ConversationListRow] {
         let rows = ChatListScreen.chatRows(
             viewModel: forwardListModel, flags: flags, readCursors: readCursors)
-        return ConversationList.sorted(rows.filter { $0.endedLine == nil })
+        return ConversationList.sorted(
+            rows.filter { $0.endedLine == nil }, pinOrder: PinOrder.storedIds(order))
     }
 
     /// Section 5.1 — what the timeline calls the ORIGINAL author of

@@ -205,6 +205,20 @@ public fun orderConversationRows(
 }
 
 /**
+ * [orderConversationRows] with the person's order of the pins
+ * (`docs/ux/navigation.md` section 2.2.1): [pinOrder] is the synced
+ * `ConversationOrder` register as row ids ([pinOrderIds]). Every list that
+ * orders conversations passes it, so they all agree on where a pin sits.
+ */
+public fun orderConversationRows(
+    rows: List<ConversationListRow>,
+    pinOrder: List<String>,
+    order: (List<SharedConversationRow>, List<String>) -> List<UInt> = { r, p ->
+        uniffi.lakko_ffi_uniffi.orderConversations(r, p)
+    },
+): List<ConversationListRow> = orderConversationRows(rows) { shared -> order(shared, pinOrder) }
+
+/**
  * Whether a row matches what was typed.
  *
  * Local and loose, over titles and previews this device already holds — which

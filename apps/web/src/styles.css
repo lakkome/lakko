@@ -670,6 +670,27 @@ a.lk-row.active {
 .lk-row.ended {
   opacity: 0.7;
 }
+/* Dragging a pin into another place (navigation.md 2.2.1): the dragged row
+   lifts on its own surface and follows the pointer; the pins it passes move
+   aside. Transforms are set by `chat/pin-drag.ts`. */
+.lk-pane-body.lk-pin-dragging {
+  cursor: grabbing;
+}
+.lk-row.lk-row-lifted {
+  z-index: 2;
+  background: var(--surface-elevated);
+  box-shadow: var(--shadow-2);
+  transition: none;
+  cursor: grabbing;
+}
+.lk-row.lk-row-shifting {
+  transition: transform 150ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lk-row.lk-row-shifting {
+    transition: none;
+  }
+}
 .lk-row.archived {
   opacity: 0.6;
 }

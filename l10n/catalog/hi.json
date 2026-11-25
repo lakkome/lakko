@@ -4157,6 +4157,14 @@
       "text": "अनपिन करें",
       "status": "machine"
     },
+    "chats.action.move_up": {
+      "text": "ऊपर ले जाएँ",
+      "status": "machine"
+    },
+    "chats.action.move_down": {
+      "text": "नीचे ले जाएँ",
+      "status": "machine"
+    },
     "chats.archived.row": {
       "text": "संग्रहीत",
       "status": "machine"

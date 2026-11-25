@@ -47,6 +47,7 @@ pub mod layer_display;
 pub mod lookup;
 pub mod media_mosaic;
 pub mod message_links;
+pub mod pin_order;
 pub mod reaction;
 pub mod ring;
 pub mod speaking;

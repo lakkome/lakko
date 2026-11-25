@@ -89,6 +89,10 @@ enum UiTestFixture: String {
     /// can read what VoiceOver hears on its heading, picker and buttons.
     case discoverPickTopics
 
+    /// `docs/ux/navigation.md` section 2.2.1 — conversation rows with three
+    /// pins, so a test can hold a pinned row and drag it, or hold and lift.
+    case pinReorder
+
     /// The launch argument that selects a fixture. Passed by the UI test as
     /// `["-LakkoUITestFixture", "voiceBubble"]`.
     static let launchArgument = "-LakkoUITestFixture"
@@ -139,6 +143,8 @@ struct UiTestFixtureRoot: View {
             EmojiPickerFixture()
         case .discoverPickTopics:
             DiscoverPickTopicsFixture()
+        case .pinReorder:
+            PinReorderFixture()
         }
     }
 }

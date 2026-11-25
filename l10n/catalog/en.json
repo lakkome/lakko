@@ -4727,6 +4727,14 @@
       "text": "Unpin",
       "comment": "Action on a pinned conversation: stop keeping it at the top of the list."
     },
+    "chats.action.move_up": {
+      "text": "Move up",
+      "comment": "Row menu item on a pinned conversation: moves it one place earlier among the pinned conversations. Not shown on the first pin."
+    },
+    "chats.action.move_down": {
+      "text": "Move down",
+      "comment": "Row menu item on a pinned conversation: moves it one place later among the pinned conversations. Not shown on the last pin."
+    },
     "chats.archived.row": {
       "text": "Archived",
       "comment": "Chat list: the bar fixed to the bottom of the list that the archived conversations are kept behind; tapping it opens them as their own list. Also the title of that list. A muted count of archived conversations stands at the end of the bar."

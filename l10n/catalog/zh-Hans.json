@@ -4157,6 +4157,14 @@
       "text": "取消置顶",
       "status": "machine"
     },
+    "chats.action.move_up": {
+      "text": "上移",
+      "status": "machine"
+    },
+    "chats.action.move_down": {
+      "text": "下移",
+      "status": "machine"
+    },
     "chats.archived.row": {
       "text": "已归档",
       "status": "machine"

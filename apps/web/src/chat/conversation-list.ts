@@ -68,7 +68,8 @@ export interface ConversationRow {
 }
 
 /**
- * Pinned first, archived last, newest between - decided by the shared rule.
+ * Pinned first (in the person's order), archived last, newest between -
+ * decided by the shared rule.
  *
  * The rule hands back the input INDICES rather than rows, so the avatar, the
  * preview and the unread count never cross the wasm boundary at all: this
@@ -77,6 +78,11 @@ export interface ConversationRow {
 export function sortConversations(
   rows: readonly ConversationRow[],
   rules: UiRules,
+  /** The order of the pins set by hand, as row ids, top first
+   *  (`docs/ux/navigation.md` 2.2.1; `chat/pin-order.ts` maps the synced
+   *  register to these). A pinned row it does not name sits above the named
+   *  ones; an id naming no pinned row is ignored. */
+  pinOrder: readonly string[] = [],
 ): readonly ConversationRow[] {
   const order = rules.orderConversations(
     rows.map(
@@ -90,6 +96,7 @@ export function sortConversations(
           r.archived,
         ),
     ),
+    [...pinOrder],
   );
   return Array.from(order, (i) => rows[i]).filter(
     (r): r is ConversationRow => r !== undefined,

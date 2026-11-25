@@ -97,6 +97,28 @@ describe("forwardPickerRows", () => {
     });
   });
 
+  it("hands the rule the Chats list's pin order, as the picker's own row ids", () => {
+    let pinOrder: unknown = null;
+    const rules = {
+      ConversationKind: { Chat: 0, Group: 1, Channel: 2 },
+      ConversationRow: class {},
+      orderConversations: (rows: unknown[], order: unknown) => {
+        pinOrder = order;
+        return Uint32Array.from(rows.map((_, i) => i));
+      },
+    } as unknown as UiRules;
+    forwardPickerRows(
+      [
+        candidate({ groupIdB64: "head-a", conversationHex: "aa", pinned: true }),
+        candidate({ groupIdB64: "head-b", conversationHex: "BB", pinned: true }),
+      ],
+      rules,
+      ["bb", "cc", "AA"],
+    );
+    // "cc" names no conversation this device offers; the rest map to rows.
+    expect(pinOrder).toEqual(["head-b", "head-a"]);
+  });
+
   it("is empty when nothing is live", () => {
     expect(forwardPickerRows([candidate({ live: false })], fakeRules().rules)).toEqual([]);
   });

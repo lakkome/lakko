@@ -116,7 +116,12 @@ public fun FolderEditorScreen(
     }
     val actions = remember(deviceGroupSync, repository) { FolderActions(deviceGroupSync, repository) }
     val allRows = rememberConversationRows(repository, channels, deviceGroupSync)
-    val pickable = remember(allRows) { orderConversationRows(allRows).filter { !it.membershipEnded } }
+    // navigation 2.2.1 — the pins in the person's order, as every list draws them.
+    val orderState by deviceGroupSync.order.collectAsStateWithLifecycle()
+    val pickable = remember(allRows, orderState) {
+        val pinOrder = me.lakko.app.chat.pinOrderIds(orderState?.groupIds.orEmpty(), allRows)
+        orderConversationRows(allRows, pinOrder).filter { !it.membershipEnded }
+    }
 
     val initial = remember(original?.idHex) {
         original?.let(FolderDraft::of) ?: FolderDraft.empty(prefill)

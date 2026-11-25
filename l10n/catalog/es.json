@@ -4157,6 +4157,14 @@
       "text": "Desfijar",
       "status": "machine"
     },
+    "chats.action.move_up": {
+      "text": "Mover arriba",
+      "status": "machine"
+    },
+    "chats.action.move_down": {
+      "text": "Mover abajo",
+      "status": "machine"
+    },
     "chats.archived.row": {
       "text": "Archivados",
       "status": "machine"

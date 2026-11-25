@@ -71,6 +71,10 @@ let groupsAccessor: (() => ActiveGroup[]) | null = null;
  *  rows have been read; `false` keeps the list from drawing anything. */
 let listReady = true;
 let flags: Record<string, { pinned?: boolean; muted?: boolean; archived?: boolean }> = {};
+/** The synced pin order (`docs/ux/navigation.md` 2.2.1); `null` for none. */
+let pinOrder: { groupIds: Uint8Array[] } | null = null;
+/** Every list `setOrder` was handed. */
+let orderWrites: Uint8Array[][] = [];
 
 vi.mock("./ChatContext", () => ({
   useChats: () => ({
@@ -114,6 +118,13 @@ vi.mock("../devices/sync/DeviceGroupSyncContext", () => ({
     // every group is its own conversation and its row is keyed on its id.
     lineage: () => [],
     readCursors: () => ({}),
+    // `docs/ux/navigation.md` 2.2.1 - the pin order set by hand, and what a
+    // reorder writes.
+    order: () => pinOrder,
+    setOrder: (ids: readonly Uint8Array[]) => {
+      orderWrites.push([...ids]);
+      return Promise.resolve();
+    },
     folders: () => [],
     pendingFolderSync: () => false,
     setFlags: () => Promise.resolve(),
@@ -170,6 +181,8 @@ beforeEach(() => {
   installLocalStorage();
   groups = [];
   flags = {};
+  pinOrder = null;
+  orderWrites = [];
   listReady = true;
   groupsAccessor = null;
 });
@@ -538,5 +551,83 @@ describe("the open conversation's row is selected", () => {
     mountAt("/");
     expect(all(".lk-pane-body > .lk-row")).toHaveLength(1);
     expect(selectedTitles()).toEqual([]);
+  });
+});
+
+describe("the order of the pins (navigation.md 2.2.1)", () => {
+  const idOf = (n: number): Uint8Array => new Uint8Array(32).fill(n);
+
+  function menuItems(): string[] {
+    return all('.lk-menu [role="menuitem"]').map((el) => el.textContent?.trim() ?? "");
+  }
+
+  function openMenuOn(title: string): void {
+    const rowEl = all(".lk-row").find((el) => el.querySelector(".lk-row-title")?.textContent === title);
+    if (rowEl === undefined) throw new Error(`no row ${title}`);
+    rowEl.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }));
+  }
+
+  it("draws the pins in the stored order, whatever their times say", () => {
+    const a = conversation("A", 1, 1_000);
+    const b = conversation("B", 2, 9_000);
+    const c = conversation("C", 3, 5_000);
+    groups = [a, b, c];
+    pin(a);
+    pin(b);
+    pin(c);
+    pinOrder = { groupIds: [idOf(3), idOf(1), idOf(2)] };
+    mountList();
+    expect(renderedOrder()).toEqual(["C", "A", "B"]);
+  });
+
+  it("offers Move up and Move down right after Unpin, only where they apply", () => {
+    const a = conversation("A", 1, 1_000);
+    const b = conversation("B", 2, 2_000);
+    const c = conversation("C", 3, 3_000);
+    groups = [a, b, c];
+    pin(a);
+    pin(b);
+    pin(c);
+    pinOrder = { groupIds: [idOf(1), idOf(2), idOf(3)] };
+    mountList();
+
+    openMenuOn("B");
+    const items = menuItems();
+    const unpin = items.indexOf("Unpin");
+    expect(unpin).toBeGreaterThanOrEqual(0);
+    expect(items.slice(unpin + 1, unpin + 3)).toEqual(["Move up", "Move down"]);
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    openMenuOn("A");
+    expect(menuItems()).not.toContain("Move up");
+    expect(menuItems()).toContain("Move down");
+  });
+
+  it("Move up writes the new order and the list shows it at once", () => {
+    const a = conversation("A", 1, 1_000);
+    const b = conversation("B", 2, 2_000);
+    groups = [a, b];
+    pin(a);
+    pin(b);
+    pinOrder = { groupIds: [idOf(1), idOf(2)] };
+    mountList();
+
+    openMenuOn("B");
+    const moveUp = all<HTMLButtonElement>('.lk-menu [role="menuitem"]').find(
+      (el) => el.textContent?.trim() === "Move up",
+    );
+    moveUp?.click();
+    expect(orderWrites).toEqual([[idOf(2), idOf(1)]]);
+    expect(renderedOrder()).toEqual(["B", "A"]);
+  });
+
+  it("one pin has nothing to reorder", () => {
+    const a = conversation("A", 1, 1_000);
+    groups = [a, conversation("B", 2, 2_000)];
+    pin(a);
+    mountList();
+    openMenuOn("A");
+    expect(menuItems()).not.toContain("Move up");
+    expect(menuItems()).not.toContain("Move down");
   });
 });

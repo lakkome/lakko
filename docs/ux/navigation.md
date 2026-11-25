@@ -103,7 +103,8 @@ difference - the row itself is the same row.
 
 ### 2.2 Ordering
 
-1. Pinned, newest first.
+1. Pinned, in the order the person set (section 2.2.1). A new message does
+   not move a pinned conversation.
 2. Everything else, newest first.
 3. Archived, newest first, below a divider - or hidden behind an "Archived"
    row when there are more than five, on the narrow layouts.
@@ -145,6 +146,89 @@ This is the rule web and Android already apply (`pinned desc`, then
 `archived asc`, then activity); it carries unchanged, and what changes is
 only the set it sorts - chats, groups and channels together rather than one
 kind at a time.
+
+Amended 2026-11-25: pinned rows are no longer ordered by activity among
+themselves but by the person's order (section 2.2.1).
+
+#### 2.2.1 Reordering pinned conversations (2026-11-25, maintainer decision)
+
+Only pinned conversations are put in order by hand, as in Telegram. Unpinned
+conversations keep sorting by last activity, and nothing a person does moves
+one of them by hand. The order of the pins is the person's, not the list's:
+a new message, a call, a read, an edit never moves a pinned conversation
+among the pins.
+
+**What changes the order of the pins.**
+
+- **Pin.** A newly pinned conversation goes to the top of the pins.
+- **Unpin.** The conversation leaves the pins and takes its place among the
+  unpinned ones by last activity; the other pins keep their order.
+- **Drag.** A pinned conversation is dragged to another place among the
+  pins (below). Dropping it above the first pin puts it first; dropping it
+  anywhere below the last pin puts it last. It never lands among the
+  unpinned ones: a drag does not unpin.
+- **Move up / Move down** (the non-drag equivalent, below) moves it by one
+  place.
+
+With one pin there is nothing to reorder: no drag starts and Move up / Move
+down are not offered. An unpinned row never starts a drag.
+
+**How a drag starts, per platform.**
+
+| platform | start | during | drop | cancel |
+|---|---|---|---|---|
+| iOS, Android | press and hold a pinned row, then move the finger; holding without moving and lifting opens the row's menu as today | the row lifts (shadow-2, the row's own surface) and follows the finger; the other pins move aside to show where it will land; the list scrolls when the finger nears its top or bottom edge | lift the finger | drag back to where it started, or the system cancels the touch |
+| web and the desktop app, mouse or trackpad | press a pinned row and move the pointer more than a few pixels; a press without movement is an ordinary click that opens the conversation | the same: the row lifts and follows the pointer, the other pins move aside | release | Escape, or release outside the list |
+| web on a touch screen | press and hold, then move, as on the natives | as above | lift | as above |
+
+**iOS (maintainer decision, 2026-11-25).** The drag is the system list's own
+reorder. It refuses a drop among the unpinned rows: a pin dropped deep below
+the last pin returns to where it was, and only a drop just under the last
+pin lands last. This is accepted; web, the desktop app and Android land such
+a drop last.
+
+There is no drag handle and no edit mode: the row itself is what is dragged,
+so the list looks exactly as it does today until a drag starts. The new
+order applies on this device at once, on drop.
+
+**The non-drag equivalent.** Every drag has one, as chat-folders.md section 9
+requires for folders:
+
+- web and the desktop app: the row menu of a pinned row (right-click, or the
+  keyboard menu key / Shift+F10 on a focused row) carries **Move up** and
+  **Move down** right after Unpin; the first pin has no Move up, the last no
+  Move down;
+- iOS: VoiceOver custom actions "Move up" and "Move down" on a pinned row;
+- Android: TalkBack custom actions "Move up" and "Move down" on a pinned row.
+
+After a move, focus stays on the moved row.
+
+**Where it applies.** In All chats (the global pins) and inside a folder
+(that folder's own pins, [`chat-folders.md`](chat-folders.md) section 2.3),
+on every width. Not while text is typed in search (the list is a list of
+matches then, and a pin's place is not what is being looked at), and not in
+the archive view, which holds no pins: a pinned conversation that is also
+archived stays with the pins (section 2.2, "Archived, as built") and is
+dragged with them.
+
+**Across the account's devices.** The order of the pins reaches the
+person's other devices like pins themselves do (chat-folders.md section 6). If two
+devices reorder the pins at nearly the same moment, the later reorder wins
+on every device. A conversation pinned on another device while this one was
+reordering is not lost: a pinned conversation the stored order does not name
+is drawn above the ordered pins, newest activity first, until the next pin,
+unpin or reorder writes it in.
+
+**What the data has to provide.** The account's synced conversation order
+(the `ConversationOrder` register, already carried between devices, in the
+snapshot a new device receives and in the backup) holds the pinned
+conversations, top first; for a folder, the folder's own pin list. A pin,
+an unpin and every reorder write the whole list of pins as it then reads on
+screen, so pins made before this order existed are written in at the first
+such change. A conversation the order names that is not pinned is ignored.
+The order rule (`order_conversations` / `order_conversations_in_folder` in
+`crates/lakko-ui-rules`) places the pins by this list, and the list each
+action writes comes from the same crate, so the clients cannot disagree.
 
 ### 2.3 States
 

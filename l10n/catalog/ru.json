@@ -4325,6 +4325,14 @@
       "text": "Открепить",
       "status": "machine"
     },
+    "chats.action.move_up": {
+      "text": "Переместить выше",
+      "status": "machine"
+    },
+    "chats.action.move_down": {
+      "text": "Переместить ниже",
+      "status": "machine"
+    },
     "chats.archived.row": {
       "text": "Архив",
       "status": "machine"

@@ -77,6 +77,11 @@ use lakko_ui_rules::lookup::{
 use lakko_ui_rules::media_mosaic::{
     media_mosaic as rust_media_mosaic, MediaSize as RustMediaSize, MOSAIC_GAP, MOSAIC_MAX_ITEMS,
 };
+use lakko_ui_rules::pin_order::{
+    pin_can_move as rust_pin_can_move, pin_order_after_move as rust_pin_order_after_move,
+    pin_order_after_pin as rust_pin_order_after_pin,
+    pin_order_after_unpin as rust_pin_order_after_unpin,
+};
 
 use lakko_ui_rules::ring::{
     remaining_ring_ms as rust_remaining_ring_ms, ring_decision as rust_ring_decision,
@@ -224,8 +229,11 @@ pub fn order_conversations_in_folder(
     rust_order_conversations_in_folder(&rust, &folder_pins)
 }
 
-/// Order the one conversation list: pinned first, archived last, newest
-/// between.
+/// Order the one conversation list: pinned first in the person's order,
+/// archived last, newest between. `pin_order` is the synced conversation
+/// order mapped to row ids, top first; it orders the pinned rows only, and a
+/// pinned row it does not name sits above the named ones
+/// (`docs/ux/navigation.md` section 2.2.1).
 ///
 /// Returns the input INDICES in display order rather than the rows themselves,
 /// so a client reorders what it already holds instead of marshalling every
@@ -234,11 +242,52 @@ pub fn order_conversations_in_folder(
 /// The order is total: two conversations nothing has happened in yet still
 /// order the same way on every call, so an unrelated refresh never reshuffles
 /// the list.
+#[uniffi::export(default(pin_order = []))]
+#[must_use]
+pub fn order_conversations(rows: Vec<ConversationRow>, pin_order: Vec<String>) -> Vec<u32> {
+    let rust: Vec<RustConversationRow> = rows.into_iter().map(Into::into).collect();
+    rust_order_conversations(&rust, &pin_order)
+}
+
+/// The pins after pinning `id`: it goes to the top
+/// (`docs/ux/navigation.md` section 2.2.1). `stored` is the synced list (the
+/// `ConversationOrder` register in All chats, the folder's pin list inside a
+/// folder) mapped to row ids; entries this device does not show keep their
+/// places. `shown` is the pins as the list draws them. The result is the
+/// whole list to write.
 #[uniffi::export]
 #[must_use]
-pub fn order_conversations(rows: Vec<ConversationRow>) -> Vec<u32> {
-    let rust: Vec<RustConversationRow> = rows.into_iter().map(Into::into).collect();
-    rust_order_conversations(&rust)
+pub fn pin_order_after_pin(stored: Vec<String>, shown: Vec<String>, id: String) -> Vec<String> {
+    rust_pin_order_after_pin(&stored, &shown, &id)
+}
+
+/// The pins after unpinning `id`; the others keep their order.
+#[uniffi::export]
+#[must_use]
+pub fn pin_order_after_unpin(stored: Vec<String>, shown: Vec<String>, id: String) -> Vec<String> {
+    rust_pin_order_after_unpin(&stored, &shown, &id)
+}
+
+/// The pins after moving the pin `id` to `to_index` among the SHOWN pins
+/// (its index after the move; past the end lands last). Move up is
+/// `index - 1`, Move down `index + 1`. An id that is not shown as a pin
+/// leaves the list as it was.
+#[uniffi::export]
+#[must_use]
+pub fn pin_order_after_move(
+    stored: Vec<String>,
+    shown: Vec<String>,
+    id: String,
+    to_index: u32,
+) -> Vec<String> {
+    rust_pin_order_after_move(&stored, &shown, &id, to_index)
+}
+
+/// Whether the shown pin `id` offers Move up (`up`) or Move down.
+#[uniffi::export]
+#[must_use]
+pub fn pin_can_move(shown: Vec<String>, id: String, up: bool) -> bool {
+    rust_pin_can_move(&shown, &id, up)
 }
 
 /// Strip the leading `@` people type and no namespace stores.
@@ -2854,7 +2903,33 @@ mod tests {
             row("old", ConversationKind::Chat, Some(1)),
             row("new", ConversationKind::Channel, Some(9)),
         ];
-        assert_eq!(order_conversations(rows), vec![1, 0]);
+        assert_eq!(order_conversations(rows, vec![]), vec![1, 0]);
+    }
+
+    #[test]
+    fn the_pin_order_crosses_the_boundary() {
+        let mut a = row("a", ConversationKind::Chat, Some(9));
+        let mut b = row("b", ConversationKind::Chat, Some(1));
+        a.pinned = true;
+        b.pinned = true;
+        assert_eq!(
+            order_conversations(vec![a, b], vec!["b".into(), "a".into()]),
+            vec![1, 0]
+        );
+        let shown: Vec<String> = vec!["a".into(), "b".into()];
+        assert_eq!(
+            pin_order_after_move(shown.clone(), shown.clone(), "a".into(), 1),
+            vec!["b".to_string(), "a".to_string()]
+        );
+        assert_eq!(
+            pin_order_after_pin(shown.clone(), shown.clone(), "c".into()),
+            vec!["c".to_string(), "a".to_string(), "b".to_string()]
+        );
+        assert_eq!(
+            pin_order_after_unpin(shown.clone(), shown.clone(), "a".into()),
+            vec!["b".to_string()]
+        );
+        assert!(!pin_can_move(shown, "a".into(), true));
     }
 
     #[test]

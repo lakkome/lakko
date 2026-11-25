@@ -176,24 +176,28 @@ internal fun ConversationPicker(
     val locale = remember(strings.language) { Locale.forLanguageTag(strings.language) }
     val use24h = remember(context) { me.lakko.app.l10n.DeviceFormats.is24Hour(context) }
 
-    val rows = remember(state, nameVersion, groupNameVersion, flagsMap, readCursorMap, strings) {
+    // navigation 2.2.1 — the pins in the person's order, as the Chats list draws them.
+    val orderState = deviceGroupSync?.order?.collectAsStateWithLifecycle()?.value
+    val rows = remember(state, nameVersion, groupNameVersion, flagsMap, readCursorMap, strings, orderState) {
+        val threadRows = threadConversationRows(
+            context = context,
+            repository = repository,
+            directory = directory,
+            // Live memberships only: a pick is a send, and the core
+            // refuses one into a group this device has left or been
+            // removed from.
+            threads = state.conversations.filter { !it.membershipEnded },
+            flagsMap = flagsMap,
+            readCursorMap = readCursorMap,
+            nowMs = System.currentTimeMillis(),
+            zone = zone,
+            use24h = use24h,
+            locale = locale,
+            strings = strings,
+        )
         orderConversationRows(
-            threadConversationRows(
-                context = context,
-                repository = repository,
-                directory = directory,
-                // Live memberships only: a pick is a send, and the core
-                // refuses one into a group this device has left or been
-                // removed from.
-                threads = state.conversations.filter { !it.membershipEnded },
-                flagsMap = flagsMap,
-                readCursorMap = readCursorMap,
-                nowMs = System.currentTimeMillis(),
-                zone = zone,
-                use24h = use24h,
-                locale = locale,
-                strings = strings,
-            ),
+            threadRows,
+            me.lakko.app.chat.pinOrderIds(orderState?.groupIds.orEmpty(), threadRows),
         )
     }
     val visible = remember(rows, query) {

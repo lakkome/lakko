@@ -56,12 +56,13 @@ public class FolderActions(
         return deliver(memberChange(folder.id, ref, state, stamp))
     }
 
-    /** Pin / Unpin inside a folder: the folder's own pins (UX spec 2.3). */
-    public suspend fun togglePin(folder: ChatFolder, row: ConversationListRow): Boolean {
-        val ref = refOf(row) ?: return false
-        val pinned = folder.pinned.any { refNames(it, row) }
-        return deliver(pinChanges(folder, ref, pin = !pinned, stamp = stamp))
-    }
+    /**
+     * Deliver a change set built elsewhere: Pin / Unpin and the moves of a
+     * folder's own pins (UX spec 2.3, navigation 2.2.1), which need the rows
+     * as the list draws them and are built by [folderPinToggleChanges] and
+     * [folderMoveChanges] on the screen that draws them.
+     */
+    public suspend fun applyChanges(changes: FolderChangeSet?): Boolean = deliver(changes)
 
     public suspend fun addSuggestion(s: FolderSuggestion): Boolean =
         deliver(suggestionChanges(mintFolderId(), s, listedFolderIds(), stamp))

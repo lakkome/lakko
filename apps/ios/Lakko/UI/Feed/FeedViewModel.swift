@@ -564,7 +564,9 @@ final class FeedViewModel: ObservableObject {
     func forwardTargets() -> [ConversationListRow] {
         let rows = ChatListScreen.chatRows(
             viewModel: chatList, flags: deviceGroupSync.flags, readCursors: deviceGroupSync.readCursors)
-        return ConversationList.sorted(rows.filter { $0.endedLine == nil })
+        return ConversationList.sorted(
+            rows.filter { $0.endedLine == nil },
+            pinOrder: PinOrder.storedIds(deviceGroupSync.order))
     }
 
     static var forwardFailed: String { Localization.text("chat.forward.error.generic") }

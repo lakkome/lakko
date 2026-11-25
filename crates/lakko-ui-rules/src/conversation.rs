@@ -57,13 +57,28 @@ pub struct ConversationRow {
     pub has_unread: bool,
 }
 
-/// Order the list: pinned first, archived last, newest between.
+/// Order the list: pinned first in the person's order, archived last, newest
+/// between.
 ///
 /// Returns the input INDICES in display order rather than the rows
 /// themselves. A client's real row carries far more than this - an avatar, a
 /// preview, an unread count, a handle to open - and handing all of it across
 /// an FFI boundary twice, in both directions, to learn an order would be
 /// waste. It reorders what it already holds.
+///
+/// `pin_order` is the account's synced conversation order
+/// (`docs/ux/navigation.md` section 2.2.1): row ids, top first, as the client
+/// maps the `ConversationOrder` register's entries to the ids of the rows it
+/// draws. It orders the PINNED rows only, and nothing else:
+///
+/// - a pinned row the order names sits at its place in the order (a repeat
+///   counts at its first position), whatever happened in it since - a new
+///   message never moves a pin;
+/// - a pinned row the order does not name (pinned on another device while
+///   this one reordered, or pinned before the order existed) sits ABOVE the
+///   named ones, newest activity first, the way a fresh pin lands on top;
+/// - an id that names no row, or a row that is not pinned, is ignored, so an
+///   unpinned conversation always sorts by activity.
 ///
 /// Pinning beats archiving. Pinning is an explicit act and archiving is a
 /// tidy-up, so a conversation that is both stays where the person put it;
@@ -76,8 +91,47 @@ pub struct ConversationRow {
 /// yield - so an unrelated refresh would reshuffle the list, which reads as
 /// a bug and is impossible to report.
 #[must_use]
-pub fn order_conversations(rows: &[ConversationRow]) -> Vec<u32> {
-    order_by(rows, compare)
+pub fn order_conversations(rows: &[ConversationRow], pin_order: &[String]) -> Vec<u32> {
+    let rank = |row: &ConversationRow| -> Option<usize> {
+        if row.pinned {
+            pin_order.iter().position(|p| *p == row.id)
+        } else {
+            None
+        }
+    };
+    let ranks: Vec<Option<usize>> = rows.iter().map(rank).collect();
+    let mut order: Vec<u32> = (0..rows.len())
+        .map(|i| u32::try_from(i).unwrap_or(u32::MAX))
+        .collect();
+    order.sort_by(|&a, &b| {
+        let (l, r) = (&rows[a as usize], &rows[b as usize]);
+        compare_with_pins(l, ranks[a as usize], r, ranks[b as usize]).then_with(|| a.cmp(&b))
+    });
+    order
+}
+
+fn compare_with_pins(
+    l: &ConversationRow,
+    l_rank: Option<usize>,
+    r: &ConversationRow,
+    r_rank: Option<usize>,
+) -> core::cmp::Ordering {
+    use core::cmp::Ordering;
+    match (l.pinned, r.pinned) {
+        (true, false) => return Ordering::Less,
+        (false, true) => return Ordering::Greater,
+        (false, false) => return compare_unpinned(l, r),
+        (true, true) => {},
+    }
+    match (l_rank, r_rank) {
+        // Both named: the person's order.
+        (Some(a), Some(b)) if a != b => a.cmp(&b),
+        // Unnamed pins above the named ones.
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        // Both unnamed (or one id named twice): by activity, then the ties.
+        _ => compare_unpinned(l, r),
+    }
 }
 
 pub(crate) fn order_by(
@@ -92,16 +146,6 @@ pub(crate) fn order_by(
         compare(l, r).then_with(|| a.cmp(&b))
     });
     order
-}
-
-fn compare(l: &ConversationRow, r: &ConversationRow) -> core::cmp::Ordering {
-    use core::cmp::Ordering;
-    match (l.pinned, r.pinned) {
-        (true, false) => return Ordering::Less,
-        (false, true) => return Ordering::Greater,
-        _ => {},
-    }
-    compare_unpinned(l, r)
 }
 
 /// The order without the global pin: archived last, newest first, then the
@@ -148,7 +192,12 @@ mod tests {
     }
 
     fn ids(rows: &[ConversationRow]) -> Vec<&str> {
-        order_conversations(rows)
+        ids_with(rows, &[])
+    }
+
+    fn ids_with<'a>(rows: &'a [ConversationRow], pins: &[&str]) -> Vec<&'a str> {
+        let pins: Vec<String> = pins.iter().map(|p| (*p).to_string()).collect();
+        order_conversations(rows, &pins)
             .into_iter()
             .map(|i| rows[i as usize].id.as_str())
             .collect()
@@ -240,7 +289,7 @@ mod tests {
 
     #[test]
     fn an_empty_list_orders_to_nothing() {
-        assert!(order_conversations(&[]).is_empty());
+        assert!(order_conversations(&[], &[]).is_empty());
     }
 
     #[test]
@@ -261,9 +310,120 @@ mod tests {
                 )
             })
             .collect();
-        let mut seen = order_conversations(&rows);
+        let mut seen = order_conversations(&rows, &["4".into(), "9".into()]);
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen.len(), rows.len());
+    }
+
+    fn pinned(id: &str, at: Option<i64>) -> ConversationRow {
+        let mut r = row(id, ConversationKind::Chat, id, at);
+        r.pinned = true;
+        r
+    }
+
+    #[test]
+    fn pins_follow_the_stored_order_not_activity() {
+        let rows = vec![
+            pinned("a", Some(30)),
+            pinned("b", Some(10)),
+            pinned("c", Some(20)),
+            row("x", ConversationKind::Chat, "x", Some(999)),
+        ];
+        assert_eq!(ids_with(&rows, &["b", "c", "a"]), ["b", "c", "a", "x"]);
+    }
+
+    #[test]
+    fn a_new_message_does_not_move_a_pin() {
+        let mut rows = vec![pinned("a", Some(1)), pinned("b", Some(2))];
+        let before = ids_with(&rows, &["a", "b"]).join(",");
+        rows[1].last_activity_ms = Some(1_000_000);
+        assert_eq!(ids_with(&rows, &["a", "b"]).join(","), before);
+    }
+
+    #[test]
+    fn an_unnamed_pin_sits_above_the_named_ones_newest_first() {
+        let rows = vec![
+            pinned("named", Some(999)),
+            pinned("old", Some(1)),
+            pinned("new", Some(5)),
+        ];
+        assert_eq!(ids_with(&rows, &["named"]), ["new", "old", "named"]);
+    }
+
+    #[test]
+    fn an_unpinned_row_the_order_names_sorts_by_activity() {
+        let rows = vec![
+            row("stale", ConversationKind::Chat, "s", Some(1)),
+            row("fresh", ConversationKind::Chat, "f", Some(2)),
+        ];
+        assert_eq!(ids_with(&rows, &["stale"]), ["fresh", "stale"]);
+    }
+
+    #[test]
+    fn a_repeated_or_unknown_id_is_harmless() {
+        let rows = vec![pinned("a", Some(1)), pinned("b", Some(2))];
+        assert_eq!(ids_with(&rows, &["zz", "b", "a", "b"]), ["b", "a"]);
+    }
+
+    #[test]
+    fn an_archived_pin_keeps_its_place_among_the_pins() {
+        let mut both = pinned("both", Some(1));
+        both.archived = true;
+        let rows = vec![pinned("first", Some(5)), both, pinned("last", Some(9))];
+        assert_eq!(
+            ids_with(&rows, &["first", "both", "last"]),
+            ["first", "both", "last"]
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn named_pins_keep_their_relative_order_and_every_row_appears_once(
+            spec in proptest::collection::vec((proptest::bool::ANY, proptest::option::of(0i64..20), proptest::bool::ANY), 0..24),
+            order_picks in proptest::collection::vec(0usize..30, 0..30),
+        ) {
+            let rows: Vec<ConversationRow> = spec
+                .iter()
+                .enumerate()
+                .map(|(i, (p, at, arch))| {
+                    let mut r = row(&format!("r{i}"), ConversationKind::Group, "t", *at);
+                    r.pinned = *p;
+                    r.archived = *arch;
+                    r
+                })
+                .collect();
+            let pin_order: Vec<String> = order_picks.iter().map(|i| format!("r{i}")).collect();
+            let out = order_conversations(&rows, &pin_order);
+            let mut seen = out.clone();
+            seen.sort_unstable();
+            seen.dedup();
+            proptest::prop_assert_eq!(seen.len(), rows.len());
+            // Pinned rows form one prefix.
+            let flags: Vec<bool> = out.iter().map(|&i| rows[i as usize].pinned).collect();
+            proptest::prop_assert!(flags.windows(2).all(|w| w[0] || !w[1]));
+            // Named pins appear in the order's first-position order, after every unnamed pin.
+            let first_pos = |id: &str| pin_order.iter().position(|p| p == id);
+            let pins: Vec<Option<usize>> = out
+                .iter()
+                .filter(|&&i| rows[i as usize].pinned)
+                .map(|&i| first_pos(&rows[i as usize].id))
+                .collect();
+            let in_order = pins.windows(2).all(|w| match (w[0], w[1]) {
+                (Some(a), Some(b)) => a < b,
+                (Some(_), None) => false,
+                _ => true,
+            });
+            proptest::prop_assert!(in_order);
+            // Unpinned rows ignore the order: same as with no order at all.
+            let unpinned = |o: &[u32]| -> Vec<u32> { o.iter().copied().filter(|&i| !rows[i as usize].pinned).collect() };
+            proptest::prop_assert_eq!(unpinned(&out), unpinned(&order_conversations(&rows, &[])));
+            // Input order does not matter (the order is total).
+            let mut rev = rows.clone();
+            rev.reverse();
+            let rev_ids: Vec<String> = order_conversations(&rev, &pin_order).into_iter().map(|i| rev[i as usize].id.clone()).collect();
+            let fwd_ids: Vec<String> = out.into_iter().map(|i| rows[i as usize].id.clone()).collect();
+            proptest::prop_assert_eq!(rev_ids, fwd_ids);
+        }
     }
 }

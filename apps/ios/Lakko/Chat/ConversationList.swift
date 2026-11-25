@@ -165,11 +165,21 @@ public enum ConversationList {
     /// Pinned first, archived last, newest between — decided by the shared
     /// rule.
     ///
+    /// `pinOrder` is the account's order of the pins as row ids, top first
+    /// (the synced `ConversationOrder` register, navigation 2.2.1): it places
+    /// the pinned rows it names; a pin it does not name sits above them,
+    /// newest first. Every list built on this order passes it, so the lists
+    /// agree.
+    ///
     /// The rule hands back the input INDICES rather than rows, so the avatar,
     /// the preview and the unread count never cross the FFI boundary at all:
     /// this reorders the array it was already given.
-    public static func sorted(_ rows: [ConversationListRow]) -> [ConversationListRow] {
-        let order = LakkoCore.orderConversations(rows: rows.map(ChatFolders.ffiRow))
+    public static func sorted(
+        _ rows: [ConversationListRow], pinOrder: [String] = []
+    ) -> [ConversationListRow] {
+        let order = LakkoCore.orderConversations(
+            rows: rows.map(ChatFolders.ffiRow),
+            pinOrder: PinOrder.spelledAsRows(pinOrder, rows: rows))
         return order.compactMap { index in
             let i = Int(index)
             return i < rows.count ? rows[i] : nil

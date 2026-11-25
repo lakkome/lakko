@@ -530,7 +530,8 @@ public struct ChatScreen: View {
                 ForwardPickerScreen(
                     rows: viewModel.forwardTargets(
                         flags: deviceGroupSync.flags,
-                        readCursors: deviceGroupSync.readCursors),
+                        readCursors: deviceGroupSync.readCursors,
+                        order: deviceGroupSync.order),
                     onPick: { row in
                         viewModel.forward(message, to: row.id)
                         onOpenConversation(row.id, nil)
@@ -547,7 +548,8 @@ public struct ChatScreen: View {
             ForwardPickerScreen(
                 rows: viewModel.forwardTargets(
                     flags: deviceGroupSync.flags,
-                    readCursors: deviceGroupSync.readCursors),
+                    readCursors: deviceGroupSync.readCursors,
+                    order: deviceGroupSync.order),
                 onPick: { row in
                     bulkForwardOpen = false
                     runBulkForward(to: row.id)
