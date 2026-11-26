@@ -8606,7 +8606,7 @@
       "status": "machine"
     },
     "restore_identity.reset.effect_messages": {
-      "text": "הודעות שנשלחו לפני היום אי אפשר לקרוא עם המפתחות החדשים.",
+      "text": "צ'אטים, קבוצות וערוצים חוזרים מהמכשירים של אנשי הקשר שלך, עם ההודעות שעדיין יש להם, מהחדשות ביותר.",
       "status": "machine"
     },
     "restore_identity.reset.effect_passkeys": {
@@ -9918,7 +9918,7 @@
       "status": "machine"
     },
     "translate.pack.source.lakko": {
-      "text": "החבילה מגיעה מהשרת של Lakko, שיודע שהמכשיר הזה ביקש אחת מהשפות האלה.",
+      "text": "החבילות מגיעות מהשרת של Lakko, שיודע שהמכשיר הזה ביקש אחת מהשפות האלה.",
       "status": "machine"
     },
     "translate.picker.title": {

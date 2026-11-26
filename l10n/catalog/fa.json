@@ -8606,7 +8606,7 @@
       "status": "machine"
     },
     "restore_identity.reset.effect_messages": {
-      "text": "پیام‌هایی که پیش از امروز فرستاده شده‌اند با کلیدهای جدید خوانده نمی‌شوند.",
+      "text": "گفتگوها، گروه‌ها و کانال‌ها از دستگاه‌های مخاطبانتان برمی‌گردند، همراه با پیام‌هایی که هنوز دارند، از جدیدترین.",
       "status": "machine"
     },
     "restore_identity.reset.effect_passkeys": {
@@ -9918,7 +9918,7 @@
       "status": "machine"
     },
     "translate.pack.source.lakko": {
-      "text": "بسته از سرور Lakko می‌آید و سرور می‌فهمد که این دستگاه یکی از این زبان‌ها را خواسته است.",
+      "text": "بسته‌ها از سرور Lakko می‌آیند و سرور می‌فهمد که این دستگاه یکی از این زبان‌ها را خواسته است.",
       "status": "machine"
     },
     "translate.picker.title": {

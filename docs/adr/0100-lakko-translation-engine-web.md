@@ -9,7 +9,8 @@
   S2 built 2026-11-25 (engine, worker, downloader, manifest tool, dialog
   and settings, desktop forwarding, nginx config); unit-tested and checked
   in Firefox, Opera and Safari on a local dev server and in the macOS
-  desktop app (2026-11-26); nothing deployed (S3), the screens not walked.
+  desktop app (2026-11-26); the dialog and Settings walked signed in on a
+  local stack (2026-11-26); nothing deployed (S3).
 - **Date:** 2026-11-25
 - **Context:**
   - [ADR-0082](0082-on-device-translation-and-transcription.md), note of
@@ -167,8 +168,24 @@ Firefox ships.
   groups (135.3 and 140.7 MB) downloaded in 4 MiB ranges, checked and
   stored; cs->en, en->ru and cs->ru through English translated, a second
   cs->en reused the loaded worker, and both groups were listed as kept.
-  Not walked: the dialog and Settings screens in a signed-in session, the
-  desktop app through the anti-censorship tunnel, the test stack.
+  **2026-11-26, signed in on a local stack** (two accounts, web client in
+  the Claude app's Chromium 156 pane, models from a local directory): a
+  Czech message offered Translate; the dialog named the pl-cs-sk group and
+  135.3 MB; Download translated it into English; Settings listed the group
+  as `Translation · 135.3 MB` with Remove; after Remove the next Translate
+  asked again, and `Not now` left the message untranslated; with Russian as
+  the target the dialog named both groups (276.0 MB), showed
+  `Translating…`, then the Russian text; Forget device deleted the
+  `lakko-translation-models` database. Found on the way: in that Chromium
+  `Translator.availability()` and `LanguageDetector.availability()` never
+  settle, and the client waited for them without a bound, so Translate was
+  never offered and Lakko's engine never asked. Since then the browser
+  adapters (`browser-engines.ts`) take a browser that has not answered
+  within 3 s (chosen, not measured) as unavailable and stop asking it until
+  the page reloads. The dialog's source sentence said "The pack comes from"
+  even for two packs; it now reads "Packs come from Lakko's server" in all
+  11 languages. Not walked: the desktop app through the anti-censorship
+  tunnel, the test stack.
 - **Output is plain text.** The engine's HTML mode is off. Output is
   rendered as text like every translation today (ADR-0082 section 5). This
   answers the injection concern raised in mozilla/standards-positions#1015.

@@ -8606,7 +8606,7 @@
       "status": "machine"
     },
     "restore_identity.reset.effect_messages": {
-      "text": "لا يمكن قراءة الرسائل المرسلة قبل اليوم بالمفاتيح الجديدة.",
+      "text": "تعود المحادثات والمجموعات والقنوات من أجهزة جهات اتصالك، مع الرسائل التي لا تزال لديهم، بدءًا بالأحدث.",
       "status": "machine"
     },
     "restore_identity.reset.effect_passkeys": {
@@ -9918,7 +9918,7 @@
       "status": "machine"
     },
     "translate.pack.source.lakko": {
-      "text": "تأتي الحزمة من خادم Lakko، الذي يعرف أن هذا الجهاز طلب إحدى هذه اللغات.",
+      "text": "تأتي الحزم من خادم Lakko، الذي يعرف أن هذا الجهاز طلب إحدى هذه اللغات.",
       "status": "machine"
     },
     "translate.picker.title": {

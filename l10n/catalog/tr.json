@@ -8606,7 +8606,7 @@
       "status": "machine"
     },
     "restore_identity.reset.effect_messages": {
-      "text": "Bugünden önce gönderilen mesajlar yeni anahtarlarla okunamaz.",
+      "text": "Sohbetler, gruplar ve kanallar, kişilerinizin cihazlarından, onlarda hâlâ bulunan mesajlarla birlikte, en yeniden başlayarak geri gelir.",
       "status": "machine"
     },
     "restore_identity.reset.effect_passkeys": {
@@ -9918,7 +9918,7 @@
       "status": "machine"
     },
     "translate.pack.source.lakko": {
-      "text": "Paket Lakko'nun sunucusundan gelir; sunucu bu cihazın bu dillerden birini istediğini öğrenir.",
+      "text": "Paketler Lakko'nun sunucusundan gelir; sunucu bu cihazın bu dillerden birini istediğini öğrenir.",
       "status": "machine"
     },
     "translate.picker.title": {

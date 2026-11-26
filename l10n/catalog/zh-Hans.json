@@ -8606,7 +8606,7 @@
       "status": "machine"
     },
     "restore_identity.reset.effect_messages": {
-      "text": "今天之前发送的消息无法用新密钥读取。",
+      "text": "聊天、群组和频道会从你的联系人的设备上恢复，带回他们仍保存的消息，最新的在前。",
       "status": "machine"
     },
     "restore_identity.reset.effect_passkeys": {

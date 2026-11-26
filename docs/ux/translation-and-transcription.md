@@ -233,7 +233,7 @@ server, and the dialog says so:
 > **Download Spanish for translation?**
 > Translation happens on this device. To translate Spanish, Lakko needs the
 > pack for Spanish, Portuguese and Galician (147.4 MB). Messages are never
-> sent anywhere to be translated. The pack comes from Lakko's server, which
+> sent anywhere to be translated. Packs come from Lakko's server, which
 > learns that this device asked for one of these languages.
 > `Not now` · `Download`
 
@@ -384,8 +384,9 @@ A sub-screen of Settings > Language (the IA of the design system, section 4):
   into the target, and the installed speech models), each `Managed by your
   system` with no Remove, as iOS lists Apple's packs (amended 2026-11-18).
   Lakko's own engine (web and desktop app, ADR-0100) lists each language
-  group it downloaded as one row: the three languages as a list, `For
-  translation · 147.5 MB`, and `Remove` (amended 2026-11-25).
+  group it downloaded as one row: the three languages as a list,
+  `Translation · 147.5 MB` (the same word as the other translation packs),
+  and `Remove` (amended 2026-11-25).
 - **Delete all translations and transcripts**: removes every one stored on this
   device. A confirmation dialog says how many.
 - One paragraph at the bottom: "Translation and transcription happen on this

@@ -8606,7 +8606,7 @@
       "status": "machine"
     },
     "restore_identity.reset.effect_messages": {
-      "text": "आज से पहले भेजे गए मैसेज नई कुंजियों से नहीं पढ़े जा सकते।",
+      "text": "चैट, ग्रुप और चैनल आपके संपर्कों के डिवाइस से वापस आते हैं, उन मैसेज के साथ जो उनके पास अभी भी हैं, सबसे नए पहले।",
       "status": "machine"
     },
     "restore_identity.reset.effect_passkeys": {
@@ -9918,7 +9918,7 @@
       "status": "machine"
     },
     "translate.pack.source.lakko": {
-      "text": "पैक Lakko के सर्वर से आता है, जिसे पता चलता है कि इस डिवाइस ने इनमें से कोई एक भाषा माँगी।",
+      "text": "पैक Lakko के सर्वर से आते हैं, जिसे पता चलता है कि इस डिवाइस ने इनमें से कोई एक भाषा माँगी।",
       "status": "machine"
     },
     "translate.picker.title": {

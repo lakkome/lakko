@@ -143,6 +143,39 @@ function globalOf<T>(name: string): T | null {
   return value === undefined || value === null ? null : (value as T);
 }
 
+/**
+ * How long a browser's availability question may take before the engine is
+ * taken as unavailable. Seen 2026-11-26: in a Chromium 156 embedding (the
+ * Claude app's browser pane) `Translator.availability()` and
+ * `LanguageDetector.availability()` never settle, so waiting for them hid
+ * Translate for every pair and the next engine in the order (Lakko's own,
+ * ADR-0100) was never asked. Chrome answers well inside this; the value is
+ * chosen, not measured.
+ */
+export const BROWSER_ANSWER_MS = 3000;
+// An API that did not answer once is not asked again until the page reloads:
+// otherwise every question would wait the whole bound again.
+
+/** Rejection of {@link answerWithin} when the browser did not answer. */
+class NoAnswer extends Error {}
+
+/** `answer`, or a {@link NoAnswer} once `ms` passed without one. */
+function answerWithin<T>(answer: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new NoAnswer("no answer")), ms);
+    answer.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e: unknown) => {
+        clearTimeout(timer);
+        reject(e instanceof Error ? e : new Error("refused"));
+      },
+    );
+  });
+}
+
 // ----- translation ----------------------------------------------------------
 
 /**
@@ -161,7 +194,10 @@ export function translatorTag(tag: string): string {
 }
 
 /** The browser `Translator` API, or an engine that offers nothing. */
-export function browserTranslation(api: TranslatorStatic | null = globalOf("Translator")): TranslationEngine {
+export function browserTranslation(
+  api: TranslatorStatic | null = globalOf("Translator"),
+  answerMs: number = BROWSER_ANSWER_MS,
+): TranslationEngine {
   if (api === null || typeof api.availability !== "function" || typeof api.create !== "function") {
     return {
       present: false,
@@ -170,14 +206,20 @@ export function browserTranslation(api: TranslatorStatic | null = globalOf("Tran
     };
   }
   const translators = new Map<string, Promise<BrowserTranslator>>();
+  let silent = false;
   return {
     present: true,
     async state(source, target): Promise<EngineState> {
+      if (silent) return "unavailable";
       try {
         return engineStateOf(
-          await api.availability({ sourceLanguage: translatorTag(source), targetLanguage: translatorTag(target) }),
+          await answerWithin(
+            api.availability({ sourceLanguage: translatorTag(source), targetLanguage: translatorTag(target) }),
+            answerMs,
+          ),
         );
-      } catch {
+      } catch (e) {
+        if (e instanceof NoAnswer) silent = true;
         return "unavailable";
       }
     },
@@ -225,19 +267,23 @@ export type HypothesisRanker = (
 export function browserDetection(
   api: DetectorStatic | null = globalOf("LanguageDetector"),
   rank: HypothesisRanker | null = null,
+  answerMs: number = BROWSER_ANSWER_MS,
 ): DetectionEngine {
   if (api === null || typeof api.availability !== "function" || typeof api.create !== "function") {
     return { present: false, detect: () => Promise.resolve(null) };
   }
   let detector: Promise<BrowserDetector | null> | null = null;
+  let silent = false;
   const open = (): Promise<BrowserDetector | null> => {
+    if (silent) return Promise.resolve(null);
     if (detector === null) {
       detector = (async () => {
         try {
           // Only a model already on the device: see the module doc.
-          if (engineStateOf(await api.availability()) !== "ready") return null;
+          if (engineStateOf(await answerWithin(api.availability(), answerMs)) !== "ready") return null;
           return await api.create();
-        } catch {
+        } catch (e) {
+          if (e instanceof NoAnswer) silent = true;
           return null;
         }
       })();

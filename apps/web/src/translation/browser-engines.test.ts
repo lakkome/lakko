@@ -80,9 +80,55 @@ describe("browserTranslation", () => {
     const api = { availability: () => Promise.reject(new Error("x")), create: () => Promise.reject(new Error("x")) };
     expect(await browserTranslation(api as never).state("es", "en")).toBe("unavailable");
   });
+
+  it("reports unavailable when the browser never answers, and stops asking", async () => {
+    // Seen in a Chromium embedding: availability() never settles.
+    let asked = 0;
+    const api = {
+      availability: () => {
+        asked++;
+        return new Promise(() => undefined);
+      },
+      create: () => Promise.reject(new Error("x")),
+    };
+    const e = browserTranslation(api as never, 20);
+    expect(await e.state("es", "en")).toBe("unavailable");
+    expect(await e.state("cs", "en")).toBe("unavailable");
+    expect(asked).toBe(1);
+  });
+
+  it("keeps asking after a refusal, which is an answer", async () => {
+    let asked = 0;
+    const api = {
+      availability: () => {
+        asked++;
+        return Promise.reject(new Error("x"));
+      },
+      create: () => Promise.reject(new Error("x")),
+    };
+    const e = browserTranslation(api as never, 20);
+    await e.state("es", "en");
+    await e.state("es", "en");
+    expect(asked).toBe(2);
+  });
 });
 
 describe("browserDetection", () => {
+  it("answers nothing when the browser never answers, and stops asking", async () => {
+    let asked = 0;
+    const api = {
+      availability: () => {
+        asked++;
+        return new Promise(() => undefined);
+      },
+      create: () => Promise.reject(new Error("x")),
+    };
+    const d = browserDetection(api as never, null, 20);
+    expect(await d.detect("hola")).toBeNull();
+    expect(await d.detect("adios")).toBeNull();
+    expect(asked).toBe(1);
+  });
+
   it("never creates a detector that would need a download", async () => {
     let created = 0;
     const api = {

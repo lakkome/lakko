@@ -8606,7 +8606,7 @@
       "status": "machine"
     },
     "restore_identity.reset.effect_messages": {
-      "text": "Los mensajes enviados antes de hoy no se pueden leer con las nuevas claves.",
+      "text": "Los chats, grupos y canales vuelven desde los dispositivos de tus contactos, con los mensajes que aún tienen, empezando por los más recientes.",
       "status": "machine"
     },
     "restore_identity.reset.effect_passkeys": {
@@ -9918,7 +9918,7 @@
       "status": "machine"
     },
     "translate.pack.source.lakko": {
-      "text": "El paquete viene del servidor de Lakko, que sabe que este dispositivo pidió uno de estos idiomas.",
+      "text": "Los paquetes vienen del servidor de Lakko, que sabe que este dispositivo pidió uno de estos idiomas.",
       "status": "machine"
     },
     "translate.picker.title": {
