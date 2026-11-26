@@ -1193,8 +1193,10 @@ mirror-translation-models-test dir:
     done
     (( ${#files[@]} > 0 )) || { echo "no group files in {{dir}}" >&2; exit 1; }
     ssh "${opts[@]}" "$target" 'install -d -m 755 /var/www/lakko-translation-models'
-    rsync -av --ignore-existing --chmod=F644 -e "ssh ${opts[*]}" \
+    # No --chmod: macOS ships openrsync, which does not take it.
+    rsync -av --ignore-existing -e "ssh ${opts[*]}" \
         "${files[@]}" "$target":/var/www/lakko-translation-models/
+    ssh "${opts[@]}" "$target" 'chown root:root /var/www/lakko-translation-models/* && chmod 644 /var/www/lakko-translation-models/*'
 
 # ADR-0026 - generate the bootstrap-signing keypair. Writes
 # bootstrap-signing-key.seed (mode 0600; keep OFFLINE, never commit) and prints

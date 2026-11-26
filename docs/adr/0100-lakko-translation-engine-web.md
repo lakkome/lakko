@@ -10,7 +10,8 @@
   and settings, desktop forwarding, nginx config); unit-tested and checked
   in Firefox, Opera and Safari on a local dev server and in the macOS
   desktop app (2026-11-26); the dialog and Settings walked signed in on a
-  local stack (2026-11-26); nothing deployed (S3).
+  local stack (2026-11-26); deployed to test.lakko.me 2026-11-26 (models,
+  nginx, web build of 4a1982462).
 - **Date:** 2026-11-25
 - **Context:**
   - [ADR-0082](0082-on-device-translation-and-transcription.md), note of
@@ -184,8 +185,22 @@ Firefox ships.
   within 3 s (chosen, not measured) as unavailable and stop asking it until
   the page reloads. The dialog's source sentence said "The pack comes from"
   even for two packs; it now reads "Packs come from Lakko's server" in all
-  11 languages. Not walked: the desktop app through the anti-censorship
-  tunnel, the test stack.
+  11 languages.
+- **Deployed 2026-11-26 to test.lakko.me:** the 19 group files (2.53 GB,
+  every file's SHA-256 equal to its name) in
+  `/var/www/lakko-translation-models`, the nginx location, and the web
+  build of `4a1982462` from a clean worktree (services not restarted).
+  Checked on the server: a range request answers 206 with the right
+  `Content-Range`, a missing group 404 with no cache header (it carried
+  the year-long `immutable` header until the `always` was removed), and,
+  on a page of test.lakko.me under its CSP, the deployed worker loaded
+  is-en from eight 4 MiB range requests with every hash matching and
+  translated an Icelandic sentence. Found on the way: the mirror recipe
+  used `rsync --chmod`, which macOS's openrsync refuses; it now sets the
+  mode over ssh after copying. Not walked: the signed-in screens on
+  test.lakko.me, and the desktop app through the anti-censorship tunnel
+  (an isolated copy was built and armed the tunnel; the screens were not
+  driven).
 - **Output is plain text.** The engine's HTML mode is off. Output is
   rendered as text like every translation today (ADR-0082 section 5). This
   answers the injection concern raised in mozilla/standards-positions#1015.
