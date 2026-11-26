@@ -37,6 +37,8 @@ final class ContinuityRuntimeTests: XCTestCase {
         var reachable = true
         var unreachable: Set<String> = []
         var recheckIsDue = true
+        /// D4 — whether the founder may hand the ownership over yet.
+        var transferIsDue = true
 
         init(
             _ kind: ContinuityKind, roster: [String]? = nil, owner: String?? = nil,
@@ -138,6 +140,7 @@ final class ContinuityRuntimeTests: XCTestCase {
         }
 
         func recheckDue(successorGroupIdB64: String) -> Bool { recheckIsDue }
+        func ownershipTransferDue(successorGroupIdB64: String) -> Bool { transferIsDue }
 
         func setAdmins(successorGroupIdB64: String, adminKeysB64: [String]) async throws {
             guard let f = factsByGroup[successorGroupIdB64] else { return }
@@ -386,6 +389,35 @@ final class ContinuityRuntimeTests: XCTestCase {
         let three = await pass(w)
         XCTAssertEqual(three, .built)
         XCTAssertEqual(w.log.count, before)
+    }
+
+    /// Live walk 2026-11-26, D4 — a founder that stays no admin after the
+    /// hand-over keeps the ownership until the reset person's history was
+    /// served: their device takes a history page only from an owner or an
+    /// admin.
+    func testAFounderThatStaysNoAdminHandsTheOwnershipOverOnlyOnceTheHistoryWasServed() async {
+        let w = World(.group, roster: [Self.oldAnna, Self.me], admins: [])
+        w.transferIsDue = false
+        await winAsAdmin(w)
+        _ = await pass(w)
+        _ = await pass(w)
+        XCTAssertFalse(w.log.contains { $0.hasPrefix("transfer:") })
+        XCTAssertEqual(w.factsByGroup["S-mine"]?.ownerKeyB64, Self.me)
+        w.transferIsDue = true
+        _ = await pass(w)
+        XCTAssertEqual(w.log.last, "transfer:anna-new:member")
+        XCTAssertEqual(w.factsByGroup["S-mine"]?.ownerKeyB64, Self.newAnna)
+    }
+
+    /// A founder that was an admin stays one: it can serve the history after
+    /// the hand-over, so the hand-over does not wait.
+    func testAFounderThatStaysAdminDoesNotWaitForTheHistory() async {
+        let w = World(.group)
+        w.transferIsDue = false
+        await winAsAdmin(w)
+        _ = await pass(w)
+        _ = await pass(w)
+        XCTAssertEqual(w.log.last, "transfer:anna-new:admin")
     }
 
     func testKeepsAddingAMemberItCouldNotReach() async {

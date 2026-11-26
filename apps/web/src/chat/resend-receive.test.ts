@@ -174,6 +174,15 @@ describe("heldResendPredicate", () => {
     expect(held(a)).toBe(false);
     expect(held(b)).toBe(false);
   });
+  it("ADR-0101 walk D3: the receiving group holds the returned history's copy, so the re-send is dropped", async () => {
+    // The person who reset holds no old segment; the history page filed the
+    // original into the successor under its original (global) DS id.
+    const p = port(logWith(NEW, [row(41, "incoming", "peer")]));
+    const e = received("peer", marker);
+    expect((await heldResendPredicate([e], p))(e)).toBe(true);
+    const other = received("attacker", marker);
+    expect((await heldResendPredicate([other], p))(other)).toBe(false);
+  });
   it("a batch with no marker never reads the log", async () => {
     const p = port(logWith(OLD, [row(41, "outgoing")]));
     const e = received("own");

@@ -1138,11 +1138,25 @@ internal fun reentryBundleRow(
     authorKeyB64: String?,
     ownKeyB64: String?,
     route: ReentryRouteKind,
+): PersistedMessage = reentryBundleRow(row, authorKeyB64, listOfNotNull(ownKeyB64), route)
+
+/**
+ * [reentryBundleRow] over every key that names this account ([ownKeysB64]):
+ * its key in the conversation now and, after an ADR-0101 key reset, the
+ * previous account key its earlier messages were authored under (live walk
+ * 2026-11-26, D2: a returned one-to-one drew the person's own earlier
+ * messages as received). Pure.
+ */
+internal fun reentryBundleRow(
+    row: PersistedMessage,
+    authorKeyB64: String?,
+    ownKeysB64: Collection<String>,
+    route: ReentryRouteKind,
 ): PersistedMessage = when {
     row.direction == "system" -> row.copy(authorKeyB64 = null)
     authorKeyB64 != null -> row.copy(
         authorKeyB64 = authorKeyB64,
-        direction = if (ownKeyB64 != null && sameKeyB64(authorKeyB64, ownKeyB64)) "outgoing" else "incoming",
+        direction = if (ownKeysB64.any { sameKeyB64(authorKeyB64, it) }) "outgoing" else "incoming",
     )
     else -> row.copy(authorKeyB64 = null, direction = reentryBundleDirection(route, row.direction))
 }

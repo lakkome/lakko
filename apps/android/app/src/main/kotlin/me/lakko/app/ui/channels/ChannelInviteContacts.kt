@@ -119,6 +119,13 @@ internal fun ChannelInviteContactsDialog(
                             busyKey = null
                         }
                         cannotMessage = cannotMessage - row.key
+                        if (channelInviteClosesAfter(outcome)) {
+                            // Section 14.1 (live walk 2026-11-26, D6): Invite
+                            // closes back to the info, so the same person
+                            // cannot be sent a second invitation from here.
+                            onClose()
+                            return@launch
+                        }
                         when (outcome) {
                             ContactInviteOutcome.SENT -> invited = invited + row.key
                             ContactInviteOutcome.REQUEST_SENT -> requested = requested + row.key
@@ -147,3 +154,11 @@ internal fun <T> withoutInChannel(items: List<T>, accountKeyOf: (T) -> ByteArray
  *  people`, the same keys web and iOS use for this screen. */
 internal fun channelInvitePickerTitleKey(publisher: Boolean): String =
     if (publisher) "channels.publishers.add" else "channels.info.invite_people"
+
+/**
+ * Section 14.1 — whether a pick's [outcome] closes the picker back to the
+ * info: an invitation that went out does. A contact request sent inside a
+ * shared group, nothing sendable and a failure keep it open, each showing
+ * its own state on the row. Pure.
+ */
+internal fun channelInviteClosesAfter(outcome: ContactInviteOutcome): Boolean = outcome == ContactInviteOutcome.SENT

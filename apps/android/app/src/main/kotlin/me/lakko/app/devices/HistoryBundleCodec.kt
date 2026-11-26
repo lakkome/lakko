@@ -227,6 +227,8 @@ public object HistoryBundleCodec {
         beforeMessageId: Long,
         pageSize: Int,
         ownAuthorKeyB64: String? = null,
+        /** How many rows the page carries (0: the empty, last page). */
+        onPage: (rows: Int) -> Unit = {},
         seal: (groups: List<StructuredHistoryGroup>, maxHlc: ULong) -> ByteArray,
     ): ByteArray? {
         val log = MessageLogStore.getLog(context, accountIdB64) ?: return null
@@ -256,6 +258,7 @@ public object HistoryBundleCodec {
                 receivedAtMs = parseIsoMs(m.createdAt),
             )
         }
+        onPage(messages.size)
         return seal(
             listOf(StructuredHistoryGroup(groupId = targetBytes, messages = messages, countCapped = false)),
             maxHlc,

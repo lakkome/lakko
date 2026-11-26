@@ -31,6 +31,8 @@ class ContinuityRuntimeTest {
         var deliverOk: Boolean = true,
         /** Whether a Welcome can reach the new identity's mailbox. */
         var reachable: Boolean = true,
+        /** D4 — whether the history was served (the hand-over is due). */
+        var transferDue: Boolean = true,
         val successorId: String,
     ) : ContinuityPort {
         val calls = ArrayList<String>()
@@ -78,6 +80,10 @@ class ContinuityRuntimeTest {
         }
         override suspend fun resendOwnMessages(oldGroupIdHex: String, successorGroupIdHex: String, accountIdB64: String) {
             calls += "resend"
+        }
+        override fun ownershipTransferDue(successorGroupIdHex: String): Boolean {
+            calls += "due?"
+            return transferDue
         }
     }
 
@@ -282,5 +288,38 @@ class ContinuityRuntimeTest {
         assertEquals(old, groupHexOfB64(groupB64OfHex(old)))
         assertEquals("", groupB64OfHex("zz"))
         assertEquals("", groupHexOfB64("***"))
+    }
+
+    // Live walk 2026-11-26, D4 — a founder that was no admin of the old group
+    // serves the history before it hands the ownership over; an admin hands
+    // it over at once and stays admin.
+    @Test
+    fun `a founder that was no admin holds the hand-over until the history was served`() = runTest {
+        val p = port().also {
+            it.facts[old] = ownedGroup(emptyList())
+            it.state = StoredClaims(own = OwnClaim(succ, 10)); it.cursor = 10
+            it.facts[succ] = ContinuityFacts(ConversationKind.Group, listOf("me", "new", "b", "c"), "me", emptyList(), true)
+            it.transferDue = false
+        }
+        assertEquals(ContinuityStep.BUILT, continueConversation(p, old))
+        assertFalse(p.calls.any { it.startsWith("transfer") })
+        assertTrue("due?" in p.calls)
+        p.calls.clear()
+        p.transferDue = true
+        assertEquals(ContinuityStep.BUILT, continueConversation(p, old))
+        assertEquals("transfer:new:false", p.calls.last())
+    }
+
+    @Test
+    fun `a founder that was an admin hands the ownership over at once`() = runTest {
+        val p = port().also {
+            it.facts[old] = ownedGroup(listOf("me"))
+            it.state = StoredClaims(own = OwnClaim(succ, 10)); it.cursor = 10
+            it.facts[succ] = ContinuityFacts(ConversationKind.Group, listOf("me", "new", "b", "c"), "me", emptyList(), true)
+            it.transferDue = false
+        }
+        assertEquals(ContinuityStep.BUILT, continueConversation(p, old))
+        assertEquals("transfer:new:true", p.calls.last())
+        assertFalse("due?" in p.calls)
     }
 }

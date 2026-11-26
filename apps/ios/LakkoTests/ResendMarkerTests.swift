@@ -253,4 +253,78 @@ final class ResendMarkerTests: XCTestCase {
         XCTAssertFalse(ResendMarker.heldResendPredicate(batch: [e], port: port(nil))(e))
         XCTAssertFalse(ResendMarker.heldResendPredicate(batch: [e], port: port(rows, lineageThrows: true))(e))
     }
+
+    // MARK: - D3 (live walk 2026-11-26): a re-send and its original in a history page
+
+    func testARowWhoseOriginalWasDrawnAsAReSendIsNotFiledAgain() {
+        let drawn = [ResendOriginLog.Entry(originMessageId: 55, authorKeyB64: "Qk9S")]
+        XCTAssertTrue(ResendMarker.historyRowAlreadyShown(messageId: 55, authorKeyB64: "Qk9S", drawn: drawn))
+        XCTAssertFalse(ResendMarker.historyRowAlreadyShown(messageId: 56, authorKeyB64: "Qk9S", drawn: drawn),
+                       "another message of the same person is filed")
+        XCTAssertFalse(ResendMarker.historyRowAlreadyShown(messageId: 55, authorKeyB64: "T1RIRVI=", drawn: drawn),
+                       "the same id by someone else is filed")
+        XCTAssertFalse(ResendMarker.historyRowAlreadyShown(messageId: 55, authorKeyB64: nil, drawn: drawn),
+                       "a row with no author is filed")
+        // A proven rotation names the same person.
+        XCTAssertTrue(ResendMarker.historyRowAlreadyShown(
+            messageId: 55, authorKeyB64: "TkVX", drawn: drawn, canonical: { $0 == "TkVX" ? "Qk9S" : $0 }))
+    }
+
+    func testOnlyTheReSendsDrawnHereAreRecorded() {
+        let origin = ResendMarker.Origin(groupIdB64: "AAEC", messageId: 9)
+        let drawnHere = ResendMarker.Received(resendOrigin: origin, senderKeyB64: "Qk9S")
+        let heldHere = ResendMarker.Received(
+            resendOrigin: ResendMarker.Origin(groupIdB64: "AAEC", messageId: 10), senderKeyB64: "Qk9S")
+        let plain = ResendMarker.Received(resendOrigin: nil, senderKeyB64: "Qk9S")
+        let unattributed = ResendMarker.Received(resendOrigin: origin, senderKeyB64: nil)
+        let out = ResendMarker.drawnOrigins(
+            [drawnHere, heldHere, plain, unattributed], alreadyHeld: { $0 == heldHere })
+        XCTAssertEqual(out, [ResendOriginLog.Entry(originMessageId: 9, authorKeyB64: "Qk9S")])
+    }
+
+    func testTheOriginLogKeepsEachOriginOnceAndClears() {
+        let suite = "resend-origins-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let log = ResendOriginLog(defaults: defaults)
+        let e = ResendOriginLog.Entry(originMessageId: 9, authorKeyB64: "Qk9S")
+        log.record([e], groupIdHex: "aa", accountIdB64: "acct")
+        log.record([e], groupIdHex: "aa", accountIdB64: "acct")
+        XCTAssertEqual(log.read(accountIdB64: "acct")["aa"], [e])
+        log.clear(accountIdB64: "acct")
+        XCTAssertTrue(log.read(accountIdB64: "acct").isEmpty)
+    }
+
+    /// D3, the other order: the history page came first and the receiving
+    /// group holds the original under its DS id, by the re-send's sender;
+    /// the origin group is not held at all (the person who reset) and its
+    /// lineage facts do not read. The re-send is skipped.
+    func testAHistoryCopyInTheReceivingGroupHidesTheReSend() {
+        let e = received("peer", origin)
+        let held = ResendMarker.heldResendPredicate(
+            batch: [e],
+            port: port(
+                log(newHex, [Row(messageId: 41, direction: .incoming, authorKeyB64: "peer")]),
+                lineageThrows: false))
+        XCTAssertTrue(held(e))
+        XCTAssertEqual(
+            ResendMarker.resendVerdict(
+                marker: origin, receivedConversation: "c", originConversation: nil,
+                originIsOlderSegment: false, heldAuthor: nil, senderAuthor: "peer",
+                heldInReceivedAuthor: "peer"),
+            .skip)
+    }
+
+    func testAHistoryCopyByAnotherAuthorHidesNothing() {
+        let e = received("attacker", origin)
+        let held = ResendMarker.heldResendPredicate(
+            batch: [e], port: port(log(newHex, [Row(messageId: 41, direction: .incoming, authorKeyB64: "peer")])))
+        XCTAssertFalse(held(e))
+        XCTAssertEqual(
+            ResendMarker.resendVerdict(
+                marker: origin, receivedConversation: "c", originConversation: nil,
+                originIsOlderSegment: false, heldAuthor: nil, senderAuthor: nil,
+                heldInReceivedAuthor: "peer"),
+            .draw, "an unattributable sender matches nothing")
+    }
 }

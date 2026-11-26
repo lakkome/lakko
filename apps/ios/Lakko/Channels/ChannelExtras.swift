@@ -112,6 +112,15 @@ public struct ChannelExtras: Codable, Equatable, Sendable {
     public var publisherReaderKeys: [String: String]?
     /// What this device last announced (``PublisherReaderKeys/sendDue``).
     public var publisherReaderKeySent: String?
+    /// ADR-0101 section 7 (live walk 2026-11-26, D1) — on a subscriber's
+    /// device, the 32-byte account key of whoever signed the invitation this
+    /// device subscribed with (the `/g/` capability's issuer). Local only,
+    /// never in the subscription register and never an authority for
+    /// anything: it is only where an owner return is sent when that key
+    /// resets. An invitation minted by a co-publisher names the co-publisher;
+    /// the reset device then fails the recovery-key check and drops the
+    /// return (``ChannelReturnRuntime/recoverOwnedChannel(idHex:channels:client:seed:accountIdB64:)``).
+    public var inviterAccountKey: Data?
 
     public init() {}
 

@@ -167,3 +167,15 @@ public enum GroupNameGate {
         return isNewer(incomingUpdatedAtMs, stored.updatedAtMs) ? .accept : .rejectStale
     }
 }
+
+/// ADR-0051 (live walk 2026-11-26, D4) — who sent a group name and what the
+/// role table said, read at the epoch the name was sealed at.
+public struct SenderAuthorityAtReceipt: Equatable {
+    public let authority: PushGroupRouting.SecretAuthority
+    public let senderKey: Data?
+
+    public init(authority: PushGroupRouting.SecretAuthority, senderKey: Data?) {
+        self.authority = authority
+        self.senderKey = senderKey
+    }
+}

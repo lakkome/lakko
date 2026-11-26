@@ -29,6 +29,8 @@ import { createEffect, onCleanup, untrack, type JSX } from "solid-js";
 import { useAuth } from "../auth/AuthContext";
 import { base64Encode } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
+import { readResetContinuity } from "../auth/reset-continuity";
+import { markHistoryServed } from "./history-served";
 import { ContactsClient, knockKeyFor } from "../contacts/client";
 import { loadAccepted } from "../contacts/local-store";
 import { DiscoveryClient } from "../discovery/client";
@@ -376,6 +378,17 @@ export function ConversationRejoinRuntime(): JSX.Element {
     });
   }
 
+  /** ADR-0101 walk 2026-11-26 (D2): the account key this account had before
+   *  its key reset, when the reset device recorded it. */
+  function previousOwnKeysOf(account: string): string[] {
+    try {
+      const prev = readResetContinuity(globalThis.localStorage, account)?.previousKeyB64 ?? null;
+      return prev === null ? [] : [prev];
+    } catch {
+      return [];
+    }
+  }
+
   /**
    * Live walk 3 — this account's key in `group` as every sent row names it:
    * the person this device's own leaf resolves to (`send-text.ts`). `null`
@@ -525,6 +538,9 @@ export function ConversationRejoinRuntime(): JSX.Element {
           // owner or an admin, or the other person of a one-to-one.
           signerAccepted: (signer) => group.gapHistorySignerAccepted(identity, signer),
           ownAuthorKeyB64: ownAuthorKeyIn(group),
+          // ADR-0101 walk 2026-11-26 (D2): a returned conversation's history
+          // names this account's key of before the reset on its own rows.
+          previousOwnKeysB64: previousOwnKeysOf(account),
           route,
         });
       },
@@ -636,6 +652,10 @@ export function ConversationRejoinRuntime(): JSX.Element {
     if (page === null) return;
     const wasm = await loadWasm();
     await ds.publishRendezvous(wasm.gapHistoryRendezvous(a.gapKeyPub), page.sealed);
+    // ADR-0101 walk 2026-11-26 (D4): the empty page is the requester's last:
+    // the history is served, and a founder holding the ownership back may
+    // hand it over (`history-served.ts`).
+    if (page.rows === 0) markHistoryServed(account, a.groupIdB64, Date.now());
     // eslint-disable-next-line no-console
     console.info(`[history] a page was sent: rows=${page.rows}`);
   }
@@ -661,7 +681,21 @@ export function ConversationRejoinRuntime(): JSX.Element {
       const secret = gap.secret;
       const sealed = await sealGapSecret(secret, deviceKey);
       secret.fill(0);
-      if (!recordGapLook({ groupIdB64, secrets: [sealed], gapFromMs: 0, gapToMs: now })) return;
+      // ADR-0101 walk 2026-11-26 (D2): in a one-to-one the answer comes from
+      // the other person, so a row that names no author takes the swapped
+      // side, as a re-admission by the other person does ("mailbox").
+      const route: ReentryRouteName | undefined = conversationKindOf(group) === "chat" ? "mailbox" : undefined;
+      if (
+        !recordGapLook({
+          groupIdB64,
+          secrets: [sealed],
+          gapFromMs: 0,
+          gapToMs: now,
+          ...(route === undefined ? {} : { route }),
+        })
+      ) {
+        return;
+      }
       const envelope = wasm.composeHistoryRequestEnvelope(gap.publicKey, BigInt(state.before));
       await chat.broadcastControl(secrets, group, envelope);
       writeHistoryState(account, groupIdB64, historyAsked(state, now));

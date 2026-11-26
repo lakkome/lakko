@@ -201,6 +201,8 @@ enum AccountLocalDataWipe {
             ReturnedInvitationStore.clearStored(accountIdB64: accountIdB64, defaults: standard)
             RecoveredChannelStore(defaults: standard).clearAll(accountIdB64: accountIdB64)
             HistoryReturnStore(defaults: standard).clear(accountIdB64: accountIdB64)
+            ResendOriginLog(defaults: standard).clear(accountIdB64: accountIdB64)
+            HistoryServedStore(defaults: standard).clear(accountIdB64: accountIdB64)
             ProfileCarriedStore(defaults: standard).clear(accountIdB64: accountIdB64)
         }
         step("predecessor-inbox-cursor") {

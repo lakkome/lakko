@@ -534,4 +534,71 @@ final class ResetReturnTests: XCTestCase {
         let decoded = try JSONDecoder().decode(ProfileClaim.self, from: try JSONEncoder().encode(claim))
         XCTAssertEqual(decoded.envelope, claim.envelope)
     }
+
+    // MARK: - Live walk 2026-11-26
+
+    /// D3 — the answerer leaves out of a one-to-one's history page the own
+    /// messages it sends again into the successor (after the reset was
+    /// signed); a group sends nothing again and leaves nothing out.
+    func testAHistoryPageLeavesOutWhatIsSentAgainAsAReSend() {
+        func row(_ id: Int64, _ direction: String, _ at: String) -> PersistedMessage {
+            PersistedMessage(messageId: id, direction: direction, text: "m\(id)", attachments: [], createdAt: at)
+        }
+        let signedAt = ChatRepository.parseDsTimestampMs("2026-11-26T10:50:00Z")!
+        let rows = [
+            row(1, "outgoing", "2026-11-26T10:00:00Z"),
+            row(2, "incoming", "2026-11-26T10:55:00Z"),
+            row(3, "outgoing", "2026-11-26T10:55:00Z"),
+        ]
+        let page = HistoryReturnRules.withoutResent(rows, isOneToOne: true, resetSignedAtMs: signedAt)
+        XCTAssertEqual(page.map(\.messageId), [1, 2])
+        XCTAssertEqual(HistoryReturnRules.withoutResent(rows, isOneToOne: false, resetSignedAtMs: signedAt), rows)
+        XCTAssertEqual(HistoryReturnRules.withoutResent(rows, isOneToOne: true, resetSignedAtMs: nil), rows)
+    }
+
+    /// D4 — the founder holds the ownership back until the history was
+    /// served, at most ``HistoryServedStore/waitMs``.
+    func testTheOwnershipHandOverWaitsForTheHistoryBounded() {
+        let store = HistoryServedStore(defaults: defaults)
+        XCTAssertFalse(store.transferDue(successorGroupIdB64: "S", accountIdB64: account, nowMs: 1_000),
+                       "the first ask starts the wait")
+        XCTAssertFalse(store.transferDue(successorGroupIdB64: "S", accountIdB64: account, nowMs: 2_000))
+        XCTAssertTrue(store.transferDue(
+            successorGroupIdB64: "S", accountIdB64: account, nowMs: 1_000 + HistoryServedStore.waitMs))
+        XCTAssertFalse(store.transferDue(successorGroupIdB64: "T", accountIdB64: account, nowMs: 5_000))
+        store.markServed(successorGroupIdB64: "T", accountIdB64: account, nowMs: 6_000)
+        XCTAssertTrue(store.transferDue(successorGroupIdB64: "T", accountIdB64: account, nowMs: 6_001))
+        XCTAssertFalse(HistoryServedStore.transferDue(
+            HistoryServedStore.Entry(firstHeldMs: 10_000, served: false), nowMs: 9_000),
+            "a clock that went back reads as just held back")
+        store.clear(accountIdB64: account)
+        XCTAssertTrue(store.read(accountIdB64: account).isEmpty)
+    }
+
+    /// D1 — a subscriber is told no owner: the owner return goes to the
+    /// key that signed its invitation; a publishing device never uses it.
+    func testTheOwnerReturnTargetOfASubscriberIsItsInviter() {
+        let inviter = Data(repeating: 0x51, count: 32)
+        let owner = Data(repeating: 0x52, count: 32)
+        var extras = ChannelExtras()
+        XCTAssertNil(ChannelReturnRules.ownerKeyB64(extras: extras, ownRole: .subscriber))
+        extras.inviterAccountKey = inviter
+        XCTAssertEqual(ChannelReturnRules.ownerKeyB64(extras: extras, ownRole: .subscriber), base64Encode(inviter))
+        XCTAssertNil(ChannelReturnRules.ownerKeyB64(extras: extras, ownRole: .publisher))
+        extras.ownerAccountKey = owner
+        XCTAssertEqual(ChannelReturnRules.ownerKeyB64(extras: extras, ownRole: .subscriber), base64Encode(owner))
+        XCTAssertEqual(ChannelReturnRules.ownerKeyB64(extras: extras, ownRole: .publisher), base64Encode(owner))
+        // A subscriber channel with the inviter as owner plans an owner
+        // return when that key reset and its card is listed.
+        let card = ReturnCard(identityPkB64: base64Encode(inviter), subscriberPkB64: "c3Vi")
+        let planned = ChannelReturnRules.returnsFor(
+            channels: [ReturnChannel(
+                idHex: "ab", ownRole: .subscriber, cards: [card],
+                ownerKeyB64: ChannelReturnRules.ownerKeyB64(
+                    extras: { var e = ChannelExtras(); e.inviterAccountKey = inviter; return e }(),
+                    ownRole: .subscriber),
+                publisherKeysB64: [])],
+            superseded: [base64Encode(inviter): "acct-anya"], ownKeysB64: [])
+        XCTAssertEqual(planned.map(\.role), [.owner])
+    }
 }

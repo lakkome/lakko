@@ -32,6 +32,9 @@ public object ResetReturnStorage {
         me.lakko.app.chat.HistoryReturnStore.KEY_PREFIX,
         me.lakko.app.channels.RecoveredChannelsStore.KEY_PREFIX,
         me.lakko.app.profile.CarriedProfileStore.KEY_PREFIX,
+        me.lakko.app.profile.CarriedProfileStore.NAME_KEY_PREFIX,
+        me.lakko.app.chat.DrawnResendStore.KEY_PREFIX,
+        me.lakko.app.chat.HistoryServedStore.KEY_PREFIX,
     )
 
     /** Every prefix of the encrypted file. */

@@ -90,6 +90,7 @@ public object ChannelReturnRuntime {
         mutex.withLock {
             val account = state.boundAccount ?: return
             step("recovery keys") { registerOwedRecoveryKeys(context, state, client, account, sessionToken) }
+            step("own cards") { keepPublishingCardsCurrent(context, state, client) }
             step("held returns") { runHeldReturns(context, state, client, account, sessionToken) }
             if (contacts != null) step("send returns") { sendReturns(context, state, client, account, contacts, ownKeysB64) }
             step("recovered channels") { settleRecovered(context, state, account) }
@@ -179,6 +180,33 @@ public object ChannelReturnRuntime {
                 Log.i(TAG, "a channel recovery key was not registered yet: ${e.javaClass.simpleName}")
             } finally {
                 key.close()
+            }
+        }
+    }
+
+    /**
+     * Live walk 2026-11-26, D1 - the owner's and every publisher's own member
+     * card, app-wide: an owner return is planned from the owner's card, so a
+     * channel whose owner never opened it after the account's reader key was
+     * registered had none and never came back after the owner's reset. Each
+     * channel this device publishes ([channelsOwingPublishingCard]) uploads
+     * its card under the account's reader key ([ChannelMemberCards.refreshPublisherCard],
+     * the "Members can find me" rule applied there); an unchanged card is
+     * not uploaded again ([cardUploadDue]).
+     */
+    private suspend fun keepPublishingCardsCurrent(context: Context, state: ChannelsUiState, client: ChannelsClient) {
+        val due = channelsOwingPublishingCard(
+            channels = state.channels.value.map { it.id },
+            publishesHere = state::publishesHere,
+            removed = RemovedChannels::isRemoved,
+        )
+        for (idHex in due) {
+            try {
+                ChannelMemberCards.refreshPublisherCard(context, state, client, idHex)
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (e: Throwable) {
+                Log.i(TAG, "a publishing device's card was not uploaded yet: ${e.javaClass.simpleName}")
             }
         }
     }

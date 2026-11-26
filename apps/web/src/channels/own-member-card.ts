@@ -33,6 +33,9 @@ export interface OwnCardSource {
   readonly seed: () => Uint8Array | undefined;
   /** `false` while the view is not in a state to upload (still subscribing). */
   readonly enabled: () => boolean;
+  /** Whether a card refused as `unknown-subscriber` registers the key and
+   *  tries again (`ownCardPlan`); default `true`. */
+  readonly reRegister?: () => boolean;
 }
 
 function accountIdBytes(b64: string): Uint8Array | null {
@@ -88,6 +91,7 @@ export function useOwnMemberCard(source: OwnCardSource): void {
         void (async (): Promise<void> => {
           const outcome = await ensureOwnMemberCard(input);
           if (outcome !== "not-registered" || !alive) return;
+          if (source.reRegister !== undefined && !source.reRegister()) return;
           try {
             await subscribe(channelIdHex, bytesToHex(keys.public));
           } catch {

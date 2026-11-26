@@ -347,6 +347,24 @@ describe("a group whose owner reset (R.7 case 3)", () => {
     expect(w.log.length).toBe(before);
   });
 
+  it("ADR-0101 walk D4: a founder that was a plain member holds the hand-back until the history was served", async () => {
+    const w = world("group");
+    // The founder was a plain member of the old group (the walk: A owned,
+    // B was a member); only the owner, who reset, held a role.
+    const old = w.facts.get(OLD)!;
+    w.facts.set(OLD, { ...old, adminKeysB64: [] });
+    let due = false;
+    const p = { ...port(w), ownershipTransferDue: () => due };
+    expect(await continueConversation(p, OLD)).toBe("claimed");
+    w.cursor = 40;
+    expect(await continueConversation(p, OLD)).toBe("built");
+    expect(w.log).toContain("name");
+    expect(w.log.some((l) => l.startsWith("transfer:"))).toBe(false);
+    due = true;
+    expect(await continueConversation(p, OLD)).toBe("built");
+    expect(w.log.at(-1)).toBe("transfer:anna-new:member");
+  });
+
   it("keeps adding a member it could not reach (the completeness re-check)", async () => {
     const w = world("group");
     w.unreachable.add(CAROL);

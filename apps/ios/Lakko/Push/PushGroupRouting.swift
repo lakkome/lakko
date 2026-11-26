@@ -1353,7 +1353,7 @@ public final class PushGroupRouting {
     /// ``SecretAuthority/unreadable`` so the classifier fails closed. A
     /// `senderLeaf` that is not in the current roster resolves to `nil`
     /// (⇒ rejected on a change), not to `.unreadable`.
-    public static func resolveSenderAuthority(
+    public nonisolated static func resolveSenderAuthority(
         group: Group,
         senderLeaf: UInt32?
     ) -> (authority: SecretAuthority, senderKey: Data?) {

@@ -687,15 +687,17 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       <ContactListPane
         filter={filter}
         onFilter={setFilter}
-        people={(listedKeysB64, anyListRow) => (
+        people={(listedKeysB64) => (
           // `docs/ux/who-can-find-me.md` section 6.1 - the same field as in
-          // Chats; here it matches only people.
+          // Chats; here it matches only people. "Nothing found" shows when
+          // nothing stands in the list, also for an account with no contacts
+          // at all (ADR-0101 walk 2026-11-26, D7: the line was withheld then,
+          // and a search for a person who cannot be found left a blank pane).
           <PeopleSearch
             scope="contacts"
             query={filter}
             groupPeopleKeys={groupPeopleKeys}
             listedB64={listedKeysB64}
-            noMatchLine={() => (anyListRow() ? t("search.nothing_found") : null)}
           />
         )}
         onAdd={(mode) => {

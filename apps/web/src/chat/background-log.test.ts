@@ -388,6 +388,14 @@ describe("the history floor (docs/ux/second-device.md section 2)", () => {
     expect(slot.syncedThroughMessageId).toBe("4");
   });
 
+  it("ADR-0101 walk D3: a history row a held re-send names is not filed a second time", () => {
+    const resent: PersistedMessage = { ...msg(90, "incoming", "b"), resendOf: { groupIdB64: "b2xk", messageId: "41" } };
+    const stored: PersistedGroup = { cursor: "90", messages: [resent] };
+    const { slot, added } = fileHistoryRows(stored, [msg(41, "incoming", "b"), msg(42, "incoming", "c")], 42n);
+    expect(added).toBe(1);
+    expect(slot.messages.map((m) => m.messageId)).toEqual(["42", "90"]);
+  });
+
   it("creates the slot of a group this device has no log for", () => {
     const { slot } = fileHistoryRows(undefined, [msg(2)], 2n);
     expect(slot).toEqual({ cursor: "0", messages: [msg(2)], syncedThroughMessageId: "2" });

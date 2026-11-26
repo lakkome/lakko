@@ -171,7 +171,8 @@ enum ChannelReturnRuntime {
             let ownRole: ReturnChannel.OwnRole = publishing
                 ? (ChannelPublisherLoops.rotates(channelId: idHex, channels: channels) ? .owner : .publisher)
                 : .subscriber
-            let ownerKeyB64 = channels.extras(idHex).ownerAccountKey.flatMap { $0.count == 32 ? base64Encode($0) : nil }
+            let ownerKeyB64 = ChannelReturnRules.ownerKeyB64(
+                extras: channels.extras(idHex), ownRole: ownRole)
             // A subscriber only ever sends an owner return.
             if ownRole == .subscriber, ownerKeyB64.map({ live[$0] == nil }) ?? true { continue }
             guard let cards = try? await openCards(channelId: idHex, channels: channels) else { continue }
@@ -408,6 +409,7 @@ enum ChannelReturnRuntime {
     /// does (``ChannelConversationModel/subscribe()``), without a screen.
     static func subscribe(facts: ChannelLinkFacts, channels: ChannelsUiState, client: ChannelsClient) async -> Bool {
         let idHex = facts.channelIdHex
+        channels.noteInviter(facts)
         if !channels.channels.contains(where: { $0.id == idHex }) {
             channels.addChannel(ChannelHandle(
                 id: idHex, localName: facts.name, localDescription: facts.description,

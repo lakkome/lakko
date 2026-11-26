@@ -4,7 +4,10 @@
 package me.lakko.app.ui.channels
 
 import me.lakko.app.l10n.en
+import me.lakko.app.calls.ContactInviteOutcome
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -23,5 +26,15 @@ class ChannelInvitePickerTitleTest {
     @Test
     fun `the subscriber picker is titled Invite people`() {
         assertEquals("Invite people", en(channelInvitePickerTitleKey(publisher = false)))
+    }
+
+    // Section 14.1 (live walk 2026-11-26, D6): a sent invitation closes the
+    // picker, so a second tap cannot send the same person a second card.
+    @Test
+    fun `a sent invitation closes the picker, every other outcome keeps it open`() {
+        assertTrue(channelInviteClosesAfter(ContactInviteOutcome.SENT))
+        assertFalse(channelInviteClosesAfter(ContactInviteOutcome.REQUEST_SENT))
+        assertFalse(channelInviteClosesAfter(ContactInviteOutcome.CANNOT_MESSAGE))
+        assertFalse(channelInviteClosesAfter(ContactInviteOutcome.FAILED))
     }
 }

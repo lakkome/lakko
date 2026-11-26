@@ -756,6 +756,14 @@ public final class ChatClient {
             resolveDevice: { AuthorIdentity.resolveDevice(group: group, leafIndex: $0) },
             conversationIdHex: (try? group.groupId()).map(DsClient.pseudonymHex)
         )
+        // D4 — a group name's authority is read now, at the epoch it was
+        // sealed at (see ``IncomingChatEvent/groupName(messageId:name:updatedAtMs:senderLeaf:createdAt:atReceipt:)``).
+        if case .groupName(let id, let name, let stamp, let leaf, let created, nil) = event {
+            let resolved = PushGroupRouting.resolveSenderAuthority(group: group, senderLeaf: leaf)
+            return .groupName(
+                messageId: id, name: name, updatedAtMs: stamp, senderLeaf: leaf, createdAt: created,
+                atReceipt: SenderAuthorityAtReceipt(authority: resolved.authority, senderKey: resolved.senderKey))
+        }
         // ADR-0092 section 3.4 — ring version 0 of an anonymous poll is the
         // roster at the epoch the poll was sealed at, which is NOW (the line
         // after the apply). Checked against the signed `ring0_hash`.
@@ -1692,12 +1700,20 @@ public enum IncomingChatEvent: Equatable {
     /// `senderLeaf` is the MLS-authenticated author, resolved against the
     /// roster + the ADR-0022 role table at receipt; `nil` means unattributable,
     /// so only a byte-identical re-send is accepted.
+    ///
+    /// `atReceipt` (live walk 2026-11-26, D4): the role table and the
+    /// sender's key read on the line after the apply, the epoch the name was
+    /// sealed at. A later commit in the same poll batch (an ownership
+    /// transfer, a demotion) does not take back a name its sender was allowed
+    /// to set when it sent it. `nil` from a path with no live group (tests);
+    /// the receive side then reads the live group as before.
     case groupName(
         messageId: Int64,
         name: String,
         updatedAtMs: UInt64,
         senderLeaf: UInt32?,
-        createdAt: String
+        createdAt: String,
+        atReceipt: SenderAuthorityAtReceipt? = nil
     )
     /// ADR-0073 R.6 — a `group_closed` envelope: a successor CLAIM naming
     /// the group a conversation continues in. Never a timeline bubble and

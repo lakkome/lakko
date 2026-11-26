@@ -15,6 +15,7 @@ import {
   cardUploadDue,
   isStaleSubscriberKey,
   memberRowName,
+  ownCardPlan,
   sealEachSkippingInvalid,
 } from "./member-card-rules";
 
@@ -161,5 +162,51 @@ describe("sealEachSkippingInvalid", () => {
       { subscriberHex: "cc", value: "sealed-cc" },
     ]);
     expect(res.skipped).toEqual(["bb"]);
+  });
+});
+
+describe("ownCardPlan (ADR-0101 walk 2026-11-26, D1)", () => {
+  const base = {
+    publishing: false,
+    readerDevice: false,
+    reading: true,
+    readingKeyHex: "aa".repeat(32),
+    registerKeyHex: null,
+    registeredReaderKeyHex: null,
+  } as const;
+
+  it("a reading subscriber uploads under its own key and may register it", () => {
+    expect(ownCardPlan(base)).toEqual({ keySource: "reading-key", reRegister: true });
+  });
+
+  it("a subscriber not let in yet uploads nothing", () => {
+    expect(ownCardPlan({ ...base, reading: false })).toBeNull();
+    expect(ownCardPlan({ ...base, readingKeyHex: null })).toBeNull();
+  });
+
+  it("a reader device of the owner uploads under the register key it reads with, never registering it", () => {
+    expect(ownCardPlan({ ...base, readerDevice: true })).toEqual({ keySource: "reading-key", reRegister: false });
+  });
+
+  it("the owner's publishing device uploads under the registered register key", () => {
+    const key = "bb".repeat(32);
+    expect(
+      ownCardPlan({ ...base, publishing: true, readingKeyHex: null, registerKeyHex: key, registeredReaderKeyHex: key }),
+    ).toEqual({ keySource: "register-key", reRegister: false });
+  });
+
+  it("the publishing device waits until the service holds the register key", () => {
+    expect(
+      ownCardPlan({ ...base, publishing: true, registerKeyHex: "bb".repeat(32), registeredReaderKeyHex: null }),
+    ).toBeNull();
+    expect(
+      ownCardPlan({
+        ...base,
+        publishing: true,
+        registerKeyHex: "bb".repeat(32),
+        registeredReaderKeyHex: "cc".repeat(32),
+      }),
+    ).toBeNull();
+    expect(ownCardPlan({ ...base, publishing: true, registerKeyHex: null })).toBeNull();
   });
 });

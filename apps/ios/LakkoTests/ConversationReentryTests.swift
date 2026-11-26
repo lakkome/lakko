@@ -1011,4 +1011,27 @@ final class ConversationReentryTests: XCTestCase {
         XCTAssertTrue(store.save(look, accountIdB64: account))
         XCTAssertEqual(store.load(accountIdB64: account, groupIdHex: "aa")?.route, "mailbox")
     }
+
+    /// ADR-0101 section 9, live walk 2026-11-26 D2 — a history page row the
+    /// reset person wrote under the key the reset retired is drawn as their
+    /// own; a row of the other person stays received.
+    func testAHistoryRowUnderAFormerOwnKeyIsDrawnAsOwn() {
+        let current = Data(repeating: 0x41, count: 32)
+        let retired = Data(repeating: 0x42, count: 32)
+        let other = Data(repeating: 0x43, count: 32)
+        let row = PersistedMessage(messageId: 7, direction: "incoming", text: "a1", attachments: [],
+                                   createdAt: "2026-11-26T10:00:00Z")
+        let mine = HistoryBundleCodec.gapRow(
+            row, author: retired, ownKey: current, route: "history-return", formerOwnKeys: [retired])
+        XCTAssertEqual(mine.direction, "outgoing")
+        XCTAssertEqual(mine.authorKeyB64, base64Encode(retired))
+        let theirs = HistoryBundleCodec.gapRow(
+            row, author: other, ownKey: current, route: "history-return", formerOwnKeys: [retired])
+        XCTAssertEqual(theirs.direction, "incoming")
+        // Without the former keys (the rule before D2) the own row read as
+        // received.
+        XCTAssertEqual(
+            HistoryBundleCodec.gapRow(row, author: retired, ownKey: current, route: "history-return").direction,
+            "incoming")
+    }
 }

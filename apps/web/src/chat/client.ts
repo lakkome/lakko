@@ -546,6 +546,13 @@ export type IncomingChatEvent =
       /** The sender's ACCOUNT key resolved at receipt (C-68), the key the
        *  ADR-0022 role table names. `undefined` ⇒ unverifiable, dropped. */
       senderKey: MemberIdentity | undefined;
+      /** ADR-0101 walk 2026-11-26 (D4): the role table as it stood at
+       *  receipt, the epoch the name was sealed at. The verdict judges the
+       *  sender against THIS table, never the live one read after the whole
+       *  poll batch (a commit later in the same batch, such as an ownership
+       *  hand-over, must not take back a name its sender was entitled to
+       *  set). Absent when the receiving path held no group to read. */
+      atReceipt?: RoleTableAtReceipt;
       createdAt: string;
     }
   | {
@@ -2637,12 +2644,14 @@ export async function toEvent(
     {
       const sniff = sniffGroupName(await loadWasm(), bytes);
       if (sniff.kind !== "none") {
+        const atReceipt = roleTableAtReceipt(evidenceGroup);
         return {
           kind: "group-name",
           messageId,
           groupName: sniff.kind === "name" ? sniff.value : undefined,
           senderLeaf,
           senderKey,
+          ...(atReceipt === undefined ? {} : { atReceipt }),
           createdAt,
         };
       }
@@ -2896,6 +2905,33 @@ export function blockDropsEvent(
 export interface EvidenceGroup {
   readonly groupId: Uint8Array;
   deviceBindingAt(leaf: number): Uint8Array | undefined;
+  /** ADR-0022 - the role table now (at receipt); optional so a test double
+   *  without one still classifies. */
+  roleTableOwner?(): Uint8Array | undefined;
+  roleTableAdmins?(): Uint8Array;
+}
+
+/** ADR-0101 walk 2026-11-26 (D4): the ADR-0022 role table read at receipt. */
+export interface RoleTableAtReceipt {
+  readonly ownerKey: Uint8Array | undefined;
+  readonly adminKeys: readonly Uint8Array[];
+  /** The table could not be read: the verdict drops the name. */
+  readonly verifyFailed: boolean;
+}
+
+/** Read the role table NOW, for an event judged later (`undefined` when the
+ *  group offers no table reader). Never throws. */
+export function roleTableAtReceipt(group: EvidenceGroup | undefined): RoleTableAtReceipt | undefined {
+  if (group?.roleTableOwner === undefined || group.roleTableAdmins === undefined) return undefined;
+  try {
+    const ownerKey = group.roleTableOwner() ?? undefined;
+    const flat = group.roleTableAdmins();
+    const adminKeys: Uint8Array[] = [];
+    for (let i = 0; i + 32 <= flat.length; i += 32) adminKeys.push(flat.slice(i, i + 32));
+    return { ownerKey, adminKeys, verifyFailed: false };
+  } catch {
+    return { ownerKey: undefined, adminKeys: [], verifyFailed: true };
+  }
 }
 
 /**

@@ -192,3 +192,63 @@ export function unnamedCardRow(input: {
     named: isSelf,
   };
 }
+
+/** Where the own card's subscriber key comes from on this device. */
+export type OwnCardKeySource =
+  /** The key this device reads the channel with (a subscriber, or a reader
+   *  device of the owner or a publisher: the account's register key). */
+  | "reading-key"
+  /** The account's register key, which the publishing device registered at
+   *  the channels service as a reader (`account-reader-key.ts`). */
+  | "register-key";
+
+/** Whether and how this device uploads its own member card. */
+export interface OwnCardPlan {
+  readonly keySource: OwnCardKeySource;
+  /** A card the service refuses as `unknown-subscriber` registers the key
+   *  once and tries again: only for a subscriber's own key, whose
+   *  registration is an ordinary subscribe. The owner's and the publishers'
+   *  key is registered by the publishing device, never from here (a private
+   *  channel wants an invite proof for it). */
+  readonly reRegister: boolean;
+}
+
+/**
+ * ADR-0060 section 3, ADR-0101 section 7 (walk 2026-11-26, D1): every member
+ * uploads a member card, the owner and the publishers too. A channel comes
+ * back to an owner who reset only through the owner's card in the member
+ * list, so an owner that never uploads one never gets the channel back.
+ *
+ * | this device                              | reading | key held              | plan                       |
+ * |------------------------------------------|---------|-----------------------|----------------------------|
+ * | subscriber                               | yes     | its subscriber key    | reading-key, re-register   |
+ * | reader device of the owner / a publisher | yes     | the register key      | reading-key, no re-register|
+ * | publishing device (owner or publisher)   | -       | register key, and the | register-key, no re-register|
+ * |                                          |         | service holds it      |                            |
+ * | anything else                            |         |                       | none                       |
+ *
+ * The card's content follows the same "who can find me" rule for every role
+ * (`cardContent`, `ownCardShareable`). Pure.
+ */
+export function ownCardPlan(input: {
+  /** This device holds the channel's publishing state. */
+  readonly publishing: boolean;
+  /** The account owns or publishes in the channel, but this device only
+   *  reads it. */
+  readonly readerDevice: boolean;
+  /** This device reads the channel (it is let in). */
+  readonly reading: boolean;
+  /** Hex of the key this device reads with, or `null`. */
+  readonly readingKeyHex: string | null;
+  /** Hex of the account's register key for the channel, or `null`. */
+  readonly registerKeyHex: string | null;
+  /** Hex of the reader key the publishing device registered, or `null`. */
+  readonly registeredReaderKeyHex: string | null;
+}): OwnCardPlan | null {
+  if (input.publishing) {
+    if (input.registerKeyHex === null || input.registeredReaderKeyHex !== input.registerKeyHex) return null;
+    return { keySource: "register-key", reRegister: false };
+  }
+  if (!input.reading || input.readingKeyHex === null) return null;
+  return { keySource: "reading-key", reRegister: !input.readerDevice };
+}

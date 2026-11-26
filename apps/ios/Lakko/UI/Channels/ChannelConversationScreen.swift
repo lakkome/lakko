@@ -149,7 +149,15 @@ struct ChannelConversationScreen: View {
                 model.reduceMotion = reduceMotion
                 model.screenVisible = true
             }
-            .onDisappear { model.screenVisible = false }
+            .onDisappear {
+                model.screenVisible = false
+                // As in the chat (``ChatScreen``): a screen pushed over the
+                // channel (Channel info) takes the keyboard away, and SwiftUI
+                // gave the composer its focus back during the pop, so the
+                // keyboard rose without the composer above it. The field
+                // takes focus again on a tap.
+                composerFocused = false
+            }
             .onChange(of: scenePhase) { _, phase in
                 if phase != .active { model.endDeletedHolds() }
             }

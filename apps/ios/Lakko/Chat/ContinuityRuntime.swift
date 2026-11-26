@@ -134,11 +134,20 @@ public protocol ContinuityPort: AnyObject {
     /// conversation. Idempotent (records that it ran). Runs only after the
     /// successor was delivered.
     func carryProfile(oldGroupIdB64: String, successorGroupIdB64: String, accountIdB64: String) async throws
+    /// ADR-0101 section 9 (live walk 2026-11-26, D4): whether the founder may
+    /// hand the successor's ownership to the reset identity now. The reset
+    /// person accepts a history page only from an owner or an admin, and the
+    /// founder of an owned group's successor is often neither once it hands
+    /// the ownership over: the hand-over waits until the history was served
+    /// (``HistoryServedStore``), or for a bounded time.
+    func ownershipTransferDue(successorGroupIdB64: String) -> Bool
 }
 
 extension ContinuityPort {
     /// Nothing is carried by default (a port that holds no profiles).
     func carryProfile(oldGroupIdB64: String, successorGroupIdB64: String, accountIdB64: String) async throws {}
+    /// Due at once by default (a port that serves no history).
+    func ownershipTransferDue(successorGroupIdB64: String) -> Bool { true }
 }
 
 /// How step 4a ended.
@@ -394,7 +403,12 @@ public enum ContinuityRuntime {
         if ResetRepair.restoreOwnershipToResetIdentity(),
            old.ownerKeyB64 == unrepairableKeyB64,
            let newOwnerKeyB64,
-           after.rosterPersonKeysB64.contains(newOwnerKeyB64) {
+           after.rosterPersonKeysB64.contains(newOwnerKeyB64),
+           // D4 — the history goes first: its pages are accepted only from an
+           // owner or an admin, which a founder that stays no admin stops
+           // being here.
+           old.adminKeysB64.contains(own)
+            || port.ownershipTransferDue(successorGroupIdB64: successorGroupIdB64) {
             try await port.transferOwnership(
                 successorGroupIdB64: successorGroupIdB64, newOwnerKeyB64: newOwnerKeyB64,
                 stayAdmin: old.adminKeysB64.contains(own))

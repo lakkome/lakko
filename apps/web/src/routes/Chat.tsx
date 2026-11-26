@@ -262,6 +262,7 @@ import {
   type CarriedCopy,
 } from "../contacts/carried-copies";
 import { heldResendPredicate } from "../chat/resend-receive";
+import { resentOriginIds } from "../chat/resend-marker";
 import { unrepairableBy } from "../chat/successor-claim";
 import {
   encodeReadPosition,
@@ -2701,7 +2702,18 @@ function ChatView(props: {
   onMount(() => {
     const off = onGapHistoryFiled((groupIdB64, filed) => {
       if (groupIdB64 !== props.entry.groupIdB64 || filed.length === 0) return;
-      setRows(insertByMessageId(rows(), filed.map(persistedToTimelineRow), rowMessageId));
+      // ADR-0101 walk 2026-11-26 (D3): a history row whose message this chat
+      // already shows as a re-send is the same message; the filer skipped it.
+      const resent = resentOriginIds(
+        rows().flatMap((r) =>
+          r.kind === "incoming" && r.event.kind === "application" && r.event.resendOrigin !== undefined
+            ? [{ resendOf: { messageId: String(r.event.resendOrigin.messageId) } }]
+            : [],
+        ),
+      );
+      const fresh = filed.filter((m) => !resent.has(m.messageId));
+      if (fresh.length === 0) return;
+      setRows(insertByMessageId(rows(), fresh.map(persistedToTimelineRow), rowMessageId));
     });
     onCleanup(off);
   });
@@ -12012,6 +12024,11 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
         createdAt: m.createdAt,
         ...(reply === undefined ? {} : { reply }),
         ...(forward === undefined ? {} : { forward }),
+        // ADR-0101 walk 2026-11-26 (D3) — a re-send keeps where it was first
+        // sent, so a returned history's copy of it is not shown again.
+        ...(m.resendOf === undefined || !/^[0-9]+$/.test(m.resendOf.messageId)
+          ? {}
+          : { resendOrigin: { groupIdB64: m.resendOf.groupIdB64, messageId: Number(m.resendOf.messageId) } }),
         // ADR-0061 section 6 — a message from a newer Lakko stays one.
         ...(typeof m.unsupportedVersion === "number" ? { unsupportedVersion: m.unsupportedVersion } : {}),
         // ADR-0099 section 1 - the report evidence captured at receipt.

@@ -22,6 +22,7 @@ struct ChannelInvitePeopleScreen: View {
     var publisher = false
 
     @ObservedObject private var l10n = Localization.shared
+    @Environment(\.dismiss) private var dismiss
     @State private var selected: Set<Data> = []
     @State private var sending = false
     /// The account keys known to be in the channel (this account, the owner,
@@ -112,16 +113,21 @@ struct ChannelInvitePeopleScreen: View {
                     : l10n.t("channels.info.invite") + " (\(selected.count))") {
                     Task { await invite() }
                 }
-                .disabled(selected.isEmpty || sending)
+                .disabled(!InviteSendGate.canInvite(selected: selected, sending: sending))
             }
         }
     }
 
     private func invite() async {
+        // Live walk 2026-11-26, D6 — one Invite sends once: a second tap
+        // while it runs does nothing, and when it is done the screen goes
+        // back to Channel info (web does the same), where a failure is
+        // named.
+        guard InviteSendGate.canInvite(selected: selected, sending: sending) else { return }
         sending = true
-        defer { sending = false }
+        let picked = selected
         var failed: [String] = []
-        for entry in candidates where selected.contains(entry.request.fromPubkey) {
+        for entry in candidates where picked.contains(entry.request.fromPubkey) {
             var oneToOne = contacts.chatGroupIdHex(for: entry)
             if oneToOne == nil { oneToOne = await contacts.openOrStartChat(for: entry) }
             guard let groupIdHex = oneToOne else {
@@ -139,7 +145,9 @@ struct ChannelInvitePeopleScreen: View {
                 failed.append(entry.displayName ?? "")
             }
         }
+        selected = InviteSendGate.afterInvite(selected)
         onDone(failed)
+        dismiss()
     }
 
     /// A one-use publisher link for the person picked (UX 15.2).
@@ -227,4 +235,17 @@ struct ChannelLinkForm: Equatable {
         case .unlimited, .custom: return InviteCreateForm.unlimitedUsesWire
         }
     }
+}
+
+/// Live walk 2026-11-26, D6 — the `Invite` button of `Invite people` and
+/// `Add publisher`: one send per tap. Pure.
+enum InviteSendGate {
+    /// `Invite` is pressable with someone picked and no send running.
+    static func canInvite(selected: Set<Data>, sending: Bool) -> Bool {
+        !selected.isEmpty && !sending
+    }
+
+    /// The pick after a send: nobody, so the screen holds nothing a later
+    /// tap could send again (it closes).
+    static func afterInvite(_ selected: Set<Data>) -> Set<Data> { [] }
 }

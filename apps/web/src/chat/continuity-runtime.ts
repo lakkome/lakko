@@ -126,6 +126,10 @@ export interface ContinuityPort {
   recheckDue(successorGroupIdB64: string): boolean;
   /** Step 4d: set the successor's admin set (one role change). */
   setAdmins(successorGroupIdB64: string, adminKeysB64: readonly string[]): Promise<void>;
+  /** ADR-0101 walk 2026-11-26 (D4): whether a founder that was no admin
+   *  may hand the successor back now (the reset person's history was served,
+   *  or the wait ran out). Absent: at once. */
+  ownershipTransferDue?(successorGroupIdB64: string): boolean;
   /** Step 4e: propose the ownership transfer to the new identity, the
    *  founder staying an admin when `stayAdmin`. */
   transferOwnership(
@@ -403,7 +407,15 @@ async function build(
     restoreOwnershipToResetIdentity() &&
     old.ownerKeyB64 === unrepairableKeyB64 &&
     newOwnerKeyB64 !== null &&
-    after.rosterPersonKeysB64.includes(newOwnerKeyB64)
+    after.rosterPersonKeysB64.includes(newOwnerKeyB64) &&
+    // ADR-0101 walk 2026-11-26 (D4): the history goes first. A history page
+    // is taken only from an owner or an admin, and so is the carried name
+    // (by the receiver's live role table, read after the whole batch): a
+    // founder that was no admin and handed the group back at once was
+    // neither by the time the reset person read them. Such a founder holds
+    // the hand-over until the history was served, or a bounded time
+    // (`history-served.ts`; the same rule as iOS).
+    (old.adminKeysB64.includes(own) || (port.ownershipTransferDue?.(successorGroupIdB64) ?? true))
   ) {
     await port.transferOwnership(successorGroupIdB64, newOwnerKeyB64, old.adminKeysB64.includes(own));
   }

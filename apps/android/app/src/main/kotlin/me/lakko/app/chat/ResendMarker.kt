@@ -152,3 +152,116 @@ public fun heldRowIn(log: MessageLogPayload?, groupHex: String, messageId: Long)
     val direction = heldRowDirectionOf(row.direction) ?: return null
     return HeldRow(direction, row.authorKeyB64)
 }
+
+/*
+ * ADR-0101 section 9 with ADR-0073 R.7 case 1 (live walk 2026-11-26, D3) -
+ * a re-sent message and the history page's copy of the same message.
+ *
+ * The person back after a key reset holds no older segment, so [resendVerdict]
+ * always draws a re-sent message there. Its history then comes back through
+ * the returned conversation, filed into the SAME group under the original DS
+ * id (DS ids are unique across journals, so that id can name nothing else),
+ * and the message showed twice. The re-send's marker names exactly that id.
+ * So, in the group a message is RECEIVED in:
+ *
+ * - a re-send whose marker names a row this group already holds, by the same
+ *   author account as the sender, is not drawn ([resendDuplicatesHeldRow]);
+ * - a history row whose id a drawn re-send of the same author named is not
+ *   filed ([historyRowAlreadyResent]); the drawn re-sends are recorded
+ *   ([DrawnResendStore]) because the re-send usually arrives first.
+ *
+ * Authors are compared through `canonical` (a retired key names the person's
+ * current key), so a sender can only ever suppress its own earlier message.
+ */
+
+/** A re-sent message this device drew: the original DS id its marker named
+ *  and its sender's account key (canonical, standard base64). */
+public data class DrawnResend(val originMessageId: Long, val senderKeyB64: String)
+
+/**
+ * Whether a re-send ([marker], from [senderAuthor], canonical) duplicates a row
+ * the RECEIVING group already holds ([heldInReceived]: the row whose id the
+ * marker names there, or `null`). Pure.
+ */
+public fun resendDuplicatesHeldRow(
+    marker: ResendOrigin?,
+    heldInReceived: HeldRow?,
+    ownPersonKeyB64: String?,
+    senderAuthor: String?,
+    canonical: (String) -> String,
+): Boolean {
+    if (marker == null || marker.messageId <= 0 || heldInReceived == null || senderAuthor == null) return false
+    val held = heldRowAuthor(heldInReceived.direction, heldInReceived.authorKeyB64, ownPersonKeyB64, canonical) ?: return false
+    return held == senderAuthor
+}
+
+/**
+ * Whether a history row ([messageId], authored by [authorKeyB64]) is the
+ * original of a re-send this device already drew in the same group. Pure.
+ */
+public fun historyRowAlreadyResent(
+    messageId: Long,
+    authorKeyB64: String?,
+    drawn: Collection<DrawnResend>,
+    canonical: (String) -> String,
+): Boolean {
+    if (messageId <= 0 || authorKeyB64.isNullOrEmpty() || drawn.isEmpty()) return false
+    val author = canonical(authorKeyB64)
+    return drawn.any { it.originMessageId == messageId && canonical(it.senderKeyB64) == author }
+}
+
+/** The re-sends this device drew, per signed-in account and group (plain:
+ *  message ids and public keys). */
+public class DrawnResendStore(private val storage: me.lakko.app.auth.MarkerStorage) {
+    private val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+    private val serializer = kotlinx.serialization.builtins.MapSerializer(
+        kotlinx.serialization.serializer<String>(),
+        kotlinx.serialization.builtins.ListSerializer(kotlinx.serialization.serializer<String>()),
+    )
+    private val cache = java.util.concurrent.ConcurrentHashMap<String, Map<String, List<String>>>()
+
+    private fun load(account: String): Map<String, List<String>> =
+        cache.getOrPut(account) {
+            val raw = runCatching { storage.get(KEY_PREFIX + account) }.getOrNull()
+            raw?.let { runCatching { json.decodeFromString(serializer, it) }.getOrNull() } ?: emptyMap()
+        }
+
+    /** The re-sends drawn in [groupIdHex]. */
+    public fun drawn(account: String, groupIdHex: String): List<DrawnResend> =
+        load(account)[groupIdHex.lowercase()].orEmpty().mapNotNull { entry ->
+            val cut = entry.indexOf('|')
+            if (cut <= 0) return@mapNotNull null
+            val id = entry.substring(0, cut).toLongOrNull() ?: return@mapNotNull null
+            DrawnResend(id, entry.substring(cut + 1))
+        }
+
+    /** Record one (once). Never throws. */
+    public fun record(account: String, groupIdHex: String, resend: DrawnResend) {
+        if (resend.originMessageId <= 0 || resend.senderKeyB64.isEmpty()) return
+        val hex = groupIdHex.lowercase()
+        val entry = "${resend.originMessageId}|${resend.senderKeyB64}"
+        val held = load(account)
+        val rows = held[hex].orEmpty()
+        if (entry in rows) return
+        val next = held + (hex to (rows + entry).takeLast(MAX_PER_GROUP))
+        cache[account] = next
+        try {
+            me.lakko.app.account.AccountStoreGate.write(account) {
+                storage.set(KEY_PREFIX + account, json.encodeToString(serializer, next))
+            }
+        } catch (_: Throwable) {
+            // Kept in memory for this run: a history page filed after a restart
+            // may show the message twice, never lose it.
+        }
+    }
+
+    public companion object {
+        public const val KEY_PREFIX: String = "resend-drawn:"
+
+        /** How many are kept per group (chosen). */
+        public const val MAX_PER_GROUP: Int = 512
+
+        public fun onDevice(context: android.content.Context): DrawnResendStore =
+            DrawnResendStore(me.lakko.app.auth.ResetReturnStorage.plain(context))
+    }
+}

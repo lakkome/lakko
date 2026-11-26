@@ -42,7 +42,10 @@ import type { ForwardPickerRow } from "../chat/forward-picker";
 import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
 import { saveEdit, savedEntryKey, savedKeySet, saveRefusal, unsaveEdit } from "../chat/saved-messages";
 import { sendTextToConversation } from "../chat/send-text";
-import { channelIdFromHex } from "../channels/composer";
+import { bytesToHex, channelIdFromHex, subscriberKeysOfSecret } from "../channels/composer";
+import { ownCardPlan } from "../channels/member-card-rules";
+import { hexToBytesExact } from "../channels/channel-log-codec";
+import { channelSubscriptionOf } from "../channels/channel-subscription-register";
 import type { TimelinePost } from "../channels/channel-timeline";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { KeyedError } from "../l10n/keyed-error";
@@ -108,7 +111,7 @@ import { t } from "../l10n";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { PushedScreen } from "../ui/PushedScreen";
-import { channelsState } from "../state/channels-state";
+import { channelsActions, channelsState } from "../state/channels-state";
 import { loadWasm } from "../wasm";
 import { getDeviceKey } from "../auth/key-store";
 import { loadChannelPostLog } from "../feed/channel-post-log-store";
@@ -405,27 +408,65 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
     }),
   );
 
-  // ADR-0060 section 3: a subscriber keeps its member card current while the
+  // ADR-0060 section 3: a member keeps its member card current while the
   // channel is open: once it is let in and holds a seed (a private channel's
   // subscriber holds none until the owner's device lets it in), after a
   // rotation, a renamed profile or a changed setting. Base walk 2026-11-13:
   // no card was ever uploaded from web since channels became conversations.
+  // ADR-0101 walk 2026-11-26 (D1): the owner and the publishers upload one
+  // too, under the account's register key (`ownCardPlan`): an owner who reset
+  // gets the channel back only through its card in the member list.
   const newestHeldEpoch = createMemo((): number | undefined => {
     const held = channelsState.subscribedSeedsByChannel().get(id);
-    if (held === undefined || held.size === 0) return undefined;
-    return Math.max(...held.keys());
+    const own = canPublish() ? channelsState.keysByChannel().get(id)?.seedEpoch : undefined;
+    const fromHeld = held === undefined || held.size === 0 ? undefined : Math.max(...held.keys());
+    if (own === undefined) return fromHeld;
+    return fromHeld === undefined ? own : Math.max(own, fromHeld);
+  });
+  const seedOfEpoch = (epoch: number): Uint8Array | undefined => {
+    const keys = canPublish() ? channelsState.keysByChannel().get(id) : undefined;
+    if (keys !== undefined && keys.seedEpoch === epoch) return keys.seed;
+    return channelsState.subscribedSeedsByChannel().get(id)?.get(epoch);
+  };
+  const registerSecretHex = createMemo((): string | null => {
+    const reg = channelSubscriptionOf(id);
+    return reg?.subscribed === true && reg.subscriberSecret.length === 32 ? bytesToHex(reg.subscriberSecret) : null;
+  });
+  const [registerKeys] = createResource(
+    () => (canPublish() ? registerSecretHex() : null),
+    async (secretHex) => {
+      const secret = hexToBytesExact(secretHex, 32);
+      return secret === null ? null : subscriberKeysOfSecret(secret);
+    },
+  );
+  const ownCard = createMemo(() => {
+    const reading = channelsState.subscriberKeysByChannel().get(id);
+    const register = registerKeys.latest ?? undefined;
+    return ownCardPlan({
+      publishing: canPublish(),
+      readerDevice: readerRole() !== null,
+      reading: channelReadStateOf(id) === "reading",
+      readingKeyHex: reading === undefined ? null : bytesToHex(reading.public),
+      registerKeyHex: canPublish() && register !== undefined ? bytesToHex(register.public) : null,
+      registeredReaderKeyHex: channelsActions.accessOf(id).readerKeyRegisteredHex ?? null,
+    });
   });
   useOwnMemberCard({
     channelIdHex: () => id,
-    keys: () => channelsState.subscriberKeysByChannel().get(id),
+    keys: () => {
+      const plan = ownCard();
+      if (plan === null) return undefined;
+      return plan.keySource === "register-key"
+        ? (registerKeys.latest ?? undefined)
+        : channelsState.subscriberKeysByChannel().get(id);
+    },
     epoch: newestHeldEpoch,
     seed: () => {
       const epoch = newestHeldEpoch();
-      return epoch === undefined ? undefined : channelsState.subscribedSeedsByChannel().get(id)?.get(epoch);
+      return epoch === undefined ? undefined : seedOfEpoch(epoch);
     },
-    // A reader device of the owner or a publisher uploads no member card,
-    // as the publishing device does not (it may hold no registered key).
-    enabled: () => !canPublish() && readerRole() === null && channelReadStateOf(id) === "reading",
+    enabled: () => ownCard() !== null,
+    reRegister: () => ownCard()?.reRegister ?? false,
   });
 
   // Reactions in view, one batched read (ADR-0087 section 13a). The comment

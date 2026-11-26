@@ -82,6 +82,11 @@ public const val HISTORY_MAX_ASKS: Int = 6
  * | no        | yes            | yes                  | yes                | chat  | -              | yes     |
  * | no        | yes            | yes                  | yes                | group | owner or admin | yes     |
  * | no        | yes            | yes                  | yes                | group | member         | no      |
+ *
+ * The reset device accepts a page only from its own account, an owner or an
+ * admin, or the other person of a one-to-one (`gapHistorySignerAccepted`), so
+ * the founder of an owned group's successor holds the ownership hand-over back
+ * until it served the history ([HistoryServedStore], live walk 2026-11-26, D4).
  */
 public fun historyAnswerAllowed(
     fromSelf: Boolean,
@@ -196,5 +201,88 @@ public class HistoryReturnStore(private val storage: MarkerStorage) {
 
         public fun onDevice(context: Context): HistoryReturnStore =
             HistoryReturnStore(me.lakko.app.auth.ResetReturnStorage.plain(context))
+    }
+}
+
+/**
+ * ADR-0101 section 9 (live walk 2026-11-26, D4) — the founder of an owned
+ * group's successor serves the reset person's history before it hands them the
+ * ownership: a page is accepted only from an owner or an admin, which a founder
+ * that was no admin of the old group stops being at the hand-over. Per signed-in
+ * account: successor group id hex -> when the founder first held the hand-over
+ * back, and whether the history was served (an empty page, the requester's
+ * last, was posted). Mirror of iOS `HistoryServedStore` and web
+ * `chat/history-served.ts`.
+ */
+public class HistoryServedStore(private val storage: MarkerStorage) {
+    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+    private val serializer = MapSerializer(String.serializer(), Entry.serializer())
+
+    /** One successor's record. */
+    @Serializable
+    public data class Entry(val firstHeldMs: Long, val served: Boolean = false)
+
+    public fun read(account: String): Map<String, Entry> {
+        val raw = runCatching { storage.get(KEY_PREFIX + account) }.getOrNull() ?: return emptyMap()
+        return runCatching { json.decodeFromString(serializer, raw) }.getOrElse { emptyMap() }
+    }
+
+    private fun write(account: String, all: Map<String, Entry>) {
+        try {
+            me.lakko.app.account.AccountStoreGate.write(account) {
+                storage.set(KEY_PREFIX + account, json.encodeToString(serializer, all))
+            }
+        } catch (_: Throwable) {
+            // Read again next pass: the hand-over waits, never runs early.
+        }
+    }
+
+    /** Whether the hand-over of [successorGroupIdHex] is due; the first ask
+     *  starts the wait. */
+    public fun transferDue(account: String, successorGroupIdHex: String, nowMs: Long): Boolean {
+        val key = successorGroupIdHex.lowercase()
+        val all = read(account)
+        val entry = all[key]
+        if (entry == null) {
+            write(account, all + (key to Entry(firstHeldMs = nowMs)))
+            return false
+        }
+        return transferDue(entry, nowMs)
+    }
+
+    /** The history of [successorGroupIdHex] was served. */
+    public fun markServed(account: String, successorGroupIdHex: String, nowMs: Long) {
+        val key = successorGroupIdHex.lowercase()
+        val all = read(account)
+        val entry = all[key] ?: Entry(firstHeldMs = nowMs)
+        if (entry.served) return
+        write(account, all + (key to entry.copy(served = true)))
+    }
+
+    public companion object {
+        public const val KEY_PREFIX: String = "history-served:"
+
+        /** How long the hand-over waits for the history at most (chosen): the
+         *  reset person may never ask (an older client, or not online). */
+        public const val WAIT_MS: Long = 3L * 24 * 60 * 60 * 1000
+
+        /**
+         * | served | held back since      | due |
+         * |--------|----------------------|-----|
+         * | yes    | -                    | yes |
+         * | no     | never (now recorded) | no  |
+         * | no     | less than [WAIT_MS]  | no  |
+         * | no     | [WAIT_MS] or more    | yes |
+         *
+         * A clock that went back reads as just held back. Pure.
+         */
+        public fun transferDue(entry: Entry?, nowMs: Long): Boolean {
+            if (entry == null) return false
+            if (entry.served) return true
+            return nowMs >= entry.firstHeldMs && nowMs - entry.firstHeldMs >= WAIT_MS
+        }
+
+        public fun onDevice(context: Context): HistoryServedStore =
+            HistoryServedStore(me.lakko.app.auth.ResetReturnStorage.plain(context))
     }
 }

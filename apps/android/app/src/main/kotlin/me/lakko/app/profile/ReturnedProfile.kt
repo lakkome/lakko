@@ -101,12 +101,17 @@ public fun newestHeldEnvelope(keysB64: List<String>, heldEnvelopeOf: (keyB64: St
  * The successors the reset person's profile was already carried into, per
  * signed-in account (plain: group ids). At most 512 kept.
  */
-public class CarriedProfileStore(private val storage: MarkerStorage) {
+public class CarriedProfileStore(
+    private val storage: MarkerStorage,
+    /** The row prefix: the profile's ([KEY_PREFIX]) or, for the same record
+     *  kept for a group's name ([NAME_KEY_PREFIX]), the name's. */
+    private val prefix: String = KEY_PREFIX,
+) {
     private val json = Json { ignoreUnknownKeys = true }
     private val serializer = ListSerializer(String.serializer())
 
     private fun load(account: String): List<String> {
-        val raw = runCatching { storage.get(KEY_PREFIX + account) }.getOrNull() ?: return emptyList()
+        val raw = runCatching { storage.get(prefix + account) }.getOrNull() ?: return emptyList()
         return runCatching { json.decodeFromString(serializer, raw) }.getOrElse { emptyList() }
     }
 
@@ -120,7 +125,7 @@ public class CarriedProfileStore(private val storage: MarkerStorage) {
         if (successorGroupIdHex !in held) held += successorGroupIdHex
         try {
             me.lakko.app.account.AccountStoreGate.write(account) {
-                storage.set(KEY_PREFIX + account, json.encodeToString(serializer, held.takeLast(MAX)))
+                storage.set(prefix + account, json.encodeToString(serializer, held.takeLast(MAX)))
             }
         } catch (_: Throwable) {
             // Carried again: the receiver keeps only a strictly newer stamp.
@@ -129,10 +134,18 @@ public class CarriedProfileStore(private val storage: MarkerStorage) {
 
     public companion object {
         public const val KEY_PREFIX: String = "continuity-profile-carried:"
+
+        /** ADR-0101 (live walk 2026-11-26, D4) - the groups a successor's
+         *  name was posted into. */
+        public const val NAME_KEY_PREFIX: String = "continuity-name-carried:"
         private const val MAX: Int = 512
 
         public fun onDevice(context: Context): CarriedProfileStore =
             CarriedProfileStore(me.lakko.app.auth.ResetReturnStorage.plain(context))
+
+        /** The device's record of carried group names. */
+        public fun namesOnDevice(context: Context): CarriedProfileStore =
+            CarriedProfileStore(me.lakko.app.auth.ResetReturnStorage.plain(context), NAME_KEY_PREFIX)
     }
 }
 

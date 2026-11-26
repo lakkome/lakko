@@ -766,6 +766,15 @@ extension ChatRepository {
                         }
                     })
                 }))
+        // D3 (live walk 2026-11-26) — a re-send drawn here because this
+        // device holds no original (the person who reset): its origin is
+        // kept, so the original a history page brings later is not filed
+        // a second time.
+        if let accountIdB64 = currentAccountIdB64 {
+            ResendOriginLog().record(
+                ResendMarker.drawnOrigins(received, alreadyHeld: alreadyHeld),
+                groupIdHex: groupIdHex, accountIdB64: accountIdB64)
+        }
         return kept.filter { event in
             guard case .application(let messageId, _, _, let senderKey, _, _, _) = event else {
                 return true
@@ -1268,6 +1277,12 @@ final class RepositoryContinuityPort: ContinuityPort {
             // A pending role change refuses a second one; the next pass tries.
             NSLog("ADR-0073 continuity: an admin was not restored yet")
         }
+    }
+
+    func ownershipTransferDue(successorGroupIdB64: String) -> Bool {
+        guard let own = repository.currentAccountIdB64 else { return false }
+        return HistoryServedStore().transferDue(
+            successorGroupIdB64: successorGroupIdB64, accountIdB64: own, nowMs: ChatRepository.nowMs())
     }
 
     func transferOwnership(successorGroupIdB64: String, newOwnerKeyB64: String, stayAdmin: Bool) async throws {

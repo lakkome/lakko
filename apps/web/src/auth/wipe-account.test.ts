@@ -346,6 +346,8 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko:continuity-mailbox-cursor:${acct}`, "3");
   put(`lakko:history-return:${acct}`, JSON.stringify({ G: { before: "0", pages: 0, sentAtMs: 0, done: false } }));
   put(`lakko:continuity-profile-carried:${acct}`, JSON.stringify(["S"]));
+  put(`lakko:continuity-name-carried:${acct}`, JSON.stringify(["S"]));
+  put(`lakko:history-served:${acct}`, JSON.stringify({ S: { firstHeldMs: 1, served: false } }));
   put(`lakko:channel-recovered:${acct}`, JSON.stringify({ c: { throughSeq: 4 } }));
   put(`lakko.channels.orphaned-by-reset.v1.${acct}`, JSON.stringify(["ch1"]));
   put(`lakko.channels.orphan-removed.v1.${acct}`, JSON.stringify(["ch2"]));
@@ -772,6 +774,8 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko:history-return:": "account",
   "lakko:channel-recovered:": "account",
   "lakko:continuity-profile-carried:": "account",
+  "lakko:continuity-name-carried:": "account",
+  "lakko:history-served:": "account",
   "lakko.channels.orphaned-by-reset.v1": "account",
   "lakko.channels.claimed-handles.v1.": "account",
   "lakko.groups.claimed-handles.v1.": "account",

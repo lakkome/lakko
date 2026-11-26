@@ -253,6 +253,8 @@ public enum HistoryBundleCodec {
         accountIdB64: String,
         ownKey: Data? = nil,
         route: String? = nil,
+        formerOwnKeys: Set<Data> = [],
+        skip: ((_ messageId: Int64, _ author: Data?) -> Bool)? = nil,
         store: MessageLogStore = MessageLogStore(),
         cards: ChannelInviteCardStore = .shared,
         callIndex: CallHistoryBacking = SealedCallHistoryBacking()
@@ -260,7 +262,7 @@ public enum HistoryBundleCodec {
         let summary = gapSummary(opened)
         let applied = applyOpened(
             opened, accountIdB64: accountIdB64, store: store, cards: cards, callIndex: callIndex,
-            gap: GapContext(ownKey: ownKey, route: route))
+            gap: GapContext(ownKey: ownKey, route: route, formerOwnKeys: formerOwnKeys, skip: skip))
         return GapApplied(applied: applied, complete: summary.complete, earliestMs: summary.earliestMs)
     }
 
@@ -283,6 +285,11 @@ public enum HistoryBundleCodec {
     struct GapContext {
         let ownKey: Data?
         let route: String?
+        /// Earlier account keys of this account (D2).
+        var formerOwnKeys: Set<Data> = []
+        /// A row to leave out, by its DS id and author (D3: the original of a
+        /// re-send this device already shows).
+        var skip: ((_ messageId: Int64, _ author: Data?) -> Bool)? = nil
     }
 
     private static func applyOpened(
@@ -305,13 +312,16 @@ public enum HistoryBundleCodec {
             let hex = Self.bytesToHex(g.groupId)
             for opened in g.messages.compactMap({ Self.decodeOpenedPlaceholder($0.payloadBytes) }) {
                 if Self.isBookkeepingSystemRow(opened.message) { continue }
+                if let skip = gap?.skip, skip(opened.message.messageId, opened.authorKey) { continue }
                 var bundled = opened.message
                 if let gap, let call = CallTranscriptRow.parse(bundled.text), bundled.direction == "system" {
                     guard let mine = Self.gapCallRow(call, route: gap.route) else { continue }
                     bundled = Self.withText(bundled, mine.marker)
                 }
                 let row = gap.map {
-                    Self.gapRow(bundled, author: opened.authorKey, ownKey: $0.ownKey, route: $0.route)
+                    Self.gapRow(
+                        bundled, author: opened.authorKey, ownKey: $0.ownKey, route: $0.route,
+                        formerOwnKeys: $0.formerOwnKeys)
                 } ?? Self.pairingRow(bundled, author: opened.authorKey)
                 decoded[hex, default: []].append(row)
                 // ADR-0087 section 14 — the card goes where this client keeps
@@ -668,15 +678,22 @@ public enum HistoryBundleCodec {
     /// the conversation, incoming otherwise. Without one: the old route rule
     /// (``ConversationReentryRules/bundleDirection(route:senderDirection:)``).
     /// A system row stays one.
-    static func gapRow(_ m: PersistedMessage, author: Data?, ownKey: Data?, route: String?) -> PersistedMessage {
+    ///
+    /// `formerOwnKeys` (ADR-0101 section 9, live walk 2026-11-26, D2): the
+    /// account keys this account held before (the key a reset retired, the
+    /// predecessors of a rotation). A row the history page carries under one
+    /// of them was written by this person and is drawn as their own.
+    static func gapRow(
+        _ m: PersistedMessage, author: Data?, ownKey: Data?, route: String?, formerOwnKeys: Set<Data> = []
+    ) -> PersistedMessage {
         guard m.direction != "system" else { return m }
         guard let author else {
             return reauthored(
                 m, authorKeyB64: m.authorKeyB64,
                 direction: ConversationReentryRules.bundleDirection(route: route, senderDirection: m.direction))
         }
-        let direction = (ownKey.map { $0 == author } ?? false) ? "outgoing" : "incoming"
-        return reauthored(m, authorKeyB64: base64Encode(author), direction: direction)
+        let own = (ownKey.map { $0 == author } ?? false) || formerOwnKeys.contains(author)
+        return reauthored(m, authorKeyB64: base64Encode(author), direction: own ? "outgoing" : "incoming")
     }
 
     /// A pairing bundle row (the same account): an incoming row takes the

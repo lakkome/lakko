@@ -33,6 +33,9 @@
   cases and amends invariant #6's acceptance side and
   [ADR-0016](0016-identity-supersession-transport.md).
 - **Date:** 2026-10-03
+- **Amended 2026-11-26 (maintainer; designed, not built):** a reset needs
+  the password and a second factor (authenticator, mailed code or passkey);
+  see "Amended 2026-11-26" below.
 - **Amended by [ADR-0078](0078-servers-cannot-link-accounts.md) phase 6 (2026-10-16):**
   the key-reset attestation is version 2, 145 bytes, without
   `device_group_journal_id` (auth would otherwise have to learn the
@@ -2373,6 +2376,133 @@ succeed.
 Seen live: on the iPhone, the waiting state ended by itself and the new
 words appeared. Not seen: the countdown on Android or web, the web
 superseded state after the fix.
+
+## Amended 2026-11-26: a reset needs the password and a second factor
+
+Maintainer decision, 2026-11-26. Designed, not built. UX:
+`identity-recovery.md` 15.1b (the reset) and 19.1a to 19.1c (every account
+has a factor); plan: ADR-0101 "Plan amended 2026-11-26". Where this section
+and the earlier ones differ, this one holds.
+
+**Why.** Since [ADR-0101](0101-reaching-a-reset-account.md) a reset brings
+the account's chats, groups, channels, profile and recent history back from
+contacts' devices, and its owned channels from a list the password opens.
+Whoever resets therefore becomes the account toward everyone and gets its
+past. The password alone must not be enough.
+
+**The rule.** `POST /account/keys/reset/{start,finish}` require the password,
+proven as before (a password sign-in within the fresh-auth grant's ten
+minutes), **and** one second factor the account has:
+
+- a code from its confirmed authenticator (TOTP);
+- a code mailed to its recovery email;
+- an assertion by one of its passkeys. A passkey that carries no keys counts;
+  the reset deletes it afterwards as before.
+
+The recovery phrase is not a factor: its holder restores the keys and has
+nothing to reset. This reverses two statements of the 2026-10-04 amendment
+and of `services/auth/src/key_reset.rs` ("Why not TOTP as well", "No passkey
+action grant"); the cost they named is now accepted: a person whose only
+factor was on the phone they lost cannot reset (UX 19.10).
+
+**A passkey sign-in no longer stands in for the password on this route.**
+The `k1` fresh-auth grant gains the method it was minted by, as a field of
+its signed text (flag day, nothing deployed for users):
+`k1.<account_id>.<key_generation>.<method>.<expires_at_ms>.<tag>`, `method`
+`p` for `/login/finish` and `/signup/finish`, `w` for
+`/webauthn/auth/finish`. Delete account, add a device and add a passkey
+accept either method, as before. The reset factor routes below accept only
+`p`.
+
+**The reset factor grant.** A new credential of `lakko-auth-token`:
+
+```text
+f1.<account_id_b64url>.<key_generation>.<factor>.<expires_at_ms>.<tag_b64url>
+```
+
+`factor` is `t` (authenticator), `e` (email) or `w` (passkey); the tag is
+HMAC-SHA256 under `BLAKE3-derive-key("lakko/key-reset-factor-grant/v1",
+session secret)`, so it is refused everywhere else by its prefix and its
+key. Lifetime `LAKKO_RESET_FACTOR_GRANT_TTL_SECS`, default 600 (chosen, not
+measured). No row. Minted only by:
+
+| Route (bearer) | Body | Check |
+|---|---|---|
+| `POST /account/keys/reset/factor/totp` | `{fresh_grant, code}` | `totp::check_code` (consumes the matched step); charged to a new `Scope::ResetFactor` per account, default 5 per 15 minutes (chosen, the `TotpRecover` budget) before the check |
+| `POST /account/keys/reset/factor/email/start` | `{fresh_grant, handle, address, lang?}` | the 19.3 shape: always `{challenge_id, resend_after_secs, expires_in_secs}`; a letter only when the pair matches the stored `email_key`, a decoy challenge otherwise; a new challenge purpose (`reset`) beside enrol and recover; the existing letter scopes |
+| `POST /account/keys/reset/factor/email/finish` | `{fresh_grant, challenge_id, code}` | five tries per code; `Scope::EmailVerify` |
+| `POST /account/keys/reset/factor/passkey` | `{fresh_grant}` | consumes an ADR-0014 action grant for a new action domain `lakko/action/reset-keys/v1` over the account id, obtained through the existing `/auth/action/{start,finish}` |
+
+Each first requires a fresh-auth grant of method `p` for the bearer's
+account at its current generation (`403 fresh-auth-required` otherwise,
+checked before anything is charged), then answers `{reset_grant,
+reset_grant_expires_at_ms}` or one `401 {"error":"factor-refused"}` (a wrong
+code, a decoy or spent challenge, no such factor on the account; the client
+offers only the factors the account has), or `429` with
+`retry_after_secs`. The mail-protected case: the email factor does not open
+the email vault; the client offers the mailed-code restore of ADR-0075
+section 7 beside it (UX 15.1b).
+
+**The grant opens one more route (settled 2026-11-26, maintainer).**
+`POST /account/owned-channels-secret {reset_grant}` (bearer) answers the
+account's server half `S` of the owned-channels password lock
+([ADR-0101](0101-reaching-a-reset-account.md) section 7) and does not spend
+the grant, so the resetting device fetches `S` and then resets. `S` is
+otherwise released only in the `/signup/finish` answer; a password or passkey
+sign-in alone never yields it.
+
+**The reset routes.** `start` and `finish` take `reset_grant` in place of
+`fresh_grant`, checked first as the fresh-auth grant was: present,
+well-formed, tagged by this server, unexpired, for the bearer's account, at
+its current generation; otherwise `403 {"error":"reset-factor-required"}`,
+nothing charged, nothing changed. `finish` compares the generation under the
+row lock as before, so the reset spends the grant. A fresh-auth grant alone
+is refused.
+
+**Adding a factor needs the fresh-auth grant.** `POST /totp/enroll/start`
+and `/finish` now take `fresh_grant` (either method) and run
+`require_fresh_grant` first: a bare session must not plant a factor that a
+person knowing the password then uses to reset. The email enrol and the
+passkey registration already require it. The `409` refusal of a second
+authenticator stays.
+
+**The last factor stays.** `DELETE /recovery-email`, `DELETE
+/webauthn/credentials/{id}` and a `PUT /auth/login-handle` that would drop
+the recovery email without moving it are refused `409
+{"error":"last-factor"}` when the account would be left with no confirmed
+authenticator, no recovery email and no passkey. The reset itself is exempt
+(it deletes the passkeys); the client then asks for a factor before the app
+(UX 19.1c). Recall (ADR-0074), which clears the authenticator and the
+passkeys, is exempt for the same reason.
+
+**The authenticator may be the only factor** (maintainer, 2026-11-26).
+The server accepts an account whose only factor is a confirmed
+authenticator; the clients then warn that losing the app loses the account
+unless a phrase is saved (UX `identity-recovery.md` 19.1a, 19.1c).
+
+**The authenticator is always available.** `services/auth` refuses to start
+without `LAKKO_TOTP_ENC_KEY`, so the sign-up step always has the
+authenticator row (ADR-0075, amended 2026-11-26). The `503` arm of the
+`/totp/*` routes stays for a misconfiguration that cannot start.
+
+**Unchanged.** `/totp/recover` stays an ACCESS factor and mints no grant;
+`/recovery-email/recover/*` as ADR-0075 states; recall is the defence
+against a hostile reset, as before.
+
+**Residual (G-46, narrowed).** A session and the password no longer reset
+the keys; a session, the password and one factor do. A reset factor grant
+lifted from a device's memory with the session and the password grant is as
+good as the factor for its ten minutes.
+
+**Tests owed** (gated on `LAKKO_AUTH_TEST_DATABASE_URL`): the reset refused
+with a fresh-auth grant alone, with a passkey-method grant plus a factor
+grant obtained earlier, with a factor grant of another account or
+generation; each factor route's refusals and its limiter, no letter for a
+mismatched address; a factor route refused with a passkey-method grant; the
+TOTP enrolment refused without a fresh-auth grant; the last-factor refusals
+on the three routes, and none after a reset or a recall; startup refused
+without the authenticator key; `lakko-auth-token` round trips and the cross-
+kind refusals for `f1` and the method field, in `token_verify`.
 
 ## What the build changed / found (phase 1, 2026-10-03)
 

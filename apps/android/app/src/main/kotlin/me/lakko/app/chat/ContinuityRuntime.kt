@@ -147,6 +147,15 @@ public interface ContinuityPort {
      *  messages sent in the old one-to-one after the reset was signed.
      *  Idempotent (records that it ran). */
     public suspend fun resendOwnMessages(oldGroupIdHex: String, successorGroupIdHex: String, accountIdB64: String)
+
+    /** ADR-0101 section 9 (live walk 2026-11-26, D4): whether the founder may
+     *  hand the successor's ownership to the reset identity now. The reset
+     *  person accepts a history page only from an owner or an admin, and the
+     *  founder of an owned group's successor is neither once it hands the
+     *  ownership over (when it was no admin of the old group): the hand-over
+     *  waits until the history was served ([HistoryServedStore]), or for a
+     *  bounded time. Due at once by default (a port that serves no history). */
+    public fun ownershipTransferDue(successorGroupIdHex: String): Boolean = true
 }
 
 /** How step 4a ended. */
@@ -409,7 +418,10 @@ private suspend fun buildSuccessor(
     if (restoreOwnershipToResetIdentity() &&
         old.ownerKeyB64 == unrepairableKeyB64 &&
         newOwnerKeyB64 != null &&
-        newOwnerKeyB64 in after.rosterPersonKeysB64
+        newOwnerKeyB64 in after.rosterPersonKeysB64 &&
+        // D4 — the history goes first: its pages are accepted only from an
+        // owner or an admin, which a founder that stays no admin stops being.
+        (own in old.adminKeysB64 || port.ownershipTransferDue(successorGroupIdHex))
     ) {
         port.transferOwnership(successorGroupIdHex, newOwnerKeyB64, own in old.adminKeysB64)
     }
@@ -471,3 +483,27 @@ public fun groupHexOfB64(b64: String): String =
     } catch (_: IllegalArgumentException) {
         ""
     }
+
+/** What [ContinuityPort.carryName] does with the old group's name. */
+public enum class SuccessorNameStep {
+    /** The successor holds no name, or an older one: store it there, then post it. */
+    SAVE_AND_SEND,
+
+    /** The successor holds this very name (an earlier pass stored it): post it. */
+    SEND,
+
+    /** The successor holds a later rename: nothing is carried. */
+    DONE,
+}
+
+/**
+ * Live walk 2026-11-26, D4 - the old group's name ([oldStampMs]) against
+ * what the successor holds ([successorStampMs], `null` for no name). Every
+ * step that sends repeats until the post went out once (the caller's marker).
+ * Pure.
+ */
+public fun successorNameStep(oldStampMs: ULong, successorStampMs: ULong?): SuccessorNameStep = when {
+    successorStampMs == null || successorStampMs < oldStampMs -> SuccessorNameStep.SAVE_AND_SEND
+    successorStampMs == oldStampMs -> SuccessorNameStep.SEND
+    else -> SuccessorNameStep.DONE
+}

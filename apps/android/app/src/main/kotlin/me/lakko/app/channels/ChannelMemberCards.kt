@@ -528,8 +528,11 @@ public object ChannelMemberCards {
         val epoch = sealing.epoch
         val seed = sealing.seed
         // A private channel registers a key only with an admission ticket
-        // (the service refuses one without), so a publisher there registers
-        // none: no request that can only be refused.
+        // (the service refuses one without), so this path registers none
+        // there: the card goes under the account's reader key, which the
+        // channel reconcile registers with a ticket of its own
+        // ([ChannelAccountReaderKey]); until it landed the upload answers
+        // NOT_REGISTERED and the next pass tries again.
         val channel = state.channels.value.firstOrNull { it.id == channelIdHex }
         val mayRegister = publisherMayRegisterCardKey(channelVisibilityOf(context, state.boundAccount, channel, channelIdHex))
         if (state.subscriberKeysByChannel.value[channelIdHex] == null) {

@@ -72,6 +72,18 @@ extension ChatRepository {
         Task { @MainActor [weak self] in await self?.requestHistoryIfDue(groupIdHex: groupIdHex) }
     }
 
+    /// The account keys this account held before its current one (D2): the
+    /// key its reset retired and the predecessors of a rotation.
+    func formerOwnAccountKeys(accountIdB64: String) -> Set<Data> {
+        var keys = Set(OwnAccountKeys.predecessorPublicKeys(accountIdB64: accountIdB64))
+        if let previous = ResetContinuityStore().read(accountIdB64: accountIdB64)?.previousKeyB64
+            .flatMap({ base64Decode($0) }), previous.count == 32 {
+            keys.insert(previous)
+        }
+        if let current = ReachCenter.shared.ownAccountKey { keys.remove(current) }
+        return keys
+    }
+
     /// The DS ids a structured bundle's rows carry (8-byte big-endian).
     nonisolated static func historyMessageIds(_ bundle: StructuredHistoryBundle) -> [Int64] {
         bundle.groups.flatMap(\.messages).compactMap { m in
@@ -108,8 +120,14 @@ extension ChatRepository {
               let sourceHex = source,
               let rendezvous = try? gapHistoryRendezvous(gapKey: request.gapKeyPub) else { return }
         persistMessageLogBestEffort()
-        let rows = (messageLogStore.getLog(accountIdB64: accountIdB64)?.groups[sourceHex]?.messages ?? [])
+        let held = (messageLogStore.getLog(accountIdB64: accountIdB64)?.groups[sourceHex]?.messages ?? [])
             .filter { !HistoryBundleCodec.isBookkeepingSystemRow($0) }
+        // D3 (live walk 2026-11-26) — this account's messages sent into the
+        // old one-to-one after the reset are sent again into the successor
+        // with the re-send marker (ADR-0073 R.7 case 1): they are not in the
+        // history page as well.
+        let rows = HistoryReturnRules.withoutResent(
+            held, isOneToOne: facts.kind == .chat, resetSignedAtMs: pin?.resetSignedAtMs)
         let page = HistoryReturnRules.pageRows(
             rows, messageId: { $0.messageId }, before: request.beforeMessageId, pageSize: HistoryReturnRules.pageSize)
         do {
@@ -120,6 +138,13 @@ extension ChatRepository {
             try await WelcomeCourier.publishHistoryBundle(
                 rendezvousPseudonym: rendezvous, sealedBytes: sealed, ds: dsClient)
             NSLog("ADR-0101: a history page was sent: rows=\(page.count)")
+            // D4 — the empty page ends the requester: the history is served,
+            // and a founder holding the ownership back may hand it over.
+            if page.isEmpty {
+                HistoryServedStore().markServed(
+                    successorGroupIdB64: base64Encode(successor.groupId), accountIdB64: accountIdB64,
+                    nowMs: Self.nowMs())
+            }
         } catch {
             NSLog("ADR-0101: a history page was not sent: \(ErrorLogTag.of(error))")
         }

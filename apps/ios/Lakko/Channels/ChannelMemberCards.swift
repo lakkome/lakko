@@ -19,15 +19,65 @@ enum ChannelMemberCards {
     /// the class key rotates on a channel left or a setting change).
     private static var uploaded: Set<String> = []
 
-    /// Upload this subscriber's card for the newest epoch it holds a seed for,
-    /// when not done yet. Best effort.
+    /// The subscriber key and the seed this device's own card goes up with.
+    struct CardSource: Equatable {
+        let keys: ChannelSubscriberKeys
+        let epoch: UInt32
+        let seed: Data
+    }
+
+    /// Which key and seed this device uploads the account's own card with,
+    /// or `nil` (live walk 2026-11-26, D1: the owner's and the publishers'
+    /// cards are uploaded too, or no subscriber device can tell the owner
+    /// reset and no owner return is ever planned, ADR-0101 section 7). Pure.
+    ///
+    /// | this device                       | key                                         | seed                         |
+    /// |-----------------------------------|---------------------------------------------|------------------------------|
+    /// | publishes the channel             | its subscriber key, else the account's       | the composer's (its epoch)   |
+    /// |                                   | register key once registered at the service |                              |
+    /// | a subscriber, or a reader device  | its subscriber key                          | the newest seed it holds     |
+    /// | of the owner or a publisher       |                                             |                              |
+    ///
+    /// A register key the service does not list yet gets no card (the card
+    /// route needs a subscriber row); the next pass uploads once it does.
+    static func cardSource(
+        publishing: Bool, subscriberKeys: ChannelSubscriberKeys?, registerKeys: ChannelSubscriberKeys?,
+        readerKeyRegisteredHex: String?, composerSeed: (epoch: UInt32, seed: Data)?,
+        heldSeeds: [UInt32: Data]
+    ) -> CardSource? {
+        if publishing {
+            guard let composerSeed else { return nil }
+            if let subscriberKeys {
+                return CardSource(keys: subscriberKeys, epoch: composerSeed.epoch, seed: composerSeed.seed)
+            }
+            guard let registerKeys,
+                  readerKeyRegisteredHex?.lowercased()
+                    == ChannelsComposer.bytesToHex(registerKeys.publicKey).lowercased()
+            else { return nil }
+            return CardSource(keys: registerKeys, epoch: composerSeed.epoch, seed: composerSeed.seed)
+        }
+        guard let subscriberKeys, let newest = heldSeeds.max(by: { $0.key < $1.key }) else { return nil }
+        return CardSource(keys: subscriberKeys, epoch: newest.key, seed: newest.value)
+    }
+
+    /// Upload this account's card for the newest epoch this device holds a
+    /// seed for, when not done yet: a subscriber's, and (D1) the owner's and
+    /// each publisher's, under the same "Members can find me" rule (the
+    /// `channel` grant only where the setting lets this channel's members
+    /// find the person). Best effort.
     static func uploadIfNeeded(state: ChannelsUiState, channelId: String) async {
-        // A reader device of the owner or a publisher holds the account's
-        // register key, which is no subscriber row at the service.
-        guard state.readerDeviceRole(channelId) == nil,
-              let keys = state.subscriberKeysByChannel[channelId],
-              let (epoch, seed) = state.subscribedSeeds(channelId: channelId).max(by: { $0.key < $1.key }),
+        let publishing = state.keysByChannel[channelId] != nil
+        guard let source = cardSource(
+                publishing: publishing,
+                subscriberKeys: state.subscriberKeysByChannel[channelId],
+                registerKeys: publishing ? ChannelSubscriptionSync.shared.registeredKeys(channelId: channelId) : nil,
+                readerKeyRegisteredHex: state.extras(channelId).readerKeyRegisteredHex,
+                composerSeed: publishing ? state.composerSeed(channelId: channelId) : nil,
+                heldSeeds: state.subscribedSeeds(channelId: channelId)),
               let channelIdBytes = CoPublisher.hexToData(channelId) else { return }
+        let keys = source.keys
+        let epoch = source.epoch
+        let seed = source.seed
         let grant = ReachCenter.shared.channelGrant(channelId: channelIdBytes)
         // The profile's stamp is part of the key: a new name or photo is a new
         // card for the same epoch (ADR-0084).

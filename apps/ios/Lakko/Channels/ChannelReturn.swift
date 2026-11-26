@@ -214,6 +214,20 @@ public enum ChannelReturnRules {
         return ProfileReturn.newestHeldEnvelope(keysB64: keys, heldEnvelopeOf: heldEnvelopeOf)
     }
 
+    /// The owner key a channel's returns are planned with (D1, live walk
+    /// 2026-11-26). The account key recorded for the channel's owner (a
+    /// co-publisher's register carries it); on a subscriber's device, which
+    /// is told no owner, the key that signed the invitation it subscribed
+    /// with: an owner return to a key that turns out not to be the owner's
+    /// fails the reset device's recovery-key check and is dropped there.
+    /// Never the inviter for a device that publishes: its owner key decides
+    /// which cards get publisher and subscriber returns. Pure.
+    static func ownerKeyB64(extras: ChannelExtras, ownRole: ReturnChannel.OwnRole) -> String? {
+        if let key = extras.ownerAccountKey, key.count == 32 { return base64Encode(key) }
+        guard ownRole == .subscriber, let inviter = extras.inviterAccountKey, inviter.count == 32 else { return nil }
+        return base64Encode(inviter)
+    }
+
     /// The owned channels still owing a recovery-key registration. Pure.
     public static func owingRecoveryKey(owned: [String], registered: Set<String>) -> [String] {
         owned.filter { !registered.contains($0) }.sorted()
@@ -328,5 +342,19 @@ public struct ChannelRecoveryRegisteredStore {
 
     public func clear(accountIdB64: String) {
         defaults.removeObject(forKey: Self.prefix + accountIdB64)
+    }
+}
+
+@MainActor
+extension ChannelsUiState {
+    /// ADR-0101 section 7 (D1) — keep who signed the invitation a subscribe
+    /// is made with, for the owner return; a key already recorded stays
+    /// (the first invitation subscribed with), and a channel this device
+    /// publishes records nothing.
+    func noteInviter(_ facts: ChannelLinkFacts) {
+        guard let key = facts.inviterAccountKey, key.count == 32,
+              keysByChannel[facts.channelIdHex] == nil,
+              extras(facts.channelIdHex).inviterAccountKey == nil else { return }
+        updateExtras(facts.channelIdHex) { $0.inviterAccountKey = key }
     }
 }

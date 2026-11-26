@@ -4,7 +4,7 @@
 /** ADR-0073 R.7 case 1 - `resend-marker.ts`. */
 import { describe, expect, it } from "vitest";
 
-import { heldRowAuthor, resendVerdict } from "./resend-marker";
+import { heldRowAuthor, resendVerdict, resentOriginIds } from "./resend-marker";
 
 const marker = { groupIdB64: "old-group", messageId: 7 };
 const match = {
@@ -36,6 +36,39 @@ describe("resendVerdict", () => {
   });
   it("no marker is an ordinary message", () => {
     expect(resendVerdict({ ...match, marker: undefined })).toBe("draw");
+  });
+});
+
+describe("resendVerdict, a returned history's copy (ADR-0101 walk D3)", () => {
+  const reset = {
+    marker,
+    receivedConversation: "successor",
+    originConversation: null,
+    originIsOlderSegment: false,
+    heldAuthor: null,
+    senderAuthor: "peer",
+  };
+  it("the receiving group holds the copy by the same author: not drawn twice", () => {
+    expect(resendVerdict({ ...reset, heldInReceivedAuthor: "peer" })).toBe("skip");
+  });
+  it("a copy by somebody else, or none, hides nothing", () => {
+    expect(resendVerdict({ ...reset, heldInReceivedAuthor: "other" })).toBe("draw");
+    expect(resendVerdict({ ...reset, heldInReceivedAuthor: null })).toBe("draw");
+    expect(resendVerdict(reset)).toBe("draw");
+    expect(resendVerdict({ ...reset, heldInReceivedAuthor: "peer", senderAuthor: null })).toBe("draw");
+  });
+});
+
+describe("resentOriginIds (ADR-0101 walk D3)", () => {
+  it("collects the original ids the held re-sends name", () => {
+    expect(
+      resentOriginIds([
+        { resendOf: { messageId: "41" } },
+        {},
+        { resendOf: { messageId: "x" } },
+        { resendOf: { messageId: "7" } },
+      ]),
+    ).toEqual(new Set(["41", "7"]));
   });
 });
 

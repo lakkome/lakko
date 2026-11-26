@@ -208,6 +208,14 @@ export interface PersistedMessage {
    */
   readonly forward?: PersistedForward;
   /**
+   * ADR-0073 R.7 / ADR-0101 walk 2026-11-26 (D3) - this received message is
+   * a RE-SEND: the sender put it again into a successor conversation after a
+   * key reset, and it names where it was first sent. Kept so a copy of the
+   * original that arrives later in the returned history is not shown a
+   * second time. Absent on any other row.
+   */
+  readonly resendOf?: { readonly groupIdB64: string; readonly messageId: string };
+  /**
    * ADR-0061 section 6 — the message came from a newer Lakko in a wire
    * version this build cannot read; the value is that version. `text` is
    * empty and there are no attachments; the bubble and the chat list preview

@@ -871,8 +871,23 @@ extension ChatRepository {
                 // Walk-3 rule W3-R3 — each row takes its author, and its
                 // direction from it, against this account's own key here.
                 let ownKey = AuthorIdentity.own(group: live.group).flatMap { Data(base64Encoded: $0) }
+                // ADR-0101 section 9 (D2, D3) — a page of the history asked
+                // for after a reset carries this person's rows under the key
+                // the reset retired (drawn as their own), and the originals
+                // of re-sends already drawn here (left out).
+                let drawn = ResendOriginLog().read(accountIdB64: accountIdB64)[groupIdHex] ?? []
+                let resolver = ReachCenter.shared.keyResolver
                 let filed = HistoryBundleCodec.applyOpenedGapBundle(
                     opened.bundle, accountIdB64: accountIdB64, ownKey: ownKey, route: look.route,
+                    formerOwnKeys: formerOwnAccountKeys(accountIdB64: accountIdB64),
+                    skip: drawn.isEmpty ? nil : { messageId, author in
+                        ResendMarker.historyRowAlreadyShown(
+                            messageId: messageId, authorKeyB64: author.map(base64Encode), drawn: drawn,
+                            canonical: { key in
+                                guard let bytes = base64Decode(key) else { return key }
+                                return base64Encode(resolver.current(of: bytes))
+                            })
+                    },
                     store: messageLogStore)
                 reentryGapLooks.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
                 // ADR-0101 section 9 — a page of the history asked for after

@@ -172,4 +172,44 @@ class ChannelReturnTest {
         store.mark("acct", "a")
         assertEquals(setOf("a", "b"), store.read("acct"))
     }
+
+    // Live walk 2026-11-26, D1 - the owner's and the publishers' own cards.
+
+    @Test
+    fun `every channel this device publishes owes its own card, owner and publisher alike`() {
+        val publishes = setOf("owned", "copublished")
+        val due = channelsOwingPublishingCard(
+            channels = listOf("owned", "read-only", "copublished", "owned"),
+            publishesHere = { it in publishes },
+            removed = { false },
+        )
+        assertEquals(listOf("owned", "copublished"), due)
+    }
+
+    @Test
+    fun `a removed channel owes no card, and a device that only reads owes none app-wide`() {
+        val due = channelsOwingPublishingCard(
+            channels = listOf("owned", "gone", "read-only"),
+            publishesHere = { it != "read-only" },
+            removed = { it == "gone" },
+        )
+        assertEquals(listOf("owned"), due)
+    }
+
+    @Test
+    fun `an owner card in the list plans an owner return on a subscriber device that knows the owner`() {
+        // The owner's card is what the return is planned from: with it, a
+        // subscriber device sends one; without it, none (the defect D1).
+        val owner = "T1dORVJfT0xEX0tFWQ=="
+        val withCard = ReturnChannel(
+            idHex = "c1",
+            ownRole = ReturnOwnRole.SUBSCRIBER,
+            cards = listOf(ReturnCard(owner, "c3ViLW93bmVy")),
+            ownerKeyB64 = owner,
+            publisherKeysB64 = emptyList(),
+        )
+        val planned = channelReturnsFor(listOf(withCard), mapOf(owner to "acct"), setOf("bWU="))
+        assertEquals(listOf(ChannelReturnRoleName.OWNER), planned.map { it.role })
+        assertTrue(channelReturnsFor(listOf(withCard.copy(cards = emptyList())), mapOf(owner to "acct"), emptySet()).isEmpty())
+    }
 }

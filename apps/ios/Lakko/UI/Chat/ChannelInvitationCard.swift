@@ -298,10 +298,14 @@ enum ChannelInviteCardFacts {
         guard let opened = try? openChannelInviteCard(card: card),
               let subscriber = opened.preview.subscriber,
               let channelId = opened.preview.channelId, channelId.count == 16 else { return nil }
+        // The issuer of the capability the card's link opened to (verified
+        // here as it is on the link page): the owner-return target (D1).
+        let issuer = try? GroupInviteCapability.decodeAndVerify(wire: opened.capabilityWire).issuerSignaturePubkey()
         return ChannelLinkFacts(
             channelIdHex: AttachmentBridge.hex(channelId), name: opened.preview.groupName ?? "",
             description: subscriber.description, access: subscriber.access,
-            avatar: ProfileAvatar(opened.preview.avatar))
+            avatar: ProfileAvatar(opened.preview.avatar),
+            inviterAccountKey: issuer)
     }
 }
 

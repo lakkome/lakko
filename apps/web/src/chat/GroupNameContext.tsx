@@ -45,7 +45,7 @@ import { loadWasm } from "../wasm";
 import { useChats, type ActiveGroup } from "./ChatContext";
 import { ownsGroup } from "./group-owner";
 import { notePublicRecordChanged } from "./handle-owed";
-import { ChatClient, isConversationBehind, type IncomingChatEvent } from "./client";
+import { ChatClient, isConversationBehind, roleTableAtReceipt, type IncomingChatEvent } from "./client";
 import { IdbGroupNameBackend } from "./group-name-idb";
 import {
   GroupSettingStore,
@@ -79,6 +79,7 @@ import {
 import { readIsActive } from "./membership-ended";
 import { conversationKindOf } from "./conversation-kind";
 import { durableSnapshotHook } from "./persist-hooks";
+import { markNameCarried, nameCarriedInto } from "./carried-name";
 import {
   groupNamesToStore,
   subscribeCarriedNames,
@@ -582,16 +583,14 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
           const readable = await opened;
           const stored = store.get(groupIdB64) ?? null;
 
-          let ownerKey: Uint8Array | undefined;
-          const adminKeys: Uint8Array[] = [];
-          let verifyFailed = false;
-          try {
-            ownerKey = entry.group.roleTableOwner() ?? undefined;
-            const flat = entry.group.roleTableAdmins();
-            for (let i = 0; i + 32 <= flat.length; i += 32) adminKeys.push(flat.slice(i, i + 32));
-          } catch {
-            verifyFailed = true;
-          }
+          // ADR-0101 walk 2026-11-26 (D4): the authority is the role table at
+          // receipt (the epoch the name was sealed at), as iOS judges it; the
+          // live table, read after the whole batch, only for an event that
+          // carries none.
+          const table = event.atReceipt ?? roleTableAtReceipt(entry.group);
+          const ownerKey = table?.ownerKey;
+          const adminKeys = [...(table?.adminKeys ?? [])];
+          const verifyFailed = table === undefined || table.verifyFailed;
           let senderKey: Uint8Array | undefined;
           if (event.senderKey !== undefined) {
             try {
@@ -667,11 +666,20 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
       if (held === undefined) return;
       await withRoutingRowLock(account, to.groupIdB64, async () => {
         const already = store.get(to.groupIdB64);
-        if (already !== undefined && already.updatedAtMs >= held.updatedAtMs) return;
+        // A newer name (a rename since) is the successor's own. The same
+        // stamp is this carry's own earlier store: it is sent again until a
+        // send went out (ADR-0101 walk 2026-11-26, D4: a failed first send
+        // stored the name and every later pass returned here, so the name
+        // never reached anyone).
+        if (already !== undefined && already.updatedAtMs > held.updatedAtMs) return;
+        if (already !== undefined && already.updatedAtMs === held.updatedAtMs && nameCarriedInto(account, to.groupIdB64)) {
+          return;
+        }
         const { envelope, value } = await compose(held.name, held.updatedAtMs);
         await store.set(account, to.groupIdB64, value);
         try {
           await send(to, envelope);
+          markNameCarried(account, to.groupIdB64);
         } catch (err) {
           // The store holds it; the growth re-send carries it.
           // eslint-disable-next-line no-console

@@ -132,14 +132,15 @@ final class GroupNameTests: XCTestCase {
 
     func testAGroupNameEnvelopeIsClassifiedWithItsSenderLeafNeverAsChat() throws {
         let bytes = try composeGroupNameEnvelope(groupName: FfiGroupName(name: "Trio", updatedAtMs: 42))
-        guard case .groupName(let messageId, let name, let stamp, let leaf, _) = classifyEvent(bytes) else {
+        guard case .groupName(let messageId, let name, let stamp, let leaf, _, let atReceipt) = classifyEvent(bytes) else {
             return XCTFail("a group-name envelope must classify as .groupName")
         }
         XCTAssertEqual(messageId, 9)
         XCTAssertEqual(name, "Trio")
         XCTAssertEqual(stamp, 42)
         XCTAssertEqual(leaf, 3, "the leaf rides onward for the role gate; it is never a resolved key here")
-        guard case .groupName(_, let cleared, _, .none, _) = classifyEvent(
+        XCTAssertNil(atReceipt, "a path with no live group reads no authority at receipt")
+        guard case .groupName(_, let cleared, _, .none, _, _) = classifyEvent(
             try composeGroupNameEnvelope(groupName: FfiGroupName(name: "", updatedAtMs: 43)), senderLeaf: nil)
         else { return XCTFail("the clear envelope is still an envelope, unattributable or not") }
         XCTAssertEqual(cleared, "")

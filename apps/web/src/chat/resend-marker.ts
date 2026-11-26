@@ -51,6 +51,15 @@ export type ResendVerdict =
  * | set    | yes                                                                     | yes                             | no                                 | `draw`  |
  * | set    | yes                                                                     | yes                             | yes                                | `skip`  |
  *
+ * ADR-0101 walk 2026-11-26 (D3): the person who reset gets the history of a
+ * returned conversation back from its contact, filed into the SUCCESSOR
+ * under the original DS ids (DS ids are global, so the successor never
+ * holds an id of the old group otherwise). A re-sent message whose named
+ * row the RECEIVING group already holds that way, by the same author, is
+ * the same message once more: `skip` (`heldInReceivedAuthor`). The reverse
+ * order is the filer's: a history row whose id a held re-send names is not
+ * filed ({@link resentOriginIds}).
+ *
  * `heldAuthor` and `senderAuthor` are the same kind of token for one
  * account (the caller resolves a key through its aliases first); `null`
  * means "not held" / "sender not attributable" and never matches.
@@ -70,8 +79,13 @@ export function resendVerdict(input: {
   readonly heldAuthor: string | null;
   /** The account of the MLS-authenticated sender of the received message. */
   readonly senderAuthor: string | null;
+  /** The author account of the row the marker names when the RECEIVING
+   *  group holds it (a returned history's copy), or `null`. */
+  readonly heldInReceivedAuthor?: string | null;
 }): ResendVerdict {
   if (input.marker === undefined) return "draw";
+  const copy = input.heldInReceivedAuthor ?? null;
+  if (copy !== null && input.senderAuthor !== null && copy === input.senderAuthor) return "skip";
   if (input.originConversation === null) return "draw";
   if (input.originConversation !== input.receivedConversation) return "draw";
   if (!input.originIsOlderSegment) return "draw";
@@ -99,4 +113,23 @@ export function heldRowAuthor(
   if (row.direction === "outgoing") return ownPersonKeyB64 === null ? null : canonical(ownPersonKeyB64);
   const key = row.authorKeyB64;
   return key === undefined || key === null || key.length === 0 ? null : canonical(key);
+}
+
+/** The slice of a stored row {@link resentOriginIds} reads. */
+export interface ResentRow {
+  readonly resendOf?: { readonly messageId: string };
+}
+
+/**
+ * ADR-0101 walk 2026-11-26 (D3) - the original DS ids the held re-sends of a
+ * slot name: a history row carrying one of them is the same message as a
+ * re-send already shown, and is not filed again. Pure.
+ */
+export function resentOriginIds(rows: readonly ResentRow[]): Set<string> {
+  const out = new Set<string>();
+  for (const r of rows) {
+    const id = r.resendOf?.messageId;
+    if (typeof id === "string" && /^[0-9]+$/.test(id)) out.add(id);
+  }
+  return out;
 }

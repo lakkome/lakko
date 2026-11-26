@@ -223,3 +223,29 @@ public val GROUP_NAME_LABEL: UiText = UiText("chat.group_name.label")
 public val GROUP_NAME_SAVE: UiText = UiText("common.save")
 public val GROUP_NAME_ONLY_ADMINS: UiText = UiText("chat.group_name.only_admins")
 public val GROUP_NAME_SEND_FAILED: UiText = UiText("chat.group_name.error.save")
+
+/**
+ * Live walk 2026-11-26, D4 — [group]'s role table as it stands now, for a
+ * receiver that calls this one line after a row applied (the epoch the row
+ * was sealed at). [GroupPushRouting.OwnerLookup.Unavailable] when it cannot be
+ * read (the gate then refuses). Must run on the provider critical path, as
+ * every read of an MLS group does.
+ */
+internal fun roleTableAtReceipt(group: uniffi.lakko_ffi_uniffi.Group): GroupPushRouting.OwnerLookup =
+    try {
+        val roles = group.groupRoles()
+        if (roles == null) GroupPushRouting.OwnerLookup.NoRoleTable else GroupPushRouting.OwnerLookup.Known(roles.owner, roles.admins)
+    } catch (_: Throwable) {
+        GroupPushRouting.OwnerLookup.Unavailable
+    }
+
+/** [event] with the role table read at receipt from [group] ([roleTableAtReceipt]). */
+internal fun groupNameAtReceipt(event: IncomingChatEvent.GroupName, group: uniffi.lakko_ffi_uniffi.Group): IncomingChatEvent.GroupName =
+    event.copy(ownerAtReceipt = roleTableAtReceipt(group))
+
+/** The authority the group-name gate judges a sender against: the one read at
+ *  receipt when the path read one, else the live one ([live]). Pure. */
+internal fun groupNameAuthority(
+    atReceipt: GroupPushRouting.OwnerLookup?,
+    live: () -> GroupPushRouting.OwnerLookup,
+): GroupPushRouting.OwnerLookup = atReceipt ?: live()

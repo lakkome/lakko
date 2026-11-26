@@ -106,6 +106,28 @@ public enum HistoryReturnRules {
         return HistoryRequestState(before: oldest!, pages: pages, sentAtMs: 0, asks: 0, done: false)
     }
 
+    /// The rows a history page may carry from the earlier one-to-one: every
+    /// row but the ones ``ResetRepair/messagesToResend(_:resetSignedAtMs:afterMessageId:)``
+    /// sends again into the successor (this account's own, after the reset
+    /// was signed), which the reset person receives as re-sends. A group
+    /// re-sends nothing, and with no reset time nothing is left out. Pure.
+    public static func withoutResent(
+        _ rows: [PersistedMessage], isOneToOne: Bool, resetSignedAtMs: Int64?
+    ) -> [PersistedMessage] {
+        guard isOneToOne, let resetSignedAtMs else { return rows }
+        let resent = Set(ResetRepair.messagesToResend(
+            rows.filter { $0.messageId > 0 }.map {
+                ResetRepair.OldSegmentMessage(
+                    messageId: $0.messageId,
+                    own: $0.direction == "outgoing",
+                    sentAtMs: ChatRepository.parseDsTimestampMs($0.createdAt),
+                    resendable: !$0.deleted && (!$0.text.isEmpty || !$0.attachments.isEmpty))
+            },
+            resetSignedAtMs: resetSignedAtMs))
+        guard !resent.isEmpty else { return rows }
+        return rows.filter { !resent.contains($0.messageId) }
+    }
+
     /// The rows of one history page: DS id below `before` (0: no bound),
     /// the newest `pageSize` of them, oldest first. Ids not above 0 are left
     /// out.
@@ -151,6 +173,82 @@ public struct HistoryReturnStore {
     public func noteReturned(groupIdB64: String, accountIdB64: String) {
         guard read(accountIdB64: accountIdB64)[groupIdB64] == nil else { return }
         write(.first, groupIdB64: groupIdB64, accountIdB64: accountIdB64)
+    }
+
+    public func clear(accountIdB64: String) {
+        defaults.removeObject(forKey: Self.prefix + accountIdB64)
+    }
+}
+
+/// ADR-0101 section 9 (live walk 2026-11-26, D4) — the founder of an owned
+/// group's successor serves the reset person's history before it hands them
+/// the ownership. Per account: successor group id (base64) -> when the
+/// founder first held the hand-over back, and whether the history was
+/// served (an empty page, the requester's last, was posted).
+public struct HistoryServedStore {
+    static let prefix = "lakko.history-served.v1."
+    /// How long the hand-over waits for the history at most (chosen): the
+    /// reset person may never ask (an older client, or not online).
+    public static let waitMs: Int64 = 3 * 24 * 60 * 60 * 1000
+
+    public struct Entry: Codable, Equatable, Sendable {
+        public var firstHeldMs: Int64
+        public var served: Bool
+    }
+
+    private let defaults: UserDefaults
+
+    public init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    public func read(accountIdB64: String) -> [String: Entry] {
+        guard let data = defaults.data(forKey: Self.prefix + accountIdB64) else { return [:] }
+        return (try? JSONDecoder().decode([String: Entry].self, from: data)) ?? [:]
+    }
+
+    private func write(_ all: [String: Entry], accountIdB64: String) {
+        guard let data = try? JSONEncoder().encode(all), let gate = AccountStoreGate.enter(accountIdB64) else {
+            return
+        }
+        defer { gate.leave() }
+        defaults.set(data, forKey: Self.prefix + accountIdB64)
+    }
+
+    /// | served | held back since       | due |
+    /// |--------|-----------------------|-----|
+    /// | yes    | -                     | yes |
+    /// | no     | never (now recorded)  | no  |
+    /// | no     | less than ``waitMs``  | no  |
+    /// | no     | ``waitMs`` or more    | yes |
+    ///
+    /// A clock that went back reads as just held back. Pure.
+    public static func transferDue(_ entry: Entry?, nowMs: Int64) -> Bool {
+        guard let entry else { return false }
+        if entry.served { return true }
+        return nowMs >= entry.firstHeldMs && nowMs - entry.firstHeldMs >= waitMs
+    }
+
+    /// Whether the hand-over of `successorGroupIdB64` is due; the first ask
+    /// starts the wait.
+    public func transferDue(successorGroupIdB64: String, accountIdB64: String, nowMs: Int64) -> Bool {
+        var all = read(accountIdB64: accountIdB64)
+        guard let entry = all[successorGroupIdB64] else {
+            all[successorGroupIdB64] = Entry(firstHeldMs: nowMs, served: false)
+            write(all, accountIdB64: accountIdB64)
+            return false
+        }
+        return Self.transferDue(entry, nowMs: nowMs)
+    }
+
+    /// The history of `successorGroupIdB64` was served.
+    public func markServed(successorGroupIdB64: String, accountIdB64: String, nowMs: Int64) {
+        var all = read(accountIdB64: accountIdB64)
+        var entry = all[successorGroupIdB64] ?? Entry(firstHeldMs: nowMs, served: false)
+        guard !entry.served else { return }
+        entry.served = true
+        all[successorGroupIdB64] = entry
+        write(all, accountIdB64: accountIdB64)
     }
 
     public func clear(accountIdB64: String) {

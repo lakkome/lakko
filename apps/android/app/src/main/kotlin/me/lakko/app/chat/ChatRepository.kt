@@ -7855,6 +7855,8 @@ public class ChatRepository(
         groupIdHex: String,
         senderKey: MemberIdentity?,
         incoming: uniffi.lakko_ffi_uniffi.FfiGroupName,
+        /** D4 — the role table read at receipt; `null`: the live one. */
+        ownerAtReceipt: me.lakko.app.push.GroupPushRouting.OwnerLookup? = null,
     ) {
         val accountIdB64 = currentAccountIdB64.get() ?: run {
             android.util.Log.i("ChatRepository", "ADR-0051 group name dropped: no session")
@@ -7872,7 +7874,9 @@ public class ChatRepository(
             android.util.Log.i("ChatRepository", "ADR-0062 group name dropped in a one-to-one")
             return
         }
-        val owner = roleTableOwner(group)
+        // Live walk 2026-11-26, D4 — the authority at the epoch the name was
+        // sealed at, not after the whole batch applied.
+        val owner = groupNameAuthority(ownerAtReceipt) { roleTableOwner(group) }
         val senderBytes = senderKey?.let {
             try {
                 java.util.Base64.getDecoder().decode(it)
@@ -10710,18 +10714,31 @@ public class ChatRepository(
         val receivedConversation = lineage.conversationOf(received)
         val receivedIndex = lineage.segmentIndexOf(received)
         val own = ownPersonKeyB64()
-        val superseded = supersededKeys()
-        val current = pinnedKeysByAccount(superseded.values.toSet())
         // A key through its aliases: a retired key names the person's
         // current key.
-        val canonical = { k: String -> superseded[k]?.let { current[it] } ?: k }
+        val canonical = resendCanonical()
+        val account = currentAccountIdB64.get()
+        fun heldOf(row: ChatMessage?): HeldRow? = when (row?.direction) {
+            null -> null
+            Direction.Outgoing -> HeldRow(HeldRowDirection.OUTGOING, row.authorKey)
+            Direction.Incoming -> HeldRow(HeldRowDirection.INCOMING, row.authorKey)
+            Direction.System -> HeldRow(HeldRowDirection.SYSTEM, row.authorKey)
+        }
         return { event ->
             val marker = event.resendOrigin
             try {
                 val originHex = marker?.let { groupHexOfB64(it.groupIdB64) }.orEmpty()
                 val slot = groups[originHex]
                 val row = slot?.snapshot()?.firstOrNull { marker != null && it.messageId == marker.messageId && it.messageId > 0 }
-                resendVerdict(
+                val senderAuthor = event.senderKey?.let(canonical)
+                // D3 (live walk 2026-11-26) — the history of a returned
+                // conversation is filed into the RECEIVING group under the
+                // original id: a re-send of a row it already holds is that row.
+                val inReceived = marker?.takeIf { it.messageId > 0 }?.let { m ->
+                    groups[received]?.snapshot()?.firstOrNull { it.messageId == m.messageId }
+                }
+                val duplicate = resendDuplicatesHeldRow(marker, heldOf(inReceived), own, senderAuthor, canonical)
+                val skip = duplicate || resendVerdict(
                     marker = marker,
                     receivedConversation = receivedConversation,
                     // A group this device holds no record for is not a
@@ -10739,8 +10756,14 @@ public class ChatRepository(
                         ownPersonKeyB64 = own,
                         canonical = canonical,
                     ),
-                    senderAuthor = event.senderKey?.let(canonical),
+                    senderAuthor = senderAuthor,
                 ) == ResendVerdict.SKIP
+                // D3 — a re-send drawn here is remembered, so the history
+                // page's copy of its original is not filed after it.
+                if (!skip && marker != null && senderAuthor != null && account != null) {
+                    resendOrigins.record(account, received, DrawnResend(marker.messageId, senderAuthor))
+                }
+                skip
             } catch (_: Throwable) {
                 false
             }
@@ -11277,22 +11300,40 @@ public class ChatRepository(
             val account = currentAccountIdB64.get() ?: return
             val identity = canonicalIdentity.get() ?: return
             val record = groups[successorGroupIdHex] ?: return
+            // Live walk 2026-11-26, D4: the name is posted into the successor
+            // until it went out once. Saving it here first and checking the
+            // store made a failed first send final (the person who reset is
+            // in the successor from its founding, so no growth re-send ever
+            // carried it).
+            val carried = me.lakko.app.profile.CarriedProfileStore.namesOnDevice(applicationContext)
+            if (carried.carriedInto(account, successorGroupIdHex)) return
             val stored = groupName(oldGroupIdHex) ?: return
             val already = groupName(successorGroupIdHex)
-            if (already != null && already.updatedAtMs >= stored.updatedAtMs) return
+            when (successorNameStep(stored.updatedAtMs, already?.updatedAtMs)) {
+                SuccessorNameStep.DONE -> {
+                    // A later rename reached the successor: nothing to carry.
+                    carried.markCarried(account, successorGroupIdHex)
+                    return
+                }
+                SuccessorNameStep.SAVE_AND_SEND -> {
+                    GroupNameStore.save(applicationContext, account, successorGroupIdHex, stored)
+                    publishThreadList()
+                }
+                SuccessorNameStep.SEND -> Unit
+            }
             // The ORIGINAL stamp, never a fresh clock read: a later rename in
             // either group out-ranks it (ADR-0051).
             val envelope = uniffi.lakko_ffi_uniffi.composeGroupNameEnvelope(
                 uniffi.lakko_ffi_uniffi.FfiGroupName(name = stored.name, updatedAtMs = stored.updatedAtMs),
             )
-            GroupNameStore.save(applicationContext, account, successorGroupIdHex, stored)
-            publishThreadList()
             try {
                 broadcastControlToGroup(identity = identity, groupIdHex = successorGroupIdHex, group = record.group, envelope = envelope)
+                    ?: return
+                carried.markCarried(account, successorGroupIdHex)
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
             } catch (cause: Throwable) {
-                // The store holds it; the growth re-send carries it.
+                // Posted again at the next pass.
                 android.util.Log.w("ChatRepository", "ADR-0073 continuity: name carry-over send failed", cause)
             }
         }
@@ -11340,6 +11381,12 @@ public class ChatRepository(
                 // A pending role change refuses a second one; the next pass.
                 android.util.Log.i("ChatRepository", "ADR-0073 continuity: an admin was not restored yet (${cause.javaClass.simpleName})")
             }
+        }
+
+        override fun ownershipTransferDue(successorGroupIdHex: String): Boolean {
+            val account = currentAccountIdB64.get() ?: return false
+            return HistoryServedStore.onDevice(applicationContext)
+                .transferDue(account, successorGroupIdHex, System.currentTimeMillis())
         }
 
         override suspend fun transferOwnership(successorGroupIdHex: String, newOwnerKeyB64: String, stayAdmin: Boolean) {
@@ -12155,11 +12202,11 @@ public class ChatRepository(
                     // ADR-0087 — inside the locked apply region (C-62 sub-invariant 5).
                     receiveGroupSettingBestEffort(record.group, groupIdHex, senderKey, kind, bytes)
                 },
-                groupNameSink = { senderKey, name ->
+                groupNameSink = { senderKey, name, ownerAtReceipt ->
                     // ADR-0051 — inside the poll's locked apply region, where
                     // the role table read and the store write are serialized
                     // per group (C-62 sub-invariant 5).
-                    receiveGroupName(record.group, groupIdHex, senderKey, name)
+                    receiveGroupName(record.group, groupIdHex, senderKey, name, ownerAtReceipt)
                 },
                 groupClosedSink = { messageId, senderKey, closed ->
                     // ADR-0073 R.6 — the same critical section as the group
@@ -17262,6 +17309,32 @@ public class ChatRepository(
     /** The requester's per-conversation paging state. */
     private val historyReturns: HistoryReturnStore by lazy { HistoryReturnStore.onDevice(applicationContext) }
 
+    /** D3 — the re-sends this device drew ([DrawnResendStore]). */
+    private val resendOrigins: DrawnResendStore by lazy { DrawnResendStore.onDevice(applicationContext) }
+
+    /** A key through its aliases: a retired key names the person's current
+     *  key (the canonical form [heldResendPredicate] compares authors in). */
+    private fun resendCanonical(): (String) -> String {
+        val superseded = supersededKeys()
+        val current = pinnedKeysByAccount(superseded.values.toSet())
+        return { k: String -> superseded[k]?.let { current[it] } ?: k }
+    }
+
+    /**
+     * D2 — every key that names this account as a history row's author: its
+     * key in the conversation ([conversationKey]), its person key, and the
+     * account key it had before an ADR-0101 key reset (the reset record keeps
+     * it for the window, when it could be established).
+     */
+    private fun historyOwnKeys(accountIdB64: String, conversationKey: String?): Set<String> {
+        val previous = try {
+            me.lakko.app.auth.ResetContinuityStore.onDevice(applicationContext).load(accountIdB64)?.previousKeyB64
+        } catch (_: Throwable) {
+            null
+        }
+        return setOfNotNull(conversationKey, ownPersonKeyB64(), previous)
+    }
+
     /**
      * ADR-0101 section 9 — a history request at receipt, inside the poll's
      * locked apply region: decoded here, answered off it (the answer reads the
@@ -17326,6 +17399,7 @@ public class ChatRepository(
             if (!allowed || earlierHex == null) return
             val ownKey = providerLock.sessionLock { ownIdentity(record.group) }
             persistMessageLogBestEffort()
+            var pageRows = -1
             val sealed = me.lakko.app.devices.HistoryBundleCodec.buildHistoryPage(
                 applicationContext,
                 accountIdB64,
@@ -17334,6 +17408,7 @@ public class ChatRepository(
                 beforeMessageId = request.beforeMessageId,
                 pageSize = HISTORY_PAGE_SIZE,
                 ownAuthorKeyB64 = ownKey,
+                onPage = { pageRows = it },
             ) { groupsIn, maxHlc ->
                 uniffi.lakko_ffi_uniffi.sealGapHistoryStructured(identity, request.gapKeyPub, record.groupId, groupsIn, maxHlc)
             } ?: return
@@ -17342,6 +17417,11 @@ public class ChatRepository(
                 sealedBytes = sealed,
             )
             android.util.Log.i(REENTRY_LOG_TAG, "ADR-0101: a history page was sent")
+            // D4 — the empty page ends the requester: the history is served,
+            // and a founder holding the ownership back may hand it over.
+            if (pageRows == 0) {
+                HistoryServedStore.onDevice(applicationContext).markServed(accountIdB64, groupIdHex, System.currentTimeMillis())
+            }
         } catch (ended: me.lakko.app.StaleBindingException) {
             throw ended
         } catch (cause: kotlinx.coroutines.CancellationException) {
@@ -17761,6 +17841,14 @@ public class ChatRepository(
                 null
             }
         }
+        // ADR-0101 section 9 (live walk 2026-11-26, D2) — a history page of a
+        // returned conversation carries this account's earlier messages under
+        // the account key it had before the reset: they are its own too.
+        val ownKeys = historyOwnKeys(accountIdB64, ownKey)
+        // D3 — the earlier messages a re-send already brought into this
+        // conversation: the history page's copy of each is left out.
+        val resent = resendOrigins.drawn(accountIdB64, hex)
+        val canonicalNow = resendCanonical()
         var filedPageIds: List<Long> = emptyList()
         val outcome = try {
             gapHistoryLooker.lookIfDue(
@@ -17803,7 +17891,9 @@ public class ChatRepository(
                         kept,
                         hex,
                     ) { row, author ->
-                        if (reentryBundleKeepsRow(row, route)) reentryBundleRow(row, author, ownKey, route) else null
+                        if (!reentryBundleKeepsRow(row, route)) return@applyReentryBundle null
+                        if (historyRowAlreadyResent(row.messageId, author, resent, canonicalNow)) return@applyReentryBundle null
+                        reentryBundleRow(row, author, ownKeys, route)
                     }
                 },
                 received = { record, applied ->
@@ -18428,7 +18518,7 @@ public class ChatRepository(
                             evidenceOf = { plaintext, leaf ->
                                 me.lakko.app.moderation.receivedEvidence(record.group, plaintext, leaf)
                             },
-                        )
+                        ).let { if (it is IncomingChatEvent.GroupName) groupNameAtReceipt(it, record.group) else it }
                         // R.5 / R.8 — the same drop as the poll's.
                         val sweptEvents = withoutBlockedSenders(
                             record.group,
@@ -18466,8 +18556,8 @@ public class ChatRepository(
                             groupSettingSink = { senderKey, kind, bytes ->
                                 receiveGroupSettingBestEffort(record.group, groupIdHex, senderKey, kind, bytes)
                             },
-                            groupNameSink = { senderKey, name ->
-                                receiveGroupName(record.group, groupIdHex, senderKey, name)
+                            groupNameSink = { senderKey, name, ownerAtReceipt ->
+                                receiveGroupName(record.group, groupIdHex, senderKey, name, ownerAtReceipt)
                             },
                             groupClosedSink = { messageId, senderKey, closed ->
                                 receiveSuccessorClaim(record.group, groupIdHex, messageId, senderKey, closed)
@@ -20296,7 +20386,7 @@ private class GroupRecord(
         committerBeaconSink: ((UInt?, String) -> Unit)? = null,
         membershipProposalSink: ((ProposalRecord, String) -> Unit)? = null,
         profileSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiProfile, ByteArray?) -> Unit)? = null,
-        groupNameSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiGroupName) -> Unit)? = null,
+        groupNameSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiGroupName, me.lakko.app.push.GroupPushRouting.OwnerLookup?) -> Unit)? = null,
         profileRequestSink: ((MemberIdentity?) -> Unit)? = null,
         pinSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiPinOp) -> Unit)? = null,
         sharedChannelsSink: ((MemberIdentity?, me.lakko.app.discover.SharedList) -> Unit)? = null,
@@ -20464,7 +20554,7 @@ private class GroupRecord(
                     when {
                         name == null -> android.util.Log.i("ChatRepository", "ADR-0051 group name dropped: malformed")
                         groupNameSink == null -> android.util.Log.i("ChatRepository", "ADR-0051 group name dropped: no receiver on this path")
-                        else -> groupNameSink.invoke(event.senderKey, name)
+                        else -> groupNameSink.invoke(event.senderKey, name, event.ownerAtReceipt)
                     }
                 }
                 is IncomingChatEvent.GroupClosed -> {

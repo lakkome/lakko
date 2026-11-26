@@ -562,7 +562,9 @@ public class ChatClient(
             // ADR-0092 section 3.4 — an anonymous poll's ring version 0 is the
             // roster at the epoch the poll was sealed, which is this row's.
             events.add(
-                if (event is IncomingChatEvent.Application && event.content.isAnonymousPoll()) {
+                if (event is IncomingChatEvent.GroupName) {
+                    groupNameAtReceipt(event, group)
+                } else if (event is IncomingChatEvent.Application && event.content.isAnonymousPoll()) {
                     event.copy(rosterAccountKeys = rosterAccountKeysOf(group))
                 } else if (processed is ProcessedMessage.Commit) {
                     IncomingChatEvent.System(
@@ -1936,6 +1938,14 @@ public sealed interface IncomingChatEvent {
         val groupName: FfiGroupName?,
         val senderKey: MemberIdentity?,
         val createdAt: String,
+        /** Live walk 2026-11-26, D4 — the role table read one line after the
+         *  row applied, at the epoch it was sealed at ([groupNameAtReceipt]).
+         *  The gate judges the sender against THIS, not against the table
+         *  after the whole batch: a later commit in the same batch (a
+         *  successor's founder handing its ownership over) must not void a
+         *  name its founder sent while it was the owner. `null` when the
+         *  path read none (then the live table decides). */
+        val ownerAtReceipt: me.lakko.app.push.GroupPushRouting.OwnerLookup? = null,
     ) : IncomingChatEvent
 
     /** ADR-0073 phase 2 / UX 16.5 — a group-closed envelope. Never a timeline

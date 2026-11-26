@@ -38,6 +38,7 @@ import { persistedFromMembership } from "./membership-rows";
 import { persistedFromForwardRef } from "./forward";
 import { persistedFromReplyRef } from "./reply-snapshot";
 import { newestNotDeleted } from "./deleted-rows";
+import { resentOriginIds } from "./resend-marker";
 import { t } from "../l10n";
 
 /** Numeric DS id of a persisted row, or `null` when it does not parse. */
@@ -159,6 +160,9 @@ export function fileHistoryRows(
 ): { readonly slot: PersistedGroup; readonly added: number } {
   const existing = slot?.messages ?? [];
   const have = new Set(existing.map((m) => m.messageId));
+  // ADR-0101 walk 2026-11-26 (D3): a row this slot already holds as a
+  // re-send (its original's DS id, ids being global) is not filed again.
+  for (const id of resentOriginIds(existing)) have.add(id);
   const merged = [...existing];
   let added = 0;
   for (const m of rows) {
@@ -431,6 +435,11 @@ export function eventToPersistedMessage(
       ...(e.reply === undefined ? {} : { reply: persistedFromReplyRef(e.reply) }),
       // ADR-0052 decision 2 — the forward attribution, verbatim.
       ...(e.forward === undefined ? {} : { forward: persistedFromForwardRef(e.forward) }),
+      // ADR-0101 walk 2026-11-26 (D3) - a re-sent message keeps where it was
+      // first sent, so its copy in a returned history is filed once.
+      ...(e.resendOrigin === undefined
+        ? {}
+        : { resendOf: { groupIdB64: e.resendOrigin.groupIdB64, messageId: String(e.resendOrigin.messageId) } }),
       // ADR-0061 section 6 — kept so the bubble and the preview still say the
       // message needs a newer Lakko after a reload.
       ...(e.unsupportedVersion === undefined ? {} : { unsupportedVersion: e.unsupportedVersion }),

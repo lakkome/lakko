@@ -9,6 +9,9 @@
   unit-tested, see "As built"; nothing was walked on a device, against a
   server or through a mail relay.
 - **Date:** 2026-10-12
+- **Amended 2026-11-26 (maintainer; designed, not built):** D7 is replaced
+  by D9: one of a recovery email, an authenticator app or a passkey is
+  required at sign-up; see "Amended 2026-11-26" below.
 - **Context:** account recovery, Part 6 (after
   [ADR-0072](0072-recovery-model-simplification.md),
   [ADR-0073](0073-account-key-reset.md) and
@@ -54,7 +57,8 @@ messages come only from another device.
   only; a key reset remains possible afterwards as its own action.
 - **D6.** A person who holds the phrase can **take the account back for a
   limited time** after such a reset.
-- **D7.** Adding an email may be skipped, with a warning.
+- **D7.** Adding an email may be skipped, with a warning. *(Replaced by D9,
+  2026-11-26: a second factor is required.)*
 - **D8.** When the account has an authenticator, its code is required in
   addition to the mailed code, in both modes.
 
@@ -512,6 +516,87 @@ the_recovery_flow_logs_neither_the_address_nor_the_account`. The address
 itself was never logged, and a relay error is reduced to its kind because
 the relay's answer can quote the recipient. The client logs carry error
 types only.
+
+## Amended 2026-11-26: a second factor is required at sign-up
+
+Maintainer decision, 2026-11-26. Designed, not built. UX:
+`identity-recovery.md` 19.1a (the step), 19.1b (the authenticator setup),
+19.1c (the landing rule and the last factor); plan: ADR-0101 "Plan amended
+2026-11-26". Taken together with [ADR-0073](0073-account-key-reset.md)'s
+amendment of the same day: a key reset now needs the password and a second
+factor, so an account without one could never reset.
+
+- **D9 (replaces D7).** The "Protect your account" step requires one of: a
+  recovery email, an authenticator app, a passkey. The 12-word phrase stays
+  on the step as an optional extra and does not count: with the phrase no
+  reset is needed, and a person who loses it is left with no factor. There
+  is no `Not now`, no "Continue without protection?" and no "This account
+  has no way back in." banner. The authenticator row is new on the step.
+- **Section 1's third state is gone.** "No phrase saved and no email added"
+  used to mean "rests on the password and the devices; the person was
+  warned". Now such an account has an authenticator or a passkey, and its
+  way back after losing every device is a key reset (password and that
+  factor), after which ADR-0101 brings its conversations back. The two
+  account modes of section 1 are unchanged: an email added on the step makes
+  the account mail-protected (the email vault, D3) as today; an account
+  protected by an authenticator or a passkey only has no vault.
+- **The authenticator is always offered.** `services/auth` refuses to start
+  without `LAKKO_TOTP_ENC_KEY` (ADR-0073, amended 2026-11-26), so every
+  sign-up has at least that row, whether mail is set up and whether the
+  device can use passkeys.
+- **Enforcement.** The clients give the step no exit and show it again at
+  every session landing to an account with a username and none of the three
+  (UX 19.1c); this also catches an account left with none after a reset that
+  deleted its only passkey, or after a recall. The server refuses to remove
+  the last of the three (`409 last-factor` on `DELETE /recovery-email`,
+  `DELETE /webauthn/credentials/{id}`, and a handle change that would drop
+  the recovery email). The server does not refuse a session to an account
+  without a factor; see the open question below.
+- **The username change** drops the recovery email (section 6). When it is
+  the last factor, the change must carry the address (ADR-0076 section 2:
+  the key moves to the new handle with no letter), else it is refused.
+- **The email as a reset factor.** The reset's email factor uses its own
+  challenge purpose and never releases the vault. On a mail-protected
+  account the client offers the section 7 restore beside it, which brings
+  the keys back without a reset. When a reset was confirmed by email, the
+  resetting device still holds the typed address and stores the new
+  phrase's vault through `PUT /recovery-email/vault` (no letter), since the
+  reset deletes the old one.
+- **D8 unchanged.** A mailed code still asks for the authenticator code when
+  the account has one. More accounts will have one now; when it lives only
+  on the lost phone, the email route ends at that step. The sign-up row says
+  so ("If the app is only on this device, you lose it with the device.").
+- **Guest accounts** (ADR-0032) have no username and no step; `Create
+  account` after a call ends on the required step like any sign-up.
+
+**Decided 2026-11-26 (maintainer): no server refusal or sweep.** An
+account with a username and no factor gets no refusal and is not swept. The
+clients already give the step no exit, the server keeps the last factor, and
+the only way to an account without one is a modified client, whose own
+account then cannot reset; a server refusal would also have to exempt the
+seconds between the username bind and the first factor, and the account
+after a reset, which is exactly where it would misfire.
+
+**Decided 2026-11-26 (maintainer): the authenticator may be the only
+factor**, with a warning. When it is the account's only second factor and no
+phrase is saved, the sign-up step and Settings say that losing the app loses
+the account; with a phrase saved, that losing both does (UX 19.1a, 19.1c).
+
+**Owned channels and the two account modes** (ADR-0101 section 7, settled
+2026-11-26). The list of the channels an account owns is under two locks:
+one opened by the password, a server half and a second factor, one opened
+by the account keys. A mail-protected account that lost every device and
+forgot the password gets its keys back from the email vault (section 7 of
+this ADR) and so opens the keys lock: its channels come back without a
+reset, and the operator, which can already open the vault (section 2), gains
+nothing new. A phrase-protected account that lost the phrase, every device
+and the password gets only a new password by mail; the password lock was
+made with the old one, so its owned channels are lost, while its chats and
+groups still come back from contacts after a reset.
+
+**Invariants.** #1 and #2 unchanged (an authenticator secret is an ACCESS
+verifier in the OPAQUE-envelope trust class, ADR-0018; a passkey is a public
+key). No `lakko-mls` change.
 
 ## References
 

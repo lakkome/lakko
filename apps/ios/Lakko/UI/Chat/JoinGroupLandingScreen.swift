@@ -303,7 +303,8 @@ public final class JoinGroupLandingViewModel: ObservableObject {
                 ChannelLinkFacts(
                     channelIdHex: AttachmentBridge.hex(channelId), name: opened.groupName ?? "",
                     description: subscriber.description, access: subscriber.access,
-                    avatar: ProfileAvatar(opened.avatar)))
+                    avatar: ProfileAvatar(opened.avatar),
+                    inviterAccountKey: cap.issuerSignaturePubkey()))
         }
         if let channelId = opened.channelId, channelId.count == 16 {
             return .publisher(
@@ -646,6 +647,10 @@ public struct ChannelLinkFacts: Equatable {
     public let description: String
     public let access: FfiChannelAccess
     public let avatar: ProfileAvatar?
+    /// ADR-0101 section 7 (D1) — the account key that signed the invitation
+    /// (the capability's issuer), recorded at subscribe as the owner return
+    /// target (``ChannelExtras/inviterAccountKey``). `nil` when unknown.
+    public var inviterAccountKey: Data? = nil
 
     public var isPublic: Bool {
         if case .public = access { return true }

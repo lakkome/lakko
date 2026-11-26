@@ -138,6 +138,10 @@ final class ChannelPublisherLoops {
                 channelId: channelId, state: channels,
                 keyHex: ChannelAccountReaderKey.keyHex(channelId: channelId),
                 ports: ChannelAccountReaderKey.livePorts(state: channels, client: client, currentSeed: seed))
+            // ADR-0101 section 7 (D1) — the owner's and each publisher's own
+            // member card, under the account's register key: a subscriber
+            // device plans an owner return from the owner's card.
+            await ChannelMemberCards.uploadIfNeeded(state: channels, channelId: channelId)
             await pollJournal(channelId: channelId, seed: seed)
             // The owner's commits the poll applied (a rotation, an approve, a
             // removal) moved a co-publisher's content seed: the composer takes

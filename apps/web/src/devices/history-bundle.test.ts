@@ -490,6 +490,18 @@ describe("a bundled message keeps its author (ADR-0091 live walk 3)", () => {
     expect(system.authorKeyB64).toBeUndefined();
   });
 
+  it("ADR-0101 walk D2: a row by this account's key of before a reset is its own", () => {
+    // The contact received it from this account's previous key and sends it
+    // back as incoming, naming that key.
+    const old = { ...row(4, "incoming", "a1"), authorKeyB64: OWNER };
+    expect(gapBundleRow(old, MEMBER, "mailbox").direction).toBe("incoming");
+    expect(gapBundleRow(old, MEMBER, "mailbox", [OWNER]).direction).toBe("outgoing");
+    expect(gapBundleRow(old, null, undefined, [OWNER]).direction).toBe("outgoing");
+    // Another person's row stays theirs.
+    const theirs = { ...row(5, "outgoing", "b1"), authorKeyB64: THIRD };
+    expect(gapBundleRow(theirs, MEMBER, "mailbox", [OWNER]).direction).toBe("incoming");
+  });
+
   it("a pairing bundle keeps the author of a received row", async () => {
     const key1 = await deviceKey();
     await saveMessageLog(SENDER, key1, {

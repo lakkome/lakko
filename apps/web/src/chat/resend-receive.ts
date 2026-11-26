@@ -66,6 +66,13 @@ export async function heldResendPredicate(
       const originHex = groupIdHex(originId);
       const slot = held.groups[originHex];
       const row = slot?.messages.find((m) => Number(m.messageId) === marker.messageId);
+      // ADR-0101 walk 2026-11-26 (D3): the returned history's copy, filed
+      // into the receiving group under the original id.
+      const receivedSlot = held.groups[groupIdHex(port.receivedGroupId)];
+      const copy =
+        originHex === groupIdHex(port.receivedGroupId)
+          ? undefined
+          : receivedSlot?.messages.find((m) => Number(m.messageId) === marker.messageId);
       return (
         resendVerdict({
           marker,
@@ -76,6 +83,7 @@ export async function heldResendPredicate(
           originIsOlderSegment: port.segmentIndexOf(originId) < receivedIndex,
           heldAuthor: heldRowAuthor(row, port.ownPersonKeyB64, (k) => port.canonical(k)),
           senderAuthor: e.senderKey === undefined ? null : port.canonical(e.senderKey),
+          heldInReceivedAuthor: heldRowAuthor(copy, port.ownPersonKeyB64, (k) => port.canonical(k)),
         }) === "skip"
       );
     } catch {

@@ -2432,6 +2432,7 @@ private struct SessionRoot: View, Equatable {
             push(.channel(channelId: channel.channelIdHex), on: tab)
             return
         }
+        channelsState.noteInviter(channel)
         switch channel.access {
         case .public(let readKey):
             FoundChannelReadKeys.put(channel.channelIdHex, readKey)
@@ -2923,6 +2924,7 @@ private struct SessionRoot: View, Equatable {
                         replaceTop(route, with: .channel(channelId: channel.channelIdHex), in: tab)
                         return
                     }
+                    channelsState.noteInviter(channel)
                     switch channel.access {
                     case .public(let readKey):
                         FoundChannelReadKeys.put(channel.channelIdHex, readKey)

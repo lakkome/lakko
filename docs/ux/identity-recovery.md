@@ -901,7 +901,9 @@ What it does:
     passkeys again afterwards.
   - Your contacts will see that your safety number changed and
     must verify you again before messaging you securely.
-  - Messages sent before today cannot be read with the new keys.
+  - Chats, groups and channels come back from your contacts'
+    devices, with the messages they still have, newest first.
+    Channels you own come back by themselves.
   - Your password and your authenticator app keep working.
 
 Type RESET to confirm
@@ -975,6 +977,199 @@ and adding a device. Two things change here:
 - **Authenticator only, password unknown.** A person who got in with the
   authenticator code and does not know the password cannot reset. The screen
   says so instead of showing a button that can never work; see 17.2.
+
+**Amended 2026-11-26 (maintainer's decision; designed, not built): the
+password is not enough any more.** Section 15.1b adds a second factor after
+the password. Two lines of the 2026-10-06 amendment above no longer hold for
+the reset: a passkey sign-in no longer stands in for the password (a passkey
+is now one of the second factors, 15.1b), and `Use a passkey instead` is not
+drawn in the reset's proof block. The sentence of 15.1a "The authenticator
+code is **not** asked for" is reversed: it is one of the three factors.
+Deleting the account and adding a device keep the 17.1 rule unchanged.
+
+### 15.1b The second factor (added 2026-11-26)
+
+Status: designed, not built. Maintainer's decision of 2026-11-26
+([ADR-0073](../adr/0073-account-key-reset.md), amendment of that date):
+since ADR-0101 a reset brings back chats, groups, channels and recent
+history, so whoever resets must prove more than the password. A reset needs
+the password, proven as in 15.1a (a password sign-in in the last ten
+minutes, or the field), **and** one of these, whichever the account has:
+
+- a code from the authenticator app;
+- a code sent to the recovery email;
+- a passkey of the account. A passkey that does not restore keys counts;
+  the reset deletes it afterwards, as the warning says.
+
+The recovery phrase is not one of them: whoever has it restores the keys
+(section 8) and does not reset.
+
+The reset panel, top to bottom: the warning of 15.1 with its bullets, the
+section below, the typed word, the buttons.
+
+```
+Confirm it is you
+
+Password
+[ ............        (show) ]
+Enter your password to reset the account keys.
+
+Then confirm with one of these:
+  [authenticator] Authenticator app                  >
+  [mail]          Code by email                      >
+  [passkey]       Passkey                            >
+
+I cannot use any of these
+
+Type RESET to confirm
+[            ]
+
+[Reset account keys]      Cancel
+```
+
+- The `Password` block is the 17.1 component without `Use a passkey
+  instead`. It is not drawn while a password proof is live (a password
+  sign-in less than ten minutes ago); then the section starts at "Then
+  confirm with one of these:" and its first line reads "Confirm with one of
+  these:" (`proof.reset.factor.title_no_password`).
+- The rows are the factors **this account has**; the device is signed in
+  and asks the server. `Passkey` is also hidden where this device or
+  browser cannot use passkeys. The order is fixed: authenticator, email,
+  passkey. A row the account does not have is absent, never disabled.
+- Choosing a row expands it in place; the other rows stay visible and can be
+  chosen instead at any moment, and the expanded one closes.
+- **The password is checked first**, at the moment the person confirms a
+  factor (the sixth digit of an authenticator code, `Send code`, `Use
+  passkey`). With no live password proof the device signs in with the typed
+  password, then checks the factor. A wrong password stops there: the
+  factor is not tried and an authenticator code is not used up.
+- Once a factor is confirmed the section collapses to one line with a check
+  mark: "Confirmed with your authenticator app." / "Confirmed with a code by
+  email." / "Confirmed with a passkey." (`proof.reset.factor.done.totp`,
+  `.email`, `.passkey`). The typed word and the button below become usable.
+- A confirmation lasts ten minutes (chosen, not measured; the same as the
+  password proof). If it runs out before `Reset account keys` is pressed,
+  the section opens again as it was, with no error styling (nothing went
+  wrong).
+- `Reset account keys` is enabled only when a factor is confirmed and the
+  word is typed.
+
+**Authenticator app**, expanded:
+
+```
+Enter the 6-digit code from your authenticator app.
+[ _ _ _ _ _ _ ]
+```
+
+The platform's one-time-code field; the code is checked on the sixth
+digit, with no separate button.
+
+**Code by email**, expanded:
+
+```
+Recovery email   [ name@example.com ]
+[ Send code ]
+```
+
+then, in place:
+
+```
+If this is the recovery email of @name, a code is on its way.
+It works for 10 minutes.
+[ _ _ _ _ _ _ ]
+Send again (in 0:45)        Use a different address
+```
+
+- The address is pre-filled when this device kept it (ADR-0075, amended
+  2026-10-13), otherwise typed. The answer to `Send code` is the same
+  whether or not the address is the account's, as in 19.3.
+- On a **mail-protected account** (no phrase saved, 19.1), the email row
+  carries one more line under it: "A code to this address can also bring
+  your keys back without a reset." with `Use my email instead`
+  (`proof.reset.factor.email_restores`, `.use_email_instead`), which leaves
+  the reset and runs the code route of 19.3 with the username filled in.
+  The reset stays possible from the row itself.
+
+**Passkey**, expanded: one button `Use passkey`. It opens the platform's
+own passkey sheet (the one system surface allowed here, 17.1) with
+`recovery.passkey.waiting` behind it.
+
+States of the section:
+
+| State | What the person sees |
+|---|---|
+| Wrong password | `restore_identity.reset.error.wrong_password` under the field; no factor was tried. |
+| Wrong authenticator code | "That code did not work. Wait for the next code in the app and try again." (`settings.recovery.totp.error.wrong`). The digits clear and keep focus. |
+| Too many authenticator codes | `recovery.error.rate_limited` with the countdown, under the code field, which stays disabled until zero. The email and passkey rows stay usable. |
+| Email: wrong code | "That code is not right." (19.2) The digits clear. Five tries per code. |
+| Email: too many wrong codes | "Too many attempts. Send a new code." The row returns to its `Send code` state. |
+| Email: too many letters | `recovery.error.rate_limited` with the countdown under `Send code`. |
+| Email: the letter could not be sent | "We could not send the letter. Try again later." |
+| Email: code expired | "That code has expired." with `Send again`. |
+| Passkey sheet up | `recovery.passkey.waiting`. |
+| Passkey cancelled | `proof.reset.cancelled` ("Cancelled. Nothing was reset."), back to the row. |
+| Passkey of another account | `proof.passkey.other_account`. |
+| Passkey failed otherwise | `proof.passkey.failed`. |
+| Offline | `common.error.offline`. Typed values are kept. |
+
+The numbers: an authenticator code is limited to 5 tries per 15 minutes per
+account (chosen, not measured; the same budget as the authenticator
+sign-in); email codes keep the letter and code limits of 19.2.
+
+**I cannot use any of these**, and an account that has none of the three,
+show the "cannot reset" panel in place of the section, the typed word and
+the button; the warning stays above it and `Cancel` stays:
+
+```
+The account keys cannot be reset
+
+Resetting needs your password and one more way to confirm it is
+you: your authenticator app, your recovery email or a passkey.
+
+What you can do:
+  - Sign in on a device that still has your keys, then add this
+    device from it.
+  - Enter your 12-word recovery phrase.
+  - Use a passkey that restores keys.
+
+Without one of these, the keys of this account cannot be restored
+or reset.
+
+Back                                                      Cancel
+```
+
+- Keys: `proof.reset.no_factor.title`, `.body`, and the existing
+  `proof.reset.cannot.what_you_can_do`, `.option_device`, `.option_phrase`,
+  `.option_passkey`, `.otherwise`. `Back` (present only when the panel came
+  from `I cannot use any of these`) returns to the section.
+- For an account that has none of the three the body reads "This account
+  has no second way to confirm it is you, so its keys cannot be reset."
+  (`proof.reset.no_factor.body_none`) and there is no `Back`. Such accounts
+  were made before 2026-11-26; on the test stack they are recreated, and no
+  production account exists. The panel has **no control to add a factor**:
+  adding one needs only the password, so a person who knows nothing but the
+  password could add a factor and reset at once.
+- No disabled `Reset account keys` button anywhere in this state, and no
+  sentence suggesting support or a later way.
+
+After the reset:
+
+- The passkeys are gone (15.1). An account whose only factor was a passkey
+  has none left, so after the new-phrase or "Your account has new keys"
+  state of 15.4 the device shows the protect step of 19.1a before the app,
+  with no way past it (19.1c).
+- When the factor was a code by email, the device still holds the address
+  that was typed, so it stores the new phrase's email vault for a
+  mail-protected account at once (the reset dropped the old one), with no
+  second letter. It forgets the address when the screen closes, as 19.2
+  says.
+- The channels the account owns come back by themselves after the reset
+  (ADR-0101 section 7, amended 2026-11-26): the password and the confirmed
+  factor together open the list of them; neither does alone. Nothing is
+  shown while that runs; each channel appears in the list when it is back.
+  A phrase-protected account whose password was changed by a mailed code
+  on a device without the keys, with no device holding the keys since, gets
+  no owned channel back (19.10).
 
 ### 15.2 The signed-out screen (every other device)
 
@@ -1125,6 +1320,12 @@ From the server (all in ADR-0073):
   back.
 - From the directory: which generation of keys the account publishes, so a
   device can tell its own keys are stale before it uploads anything.
+- Since 2026-11-26 (15.1b): which of the three second factors the account
+  has (a confirmed authenticator, a recovery email, passkeys); one check per
+  factor that, after a password sign-in, answers "confirmed" with a
+  ten-minute expiry or a refusal with a retry time; the email check sends a
+  letter only for the account's address and answers alike either way; the
+  reset itself refuses without a confirmed factor.
 
 Kept by the client:
 
@@ -1398,6 +1599,16 @@ post here. Your account keys were reset.` with `Remove from this device`
 a channel that receives no new posts. A channel is not moved to a successor:
 its subscribers are not members of anything the device could move.
 
+**Superseded for the owner (ADR-0101 section 7, amended 2026-11-26):** the
+device that reset the keys takes each channel it owned back by itself,
+from a list that the account's password and a second factor open together
+(and that any device holding the account keys opens), and posts again; its
+subscribers keep the channel and see new posts, with nothing shown to them
+and nothing asked of them. `channels.keys_reset.*` remains only for a
+channel that could not be taken back (not in the list, or its recovery key
+was replaced). Subscriptions and publisher seats come back from contacts'
+devices as ADR-0101 section 7 says.
+
 ### 16.8 Data the UI needs
 
 The architecture is in the ADR; this is the list the screens depend on.
@@ -1471,9 +1682,12 @@ Kept: `channels.keys_reset.*` (3; the person's own reset, 16.7) and
 contacts will see that your safety number changed and must verify you again
 before messaging you securely.") and the same sentence on the new-phrase
 screen (9.1 / 15.4). Proposed: "Your contacts keep their chats with you. Your
-safety number changes." The other bullets of 15.1 stand; "Messages sent
-before today cannot be read with the new keys" is about the resetting
-device and stays true.
+safety number changes." The other bullets of 15.1 stand. The messages
+bullet changed with ADR-0101 (walk 2026-11-26): "Messages sent before today
+cannot be read with the new keys" was no longer true once conversations and
+their history come back from contacts' devices; it reads "Chats, groups and
+channels come back from your contacts' devices, with the messages they
+still have, newest first."
 
 ### 16.10 Cross-platform shape, and what is open
 
@@ -1542,6 +1756,12 @@ passkey gesture.
 - One exception to the ten minutes, kept from ADR-0014: deleting an account
   **that has a passkey** always asks for the passkey gesture for that
   deletion, whatever was proven before.
+- **Amended 2026-11-26:** the reset is stricter than this rule. It needs the
+  password (a passkey does not stand in for it) and then a second factor:
+  the authenticator code, a code by email or a passkey (15.1b). Delete
+  account and Add a device keep the rule as written. Setting up an
+  authenticator app now needs this proof too (19.1b), because the
+  authenticator is one of the reset's factors.
 
 The proof block is one component, drawn the same in all three places:
 
@@ -1587,6 +1807,13 @@ States the block shares, wherever it is drawn:
 | Success | The surface continues with what it was doing; the person never sees a separate "verified" step. |
 
 ### 17.2 Reset account keys
+
+**Amended 2026-11-26:** for the reset, the proof is the password **and** a
+second factor (15.1b). In the table below, "Password or passkey sign-in"
+reads "password sign-in", the passkey rows lose `Use a passkey instead` (a
+passkey is one of the second factors of 15.1b instead), and the "cannot
+reset" panel of an account with no usable factor is the one of 15.1b. The
+rest of this subsection stands.
 
 The screen of 15.1, with 15.1a as amended. In order, top to bottom: the
 warning and its bullets, the proof block (when no proof is live), the typed
@@ -2344,14 +2571,16 @@ What was decided:
 - **Once a phrase is saved**, the mailed code gives a new password only.
 - A person who holds the phrase can **take the account back** for about a
   month after someone reset its keys.
-- Adding an email can be skipped, with a warning.
+- Adding an email can be skipped, with a warning. **Superseded 2026-11-26:**
+  one of an email, an authenticator app or a passkey is required at
+  sign-up; the phrase is an optional extra and does not count (19.1a).
 - When the account has an authenticator, its code is asked for as well.
 
 ### 19.1 The two kinds of account, in the app's words
 
 | | No phrase saved | Phrase saved |
 |---|---|---|
-| Settings > Account shows | "Protected by your email" (or "Not protected" when no email) | "Protected by your recovery phrase" |
+| Settings > Account shows | "Protected by your email" (or, without an email, the 19.1c line naming the account's factor; "Not protected" is gone since 2026-11-26) | "Protected by your recovery phrase" |
 | A mailed code gives | New password and everything back | New password only |
 | On a new device after the code | The app, with contacts and chats | **Restore your keys** (section 8) |
 | Three-word row (section 2) | Absent | Present on a device that holds the account |
@@ -2361,42 +2590,198 @@ No screen promises otherwise.
 
 ### 19.1a Sign-up
 
+**Rewritten 2026-11-26 (maintainer's decision; designed, not built).** A
+second way to confirm it is you is **required** at sign-up: a recovery
+email, an authenticator app or a passkey. It is what a key reset asks for
+after the password (15.1b), and since ADR-0101 a reset brings the chats,
+groups, channels and recent history back. The recovery phrase stays on the
+step as an optional extra; it is **not** one of the three, because a person
+who later loses it is left with nothing. There is no `Not now`, no "Continue
+without protection?" and no banner. The earlier text of this subsection
+(2026-10-12) is replaced by what follows.
+
 Username and password, then one step:
 
 ```
 Protect your account
 If you forget your password or lose this device, this is how
-you get back in.
+you get back in. Choose at least one.
 
   [mail]  Add an email                 Recommended     >
           We send a code to it. Anyone who can read that
           mailbox can get into your account.
+  [authenticator] Use an authenticator app            >
+          A 6-digit code from an app on your phone. If
+          the app is only on this device, you lose it
+          with the device.
   [passkey] Create a passkey                           >
           Sign in with your fingerprint, face or screen
           lock. No password to remember.
-  [key]   Save a recovery phrase                       >
-          12 words only you keep. Stronger, and nothing
-          to do with email.
 
-Not now
+Optional
+  [key]   Also save a recovery phrase                  >
+          12 words only you keep. The strongest way back.
+
+[ Continue ]
 ```
 
-- `Create a passkey` (added 2026-10-12) is shown only where the device or
-  browser can use passkeys. It runs the existing passkey creation, including
-  its own choice of whether the passkey also carries the keys, and returns
-  to this step with the row marked `Done`; the person may then add another
-  option or press `Continue`, which replaces `Not now` once any row is done.
-- An account with a passkey does not show the "no way back in" banner.
+- **Rows.** `Add an email` is shown when mail is set up on this server and
+  the account has a username (as before). `Use an authenticator app` is
+  **always** shown: the server refuses to start without the authenticator
+  configured (ADR-0073, amended 2026-11-26), so every sign-up has at least
+  this row. `Create a passkey` is shown where this device or browser can use
+  passkeys and the account has a username. Order fixed: email,
+  authenticator, passkey, then the optional phrase under the caption
+  `Optional` (`protect.optional`).
+- **`Continue`** is the only way off the step. It is disabled until at least
+  one of the first three rows is marked `Done`; a saved phrase alone does not
+  enable it. Disabled means drawn in the disabled style with the line under
+  it "Choose one of the first three to continue." (`protect.continue_needs`),
+  never hidden. Once enabled it goes to the app.
+- **The authenticator alone** (maintainer, 2026-11-26) is allowed, with a
+  warning. When the authenticator is the only one of the three marked
+  `Done`, a note in the `--warning` colour token (not the danger colour),
+  with the warning icon, stands between the rows and
+  `Continue`:
 
-- `Add an email` goes to 19.2. `Save a recovery phrase` goes to 19.5.
-  Either lands in the app afterwards; the other stays available in Settings.
-- `Not now` opens the app's own confirmation: "Continue without protection?
-  If you forget your password or lose this device, you will not be able to
-  get back into this account." with `Add an email` (primary) and `Continue
-  without` (plain).
-- An unprotected account shows one dismissible banner in Settings > Account,
-  "This account has no way back in.", with `Protect it`. It returns after 30
-  days if nothing changed. Nowhere else.
+  > If you lose your authenticator app, you will not be able to get this
+  > account back. Add an email or a passkey as well.
+
+  (`protect.totp_only.warning`). When a phrase was also saved on the step,
+  it reads instead: "If you lose both your authenticator app and your
+  recovery phrase, you will not be able to get this account back."
+  (`protect.totp_only.warning_phrase`). `Continue` stays enabled; the note
+  goes as soon as an email or a passkey is added. It is announced once by
+  screen readers when it appears.
+- **Rows done.** Each of the three runs its flow (email 19.2, authenticator
+  19.1b, passkey the existing creation) and returns here with the row marked
+  `Done`; the person may add another before `Continue`. A row marked `Done`
+  can be opened again only from Settings.
+- **The phrase.** `Also save a recovery phrase` runs 19.5 and returns here
+  with the row marked `Done`; it no longer ends the step by itself (it did
+  before 2026-11-26). When the phrase is saved first and an email after,
+  the email is the password-only kind of 19.1 (no vault), as today.
+- **Copy changes.** `protect.body` gains "Choose at least one."; the
+  passkey row's body is unchanged; the phrase row's body drops "Stronger,
+  and nothing to do with email." for "The strongest way back." (the
+  existing `protect.phrase.body`); its title becomes `Also save a recovery
+  phrase` (`protect.phrase.title_optional`).
+- **Removed:** `protect.skip`, `protect.skip.confirm.*`,
+  `protect.banner.none`, `protect.banner.action`, `protect.status.none`, and
+  the line "An account with a passkey does not show the 'no way back in'
+  banner."
+
+What happens when a flow fails or is left:
+
+| Case | What the person sees |
+|---|---|
+| Email: any state of the 19.2 table that is not `Done` | That table's line on the email surface; `Back` returns to the step with the row not done. |
+| Email: mail could not be sent | "We could not send the letter. Try again later." on the email surface; the other rows stay available. |
+| Authenticator: wrong code, offline, leaving | 19.1b; the row stays not done. |
+| Passkey: the system sheet cancelled | Back on the step, one line under the passkey row: "No passkey was added." (`protect.passkey.cancelled`), no error styling. |
+| Passkey: creation failed | "Could not add the passkey. Try again, or choose another way." (the existing key, text changed: it named `Not now`). |
+| The app is closed on the step | At the next start the step is shown again before the app (19.1c). |
+
+Accessibility: `Continue` announces its disabled state together with the
+line under it; each row announces `Done` with its title.
+
+### 19.1b The authenticator app (added 2026-11-26)
+
+Status: designed, not built. Entry points: `Use an authenticator app` on the
+step of 19.1a, and Settings > Security > Recovery > Authenticator app
+(10.1), which is the same screen. Until now the setup existed only in
+Settings (`settings.recovery.totp.*`); this subsection specifies it for both.
+
+```
+Use an authenticator app
+
+Scan this code with your authenticator app, or type the key in
+by hand, then enter the six-digit code the app shows.
+
+        [ QR code ]
+
+Key: ABCD EFGH IJKL MNOP QRST UVWX YZ23 4567     Copy
+
+[ Open in authenticator app ]        (phones only)
+
+Code  [ _ _ _ _ _ _ ]
+
+Back
+```
+
+- The QR code is the shared `BrandedQr` component; the key is the same
+  secret in groups of four, in the code font, with `Copy`
+  (`settings.recovery.totp.key`, `common.copy`).
+- `Open in authenticator app` (`settings.recovery.totp.open_app`) is shown
+  on iOS and Android only and hands the setup link to whichever
+  authenticator app the phone has. It is there because a phone cannot scan
+  its own screen; it is a link to another app, not a share sheet.
+- The code is checked on the sixth digit, with no separate button.
+- **Proof.** Setting up an authenticator needs the 17.1 proof (it is one of
+  the reset's factors, so a bare session must not be able to add one). The
+  sign-up counts as that proof for ten minutes, so the step asks nothing
+  more. In Settings, when no proof is live, the 17.1 block is drawn above
+  the QR code with the helper "Enter your password to set up an
+  authenticator app." (`proof.add_totp.help`).
+
+| State | What the person sees |
+|---|---|
+| Starting | The QR area shows a spinner; nothing else is usable. |
+| Ready | As drawn. |
+| Checking | The code field is disabled with a spinner beside it. |
+| Wrong or expired code | `settings.recovery.totp.error.wrong` ("That code did not work. Wait for the next code in the app and try again."); the digits clear and keep focus. |
+| Too many tries | `recovery.error.rate_limited` with the countdown; the field stays disabled until zero. |
+| Already set up | `settings.recovery.totp.already_enabled`; at sign-up this cannot happen, and if it does the step marks the row `Done`. |
+| Offline | `common.error.offline`; the QR and key stay. |
+| Any other failure | `settings.recovery.totp.error.generic` with `Try again`, which starts over with a new key. |
+| Done | At sign-up, back to the step with the row `Done`. In Settings, `settings.recovery.totp.done` and the card shows "On". |
+| `Back` before Done | Back to where it came from; nothing is set up. The key shown is never used: the next setup makes a new one. |
+
+`settings.recovery.totp.done` loses its second sentence's claim ("A code
+from the app can now get you back into your account.") for "A code from the
+app now confirms it is you." (`settings.recovery.totp.done`, text changed):
+the code signs in (section 6) and confirms a reset, and it does not bring
+keys.
+
+### 19.1c Every account keeps a second way in (added 2026-11-26)
+
+- **At every session landing**, an account with a username and none of the
+  three (no confirmed authenticator, no recovery email, no passkey) is shown
+  the step of 19.1a before the app, with the heading "Add a second way to
+  get back in" (`protect.title_required`) and the same rows and rule. This
+  covers an account whose only factor was a passkey after a reset (15.1b),
+  after a recall (18.4, which clears the authenticator and the passkeys),
+  and accounts made before this rule.
+- **The last one cannot be removed.** In Settings, `Remove recovery email`
+  and deleting the last passkey are refused when the account would be left
+  with none of the three: the app's own dialog says "Add another way to get
+  back in first. This is the last one this account has."
+  (`protect.last_factor`) with `OK`. The server refuses it too.
+- **Changing the username** turns the recovery email off (19.2). When the
+  email is the last of the three, the device carries the address it kept
+  into the change (ADR-0076 section 2), so the email moves to the new name;
+  when it holds no address, the username screen asks for it before the
+  change, with the line "Your recovery email moves to your new username.
+  Type it once." (`protect.username_email`).
+- **The authenticator as the only one left.** When the authenticator
+  becomes the account's only second way in (an email or a passkey was
+  removed, or a reset deleted the passkeys), Settings > Security > Recovery
+  (10.1) shows the note of 19.1a at its top, in the same `--warning` style, for
+  as long as it stays the only one; it cannot be dismissed. The
+  confirmation of a removal that would leave only the authenticator adds,
+  before its buttons: "Your authenticator app will be the only other way to
+  confirm it is you. If you lose it, you will not be able to get this
+  account back." (`protect.totp_only.remove_notice`; with a saved phrase,
+  "...If you lose it and your recovery phrase, ...",
+  `protect.totp_only.remove_notice_phrase`). The note is not shown anywhere
+  else: not on the chat list, not as a banner.
+- **Settings > Account** status line names the strongest way back the
+  account has: "Protected by your recovery phrase", else "Protected by your
+  email", else "Protected by your authenticator app"
+  (`protect.status.totp`), else "Protected by a passkey"
+  (`protect.status.passkey`).
+- **Guest accounts** (ADR-0032) have no username and see none of this;
+  `Create account` after a call ends on the step of 19.1a like any sign-up.
 
 ### 19.2 Adding the address
 
@@ -2440,10 +2825,13 @@ Send again (in 0:45)        Use a different address
 - Replacing is the same two steps for the new address; the old one stops
   working when the new code is accepted, not before.
 - Removing is one confirmation in the app's own dialog: "Remove recovery
-  email? You will not be able to get a new password by email."
+  email? You will not be able to get a new password by email." When the
+  email is the account's last second way in, removing is refused instead
+  (19.1c, since 2026-11-26).
 - Changing the username turns the recovery email off (the stored value was
   made from the old name). The username screen says so before the change and
-  offers to add it again after.
+  offers to add it again after. When the email is the last second way in,
+  it moves with the name instead (19.1c).
 
 States:
 
@@ -2631,6 +3019,10 @@ in by email holds the same words.
   opened by email, email added / replaced / removed, phrase saved.
 - For 19.7: whether the typed phrase is the account's phrase from before a
   reset within the window, and the reset's date.
+- Since 2026-11-26 (19.1a to 19.1c): authenticator setup start / finish
+  under a 17.1 proof; whether mail is available (the authenticator always
+  is); the three factors of the signed-in account; a refusal, with its own
+  code, of removing the email or a passkey that is the last of the three.
 
 ### 19.9 Cross-platform shape
 
@@ -2647,7 +3039,24 @@ has no link).
   keys. `It was not me` is a race the owner can lose.
 - With a saved phrase, the mailbox still reaches the password and, on a new
   device, a key reset. 19.7 and 18.4 are the answer.
-- No email and no phrase: no way back. The app says so twice (19.1a).
+- ~~No email and no phrase: no way back. The app says so twice (19.1a).~~
+  Since 2026-11-26 every account has an email, an authenticator or a
+  passkey (19.1a, 19.1c), and with the password any one of them resets the
+  keys (15.1b), after which conversations come back from contacts.
+- **What the second factor costs (2026-11-26).** A person whose only factor
+  is an authenticator app on the phone they lost, with no recovery email,
+  no passkey elsewhere and no phrase, can no longer reset: the account is
+  lost. The maintainer allowed the authenticator as the only factor with a
+  warning (19.1a, 19.1c); nothing else can be done about it without making
+  the password enough again.
+- **Owned channels** (ADR-0101 section 7, settled 2026-11-26) are under two
+  locks: the password with a second factor, and the account keys. A device
+  with the keys always opens them. A reset with the password and a factor
+  opens them. A mail-protected account (no phrase saved) that lost every
+  device and forgot the password gets its keys back by mailed code and so
+  its channels. A phrase-protected account that lost the phrase, every
+  device and the password loses its owned channels; its chats and groups
+  still come back from contacts after a reset.
 - An authenticator on the lost phone blocks the email route.
 - Changing the username turns the recovery email off. A forgotten address or
   username cannot be looked up.

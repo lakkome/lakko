@@ -190,6 +190,7 @@ import { NO_CLAIMS } from "./group-closed-store";
 import { messagesToResend, resendParts, resendRemaining } from "./reset-repair";
 import { composeResendEnvelope } from "./attachments";
 import { heldResendPredicate } from "./resend-receive";
+import { historyTransferDueFor } from "./history-served";
 import { flushVerdict, isDeadSession, replyForSend, sendRoute } from "./held-send";
 import {
   composeHeldEnvelope,
@@ -1077,6 +1078,13 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         // eslint-disable-next-line no-console
         console.info("[continuity] an admin was not restored yet", err instanceof Error ? err.name : "");
       }
+    },
+    // ADR-0101 walk 2026-11-26 (D4): a founder that was no admin holds the
+    // hand-over until the reset person's history was served (or the wait ran
+    // out), so the pages and the carried name come from an owner.
+    ownershipTransferDue: (successorGroupIdB64) => {
+      const account = activeAccount;
+      return account !== null && historyTransferDueFor(account, successorGroupIdB64, Date.now());
     },
     async transferOwnership(successorGroupIdB64, newOwnerKeyB64, stayAdmin) {
       const secrets = auth.identitySecrets();

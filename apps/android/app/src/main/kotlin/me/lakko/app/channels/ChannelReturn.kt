@@ -204,6 +204,19 @@ public fun newestSeeds(seeds: List<HeldSeed>): List<HeldSeed> {
     return unique.entries.toList().takeLast(CHANNEL_RETURN_MAX_SEEDS).map { HeldSeed(it.key, it.value) }
 }
 
+/**
+ * Live walk 2026-11-26, D1 - the channels whose own member card this device
+ * keeps current app-wide: every channel it publishes (owner and publisher
+ * alike: the owner's card is what an owner return is planned from), never a
+ * removed one. A channel this device only reads uploads its card from the
+ * channel view. Distinct, in the order given. Pure.
+ */
+public fun channelsOwingPublishingCard(
+    channels: List<String>,
+    publishesHere: (String) -> Boolean,
+    removed: (String) -> Boolean,
+): List<String> = channels.distinct().filter { publishesHere(it) && !removed(it) }
+
 /** The owned channels still owing a recovery-key registration, sorted. */
 public fun channelsOwingRecoveryKey(owned: Collection<String>, registered: Set<String>): List<String> =
     owned.filter { it !in registered }.distinct().sorted()

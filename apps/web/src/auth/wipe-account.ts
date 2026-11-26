@@ -137,6 +137,7 @@ import { clearResetContinuity } from "./reset-continuity";
 import { clearContinuityTargets } from "../reach/continuity";
 import { clearHeldReturns } from "../channels/channel-return";
 import { clearHistoryStates } from "../chat/history-return";
+import { clearHistoryServed } from "../chat/history-served";
 import { clearRecoveredChannels } from "../channels/recovered-channels";
 import { clearRecoveryRegistered, clearSentReturns } from "../channels/channel-return-runtime";
 import { clearGenesisRecorded, clearKnownDeviceId } from "./session-device";
@@ -347,10 +348,15 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
       run: () => storage?.removeItem(`lakko:channel-return-invitations:${accountIdB64}`),
     },
     { name: "history-return", run: () => clearHistoryStates(accountIdB64, storage) },
+    { name: "history-served", run: () => clearHistoryServed(accountIdB64, storage) },
     { name: "channel-recovered", run: () => clearRecoveredChannels(accountIdB64, storage) },
     {
       name: "continuity-profile-carried",
       run: () => storage?.removeItem(`lakko:continuity-profile-carried:${accountIdB64}`),
+    },
+    {
+      name: "continuity-name-carried",
+      run: () => storage?.removeItem(`lakko:continuity-name-carried:${accountIdB64}`),
     },
     {
       name: "continuity-mailbox-cursor",

@@ -529,6 +529,9 @@ export async function applyGapHistoryBundle(args: {
   readonly signerAccepted: (signerLeafKey: Uint8Array) => boolean;
   /** This account's own key in the conversation (live walk 3). */
   readonly ownAuthorKeyB64: string | null;
+  /** ADR-0101 walk 2026-11-26 (D2): the account keys this account had
+   *  before a key reset; a row they authored is this account's own. */
+  readonly previousOwnKeysB64?: readonly string[];
   /** The route of the request the device came back by, when known. */
   readonly route: GapBundleRoute | undefined;
 }): Promise<{
@@ -540,7 +543,8 @@ export async function applyGapHistoryBundle(args: {
   readonly rows: readonly PersistedMessage[];
 } | null> {
   const wasm = await loadWasm();
-  const adapt = (row: PersistedMessage): PersistedMessage => gapBundleRow(row, args.ownAuthorKeyB64, args.route);
+  const adapt = (row: PersistedMessage): PersistedMessage =>
+    gapBundleRow(row, args.ownAuthorKeyB64, args.route, args.previousOwnKeysB64 ?? []);
   const structured = wasm.openGapHistoryStructured(args.gapSecret, args.groupId, args.sealedBytes);
   let opened: OpenedHistoryBundle | undefined;
   try {
@@ -772,11 +776,17 @@ export type GapBundleRoute = "own-device" | "mailbox" | "knock";
  * outgoing row is another person's unless it is this account's own device;
  * in a one-to-one the two sides swap). A system row stays a system row and
  * names nobody. The same rule as iOS and Android.
+ *
+ * ADR-0101 walk 2026-11-26 (D2): after a key reset the history a contact
+ * sends back names this account's OLD key on the rows it wrote before the
+ * reset; a row authored by any of `previousOwnKeysB64` is this account's
+ * own too (outgoing), never someone else's.
  */
 export function gapBundleRow(
   row: PersistedMessage,
   ownAuthorKeyB64: string | null,
   route: GapBundleRoute | undefined,
+  previousOwnKeysB64: readonly string[] = [],
 ): PersistedMessage {
   if (row.direction === "system") {
     const { authorKeyB64: _dropped, ...rest } = row;
@@ -784,7 +794,8 @@ export function gapBundleRow(
   }
   const author = typeof row.authorKeyB64 === "string" ? row.authorKeyB64 : undefined;
   if (author !== undefined) {
-    return { ...row, direction: ownAuthorKeyB64 !== null && author === ownAuthorKeyB64 ? "outgoing" : "incoming" };
+    const own = (ownAuthorKeyB64 !== null && author === ownAuthorKeyB64) || previousOwnKeysB64.includes(author);
+    return { ...row, direction: own ? "outgoing" : "incoming" };
   }
   let direction: PersistedMessage["direction"];
   if (route === "own-device") direction = row.direction;

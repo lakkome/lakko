@@ -2593,7 +2593,8 @@ public final class ChatRepository: ObservableObject {
         groupIdHex: String,
         name: String,
         updatedAtMs: UInt64,
-        senderLeaf: UInt32?
+        senderLeaf: UInt32?,
+        atReceipt: SenderAuthorityAtReceipt? = nil
     ) {
         guard currentAccountIdB64 != nil, groups[groupIdHex] != nil else { return }
         // The name was received by this binding's account: it is not judged
@@ -2605,7 +2606,7 @@ public final class ChatRepository: ObservableObject {
                 guard bound.isCurrent else { return }
                 self?.performReceiveGroupName(
                     groupIdHex: groupIdHex, name: name, updatedAtMs: updatedAtMs,
-                    senderLeaf: senderLeaf)
+                    senderLeaf: senderLeaf, atReceipt: atReceipt)
             }
         }
     }
@@ -2618,7 +2619,8 @@ public final class ChatRepository: ObservableObject {
         groupIdHex: String,
         name: String,
         updatedAtMs: UInt64,
-        senderLeaf: UInt32?
+        senderLeaf: UInt32?,
+        atReceipt: SenderAuthorityAtReceipt? = nil
     ) {
         guard let accountIdB64 = currentAccountIdB64, let record = groups[groupIdHex] else {
             NSLog("ADR-0051 group name dropped: no session or no group")
@@ -2631,8 +2633,10 @@ public final class ChatRepository: ObservableObject {
             NSLog("ADR-0062 group name dropped: a one-to-one has no group name")
             return
         }
-        let resolved = PushGroupRouting.resolveSenderAuthority(
-            group: record.group, senderLeaf: senderLeaf)
+        // D4 — the authority read at the epoch the name was sealed at, else
+        // (a path with no live group at receipt) the live one.
+        let resolved = atReceipt.map { (authority: $0.authority, senderKey: $0.senderKey) }
+            ?? PushGroupRouting.resolveSenderAuthority(group: record.group, senderLeaf: senderLeaf)
         let stored = groupNameStore.load(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         let verdict = GroupNameGate.classify(
             incomingName: name,
@@ -6140,10 +6144,10 @@ public final class ChatRepository: ObservableObject {
             // ADR-0051 — role-gate against the live group, order, store,
             // re-title. Fire-and-forget (it only spawns a `Task`), so the name
             // chain it takes is never awaited while the commit chain is held.
-            groupNameSink: { [weak self] name, updatedAtMs, senderLeaf in
+            groupNameSink: { [weak self] name, updatedAtMs, senderLeaf, atReceipt in
                 self?.receiveGroupName(
                     groupIdHex: groupIdHex, name: name, updatedAtMs: updatedAtMs,
-                    senderLeaf: senderLeaf)
+                    senderLeaf: senderLeaf, atReceipt: atReceipt)
             },
             // ADR-0048 §2 trigger 4 — only SCHEDULES a throttled republish, so
             // the lock held here is never awaited against itself.
@@ -7907,10 +7911,10 @@ public final class ChatRepository: ObservableObject {
                             self.keepProfileGrants(
                                 claim, senderKey: senderKey, groupIdHex: groupIdHex)
                         },
-                        groupNameSink: { [weak self] name, updatedAtMs, senderLeaf in
+                        groupNameSink: { [weak self] name, updatedAtMs, senderLeaf, atReceipt in
                             self?.receiveGroupName(
                                 groupIdHex: groupIdHex, name: name, updatedAtMs: updatedAtMs,
-                                senderLeaf: senderLeaf)
+                                senderLeaf: senderLeaf, atReceipt: atReceipt)
                         },
                         profileRequestSink: { [weak self] senderKey in
                             self?.answerProfileRequest(groupIdHex: groupIdHex, senderKey: senderKey)
@@ -11843,7 +11847,7 @@ final class GroupRecord {
         committerBeaconSink: ((UInt32?, String) -> Void)? = nil,
         membershipProposalSink: ((ProposalRecord, String) -> Void)? = nil,
         profileSink: ((ProfileClaim, MemberIdentity?) -> Void)? = nil,
-        groupNameSink: ((String, UInt64, UInt32?) -> Void)? = nil,
+        groupNameSink: ((String, UInt64, UInt32?, SenderAuthorityAtReceipt?) -> Void)? = nil,
         profileRequestSink: ((MemberIdentity) -> Void)? = nil,
         groupContactRequestSink: ((Data, MemberIdentity) -> Void)? = nil,
         accountDeletedSink: ((Data, MemberIdentity) -> Void)? = nil,
@@ -12024,14 +12028,14 @@ final class GroupRecord {
                 // ADR-0060 — a "who can find me" service envelope. Not a
                 // timeline row: routed out with the sender resolved at receipt.
                 scopedDiscoverySink?(envelope, senderKey)
-            case .groupName(_, let name, let updatedAtMs, let senderLeaf, _):
+            case .groupName(_, let name, let updatedAtMs, let senderLeaf, _, let atReceipt):
                 // ADR-0051 — the group's shared name. Not a timeline row:
                 // routed out to the repository, which owns the name store AND
                 // the live `Group` handle the role gate needs. The
                 // MLS-authenticated `senderLeaf` rides along so only the
                 // owner / admins can set it; the stamp so the strictly-newer
                 // order can refuse a stale re-send.
-                groupNameSink?(name, updatedAtMs, senderLeaf)
+                groupNameSink?(name, updatedAtMs, senderLeaf, atReceipt)
             case .groupSetting(_, let setting, let senderLeaf, _):
                 // ADR-0087 — the group's photo, allowed reactions, @name or a
                 // knock seed. Not a timeline row: routed out to the

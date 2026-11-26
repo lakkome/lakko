@@ -72,15 +72,25 @@ public enum ResendMarker {
     ///     `nil` when this device does not hold that row.
     ///   - senderAuthor: the account of the MLS-authenticated sender of the
     ///     received message.
+    ///   - heldInReceivedAuthor: the author account of the row the marker
+    ///     names when the RECEIVING group holds it under the original DS id
+    ///     (a returned history page's copy, ADR-0101 section 9), or `nil`.
+    ///     DS ids are unique across journals, so the receiving group holds
+    ///     that id only as such a copy; by the same author the re-send is
+    ///     the same message once more: `skip` (live walk 2026-11-26, D3, the
+    ///     history page before the re-send; web `heldInReceivedAuthor`). The
+    ///     other order is the filer's (``ResendOriginLog``).
     public static func resendVerdict(
         marker: Origin?,
         receivedConversation: String,
         originConversation: String?,
         originIsOlderSegment: Bool,
         heldAuthor: String?,
-        senderAuthor: String?
+        senderAuthor: String?,
+        heldInReceivedAuthor: String? = nil
     ) -> Verdict {
         guard marker != nil else { return .draw }
+        if let copy = heldInReceivedAuthor, let senderAuthor, copy == senderAuthor { return .skip }
         guard let originConversation else { return .draw }
         if originConversation != receivedConversation { return .draw }
         if !originIsOlderSegment { return .draw }
@@ -240,6 +250,21 @@ public enum ResendMarker {
         return { message in
             guard let marker = message.resendOrigin,
                   let originHex = groupIdHex(fromB64: marker.groupIdB64) else { return false }
+            let senderAuthor = message.senderKeyB64.map(port.canonical)
+            // D3 — a history page's copy of the original in the receiving
+            // group itself, read first: the origin group is one this device
+            // may not hold at all (the person who reset), so its lineage
+            // facts below may not read.
+            let copy = originHex == port.receivedGroupIdHex
+                ? nil
+                : held.rows(port.receivedGroupIdHex)?.first { $0.messageId == marker.messageId }
+            if resendVerdict(
+                marker: marker, receivedConversation: receivedConversation, originConversation: nil,
+                originIsOlderSegment: false, heldAuthor: nil, senderAuthor: senderAuthor,
+                heldInReceivedAuthor: heldRowAuthor(
+                    copy, ownPersonKeyB64: port.ownPersonKeyB64, canonical: port.canonical)) == .skip {
+                return true
+            }
             do {
                 let slot = held.rows(originHex)
                 let row = slot?.first { $0.messageId == marker.messageId }
@@ -253,11 +278,99 @@ public enum ResendMarker {
                     originIsOlderSegment: try port.segmentIndexOf(originHex) < receivedIndex,
                     heldAuthor: heldRowAuthor(
                         row, ownPersonKeyB64: port.ownPersonKeyB64, canonical: port.canonical),
-                    senderAuthor: message.senderKeyB64.map(port.canonical))
+                    senderAuthor: senderAuthor)
                 return verdict == .skip
             } catch {
                 return false
             }
+        }
+    }
+}
+
+// MARK: - D3: a re-send drawn here, and its original in a history page
+
+/// ADR-0101 section 9 (live walk 2026-11-26, D3) — the re-sends this device
+/// drew as ordinary messages because it held no original (the person who
+/// reset). Their originals come back later in the history pages the other
+/// person sends; a page row naming the same original is not filed again.
+///
+/// Per account: received group (lowercase hex) -> the origins drawn there,
+/// newest last, at most ``maxPerGroup`` per group (chosen).
+public struct ResendOriginLog {
+    static let prefix = "lakko.resend-origins.v1."
+    public static let maxPerGroup = 512
+
+    public struct Entry: Codable, Equatable, Sendable {
+        /// The original's DS message id in its own group.
+        public let originMessageId: Int64
+        /// The MLS-authenticated sender of the re-send (standard base64).
+        public let authorKeyB64: String
+
+        public init(originMessageId: Int64, authorKeyB64: String) {
+            self.originMessageId = originMessageId
+            self.authorKeyB64 = authorKeyB64
+        }
+    }
+
+    private let defaults: UserDefaults
+
+    public init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    public func read(accountIdB64: String) -> [String: [Entry]] {
+        guard let data = defaults.data(forKey: Self.prefix + accountIdB64) else { return [:] }
+        return (try? JSONDecoder().decode([String: [Entry]].self, from: data)) ?? [:]
+    }
+
+    /// Record origins drawn in `groupIdHex` (a duplicate is kept once).
+    public func record(_ entries: [Entry], groupIdHex: String, accountIdB64: String) {
+        guard !entries.isEmpty else { return }
+        var all = read(accountIdB64: accountIdB64)
+        var held = all[groupIdHex] ?? []
+        for entry in entries where !held.contains(entry) { held.append(entry) }
+        if held.count > Self.maxPerGroup { held.removeFirst(held.count - Self.maxPerGroup) }
+        all[groupIdHex] = held
+        guard let data = try? JSONEncoder().encode(all), let gate = AccountStoreGate.enter(accountIdB64) else {
+            return
+        }
+        defer { gate.leave() }
+        defaults.set(data, forKey: Self.prefix + accountIdB64)
+    }
+
+    public func clear(accountIdB64: String) {
+        defaults.removeObject(forKey: Self.prefix + accountIdB64)
+    }
+}
+
+extension ResendMarker {
+    /// | the page row's id is a drawn re-send's origin | by the same person | filed |
+    /// |-----------------------------------------------|--------------------|-------|
+    /// | no                                            | -                  | yes   |
+    /// | yes                                           | no                 | yes   |
+    /// | yes                                           | yes                | no    |
+    ///
+    /// `canonical` maps a key through its aliases (a proven rotation names
+    /// the same person); a row with no author is always filed. Pure.
+    public static func historyRowAlreadyShown(
+        messageId: Int64, authorKeyB64: String?, drawn: [ResendOriginLog.Entry],
+        canonical: (String) -> String = { $0 }
+    ) -> Bool {
+        guard let authorKeyB64, !authorKeyB64.isEmpty else { return false }
+        let author = canonical(authorKeyB64)
+        return drawn.contains { $0.originMessageId == messageId && canonical($0.authorKeyB64) == author }
+    }
+
+    /// The origins of a batch's re-sends this device draws (it holds no
+    /// original): every kept message carrying a marker and an attributable
+    /// sender, for which `alreadyHeld` said no. Pure.
+    public static func drawnOrigins(
+        _ received: [Received], alreadyHeld: (Received) -> Bool
+    ) -> [ResendOriginLog.Entry] {
+        received.compactMap { message in
+            guard let origin = message.resendOrigin, let sender = message.senderKeyB64, !sender.isEmpty,
+                  !alreadyHeld(message) else { return nil }
+            return ResendOriginLog.Entry(originMessageId: origin.messageId, authorKeyB64: sender)
         }
     }
 }

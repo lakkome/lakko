@@ -145,4 +145,61 @@ final class ChannelMemberCardRulesTests: XCTestCase {
         XCTAssertTrue(c.bundleNeedsSending(groupIdHex: g, digest: "d2"))
         XCTAssertFalse(c.offerNeedsSending(groupIdHex: g, key: "o1"), "a new bundle leaves the offer alone")
     }
+
+    // MARK: - D1 (live walk 2026-11-26): the owner's and the publishers' own card
+
+    private func keys(_ byte: UInt8) -> ChannelSubscriberKeys {
+        ChannelSubscriberKeys(secret: Data(repeating: byte, count: 32), publicKey: Data(repeating: byte &+ 1, count: 32))
+    }
+
+    func testAPublishingDeviceUploadsTheCardUnderTheRegisteredAccountKeyWithTheComposersSeed() {
+        let register = keys(0x10)
+        let seed = Data(repeating: 0x77, count: 32)
+        let registeredHex = ChannelsComposer.bytesToHex(register.publicKey)
+        let source = ChannelMemberCards.cardSource(
+            publishing: true, subscriberKeys: nil, registerKeys: register,
+            readerKeyRegisteredHex: registeredHex.uppercased(), composerSeed: (epoch: 4, seed: seed),
+            heldSeeds: [9: Data(repeating: 1, count: 32)])
+        XCTAssertEqual(source, ChannelMemberCards.CardSource(keys: register, epoch: 4, seed: seed))
+        // Not registered at the service yet: no card (the route needs a row).
+        XCTAssertNil(ChannelMemberCards.cardSource(
+            publishing: true, subscriberKeys: nil, registerKeys: register, readerKeyRegisteredHex: nil,
+            composerSeed: (epoch: 4, seed: seed), heldSeeds: [:]))
+        XCTAssertNil(ChannelMemberCards.cardSource(
+            publishing: true, subscriberKeys: nil, registerKeys: register, readerKeyRegisteredHex: registeredHex,
+            composerSeed: nil, heldSeeds: [:]))
+        // A publisher that subscribed before keeps its subscriber key.
+        let sub = keys(0x20)
+        XCTAssertEqual(
+            ChannelMemberCards.cardSource(
+                publishing: true, subscriberKeys: sub, registerKeys: register, readerKeyRegisteredHex: nil,
+                composerSeed: (epoch: 4, seed: seed), heldSeeds: [:]),
+            ChannelMemberCards.CardSource(keys: sub, epoch: 4, seed: seed))
+    }
+
+    func testASubscriberOrAReaderDeviceUploadsUnderItsKeyWithTheNewestSeed() {
+        let sub = keys(0x30)
+        let newest = Data(repeating: 0x09, count: 32)
+        XCTAssertEqual(
+            ChannelMemberCards.cardSource(
+                publishing: false, subscriberKeys: sub, registerKeys: nil, readerKeyRegisteredHex: nil,
+                composerSeed: nil, heldSeeds: [2: Data(repeating: 0x02, count: 32), 7: newest]),
+            ChannelMemberCards.CardSource(keys: sub, epoch: 7, seed: newest))
+        XCTAssertNil(ChannelMemberCards.cardSource(
+            publishing: false, subscriberKeys: sub, registerKeys: nil, readerKeyRegisteredHex: nil,
+            composerSeed: nil, heldSeeds: [:]), "no seed held yet (a private channel before the let-in)")
+        XCTAssertNil(ChannelMemberCards.cardSource(
+            publishing: false, subscriberKeys: nil, registerKeys: nil, readerKeyRegisteredHex: nil,
+            composerSeed: nil, heldSeeds: [7: newest]))
+    }
+
+    /// D6 — the `Invite` button: one send per tap, nothing picked after it.
+    func testTheInviteButtonSendsOncePerTap() {
+        let picked: Set<Data> = [Data([1])]
+        XCTAssertTrue(InviteSendGate.canInvite(selected: picked, sending: false))
+        XCTAssertFalse(InviteSendGate.canInvite(selected: picked, sending: true), "a second tap while it runs")
+        XCTAssertFalse(InviteSendGate.canInvite(selected: [], sending: false))
+        XCTAssertTrue(InviteSendGate.afterInvite(picked).isEmpty)
+        XCTAssertFalse(InviteSendGate.canInvite(selected: InviteSendGate.afterInvite(picked), sending: false))
+    }
 }

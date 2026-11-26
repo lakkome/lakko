@@ -242,6 +242,14 @@ if ! grep -q '^LAKKO_AUTH_SUPPORTER_CODE_PEPPER=' $ENV_FILE; then
   echo "supporter-code pepper added to the env file"
 fi
 
+# Channel recovery (ADR-0101) arrived later: an older env file gains the
+# secret the per-account channel recovery key is derived from, generated once
+# and then kept (regenerating it makes every registered recovery key useless).
+if ! grep -q '^LAKKO_AUTH_CHANNEL_RECOVERY_SECRET=' $ENV_FILE; then
+  echo "LAKKO_AUTH_CHANNEL_RECOVERY_SECRET=$(openssl rand -hex 32)" >> $ENV_FILE
+  echo "channel recovery secret added to the env file"
+fi
+
 # The recovery email (ADR-0075) arrived later: an older env file gains the
 # pepper that keys the stored (login handle, address) values, generated once
 # and then kept (regenerating it turns every recovery email off). The SMTP
