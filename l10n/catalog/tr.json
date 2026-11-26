@@ -9909,6 +9909,18 @@
       "text": "{language} indirmek için Wi-Fi bekleniyor",
       "status": "machine"
     },
+    "translate.pack.body.lakko": {
+      "text": "Çeviri bu cihazda yapılır. {language} dilinden çeviri için Lakko'nun {languages} paketine ihtiyacı var ({size}). Mesajlar çeviri için hiçbir yere gönderilmez.",
+      "status": "machine"
+    },
+    "translate.pack.body.lakko_two": {
+      "text": "Çeviri bu cihazda yapılır. {language} dilinden çeviri için Lakko'nun {first} ve {second} paketlerine ihtiyacı var ({size}). Mesajlar çeviri için hiçbir yere gönderilmez.",
+      "status": "machine"
+    },
+    "translate.pack.source.lakko": {
+      "text": "Paket Lakko'nun sunucusundan gelir; sunucu bu cihazın bu dillerden birini istediğini öğrenir.",
+      "status": "machine"
+    },
     "translate.picker.title": {
       "text": "Bu mesajın dili",
       "status": "machine"

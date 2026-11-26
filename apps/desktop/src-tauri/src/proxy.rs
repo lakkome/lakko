@@ -6,6 +6,8 @@
 //! Three kinds of path:
 //! - `/api/<service>/...` for a known service: forwarded to the one configured
 //!   Lakko origin with the same method, headers and body;
+//! - `/translation-models/<sha256>` (GET): one language group of Lakko's own
+//!   translation engine (ADR-0100), forwarded to the same origin;
 //! - `/__probe...`: the S1 measurement page (`probe.rs`);
 //! - `/__host/engines/...`: the system's translation and transcription
 //!   (`engines.rs`);
@@ -48,6 +50,11 @@ const SERVICES: &[&str] = &[
 /// forwarded on GET alone; any other path under `/.well-known/` stays a
 /// bundled asset.
 const FORWARDED_WELL_KNOWN: &[&str] = &["/.well-known/lakko-release", "/.well-known/lakko-supporters"];
+
+/// Where the language groups of Lakko's own translation engine are served
+/// (ADR-0100 section 3): `/translation-models/<64 lower-case hex>`, forwarded
+/// on GET alone. Any other path under it stays a bundled asset.
+const TRANSLATION_MODELS_PREFIX: &str = "/translation-models/";
 
 /// Request headers never forwarded: the connection's own, and the ones that
 /// would name the page's origin to the server.
@@ -149,6 +156,11 @@ pub async fn handle<R: Runtime>(
         debug!(path = %path, "forward well-known");
         return forward(config, request).await;
     }
+    if forwards_translation_model(&path, request.method()) {
+        // The group's name is not logged: it tells which languages are read.
+        debug!("forward translation model");
+        return forward(config, request).await;
+    }
     if path.starts_with(probe::PROBE_PATH) {
         return probe::handle(request).await;
     }
@@ -190,6 +202,14 @@ fn api_service(path: &str) -> Option<&'static str> {
 /// Whether `path` is one of [`FORWARDED_WELL_KNOWN`], asked with GET.
 fn forwards_well_known(path: &str, method: &Method) -> bool {
     *method == Method::GET && FORWARDED_WELL_KNOWN.contains(&path)
+}
+
+/// Whether `path` names one translation model group file, asked with GET.
+fn forwards_translation_model(path: &str, method: &Method) -> bool {
+    *method == Method::GET
+        && path.strip_prefix(TRANSLATION_MODELS_PREFIX).is_some_and(|name| {
+            name.len() == 64 && name.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
 }
 
 async fn forward(config: &ProxyConfig, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
@@ -341,7 +361,7 @@ pub fn plain(status: StatusCode, text: &str) -> Response<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{api_service, forwards_well_known};
+    use super::{api_service, forwards_translation_model, forwards_well_known};
     use http::Method;
 
     #[test]
@@ -351,6 +371,13 @@ mod tests {
         assert!(!forwards_well_known("/.well-known/lakko-supporters", &Method::POST));
         assert!(!forwards_well_known("/.well-known/other", &Method::GET));
         assert!(!forwards_well_known("/.well-known/lakko-supporters/x", &Method::GET));
+        let name = "0123456789abcdef".repeat(4);
+        assert!(forwards_translation_model(&format!("/translation-models/{name}"), &Method::GET));
+        assert!(!forwards_translation_model(&format!("/translation-models/{name}"), &Method::POST));
+        assert!(!forwards_translation_model(&format!("/translation-models/{}", name.to_uppercase()), &Method::GET));
+        assert!(!forwards_translation_model(&format!("/translation-models/{name}0"), &Method::GET));
+        assert!(!forwards_translation_model("/translation-models/", &Method::GET));
+        assert!(!forwards_translation_model(&format!("/translation-models/x/{name}"), &Method::GET));
     }
 
     #[test]

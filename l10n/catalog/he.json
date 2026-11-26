@@ -9909,6 +9909,18 @@
       "text": "ממתין ל־Wi-Fi כדי להוריד את {language}",
       "status": "machine"
     },
+    "translate.pack.body.lakko": {
+      "text": "התרגום מתבצע במכשיר הזה. כדי לתרגם מ{language}, Lakko צריך את החבילה של {languages} ({size}). הודעות אף פעם לא נשלחות לשום מקום לתרגום.",
+      "status": "machine"
+    },
+    "translate.pack.body.lakko_two": {
+      "text": "התרגום מתבצע במכשיר הזה. כדי לתרגם מ{language}, Lakko צריך את החבילות של {first} ושל {second} ({size}). הודעות אף פעם לא נשלחות לשום מקום לתרגום.",
+      "status": "machine"
+    },
+    "translate.pack.source.lakko": {
+      "text": "החבילה מגיעה מהשרת של Lakko, שיודע שהמכשיר הזה ביקש אחת מהשפות האלה.",
+      "status": "machine"
+    },
     "translate.picker.title": {
       "text": "השפה של ההודעה הזו",
       "status": "machine"

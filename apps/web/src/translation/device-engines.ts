@@ -19,6 +19,7 @@ import {
 } from "./browser-engines";
 import { enginesInOrder } from "./engine-order";
 import type { Engines } from "./engines";
+import { lakkoDeviceTranslation } from "./lakko-engine/device";
 import { hostEngines } from "../platform/host-engines";
 
 export function deviceEngines(): Engines {
@@ -28,6 +29,16 @@ export function deviceEngines(): Engines {
     detection: layeredDetection(undefined, core),
     transcription: browserTranscription(),
   };
+  const lakko: Engines = {
+    translation: lakkoDeviceTranslation(),
+    detection: { present: false, detect: () => Promise.resolve(null) },
+    transcription: {
+      present: false,
+      state: () => Promise.resolve("unavailable"),
+      install: () => Promise.resolve(false),
+      transcribe: () => Promise.reject(new Error("no on-device recognizer")),
+    },
+  };
   const host = hostEngines(core.rank);
-  return host === null ? browser : enginesInOrder([host, browser]);
+  return enginesInOrder(host === null ? [browser, lakko] : [host, browser, lakko]);
 }

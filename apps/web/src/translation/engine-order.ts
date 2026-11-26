@@ -20,6 +20,8 @@ import type {
   DetectionEngine,
   EngineState,
   Engines,
+  OwnPack,
+  PackDisclosure,
   PackFetch,
   TranscriptionEngine,
   TranslationEngine,
@@ -79,6 +81,29 @@ export function translationInOrder(list: readonly TranslationEngine[]): Translat
     packFetch(source, target): PackFetch {
       return owners.get(key(source, target))?.packFetch?.(source, target) ?? "engine";
     },
+    async packDisclosure(source, target): Promise<PackDisclosure | null> {
+      const engine = owners.get(key(source, target)) ?? (await ownerOf(source, target));
+      return (await engine?.packDisclosure?.(source, target).catch(() => null)) ?? null;
+    },
+    keepsOwnPacks(source, target): boolean {
+      return owners.get(key(source, target))?.ownPacks !== undefined;
+    },
+    ...(present.some((e) => e.ownPacks !== undefined)
+      ? {
+          async ownPacks(): Promise<OwnPack[]> {
+            const out: OwnPack[] = [];
+            for (const e of present) out.push(...((await e.ownPacks?.().catch(() => [])) ?? []));
+            return out;
+          },
+          async removeOwnPack(id: string): Promise<void> {
+            for (const e of present) {
+              if (e.removeOwnPack === undefined) continue;
+              const own = await e.ownPacks?.().catch(() => []);
+              if (own?.some((p) => p.id === id) === true) await e.removeOwnPack(id);
+            }
+          },
+        }
+      : {}),
     ...(opener?.openPackSettings !== undefined
       ? { openPackSettings: () => opener.openPackSettings?.() ?? Promise.resolve() }
       : {}),

@@ -18,6 +18,7 @@ import { LakkoPicker } from "../ui/LakkoPicker";
 import { CANDIDATE_LANGUAGES, languageName } from "./model";
 import { translationRules } from "./rules";
 import { packList, translationSettings, updateTranslationSettings, type PackRecord } from "./settings";
+import { formatPackSize, languageListText } from "./pack-copy";
 import { useTranslation } from "./context";
 
 function SwitchRow(props: { title: string; on: boolean; onToggle: () => void }): JSX.Element {
@@ -81,6 +82,19 @@ export function TranslationSettingsSection(): JSX.Element {
       (tag) => languageName(tag, ui()),
     );
   };
+
+  // Language groups Lakko's own engine downloaded (ADR-0100): listed from
+  // the engine, each with its size and Remove.
+  const [ownPacks, { refetch: refetchOwnPacks }] = createResource(
+    () => controller,
+    (c) => c.ownPacks(),
+  );
+  async function removeOwn(id: string): Promise<void> {
+    await controller?.removeOwnPack(id).catch((err: unknown) => {
+      console.warn("[translation] removing a pack failed", err instanceof Error ? err.name : "unknown");
+    });
+    void refetchOwnPacks();
+  }
 
   async function deleteAll(): Promise<void> {
     if (controller === undefined) return;
@@ -208,7 +222,7 @@ export function TranslationSettingsSection(): JSX.Element {
         <section class="lk-card">
           <h2>{t("settings.translation.packs")}</h2>
           <Show
-            when={packs().length > 0}
+            when={packs().length > 0 || (ownPacks.latest ?? []).length > 0}
             fallback={<p class="lk-card-desc">{t("settings.translation.packs.empty")}</p>}
           >
             <For each={packs()}>
@@ -220,6 +234,21 @@ export function TranslationSettingsSection(): JSX.Element {
                       {packUseLabel(p)} · {t("settings.translation.pack.managed.web")}
                     </span>
                   </div>
+                </div>
+              )}
+            </For>
+            <For each={ownPacks.latest ?? []}>
+              {(p) => (
+                <div class="lk-card-row">
+                  <div class="lk-card-row-body">
+                    <span class="lk-card-row-title">{languageListText(p.languages, ui())}</span>
+                    <span class="lk-card-row-sub">
+                      {t("settings.translation.pack.for_translation")} · {formatPackSize(p.bytes, ui())}
+                    </span>
+                  </div>
+                  <button type="button" class="lk-card-row-action" onClick={() => void removeOwn(p.id)}>
+                    {t("settings.translation.pack.remove")}
+                  </button>
                 </div>
               )}
             </For>

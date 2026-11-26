@@ -153,6 +153,13 @@ describe("the translation code reaches no network", () => {
     // The desktop host's engine routes: this app's own process, never a
     // server (checked below, "the host engines ask only the host").
     /^\.\.\/platform\/host-engines$/,
+    // Lakko's own engine (ADR-0100): its downloader, which asks only for
+    // model group files and the engine binary (checked below, "the model
+    // store asks only for model files"), and the engine module the worker
+    // runs.
+    /^\.\.\/engines$/,
+    /^\.\.\/\.\.\/translation-models\/models-store$/,
+    /^\.\.\/\.\.\/\.\.\/wasm-translate\/lakko_translate\.mjs$/,
   ];
 
   it("scans every translation module", () => {
@@ -188,6 +195,24 @@ describe("the host engines ask only the host (ADR-0082 note of 2026-11-18)", () 
     expect(src).toMatch(/export const HOST_ENGINES_PATH = "\/__host\/engines";/);
     // No other network API, and no request to a page-chosen address.
     expect(/\bXMLHttpRequest\b|\bWebSocket\b|\bEventSource\b|\bsendBeacon\b/.test(src)).toBe(false);
+  });
+});
+
+describe("the model store asks only for model files (ADR-0100 section 3)", () => {
+  const STORE = join(SRC_ROOT, "translation-models", "models-store.ts");
+
+  it("requests a group file by its hash, or the engine binary, and nothing else", () => {
+    const src = readFileSync(STORE, "utf8");
+    const calls = [...src.matchAll(/\bfetchImpl\s*\(\s*([^,)]+)/g)].map((m) => (m[1] ?? "").trim());
+    expect(calls.sort()).toEqual(["`${MODELS_PATH}${group}`", "engineWasmUrl"]);
+    expect(src).toMatch(/export const MODELS_PATH = "\/translation-models\/";/);
+    // The group name is checked to be a SHA-256 before it is requested.
+    expect(src).toMatch(/if \(!HEX64\.test\(group\)\) throw/);
+    expect(src).toMatch(/import engineWasmUrl from "\.\.\/\.\.\/wasm-translate\/lakko_translate\.wasm\?url";/);
+    const code = stripCommentsAndStrings(src);
+    expect(/\bXMLHttpRequest\b|\bWebSocket\b|\bEventSource\b|\bsendBeacon\b|\bimport\s*\(/.test(code)).toBe(false);
+    // No request outside the two above: every `fetch` goes through `fetchImpl`.
+    expect(code.match(/\bfetch\s*\(/g) ?? []).toEqual([]);
   });
 });
 

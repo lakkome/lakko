@@ -9909,6 +9909,18 @@
       "text": "Aguardando Wi-Fi para baixar {language}",
       "status": "machine"
     },
+    "translate.pack.body.lakko": {
+      "text": "A tradução acontece neste dispositivo. Para traduzir do {language}, o Lakko precisa do pacote de {languages} ({size}). As mensagens nunca são enviadas a lugar nenhum para serem traduzidas.",
+      "status": "machine"
+    },
+    "translate.pack.body.lakko_two": {
+      "text": "A tradução acontece neste dispositivo. Para traduzir do {language}, o Lakko precisa dos pacotes de {first} e de {second} ({size}). As mensagens nunca são enviadas a lugar nenhum para serem traduzidas.",
+      "status": "machine"
+    },
+    "translate.pack.source.lakko": {
+      "text": "O pacote vem do servidor do Lakko, que fica sabendo que este dispositivo pediu um destes idiomas.",
+      "status": "machine"
+    },
     "translate.picker.title": {
       "text": "Idioma desta mensagem",
       "status": "machine"

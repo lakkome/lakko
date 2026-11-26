@@ -12,6 +12,11 @@ dist-desktop/
 # them from `crates/lakko-ffi-wasm`.
 wasm/
 
+# Lakko's own translation engine (ADR-0100), built by
+# `tools/translate-wasm/build.sh`. Kept apart from wasm/: wasm-pack runs
+# wasm-opt over every .wasm in its output directory and fails on this one.
+wasm-translate/
+
 # Playwright: run output, and the audio fixtures `globalSetup` generates.
 # The fixtures are binary and reproducible from `playwright/fixtures/make-assets.mjs`,
 # so they are built rather than committed.

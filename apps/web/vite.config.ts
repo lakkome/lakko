@@ -5,6 +5,7 @@ import { defineConfig, loadEnv } from "vite";
 import solid from "vite-plugin-solid";
 import wasm from "vite-plugin-wasm";
 import pkg from "./package.json";
+import { devTranslationModels } from "./scripts/dev-translation-models";
 
 // `vite-plugin-wasm` lets us `import` the wasm-pack output as a
 // regular ES module — Vite handles the WebAssembly.instantiate dance
@@ -19,7 +20,7 @@ import pkg from "./package.json";
 export default defineConfig(({ mode }) => {
   const desktop = loadEnv(mode, ".", "VITE_")["VITE_LAKKO_PLATFORM"] === "desktop";
   return {
-    plugins: [solid(), wasm()],
+    plugins: [solid(), wasm(), devTranslationModels()],
 
     // Settings > About reads the package version through this constant
     // (`src/ui/app-version.ts`); `VITE_APP_VERSION` from the environment wins

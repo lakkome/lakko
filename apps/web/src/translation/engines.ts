@@ -40,6 +40,23 @@ export type ProgressListener = (fraction: number) => void;
  */
 export type PackFetch = "engine" | "system-settings";
 
+/**
+ * What downloading the packs of a pair reveals and costs, for the UX 3.5
+ * dialog (ADR-0100 section 4): the language groups that are not on the
+ * device yet, each with the transfer size. An engine that downloads a single
+ * language from its vendor offers none.
+ */
+export interface PackDisclosure {
+  readonly groups: readonly { readonly languages: readonly string[]; readonly bytes: number }[];
+}
+
+/** A pack an engine downloaded itself and can list and remove (UX 6). */
+export interface OwnPack {
+  readonly id: string;
+  readonly languages: readonly string[];
+  readonly bytes: number;
+}
+
 /** On-device translation (the browser `Translator` API on web). */
 export interface TranslationEngine {
   /** Whether this browser has an on-device translator at all. */
@@ -67,6 +84,17 @@ export interface TranslationEngine {
   readonly fetchesPacks?: boolean;
   /** Open the system's settings where its packs are downloaded. */
   openPackSettings?(): Promise<void>;
+  /** What the pack download of a `needs-pack` pair reveals and costs. */
+  packDisclosure?(source: string, target: string): Promise<PackDisclosure | null>;
+  /** The packs this engine downloaded itself; present only on an engine
+   *  that keeps its own packs (Lakko's), whose packs are then listed from
+   *  here rather than recorded in the settings. */
+  ownPacks?(): Promise<OwnPack[]>;
+  /** Delete one of {@link ownPacks}. */
+  removeOwnPack?(id: string): Promise<void>;
+  /** Whether the engine that owns this pair keeps its own packs, so the
+   *  controller records nothing in the settings (`engine-order.ts`). */
+  keepsOwnPacks?(source: string, target: string): boolean;
 }
 
 /** On-device language detection (the browser `LanguageDetector` API). */

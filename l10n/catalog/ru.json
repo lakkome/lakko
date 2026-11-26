@@ -10521,6 +10521,18 @@
       "text": "Ожидание Wi-Fi для скачивания «{language}»",
       "status": "machine"
     },
+    "translate.pack.body.lakko": {
+      "text": "Перевод выполняется на этом устройстве. Чтобы переводить с языка «{language}», Lakko нужен пакет для языков: {languages} ({size}). Сообщения никуда не отправляются для перевода.",
+      "status": "machine"
+    },
+    "translate.pack.body.lakko_two": {
+      "text": "Перевод выполняется на этом устройстве. Чтобы переводить с языка «{language}», Lakko нужны пакеты для языков: {first} и {second} ({size}). Сообщения никуда не отправляются для перевода.",
+      "status": "machine"
+    },
+    "translate.pack.source.lakko": {
+      "text": "Пакет скачивается с сервера Lakko, и сервер узнаёт, что это устройство запросило один из этих языков.",
+      "status": "machine"
+    },
     "translate.picker.title": {
       "text": "Язык этого сообщения",
       "status": "machine"

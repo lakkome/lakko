@@ -427,6 +427,7 @@ Two `server_name`s share one nginx config (`infra/nginx/sites-available/lakko.co
 | `lakko.me` | `/`, `/assets/*`, `/sw.js`, `/manifest.webmanifest` | The web SPA root + hashed assets + the service worker + the PWA manifest |
 | `lakko.me` | `/.well-known/lakko-release` (ADR-0038) | The signed "update available" manifest — a raw 89-byte Ed25519 blob served from a **separate** root `/var/www/lakko-release/` (NOT the SPA root) with `Cache-Control: no-store` |
 | `lakko.me` | `/.well-known/lakko-supporters` (ADR-0097) | The signed supporters list, signed with the release key, same separate root `/var/www/lakko-release/`, `Cache-Control: no-store` |
+| `lakko.me` | `/translation-models/<sha256>` (ADR-0100) | Translation model groups, one file per group of three languages, from the separate root `/var/www/lakko-translation-models/`; immutable, a year of caching, no access log, only 64-hex names |
 | `lakko.me` | `/api/auth/*`, `/api/ds/*`, `/api/discovery/*`, `/api/storage/*` (1.19c1), `/api/push/*` (1.20b), `/api/gifs/*` (ADR-0047) | Same-origin proxy to the backend services so the web client's `connect-src 'self'` CSP stays valid |
 | `api.lakko.me` | `/auth/*`, `/ds/*`, `/storage/*`, `/discovery/*`, `/push-gw/*`, `/gifs/*` | Canonical external API entry point for the iOS / Android / Tauri clients (different CSP boundary; CORS not needed because Lakko clients never cross the `lakko.me ↔ api.lakko.me` origin pair) |
 
@@ -547,6 +548,29 @@ scp lakko-supporters.bin lakkome@lakko.me:/var/www/lakko-release/lakko-supporter
 ```
 
 `version` must be higher than the last published one. Served immediately, no reload.
+
+### Translation models (ADR-0100)
+
+The web client and the desktop app translate with Mozilla's Firefox Translations models, served from Lakko's own origin at **`/translation-models/<sha256>`**: an nginx location (`lakko.conf`, and `infra/test-stack/nginx/lakko-test.conf`) over the separate root `/var/www/lakko-translation-models/` (the SPA deploy rsyncs with `--delete`). Each file is one language group (three languages, each to and from English), named by its SHA-256 and listed with its model files' offsets and hashes in `apps/web/src/translation/lakko-engine/models.json`, which ships in the web build; the client loads a file only if its hashes match. Only a 64-hex name is served, GET and HEAD only, `Cache-Control: public, max-age=31536000, immutable`, `access_log off` (a request names a group of languages). Clients never fetch from Mozilla.
+
+**Build the files — on the operator's machine** (`tools/translation-models/README.md`; about 2.5 GB):
+
+```bash
+just translation-models-fetch ~/lakko-models/cache
+just translation-models-build ~/lakko-models/cache ~/lakko-models/out
+# -> ~/lakko-models/out/<sha256> per group, and the manifest in apps/web
+```
+
+**Copy them to the server before deploying a web build whose manifest names them:**
+
+```bash
+just mirror-translation-models-test ~/lakko-models/out   # test.lakko.me
+# production: same rsync, to /var/www/lakko-translation-models/ on lakko.me
+#   sudo install -d -o lakkome -g www-data -m 755 /var/www/lakko-translation-models
+#   rsync -av --ignore-existing --chmod=F644 ~/lakko-models/out/ lakkome@lakko.me:/var/www/lakko-translation-models/
+```
+
+Files are only ever added (`--ignore-existing`, no `--delete`): a new build names new files, and older web builds still in browsers keep finding theirs. Removing files no deployed build names is a manual step. Served immediately, no reload.
 
 ### Supporter codes (ADR-0097)
 

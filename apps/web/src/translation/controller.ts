@@ -25,7 +25,7 @@
 
 import { createSignal } from "solid-js";
 
-import type { Detection, EngineState, Engines, SystemPacks } from "./engines";
+import type { Detection, EngineState, Engines, OwnPack, PackDisclosure, SystemPacks } from "./engines";
 import {
   CANDIDATE_LANGUAGES,
   connectionTypeKnown,
@@ -116,6 +116,10 @@ export interface PackRequest {
   /** The system downloads this pack in its own settings (macOS translation):
    *  the button opens them and nothing is downloaded by Lakko. */
   readonly systemSettings: boolean;
+  /** The language groups the download fetches and their size, where the
+   *  engine downloads groups (Lakko's own, ADR-0100 section 4); `null` for
+   *  an engine that fetches one language from its vendor. */
+  readonly disclosure: PackDisclosure | null;
   /** `Download` - called from the person's press, which the browser needs. */
   readonly download: () => void;
   readonly dismiss: () => void;
@@ -203,6 +207,20 @@ export class TranslationController {
     const list = this.deps.engines.systemPacks;
     if (list === undefined) return null;
     return list.call(this.deps.engines, target).catch(() => null);
+  }
+
+  /** The language groups Lakko's own engine downloaded (UX 6, ADR-0100);
+   *  empty where no engine keeps its own packs. */
+  async ownPacks(): Promise<OwnPack[]> {
+    return (await this.deps.engines.translation.ownPacks?.().catch(() => [])) ?? [];
+  }
+
+  /** `Remove` on one of {@link ownPacks}: the group is deleted, every pair it
+   *  served reads `needs-pack` again. */
+  async removeOwnPack(id: string): Promise<void> {
+    await this.deps.engines.translation.removeOwnPack?.(id);
+    this.engineStates.clear();
+    this.bump();
   }
 
   /** The language translations are made into. */
@@ -590,6 +608,7 @@ export class TranslationController {
         },
         () => undefined,
         () => this.setView(key, { phase: "waiting-wifi", language: source }),
+        { source, target },
       );
       return;
     }
@@ -620,7 +639,7 @@ export class TranslationController {
       });
       if (abort.signal.aborted || this.explicitOriginal.has(key)) return;
       if (downloading) {
-        this.deps.recordPack(source, "translation");
+        this.recordTranslationPack(source, target);
         this.forgetState(`t:${source}>${target}`);
       }
       this.setView(key, { phase: "translated", source, text: translated }, ref.lastOpId);
@@ -684,6 +703,21 @@ export class TranslationController {
     start: (waited: boolean) => Promise<void> | void,
     onDismiss: () => void,
     onWaiting: () => void = () => undefined,
+    pair: { readonly source: string; readonly target: string } | null = null,
+  ): void {
+    const ask = pair === null || use !== "translation"
+      ? Promise.resolve(null)
+      : (this.deps.engines.translation.packDisclosure?.(pair.source, pair.target) ?? Promise.resolve(null)).catch(() => null);
+    void ask.then((disclosure) => this.showPackDialog(use, language, start, onDismiss, onWaiting, disclosure));
+  }
+
+  private showPackDialog(
+    use: PackUse,
+    language: string,
+    start: (waited: boolean) => Promise<void> | void,
+    onDismiss: () => void,
+    onWaiting: () => void,
+    disclosure: PackDisclosure | null,
   ): void {
     const wifiOnly = onCellular() && !this.deps.settings().mobileData;
     this.packSignal[1]({
@@ -691,6 +725,7 @@ export class TranslationController {
       language,
       wifiOnly,
       systemSettings: false,
+      disclosure,
       download: () => {
         this.packSignal[1](null);
         if (wifiOnly) {
@@ -705,6 +740,13 @@ export class TranslationController {
         onDismiss();
       },
     });
+  }
+
+  /** Record a downloaded translation pack in the settings, unless the
+   *  engine that owns the pair lists its own packs (Lakko's, UX 6). */
+  private recordTranslationPack(source: string, target: string): void {
+    if (this.deps.engines.translation.keepsOwnPacks?.(source, target) === true) return;
+    this.deps.recordPack(source, "translation");
   }
 
   /** Who fetches the pack of a pair (`engines.ts`, `PackFetch`). */
@@ -725,6 +767,7 @@ export class TranslationController {
       language,
       wifiOnly: false,
       systemSettings: true,
+      disclosure: null,
       download: () => {
         this.packSignal[1](null);
         onOpened();
@@ -857,7 +900,7 @@ export class TranslationController {
         try {
           // Creating the translator is what fetches the pack.
           await this.deps.engines.translation.translate(language, target, "");
-          this.deps.recordPack(language, "translation");
+          this.recordTranslationPack(language, target);
         } catch (err) {
           console.warn("[translation] pack download failed", err instanceof Error ? err.name : "unknown");
         }
@@ -866,6 +909,8 @@ export class TranslationController {
         this.bump();
       },
       () => undefined,
+      () => undefined,
+      { source: language, target },
     );
   }
 

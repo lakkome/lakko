@@ -1164,6 +1164,38 @@ sign-donations input out="donations.signed.json":
 deploy-test-obfs:
     infra/test-stack/deploy-obfs-proxy.sh
 
+# ADR-0100 - download Mozilla's translation models into a cache directory on
+# this machine, checking every compressed and decompressed hash. Resumable.
+# Operator tool; clients never fetch from Mozilla. See tools/translation-models.
+translation-models-fetch cache:
+    python3 -I tools/translation-models/translation_models.py fetch --cache {{cache}}
+
+# ADR-0100 - write one file per language group into `out` (named by SHA-256),
+# write the manifest the web build ships, then check both.
+translation-models-build cache out:
+    python3 -I tools/translation-models/translation_models.py build --cache {{cache}} --out {{out}} \
+        --manifest apps/web/src/translation/lakko-engine/models.json
+    python3 -I tools/translation-models/translation_models.py verify \
+        --manifest apps/web/src/translation/lakko-engine/models.json --dir {{out}}
+
+# ADR-0100 - copy the group files in `dir` to the test stack's
+# /var/www/lakko-translation-models/ (served at /translation-models/<sha256>).
+# Adds files, never overwrites or deletes one. Env as for deploy-test.
+mirror-translation-models-test dir:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    target="${LAKKO_TEST_SSH:-root@${LAKKO_TEST_DOMAIN:-test.lakko.me}}"
+    opts=(-o BatchMode=yes)
+    if [[ -n ${LAKKO_TEST_SSH_KEY:-} ]]; then opts+=(-i "$LAKKO_TEST_SSH_KEY"); fi
+    files=()
+    for f in "{{dir}}"/*; do
+        [[ $(basename "$f") =~ ^[0-9a-f]{64}$ ]] && files+=("$f")
+    done
+    (( ${#files[@]} > 0 )) || { echo "no group files in {{dir}}" >&2; exit 1; }
+    ssh "${opts[@]}" "$target" 'install -d -m 755 /var/www/lakko-translation-models'
+    rsync -av --ignore-existing --chmod=F644 -e "ssh ${opts[*]}" \
+        "${files[@]}" "$target":/var/www/lakko-translation-models/
+
 # ADR-0026 - generate the bootstrap-signing keypair. Writes
 # bootstrap-signing-key.seed (mode 0600; keep OFFLINE, never commit) and prints
 # the base64 public key every client pins as its trust anchor.

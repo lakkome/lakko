@@ -11659,6 +11659,21 @@
       "comment": "Desktop app on macOS: dialog body when a translation pack is needed; macOS downloads it in its own settings, which the button opens. 'System Settings', 'Language & Region' and 'Translation Languages' are the names macOS shows; use the names macOS shows in this language. {language} is a language name in the interface language, e.g. 'Spanish'.",
       "security_critical": true
     },
+    "translate.pack.body.lakko": {
+      "text": "Translation happens on this device. To translate {language}, Lakko needs the pack for {languages} ({size}). Messages are never sent anywhere to be translated.",
+      "comment": "Pack dialog body for Lakko's own translation engine, which downloads languages in groups of three. {language} is the language of the message, e.g. 'Spanish'; {languages} is the group as a list, e.g. 'Spanish, Portuguese and Galician'; {size} is the download size, e.g. '147.5 MB'.",
+      "security_critical": true
+    },
+    "translate.pack.body.lakko_two": {
+      "text": "Translation happens on this device. To translate {language}, Lakko needs the packs for {first} and for {second} ({size}). Messages are never sent anywhere to be translated.",
+      "comment": "Pack dialog body when two language groups are needed (a pair translated through English). {first} and {second} are each a group as a list, e.g. 'Spanish, Portuguese and Galician'; {size} is the total download size.",
+      "security_critical": true
+    },
+    "translate.pack.source.lakko": {
+      "text": "The pack comes from Lakko's server, which learns that this device asked for one of these languages.",
+      "comment": "Second paragraph of the pack dialog for Lakko's own translation engine: who serves the download and what it learns. Must not claim more privacy than this.",
+      "security_critical": true
+    },
     "translate.pack.cancel": {
       "text": "Cancel",
       "comment": "Cancels a pack download in progress."

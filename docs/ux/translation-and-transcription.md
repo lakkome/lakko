@@ -225,6 +225,24 @@ asks the device again and translates once the pack is there (ADR-0082 note of
 2026-11-15). On Android the pack of a pair the system service cannot supply
 comes from ML Kit, so the dialog there says `The pack comes from Google.`
 
+Where no system or browser engine translates a pair, Lakko's own engine does
+(web in a desktop browser and the desktop app; ADR-0100, amended 2026-11-25).
+It downloads languages in groups of three, by region, from Lakko's own
+server, and the dialog says so:
+
+> **Download Spanish for translation?**
+> Translation happens on this device. To translate Spanish, Lakko needs the
+> pack for Spanish, Portuguese and Galician (147.4 MB). Messages are never
+> sent anywhere to be translated. The pack comes from Lakko's server, which
+> learns that this device asked for one of these languages.
+> `Not now` · `Download`
+
+A pair translated through English that needs two groups names both: `the
+packs for Spanish, Portuguese and Galician and for Russian, Ukrainian and
+Belarusian (288.2 MB)`. The size is the manifest's, never guessed. In a phone
+or tablet browser Lakko's engine is not offered; the Lakko app translates
+there with the system's engine.
+
 In the desktop app on macOS a translation pack is downloaded by macOS in its
 own settings, never by Lakko (ADR-0082 note of 2026-11-18). The dialog keeps
 its title and says where:
@@ -365,6 +383,9 @@ A sub-screen of Settings > Language (the IA of the design system, section 4):
   list also holds the languages macOS reports ready on this Mac (translation
   into the target, and the installed speech models), each `Managed by your
   system` with no Remove, as iOS lists Apple's packs (amended 2026-11-18).
+  Lakko's own engine (web and desktop app, ADR-0100) lists each language
+  group it downloaded as one row: the three languages as a list, `For
+  translation · 147.5 MB`, and `Remove` (amended 2026-11-25).
 - **Delete all translations and transcripts**: removes every one stored on this
   device. A confirmation dialog says how many.
 - One paragraph at the bottom: "Translation and transcription happen on this
@@ -377,8 +398,9 @@ browser: `in this browser`; the desktop app uses the device wording), with no
 action. A pack the system manages reads `Managed by your browser` in a browser
 and `Managed by your system` in the desktop app. The desktop app on macOS 26.4 and
 later translates and transcribes with Apple's on-device engines (section 7,
-case 1 or 2); on Windows and Linux, and on older macOS, it shows the
-`isn't available on this device` lines until Lakko's own engine exists.
+case 1 or 2); on Windows and Linux, and on older macOS, it translates with
+Lakko's own engine (ADR-0100) and shows the transcription line `isn't
+available on this device` (amended 2026-11-25).
 
 These settings are per device and never reach a server, like the interface
 language ([`localization.md`](localization.md) section 4).

@@ -24,6 +24,7 @@ import { TranslationContext } from "./context";
 import { TranslationController } from "./controller";
 import { languageName } from "./model";
 import { IdbResultBackend } from "./result-idb";
+import { formatPackSize, languageListText } from "./pack-copy";
 import { ResultStore } from "./result-store";
 import { orderPickerLanguagesFor, translationRules } from "./rules";
 import { translationSettings, updateTranslationSettings, withPack } from "./settings";
@@ -68,7 +69,8 @@ export function TranslationProvider(props: { children: JSX.Element }): JSX.Eleme
  * (`requestConfirm`, the design system's `LakkoDialog`): the title, one body
  * of two sentences (the on-device sentence and where the pack comes from),
  * `Not now` first and the confirming `Download` (or `Download on Wi-Fi`).
- * The browser reports no pack size, so the sized sentence is never used.
+ * A browser reports no pack size, so its dialog has no size; Lakko's own
+ * engine names its language groups and their size (ADR-0100 section 4).
  *
  * The dialog resolves after the press, inside the person's transient
  * activation, which is what lets the browser start the download.
@@ -82,7 +84,12 @@ function PackDialog(props: { controller: TranslationController }): JSX.Element {
         const name = languageName(r.language, currentLanguage());
         // macOS downloads its translation languages in System Settings: the
         // dialog says where and opens it (ADR-0082 note of 2026-11-18).
-        const body = r.systemSettings
+        // Lakko's own engine downloads language groups from Lakko's server
+        // and says which and how big (ADR-0100 section 4).
+        const groups = r.disclosure?.groups ?? [];
+        const body = groups.length > 0
+          ? lakkoPackBody(name, groups, currentLanguage())
+          : r.systemSettings
           ? t("translate.pack.body.translation_system_settings", { language: name })
           : (r.use === "transcription"
               ? t("translate.pack.body.transcription", { language: name })
@@ -112,6 +119,22 @@ function PackDialog(props: { controller: TranslationController }): JSX.Element {
     ),
   );
   return null;
+}
+
+/** The UX 3.5 body for Lakko's own engine: the group or two groups to
+ *  download, their size, and that Lakko's server learns which group. */
+function lakkoPackBody(
+  language: string,
+  groups: readonly { readonly languages: readonly string[]; readonly bytes: number }[],
+  ui: string,
+): string {
+  const size = formatPackSize(groups.reduce((n, g) => n + g.bytes, 0), ui);
+  const [first, second] = groups.map((g) => languageListText(g.languages, ui));
+  const need =
+    second === undefined
+      ? t("translate.pack.body.lakko", { language, languages: first ?? "", size })
+      : t("translate.pack.body.lakko_two", { language, first: first ?? "", second, size });
+  return need + " " + t("translate.pack.source.lakko");
 }
 
 /** UX 3.4 — the languages this device can translate from (or transcribe),

@@ -3,8 +3,13 @@
 
 # ADR-0100: Lakko's own on-device translation engine for the web client and the desktop app
 
-- **Status:** Proposed (2026-11-25). Nothing is built. The open decisions
-  are listed at the end; they are the maintainer's.
+- **Status:** Accepted (2026-11-25, maintainer): Bergamot after the S1
+  measurement in section 1, all 114 directions, groups of three languages
+  by region, no persistence request, Mozilla's MPL-2.0 statement relied on.
+  S2 built 2026-11-25 (engine, worker, downloader, manifest tool, dialog
+  and settings, desktop forwarding, nginx config); unit-tested and checked
+  in Firefox, Opera and Safari on a local dev server and in the macOS
+  desktop app (2026-11-26); nothing deployed (S3), the screens not walked.
 - **Date:** 2026-11-25
 - **Context:**
   - [ADR-0082](0082-on-device-translation-and-transcription.md), note of
@@ -102,9 +107,68 @@ Firefox ships.
     - bug 1926100, x86_64 Linux, en->ru: 420.92 words/s on the fallback
       against 786.66 with `mozIntGemm` (~20 MB model), and 237.79 on the
       fallback with a ~40 MB model.
-  - Speed and peak memory in Firefox, Safari and Opera on this Mac are
-    measured in S1. They are the gate before S2. Nothing in
-    this ADR claims a speed it has not measured.
+  - **S1, measured 2026-11-25** on this Mac (Apple silicon, macOS 27.2) in
+    a web page served from localhost, one Web Worker, the fallback gemm,
+    the v2 models of es->en (`base-memory`) and en->ru (`base`), 20 chat
+    sentences translated twice; times from the second pass:
+
+    | Browser | Pair | Model load | Median per sentence | Words/s |
+    |---|---|---|---|---|
+    | Firefox | en->ru | 230 ms | 27 ms | 415 |
+    | Firefox | es->en | 198 ms | 22 ms | 501 |
+    | Opera | en->ru | 97 ms | 24 ms | 448 |
+    | Opera | es->en | 120 ms | 20 ms | 544 |
+    | Safari | en->ru | 141 ms | 24 ms | 493 |
+    | Safari | es->en | 115 ms | 18 ms | 581 |
+
+    - Wasm linear memory after the run: 253 MiB (Opera, en->ru) and
+      196 MiB (Firefox, es->en). Load time excludes the download.
+    - The build was a scratch spike, not the repository build of S2.
+    - en->ru output had malformed words in a few of the 20 sentences
+      ("приезшь", "пекарю", "был ли оплачено счет"). Whether Firefox's own
+      translator produces the same output from the same model is not
+      checked.
+- **As built (2026-11-25), the engine binary.** `tools/translate-wasm/build.sh`
+  builds `apps/web/wasm-translate/lakko_translate.{mjs,wasm}` (5.0 MB wasm, 1.8 MB
+  gzip) from the pinned commit with emsdk 3.1.8 and zstd 1.5.7 (hash
+  checked), as an ES module for a module worker, `-sDYNAMIC_EXECUTION=0`
+  for the CSP; two clean builds are byte-identical. Two things differ from
+  Mozilla's build:
+  - **The matrix multiply is linked inside the wasm.** Upstream routes
+    every int8 matrix multiply wasm -> JS -> wasm through a JS wrapper
+    (`import-gemm-module.js`) so Firefox can swap in `mozIntGemm`, which a
+    web page never has. In an ES module that wrapper runs in strict mode,
+    and under JavaScriptCore (Safari 27.2, this Mac) a strict JS function
+    re-entering wasm on that path gave wrong results after the first
+    sentence or two: 37 of 40 translations empty, against 0 of 40 for the
+    same objects linked as a classic script, and 0 of 40 in Firefox and
+    Opera. Bisected to that one function. `gemm_direct.cpp` binds the
+    seven `wasm_gemm` symbols to their fallback implementations inside the
+    module; after it Safari, Firefox and Opera give 40 of 40, byte-identical
+    to Mozilla's own build.
+  - **zstd is compiled in**: `zstdDecompressToAligned(src, alignment,
+    expectedSize)` decompresses a model file straight into aligned engine
+    memory. Mozilla's frames state no size, so the manifest's is required
+    and the output must be exactly that long.
+- **As built, workers.** The page runs one worker per loaded direction (at
+  most two, chosen) and translates a pair through English one direction
+  after the other, as Bergamot's own `pivotMultiple` does. (This was made
+  while the Safari defect above was misread as two models in one instance;
+  it is kept because it holds one model per engine instance in every
+  browser. Cost: a second engine instance during a pair through English.)
+- **Verified 2026-11-25** in Firefox, Opera and Safari on this Mac through
+  the web client's own engine code on a local dev server (models from a
+  local directory with byte ranges, as nginx serves them): groups of 147.4
+  and 140.7 MB downloaded, checked, stored; es->en, en->ru and es->ru
+  through English translated; a second translation reuses the loaded
+  worker. **2026-11-26 in the macOS desktop app** (debug build, WKWebView,
+  anti-censorship off, models from a local origin through the host's
+  forwarding of `/translation-models/<hex>`): the pl-cs-sk and ru-uk-be
+  groups (135.3 and 140.7 MB) downloaded in 4 MiB ranges, checked and
+  stored; cs->en, en->ru and cs->ru through English translated, a second
+  cs->en reused the loaded worker, and both groups were listed as kept.
+  Not walked: the dialog and Settings screens in a signed-in session, the
+  desktop app through the anti-censorship tunnel, the test stack.
 - **Output is plain text.** The engine's HTML mode is off. Output is
   rendered as text like every translation today (ADR-0082 section 5). This
   answers the injection concern raised in mozilla/standards-positions#1015.
@@ -156,6 +220,21 @@ collection `translations-models-v2`, read 2026-11-25, last modified
   Mozilla ships without a channel filter. That is the same set a person gets
   in release Firefox.
 
+- **Licences of what is compiled in (build of 2026-11-25,
+  `tools/translate-wasm/THIRD_PARTY.md`).** From the link line: the
+  `inference/` code MPL-2.0; marian-fork, intgemm, yaml-cpp, phf, cnpy and
+  onnxjs MIT; sentencepiece (with the Abseil subset) Apache-2.0;
+  protobuf-lite BSD-3-Clause; pathie-cpp BSD-2-Clause; zstd BSD-3-Clause;
+  the Emscripten runtime MIT / NCSA (musl MIT, libc++ Apache-2.0 with the
+  LLVM exception). PCRE2 and ruy are not in the wasm build. Eigen (included
+  by onnxjs's sgemm) counts as MPL-2.0: its three LGPL-2.1 files are
+  sparse-solver headers `Eigen/Dense` does not include, and the build
+  defines `EIGEN_MPL2_ONLY` so including one fails it (the rebuild with it
+  produced a byte-identical `.wasm`). marian-fork's bundled
+  onnx protobuf (no licence file) is not in the binary: its sources are
+  wrapped in `#ifdef USE_ONNX`, which this build does not define. The binary
+  is not committed; it is built.
+
 ### 3. Serving and integrity
 
 - **Where the files live.** Under one path on Lakko's own origin, e.g.
@@ -194,52 +273,108 @@ collection `translations-models-v2`, read 2026-11-25, last modified
   brotli in `tools/translation-models` so the browser's `Content-Encoding`
   does it. That is open question 6.
 
-### 4. What the download reveals, and what the dialog says
+### 4. Language groups: what the download reveals, and what the dialog says
 
-The request reveals the language pair the device asked for, and the IP
-address, to Lakko's server (and to anything on the path that can read TLS
-SNI and sizes: the host, plus a file size that may identify the pair). It
-carries no account, and the server does not log it. That is the same class
-of disclosure ADR-0082 section 4 accepts for Apple's and Google's packs,
-with Lakko in the vendor's place. The UX 3.5 dialog must say it (UX 3.5:
-the dialog must not claim more privacy than the download has). Proposed
-copy:
+**Languages come in groups of three, by region** (maintainer, 2026-11-25).
+A group is the six directions of its three languages, each to and from
+English. It is served as **one file**, so one request names a group and
+never a language. The 57 languages of the 114 directions form 19 groups
+(sizes: the sum of Mozilla's compressed files, from the collection):
 
-> **Download Spanish for translation?**
-> Translation happens on this device. Lakko needs the Spanish pack to do it
-> (25.1 MB). The pack comes from Lakko's server, which learns that this
-> device asked for Spanish. Messages are never sent anywhere to be
-> translated.
+| Group | Languages | MB |
+|---|---|---|
+| 1 | Russian, Ukrainian, Belarusian | 140.7 |
+| 2 | Polish, Czech, Slovak | 135.3 |
+| 3 | Serbian, Croatian, Bosnian | 145.4 |
+| 4 | Bulgarian, Slovenian, Romanian | 125.1 |
+| 5 | Lithuanian, Latvian, Estonian | 126.1 |
+| 6 | Swedish, Danish, Norwegian Bokmal | 86.8 |
+| 7 | Finnish, Icelandic, Hungarian | 144.8 |
+| 8 | German, Dutch, Afrikaans | 147.6 |
+| 9 | Spanish, Portuguese, Galician | 147.5 |
+| 10 | French, Catalan, Basque | 147.1 |
+| 11 | Italian, Greek, Albanian | 108.0 |
+| 12 | Turkish, Azerbaijani, Uyghur | 127.2 |
+| 13 | Arabic, Hebrew, Persian | 107.1 |
+| 14 | Hindi, Urdu, Bengali | 105.0 |
+| 15 | Marathi, Gujarati, Malayalam | 104.0 |
+| 16 | Tamil, Telugu, Kannada | 107.5 |
+| 17 | Chinese (Simplified), Chinese (Traditional), Japanese | 236.1 |
+| 18 | Korean, Vietnamese, Thai | 183.0 |
+| 19 | Indonesian, Malay, Tagalog | 106.8 |
+
+- The assignment above is the build's proposal under the maintainer's
+  rule (by region, three each); 57 does not split evenly by region, so a
+  few groups join neighbouring regions (11, 12, 18). The list lives in
+  `tools/translation-models` and in the manifest; changing it is a
+  rebuild of the files, nothing else.
+- English is in every group (each language's two directions go through
+  it), so there is no English download.
+- A pair of two non-English languages in different groups needs both
+  groups, and the server sees both.
+- **What the request reveals:** the group (one of three languages, and the
+  region by construction), the time and the IP address, to Lakko's server,
+  and the size to anything on the path. No account; the server does not
+  log it. The same class of disclosure ADR-0082 section 4 accepts for
+  Apple's and Google's packs, with Lakko in the vendor's place.
+
+The UX 3.5 dialog says it and claims no more (proposed copy):
+
+> **Download languages for translation?**
+> Translation happens on this device. To translate Spanish, Lakko needs
+> the pack for Spanish, Portuguese and Galician (147.5 MB). It comes from
+> Lakko's server, which learns that this device asked for one of these
+> three languages. Messages are never sent anywhere to be translated.
 > `Not now` · `Download`
 
-- **Two packs.** A pair through English that needs two models names both
-  languages and the summed size: "Lakko needs the Spanish and Russian packs
-  (56.2 MB)".
-- **The size shown.** It is the transfer size from the manifest, never
-  guessed (UX 3.5).
+- **Two groups.** A pair needing two names both and the summed size.
+- **The size shown.** The transfer size from the manifest, never guessed
+  (UX 3.5).
 - **Anti-censorship.** In the desktop app with anti-censorship on, the
   request goes through the tunnel like every other request to Lakko's
   origin (ADR-0085 section 14). The amendment of 2026-11-19 stands: packs
   are offered whether it is on or off.
+- **Section 3 for groups.** `/translation-models/<group file sha256>`; the
+  manifest lists per group its file hash and size and, per direction, the
+  offsets and SHA-256 of the model files inside it.
+  - **As built:** the page fetches a group in ranges of 4 MiB (chosen): a
+    response through the desktop app's anti-censorship tunnel may carry at
+    most 8 MiB (`lakko-transport` `MAX_RESPONSE_BYTES`), and the desktop
+    host hands the page a forwarded response whole, so ranges are also what
+    moves the progress there. Every range must come back as a `206` with
+    the exact `Content-Range`; a server that ignores ranges may answer the
+    first request with the whole file.
+  - The group file is kept only when its model files cover it exactly and
+    each one's zstd bytes hash to the manifest, which checks every byte of
+    it without hashing the whole file in one piece. The worker checks each
+    model file's decompressed hash again before loading it.
+  - The desktop host forwards `GET /translation-models/<64 hex>` to the
+    Lakko origin like the release manifest, and logs no group name.
+- **Exact sizes** (`tools/translation-models`, sums of Mozilla's files):
+  the table above adds per-language sizes rounded to 0.1 MB; the exact
+  group sizes differ from it by at most 0.11 MB (group 7: 144.7 MB). The
+  dialog shows the manifest's exact size.
 
 ### 5. Storage on the device
 
-- **Where.** Model files are stored in the Cache Storage API under a cache
-  of their own (`lakko-translation-models-v1`), keyed by file hash. They are
-  per device, not per account: they are public files, and every account on
-  the device reads the same languages from them. Translations themselves
+- **Where.** Group files are stored as Blobs in an IndexedDB database of
+  their own (`lakko-translation-models`), keyed by the group file's hash.
+  (The first draft said the Cache Storage API; changed in the build: its
+  keys must be http(s) URLs, and the desktop app's page lives on its own
+  scheme.) They are per device, not per account: they are public files, and
+  every account on the device reads the same languages from them. Translations themselves
   stay where ADR-0082 section 5 puts them, behind the ADR-0077 store gate.
 - **What the person sees.** Settings, Language packs lists each Lakko pack
   with its size and `Remove`, as UX 6 already describes for packs Lakko
-  downloaded. Forget device deletes the cache, because a pack tells which
-  languages the person reads.
-- **Eviction.** The browser may evict the cache under storage pressure.
-  Lakko does not request `navigator.storage.persist()`. An evicted pack
-  reads `needs-pack` again, and the next Translate asks again (UX 3.5). An
-  open question (3) asks whether to request persistence.
+  downloaded. Forget device deletes the database, because a pack tells
+  which languages the person reads.
+- **Eviction.** The browser may evict the database under storage pressure.
+  Lakko does not request `navigator.storage.persist()` (open question 3).
+  An evicted pack reads `needs-pack` again, and the next Translate asks
+  again (UX 3.5).
 - **The interrupted line.** UX 3.5 already forbids a download line with
   nothing watching it; a download cut off by a closed tab leaves no partial
-  file in the cache.
+  file stored.
 
 ### 6. Place in the engine order
 
@@ -342,7 +477,14 @@ written for.
      2026-11-25, candle 0.11.1): opus-mt-en-ru fp32 translated one
      15-word sentence in 0.35 s warm. But the fp32 download is 292.7 MiB per
      direction, and candle has no quantised Marian.
-   - The wasm speed of candle, burn and tract is not measured.
+   - **Measured in S1 (2026-11-25)**: the candle spike with opus-mt fp32
+     in a Web Worker, same sentences and Mac as section 1. Median per
+     sentence 164 to 295 ms, 47 to 61 words/s (about a tenth of Bergamot),
+     wasm memory about 645 MiB. Safari did not finish the en->ru run within
+     10 minutes; the cause is not investigated. Its Russian read more
+     naturally in several sentences but lost the meaning of two (a birthday
+     greeting turned into a different sentence). burn and tract are not
+     measured.
    - Not chosen for v1: Mozilla's C++ engine already loads their models as
      shipped and builds for wasm. Kept as a later option, because the same
      crate could also serve iOS and Android.
@@ -422,31 +564,30 @@ Invariants:
 1. **v1 language set.** Decided 2026-11-25 (maintainer): all 114 desktop
    directions Mozilla ships without a channel filter.
 2. **Language privacy of the download.** Decided 2026-11-25 (maintainer):
-   languages are downloaded in fixed groups, so one request reveals the
-   group rather than the language; section 4 is to be rewritten for it.
-   Open: the group size and how languages are grouped. Each language costs
-   its two directions to and from English, 28.0 to 93.9 MB compressed,
-   median 48.3 MB (from the collection), so a group of g languages is
-   roughly g times 48 MB.
-3. **Persistent storage.** Whether to ask the browser for
-   `navigator.storage.persist()` so packs are not evicted. How each browser
-   answers the request is not checked yet.
+   groups of three languages, by region; one file per group (section 4).
+3. **Persistent storage.** Decided 2026-11-25 (maintainer): Lakko does not
+   request `navigator.storage.persist()`. An evicted group reads
+   `needs-pack` and the next Translate shows the dialog again.
 4. **Phones.** Decided 2026-11-25 (maintainer): wherever a native engine
    exists it is used, and this engine only where there is none. The iOS and
    Android apps translate with their system engines (ADR-0082) and never
    with this one. A phone has a native engine through the Lakko app, so the
    web client opened in a phone browser does not offer this engine either;
-   it keeps the browser's `Translator` where the browser has one. The
-   web client tells a phone browser by `navigator.userAgentData.mobile`,
-   else the user agent string (to be pinned in S2 tests). Nothing is
-   measured on phones.
-5. **Training-data licences.** Mozilla states MPL-2.0 for the model files
-   but nothing about the corpora's licences. Ship on Mozilla's statement
-   (proposed), or ask Mozilla first.
-6. **Compression on the wire.** Keep Mozilla's zstd and decompress in the
-   worker, or recompress to brotli for the browser to decode. Measured for
-   the es->en model file: brotli 22.5 MB against 22.9 MB for zstd -19 (the
-   v2 collection serves its own zstd files; their sizes are in section 2).
+   it keeps the browser's `Translator` where the browser has one. Tablets
+   are treated the same (the iPad and Android apps have the system
+   engines). The web client tells them by `navigator.userAgentData.mobile`,
+   else the user agent string, and an iPad that reports a Mac by its touch
+   points (`lakko-engine/device.ts`). Nothing is measured on phones.
+5. **Training-data licences.** Decided 2026-11-25 (maintainer): ship on
+   Mozilla's MPL-2.0 statement for the model files. The licences of the
+   training corpora are not stated by Mozilla and are not known to Lakko.
+6. **Compression on the wire.** Decided in the build (not a product
+   decision): the group file carries Mozilla's zstd files byte for byte, so
+   each one's hash is Mozilla's, and the worker decompresses them with the
+   zstd decoder compiled into `lakko_translate.wasm`. Measured for the
+   es->en model file: brotli 22.5 MB against 22.9 MB for zstd -19, so
+   recompressing would save little and would replace Mozilla's hashes
+   with Lakko's own.
 7. **Transcription.** On-device speech recognition for the same browsers
    (for example whisper.cpp compiled to wasm) is a separate ADR, not part of
    this one.

@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+#
+# Applied by tools/translate-wasm/build.sh to the pinned mozilla/translations
+# checkout (git apply ignores the text before the first "diff --git" line).
+# It only adds a hook: wasm/CMakeLists.txt includes the file named by
+# -DLAKKO_TRANSLATE_CMAKE, which is tools/translate-wasm/lakko.cmake.
+
+diff --git a/inference/wasm/CMakeLists.txt b/inference/wasm/CMakeLists.txt
+--- a/inference/wasm/CMakeLists.txt
++++ b/inference/wasm/CMakeLists.txt
+@@ -27,3 +27,9 @@ set_target_properties(bergamot-translator PROPERTIES
+                       )
+ 
+ target_link_libraries(bergamot-translator bergamot-translator-source)
++
++# Lakko: the web client's build (tools/translate-wasm in the Lakko repository)
++# adds its own sources and link options to this target from one file.
++if(LAKKO_TRANSLATE_CMAKE)
++  include(${LAKKO_TRANSLATE_CMAKE})
++endif()

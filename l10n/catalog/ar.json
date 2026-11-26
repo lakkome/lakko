@@ -9909,6 +9909,18 @@
       "text": "بانتظار Wi-Fi لتنزيل {language}",
       "status": "machine"
     },
+    "translate.pack.body.lakko": {
+      "text": "تتم الترجمة على هذا الجهاز. للترجمة من {language}، يحتاج Lakko إلى حزمة {languages} ({size}). لا تُرسل الرسائل إلى أي مكان لترجمتها.",
+      "status": "machine"
+    },
+    "translate.pack.body.lakko_two": {
+      "text": "تتم الترجمة على هذا الجهاز. للترجمة من {language}، يحتاج Lakko إلى حزمتي {first} و{second} ({size}). لا تُرسل الرسائل إلى أي مكان لترجمتها.",
+      "status": "machine"
+    },
+    "translate.pack.source.lakko": {
+      "text": "تأتي الحزمة من خادم Lakko، الذي يعرف أن هذا الجهاز طلب إحدى هذه اللغات.",
+      "status": "machine"
+    },
     "translate.picker.title": {
       "text": "لغة هذه الرسالة",
       "status": "machine"
