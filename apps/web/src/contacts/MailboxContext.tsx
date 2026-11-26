@@ -62,6 +62,12 @@ import {
 } from "./group-contact-request";
 import { reachSession, reachSessionSignal } from "../reach/reach-service";
 import { DiscoveryClient } from "../discovery/client";
+import { continuityMailboxReadable, readResetContinuity } from "../auth/reset-continuity";
+import { peerContinuityTarget } from "../reach/continuity";
+import { installContinuityMailboxAccess } from "../ds/session-access";
+import { holdReturn } from "../channels/channel-return";
+import { notifyChannelReturnsHeld } from "../channels/channel-return-runtime";
+import { noteReturnedConversation } from "../chat/history-return";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
 import { adoptAnsweredOneToOne, applyContactAck } from "./contact-ack";
 import { foundOneToOneWith } from "./found-one-to-one";
@@ -272,6 +278,30 @@ function claimInputs(claims: readonly ObservedClaim[]): { ids: BigUint64Array; a
     authors: concatBytes(claims.map((c) => hexToBytes(c.author))),
   };
 }
+
+/** ADR-0101: the continuity mailbox's own cursor, per account. */
+function continuityCursorKey(accountIdB64: string): string {
+  return `lakko:continuity-mailbox-cursor:${accountIdB64}`;
+}
+
+function readContinuityMailboxCursor(accountIdB64: string): number {
+  try {
+    const raw = globalThis.localStorage?.getItem(continuityCursorKey(accountIdB64)) ?? null;
+    const n = raw === null ? 0 : Number(raw);
+    return Number.isSafeInteger(n) && n >= 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeContinuityMailboxCursor(accountIdB64: string, cursor: number): void {
+  // A failed write throws, which holds the cursor: the rows come back.
+  globalThis.localStorage?.setItem(continuityCursorKey(accountIdB64), String(cursor));
+}
+
+/** How often another device of a reset account asks the directory whether
+ *  a continuity window is open (chosen, not measured). */
+const CONTINUITY_RECHECK_MS = 6 * 60 * 60 * 1000;
 
 function readPredecessorMailboxCursor(accountIdB64: string, keyHex: string): number {
   try {
@@ -1340,6 +1370,11 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     // group as active the core refuses it and it is held like any other
     // (`retryHeldWelcomes`).
     await chats.persistSnapshotDurable(accountIdB64);
+    // ADR-0101 section 9 - inside this account's own continuity window every
+    // conversation it joins is a returned one: ask there for its history.
+    if (continuityMailboxReadable(readResetContinuity(globalThis.localStorage, accountIdB64), Date.now())) {
+      for (const entry of entries) noteReturnedConversation(accountIdB64, entry.groupIdB64);
+    }
     for (const entry of entries) {
       // ADR-0087 section 9 - an end still under way goes first, and a person
       // back in a group this account's devices were told it left says so.
@@ -1601,6 +1636,12 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           } finally {
             decoded.free();
           }
+        } else if (ev.kind === "channel-return") {
+          // ADR-0101 section 7 - kept for the channels runtime, which
+          // verifies it against this account's previous key before acting.
+          // A storage refusal throws, which holds the cursor.
+          holdReturn(globalThis.localStorage, accountIdB64, base64Encode(ev.envelope));
+          notifyChannelReturnsHeld();
         } else if (ev.kind === "link-refusal") {
           // ADR-0079 amendment of 2026-10-19 - the inviter's app refused the
           // request this account sent through their link (the link no longer
@@ -1754,6 +1795,88 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     }
   }
 
+  // ADR-0101 section 5 — for the window after a key reset the account's
+  // CONTINUITY mailbox is read beside the account mailbox, with the same row
+  // handler (`pollMailbox` with `continuity`), and left once it ends. The
+  // window is the resetting device's own record, else the account's binding
+  // as the directory serves it (another device of the account), verified
+  // under this account's key.
+  let continuityInstalledFor: string | null = null;
+  const continuityChecked = new Map<string, { expiresAtMs: number | null; checkedAtMs: number }>();
+  const continuityDiscovery = new DiscoveryClient();
+  const continuityPoller: MailboxPoller = createMailboxPoller<IncomingMailboxEvent>({
+    readCursor: () => (activeAccount === null ? 0 : readContinuityMailboxCursor(activeAccount)),
+    writeCursor: (next) => {
+      if (activeAccount === null) throw new Error("continuity mailbox cursor write without an account");
+      writeContinuityMailboxCursor(activeAccount, next);
+    },
+    fetch: async (after, waitSecs, signal) =>
+      client.pollMailbox(auth.identitySecrets(), after, waitSecs, signal, { continuity: true }),
+    dispatch: (events) => dispatch(events, scope),
+  });
+
+  /** Whether the continuity mailbox is read now. Never throws. */
+  async function continuityWindowOpen(accountIdB64: string): Promise<boolean> {
+    const now = Date.now();
+    const own = readResetContinuity(globalThis.localStorage, accountIdB64);
+    if (own !== null) return continuityMailboxReadable(own, now);
+    const held = continuityChecked.get(accountIdB64);
+    if (held !== undefined && now - held.checkedAtMs < CONTINUITY_RECHECK_MS) {
+      return held.expiresAtMs !== null && now < held.expiresAtMs;
+    }
+    const identity = chats.accountIdentity();
+    if (identity === null) return false;
+    let expiresAtMs: number | null = null;
+    try {
+      const bundle = await continuityDiscovery.identityFetch(base64Decode(accountIdB64));
+      const wasm = await loadWasm();
+      const ownKey = identity.signaturePublicKey;
+      const target = peerContinuityTarget(
+        bundle?.continuity_binding_b64,
+        ownKey,
+        now,
+        (b, k, n) => wasm.verifyContinuityBinding(b, k, n),
+        base64Decode,
+        base64Encode,
+      );
+      if (target !== null) {
+        const mine = wasm.MailboxKey.continuityFromAccountIdentity(identity);
+        try {
+          if (base64Encode(mine.publicKey()) === target.mailboxPkB64) expiresAtMs = target.expiresAtMs;
+        } finally {
+          mine.free();
+        }
+      }
+    } catch {
+      expiresAtMs = held?.expiresAtMs ?? null;
+    }
+    continuityChecked.set(accountIdB64, { expiresAtMs, checkedAtMs: now });
+    return expiresAtMs !== null && now < expiresAtMs;
+  }
+
+  /** Read the continuity mailbox once when its window is open. */
+  async function pollContinuityMailbox(accountIdB64: string, signal: AbortSignal): Promise<void> {
+    if (!(await continuityWindowOpen(accountIdB64))) {
+      if (continuityInstalledFor !== null) {
+        continuityInstalledFor = null;
+        void installContinuityMailboxAccess(null);
+      }
+      return;
+    }
+    if (continuityInstalledFor !== accountIdB64) {
+      const address = await installContinuityMailboxAccess(chats.accountIdentity());
+      if (address === null) return;
+      continuityInstalledFor = accountIdB64;
+    }
+    try {
+      await continuityPoller.poll(0, signal);
+    } catch (err) {
+      // Never costs the account mailbox its poll.
+      // eslint-disable-next-line no-console
+      console.warn("continuity mailbox poll failed", err);
+    }
+  }
+
   // ADR-0060 section 6 — one inbound mailbox per person: every Welcome is
   // addressed to the ACCOUNT mailbox. ADR-0078 removed the device mailbox:
   // nothing claims or polls one (its old cursor key `lakko.contacts.device-
@@ -1824,6 +1947,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         // Rule 4 of section 3.5a: read only, for 30 days from the adoption,
         // then left. Nothing is registered or written there.
         await pollPredecessorMailboxes(accountIdB64, signal);
+        await pollContinuityMailbox(accountIdB64, signal);
         await poller.poll(LONG_POLL_WAIT_SECS, signal);
         // ADR-0079 (reworked 2026-10-17): a claim whose journal read did not
         // finish, or a won claim whose build failed, is taken up again after
@@ -1843,6 +1967,11 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
 
   function stop(): void {
     waitingKnownRequests.length = 0;
+    if (continuityInstalledFor !== null) {
+      continuityInstalledFor = null;
+      void installContinuityMailboxAccess(null);
+    }
+    continuityChecked.clear();
     if (loopAbort !== null) {
       loopAbort.abort();
       loopAbort = null;

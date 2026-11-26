@@ -34,6 +34,13 @@ const ACCOUNT = "QkJCQkJCQkJCQkJCQkJCQg==";
 const ACCOUNT_BYTES = base64Decode(ACCOUNT);
 const OTHER_ACCOUNT_FOR_USERNAME = "Q0NDQ0NDQ0NDQ0NDQ0NDQw==";
 
+/** ADR-0101 section 8: a v6 profile envelope is signed by an account
+ *  identity; this test's profiles are signed by one fixed identity. */
+let profileSignerHeld: wasm.Identity | undefined;
+function profileSigner(): wasm.Identity {
+  return (profileSignerHeld ??= wasm.Identity.fromSeed(new Uint8Array(64).fill(0x5a)));
+}
+
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
   await init({ module_or_path: readFileSync(path) });
@@ -67,7 +74,7 @@ describe("what a backup carries", () => {
   it("the stored name under the stored stamp, with the username", () => {
     const own = saveOwnProfile(ACCOUNT, "Anna", 1_000);
     const stop = registerBackupUsernameSource(() => "anna");
-    const bytes = ownProfileForBackup(core, ACCOUNT, ACCOUNT_BYTES);
+    const bytes = ownProfileForBackup(core, profileSigner(), ACCOUNT, ACCOUNT_BYTES);
     stop();
     expect(bytes).not.toBeNull();
     const decoded = wasm.decodeProfileEnvelope(bytes as Uint8Array);
@@ -77,7 +84,7 @@ describe("what a backup carries", () => {
   });
 
   it("nothing for an account that never saved a profile", () => {
-    expect(ownProfileForBackup(core, ACCOUNT, ACCOUNT_BYTES)).toBeNull();
+    expect(ownProfileForBackup(core, profileSigner(), ACCOUNT, ACCOUNT_BYTES)).toBeNull();
   });
 
   it("travels through the payload and comes back", async () => {
@@ -93,7 +100,7 @@ describe("what a backup carries", () => {
       undefined,
       undefined,
       undefined,
-      ownProfileForBackup(core, ACCOUNT, ACCOUNT_BYTES) ?? undefined,
+      ownProfileForBackup(core, profileSigner(), ACCOUNT, ACCOUNT_BYTES) ?? undefined,
       (await visibilityForBackup(ACCOUNT)) ?? undefined,
     );
     const parsed = wasm.parseBackupPayload(payload);
@@ -108,7 +115,7 @@ describe("the username a backup names (docs/ux/identity-recovery.md 8b)", () => 
   it("is kept for the landing to check, apart from the name and photo", async () => {
     const stop = registerBackupUsernameSource(() => "anna");
     saveOwnProfile(ACCOUNT, "Anna", 1_000);
-    const bytes = ownProfileForBackup(core, ACCOUNT, ACCOUNT_BYTES) as Uint8Array;
+    const bytes = ownProfileForBackup(core, profileSigner(), ACCOUNT, ACCOUNT_BYTES) as Uint8Array;
     stop();
     expect(decodeRestoredOwnProfile(core, bytes, ACCOUNT)?.username).toBe("anna");
     expect(restoredOwnUsername(ACCOUNT)).toBeNull();
@@ -117,7 +124,7 @@ describe("the username a backup names (docs/ux/identity-recovery.md 8b)", () => 
   });
 
   it("a profile with no username leaves nothing to check", async () => {
-    const carried = wasm.composeProfileEnvelope("Anna", undefined, 500n, base64Decode(OTHER_ACCOUNT_FOR_USERNAME));
+    const carried = wasm.composeProfileEnvelope(profileSigner(), "Anna", undefined, 500n, base64Decode(OTHER_ACCOUNT_FOR_USERNAME));
     expect(decodeRestoredOwnProfile(core, carried, OTHER_ACCOUNT_FOR_USERNAME)?.username).toBeNull();
     await adoptRestoredOwnProfile(OTHER_ACCOUNT_FOR_USERNAME, carried);
     expect(restoredOwnUsername(OTHER_ACCOUNT_FOR_USERNAME)).toBeNull();
@@ -126,21 +133,21 @@ describe("the username a backup names (docs/ux/identity-recovery.md 8b)", () => 
 
 describe("restoring the name and photo", () => {
   it("fills an empty store under the stored stamp", async () => {
-    const carried = wasm.composeProfileEnvelope("Anna", undefined, 500n, ACCOUNT_BYTES);
+    const carried = wasm.composeProfileEnvelope(profileSigner(), "Anna", undefined, 500n, ACCOUNT_BYTES);
     expect(await adoptRestoredOwnProfile(ACCOUNT, carried)).toBe(true);
     expect(loadOwnProfile(ACCOUNT)).toMatchObject({ displayName: "Anna", updatedAtMs: 500 });
   });
 
   it("leaves a newer profile alone", async () => {
     saveOwnProfile(ACCOUNT, "Newer", 900);
-    const carried = wasm.composeProfileEnvelope("Older", undefined, 500n, ACCOUNT_BYTES);
+    const carried = wasm.composeProfileEnvelope(profileSigner(), "Older", undefined, 500n, ACCOUNT_BYTES);
     expect(await adoptRestoredOwnProfile(ACCOUNT, carried)).toBe(false);
     expect(loadOwnProfile(ACCOUNT).displayName).toBe("Newer");
   });
 
   it("an empty, damaged or foreign field changes nothing", async () => {
     saveOwnProfile(ACCOUNT, "Kept", 900);
-    const foreign = wasm.composeProfileEnvelope("Other", undefined, 2_000n, new Uint8Array(16).fill(9));
+    const foreign = wasm.composeProfileEnvelope(profileSigner(), "Other", undefined, 2_000n, new Uint8Array(16).fill(9));
     expect(await adoptRestoredOwnProfile(ACCOUNT, new Uint8Array(0))).toBe(false);
     expect(await adoptRestoredOwnProfile(ACCOUNT, new Uint8Array([1, 2, 3]))).toBe(false);
     expect(await adoptRestoredOwnProfile(ACCOUNT, foreign)).toBe(false);

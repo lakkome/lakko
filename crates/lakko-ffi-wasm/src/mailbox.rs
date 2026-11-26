@@ -78,6 +78,8 @@ pub enum MailboxKind {
     LinkRefusal = 5,
     /// A conversation re-entry request (ADR-0091 phase 2, route 2).
     ConversationReentry = 6,
+    /// A channel return (ADR-0101 section 7), in a continuity mailbox.
+    ChannelReturn = 7,
 }
 
 impl From<MailboxKind> for core::MailboxKind {
@@ -89,6 +91,7 @@ impl From<MailboxKind> for core::MailboxKind {
             MailboxKind::WelcomeRendezvous => Self::WelcomeRendezvous,
             MailboxKind::LinkRefusal => Self::LinkRefusal,
             MailboxKind::ConversationReentry => Self::ConversationReentry,
+            MailboxKind::ChannelReturn => Self::ChannelReturn,
         }
     }
 }
@@ -102,6 +105,7 @@ impl From<core::MailboxKind> for MailboxKind {
             core::MailboxKind::WelcomeRendezvous => Self::WelcomeRendezvous,
             core::MailboxKind::LinkRefusal => Self::LinkRefusal,
             core::MailboxKind::ConversationReentry => Self::ConversationReentry,
+            core::MailboxKind::ChannelReturn => Self::ChannelReturn,
         }
     }
 }
@@ -148,6 +152,20 @@ impl MailboxKey {
     pub fn from_account_identity(account_identity: &Identity) -> MailboxKey {
         Self {
             inner: core::MailboxKey::from_account_seed(
+                &account_identity.mls_identity().ed25519_seed_bytes(),
+            ),
+        }
+    }
+
+    /// The **continuity** mailbox key of the account (ADR-0101 section 1): a
+    /// second mailbox, never the real one, a reset identity announces for a
+    /// window. Read and open its rows exactly as the real one; claim it with
+    /// `dsContinuityMailboxSigner`.
+    #[wasm_bindgen(js_name = continuityFromAccountIdentity)]
+    #[must_use]
+    pub fn continuity_from_account_identity(account_identity: &Identity) -> MailboxKey {
+        Self {
+            inner: lakko_contacts::continuity::continuity_mailbox_key(
                 &account_identity.mls_identity().ed25519_seed_bytes(),
             ),
         }

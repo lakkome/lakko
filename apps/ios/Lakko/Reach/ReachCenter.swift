@@ -1394,8 +1394,14 @@ public final class ReachCenter: ObservableObject {
                 return WritePlan(target: target, candidates: [delegated])
             }
         }
-        return nil
+        // ADR-0101 section 4 — the continuity mailbox, last: an ordinary
+        // grant (the person's real mailbox) is always preferred, and once a
+        // conversation is back the person's profile hands those over.
+        return continuityPlan(toPersonKey: person)
     }
+
+    /// The signed-in account this center serves (standard base64), or `nil`.
+    public var boundAccountIdB64: String? { accountIdB64 }
 
     /// ``writePlan(toAccountKey:groupIdHex:)`` for a write addressed by a
     /// mailbox recorded earlier (a Welcome in the ADR-0040 outbox): this
@@ -1429,13 +1435,10 @@ public final class ReachCenter: ObservableObject {
         writePlan(toMailbox: address, groupIdHex: groupIdHex)?.candidates ?? []
     }
 
-    // ADR-0073 R.4 / ADR-0078 open question — a peer that accepted a reset
-    // used to write a Welcome to the reset account's new mailbox under the
-    // continuity key, at the address derived from the new identity key. A
-    // mailbox address is no longer derivable from an identity key, and no
-    // carrier yet brings the reset account's new mailbox binding, so the
-    // continuity key is neither registered nor used on this client. A grant
-    // the new identity itself hands out is the only way to its mailbox.
+    // ADR-0073 R.4 / ADR-0101 — a peer that accepted a reset writes to the
+    // reset account's CONTINUITY mailbox under the continuity key, once the
+    // binding the person announced was verified and kept
+    // (``continuityPlan(toPersonKey:)``, ``ContinuityTargets``).
 
     // MARK: - Committer delegations (ADR-0060 section 6)
 

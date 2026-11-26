@@ -787,6 +787,12 @@ class MultiJoinerCall private constructor(
             // ADR-0087 section 15 — a channel read key rides the PublisherGroup
             // journal, sealed to one co-publisher; never a call relay.
             FfiIncomingEnvelopeKind.CHANNEL_READ_KEY -> Unit
+            // ADR-0101 — a channel return and a history request ride a
+            // continuity mailbox and a conversation journal, never a call
+            // relay. Dropped.
+            FfiIncomingEnvelopeKind.CHANNEL_RETURN,
+            FfiIncomingEnvelopeKind.HISTORY_REQUEST,
+            -> Unit
             // ADR-0048 trigger 4 — a profile REQUEST likewise rides the GROUP
             // JOURNAL, where the chat receive loop answers it with a profile
             // sealed into the group. A relay payload names no member to answer

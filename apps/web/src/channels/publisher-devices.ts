@@ -57,6 +57,7 @@ import {
   withPublisherGroup,
 } from "./publisher-group-registry";
 import { publisherDevice, publisherDeviceOrNull } from "./publisher-device";
+import { readRecoveredChannels, refoundAdmittedThrough } from "./recovered-channels";
 import { channelSubscriptionPort } from "./channel-subscription-register";
 import { effectiveAdmissionMark } from "./channel-access-record";
 import {
@@ -1408,6 +1409,8 @@ export async function settleReaderDevices(
  */
 async function refoundOwnedChannel(wasm: Wasm, lineage: WasmIdentity, idHex: string): Promise<void> {
   const device = publisherDevice();
+  const account = channelSubscriptionPort()?.accountIdB64 ?? null;
+  const recovered = account === null ? undefined : readRecoveredChannels(account)[idHex];
   const channelId = channelIdFromHex(idHex);
   try {
     const old = wasm.PublisherGroup.load(device, lineage.ed25519Seed, channelId);
@@ -1431,8 +1434,12 @@ async function refoundOwnedChannel(wasm: Wasm, lineage: WasmIdentity, idHex: str
       publisherKeys: [],
       ownHandover: null,
       // Nothing was let in by this device: the admission pass judges every
-      // row again from the start, leaving a row with no ticket alone.
-      admittedThroughSeq: 0,
+      // row again from the start, leaving a row with no ticket alone. A
+      // channel taken back with its recovery key (ADR-0101 section 7) keeps
+      // every reader the service listed at the recovery, so the reseal below
+      // reaches them.
+      admittedThroughSeq: refoundAdmittedThrough(recovered),
+      ...(recovered === undefined ? {} : { admissionMarkSet: true as const }),
     }));
     const keys = await heldPublisherKeys(lineage, idHex);
     if (keys === null) throw new Error("the founded group did not load");

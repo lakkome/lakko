@@ -467,7 +467,10 @@ export type IncomingMailboxEvent =
   | { kind: "link-refusal"; refusal: Uint8Array }
   /** ADR-0091 section 3, route 2: a request to be brought back into a
    *  one-to-one, the envelope still undecoded. The re-admitter judges it. */
-  | { kind: "conversation-reentry"; envelope: Uint8Array; reachPk?: Uint8Array };
+  | { kind: "conversation-reentry"; envelope: Uint8Array; reachPk?: Uint8Array }
+  /** ADR-0101 section 7: a channel return, NOT yet verified (the receiver
+   *  checks the old card binding against its previous key). */
+  | { kind: "channel-return"; envelope: Uint8Array };
 
 /** One account-mailbox row as the DS served it. `payload` is the envelope
  *  (kind byte + wire bytes): a signed ContactRequest whose intro and profile
@@ -3236,9 +3239,9 @@ export class ContactsClient {
           ...(options.groupId === undefined ? {} : { scope: options.groupId }),
           explicit: options.explicitGrantB64 ?? null,
           ...(options.answersRequest === true ? { answersRequest: true } : {}),
-          // `allowMember` marks a Welcome. ADR-0073 R.4's continuity key is a
-          // recorded no-op under ADR-0078 (no carrier names a reset account's
-          // new mailbox); see `planWriteToPerson`.
+          // `allowMember` marks a Welcome. ADR-0101: to a reset person this
+          // device accepted, after every ordinary grant, the continuity
+          // mailbox they announced; see `planWriteToPerson`.
           allowMember: true,
         },
         (target, auth) =>
@@ -3296,13 +3299,20 @@ export class ContactsClient {
        *  delivers Welcomes only: a request or an ack found there is neither
        *  opened nor acted on (the cursor still advances). */
       readonly welcomesOnly?: boolean;
+      /** ADR-0101 section 5 - read the account's CONTINUITY mailbox (the
+       *  one announced after a key reset), with the same row handler; the
+       *  only mailbox a channel return is taken from. */
+      readonly continuity?: boolean;
     } = {},
   ): Promise<PollResult> {
     const wasm = await loadWasm();
     const myIdentity = await this.resolveAccountIdentity(identity);
     // ADR-0078 - the account's mailbox key (the predecessor's, for a
     // predecessor mailbox: `resolveAccountIdentity` gives that identity).
-    const mailboxKey = wasm.MailboxKey.fromAccountIdentity(myIdentity);
+    const mailboxKey =
+      options.continuity === true
+        ? wasm.MailboxKey.continuityFromAccountIdentity(myIdentity)
+        : wasm.MailboxKey.fromAccountIdentity(myIdentity);
     const myX25519Secret = myIdentity.x25519SecretKey;
 
     try {
@@ -5411,7 +5421,7 @@ export function dispatchMailboxRows(
   }[],
   after: number,
   myX25519Secret: Uint8Array,
-  options: { readonly welcomesOnly?: boolean } = {},
+  options: { readonly welcomesOnly?: boolean; readonly continuity?: boolean } = {},
 ): { events: IncomingMailboxEvent[]; cursor: number } {
   const events: IncomingMailboxEvent[] = [];
   let cursor = after;
@@ -5444,6 +5454,11 @@ export function dispatchMailboxRows(
     }
     if (row.kind === "conversation-reentry") {
       events.push({ kind: "conversation-reentry", envelope: row.body, ...reach });
+      continue;
+    }
+    if (row.kind === "channel-return") {
+      // Only the continuity mailbox carries one; anywhere else it is dropped.
+      if (options.continuity === true) events.push({ kind: "channel-return", envelope: row.body });
       continue;
     }
     if (row.kind === "contact-ack") {

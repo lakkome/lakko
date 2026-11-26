@@ -36,7 +36,18 @@
 //! is tried first when both headers are present. Every other owner-signed
 //! route (the listing, the appointments themselves) stays owner-only.
 //!
+//! ## The channel recovery key
+//!
+//! `PUT /v1/channels/<id>/owner` alone also accepts, instead of an owner
+//! proof, an `x-lakko-channel-recovery-proof` by the channel recovery key the
+//! owner registered ([ADR-0101] section 7), checked by [`require_recovery`]:
+//! the header parses, the channel has a recovery key, the proof is inside
+//! the window and verifies over the channel id and the new owner key, and it
+//! was not used before (its signature, hashed, is recorded in the same nonce
+//! table). Every refusal is the same `401`.
+//!
 //! [ADR-0059]: ../../../docs/adr/0059-channel-discover.md
+//! [ADR-0101]: ../../../docs/adr/0101-reaching-a-reset-account.md
 
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
@@ -45,6 +56,9 @@ use lakko_channels::copublisher::{
 };
 use lakko_channels::owner::{
     verify_owner_proof, OwnerProof, OwnerRequest, OWNER_PROOF_HEADER_NAME, OWNER_PROOF_WINDOW_MS,
+};
+use lakko_channels::recovery::{
+    verify_recovery_owner_change, RecoveryOwnerProof, RECOVERY_PROOF_HEADER_NAME,
 };
 use lakko_crypto::signing::VerifyingKey;
 
@@ -199,4 +213,69 @@ pub async fn require_publisher(
         return Err(refused());
     }
     consume_nonce(state, ProofKind::CoPublisher, proof.proof.nonce, now).await
+}
+
+/// BLAKE3 derive-key context turning a recovery proof's signature into the
+/// nonce recorded for it. Frozen.
+const RECOVERY_NONCE_DOMAIN: &str = "lakko/channels/recovery-proof-nonce/v1";
+
+/// Whether the request carries a recovery proof header.
+pub fn has_recovery_proof(headers: &HeaderMap) -> bool {
+    headers.contains_key(RECOVERY_PROOF_HEADER_NAME)
+}
+
+/// Require a valid recovery proof for handing `channel` to `new_owner`
+/// (ADR-0101 section 7). Called only by the owner-change route, before the
+/// swap. With `consume`, the proof's signature, hashed, is recorded in the
+/// nonce table so the same proof changes the owner once; the route passes
+/// `false` when `new_owner` already owns the channel (the retry after a lost
+/// answer, which changes nothing and must still get its `204`).
+///
+/// # Errors
+///
+/// The response to return instead of running the handler: the same single
+/// `401` as [`require_owner`] for every refusal (no recovery key registered
+/// included), a `500` on a store failure.
+pub async fn require_recovery(
+    state: &AppState,
+    channel: ChannelId,
+    headers: &HeaderMap,
+    new_owner: &[u8; 32],
+    consume: bool,
+) -> Result<(), Response> {
+    let Some(proof) = headers
+        .get(RECOVERY_PROOF_HEADER_NAME)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| RecoveryOwnerProof::parse(v).ok())
+    else {
+        proof_refused(ProofKind::Recovery, RefusalReason::Malformed);
+        return Err(refused());
+    };
+    let recovery = match state.store.recovery_pubkey(channel).await {
+        Ok(Some(key)) => key,
+        Ok(None) => {
+            proof_refused(ProofKind::Recovery, RefusalReason::UnknownKey);
+            return Err(refused());
+        },
+        Err(e) => {
+            tracing::error!(error = %e, "recovery key lookup failed");
+            return Err(internal());
+        },
+    };
+    let now = unix_ms();
+    if verify_recovery_owner_change(&proof, channel.as_bytes(), new_owner, &recovery, now).is_err()
+    {
+        proof_refused(ProofKind::Recovery, RefusalReason::Invalid);
+        return Err(refused());
+    }
+    if !consume {
+        return Ok(());
+    }
+    let digest = lakko_crypto::hash::blake3_derive_key_from_material(
+        RECOVERY_NONCE_DOMAIN,
+        &proof.signature,
+    );
+    let mut nonce = [0u8; lakko_channels::owner::OWNER_PROOF_NONCE_LEN];
+    nonce.copy_from_slice(&digest[..lakko_channels::owner::OWNER_PROOF_NONCE_LEN]);
+    consume_nonce(state, ProofKind::Recovery, nonce, now).await
 }

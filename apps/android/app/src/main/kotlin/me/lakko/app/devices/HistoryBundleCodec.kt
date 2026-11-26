@@ -209,6 +209,73 @@ public object HistoryBundleCodec {
         )
     }
 
+    /**
+     * ADR-0101 section 9 - one page of a conversation's history for a person
+     * back after a key reset, newest first: the rows of [sourceSlotHex] (the
+     * conversation's earlier group, whose DS ids are unique across journals
+     * and older than any of the successor's) with a DS id below
+     * [beforeMessageId] (0: the newest), at most [pageSize], sealed by [seal]
+     * for [targetGroupIdHex] (the successor the person is in). An EMPTY page
+     * (nothing older is held) is sealed too: it tells the requester to stop.
+     * `null` when the source slot is not held or the target id is malformed.
+     */
+    public fun buildHistoryPage(
+        context: Context,
+        accountIdB64: String,
+        sourceSlotHex: String,
+        targetGroupIdHex: String,
+        beforeMessageId: Long,
+        pageSize: Int,
+        ownAuthorKeyB64: String? = null,
+        seal: (groups: List<StructuredHistoryGroup>, maxHlc: ULong) -> ByteArray,
+    ): ByteArray? {
+        val log = MessageLogStore.getLog(context, accountIdB64) ?: return null
+        val slot = log.groups[sourceSlotHex] ?: log.groups[sourceSlotHex.lowercase()] ?: return null
+        val targetBytes = hexToBytes(targetGroupIdHex) ?: return null
+        val page = me.lakko.app.chat.historyPageRows(
+            bundledMessages(slot.messages),
+            { it.messageId },
+            beforeMessageId,
+            pageSize,
+        )
+        var maxHlc: ULong = 0u
+        val messages = page.mapNotNull { m ->
+            val placeholder = try {
+                encodePlaceholder(m, ownAuthorKeyB64)
+            } catch (_: Throwable) {
+                return@mapNotNull null
+            }
+            if (m.messageId > 0 && m.messageId.toULong() > maxHlc) maxHlc = m.messageId.toULong()
+            StructuredHistoryMessage(
+                payloadBytes = placeholder,
+                senderLeaf = 0u,
+                messageId = java.nio.ByteBuffer.allocate(8)
+                    .order(java.nio.ByteOrder.BIG_ENDIAN)
+                    .putLong(m.messageId)
+                    .array(),
+                receivedAtMs = parseIsoMs(m.createdAt),
+            )
+        }
+        return seal(
+            listOf(StructuredHistoryGroup(groupId = targetBytes, messages = messages, countCapped = false)),
+            maxHlc,
+        )
+    }
+
+    /** ADR-0101 section 9 - the DS ids of the rows an opened page carries
+     *  for [groupIdHex] (8-byte big-endian), what the requester's next
+     *  `before` is computed from. */
+    public fun historyPageMessageIds(
+        opened: uniffi.lakko_ffi_uniffi.StructuredHistoryBundle,
+        groupIdHex: String,
+    ): List<Long> {
+        val group = opened.groups.firstOrNull { bytesToHex(it.groupId).equals(groupIdHex, ignoreCase = true) }
+            ?: return emptyList()
+        return group.messages.mapNotNull { m ->
+            m.messageId.takeIf { it.size == 8 }?.let { java.nio.ByteBuffer.wrap(it).order(java.nio.ByteOrder.BIG_ENDIAN).long }
+        }
+    }
+
     /** What [applyReentryBundle] took in. */
     public class ReentryBundleApplied(
         /** Rows added to the log. */

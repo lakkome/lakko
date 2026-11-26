@@ -80,6 +80,14 @@ import { backgroundReceiveIsActive } from "./receive-activity";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { ContactsClient } from "../contacts/client";
 import { DiscoveryClient } from "../discovery/client";
+import { bindContinuityTargets, newIdentityReachableVerdict } from "../reach/continuity";
+import { refreshContinuityTarget } from "../reach/continuity-target";
+import {
+  fileReceivedProfile,
+  markProfileCarried,
+  newestHeldEnvelope,
+  profileCarriedInto,
+} from "../profile/returned-profile";
 import { loadWasm } from "../wasm";
 import {
   appendToGroupSlot,
@@ -883,16 +891,28 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     },
     async newIdentityReachable(accountIdB64) {
       // The same plan the Welcome write runs (`ContactsClient.sendWelcome`),
-      // without writing: any candidate is a way in, none means the write
-      // would throw `MailboxUnreachableError` with nothing tried.
-      const wanted = readPin(accountIdB64)?.pinnedSignaturePubkeyB64;
+      // without writing: any ordinary candidate is a way in. ADR-0101
+      // section 4: otherwise the continuity mailbox the person announced,
+      // verified here under the attested key this device pinned and kept
+      // for the write (`reach/continuity.ts`).
+      const pin = readPin(accountIdB64);
+      const wanted = pin?.pinnedSignaturePubkeyB64;
       if (wanted === undefined) return false;
+      let ordinary = 0;
       try {
         const plan = await planWriteToPerson(base64Decode(wanted), { allowMember: true, continuity: null });
-        return plan.candidates.length > 0;
+        ordinary = plan.candidates.length;
       } catch {
-        return false;
+        ordinary = 0;
       }
+      if (ordinary > 0) return true;
+      const target = await refreshContinuityTarget(discovery, accountIdB64, wanted);
+      return newIdentityReachableVerdict({
+        ordinaryCandidates: 0,
+        continuity: target,
+        resetSignedAtMs: pin?.resetSignedAtMs ?? null,
+        nowMs: Date.now(),
+      });
     },
     async prepareSuccessor(oldGroupIdB64, newIdentityAccountIdB64) {
       const secrets = auth.identitySecrets();
@@ -1075,6 +1095,21 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         // eslint-disable-next-line no-console
         console.info("[continuity] the owner was not restored yet", err instanceof Error ? err.name : "");
       }
+    },
+    async carryProfile(_oldGroupIdB64, successorGroupIdB64, accountIdB64) {
+      // ADR-0101 section 8: the reset person's newest profile this device
+      // holds, verbatim (signed by their previous key), posted once into the
+      // delivered successor. Their device keeps it only if it verifies under
+      // its own previous key; nobody else files it (not signed by the sender).
+      const account = activeAccount;
+      const secrets = auth.identitySecrets();
+      const successor = chats.get(successorGroupIdB64);
+      if (account === null || secrets === null || successor === undefined) return;
+      if (profileCarriedInto(account, successorGroupIdB64)) return;
+      const keys = [...loadSupersededKeys()].filter(([, acct]) => acct === accountIdB64).map(([k]) => k);
+      const envelope = newestHeldEnvelope(keys, (k) => profiles.heldEnvelopeOf(k));
+      if (envelope !== null) await chat.sendMessage(secrets, successor.group, envelope);
+      markProfileCarried(account, successorGroupIdB64);
     },
     async resendOwnMessages(oldGroupIdB64, successorGroupIdB64, accountIdB64) {
       const s = auth.state();
@@ -2023,10 +2058,20 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     // write below spends its round trip.
     for (const row of plan.signaling) callHost.ingestSignaling(groupIdB64, row);
 
+    // ADR-0101 section 8 - a profile is filed under its sender only when the
+    // sender signed it; this account's own, carried back by a peer after its
+    // key reset (signed by its previous key), is offered as its own.
     for (const p of plan.profiles) {
-      if (p.profile !== undefined && p.senderKey !== undefined) {
-        profiles.ingest(p.senderKey, p.profile, { groupIdB64 });
-      }
+      const senderKey = p.senderKey;
+      const profile = p.profile;
+      if (profile === undefined || senderKey === undefined) continue;
+      // Filed in order: the ingest is synchronous once the route is known.
+      await fileReceivedProfile({
+        accountIdB64: account,
+        senderKeyB64: senderKey,
+        profile,
+        ingest: () => profiles.ingest(senderKey, profile, { groupIdB64 }),
+      });
     }
     // ADR-0060 — scoped-discovery service envelopes, to their handler.
     for (const e of plan.scoped) {
@@ -2349,6 +2394,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     if (activeAccount === accountIdB64 && loopAbort !== null) return;
     stop();
     activeAccount = accountIdB64;
+    bindContinuityTargets(accountIdB64);
     mirrorSupersededKeys();
     // ADR-0073 R.7 case 1 — messages held before a reload are read back.
     void restoreHeldSends(accountIdB64);
@@ -2445,6 +2491,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     // begun just before the first `start` of a session is that session's.
     if (activeAccount !== null) binding.advance();
     activeAccount = null;
+    bindContinuityTargets(null);
     seenGroups = null;
     logCursors = null;
     backoff.clear();

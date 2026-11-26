@@ -97,6 +97,7 @@ extension ChatRepository {
     /// Install the process-wide publish guard and the reset-accepted trigger.
     /// Called once per bootstrap.
     func installContinuity() {
+        installHistoryReturn()
         ChatClient.deadSessionGuard = { [weak self] group in
             guard let self else { return false }
             let kind: HeldSend.Kind = (try? group.groupKind()) == .oneToOne ? .chat : .group
@@ -1137,7 +1138,36 @@ final class RepositoryContinuityPort: ContinuityPort {
     }
 
     func newIdentityReachable(accountIdB64: String) async -> Bool {
-        repository.newIdentityReachable(accountIdB64: accountIdB64)
+        // Any ordinary candidate (or a continuity mailbox already kept) is a
+        // way in. ADR-0101 section 4: otherwise the continuity mailbox the
+        // person announced, verified here under the attested key this device
+        // pinned and kept for the write.
+        if repository.newIdentityReachable(accountIdB64: accountIdB64) { return true }
+        guard let pin = pins.readPin(accountIdB64: accountIdB64),
+              let own = repository.currentAccountIdB64 else { return false }
+        let target = await ContinuityTargetRefresh.refresh(
+            accountIdB64: accountIdB64, attestedKeyB64: pin.pinnedSignaturePubkeyB64, ownAccountIdB64: own)
+        return ContinuityTargets.newIdentityReachable(
+            ordinaryCandidates: 0, continuity: target, resetSignedAtMs: pin.resetSignedAtMs,
+            nowMs: ChatRepository.nowMs())
+    }
+
+    func carryProfile(oldGroupIdB64: String, successorGroupIdB64: String, accountIdB64: String) async throws {
+        // ADR-0101 section 8: the reset person's newest profile this device
+        // holds, verbatim (signed by their previous key), posted once into
+        // the delivered successor. Their device keeps it only if it verifies
+        // under its own previous key; nobody else files it (not signed by
+        // the sender).
+        let successorHex = try hex(successorGroupIdB64)
+        guard let own = repository.currentAccountIdB64, repository.groups[successorHex] != nil else { return }
+        let carried = ProfileCarriedStore()
+        guard !carried.carried(accountIdB64: own, successorGroupIdB64: successorGroupIdB64) else { return }
+        let keys = pins.loadSupersededKeys().filter { $0.value == accountIdB64 }.map(\.key).sorted()
+        if let envelope = ProfileReturn.newestHeldEnvelope(
+            keysB64: keys, heldEnvelopeOf: { ProfileDirectory.shared.heldEnvelope(signatureKeyB64: $0) }) {
+            try await repository.publishApplicationMessage(groupIdHex: successorHex, plaintextBytes: envelope)
+        }
+        carried.mark(accountIdB64: own, successorGroupIdB64: successorGroupIdB64)
     }
 
     func prepareSuccessor(oldGroupIdB64: String, newIdentityAccountIdB64: String) async throws -> String {

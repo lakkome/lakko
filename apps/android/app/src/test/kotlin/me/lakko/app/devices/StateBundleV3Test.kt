@@ -18,6 +18,7 @@ import me.lakko.app.profile.InMemoryProfilePersistence
 import me.lakko.app.profile.PeerProfile
 import me.lakko.app.profile.PeerProfileStore
 import me.lakko.app.profile.ProfileDirectory
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -270,6 +271,22 @@ class StateBundleV3Test {
         )!!.pendingContacts.single().heldMessages.single()
         assertEquals(7L, other.replyTo)
         assertEquals(2, StateBundle.heldCopyOf(other).attachmentCount)
+    }
+
+    @Test
+    fun `ADR-0101 - a carried profile is the envelope as received, and one held without it is not carried`() {
+        val received = byteArrayOf(4, 5, 6)
+        val withEnvelope = PeerProfile("Anna", null, 3uL, envelopeB64 = java.util.Base64.getEncoder().encodeToString(received))
+        assertArrayEquals(received, StateBundle.receivedEnvelopeOrNull(withEnvelope))
+        assertNull(StateBundle.receivedEnvelopeOrNull(PeerProfile("Found", null, 0uL)))
+        val carried = StateBundle.carriedProfiles(
+            mapOf(b64(ByteArray(32) { 10 }) to withEnvelope, b64(ByteArray(32) { 11 }) to PeerProfile("Bare", null, 1uL)),
+            ownKeysB64 = emptySet(),
+            ownAccountIdHex = null,
+            compose = StateBundle::receivedEnvelopeOrNull,
+        )
+        assertEquals(listOf(b64(ByteArray(32) { 10 })), carried.map { it.personKeyB64 })
+        assertEquals(java.util.Base64.getEncoder().encodeToString(received), carried.single().envelopeB64)
     }
 
     @Test

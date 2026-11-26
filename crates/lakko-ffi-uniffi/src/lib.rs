@@ -89,6 +89,7 @@ pub mod reach_plan;
 pub mod reaction_rules;
 pub mod recovery_payload;
 pub mod release;
+pub mod reset_return;
 pub mod scoped_discovery;
 pub mod sframe;
 pub mod sfu_signaling;
@@ -919,6 +920,21 @@ pub enum FfiError {
     /// from the group, or who left it, is no longer an admin.
     #[error("{0}")]
     MembershipAdminNotAMember(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0101 reaching a reset account. APPENDED last: a `flat_error`
+    // lowers by ordinal.
+    // ------------------------------------------------------------------
+    /// A continuity binding, channel return, history request or channel
+    /// recovery proof was refused (`reset_return.rs`). The message is
+    /// `"<code>: <reason>"` with the frozen codes of
+    /// `lakko_contacts::continuity::ContinuityError`,
+    /// `lakko_contacts::channel_return::ChannelReturnError`,
+    /// `lakko_contacts::history_request::HistoryRequestError`,
+    /// `lakko_channels::recovery::RecoveryProofError`, or `keyLength` /
+    /// `seedLength` for a wrong-length argument.
+    #[error("{0}")]
+    ResetReturn(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {

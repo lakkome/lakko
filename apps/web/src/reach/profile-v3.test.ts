@@ -15,6 +15,13 @@ import { sniffProfile } from "../profile/profile-envelope";
 import { foldProfileGrants } from "./grant-intake";
 import { EMPTY_RECEIVED_GRANTS, bestGrantFor } from "./received-grants";
 
+/** ADR-0101 section 8: a v6 profile envelope is signed by an account
+ *  identity; this test's profiles are signed by one fixed identity. */
+let profileSignerHeld: wasm.Identity | undefined;
+function profileSigner(): wasm.Identity {
+  return (profileSignerHeld ??= wasm.Identity.fromSeed(new Uint8Array(64).fill(0x5a)));
+}
+
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
   await initWasm({ module_or_path: readFileSync(path) });
@@ -28,7 +35,7 @@ describe("profile v3 through the foreground sniff", () => {
     const contact = wasm.deriveReachGrant(ACCOUNT_SEED, wasm.ReachClass.Contact, new Uint8Array(0), 1);
     // Read before composing: `composeProfileEnvelope` takes the grants by value.
     const memberKey = member.verifyingKey();
-    const bytes = wasm.composeProfileEnvelope("Anna", undefined, 5n, new Uint8Array(16).fill(1), undefined, [
+    const bytes = wasm.composeProfileEnvelope(profileSigner(), "Anna", undefined, 5n, new Uint8Array(16).fill(1), undefined, [
       member,
       contact,
     ]);
@@ -50,7 +57,7 @@ describe("profile v3 through the foreground sniff", () => {
 
   it("a one-to-one keeps the contact grant, which then authorises a write", () => {
     const contact = wasm.deriveReachGrant(ACCOUNT_SEED, wasm.ReachClass.Contact, new Uint8Array(0), 0);
-    const bytes = wasm.composeProfileEnvelope("Anna", undefined, 5n, undefined, undefined, [contact]);
+    const bytes = wasm.composeProfileEnvelope(profileSigner(), "Anna", undefined, 5n, undefined, undefined, [contact]);
     const sniff = sniffProfile(wasm, bytes);
     if (sniff.kind !== "profile") throw new Error("not a profile");
     const store = foldProfileGrants(EMPTY_RECEIVED_GRANTS, {

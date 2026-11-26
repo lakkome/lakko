@@ -875,6 +875,11 @@ extension ChatRepository {
                     opened.bundle, accountIdB64: accountIdB64, ownKey: ownKey, route: look.route,
                     store: messageLogStore)
                 reentryGapLooks.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+                // ADR-0101 section 9 — a page of the history asked for after
+                // this account's key reset: the next page is asked for.
+                if look.route == HistoryReturnRules.lookRoute {
+                    historyPageFiled(groupIdHex: groupIdHex, messageIds: Self.historyMessageIds(opened.bundle))
+                }
                 if live.narrowReentryGap(
                     gapToMs: look.gapToMs, complete: filed.complete, earliestMs: filed.earliestMs) {
                     persistMessageLogBestEffort()

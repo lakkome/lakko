@@ -107,7 +107,7 @@ one, announced in the attested identity bundle for a window.**
      loses it and nobody else holds it. Decided (maintainer, 2026-11-25: the
      owner gets the channel back with no action, even when alone):
      a **channel recovery key** bound to the account, not to its keys. Its
-     seed is a VOPRF evaluation by `services/auth` under a per-account key
+     seed is an OPRF evaluation (RFC 9497 OPRF mode, no proof) by `services/auth` under a per-account key
      `k_acct = BLAKE3-derive-key("lakko/auth/channel-recovery/v1",
      master ‖ account_id)` (no table), requested by a signed-in device with
      the channel id blinded, so auth never learns the channel id. At
@@ -227,7 +227,7 @@ binding sign / verify on both FFI surfaces, the three clients.
 | Sprint | Content |
 |---|---|
 | S1 core | `lakko-contacts`: continuity mailbox seed and binding codec (sign, verify, expiry); channel return envelope (channel id, role, the old card's binding signature and profile, invitation, epoch seeds); history request envelope; profile v5 signed by the identity key; goldens, proptests, fuzz targets; `lakko-channels`: recovery-key owner proof; both FFI surfaces; NSE recognisers. |
-| S2 services | Discovery: `continuity_binding` (migration, verified upload, served while unexpired, swept). Auth: channel-recovery VOPRF evaluation under `k_acct` (session, rate-limited). Channels: register a recovery key, `PUT owner` with a recovery proof (migration). Route tests. |
+| S2 services | Discovery: `continuity_binding` (migration, verified upload, served while unexpired, swept). Auth: channel-recovery OPRF evaluation under `k_acct` (session, rate-limited). Channels: register a recovery key, `PUT owner` with a recovery proof (migration). Route tests. |
 | S3 web | Reset order (continuity mailbox, binding, reach key); read loop for the window; peer side for chats, groups, subscribers, publishers, owners; profile return; history request and answer; channel recovery. |
 | S4 iOS, Android | The same, in parallel. |
 | S5 walk | Base scenario 4b with the return of a chat, a group, a subscription, an owned channel, the profile and history, on two clients. |

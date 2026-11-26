@@ -275,6 +275,12 @@ public object AccountLocalWipe {
         Step("verified-bindings") { ctx, acct -> me.lakko.app.contacts.SharedPrefsVerifiedBindingStore(ctx).clearForOwner(acct) },
         Step("successor-claims") { ctx, acct -> me.lakko.app.chat.SealedSuccessorClaimBackend.deleteAccount(ctx, acct) },
         Step("reset-continuity") { ctx, acct -> me.lakko.app.chat.SharedPrefsContinuityBackend.deleteAccount(ctx, acct) },
+        // ADR-0101 — the reset's continuity window and previous key, the
+        // continuity mailboxes kept for reset contacts and the continuity
+        // mailbox cursor, the channel returns held and sent, the recovery-key
+        // registrations, the returned invitations, the history paging, the
+        // recovered channels and the profiles carried into successors.
+        Step("reset-return") { ctx, acct -> me.lakko.app.auth.ResetReturnStorage.wipeOnDevice(ctx, acct) },
         Step("lineage-mirror") { ctx, acct -> me.lakko.app.chat.LineageMirror.deleteAccount(ctx, acct) },
         Step("held-sends") { ctx, acct -> me.lakko.app.chat.SealedHeldSendBackend.deleteAccount(ctx, acct) },
         // docs/ux/connection-state.md section 7.3 — the messages that never

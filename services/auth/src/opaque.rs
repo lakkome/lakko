@@ -2086,6 +2086,7 @@ mod signup_login_limits_e2e_tests {
             anon_cred: None,
             handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
             recovery_email: None,
+            channel_recovery: None,
             limits: Arc::new(limits),
         }
     }

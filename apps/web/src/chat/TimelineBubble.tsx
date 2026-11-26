@@ -378,7 +378,7 @@ export function TimelineBubble(
       // pushed into `rows()`. Defensive.
       return null;
     }
-    if (ev.kind === "registrarSeed" || ev.kind === "groupContactRequest" || ev.kind === "accountDeleted") {
+    if (ev.kind === "registrarSeed" || ev.kind === "groupContactRequest" || ev.kind === "accountDeleted" || ev.kind === "historyRequest") {
       // ADR-0057 / who-can-find-me 6.4 — consumed at receipt by the chat
       // client, never a row.
       // Defensive.

@@ -1295,14 +1295,22 @@ public final class ContactsClient {
     public func pollStrangerInbox(
         accountIdentity: Identity,
         after: Int64 = 0,
-        waitSecs: Int = 0
+        waitSecs: Int = 0,
+        continuity: Bool = false
     ) async throws -> PollResult {
         // ADR-0078 — the mailbox is named by the account's mailbox key
         // (derived from the account seed; every device derives the same), not
         // by the identity key; reads are signed with it and every row is
         // opened with it.
-        let mailboxKey = MailboxKey.fromAccountIdentity(accountIdentity: accountIdentity)
-        let signer = dsMailboxSigner(accountIdentity: accountIdentity)
+        // ADR-0101 section 5 — `continuity`: the account's CONTINUITY mailbox
+        // instead, read beside the account mailbox for the window after a
+        // key reset; only there is a channel return accepted.
+        let mailboxKey = continuity
+            ? MailboxKey.continuityFromAccountIdentity(accountIdentity: accountIdentity)
+            : MailboxKey.fromAccountIdentity(accountIdentity: accountIdentity)
+        let signer = continuity
+            ? dsContinuityMailboxSigner(accountIdentity: accountIdentity)
+            : dsMailboxSigner(accountIdentity: accountIdentity)
         let myX25519Secret = accountIdentity.x25519SecretKey()
         let myAddress = signer.mailboxAddress()
 
@@ -1332,7 +1340,8 @@ public final class ContactsClient {
         }
         return Self.dispatch(
             rows: raw.messages, after: after, hasMore: raw.hasMore,
-            mailboxKey: mailboxKey, myX25519Secret: myX25519Secret)
+            mailboxKey: mailboxKey, myX25519Secret: myX25519Secret,
+            acceptsChannelReturns: continuity)
     }
 
     /// One contact-request wire, verified and opened with this account's
@@ -1407,7 +1416,8 @@ public final class ContactsClient {
     /// The cursor moves past every row either way.
     static func dispatch(
         rows: [MailboxMessage], after: Int64, hasMore: Bool,
-        mailboxKey: MailboxKey, myX25519Secret: Data
+        mailboxKey: MailboxKey, myX25519Secret: Data,
+        acceptsChannelReturns: Bool = false
     ) -> PollResult {
         var events: [IncomingMailboxEvent] = []
         var cursor = after
@@ -1430,6 +1440,14 @@ public final class ContactsClient {
                 // one-to-one fell behind and asks to be brought back. Decoded
                 // and judged by the chat repository; nothing is trusted here.
                 events.append(.conversationReentry(messageId: message.id, envelope: body))
+            case .channelReturn:
+                // ADR-0101 section 7 — accepted ONLY from the continuity
+                // mailbox; in any other mailbox it is dropped. Not verified
+                // here: the channels runtime checks it against this
+                // account's previous key before acting.
+                if acceptsChannelReturns {
+                    events.append(.channelReturn(messageId: message.id, envelope: body))
+                }
             case .welcome:
                 events.append(
                     .welcome(
@@ -1703,6 +1721,9 @@ public enum IncomingMailboxEvent: Equatable {
     /// of a one-to-one whose device fell behind; the whole envelope, NOT yet
     /// checked (`ChatRepository.receiveConversationReentry`).
     case conversationReentry(messageId: Int64, envelope: Data)
+    /// ADR-0101 section 7 — a channel return read from this account's
+    /// continuity mailbox (never from another), NOT yet verified.
+    case channelReturn(messageId: Int64, envelope: Data)
 }
 
 /// Result of ``ContactsClient/pollStrangerInbox(...)``.

@@ -425,3 +425,24 @@ path = "fuzz_targets/publisher_reader_key_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "continuity_binding_decode"
+path = "fuzz_targets/continuity_binding_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "channel_return_decode"
+path = "fuzz_targets/channel_return_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "history_request_decode"
+path = "fuzz_targets/history_request_decode.rs"
+test = false
+doc = false
+bench = false

@@ -334,6 +334,19 @@ function seedAccount(acct: string, acctUrl: string): void {
     JSON.stringify({ QUFB: { keyB64: "a2V5", keyGeneration: 1, verifiedAtMs: 1 } }),
   );
   put(`lakko.reset-continuity.v1.${acct}`, JSON.stringify({ moved: { G: 1 }, resent: {} }));
+  put(
+    `lakko:reset-continuity:${acct}`,
+    JSON.stringify({ v: 1, expiresAtMs: 9, previousKeyB64: null, keyGeneration: "2", announced: false }),
+  );
+  put(`lakko:continuity-targets:${acct}`, JSON.stringify({ K: { mailboxPkB64: "x", expiresAtMs: 9 } }));
+  put(`lakko:channel-returns:${acct}`, JSON.stringify(["AAAA"]));
+  put(`lakko:channel-returns-sent:${acct}`, JSON.stringify({ "c|subscriber|a": 2 }));
+  put(`lakko:channel-recovery-registered:${acct}`, JSON.stringify(["c"]));
+  put(`lakko:channel-return-invitations:${acct}`, JSON.stringify({ c: "AAAA" }));
+  put(`lakko:continuity-mailbox-cursor:${acct}`, "3");
+  put(`lakko:history-return:${acct}`, JSON.stringify({ G: { before: "0", pages: 0, sentAtMs: 0, done: false } }));
+  put(`lakko:continuity-profile-carried:${acct}`, JSON.stringify(["S"]));
+  put(`lakko:channel-recovered:${acct}`, JSON.stringify({ c: { throughSeq: 4 } }));
   put(`lakko.channels.orphaned-by-reset.v1.${acct}`, JSON.stringify(["ch1"]));
   put(`lakko.channels.orphan-removed.v1.${acct}`, JSON.stringify(["ch2"]));
   put(`lakko.channels.claimed-handles.v1.${acct}`, JSON.stringify({ news: "ch2" }));
@@ -748,6 +761,17 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko:username-change-owed:": "account",
   "lakko.contacts.verified-bindings.v1.": "account",
   "lakko.reset-continuity.v1.": "account",
+  // ADR-0101: the reset side's window and the peer side's kept mailboxes.
+  "lakko:reset-continuity:": "account",
+  "lakko:continuity-targets:": "account",
+  "lakko:channel-returns:": "account",
+  "lakko:channel-returns-sent:": "account",
+  "lakko:channel-recovery-registered:": "account",
+  "lakko:channel-return-invitations:": "account",
+  "lakko:continuity-mailbox-cursor:": "account",
+  "lakko:history-return:": "account",
+  "lakko:channel-recovered:": "account",
+  "lakko:continuity-profile-carried:": "account",
   "lakko.channels.orphaned-by-reset.v1": "account",
   "lakko.channels.claimed-handles.v1.": "account",
   "lakko.groups.claimed-handles.v1.": "account",
@@ -826,6 +850,9 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.language": "device",
   // ADR-0082 / UX section 6: the translation settings are per device.
   "lakko.translation.settings.v1": "device",
+  // ADR-0100: the language groups of Lakko's own translation engine, per
+  // device; Forget device deletes them (`AuthContext.tsx`).
+  "lakko-translation-models": "device",
   "lakko.transparency.last-seen-root.v1": "device",
   // The store gate's cross-tab marker: digests of the accounts wiped in the
   // last minute, never an account id; it prunes itself.

@@ -133,6 +133,12 @@ export interface ContinuityPort {
     newOwnerKeyB64: string,
     stayAdmin: boolean,
   ): Promise<void>;
+  /** ADR-0101 section 8: post into the delivered successor, verbatim, the
+   *  newest profile envelope this device holds for the reset person (signed
+   *  by their previous key), so their profile comes back with the
+   *  conversation. Idempotent (records that it ran); absent: nothing is
+   *  carried. Runs only after the successor was delivered. */
+  carryProfile?(oldGroupIdB64: string, successorGroupIdB64: string, accountIdB64: string): Promise<void>;
   /** R.7 case 1 / D5: send again, into the successor, this account's
    *  messages sent in the old one-to-one after `signedAtMs`. Idempotent
    *  (records that it ran). */
@@ -356,6 +362,7 @@ async function build(
   if (delivery === "unreachable") return "waiting-for-reach";
   if (delivery !== "delivered") return "failed";
   await port.recordLineage(oldGroupIdB64, successorGroupIdB64);
+  await port.carryProfile?.(oldGroupIdB64, successorGroupIdB64, accountIdB64);
   const superseded = new Set(port.supersededKeys().keys());
   if (old.kind === "chat") {
     await port.resendOwnMessages(oldGroupIdB64, successorGroupIdB64, accountIdB64);

@@ -225,7 +225,9 @@ private class ChannelsPort(
         // invite key; a co-publisher with none leaves it to the owner.
         state.boundAccount?.let { account ->
             val context = appContext
-            if (context != null) {
+            // ADR-0101 section 7 — a channel taken back with its recovery key
+            // whose type is still unknown lets every row in.
+            if (context != null && !ChannelReturnRuntime.recoveredTypeUnknown(context, state, channelIdHex)) {
                 if (ChannelAdmissionKeys.all(context, account, channelIdHex).also { l -> l.forEach { it.second.fill(0) } }.isNotEmpty()) {
                     return ChannelSubscriberRows.admissible(context, state, client, channelIdHex).orEmpty()
                 }

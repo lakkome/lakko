@@ -5,6 +5,38 @@ import XCTest
 @testable import Lakko
 import LakkoCore
 
+/// ADR-0101 section 8 — profile v6 is signed by an account identity. The
+/// identity tests sign with: a fixed one, never a real account's.
+enum TestProfileSigning {
+    // swiftlint:disable:next force_try
+    static let identity: Identity = try! Identity.fromSeed(seed: Data(repeating: 0x6B, count: 32))
+    /// The provider a test ``ProfileDirectory`` signs its own envelopes with.
+    static let provider: @MainActor (String) -> Identity? = { _ in identity }
+}
+
+extension ProfileClaim {
+    /// ADR-0101 section 8 — a received claim as the store keeps it: the
+    /// decoded fields and the raw envelope (signed by
+    /// ``TestProfileSigning/identity``), what a bundle or a backup carries.
+    static func signed(
+        displayName: String?, username: String? = nil, updatedAtMs: UInt64, accountId: Data? = nil
+    ) -> ProfileClaim {
+        // swiftlint:disable:next force_try
+        let envelope = try! composeProfileEnvelope(profile: FfiProfile(
+            displayName: displayName, username: username, updatedAtMs: updatedAtMs,
+            accountId: accountId, usernameCertificate: nil, grants: []))
+        return ProfileClaim(
+            displayName: displayName, username: username, updatedAtMs: updatedAtMs, accountId: accountId,
+            envelope: envelope)
+    }
+}
+
+/// The suite's own `composeProfileEnvelope(profile:)`: the core's, signed by
+/// ``TestProfileSigning/identity`` (the core takes the signer since profile v6).
+func composeProfileEnvelope(profile: FfiProfile) throws -> Data {
+    try LakkoCore.composeProfileEnvelope(profile: profile, accountIdentity: TestProfileSigning.identity)
+}
+
 /// ADR-0048 on iOS — the username rule as the forms apply it, the display-name
 /// resolver's precedence, the received-profile store's ordering and keying,
 /// the username verification state machine, the own-profile stamp, and the
@@ -405,7 +437,9 @@ final class ProfileNamesTests: XCTestCase {
         XCTAssertEqual(
             profile,
             ProfileClaim(
-                displayName: "Alice Petrova", username: "alice", updatedAtMs: 42, accountId: accountId))
+                displayName: "Alice Petrova", username: "alice", updatedAtMs: 42, accountId: accountId,
+                // ADR-0101 section 8 — the envelope rides along verbatim.
+                envelope: bytes))
         XCTAssertEqual(senderKey, "member-3", "bound to the identity the sender leaf names at receipt")
         guard case .profile(_, _, .none, _) = classify(bytes, senderLeaf: nil) else {
             return XCTFail("an unattributable profile still never becomes a bubble")
@@ -738,6 +772,7 @@ final class ProfileDirectoryTests: XCTestCase {
             verifier: verifier,
             ownStore: OwnProfileStore(defaults: defaults)
         )
+        directory.accountIdentityProvider = TestProfileSigning.provider
         directory.verifiesOnResolve = false
         directory.setRenames(from: [])
         directory.activate(accountIdB64: "acct", username: "valentin")
@@ -754,10 +789,14 @@ final class ProfileDirectoryTests: XCTestCase {
         let other = base64Encode(Data(repeating: 0x03, count: 32))
         let own = base64Encode(Data(repeating: 0x04, count: 32))
         let profiles: [String: ProfileClaim] = [
-            other: ProfileClaim(displayName: "Other", username: nil, updatedAtMs: 1),
-            recent: ProfileClaim(displayName: "Recent", username: nil, updatedAtMs: 1),
-            contact: ProfileClaim(displayName: "Contact", username: nil, updatedAtMs: 1),
-            own: ProfileClaim(displayName: "Me", username: nil, updatedAtMs: 1),
+            other: .signed(displayName: "Other", updatedAtMs: 1),
+            recent: .signed(displayName: "Recent", updatedAtMs: 1),
+            contact: .signed(displayName: "Contact", updatedAtMs: 1),
+            own: .signed(displayName: "Me", updatedAtMs: 1),
+            // ADR-0101 section 8 — a row held without its envelope (a found
+            // name) is not carried: nobody re-signs another person's profile.
+            base64Encode(Data(repeating: 0x07, count: 32)):
+                ProfileClaim(displayName: "Found", username: nil, updatedAtMs: 0),
         ]
         let records = OwnBackupEnvelopes.receivedProfileRecords(
             profiles: profiles, contactKeysB64: [contact], recentPeopleB64: [recent, own],
@@ -777,8 +816,8 @@ final class ProfileDirectoryTests: XCTestCase {
         let gathered = OwnBackupEnvelopes.Gathered(
             ownProfile: Data([1]), visibility: Data([2]),
             profiles: [
-                other: ProfileClaim(displayName: "Other", username: nil, updatedAtMs: 1),
-                contact: ProfileClaim(displayName: "Contact", username: nil, updatedAtMs: 1),
+                other: .signed(displayName: "Other", updatedAtMs: 1),
+                contact: .signed(displayName: "Contact", updatedAtMs: 1),
             ],
             contactKeysB64: [contact], recentPeopleB64: [], ownKeysB64: [])
         let (assembled, onMain) = await Task.detached {
@@ -809,8 +848,9 @@ final class ProfileDirectoryTests: XCTestCase {
             ProfileClaim(displayName: "Kept", username: nil, updatedAtMs: 9),
             signatureKeyB64: base64Encode(newerHeld), accountIdB64: directory.accountIdB64)
         func record(_ key: Data, _ name: String, _ stamp: UInt64) throws -> BackupReceivedProfile {
-            BackupReceivedProfile(personKey: key, envelope: try XCTUnwrap(
-                StateBundle.profileEnvelope(ProfileClaim(displayName: name, username: nil, updatedAtMs: stamp))))
+            BackupReceivedProfile(
+                personKey: key,
+                envelope: try XCTUnwrap(ProfileClaim.signed(displayName: name, updatedAtMs: stamp).envelope))
         }
         let stored = PhraseRestoreBackup.applyReceivedProfiles(
             [try record(fresh, "VG3", 5), try record(newerHeld, "Older", 3), try record(own, "Me", 5)],
@@ -867,6 +907,7 @@ final class ProfileDirectoryTests: XCTestCase {
                 isNewer: { profileIsNewer(incomingUpdatedAtMs: $0, storedUpdatedAtMs: $1) }),
             verifier: verifier,
             ownStore: OwnProfileStore(defaults: defaults))
+        directory.accountIdentityProvider = TestProfileSigning.provider
         directory.setRenames(from: [])
         directory.activate(accountIdB64: "acct", username: "valentin")
         return directory
@@ -1330,6 +1371,7 @@ final class ProfileDirectoryTests: XCTestCase {
                 isNewer: { profileIsNewer(incomingUpdatedAtMs: $0, storedUpdatedAtMs: $1) }),
             verifier: UsernameVerifier(resolve: { _ in .notRegistered }, defaults: defaults),
             ownStore: OwnProfileStore(defaults: defaults))
+        directory.accountIdentityProvider = TestProfileSigning.provider
         directory.verifiesOnResolve = false
         directory.activate(accountIdB64: suite, username: nil)
         let oldKey = Data(repeating: 0xA1, count: 32)

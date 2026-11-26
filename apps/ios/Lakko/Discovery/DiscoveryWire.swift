@@ -281,6 +281,11 @@ public struct IdentityFetchResponse: Codable, Equatable {
     /// since). Verified locally against the key the gate left trusted
     /// (`verifyConversationLink`); one that does not verify is ignored.
     public let conversationLink: String?
+    /// ADR-0101 section 2: standard base64 of the 105-byte continuity
+    /// binding of an account that reset its keys; served only while
+    /// unexpired. A peer verifies it under the attested new key before
+    /// writing to the mailbox it names (``ContinuityTargets``).
+    public let continuityBindingB64: String?
 
     public init(
         signaturePubkey: String,
@@ -289,8 +294,10 @@ public struct IdentityFetchResponse: Codable, Equatable {
         supersessionProof: String? = nil,
         keyGeneration: UInt64 = 1,
         keyResetAttest: String? = nil,
-        conversationLink: String? = nil
+        conversationLink: String? = nil,
+        continuityBindingB64: String? = nil
     ) {
+        self.continuityBindingB64 = continuityBindingB64
         self.signaturePubkey = signaturePubkey
         self.x25519Pubkey = x25519Pubkey
         self.x25519Binding = x25519Binding
@@ -309,6 +316,7 @@ public struct IdentityFetchResponse: Codable, Equatable {
         keyGeneration = try c.decodeIfPresent(UInt64.self, forKey: .keyGeneration) ?? 1
         keyResetAttest = try c.decodeIfPresent(String.self, forKey: .keyResetAttest)
         conversationLink = try c.decodeIfPresent(String.self, forKey: .conversationLink)
+        continuityBindingB64 = try c.decodeIfPresent(String.self, forKey: .continuityBindingB64)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -319,6 +327,20 @@ public struct IdentityFetchResponse: Codable, Equatable {
         case keyGeneration = "key_generation"
         case keyResetAttest = "key_reset_attest"
         case conversationLink = "conversation_link"
+        case continuityBindingB64 = "continuity_binding_b64"
+    }
+}
+
+/// Body of `PUT /discovery/identity/continuity` (ADR-0101 section 2).
+public struct ContinuityBindingUploadRequest: Codable, Equatable {
+    public let continuityBindingB64: String
+
+    public init(continuityBindingB64: String) {
+        self.continuityBindingB64 = continuityBindingB64
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case continuityBindingB64 = "continuity_binding_b64"
     }
 }
 

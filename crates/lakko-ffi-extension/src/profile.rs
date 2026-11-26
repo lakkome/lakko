@@ -112,8 +112,17 @@ pub fn profile_envelope_max_len() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lakko_contacts::profile::{compose_profile, Profile, PROFILE_ENVELOPE_DOMAIN_V1};
+    use lakko_contacts::profile::{Profile, ProfileError, PROFILE_ENVELOPE_DOMAIN_V1};
     use lakko_contacts::reach::{ReachClass, ReachGrant};
+
+    /// The core compose, signed by a fixed test account (profile v6,
+    /// ADR-0101 section 8).
+    fn compose_profile(p: &Profile) -> Result<Vec<u8>, ProfileError> {
+        lakko_contacts::profile::compose_profile(
+            p,
+            &lakko_crypto::signing::SigningKey::from_seed(&[0x6B; 32]),
+        )
+    }
 
     #[test]
     fn the_display_name_is_read_and_nothing_else_is_needed() {
@@ -196,12 +205,12 @@ mod tests {
     /// silently narrowing the NSE peek.
     #[test]
     fn golden_pins_the_swift_prefilter_shape() {
-        // Profile v4 (ADR-0084): v3 plus the avatar length byte and, at most,
-        // a still and a video reference.
-        assert_eq!(profile_envelope_min_len(), 33);
-        assert_eq!(profile_envelope_max_len(), 927);
+        // Profile v6 (ADR-0101 section 8): v5 plus the 64-byte identity
+        // signature.
+        assert_eq!(profile_envelope_min_len(), 97);
+        assert_eq!(profile_envelope_max_len(), 991);
         let smallest = compose_profile(&profile(None, None)).unwrap();
-        assert_eq!(smallest.len(), 33);
+        assert_eq!(smallest.len(), 97);
         assert_eq!(smallest[0], 0x6c);
         let name = format!("{}\u{20AC}", "\u{1F600}".repeat(63));
         let mut maximal = profile(Some(&name), Some(&"a".repeat(32)));
@@ -232,7 +241,7 @@ mod tests {
             }),
         });
         let largest = compose_profile(&maximal).unwrap();
-        assert_eq!(largest.len(), 927);
+        assert_eq!(largest.len(), 991);
         decode_profile_envelope(largest).expect("the maximal envelope decodes");
     }
 

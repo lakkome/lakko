@@ -10617,3 +10617,9 @@ button.lk-card-row-button {
     font-size: max(16px, calc(15px * var(--lk-text-scale))) !important;
   }
 }
+
+/* ADR-0101 section 7 - a returned channel invitation above the chat list:
+   the ordinary invitation card, inset like a list row. */
+.lk-returned-invitation {
+  padding: var(--space-2, 8px) var(--space-3, 12px);
+}

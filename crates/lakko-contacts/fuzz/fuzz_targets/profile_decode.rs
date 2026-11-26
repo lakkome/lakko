@@ -26,17 +26,22 @@
 //!   never without a username, at most two grants, one per class, of a
 //!   class a profile may carry;
 //! * the order is total and panic-free, and a profile is never newer than
-//!   itself.
+//!   itself;
+//! * (v6, ADR-0101 section 8) the signature: the body re-composed under a
+//!   fixed key equals the input up to the signature, and the input never
+//!   verifies under that key (a fuzzer cannot sign with it) unless it is
+//!   exactly what that key composes.
 
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
 
 use lakko_contacts::profile::{
-    compose_profile, decode_profile, is_profile_grant_class, profile_is_newer, AVATAR_STILL_MAX_PX,
-    AVATAR_VIDEO_MAX_PX, MAX_PROFILE_GRANTS, PROFILE_ENVELOPE_MAX_LEN, PROFILE_ENVELOPE_MIN_LEN,
-    USERNAME_CERT_LEN,
+    compose_profile, decode_profile, is_profile_grant_class, profile_is_newer, verify_profile,
+    AVATAR_STILL_MAX_PX, AVATAR_VIDEO_MAX_PX, MAX_PROFILE_GRANTS, PROFILE_ENVELOPE_MAX_LEN,
+    PROFILE_ENVELOPE_MIN_LEN, PROFILE_SIG_LEN, USERNAME_CERT_LEN,
 };
+use lakko_crypto::signing::SigningKey;
 
 fuzz_target!(|data: &[u8]| {
     let Ok(profile) = decode_profile(data) else {
@@ -69,11 +74,18 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    let recomposed = compose_profile(&profile).expect("compose must accept what decode accepted");
+    let key = SigningKey::from_seed(&[0x6B; 32]);
+    let recomposed =
+        compose_profile(&profile, &key).expect("compose must accept what decode accepted");
+    let body = data.len() - PROFILE_SIG_LEN;
     assert_eq!(
-        recomposed.as_slice(),
-        data,
+        &recomposed[..body],
+        &data[..body],
         "the encoding must be canonical"
+    );
+    assert_eq!(
+        verify_profile(data, &key.verifying_key().to_bytes()).is_ok(),
+        recomposed.as_slice() == data
     );
     let again = decode_profile(&recomposed).expect("a composed profile must decode");
     assert_eq!(again, profile);

@@ -199,6 +199,12 @@ public struct ChatListScreen: View {
                 if accountSuspended {
                     SuspendedBanner { SuspensionCenter.shared.showScreen() }
                 }
+                // ADR-0101 section 7 — a channel coming back after the key
+                // reset whose old card this device could not confirm: the
+                // ordinary invitation card, for the person to decide on.
+                if archive == nil, let accountIdB64 {
+                    ReturnedInvitationsStrip(channels: channels, accountIdB64: accountIdB64)
+                }
                 if showsFolderBar && archive == nil {
                     FolderBar(
                         folders: deviceGroupSync.folders,

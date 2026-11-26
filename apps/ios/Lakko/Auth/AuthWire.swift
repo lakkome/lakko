@@ -950,3 +950,31 @@ public struct SessionUpgradeRequest: Codable, Equatable {
         case keyStatementB64 = "key_statement_b64"
     }
 }
+
+// ----------------------------------------------------------------------------
+// Channel recovery key (ADR-0101 section 7)
+// ----------------------------------------------------------------------------
+
+/// `POST /auth/channel-recovery/evaluate` request body (bearer).
+public struct ChannelRecoveryEvaluateRequest: Codable, Equatable {
+    /// URL-safe base64 (no pad) of the blinded element.
+    public let blindedElement: String
+
+    public init(blindedElement: String) {
+        self.blindedElement = blindedElement
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case blindedElement = "blinded_element"
+    }
+}
+
+/// `POST /auth/channel-recovery/evaluate` response body.
+public struct ChannelRecoveryEvaluateResponse: Codable, Equatable {
+    /// URL-safe base64 (no pad) of the evaluation.
+    public let evaluation: String
+
+    public init(evaluation: String) {
+        self.evaluation = evaluation
+    }
+}

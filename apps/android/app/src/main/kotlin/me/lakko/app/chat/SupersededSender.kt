@@ -92,6 +92,7 @@ internal fun senderActOf(
     is IncomingChatEvent.GroupName -> SenderAct.CONTROL to event.senderKey
     is IncomingChatEvent.GroupClosed -> SenderAct.CONTROL to event.senderKey
     is IncomingChatEvent.AccountDeleted -> SenderAct.CONTROL to event.senderKey
+    is IncomingChatEvent.HistoryRequest -> SenderAct.CONTROL to event.senderKey
     is IncomingChatEvent.Pin -> SenderAct.CONTROL to event.senderKey
     is IncomingChatEvent.SharedChannels -> SenderAct.CONTROL to event.senderKey
     is IncomingChatEvent.RegistrarSeed -> SenderAct.CONTROL to event.senderKey

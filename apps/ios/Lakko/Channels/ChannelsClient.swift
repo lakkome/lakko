@@ -432,6 +432,48 @@ public final class ChannelsClient {
         let _: EmptyResponse = try decode(data: data, http: http)
     }
 
+    /// ADR-0101 section 7 — `PUT /v1/channels/{id}/recovery-key`: register
+    /// the channel's recovery public key (32 raw bytes), proven by the
+    /// CURRENT owner key of `ownerIdentity`. Returns the HTTP status (`204`
+    /// done), or `nil` when no answer arrived. Never throws for a refusal.
+    public func putRecoveryKey(channelIdHex: String, ownerIdentity: Identity, recoveryPk: Data) async -> Int? {
+        let path = "/v1/channels/\(channelIdHex)/recovery-key"
+        do {
+            let signer = try Self.ownerSigner(accountIdentity: ownerIdentity, channelIdHex: channelIdHex)
+            var request = URLRequest(url: try buildURL(endpoint: path))
+            request.httpMethod = "PUT"
+            request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+            request.setValue(
+                signer.sign(method: "PUT", path: path, query: "", body: recoveryPk),
+                forHTTPHeaderField: channelOwnerProofHeaderName())
+            request.httpBody = recoveryPk
+            let (_, response) = try await gatedTransport(request)
+            return (response as? HTTPURLResponse)?.statusCode
+        } catch {
+            return nil
+        }
+    }
+
+    /// ADR-0101 section 7 — `PUT /v1/channels/{id}/owner` with the RECOVERY
+    /// proof (`x-lakko-channel-recovery-proof`) instead of an owner proof:
+    /// hand the channel to `newOwnerPk`. `204` means the channel was this
+    /// account's; the uniform `401 owner-proof-required` means it was not
+    /// (or no recovery key is registered). `nil` when no answer arrived.
+    public func putOwnerByRecovery(channelIdHex: String, recoveryProofHeader: String, newOwnerPk: Data) async -> Int? {
+        let path = "/v1/channels/\(channelIdHex)/owner"
+        do {
+            var request = URLRequest(url: try buildURL(endpoint: path))
+            request.httpMethod = "PUT"
+            request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+            request.setValue(recoveryProofHeader, forHTTPHeaderField: channelRecoveryProofHeaderName())
+            request.httpBody = newOwnerPk
+            let (_, response) = try await gatedTransport(request)
+            return (response as? HTTPURLResponse)?.statusCode
+        } catch {
+            return nil
+        }
+    }
+
     /// `GET /v1/channels/:id/subscribers/:pk/envelope` —
     /// fetch the latest seed envelope delivered to this
     /// subscriber. Returns `nil` when registered but no

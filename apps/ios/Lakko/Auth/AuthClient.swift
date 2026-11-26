@@ -307,6 +307,29 @@ public final class AuthClient {
         return attestation
     }
 
+    // MARK: - Channel recovery key — ADR-0101 section 7
+
+    /// `POST /auth/channel-recovery/evaluate`: auth evaluates one blinded
+    /// element (the channel recovery input of a channel id it never learns)
+    /// under the account's per-account key. Bearer. Both elements are
+    /// URL-safe base64 without padding on the wire; this takes and returns
+    /// them as bytes. `503 channel-recovery-disabled` / `429` surface as
+    /// ``AuthClientError/http(status:endpoint:body:)``.
+    public func channelRecoveryEvaluate(sessionToken: String, blindedElement: Data) async throws -> Data {
+        guard !sessionToken.isEmpty else {
+            throw AuthClientError.argument("sessionToken must be non-empty")
+        }
+        let endpoint = "/auth/channel-recovery/evaluate"
+        let resp: ChannelRecoveryEvaluateResponse = try await post(
+            endpoint: endpoint,
+            body: ChannelRecoveryEvaluateRequest(blindedElement: base64UrlEncodeNoPad(blindedElement)),
+            bearer: sessionToken)
+        guard let evaluation = base64UrlDecodeNoPad(resp.evaluation) else {
+            throw AuthClientError.http(status: 200, endpoint: endpoint, body: "malformed evaluation in response")
+        }
+        return evaluation
+    }
+
     // MARK: - TOTP — ADR-0018 factor (c), authenticator-code recovery
 
     /// `POST /totp/enroll/start` — mint + store an (unconfirmed) TOTP

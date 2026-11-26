@@ -35,6 +35,13 @@ import { base64Encode } from "../auth/account-id";
 const IDENTITY_TOKEN = {} as unknown as WasmIdentity;
 let wasm: typeof wasmNs;
 
+/** ADR-0101 section 8: a v6 profile envelope is signed by an account
+ *  identity; this test's profiles are signed by one fixed identity. */
+let profileSignerHeld: WasmIdentity | undefined;
+function profileSigner(): WasmIdentity {
+  return (profileSignerHeld ??= wasm.Identity.fromSeed(new Uint8Array(64).fill(0x5a)));
+}
+
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
   await initWasm({ module_or_path: readFileSync(path) });
@@ -89,15 +96,19 @@ function profileEnvelope(
   at = 1_700n,
   accountId?: Uint8Array,
 ): Uint8Array {
-  return wasm.composeProfileEnvelope(name, username, at, accountId);
+  return wasm.composeProfileEnvelope(profileSigner(), name, username, at, accountId);
 }
 
 describe("ADR-0048 — a profile is filtered in the foreground loop", () => {
   it("a profile is classified as a profile", async () => {
-    const [ev] = await classify(3, profileEnvelope());
+    const sent = profileEnvelope();
+    const [ev] = await classify(3, sent);
     expect(ev?.kind).toBe("profile");
     if (ev?.kind !== "profile") throw new Error("unreachable");
-    expect(ev.profile).toEqual({
+    // ADR-0101 section 8 — the envelope rides along verbatim.
+    expect(Array.from(ev.profile?.envelope ?? [])).toEqual(Array.from(sent));
+    const { envelope: _envelope, ...fields } = ev.profile ?? {};
+    expect(fields).toEqual({
       displayName: "Alice Petrova",
       username: "alice",
       updatedAtMs: 1_700n,

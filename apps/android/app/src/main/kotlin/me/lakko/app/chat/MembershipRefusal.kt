@@ -506,6 +506,9 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 // ADR-0051 — a channel metadata record out of bounds; not a
                 // membership refusal.
                 is FfiException.ChannelMeta -> null
+                // ADR-0101 — a reset-return codec refusal; not a membership
+                // refusal.
+                is FfiException.ResetReturn -> null
                 // ADR-0092 — content, ballot, hand-over and credential errors
                 // are never membership refusals.
                 is FfiException.AnonCred -> null

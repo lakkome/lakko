@@ -42,6 +42,7 @@ private func makeDirectory(
         verifier: verifier,
         ownStore: OwnProfileStore(defaults: defaults)
     )
+    directory.accountIdentityProvider = TestProfileSigning.provider
     directory.verifiesOnResolve = false
     directory.setRenames(from: [])
     directory.activate(accountIdB64: base64Encode(Data(repeating: 0x01, count: 16)), username: "viewer")

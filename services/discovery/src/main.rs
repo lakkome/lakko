@@ -150,6 +150,7 @@
 //! - `GET    /.well-known/lakko-username-cert-key` — the certificate verifying key (ADR-0060)
 //! - `POST   /discovery/identity`           — upsert public identity bundle (Phase 1.16d3a)
 //! - `GET    /discovery/identity/{acct}`    — fetch public identity bundle (Phase 1.16d3a)
+//! - `PUT    /discovery/identity/continuity` — store the ADR-0101 continuity binding (session)
 //! - `POST   /discovery/keypackage`         — upsert one device's MLS KeyPackage (ADR-0050)
 //! - `DELETE /discovery/keypackage/device/{dev}` — remove one device's KeyPackage (ADR-0050)
 //! - `GET    /discovery/keypackage/{acct}`  — fetch every device's KeyPackage (ADR-0050)
@@ -178,6 +179,7 @@
 mod account;
 pub(crate) mod auth;
 mod call_invite;
+mod continuity;
 mod donate;
 mod group_invite;
 mod handles;
@@ -499,6 +501,7 @@ async fn main() -> Result<()> {
     // ADR-0099 step 5 — the internal listener the moderation service
     // forwards a moderator's statement to. Loopback, never proxied.
     let _hold_pruner = moderation::spawn_hold_pruner(pool.clone());
+    let _continuity_sweeper = continuity::spawn_sweeper(pool.clone());
     spawn_internal_listener(state.clone()).await?;
     let _internal = internal::spawn(pool.clone(), internal_config).await?;
 
@@ -588,6 +591,12 @@ fn protected_routes(state: &AppState) -> Router<AppState> {
         // `DELETE /discovery/account` is in `account_delete_routes`: it also
         // takes a suspended account's restricted session (ADR-0099 step 3).
         .route("/discovery/identity", post(identity_bundle::upload))
+        // ADR-0101 S2: the continuity binding of an account that reset its
+        // keys, verified against the row's current identity key.
+        .route(
+            "/discovery/identity/continuity",
+            axum::routing::put(continuity::put),
+        )
         .route("/discovery/keypackage", post(keypackage::upload))
         // ADR-0050 — remove one device's KeyPackage (device removal). ADR-0074:
         // under the generation floor, tombstones the id, and needs an account

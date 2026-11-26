@@ -35,7 +35,10 @@ export type MailboxRowKind =
   | "link-refusal"
   /** ADR-0091 section 3, route 2: the other person of a one-to-one asks to
    *  be brought back into it. */
-  | "conversation-reentry";
+  | "conversation-reentry"
+  /** ADR-0101 section 7: a channel comes back to this account after its key
+   *  reset (only in the continuity mailbox). */
+  | "channel-return";
 
 /** Where one write goes: the person's verified mailbox key and its address. */
 export interface MailboxTarget {
@@ -54,6 +57,9 @@ export interface MailboxRowWasm {
     readonly WelcomeRendezvous: WasmMailboxKind | number;
     readonly LinkRefusal: WasmMailboxKind | number;
     readonly ConversationReentry: WasmMailboxKind | number;
+    /** Absent from an older wasm (a test double): such a row never opens
+     *  as a channel return. */
+    readonly ChannelReturn?: WasmMailboxKind | number;
   };
   sealMailboxRow(mailboxPk: Uint8Array, kind: WasmMailboxKind, body: Uint8Array): Uint8Array;
   openMailboxRow(key: MailboxKey, row: Uint8Array): {
@@ -78,6 +84,9 @@ export function wasmKindOf(wasm: MailboxRowWasm, kind: MailboxRowKind): WasmMail
       return wasm.MailboxKind.LinkRefusal as WasmMailboxKind;
     case "conversation-reentry":
       return wasm.MailboxKind.ConversationReentry as WasmMailboxKind;
+    case "channel-return":
+      if (wasm.MailboxKind.ChannelReturn === undefined) throw new Error("no channel-return mailbox kind");
+      return wasm.MailboxKind.ChannelReturn as WasmMailboxKind;
   }
 }
 
@@ -88,6 +97,9 @@ function nameOf(wasm: MailboxRowWasm, kind: number): MailboxRowKind | null {
   if (kind === wasm.MailboxKind.WelcomeRendezvous) return "welcome-rendezvous";
   if (kind === wasm.MailboxKind.LinkRefusal) return "link-refusal";
   if (kind === wasm.MailboxKind.ConversationReentry) return "conversation-reentry";
+  if (wasm.MailboxKind.ChannelReturn !== undefined && kind === wasm.MailboxKind.ChannelReturn) {
+    return "channel-return";
+  }
   return null;
 }
 

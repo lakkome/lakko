@@ -137,6 +137,7 @@ pub mod poll;
 pub mod post;
 pub mod public_seed;
 pub mod reaction;
+pub mod recovery;
 pub mod rotation_policy;
 pub mod seed;
 pub mod subscribe;
@@ -213,6 +214,12 @@ pub use public_seed::{
 pub use reaction::{
     CommentReactionKey, ReactionKey, ReactionLabel, ReactionLabels, COMMENT_REACTION_KEY_INFO_V1,
     REACTION_KEY_INFO_V1, REACTION_LABEL_LEN,
+};
+pub use recovery::{
+    channel_recovery_oprf_input, recovery_owner_change_bytes, verify_recovery_owner_change,
+    ChannelRecoveryKey, RecoveryOwnerProof, RecoveryProofError, CHANNEL_RECOVERY_KEY_DOMAIN,
+    CHANNEL_RECOVERY_OPRF_INPUT_DOMAIN, RECOVERY_OWNER_CHANGE_DOMAIN, RECOVERY_PROOF_HEADER_NAME,
+    RECOVERY_PROOF_MAX_HEADER_LEN,
 };
 pub use rotation_policy::{RotationPolicy, RotationState, DEFAULT_INTERVAL_MS, DEFAULT_MAX_POSTS};
 pub use seed::{ContentKeySeed, CONTENT_KEY_SEED_LEN, EXPORTER_LABEL_V1};

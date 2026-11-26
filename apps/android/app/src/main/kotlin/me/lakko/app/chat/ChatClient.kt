@@ -1094,6 +1094,7 @@ internal fun toEvent(
                     profile = decodeProfile(processed.data),
                     senderKey = processed.senderLeaf?.let(resolveSender),
                     createdAt = createdAt,
+                    envelope = processed.data.copyOf(),
                 )
             } else if (looksLikeGroupNameEnvelope(processed.data)) {
                 // ADR-0051 — the group's shared name. Never a timeline bubble.
@@ -1120,6 +1121,17 @@ internal fun toEvent(
                 IncomingChatEvent.GroupClosed(
                     messageId = messageId,
                     closed = decodeGroupClosed(processed.data),
+                    senderKey = processed.senderLeaf?.let(resolveSender),
+                    createdAt = createdAt,
+                )
+            } else if (looksLikeHistoryRequestEnvelope(processed.data)) {
+                // ADR-0101 section 9 — a device back after a key reset asks
+                // for this conversation's history. Never a timeline bubble:
+                // consumed at receipt, where the answering device decides. The
+                // sender is resolved to its account KEY here (C-68).
+                IncomingChatEvent.HistoryRequest(
+                    messageId = messageId,
+                    envelope = processed.data,
                     senderKey = processed.senderLeaf?.let(resolveSender),
                     createdAt = createdAt,
                 )
@@ -1753,6 +1765,10 @@ public sealed interface IncomingChatEvent {
         val profile: FfiProfile?,
         val senderKey: MemberIdentity?,
         val createdAt: String,
+        /** ADR-0101 section 8 - the envelope exactly as received (profile v6
+         *  is signed by its author's account identity key): verified against
+         *  the sender before it is filed, kept verbatim beside the fields. */
+        val envelope: ByteArray? = null,
     ) : IncomingChatEvent
 
     /** ADR-0027 (G-3) — an external-join *request*: a non-member posted an
@@ -1937,6 +1953,22 @@ public sealed interface IncomingChatEvent {
         val senderKey: MemberIdentity?,
         val createdAt: String,
     ) : IncomingChatEvent
+
+    /** ADR-0101 section 9 — a history request. Never a timeline bubble.
+     *  [envelope] is the whole plaintext; [senderKey] the sender's account key
+     *  resolved at receipt (C-68; `null` when unresolvable, then dropped). */
+    public data class HistoryRequest(
+        val messageId: Long,
+        val envelope: ByteArray,
+        val senderKey: MemberIdentity?,
+        val createdAt: String,
+    ) : IncomingChatEvent {
+        override fun equals(other: Any?): Boolean =
+            other is HistoryRequest && messageId == other.messageId && envelope.contentEquals(other.envelope) &&
+                senderKey == other.senderKey && createdAt == other.createdAt
+
+        override fun hashCode(): Int = messageId.hashCode() * 31 + envelope.contentHashCode()
+    }
 
     /** ADR-0098 section 1 — an account-deleted statement. Never a timeline
      *  bubble. [envelope] is the whole plaintext, verified by the repository

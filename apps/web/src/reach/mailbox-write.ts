@@ -52,7 +52,7 @@ import { journalHex, type ProofSigner } from "../ds/access";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { acceptedResetOfKey } from "../contacts/local-store";
 import type { MailboxTarget } from "../contacts/mailbox-row";
-import { continuityKeyUsable } from "./continuity";
+import { continuityKeyUsable, continuityTargetOf } from "./continuity";
 import { loadWasm } from "../wasm";
 import { personKeysHex } from "../contacts/address-resolver";
 import {
@@ -72,12 +72,10 @@ export type WriteAuthKind = "own" | "explicit" | "kept" | "continuity" | "delega
 /**
  * ADR-0073 R.4 - the continuity reach key of an account whose reset this
  * device ACCEPTED: derived from the account id and the attested generation.
- * ADR-0078: the resetting device no longer registers it on its new mailbox.
  *
- * ADR-0078 open question: a Welcome under this key needs the reset account's
- * NEW mailbox, and no carrier names it (the address is no longer derivable
- * from the account id or the identity key). Until one exists the write is a
- * recorded no-op (see {@link planWriteToPerson}).
+ * ADR-0101: the reset account registers it on its CONTINUITY mailbox, which
+ * it announces in a binding signed by its new identity key; a write under
+ * this key goes there (`continuity.ts`), after every ordinary grant.
  */
 export interface ContinuityAuth {
   /** The 16-byte account id the reset was accepted for. */
@@ -481,19 +479,16 @@ export async function planWriteToPerson(
     readonly openWelcome?: boolean;
   } = {},
 ): Promise<WritePlan> {
-  // A Welcome (`allowMember`) to the new identity of an account whose reset
-  // this device accepted used to be signed with the continuity key and
-  // addressed to a mailbox derived from the identity key. ADR-0078 open
-  // question: no carrier names the reset account's new mailbox, so that
-  // write is a recorded no-op. The kept grants of the new identity (once it
-  // re-sends its profile) still reach it.
+  // ADR-0101 section 4 - a Welcome (`allowMember`) to the new identity of
+  // an account whose reset this device accepted: when no ordinary grant
+  // reaches it, the continuity mailbox the person announced (verified and
+  // kept by `newIdentityReachable`) is written to under the continuity key.
   const continuity =
     options.continuity !== undefined
       ? options.continuity
       : options.allowMember === true
         ? continuityFor(targetAccountKey, Date.now())
         : null;
-  if (continuity !== null) noteContinuitySkipped();
   const session = reachSession();
   const personKeys = personKeysOf(targetAccountKey, options.exactKey === true);
   const personHexes = personKeysHex(journalHex(targetAccountKey));
@@ -585,6 +580,14 @@ export async function planWriteToPerson(
       });
     }
   }
+  // ADR-0101 section 4 - the continuity mailbox, last among the signed
+  // candidates: an ordinary grant (the person's real mailbox) is always
+  // preferred, and once a conversation is back the person's profile hands
+  // those over.
+  if (continuity !== null) {
+    const held = continuityCandidate(targetAccountKey, continuity);
+    if (held !== null) candidates.push(held);
+  }
   // G-53 - the open fallback follows every signed candidate; whether it runs
   // is decided when it is reached (`openFallback`).
   if (options.openWelcome === true && options.scope !== undefined && session !== null) {
@@ -660,20 +663,47 @@ export async function openWelcomeBinding(
   return null;
 }
 
-/** Log the ADR-0078 continuity no-op. No identifier is logged. */
-function noteContinuitySkipped(): void {
-  // eslint-disable-next-line no-console
-  console.info(
-    "ADR-0078: a Welcome under the continuity key was skipped; no carrier names a reset account's new mailbox",
-  );
+/**
+ * ADR-0101 section 4 - the candidate that writes to the continuity mailbox of
+ * the person `targetAccountKey` names, signed with the continuity reach key
+ * of the accepted reset, or `null` when this device holds no live, verified
+ * continuity mailbox for that key. The target was verified under the attested
+ * new key when it was kept (`continuity.ts`), so it is not verified again.
+ */
+export function continuityCandidate(
+  targetAccountKey: Uint8Array,
+  continuity: ContinuityAuth,
+  nowMs: number = Date.now(),
+): WriteCandidate | null {
+  const held = continuityTargetOf(base64Encode(targetAccountKey), nowMs);
+  if (held === null) return null;
+  return {
+    kind: "continuity",
+    resolve: async () => {
+      const wasm = await loadWasm();
+      let mailboxPk: Uint8Array;
+      try {
+        mailboxPk = base64Decode(held.mailboxPkB64);
+      } catch {
+        return null;
+      }
+      const seed = wasm.continuityReachSeed(continuity.accountId, BigInt(continuity.keyGeneration));
+      try {
+        const signer = wasm.DsProofSigner.forReach(seed);
+        return released("continuity", { mailboxPk, address: wasm.mailboxAddress(mailboxPk) }, signer, null);
+      } finally {
+        seed.fill(0);
+      }
+    },
+  };
 }
 
 /**
- * The continuity key a Welcome to `targetAccountKey` would have been signed
- * with (R.4), or `null`: only when that key is the one an accepted reset
- * re-pinned this device to, and only inside the key's window, counted from
- * the attestation's `signed_at` this device verified. Reads the pin store;
- * never throws. ADR-0078: used only to record the skipped write.
+ * The continuity key a Welcome to `targetAccountKey` is signed with (R.4),
+ * or `null`: only when that key is the one an accepted reset re-pinned this
+ * device to, and only inside the key's window, counted from the
+ * attestation's `signed_at` this device verified. Reads the pin store;
+ * never throws.
  */
 export function continuityFor(targetAccountKey: Uint8Array, nowMs: number): ContinuityAuth | null {
   try {
@@ -696,6 +726,13 @@ let installedScopeLineage: ScopeLineage | null = null;
  *  the core's plan, G-53). */
 export function installScopeLineage(lineage: ScopeLineage | null): void {
   installedScopeLineage = lineage;
+}
+
+/** The earlier groups of the conversation `scopeHex` continues (hex, the
+ *  scope itself left out), as the installed lineage says; none when no
+ *  lineage is installed. */
+export function earlierGroupsHexOf(scopeHex: string): readonly string[] {
+  return scopeLineage(scopeHex);
 }
 
 function scopeLineage(scopeHex: string): readonly string[] {

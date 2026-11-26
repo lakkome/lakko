@@ -131,3 +131,10 @@ path = "fuzz_targets/channel_poll_tally_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "recovery_proof_parse"
+path = "fuzz_targets/recovery_proof_parse.rs"
+test = false
+doc = false
+bench = false

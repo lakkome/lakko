@@ -57,6 +57,7 @@ import { finalizeOprf } from "./oprf-pair";
 import type {
   IdentityFetchResponse,
   IdentityUploadRequest,
+  ContinuityBindingUploadRequest,
   IdentityUploadResponse,
   GroupInviteUploadRequest,
   InviteConsumeRequest,
@@ -531,6 +532,33 @@ export class DiscoveryClient {
     req: IdentityUploadRequest,
   ): Promise<IdentityUploadResponse> {
     return this.post("/discovery/identity", req);
+  }
+
+  /**
+   * `PUT /discovery/identity/continuity` (ADR-0101 section 2): store this
+   * account's continuity binding beside its identity bundle. Bearer, under
+   * the key-generation floor. `400 continuity-binding-invalid`, `404
+   * identity-bundle-not-found` (publish the bundle first) and `401
+   * key-generation-superseded` surface as {@link DiscoveryHttpError}.
+   */
+  async putContinuityBinding(binding: Uint8Array): Promise<void> {
+    const endpoint = "/discovery/identity/continuity";
+    const url = `${this.baseUrl}${endpoint}`;
+    const body: ContinuityBindingUploadRequest = { continuity_binding_b64: base64Encode(binding) };
+    let response: Response;
+    try {
+      response = await sessionFetch(url, {
+        method: "PUT",
+        headers: { "content-type": "application/json", ...this.authHeaders() },
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      throw new DiscoveryNetworkError(`${endpoint} (PUT)`, err);
+    }
+    if (!response.ok) {
+      const text = await safeReadBody(response);
+      throw new DiscoveryHttpError(response.status, `${endpoint} (PUT)`, text);
+    }
   }
 
   /** `POST /discovery/keypackage` — upsert the user's MLS

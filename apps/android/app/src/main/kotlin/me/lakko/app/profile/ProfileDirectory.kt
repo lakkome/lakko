@@ -230,6 +230,20 @@ public class ProfileDirectory internal constructor(
         return offer
     }
 
+    /**
+     * ADR-0101 section 8 - the profile envelope held for [signatureKeyB64]
+     * exactly as it was received, with its stamp, or `null` when none is held.
+     */
+    public fun heldEnvelopeOf(signatureKeyB64: String): HeldEnvelope? {
+        val held = profiles.get(signatureKeyB64) ?: return null
+        val b64 = held.envelopeB64 ?: return null
+        return try {
+            HeldEnvelope(java.util.Base64.getDecoder().decode(b64), held.updatedAtMs)
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+    }
+
     /** Verify [signatureKeyB64]'s current claim if it has one and it is not
      *  yet verified (e.g. a contact detail opened while a lookup failed). */
     public fun ensureVerified(signatureKeyB64: String) {
@@ -696,6 +710,13 @@ internal class SharedPrefsProfilePersistence(private val context: Context) : Pro
         /** ADR-0084 — the profile photo references (they carry the AEAD
          *  keys), sealed under the device's avatar key; absent before v4. */
         val avatarSealed: String? = null,
+        /** ADR-0101 section 8 - the envelope as received, sealed under the
+         *  device's avatar key (it carries the photo references' keys);
+         *  absent before the field. */
+        val envelopeSealed: String? = null,
+        /** ADR-0092 section 7 - whether the person lets others share their
+         *  card; absent (a row written before the field) reads as `true`. */
+        val cardShareable: Boolean = true,
     )
 
     private fun prefs() = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -713,6 +734,8 @@ internal class SharedPrefsProfilePersistence(private val context: Context) : Pro
                     s.accountIdHex,
                     s.usernameCertificateHex,
                     me.lakko.app.avatar.openAvatarRefs(me.lakko.app.avatar.KeystoreAvatarSeal, s.avatarSealed),
+                    cardShareable = s.cardShareable,
+                    envelopeB64 = openEnvelope(s.envelopeSealed),
                 )
             }
         } catch (_: Exception) {
@@ -727,9 +750,35 @@ internal class SharedPrefsProfilePersistence(private val context: Context) : Pro
         }
         val stored = profiles.mapValues { (_, p) ->
             StoredProfile(p.displayName, p.username, p.updatedAtMs.toLong(), p.accountIdHex, p.usernameCertificateHex,
-                me.lakko.app.avatar.sealAvatarRefs(me.lakko.app.avatar.KeystoreAvatarSeal, p.avatar))
+                me.lakko.app.avatar.sealAvatarRefs(me.lakko.app.avatar.KeystoreAvatarSeal, p.avatar),
+                sealEnvelope(p.envelopeB64),
+                cardShareable = p.cardShareable)
         }
         prefs().edit().putString(profilesKey(account), json.encodeToString(stored)).apply()
+    }
+
+    /** ADR-0101 section 8 - [envelopeB64] sealed for the row, or `null`. */
+    private fun sealEnvelope(envelopeB64: String?): String? {
+        val b64 = envelopeB64 ?: return null
+        return try {
+            val sealed = me.lakko.app.avatar.KeystoreAvatarSeal.seal(java.util.Base64.getDecoder().decode(b64))
+                ?: return null
+            java.util.Base64.getEncoder().encodeToString(sealed)
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /** The inverse of [sealEnvelope]; `null` on any failure. */
+    private fun openEnvelope(stored: String?): String? {
+        val s = stored ?: return null
+        return try {
+            val plain = me.lakko.app.avatar.KeystoreAvatarSeal.open(java.util.Base64.getDecoder().decode(s))
+                ?: return null
+            java.util.Base64.getEncoder().encodeToString(plain)
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     override fun loadVerifications(account: String): Map<String, UsernameVerification> {

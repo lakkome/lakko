@@ -409,6 +409,42 @@ public class ChannelsClient(
         if (!response.status.isSuccess()) throw decodeError(response, "replace owner")
     }
 
+    /**
+     * ADR-0101 section 7 - `PUT /v1/channels/:id/recovery-key`: register the
+     * channel's recovery public key (32 raw bytes), proven by the CURRENT
+     * owner key ([owner]). `204` on success. Throws [ChannelsApiException].
+     */
+    public suspend fun putRecoveryKey(channelIdHex: String, owner: ChannelOwnerSigner, recoveryPk: ByteArray) {
+        val path = "/v1/channels/$channelIdHex/recovery-key"
+        val proof = owner.sign("PUT", path, "", recoveryPk)
+        val response: HttpResponse = client.request("$baseUrl$path") {
+            method = HttpMethod.Put
+            header(channelOwnerProofHeaderName(), proof)
+            contentType(ContentType.Application.OctetStream)
+            setBody(recoveryPk)
+        }
+        if (!response.status.isSuccess()) throw decodeError(response, "put recovery key")
+    }
+
+    /**
+     * ADR-0101 section 7 - `PUT /v1/channels/:id/owner` with the RECOVERY
+     * proof ([recoveryProofHeader], `ChannelRecoveryKey.signOwnerChange`)
+     * instead of an owner proof: hand the channel to [newOwnerKey]. Returns
+     * normally on `204` (the channel was this account's); throws
+     * [ChannelsApiException] otherwise (the uniform `401 owner-proof-required`
+     * when it was not, or no recovery key is registered).
+     */
+    public suspend fun replaceOwnerByRecovery(channelIdHex: String, recoveryProofHeader: String, newOwnerKey: ByteArray) {
+        val path = "/v1/channels/$channelIdHex/owner"
+        val response: HttpResponse = client.request("$baseUrl$path") {
+            method = HttpMethod.Put
+            header(uniffi.lakko_ffi_uniffi.channelRecoveryProofHeaderName(), recoveryProofHeader)
+            contentType(ContentType.Application.OctetStream)
+            setBody(newOwnerKey)
+        }
+        if (!response.status.isSuccess()) throw decodeError(response, "replace owner by recovery")
+    }
+
     /** `DELETE /v1/channels/:id/listing` — withdraw the listing (owner-signed,
      *  idempotent). */
     public suspend fun deleteListing(channelIdHex: String, owner: ChannelOwnerSigner) {

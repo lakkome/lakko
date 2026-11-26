@@ -1000,7 +1000,7 @@ private fun ownProfileEnvelopeWithAccount(context: android.content.Context, acco
     return try {
         me.lakko.app.profile.OwnProfileStore.load(context, accountId)
             ?.toFfi(accountId = accountId, shareUsername = false)
-            ?.let { uniffi.lakko_ffi_uniffi.composeProfileEnvelope(it) }
+            ?.let { me.lakko.app.profile.ProfileSigner.compose(it, accountId) }
             ?: ByteArray(0)
     } catch (_: Throwable) {
         ByteArray(0)

@@ -17,10 +17,12 @@ import kotlinx.coroutines.flow.update
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.IdentitySecrets
 import me.lakko.app.auth.base64Encode
+import me.lakko.app.auth.base64Decode
 import me.lakko.app.profile.toFfi
 import me.lakko.app.auth.base64UrlEncodeNoPad
 import me.lakko.app.chat.ChatRepository
 import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.MailboxKey
 import uniffi.lakko_ffi_uniffi.InviteCapability
 import uniffi.lakko_ffi_uniffi.composeInviteCapability
 
@@ -237,6 +239,57 @@ public class ContactsRepository(
      *  ACCEPTED RESET re-pinned this device to it, or `null`. */
     public fun acceptedResetOfKey(currentKeyB64: String): AcceptedResetOfKey? =
         acceptedResetOfKey(currentKeyB64, resetLedgerRows(), ::pinnedKeyOf)
+
+    /** ADR-0101 section 4 - the verified continuity mailboxes kept for reset
+     *  contacts, `null` without a [Context] (host tests). */
+    private val continuityTargets: me.lakko.app.reach.ContinuityTargetStore? by lazy {
+        appCtx?.let { me.lakko.app.reach.ContinuityTargetStore.onDevice(it) }
+    }
+
+    /** The live continuity mailbox key kept for the person whose CURRENT key
+     *  is [currentKey], or `null`. */
+    private fun continuityTargetPkOf(currentKey: ByteArray): ByteArray? {
+        val owner = boundAccountB64 ?: return null
+        val target = continuityTargets?.targetOf(owner, base64Encode(currentKey), System.currentTimeMillis())
+            ?: return null
+        return runCatching { base64Decode(target.mailboxPkB64) }.getOrNull()
+    }
+
+    /**
+     * ADR-0101 section 4 - fetch the identity bundle of [accountIdB64] and keep
+     * the continuity mailbox its binding names, verified under the key this
+     * device ACCEPTED for it (the pin an accepted reset left). `null` when the
+     * account has no accepted reset, no live binding, or the bundle names
+     * another key.
+     */
+    public suspend fun refreshContinuityTarget(accountIdB64: String): me.lakko.app.reach.ContinuityTarget? {
+        val owner = boundAccountB64 ?: return null
+        val store = continuityTargets ?: return null
+        val pinned = pinnedKeyOf(accountIdB64) ?: return null
+        if (acceptedResetOfKey(pinned) == null) return null
+        return me.lakko.app.reach.refreshContinuityTarget(
+            fetch = { id -> discoveryClientFactory().use { it.identityFetch(id) } },
+            store = store,
+            ownAccountIdB64 = owner,
+            accountIdB64 = accountIdB64,
+            attestedKeyB64 = pinned,
+            nowMs = System.currentTimeMillis(),
+        )
+    }
+
+    /** ADR-0101 - the key this device trusts for [accountIdB64] now (the pin
+     *  an accepted reset left), or `null`. */
+    public fun pinnedKeyB64Of(accountIdB64: String): String? = pinnedKeyOf(accountIdB64)
+
+    /** ADR-0101 section 7 - the generation of the reset this device accepted
+     *  for [accountIdB64], while that reset's continuity key is still usable;
+     *  `null` otherwise (no accepted reset, or its window ended). */
+    public fun liveResetGeneration(accountIdB64: String): Long? {
+        val pinned = pinnedKeyOf(accountIdB64) ?: return null
+        val reset = acceptedResetOfKey(pinned) ?: return null
+        if (!me.lakko.app.reach.continuityKeyUsable(reset.signedAtMs, System.currentTimeMillis())) return null
+        return reset.keyGeneration
+    }
 
     /** The account id (standard base64) whose pin or retired keys include
      *  [keyB64], or `null`: how a person key is named by account. */
@@ -1557,6 +1610,10 @@ public class ContactsRepository(
         // R.4 - a Welcome to a person whose reset this device accepted may be
         // signed with the continuity key of their new mailbox.
         reach()?.acceptedResetOf = { ownerKey -> acceptedResetOfKey(base64Encode(ownerKey)) }
+        // ADR-0101 section 4 - the continuity mailbox a reset person
+        // announced, verified and kept by [refreshContinuityTarget].
+        reach()?.continuityTargetOf = { currentKey -> continuityTargetPkOf(currentKey) }
+        chatRepo?.continuityTargetRefresh = { accountIdB64 -> refreshContinuityTarget(accountIdB64) }
         // ADR-0074 section 3.5a rule 6 - a refused mailbox write re-checks
         // the person's address through the same gate, once.
         chatRepo?.addressRecheck = { accountKey, accountId -> recheckAddress(accountKey, accountId) }
@@ -2040,6 +2097,9 @@ public class ContactsRepository(
                         }
                     }
                     pollPredecessorWelcomes(secrets.accountId)
+                    // ADR-0101 section 5 - for the window after a key reset
+                    // the CONTINUITY mailbox is read too (no long poll).
+                    pollContinuityMailbox(secrets.accountId, secrets.accountIdentitySeed)
                     val result = client.pollStrangerInbox(
                         own = sender.ownMailbox,
                         myX25519Secret = sender.x25519Secret,
@@ -2241,6 +2301,9 @@ public class ContactsRepository(
                             try {
                                 val joinedHex = chatRepo.joinGroupFromWelcome(welcome.welcomeBytes)
                                 Log.i(TAG, "inbox: Welcome ${me.lakko.app.chat.WelcomeOutcome.JOINED}")
+                                // ADR-0101 section 9 - a conversation joined
+                                // inside the own window asks for its history.
+                                noteReturnedConversationIfInWindow(accountB64, joinedHex)
                                 // ADR-0060 §6 — the answer to a request of this
                                 // device's arrived: retire its reply key for
                                 // that person.
@@ -4186,6 +4249,149 @@ public class ContactsRepository(
      * identity bundle and follows the proof). Best-effort; the cursor of
      * each mailbox only moves forward.
      */
+    /** ADR-0101 - the reset's own continuity record, `null` without a
+     *  [Context] (host tests). */
+    private val resetContinuity: me.lakko.app.auth.ResetContinuityStore? by lazy {
+        appCtx?.let { me.lakko.app.auth.ResetContinuityStore.onDevice(it) }
+    }
+
+    /** Per account, what the directory said about the account's own
+     *  continuity window (another device of a reset account) and when. In
+     *  memory: asked again every [CONTINUITY_RECHECK_MS]. */
+    private val continuityChecked = java.util.concurrent.ConcurrentHashMap<String, Pair<Long?, Long>>()
+
+    /**
+     * ADR-0101 section 5 - whether this account's continuity mailbox is read
+     * now: the resetting device's own record, else the account's binding as
+     * the directory serves it (another device of the account), verified under
+     * this account's key and naming the continuity mailbox this account's
+     * identity derives. Never throws but for cancellation.
+     */
+    private suspend fun continuityWindowOpen(accountIdB64: String, identity: Identity): Boolean {
+        val now = System.currentTimeMillis()
+        resetContinuity?.load(accountIdB64)?.let {
+            return me.lakko.app.auth.continuityMailboxReadable(it.expiresAtMs, now)
+        }
+        continuityChecked[accountIdB64]?.let { (expiresAtMs, checkedAtMs) ->
+            if (now - checkedAtMs < CONTINUITY_RECHECK_MS) return expiresAtMs != null && now < expiresAtMs
+        }
+        val expiresAtMs: Long? = try {
+            val bundle = discoveryClientFactory().use { it.identityFetch(base64Decode(accountIdB64)) }
+            val target = me.lakko.app.reach.peerContinuityTarget(
+                bundle?.continuity_binding_b64,
+                identity.signaturePublicKey(),
+                now,
+            ) { b, k, n -> uniffi.lakko_ffi_uniffi.verifyContinuityBinding(b, k, n.toULong()) }
+            if (target == null) {
+                null
+            } else {
+                val mine = MailboxKey.continuityFromAccountIdentity(identity).use { base64Encode(it.publicKey()) }
+                target.expiresAtMs.takeIf { mine == target.mailboxPkB64 }
+            }
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            continuityChecked[accountIdB64]?.first
+        }
+        continuityChecked[accountIdB64] = expiresAtMs to now
+        return expiresAtMs != null && now < expiresAtMs
+    }
+
+    /**
+     * ADR-0101 section 5 - read the account's continuity mailbox once when its
+     * window is open: the successor Welcomes a peer that accepted the reset
+     * wrote there are joined (and their history asked for), the channel
+     * returns are held for the channels runtime, an approved publisher
+     * request's Welcome is landed. Its own cursor. Never throws but for
+     * cancellation.
+     */
+    private suspend fun pollContinuityMailbox(accountId: ByteArray, accountIdentitySeed: ByteArray) {
+        val context = appCtx ?: return
+        val chat = chatRepo
+        if (chat != null && !chat.isReadyFor(accountId)) return
+        val accountIdB64 = base64Encode(accountId)
+        try {
+            clientFactory().use { client ->
+                Identity.fromSeed(accountIdentitySeed).use { identity ->
+                    if (!continuityWindowOpen(accountIdB64, identity)) return
+                    val plain = me.lakko.app.auth.ResetReturnStorage.plain(context)
+                    val after = me.lakko.app.auth.ResetReturnStorage.readContinuityCursor(plain, accountIdB64)
+                    val secret = identity.x25519SecretKey()
+                    try {
+                        val result = client.pollStrangerInbox(
+                            own = NativeOwnMailbox.continuityOf(identity),
+                            myX25519Secret = secret,
+                            after = after,
+                            waitSecs = 0,
+                            mailboxSigner = me.lakko.app.ds.FfiDsJournalSigner(
+                                uniffi.lakko_ffi_uniffi.dsContinuityMailboxSigner(identity),
+                            ),
+                            continuity = true,
+                        )
+                        val held = ArrayList<Long>()
+                        var returnsHeld = false
+                        for (event in result.events) {
+                            when (event) {
+                                is IncomingMailboxEvent.ChannelReturn -> {
+                                    // A storage refusal throws, which holds the cursor.
+                                    me.lakko.app.channels.HeldReturnsStore.onDevice(context)
+                                        .hold(accountIdB64, java.util.Base64.getEncoder().encodeToString(event.envelope))
+                                    returnsHeld = true
+                                }
+                                is IncomingMailboxEvent.PublisherWelcome -> try {
+                                    me.lakko.app.channels.PendingPublisherRequests.lander?.invoke(event.welcomeBytes)
+                                } catch (cancel: kotlinx.coroutines.CancellationException) {
+                                    throw cancel
+                                } catch (_: Throwable) {
+                                    held += event.messageId
+                                }
+                                is IncomingMailboxEvent.Welcome -> {
+                                    if (chat == null) continue
+                                    try {
+                                        val joinedHex = chat.joinGroupFromWelcome(event.welcomeBytes)
+                                        noteReturnedConversationIfInWindow(accountIdB64, joinedHex)
+                                    } catch (cancel: kotlinx.coroutines.CancellationException) {
+                                        throw cancel
+                                    } catch (cause: Throwable) {
+                                        if (me.lakko.app.chat.isChatLayerNotReady(cause)) {
+                                            held += event.messageId
+                                        } else if (!me.lakko.app.chat.isWelcomeForAnotherDevice(cause)) {
+                                            Log.w(TAG, "a Welcome in the continuity mailbox was not joined: ${cause.javaClass.simpleName}")
+                                        }
+                                    }
+                                }
+                                else -> Unit
+                            }
+                        }
+                        me.lakko.app.auth.ResetReturnStorage.writeContinuityCursor(
+                            plain,
+                            accountIdB64,
+                            me.lakko.app.chat.inboxCursorAfterPass(after, result.cursor, held),
+                        )
+                        if (returnsHeld) me.lakko.app.channels.ChannelReturnRuntime.notifyHeld()
+                    } finally {
+                        secret.fill(0)
+                    }
+                }
+            }
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (cause: Throwable) {
+            // Never costs the account mailbox its poll.
+            Log.w(TAG, "continuity mailbox poll failed: ${cause.javaClass.simpleName}")
+        }
+    }
+
+    /** ADR-0101 section 9 - inside this account's own continuity window
+     *  every conversation it joins is a returned one: ask there for its
+     *  history. */
+    private fun noteReturnedConversationIfInWindow(accountIdB64: String, groupIdHex: String) {
+        val context = appCtx ?: return
+        val record = resetContinuity?.load(accountIdB64) ?: return
+        if (!me.lakko.app.auth.continuityMailboxReadable(record.expiresAtMs, System.currentTimeMillis())) return
+        me.lakko.app.chat.HistoryReturnStore.onDevice(context).noteReturned(accountIdB64, groupIdHex.lowercase())
+    }
+
     private suspend fun pollPredecessorWelcomes(accountId: ByteArray) {
         val chat = chatRepo ?: return
         // Not bootstrapped for this account yet: the previous mailboxes are
@@ -4324,6 +4530,10 @@ public class ContactsRepository(
 
 /** Log tag. */
 private const val TAG = "ContactsRepository"
+
+/** How often another device of a reset account asks the directory whether a
+ *  continuity window is open (ADR-0101 section 5; chosen, not measured). */
+private const val CONTINUITY_RECHECK_MS: Long = 6L * 60 * 60 * 1000
 
 /**
  * What went wrong on the inbox, held as a kind so the screen renders the

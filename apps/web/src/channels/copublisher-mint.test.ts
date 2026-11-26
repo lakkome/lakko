@@ -45,7 +45,7 @@ describe("Add publisher invitation", () => {
     const device = real.Identity.fromSeedBound(new Uint8Array(64).fill(0x62), owner.ed25519Seed, 1_700_000_000n);
     const group = new real.PublisherGroup(device, owner.ed25519Seed, new Uint8Array(16).fill(0x42));
     installOwnProfileEnvelopeSource(async () =>
-      real.composeProfileEnvelope("Icons QA", undefined, 1n, undefined, undefined, undefined, undefined),
+      real.composeProfileEnvelope(owner, "Icons QA", undefined, 1n, undefined, undefined, undefined, undefined),
     );
     const ledger = new Uint8Array(6).fill(7);
     const minted = await mintOneUseCoPublisherLink(owner, group, "https://test.lakko.me", {

@@ -105,6 +105,8 @@ pub(crate) enum ProofKind {
     Invite,
     /// A subscriber's write proof (comments, reactions).
     Write,
+    /// `x-lakko-channel-recovery-proof` (ADR-0101 section 7).
+    Recovery,
 }
 
 impl ProofKind {
@@ -114,6 +116,7 @@ impl ProofKind {
             Self::CoPublisher => "copublisher",
             Self::Invite => "invite",
             Self::Write => "write",
+            Self::Recovery => "recovery",
         }
     }
 }
@@ -191,11 +194,12 @@ mod tests {
         RotationStep::Stage,
         RotationStep::Commit,
     ];
-    const KINDS: [ProofKind; 4] = [
+    const KINDS: [ProofKind; 5] = [
         ProofKind::Owner,
         ProofKind::CoPublisher,
         ProofKind::Invite,
         ProofKind::Write,
+        ProofKind::Recovery,
     ];
     const REASONS: [RefusalReason; 5] = [
         RefusalReason::Malformed,

@@ -318,6 +318,17 @@ data class IdentityFetchResponse(
      *  link, absent when it never rotated. Opaque to discovery; verified
      *  locally against the key the gate left trusted, ignored when refused. */
     val conversation_link: String? = null,
+    /** ADR-0101 section 2: standard base64 of the 105-byte continuity binding
+     *  of an account that reset its keys; served only while unexpired. A peer
+     *  verifies it under the attested new key before writing to the mailbox
+     *  it names ([me.lakko.app.reach.peerContinuityTarget]). */
+    val continuity_binding_b64: String? = null,
+)
+
+/** Body of `PUT /discovery/identity/continuity` (ADR-0101 section 2). */
+@Serializable
+data class ContinuityBindingUploadRequest(
+    val continuity_binding_b64: String,
 )
 
 // ----------------------------------------------------------------------------

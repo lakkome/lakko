@@ -16,7 +16,8 @@
 //! | `PUT`  | `/v1/channels/:id/invite-keys/:pk` | publisher proof | Register or update an invite key: `{expiry_ms, max_uses}`. |
 //! | `DELETE` | `/v1/channels/:id/invite-keys/:pk` | publisher proof | Revoke it. |
 //! | `GET`  | `/v1/channels/:id/subscribers/count` | publisher proof | The maintained subscriber count (ADR-0087 section 15). |
-//! | `PUT`  | `/v1/channels/:id/owner` | owner proof (by the CURRENT owner key) | Hand the channel to a new owner key (ADR-0074 section 3.5). Body: the new key, 32 raw bytes, `application/octet-stream`. |
+//! | `PUT`  | `/v1/channels/:id/owner` | owner proof (by the CURRENT owner key), or a recovery proof (`x-lakko-channel-recovery-proof`, by the registered recovery key; ADR-0101 section 7) | Hand the channel to a new owner key (ADR-0074 section 3.5). Body: the new key, 32 raw bytes, `application/octet-stream`. |
+//! | `PUT`  | `/v1/channels/:id/recovery-key` | owner proof | Set or replace the channel recovery key (ADR-0101 section 7). Body: the key, 32 raw bytes, `application/octet-stream`. |
 //! | `POST` | `/v1/channels/:id/posts` | publisher proof | Publish an opaque ChannelPost. |
 //! | `GET`  | `/v1/channels/:id/posts?after=&limit=` | none | Cursor-paginated fetch. |
 //! | `POST` | `/v1/channels/:id/subscribers` | one `channel-subscribe` token; on a private channel also an `x-lakko-channel-invite-proof` | Register a subscriber key, with its sealed admission ticket on a private channel. |
@@ -83,7 +84,7 @@ use crate::directory::{
     band, normalize_search_query, rank, DirectoryEntry, BUCKET_PAGE_LEN, SEARCH_PAGE_LEN,
 };
 use crate::metrics::{self, Outcome, ProofKind, RefusalReason, RotationStep};
-use crate::owner_auth::{require_owner, require_publisher};
+use crate::owner_auth::{has_recovery_proof, require_owner, require_publisher, require_recovery};
 use crate::storage::SealedTicket;
 use crate::storage::{
     ChannelId, ChannelStore, DirectoryQuery, InviteKeyRow, PublicSeedOutcome, StorageError,
@@ -2255,6 +2256,14 @@ async fn replace_owner(
             return internal_error();
         },
     };
+    // ADR-0101 section 7: without an owner proof, a recovery proof by the
+    // registered recovery key may stand in. It signs the new owner key, so
+    // the body is read first.
+    if !headers.contains_key(lakko_channels::owner::OWNER_PROOF_HEADER_NAME)
+        && has_recovery_proof(&headers)
+    {
+        return replace_owner_by_recovery(&state, channel, current, &headers, &body).await;
+    }
     if let Err(refused) = require_owner(&state, channel, &method, &uri, &headers, &body).await {
         return refused;
     }
@@ -2300,6 +2309,113 @@ async fn replace_owner(
         Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(e) => {
             tracing::error!(error = %e, "replace owner failed");
+            internal_error()
+        },
+    }
+}
+
+/// The owner change of [`replace_owner`] proven by the channel recovery key
+/// (ADR-0101 section 7): the body (`400 bad-owner-pubkey`), then the proof
+/// (the uniform `401 owner-proof-required`, also when no recovery key is
+/// registered or the channel is unknown), then the same compare-and-swap.
+/// Naming the key that already owns the channel is a `204` that changes
+/// nothing and leaves the proof unspent.
+async fn replace_owner_by_recovery(
+    state: &AppState,
+    channel: ChannelId,
+    current: Option<[u8; OWNER_PUBKEY_LEN]>,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Response {
+    let Ok(new_owner) = lakko_channels::parse_owner_handover_body(body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            ErrJson(err(
+                "bad-owner-pubkey",
+                "the body must be the 32 bytes of the new owner's Ed25519 public key",
+            )),
+        )
+            .into_response();
+    };
+    let new_owner = new_owner.to_bytes();
+    let already = current == Some(new_owner);
+    if let Err(refused) = require_recovery(state, channel, headers, &new_owner, !already).await {
+        return refused;
+    }
+    let Some(current) = current else {
+        return (
+            StatusCode::CONFLICT,
+            ErrJson(err(
+                "owner-changed",
+                "the channel's owner changed; ask again",
+            )),
+        )
+            .into_response();
+    };
+    if already {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    match state.store.replace_owner(channel, current, new_owner).await {
+        Ok(true) => {
+            tracing::info!("channel owner key replaced by the recovery key");
+            StatusCode::NO_CONTENT.into_response()
+        },
+        Ok(false) => (
+            StatusCode::CONFLICT,
+            ErrJson(err(
+                "owner-changed",
+                "the channel's owner key changed while this request was in flight",
+            )),
+        )
+            .into_response(),
+        Err(StorageError::UnknownChannel) => unknown_channel(channel),
+        Err(e) => {
+            tracing::error!(error = %e, "replace owner failed");
+            internal_error()
+        },
+    }
+}
+
+/// `PUT /v1/channels/:channel_id/recovery-key` — set or replace the channel
+/// recovery key (ADR-0101 section 7). Owner-signed over the exact body, the
+/// key's 32 raw bytes. Order: the owner proof (the uniform `401`), the body
+/// (`400 bad-recovery-pubkey`), the store. `204`.
+async fn put_recovery_key(
+    State(state): State<Arc<AppState>>,
+    Path(channel_id): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Ok(channel) = ChannelId::from_hex(&channel_id) else {
+        return bad_channel_id();
+    };
+    if let Err(refused) = require_owner(&state, channel, &method, &uri, &headers, &body).await {
+        return refused;
+    }
+    let Ok(key) = lakko_channels::parse_owner_handover_body(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            ErrJson(err(
+                "bad-recovery-pubkey",
+                "the body must be the 32 bytes of an Ed25519 public key",
+            )),
+        )
+            .into_response();
+    };
+    match state
+        .store
+        .set_recovery_pubkey(channel, key.to_bytes())
+        .await
+    {
+        Ok(()) => {
+            tracing::info!("channel recovery key set");
+            StatusCode::NO_CONTENT.into_response()
+        },
+        Err(StorageError::UnknownChannel) => unknown_channel(channel),
+        Err(e) => {
+            tracing::error!(error = %e, "set recovery key failed");
             internal_error()
         },
     }
@@ -3004,6 +3120,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             axum::routing::delete(delete_channel),
         )
         .route("/v1/channels/{channel_id}/owner", put(replace_owner))
+        .route(
+            "/v1/channels/{channel_id}/recovery-key",
+            put(put_recovery_key),
+        )
         .route("/v1/channels/{channel_id}/access", put(put_access))
         .route(
             "/v1/channels/{channel_id}/public-seed/{epoch}",

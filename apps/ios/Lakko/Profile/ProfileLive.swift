@@ -97,10 +97,15 @@ enum ProfileAvatarUpload {
 
     /// Refuse a profile the core would refuse, before anything is stored:
     /// a published profile that no envelope can carry would reach nobody.
+    ///
+    /// The envelope is thrown away, so it is signed (profile v6, ADR-0101
+    /// section 8) by a fixed throwaway identity: the signature never decides
+    /// whether the core accepts a profile.
     static func checkComposes(name: String?, avatar: ProfileAvatar?) throws {
         let normalized = try checkDisplayName(name ?? "")
         _ = try composeProfileEnvelope(profile: FfiProfile(
             displayName: normalized, username: nil, updatedAtMs: 1, accountId: nil,
-            usernameCertificate: nil, grants: [], avatar: avatar?.ffi))
+            usernameCertificate: nil, grants: [], avatar: avatar?.ffi),
+            accountIdentity: try Identity.fromSeed(seed: Data(repeating: 0x5A, count: 32)))
     }
 }

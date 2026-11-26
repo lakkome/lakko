@@ -240,10 +240,14 @@ pub(crate) enum Scope {
     /// (ADR-0097). Charged only for a code that exists, after the lookup:
     /// an unknown code has no counter to spend and answers `404` anyway.
     SupporterCode = 24,
+    /// `POST /auth/channel-recovery/evaluate`, keyed on the signed-in
+    /// account (ADR-0101 section 7). Charged after the element decodes and
+    /// before it is evaluated.
+    ChannelRecovery = 25,
 }
 
 impl Scope {
-    pub(crate) const ALL: [Self; 20] = [
+    pub(crate) const ALL: [Self; 21] = [
         Self::LoginPassword,
         Self::LoginRecovery,
         Self::PasswordReset,
@@ -264,6 +268,7 @@ impl Scope {
         Self::HandleCheck,
         Self::AnonCredential,
         Self::SupporterCode,
+        Self::ChannelRecovery,
     ];
 
     /// Position in [`Self::ALL`] (the stored discriminants have a gap, so
@@ -290,6 +295,7 @@ impl Scope {
             Self::HandleCheck => 17,
             Self::AnonCredential => 18,
             Self::SupporterCode => 19,
+            Self::ChannelRecovery => 20,
         }
     }
 
@@ -316,6 +322,7 @@ impl Scope {
             Self::HandleCheck => "handle_check",
             Self::AnonCredential => "anon_credential",
             Self::SupporterCode => "supporter_code",
+            Self::ChannelRecovery => "channel_recovery",
         }
     }
 
@@ -341,6 +348,7 @@ impl Scope {
             Self::HandleCheck => "LAKKO_AUTH_LIMIT_HANDLE_CHECK",
             Self::AnonCredential => "LAKKO_AUTH_LIMIT_ANON_CREDENTIAL",
             Self::SupporterCode => "LAKKO_AUTH_LIMIT_SUPPORTER_CODE",
+            Self::ChannelRecovery => "LAKKO_AUTH_LIMIT_CHANNEL_RECOVERY",
         }
     }
 
@@ -373,6 +381,10 @@ impl Scope {
             Self::HandleCheck => Window::new(120, 3600),
             // A device asks once a period, a few devices and retries a day.
             Self::AnonCredential => Window::new(30, 86_400),
+            // A device evaluates once per channel it owns or recovers, after
+            // a reset and at its next owner pass; sixty an hour leaves room
+            // for an owner of many channels.
+            Self::ChannelRecovery => Window::new(60, 3600),
         }
     }
 
@@ -392,7 +404,8 @@ impl Scope {
             | Self::EmailVaultOpen
             | Self::EmailVaultStore
             | Self::HandleCheck
-            | Self::AnonCredential => CODE_TOO_MANY_ATTEMPTS,
+            | Self::AnonCredential
+            | Self::ChannelRecovery => CODE_TOO_MANY_ATTEMPTS,
             Self::EmailLetterHandle | Self::EmailLetterAccount => CODE_EMAIL_RATE_LIMITED,
             Self::DeviceRequestTarget => CODE_DEVICE_REQUEST_LIMITED,
             Self::HandleBind => CODE_HANDLE_BIND_LIMITED,
@@ -1178,10 +1191,10 @@ mod tests {
         // were the removed one-time-code factor's. None is reused. 14 is the
         // ADR-0074 recall (listed after 15: it was added later); 16 is the
         // key rotation; 23 the ADR-0092 anonymous credential, 24 the
-        // ADR-0097 supporter code.
+        // ADR-0097 supporter code, 25 the ADR-0101 channel recovery.
         assert_eq!(
             pinned,
-            vec![1, 2, 3, 4, 9, 10, 11, 12, 13, 15, 14, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+            vec![1, 2, 3, 4, 9, 10, 11, 12, 13, 15, 14, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]
         );
         for (i, s) in Scope::ALL.iter().enumerate() {
             assert_eq!(s.index(), i);

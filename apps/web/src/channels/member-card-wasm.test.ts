@@ -14,6 +14,7 @@ import init, {
   ChannelSubscriberKeypair,
   composeProfileEnvelope,
   decodeProfileEnvelope,
+  Identity,
   memberCardEpoch,
   memberCardSigHeaderName,
   openMemberCard,
@@ -21,6 +22,13 @@ import init, {
 } from "../../wasm/lakko_ffi_wasm";
 import { MEMBER_CARD_SIG_HEADER } from "./api";
 import { isStaleSubscriberKey } from "./member-card-rules";
+
+/** ADR-0101 section 8: a v6 profile envelope is signed by an account
+ *  identity; this test's profiles are signed by one fixed identity. */
+let profileSignerHeld: Identity | undefined;
+function profileSigner(): Identity {
+  return (profileSignerHeld ??= Identity.fromSeed(new Uint8Array(64).fill(0x5a)));
+}
 
 beforeAll(async () => {
   const wasmPath = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
@@ -39,7 +47,7 @@ describe("member cards through the core", () => {
     const me = ChannelSubscriberKeypair.generate();
     const other = ChannelSubscriberKeypair.generate();
     try {
-      const profile = composeProfileEnvelope("Ada", undefined, 5n, new Uint8Array(16).fill(1));
+      const profile = composeProfileEnvelope(profileSigner(), "Ada", undefined, 5n, new Uint8Array(16).fill(1));
       const accountSeed = new Uint8Array(32).fill(0x07);
       const card = sealMemberCard(seed, 3, channelId, me.public(), accountSeed, profile);
       expect(memberCardEpoch(card)).toBe(3);
@@ -83,5 +91,47 @@ describe("member cards through the core", () => {
     } finally {
       kp.free();
     }
+  });
+});
+
+import { verifyProfileEnvelope } from "../../wasm/lakko_ffi_wasm";
+import { unnamedCardRow } from "./member-card-rules";
+
+describe("ADR-0101 section 8: a card's profile counts only when its bound account signed it", () => {
+  it("a profile signed by the card's account verifies; one signed by another account is refused", () => {
+    const me = ChannelSubscriberKeypair.generate();
+    const account = Identity.fromSeed(new Uint8Array(32).fill(0x07));
+    const stranger = Identity.fromSeed(new Uint8Array(32).fill(0x08));
+    try {
+      const own = composeProfileEnvelope(account, "Ada", undefined, 5n);
+      const forged = composeProfileEnvelope(stranger, "Eve", undefined, 5n);
+      for (const [profile, ok] of [
+        [own, true],
+        [forged, false],
+      ] as const) {
+        const card = sealMemberCard(seed, 1, channelId, me.public(), account.ed25519Seed, profile);
+        const opened = openMemberCard(seed, card, channelId, me.public());
+        try {
+          if (ok) verifyProfileEnvelope(opened.profile, opened.identityPk).free();
+          else expect(() => verifyProfileEnvelope(opened.profile, opened.identityPk)).toThrow();
+        } finally {
+          opened.free();
+        }
+      }
+    } finally {
+      me.free();
+      account.free();
+      stranger.free();
+    }
+  });
+
+  it("a member with a refused profile is an unnamed row under its bound key", () => {
+    expect(unnamedCardRow({ identityPkHex: "ab", isOwnCard: false, ownAccountKeyHex: "cd" })).toMatchObject({
+      key: "ab",
+      username: null,
+      isSelf: false,
+      named: false,
+    });
+    expect(unnamedCardRow({ identityPkHex: "cd", isOwnCard: false, ownAccountKeyHex: "cd" }).key).toBe("self");
   });
 });

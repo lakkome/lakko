@@ -835,6 +835,11 @@ final class MultiJoinerCall {
             // request ride a PublisherGroup journal, never the SFU
             // signal-relay. Out of place here — drop.
             break
+        case .channelReturn, .historyRequest:
+            // ADR-0101 — a channel return rides a continuity mailbox and a
+            // history request a conversation journal, never the SFU
+            // signal-relay. Out of place here — drop.
+            break
         case .pin:
             // ADR-0052 decision 3 — a shared-pin envelope rides the GROUP
             // JOURNAL (standing-gated in `ChatRepository.receivePin`), never

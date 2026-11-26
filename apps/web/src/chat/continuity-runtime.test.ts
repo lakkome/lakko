@@ -445,3 +445,35 @@ describe("the completeness re-check of a moved admin that did not found (R.7 cas
     expect(mayRecheckCompleteness(facts({ adminKeysB64: [ME], rosterPersonKeysB64: [BOB] }), ME)).toBe(false);
   });
 });
+
+describe("ADR-0101 section 8: the profile comes back with the conversation", () => {
+  it("is carried after the delivery and the lineage, never before", async () => {
+    const w = world("chat");
+    w.cursor = 100;
+    w.claims.set(OLD, { ...NO_CLAIMS, own: { successorGroupIdB64: "S-mine", messageId: 40 } });
+    const p = port(w);
+    const withProfile: ContinuityPort = {
+      ...p,
+      carryProfile: async (_g, s, acct) => {
+        w.log.push(`profile:${s}:${acct}`);
+      },
+    };
+    expect(await continueConversation(withProfile, OLD)).toBe("built");
+    const i = w.log.indexOf("deliver:S-mine");
+    const j = w.log.indexOf("lineage:S-mine");
+    const k = w.log.indexOf(`profile:S-mine:${ANNA_ACCOUNT}`);
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(j).toBeGreaterThan(i);
+    expect(k).toBeGreaterThan(j);
+  });
+  it("is not carried while the new identity is unreachable", async () => {
+    const w = world("chat");
+    w.cursor = 100;
+    w.reachable = false;
+    w.claims.set(OLD, { ...NO_CLAIMS, own: { successorGroupIdB64: "S-mine", messageId: 40 } });
+    const carried: string[] = [];
+    const p: ContinuityPort = { ...port(w), carryProfile: async (_g, s) => void carried.push(s) };
+    expect(await continueConversation(p, OLD)).toBe("waiting-for-reach");
+    expect(carried).toEqual([]);
+  });
+});

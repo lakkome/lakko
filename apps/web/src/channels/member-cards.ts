@@ -44,7 +44,7 @@ import {
   listMemberCards,
   putMemberCard,
 } from "./api";
-import { bytesToHex, channelIdFromHex, type ChannelSubscriberKeys } from "./composer";
+import { bytesToHex, channelIdFromHex, type ChannelSubscriberKeys, type WasmIdentity } from "./composer";
 import { avatarFromWasm, avatarToWasm, bytesToB64, type AvatarData } from "../profile/avatar-model";
 import { OWN_AVATAR_KEY, rememberCardAvatar } from "../profile/avatar-runtime";
 import {
@@ -53,6 +53,7 @@ import {
   cardGrantDecision,
   cardUploadDue,
   memberRowName,
+  unnamedCardRow,
   type UploadedCard,
 } from "./member-card-rules";
 
@@ -93,6 +94,10 @@ export interface OwnCardInput {
   readonly usernameCertificate?: Uint8Array | null;
   /** ADR-0084 — the saved profile photo, or `null`. */
   readonly avatar?: AvatarData | null;
+  /** ADR-0101 section 8 — the ACCOUNT identity (ADR-0050: the person, not
+   *  this device) at compose time; it signs the profile the card carries.
+   *  `null` while none is held: no card is uploaded. */
+  readonly accountIdentity: () => WasmIdentity | null;
 }
 
 export type OwnCardOutcome =
@@ -157,7 +162,10 @@ async function uploadOwnCard(input: OwnCardInput): Promise<OwnCardOutcome> {
     const fingerprint = `${cardFingerprint(content, input.updatedAtMs, grant?.version ?? null)}${cardShareable ? "" : "|nocard"}`;
     if (!cardUploadDue(uploaded.get(key), input.epoch, fingerprint)) return "unchanged";
 
+    const accountIdentity = input.accountIdentity();
+    if (accountIdentity === null) return "failed";
     const profile = wasm.composeProfileEnvelope(
+      accountIdentity,
       content.displayName ?? undefined,
       content.username ?? undefined,
       BigInt(input.updatedAtMs),
@@ -389,13 +397,40 @@ export async function loadChannelMembers(input: LoadMembersInput): Promise<Chann
         const opened = wasm.openMemberCard(seed, m.card, idBytes, m.subscriberPk);
         try {
           identityPk = opened.identityPk;
-          profile = wasm.decodeProfileEnvelope(opened.profile);
+          // ADR-0101 section 8 - the card's profile counts only when the
+          // account its binding names signed it.
+          try {
+            profile = wasm.verifyProfileEnvelope(opened.profile, opened.identityPk);
+          } catch {
+            profile = null;
+          }
         } finally {
           opened.free();
         }
       } catch {
         unreadable += 1;
-        profile?.free();
+        (profile as Wasm["Profile"]["prototype"] | null)?.free();
+        continue;
+      }
+      if (profile === null) {
+        // A member with a refused profile: an unnamed row, nothing filed.
+        const bare = unnamedCardRow({
+          identityPkHex: journalHex(identityPk),
+          isOwnCard: input.ownSubscriberPkHex !== null && pkHex === input.ownSubscriberPkHex,
+          ownAccountKeyHex,
+        });
+        const earlier = byKey.get(bare.key);
+        if (earlier !== undefined) {
+          if (!earlier.subscriberPksHex.includes(pkHex)) earlier.subscriberPksHex.push(pkHex);
+          continue;
+        }
+        const entry = {
+          ...bare,
+          personKeyB64: bare.isSelf ? OWN_AVATAR_KEY : bytesToB64(identityPk),
+          subscriberPksHex: [pkHex],
+        };
+        byKey.set(bare.key, entry);
+        rows.push(entry);
         continue;
       }
       try {

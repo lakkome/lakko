@@ -136,6 +136,13 @@ public interface ContinuityPort {
      *  founder staying an admin when [stayAdmin]. */
     public suspend fun transferOwnership(successorGroupIdHex: String, newOwnerKeyB64: String, stayAdmin: Boolean)
 
+    /** ADR-0101 section 8: post into the delivered successor, verbatim, the
+     *  newest profile envelope this device holds for the reset person
+     *  (signed by their previous key), so their profile comes back with the
+     *  conversation. Idempotent (records that it ran). Runs only after the
+     *  successor was delivered. The default carries nothing. */
+    public suspend fun carryProfile(oldGroupIdHex: String, successorGroupIdHex: String, accountIdB64: String) {}
+
     /** R.7 case 1 / D5: send again, into the successor, this account's
      *  messages sent in the old one-to-one after the reset was signed.
      *  Idempotent (records that it ran). */
@@ -365,6 +372,7 @@ private suspend fun buildSuccessor(
         SuccessorDelivery.NOT_READY -> return ContinuityStep.FAILED
     }
     port.recordLineage(oldGroupIdHex, successorGroupIdHex)
+    port.carryProfile(oldGroupIdHex, successorGroupIdHex, accountIdB64)
     val superseded = port.supersededKeys().keys
     if (old.kind == ConversationKind.Chat) {
         port.resendOwnMessages(oldGroupIdHex, successorGroupIdHex, accountIdB64)

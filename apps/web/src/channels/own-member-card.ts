@@ -15,6 +15,7 @@ import { createEffect, on, onCleanup } from "solid-js";
 
 import { base64Decode } from "../auth/account-id";
 import { useAuth } from "../auth/AuthContext";
+import { useChats } from "../chat/ChatContext";
 import { useProfiles } from "../profile/ProfileContext";
 import { visibilitySetting } from "../reach/visibility-store";
 import { reachVersionsTick } from "../reach/reach-service";
@@ -45,6 +46,7 @@ function accountIdBytes(b64: string): Uint8Array | null {
 
 export function useOwnMemberCard(source: OwnCardSource): void {
   const auth = useAuth();
+  const chats = useChats();
   const profiles = useProfiles();
   let alive = true;
   onCleanup(() => {
@@ -80,6 +82,8 @@ export function useOwnMemberCard(source: OwnCardSource): void {
           accountId,
           usernameCertificate: profiles.ownUsernameCertificate(),
           avatar: own.avatar,
+          // ADR-0101 section 8 — the account identity signs the card's profile.
+          accountIdentity: () => chats.accountIdentity(),
         };
         void (async (): Promise<void> => {
           const outcome = await ensureOwnMemberCard(input);

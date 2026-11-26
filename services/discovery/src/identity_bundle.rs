@@ -83,6 +83,8 @@ type IdentityBundleRow = (
     Option<Vec<u8>>,
     Option<Vec<u8>>,
     Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<u64>,
 );
 
 fn decode_fixed<const N: usize>(
@@ -983,7 +985,9 @@ async fn try_apply_identity_once(
                     key_reset_attest            = COALESCE(?, key_reset_attest), \
                     previous_signature_pubkey   = COALESCE(?, previous_signature_pubkey), \
                     last_unproven_key_change_at = IF(?, NOW(3), last_unproven_key_change_at), \
-                    conversation_link           = IF(?, ?, COALESCE(?, conversation_link)) \
+                    conversation_link           = IF(?, ?, COALESCE(?, conversation_link)), \
+                    continuity_binding          = IF(?, NULL, continuity_binding), \
+                    continuity_expires_at_ms    = IF(?, NULL, continuity_expires_at_ms) \
                  WHERE account_id = ?",
             )
             .bind(signature_pubkey)
@@ -1002,6 +1006,10 @@ async fn try_apply_identity_once(
             .bind(i64::from(key_changed))
             .bind(evidence.conversation_link)
             .bind(evidence.conversation_link)
+            // ADR-0101: a key change clears the continuity binding, which
+            // names the key that signed it.
+            .bind(i64::from(key_changed))
+            .bind(i64::from(key_changed))
             .bind(account_id)
             .execute(&mut *tx)
             .await?;
@@ -1428,6 +1436,12 @@ pub(crate) struct FetchResponse {
     /// binding as an unusable X25519 key.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) x25519_binding: Option<String>,
+    /// ADR-0101: standard base64 of the 105-byte continuity binding of an
+    /// account that reset its keys, served only while unexpired. Verified
+    /// at upload against the identity key this row held; a peer verifies it
+    /// again against the attested new key it accepted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) continuity_binding_b64: Option<String>,
 }
 
 /// `GET /discovery/identity/{account_id_b64url}` — fetch.
@@ -1462,7 +1476,8 @@ pub(crate) async fn fetch(
 
     let row: Option<IdentityBundleRow> = sqlx::query_as(
         "SELECT signature_pubkey, x25519_pubkey, supersession_proof, key_generation, \
-                key_reset_attest, conversation_link, x25519_binding \
+                key_reset_attest, conversation_link, x25519_binding, \
+                continuity_binding, continuity_expires_at_ms \
          FROM identity_bundles WHERE account_id = ?",
     )
     .bind(&bytes[..])
@@ -1476,11 +1491,20 @@ pub(crate) async fn fetch(
         )
     })?;
 
-    let (sig, x25519, proof, key_generation, key_reset_attest, conversation_link, x25519_binding) =
-        row.ok_or((
-            StatusCode::NOT_FOUND,
-            "identity bundle not found".to_string(),
-        ))?;
+    let (
+        sig,
+        x25519,
+        proof,
+        key_generation,
+        key_reset_attest,
+        conversation_link,
+        x25519_binding,
+        continuity_binding,
+        continuity_expires_at_ms,
+    ) = row.ok_or((
+        StatusCode::NOT_FOUND,
+        "identity bundle not found".to_string(),
+    ))?;
 
     if sig.len() != SIGNATURE_PUBKEY_LEN || x25519.len() != X25519_PUBKEY_LEN {
         // Schema enforces fixed lengths; a row that doesn't match
@@ -1508,6 +1532,11 @@ pub(crate) async fn fetch(
         // The same opaque pass-through (ADR-0074 section 3.7).
         conversation_link: conversation_link.map(|l| B64.encode(&l)),
         x25519_binding: x25519_binding.map(|b| B64.encode(&b)),
+        continuity_binding_b64: crate::continuity::served_binding(
+            continuity_binding,
+            continuity_expires_at_ms,
+            crate::continuity::now_unix_ms(),
+        ),
     }))
 }
 

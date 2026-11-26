@@ -339,6 +339,12 @@ class MainActivity : ComponentActivity() {
             chatRepository.publishOwnProfileToAllGroups()
             me.lakko.app.reach.ReachManager.get(applicationContext).publishOwnProfileToDevices()
         }
+        // ADR-0101 section 8 — a peer returned this account's profile after its
+        // key reset (verified under the previous key): republished everywhere.
+        me.lakko.app.profile.ReturnedOwnProfile.onAdopted = {
+            chatRepository.publishOwnProfileToAllGroups()
+            me.lakko.app.reach.ReachManager.get(applicationContext).publishOwnProfileToDevices()
+        }
 
         // ADR-0026 Phase 4 — the anti-censorship arming controller.
         // Apply the persisted preference at boot: when on, fetch +
@@ -2404,6 +2410,51 @@ private fun SessionRoot(
                 val roster = me.lakko.app.devices.DeviceRosterChanges.revision.value
                 kotlinx.coroutines.withTimeoutOrNull(me.lakko.app.channels.SubscriberAdmission.APP_INTERVAL_MS) {
                     me.lakko.app.devices.DeviceRosterChanges.revision.first { it != roster }
+                }
+            }
+        }
+    }
+
+    // ADR-0101 section 7 — the channel side of a key reset, app-wide (a reset
+    // device publishes nothing yet, so the publisher loop does not run on it):
+    // recovery keys of owned channels, returns read from the continuity
+    // mailbox, returns this device owes reset contacts, recovered channels.
+    val returnContext = LocalContext.current.applicationContext
+    LaunchedEffect(lifecycleOwner, identitySecrets, channelsState, channelsClient) {
+        val secrets = identitySecrets ?: return@LaunchedEffect
+        if (guest != null) return@LaunchedEffect
+        val contactsPort = object : me.lakko.app.channels.ResetContactsPort {
+            override fun supersededKeys(): Map<String, String> = contactsRepository.supersededKeys()
+            override fun pinnedKeyB64Of(accountIdB64: String): String? = contactsRepository.pinnedKeyB64Of(accountIdB64)
+            override fun liveResetGeneration(accountIdB64: String): Long? = contactsRepository.liveResetGeneration(accountIdB64)
+            override suspend fun refreshContinuityTarget(accountIdB64: String): Boolean =
+                contactsRepository.refreshContinuityTarget(accountIdB64) != null
+        }
+        lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+            while (true) {
+                if (channelsState.boundAccount != null) {
+                    val ownKeys = buildSet {
+                        chatRepository.ownPersonKeyB64()?.let { add(it) }
+                        try {
+                            uniffi.lakko_ffi_uniffi.Identity.fromSeed(secrets.accountIdentitySeed).use {
+                                add(java.util.Base64.getEncoder().encodeToString(it.signaturePublicKey()))
+                            }
+                        } catch (_: Throwable) {
+                            // No own current key: only the conversation key.
+                        }
+                    }
+                    me.lakko.app.channels.ChannelReturnRuntime.pass(
+                        context = returnContext,
+                        state = channelsState,
+                        client = channelsClient,
+                        contacts = contactsPort,
+                        ownKeysB64 = ownKeys,
+                        sessionToken = { me.lakko.app.auth.SessionTokens.provider?.current() ?: secrets.sessionToken },
+                    )
+                }
+                val wake = me.lakko.app.channels.ChannelReturnRuntime.wakes.value
+                kotlinx.coroutines.withTimeoutOrNull(me.lakko.app.channels.SubscriberAdmission.APP_INTERVAL_MS) {
+                    me.lakko.app.channels.ChannelReturnRuntime.wakes.first { it != wake }
                 }
             }
         }

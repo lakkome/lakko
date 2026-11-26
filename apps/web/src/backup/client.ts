@@ -577,7 +577,13 @@ export class BackupClient {
     const { seeds, adoptedAtMs } = flattenOwnPredecessors(own);
     // The person themselves: without these a restore has no name, no photo
     // and the default "who can find me".
-    const ownProfile = ownProfileForBackup(wasm, base64Encode(accountId), accountId);
+    // ADR-0101 section 8 — the own profile is signed by the account identity.
+    // The backup is sealed under the phrase, and the phrase is what that
+    // identity is derived from; it is used only when it is the identity whose
+    // seed this backup carries, else the backup carries no own profile.
+    const ownProfile = withPhraseAccountIdentity(wasm, phraseBytes, ed25519Seed, (identity) =>
+      ownProfileForBackup(wasm, identity, base64Encode(accountId), accountId),
+    );
     const visibility = await visibilityForBackup(base64Encode(accountId));
     // Payload v8 — the names of the people this device knows. Read from the
     // stores under the device key; a store that cannot be read fails this
@@ -736,6 +742,46 @@ export async function receivedProfilesForBackup(
     lastWrittenByAuthor(log),
     own,
   );
+}
+
+/**
+ * Run `use` with the account identity the phrase derives (`Identity.fromSeed`
+ * over the phrase seed, as the sign-in does), when its Ed25519 seed is
+ * `ed25519Seed`; `null` when the phrase does not parse or names another
+ * identity. The identity and the derived seed are released afterwards.
+ */
+function withPhraseAccountIdentity<T>(
+  wasm: Wasm,
+  phraseBytes: Uint8Array,
+  ed25519Seed: Uint8Array,
+  use: (identity: InstanceType<Wasm["Identity"]>) => T | null,
+): T | null {
+  let mnemonic: Wasm["RecoveryMnemonic"]["prototype"] | null = null;
+  let seed: Uint8Array | null = null;
+  let identity: InstanceType<Wasm["Identity"]> | null = null;
+  try {
+    mnemonic = wasm.RecoveryMnemonic.fromPhrase(new TextDecoder().decode(phraseBytes));
+    const phraseSeed = mnemonic.toSeed();
+    seed = phraseSeed;
+    identity = wasm.Identity.fromSeed(phraseSeed);
+    const held = identity.ed25519Seed;
+    const same = held.length === ed25519Seed.length && held.every((b, i) => b === ed25519Seed[i]);
+    held.fill(0);
+    if (!same) {
+      // eslint-disable-next-line no-console
+      console.warn("backup: phrase names another identity, own profile not carried");
+      return null;
+    }
+    return use(identity);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("backup: own profile not carried", err instanceof Error ? err.name : "");
+    return null;
+  } finally {
+    seed?.fill(0);
+    identity?.free();
+    mnemonic?.free();
+  }
 }
 
 function hexBytes(hex: string): Uint8Array {

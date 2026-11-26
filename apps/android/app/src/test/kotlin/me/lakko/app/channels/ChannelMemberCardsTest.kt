@@ -89,6 +89,9 @@ class ChannelMemberCardsTest {
         val published: Map<String, String?> = emptyMap(),
         val reach: Boolean? = true,
         held: Set<String> = emptySet(),
+        /** ADR-0101 section 8 — the card's profile is not signed by the
+         *  account its binding names. */
+        val refuseProfile: Boolean = false,
     ) : MemberCardPorts {
         val heldSet = held.toMutableSet()
         val filed = mutableListOf<String>()
@@ -108,6 +111,9 @@ class ChannelMemberCardsTest {
         }
 
         override fun decodeProfile(bytes: ByteArray): FfiProfile = opens.getValue(String(bytes))!!.second
+
+        override fun verifyProfile(bytes: ByteArray, identityPk: ByteArray): FfiProfile? =
+            if (refuseProfile) null else decodeProfile(bytes)
 
         override suspend fun resolveAccountKeyHex(accountId: ByteArray): String? = published[reachHex(accountId)]
 
@@ -161,6 +167,27 @@ class ChannelMemberCardsTest {
         assertEquals("Bob", row.name)
         assertEquals("bob", row.username)
         assertEquals(listOf(reachHex(bobKey)), fake.filed)
+    }
+
+    @Test
+    fun `ADR-0101 - a card whose profile its account did not sign is an unnamed member, nothing filed`() = runTest {
+        val fake = Fake(
+            cards = listOf("bob" to ByteArray(32) { 1 }),
+            opens = mapOf("bob" to (bobKey to profile("Bob"))),
+            published = mapOf(reachHex(bobAccount) to reachHex(bobKey)),
+            refuseProfile = true,
+        )
+        val result = read(fake)
+        val row = result.rows.single()
+        assertEquals(reachHex(bobKey), row.key)
+        assertNull(row.username)
+        assertNull(row.avatar)
+        assertEquals(false, row.named)
+        assertEquals(0, result.unreadable)
+        assertTrue(fake.filed.isEmpty())
+        assertTrue(fake.checks.isEmpty())
+        // The viewer's own key reads as the self row.
+        assertEquals("self", unnamedCardRow(reachHex(ownKey), isOwnCard = false, ownAccountKeyHex = reachHex(ownKey)).key)
     }
 
     @Test

@@ -318,6 +318,26 @@ public class AuthClient(
         return base64UrlDecodeNoPad(resp.genesis_attest_b64)
     }
 
+    /**
+     * ADR-0101 section 7 - `POST /auth/channel-recovery/evaluate`: auth
+     * evaluates one blinded element (the channel recovery input of a channel
+     * id it never learns) under the account's per-account key. Bearer. Both
+     * elements are URL-safe base64 without padding on the wire; this takes and
+     * returns them as bytes. `503 channel-recovery-disabled` / `429
+     * too-many-attempts` surface as [AuthHttpError].
+     */
+    public suspend fun channelRecoveryEvaluate(sessionToken: String, blindedElement: ByteArray): ByteArray {
+        if (sessionToken.isEmpty()) {
+            throw AuthClientArgError("sessionToken must be non-empty")
+        }
+        val resp: ChannelRecoveryEvaluateResponse = post(
+            "/auth/channel-recovery/evaluate",
+            ChannelRecoveryEvaluateRequest(blinded_element = base64UrlEncodeNoPad(blindedElement)),
+            bearer = sessionToken,
+        )
+        return base64UrlDecodeNoPad(resp.evaluation)
+    }
+
     // -----------------------------------------------------------------
     // TOTP — ADR-0018 factor (c), authenticator-code recovery
     // -----------------------------------------------------------------

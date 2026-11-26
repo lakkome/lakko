@@ -647,11 +647,12 @@ internal class MultiJoinerLinkCallPort(
             ownProfileEnvelope = {
                 ownProfile?.let { profile ->
                     try {
-                        uniffi.lakko_ffi_uniffi.composeProfileEnvelope(
+                        me.lakko.app.profile.ProfileSigner.compose(
                             profile.toFfi(
                                 accountId = request.accountId,
                                 usernameCertificate = ownUsernameCertificate(),
                             ),
+                            request.accountId,
                         )
                     } catch (e: Throwable) {
                         android.util.Log.w("AppCallHost", "own profile refused by the composer", e)

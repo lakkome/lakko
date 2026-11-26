@@ -917,6 +917,13 @@ pub struct OpenedMemberCard {
     pub identity_pk: Vec<u8>,
     /// The profile envelope; decode it with `decodeProfileEnvelope`.
     pub profile: Vec<u8>,
+    /// The 64-byte account binding signature (ADR-0101 section 7): keep it
+    /// beside the card to hand back in a channel return if this account
+    /// resets its keys. Appended last.
+    pub binding_sig: Vec<u8>,
+    /// The 32-byte BLAKE3 of `profile`, the `profile_hash` a channel return
+    /// carries beside `binding_sig` (ADR-0101 section 7). Appended last.
+    pub profile_hash: Vec<u8>,
 }
 
 /// The clear epoch of a member card, to pick the matching seed before
@@ -951,9 +958,12 @@ pub fn open_member_card(
     let channel = channel_id_from_vec(channel_id)?;
     let pk = subscriber_pk_from_vec(&subscriber_pk)?;
     let opened = inner_open_member_card(&content_seed(&seed)?, &card, &channel, &pk)?;
+    let profile_hash = lakko_crypto::hash::blake3(&opened.profile).to_vec();
     Ok(OpenedMemberCard {
         identity_pk: opened.identity_pk.to_vec(),
         profile: opened.profile,
+        binding_sig: opened.binding_sig.to_vec(),
+        profile_hash,
     })
 }
 

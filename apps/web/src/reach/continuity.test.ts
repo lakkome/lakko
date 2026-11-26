@@ -10,7 +10,16 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import init, * as wasm from "../../wasm/lakko_ffi_wasm";
-import { CONTINUITY_KEY_TTL_MS, continuityExpiryMs, continuityKeyUsable } from "./continuity";
+import {
+  CONTINUITY_BINDING_LEN,
+  CONTINUITY_KEY_TTL_MS,
+  continuityBindingExpiryMs,
+  continuityExpiryMs,
+  continuityKeyUsable,
+  continuityTargetLive,
+  newIdentityReachableVerdict,
+  peerContinuityTarget,
+} from "./continuity";
 
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
@@ -47,5 +56,80 @@ describe("both sides derive one key (the wasm core)", () => {
     } finally {
       signer.free();
     }
+  });
+});
+
+const b64 = (b: Uint8Array): string => Buffer.from(b).toString("base64");
+const unb64 = (s: string): Uint8Array => new Uint8Array(Buffer.from(s, "base64"));
+
+describe("ADR-0101: the peer verifies the continuity binding under the attested key", () => {
+  it("the window equals the core's", () => {
+    expect(BigInt(CONTINUITY_KEY_TTL_MS)).toBe(wasm.continuityWindowMs());
+    expect(CONTINUITY_BINDING_LEN).toBe(wasm.continuityBindingLen());
+  });
+
+  it("a binding signed by the new key yields its continuity mailbox and expiry", () => {
+    const id = wasm.Identity.fromSeed(new Uint8Array(32).fill(9));
+    const now = 1_700_000_000_000;
+    const binding = wasm.signContinuityBinding(id, BigInt(now + 1000));
+    const mailbox = wasm.MailboxKey.continuityFromAccountIdentity(id);
+    try {
+      expect(continuityBindingExpiryMs(binding)).toBe(now + 1000);
+      const target = peerContinuityTarget(b64(binding), id.signaturePublicKey, now, wasm.verifyContinuityBinding, unb64, b64);
+      expect(target).toEqual({ mailboxPkB64: b64(mailbox.publicKey()), expiresAtMs: now + 1000 });
+      // Never the real mailbox.
+      const real = wasm.MailboxKey.fromAccountIdentity(id);
+      expect(target?.mailboxPkB64).not.toBe(b64(real.publicKey()));
+      real.free();
+    } finally {
+      mailbox.free();
+      id.free();
+    }
+  });
+
+  it("refuses another key, an expired binding, garbage and absence", () => {
+    const id = wasm.Identity.fromSeed(new Uint8Array(32).fill(9));
+    const other = wasm.Identity.fromSeed(new Uint8Array(32).fill(8));
+    const now = 1_700_000_000_000;
+    const binding = wasm.signContinuityBinding(id, BigInt(now + 1000));
+    try {
+      const v = wasm.verifyContinuityBinding;
+      expect(peerContinuityTarget(b64(binding), other.signaturePublicKey, now, v, unb64, b64)).toBeNull();
+      expect(peerContinuityTarget(b64(binding), id.signaturePublicKey, now + 1000, v, unb64, b64)).toBeNull();
+      expect(peerContinuityTarget("AAAA", id.signaturePublicKey, now, v, unb64, b64)).toBeNull();
+      expect(peerContinuityTarget(undefined, id.signaturePublicKey, now, v, unb64, b64)).toBeNull();
+      const flipped = binding.slice();
+      flipped[104] = (flipped[104] ?? 0) ^ 1;
+      expect(peerContinuityTarget(b64(flipped), id.signaturePublicKey, now, v, unb64, b64)).toBeNull();
+    } finally {
+      id.free();
+      other.free();
+    }
+  });
+});
+
+describe("ADR-0101 section 4: newIdentityReachable", () => {
+  const live = { mailboxPkB64: "x", expiresAtMs: 2000 };
+  it("an ordinary candidate is enough", () => {
+    expect(newIdentityReachableVerdict({ ordinaryCandidates: 1, continuity: null, resetSignedAtMs: null, nowMs: 0 })).toBe(true);
+  });
+  it("otherwise a live binding AND a usable continuity key", () => {
+    expect(newIdentityReachableVerdict({ ordinaryCandidates: 0, continuity: live, resetSignedAtMs: 0, nowMs: 1000 })).toBe(true);
+    expect(newIdentityReachableVerdict({ ordinaryCandidates: 0, continuity: live, resetSignedAtMs: 0, nowMs: 2000 })).toBe(false);
+    expect(newIdentityReachableVerdict({ ordinaryCandidates: 0, continuity: null, resetSignedAtMs: 0, nowMs: 1000 })).toBe(false);
+    expect(newIdentityReachableVerdict({ ordinaryCandidates: 0, continuity: live, resetSignedAtMs: null, nowMs: 1000 })).toBe(false);
+    expect(
+      newIdentityReachableVerdict({
+        ordinaryCandidates: 0,
+        continuity: { mailboxPkB64: "x", expiresAtMs: Number.MAX_SAFE_INTEGER },
+        resetSignedAtMs: 0,
+        nowMs: CONTINUITY_KEY_TTL_MS,
+      }),
+    ).toBe(false);
+  });
+  it("a target is live strictly before its expiry", () => {
+    expect(continuityTargetLive(live, 1999)).toBe(true);
+    expect(continuityTargetLive(live, 2000)).toBe(false);
+    expect(continuityTargetLive(null, 0)).toBe(false);
   });
 });

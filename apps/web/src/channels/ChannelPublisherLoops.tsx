@@ -107,6 +107,16 @@ import { syncAdmissionSeeds } from "./channel-admission-seed-register";
 import { clearFoundedAlone, foundedAloneDone, isFoundedAlone } from "./founded-alone-marker";
 import { channelSubscriptionPort } from "./channel-subscription-register";
 import { boundContactsAccount } from "../contacts/local-store";
+import {
+  installChannelReturnRunner,
+  installHeldProfileSource,
+  registerOwedRecoveryKeys,
+  runHeldChannelReturns,
+  sendChannelReturns,
+  settleRecoveredChannels,
+} from "./channel-return-runtime";
+import { offerReturnedOwnProfile } from "../profile/returned-profile";
+import { base64Encode as b64 } from "../auth/account-id";
 import { ownDeviceRoster } from "../devices/own-device-roster";
 import { isStatus } from "../ds/ownership";
 import { resealToSubscribers } from "./rotation-cron";
@@ -120,7 +130,7 @@ import {
 /** The holds of the subscriber admission pass (2026-11-20), apart from the
  *  recorded commits' so a transient failure here never delays those. */
 const subscriberAdmissionRetry = new PublisherCommitRetry();
-import { fetchEpoch } from "./api";
+import { fetchEpoch, ownerProofIdentity } from "./api";
 import {
   catchUpChannel,
   ensurePublicSeed,
@@ -1661,6 +1671,21 @@ export const ChannelPublisherLoops: Component = () => {
         console.warn("[channels] publisher pass failed", err instanceof Error ? err.name : "");
       }
     }
+    // ADR-0101 section 7: every owned channel registers its recovery key;
+    // returns read from the continuity mailbox are acted on; returns this
+    // device owes reset people are sent. Each step never throws.
+    const returnAccount = boundContactsAccount();
+    if (returnAccount !== null) {
+      await registerOwedRecoveryKeys(returnAccount, current);
+      await runHeldChannelReturns({
+        accountIdB64: returnAccount,
+        identity: ownerProofIdentity(current),
+        offerProfile: (envelope) => void offerReturnedOwnProfile(returnAccount, envelope),
+      });
+      const ownKeys = new Set([b64(current.signaturePublicKey), b64(lineage.signaturePublicKey)]);
+      await sendChannelReturns(returnAccount, lineage, ownKeys);
+      await settleRecoveredChannels(returnAccount, lineage);
+    }
     // A refusal recorded during this pass is repaired now, not a pass later.
     await repairRefusedOwners();
     for (const [idHex, record] of channelsState.accessByChannel()) {
@@ -1683,6 +1708,13 @@ export const ChannelPublisherLoops: Component = () => {
 
   onMount(() => {
     const timer = setInterval(run, PASS_INTERVAL_MS);
+    // ADR-0101: a channel return the mailbox kept runs the pass now.
+    installChannelReturnRunner(run);
+    onCleanup(() => installChannelReturnRunner(null));
+    // ADR-0101 section 8: a return carries the reset person's newest raw
+    // profile this device holds.
+    installHeldProfileSource((k) => profiles.heldEnvelopeOf(k));
+    onCleanup(() => installHeldProfileSource(null));
     onCleanup(() => clearInterval(timer));
     // A new session (another account, a sign-in) tries a held channel again.
     const resetHolds = (): void => {

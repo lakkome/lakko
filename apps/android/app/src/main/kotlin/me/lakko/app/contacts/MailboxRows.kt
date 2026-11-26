@@ -46,6 +46,10 @@ public enum class MailboxRowKind {
 
     /** A conversation re-entry request (ADR-0091 phase 2, route 2). */
     CONVERSATION_REENTRY,
+
+    /** A channel return to this account after its key reset (ADR-0101
+     *  section 7), taken only from the continuity mailbox. */
+    CHANNEL_RETURN,
     ;
 
     /** The core's kind. */
@@ -56,6 +60,7 @@ public enum class MailboxRowKind {
         WELCOME_RENDEZVOUS -> FfiMailboxKind.WELCOME_RENDEZVOUS
         LINK_REFUSAL -> FfiMailboxKind.LINK_REFUSAL
         CONVERSATION_REENTRY -> FfiMailboxKind.CONVERSATION_REENTRY
+        CHANNEL_RETURN -> FfiMailboxKind.CHANNEL_RETURN
     }
 
     public companion object {
@@ -67,6 +72,7 @@ public enum class MailboxRowKind {
             FfiMailboxKind.WELCOME_RENDEZVOUS -> WELCOME_RENDEZVOUS
             FfiMailboxKind.LINK_REFUSAL -> LINK_REFUSAL
             FfiMailboxKind.CONVERSATION_REENTRY -> CONVERSATION_REENTRY
+            FfiMailboxKind.CHANNEL_RETURN -> CHANNEL_RETURN
         }
     }
 }
@@ -241,6 +247,11 @@ public class NativeOwnMailbox(private val key: MailboxKey) : OwnMailbox {
         /** The own mailbox of the account whose identity is [accountIdentity]. */
         public fun of(accountIdentity: Identity): NativeOwnMailbox =
             NativeOwnMailbox(MailboxKey.fromAccountIdentity(accountIdentity))
+
+        /** ADR-0101 section 1 — the CONTINUITY mailbox a reset announces,
+         *  never the real one. */
+        public fun continuityOf(accountIdentity: Identity): NativeOwnMailbox =
+            NativeOwnMailbox(MailboxKey.continuityFromAccountIdentity(accountIdentity))
     }
 }
 

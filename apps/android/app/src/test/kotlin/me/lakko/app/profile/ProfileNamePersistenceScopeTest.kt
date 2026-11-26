@@ -60,6 +60,28 @@ class ProfileNamePersistenceScopeTest {
     }
 
     @Test
+    fun `the card-sharing flag is read back as stored, and an old row reads as shareable`() {
+        val context = RuntimeEnvironment.getApplication()
+        val persistence = SharedPrefsProfilePersistence(context)
+        val other = Base64.getEncoder().encodeToString(ByteArray(32) { 0x44 })
+        persistence.saveProfiles(
+            aB64,
+            mapOf(
+                peerKey to PeerProfile("Alice", null, 10uL, cardShareable = false),
+                other to PeerProfile("Bob", null, 11uL, cardShareable = true),
+            ),
+        )
+        val loaded = persistence.loadProfiles(aB64)
+        assertFalse(loaded.getValue(peerKey).cardShareable)
+        assertTrue(loaded.getValue(other).cardShareable)
+        // A row written before the field reads as shareable.
+        context.getSharedPreferences(SharedPrefsProfilePersistence.PREFS, android.content.Context.MODE_PRIVATE).edit()
+            .putString(SharedPrefsProfilePersistence.profilesKey(aB64), """{"$peerKey":{"displayName":"Old","updatedAtMs":1}}""")
+            .commit()
+        assertTrue(persistence.loadProfiles(aB64).getValue(peerKey).cardShareable)
+    }
+
+    @Test
     fun `the two accounts' rows live under different keys`() {
         val a = SharedPrefsProfilePersistence.profilesKey(aB64)
         val b = SharedPrefsProfilePersistence.profilesKey(bB64)

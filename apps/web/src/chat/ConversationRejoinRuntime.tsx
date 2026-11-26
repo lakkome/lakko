@@ -57,8 +57,24 @@ import { ownPersonKeyB64 } from "./person-key";
 import { resolveMemberIdentity, type RosterMember } from "./author-identity";
 import { handleReentryRequest, installReentryIntake, type ReentryArrival } from "./reentry-admit";
 import {
+  HISTORY_PAGE_SIZE,
+  historyAnswerAllowed,
+  historyAsked,
+  historyRequestDue,
+  installHistoryRequestHandler,
+  nextHistoryStep,
+  readHistoryStates,
+  writeHistoryState,
+  type HistoryRequestArrival,
+} from "./history-return";
+import { buildHistoryPage } from "../devices/history-bundle";
+import { acceptedResetOfKey, loadSupersededKeys } from "../contacts/local-store";
+import { earlierGroupsHexOf } from "../reach/mailbox-write";
+import { personKeysOf } from "./person-key";
+import {
   afterGroupPollForGapHistory,
   emitGapHistoryFiled,
+  onGapHistoryFiled,
   installGapLookRequester,
   lookForGapHistory,
   noteGapHistoryOwed,
@@ -551,6 +567,121 @@ export function ConversationRejoinRuntime(): JSX.Element {
   installGapLookRequester(lookFor);
   onCleanup(() => installGapLookRequester(null));
 
+  // ---------- ADR-0101 section 9: the history after a key reset ------------
+
+  /** The answerer: one page for a reset person's request (`history-return.ts`
+   *  decides who answers). Never throws. */
+  async function answerHistoryRequest(a: HistoryRequestArrival): Promise<void> {
+    const account = sessionAccount(auth.state());
+    const entry = chats.get(a.groupIdB64);
+    const readmitter = chats.identity();
+    if (account === null || entry === undefined || readmitter === null) return;
+    const ownKeys = new Set(
+      [chats.accountIdentity(), chats.conversationAccountIdentity()]
+        .filter((i): i is WasmIdentity => i !== null)
+        .map((i) => base64Encode(i.signaturePublicKey)),
+    );
+    const reset = acceptedResetOfKey(a.senderKeyB64);
+    const retired = new Set(
+      reset === null ? [] : [...loadSupersededKeys()].filter(([, acct]) => acct === reset.accountIdB64).map(([k]) => k),
+    );
+    // The conversation's earlier group the requester's retired key was in.
+    let earlierHex: string | null = null;
+    for (const hex of earlierGroupsHexOf(bytesToHex(entry.group.groupId))) {
+      const bytes = hexToBytes(hex);
+      const earlier = bytes === null ? undefined : chats.get(base64Encode(bytes));
+      if (earlier === undefined) continue;
+      if (personKeysOf(earlier.group).some((k) => retired.has(k))) {
+        earlierHex = hex;
+        break;
+      }
+    }
+    const own = ownPersonKeyB64(readmitter);
+    let ownIsOwnerOrAdmin = false;
+    try {
+      const owner = entry.group.roleTableOwner() as Uint8Array | undefined;
+      const admins = entry.group.roleTableAdmins() as Uint8Array;
+      const adminKeys: string[] = [];
+      for (let i = 0; i + 32 <= admins.length; i += 32) adminKeys.push(base64Encode(admins.slice(i, i + 32)));
+      ownIsOwnerOrAdmin = own !== null && ((owner !== undefined && base64Encode(owner) === own) || adminKeys.includes(own));
+    } catch {
+      ownIsOwnerOrAdmin = false;
+    }
+    if (
+      !historyAnswerAllowed({
+        fromSelf: ownKeys.has(a.senderKeyB64),
+        requesterResetAccepted: reset !== null,
+        requesterWasInEarlierGroup: earlierHex !== null,
+        earlierGroupHeld: earlierHex !== null,
+        kind: conversationKindOf(entry.group),
+        ownIsOwnerOrAdmin,
+      }) ||
+      earlierHex === null
+    ) {
+      return;
+    }
+    const deviceKey = await getDeviceKey(account);
+    if (deviceKey === null) return;
+    const page = await buildHistoryPage({
+      accountIdB64: account,
+      deviceKey,
+      readmitter,
+      gapKey: a.gapKeyPub,
+      sourceSlotHex: earlierHex,
+      targetGroupId: entry.group.groupId,
+      beforeMessageId: a.beforeMessageId,
+      pageSize: HISTORY_PAGE_SIZE,
+      ownAuthorKeyB64: ownAuthorKeyIn(entry.group),
+    });
+    if (page === null) return;
+    const wasm = await loadWasm();
+    await ds.publishRendezvous(wasm.gapHistoryRendezvous(a.gapKeyPub), page.sealed);
+    // eslint-disable-next-line no-console
+    console.info(`[history] a page was sent: rows=${page.rows}`);
+  }
+  installHistoryRequestHandler((a) => {
+    void answerHistoryRequest(a).catch(() => undefined);
+  });
+  onCleanup(() => installHistoryRequestHandler(null));
+
+  /** The requester: post the conversation's history request when due, with a
+   *  fresh gap key the gap look then reads the answer under. Never throws. */
+  async function requestHistoryIfDue(group: WasmGroup, groupIdB64: string): Promise<void> {
+    const account = sessionAccount(auth.state());
+    const secrets = auth.identitySecrets();
+    if (account === null || secrets === null) return;
+    const state = readHistoryStates(account)[groupIdB64];
+    const now = Date.now();
+    if (state === undefined || !historyRequestDue(state, now)) return;
+    const deviceKey = await getDeviceKey(account);
+    if (deviceKey === null) return;
+    const wasm = await loadWasm();
+    const gap = wasm.generateGapKey();
+    try {
+      const secret = gap.secret;
+      const sealed = await sealGapSecret(secret, deviceKey);
+      secret.fill(0);
+      if (!recordGapLook({ groupIdB64, secrets: [sealed], gapFromMs: 0, gapToMs: now })) return;
+      const envelope = wasm.composeHistoryRequestEnvelope(gap.publicKey, BigInt(state.before));
+      await chat.broadcastControl(secrets, group, envelope);
+      writeHistoryState(account, groupIdB64, historyAsked(state, now));
+    } finally {
+      gap.free();
+    }
+  }
+
+  onCleanup(
+    onGapHistoryFiled((groupIdB64, rows) => {
+      const account = sessionAccount(auth.state());
+      if (account === null) return;
+      const state = readHistoryStates(account)[groupIdB64];
+      if (state === undefined || state.done) return;
+      writeHistoryState(account, groupIdB64, nextHistoryStep(state, rows.map((r) => r.messageId)));
+      const entry = chats.get(groupIdB64);
+      if (entry !== undefined) void requestHistoryIfDue(entry.group, groupIdB64).catch(() => undefined);
+    }),
+  );
+
   async function onPolled(group: WasmGroup): Promise<void> {
     let groupIdB64: string;
     try {
@@ -562,6 +693,8 @@ export function ConversationRejoinRuntime(): JSX.Element {
     rosterOf(group);
     // A look for the gap's messages is a read: it runs whatever else does.
     lookFor(groupIdB64);
+    // ADR-0101 section 9 - a returned conversation asks for its history.
+    await requestHistoryIfDue(group, groupIdB64).catch(() => undefined);
     if (conversationBehind.stopsActing(groupIdB64)) {
       await requestFor(groupIdB64);
       return;

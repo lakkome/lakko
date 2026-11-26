@@ -71,10 +71,12 @@ pub(crate) mod jobs {
     pub(crate) const RATE_LIMIT_BUCKET_PRUNE: &str = "discovery_rate_limit_bucket_prune";
     /// `transparency_log::spawn_transparency_reconciler` (KT-log backfill).
     pub(crate) const KT_RECONCILE: &str = "discovery_kt_reconcile";
+    /// `continuity::spawn_sweeper` (ADR-0101 expired continuity bindings).
+    pub(crate) const CONTINUITY_BINDING_SWEEP: &str = "discovery_continuity_binding_sweep";
 
     /// Every job name, for the test.
     #[cfg(test)]
-    pub(crate) const ALL: [&str; 8] = [
+    pub(crate) const ALL: [&str; 9] = [
         RETIRED_USERNAME_PRUNE,
         INVITE_PRUNE,
         GROUP_INVITE_PRUNE,
@@ -83,6 +85,7 @@ pub(crate) mod jobs {
         UNCLAIMED_ACCOUNT_PRUNE,
         RATE_LIMIT_BUCKET_PRUNE,
         KT_RECONCILE,
+        CONTINUITY_BINDING_SWEEP,
     ];
 }
 

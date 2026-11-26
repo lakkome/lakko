@@ -92,6 +92,7 @@ import {
 } from "./client";
 import { loadPersistedAccount, savePersistedAccount } from "./persisted-account";
 import { accountStoreIds, wipeAccountLocalData, wipeAccountStaged } from "./wipe-account";
+import { removeAllGroups } from "../translation-models/models-store";
 import { dropAccountMemory } from "./account-memory";
 import {
   deleteRecallRecord,
@@ -285,6 +286,16 @@ import {
   type KeyResetOwed,
   type KeyResetStep,
 } from "./key-reset-owed";
+import {
+  announcementOwed,
+  previousKeyStanding,
+  readResetContinuity,
+  resetContinuityExpiryMs,
+  withAnnounced,
+  writeResetContinuity,
+} from "./reset-continuity";
+import { verifyIdentityInLog, type LogVerifyStatus } from "../transparency/verify";
+import { installContinuityMailboxAccess } from "../ds/session-access";
 import {
   EMPTY_KEY_ROTATION_STATE,
   conversationSeed,
@@ -3402,6 +3413,96 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     } finally {
       canonical.free();
     }
+    // ADR-0101: the keys are published, the continuity mailbox is announced.
+    // Its failure does not fail the publish (the words are not withheld for
+    // it); the next landing retries.
+    try {
+      await announceContinuity(ctx.accountIdB64, ctx.accountIdBytes, ctx.seed);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("continuity announcement failed; retried at the next session start", err instanceof Error ? err.name : "unknown");
+    }
+  }
+
+  /**
+   * ADR-0101 sections 7 and 8 - the account key of before a reset: the key
+   * the directory serves for the account now, confirmed by the KT log
+   * (`reset-continuity.ts` `previousKeyStanding`). `null` when it cannot be
+   * established. Never throws.
+   */
+  async function readPreviousOwnKey(accountIdBytes: Uint8Array, newKeyB64: string): Promise<string | null> {
+    try {
+      const bundle = await discovery.identityFetch(accountIdBytes);
+      const served = bundle?.signature_pubkey ?? null;
+      if (served === null) return null;
+      let logStatus: LogVerifyStatus | null = null;
+      try {
+        logStatus = (await verifyIdentityInLog(accountIdBytes, base64Decode(served))).status;
+      } catch {
+        logStatus = null;
+      }
+      return previousKeyStanding({ servedKeyB64: served, logStatus, newKeyB64 });
+    } catch {
+      return null;
+    }
+  }
+
+  /** The account key a 32-byte account Ed25519 seed signs with, or `null`. */
+  function previousKeyOfSeed(wasm: Wasm, ed25519Seed: Uint8Array): string | null {
+    try {
+      return base64Encode(wasm.reachVerifyingKey(ed25519Seed));
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * ADR-0101 sections 1 to 3 - the continuity announcement a reset owes once
+   * its keys are published: claim the continuity mailbox, register on it the
+   * continuity reach key alone, and upload the binding. Each part is
+   * idempotent (a claim by the same key, a reach key added again, a binding
+   * replaced). Throws what failed; the record stays owed.
+   */
+  async function announceContinuity(accountIdB64: string, accountIdBytes: Uint8Array, seed: Uint8Array): Promise<void> {
+    const storage = plainStorage();
+    const record = readResetContinuity(storage, accountIdB64);
+    if (record === null || !announcementOwed(record, Date.now())) return;
+    const wasm = await loadWasm();
+    const identity = wasm.Identity.fromSeed(seed);
+    try {
+      const address = await installContinuityMailboxAccess(identity, { awaitClaim: true });
+      if (address === null) throw new Error("continuity mailbox signer not installed");
+      const reachSeed = wasm.continuityReachSeed(accountIdBytes, BigInt(record.keyGeneration));
+      let reachPk: Uint8Array;
+      try {
+        reachPk = wasm.reachVerifyingKey(reachSeed);
+      } finally {
+        reachSeed.fill(0);
+      }
+      await new DsClient().putMailboxReach(address, {
+        add: [{ publicKey: reachPk, expiresAtMs: record.expiresAtMs }],
+      });
+      const binding = wasm.signContinuityBinding(identity, BigInt(record.expiresAtMs));
+      await discovery.putContinuityBinding(binding);
+      writeResetContinuity(storage, accountIdB64, withAnnounced(record));
+    } finally {
+      identity.free();
+    }
+  }
+
+  /** The announcement in the background; a failure waits for the next
+   *  landing. Never throws. */
+  function settleOwedContinuity(accountIdB64: string, accountIdBytes: Uint8Array, accountIdentitySeed: Uint8Array): void {
+    if (!announcementOwed(readResetContinuity(plainStorage(), accountIdB64), Date.now())) return;
+    // The publish is not done yet: the publish run announces after it.
+    if (isKeyResetOwed(plainStorage(), accountIdB64)) return;
+    const seed = accountIdentitySeed.slice();
+    void announceContinuity(accountIdB64, accountIdBytes, seed)
+      .catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("continuity announcement failed; retried at the next session start", err instanceof Error ? err.name : "unknown");
+      })
+      .finally(() => seed.fill(0));
   }
 
   /** Step 3: the attested identity upload. */
@@ -4165,6 +4266,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         reset,
         afterPersist: target.afterPersist,
         wipes,
+        // A recall takes the account back from the key this device held:
+        // that key is the previous one, known without asking anyone.
+        previousKeyB64: previousKeyOfSeed(await loadWasm(), target.oldSeed),
       });
       return null;
     });
@@ -4517,6 +4621,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     await restoreOwedSignupPhrase(args.accountIdB64);
     requireNotSignedOut();
     settleOwedKeyResetPublish(args.accountIdB64, args.accountIdBytes, args.accountIdentitySeed);
+    settleOwedContinuity(args.accountIdB64, args.accountIdBytes, args.accountIdentitySeed);
 
     const secrets: IdentitySecrets = {
       accountId: args.accountIdBytes,
@@ -5575,6 +5680,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
      *  back over a Forget device of the account that ran since (it staged
      *  the phrase under the same mark before the server step). */
     readonly wipes: WipeMark;
+    /** ADR-0101 sections 7 and 8: the account key of before the reset
+     *  (standard base64), or `null` when it could not be established. */
+    readonly previousKeyB64: string | null;
   }): Promise<void> {
     // 3. Persist immediately, before any further network call: the new
     // pair (the old one is superseded by the same transaction), the seed
@@ -5647,6 +5755,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       done: { directory: false, deviceGroup: false },
     };
     writeKeyResetOwed(plainStorage(), ctx.accountIdB64, record);
+    // ADR-0101: the continuity announcement owed after the publish, the
+    // window it opens and the previous key a returned profile or channel is
+    // checked against.
+    writeResetContinuity(plainStorage(), ctx.accountIdB64, {
+      v: 1,
+      expiresAtMs: resetContinuityExpiryMs(record.signedAtMs),
+      previousKeyB64: ctx.previousKeyB64,
+      keyGeneration: record.keyGeneration,
+      announced: false,
+    });
     // ADR-0074 section 3.5: a reset makes every predecessor, proven or not,
     // a superseded key, and ends a rotation this device was finishing.
     clearRotation(plainStorage(), ctx.accountIdB64);
@@ -8197,6 +8315,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const newPubkey = canonical.signaturePublicKey;
       canonical.free();
 
+      // 1b. ADR-0101 sections 7 and 8: the account key of before the reset,
+      // read now, while the directory and the log still name it. Without it
+      // nothing a peer returns is accepted silently.
+      const previousKeyB64 = await readPreviousOwnKey(pending.accountIdBytes, base64Encode(newPubkey));
+      requireStillParked(pending, flow);
+
       // 2. The phrase goes into this account's own row of the phrase store
       // BEFORE the server step (ADR-0077 decision 3, G-47). From that step on
       // it is the account's only way back, and it must not exist in this
@@ -8266,6 +8390,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         phrase,
         newPubkey,
         reset,
+        previousKeyB64,
         wipes,
       });
       return phrase;
@@ -9127,6 +9252,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         await wipeAccountLocalData(wipeTarget);
         phraseOwedInMemory.delete(wipeTarget);
       }
+      // ADR-0100 section 5: the language groups Lakko's own translation
+      // engine downloaded. Per device, not per account, but which groups a
+      // device holds tells which languages its person reads.
+      await removeAllGroups().catch(() => undefined);
       keyPackageAccount = null;
       setIdentitySecrets(null);
       // ADR-0017: drop any parked recovery / fresh-phrase context.

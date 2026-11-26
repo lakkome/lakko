@@ -31,6 +31,7 @@
  * surface) is also a follow-up — current composer is a plain
  * `<input>`, no edit history.
  */
+import { fileReceivedProfile } from "../profile/returned-profile";
 import { accountSuspended } from "../auth/suspension-state";
 import { SuspendedComposerLine } from "../auth/SuspendedReadOnly";
 import { contentFromPersisted } from "../attach/preview";
@@ -4866,8 +4867,17 @@ function ChatView(props: {
       // never a timeline row. A malformed envelope (`profile` undefined) or an
       // unattributable sender is dropped.
       if (e.kind === "profile") {
-        if (e.profile !== undefined && e.senderKey !== undefined) {
-          profiles.ingest(e.senderKey, e.profile, { groupIdB64: props.entry.groupIdB64 });
+        const senderKey = e.senderKey;
+        const profile = e.profile;
+        const account = sessionAccountOf(auth.state());
+        if (profile !== undefined && senderKey !== undefined && account !== null) {
+          // ADR-0101 section 8: filed only when the sender signed it.
+          void fileReceivedProfile({
+            accountIdB64: account,
+            senderKeyB64: senderKey,
+            profile,
+            ingest: () => profiles.ingest(senderKey, profile, { groupIdB64: props.entry.groupIdB64 }),
+          });
         }
         continue;
       }
@@ -4888,7 +4898,7 @@ function ChatView(props: {
       // dropped here, never shown.
       if (e.kind === "registrarSeed") continue;
       // ADR-0098 — an account-deleted statement: the same.
-      if (e.kind === "accountDeleted") continue;
+      if (e.kind === "accountDeleted" || e.kind === "historyRequest") continue;
       // Who-can-find-me 6.4 — a contact request sealed to one member: the
       // same.
       if (e.kind === "groupContactRequest") continue;
@@ -11861,7 +11871,8 @@ function timelineRowToPersisted(
   if (
     row.event.kind === "registrarSeed" ||
     row.event.kind === "groupContactRequest" ||
-    row.event.kind === "accountDeleted"
+    row.event.kind === "accountDeleted" ||
+    row.event.kind === "historyRequest"
   ) {
     // ADR-0057 / who-can-find-me 6.4 — consumed at receipt by the chat
     // client and never a row. Never persisted: it carries a sealed seed or a

@@ -593,6 +593,9 @@ public fun ChatListScreen(
                 }
                 if (!searching && !archiveOpen) {
                     RequestsSentRow(requests = openRequests, onAskAgain = { repository.askAgain(it) })
+                    // ADR-0101 section 7 — a returned channel invitation that
+                    // did not verify: the ordinary card, for the person.
+                    me.lakko.app.ui.channels.ReturnedInvitations(repository.currentAccountIdB64())
                 }
                 // docs/ux/chat-folders.md 2.1 — the bar exists once one folder
                 // does; a search hides it and searches everything (2.4).

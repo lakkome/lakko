@@ -36,8 +36,13 @@ enum ChannelMemberCards {
         // `Nobody` changes what the card says without a new name.
         let shareable = ProfileDirectory.shared.ownCardShareable
         let uploadKey = "\(channelId)|\(epoch)|\(grant.map { String($0.version) } ?? "-")|\(stamp)|\(shareable)"
+        // ADR-0101 section 8 — the profile in the card is signed by the
+        // account identity (profile v6).
         guard !uploaded.contains(uploadKey),
-              var profile = ProfileDirectory.shared.ownProfileForRequest() else { return }
+              var profile = ProfileDirectory.shared.ownProfileForRequest(),
+              let accountIdB64 = ProfileDirectory.shared.accountIdB64,
+              let signer = ProfileDirectory.shared.signingIdentity(accountIdB64: accountIdB64)
+        else { return }
         profile.grants = grant.map { [$0] } ?? []
         if profile.grants.isEmpty {
             // Not findable by this channel's members: the name, no username.
@@ -51,7 +56,8 @@ enum ChannelMemberCards {
             // drops an unbound card.
             guard let card = try ReachCenter.shared.sealOwnMemberCard(
                 seed: seed, epochId: epoch, channelId: channelIdBytes,
-                subscriberPk: kp.`public`(), profile: try composeProfileEnvelope(profile: profile))
+                subscriberPk: kp.`public`(),
+                profile: try composeProfileEnvelope(profile: profile, accountIdentity: signer))
             else { return }
             let sig = try kp.memberCardRequestSignature(channelId: channelIdBytes, card: card)
             try await ChannelsClient().putMemberCard(
@@ -219,9 +225,28 @@ enum ChannelMemberCards {
                 guard let epoch = try? memberCardEpoch(card: member.card), let seed = seeds[epoch],
                       let opened = try? openMemberCard(
                           seed: seed, card: member.card, channelId: channelIdBytes,
-                          subscriberPk: member.subscriberPk),
-                      let profile = try? decodeProfileEnvelope(plaintext: opened.profile) else { continue }
+                          subscriberPk: member.subscriberPk) else { continue }
                 let key = opened.identityPk
+                // ADR-0101 section 8 — the card's profile counts only when
+                // the account its binding names signed it. A card whose
+                // profile is not is still a member (the binding verified),
+                // drawn as an unnamed row: no name, username, photo or grant
+                // is taken from it, and nothing is filed.
+                guard let profile = try? verifyProfileEnvelope(plaintext: opened.profile, identityPk: key) else {
+                    if key == ownAccountKey {
+                        if !selfPks.contains(member.subscriberPk) { selfPks.append(member.subscriberPk) }
+                    } else if let at = names.firstIndex(where: { $0.accountKey == key }) {
+                        if !names[at].subscriberPks.contains(member.subscriberPk) {
+                            names[at].subscriberPks.append(member.subscriberPk)
+                        }
+                    } else if seen.insert(key).inserted {
+                        names.append(Member(
+                            subscriberPk: member.subscriberPk,
+                            claim: ProfileClaim(displayName: nil, username: nil, updatedAtMs: 0),
+                            accountKey: key, subscriberPks: [member.subscriberPk]))
+                    }
+                    continue
+                }
                 if let accountId = profile.accountId,
                    !cardKept(cardKey: key, publishedKey: await resolveKey(accountId)) {
                     continue
@@ -268,7 +293,8 @@ enum ChannelMemberCards {
                     updatedAtMs: profile.updatedAtMs, accountId: profile.accountId,
                     usernameCertificate: username == nil ? nil : profile.usernameCertificate,
                     avatar: ProfileAvatar(profile.avatar),
-                    cardShareable: profile.cardShareable)
+                    cardShareable: profile.cardShareable,
+                    envelope: opened.profile)
                 names.append(Member(
                     subscriberPk: member.subscriberPk, claim: claim, accountKey: key,
                     subscriberPks: [member.subscriberPk]))

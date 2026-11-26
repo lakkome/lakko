@@ -169,6 +169,16 @@ export interface IdentityFetchResponse {
    *  unparsed; a peer verifies it against the key its gate left trusted
    *  (`contacts/conversation-link.ts`). */
   conversation_link?: string;
+  /** ADR-0101 section 2: standard base64 of the 105-byte continuity binding
+   *  of an account that reset its keys; served only while unexpired. A peer
+   *  verifies it under the attested new key before writing to the mailbox
+   *  it names (`reach/continuity.ts`). */
+  continuity_binding_b64?: string;
+}
+
+/** Body of `PUT /discovery/identity/continuity` (ADR-0101 section 2). */
+export interface ContinuityBindingUploadRequest {
+  continuity_binding_b64: string;
 }
 
 // ----------------------------------------------------------------------------

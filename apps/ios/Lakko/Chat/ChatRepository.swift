@@ -579,8 +579,11 @@ public final class ChatRepository: ObservableObject {
     /// profile only while that account is the active one.
     var receivedProfileSink: @MainActor (ProfileClaim, MemberIdentity?, String?) -> Void = {
         claim, senderKey, accountIdB64 in
-        ProfileDirectory.shared.acceptReceived(
-            claim, signatureKeyB64: senderKey, accountIdB64: accountIdB64)
+        // ADR-0101 section 8 — filed under the sender only when the sender
+        // signed it; this account's own, carried back by a peer after its key
+        // reset (signed by its previous key), is offered as its own.
+        ProfileDirectory.shared.fileReceivedGroupProfile(
+            claim, senderKeyB64: senderKey, accountIdB64: accountIdB64)
     }
 
     /// ADR-0051 §3 — the per-account, per-group `{ name, updatedAtMs }` store
@@ -5948,6 +5951,9 @@ public final class ChatRepository: ObservableObject {
         Task { @MainActor [weak self] in await self?.sendOwedReentryHistory(groupIdHex: groupIdHex) }
         // A device that came back keeps looking for its gap history (throttled).
         Task { @MainActor [weak self] in await self?.lookForReentryGapHistory(groupIdHex: groupIdHex) }
+        // ADR-0101 section 9 — a conversation returned after this account's
+        // key reset asks for its history, page by page.
+        Task { @MainActor [weak self] in await self?.requestHistoryIfDue(groupIdHex: groupIdHex) }
         if reentryStopsActing(groupIdHex: groupIdHex) { return }
         // Walk-2 rule R4 — a knock key still owed to a member (a growth whose
         // send was skipped or failed) goes from here; a no-op when delivered.

@@ -169,3 +169,26 @@ export function sealEachSkippingInvalid<T>(
   }
   return { sealed, skipped };
 }
+
+/**
+ * ADR-0101 section 8 - the profile a member card carries counts only when it
+ * is signed by the account the card's binding names (`verifyProfileEnvelope`
+ * against the card's `identityPk`). A card whose profile is not is still a
+ * member (the binding verified), drawn as an unnamed row: its name, username,
+ * photo and grants are refused. Pure over the verdict.
+ */
+export function unnamedCardRow(input: {
+  readonly identityPkHex: string;
+  readonly isOwnCard: boolean;
+  readonly ownAccountKeyHex: string | null;
+}): { key: string; name: string; username: null; isSelf: boolean; named: boolean } {
+  const isSelf =
+    input.isOwnCard || (input.ownAccountKeyHex !== null && input.identityPkHex === input.ownAccountKeyHex);
+  return {
+    key: isSelf ? "self" : input.identityPkHex,
+    name: memberRowName(null, isSelf),
+    username: null,
+    isSelf,
+    named: isSelf,
+  };
+}

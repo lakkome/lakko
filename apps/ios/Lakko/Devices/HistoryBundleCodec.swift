@@ -113,6 +113,34 @@ public enum HistoryBundleCodec {
             groups: [projected.group], maxHlc: projected.maxHlc)
     }
 
+    /// ADR-0101 section 9 — one page of a conversation's history for a
+    /// person back after a key reset: `rows` (the page, already chosen by
+    /// ``HistoryReturnRules/pageRows(_:messageId:before:pageSize:)`` from the
+    /// conversation's earlier group `sourceHex`, whose DS ids are unique
+    /// across journals and older than any of the successor's), sealed to the
+    /// request's gap key for `targetGroupId` (the successor the person is
+    /// in), signed by `readmitter`'s leaf. An EMPTY page is sealed too: it
+    /// tells the requester to stop.
+    static func buildHistoryPage(
+        sourceHex: String,
+        rows: [PersistedMessage],
+        accountIdB64: String,
+        readmitter: Identity,
+        gapKey: Data,
+        targetGroupId: Data,
+        ownKey: Data? = nil,
+        cards: ChannelInviteCardStore = .shared
+    ) throws -> Data {
+        let projected = projectGroup(
+            hex: sourceHex, rows: rows, cap: max(rows.count, 1), accountIdB64: accountIdB64, cards: cards,
+            ownKey: ownKey)
+        return try sealGapHistoryStructured(
+            readmitter: readmitter, gapKey: gapKey, groupId: targetGroupId,
+            groups: [StructuredHistoryGroup(
+                groupId: targetGroupId, messages: projected?.group.messages ?? [], countCapped: false)],
+            maxHlc: projected?.maxHlc ?? 0)
+    }
+
     /// One group's rows projected onto the structured history wire: the
     /// newest `cap` of `carried`, each as the canonical placeholder.
     private static func projectGroup(

@@ -385,6 +385,25 @@ struct LakkoApp: App {
             return BlobDeleteKeys.seed(
                 accountIdB64: base64Encode(secrets.accountId), currentSeed: secrets.accountIdentitySeed)
         }
+        // ADR-0101 section 8 — every own profile envelope (profile v6) is
+        // signed by the ACCOUNT identity the conversations bind this
+        // person's leaves under (ADR-0050; the old key during an ADR-0074
+        // Stage A), never a device leaf: the chat layer's once it holds one
+        // for this account, else the phrase-seeded identity of the session.
+        ProfileDirectory.shared.accountIdentityProvider = { [weak auth, weak chat] accountIdB64 in
+            guard let secrets = auth?.identitySecrets,
+                  base64Encode(secrets.accountId) == accountIdB64 else { return nil }
+            if let chat, chat.currentAccountIdB64 == accountIdB64,
+               let identity = chat.conversationAccountIdentity {
+                return identity
+            }
+            return try? Identity.fromSeed(seed: secrets.accountIdentitySeed)
+        }
+        // ADR-0101 section 8 — a profile a peer carried back after this
+        // account's key reset was adopted: republished in every conversation.
+        ProfileDirectory.shared.onOwnProfileReturned = { [weak chat] in
+            Task { @MainActor in await chat?.publishOwnProfileToAllGroups() }
+        }
         BlobLifecycle.shared.accountIdB64 = { [weak auth] in
             auth?.identitySecrets.map { base64Encode($0.accountId) }
         }
@@ -2210,6 +2229,9 @@ private struct SessionRoot: View, Equatable {
                 }
                 // ADR-0045 decision 2 — a publisher request's Welcome lands
                 // through the mailbox loop whenever the owner approves.
+                // ADR-0101 section 7 — the continuity mailbox kept a channel
+                // return: the channels runtime acts on it now.
+                contactsRepository.onChannelReturnHeld = { ChannelReturnRuntime.wake() }
                 contactsRepository.publisherWelcomeLander = { welcome, accountIdB64 in
                     // ADR-0090 section 2.3 — an owner device admitted this one
                     // (or a co-publisher's other device) to a channel's

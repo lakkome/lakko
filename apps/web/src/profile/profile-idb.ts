@@ -89,7 +89,7 @@ export function encodeProfileRow(
   labels: ReadonlyMap<string, string> = new Map(),
   deleted: ReadonlyMap<string, string> = new Map(),
 ): string {
-  const p: Record<string, { d: string | null; u: string | null; t: string; a?: string; c?: string; av?: unknown; ns?: boolean }> = {};
+  const p: Record<string, { d: string | null; u: string | null; t: string; a?: string; c?: string; av?: unknown; ns?: boolean; e?: string }> = {};
   for (const [key, prof] of row.profiles) {
     p[key] = {
       d: prof.displayName,
@@ -104,6 +104,8 @@ export function encodeProfileRow(
       ...(prof.avatar === undefined || prof.avatar === null ? {} : { av: prof.avatar }),
       // ADR-0092 section 7 — present only when the card may not be shared.
       ...(prof.cardShareable === false ? { ns: true } : {}),
+      // ADR-0101 section 8 — the envelope as received.
+      ...(prof.envelopeB64 === undefined ? {} : { e: prof.envelopeB64 }),
     };
   }
   const vf: Record<string, { s: string; c: number }> = {};
@@ -172,6 +174,10 @@ export function decodeProfileRow(json: string): ProfileRow | null {
         usernameCertificateB64,
         ...(avatar === null ? {} : { avatar }),
         ...((raw as { ns?: unknown }).ns === true ? { cardShareable: false } : {}),
+        ...((): { envelopeB64?: string } => {
+          const e = (raw as { e?: unknown }).e;
+          return typeof e === "string" && /^[A-Za-z0-9+/=]+$/.test(e) ? { envelopeB64: e } : {};
+        })(),
       });
     }
   }

@@ -400,6 +400,89 @@ export async function putChannelOwner(
   }
 }
 
+/**
+ * ADR-0101 section 7 - `PUT /v1/channels/{id}/recovery-key`: register the
+ * channel's recovery public key (32 raw bytes), proven by the CURRENT owner
+ * key of `ownerIdentity`. Returns the HTTP status (`204` done), or `null`
+ * when no answer arrived. Never throws for a refusal.
+ */
+export async function putChannelRecoveryKey(
+  channelIdHex: string,
+  ownerIdentity: Identity,
+  recoveryPk: Uint8Array,
+  base: string = DEFAULT_BASE,
+): Promise<number | null> {
+  const path = `/v1/channels/${channelIdHex}/recovery-key`;
+  const wasm = await loadWasm();
+  const signer = wasm.channelOwnerSigner(ownerProofIdentity(ownerIdentity), hexToBytesStrict(channelIdHex));
+  let proof: string;
+  try {
+    proof = signer.sign("PUT", path, "", recoveryPk);
+  } finally {
+    signer.free();
+  }
+  try {
+    await fetchJson<void>(`${base}${path}`, {
+      method: "PUT",
+      headers: { "content-type": "application/octet-stream", [wasm.channelOwnerProofHeaderName()]: proof },
+      body: new Blob([recoveryPk.slice().buffer as ArrayBuffer], { type: "application/octet-stream" }),
+    });
+    return 204;
+  } catch (err) {
+    return isChannelApiError(err) ? err.status : null;
+  }
+}
+
+/**
+ * ADR-0101 section 7 - `PUT /v1/channels/{id}/owner` with the RECOVERY proof
+ * (`x-lakko-channel-recovery-proof`, `ChannelRecoveryKey.signOwnerChange`)
+ * instead of an owner proof: hand the channel to `newOwnerIdentity`'s owner
+ * key. `204` means the channel was this account's; the uniform `401
+ * owner-proof-required` means it was not (or no recovery key is
+ * registered). `null` when no answer arrived. Never throws for a refusal.
+ */
+export async function putChannelOwnerByRecovery(
+  channelIdHex: string,
+  recoveryProofHeader: string,
+  newOwnerIdentity: Identity,
+  base: string = DEFAULT_BASE,
+): Promise<number | null> {
+  const path = `/v1/channels/${channelIdHex}/owner`;
+  const wasm = await loadWasm();
+  const next = wasm.channelOwnerSigner(newOwnerIdentity, hexToBytesStrict(channelIdHex));
+  let body: Uint8Array;
+  try {
+    body = next.verifyingKey();
+  } finally {
+    next.free();
+  }
+  try {
+    await fetchJson<void>(`${base}${path}`, {
+      method: "PUT",
+      headers: {
+        "content-type": "application/octet-stream",
+        [wasm.channelRecoveryProofHeaderName()]: recoveryProofHeader,
+      },
+      body: new Blob([body.slice().buffer as ArrayBuffer], { type: "application/octet-stream" }),
+    });
+    return 204;
+  } catch (err) {
+    return isChannelApiError(err) ? err.status : null;
+  }
+}
+
+/** The owner key `identity` derives for a channel (the body of an owner
+ *  change naming it). */
+export async function channelOwnerKeyOf(identity: Identity, channelIdHex: string): Promise<Uint8Array> {
+  const wasm = await loadWasm();
+  const signer = wasm.channelOwnerSigner(identity, hexToBytesStrict(channelIdHex));
+  try {
+    return signer.verifyingKey();
+  } finally {
+    signer.free();
+  }
+}
+
 function hexToBytesStrict(hex: string): Uint8Array {
   if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(hex)) {
     throw new Error("channel id is not hex");

@@ -59,6 +59,7 @@ fn build_state(pool: MySqlPool, anon: Option<AnonTokenIssuer>) -> crate::AppStat
         anon_cred: None,
         handle_pepper: Some(Arc::new(TEST_PEPPER)),
         recovery_email: None,
+        channel_recovery: None,
         limits: Arc::new(crate::limits::Limits::defaults()),
     }
 }

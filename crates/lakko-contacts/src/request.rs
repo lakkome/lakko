@@ -146,7 +146,7 @@ use crate::envelope;
 use crate::error::{ContactError, Result};
 use crate::invite::LINK_ID_LEN;
 use crate::link_seal::{link_secrets_match, LINK_SECRET_LEN};
-use crate::profile::{compose_profile, decode_profile, Profile};
+use crate::profile::{compose_profile, decode_profile, verify_profile, Profile};
 use crate::pseudonym::{decode_pseudonym, PSEUDONYM_LEN};
 use crate::reach::{ReachClass, ReachGrant, REACH_GRANT_LEN};
 
@@ -347,8 +347,15 @@ pub fn compose(
                 ContactError::InvalidArgument(format!("reply grant binding: {}", e.code()))
             })?;
     }
+    // ADR-0101 section 8: the profile is signed by the same account identity
+    // key that signs the request.
+    let profile_wire = match profile {
+        Some(p) => compose_profile(p, sender_signing)
+            .map_err(|e| ContactError::InvalidArgument(format!("profile: {e}")))?,
+        None => Vec::new(),
+    };
     let sealed_plaintext =
-        frame_sealed_plaintext(profile, reply_grant, link_answer, intro_message)?;
+        frame_sealed_plaintext(&profile_wire, reply_grant, link_answer, intro_message)?;
     let sealed_envelope = envelope::seal(recipient_x25519_pub, ENVELOPE_AAD, &sealed_plaintext)?;
 
     let from_pubkey = sender_signing.verifying_key();
@@ -461,7 +468,8 @@ pub fn open_envelope(
     recipient_priv: &X25519SecretKey,
 ) -> Result<OpenedRequest> {
     let plaintext = envelope::open(recipient_priv, ENVELOPE_AAD, &req.sealed_envelope)?;
-    let (profile, reply_grant, link_answer, intro) = split_sealed_plaintext(&plaintext)?;
+    let (profile, _, reply_grant, link_answer, intro) =
+        split_sealed_plaintext(&plaintext, Some(&req.from_pubkey.to_bytes()))?;
     if let Some(grant) = &reply_grant {
         grant
             .mailbox_pk_verified(&req.from_pubkey.to_bytes())
@@ -480,17 +488,15 @@ pub fn open_envelope(
 /// Build the sealed plaintext
 /// `profile_len ‖ profile ‖ reply_grant_len ‖ reply_grant ‖ link_answer_len ‖
 /// link_answer ‖ intro`.
+///
+/// `profile_bytes` is the composed (signed) profile envelope, or empty for
+/// none.
 fn frame_sealed_plaintext(
-    profile: Option<&Profile>,
+    profile_bytes: &[u8],
     reply_grant: Option<&ReachGrant>,
     link_answer: Option<&LinkAnswer>,
     intro_message: &[u8],
 ) -> Result<Vec<u8>> {
-    let profile_bytes = match profile {
-        Some(p) => compose_profile(p)
-            .map_err(|e| ContactError::InvalidArgument(format!("profile: {e}")))?,
-        None => Vec::new(),
-    };
     if let Some(grant) = reply_grant {
         if grant.class != ReachClass::Reply {
             return Err(ContactError::InvalidArgument(format!(
@@ -518,7 +524,7 @@ fn frame_sealed_plaintext(
             + intro_message.len(),
     );
     out.extend_from_slice(&profile_len.to_be_bytes());
-    out.extend_from_slice(&profile_bytes);
+    out.extend_from_slice(profile_bytes);
     match reply_grant {
         Some(grant) => {
             // REACH_GRANT_LEN is 134, a one-byte value by construction.
@@ -546,21 +552,30 @@ const REPLY_GRANT_WIRE_LEN: u8 = {
     len
 };
 
-/// The four parts of an opened sealed plaintext.
+/// The parts of an opened sealed plaintext: the profile (decoded), the raw
+/// profile bytes as framed, the reply grant, the link answer, the intro.
 type SplitPlaintext<'a> = (
     Option<Profile>,
+    &'a [u8],
     Option<ReachGrant>,
     Option<LinkAnswer>,
     &'a [u8],
 );
 
-/// Split an opened sealed plaintext into `(profile, reply_grant,
-/// link_answer, intro)`.
+/// Split an opened sealed plaintext into `(profile, profile_bytes,
+/// reply_grant, link_answer, intro)`.
 ///
 /// Framing errors are errors; a well-framed but invalid profile is
 /// `None`; a present but invalid reply grant is an error (see the module
 /// docs for why the three differ); a link answer is framing only.
-pub(crate) fn split_sealed_plaintext(plaintext: &[u8]) -> Result<SplitPlaintext<'_>> {
+///
+/// With `sender_pk` the profile must also verify under it (ADR-0101 section
+/// 8, the request's `from_pubkey`); one that does not is `None`, like an
+/// invalid one. Without it (the fuzz oracle) the profile is decoded only.
+pub(crate) fn split_sealed_plaintext<'a>(
+    plaintext: &'a [u8],
+    sender_pk: Option<&[u8; 32]>,
+) -> Result<SplitPlaintext<'a>> {
     let mut cur = plaintext;
     let len_bytes: [u8; PROFILE_LEN_PREFIX_LEN] = take_n(&mut cur, PROFILE_LEN_PREFIX_LEN)?
         .try_into()
@@ -570,7 +585,11 @@ pub(crate) fn split_sealed_plaintext(plaintext: &[u8]) -> Result<SplitPlaintext<
     let profile = if profile_bytes.is_empty() {
         None
     } else {
-        match decode_profile(profile_bytes) {
+        let decoded = match sender_pk {
+            Some(pk) => verify_profile(profile_bytes, pk),
+            None => decode_profile(profile_bytes),
+        };
+        match decoded {
             Ok(p) => Some(p),
             Err(e) => {
                 // The reason code only: the profile's content is the
@@ -614,27 +633,22 @@ pub(crate) fn split_sealed_plaintext(plaintext: &[u8]) -> Result<SplitPlaintext<
             )));
         },
     };
-    Ok((profile, reply_grant, link_answer, cur))
+    Ok((profile, profile_bytes, reply_grant, link_answer, cur))
 }
 
 /// The fuzz oracle behind `fuzz_api::contact_request_plaintext`.
 pub(crate) fn fuzz_split(plain: &[u8]) -> Option<bool> {
-    let (profile, reply_grant, link_answer, intro) = split_sealed_plaintext(plain).ok()?;
+    let (_, profile_bytes, reply_grant, link_answer, intro) =
+        split_sealed_plaintext(plain, None).ok()?;
     if reply_grant
         .as_ref()
         .is_some_and(|g| g.class != ReachClass::Reply)
     {
         return Some(false);
     }
-    // Only a decoded profile re-frames byte-identically (an invalid one is
-    // dropped to `None` on purpose), so re-frame and compare only then or
-    // when the profile field was empty.
-    let profile_len = usize::from(u16::from_be_bytes([plain[0], plain[1]]));
-    if profile.is_none() && profile_len != 0 {
-        return Some(true);
-    }
+    // The profile is re-framed from the bytes as framed, valid or not.
     let reframed = frame_sealed_plaintext(
-        profile.as_ref(),
+        profile_bytes,
         reply_grant.as_ref(),
         link_answer.as_ref(),
         intro,
@@ -1169,6 +1183,31 @@ mod tests {
         decode_and_verify(&wire).unwrap()
     }
 
+    /// ADR-0101 section 8: a profile inside a request must be signed by the
+    /// request's own sender; one signed by any other key is dropped, the
+    /// request and its intro kept.
+    #[test]
+    fn a_profile_signed_by_another_key_opens_the_request_without_it() {
+        let bob = recipient_x25519();
+        let foreign =
+            crate::profile::compose_profile(&alice_profile(), &SigningKey::from_seed(&[8u8; 32]))
+                .unwrap();
+        let mut plaintext = u16::try_from(foreign.len()).unwrap().to_be_bytes().to_vec();
+        plaintext.extend_from_slice(&foreign);
+        plaintext.extend_from_slice(&[0, 0]);
+        plaintext.extend_from_slice(b"hi bob");
+        let opened = open_envelope(&signed_request_sealing(&plaintext), &bob).unwrap();
+        assert_eq!(opened.profile, None);
+        assert_eq!(opened.intro, b"hi bob");
+        // Control: the sender's own signature is kept.
+        let own = crate::profile::compose_profile(&alice_profile(), &sender()).unwrap();
+        let mut plaintext = u16::try_from(own.len()).unwrap().to_be_bytes().to_vec();
+        plaintext.extend_from_slice(&own);
+        plaintext.extend_from_slice(&[0, 0]);
+        let opened = open_envelope(&signed_request_sealing(&plaintext), &bob).unwrap();
+        assert_eq!(opened.profile, Some(alice_profile()));
+    }
+
     #[test]
     fn profile_and_intro_round_trip() {
         let alice = sender();
@@ -1216,9 +1255,8 @@ mod tests {
     #[test]
     fn sealed_plaintext_framing_is_pinned() {
         let grant = reply_grant();
-        let framed =
-            frame_sealed_plaintext(Some(&alice_profile()), Some(&grant), None, b"intro").unwrap();
-        let profile_wire = crate::profile::compose_profile(&alice_profile()).unwrap();
+        let profile_wire = crate::profile::compose_profile(&alice_profile(), &sender()).unwrap();
+        let framed = frame_sealed_plaintext(&profile_wire, Some(&grant), None, b"intro").unwrap();
         let len = u16::try_from(profile_wire.len()).unwrap();
         let p = profile_wire.len();
         assert_eq!(&framed[..2], &len.to_be_bytes());
@@ -1229,7 +1267,7 @@ mod tests {
         assert_eq!(&framed[4 + p + 134..], b"intro");
         // Nothing: three zero prefixes, then the intro verbatim.
         assert_eq!(
-            frame_sealed_plaintext(None, None, None, b"x").unwrap(),
+            frame_sealed_plaintext(&[], None, None, b"x").unwrap(),
             b"\x00\x00\x00\x00x"
         );
     }
@@ -1540,7 +1578,7 @@ mod tests {
             assert_eq!(opened.intro, intro);
         }
         // Framing: the length byte then the id then the secret.
-        let framed = frame_sealed_plaintext(None, None, Some(&link_answer()), b"x").unwrap();
+        let framed = frame_sealed_plaintext(&[], None, Some(&link_answer()), b"x").unwrap();
         let mut expected = vec![0, 0, 0, 28];
         expected.extend_from_slice(&[0x1D; LINK_ID_LEN]);
         expected.extend_from_slice(&[0x5C; LINK_SECRET_LEN]);
@@ -1565,8 +1603,9 @@ mod tests {
 
     #[test]
     fn the_split_oracle_accepts_a_framed_link_answer() {
+        let profile_wire = crate::profile::compose_profile(&alice_profile(), &sender()).unwrap();
         let framed = frame_sealed_plaintext(
-            Some(&alice_profile()),
+            &profile_wire,
             Some(&reply_grant()),
             Some(&link_answer()),
             b"intro",

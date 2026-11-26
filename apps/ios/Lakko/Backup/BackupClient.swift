@@ -469,9 +469,9 @@ struct OwnBackupEnvelopes: Equatable {
     /// them when it must cut: the account's contacts first (in contact
     /// order), then everyone else by recent use (``BackupPeopleOrder``), then
     /// the rest in key order. Never this account's own keys. Each entry is
-    /// the person key the profile is stored under and its envelope, composed
-    /// from the stored profile with its original stamp (grants are never
-    /// kept, so none travel).
+    /// the person key the profile is stored under and the envelope it was
+    /// RECEIVED as (ADR-0101 section 8: nobody re-signs another person's
+    /// profile); a row held without one is not carried.
     static func receivedProfileRecords(
         profiles: [String: ProfileClaim],
         contactKeysB64: [String],
@@ -487,7 +487,7 @@ struct OwnBackupEnvelopes: Equatable {
         return order.compactMap { key in
             guard let personKey = Data(base64Encoded: key), personKey.count == 32,
                   let claim = profiles[key],
-                  let envelope = StateBundle.profileEnvelope(claim) else { return nil }
+                  let envelope = claim.envelope else { return nil }
             return BackupReceivedProfile(personKey: personKey, envelope: envelope)
         }
     }

@@ -987,8 +987,14 @@ impl WasmProfile {
 /// `cardShareable` (ADR-0092 section 7), the last argument, is optional:
 /// `undefined` means `true`. Pass `false` exactly when this device's "who
 /// can find me" setting is `Nobody`.
+///
+/// `accountIdentity` (ADR-0101 section 8, profile v6), the first argument,
+/// signs the envelope, so a peer can carry it back to this account after a
+/// key reset and the account can check it came from itself.
 #[wasm_bindgen(js_name = composeProfileEnvelope)]
+#[allow(clippy::too_many_arguments)]
 pub fn compose_profile_envelope(
+    account_identity: &crate::mls::Identity,
     display_name: Option<String>,
     username: Option<String>,
     updated_at_ms: u64,
@@ -1008,7 +1014,31 @@ pub fn compose_profile_envelope(
         avatar,
         card_shareable,
     )?;
-    rust_compose_profile(&profile).map_err(profile_error_value)
+    let signing = lakko_crypto::signing::SigningKey::from_seed(
+        &account_identity.mls_identity().ed25519_seed_bytes(),
+    );
+    rust_compose_profile(&profile, &signing).map_err(profile_error_value)
+}
+
+/// Decode a profile envelope and verify its signature against the 32-byte
+/// account identity key `identityPk` the caller trusts (ADR-0101 section 8):
+/// the sender's account key resolved at receipt, or, for a profile a peer
+/// returns after this account's key reset, this account's previous key.
+///
+/// # Errors
+///
+/// Throws an `Error` with a `profileError` code: every decode code, and
+/// `"signature.badKey"` / `"signature.bad"`.
+#[wasm_bindgen(js_name = verifyProfileEnvelope)]
+pub fn verify_profile_envelope(
+    plaintext: &[u8],
+    identity_pk: &[u8],
+) -> Result<WasmProfile, JsValue> {
+    let pk =
+        <[u8; 32]>::try_from(identity_pk).map_err(|_| profile_error_value(ProfileError::BadKey))?;
+    lakko_contacts::profile::verify_profile(plaintext, &pk)
+        .map(WasmProfile::from)
+        .map_err(profile_error_value)
 }
 
 /// Strictly decode a profile envelope (ADR-0048). Fail-closed: anything
@@ -2635,6 +2665,17 @@ pub enum WasmIncomingEnvelopeKind {
     /// publisher account resolved at receipt, and leave those keys out of
     /// the subscriber list and count. Never render it.
     PublisherReaderKey = 38,
+    /// ADR-0101 section 7 — a channel comes back to this account after its
+    /// key reset (a continuity-mailbox row). `payload` is the whole envelope;
+    /// decode it with `decodeChannelReturnEnvelope` and act on it without a
+    /// prompt only when `verifyChannelReturnCardBinding` accepts it under
+    /// this account's previous key. Never render it.
+    ChannelReturn = 39,
+    /// ADR-0101 section 9 — a device back after a key reset asks for this
+    /// conversation's history, newest first. `payload` is the whole
+    /// envelope; decode it with `decodeHistoryRequestEnvelope` and answer
+    /// with `sealGapHistory` when this device may. Never render it.
+    HistoryRequest = 40,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -3056,6 +3097,14 @@ fn dispatch_incoming_envelope_inner(plaintext: &[u8]) -> Result<WasmIncomingEnve
         IncomingEnvelope::PublisherReaderKey(_) => WasmIncomingEnvelope {
             payload: plaintext.to_vec(),
             ..WasmIncomingEnvelope::of(K::PublisherReaderKey)
+        },
+        IncomingEnvelope::ChannelReturn(_) => WasmIncomingEnvelope {
+            payload: plaintext.to_vec(),
+            ..WasmIncomingEnvelope::of(K::ChannelReturn)
+        },
+        IncomingEnvelope::HistoryRequest(_) => WasmIncomingEnvelope {
+            payload: plaintext.to_vec(),
+            ..WasmIncomingEnvelope::of(K::HistoryRequest)
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             payload: p.to_vec(),
@@ -4732,6 +4781,7 @@ mod tests {
     #[test]
     fn profile_envelope_rides_a_contact_request() {
         let envelope = compose_profile_envelope(
+            &crate::mls::Identity::from_seed(&[0x6B; 32]).unwrap(),
             Some("  Alice Petrova ".to_string()),
             Some("@Alice".to_string()),
             42,
@@ -4794,6 +4844,7 @@ mod tests {
             derive_reach_grant(&[0x42; 32], ReachClass::Member, &[], 1).unwrap(),
         ];
         let envelope = compose_profile_envelope(
+            &crate::mls::Identity::from_seed(&[0x6B; 32]).unwrap(),
             Some("Alice".to_string()),
             Some("alice".to_string()),
             7,
@@ -4829,7 +4880,7 @@ mod tests {
         too_many.push(derive_reach_grant(&[0x42; 32], ReachClass::Channel, &[], 1).unwrap());
         let p = prepare_profile(None, None, 1, None, None, Some(too_many), None, None).unwrap();
         assert!(matches!(
-            rust_compose_profile(&p),
+            rust_compose_profile(&p, &lakko_crypto::signing::SigningKey::from_seed(&[1; 32])),
             Err(ProfileError::TooManyGrants { count: 3 })
         ));
     }

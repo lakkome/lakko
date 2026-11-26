@@ -187,6 +187,22 @@ enum AccountLocalDataWipe {
         step("joined-device-group-id") { JoinedDeviceGroupIdStore().clear(accountIdB64: accountIdB64) }
         step("keys-rotated-notice") { KeysRotatedNoticeStore().clear(accountIdB64: accountIdB64) }
         step("profile-resend-owed") { ProfileResendOwed.Store().clear(accountIdB64: accountIdB64) }
+        // ADR-0101 — reaching an account after a key reset: the reset's own
+        // record, the kept continuity targets and mailbox cursor, the channel
+        // returns (held, sent, shown), the recovery-key registrations, the
+        // recovered channels, the history requests and the carried profiles.
+        step("reset-continuity") {
+            ResetContinuityStore(defaults: standard).clear(accountIdB64: accountIdB64)
+            ContinuityTargetStore.clear(accountIdB64: accountIdB64, defaults: standard)
+            ContinuityMailboxWindow.CursorStore(defaults: standard).clear(accountIdB64: accountIdB64)
+            HeldChannelReturnStore(defaults: standard).clear(accountIdB64: accountIdB64)
+            SentChannelReturnStore(defaults: standard).clear(accountIdB64: accountIdB64)
+            ChannelRecoveryRegisteredStore(defaults: standard).clear(accountIdB64: accountIdB64)
+            ReturnedInvitationStore.clearStored(accountIdB64: accountIdB64, defaults: standard)
+            RecoveredChannelStore(defaults: standard).clearAll(accountIdB64: accountIdB64)
+            HistoryReturnStore(defaults: standard).clear(accountIdB64: accountIdB64)
+            ProfileCarriedStore(defaults: standard).clear(accountIdB64: accountIdB64)
+        }
         step("predecessor-inbox-cursor") {
             PredecessorMailbox.CursorStore().clear(accountIdB64: accountIdB64)
             PredecessorMailbox.AdoptionStore().clear(accountIdB64: accountIdB64)

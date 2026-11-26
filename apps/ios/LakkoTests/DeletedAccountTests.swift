@@ -323,6 +323,7 @@ final class DeletedAccountTests: XCTestCase {
             verifier: verifier,
             ownStore: OwnProfileStore(defaults: defaults),
             deletions: deletions)
+        directory.accountIdentityProvider = TestProfileSigning.provider
         directory.verifiesOnResolve = false
         directory.activate(accountIdB64: own, username: "me")
         directory.acceptReceived(

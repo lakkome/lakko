@@ -128,10 +128,12 @@ pub mod call_welcome;
 pub mod channel_admission_mark;
 pub mod channel_epoch_seeds;
 pub mod channel_read_key;
+pub mod channel_return;
 pub mod channel_rotate_request;
 pub mod channel_text;
 pub mod committer_beacon;
 pub mod committer_delegation;
+pub mod continuity;
 pub mod conversation_handle;
 pub mod conversation_reentry;
 pub mod device_card;
@@ -147,6 +149,7 @@ pub mod group_photo;
 pub mod group_reactions;
 pub mod handle;
 pub mod handle_record;
+pub mod history_request;
 pub mod incoming_envelope;
 pub mod introduction;
 pub mod invite;
@@ -238,6 +241,12 @@ pub use channel_read_key::{
     ChannelReadKeyEnvelope, ChannelReadKeyError, CHANNEL_READ_KEY_ENVELOPE_DOMAIN_V1,
     CHANNEL_READ_KEY_ENVELOPE_LEN,
 };
+pub use channel_return::{
+    compose_channel_return, decode_channel_return, member_card_binding_bytes_from_hash,
+    try_unwrap_channel_return, ChannelReturn, ChannelReturnError, ChannelReturnRole,
+    CHANNEL_RETURN_DOMAIN_V1, CHANNEL_RETURN_MAX_INVITATION_LEN, CHANNEL_RETURN_MAX_LEN,
+    CHANNEL_RETURN_MIN_LEN, MEMBER_CARD_BINDING_DOMAIN_V1,
+};
 pub use channel_rotate_request::{
     compose_channel_rotate_request, decode_channel_rotate_request,
     try_unwrap_channel_rotate_request, ChannelRotateRequestError,
@@ -260,6 +269,10 @@ pub use committer_delegation::{
     COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1, COMMITTER_DELEGATION_ENVELOPE_MAX_LEN,
     COMMITTER_DELEGATION_ENVELOPE_MIN_LEN, COMMITTER_DELEGATION_VERSION_V2,
     MAX_COMMITTER_DELEGATIONS,
+};
+pub use continuity::{
+    continuity_mailbox_key, continuity_mailbox_seed, verify_continuity_binding, ContinuityBinding,
+    ContinuityError, CONTINUITY_BINDING_LEN, CONTINUITY_MAX_WINDOW_MS, CONTINUITY_WINDOW_MS,
 };
 pub use conversation_handle::{
     compose_conversation_handle, conversation_handle_is_newer, decode_conversation_handle,
@@ -339,6 +352,10 @@ pub use handle_record::{
     HandleRecordKind, HandleRecordPayload, SearchRecord, HANDLE_RECORD_KNOCK_VERSION_LEN,
     HANDLE_RECORD_PAYLOAD_MAX_LEN, HANDLE_RECORD_PAYLOAD_MIN_LEN, HANDLE_RECORD_PAYLOAD_VERSION_V3,
     MAX_SIZE_BAND,
+};
+pub use history_request::{
+    compose_history_request, decode_history_request, try_unwrap_history_request, HistoryRequest,
+    HistoryRequestError, HISTORY_REQUEST_DOMAIN_V1, HISTORY_REQUEST_ENVELOPE_LEN,
 };
 pub use incoming_envelope::{dispatch_incoming_envelope, DispatchError, IncomingEnvelope};
 pub use introduction::{
@@ -431,11 +448,11 @@ pub use poll_ballots::{
 };
 pub use profile::{
     check_display_name, compose_profile, decode_profile, is_format_char, is_profile_grant_class,
-    normalize_display_name, profile_is_newer, try_unwrap_profile, DisplayNameError, Profile,
-    ProfileError, DISPLAY_NAME_MAX_BYTES, DISPLAY_NAME_MAX_CHARS, FORMAT_CHAR_RANGES,
+    normalize_display_name, profile_is_newer, try_unwrap_profile, verify_profile, DisplayNameError,
+    Profile, ProfileError, DISPLAY_NAME_MAX_BYTES, DISPLAY_NAME_MAX_CHARS, FORMAT_CHAR_RANGES,
     MAX_PROFILE_GRANTS, PROFILE_ENVELOPE_DOMAIN_V1, PROFILE_ENVELOPE_MAX_LEN,
-    PROFILE_ENVELOPE_MIN_LEN, PROFILE_VERSION_V1, PROFILE_VERSION_V2, PROFILE_VERSION_V3,
-    USERNAME_CERT_LEN,
+    PROFILE_ENVELOPE_MIN_LEN, PROFILE_SIG_DOMAIN, PROFILE_SIG_LEN, PROFILE_VERSION_V1,
+    PROFILE_VERSION_V2, PROFILE_VERSION_V3, PROFILE_VERSION_V6, USERNAME_CERT_LEN,
 };
 pub use profile_request::{
     compose_profile_request, decode_profile_request, should_request_profiles,
@@ -823,6 +840,47 @@ pub mod fuzz_api {
     #[must_use]
     pub fn x25519_binding_verify(bytes: &[u8]) -> bool {
         crate::x25519_binding::fuzz_verify(bytes)
+    }
+
+    /// Decode `bytes` as a continuity binding (ADR-0101 section 2): whatever
+    /// decodes re-encodes to the same bytes, never verifies under a fixed
+    /// identity key the fuzzer does not hold, and a binding that key signs
+    /// verifies inside its window. `None` when the decoder refuses;
+    /// `Some(true)` when all hold.
+    #[must_use]
+    pub fn continuity_binding_decode(bytes: &[u8]) -> Option<bool> {
+        crate::continuity::fuzz_decode(bytes)
+    }
+
+    /// Decode `bytes` as a channel return (ADR-0101 section 7) and check
+    /// the dispatcher agrees. `None` when the decoder refuses; `Some(true)`
+    /// when it re-composes to the same bytes within the advertised bounds,
+    /// its card binding never verifies under a fixed key the fuzzer does not
+    /// hold, and it dispatches as the same return.
+    #[must_use]
+    pub fn channel_return_decode(bytes: &[u8]) -> Option<bool> {
+        let ok = crate::channel_return::fuzz_decode(bytes)?;
+        let ret = crate::channel_return::decode_channel_return(bytes).ok()?;
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::ChannelReturn(r)) if r == ret
+        );
+        Some(ok && dispatched)
+    }
+
+    /// Decode `bytes` as a history request (ADR-0101 section 9) and check
+    /// the dispatcher agrees. `None` when the decoder refuses; `Some(true)`
+    /// when it re-composes to the same bytes at the fixed length and
+    /// dispatches as the same request.
+    #[must_use]
+    pub fn history_request_decode(bytes: &[u8]) -> Option<bool> {
+        let ok = crate::history_request::fuzz_decode(bytes)?;
+        let req = crate::history_request::decode_history_request(bytes).ok()?;
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::HistoryRequest(r)) if r == req
+        );
+        Some(ok && dispatched)
     }
 
     /// Decode `bytes` as a knock-key envelope (ADR-0091 phase 2, route 3)

@@ -22,7 +22,7 @@
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { avatarFromWasm, type AvatarData } from "../profile/avatar-model";
 import { adoptOwnProfile, loadOwnProfile } from "../profile/own-profile";
-import { composeOwnProfileForDevices } from "../profile/own-profile-sync";
+import { composeOwnProfileForDevices, type AccountIdentity } from "../profile/own-profile-sync";
 import { ownCardShareable } from "../profile/card-share";
 import { visibilitySetting } from "../reach/visibility-store";
 import { loadReachRow, saveReachRow } from "../reach/reach-store";
@@ -49,12 +49,16 @@ export function registerBackupUsernameSource(source: BackupUsernameSource): () =
  */
 export function ownProfileForBackup(
   wasm: Wasm,
+  /** The account identity (ADR-0050: the person, not a device); it signs
+   *  the envelope (ADR-0101 section 8). */
+  accountIdentity: AccountIdentity,
   accountIdB64: string,
   accountIdBytes: Uint8Array,
 ): Uint8Array | null {
   try {
     return composeOwnProfileForDevices(
       wasm,
+      accountIdentity,
       loadOwnProfile(accountIdB64),
       accountIdBytes,
       usernameSource?.(accountIdB64) ?? null,

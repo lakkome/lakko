@@ -280,6 +280,7 @@ export function planBackgroundEvents(
       case "registrarSeed":
       case "groupContactRequest":
       case "accountDeleted":
+      case "historyRequest":
         // ADR-0057 / who-can-find-me 6.4 — consumed at receipt by the chat
         // client and never handed on; a stray one is dropped here rather than
         // rendered or notified.

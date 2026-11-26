@@ -31,6 +31,13 @@ import { forwardEnabled } from "../chat/selection";
 import { feedForwardPayload, feedItemForwardable } from "../feed/feed-forward";
 import type { PersistedMessage } from "../chat/message-log-store";
 
+/** ADR-0101 section 8: a v6 profile envelope is signed by an account
+ *  identity; this test's profiles are signed by one fixed identity. */
+let profileSignerHeld: wasm.Identity | undefined;
+function profileSigner(): wasm.Identity {
+  return (profileSignerHeld ??= wasm.Identity.fromSeed(new Uint8Array(64).fill(0x5a)));
+}
+
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
   await initWasm({ module_or_path: readFileSync(path) });
@@ -60,8 +67,8 @@ describe("own card flag", () => {
   });
 
   it("is carried by the composed envelope and read back by the sniffer", () => {
-    const off = wasm.composeProfileEnvelope("Ann", undefined, 5n, undefined, undefined, undefined, undefined, ownCardShareable({ mode: wasm.VisibilityMode.Nobody }));
-    const on = wasm.composeProfileEnvelope("Ann", undefined, 5n, undefined, undefined, undefined, undefined, true);
+    const off = wasm.composeProfileEnvelope(profileSigner(), "Ann", undefined, 5n, undefined, undefined, undefined, undefined, ownCardShareable({ mode: wasm.VisibilityMode.Nobody }));
+    const on = wasm.composeProfileEnvelope(profileSigner(), "Ann", undefined, 5n, undefined, undefined, undefined, undefined, true);
     const decoder = wasm as unknown as ProfileDecoder;
     const a = sniffProfile(decoder, off);
     const b = sniffProfile(decoder, on);

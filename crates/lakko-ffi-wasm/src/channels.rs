@@ -894,6 +894,8 @@ pub fn seal_member_card(
 pub struct OpenedMemberCard {
     identity_pk: Vec<u8>,
     profile: Vec<u8>,
+    binding_sig: Vec<u8>,
+    profile_hash: Vec<u8>,
 }
 
 #[wasm_bindgen]
@@ -911,6 +913,23 @@ impl OpenedMemberCard {
     #[must_use]
     pub fn profile(&self) -> Vec<u8> {
         self.profile.clone()
+    }
+
+    /// The 64-byte account binding signature (ADR-0101 section 7): keep it
+    /// beside the card to hand back in a channel return if this account
+    /// resets its keys.
+    #[wasm_bindgen(getter, js_name = bindingSig)]
+    #[must_use]
+    pub fn binding_sig(&self) -> Vec<u8> {
+        self.binding_sig.clone()
+    }
+
+    /// The 32-byte BLAKE3 of the profile, the `profileHash` a channel return
+    /// carries beside `bindingSig` (ADR-0101 section 7).
+    #[wasm_bindgen(getter, js_name = profileHash)]
+    #[must_use]
+    pub fn profile_hash(&self) -> Vec<u8> {
+        self.profile_hash.clone()
     }
 }
 
@@ -935,6 +954,8 @@ fn open_member_card_inner(
         .map_err(|e| format!("open_member_card: {e}"))?;
     Ok(OpenedMemberCard {
         identity_pk: opened.identity_pk.to_vec(),
+        binding_sig: opened.binding_sig.to_vec(),
+        profile_hash: lakko_crypto::hash::blake3(&opened.profile).to_vec(),
         profile: opened.profile,
     })
 }

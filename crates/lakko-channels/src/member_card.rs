@@ -116,7 +116,8 @@ pub const MEMBER_CARD_KEY_INFO_V1: &[u8] = b"lakko/channel/member-card/v1";
 
 /// Domain that opens the bytes the account identity key signs to bind a card
 /// to its account, frozen at v1. Distinct from every other domain here.
-pub const MEMBER_CARD_BINDING_DOMAIN_V1: &[u8] = b"lakko/channel/member-card-binding/v1";
+pub const MEMBER_CARD_BINDING_DOMAIN_V1: &[u8] =
+    lakko_contacts::channel_return::MEMBER_CARD_BINDING_DOMAIN_V1;
 
 /// Length of the account identity public key a card names.
 pub const MEMBER_CARD_IDENTITY_PK_LEN: usize = PUBLIC_KEY_LEN;
@@ -159,6 +160,10 @@ pub struct OpenedMemberCard {
     pub identity_pk: [u8; MEMBER_CARD_IDENTITY_PK_LEN],
     /// The profile envelope, opaque here.
     pub profile: Vec<u8>,
+    /// The binding signature itself (ADR-0101 section 7): what a device of
+    /// the channel's owner or a publisher hands back in a channel return
+    /// when this account resets its keys.
+    pub binding_sig: [u8; SIGNATURE_LEN],
 }
 
 /// Largest valid card: header plus a maximal profile plus its tag.
@@ -299,9 +304,13 @@ pub(crate) fn verify_binding(
             &signature,
         )
         .map_err(|_| ChannelError::MemberCardBinding)?;
+    let binding_sig: [u8; SIGNATURE_LEN] = sig_bytes
+        .try_into()
+        .map_err(|_| ChannelError::MemberCardBinding)?;
     Ok(OpenedMemberCard {
         identity_pk,
         profile: profile.to_vec(),
+        binding_sig,
     })
 }
 
@@ -313,15 +322,13 @@ pub fn member_card_binding_bytes(
     subscriber_pk: &[u8; SUBSCRIBER_PK_LEN],
     profile: &[u8],
 ) -> Vec<u8> {
-    let digest = hash::blake3(profile);
-    let mut out = Vec::with_capacity(
-        MEMBER_CARD_BINDING_DOMAIN_V1.len() + CHANNEL_ID_LEN + SUBSCRIBER_PK_LEN + digest.len(),
-    );
-    out.extend_from_slice(MEMBER_CARD_BINDING_DOMAIN_V1);
-    out.extend_from_slice(channel_id);
-    out.extend_from_slice(subscriber_pk);
-    out.extend_from_slice(&digest);
-    out
+    // One definition, shared with the ADR-0101 channel return, which checks
+    // an old card's binding from the profile hash alone.
+    lakko_contacts::channel_return::member_card_binding_bytes_from_hash(
+        channel_id,
+        subscriber_pk,
+        &hash::blake3(profile),
+    )
 }
 
 /// The bytes a subscriber signs to upload `card` (or, with an empty `card`, to
@@ -492,6 +499,32 @@ mod tests {
         out.extend_from_slice(&sig);
         out.extend_from_slice(profile);
         out
+    }
+
+    /// ADR-0101 section 7: the binding of an opened card, handed back in a
+    /// channel return, verifies under the account's (now previous) key from
+    /// the profile hash alone, and under no other key.
+    #[test]
+    fn an_opened_cards_binding_verifies_in_a_channel_return() {
+        use lakko_contacts::channel_return::{ChannelReturn, ChannelReturnRole};
+        let opened = open_member_card(&seed(), &card(b"profile"), &CHANNEL, &ALICE).unwrap();
+        let ret = ChannelReturn {
+            channel_id: CHANNEL,
+            role: ChannelReturnRole::Subscriber,
+            old_binding_sig: opened.binding_sig,
+            old_subscriber_pk: ALICE,
+            profile_hash: hash::blake3(&opened.profile),
+            invitation: Vec::new(),
+            epoch_seeds: Vec::new(),
+            profile: None,
+        };
+        assert_eq!(
+            ret.verify_old_card_binding(&account_pk(&ALICE_ACCOUNT)),
+            Ok(())
+        );
+        assert!(ret
+            .verify_old_card_binding(&account_pk(&BOB_ACCOUNT))
+            .is_err());
     }
 
     #[test]

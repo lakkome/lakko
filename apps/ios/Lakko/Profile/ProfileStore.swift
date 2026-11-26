@@ -42,9 +42,18 @@ public struct ProfileClaim: Codable, Equatable, Hashable, Sendable {
     /// stored before the field existed and for a claim this device made up (a
     /// found name, a pending contact's link).
     public let cardShareable: Bool
+    /// ADR-0101 section 8 — the received profile envelope VERBATIM (profile
+    /// v6, signed by its author's account key), kept beside the decoded
+    /// fields so it can be carried (a pairing bundle, a backup, a return to a
+    /// person after their key reset) without anyone re-signing another
+    /// person's profile. `nil` for a claim made on this device (a found
+    /// name, a pending contact) or one stored before the field; such a row
+    /// is not carried.
+    public let envelope: Data?
 
     enum CodingKeys: String, CodingKey {
         case displayName, username, updatedAtMs, accountId, usernameCertificate, avatar, cardShareable
+        case envelope = "e"
     }
 
     public init(
@@ -55,8 +64,10 @@ public struct ProfileClaim: Codable, Equatable, Hashable, Sendable {
         usernameCertificate: Data? = nil,
         grants: [FfiReachGrant] = [],
         avatar: ProfileAvatar? = nil,
-        cardShareable: Bool = true
+        cardShareable: Bool = true,
+        envelope: Data? = nil
     ) {
+        self.envelope = envelope
         self.avatar = avatar
         self.cardShareable = cardShareable
         self.displayName = displayName
@@ -77,7 +88,8 @@ public struct ProfileClaim: Codable, Equatable, Hashable, Sendable {
             accountId: try c.decodeIfPresent(Data.self, forKey: .accountId),
             usernameCertificate: try c.decodeIfPresent(Data.self, forKey: .usernameCertificate),
             avatar: try c.decodeIfPresent(ProfileAvatar.self, forKey: .avatar),
-            cardShareable: try c.decodeIfPresent(Bool.self, forKey: .cardShareable) ?? true)
+            cardShareable: try c.decodeIfPresent(Bool.self, forKey: .cardShareable) ?? true,
+            envelope: try c.decodeIfPresent(Data.self, forKey: .envelope))
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -89,6 +101,7 @@ public struct ProfileClaim: Codable, Equatable, Hashable, Sendable {
         try c.encodeIfPresent(usernameCertificate, forKey: .usernameCertificate)
         try c.encodeIfPresent(avatar, forKey: .avatar)
         try c.encode(cardShareable, forKey: .cardShareable)
+        try c.encodeIfPresent(envelope, forKey: .envelope)
     }
 
     /// The name this device found a person under, filed for them until their
@@ -112,7 +125,7 @@ public struct ProfileClaim: Codable, Equatable, Hashable, Sendable {
         ProfileClaim(
             displayName: displayName, username: username, updatedAtMs: updatedAtMs,
             accountId: accountId, usernameCertificate: usernameCertificate, avatar: avatar,
-            cardShareable: cardShareable)
+            cardShareable: cardShareable, envelope: envelope)
     }
 }
 
@@ -234,7 +247,7 @@ final class ReceivedProfileStore {
             profiles[key] = ProfileClaim(
                 displayName: stored.displayName, username: stored.username,
                 updatedAtMs: stored.updatedAtMs, avatar: stored.avatar,
-                cardShareable: claim.cardShareable)
+                cardShareable: claim.cardShareable, envelope: claim.envelope)
             if let data = try? JSONEncoder().encode(profiles) {
                 persistence.save(data, accountIdB64: accountIdB64)
             }
@@ -246,16 +259,21 @@ final class ReceivedProfileStore {
             // account id the held row never had: a row filed before the
             // envelope carried one. Take the id and nothing else, or the call
             // roster can never name a person whose profile predates the field.
-            guard stored.accountId == nil, let learned = claim.accountId,
-                claim.updatedAtMs == stored.updatedAtMs
+            // ADR-0101 section 8 — likewise the envelope itself, for a row
+            // stored before the raw envelope was kept.
+            guard claim.updatedAtMs == stored.updatedAtMs,
+                  (stored.accountId == nil && claim.accountId != nil)
+                    || (stored.envelope == nil && claim.envelope != nil)
             else { return .notNewer }
+            let learned = stored.accountId ?? claim.accountId
             profiles[key] = ProfileClaim(
                 displayName: stored.displayName,
                 username: stored.username,
                 updatedAtMs: stored.updatedAtMs,
                 accountId: learned,
                 avatar: stored.avatar,
-                cardShareable: stored.cardShareable
+                cardShareable: stored.cardShareable,
+                envelope: stored.envelope ?? claim.envelope
             )
             if let data = try? JSONEncoder().encode(profiles) {
                 persistence.save(data, accountIdB64: accountIdB64)
@@ -274,7 +292,8 @@ final class ReceivedProfileStore {
                 updatedAtMs: claim.updatedAtMs,
                 accountId: known,
                 avatar: claim.avatar,
-                cardShareable: claim.cardShareable
+                cardShareable: claim.cardShareable,
+                envelope: claim.envelope
             )
         }
         profiles[key] = next

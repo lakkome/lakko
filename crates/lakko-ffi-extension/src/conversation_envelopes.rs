@@ -39,6 +39,9 @@ use lakko_contacts::channel_epoch_seeds::{
     CHANNEL_EPOCH_SEEDS_ENVELOPE_MIN_LEN,
 };
 use lakko_contacts::channel_read_key::{decode_channel_read_key, CHANNEL_READ_KEY_ENVELOPE_LEN};
+use lakko_contacts::channel_return::{
+    decode_channel_return, CHANNEL_RETURN_MAX_LEN, CHANNEL_RETURN_MIN_LEN,
+};
 use lakko_contacts::channel_rotate_request::{
     decode_channel_rotate_request, CHANNEL_ROTATE_REQUEST_ENVELOPE_LEN,
 };
@@ -56,6 +59,7 @@ use lakko_contacts::group_photo::{
 use lakko_contacts::group_reactions::{
     decode_group_reactions, GROUP_REACTIONS_ENVELOPE_MAX_LEN, GROUP_REACTIONS_ENVELOPE_MIN_LEN,
 };
+use lakko_contacts::history_request::{decode_history_request, HISTORY_REQUEST_ENVELOPE_LEN};
 use lakko_contacts::knock_key::{decode_knock_key, KNOCK_KEY_ENVELOPE_LEN};
 use lakko_contacts::knock_seed::{decode_knock_seed, KNOCK_SEED_ENVELOPE_LEN};
 use lakko_contacts::publisher_device_request::{
@@ -319,6 +323,43 @@ pub fn knock_key_envelope_len() -> u32 {
     len_u32(KNOCK_KEY_ENVELOPE_LEN)
 }
 
+/// Whether `plaintext` is a channel return (ADR-0101 section 7), a
+/// continuity-mailbox row body. Recognised only, to suppress it.
+#[uniffi::export]
+#[must_use]
+pub fn is_channel_return_envelope(plaintext: Vec<u8>) -> bool {
+    decode_channel_return(&plaintext).is_ok()
+}
+
+/// The shortest channel return.
+#[uniffi::export]
+#[must_use]
+pub fn channel_return_envelope_min_len() -> u32 {
+    len_u32(CHANNEL_RETURN_MIN_LEN)
+}
+
+/// The longest channel return.
+#[uniffi::export]
+#[must_use]
+pub fn channel_return_envelope_max_len() -> u32 {
+    len_u32(CHANNEL_RETURN_MAX_LEN)
+}
+
+/// Whether `plaintext` is a history request (ADR-0101 section 9).
+/// Recognised only, to suppress it.
+#[uniffi::export]
+#[must_use]
+pub fn is_history_request_envelope(plaintext: Vec<u8>) -> bool {
+    decode_history_request(&plaintext).is_ok()
+}
+
+/// The one length of a history request.
+#[uniffi::export]
+#[must_use]
+pub fn history_request_envelope_len() -> u32 {
+    len_u32(HISTORY_REQUEST_ENVELOPE_LEN)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,8 +480,36 @@ mod tests {
         })
     }
 
+    fn channel_return() -> Vec<u8> {
+        lakko_contacts::channel_return::compose_channel_return(
+            &lakko_contacts::channel_return::ChannelReturn {
+                channel_id: [0x0C; 16],
+                role: lakko_contacts::channel_return::ChannelReturnRole::Subscriber,
+                old_binding_sig: [0x51; 64],
+                old_subscriber_pk: [0x52; 32],
+                profile_hash: [0x53; 32],
+                invitation: Vec::new(),
+                epoch_seeds: Vec::new(),
+                profile: None,
+            },
+        )
+        .unwrap()
+    }
+
+    fn history_request() -> Vec<u8> {
+        lakko_contacts::history_request::compose_history_request(
+            &lakko_contacts::history_request::HistoryRequest {
+                gap_key_pub: [0x6A; 32],
+                before_message_id: 0,
+            },
+        )
+        .unwrap()
+    }
+
     #[test]
     fn recognises_each_envelope_and_refuses_chat() {
+        assert!(is_channel_return_envelope(channel_return()));
+        assert!(is_history_request_envelope(history_request()));
         assert!(is_conversation_reentry_envelope(reentry()));
         assert!(is_knock_key_envelope(knock_key()));
         assert!(is_group_photo_envelope(photo()));
@@ -469,6 +538,8 @@ mod tests {
         assert!(!is_publisher_reader_key_envelope(chat.clone()));
         assert!(!is_conversation_reentry_envelope(chat.clone()));
         assert!(!is_knock_key_envelope(chat.clone()));
+        assert!(!is_channel_return_envelope(chat.clone()));
+        assert!(!is_history_request_envelope(chat.clone()));
         assert!(!is_publisher_step_down_envelope(chat));
     }
 
@@ -489,6 +560,8 @@ mod tests {
             reentry(),
             knock_key(),
             reader_key(),
+            channel_return(),
+            history_request(),
         ] {
             assert_eq!(
                 lakko_attachments::parse_body(&w),
@@ -517,6 +590,11 @@ mod tests {
         assert_eq!(publisher_step_down_envelope_len(), 46);
         assert_eq!(publisher_device_request_envelope_min_len(), 84);
         assert_eq!(publisher_device_request_envelope_max_len(), 7208);
+        assert_eq!(channel_return_envelope_min_len(), 175);
+        assert_eq!(channel_return_envelope_max_len(), 7566);
+        assert_eq!(history_request_envelope_len(), 66);
+        assert_eq!(channel_return()[0], 0x6c);
+        assert_eq!(history_request()[0], 0x6c);
         assert_eq!(channel_admission_mark_envelope_len(), 57);
         assert_eq!(publisher_reader_key_envelope_len(), 79);
         // Version 2 carries the 32-byte gap key (security review 2026-11-21).
@@ -590,8 +668,10 @@ mod tests {
             reentry(),
             knock_key(),
             reader_key(),
+            channel_return(),
+            history_request(),
         ];
-        let tests: [fn(Vec<u8>) -> bool; 14] = [
+        let tests: [fn(Vec<u8>) -> bool; 16] = [
             is_group_photo_envelope,
             is_group_reactions_envelope,
             is_conversation_handle_envelope,
@@ -606,6 +686,8 @@ mod tests {
             is_conversation_reentry_envelope,
             is_knock_key_envelope,
             is_publisher_reader_key_envelope,
+            is_channel_return_envelope,
+            is_history_request_envelope,
         ];
         for (i, w) in all.iter().enumerate() {
             for (j, t) in tests.iter().enumerate() {

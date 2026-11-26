@@ -813,7 +813,7 @@ public class ReachManager internal constructor(
         val profiles = ownProfiles ?: return null
         val accountId = rawAccountId(b) ?: return null
         return me.lakko.app.profile.ownProfileDeviceEnvelope(profiles.load(accountId), accountId) {
-            uniffi.lakko_ffi_uniffi.composeProfileEnvelope(it)
+            me.lakko.app.profile.ProfileSigner.compose(it, accountId)
         }
     }
 
@@ -1949,14 +1949,6 @@ public class ReachManager internal constructor(
                 out += { verifiedGrantDest(grant, current, mailboxCrypto) { seed -> DsReachAuth(reachSigner(seed)) } }
             }
         }
-        // ADR-0073 R.4 - the continuity Welcome to a person whose reset this
-        // device accepted is a recorded no-op under ADR-0078: there is no
-        // carrier for the reset account's new mailbox key (ADR-0078 open
-        // question), and an address derived from the account id or the
-        // identity key is exactly what ADR-0078 removed.
-        if (purpose == WritePurpose.WELCOME) {
-            out += { continuityWelcomeDest(runCatching { acceptedResetOf?.invoke(current) }.getOrNull() != null) }
-        }
         if (purpose == WritePurpose.WELCOME && groupHex != null) {
             out += {
                 // The write is signed with the own key the delegation
@@ -1969,6 +1961,13 @@ public class ReachManager internal constructor(
                     }
                 }
             }
+        }
+        // ADR-0101 section 4 - the continuity mailbox of a person whose reset
+        // this device accepted, last among the signed candidates: an ordinary
+        // grant (the person's real mailbox) is always preferred, and once a
+        // conversation is back the person's profile hands those over.
+        if (purpose == WritePurpose.WELCOME) {
+            out += { continuityDestFor(current) }
         }
         return out to proofless
     }
@@ -2416,14 +2415,43 @@ public class ReachManager internal constructor(
      */
     public fun welcomeMailboxPkFor(accountKey: ByteArray, groupHex: String?): ByteArray? {
         mailboxPkFor(accountKey)?.let { return it }
-        val group = groupHex ?: return null
         val current = mailboxAccountKey(accountKey)
-        delegationFor(group, accountKey)?.let { picked ->
-            picked.signerSeed.fill(0)
-            mailboxCrypto.bindingMailboxPkOrNull(picked.addedMailboxBinding, current)?.let { return it }
+        if (groupHex != null) {
+            delegationFor(groupHex, accountKey)?.let { picked ->
+                picked.signerSeed.fill(0)
+                mailboxCrypto.bindingMailboxPkOrNull(picked.addedMailboxBinding, current)?.let { return it }
+            }
+            openWelcomeMailboxPk(groupHex, accountKey)?.let { return it }
         }
-        return openWelcomeMailboxPk(group, accountKey)
+        // ADR-0101 section 4 - the continuity mailbox the reset person
+        // announced, when it is the one way in.
+        return continuityMailboxPkFor(current)
     }
+
+    /**
+     * ADR-0101 section 4 - the live, verified continuity mailbox key kept for
+     * the person whose CURRENT account key is given, or `null`. Installed by
+     * the contacts repository ([ContinuityTargetStore]); `null` keeps none.
+     */
+    @Volatile
+    public var continuityTargetOf: ((currentKey: ByteArray) -> ByteArray?)? = null
+
+    /** The continuity mailbox key of [current], only while a write to it
+     *  would be signed ([continuityDestFor] would yield a destination). */
+    public fun continuityMailboxPkFor(current: ByteArray): ByteArray? =
+        continuityDestFor(current)?.mailboxPk
+
+    /** ADR-0101 section 4 - the continuity destination of [current], or `null`
+     *  ([continuityDest]). */
+    public fun continuityDestFor(current: ByteArray): MailboxDest? = continuityDest(
+        accepted = runCatching { acceptedResetOf?.invoke(current) }.getOrNull(),
+        targetPk = runCatching { continuityTargetOf?.invoke(current) }.getOrNull(),
+        nowMs = System.currentTimeMillis(),
+        seedOf = { accountId, generation ->
+            uniffi.lakko_ffi_uniffi.continuityReachSeed(accountId, generation.toULong())
+        },
+        signerOf = { seed -> DsReachAuth(reachSigner(seed)) },
+    )
 
     // -----------------------------------------------------------------
     // Helpers

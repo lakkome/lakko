@@ -133,6 +133,12 @@ import { clearRootHeldAll } from "../ds/root-held";
 import { deletePhrase } from "../backup/phrase-store";
 import { clearBudget, clearThreeWordsSuspended } from "./recover/three-words";
 import { clearKeyResetOwed } from "./key-reset-owed";
+import { clearResetContinuity } from "./reset-continuity";
+import { clearContinuityTargets } from "../reach/continuity";
+import { clearHeldReturns } from "../channels/channel-return";
+import { clearHistoryStates } from "../chat/history-return";
+import { clearRecoveredChannels } from "../channels/recovered-channels";
+import { clearRecoveryRegistered, clearSentReturns } from "../channels/channel-return-runtime";
 import { clearGenesisRecorded, clearKnownDeviceId } from "./session-device";
 import { clearBindingConfirmed } from "./own-binding-republish";
 import { clearNoPrfPasskeys } from "./passkey-no-prf";
@@ -326,6 +332,29 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     {
       name: "key-reset-owed",
       run: () => clearKeyResetOwed(storage, accountIdB64),
+    },
+    // ADR-0101: the reset's continuity window and previous key, and the
+    // continuity mailboxes this account kept for its reset contacts.
+    { name: "reset-continuity", run: () => clearResetContinuity(storage, accountIdB64) },
+    { name: "continuity-targets", run: () => clearContinuityTargets(accountIdB64, storage) },
+    // ADR-0101 section 7: the channel returns held and sent, the recovery
+    // registrations, the kept invitations, the continuity mailbox cursor.
+    { name: "channel-returns-held", run: () => clearHeldReturns(storage, accountIdB64) },
+    { name: "channel-returns-sent", run: () => clearSentReturns(storage, accountIdB64) },
+    { name: "channel-recovery-registered", run: () => clearRecoveryRegistered(storage, accountIdB64) },
+    {
+      name: "channel-return-invitations",
+      run: () => storage?.removeItem(`lakko:channel-return-invitations:${accountIdB64}`),
+    },
+    { name: "history-return", run: () => clearHistoryStates(accountIdB64, storage) },
+    { name: "channel-recovered", run: () => clearRecoveredChannels(accountIdB64, storage) },
+    {
+      name: "continuity-profile-carried",
+      run: () => storage?.removeItem(`lakko:continuity-profile-carried:${accountIdB64}`),
+    },
+    {
+      name: "continuity-mailbox-cursor",
+      run: () => storage?.removeItem(`lakko:continuity-mailbox-cursor:${accountIdB64}`),
     },
     // ADR-0074: the id of the device identity wiped above (the next setup
     // mints a NEW device key; the old id is tombstoned in the directory once

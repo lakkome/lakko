@@ -1103,6 +1103,7 @@ mod action_grant_e2e_tests {
             anon_cred: None,
             handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
             recovery_email: None,
+            channel_recovery: None,
             limits: Arc::new(crate::limits::Limits::defaults()),
         };
         (state, token_secret)

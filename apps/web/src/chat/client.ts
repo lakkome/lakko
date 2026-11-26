@@ -144,6 +144,7 @@ import { isGroupContactRequestEnvelope } from "./group-contact-request-envelope"
 import { deliverGroupContactRequest } from "../contacts/group-contact-request";
 import { deliverRegistrarSeed } from "../ds/registrar-seeds";
 import { deliverAccountDeleted, isAccountDeletedBytes } from "./account-deleted-envelope";
+import { deliverHistoryRequest } from "./history-return";
 import { deliverKnockSeed, groupIsPublic, knockSeedsForRow, rememberKnockName } from "../ds/knock-seeds";
 import { rememberKnockOrigin, rowStampMs } from "./knock-origins";
 import { joinReplyBindingVerifies, rememberJoinReply } from "../reach/join-replies";
@@ -669,6 +670,18 @@ export type IncomingChatEvent =
        *  union, like `registrarSeed`, only so a caller that forgets to
        *  consume it cannot render it. */
       kind: "accountDeleted";
+      messageId: number;
+      /** The whole envelope. */
+      plaintext: Uint8Array;
+      /** The sender's ACCOUNT key resolved at receipt (C-68). */
+      senderKey: MemberIdentity | undefined;
+      createdAt: string;
+    }
+  | {
+      /** ADR-0101 section 9 — a device back after a key reset asks for this
+       *  conversation's history. Never a timeline bubble: consumed at receipt
+       *  (`chat/history-return.ts`), where the answering device decides. */
+      kind: "historyRequest";
       messageId: number;
       /** The whole envelope. */
       plaintext: Uint8Array;
@@ -1988,6 +2001,11 @@ export class ChatClient {
         await consumeRegistrarSeed(group, event);
         continue;
       }
+      // ADR-0101 section 9 — a history request, handed on at receipt.
+      if (event.kind === "historyRequest") {
+        consumeHistoryRequest(group, event);
+        continue;
+      }
       // ADR-0098 — the same: verified and recorded at receipt.
       if (event.kind === "accountDeleted") {
         await consumeAccountDeleted(group, event);
@@ -2309,6 +2327,32 @@ export async function consumeRegistrarSeed(
 }
 
 /**
+ * ADR-0101 section 9 — hand one history request on, with this conversation's
+ * id and the sender's account key resolved at receipt (C-68). Never throws.
+ */
+export function consumeHistoryRequest(
+  group: WasmGroup,
+  event: { readonly plaintext: Uint8Array; readonly senderKey: MemberIdentity | undefined },
+): void {
+  if (event.senderKey === undefined) return;
+  void loadWasm()
+    .then((wasm) => {
+      const decoded = wasm.decodeHistoryRequestEnvelope(event.plaintext);
+      try {
+        deliverHistoryRequest({
+          groupIdB64: base64Encode(group.groupId),
+          senderKeyB64: event.senderKey as string,
+          gapKeyPub: decoded.gapKeyPub,
+          beforeMessageId: BigInt(decoded.beforeMessageId),
+        });
+      } finally {
+        decoded.free();
+      }
+    })
+    .catch(() => undefined);
+}
+
+/**
  * ADR-0098 — hand one account-deleted statement on, with this conversation's
  * group id and the sender's account key resolved at receipt (C-68). Never
  * throws; the sink verifies it and drops anything that does not verify.
@@ -2492,6 +2536,24 @@ export async function toEvent(
     // fixed length so a chat message never pays for the call.
     if (isRegistrarSeedEnvelope(await loadWasm(), bytes)) {
       return { kind: "registrarSeed", messageId, plaintext: bytes, senderKey, createdAt };
+    }
+    // ADR-0101 section 9 — a history request, before the chat parser for the
+    // same reason. Fixed length, so a chat message never pays the call.
+    {
+      const wasm = await loadWasm();
+      // A test double without the export never classifies one.
+      if (
+        bytes[0] === 0x6c &&
+        typeof wasm.historyRequestEnvelopeLen === "function" &&
+        bytes.length === wasm.historyRequestEnvelopeLen()
+      ) {
+        try {
+          wasm.decodeHistoryRequestEnvelope(bytes).free();
+          return { kind: "historyRequest", messageId, plaintext: bytes, senderKey, createdAt };
+        } catch {
+          /* not one: carry on */
+        }
+      }
     }
     // ADR-0098 — an account-deleted statement, before the chat parser for
     // the same reason. Fixed length, so a chat message never pays the call.

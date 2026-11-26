@@ -34,6 +34,13 @@ const PLACEHOLDERS = ["Member", "Someone", "Участник", "Кто-то"];
 const hasPlaceholder = (text: string | undefined): boolean =>
   PLACEHOLDERS.some((w) => (text ?? "").includes(w));
 
+/** ADR-0101 section 8: a v6 profile envelope is signed by an account
+ *  identity; this test's profiles are signed by one fixed identity. */
+let profileSignerHeld: realWasm.Identity | undefined;
+function profileSigner(): realWasm.Identity {
+  return (profileSignerHeld ??= realWasm.Identity.fromSeed(new Uint8Array(64).fill(0x5a)));
+}
+
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
   await initWasm({ module_or_path: readFileSync(path) });
@@ -100,7 +107,7 @@ function deps(messages: unknown[], overrides: Record<string, unknown> = {}) {
 }
 
 const wake = { subHex: "dd".repeat(16), groupHex: GROUP_HEX, pointer: 42 };
-const profile = (name = "Zed Unique Name") => realWasm.composeProfileEnvelope(name, "zed", 5n);
+const profile = (name = "Zed Unique Name") => realWasm.composeProfileEnvelope(profileSigner(), name, "zed", 5n);
 
 describe("the background path never previews a profile", () => {
   it("the unfiltered profile really would render as text (the defect)", () => {

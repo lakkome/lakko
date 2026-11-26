@@ -136,6 +136,15 @@ private fun openCard(card: ByteArray): OpenedCard? {
     )
 }
 
+/** ADR-0101 section 7 — a channel return's invitation card opened offline:
+ *  its facts and the link it carries, or `null` when it does not open. */
+internal fun openReturnedInvitationCard(card: ByteArray): Pair<ChannelInviteFacts, me.lakko.app.contacts.LakkoLink.Group>? =
+    try {
+        openCard(card)?.let { it.facts to it.link }
+    } catch (_: Throwable) {
+        null
+    }
+
 /** What a chat-list row says for a message carrying a channel invitation
  *  card: the channel's name and whether it invites to publish. */
 public data class ChannelInviteSummary(val channelName: String, val publisher: Boolean)

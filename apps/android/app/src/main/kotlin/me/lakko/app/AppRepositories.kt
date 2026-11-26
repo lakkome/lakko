@@ -48,6 +48,18 @@ internal class AppRepositories private constructor(applicationContext: Context) 
      *  the identity secrets land; cleared on logout / forget device there. */
     val deviceGroupSync: DeviceGroupSyncRepository = DeviceGroupSyncRepository(applicationContext)
 
+    init {
+        // ADR-0101 section 8 — every own profile envelope (profile v6) is
+        // signed by the account identity: the chat layer's conversation
+        // identity once it holds one, else the session's phrase seed.
+        me.lakko.app.profile.ProfileSigner.held = chat::profileSigningIdentity
+        me.lakko.app.profile.ProfileSigner.sessionSeed = { accountId ->
+            auth.identitySecrets.value
+                ?.takeIf { accountId == null || it.accountId.contentEquals(accountId) }
+                ?.accountIdentitySeed
+        }
+    }
+
     companion object {
         @Volatile
         private var instance: AppRepositories? = null

@@ -209,61 +209,95 @@ describe("an owed Welcome is retried when a grant arrives", () => {
   });
 });
 
-// ---- ADR-0073 R.4 under ADR-0078: the continuity write is a recorded no-op --
+// ---- ADR-0101: the continuity write goes to the announced mailbox ----------
 
 import { planWriteToPerson } from "./mailbox-write";
+import { bindContinuityTargets, rememberContinuityTarget } from "./continuity";
 
-describe("the continuity key (ADR-0073 R.4) under ADR-0078", () => {
+describe("the continuity key (ADR-0073 R.4) under ADR-0101", () => {
+  const mem = new Map<string, string>();
+  beforeAll(() => {
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => mem.get(k) ?? null,
+      setItem: (k: string, v: string) => void mem.set(k, v),
+      removeItem: (k: string) => void mem.delete(k),
+    });
+  });
   let TARGET: Uint8Array;
+  let TARGET_B64: string;
   beforeAll(() => {
     const id = wasm.Identity.fromSeed(new Uint8Array(32).fill(0x42));
     TARGET = id.signaturePublicKey;
+    TARGET_B64 = Buffer.from(TARGET).toString("base64");
     id.free();
   });
   const CONTINUITY = { accountId: new Uint8Array(16).fill(7), keyGeneration: 2 };
+  const MAILBOX_PK = new Uint8Array(32).fill(0x33);
 
-  it("is NOT a candidate: no carrier names the reset account's new mailbox, so the write is skipped and logged without identifiers", async () => {
-    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+  it("with no continuity mailbox held for the key, nothing is offered and nothing is written", async () => {
+    bindContinuityTargets("acct-a");
+    rememberContinuityTarget(TARGET_B64, null);
+    const plan = await planWriteToPerson(TARGET, { allowMember: true, neverUnsigned: true, continuity: CONTINUITY });
+    expect(plan.candidates).toEqual([]);
+    const publish = vi.fn(async () => 1);
+    await expect(writeWelcome(TARGET, { scope: new Uint8Array(32).fill(1) }, publish)).rejects.toBeInstanceOf(
+      MailboxUnreachableError,
+    );
+    expect(publish).not.toHaveBeenCalled();
+    bindContinuityTargets(null);
+  });
+
+  it("a held, live continuity mailbox is the candidate: sealed to it, addressed to its address, signed with the continuity reach key", async () => {
+    bindContinuityTargets("acct-b");
+    rememberContinuityTarget(TARGET_B64, {
+      mailboxPkB64: Buffer.from(MAILBOX_PK).toString("base64"),
+      expiresAtMs: Date.now() + 60_000,
+    });
     try {
-      const plan = await planWriteToPerson(TARGET, {
-        allowMember: true,
-        neverUnsigned: true,
-        continuity: CONTINUITY,
-      });
-      // Nothing to try: the Welcome stays owed (an exhausted Welcome write
-      // throws MailboxUnreachableError and nothing is published).
-      expect(plan.candidates).toEqual([]);
-      const lines = info.mock.calls.map((c) => String(c[0]));
-      expect(lines.some((l) => l.includes("ADR-0078") && l.includes("continuity"))).toBe(true);
-      // No identifier reaches the log line.
-      const hex = Array.from(TARGET, (b) => b.toString(16).padStart(2, "0")).join("");
-      for (const l of lines) {
-        expect(l).not.toContain(hex);
-        expect(l).not.toContain(Buffer.from(CONTINUITY.accountId).toString("base64"));
-      }
-      // And no address is derived from the identity key or the account id.
-      const publish = vi.fn(async () => 1);
-      await expect(
-        writeWelcome(TARGET, { scope: new Uint8Array(32).fill(1) }, publish),
-      ).rejects.toBeInstanceOf(MailboxUnreachableError);
-      expect(publish).not.toHaveBeenCalled();
+      const plan = await planWriteToPerson(TARGET, { allowMember: true, neverUnsigned: true, continuity: CONTINUITY });
+      expect(plan.candidates.map((c) => c.kind)).toEqual(["continuity"]);
+      const resolved = await plan.candidates[0]!.resolve();
+      expect(resolved).not.toBeNull();
+      expect(Array.from(resolved!.target.mailboxPk)).toEqual(Array.from(MAILBOX_PK));
+      expect(Array.from(resolved!.target.address)).toEqual(Array.from(wasm.mailboxAddress(MAILBOX_PK)));
+      const registered = wasm.reachVerifyingKey(
+        wasm.continuityReachSeed(CONTINUITY.accountId, BigInt(CONTINUITY.keyGeneration)),
+      );
+      expect(Array.from(resolved!.auth.signer!.verifyingKey())).toEqual(Array.from(registered));
+      resolved!.release();
     } finally {
-      info.mockRestore();
+      rememberContinuityTarget(TARGET_B64, null);
+      bindContinuityTargets(null);
     }
   });
 
-  it("logs nothing when the caller rules it out, and offers nothing either", async () => {
-    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+  it("an expired continuity mailbox is never offered", async () => {
+    bindContinuityTargets("acct-c");
+    rememberContinuityTarget(
+      TARGET_B64,
+      { mailboxPkB64: Buffer.from(MAILBOX_PK).toString("base64"), expiresAtMs: 10 },
+      0,
+    );
     try {
-      const ruledOut = await planWriteToPerson(TARGET, {
-        allowMember: true,
-        neverUnsigned: true,
-        continuity: null,
-      });
-      expect(ruledOut.candidates).toEqual([]);
-      expect(info).not.toHaveBeenCalled();
+      const plan = await planWriteToPerson(TARGET, { allowMember: true, neverUnsigned: true, continuity: CONTINUITY });
+      expect(plan.candidates).toEqual([]);
     } finally {
-      info.mockRestore();
+      bindContinuityTargets(null);
+    }
+  });
+
+  it("the caller can rule it out", async () => {
+    bindContinuityTargets("acct-d");
+    rememberContinuityTarget(TARGET_B64, {
+      mailboxPkB64: Buffer.from(MAILBOX_PK).toString("base64"),
+      expiresAtMs: Date.now() + 60_000,
+    });
+    try {
+      const ruledOut = await planWriteToPerson(TARGET, { allowMember: true, neverUnsigned: true, continuity: null });
+      expect(ruledOut.candidates).toEqual([]);
+    } finally {
+      rememberContinuityTarget(TARGET_B64, null);
+      bindContinuityTargets(null);
     }
   });
 });

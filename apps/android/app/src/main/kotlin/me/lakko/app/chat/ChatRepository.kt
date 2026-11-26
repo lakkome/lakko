@@ -534,6 +534,21 @@ public class ChatRepository(
     private fun rootAccountIdentity(): Identity? = publishedAccountIdentity.get() ?: accountIdentity.get()
 
     /**
+     * ADR-0101 section 8 — the account identity that signs this account's
+     * own profile envelopes (profile v6): the CONVERSATION identity
+     * [accountIdentity], the key the leaves are bound under (ADR-0050), for
+     * [accountId] (`null` = the active account), else `null`. Borrowed: the
+     * caller never closes it. Read by `ProfileSigner`.
+     */
+    public fun profileSigningIdentity(accountId: ByteArray?): Identity? {
+        val identity = accountIdentity.get() ?: return null
+        if (accountId == null) return identity
+        val current = currentAccountIdB64.get() ?: return null
+        val currentBytes = runCatching { me.lakko.app.auth.base64Decode(current) }.getOrNull() ?: return null
+        return identity.takeIf { currentBytes.contentEquals(accountId) }
+    }
+
+    /**
      * Keep [publishedAccountIdentity] in step with the session's current
      * account seed. [conversation] is the conversation identity when the
      * caller has not installed it yet.
@@ -2033,6 +2048,14 @@ public class ChatRepository(
      */
     @Volatile
     public var addressRecheck: (suspend (accountKey: ByteArray, accountIdHint: ByteArray?) -> Boolean)? = null
+
+    /**
+     * ADR-0101 section 4 - fetch the identity bundle of an account whose reset
+     * this device accepted and keep the continuity mailbox it announces. Set
+     * by the contacts repository; `null` keeps none (tests).
+     */
+    @Volatile
+    public var continuityTargetRefresh: (suspend (accountIdB64: String) -> Unit)? = null
 
     /**
      * Rule 5 - the rotating device's owed step: revoke the links of the
@@ -6469,8 +6492,10 @@ public class ChatRepository(
         // ADR-0099 section 6 — profile updates stop going to a blocked person.
         if (withholdsSignalIn(groupIdHex)) return nothing
         val profile = ownProfileForWire(groupIdHex, record.group) ?: return nothing
+        // ADR-0101 section 8 — signed by the conversation account identity.
+        val signer = accountIdentity.get() ?: return failed
         val envelope = try {
-            uniffi.lakko_ffi_uniffi.composeProfileEnvelope(profile)
+            uniffi.lakko_ffi_uniffi.composeProfileEnvelope(profile, signer)
         } catch (cause: Throwable) {
             // A stored profile the core refuses (it was validated when saved,
             // so this is not expected) is never sent in a weakened form.
@@ -7126,16 +7151,35 @@ public class ChatRepository(
     private fun receiveProfileBestEffort(
         senderKey: MemberIdentity?,
         profile: uniffi.lakko_ffi_uniffi.FfiProfile,
-    ) {
-        try {
-            profileDirectory.onProfileReceived(
-                signatureKeyB64 = senderKey,
-                // ADR-0048 v2 / ADR-0060 §5 / ADR-0084: the one conversion.
-                profile = me.lakko.app.profile.peerProfileOf(profile),
-            )
-        } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0048 profile not stored", cause)
+        envelope: ByteArray?,
+    ): Boolean {
+        // ADR-0101 section 8 - a profile is filed under its sender only when
+        // the sender signed it; this account's own, carried back by a peer
+        // after its key reset (signed by its previous key), is offered as its
+        // own; anything else is dropped. Returns whether it was filed.
+        var filed = false
+        val accountId = currentAccountIdB64.get()?.let {
+            runCatching { java.util.Base64.getDecoder().decode(it) }.getOrNull()
         }
+        me.lakko.app.profile.fileReceivedProfile(
+            context = applicationContext,
+            accountId = accountId,
+            senderKeyB64 = senderKey,
+            envelope = envelope,
+            ingest = {
+                try {
+                    profileDirectory.onProfileReceived(
+                        signatureKeyB64 = senderKey,
+                        // ADR-0048 v2 / ADR-0060 §5 / ADR-0084: the one conversion.
+                        profile = me.lakko.app.profile.peerProfileOf(profile, envelope),
+                    )
+                    filed = true
+                } catch (cause: Throwable) {
+                    android.util.Log.w("ChatRepository", "ADR-0048 profile not stored", cause)
+                }
+            },
+        )
+        return filed
     }
 
     /**
@@ -8881,7 +8925,10 @@ public class ChatRepository(
         return try {
             me.lakko.app.profile.OwnProfileStore.load(applicationContext, accountId)
                 ?.toFfi(accountId = accountId, shareUsername = false)
-                ?.let { uniffi.lakko_ffi_uniffi.composeProfileEnvelope(it) }
+                ?.let { profile ->
+                    // ADR-0101 section 8 — signed by the account identity.
+                    accountIdentity.get()?.let { uniffi.lakko_ffi_uniffi.composeProfileEnvelope(profile, it) }
+                }
                 ?: ByteArray(0)
         } catch (_: Throwable) {
             ByteArray(0)
@@ -10991,10 +11038,20 @@ public class ChatRepository(
             return try {
                 val key = java.util.Base64.getDecoder().decode(wanted)
                 val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
-                newIdentityReachableVerdict(
-                    mailboxKnown = reach.welcomeMailboxPkFor(reach.mailboxAccountKey(key), null) != null,
-                    candidates = reach.reachAuthCandidates(key, me.lakko.app.reach.WritePurpose.WELCOME, null).size,
-                )
+                val now = {
+                    newIdentityReachableVerdict(
+                        mailboxKnown = reach.welcomeMailboxPkFor(reach.mailboxAccountKey(key), null) != null,
+                        candidates = reach.reachAuthCandidates(key, me.lakko.app.reach.WritePurpose.WELCOME, null).size,
+                    )
+                }
+                if (now()) return true
+                // ADR-0101 section 4 - otherwise the continuity mailbox the
+                // person announced, fetched and verified under the key this
+                // device accepted, then the same question again (the kept
+                // target is a destination [welcomeMailboxFor] and the
+                // candidates name, only while the continuity key is usable).
+                continuityTargetRefresh?.invoke(accountIdB64)
+                now()
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
             } catch (_: Throwable) {
@@ -11183,6 +11240,37 @@ public class ChatRepository(
                 preparedGroups.remove(successorGroupIdHex)
             }
             return SuccessorDelivery.DELIVERED
+        }
+
+        override suspend fun carryProfile(oldGroupIdHex: String, successorGroupIdHex: String, accountIdB64: String) {
+            // ADR-0101 section 8: the reset person's newest profile this
+            // device holds, verbatim (signed by their previous key), posted
+            // once into the delivered successor. Their device keeps it only if
+            // it verifies under its own previous key; nobody else files it
+            // (it is not signed by the sender).
+            val account = currentAccountIdB64.get() ?: return
+            val identity = canonicalIdentity.get() ?: return
+            val record = groups[successorGroupIdHex] ?: return
+            val carried = me.lakko.app.profile.CarriedProfileStore.onDevice(applicationContext)
+            if (carried.carriedInto(account, successorGroupIdHex)) return
+            val keys = supersededKeys().filter { it.value == accountIdB64 }.keys.sorted()
+            val envelope = me.lakko.app.profile.newestHeldEnvelope(keys) { profileDirectory.heldEnvelopeOf(it) }
+            if (envelope != null) {
+                try {
+                    broadcastControlToGroup(
+                        identity = identity,
+                        groupIdHex = successorGroupIdHex,
+                        group = record.group,
+                        envelope = envelope,
+                    ) ?: return
+                } catch (cause: kotlinx.coroutines.CancellationException) {
+                    throw cause
+                } catch (cause: Throwable) {
+                    android.util.Log.w("ChatRepository", "ADR-0101: the returned profile was not posted", cause)
+                    return
+                }
+            }
+            carried.markCarried(account, successorGroupIdHex)
         }
 
         override suspend fun carryName(oldGroupIdHex: String, successorGroupIdHex: String) {
@@ -12052,11 +12140,13 @@ public class ChatRepository(
                         record.group,
                     )
                 },
-                profileSink = { senderKey, profile ->
-                    receiveProfileBestEffort(senderKey, profile)
-                    // ADR-0060 §3 — keep the grants the profile hands out,
-                    // gated on who sent them and where (C-68).
-                    receiveProfileGrantsBestEffort(record.group, groupIdHex, senderKey, profile)
+                profileSink = { senderKey, profile, envelope ->
+                    // ADR-0101 section 8 - filed only when the sender signed it.
+                    if (receiveProfileBestEffort(senderKey, profile, envelope)) {
+                        // ADR-0060 §3 — keep the grants the profile hands out,
+                        // gated on who sent them and where (C-68).
+                        receiveProfileGrantsBestEffort(record.group, groupIdHex, senderKey, profile)
+                    }
                 },
                 scopedSink = { senderKey, kind, bytes ->
                     receiveScopedEnvelopeBestEffort(record.group, groupIdHex, senderKey, kind, bytes)
@@ -12082,6 +12172,9 @@ public class ChatRepository(
                     // ADR-0098 — verified here, inside the locked apply region,
                     // against the group as it stands at receipt.
                     receiveAccountDeleted(groupIdHex, senderKey, envelope)
+                },
+                historyRequestSink = { senderKey, envelope ->
+                    receiveHistoryRequest(groupIdHex, senderKey, envelope)
                 },
                 // UX second-device.md section 4 — a batch of commits that
                 // changed the PEOPLE of a group names them on its last commit
@@ -12309,6 +12402,10 @@ public class ChatRepository(
         // messages it missed after each applied poll (throttled to once a
         // minute by its record). A read, not a send: also while behind.
         pushScope.launchSession { lookForGapHistoryBestEffort(groupIdHex) }
+        // ADR-0101 section 9 — a returned conversation asks for its history.
+        if (!me.lakko.app.auth.SuspensionGate.readOnly.value) {
+            pushScope.launchSession { requestHistoryIfDueBestEffort(groupIdHex) }
+        }
         // ADR-0099 section 4 — a suspended account reads and writes nothing:
         // every duty below (registrations, the sweep, re-requests, the
         // committer envelope, repairs) is a DS write the transport refuses,
@@ -17158,6 +17255,155 @@ public class ChatRepository(
         }
     }
 
+    // ---------------------------------------------------------------------
+    // ADR-0101 section 9 — the history after a key reset
+    // ---------------------------------------------------------------------
+
+    /** The requester's per-conversation paging state. */
+    private val historyReturns: HistoryReturnStore by lazy { HistoryReturnStore.onDevice(applicationContext) }
+
+    /**
+     * ADR-0101 section 9 — a history request at receipt, inside the poll's
+     * locked apply region: decoded here, answered off it (the answer reads the
+     * message log and posts to the DS). Never throws.
+     */
+    private fun receiveHistoryRequest(groupIdHex: String, senderKey: MemberIdentity?, envelope: ByteArray) {
+        val sender = senderKey ?: return
+        val request = try {
+            uniffi.lakko_ffi_uniffi.decodeHistoryRequestEnvelope(envelope)
+        } catch (_: Throwable) {
+            return
+        }
+        pushScope.launchSession { answerHistoryRequestBestEffort(groupIdHex.lowercase(), sender, request) }
+    }
+
+    /**
+     * ADR-0101 section 9 — the answerer: one page for a reset person's request
+     * ([historyAnswerAllowed] decides who answers): the earlier group's rows
+     * below `before`, [HISTORY_PAGE_SIZE] at most, sealed to the request's gap
+     * key for the successor and posted to its rendezvous. An empty page is
+     * posted too. Never throws but for cancellation.
+     */
+    private suspend fun answerHistoryRequestBestEffort(
+        groupIdHex: String,
+        senderKeyB64: String,
+        request: uniffi.lakko_ffi_uniffi.FfiHistoryRequest,
+    ) {
+        try {
+            val accountIdB64 = currentAccountIdB64.get() ?: return
+            val identity = canonicalIdentity.get() ?: return
+            val record = groups[groupIdHex] ?: return
+            val ownKeys = setOfNotNull(ownPersonKeyB64(), ownMemberIdentity(groupIdHex))
+            val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
+            val senderBytes = java.util.Base64.getDecoder().decode(senderKeyB64)
+            val reset = runCatching { reach.acceptedResetOf?.invoke(senderBytes) }.getOrNull()
+            val retired = if (reset == null) emptySet() else supersededKeys().filter { it.value == reset.accountIdB64 }.keys
+            // The conversation's earlier group the requester's retired key was in.
+            val lineage = lineageNow()
+            val segments = lineage.segmentsOf(lineage.conversationOf(groupIdHex))
+            val earlierHex = segments.takeWhile { it != groupIdHex }.reversed().firstOrNull { hex ->
+                val earlier = groups[hex] ?: return@firstOrNull false
+                val roster = try {
+                    providerLock.sessionLock { earlier.group.members() }
+                } catch (ended: me.lakko.app.StaleBindingException) {
+                    throw ended
+                } catch (cause: kotlinx.coroutines.CancellationException) {
+                    throw cause
+                } catch (_: Throwable) {
+                    return@firstOrNull false
+                }
+                personKeysOf(roster).any { it in retired }
+            }
+            val role = ownRole(groupIdHex)
+            val allowed = historyAnswerAllowed(
+                fromSelf = senderKeyB64 in ownKeys,
+                requesterResetAccepted = reset != null,
+                requesterWasInEarlierGroup = earlierHex != null,
+                earlierGroupHeld = earlierHex != null,
+                kind = if (groupKind(groupIdHex) == GroupKind.ONE_TO_ONE) ConversationKind.Chat else ConversationKind.Group,
+                ownIsOwnerOrAdmin = role == Role.OWNER || role == Role.ADMIN,
+            )
+            if (!allowed || earlierHex == null) return
+            val ownKey = providerLock.sessionLock { ownIdentity(record.group) }
+            persistMessageLogBestEffort()
+            val sealed = me.lakko.app.devices.HistoryBundleCodec.buildHistoryPage(
+                applicationContext,
+                accountIdB64,
+                sourceSlotHex = earlierHex,
+                targetGroupIdHex = groupIdHex,
+                beforeMessageId = request.beforeMessageId,
+                pageSize = HISTORY_PAGE_SIZE,
+                ownAuthorKeyB64 = ownKey,
+            ) { groupsIn, maxHlc ->
+                uniffi.lakko_ffi_uniffi.sealGapHistoryStructured(identity, request.gapKeyPub, record.groupId, groupsIn, maxHlc)
+            } ?: return
+            me.lakko.app.devices.WelcomeCourier.publishHistoryBundle(
+                rendezvousPseudonym = uniffi.lakko_ffi_uniffi.gapHistoryRendezvous(request.gapKeyPub),
+                sealedBytes = sealed,
+            )
+            android.util.Log.i(REENTRY_LOG_TAG, "ADR-0101: a history page was sent")
+        } catch (ended: me.lakko.app.StaleBindingException) {
+            throw ended
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            android.util.Log.w(REENTRY_LOG_TAG, "ADR-0101: a history page was not sent (${errorLogTag(cause)})")
+        }
+    }
+
+    /**
+     * ADR-0101 section 9 — the requester: post the conversation's history
+     * request when due ([historyRequestDue]), with a fresh gap key the gap
+     * look then reads the answer under. Never throws but for cancellation.
+     */
+    private suspend fun requestHistoryIfDueBestEffort(groupIdHex: String) {
+        val hex = groupIdHex.lowercase()
+        try {
+            val accountIdB64 = currentAccountIdB64.get() ?: return
+            val state = historyReturns.get(accountIdB64, hex) ?: return
+            val now = System.currentTimeMillis()
+            if (!historyRequestDue(state, now)) return
+            val identity = canonicalIdentity.get() ?: return
+            val record = groups[hex] ?: return
+            val gap = uniffi.lakko_ffi_uniffi.generateGapKey()
+            val entry = GapKeyEntry(
+                java.util.Base64.getEncoder().encodeToString(gap.publicKey),
+                java.util.Base64.getEncoder().encodeToString(gap.secret),
+            )
+            gap.secret.fill(0)
+            // The look is durable before the request leaves: its answer is read
+            // under the secret this record keeps (sealed at rest).
+            val held = gapLookStore.get(accountIdB64, hex)
+            val look = held?.copy(keys = held.keys + entry, lastLookMs = 0L)
+                ?: GapLookRecord(groupIdHex = hex, keys = listOf(entry), gapFromMs = 0L, gapToMs = now, route = ReentryRouteKind.MAILBOX)
+            if (!gapHistoryLooker.start(accountIdB64, look)) return
+            val envelope = uniffi.lakko_ffi_uniffi.composeHistoryRequestEnvelope(
+                gap.publicKey,
+                state.before.toLongOrNull() ?: 0L,
+            )
+            broadcastControlToGroup(identity = identity, groupIdHex = hex, group = record.group, envelope = envelope)
+                ?: return
+            historyReturns.put(accountIdB64, hex, historyAsked(state, now))
+        } catch (ended: me.lakko.app.StaleBindingException) {
+            throw ended
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            android.util.Log.w(REENTRY_LOG_TAG, "ADR-0101: the history request was not sent (${errorLogTag(cause)})")
+        }
+    }
+
+    /** ADR-0101 section 9 — a page was filed for [groupIdHex]: move `before`
+     *  to its oldest DS id and ask again at once, or stop. */
+    private suspend fun onHistoryPageFiled(groupIdHex: String, messageIds: List<Long>) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val hex = groupIdHex.lowercase()
+        val state = historyReturns.get(accountIdB64, hex) ?: return
+        if (state.done) return
+        historyReturns.put(accountIdB64, hex, nextHistoryStep(state, messageIds))
+        requestHistoryIfDueBestEffort(hex)
+    }
+
     /**
      * Section 7 — send each gap bundle this device owes for [groupIdHex] once
      * its group moved past the epoch the request named (the replacement
@@ -17515,6 +17761,7 @@ public class ChatRepository(
                 null
             }
         }
+        var filedPageIds: List<Long> = emptyList()
         val outcome = try {
             gapHistoryLooker.lookIfDue(
                 accountIdB64 = accountIdB64,
@@ -17531,6 +17778,8 @@ public class ChatRepository(
                     val joined = groups[hex] ?: return@open null
                     val identity = canonicalIdentity.get() ?: return@open null
                     val opened = uniffi.lakko_ffi_uniffi.openGapHistoryStructured(secret, joined.groupId, payload)
+                    // ADR-0101 section 9 — the DS ids a history page carried.
+                    filedPageIds = me.lakko.app.devices.HistoryBundleCodec.historyPageMessageIds(opened.bundle, hex)
                     // Kept only from the own account, the owner or an admin,
                     // or the other person of a one-to-one; anything else is
                     // dropped and the gap line stays.
@@ -17585,6 +17834,9 @@ public class ChatRepository(
         if (outcome == GapLookOutcome.DROPPED) {
             android.util.Log.i(REENTRY_LOG_TAG, "gap look dropped: retention passed")
         }
+        // ADR-0101 section 9 — a filed page of a returned conversation's
+        // history asks for the next one (an empty page ends it).
+        if (outcome == GapLookOutcome.RECEIVED) onHistoryPageFiled(hex, filedPageIds)
     }
 
     /**
@@ -18203,9 +18455,10 @@ public class ChatRepository(
                                     record.group,
                                 )
                             },
-                            profileSink = { senderKey, profile ->
-                                receiveProfileBestEffort(senderKey, profile)
-                                receiveProfileGrantsBestEffort(record.group, groupIdHex, senderKey, profile)
+                            profileSink = { senderKey, profile, envelope ->
+                                if (receiveProfileBestEffort(senderKey, profile, envelope)) {
+                                    receiveProfileGrantsBestEffort(record.group, groupIdHex, senderKey, profile)
+                                }
                             },
                             scopedSink = { senderKey, kind, bytes ->
                                 receiveScopedEnvelopeBestEffort(record.group, groupIdHex, senderKey, kind, bytes)
@@ -18221,6 +18474,9 @@ public class ChatRepository(
                             },
                             accountDeletedSink = { senderKey, envelope ->
                                 receiveAccountDeleted(groupIdHex, senderKey, envelope)
+                            },
+                            historyRequestSink = { senderKey, envelope ->
+                                receiveHistoryRequest(groupIdHex, senderKey, envelope)
                             },
                             pinSink = { senderKey, op ->
                                 receivePin(record.group, groupIdHex, senderKey, op)
@@ -20039,7 +20295,7 @@ private class GroupRecord(
         pushRoutingSecretSink: ((ByteArray, ULong, UInt?) -> Unit)? = null,
         committerBeaconSink: ((UInt?, String) -> Unit)? = null,
         membershipProposalSink: ((ProposalRecord, String) -> Unit)? = null,
-        profileSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiProfile) -> Unit)? = null,
+        profileSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiProfile, ByteArray?) -> Unit)? = null,
         groupNameSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiGroupName) -> Unit)? = null,
         profileRequestSink: ((MemberIdentity?) -> Unit)? = null,
         pinSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiPinOp) -> Unit)? = null,
@@ -20052,6 +20308,8 @@ private class GroupRecord(
         groupClosedSink: ((Long, MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiGroupClosed) -> Unit)? = null,
         /** ADR-0098 — an account-deleted statement: (sender key, envelope). */
         accountDeletedSink: ((MemberIdentity?, ByteArray) -> Unit)? = null,
+        /** ADR-0101 section 9 — a history request, handed on at receipt. */
+        historyRequestSink: ((MemberIdentity?, ByteArray) -> Unit)? = null,
         /** `docs/ux/who-can-find-me.md` section 6.4 — a contact request sent
          *  inside the group: (sender key, envelope, DS message id, created at). */
         groupContactRequestSink: ((MemberIdentity?, ByteArray, Long, String) -> Unit)? = null,
@@ -20195,7 +20453,7 @@ private class GroupRecord(
                     // no-op; the sink stores a well-formed one under the
                     // sender key the classifier resolved at receipt.
                     val profile = event.profile
-                    if (profile != null) profileSink?.invoke(event.senderKey, profile)
+                    if (profile != null) profileSink?.invoke(event.senderKey, profile, event.envelope)
                 }
                 is IncomingChatEvent.GroupName -> {
                     // ADR-0051 — the group's shared name. Not a timeline row. A
@@ -20220,6 +20478,11 @@ private class GroupRecord(
                     // ADR-0098 — never a timeline row; the sink verifies the
                     // statement against the sender resolved at receipt.
                     accountDeletedSink?.invoke(event.senderKey, event.envelope)
+                }
+                is IncomingChatEvent.HistoryRequest -> {
+                    // ADR-0101 section 9 — never a timeline row; the sink
+                    // decides whether this device answers.
+                    historyRequestSink?.invoke(event.senderKey, event.envelope)
                 }
                 is IncomingChatEvent.Pin -> {
                     // ADR-0052 decision 3 — a shared pin / unpin. Not a

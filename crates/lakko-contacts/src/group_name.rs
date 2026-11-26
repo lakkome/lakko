@@ -693,7 +693,11 @@ mod tests {
             compose_media_state(true, true),
             compose_push_routing_secret(7, &[0x11; 32]),
             compose_committer_beacon(),
-            compose_profile(&profile).unwrap(),
+            compose_profile(
+                &profile,
+                &lakko_crypto::signing::SigningKey::from_seed(&[1; 32]),
+            )
+            .unwrap(),
         ] {
             assert_eq!(try_unwrap_group_name(&sibling), Ok(None));
         }

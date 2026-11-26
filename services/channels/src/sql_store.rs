@@ -1076,6 +1076,44 @@ impl ChannelStore for SqlChannelStore {
         }
     }
 
+    async fn recovery_pubkey(
+        &self,
+        channel: ChannelId,
+    ) -> Result<Option<[u8; OWNER_PUBKEY_LEN]>, StorageError> {
+        let row: Option<(Option<Vec<u8>>,)> =
+            sqlx::query_as("SELECT recovery_pk FROM channels WHERE id = ?")
+                .bind(channel.as_bytes().as_slice())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(db_err)?;
+        row.and_then(|(bytes,)| bytes)
+            .map(|bytes| {
+                <[u8; OWNER_PUBKEY_LEN]>::try_from(bytes.as_slice())
+                    .map_err(|_| StorageError::Database("recovery_pk is not 32 bytes".to_string()))
+            })
+            .transpose()
+    }
+
+    async fn set_recovery_pubkey(
+        &self,
+        channel: ChannelId,
+        recovery: [u8; OWNER_PUBKEY_LEN],
+    ) -> Result<(), StorageError> {
+        let updated = sqlx::query("UPDATE channels SET recovery_pk = ? WHERE id = ?")
+            .bind(recovery.as_slice())
+            .bind(channel.as_bytes().as_slice())
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?
+            .rows_affected();
+        // MariaDB reports 0 affected rows for an UPDATE that writes the value
+        // already stored, so 0 is not by itself an unknown channel.
+        if updated == 0 && self.owner_pubkey(channel).await?.is_none() {
+            return Err(StorageError::UnknownChannel);
+        }
+        Ok(())
+    }
+
     async fn consume_owner_nonce(
         &self,
         nonce: [u8; OWNER_NONCE_LEN],

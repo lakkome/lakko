@@ -458,6 +458,34 @@ public final class DiscoveryClient {
         }
     }
 
+    /// `PUT /discovery/identity/continuity` (ADR-0101 section 2): store this
+    /// account's continuity binding beside its identity bundle. Bearer, under
+    /// the key-generation floor. `400 continuity-binding-invalid`, `404
+    /// identity-bundle-not-found` (publish the bundle first) and `401
+    /// key-generation-superseded` surface as ``DiscoveryClientError/http``.
+    public func putContinuityBinding(_ binding: Data) async throws {
+        let endpoint = "/discovery/identity/continuity"
+        var request = URLRequest(url: try buildURL(endpoint: endpoint))
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        attachAuthorizationHeader(to: &request)
+        request.httpBody = try encoder.encode(
+            ContinuityBindingUploadRequest(continuityBindingB64: base64Encode(binding)))
+        let raw: (Data, URLResponse)
+        do {
+            raw = try await AntiCensorshipTransport.perform(
+                request, session: session, config: antiCensorship)
+        } catch {
+            throw DiscoveryClientError.network(endpoint: endpoint, underlying: error)
+        }
+        guard let http = raw.1 as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let status = (raw.1 as? HTTPURLResponse)?.statusCode ?? 0
+            throw DiscoveryClientError.http(
+                status: status, endpoint: endpoint,
+                body: Self.truncate(String(data: raw.0, encoding: .utf8) ?? "<binary>"))
+        }
+    }
+
     /// `POST /discovery/name/lookup` (anonymous) — the people (at most 20) in
     /// Everyone who published the name term whose lookup key
     /// (`OprfResult.lookupKey`, never the OPRF output) is `termLookupKey`,

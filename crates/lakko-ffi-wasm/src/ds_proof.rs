@@ -312,6 +312,23 @@ pub fn ds_mailbox_signer(account_identity: &Identity) -> DsProofSigner {
     }
 }
 
+/// The signer for the account's **continuity** mailbox (ADR-0101 section 1,
+/// derived from the account seed under its own context; never the real
+/// mailbox key) at `dsMailboxEpoch()`: claim, read and register its one
+/// continuity reach key with it.
+#[wasm_bindgen(js_name = dsContinuityMailboxSigner)]
+#[must_use]
+pub fn ds_continuity_mailbox_signer(account_identity: &Identity) -> DsProofSigner {
+    DsProofSigner {
+        inner: Inner::for_mailbox(
+            lakko_contacts::continuity::continuity_mailbox_seed(
+                &account_identity.mls_identity().ed25519_seed_bytes(),
+            )
+            .as_bytes(),
+        ),
+    }
+}
+
 /// The 32-byte access seed of the group's current epoch (the input of
 /// [`group_signer`]), for a commit that must record it (ADR-0081).
 pub(crate) fn group_access_seed(

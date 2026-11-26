@@ -325,6 +325,9 @@ final class RecoveryFlowTests: XCTestCase {
             backupRestoreSource: backup ?? LiveBackupRestoreSource(),
             earlierKeysInputs: gateInputs
         )
+        // ADR-0101 — the continuity announcement after the publish is the
+        // network's; these tests model the reset's client order only.
+        repository.continuityAnnouncer = { _, _, _, _ in }
         return Harness(
             repository: repository, store: store, persistence: persistence, directory: directory,
             reset: reset, passkey: passkey, markers: markers, tokens: tokens, host: host, wiped: wiped,
@@ -586,7 +589,9 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertNotNil(DevicePhrase.read(accountIdB64: account.b64))
         let published = await waitUntil { !h.markers.isPublishOwed(accountIdB64: account.b64) }
         XCTAssertTrue(published)
-        XCTAssertEqual(h.directory.events, ["publish+attest"])
+        // ADR-0101 sections 7 and 8 — the account key of before the reset is
+        // read before the server step, then the attested publish.
+        XCTAssertEqual(h.directory.events, ["identity", "publish+attest"])
     }
 
     func testAnOwedPublishWithoutASavedPhraseShowsTheFinishingScreenThenLandsWithNoWords() async throws {

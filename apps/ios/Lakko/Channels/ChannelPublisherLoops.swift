@@ -158,6 +158,9 @@ final class ChannelPublisherLoops {
         // while the account publishes them.
         await ChannelDeviceAdmission.passWaiting(
             state: channels, client: client, seed: seed, accountIdB64: accountIdB64)
+        // ADR-0101 section 7 — recovery keys, channel returns (both sides)
+        // and the channels taken back after a key reset.
+        await ChannelReturnRuntime.pass(channels: channels, client: client, seed: seed, accountIdB64: accountIdB64)
     }
 
     /// The owner-key repair for every channel this device rotates; each

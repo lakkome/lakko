@@ -44,6 +44,7 @@ final class OwnProfileDeviceSyncTests: XCTestCase {
                 isNewer: { profileIsNewer(incomingUpdatedAtMs: $0, storedUpdatedAtMs: $1) }),
             verifier: UsernameVerifier(resolve: { _ in .notRegistered }, defaults: defaults),
             ownStore: OwnProfileStore(defaults: defaults))
+        directory.accountIdentityProvider = TestProfileSigning.provider
         directory.verifiesOnResolve = false
         directory.setRenames(from: [])
         directory.activate(accountIdB64: accountIdB64, username: "valentin")

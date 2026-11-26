@@ -58,6 +58,13 @@ const isNewer = (a: bigint, b: bigint): boolean => wasm.profileIsNewer(a, b);
 
 let deviceKey: WebDeviceCipher;
 
+/** ADR-0101 section 8: a v6 profile envelope is signed by an account
+ *  identity; this test's profiles are signed by one fixed identity. */
+let profileSignerHeld: wasm.Identity | undefined;
+function profileSigner(): wasm.Identity {
+  return (profileSignerHeld ??= wasm.Identity.fromSeed(new Uint8Array(64).fill(0x5a)));
+}
+
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
   await init({ module_or_path: readFileSync(path) });
@@ -78,7 +85,7 @@ afterEach(() => {
 });
 
 function received(name: string, stamp: bigint) {
-  const sniff = sniffProfile(core, wasm.composeProfileEnvelope(name, undefined, stamp));
+  const sniff = sniffProfile(core, wasm.composeProfileEnvelope(profileSigner(), name, undefined, stamp));
   if (sniff.kind !== "profile") throw new Error("fixture");
   return sniff.profile;
 }

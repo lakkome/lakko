@@ -27,6 +27,13 @@ import { MemoryProfileBackend, ProfileStore } from "./profile-store";
 import { sniffProfile } from "./profile-envelope";
 import { composeOwnProfileForDevices } from "./own-profile-sync";
 
+/** ADR-0101 section 8: a v6 profile envelope is signed by an account
+ *  identity; this test's profiles are signed by one fixed identity. */
+let profileSignerHeld: wasm.Identity | undefined;
+function profileSigner(): wasm.Identity {
+  return (profileSignerHeld ??= wasm.Identity.fromSeed(new Uint8Array(64).fill(0x5a)));
+}
+
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
   await initWasm({ module_or_path: readFileSync(path) });
@@ -48,6 +55,7 @@ const VIDEO: AvatarData = {
 
 function compose(avatar: AvatarData | null): Uint8Array {
   return wasm.composeProfileEnvelope(
+    profileSigner(),
     "Alice",
     undefined,
     1_000n,
@@ -93,6 +101,7 @@ describe("the avatar through the real core", () => {
   it("goes to the account's other devices with the name", () => {
     const bytes = composeOwnProfileForDevices(
       wasm as never,
+      profileSigner(),
       { displayName: "Alice", updatedAtMs: 5_000, avatar: PHOTO },
       null,
     );

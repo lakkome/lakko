@@ -70,6 +70,11 @@ export interface StoredProfile {
    *  contact card (off exactly when their "who can find me" setting is
    *  `Nobody`). Absent (rows filed before the field) reads as `true`. */
   readonly cardShareable?: boolean;
+  /** ADR-0101 section 8 - standard base64 of the envelope exactly as
+   *  received, when it was received as one (absent for a name found by
+   *  search, or a row filed before the field). Carried verbatim, never
+   *  re-signed. */
+  readonly envelopeB64?: string;
 }
 
 /** Whether a held profile lets its person's card be shared. No profile, or
@@ -93,6 +98,8 @@ export interface IncomingProfile {
   readonly avatar?: AvatarData | WasmProfileAvatarLike | undefined | null;
   /** ADR-0092 section 7 — the "my card may be shared" flag; absent = true. */
   readonly cardShareable?: boolean | undefined | null;
+  /** ADR-0101 section 8 — the envelope as received, when there was one. */
+  readonly envelope?: Uint8Array | undefined | null;
 }
 
 function isAvatarData(a: unknown): a is AvatarData {
@@ -242,6 +249,9 @@ function toStored(p: IncomingProfile): StoredProfile {
         : bytesToB64(p.usernameCertificate),
     ...avatarField(incomingAvatar(p)),
     ...(p.cardShareable === false ? { cardShareable: false } : {}),
+    ...(p.envelope === undefined || p.envelope === null || p.envelope.length === 0
+      ? {}
+      : { envelopeB64: bytesToB64(p.envelope) }),
   };
 }
 

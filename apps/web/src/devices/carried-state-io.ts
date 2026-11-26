@@ -29,10 +29,9 @@ import {
   withPendingContact,
   type PendingContact,
 } from "../contacts/pending-contacts";
-import { avatarToWasm, type AvatarWasm } from "../profile/avatar-model";
 import { IdbProfileBackend } from "../profile/profile-idb";
 import { forStateBundle, type ProfileRow } from "../profile/profile-store";
-import { base64Decode, base64Encode } from "../auth/account-id";
+import { base64Encode } from "../auth/account-id";
 import type { DeviceCipher } from "../auth/device-cipher";
 import type { Wasm } from "../wasm";
 import {
@@ -82,14 +81,17 @@ function heldFor(contact: PendingContact, logHeld: readonly PersistedHeldSend[])
 }
 
 /**
- * The received profiles a row holds, each composed again as an envelope with
- * its stored stamp, keyed on the person key it is filed under: what a pairing
- * state bundle and a backup carry of the people this device knows. A profile
- * filed under one of `ownKeysB64` is not carried, and neither is one the core
- * refuses. Row order. Pure over the core.
+ * The received profiles a row holds, each as the ENVELOPE IT WAS RECEIVED AS
+ * (ADR-0101 section 8: profile v6 is signed by its author's account identity
+ * key, and no key this device holds may sign in the author's place), keyed on
+ * the person key it is filed under: what a pairing state bundle and a backup
+ * carry of the people this device knows. A profile filed under one of
+ * `ownKeysB64` is not carried, and neither is one held without its envelope
+ * (a name found by search, a row filed before the envelope was kept). Row
+ * order. Pure.
  */
 export function carriedProfilesFromRow(
-  wasm: Pick<Wasm, "composeProfileEnvelope"> & Partial<AvatarWasm>,
+  _wasm: unknown,
   row: Pick<ProfileRow, "profiles"> | null,
   ownKeysB64: readonly string[],
 ): CarriedProfile[] {
@@ -98,29 +100,8 @@ export function carriedProfilesFromRow(
   for (const [personKeyB64, stored] of row?.profiles ?? []) {
     if (own.has(personKeyB64)) continue;
     const p = forStateBundle(stored);
-    if (p === null) continue;
-    try {
-      const avatar =
-        p.avatar === undefined || p.avatar === null || wasm.AvatarRef === undefined
-          ? undefined
-          : avatarToWasm<never>(wasm as unknown as AvatarWasm, p.avatar);
-      const envelope = wasm.composeProfileEnvelope(
-        p.displayName ?? undefined,
-        p.username ?? undefined,
-        p.updatedAtMs,
-        p.accountIdHex === null ? undefined : hexToBytes(p.accountIdHex),
-        p.usernameCertificateB64 === undefined || p.usernameCertificateB64 === null
-          ? undefined
-          : base64Decode(p.usernameCertificateB64),
-        undefined,
-        avatar,
-        // ADR-0092 section 7 — the person's own "my card may be shared".
-        p.cardShareable !== false,
-      );
-      out.push({ personKeyB64, envelopeB64: base64Encode(envelope) });
-    } catch {
-      /* a stored profile the core refuses is not carried */
-    }
+    if (p === null || p.envelopeB64 === undefined) continue;
+    out.push({ personKeyB64, envelopeB64: p.envelopeB64 });
   }
   return out;
 }

@@ -115,6 +115,7 @@ pub(crate) fn build_state(pool: MySqlPool, limits: Limits) -> AppState {
         anon_cred: None,
         handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
         recovery_email: None,
+        channel_recovery: None,
         limits: Arc::new(limits),
     }
 }

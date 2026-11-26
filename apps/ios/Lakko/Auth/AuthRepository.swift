@@ -4996,7 +4996,10 @@ public final class AuthRepository: ObservableObject {
             accountIdB64: record.accountIdB64,
             username: record.username,
             context: "recall",
-            writes: writes
+            writes: writes,
+            // A recall takes the account back from the key this device held:
+            // that key is the previous one, known without asking anyone.
+            previousKeyB64: ResetAnnouncement.previousKey(ofEd25519Seed: record.oldSeed)
         )
     }
 
@@ -5101,7 +5104,8 @@ public final class AuthRepository: ObservableObject {
             accountIdB64: accountIdB64,
             username: offer.username,
             context: "recall by phrase",
-            writes: writes
+            writes: writes,
+            previousKeyB64: ResetAnnouncement.previousKey(ofEd25519Seed: record.oldSeed)
         )
     }
 
@@ -6097,6 +6101,19 @@ public final class AuthRepository: ObservableObject {
         let seed = mnemonic.toSeed()
         let newPubkey = try Identity.fromSeed(seed: seed).signaturePublicKey()
 
+        // 1b. ADR-0101 sections 7 and 8: the account key of before the reset,
+        // read now, while the directory and the log still name it. Without it
+        // nothing a peer returns is accepted silently.
+        let previousToken = pending.currentSession(tokenProvider).sessionToken
+        let previousKeyB64 = await ResetAnnouncement.readPreviousOwnKey(
+            accountId: pending.accountIdBytes, newKeyB64: base64Encode(newPubkey),
+            fetchBundle: { [restoreDirectory] in
+                try await restoreDirectory.fetchIdentityBundle(accountId: $0, sessionToken: previousToken)
+            })
+        guard pendingRecovery?.accountIdB64 == pending.accountIdB64 else {
+            throw AuthClientError.argument("no pending identity recovery — sign in first")
+        }
+
         // ADR-0077 decision 3, rule 1: the phrase goes into this account's
         // own Keychain row BEFORE the server step. From that step on it is
         // the account's only way back, and it must not exist in this call
@@ -6158,7 +6175,8 @@ public final class AuthRepository: ObservableObject {
             username: pending.username,
             context: "key reset",
             writes: writes,
-            bound: bound
+            bound: bound,
+            previousKeyB64: previousKeyB64
         )
         // Not this device's session any more (another account signed in, or
         // the account was removed from this device): no screen of this flow
@@ -6186,7 +6204,8 @@ public final class AuthRepository: ObservableObject {
         username: String,
         context: String,
         writes: SignInKeyWrites,
-        bound: BindingEpoch.Captured? = nil
+        bound: BindingEpoch.Captured? = nil,
+        previousKeyB64: String? = nil
     ) async -> Bool {
         // The account was forgotten on this device (Forget device, Delete
         // account) while the server step was out: its stores were wiped and
@@ -6244,6 +6263,15 @@ public final class AuthRepository: ObservableObject {
             newSignaturePubkey: newPubkey
         )
         markers.markPublishOwed(record, accountIdB64: accountIdB64)
+        // ADR-0101: the continuity announcement owed after the publish, the
+        // window it opens (completed from the attestation's `signed_at` at
+        // the publish's verify step) and the previous key a returned profile
+        // or channel is checked against.
+        ResetContinuityStore().write(
+            ResetContinuity(
+                expiresAtMs: 0, previousKeyB64: previousKeyB64,
+                keyGeneration: reset.session.keyGeneration),
+            accountIdB64: accountIdB64)
         // ADR-0074 section 3.5: a reset makes every predecessor, proven or
         // not, a superseded key (web `deleteKeyRotationState` on the same
         // step). ADR-0078 section 6: the DeviceGroup id is derived from the
@@ -6707,7 +6735,14 @@ public final class AuthRepository: ObservableObject {
         accountIdentitySeed: Data,
         requireFresh: Bool
     ) {
-        guard markers.isPublishOwed(accountIdB64: accountIdB64) else { return }
+        guard markers.isPublishOwed(accountIdB64: accountIdB64) else {
+            // ADR-0101 — the publish is done: the continuity announcement is
+            // retried at every landing while it is owed.
+            settleOwedContinuity(
+                accountIdB64: accountIdB64, accountIdBytes: accountIdBytes,
+                accountIdentitySeed: accountIdentitySeed)
+            return
+        }
         Task { [weak self] in
             do {
                 try await self?.runOwedKeyResetPublish(
@@ -6743,6 +6778,9 @@ public final class AuthRepository: ObservableObject {
         if steps.isEmpty {
             markers.clearPublishOwed(accountIdB64: accountIdB64)
             finishOwedPublish(accountIdB64: accountIdB64)
+            settleOwedContinuity(
+                accountIdB64: accountIdB64, accountIdBytes: accountIdBytes,
+                accountIdentitySeed: accountIdentitySeed)
             return
         }
         let nowMs = SessionRestore.nowMs()
@@ -6774,6 +6812,9 @@ public final class AuthRepository: ObservableObject {
                         record.signedAtMs = claims.signedAtMs
                         markers.markPublishOwed(record, accountIdB64: accountIdB64)
                     }
+                    // ADR-0101 — the continuity window counts from this
+                    // instant, as every peer counts it.
+                    ResetContinuityStore().setSignedAt(claims.signedAtMs, accountIdB64: accountIdB64)
                 case .discovery:
                     do {
                         try await publishFreshIdentityBundle(
@@ -6827,6 +6868,43 @@ public final class AuthRepository: ObservableObject {
         }
         markers.clearPublishOwed(accountIdB64: accountIdB64)
         finishOwedPublish(accountIdB64: accountIdB64)
+        // ADR-0101: the keys are published, the continuity mailbox is
+        // announced. Its failure does not fail the publish (the words are not
+        // withheld for it); the next landing retries.
+        settleOwedContinuity(
+            accountIdB64: accountIdB64, accountIdBytes: accountIdBytes,
+            accountIdentitySeed: accountIdentitySeed)
+    }
+
+    /// ADR-0101 sections 1 to 3 — what announces the continuity mailbox
+    /// (``ResetAnnouncement/announce(accountIdB64:accountId:accountIdentitySeed:sessionToken:store:ds:nowMs:)``);
+    /// a seam so a host test runs the key reset without the network.
+    var continuityAnnouncer: (String, Data, Data, String) async throws -> Void = {
+        try await ResetAnnouncement.announce(
+            accountIdB64: $0, accountId: $1, accountIdentitySeed: $2, sessionToken: $3)
+    }
+
+    /// ADR-0101 sections 1 to 3 — the continuity announcement in the
+    /// background while it is owed (``ResetAnnouncement``); a failure waits
+    /// for the next landing. Never while the publish itself is still owed.
+    private func settleOwedContinuity(accountIdB64: String, accountIdBytes: Data, accountIdentitySeed: Data) {
+        let nowMs = SessionRestore.nowMs()
+        guard ResetContinuityRules.announcementOwed(
+                ResetContinuityStore().read(accountIdB64: accountIdB64), nowMs: nowMs),
+              !markers.isPublishOwed(accountIdB64: accountIdB64) else { return }
+        let token = (tokenProvider.account == accountIdB64 ? tokenProvider.current?.sessionToken : nil)
+            ?? identitySecrets.flatMap { $0.accountId == accountIdBytes ? $0.session.sessionToken : nil }
+            ?? pendingFreshPhrase.flatMap { $0.accountIdB64 == accountIdB64 ? $0.session.sessionToken : nil }
+        guard let token else { return }
+        let announce = continuityAnnouncer
+        Task {
+            do {
+                try await announce(accountIdB64, accountIdBytes, accountIdentitySeed, token)
+            } catch {
+                NSLog("[auth] continuity announcement failed; retried at the next session start: %@",
+                      String(describing: type(of: error)))
+            }
+        }
     }
 
     /// Nothing is owed any more: the phrase screen may show the words.

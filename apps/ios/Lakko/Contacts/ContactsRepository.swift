@@ -171,6 +171,13 @@ public final class ContactsRepository: ObservableObject {
     /// live in `@StateObject` slots at the `LakkoApp` scope and
     /// outlive any single view tree, so a `weak` reference is
     /// safe.
+    /// ADR-0101 section 7 — told when the continuity mailbox kept a channel
+    /// return, so the channels runtime acts on it now. Set by the app.
+    public var onChannelReturnHeld: (() -> Void)?
+
+    /// ADR-0101 section 5 — when the continuity mailbox is read.
+    let continuityWindow = ContinuityMailboxWindow()
+
     public weak var chatRepository: ChatRepository? {
         didSet {
             chatRepository?.owedAnswerAck = { [weak self] messageId, groupIdHex in
@@ -692,6 +699,20 @@ public final class ContactsRepository: ObservableObject {
     ///   window (1.14e5's continuous-polling loop uses
     ///   `waitSecs = 30`).
     public func refreshInbox(waitSecs: Int = 0) async {
+        await refreshInbox(waitSecs: waitSecs, source: .account)
+    }
+
+    /// Which mailbox one pass of ``refreshInbox(waitSecs:source:)`` reads.
+    enum InboxSource: Equatable {
+        /// The account mailbox (the long-polled one; ``ContactsState/cursor``).
+        case account
+        /// ADR-0101 section 5 — the account's CONTINUITY mailbox, for the
+        /// window after a key reset, with its own cursor
+        /// (``ContinuityMailboxWindow``); a short read, never a spinner.
+        case continuity
+    }
+
+    func refreshInbox(waitSecs: Int, source: InboxSource) async {
         guard let secrets = authRepository.identitySecrets else {
             state = state.with(requiresReauth: true)
             return
@@ -708,7 +729,13 @@ public final class ContactsRepository: ObservableObject {
         // under whoever signs in next.
         let pollAccountIdB64 = base64Encode(secrets.accountId)
         bind(accountIdB64: pollAccountIdB64)
-        let isManualRefresh = waitSecs == 0
+        // ADR-0101 section 5 — the continuity mailbox is read once per tick,
+        // BEFORE the account mailbox's long poll, while its window is open.
+        if source == .account {
+            await pollContinuityMailboxIfOpen(accountIdB64: pollAccountIdB64, secrets: secrets)
+        }
+        let continuityCursors = ContinuityMailboxWindow.CursorStore()
+        let isManualRefresh = waitSecs == 0 && source == .account
         if isManualRefresh {
             state = state.with(refreshing: true, lastError: nil)
         }
@@ -727,8 +754,10 @@ public final class ContactsRepository: ObservableObject {
             // account's mailbox key, derived from its seed.
             let pollResult = try await client.pollStrangerInbox(
                 accountIdentity: identity,
-                after: state.cursor,
-                waitSecs: waitSecs
+                after: source == .account
+                    ? state.cursor : continuityCursors.cursor(accountIdB64: pollAccountIdB64),
+                waitSecs: waitSecs,
+                continuity: source == .continuity
             )
             // ADR-0073 R.3 — the requests that were waiting, unshown, for an
             // identity verdict are judged again first; one whose sender is no
@@ -883,6 +912,11 @@ public final class ContactsRepository: ObservableObject {
                             let joined = try await chatRepository
                                 .joinGroupFromWelcome(welcomeBytes: welcomeBytes)
                             noteAnsweredByWelcome(groupIdHex: joined)
+                            // ADR-0101 section 9 — inside this account's own
+                            // continuity window every conversation it joins
+                            // is a returned one: ask there for its history.
+                            noteReturnedConversationIfInsideWindow(
+                                groupIdHex: joined, accountIdB64: pollAccountIdB64)
                             // ADR-0079 section 5 — a one-to-one with a person
                             // added through their link: what was written to
                             // them goes out now, in order.
@@ -940,6 +974,15 @@ public final class ContactsRepository: ObservableObject {
                     guard boundAccountIdB64 == pollAccountIdB64 else { continue }
                     if applyContactAck(ack) { needChat.append(ack) }
                     continue
+                case .channelReturn(_, let envelope):
+                    // ADR-0101 section 7 — kept for the channels runtime,
+                    // which verifies it against this account's previous key
+                    // before acting. A sealed store throws, which holds the
+                    // cursor. Only the continuity mailbox surfaces one.
+                    guard source == .continuity, boundAccountIdB64 == pollAccountIdB64 else { continue }
+                    try HeldChannelReturnStore().hold(base64Encode(envelope), accountIdB64: pollAccountIdB64)
+                    onChannelReturnHeld?()
+                    continue
                 }
             }
             if !regrant.isEmpty, boundAccountIdB64 == pollAccountIdB64 {
@@ -983,6 +1026,17 @@ public final class ContactsRepository: ObservableObject {
                 )
             }
             #endif
+            if source == .continuity {
+                // Its own cursor; the account mailbox's state is untouched
+                // but for the requests this batch brought.
+                continuityCursors.advance(
+                    accountIdB64: pollAccountIdB64,
+                    to: ContactsInboxMerge.advancedCursor(
+                        current: continuityCursors.cursor(accountIdB64: pollAccountIdB64),
+                        polled: pollResult.cursor, heldWelcomeIds: heldWelcomeIds))
+                state = state.with(pending: merged.applied(to: state.pending), lastError: state.lastError)
+                return
+            }
             state = state.with(
                 pending: merged.applied(to: state.pending),
                 cursor: ContactsInboxMerge.advancedCursor(
@@ -1018,6 +1072,12 @@ public final class ContactsRepository: ObservableObject {
             // slot held and let the next iteration run.
             if Self.isCancellation(error) {
                 state = state.with(refreshing: false, lastError: state.lastError)
+                return
+            }
+            // ADR-0101 — the continuity read never costs the account mailbox
+            // its state; the next tick reads it again.
+            if source == .continuity {
+                NSLog("contacts inbox: the continuity mailbox could not be read: \(type(of: error))")
                 return
             }
             // Background long-polls surface failures on the `lastError`
@@ -1086,7 +1146,8 @@ public final class ContactsRepository: ObservableObject {
                             }
                             NSLog("contacts inbox: a predecessor-mailbox Welcome did not open as a chat: \(error)")
                         }
-                    case .contactRequest, .contactAck, .linkRefusal, .publisherWelcome, .conversationReentry:
+                    case .contactRequest, .contactAck, .linkRefusal, .publisherWelcome, .conversationReentry,
+                         .channelReturn:
                         // Rule 5 — a predecessor mailbox carries Welcomes
                         // only. A request sent here was sealed to the old
                         // key and its sender still addresses the old
@@ -1140,7 +1201,7 @@ public final class ContactsRepository: ObservableObject {
             guard let proving = reachKeys[messageId] else { return (.process, nil) }
             let founder = welcomeFounder(welcomeBytes)
             return (verdict(proving, founder.map(isContact) ?? false), founder)
-        case .linkRefusal, .publisherWelcome, .conversationReentry:
+        case .linkRefusal, .publisherWelcome, .conversationReentry, .channelReturn:
             return (.process, nil)
         }
     }

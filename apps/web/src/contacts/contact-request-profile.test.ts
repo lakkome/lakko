@@ -23,6 +23,13 @@ import { ContactsClient } from "./client";
 import type { DsClient } from "../ds/client";
 import type { IdentitySecrets } from "../auth/AuthContext";
 
+/** ADR-0101 section 8: a v6 profile envelope is signed by an account
+ *  identity; this test's profiles are signed by one fixed identity. */
+let profileSignerHeld: wasm.Identity | undefined;
+function profileSigner(): wasm.Identity {
+  return (profileSignerHeld ??= wasm.Identity.fromSeed(new Uint8Array(64).fill(0x5a)));
+}
+
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
   await initWasm({ module_or_path: readFileSync(path) });
@@ -86,7 +93,7 @@ async function roundTrip(ownProfileEnvelope: (() => Promise<Uint8Array | null>) 
 describe("contact request carries a profile", () => {
   it("carries the sender's profile, bound to the authenticated sender key", async () => {
     const { request, aliceKey } = await roundTrip(async () =>
-      wasm.composeProfileEnvelope("Alice Petrova", "alice", 1_234n),
+      wasm.composeProfileEnvelope(profileSigner(), "Alice Petrova", "alice", 1_234n),
     );
     expect(request.profile).toEqual({
       displayName: "Alice Petrova",
@@ -102,7 +109,7 @@ describe("contact request carries a profile", () => {
   it("carries the sender's claimed account id when the envelope has one (ADR-0048 v2)", async () => {
     const id = new Uint8Array(16).fill(0x5a);
     const { request } = await roundTrip(async () =>
-      wasm.composeProfileEnvelope("Alice Petrova", "alice", 1_234n, id),
+      wasm.composeProfileEnvelope(profileSigner(), "Alice Petrova", "alice", 1_234n, id),
     );
     expect(request.profile?.accountId).toEqual(id);
     expect(request.profile?.displayName).toBe("Alice Petrova");
@@ -112,7 +119,7 @@ describe("contact request carries a profile", () => {
     const id = new Uint8Array(16).fill(0x5a);
     const cert = new Uint8Array(wasm.usernameCertificateLen()).fill(0x33);
     const { request } = await roundTrip(async () =>
-      wasm.composeProfileEnvelope("Alice Petrova", "alice", 1_234n, id, cert),
+      wasm.composeProfileEnvelope(profileSigner(), "Alice Petrova", "alice", 1_234n, id, cert),
     );
     expect(request.profile?.usernameCertificate).toEqual(cert);
   });

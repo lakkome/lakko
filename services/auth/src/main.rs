@@ -243,6 +243,7 @@ mod anon_credential;
 mod anon_tokens;
 mod backup_head;
 mod call_jwt;
+mod channel_recovery;
 mod device_authorize;
 mod device_request;
 mod devices;
@@ -422,6 +423,10 @@ pub(crate) struct AppState {
     /// routes answer 503 `recovery-email-disabled`. The feature also needs
     /// `vault_enc_key` and `handle_pepper`.
     pub(crate) recovery_email: Option<Arc<recovery_email::Config>>,
+    /// ADR-0101 section 7: the master of the per-account channel recovery
+    /// OPRF key (`LAKKO_AUTH_CHANNEL_RECOVERY_SECRET`). `None`: the route
+    /// answers `503 channel-recovery-disabled`.
+    pub(crate) channel_recovery: Option<Arc<channel_recovery::ChannelRecoveryMaster>>,
 }
 
 #[tokio::main]
@@ -641,6 +646,12 @@ async fn main() -> Result<()> {
     // the worker off (rows still queue).
     let purge_config = purge::PurgeConfig::from_env().context("load the account purge config")?;
 
+    // ADR-0101 section 7 — the channel recovery master. Loud-fail when
+    // malformed; dormant (with a warning) when unset.
+    let channel_recovery =
+        channel_recovery::load_master().context("load LAKKO_AUTH_CHANNEL_RECOVERY_SECRET")?;
+    channel_recovery::log_startup(channel_recovery.as_ref());
+
     let state = AppState {
         db: pool.clone(),
         opaque_setup: Arc::new(opaque_setup),
@@ -661,6 +672,7 @@ async fn main() -> Result<()> {
         anon_cred: anon_cred.map(Arc::new),
         handle_pepper: handle_pepper.map(Arc::new),
         recovery_email: recovery_email.map(Arc::new),
+        channel_recovery: channel_recovery.map(Arc::new),
         limits: limits.clone(),
     };
 
@@ -958,6 +970,19 @@ fn build_app(state: AppState) -> Router {
     // storage-tier rollback). Bearer-auth ONLY (the same session-token
     // middleware) — holding a valid session token IS proof the caller
     // OPAQUE-authenticated as `account_id`.
+    // ADR-0101 section 7 — `POST /auth/channel-recovery/evaluate` evaluates
+    // a blinded channel id under the account's recovery OPRF key. Bearer-auth
+    // ONLY; a suspended account is refused by the middleware.
+    let channel_recovery_routes = Router::new()
+        .route(
+            "/auth/channel-recovery/evaluate",
+            post(channel_recovery::evaluate),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            webauthn::require_session,
+        ));
+
     let backup_head_routes = Router::new()
         .route("/auth/backup/head", post(backup_head::backup_head))
         .route_layer(axum::middleware::from_fn_with_state(
@@ -1142,6 +1167,7 @@ fn build_app(state: AppState) -> Router {
         .merge(call_jwt_routes)
         .merge(genesis_routes)
         .merge(backup_head_routes)
+        .merge(channel_recovery_routes)
         // ADR-0054 — the anonymous-token public key for (context, epoch).
         // ANONYMOUS: a client checks the issuance proof against this key,
         // fetched independently of the issuance response.

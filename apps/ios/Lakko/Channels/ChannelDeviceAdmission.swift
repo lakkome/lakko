@@ -1044,8 +1044,12 @@ enum ChannelDeviceAdmission {
                     channelId: channelId, state: state, client: client, seed: seed, accountIdB64: accountIdB64)
                 if result.entered || !result.fallBack { continue }
             }
+            // ADR-0101 section 7 — a channel taken back with its recovery
+            // key after a key reset is founded again like decision A: the
+            // reset left this device the account's only one.
+            let recovered = RecoveredChannelStore().read(accountIdB64: accountIdB64)[channelId.lowercased()] != nil
             guard shouldRefound(
-                foundedAlone: foundedDeviceGroupAlone(), rosterCount: deviceGroupRoster()?.count,
+                foundedAlone: foundedDeviceGroupAlone() || recovered, rosterCount: deviceGroupRoster()?.count,
                 accountRole: state.extras(channelId).accountRole, holdsGroup: false) else { continue }
             await refound(channelId: channelId, state: state, client: client, seed: seed, accountIdB64: accountIdB64)
         }

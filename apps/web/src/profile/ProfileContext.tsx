@@ -204,6 +204,10 @@ export interface ProfileApi {
    *  `(personKeyB64, accountIdHex)` pairs. The own account is not among them
    *  (the device never receives its own envelope). Reactive. */
   accountIdBindings(): readonly AccountIdBinding[];
+  /** ADR-0101 section 8 - the profile envelope held for `keyB64` exactly as
+   *  it was received, with its stamp, or `null` when none is held. Not
+   *  reactive. */
+  heldEnvelopeOf(keyB64: string): { readonly envelope: Uint8Array; readonly updatedAtMs: bigint } | null;
 }
 
 /** One person's claimed account id, keyed on the signature key it was
@@ -428,6 +432,12 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     }
     const w = await loadWasm();
     await ensureOwnCertificate();
+    // ADR-0101 section 8 — a v6 profile is signed by the ACCOUNT identity
+    // key (ADR-0050: the person, never this device's leaf identity). Read
+    // after the waits, so a replaced identity is never used. None held
+    // (signed out mid-publish): nothing to send.
+    const accountIdentity = chats.accountIdentity();
+    if (accountIdentity === null) return null;
     // ADR-0060 — the grants this conversation gets. A missing reach session
     // (signed out mid-publish) sends none.
     const grants = groupIdB64 === undefined ? [] : grantsFor(groupIdB64);
@@ -437,6 +447,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       // without one.
       // ADR-0060 v3 — the username certificate, and the grants.
       return w.composeProfileEnvelope(
+        accountIdentity,
         own.displayName,
         username,
         BigInt(own.updatedAtMs),
@@ -626,7 +637,8 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       // a group screen opened first still names them.
       const pendingRead = loadPendingContacts(account);
       // ADR-0048 section 4a — the own name between this account's devices.
-      bindOwnProfileSync(account, ownAccountIdBytes());
+      // ADR-0101 section 8 — the ACCOUNT identity signs the envelope.
+      bindOwnProfileSync(account, ownAccountIdBytes(), () => chats.accountIdentity());
       void applyHeldServiceEnvelopes();
       scheduler.start();
       const opened = store.open(account);
@@ -1124,6 +1136,15 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     async fetchOwnUsernameCertificate() {
       await ensureOwnCertificate();
       return ownCert();
+    },
+    heldEnvelopeOf(keyB64) {
+      const held = store.get(keyB64);
+      if (held?.envelopeB64 === undefined) return null;
+      try {
+        return { envelope: base64Decode(held.envelopeB64), updatedAtMs: held.updatedAtMs };
+      } catch {
+        return null;
+      }
     },
     accountIdHexOf(keyB64) {
       version();

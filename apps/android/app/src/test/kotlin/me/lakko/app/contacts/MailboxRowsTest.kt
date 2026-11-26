@@ -15,7 +15,7 @@ import me.lakko.app.ds.DsClient
 import me.lakko.app.ds.DsJournalSigner
 import me.lakko.app.ds.DsReachAuth
 import me.lakko.app.ds.DsSignerRegistry
-import me.lakko.app.reach.continuityWelcomeDest
+import me.lakko.app.reach.continuityDest
 import me.lakko.app.reach.WelcomeDelivery
 import me.lakko.app.reach.deliverSuccessorWelcomes
 import org.junit.Assert.assertArrayEquals
@@ -289,12 +289,34 @@ class MailboxRowsTest {
         assertTrue((error.variant as ContactsError.Variant.Wrapped).cause is MailboxUnknown)
     }
 
-    // ------------------------------------------------------------ ADR-0073 continuity: a recorded no-op
+    // ------------------------------------------------------------ ADR-0101 continuity mailbox
 
     @Test
-    fun `the continuity Welcome writes nothing whether or not a reset was accepted`() {
-        assertNull(continuityWelcomeDest(acceptedResetKnown = true))
-        assertNull(continuityWelcomeDest(acceptedResetKnown = false))
+    fun `the continuity write goes to the kept mailbox only for an accepted reset inside its window`() {
+        val accepted = me.lakko.app.contacts.AcceptedResetOfKey(
+            accountIdB64 = java.util.Base64.getEncoder().encodeToString(ByteArray(16) { 7 }),
+            keyGeneration = 3,
+            signedAtMs = 1_000L,
+        )
+        val target = ByteArray(32) { 0x55 }
+        var seedArgs: Pair<ByteArray, Long>? = null
+        val seen = ByteArray(32) { 9 }
+        val dest = continuityDest(
+            accepted = accepted,
+            targetPk = target,
+            nowMs = 2_000L,
+            seedOf = { id, gen -> seedArgs = id to gen; seen.copyOf() },
+            signerOf = { DsReachAuth(NoSigner()) },
+        )
+        assertNotNull(dest)
+        assertArrayEquals(target, dest!!.mailboxPk)
+        assertEquals(3L, seedArgs!!.second)
+        assertArrayEquals(ByteArray(16) { 7 }, seedArgs!!.first)
+        // No accepted reset, no kept mailbox, or past the window: nothing.
+        assertNull(continuityDest(null, target, 2_000L, { _, _ -> ByteArray(32) }, { DsReachAuth(NoSigner()) }))
+        assertNull(continuityDest(accepted, null, 2_000L, { _, _ -> ByteArray(32) }, { DsReachAuth(NoSigner()) }))
+        val past = 1_000L + me.lakko.app.reach.CONTINUITY_KEY_TTL_MS
+        assertNull(continuityDest(accepted, target, past, { _, _ -> ByteArray(32) }, { DsReachAuth(NoSigner()) }))
     }
 
     @Test
@@ -305,8 +327,8 @@ class MailboxRowsTest {
         val published = mutableListOf<ByteArray>()
         val outcome = deliverSuccessorWelcomes(
             targets = listOf(own, reset),
-            // Only the own account's mailbox is known; the reset person's
-            // new mailbox has no carrier (ADR-0078 open question).
+            // Only the own account's mailbox is known; no continuity mailbox
+            // is kept for the reset person.
             mailboxOf = { key -> if (key.contentEquals(own)) ownAddress else null },
             publish = { published += it },
         )

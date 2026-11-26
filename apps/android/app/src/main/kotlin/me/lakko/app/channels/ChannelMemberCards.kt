@@ -90,6 +90,20 @@ public interface MemberCardPorts {
     /** `decodeProfileEnvelope`; throws on a malformed profile. */
     public fun decodeProfile(bytes: ByteArray): FfiProfile
 
+    /**
+     * ADR-0101 section 8 - the card's profile only when the account its
+     * binding names signed it (`verifyProfileEnvelope` against [identityPk]),
+     * else `null`: the card is still a member, drawn as an unnamed row.
+     */
+    public fun verifyProfile(bytes: ByteArray, identityPk: ByteArray): FfiProfile? =
+        try {
+            decodeProfile(bytes)
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            null
+        }
+
     /** The account key hex the directory publishes for [accountId], `null`
      *  for an unknown account or when the directory could not answer. */
     public suspend fun resolveAccountKeyHex(accountId: ByteArray): String?
@@ -138,7 +152,7 @@ public suspend fun loadChannelMembers(
         for (m in res.members) {
             val pkHex = reachHex(m.subscriberPk)
             val opened: OpenedCard
-            val profile: FfiProfile
+            val profile: FfiProfile?
             try {
                 val seed = seedForEpoch(ports.cardEpoch(m.card))
                 if (seed == null) {
@@ -146,14 +160,20 @@ public suspend fun loadChannelMembers(
                     continue
                 }
                 opened = ports.openCard(seed, m.card, channelId, m.subscriberPk)
-                profile = ports.decodeProfile(opened.profile)
+                // ADR-0101 section 8 - the profile counts only when the card's
+                // bound account signed it.
+                profile = ports.verifyProfile(opened.profile, opened.identityPk)
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (_: Throwable) {
                 unreadable += 1
                 continue
             }
-            val row = readCard(channelIdHex, pkHex, ownSubscriberPkHex, opened.identityPk, profile, ports)
+            val row = if (profile == null) {
+                unnamedCardRow(reachHex(opened.identityPk), ownSubscriberPkHex != null && pkHex == ownSubscriberPkHex, ports.ownAccountKeyHex)
+            } else {
+                readCard(channelIdHex, pkHex, ownSubscriberPkHex, opened.identityPk, profile, ports)
+            }
             if (row == null) {
                 unreadable += 1
                 continue
@@ -255,6 +275,24 @@ private suspend fun readCard(
 }
 
 /**
+ * ADR-0101 section 8 - a member whose card's profile is not signed by the
+ * account its binding names: still a member (the binding verified), drawn as
+ * an unnamed row under its bound key. No name, username, photo or grant is
+ * taken from it. Pure.
+ */
+public fun unnamedCardRow(identityPkHex: String, isOwnCard: Boolean, ownAccountKeyHex: String?): ChannelMemberRow {
+    val isSelf = isOwnCard || (ownAccountKeyHex != null && identityPkHex == ownAccountKeyHex)
+    return ChannelMemberRow(
+        key = if (isSelf) "self" else identityPkHex,
+        name = memberRowName(null, isSelf),
+        username = null,
+        isSelf = isSelf,
+        avatar = null,
+        named = isSelf,
+    )
+}
+
+/**
  * Whether a publisher's device registers a subscriber key for its own member
  * card: only in a channel known to be public. A private channel's service
  * takes a key only with an admission ticket, which a publisher has no reason
@@ -350,7 +388,8 @@ public object ChannelMemberCards {
             if (!cardUploadDue(uploaded[key], input.epoch, fingerprint)) {
                 OwnCardOutcome.UNCHANGED
             } else {
-                val profile = uniffi.lakko_ffi_uniffi.composeProfileEnvelope(
+                // ADR-0101 section 8 — signed by the account identity.
+                val profile = me.lakko.app.profile.ProfileSigner.compose(
                     FfiProfile(
                         displayName = content.displayName,
                         username = content.username,
@@ -361,6 +400,7 @@ public object ChannelMemberCards {
                         avatar = input.avatar?.toFfi(),
                         cardShareable = input.cardShareable,
                     ),
+                    input.accountId,
                 )
                 // The card is bound to the account: without a reach session
                 // there is no account seed to sign with, and a reader drops an
@@ -535,6 +575,13 @@ public object ChannelMemberCards {
 
         override fun decodeProfile(bytes: ByteArray): FfiProfile =
             uniffi.lakko_ffi_uniffi.decodeProfileEnvelope(bytes)
+
+        override fun verifyProfile(bytes: ByteArray, identityPk: ByteArray): FfiProfile? =
+            try {
+                uniffi.lakko_ffi_uniffi.verifyProfileEnvelope(bytes, identityPk)
+            } catch (_: Throwable) {
+                null
+            }
 
         override suspend fun resolveAccountKeyHex(accountId: ByteArray): String? {
             val idHex = reachHex(accountId)

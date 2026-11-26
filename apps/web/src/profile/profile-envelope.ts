@@ -52,6 +52,11 @@ export interface ReceivedProfile {
   /** ADR-0092 section 7 — `false` when the sender does not let others share
    *  their contact card; absent or `true` otherwise. */
   readonly cardShareable?: boolean;
+  /** ADR-0101 section 8 - the envelope exactly as received (profile v6 is
+   *  signed by the sender's account identity key). Kept verbatim beside the
+   *  decoded fields so it can be carried to a paired device, a backup or,
+   *  after the person's key reset, back to the person; never re-signed. */
+  readonly envelope?: Uint8Array;
 }
 
 /** One grant from a profile, detached from the wasm handle. */
@@ -138,6 +143,7 @@ export function sniffProfile(decoder: ProfileDecoder, bytes: Uint8Array): Profil
       return avatar === null ? {} : { avatar };
     })(),
     ...(decoded.cardShareable === false ? { cardShareable: false } : {}),
+    envelope: bytes.slice(),
   };
   try {
     decoded.free?.();

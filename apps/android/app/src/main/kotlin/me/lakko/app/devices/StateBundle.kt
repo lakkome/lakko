@@ -22,7 +22,6 @@ import kotlinx.serialization.json.put
 import me.lakko.app.ds.DsClient
 import me.lakko.app.ds.DsHttpError
 import me.lakko.app.ds.DsNetworkError
-import me.lakko.app.profile.toFfi
 
 /**
  * ADR-0050 section 2.9 — the state bundle a pairing hands to the new device
@@ -1037,44 +1036,34 @@ public object StateBundle {
             }
         },
         groupNameIsNewer = { a, b -> uniffi.lakko_ffi_uniffi.groupNameIsNewer(a, b) },
-        composeProfile = ::composeProfileOrNull,
+        composeProfile = ::receivedEnvelopeOrNull,
         decodeProfile = { bytes ->
             try {
-                me.lakko.app.profile.peerProfileOf(uniffi.lakko_ffi_uniffi.decodeProfileEnvelope(bytes))
+                // ADR-0101 section 8 - the envelope rides along verbatim, so
+                // this device can carry it on in its turn.
+                me.lakko.app.profile.peerProfileOf(uniffi.lakko_ffi_uniffi.decodeProfileEnvelope(bytes), bytes)
             } catch (_: Throwable) {
                 null
             }
         },
     )
 
-    /** A stored profile as the ADR-0048 envelope, with its ORIGINAL stamp;
-     *  without the certificate when the composer refuses it with one, and
-     *  `null` when it refuses the profile. No reach grants are carried. */
-    private fun composeProfileOrNull(p: me.lakko.app.profile.PeerProfile): ByteArray? {
-        fun ffi(withCertificate: Boolean) = uniffi.lakko_ffi_uniffi.FfiProfile(
-            displayName = p.displayName,
-            username = p.username,
-            updatedAtMs = p.updatedAtMs,
-            accountId = p.accountIdHex?.let { bytesOfHex(it) }?.takeIf { it.size == ACCOUNT_ID_LEN },
-            usernameCertificate = if (withCertificate && p.username != null) {
-                p.usernameCertificateHex?.let { bytesOfHex(it) }
-            } else {
-                null
-            },
-            grants = emptyList(),
-            avatar = p.avatar?.toFfi(),
-            cardShareable = p.cardShareable,
-        )
-        return try {
-            uniffi.lakko_ffi_uniffi.composeProfileEnvelope(ffi(withCertificate = true))
-        } catch (_: Throwable) {
+    /**
+     * A stored profile as the envelope it was RECEIVED as (ADR-0101 section 8:
+     * profile v6 is signed by its author's account identity key, and no key
+     * this device holds may sign in the author's place), or `null` when it is
+     * held without one (a name found by search, a row filed before the
+     * envelope was kept): such a profile is not carried. Nobody re-signs
+     * another person's profile.
+     */
+    internal fun receivedEnvelopeOrNull(p: me.lakko.app.profile.PeerProfile): ByteArray? =
+        p.envelopeB64?.let {
             try {
-                uniffi.lakko_ffi_uniffi.composeProfileEnvelope(ffi(withCertificate = false))
-            } catch (_: Throwable) {
+                Base64.getDecoder().decode(it).takeIf { bytes -> bytes.isNotEmpty() }
+            } catch (_: IllegalArgumentException) {
                 null
             }
         }
-    }
 
     /** The group names to carry: one per known group this device holds a
      *  stored name row for (a cleared name too, so its stamp orders), in a

@@ -354,7 +354,7 @@ public data class BackupPersonal(
                 me.lakko.app.profile.ownProfileBackupEnvelope(
                     me.lakko.app.profile.OwnProfileStore.load(context, accountId),
                     accountId,
-                ) { uniffi.lakko_ffi_uniffi.composeProfileEnvelope(it) }
+                ) { me.lakko.app.profile.ProfileSigner.compose(it, accountId) }
             }.getOrNull()
             val visibility = runCatching {
                 me.lakko.app.reach.ReachManager.get(context).visibilityEnvelopeFor(accountIdB64)

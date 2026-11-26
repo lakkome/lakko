@@ -52,6 +52,7 @@ fn build_state(pool: MySqlPool, enabled: bool) -> (crate::AppState, lakko_auth_t
         anon_cred: enabled.then(|| Arc::new(AnonCredIssuer::new(MasterSecret::from_bytes(MASTER)))),
         handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
         recovery_email: None,
+        channel_recovery: None,
         limits: Arc::new(crate::limits::Limits::defaults()),
     };
     (state, token_secret)

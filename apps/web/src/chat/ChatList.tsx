@@ -23,6 +23,7 @@ import { SuspendedBanner } from "../auth/SuspendedReadOnly";
 import { isDeletedAccount } from "../people/person-status";
 import { dropRequestSent, requestsSent } from "./requests-sent";
 import { RequestsSentScreen } from "./RequestsSentScreen";
+import { ReturnedInvitations } from "../channels/ReturnedInvitations";
 import { unseenReactionIds } from "./unseen-reactions";
 import {
   createEffect,
@@ -1187,6 +1188,11 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                   {t("folders.edit")}
                 </button>
               </div>
+            </Show>
+            <Show when={currentFolder() === null && !searching() && !inArchive()}>
+              {/* ADR-0101 section 7 - a returned channel invitation that did
+                  not verify: the ordinary card, for the person to decide on. */}
+              <ReturnedInvitations accountId={accountId()} />
             </Show>
             <Show when={(currentFolder() === null || searching()) && !inArchive()}>
               <For each={invitedRows()}>

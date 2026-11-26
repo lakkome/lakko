@@ -20,16 +20,22 @@
  * stamp and tells the listeners (the own-name UI). It is never republished
  * into groups: the device that made the change already did.
  */
-import { loadWasm } from "../wasm";
+import { loadWasm, type Wasm } from "../wasm";
 import { markServiceEnvelopeDirty, setServiceEnvelopeComposer } from "../reach/service-envelope-outbox";
 import { adoptOwnProfile, loadOwnProfile, type OwnProfile, type OwnProfileStorage } from "./own-profile";
 import { avatarToWasm, type AvatarData, type AvatarWasm } from "./avatar-model";
 import { ownCardShareable } from "./card-share";
 import { visibilitySetting } from "../reach/visibility-store";
 
-/** The one wasm export the composer needs, structurally. */
+/** The account identity: a wasm `Identity` handle. */
+export type AccountIdentity = Wasm["Identity"]["prototype"];
+
+/** The one wasm export the composer needs, structurally. The first argument
+ *  is the ACCOUNT identity (ADR-0101 section 8: a v6 profile is signed by the
+ *  account identity key), never a device or leaf identity. */
 export interface OwnProfileComposer {
   composeProfileEnvelope(
+    accountIdentity: AccountIdentity,
     displayName: string | null | undefined,
     username: string | null | undefined,
     updatedAtMs: bigint,
@@ -47,6 +53,9 @@ export interface OwnProfileComposer {
  */
 export function composeOwnProfileForDevices(
   wasm: OwnProfileComposer & Partial<AvatarWasm>,
+  /** The account identity (ADR-0050: the person, not this device); it signs
+   *  the envelope (ADR-0101 section 8). */
+  accountIdentity: AccountIdentity,
   own: OwnProfile,
   accountIdBytes: Uint8Array | null,
   /** The backup carries it too; a device of the account keeps the session's. */
@@ -62,6 +71,7 @@ export function composeOwnProfileForDevices(
       ? undefined
       : avatarToWasm<never>(wasm as AvatarWasm, own.avatar);
   return wasm.composeProfileEnvelope(
+    accountIdentity,
     own.displayName,
     username ?? undefined,
     BigInt(own.updatedAtMs),
@@ -76,6 +86,8 @@ export function composeOwnProfileForDevices(
 interface Binding {
   readonly accountId: string;
   readonly accountIdBytes: Uint8Array | null;
+  /** The account identity at compose time (`null` while none is held). */
+  readonly accountIdentity: () => AccountIdentity | null;
   readonly storage: OwnProfileStorage | undefined;
 }
 
@@ -88,7 +100,17 @@ setServiceEnvelopeComposer("profile", async () => {
   if (b === null) return null;
   const own = loadOwnProfile(b.accountId, b.storage);
   if (own.updatedAtMs <= 0) return null;
-  return composeOwnProfileForDevices(await loadWasm(), own, b.accountIdBytes, null, ownCardShareable(visibilitySetting()));
+  // ADR-0101 section 8 — no account identity, no signature: send nothing.
+  const identity = b.accountIdentity();
+  if (identity === null) return null;
+  return composeOwnProfileForDevices(
+    await loadWasm(),
+    identity,
+    own,
+    b.accountIdBytes,
+    null,
+    ownCardShareable(visibilitySetting()),
+  );
 });
 
 /**
@@ -98,9 +120,11 @@ setServiceEnvelopeComposer("profile", async () => {
 export function bindOwnProfileSync(
   accountId: string,
   accountIdBytes: Uint8Array | null,
+  /** The account identity at compose time; it signs the envelope. */
+  accountIdentity: () => AccountIdentity | null,
   storage?: OwnProfileStorage,
 ): void {
-  bound = { accountId, accountIdBytes: accountIdBytes?.slice() ?? null, storage };
+  bound = { accountId, accountIdBytes: accountIdBytes?.slice() ?? null, accountIdentity, storage };
 }
 
 /** Sign-out. */

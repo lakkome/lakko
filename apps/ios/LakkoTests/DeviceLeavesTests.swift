@@ -313,6 +313,7 @@ final class StateBundleV3Tests: XCTestCase {
                 isNewer: { profileIsNewer(incomingUpdatedAtMs: $0, storedUpdatedAtMs: $1) }),
             verifier: UsernameVerifier(resolve: { _ in .notRegistered }, defaults: defaults),
             ownStore: OwnProfileStore(defaults: defaults))
+        directory.accountIdentityProvider = TestProfileSigning.provider
         directory.verifiesOnResolve = false
         directory.setRenames(from: [])
         directory.activate(accountIdB64: account, username: "me")
@@ -353,8 +354,8 @@ final class StateBundleV3Tests: XCTestCase {
             groupNameStore: senderNames,
             knownGroupIdHexes: [groupIdHex],
             profiles: [
-                base64Encode(alice): ProfileClaim(displayName: "Alice", username: nil, updatedAtMs: 77),
-                base64Encode(own): ProfileClaim(displayName: "Me", username: nil, updatedAtMs: 1),
+                base64Encode(alice): .signed(displayName: "Alice", updatedAtMs: 77),
+                base64Encode(own): .signed(displayName: "Me", updatedAtMs: 1),
             ],
             ownKeysB64: [base64Encode(own)],
             pendingDefaults: senderDefaults,
@@ -467,7 +468,7 @@ final class StateBundleV3Tests: XCTestCase {
                 StoredGroupName(name: "Old name", updatedAtMs: 1_000)
             },
             profiles: StateBundle.carriedProfiles(
-                [base64Encode(alice): ProfileClaim(displayName: "Alice 1", username: nil, updatedAtMs: 100)],
+                [base64Encode(alice): .signed(displayName: "Alice 1", updatedAtMs: 100)],
                 ownKeysB64: []))
         let applied = StateBundle.applyNames(
             bundle, accountIdB64: account, groupNameStore: names, directory: directory, ownKeysB64: [])
@@ -481,7 +482,7 @@ final class StateBundleV3Tests: XCTestCase {
     func testAProfileUnderThisAccountsOwnKeyIsNeverStoredFromABundle() throws {
         let directory = try directory()
         let carried = StateBundle.carriedProfiles(
-            [base64Encode(own): ProfileClaim(displayName: "Me", username: nil, updatedAtMs: 5)], ownKeysB64: [])
+            [base64Encode(own): .signed(displayName: "Me", updatedAtMs: 5)], ownKeysB64: [])
         XCTAssertEqual(carried.count, 1, "a sender that did not leave it out")
         let bundle = StateBundle.V4(contacts: [], pins: [], knownGroupIdsB64: [], profiles: carried)
         let applied = StateBundle.applyNames(

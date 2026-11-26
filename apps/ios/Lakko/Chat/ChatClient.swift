@@ -939,6 +939,17 @@ public final class ChatClient {
             // read. It is still the same synchronous region, hence still the
             // same epoch.
             let senderKey = senderLeaf.flatMap(resolveSender)
+            // ADR-0101 section 9 — a history request from a person back
+            // after a key reset. Never a timeline row and never a
+            // notification: handed to the answerer with the sender resolved
+            // here (C-68), which decides whether to answer.
+            if data.count == Self.historyRequestLen, data.first == 0x6C,
+               let request = try? decodeHistoryRequestEnvelope(plaintext: data) {
+                if let senderKey, let conversationIdHex {
+                    Self.historyRequestHandler?(conversationIdHex, senderKey, request)
+                }
+                return .serviceEnvelope(messageId: messageId, createdAt: createdAt)
+            }
             // ADR-0098 — a person's device says their account was deleted.
             // Never a timeline row and never a notification: the receive side
             // verifies it against the sender's account key resolved here
@@ -1340,7 +1351,10 @@ public final class ChatClient {
             avatar: ProfileAvatar(decoded.avatar),
             // Envelope v5 (ADR-0092 section 7) — whether the sender lets
             // others share their contact card.
-            cardShareable: decoded.cardShareable
+            cardShareable: decoded.cardShareable,
+            // ADR-0101 section 8 — the envelope verbatim: the receiver files
+            // it only under the key that signed it, and carries it on as is.
+            envelope: bytes
         )
     }
 
@@ -2001,6 +2015,14 @@ extension ChatClient {
     /// and a guard on one caller would leave the others free to write into
     /// the dead session.
     nonisolated(unsafe) static var deadSessionGuard: DeadSessionGuard?
+
+    /// ADR-0101 section 9 — told of every history request at receipt, with
+    /// the conversation (hex) and the sender's ACCOUNT key resolved from the
+    /// MLS-authenticated leaf then (C-68). Installed by the repository.
+    nonisolated(unsafe) static var historyRequestHandler: ((String, MemberIdentity, FfiHistoryRequest) -> Void)?
+
+    /// The fixed length of a history request envelope (the core's).
+    static let historyRequestLen = Int(historyRequestEnvelopeLen())
 
     /// Throws ``HeldSend/HeldForSuccessor`` when the guard says `group` is a
     /// dead session and this is not the successor claim. The guard reads the

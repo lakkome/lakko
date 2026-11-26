@@ -35,6 +35,13 @@ import {
 import { decodeProfileRow, encodeProfileRow } from "./profile-idb";
 import { resolveDisplay } from "./resolver";
 
+/** ADR-0101 section 8: a v6 profile envelope is signed by an account
+ *  identity; this test's profiles are signed by one fixed identity. */
+let profileSignerHeld: wasm.Identity | undefined;
+function profileSigner(): wasm.Identity {
+  return (profileSignerHeld ??= wasm.Identity.fromSeed(new Uint8Array(64).fill(0x5a)));
+}
+
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
   await initWasm({ module_or_path: readFileSync(path) });
@@ -416,7 +423,7 @@ describe("a name a search found", () => {
   });
 
   it("the name alone is a profile the core will carry to a new device", () => {
-    const wire = wasm.composeProfileEnvelope("Elin Holm", undefined, FOUND_NAME_STAMP, undefined, undefined, [], undefined);
+    const wire = wasm.composeProfileEnvelope(profileSigner(), "Elin Holm", undefined, FOUND_NAME_STAMP, undefined, undefined, [], undefined);
     expect(wire.length).toBeGreaterThan(0);
   });
 });

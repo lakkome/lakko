@@ -23,6 +23,13 @@ import { MemoryProfileBackend, ProfileStore } from "../profile/profile-store";
 import { encodeProfileRow } from "../profile/profile-idb";
 import { sniffProfile } from "../profile/profile-envelope";
 
+/** ADR-0101 section 8: a v6 profile envelope is signed by an account
+ *  identity; this test's profiles are signed by one fixed identity. */
+let profileSignerHeld: realWasm.Identity | undefined;
+function profileSigner(): realWasm.Identity {
+  return (profileSignerHeld ??= realWasm.Identity.fromSeed(new Uint8Array(64).fill(0x5a)));
+}
+
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
   await initWasm({ module_or_path: readFileSync(path) });
@@ -40,7 +47,7 @@ const at = (id: number) => new Date(id * 1000).toISOString();
 const profileRow = (id: number, name: string, stamp: bigint, leaf = 2) => ({
   id,
   leaf,
-  payload: realWasm.composeProfileEnvelope(name, "vg3", stamp),
+  payload: realWasm.composeProfileEnvelope(profileSigner(), name, "vg3", stamp),
   createdAt: at(id),
 });
 const chatRow = (id: number, text: string, leaf = 2) => ({
@@ -149,7 +156,7 @@ async function appRow(
   const backend = new MemoryProfileBackend();
   const store = new ProfileStore(backend, (a, b) => realWasm.profileIsNewer(a, b));
   for (const [key, name, stamp] of profiles) {
-    const sniff = sniffProfile(realWasm, realWasm.composeProfileEnvelope(name, "vg3", stamp));
+    const sniff = sniffProfile(realWasm, realWasm.composeProfileEnvelope(profileSigner(), name, "vg3", stamp));
     if (sniff.kind !== "profile") throw new Error("not a profile");
     await store.ingest("acct", key, sniff.profile);
   }

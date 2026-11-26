@@ -1649,6 +1649,9 @@ public class ContactsClient(
          *  every read of a personal mailbox is signed (an unsigned one is
          *  `401`), and a refusal claims the mailbox and retries once. */
         mailboxSigner: DsJournalSigner? = null,
+        /** ADR-0101 section 5 — [own] is the account's CONTINUITY mailbox, the
+         *  only mailbox a channel return is taken from. */
+        continuity: Boolean = false,
     ): PollResult {
         val raw = try {
             ds.fetchMailbox(own.address, after = after, waitSecs = waitSecs, signer = mailboxSigner)
@@ -1692,6 +1695,12 @@ public class ContactsClient(
                     // one-to-one asks to be brought back. Unverified here:
                     // the chat layer checks the KeyPackage it carries.
                     events.add(IncomingMailboxEvent.ConversationReentry(env.body))
+                }
+
+                MailboxRowKind.CHANNEL_RETURN -> {
+                    // ADR-0101 section 7 — only the continuity mailbox carries
+                    // one; anywhere else it is dropped.
+                    if (continuity) events.add(IncomingMailboxEvent.ChannelReturn(env.body))
                 }
 
                 MailboxRowKind.WELCOME -> {
@@ -2065,6 +2074,14 @@ public sealed interface IncomingMailboxEvent {
      *  verified (the chat layer checks the KeyPackage it carries). */
     public data class ConversationReentry(val envelope: ByteArray) : IncomingMailboxEvent {
         override fun equals(other: Any?): Boolean = other is ConversationReentry && envelope.contentEquals(other.envelope)
+        override fun hashCode(): Int = envelope.contentHashCode()
+    }
+
+    /** ADR-0101 section 7 — a channel return, NOT yet verified (the reset
+     *  device checks the old card binding against its previous key). Read
+     *  only from the continuity mailbox. */
+    public data class ChannelReturn(val envelope: ByteArray) : IncomingMailboxEvent {
+        override fun equals(other: Any?): Boolean = other is ChannelReturn && envelope.contentEquals(other.envelope)
         override fun hashCode(): Int = envelope.contentHashCode()
     }
 }

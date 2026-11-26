@@ -29,11 +29,11 @@ import { DsClient } from "./client";
 /** `predecessor` (ADR-0074 section 3.5): the mailbox of the account key the
  *  conversation leaves are still bound to after a proven key rotation. It is
  *  read for as long as leaves name it. */
-type Slot = "account" | "predecessor";
+type Slot = "account" | "predecessor" | "continuity";
 
-const SLOTS: readonly Slot[] = ["account", "predecessor"];
-const installed: Record<Slot, string | null> = { account: null, predecessor: null };
-const generation: Record<Slot, number> = { account: 0, predecessor: 0 };
+const SLOTS: readonly Slot[] = ["account", "predecessor", "continuity"];
+const installed: Record<Slot, string | null> = { account: null, predecessor: null, continuity: null };
+const generation: Record<Slot, number> = { account: 0, predecessor: 0, continuity: 0 };
 
 /** ADR-0074 section 3.5a - the mailboxes of the INTERMEDIATE own
  *  predecessors (the keys held between two rotations), read inside their own
@@ -87,6 +87,46 @@ export function installMailboxAccess(slot: Slot, identity: WasmIdentity | null):
       console.warn(`ds: ${slot} mailbox claim failed; retried on the next refused read`, err);
     }
   })();
+}
+
+/**
+ * ADR-0101 section 5 - install (or, with `null`, remove) the signer of the
+ * account's CONTINUITY mailbox (`dsContinuityMailboxSigner`), read beside the
+ * account mailbox for the window after a key reset, and claim it. Never
+ * throws; returns the mailbox address once installed, or `null`.
+ */
+export async function installContinuityMailboxAccess(
+  identity: WasmIdentity | null,
+  options: { readonly awaitClaim?: boolean } = {},
+): Promise<Uint8Array | null> {
+  generation.continuity += 1;
+  const mine = generation.continuity;
+  dropSlot("continuity");
+  if (identity === null) return null;
+  try {
+    const wasm = await loadWasm();
+    if (generation.continuity !== mine) return null;
+    const signer = wasm.dsContinuityMailboxSigner(identity);
+    const address = signer.mailboxAddress();
+    installed.continuity = dsAccess.setMailboxSigner(signer);
+    const held = dsAccess.mailboxSigner(address);
+    if (held === null) return null;
+    const claim = new DsClient().claimMailbox(held);
+    if (options.awaitClaim === true) {
+      await claim;
+    } else {
+      void claim.catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("ds: continuity mailbox claim failed; retried on the next refused read", err);
+      });
+    }
+    return address;
+  } catch (err) {
+    if (options.awaitClaim === true) throw err;
+    // eslint-disable-next-line no-console
+    console.warn("ds: continuity mailbox signer not installed", err);
+    return null;
+  }
 }
 
 /**

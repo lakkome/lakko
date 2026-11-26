@@ -547,34 +547,12 @@ public enum StateBundle {
         return out
     }
 
-    /// ADR-0048 — `claim` as the profile envelope with its original stamp.
-    /// A stored username the core refuses to compose (one with no
-    /// certificate it can carry) is left out rather than losing the name.
-    static func profileEnvelope(_ claim: ProfileClaim) -> Data? {
-        let full = FfiProfile(
-            displayName: claim.displayName,
-            username: claim.username,
-            updatedAtMs: claim.updatedAtMs,
-            accountId: claim.accountId,
-            usernameCertificate: claim.username == nil ? nil : claim.usernameCertificate,
-            grants: [],
-            avatar: claim.avatar?.ffi,
-            cardShareable: claim.cardShareable)
-        if let envelope = try? composeProfileEnvelope(profile: full) { return envelope }
-        let nameOnly = FfiProfile(
-            displayName: claim.displayName,
-            username: nil,
-            updatedAtMs: claim.updatedAtMs,
-            accountId: claim.accountId,
-            usernameCertificate: nil,
-            grants: [],
-            avatar: claim.avatar?.ffi,
-            cardShareable: claim.cardShareable)
-        return try? composeProfileEnvelope(profile: nameOnly)
-    }
-
-    /// ADR-0048 — every stored profile but this account's own keys, sorted by
-    /// key (a stable order), at most ``maxProfiles``.
+    /// ADR-0048 / ADR-0101 section 8 — every stored profile but this
+    /// account's own keys, each as the ENVELOPE IT WAS RECEIVED AS (profile
+    /// v6 is signed by its author's account key, and no key this device holds
+    /// may sign in the author's place), sorted by key (a stable order), at
+    /// most ``maxProfiles``. A row held without its envelope (a name found by
+    /// search, a row filed before the envelope was kept) is not carried.
     static func carriedProfiles(
         _ profiles: [String: ProfileClaim], ownKeysB64: Set<String>
     ) -> [CarriedProfile] {
@@ -582,8 +560,7 @@ public enum StateBundle {
         for key in profiles.keys.sorted() where out.count < maxProfiles {
             guard !ownKeysB64.contains(key),
                   Data(base64Encoded: key)?.count == signatureKeyLength,
-                  let claim = profiles[key],
-                  let envelope = profileEnvelope(claim) else { continue }
+                  let envelope = profiles[key]?.envelope else { continue }
             out.append(CarriedProfile(personKeyB64: key, envelopeB64: base64Encode(envelope)))
         }
         return out
@@ -983,7 +960,9 @@ public enum StateBundle {
                 accountId: decoded.accountId,
                 usernameCertificate: decoded.usernameCertificate,
                 avatar: ProfileAvatar(decoded.avatar),
-                cardShareable: decoded.cardShareable)
+                cardShareable: decoded.cardShareable,
+                // ADR-0101 section 8 — kept verbatim, so it can be carried on.
+                envelope: envelope)
             return (personKeyB64: entry.personKeyB64, claim: claim)
         }
     }

@@ -853,6 +853,10 @@ public class AuthRepository(
 
     private val keyResetOwedStore: KeyResetOwedStore by lazy { KeyResetOwedStore.onDevice(applicationContext) }
 
+    /** ADR-0101 - the reset's continuity window, previous key and the owed
+     *  announcement, per account. */
+    private val resetContinuityStore: ResetContinuityStore by lazy { ResetContinuityStore.onDevice(applicationContext) }
+
     /** When the person last signed in on this device, per account, this
      *  process: what lets a reset older than 30 days be published after all
      *  ([attestationAgeAt]). */
@@ -1851,6 +1855,7 @@ public class AuthRepository(
         restoreKeysRotatedNotice(accountIdB64)
         mutableIdentitySecrets.value = secrets
         settleOwedPublish(accountIdB64, secrets.accountId, secrets.accountIdentitySeed)
+        settleOwedContinuity(accountIdB64, secrets.accountId, secrets.accountIdentitySeed)
         runSessionDuties(secrets)
         // ADR-0075 - how the account is protected, and what happened to it
         // elsewhere, read at every landing.
@@ -2293,6 +2298,14 @@ public class AuthRepository(
                         ),
                     )
                 }
+                // ADR-0101 - the continuity window counts from the same
+                // instant every peer counts the continuity key from.
+                resetContinuityStore.load(accountIdB64)?.let { record ->
+                    val expiry = resetContinuityExpiryMs(verified.signedAtMs)
+                    if (!record.announced && record.expiresAtMs != expiry) {
+                        resetContinuityStore.save(accountIdB64, record.copy(expiresAtMs = expiry))
+                    }
+                }
             }
         }
         var step = nextKeyResetStep(owed)
@@ -2330,7 +2343,125 @@ public class AuthRepository(
         mutablePublishOwedReason.value = null
         mutablePublishOwedRevision.value = mutablePublishOwedRevision.value + 1
         if (signedInAccountIdB64() == accountIdB64) restoreOwedPhrase(accountIdB64)
+        // ADR-0101: the keys are published, the continuity mailbox is
+        // announced. Its failure does not fail the publish (the words are not
+        // withheld for it); the next landing retries.
+        try {
+            announceContinuity(accountIdB64, accountIdBytes, accountIdentitySeed)
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            Log.w("lakko-auth", "continuity announcement failed; retried at the next session start: ${cause.javaClass.simpleName}")
+        }
     }
+
+    /**
+     * ADR-0101 sections 1 to 3 - the continuity announcement a reset owes
+     * once its keys are published: claim the continuity mailbox, register on
+     * it the continuity reach key alone, and upload the binding. Each part is
+     * idempotent (a claim by the same key, a reach key added again, a binding
+     * replaced). Throws what failed; the record stays owed.
+     */
+    private suspend fun announceContinuity(accountIdB64: String, accountIdBytes: ByteArray, accountIdentitySeed: ByteArray) {
+        val record = resetContinuityStore.load(accountIdB64) ?: return
+        if (!announcementOwed(record, System.currentTimeMillis())) return
+        val sessionToken = sessionTokenProvider.current() ?: mutableIdentitySecrets.value?.sessionToken
+            ?: throw AuthClientArgError("no session to announce with")
+        Identity.fromSeed(accountIdentitySeed).use { identity ->
+            val ffi = uniffi.lakko_ffi_uniffi.dsContinuityMailboxSigner(identity)
+            val signer = me.lakko.app.ds.FfiDsJournalSigner(ffi)
+            val address = ffi.mailboxAddress()
+            val reachSeed = uniffi.lakko_ffi_uniffi.continuityReachSeed(accountIdBytes, record.keyGeneration.toULong())
+            val reachPk = try {
+                uniffi.lakko_ffi_uniffi.reachVerifyingKey(reachSeed)
+            } finally {
+                reachSeed.fill(0)
+            }
+            me.lakko.app.ds.DsClient().use { ds ->
+                ds.claimMailbox(address, signer)
+                ds.putMailboxReach(
+                    address,
+                    signer,
+                    add = listOf(me.lakko.app.ds.DsReachKeyAdd(reachPk, record.expiresAtMs)),
+                    remove = emptyList(),
+                )
+            }
+            val binding = uniffi.lakko_ffi_uniffi.signContinuityBinding(identity, record.expiresAtMs.toULong())
+            discoveryClientFactory().use { discovery ->
+                discovery.setSessionToken(sessionToken)
+                discovery.putContinuityBinding(binding)
+            }
+        }
+        resetContinuityStore.save(accountIdB64, record.withAnnounced())
+    }
+
+    /** The announcement in the background at a session landing; skipped
+     *  while the publish is still owed (the publish run announces after it).
+     *  A failure waits for the next landing. */
+    private fun settleOwedContinuity(accountIdB64: String, accountIdBytes: ByteArray, accountIdentitySeed: ByteArray) {
+        if (!announcementOwed(resetContinuityStore.load(accountIdB64), System.currentTimeMillis())) return
+        if (owedStore.isPublishOwed(accountIdB64)) return
+        val seed = accountIdentitySeed.copyOf()
+        val accountId = accountIdBytes.copyOf()
+        pushScope.launchBound(accountBinding) {
+            try {
+                announceContinuity(accountIdB64, accountId, seed)
+            } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                Log.w("lakko-auth", "continuity announcement failed; retried at the next session start: ${cause.javaClass.simpleName}")
+            } finally {
+                seed.fill(0)
+            }
+        }
+    }
+
+    /**
+     * ADR-0101 sections 7 and 8 - the account key of before a reset: the key
+     * the directory serves for the account now, confirmed by the KT log
+     * ([previousKeyStanding]). `null` when it cannot be established. Never
+     * throws but for cancellation.
+     */
+    private suspend fun readPreviousOwnKey(accountIdBytes: ByteArray, newKeyB64: String): String? {
+        return try {
+            val served = discoveryClientFactory().use { it.identityFetch(accountIdBytes) }?.signature_pubkey
+                ?: return null
+            val logStatus = try {
+                val client = me.lakko.app.transparency.TransparencyClient.forOptionalConfig()
+                if (client == null) {
+                    me.lakko.app.transparency.LogVerifyStatus.OFF
+                } else {
+                    client.use { c ->
+                        me.lakko.app.transparency.verifyIdentityInLog(
+                            accountId = accountIdBytes,
+                            publishedSignaturePubkey = base64Decode(served),
+                            client = c,
+                            operatorKey = me.lakko.app.transparency.TransparencyConfig.pinnedOperatorKey(),
+                            lastSeenRoot = me.lakko.app.transparency.InMemoryLastSeenRoot(),
+                            witnessKeys = me.lakko.app.transparency.TransparencyConfig.pinnedWitnessKeys(),
+                            witnessThreshold = me.lakko.app.transparency.TransparencyConfig.witnessThreshold(),
+                        ).status
+                    }
+                }
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (_: Throwable) {
+                null
+            }
+            previousKeyStanding(served, logStatus, newKeyB64)
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /** The account key a 32-byte account Ed25519 seed signs with (standard
+     *  base64), or `null`. */
+    private fun previousKeyOfSeed(ed25519Seed: ByteArray): String? =
+        try {
+            base64Encode(uniffi.lakko_ffi_uniffi.reachVerifyingKey(ed25519Seed))
+        } catch (_: Throwable) {
+            null
+        }
 
     /**
      * Whether the publish of a reset is owed for the signed-in account.
@@ -4886,6 +5017,7 @@ public class AuthRepository(
                 context = "phrase-recall",
                 wipes = wipes,
                 landHere = deviceFreeFor(accountIdB64),
+                previousKeyB64 = previousKeyOfSeed(oldAccountSeed),
             )
         } finally {
             oldRecoverySeed.fill(0)
@@ -5558,6 +5690,10 @@ public class AuthRepository(
             seed.fill(0)
             throw cause
         }
+        // ADR-0101 sections 7 and 8: the account key of before the reset,
+        // read now, while the directory and the log still name it. Without it
+        // nothing a peer returns is accepted silently.
+        val previousKeyB64 = readPreviousOwnKey(accountIdBytes, base64Encode(newSignaturePubkey))
 
         // The phrase goes into this account's own protected row BEFORE the
         // server step. From that step on it is the account's only way back,
@@ -5637,6 +5773,7 @@ public class AuthRepository(
             context = "mintFreshIdentity",
             wipes = wipes,
             landHere = after != FreshIdentityAfterPublish.KEEP_OWED,
+            previousKeyB64 = previousKeyB64,
         )
         return phrase
     }
@@ -5703,6 +5840,9 @@ public class AuthRepository(
          *  or landed over the other one, and the call ends as a stale
          *  binding. */
         landHere: Boolean = true,
+        /** ADR-0101 sections 7 and 8: the account key of before the reset
+         *  (standard base64), or `null` when it could not be established. */
+        previousKeyB64: String? = null,
     ) {
         // Its stores are written from here on, whatever sealed them before.
         openStoresFor(accountIdB64)
@@ -5736,6 +5876,19 @@ public class AuthRepository(
                 // verified below; the response time is the fallback.
                 signedAtMs = System.currentTimeMillis(),
                 newSignaturePubkeyB64 = base64Encode(newSignaturePubkey),
+            ),
+        )
+        // ADR-0101: the continuity announcement owed after the publish, the
+        // window it opens and the previous key a returned profile or channel
+        // is checked against. The window starts at the attestation's mint
+        // time, corrected once it is verified ([runOwedPublish]).
+        resetContinuityStore.save(
+            accountIdB64,
+            ResetContinuity(
+                expiresAtMs = resetContinuityExpiryMs(System.currentTimeMillis()),
+                previousKeyB64 = previousKeyB64,
+                keyGeneration = reset.keyGeneration.toString(),
+                announced = false,
             ),
         )
         owedStore.markPhraseOwed(accountIdB64, OwedPhraseOrigin.FreshIdentity)
@@ -9004,6 +9157,9 @@ public class AuthRepository(
         val (newSignaturePubkey, recalled) = result
         val landedSeed = seed ?: return
         val landedPhrase = phrase ?: return
+        // ADR-0101: a recall takes the account back from the key this device
+        // held: that key is the previous one, known without asking anyone.
+        val recallPreviousKeyB64 = previousKeyOfSeed(record.oldAccountSeed)
         // `finish` answered: the account is this device's again and the
         // record has done its work.
         record.zero()
@@ -9031,6 +9187,7 @@ public class AuthRepository(
                 context = "recall",
                 wipes = wipes,
                 landHere = deviceFreeFor(ui.accountIdB64),
+                previousKeyB64 = recallPreviousKeyB64,
             )
         } finally {
             mutableRecall.value = null

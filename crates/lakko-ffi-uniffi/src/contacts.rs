@@ -898,10 +898,42 @@ fn prepare_profile(p: FfiProfile) -> Result<RustProfile, FfiError> {
 /// * [`FfiError::Contacts`] for the ADR-0060 bounds: a certificate that is
 ///   not 153 bytes or has no username, more than two grants, two grants of
 ///   one class, or a grant of a class a profile may not carry.
+///
+/// Since ADR-0101 section 8 (profile v6) the envelope is signed by
+/// `account_identity`'s identity key, so a peer can carry it back to this
+/// account after a key reset and the account can check it came from itself.
 #[uniffi::export]
-pub fn compose_profile_envelope(profile: FfiProfile) -> Result<Vec<u8>, FfiError> {
+pub fn compose_profile_envelope(
+    profile: FfiProfile,
+    account_identity: &crate::Identity,
+) -> Result<Vec<u8>, FfiError> {
     let prepared = prepare_profile(profile)?;
-    rust_compose_profile(&prepared).map_err(Into::into)
+    let signing = SigningKey::from_seed(&account_identity.inner.ed25519_seed_bytes());
+    rust_compose_profile(&prepared, &signing).map_err(Into::into)
+}
+
+/// Decode a profile envelope and verify its signature against the 32-byte
+/// account identity key `identity_pk` the caller trusts (ADR-0101 section
+/// 8): the sender's account key resolved at receipt, or, for a profile a
+/// peer returns after this account's key reset, this account's own previous
+/// key.
+///
+/// # Errors
+///
+/// Every error of [`decode_profile_envelope`]; [`FfiError::Contacts`] with
+/// `signature.badKey` / `signature.bad` when the key is unusable or the
+/// signature does not verify.
+#[uniffi::export]
+pub fn verify_profile_envelope(
+    plaintext: Vec<u8>,
+    identity_pk: Vec<u8>,
+) -> Result<FfiProfile, FfiError> {
+    let pk = <[u8; 32]>::try_from(identity_pk.as_slice()).map_err(|_| {
+        FfiError::Contacts("signature.badKey: identityPk must be 32 bytes".to_string())
+    })?;
+    lakko_contacts::profile::verify_profile(&plaintext, &pk)
+        .map(Into::into)
+        .map_err(Into::into)
 }
 
 /// Strictly decode a profile envelope (ADR-0048). Fail-closed: a plaintext
@@ -2605,6 +2637,19 @@ pub enum FfiIncomingEnvelopeKind {
     /// publisher account resolved at receipt (C-68), and leave those keys
     /// out of the subscriber list and count. Never render it. Appended last.
     PublisherReaderKey,
+    /// ADR-0101 section 7 — a channel comes back to this account after its
+    /// key reset (a continuity-mailbox row). `payload` is the whole envelope;
+    /// decode it with `decodeChannelReturnEnvelope` and act on it without a
+    /// prompt only when `verifyChannelReturnCardBinding` accepts it under
+    /// this account's previous key. Never render it. Appended last.
+    ChannelReturn,
+    /// ADR-0101 section 9 — a device back after a key reset asks for this
+    /// conversation's history, newest first. `payload` is the whole
+    /// envelope; decode it with `decodeHistoryRequestEnvelope` and answer
+    /// with `sealGapHistory` when this device may (the other person of a
+    /// one-to-one, an owner or admin of a group). Never render it. Appended
+    /// last.
+    HistoryRequest,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -2878,6 +2923,14 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
         IncomingEnvelope::AccountDeleted(_) => FfiIncomingEnvelope {
             payload: plaintext.clone(),
             ..FfiIncomingEnvelope::of(K::AccountDeleted)
+        },
+        IncomingEnvelope::ChannelReturn(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::ChannelReturn)
+        },
+        IncomingEnvelope::HistoryRequest(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::HistoryRequest)
         },
         IncomingEnvelope::IntroMessage(p) => FfiIncomingEnvelope {
             payload: p.to_vec(),
@@ -4219,6 +4272,39 @@ mod tests {
     use super::*;
     use crate::scoped_discovery::{derive_reach_grant, FfiReachClass, FfiReachGrant};
     use lakko_crypto::agreement::SecretKey as InnerX25519SecretKey;
+
+    /// The module's `compose_profile_envelope`, signed by a fixed test
+    /// account (ADR-0101 profile v6).
+    fn compose_profile_envelope(p: FfiProfile) -> Result<Vec<u8>, FfiError> {
+        super::compose_profile_envelope(p, &test_profile_identity())
+    }
+
+    fn test_profile_identity() -> crate::Identity {
+        crate::Identity::from_seed(vec![0x6B; 32]).unwrap()
+    }
+
+    #[test]
+    fn a_composed_profile_verifies_under_its_account_and_no_other() {
+        let id = test_profile_identity();
+        let p = FfiProfile {
+            display_name: Some("Alice".to_string()),
+            username: None,
+            updated_at_ms: 1,
+            account_id: None,
+            username_certificate: None,
+            grants: Vec::new(),
+            avatar: None,
+            card_shareable: true,
+        };
+        let wire = compose_profile_envelope(p.clone()).unwrap();
+        let pk = SigningKey::from_seed(&id.inner.ed25519_seed_bytes())
+            .verifying_key()
+            .to_bytes()
+            .to_vec();
+        assert_eq!(verify_profile_envelope(wire.clone(), pk).unwrap(), p);
+        assert!(verify_profile_envelope(wire.clone(), vec![0x11; 32]).is_err());
+        assert!(verify_profile_envelope(wire, vec![0x11; 31]).is_err());
+    }
 
     const TEST_LINK_ID: [u8; 16] = [0x1C; 16];
 

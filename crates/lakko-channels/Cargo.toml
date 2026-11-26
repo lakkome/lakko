@@ -41,3 +41,5 @@ base64 = "0.22"
 
 [dev-dependencies]
 hex = "0.4"
+# Already in the tree through lakko-contacts; test-only.
+proptest = "1"

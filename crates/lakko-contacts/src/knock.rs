@@ -373,7 +373,12 @@ fn reopens(seed: &[u8; KNOCK_KEY_LEN], request: &KnockRequest) -> bool {
     let profile = request
         .profile
         .as_ref()
-        .and_then(|p| crate::profile::compose_profile(p).ok())
+        .and_then(|p| {
+            // Any key: the knock carries the profile bytes as given and
+            // neither seals nor opens verify the signature.
+            let key = lakko_crypto::signing::SigningKey::from_seed(&[0x4C; 32]);
+            crate::profile::compose_profile(p, &key).ok()
+        })
         .unwrap_or_default();
     let Ok(row) = seal_knock(&knock_public_key(seed), 1, request, &profile) else {
         return false;

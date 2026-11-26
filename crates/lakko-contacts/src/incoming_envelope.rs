@@ -137,6 +137,7 @@ use crate::channel_epoch_seeds::{
 use crate::channel_read_key::{
     try_unwrap_channel_read_key, ChannelReadKeyEnvelope, ChannelReadKeyError,
 };
+use crate::channel_return::{try_unwrap_channel_return, ChannelReturn, ChannelReturnError};
 use crate::channel_rotate_request::{try_unwrap_channel_rotate_request, ChannelRotateRequestError};
 use crate::committer_beacon::{try_unwrap_committer_beacon, CommitterBeaconError};
 use crate::committer_delegation::{
@@ -156,6 +157,7 @@ use crate::group_contact_request::{
 use crate::group_name::{try_unwrap_group_name, GroupName, GroupNameError};
 use crate::group_photo::{try_unwrap_group_photo, GroupPhoto, GroupPhotoError};
 use crate::group_reactions::{try_unwrap_group_reactions, GroupReactions, GroupReactionsError};
+use crate::history_request::{try_unwrap_history_request, HistoryRequest, HistoryRequestError};
 use crate::introduction::{
     try_unwrap_introduction_offer, try_unwrap_introductions, IntroductionError, IntroductionRecord,
     IntroductionsBundle,
@@ -520,6 +522,17 @@ pub enum IncomingEnvelope<'a> {
     /// receipt (C-68), and only when strictly newer
     /// ([`crate::knock_key::knock_key_is_newer`]).
     KnockKey(KnockKey),
+    /// A channel comes back to a person who reset their keys (ADR-0101
+    /// section 7). Arrives in a continuity-mailbox row. Never a chat bubble.
+    /// The reset device acts on it without a prompt only when
+    /// [`ChannelReturn::verify_old_card_binding`] accepts it under its own
+    /// previous account key; otherwise it is an ordinary invitation.
+    ChannelReturn(ChannelReturn),
+    /// A device back in a conversation after a key reset asks for its
+    /// history, newest first (ADR-0101 section 9). Never a chat bubble.
+    /// Answered with [`crate::gap_history::seal_gap_history`] by the other
+    /// person of a one-to-one or an owner or admin of a group.
+    HistoryRequest(HistoryRequest),
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -661,6 +674,12 @@ pub enum DispatchError {
     /// The knock-key domain (ADR-0091) with a malformed payload.
     #[error(transparent)]
     KnockKey(#[from] KnockKeyError),
+    /// The channel-return domain (ADR-0101) with a malformed payload.
+    #[error(transparent)]
+    ChannelReturn(#[from] ChannelReturnError),
+    /// The history-request domain (ADR-0101) with a malformed payload.
+    #[error(transparent)]
+    HistoryRequest(#[from] HistoryRequestError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -818,6 +837,14 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     // 7n8. The group's knock public key — ADR-0091 phase 2.
     if let Some(key) = try_unwrap_knock_key(plaintext)? {
         return Ok(IncomingEnvelope::KnockKey(key));
+    }
+    // 7n9. A channel comes back after a key reset — ADR-0101 section 7.
+    if let Some(ret) = try_unwrap_channel_return(plaintext)? {
+        return Ok(IncomingEnvelope::ChannelReturn(ret));
+    }
+    // 7n10. History asked for after a key reset — ADR-0101 section 9.
+    if let Some(req) = try_unwrap_history_request(plaintext)? {
+        return Ok(IncomingEnvelope::HistoryRequest(req));
     }
     // 7o. Contact request inside a group — ADR-0086 §6.
     if let Some(items) = try_unwrap_open_items(plaintext)? {
@@ -1066,7 +1093,11 @@ mod tests {
             avatar: None,
             card_shareable: true,
         };
-        let wrapped = compose_profile(&profile).unwrap();
+        let wrapped = compose_profile(
+            &profile,
+            &lakko_crypto::signing::SigningKey::from_seed(&[1; 32]),
+        )
+        .unwrap();
         assert_eq!(
             dispatch_incoming_envelope(&wrapped).unwrap(),
             IncomingEnvelope::Profile(profile),
@@ -1077,15 +1108,19 @@ mod tests {
     fn an_out_of_bounds_profile_is_an_error_not_an_intro_message() {
         // Fail-closed: a profile carrying a right-to-left override in
         // its name must be dropped, never rendered as chat text.
-        use crate::profile::{DisplayNameError, PROFILE_ENVELOPE_DOMAIN_V1, PROFILE_VERSION_V5};
+        use crate::profile::{
+            DisplayNameError, PROFILE_ENVELOPE_DOMAIN_V1, PROFILE_SIG_LEN, PROFILE_VERSION_V6,
+        };
         let name = "Alice\u{202E}".as_bytes();
         let mut wrapped = PROFILE_ENVELOPE_DOMAIN_V1.to_vec();
-        wrapped.push(PROFILE_VERSION_V5);
+        wrapped.push(PROFILE_VERSION_V6);
         wrapped.extend_from_slice(&0u64.to_be_bytes());
         wrapped.push(u8::try_from(name.len()).unwrap());
         wrapped.extend_from_slice(name);
-        // No username, account id, certificate, grants, avatar or flags.
+        // No username, account id, certificate, grants, avatar or flags;
+        // a placeholder signature (decode does not verify it).
         wrapped.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+        wrapped.extend_from_slice(&[0; PROFILE_SIG_LEN]);
         assert_eq!(
             dispatch_incoming_envelope(&wrapped),
             Err(DispatchError::Profile(ProfileError::DisplayName(

@@ -875,3 +875,17 @@ data class AccountNoticesResponse(
  *  to the moderators, standard base64. */
 @Serializable
 public data class SuspensionAppealRequest(val sealed_b64: String)
+
+/** Body of `POST /auth/channel-recovery/evaluate` (ADR-0101 section 7):
+ *  URL-safe base64 (no padding) of one blinded element. */
+@Serializable
+data class ChannelRecoveryEvaluateRequest(
+    val blinded_element: String,
+)
+
+/** Response of `POST /auth/channel-recovery/evaluate`: URL-safe base64 (no
+ *  padding) of the evaluation. */
+@Serializable
+data class ChannelRecoveryEvaluateResponse(
+    val evaluation: String,
+)

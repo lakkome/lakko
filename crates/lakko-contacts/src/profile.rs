@@ -88,15 +88,36 @@
 //!       || flags
 //!          └ 1 B: bit 0 = card_not_shareable, every other bit refused ┘
 //!
+//!       || sig
+//!          └ 64 B: Ed25519 by the account identity key over
+//!                  PROFILE_SIG_DOMAIN || every preceding byte ┘
+//!
 //!                     "lakko/profile/v1\x00"
 //! ```
 //!
 //! A length of `0` means "no name" / "no username" / "no account id" / "no
 //! certificate". Total length is between [`PROFILE_ENVELOPE_MIN_LEN`] and
 //! [`PROFILE_ENVELOPE_MAX_LEN`]. v5 ([ADR-0092](../../../docs/adr/0092-attachment-kinds.md)
-//! section 7, the "card may not be shared" flag) is a flag day: v1 to v4
-//! are refused as [`ProfileError::UnknownVersion`], as v4 (ADR-0084, the
-//! profile photo) refused v1 to v3.
+//! section 7, the "card may not be shared" flag) was a flag day that refused
+//! v1 to v4; v6 ([ADR-0101](../../../docs/adr/0101-reaching-a-reset-account.md)
+//! section 8, the signature) is another: v1 to v5 are refused as
+//! [`ProfileError::UnknownVersion`].
+//!
+//! ## The signature (v6, ADR-0101 section 8)
+//!
+//! The envelope ends with an Ed25519 signature by the sender's **account
+//! identity key** over [`PROFILE_SIG_DOMAIN`] followed by every byte before
+//! the signature (the envelope domain included). [`compose_profile`] takes the
+//! identity key and signs. [`decode_profile`] / [`try_unwrap_profile`] parse
+//! the signature's place and length but do **not** verify it: the decoder does
+//! not know whose profile it is. [`verify_profile`] decodes and verifies
+//! against an identity key the caller trusts: the sender's account key
+//! resolved at receipt (C-68) for an ordinary profile, the device's own
+//! previous account key for a profile a peer returns after a key reset
+//! (ADR-0101 section 8). The signature is what lets a profile be carried by
+//! someone other than its owner, which the receiver-side binding of the
+//! module docs above cannot do. ADR-0101 calls this "version 5"; v5 was
+//! already taken by the ADR-0092 flags byte, so the signed envelope is v6.
 //!
 //! ## Bounds, and why a violation rejects the whole envelope
 //!
@@ -189,6 +210,7 @@
 
 use core::result::Result as CoreResult;
 
+use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey};
 use thiserror::Error;
 
 use crate::avatar::{encode_avatar_field, read_avatar_field, AvatarError};
@@ -236,9 +258,20 @@ pub const PROFILE_VERSION_V3: u8 = 0x03;
 pub const PROFILE_VERSION_V4: u8 = 0x04;
 
 /// Schema version carried in the first payload byte since ADR-0092 section 7
-/// (2026-11-18): v4 plus one flags byte after the avatar. The only version
-/// decoded; v1 to v4 are refused (`UnknownVersion`), a flag day.
+/// (2026-11-18): v4 plus one flags byte after the avatar. Refused since v6.
 pub const PROFILE_VERSION_V5: u8 = 0x05;
+
+/// Schema version carried in the first payload byte since ADR-0101 section 8
+/// (2026-11-25): v5 plus the account identity key's signature. The only
+/// version decoded; v1 to v5 are refused (`UnknownVersion`), a flag day.
+pub const PROFILE_VERSION_V6: u8 = 0x06;
+
+/// Domain separator the account identity key signs a profile under, followed
+/// by every envelope byte before the signature. Frozen.
+pub const PROFILE_SIG_DOMAIN: &[u8] = b"lakko/profile/sig/v1\x00";
+
+/// Length of the profile signature (Ed25519).
+pub const PROFILE_SIG_LEN: usize = 64;
 
 /// Flags-byte bit: the sender's contact card may not be shared
 /// (ADR-0092 section 7). Set exactly when the sender's "who can find me"
@@ -276,8 +309,8 @@ pub const DISPLAY_NAME_MAX_BYTES: usize = u8::MAX as usize;
 
 /// Bytes after the separator that every envelope carries: version,
 /// `updated_at_ms`, `name_len`, `username_len`, `account_id_len`,
-/// `cert_len`, `grant_count`, `avatar_len`, `flags`.
-const FIXED_PAYLOAD_LEN: usize = 1 + 8 + 1 + 1 + 1 + 1 + 1 + 1 + 1;
+/// `cert_len`, `grant_count`, `avatar_len`, `flags`, the signature.
+const FIXED_PAYLOAD_LEN: usize = 1 + 8 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + PROFILE_SIG_LEN;
 
 /// Shortest well-formed envelope: no name, no username.
 pub const PROFILE_ENVELOPE_MIN_LEN: usize = PROFILE_ENVELOPE_DOMAIN_V1.len() + FIXED_PAYLOAD_LEN;
@@ -608,17 +641,22 @@ pub const fn profile_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms:
     incoming_updated_at_ms > stored_updated_at_ms
 }
 
-/// Compose a profile envelope.
+/// Compose a profile envelope, signed by the account identity key
+/// `identity` (v6, ADR-0101 section 8).
 ///
 /// The output is the **inner** plaintext handed to the MLS
 /// application-message send path, or placed in a contact request's sealed
-/// envelope by [`crate::request::compose`].
+/// envelope by [`crate::request::compose`]. Deterministic: Ed25519
+/// signatures are.
 ///
 /// # Errors
 ///
 /// Exactly the errors [`Profile::validate`] returns — `compose` refuses what
 /// [`decode_profile`] would refuse.
-pub fn compose_profile(profile: &Profile) -> CoreResult<Vec<u8>, ProfileError> {
+pub fn compose_profile(
+    profile: &Profile,
+    identity: &SigningKey,
+) -> CoreResult<Vec<u8>, ProfileError> {
     profile.validate()?;
     let name = profile.display_name.as_deref().unwrap_or("").as_bytes();
     let username = profile.username.as_deref().unwrap_or("").as_bytes();
@@ -637,7 +675,7 @@ pub fn compose_profile(profile: &Profile) -> CoreResult<Vec<u8>, ProfileError> {
 
     let mut out = Vec::with_capacity(PROFILE_ENVELOPE_MIN_LEN + name.len() + username.len());
     out.extend_from_slice(PROFILE_ENVELOPE_DOMAIN_V1);
-    out.push(PROFILE_VERSION_V5);
+    out.push(PROFILE_VERSION_V6);
     out.extend_from_slice(&profile.updated_at_ms.to_be_bytes());
     out.push(name_len);
     out.extend_from_slice(name);
@@ -676,7 +714,18 @@ pub fn compose_profile(profile: &Profile) -> CoreResult<Vec<u8>, ProfileError> {
     } else {
         PROFILE_FLAG_CARD_NOT_SHAREABLE
     });
+    let signature = identity.sign(&signed_bytes(&out)).to_bytes();
+    out.extend_from_slice(&signature);
     Ok(out)
+}
+
+/// The bytes the identity key signs: [`PROFILE_SIG_DOMAIN`] followed by the
+/// envelope up to (not including) the signature.
+fn signed_bytes(unsigned_envelope: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(PROFILE_SIG_DOMAIN.len() + unsigned_envelope.len());
+    out.extend_from_slice(PROFILE_SIG_DOMAIN);
+    out.extend_from_slice(unsigned_envelope);
+    out
 }
 
 /// Discriminated unwrap for the [`crate::incoming_envelope`] dispatcher.
@@ -691,9 +740,9 @@ pub fn compose_profile(profile: &Profile) -> CoreResult<Vec<u8>, ProfileError> {
 ///
 /// * [`ProfileError::Truncated`] — the payload ends before a declared field.
 /// * [`ProfileError::UnknownVersion`] — the version byte is not
-///   [`PROFILE_VERSION_V5`].
+///   [`PROFILE_VERSION_V6`].
 /// * [`ProfileError::UnknownFlags`] — a flags bit other than bit 0 is set.
-/// * [`ProfileError::TrailingBytes`] — bytes remain after the flags byte.
+/// * [`ProfileError::TrailingBytes`] — bytes remain after the signature.
 /// * [`ProfileError::AvatarLength`] — the avatar length byte is not 0, 84
 ///   or 170.
 /// * [`ProfileError::AccountIdLength`] / [`ProfileError::CertificateLength`]
@@ -708,7 +757,7 @@ pub fn try_unwrap_profile(plaintext: &[u8]) -> CoreResult<Option<Profile>, Profi
     let mut cur = payload;
 
     let version = take_u8(&mut cur)?;
-    if version != PROFILE_VERSION_V5 {
+    if version != PROFILE_VERSION_V6 {
         return Err(ProfileError::UnknownVersion(version));
     }
     let updated_at_bytes: [u8; 8] = take(&mut cur, 8)?
@@ -752,6 +801,8 @@ pub fn try_unwrap_profile(plaintext: &[u8]) -> CoreResult<Option<Profile>, Profi
     if flags & !PROFILE_KNOWN_FLAGS != 0 {
         return Err(ProfileError::UnknownFlags(flags));
     }
+    // The signature: its place and length only; [`verify_profile`] checks it.
+    take(&mut cur, PROFILE_SIG_LEN)?;
     if !cur.is_empty() {
         return Err(ProfileError::TrailingBytes { count: cur.len() });
     }
@@ -786,7 +837,8 @@ pub fn try_unwrap_profile(plaintext: &[u8]) -> CoreResult<Option<Profile>, Profi
     Ok(Some(profile))
 }
 
-/// Strict standalone decoder: a non-profile plaintext is a hard error.
+/// Strict standalone decoder: a non-profile plaintext is a hard error. The
+/// signature is **not** verified; see [`verify_profile`].
 ///
 /// # Errors
 ///
@@ -795,6 +847,33 @@ pub fn try_unwrap_profile(plaintext: &[u8]) -> CoreResult<Option<Profile>, Profi
 /// * Every error [`try_unwrap_profile`] returns.
 pub fn decode_profile(bytes: &[u8]) -> CoreResult<Profile, ProfileError> {
     try_unwrap_profile(bytes)?.ok_or(ProfileError::WrongDomain)
+}
+
+/// Decode a profile envelope and verify its signature against the account
+/// identity key `identity_pk` the caller trusts (ADR-0101 section 8).
+///
+/// # Errors
+///
+/// * Every error [`decode_profile`] returns (the layout is checked first).
+/// * [`ProfileError::BadKey`] — `identity_pk` is not a usable public key.
+/// * [`ProfileError::BadSignature`] — the signature does not verify under
+///   `identity_pk`.
+pub fn verify_profile(bytes: &[u8], identity_pk: &[u8; 32]) -> CoreResult<Profile, ProfileError> {
+    let profile = decode_profile(bytes)?;
+    let key = VerifyingKey::from_bytes(identity_pk).map_err(|_| ProfileError::BadKey)?;
+    if key.is_weak() {
+        return Err(ProfileError::BadKey);
+    }
+    // A decoded envelope ends with exactly PROFILE_SIG_LEN signature bytes.
+    let split = bytes
+        .len()
+        .checked_sub(PROFILE_SIG_LEN)
+        .ok_or(ProfileError::Truncated)?;
+    let (unsigned, sig) = bytes.split_at(split);
+    let signature = Signature::from_bytes(sig).map_err(|_| ProfileError::BadSignature)?;
+    key.verify(&signed_bytes(unsigned), &signature)
+        .map_err(|_| ProfileError::BadSignature)?;
+    Ok(profile)
 }
 
 /// Why a profile envelope was refused.
@@ -813,7 +892,7 @@ pub enum ProfileError {
         /// How many bytes followed the last field.
         count: usize,
     },
-    /// The version byte is not [`PROFILE_VERSION_V5`].
+    /// The version byte is not [`PROFILE_VERSION_V6`].
     #[error("profile envelope carries unknown schema version {0:#04x}")]
     UnknownVersion(u8),
     /// The display name violates a bound.
@@ -880,6 +959,13 @@ pub enum ProfileError {
     /// as read).
     #[error("profile flags byte {0:#04x} sets an unknown bit")]
     UnknownFlags(u8),
+    /// The identity key given to [`verify_profile`] is not a usable public
+    /// key.
+    #[error("profile identity key is not a usable public key")]
+    BadKey,
+    /// The profile signature does not verify under the identity key given.
+    #[error("profile signature does not verify")]
+    BadSignature,
 }
 
 impl ProfileError {
@@ -910,6 +996,8 @@ impl ProfileError {
             Self::AvatarSize => "avatar.size".to_string(),
             Self::AvatarDuration => "avatar.duration".to_string(),
             Self::UnknownFlags(_) => "flags.unknown".to_string(),
+            Self::BadKey => "signature.badKey".to_string(),
+            Self::BadSignature => "signature.bad".to_string(),
         }
     }
 }
@@ -949,6 +1037,27 @@ fn take<'a>(cur: &mut &'a [u8], n: usize) -> CoreResult<&'a [u8], ProfileError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_IDENTITY_SEED: [u8; 32] = [0x6B; 32];
+
+    fn test_identity() -> SigningKey {
+        SigningKey::from_seed(&TEST_IDENTITY_SEED)
+    }
+
+    fn test_identity_pub() -> [u8; 32] {
+        test_identity().verifying_key().to_bytes()
+    }
+
+    /// The module's `compose_profile`, signed with the test identity key.
+    fn compose_profile(p: &Profile) -> CoreResult<Vec<u8>, ProfileError> {
+        super::compose_profile(p, &test_identity())
+    }
+
+    /// Append a placeholder signature: decode checks its length, not its
+    /// value.
+    fn add_sig(wire: &mut Vec<u8>) {
+        wire.extend_from_slice(&[0; PROFILE_SIG_LEN]);
+    }
 
     fn profile(name: Option<&str>, username: Option<&str>, at: u64) -> Profile {
         Profile {
@@ -1013,9 +1122,12 @@ mod tests {
             p.avatar = Some(avatar.clone());
             let wire = compose_profile(&p).unwrap();
             let expected_avatar_len = if avatar.video.is_some() { 170 } else { 84 };
-            assert_eq!(wire.len(), 33 + 5 + 5 + expected_avatar_len);
             assert_eq!(
-                wire[wire.len() - expected_avatar_len - 2],
+                wire.len(),
+                PROFILE_ENVELOPE_MIN_LEN + 5 + 5 + expected_avatar_len
+            );
+            assert_eq!(
+                wire[wire.len() - expected_avatar_len - 2 - PROFILE_SIG_LEN],
                 u8::try_from(expected_avatar_len).unwrap()
             );
             assert_eq!(decode_profile(&wire).unwrap(), p);
@@ -1037,7 +1149,7 @@ mod tests {
             video: None,
         });
         let wire = compose_profile(&p).unwrap();
-        let at = PROFILE_ENVELOPE_MIN_LEN - 2;
+        let at = PROFILE_ENVELOPE_MIN_LEN - 2 - PROFILE_SIG_LEN;
         assert_eq!(wire[at], 84);
         let r = &wire[at + 1..];
         assert_eq!(&r[..32], &[1; 32]);
@@ -1094,8 +1206,8 @@ mod tests {
             p.avatar = Some(avatar.clone());
             assert_eq!(compose_profile(&p), Err(why), "{avatar:?}");
             // The same avatar on the wire, hand-built past compose.
-            let mut wire = raw(5, 5, b"Alice", b"");
-            wire.truncate(wire.len() - 2); // the avatar length and the flags
+            let mut wire = raw(PROFILE_VERSION_V6, 5, b"Alice", b"");
+            wire.truncate(wire.len() - 2 - PROFILE_SIG_LEN); // the avatar length, the flags and the signature
             wire.push(u8::try_from(avatar.encoded_len()).unwrap());
             avatar.still.encode_into(&mut wire);
             if let Some(v) = &avatar.video {
@@ -1103,6 +1215,7 @@ mod tests {
                 wire.extend_from_slice(&v.duration_ms.to_be_bytes());
             }
             wire.push(0);
+            add_sig(&mut wire);
             assert_eq!(decode_profile(&wire), Err(why), "{avatar:?}");
         }
     }
@@ -1110,11 +1223,12 @@ mod tests {
     #[test]
     fn an_avatar_length_other_than_0_84_or_170_is_refused() {
         for got in [1_u8, 83, 85, 169, 171, 255] {
-            let mut wire = raw(5, 5, b"", b"");
-            wire.truncate(wire.len() - 2); // the avatar length and the flags
+            let mut wire = raw(PROFILE_VERSION_V6, 5, b"", b"");
+            wire.truncate(wire.len() - 2 - PROFILE_SIG_LEN); // the avatar length, the flags and the signature
             wire.push(got);
             wire.extend(core::iter::repeat_n(0_u8, usize::from(got)));
             wire.push(0);
+            add_sig(&mut wire);
             assert_eq!(
                 decode_profile(&wire),
                 Err(ProfileError::AvatarLength {
@@ -1165,8 +1279,8 @@ mod tests {
             p.avatar = Some(full_avatar());
             p.card_shareable = shareable;
             let wire = compose_profile(&p).unwrap();
-            let last = *wire.last().unwrap();
-            assert_eq!(last, u8::from(!shareable));
+            let flags = wire[wire.len() - 1 - PROFILE_SIG_LEN];
+            assert_eq!(flags, u8::from(!shareable));
             assert_eq!(decode_profile(&wire).unwrap(), p);
         }
     }
@@ -1174,8 +1288,9 @@ mod tests {
     #[test]
     fn an_unknown_flag_bit_is_refused() {
         for flags in [0x02_u8, 0x03, 0x80, 0xFF] {
-            let mut wire = raw(5, 0, b"Alice", b"");
-            *wire.last_mut().unwrap() = flags;
+            let mut wire = raw(PROFILE_VERSION_V6, 0, b"Alice", b"");
+            let at = wire.len() - 1 - PROFILE_SIG_LEN;
+            wire[at] = flags;
             assert_eq!(
                 decode_profile(&wire),
                 Err(ProfileError::UnknownFlags(flags))
@@ -1197,13 +1312,13 @@ mod tests {
 
     #[test]
     fn an_envelope_ending_before_the_flags_is_truncated() {
-        let mut wire = raw(5, 0, b"Alice", b"");
-        wire.pop();
+        let mut wire = raw(PROFILE_VERSION_V6, 0, b"Alice", b"");
+        wire.truncate(wire.len() - 1 - PROFILE_SIG_LEN);
         assert_eq!(decode_profile(&wire), Err(ProfileError::Truncated));
         let mut p = profile(None, None, 1);
         p.avatar = Some(still_avatar());
         let mut wire = compose_profile(&p).unwrap();
-        wire.pop();
+        wire.truncate(wire.len() - 1 - PROFILE_SIG_LEN);
         assert_eq!(decode_profile(&wire), Err(ProfileError::Truncated));
     }
 
@@ -1227,6 +1342,7 @@ mod tests {
         out.extend_from_slice(username);
         // No account id, no certificate, no grants, no avatar, no flags.
         out.extend_from_slice(&[0, 0, 0, 0, 0]);
+        add_sig(&mut out);
         out
     }
 
@@ -1240,6 +1356,82 @@ mod tests {
     /// by [`raw`] / `compose` with the given name and username lengths.
     fn account_id_len_offset(name_len: usize, username_len: usize) -> usize {
         PROFILE_ENVELOPE_DOMAIN_V1.len() + 1 + 8 + 1 + name_len + 1 + username_len
+    }
+
+    // --- v6: the identity key's signature (ADR-0101 section 8) --------------
+
+    #[test]
+    fn a_signed_profile_verifies_under_its_key_and_no_other() {
+        let mut p = profile(Some("Alice"), Some("alice"), 3);
+        p.avatar = Some(full_avatar());
+        let wire = compose_profile(&p).unwrap();
+        assert_eq!(verify_profile(&wire, &test_identity_pub()), Ok(p.clone()));
+        let other = SigningKey::from_seed(&[0x6C; 32])
+            .verifying_key()
+            .to_bytes();
+        assert_eq!(
+            verify_profile(&wire, &other),
+            Err(ProfileError::BadSignature)
+        );
+        // A tampered body and a tampered signature are both refused.
+        for at in [PROFILE_ENVELOPE_DOMAIN_V1.len() + 2, wire.len() - 1] {
+            let mut bad = wire.clone();
+            bad[at] ^= 0x01;
+            assert!(
+                verify_profile(&bad, &test_identity_pub()).is_err(),
+                "byte {at}"
+            );
+        }
+        // An unusable key.
+        let mut weak = [0u8; 32];
+        weak[0] = 1;
+        assert_eq!(verify_profile(&wire, &weak), Err(ProfileError::BadKey));
+        // The layout is checked before the key.
+        assert_eq!(
+            verify_profile(b"hi", &test_identity_pub()),
+            Err(ProfileError::WrongDomain)
+        );
+        assert_eq!(ProfileError::BadSignature.code(), "signature.bad");
+        assert_eq!(ProfileError::BadKey.code(), "signature.badKey");
+    }
+
+    #[test]
+    fn the_signature_covers_the_envelope_domain_and_is_deterministic() {
+        let p = profile(Some("Al"), None, 1);
+        let wire = compose_profile(&p).unwrap();
+        assert_eq!(compose_profile(&p).unwrap(), wire);
+        let (unsigned, sig) = wire.split_at(wire.len() - PROFILE_SIG_LEN);
+        let mut signed = PROFILE_SIG_DOMAIN.to_vec();
+        signed.extend_from_slice(unsigned);
+        let signature = Signature::from_bytes(sig).unwrap();
+        assert!(test_identity()
+            .verifying_key()
+            .verify(&signed, &signature)
+            .is_ok());
+        assert!(!PROFILE_SIG_DOMAIN.starts_with(PROFILE_ENVELOPE_DOMAIN_V1));
+        assert!(!PROFILE_ENVELOPE_DOMAIN_V1.starts_with(PROFILE_SIG_DOMAIN));
+    }
+
+    #[test]
+    fn a_v5_envelope_is_refused() {
+        // A v5 envelope: the v6 layout without the signature.
+        let mut wire = raw(PROFILE_VERSION_V5, 0, b"Alice", b"");
+        wire.truncate(wire.len() - PROFILE_SIG_LEN);
+        assert_eq!(
+            decode_profile(&wire),
+            Err(ProfileError::UnknownVersion(PROFILE_VERSION_V5))
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn verify_never_accepts_a_foreign_key(seed in proptest::prelude::any::<[u8; 32]>()) {
+            let wire = compose_profile(&profile(Some("Alice"), None, 2)).unwrap();
+            let other = SigningKey::from_seed(&seed).verifying_key().to_bytes();
+            if other != test_identity_pub() {
+                proptest::prop_assert!(verify_profile(&wire, &other).is_err());
+            }
+        }
     }
 
     // --- wire format ---------------------------------------------------------
@@ -1265,14 +1457,15 @@ mod tests {
         let sep = PROFILE_ENVELOPE_DOMAIN_V1.len();
         assert_eq!(sep, 17);
         assert_eq!(&wire[..sep], b"lakko/profile/v1\x00");
-        assert_eq!(wire[sep], PROFILE_VERSION_V5);
+        assert_eq!(wire[sep], PROFILE_VERSION_V6);
         assert_eq!(&wire[sep + 1..sep + 9], &[1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(wire[sep + 9], 2);
         assert_eq!(&wire[sep + 10..sep + 12], b"Al");
         assert_eq!(wire[sep + 12], 3);
         assert_eq!(&wire[sep + 13..sep + 16], b"abc");
+        assert_eq!(wire.len(), sep + 21 + PROFILE_SIG_LEN);
         assert_eq!(
-            &wire[sep + 16..],
+            &wire[sep + 16..sep + 21],
             &[0, 0, 0, 0, 0],
             "no account id, no certificate, no grants, no avatar, no flags: five zero bytes"
         );
@@ -1280,12 +1473,12 @@ mod tests {
 
     #[test]
     fn envelope_length_bounds_are_the_documented_construction() {
-        assert_eq!(PROFILE_ENVELOPE_MIN_LEN, 33);
+        assert_eq!(PROFILE_ENVELOPE_MIN_LEN, 97);
         assert_eq!(
             PROFILE_ENVELOPE_MAX_LEN,
-            33 + 255 + 32 + 16 + 153 + 2 * 134 + 170
+            97 + 255 + 32 + 16 + 153 + 2 * 134 + 170
         );
-        assert_eq!(PROFILE_ENVELOPE_MAX_LEN, 927);
+        assert_eq!(PROFILE_ENVELOPE_MAX_LEN, 991);
         let empty = compose_profile(&profile(None, None, 0)).unwrap();
         assert_eq!(empty.len(), PROFILE_ENVELOPE_MIN_LEN);
         // A maximal envelope: 255 bytes of name in exactly 64 chars (63
@@ -1354,11 +1547,11 @@ mod tests {
     #[test]
     fn non_utf8_fields_are_refused() {
         assert_eq!(
-            decode_profile(&raw(5, 0, &[0xFF, 0xFE], b"")),
+            decode_profile(&raw(PROFILE_VERSION_V6, 0, &[0xFF, 0xFE], b"")),
             Err(ProfileError::DisplayName(DisplayNameError::NotUtf8))
         );
         assert_eq!(
-            decode_profile(&raw(5, 0, b"", &[0xC3, 0x28, 0x61])),
+            decode_profile(&raw(PROFILE_VERSION_V6, 0, b"", &[0xC3, 0x28, 0x61])),
             Err(ProfileError::Username(UsernameError::InvalidCharacters))
         );
     }
@@ -1367,13 +1560,23 @@ mod tests {
     fn an_out_of_bounds_field_rejects_the_whole_envelope() {
         // A perfectly good username does not rescue a bad name, and vice versa.
         assert_eq!(
-            decode_profile(&raw(5, 0, "Alice\u{202E}".as_bytes(), b"alice")),
+            decode_profile(&raw(
+                PROFILE_VERSION_V6,
+                0,
+                "Alice\u{202E}".as_bytes(),
+                b"alice"
+            )),
             Err(ProfileError::DisplayName(
                 DisplayNameError::ControlOrFormatCharacter
             ))
         );
         assert_eq!(
-            decode_profile(&raw(5, 0, b"Pavel", "p\u{430}vel".as_bytes())),
+            decode_profile(&raw(
+                PROFILE_VERSION_V6,
+                0,
+                b"Pavel",
+                "p\u{430}vel".as_bytes()
+            )),
             Err(ProfileError::Username(UsernameError::InvalidCharacters))
         );
     }
@@ -1401,8 +1604,13 @@ mod tests {
                 0,
             );
             let compose_err = compose_profile(&p).unwrap_err();
-            let decode_err =
-                decode_profile(&raw(5, 0, name.as_bytes(), username.as_bytes())).unwrap_err();
+            let decode_err = decode_profile(&raw(
+                PROFILE_VERSION_V6,
+                0,
+                name.as_bytes(),
+                username.as_bytes(),
+            ))
+            .unwrap_err();
             assert_eq!(compose_err, decode_err, "{name:?} / {username:?}");
         }
         // 65 chars cannot even be hand-built past the u8 length on some
@@ -1410,7 +1618,7 @@ mod tests {
         let long = "a".repeat(DISPLAY_NAME_MAX_CHARS + 1);
         assert_eq!(
             compose_profile(&profile(Some(&long), None, 0)),
-            decode_profile(&raw(5, 0, long.as_bytes(), b"")).map(|_| Vec::new()),
+            decode_profile(&raw(PROFILE_VERSION_V6, 0, long.as_bytes(), b"")).map(|_| Vec::new()),
         );
     }
 
@@ -1549,7 +1757,13 @@ mod tests {
     fn error_messages_never_echo_the_name() {
         let err = check_display_name("Secret\u{202E}Name").unwrap_err();
         assert!(!err.to_string().contains("Secret"));
-        let err = decode_profile(&raw(5, 0, "Secret\u{202E}".as_bytes(), b"")).unwrap_err();
+        let err = decode_profile(&raw(
+            PROFILE_VERSION_V6,
+            0,
+            "Secret\u{202E}".as_bytes(),
+            b"",
+        ))
+        .unwrap_err();
         assert!(!err.to_string().contains("Secret"));
         assert!(!format!("{err:?}").contains("Secret"));
     }
@@ -1559,7 +1773,7 @@ mod tests {
         let mut p = profile(Some("Alice"), Some("alice"), 7);
         p.account_id = Some([0xAB; ACCOUNT_ID_LEN]);
         let wire = compose_profile(&p).unwrap();
-        assert_eq!(wire.len(), 33 + 5 + 5 + 16);
+        assert_eq!(wire.len(), PROFILE_ENVELOPE_MIN_LEN + 5 + 5 + 16);
         assert_eq!(decode_profile(&wire).unwrap(), p);
         // No account id: a single zero length byte.
         let bare = compose_profile(&profile(None, None, 1)).unwrap();
@@ -1633,7 +1847,11 @@ mod tests {
             let wire = compose_profile(&p).unwrap();
             assert_eq!(
                 wire.len(),
-                33 + 5 + 5 + USERNAME_CERT_LEN + p.grants.len() * REACH_GRANT_LEN
+                PROFILE_ENVELOPE_MIN_LEN
+                    + 5
+                    + 5
+                    + USERNAME_CERT_LEN
+                    + p.grants.len() * REACH_GRANT_LEN
             );
             assert_eq!(decode_profile(&wire).unwrap(), p);
         }
@@ -1648,7 +1866,7 @@ mod tests {
             Err(ProfileError::CertificateWithoutUsername)
         );
         // The same fields on the wire, hand-built past compose.
-        let mut wire = raw(5, 5, b"Alice", b"");
+        let mut wire = raw(PROFILE_VERSION_V6, 5, b"Alice", b"");
         let at = account_id_len_offset(5, 0);
         wire[at + 1] = u8::try_from(USERNAME_CERT_LEN).unwrap();
         insert_at(&mut wire, at + 2, &cert(1));
@@ -1673,7 +1891,7 @@ mod tests {
                 compose_profile(&p),
                 Err(ProfileError::CertificateLength { got: len })
             );
-            let mut wire = raw(5, 5, b"", b"alice");
+            let mut wire = raw(PROFILE_VERSION_V6, 5, b"", b"alice");
             let at = account_id_len_offset(0, 5);
             wire[at + 1] = u8::try_from(len).unwrap();
             insert_at(&mut wire, at + 2, &vec![0; len]);
@@ -1729,29 +1947,31 @@ mod tests {
             p.grants.clone_from(&grants);
             assert_eq!(compose_profile(&p), Err(why), "{grants:?}");
             // The same grants on the wire, hand-built past compose.
-            let mut wire = raw(5, 5, b"Alice", b"");
+            let mut wire = raw(PROFILE_VERSION_V6, 5, b"Alice", b"");
             let count_at = account_id_len_offset(5, 0) + 2;
             wire[count_at] = u8::try_from(grants.len()).unwrap();
             // The avatar length and the flags, re-pushed after the grants.
-            wire.truncate(wire.len() - 2);
+            wire.truncate(wire.len() - 2 - PROFILE_SIG_LEN);
             for g in &grants {
                 wire.extend_from_slice(&g.encode());
             }
             wire.extend_from_slice(&[0, 0]);
+            add_sig(&mut wire);
             assert_eq!(decode_profile(&wire), Err(why), "{grants:?}");
         }
     }
 
     #[test]
     fn a_grant_with_an_unknown_class_byte_is_refused() {
-        let mut wire = raw(5, 5, b"Alice", b"");
+        let mut wire = raw(PROFILE_VERSION_V6, 5, b"Alice", b"");
         let count_at = account_id_len_offset(5, 0) + 2;
         wire[count_at] = 1;
         let mut g = grant(ReachClass::Group, 1).encode();
         g[0] = 0x09;
-        wire.truncate(wire.len() - 2);
+        wire.truncate(wire.len() - 2 - PROFILE_SIG_LEN);
         wire.extend_from_slice(&g);
         wire.extend_from_slice(&[0, 0]);
+        add_sig(&mut wire);
         assert_eq!(
             decode_profile(&wire),
             Err(ProfileError::Grant(ReachError::UnknownClass(0x09)))
@@ -1760,7 +1980,7 @@ mod tests {
 
     #[test]
     fn a_huge_grant_count_is_refused_before_reading_grants() {
-        let mut wire = raw(5, 5, b"", b"");
+        let mut wire = raw(PROFILE_VERSION_V6, 5, b"", b"");
         let count_at = account_id_len_offset(0, 0) + 2;
         wire[count_at] = 0xFF;
         assert_eq!(
@@ -1830,7 +2050,12 @@ mod tests {
                 let mut m = wire.clone();
                 m[at] = byte;
                 if let Ok(decoded) = decode_profile(&m) {
-                    assert_eq!(compose_profile(&decoded).unwrap(), m);
+                    // The body is canonical; a mutated signature decodes
+                    // (decode does not verify) and never verifies.
+                    let again = compose_profile(&decoded).unwrap();
+                    let body = m.len() - PROFILE_SIG_LEN;
+                    assert_eq!(again[..body], m[..body]);
+                    assert_eq!(verify_profile(&m, &test_identity_pub()).is_ok(), again == m);
                 }
             }
         }

@@ -63,6 +63,9 @@ pub enum FfiMailboxKind {
     /// A conversation re-entry request (ADR-0091 phase 2, route 2).
     /// Appended: a uniffi enum lowers by ordinal.
     ConversationReentry,
+    /// A channel return (ADR-0101 section 7), in a continuity mailbox.
+    /// Appended: a uniffi enum lowers by ordinal.
+    ChannelReturn,
 }
 
 impl From<FfiMailboxKind> for MailboxKind {
@@ -74,6 +77,7 @@ impl From<FfiMailboxKind> for MailboxKind {
             FfiMailboxKind::WelcomeRendezvous => Self::WelcomeRendezvous,
             FfiMailboxKind::LinkRefusal => Self::LinkRefusal,
             FfiMailboxKind::ConversationReentry => Self::ConversationReentry,
+            FfiMailboxKind::ChannelReturn => Self::ChannelReturn,
         }
     }
 }
@@ -87,6 +91,7 @@ impl From<MailboxKind> for FfiMailboxKind {
             MailboxKind::WelcomeRendezvous => Self::WelcomeRendezvous,
             MailboxKind::LinkRefusal => Self::LinkRefusal,
             MailboxKind::ConversationReentry => Self::ConversationReentry,
+            MailboxKind::ChannelReturn => Self::ChannelReturn,
         }
     }
 }
@@ -115,6 +120,19 @@ impl MailboxKey {
     pub fn from_account_identity(account_identity: &Identity) -> Arc<Self> {
         Arc::new(Self {
             inner: core::MailboxKey::from_account_seed(
+                &account_identity.inner.ed25519_seed_bytes(),
+            ),
+        })
+    }
+
+    /// The **continuity** mailbox key of the account (ADR-0101 section 1):
+    /// a second mailbox, never the real one, a reset identity announces for
+    /// a window. Read and open its rows exactly as the real one; claim it
+    /// with `dsContinuityMailboxSigner`.
+    #[uniffi::constructor]
+    pub fn continuity_from_account_identity(account_identity: &Identity) -> Arc<Self> {
+        Arc::new(Self {
+            inner: lakko_contacts::continuity::continuity_mailbox_key(
                 &account_identity.inner.ed25519_seed_bytes(),
             ),
         })

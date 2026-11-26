@@ -167,7 +167,12 @@ public class PeerProfileStore(
                 ) {
                     return ProfileOffer.NOT_NEWER
                 }
-                profiles = profiles + (signatureKeyB64 to held.copy(accountIdHex = learned))
+                profiles = profiles + (
+                    signatureKeyB64 to held.copy(
+                        accountIdHex = learned,
+                        envelopeB64 = held.envelopeB64 ?: profile.envelopeB64,
+                    )
+                    )
                 persistence.saveProfiles(account, profiles)
                 return ProfileOffer.STORED
             }

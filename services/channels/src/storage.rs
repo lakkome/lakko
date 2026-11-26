@@ -711,6 +711,25 @@ pub trait ChannelStore: Send + Sync {
         new_owner: [u8; OWNER_PUBKEY_LEN],
     ) -> Result<bool, StorageError>;
 
+    /// The channel recovery key registered for `channel` (ADR-0101 section
+    /// 7), `None` when none is registered or the channel is unknown.
+    async fn recovery_pubkey(
+        &self,
+        channel: ChannelId,
+    ) -> Result<Option<[u8; OWNER_PUBKEY_LEN]>, StorageError>;
+
+    /// Set or replace the channel recovery key of `channel` (ADR-0101
+    /// section 7). The caller verified an owner proof.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownChannel`] when the channel does not exist.
+    async fn set_recovery_pubkey(
+        &self,
+        channel: ChannelId,
+        recovery: [u8; OWNER_PUBKEY_LEN],
+    ) -> Result<(), StorageError>;
+
     /// Record an owner request-proof nonce. `Ok(false)` when it was already
     /// recorded (a replay).
     async fn consume_owner_nonce(
@@ -1432,6 +1451,8 @@ struct Inner {
     member_cards: HashMap<ChannelId, BTreeMap<SubscriberId, (u32, Vec<u8>)>>,
     /// Channel id → owner key (ADR-0059 section 1).
     owners: HashMap<ChannelId, [u8; OWNER_PUBKEY_LEN]>,
+    /// Channel id → channel recovery key (ADR-0101 section 7).
+    recovery_keys: HashMap<ChannelId, [u8; OWNER_PUBKEY_LEN]>,
     /// Channel id → (subscriber → first registration time). Kept across
     /// re-subscribes; feeds the directory's 7-day growth signal.
     registered_at: HashMap<ChannelId, HashMap<SubscriberId, u64>>,
@@ -1482,6 +1503,7 @@ impl Inner {
         self.staged_envelopes.retain(|(c, _), _| *c != channel);
         self.member_cards.remove(&channel);
         self.owners.remove(&channel);
+        self.recovery_keys.remove(&channel);
         self.registered_at.remove(&channel);
         self.copublishers.remove(&channel);
         self.listings.remove(&channel);
@@ -2216,6 +2238,26 @@ impl ChannelStore for InMemoryChannelStore {
         }
         *stored = new_owner;
         Ok(true)
+    }
+
+    async fn recovery_pubkey(
+        &self,
+        channel: ChannelId,
+    ) -> Result<Option<[u8; OWNER_PUBKEY_LEN]>, StorageError> {
+        Ok(self.inner.read().await.recovery_keys.get(&channel).copied())
+    }
+
+    async fn set_recovery_pubkey(
+        &self,
+        channel: ChannelId,
+        recovery: [u8; OWNER_PUBKEY_LEN],
+    ) -> Result<(), StorageError> {
+        let mut guard = self.inner.write().await;
+        if !guard.owners.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        guard.recovery_keys.insert(channel, recovery);
+        Ok(())
     }
 
     async fn consume_owner_nonce(
@@ -3056,6 +3098,22 @@ mod tests {
             store.create(c, [1; 32]).await,
             Err(StorageError::OwnerMismatch)
         ));
+    }
+
+    #[tokio::test]
+    async fn the_recovery_key_is_set_replaced_and_survives_an_owner_change() {
+        let store = InMemoryChannelStore::new();
+        let c = cid(0xA7);
+        assert!(matches!(
+            store.set_recovery_pubkey(c, [3; 32]).await,
+            Err(StorageError::UnknownChannel)
+        ));
+        store.create(c, [1; 32]).await.unwrap();
+        assert_eq!(store.recovery_pubkey(c).await.unwrap(), None);
+        store.set_recovery_pubkey(c, [3; 32]).await.unwrap();
+        store.set_recovery_pubkey(c, [4; 32]).await.unwrap();
+        assert!(store.replace_owner(c, [1; 32], [2; 32]).await.unwrap());
+        assert_eq!(store.recovery_pubkey(c).await.unwrap(), Some([4; 32]));
     }
 
     #[tokio::test]

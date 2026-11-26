@@ -48,6 +48,13 @@ import {
 
 const W = (): Wasm => wasm as unknown as Wasm;
 
+/** ADR-0101 section 8: a v6 profile envelope is signed by an account
+ *  identity; this test's profiles are signed by one fixed identity. */
+let profileSignerHeld: wasm.Identity | undefined;
+function profileSigner(): wasm.Identity {
+  return (profileSignerHeld ??= wasm.Identity.fromSeed(new Uint8Array(64).fill(0x5a)));
+}
+
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
   await initWasm({ module_or_path: readFileSync(path) });
@@ -425,7 +432,7 @@ function memoryStorage(): OwnProfileStorage {
 
 /** An own-profile envelope as another device of the account sends it. */
 function ownProfileAt(stamp: bigint, name: string | null, accountId: Uint8Array | undefined = ACCOUNT): Uint8Array {
-  return wasm.composeProfileEnvelope(name, undefined, stamp, accountId);
+  return wasm.composeProfileEnvelope(profileSigner(), name, undefined, stamp, accountId);
 }
 
 describe("classifyServiceEnvelope: the own profile", () => {
@@ -482,7 +489,7 @@ describe("the own-profile intake", () => {
   it("adopts a strictly newer name with the received stamp, and nothing else", async () => {
     const storage = memoryStorage();
     saveOwnProfile("acct", "Old", 1_000, storage);
-    bindOwnProfileSync("acct", ACCOUNT, storage);
+    bindOwnProfileSync("acct", ACCOUNT, () => profileSigner(), storage);
     const adopted: (string | null)[] = [];
     const stop = subscribeOwnProfileAdopted((own) => adopted.push(own.displayName));
     try {
@@ -517,7 +524,7 @@ describe("sending the own profile to the other devices", () => {
     const storage = memoryStorage();
     saveOwnProfile("acct", "Alice", 7_000, storage);
     const own = loadOwnProfile("acct", storage);
-    const bytes = composeOwnProfileForDevices(W(), own, ACCOUNT)!;
+    const bytes = composeOwnProfileForDevices(W(), profileSigner(), own, ACCOUNT)!;
     const decoded = wasm.decodeProfileEnvelope(bytes);
     try {
       expect(decoded.updatedAtMs).toBe(7_000n);
@@ -530,7 +537,7 @@ describe("sending the own profile to the other devices", () => {
       decoded.free();
     }
     // Never saved: nothing to send.
-    expect(composeOwnProfileForDevices(W(), { displayName: null, updatedAtMs: 0, avatar: null }, ACCOUNT)).toBeNull();
+    expect(composeOwnProfileForDevices(W(), profileSigner(), { displayName: null, updatedAtMs: 0, avatar: null }, ACCOUNT)).toBeNull();
   });
 
   it("goes out on a save, and in the pairing hand-over when a name was saved", async () => {
@@ -538,7 +545,7 @@ describe("sending the own profile to the other devices", () => {
     setServiceEnvelopeComposer("visibility", null);
     setServiceEnvelopeComposer("reachState", null);
     const storage = memoryStorage();
-    bindOwnProfileSync("acct", ACCOUNT, storage);
+    bindOwnProfileSync("acct", ACCOUNT, () => profileSigner(), storage);
     const sent: Uint8Array[] = [];
     const unregister = registerServiceEnvelopeSender(async (bytes) => {
       sent.push(bytes);
@@ -552,7 +559,7 @@ describe("sending the own profile to the other devices", () => {
       saveOwnProfile("acct", "Alice", 7_000, storage);
       ownProfileChanged();
       await flushServiceEnvelopes();
-      const expected = composeOwnProfileForDevices(W(), loadOwnProfile("acct", storage), ACCOUNT);
+      const expected = composeOwnProfileForDevices(W(), profileSigner(), loadOwnProfile("acct", storage), ACCOUNT);
       expect(sent).toEqual([expected]);
 
       // A device was added: the same envelope, same stamp, again.

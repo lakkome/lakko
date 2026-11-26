@@ -1194,8 +1194,9 @@ private fun inviteKeyHexOf(record: uniffi.lakko_ffi_uniffi.LinkRecord): String? 
 }
 
 
-/** Section 15.2 — mint and upload a co-publisher link for [channelId]. */
-private suspend fun mintCoPublisherLink(
+/** Section 15.2 — mint and upload a co-publisher link for [channelId]. Also
+ *  the publisher invitation a channel return carries (ADR-0101 section 7). */
+internal suspend fun mintCoPublisherLink(
     state: ChannelsUiState,
     channelId: String,
     context: android.content.Context,

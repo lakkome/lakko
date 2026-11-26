@@ -46,6 +46,11 @@ public final class ProfileDirectory: ObservableObject {
     /// the DeviceGroup sync runtime's own send). Never called for a profile
     /// adopted from another device: that one is already on the journal.
     var onOwnDeviceEnvelope: ((Data) -> Void)?
+    /// ADR-0101 section 8 — the ACCOUNT identity (ADR-0050, never a device
+    /// leaf) that signs every own profile envelope (profile v6), for the
+    /// account named; `nil` when this device holds none for it. Set by the
+    /// app shell; with none set no own profile envelope can be composed.
+    var accountIdentityProvider: (@MainActor (_ accountIdB64: String) -> Identity?)?
     /// ADR-0098 — who is a deleted account and whose username may be shown.
     /// `nil` (a directory built by a test) shows names as before.
     let deletions: DeletedAccounts?
@@ -240,6 +245,21 @@ public final class ProfileDirectory: ObservableObject {
         return saved
     }
 
+    /// The account identity that signs an own profile envelope of
+    /// `accountIdB64` (ADR-0101 section 8), or `nil`.
+    func signingIdentity(accountIdB64: String) -> Identity? {
+        accountIdentityProvider?(accountIdB64)
+    }
+
+    /// Compose an own profile envelope of `accountIdB64`, signed by its
+    /// account identity. Throws when no account identity is held.
+    private func composeOwnEnvelope(_ profile: FfiProfile, accountIdB64: String) throws -> Data {
+        guard let identity = signingIdentity(accountIdB64: accountIdB64) else {
+            throw ProfileSigningError.noAccountIdentity
+        }
+        return try composeProfileEnvelope(profile: profile, accountIdentity: identity)
+    }
+
     // MARK: - Own profile between the account's devices (ADR-0048 section 4a)
 
     /// The own profile as the envelope the account's OTHER devices get over
@@ -264,7 +284,7 @@ public final class ProfileDirectory: ObservableObject {
             cardShareable: ownCardShareable
         )
         do {
-            return try composeProfileEnvelope(profile: profile)
+            return try composeOwnEnvelope(profile, accountIdB64: accountIdB64)
         } catch {
             NSLog("ADR-0048 own profile device envelope refused: \(error)")
             return nil
@@ -326,6 +346,71 @@ public final class ProfileDirectory: ObservableObject {
         return .adopted
     }
 
+    // MARK: - ADR-0101 section 8 — the profile after a key reset
+
+    /// Told after a returned own profile was adopted: the app republishes it
+    /// in every conversation. Set by the app shell.
+    var onOwnProfileReturned: (() -> Void)?
+
+    /// The newest raw envelope held under `signatureKeyB64`, with its stamp,
+    /// or `nil` (no row, or a row held without its envelope).
+    func heldEnvelope(signatureKeyB64: String) -> (envelope: Data, updatedAtMs: UInt64)? {
+        guard let claim = received.profile(signatureKeyB64: signatureKeyB64), let envelope = claim.envelope else {
+            return nil
+        }
+        return (envelope, claim.updatedAtMs)
+    }
+
+    /// A profile received in a conversation, routed by its signer
+    /// (``ProfileReturn/route(verifiesUnderSender:verifiesUnderPreviousOwnKey:)``):
+    /// filed under the sender (resolved at receipt, C-68) only when the
+    /// sender signed it, offered as this account's own when its previous key
+    /// did (a peer carried it back after this account's key reset), dropped
+    /// otherwise.
+    func fileReceivedGroupProfile(_ claim: ProfileClaim, senderKeyB64: String?, accountIdB64 receivedFor: String?) {
+        guard let envelope = claim.envelope, let receivedFor else { return }
+        let previous = ResetContinuityStore().read(accountIdB64: receivedFor)?.previousKeyB64
+        switch ProfileReturn.route(
+            verifiesUnderSender: ProfileReturn.verifies(envelope, underKeyB64: senderKeyB64),
+            verifiesUnderPreviousOwnKey: ProfileReturn.verifies(envelope, underKeyB64: previous)) {
+        case .file:
+            acceptReceived(claim, signatureKeyB64: senderKeyB64, accountIdB64: receivedFor)
+        case .returnedOwn:
+            offerReturnedOwnProfile(envelope: envelope, accountIdB64: receivedFor)
+        case .drop:
+            break
+        }
+    }
+
+    /// Offer one returned profile envelope for the signed-in account.
+    /// Adopted only when this device recorded a previous key for the reset,
+    /// the envelope verifies under it and is strictly newer than the own
+    /// profile held; then its name and photo references (never the username,
+    /// which belongs to the account) are kept, sent to the account's other
+    /// devices and republished everywhere. Returns whether it was adopted.
+    @discardableResult
+    func offerReturnedOwnProfile(envelope: Data, accountIdB64 forAccount: String) -> Bool {
+        guard forAccount == accountIdB64,
+              let previous = ResetContinuityStore().read(accountIdB64: forAccount)?.previousKeyB64,
+              let key = base64Decode(previous),
+              let verified = try? verifyProfileEnvelope(plaintext: envelope, identityPk: key),
+              ProfileReturn.adopts(candidateStamp: verified.updatedAtMs, heldStamp: ownProfile?.updatedAtMs ?? 0),
+              let gate = AccountStoreGate.enter(forAccount)
+        else { return false }
+        let adopted = OwnProfile(
+            displayName: verified.displayName, updatedAtMs: verified.updatedAtMs,
+            avatar: ProfileAvatar(verified.avatar), cardShareable: ownCardShareable)
+        ownStore.store(adopted, accountIdB64: forAccount)
+        AutoBackupStore.markDirty(accountIdB64: forAccount, nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+        gate.leave()
+        ownProfile = adopted
+        bump()
+        if let own = ownDeviceEnvelope() { onOwnDeviceEnvelope?(own) }
+        onOwnProfileReturned?()
+        NSLog("ADR-0101: the own profile came back after the key reset")
+        return true
+    }
+
     /// The own profile as the envelope a backup carries for `accountIdB64`,
     /// stored stamp and all, or `nil` when it was never set. Read from the
     /// store, so a baseline sent before the session mounted carries it too;
@@ -345,7 +430,7 @@ public final class ProfileDirectory: ObservableObject {
             cardShareable: accountIdB64 == self.accountIdB64 ? ownCardShareable : (own.cardShareable ?? true)
         )
         do {
-            return try composeProfileEnvelope(profile: profile)
+            return try composeOwnEnvelope(profile, accountIdB64: accountIdB64)
         } catch {
             NSLog("ADR-0048 own profile backup envelope refused: \(error)")
             return nil
@@ -390,7 +475,7 @@ public final class ProfileDirectory: ObservableObject {
     /// only where the setting lets this conversation's members find the
     /// owner (UX section 6.2), always with its certificate.
     func ownProfileEnvelope(groupId: Data? = nil, oneToOne: Bool = false, contactGrant: Bool = true) -> Data? {
-        guard var profile = ownProfileForRequest() else { return nil }
+        guard let accountIdB64, var profile = ownProfileForRequest() else { return nil }
         if let groupId {
             let reach = ReachCenter.shared
             profile.grants = reach.profileGrants(groupId: groupId, oneToOne: oneToOne, contactGrant: contactGrant)
@@ -400,7 +485,7 @@ public final class ProfileDirectory: ObservableObject {
             }
         }
         do {
-            return try composeProfileEnvelope(profile: profile)
+            return try composeOwnEnvelope(profile, accountIdB64: accountIdB64)
         } catch {
             // A stored name that no longer passes the core rule (or a username
             // that does not) is not published half-way: the envelope is
@@ -420,10 +505,10 @@ public final class ProfileDirectory: ObservableObject {
     /// name, and an account that set no display name would otherwise announce
     /// nothing to name its tile by. No grants: a call is not a conversation.
     func ownProfileEnvelopeForCall() -> Data? {
-        guard var profile = ownProfileForRequest() else { return nil }
+        guard let accountIdB64, var profile = ownProfileForRequest() else { return nil }
         if profile.username == nil { profile.username = ownUsername }
         do {
-            return try composeProfileEnvelope(profile: profile)
+            return try composeOwnEnvelope(profile, accountIdB64: accountIdB64)
         } catch {
             NSLog("ADR-0048 own profile call envelope refused: \(error)")
             return nil
@@ -1012,4 +1097,10 @@ func checkDisplayName(
             throw DisplayNameRuleViolation(message: Localization.text("display_name.error.unknown"))
         }
     }
+}
+
+/// ADR-0101 section 8 — why an own profile envelope could not be composed.
+enum ProfileSigningError: Error {
+    /// No account identity is held for the account (profile v6 is signed).
+    case noAccountIdentity
 }

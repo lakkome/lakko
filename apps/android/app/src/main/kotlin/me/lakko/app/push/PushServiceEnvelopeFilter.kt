@@ -301,6 +301,10 @@ private fun isServiceEnvelopeOtherThanCall(
     // and records it when it next reads the journal.
     if (me.lakko.app.chat.looksLikeAccountDeletedEnvelope(payload)) return true
 
+    // Kind 5b3 — ADR-0101 section 9, a history request after a key reset.
+    // Suppressed only: answering it is the foreground's (C-59).
+    if (me.lakko.app.chat.looksLikeHistoryRequestEnvelope(payload)) return true
+
     // Kind 5c — ADR-0087: the group photo, the allowed reactions, the
     // conversation handle and the knock seed. NUL-terminated domains, the same
     // peek the foreground classifier uses; suppressed only (storing is a write,

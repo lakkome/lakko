@@ -212,16 +212,19 @@ mod tests {
         assert!(decode_group_name_envelope(beacon).is_err());
         let routing = lakko_contacts::push_routing::compose_push_routing_secret(7, &[0x42; 32]);
         assert!(decode_group_name_envelope(routing).is_err());
-        let profile = lakko_contacts::profile::compose_profile(&lakko_contacts::profile::Profile {
-            display_name: Some("Alice".to_string()),
-            username: None,
-            updated_at_ms: 1,
-            account_id: None,
-            username_certificate: None,
-            grants: Vec::new(),
-            avatar: None,
-            card_shareable: true,
-        })
+        let profile = lakko_contacts::profile::compose_profile(
+            &lakko_contacts::profile::Profile {
+                display_name: Some("Alice".to_string()),
+                username: None,
+                updated_at_ms: 1,
+                account_id: None,
+                username_certificate: None,
+                grants: Vec::new(),
+                avatar: None,
+                card_shareable: true,
+            },
+            &lakko_crypto::signing::SigningKey::from_seed(&[1; 32]),
+        )
         .unwrap();
         assert!(decode_group_name_envelope(profile).is_err());
     }

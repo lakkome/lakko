@@ -618,6 +618,26 @@ export class AuthClient {
     return base64UrlDecodeNoPad(resp.genesis_attest_b64);
   }
 
+  /**
+   * ADR-0101 section 7 - `POST /auth/channel-recovery/evaluate`: auth
+   * evaluates one blinded element (the channel recovery input of a channel
+   * id it never learns) under the account's per-account key. Bearer. Both
+   * elements are URL-safe base64 without padding on the wire; this takes and
+   * returns them as bytes. `503 channel-recovery-disabled` / `429
+   * too-many-attempts` surface as `AuthHttpError`.
+   */
+  async channelRecoveryEvaluate(sessionToken: string, blindedElement: Uint8Array): Promise<Uint8Array> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    const resp = await this.post<{ blinded_element: string }, { evaluation: string }>(
+      "/auth/channel-recovery/evaluate",
+      { blinded_element: base64UrlEncodeNoPad(blindedElement) },
+      sessionToken,
+    );
+    return base64UrlDecodeNoPad(resp.evaluation);
+  }
+
   // -----------------------------------------------------------------
   // TOTP — ADR-0018 factor (c), authenticator-code recovery
   // -----------------------------------------------------------------

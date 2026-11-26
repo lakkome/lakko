@@ -39,6 +39,13 @@ import {
   type StateBundle,
 } from "./state-bundle";
 
+/** ADR-0101 section 8: a v6 profile envelope is signed by an account
+ *  identity; this test's profiles are signed by one fixed identity. */
+let profileSignerHeld: wasm.Identity | undefined;
+function profileSigner(): wasm.Identity {
+  return (profileSignerHeld ??= wasm.Identity.fromSeed(new Uint8Array(64).fill(0x5a)));
+}
+
 beforeAll(async () => {
   const wasmPath = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
   await init({ module_or_path: readFileSync(wasmPath) });
@@ -67,7 +74,7 @@ function nameEnvelope(name: string, stamp: bigint): string {
 }
 
 function profileEnvelope(displayName: string, stamp: bigint): string {
-  return base64Encode(wasm.composeProfileEnvelope(displayName, undefined, stamp));
+  return base64Encode(wasm.composeProfileEnvelope(profileSigner(), displayName, undefined, stamp));
 }
 
 function pending(i: number, held = 0): CarriedPendingContact {

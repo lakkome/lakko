@@ -75,6 +75,14 @@ public data class PeerProfile(
      * before the field, or a person who never sent a profile, is shareable.
      */
     val cardShareable: Boolean = true,
+    /**
+     * ADR-0101 section 8 - standard base64 of the envelope exactly as it was
+     * received (profile v6 is signed by its author's account identity key),
+     * or `null` (a name found by search, a row filed before the field). Kept
+     * verbatim so it can be carried to a paired device, a backup or, after
+     * the person's key reset, back to the person; never re-signed.
+     */
+    val envelopeB64: String? = null,
 ) {
     /**
      * Whether this is only what a search knew about the person
@@ -110,7 +118,11 @@ public fun accountIdHexOrNull(accountId: ByteArray?): String? =
 
 /** A decoded profile envelope as the profile store takes it
  *  ([ProfileDirectory.onProfileReceived]). */
-public fun peerProfileOf(profile: uniffi.lakko_ffi_uniffi.FfiProfile): PeerProfile =
+public fun peerProfileOf(
+    profile: uniffi.lakko_ffi_uniffi.FfiProfile,
+    /** ADR-0101 section 8 - the envelope as received, when there was one. */
+    envelope: ByteArray? = null,
+): PeerProfile =
     PeerProfile(
         displayName = profile.displayName,
         username = profile.username,
@@ -119,6 +131,7 @@ public fun peerProfileOf(profile: uniffi.lakko_ffi_uniffi.FfiProfile): PeerProfi
         usernameCertificateHex = profile.usernameCertificate?.let { me.lakko.app.reach.reachHex(it) },
         avatar = avatarRefsOf(profile.avatar),
         cardShareable = profile.cardShareable,
+        envelopeB64 = envelope?.takeIf { it.isNotEmpty() }?.let { java.util.Base64.getEncoder().encodeToString(it) },
     )
 
 /**

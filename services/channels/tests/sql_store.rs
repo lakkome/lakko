@@ -128,6 +128,30 @@ async fn replace_owner_is_a_compare_and_swap() {
     assert_eq!(s.current_epoch(c).await.unwrap(), 0);
 }
 
+/// ADR-0101 section 7: the recovery key is nullable, set and replaced, kept
+/// across an owner change, and refused for an unknown channel (also when the
+/// value written equals the stored one, which MariaDB reports as 0 rows).
+#[tokio::test]
+async fn the_recovery_key_is_set_replaced_and_survives_an_owner_change() {
+    let Some(s) = store("the_recovery_key_is_set_replaced_and_survives_an_owner_change").await
+    else {
+        return;
+    };
+    let c = channel();
+    assert!(matches!(
+        s.set_recovery_pubkey(c, [3; 32]).await,
+        Err(StorageError::UnknownChannel)
+    ));
+    assert_eq!(s.recovery_pubkey(c).await.unwrap(), None);
+    s.create(c, OWNER).await.unwrap();
+    assert_eq!(s.recovery_pubkey(c).await.unwrap(), None);
+    s.set_recovery_pubkey(c, [3; 32]).await.unwrap();
+    s.set_recovery_pubkey(c, [3; 32]).await.unwrap();
+    s.set_recovery_pubkey(c, [4; 32]).await.unwrap();
+    assert!(s.replace_owner(c, OWNER, [8; 32]).await.unwrap());
+    assert_eq!(s.recovery_pubkey(c).await.unwrap(), Some([4; 32]));
+}
+
 #[tokio::test]
 async fn an_owner_nonce_is_accepted_once_and_pruned() {
     let Some(s) = store("an_owner_nonce_is_accepted_once_and_pruned").await else {

@@ -269,6 +269,32 @@ public class DiscoveryClient(
         return bundle
     }
 
+    /**
+     * `PUT /discovery/identity/continuity` (ADR-0101 section 2): store this
+     * account's continuity binding beside its identity bundle. Bearer, under
+     * the key-generation floor. `400 continuity-binding-invalid`, `404
+     * identity-bundle-not-found` (publish the bundle first) and `401
+     * key-generation-superseded` surface as [DiscoveryHttpError].
+     */
+    public suspend fun putContinuityBinding(binding: ByteArray) {
+        val endpoint = "/discovery/identity/continuity"
+        val authHeader = sessionToken?.let { "Bearer $it" }
+        val response: HttpResponse = try {
+            client.put("$baseUrl$endpoint") {
+                if (authHeader != null) header(io.ktor.http.HttpHeaders.Authorization, authHeader)
+                contentType(ContentType.Application.Json)
+                setBody(ContinuityBindingUploadRequest(java.util.Base64.getEncoder().encodeToString(binding)))
+            }
+        } catch (cause: CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            throw DiscoveryNetworkError(endpoint, cause)
+        }
+        if (!response.status.isSuccess()) {
+            throw DiscoveryHttpError(response.status.value, endpoint, response.safeReadBody())
+        }
+    }
+
     /** `POST /discovery/keypackage` — upsert the user's MLS
      *  KeyPackage. */
     public suspend fun keypackageUpload(

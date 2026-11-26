@@ -81,10 +81,9 @@ public protocol ContinuityPort: AnyObject {
     /// Whether the new identity publishes at least one device (R.8).
     func newIdentityHasDevices(accountIdB64: String) async throws -> Bool
     /// Whether this device holds anything that lets it write a Welcome to the
-    /// new identity's mailbox (a kept grant of the new key, a delegation). A
-    /// reset account knows nobody, and since ADR-0078 the continuity key
-    /// reaches no mailbox, so this is usually `false` until the person sends
-    /// this account a contact request from the new key (UX 16.6).
+    /// new identity's mailbox (a kept grant of the new key, a delegation),
+    /// or, ADR-0101 section 4, a verified, unexpired continuity binding the
+    /// person announced while the accepted reset's continuity key is usable.
     func newIdentityReachable(accountIdB64: String) async -> Bool
     /// Step 1: create the successor of `oldGroupIdB64` locally, add the new
     /// identity's devices and this account's other devices in ONE commit,
@@ -129,6 +128,17 @@ public protocol ContinuityPort: AnyObject {
     /// messages sent in the old one-to-one after `signedAtMs`. Idempotent
     /// (records that it ran).
     func resendOwnMessages(oldGroupIdB64: String, successorGroupIdB64: String, accountIdB64: String) async throws
+    /// ADR-0101 section 8: post into the delivered successor, verbatim, the
+    /// newest profile envelope this device holds for the reset person
+    /// (signed by their previous key), so their profile comes back with the
+    /// conversation. Idempotent (records that it ran). Runs only after the
+    /// successor was delivered.
+    func carryProfile(oldGroupIdB64: String, successorGroupIdB64: String, accountIdB64: String) async throws
+}
+
+extension ContinuityPort {
+    /// Nothing is carried by default (a port that holds no profiles).
+    func carryProfile(oldGroupIdB64: String, successorGroupIdB64: String, accountIdB64: String) async throws {}
 }
 
 /// How step 4a ended.
@@ -339,6 +349,8 @@ public enum ContinuityRuntime {
         case .notReady: return .failed
         }
         try await port.recordLineage(oldGroupIdB64: oldGroupIdB64, successorGroupIdB64: successorGroupIdB64)
+        try await port.carryProfile(
+            oldGroupIdB64: oldGroupIdB64, successorGroupIdB64: successorGroupIdB64, accountIdB64: accountIdB64)
         let superseded = Set(port.supersededKeys().keys)
         if old.kind == .chat {
             try await port.resendOwnMessages(

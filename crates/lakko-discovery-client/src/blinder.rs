@@ -247,6 +247,21 @@ impl OprfBlinder {
         Self::blind_name_term(&term)
     }
 
+    /// Blind arbitrary OPRF input bytes that are not a name: used for the
+    /// channel recovery key (ADR-0101 section 7), whose input is
+    /// `lakko_channels::recovery::channel_recovery_oprf_input(channel_id)`
+    /// and whose evaluation `services/auth` makes under a per-account key.
+    /// The input is fed to `blind` and `finalize` verbatim (no
+    /// normalisation, no domain added here: the caller's input carries its
+    /// own); [`Self::normalised_username`] returns an empty string.
+    ///
+    /// # Errors
+    ///
+    /// [`DiscoveryClientError::Voprf`] on a `voprf` blind failure.
+    pub fn blind_bytes(oprf_input: &[u8]) -> Result<(Self, String), DiscoveryClientError> {
+        Self::blind_input(String::new(), oprf_input.to_vec())
+    }
+
     /// Shared blind step: blind the already-constructed OPRF input
     /// bytes and build the blinder. `display` is the human-normalised
     /// handle (valid UTF-8) surfaced by [`Self::normalised_username`];
@@ -357,6 +372,27 @@ mod tests {
         assert_eq!(done.output().as_slice(), direct.as_slice());
         assert_eq!(done.lookup_key(), &discovery_lookup_key(done.output()));
         assert_ne!(done.lookup_key(), done.output());
+    }
+
+    /// ADR-0101: raw input bytes (the channel recovery input) are blinded
+    /// and finalised verbatim: the output equals the server's own
+    /// evaluation of the same bytes.
+    #[test]
+    fn blind_bytes_round_trips_raw_input() {
+        let server = OprfServer::<LakkoOprfCs>::new_from_seed(&[0x11; 32], b"lakko/oprf/v1")
+            .expect("server seed");
+        let input = [0xFFu8, 0x00, 0x7A, 0x01];
+        let (blinder, blinded_b64) = OprfBlinder::blind_bytes(&input).expect("blind");
+        assert_eq!(blinder.normalised_username(), "");
+        let element =
+            BlindedElement::<LakkoOprfCs>::deserialize(&B64.decode(&blinded_b64).expect("b64"))
+                .expect("element");
+        let evaluated_b64 = B64.encode(server.blind_evaluate(&element).serialize());
+        let done = blinder.finalize(&evaluated_b64).expect("finalize");
+        assert_eq!(
+            done.output().as_slice(),
+            server.evaluate(&input).expect("evaluate").as_slice()
+        );
     }
 
     /// Determinism: two clients looking up the SAME normalised

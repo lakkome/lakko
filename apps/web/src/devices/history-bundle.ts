@@ -426,6 +426,88 @@ export async function buildGapHistoryBundle(args: {
 }
 
 /**
+ * ADR-0101 section 9 - one page of a conversation's history for a person
+ * back after a key reset, newest first: the rows of `sourceSlotHex` (the
+ * conversation's earlier group, whose DS ids are unique across journals and
+ * older than any of the successor's) with a DS id below `beforeMessageId`
+ * (0: the newest), at most `pageSize`, sealed to the request's gap key for
+ * `targetGroupId` (the successor the person is in), signed by
+ * `readmitter`'s leaf. An EMPTY page (nothing older is held) is sealed too:
+ * it tells the requester to stop. `oldestMessageId` is the next request's
+ * `before`. `null` when the source slot is not held or the core refuses.
+ */
+export async function buildHistoryPage(args: {
+  readonly accountIdB64: string;
+  readonly deviceKey: DeviceCipher;
+  readonly readmitter: WasmIdentity;
+  readonly gapKey: Uint8Array;
+  readonly sourceSlotHex: string;
+  readonly targetGroupId: Uint8Array;
+  readonly beforeMessageId: bigint;
+  readonly pageSize: number;
+  readonly ownAuthorKeyB64?: string | null;
+}): Promise<{ readonly sealed: Uint8Array; readonly rows: number; readonly oldestMessageId: bigint | null } | null> {
+  const log = await loadMessageLog(args.accountIdB64, args.deviceKey);
+  const slot = log?.groups[args.sourceSlotHex];
+  if (slot === undefined) return null;
+  const page = historyPageRows(
+    slot.messages.filter((m) => !isBookkeepingSystemRow(m)),
+    args.beforeMessageId,
+    args.pageSize,
+  );
+  const wasm = await loadWasm();
+  const targetB64 = base64Encode(args.targetGroupId);
+  const messages: HistoryMessageInput[] = [];
+  let maxHlc = 0n;
+  let oldest: bigint | null = null;
+  for (const m of page) {
+    const t = rowMs(m);
+    const placeholder = placeholderOrNull(wasm, m, targetB64, args.ownAuthorKeyB64);
+    const id = safeBigInt(m.messageId);
+    if (id !== null && (oldest === null || id < oldest)) oldest = id;
+    if (placeholder === null) continue;
+    messages.push(
+      new wasm.HistoryMessageInput(placeholder, 0, messageIdToBeBytes(m.messageId), BigInt(Number.isFinite(t) && t > 0 ? t : 0)),
+    );
+    if (id !== null && id > maxHlc) maxHlc = id;
+  }
+  try {
+    const sealed = wasm.sealGapHistoryStructured(
+      args.readmitter,
+      args.gapKey,
+      args.targetGroupId,
+      [new wasm.HistoryGroupInput(args.targetGroupId, messages, false)],
+      maxHlc,
+    );
+    return { sealed, rows: messages.length, oldestMessageId: oldest };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The rows of one history page: DS id below `before` (0: no bound), the
+ * newest `pageSize` of them, oldest first. Rows whose id does not parse are
+ * left out. Pure.
+ */
+export function historyPageRows<T extends { readonly messageId: string }>(
+  rows: readonly T[],
+  before: bigint,
+  pageSize: number,
+): T[] {
+  const withIds: { row: T; id: bigint }[] = [];
+  for (const row of rows) {
+    const id = safeBigInt(row.messageId);
+    if (id === null || id <= 0n) continue;
+    if (before > 0n && id >= before) continue;
+    withIds.push({ row, id });
+  }
+  if (pageSize <= 0) return [];
+  withIds.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return withIds.slice(-pageSize).map((x) => x.row);
+}
+
+/**
  * The receiving half: open a gap bundle with this device's gap secret and
  * file its rows into the log (the same filing as a pairing bundle) - only
  * when `signerAccepted` says the joined group accepts the leaf that signed
