@@ -66,12 +66,10 @@
 //!   again from a device that holds the NEW phrase, which seals the new
 //!   entropy. The server cannot re-seal a vault itself (it never sees the
 //!   entropy or the PRF output, invariant #2), so there is nothing to keep.
-//! - **Deleted: the email vault** (ADR-0075 section 3), for the same reason:
-//!   it seals the old phrase. With `phrase_saved: true` in `finish` the
-//!   rotation is "Save a recovery phrase": the account is marked
-//!   phrase-protected in the same transaction (it never gets an email vault
-//!   again, and a mailed code changes its password only) and its devices get
-//!   the "recovery phrase saved" notice. The `recovery_emails` row is kept.
+//! - **Deleted: the recovery-email tickets in flight.** The email vault this
+//!   step once deleted is gone (ADR-0075, amended 2026-11-26), and with it
+//!   `phrase_saved`: saving a phrase changes no key. The `recovery_emails`
+//!   row is kept.
 //! - **Deleted: in-flight WebAuthn states and action grants, device grants,
 //!   device requests.** A device grant minted before the rotation would land
 //!   a new device with the old phrase.
@@ -109,7 +107,7 @@ use lakko_auth_token::UNBOUND_DEVICE_ID;
 use opaque_ke::ServerRegistration;
 use serde::Deserialize;
 
-use crate::key_reset::{ResetFinishRes, ResetStartReq, ResetStartRes};
+use crate::key_reset::{ResetFinishRes, ResetStartRes};
 use crate::limits::Scope;
 use crate::opaque::{
     decode_registration_request, decode_registration_upload, opaque_registration_start,
@@ -123,6 +121,19 @@ use crate::AppState;
 /// chosen). A rotation removes the one stolen device; the list exists for a
 /// removal that raced the commit.
 pub(crate) const MAX_REVOKE_DEVICE_IDS: usize = 8;
+
+/// Body of `POST /account/keys/rotate/start`.
+#[derive(Deserialize)]
+pub(crate) struct RotateStartReq {
+    /// The `k1` fresh-auth grant a password or passkey sign-in returned.
+    /// Optional on the wire so that its absence is the `403
+    /// fresh-auth-required` every other refusal gets.
+    #[serde(default)]
+    pub(crate) fresh_grant: Option<String>,
+    /// Base64-encoded `RegistrationRequest` made from the NEW recovery
+    /// phrase's 64-byte BIP39 seed.
+    pub(crate) recovery_request: String,
+}
 
 /// Body of `POST /account/keys/rotate/finish`.
 #[derive(Deserialize)]
@@ -151,11 +162,6 @@ pub(crate) struct RotateFinishReq {
     /// transaction. Absent or empty: none.
     #[serde(default)]
     pub(crate) revoke_device_ids_b64: Vec<String>,
-    /// ADR-0075 section 3: this rotation is "Save a recovery phrase". The
-    /// person is shown the NEW phrase's words once it commits; the account
-    /// is marked phrase-protected and its devices are told. Absent: false.
-    #[serde(default)]
-    pub(crate) phrase_saved: bool,
 }
 
 /// Decode the URL-safe base64 new identity key and refuse an unusable one.
@@ -248,7 +254,7 @@ fn proof_authorises(
 pub(crate) async fn start(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthenticatedAccount>,
-    Json(payload): Json<ResetStartReq>,
+    Json(payload): Json<RotateStartReq>,
 ) -> Result<Json<ResetStartRes>, OpaqueError> {
     let account_id = auth.0;
     crate::session::require_fresh_grant(&state, &account_id, payload.fresh_grant.as_deref())
@@ -372,7 +378,7 @@ pub(crate) async fn finish(
     //    the generation and the identity key, in one statement.
     crate::identity_target::claim(&mut tx, &account_id, &new_signature_pubkey, now).await?;
     let bumped = sqlx::query(
-        "UPDATE accounts SET identity_version = LAST_INSERT_ID(identity_version + 1), phrase_in_vault = 0, \
+        "UPDATE accounts SET identity_version = LAST_INSERT_ID(identity_version + 1), \
          identity_pubkey = ?, identity_target = ? WHERE id = ?",
     )
     .bind(&new_signature_pubkey[..])
@@ -414,7 +420,6 @@ pub(crate) async fn finish(
     //    (`webauthn_credentials`) are kept.
     for statement in [
         "DELETE FROM passkey_vaults WHERE account_id = ?",
-        "DELETE FROM email_vaults WHERE account_id = ?",
         "DELETE FROM email_tickets WHERE account_id = ?",
         "DELETE FROM webauthn_states WHERE account_id = ?",
         "DELETE FROM webauthn_action_grants WHERE account_id = ?",
@@ -424,14 +429,6 @@ pub(crate) async fn finish(
         sqlx::query(statement)
             .bind(account_id.as_slice())
             .execute(&mut *tx)
-            .await
-            .map_err(ApiError::Db)?;
-    }
-
-    //    ADR-0075 section 3: "Save a recovery phrase". The vault of the old
-    //    phrase is gone (above); from here the account is phrase-protected.
-    if payload.phrase_saved {
-        crate::account_notices::mark_phrase_saved(&mut tx, &account_id, now)
             .await
             .map_err(ApiError::Db)?;
     }

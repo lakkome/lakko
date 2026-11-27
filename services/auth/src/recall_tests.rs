@@ -115,7 +115,10 @@ pub(crate) fn build_state(pool: MySqlPool, limits: Limits) -> AppState {
         anon_cred: None,
         handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
         recovery_email: None,
-        channel_recovery: None,
+        owned_channels: Some(std::sync::Arc::new(
+            crate::owned_channels::OwnedChannelsMaster::from_bytes([0x0C; 32]),
+        )),
+        reset_factor_grant_ttl_ms: 600_000,
         limits: Arc::new(limits),
     }
 }
@@ -459,7 +462,30 @@ pub(crate) fn grant(v: &Value) -> String {
     v["fresh_grant"].as_str().unwrap().to_string()
 }
 
-/// Reset the account keys from a signed-in session with a live grant.
+/// A reset factor grant for the account of a signed-in session, at the
+/// generation its fresh-auth grant names (ADR-0073, amended 2026-11-26). The
+/// factor routes have their own tests (`reset_factor_tests`); these tests
+/// are about what a reset does, so they mint the grant the way a factor
+/// route would.
+pub(crate) fn reset_grant(state: &AppState, session: &Value) -> String {
+    let now = now_ms();
+    let fresh = state
+        .session_token_secret
+        .verify_fresh_grant(&grant(session), now)
+        .expect("a live fresh-auth grant");
+    state
+        .session_token_secret
+        .issue_factor_grant(
+            &fresh.account_id,
+            fresh.key_generation,
+            lakko_auth_token::ResetFactor::Authenticator,
+            now + 60_000,
+        )
+        .expect("factor grant")
+}
+
+/// Reset the account keys from a signed-in session with the password grant
+/// and a second factor.
 pub(crate) async fn reset_keys(
     state: &AppState,
     session: &Value,
@@ -467,13 +493,13 @@ pub(crate) async fn reset_keys(
     new_key: &SigningKey,
 ) -> (StatusCode, Bytes) {
     let bearer = token(session);
-    let fresh = grant(session);
+    let fresh = reset_grant(state, session);
     let (cs, request) = reg_start(new_seed);
     let (st, body) = post(
         state,
         "/account/keys/reset/start",
         Some(&bearer),
-        &json!({ "fresh_grant": fresh, "recovery_request": request }),
+        &json!({ "reset_grant": fresh, "recovery_request": request }),
     )
     .await;
     if st != StatusCode::OK {
@@ -489,7 +515,7 @@ pub(crate) async fn reset_keys(
         "/account/keys/reset/finish",
         Some(&bearer),
         &json!({
-            "fresh_grant": fresh,
+            "reset_grant": fresh,
             "recovery_upload": upload,
             "new_signature_pubkey_b64": b64u(&pubkey(new_key)),
             "identity_proof_b64": identity_proof(&account_of_token(&bearer), new_key),
@@ -498,8 +524,8 @@ pub(crate) async fn reset_keys(
     .await
 }
 
-/// Sign in with the password and reset the keys: what someone who knows only
-/// the password does. Returns the session the reset answered with.
+/// Sign in with the password and reset the keys: what someone who knows the
+/// password and holds a second factor does. Returns the session the reset answered with.
 pub(crate) async fn takeover(
     state: &AppState,
     account: &Account,
@@ -1190,7 +1216,7 @@ async fn the_owner_recalls_after_a_password_only_takeover() {
         &state,
         "/account/keys/reset/start",
         Some(&token(&attacker)),
-        &json!({ "fresh_grant": grant(&attacker), "recovery_request": reg_start(b"x").1 }),
+        &json!({ "reset_grant": "f1.stale", "recovery_request": reg_start(b"x").1 }),
     )
     .await;
     assert_eq!(st, StatusCode::UNAUTHORIZED);

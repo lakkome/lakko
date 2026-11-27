@@ -72,9 +72,13 @@ services:
       LAKKO_TURN_SHARED_SECRET: ${LAKKO_TURN_SHARED_SECRET:-ZHVtbXktdHVybi1zZWNyZXQ=}
       LAKKO_TURN_URIS: ${LAKKO_TURN_URIS:-turn:localhost:3478}
       # ADR-0018 factor (c) — TOTP secret-encryption key (base64, 32 bytes
-      # after decode). Dev fixture only; never a production value. Unset it
-      # to disable the /totp/* routes (they return 503).
+      # after decode). Dev fixture only; never a production value. Required
+      # since ADR-0073 (amended 2026-11-26): auth refuses to start without it.
       LAKKO_TOTP_ENC_KEY: ${LAKKO_TOTP_ENC_KEY:-ZGV2LXRvdHAtZW5jLWtleS0zMi1ieXRlcy1maXhlZCE=}
+      # ADR-0101 section 7 — master of every account's server half of the
+      # owned-channels password lock (64 hex chars). Dev fixture only; never
+      # a production value. Required: auth refuses to start without it.
+      LAKKO_AUTH_OWNED_CHANNELS_SECRET: ${LAKKO_AUTH_OWNED_CHANNELS_SECRET:-6c616b6b6f2d6c6f63616c2d6465762d6f776e65642d6368616e6e656c732d73}
       # ADR-0072 — passkey-vault blob-encryption key (base64, 32 bytes after
       # decode). Dev fixture only; never a production value. Unset it to
       # disable the /vault/passkey* routes (they return 503).

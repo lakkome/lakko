@@ -17,50 +17,33 @@
 //! the pepper a suspected (username, address) pair can be confirmed; without
 //! the pepper it cannot.
 //!
-//! For an account whose owner has not saved a recovery phrase the server also
-//! keeps the **email vault**: the 44-byte blob the client sealed (the phrase
-//! entropy under an Argon2id key over the login handle, the address and a
-//! server-minted `vault_salt`), wrapped again at rest under
-//! `LAKKO_VAULT_ENC_KEY`. It leaves the server only in the answer to a
-//! verified mailed code (and authenticator code). **This is the stated
-//! exception to invariant #2** (ADR-0075 section 2): the server handles the
-//! address in the clear whenever it sends a letter, so an operator who
-//! records it can open the vault. Saving a recovery phrase ends the exception
-//! for that account by changing its keys (a key rotation with
-//! `phrase_saved`, [`crate::key_rotate`]).
+//! No vault: the email vault this module once kept (the phrase entropy
+//! sealed under a key the operator could reach) was removed (ADR-0075,
+//! amended 2026-11-26). A mailed code gives a new password, for every
+//! account, and confirms a key reset as a second factor (ADR-0073, amended
+//! 2026-11-26); it never returns keys.
 //!
 //! # When it is on
 //!
-//! With `LAKKO_AUTH_EMAIL_PEPPER` (64 hex), `LAKKO_AUTH_HANDLE_PEPPER` and
-//! `LAKKO_VAULT_ENC_KEY` all set. Otherwise the enrol, remove and recover
-//! routes answer `503 {"error":"recovery-email-disabled"}` and
+//! With `LAKKO_AUTH_EMAIL_PEPPER` (64 hex) and `LAKKO_AUTH_HANDLE_PEPPER`
+//! both set. Otherwise the enrol, remove, recover and reset-factor routes
+//! answer `503 {"error":"recovery-email-disabled"}` and
 //! `GET /recovery-email/available` answers `{"available": false}`.
 //!
 //! # Enrol, replace, remove (bearer)
 //!
 //! - `POST /recovery-email/enrol/start {fresh_grant, handle, address, lang?}`
-//!   -> `{challenge_id, vault_salt, resend_after_secs, expires_in_secs}`.
-//!   Needs a fresh-auth grant; the handle must be the one bound to the
-//!   session's account. The letter is sent before the answer, so a relay
-//!   failure is `502 mail-send-failed`.
-//! - `POST /recovery-email/enrol/finish {challenge_id, code,
-//!   sealed_entropy?}` -> `{enabled, vault}`. Stores `email_key` and, when
-//!   `sealed_entropy` (exactly 44 bytes) is present, the vault with the salt
-//!   the start minted. Without it any vault the account had is deleted (it
-//!   was sealed under the previous address). An account marked
-//!   phrase-protected never gets a vault (`409 phrase-saved`).
-//! - `DELETE /recovery-email {fresh_grant}` -> `{removed}`.
-//! - `GET /recovery-email` -> `{available, enabled, vault, phrase_saved,
-//!   totp}`.
-//! - `PUT /recovery-email/vault {handle, address, vault_salt,
-//!   sealed_entropy}` -> `{vault}` (amended 2026-10-13, no fresh-auth
-//!   grant): a device that kept the address re-seals a vault after a reset
-//!   or a rotation dropped it. No letter: the server recomputes `email_key`
-//!   and requires it to equal the stored one. Only where no vault exists and
-//!   no phrase is saved.
-//! - `DELETE /recovery-email/vault {fresh_grant}` -> `{vault_removed,
-//!   phrase_saved}`: the account becomes phrase-protected.
-//! - Re-binding or removing the login handle deletes both rows in the same
+//!   -> `{challenge_id, resend_after_secs, expires_in_secs}`. Needs a
+//!   fresh-auth grant; the handle must be the one bound to the session's
+//!   account. The letter is sent before the answer, so a relay failure is
+//!   `502 mail-send-failed`.
+//! - `POST /recovery-email/enrol/finish {challenge_id, code}` ->
+//!   `{enabled}`. Stores `email_key`.
+//! - `DELETE /recovery-email {fresh_grant}` -> `{removed}`; `409
+//!   {"error":"last-factor"}` when it is the account's last second factor
+//!   (no confirmed authenticator, no passkey; ADR-0075, amended 2026-11-26).
+//! - `GET /recovery-email` -> `{available, enabled, totp}`.
+//! - Re-binding or removing the login handle deletes the key in the same
 //!   transaction ([`drop_for_handle_change`]), unless the bind carries the
 //!   address (`recovery_email`, ADR-0076 section 2): then the key is moved to
 //!   the new handle in that transaction ([`rekey_for_handle_change`]), with
@@ -76,21 +59,34 @@
 //!   code nobody was sent, so a match and a miss do the same work and answer
 //!   alike.
 //! - `POST /recovery-email/recover/verify {challenge_id, code}` -> `{ticket,
-//!   totp_required}` or the one `401 {"error":"code-refused"}` (wrong code,
-//!   decoy, unknown, expired or spent challenge).
+//!   totp_required, expires_in_secs}` or the one `401
+//!   {"error":"code-refused"}` (wrong code, decoy, unknown, expired or spent
+//!   challenge).
 //! - `POST /recovery-email/recover/totp {ticket, code}` when required (D8).
-//! - `POST /recovery-email/recover/open {ticket}` -> `{mode: "vault",
-//!   vault_salt, sealed_entropy}` (the ticket is spent and the account's
-//!   devices are told) or `{mode: "password"}`.
-//! - `POST /recovery-email/recover/password/{start,finish}` (password mode):
-//!   an OPAQUE registration for the password under the ticket. `finish`, in
-//!   one transaction under the account row's lock, captures the recall anchor
+//! - `POST /recovery-email/recover/password/{start,finish}` under the
+//!   ticket, once the authenticator step (when required) passed: an OPAQUE
+//!   registration for the password. `finish`, in one transaction under the
+//!   account row's lock, captures the recall anchor
 //!   ([`crate::recall::capture_anchor`]) BEFORE the envelope changes,
 //!   replaces the envelope, deletes the in-flight password logins, writes the
 //!   notice and lands a session pair. It mints **no fresh-auth grant**: a
 //!   mailbox is not the password or a passkey, so whoever came in this way
 //!   signs in with the new password before they can reset keys, add a device
 //!   or change the email.
+//!
+//! # The reset factor (bearer; ADR-0073, amended 2026-11-26)
+//!
+//! - `POST /account/keys/reset/factor/email/start {fresh_grant, handle,
+//!   address, lang?}` -> always `{challenge_id, resend_after_secs,
+//!   expires_in_secs}`; a letter only when the pair matches the stored
+//!   `email_key` of the bearer's account, a decoy challenge otherwise (its
+//!   own purpose, `reset`, beside enrol and recover).
+//! - `POST /account/keys/reset/factor/email/finish {fresh_grant,
+//!   challenge_id, code}` -> `{reset_grant, reset_grant_expires_at_ms}` or
+//!   `401 {"error":"factor-refused"}`.
+//!
+//! Both need a fresh-auth grant minted by the PASSWORD (`403
+//! fresh-auth-required` otherwise, before anything is charged).
 //!
 //! # Codes and tickets
 //!
@@ -105,8 +101,7 @@
 //! [`Scope::EmailLetterHandle`] and the `Email` address bucket before
 //! anything is looked up; [`Scope::EmailLetterAccount`] after (a spent one
 //! sends no letter and, on the anonymous route, answers as always);
-//! [`Scope::EmailVerify`] per login handle across challenges;
-//! [`Scope::EmailVaultOpen`] per account.
+//! [`Scope::EmailVerify`] per login handle across challenges.
 //!
 //! [ADR-0075]: ../../../docs/adr/0075-recovery-email.md
 
@@ -117,7 +112,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Json;
 use axum::Extension;
-use base64::engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use lakko_crypto::hash::{blake3_derive_key_from_material, blake3_keyed};
 use opaque_ke::ServerRegistration;
@@ -144,13 +139,6 @@ pub(crate) const PEPPER_VAR: &str = "LAKKO_AUTH_EMAIL_PEPPER";
 /// Domain of `email_key`. Frozen: a change orphans every stored key.
 const EMAIL_KEY_DOMAIN: &[u8] = b"lakko/auth/recovery-email/v1";
 
-/// The exact size of an email-vault blob as the client seals it:
-/// 12 (nonce) + 16 (phrase entropy) + 16 (tag), the passkey vault's shape.
-pub(crate) const SEALED_ENTROPY_LEN: usize = lakko_mnemonic::vault::EMAIL_VAULT_SEALED_LEN;
-
-/// Length of the per-vault salt minted at enrol start.
-pub(crate) const VAULT_SALT_LEN: usize = lakko_mnemonic::vault::EMAIL_VAULT_SALT_LEN;
-
 /// How long a mailed code is good for.
 pub(crate) const CODE_TTL_MS: i64 = 600_000;
 
@@ -170,6 +158,8 @@ pub(crate) const RESEND_AFTER_SECS: u32 = 45;
 /// `email_challenges.purpose`.
 const PURPOSE_ENROL: u8 = 1;
 const PURPOSE_RECOVER: u8 = 2;
+/// A reset factor's code (ADR-0073, amended 2026-11-26).
+const PURPOSE_RESET: u8 = 3;
 
 /// How often expired challenges and tickets are deleted.
 const PRUNE_INTERVAL: Duration = Duration::from_secs(300);
@@ -181,15 +171,10 @@ const CODE_CODE_EXPIRED: &str = "code-expired";
 const CODE_TICKET_REFUSED: &str = "ticket-refused";
 const CODE_TOTP_REQUIRED: &str = "totp-required";
 const CODE_TOTP_DISABLED: &str = "totp-disabled";
-const CODE_WRONG_MODE: &str = "wrong-mode";
 const CODE_ADDRESS_INVALID: &str = "address-invalid";
 const CODE_HANDLE_MISMATCH: &str = "handle-mismatch";
 const CODE_USERNAME_REQUIRED: &str = "username-required";
-const CODE_PHRASE_SAVED: &str = "phrase-saved";
 const CODE_MAIL_SEND_FAILED: &str = "mail-send-failed";
-const CODE_ADDRESS_MISMATCH: &str = "address-mismatch";
-const CODE_NO_RECOVERY_EMAIL: &str = "no-recovery-email";
-const CODE_VAULT_EXISTS: &str = "vault-exists";
 
 const fn disabled() -> ApiError {
     ApiError::Coded(StatusCode::SERVICE_UNAVAILABLE, CODE_DISABLED)
@@ -313,10 +298,10 @@ pub(crate) fn log_startup(state: &AppState) {
         None => tracing::warn!(
             "recovery email DISABLED: {PEPPER_VAR} is not set; its routes answer 503"
         ),
-        Some(_) if state.vault_enc_key.is_none() || state.handle_pepper.is_none() => {
+        Some(_) if state.handle_pepper.is_none() => {
             tracing::warn!(
-                "recovery email DISABLED: it also needs LAKKO_VAULT_ENC_KEY and \
-                 LAKKO_AUTH_HANDLE_PEPPER; its routes answer 503"
+                "recovery email DISABLED: it also needs LAKKO_AUTH_HANDLE_PEPPER; its routes \
+                 answer 503"
             );
         },
         Some(config) => {
@@ -336,20 +321,14 @@ pub(crate) fn log_startup(state: &AppState) {
 /// Everything a route of this module needs to run.
 struct Enabled {
     config: Arc<Config>,
-    vault_key: [u8; 32],
     handle_pepper: [u8; 32],
 }
 
 /// The configuration, or the `503` every gated route answers without it.
 fn enabled(state: &AppState) -> Result<Enabled, ApiError> {
-    match (
-        state.recovery_email.as_ref(),
-        state.vault_enc_key.as_ref(),
-        state.handle_pepper.as_ref(),
-    ) {
-        (Some(config), Some(vault_key), Some(handle_pepper)) => Ok(Enabled {
+    match (state.recovery_email.as_ref(), state.handle_pepper.as_ref()) {
+        (Some(config), Some(handle_pepper)) => Ok(Enabled {
             config: config.clone(),
-            vault_key: **vault_key,
             handle_pepper: **handle_pepper,
         }),
         _ => Err(disabled()),
@@ -369,7 +348,7 @@ fn is_available(state: &AppState) -> bool {
 /// (`lakko_mnemonic::recovery_email::normalize_recovery_email`: trim,
 /// lower-case the whole address, no control character and no white space, 3
 /// to 254 bytes, exactly one `@` with text on both sides, no provider
-/// rules). The client derives the vault key from the same function's output,
+/// rules). The client builds the address it sends from the same function,
 /// so the two cannot disagree on a byte. `None` when the address is refused.
 fn normalise_address(raw: &str) -> Option<String> {
     lakko_mnemonic::recovery_email::normalize_recovery_email(raw).ok()
@@ -438,7 +417,6 @@ struct NewChallenge<'a> {
     purpose: u8,
     code_key: [u8; 32],
     pending_key: Option<[u8; 32]>,
-    vault_salt: Option<[u8; VAULT_SALT_LEN]>,
     handle_tag: [u8; 32],
 }
 
@@ -451,12 +429,12 @@ async fn put_challenge(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO email_challenges \
-            (id, account_id, purpose, code_key, pending_key, vault_salt, handle_tag, attempts, \
+            (id, account_id, purpose, code_key, pending_key, handle_tag, attempts, \
              expires_at_ms) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?) \
+         VALUES (?, ?, ?, ?, ?, ?, 0, ?) \
          ON DUPLICATE KEY UPDATE \
             id = VALUES(id), code_key = VALUES(code_key), pending_key = VALUES(pending_key), \
-            vault_salt = VALUES(vault_salt), handle_tag = VALUES(handle_tag), attempts = 0, \
+            handle_tag = VALUES(handle_tag), attempts = 0, \
             expires_at_ms = VALUES(expires_at_ms)",
     )
     .bind(&challenge.id[..])
@@ -464,7 +442,6 @@ async fn put_challenge(
     .bind(challenge.purpose)
     .bind(&challenge.code_key[..])
     .bind(challenge.pending_key.as_ref().map(|k| &k[..]))
-    .bind(challenge.vault_salt.as_ref().map(|s| &s[..]))
     .bind(&challenge.handle_tag[..])
     .bind(now.saturating_add(CODE_TTL_MS))
     .execute(pool)
@@ -477,11 +454,10 @@ struct Challenge {
     account_id: [u8; 16],
     code_key: [u8; 32],
     pending_key: Option<[u8; 32]>,
-    vault_salt: Option<[u8; VAULT_SALT_LEN]>,
     handle_tag: [u8; 32],
 }
 
-type ChallengeRow = (Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>, Vec<u8>);
+type ChallengeRow = (Vec<u8>, Vec<u8>, Option<Vec<u8>>, Vec<u8>);
 
 /// The unexpired challenge `id` of `purpose`, if any.
 async fn load_challenge(
@@ -491,7 +467,7 @@ async fn load_challenge(
     now: i64,
 ) -> Result<Option<Challenge>, sqlx::Error> {
     let row: Option<ChallengeRow> = sqlx::query_as(
-        "SELECT account_id, code_key, pending_key, vault_salt, handle_tag \
+        "SELECT account_id, code_key, pending_key, handle_tag \
          FROM email_challenges WHERE id = ? AND purpose = ? AND expires_at_ms > ?",
     )
     .bind(&id[..])
@@ -499,12 +475,11 @@ async fn load_challenge(
     .bind(now)
     .fetch_optional(pool)
     .await?;
-    Ok(row.and_then(|(account, code_key, pending, salt, tag)| {
+    Ok(row.and_then(|(account, code_key, pending, tag)| {
         Some(Challenge {
             account_id: <[u8; 16]>::try_from(account.as_slice()).ok()?,
             code_key: <[u8; 32]>::try_from(code_key.as_slice()).ok()?,
             pending_key: pending.and_then(|p| <[u8; 32]>::try_from(p.as_slice()).ok()),
-            vault_salt: salt.and_then(|s| <[u8; VAULT_SALT_LEN]>::try_from(s.as_slice()).ok()),
             handle_tag: <[u8; 32]>::try_from(tag.as_slice()).ok()?,
         })
     }))
@@ -584,28 +559,18 @@ pub(crate) async fn available(State(state): State<AppState>) -> Json<serde_json:
 
 /// Answer of `GET /recovery-email`.
 #[derive(Serialize)]
-#[allow(clippy::struct_excessive_bools)] // four independent facts on the wire, not a state
 pub(crate) struct StatusRes {
     /// Whether this server can send a recovery code.
     pub(crate) available: bool,
     /// The account has a recovery email. Never the address.
     pub(crate) enabled: bool,
-    /// The account has an email vault: a mailed code brings its keys back.
-    pub(crate) vault: bool,
-    /// The owner saved a recovery phrase: a mailed code changes the password
-    /// only, and the account never gets a vault.
-    pub(crate) phrase_saved: bool,
     /// The account has a confirmed authenticator: a mailed code will not be
     /// enough without its code (D8), which the enrolment screens say.
     pub(crate) totp: bool,
 }
 
-/// `(phrase_saved, has email, has vault, has confirmed authenticator)` of an
-/// account, as [`status`] reads it.
-type StatusRow = (bool, Option<i64>, Option<i64>, Option<i64>);
-
 /// `GET /recovery-email` — bearer. The session's account only. Not gated on
-/// the pepper: `phrase_saved` is meaningful on a server that sends no mail.
+/// the pepper: a server that sends no mail answers `available: false`.
 ///
 /// # Errors
 ///
@@ -615,10 +580,8 @@ pub(crate) async fn status(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthenticatedAccount>,
 ) -> Result<Json<StatusRes>, ApiError> {
-    let row: Option<StatusRow> = sqlx::query_as(
-        "SELECT a.phrase_saved, \
-                (SELECT 1 FROM recovery_emails e WHERE e.account_id = a.id), \
-                (SELECT 1 FROM email_vaults v WHERE v.account_id = a.id), \
+    let row: Option<(Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT (SELECT 1 FROM recovery_emails e WHERE e.account_id = a.id), \
                 (SELECT 1 FROM totp_secrets t \
                   WHERE t.account_id = a.id AND t.confirmed_at IS NOT NULL) \
          FROM accounts a WHERE a.id = ?",
@@ -627,12 +590,10 @@ pub(crate) async fn status(
     .fetch_optional(&state.db)
     .await
     .map_err(ApiError::Db)?;
-    let (phrase_saved, email, vault, totp) = row.ok_or(ApiError::InvalidCredential)?;
+    let (email, totp) = row.ok_or(ApiError::InvalidCredential)?;
     Ok(Json(StatusRes {
         available: is_available(&state),
         enabled: email.is_some(),
-        vault: vault.is_some(),
-        phrase_saved,
         totp: totp.is_some(),
     }))
 }
@@ -691,8 +652,6 @@ pub(crate) struct EnrolStartReq {
 pub(crate) struct EnrolStartRes {
     /// URL-safe base64 of the 16-byte challenge id, echoed in `finish`.
     pub(crate) challenge_id: String,
-    /// Standard base64 of the 16-byte salt the client seals the vault with.
-    pub(crate) vault_salt: String,
     /// Seconds before the client offers "Send again".
     pub(crate) resend_after_secs: u32,
     /// Seconds the code is good for.
@@ -738,7 +697,6 @@ pub(crate) async fn enrol_start(
     .await?;
 
     let id: [u8; 16] = random();
-    let vault_salt: [u8; VAULT_SALT_LEN] = random();
     let code = generate_code();
     let now = now_ms();
     put_challenge(
@@ -749,7 +707,6 @@ pub(crate) async fn enrol_start(
             purpose: PURPOSE_ENROL,
             code_key: on.config.hash_code(&id, &code),
             pending_key: Some(on.config.email_key(&handle, &address)),
-            vault_salt: Some(vault_salt),
             handle_tag: on.config.handle_tag(&handle),
         },
         now,
@@ -777,7 +734,6 @@ pub(crate) async fn enrol_start(
     tracing::info!("recovery email: enrol code sent");
     Ok(Json(EnrolStartRes {
         challenge_id: URL_SAFE_NO_PAD.encode(id),
-        vault_salt: B64.encode(vault_salt),
         resend_after_secs: RESEND_AFTER_SECS,
         expires_in_secs: ttl_secs(CODE_TTL_MS),
     }))
@@ -794,11 +750,6 @@ pub(crate) struct EnrolFinishReq {
     pub(crate) challenge_id: String,
     /// The six digits from the letter.
     pub(crate) code: String,
-    /// Standard base64 of the 44-byte email vault, sealed with the start's
-    /// `vault_salt`. Present for an account without a saved phrase; absent
-    /// otherwise.
-    #[serde(default)]
-    pub(crate) sealed_entropy: Option<String>,
 }
 
 /// Answer of `POST /recovery-email/enrol/finish`.
@@ -806,8 +757,6 @@ pub(crate) struct EnrolFinishReq {
 pub(crate) struct EnrolFinishRes {
     /// Always `true`: the account has a recovery email.
     pub(crate) enabled: bool,
-    /// Whether a vault was stored with it.
-    pub(crate) vault: bool,
 }
 
 /// `POST /recovery-email/enrol/finish` — bearer.
@@ -816,15 +765,13 @@ pub(crate) struct EnrolFinishRes {
 /// there (expired, spent, another account's, replaced by a newer start) is
 /// `410 code-expired`. On the right code, one transaction under the account
 /// row's lock: the `email_key` is stored (replacing the previous address's),
-/// the vault is stored or, without `sealed_entropy`, deleted, the account's
-/// recovery tickets are deleted, and the "added" / "replaced" notice written.
+/// the account's recovery tickets are deleted, and the "added" / "replaced"
+/// notice written.
 ///
 /// # Errors
 ///
-/// As above; `409 phrase-saved` for a vault offered by a phrase-protected
-/// account; [`ApiError::BadInput`]; [`ApiError::Db`]; [`ApiError::Internal`].
+/// As above; [`ApiError::BadInput`]; [`ApiError::Db`]; [`ApiError::Internal`].
 #[axum::debug_handler]
-#[allow(clippy::too_many_lines)] // the code check, then one transaction read top to bottom
 pub(crate) async fn enrol_finish(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthenticatedAccount>,
@@ -835,18 +782,6 @@ pub(crate) async fn enrol_finish(
     let id = decode_challenge_id(&req.challenge_id).ok_or(ApiError::BadInput(
         "challenge_id must be 16 bytes of URL-safe base64",
     ))?;
-    let sealed = req
-        .sealed_entropy
-        .as_deref()
-        .map(|b64| {
-            B64.decode(b64)
-                .ok()
-                .filter(|bytes| bytes.len() == SEALED_ENTROPY_LEN)
-                .ok_or(ApiError::BadInput(
-                    "sealed_entropy must be the 44-byte blob of a 12-word phrase, base64",
-                ))
-        })
-        .transpose()?;
 
     let gone = || ApiError::Coded(StatusCode::GONE, CODE_CODE_EXPIRED);
     let now = now_ms();
@@ -863,19 +798,10 @@ pub(crate) async fn enrol_finish(
         CodeOutcome::Wrong => return Err(code_refused()),
         CodeOutcome::Gone => return Err(gone()),
     };
-    let (Some(email_key), Some(vault_salt)) = (challenge.pending_key, challenge.vault_salt) else {
+    let Some(email_key) = challenge.pending_key else {
         tracing::error!("recovery email: an enrol challenge without its pending key");
         return Err(ApiError::Internal);
     };
-    let body_enc = sealed
-        .as_deref()
-        .map(|sealed| {
-            lakko_crypto::aead::seal_with_key(&on.vault_key, sealed).map_err(|e| {
-                tracing::error!(error = %e, "recovery email: vault seal failed");
-                ApiError::Internal
-            })
-        })
-        .transpose()?;
 
     let mut conn = crate::session::read_committed_conn(&state.db)
         .await
@@ -883,16 +809,7 @@ pub(crate) async fn enrol_finish(
     let mut tx = sqlx::Acquire::begin(&mut conn)
         .await
         .map_err(ApiError::Db)?;
-    let phrase_saved: Option<bool> =
-        sqlx::query_scalar("SELECT phrase_saved FROM accounts WHERE id = ? FOR UPDATE")
-            .bind(&account_id[..])
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(ApiError::Db)?;
-    let phrase_saved = phrase_saved.ok_or(ApiError::InvalidCredential)?;
-    if phrase_saved && body_enc.is_some() {
-        return Err(ApiError::Coded(StatusCode::CONFLICT, CODE_PHRASE_SAVED));
-    }
+    lock_account(&mut tx, &account_id).await?;
     // Under the row lock nothing else writes this account's row, so the read
     // and the upsert below see the same state.
     let had: Option<i64> = sqlx::query_scalar("SELECT 1 FROM recovery_emails WHERE account_id = ?")
@@ -909,37 +826,6 @@ pub(crate) async fn enrol_finish(
     .execute(&mut *tx)
     .await
     .map_err(ApiError::Db)?;
-    match body_enc.as_deref() {
-        Some(body_enc) => {
-            sqlx::query(
-                "INSERT INTO email_vaults (account_id, vault_salt, body_enc) VALUES (?, ?, ?) \
-                 ON DUPLICATE KEY UPDATE vault_salt = VALUES(vault_salt), \
-                    body_enc = VALUES(body_enc), created_at = NOW(3)",
-            )
-            .bind(&account_id[..])
-            .bind(&vault_salt[..])
-            .bind(body_enc)
-            .execute(&mut *tx)
-            .await
-            .map_err(ApiError::Db)?;
-            // ADR-0075 section 3: from here a copy of the vault opens this
-            // phrase, so saving it takes a rotation, whatever happens to the
-            // email later.
-            sqlx::query("UPDATE accounts SET phrase_in_vault = 1 WHERE id = ?")
-                .bind(&account_id[..])
-                .execute(&mut *tx)
-                .await
-                .map_err(ApiError::Db)?;
-        },
-        None => {
-            // A vault the account had was sealed under the previous address.
-            sqlx::query("DELETE FROM email_vaults WHERE account_id = ?")
-                .bind(&account_id[..])
-                .execute(&mut *tx)
-                .await
-                .map_err(ApiError::Db)?;
-        },
-    }
     // A ticket earned with the previous address must not outlive it.
     sqlx::query("DELETE FROM email_tickets WHERE account_id = ?")
         .bind(&account_id[..])
@@ -956,18 +842,11 @@ pub(crate) async fn enrol_finish(
         .map_err(ApiError::Db)?;
     tx.commit().await.map_err(ApiError::Db)?;
 
-    tracing::info!(
-        vault = body_enc.is_some(),
-        replaced = had.is_some(),
-        "recovery email: enrolled"
-    );
-    Ok(Json(EnrolFinishRes {
-        enabled: true,
-        vault: body_enc.is_some(),
-    }))
+    tracing::info!(replaced = had.is_some(), "recovery email: enrolled");
+    Ok(Json(EnrolFinishRes { enabled: true }))
 }
 
-/// Body of `DELETE /recovery-email` and `DELETE /recovery-email/vault`.
+/// Body of `DELETE /recovery-email`.
 #[derive(Deserialize)]
 pub(crate) struct GrantReq {
     /// The `k1` fresh-auth grant.
@@ -976,7 +855,7 @@ pub(crate) struct GrantReq {
 }
 
 /// Delete everything the recovery email keeps for `account_id`: the key, the
-/// vault, the tickets and the challenges. Returns whether there was a key.
+/// tickets and the challenges. Returns whether there was a key.
 async fn delete_rows(
     tx: &mut Transaction<'_, MySql>,
     account_id: &[u8; 16],
@@ -988,7 +867,6 @@ async fn delete_rows(
         .rows_affected()
         > 0;
     for statement in [
-        "DELETE FROM email_vaults WHERE account_id = ?",
         "DELETE FROM email_tickets WHERE account_id = ?",
         "DELETE FROM email_challenges WHERE account_id = ?",
     ] {
@@ -1001,8 +879,7 @@ async fn delete_rows(
 }
 
 /// The login handle of `account_id` is changing or going away: the stored
-/// `email_key` (and the vault key the client derives) was made from the old
-/// name, so the recovery email is turned off in the SAME transaction
+/// `email_key` was made from the old name, so the recovery email is turned off in the SAME transaction
 /// (ADR-0075 section 6) and the account's devices are told.
 ///
 /// # Errors
@@ -1025,13 +902,6 @@ pub(crate) async fn drop_for_handle_change(
 pub(crate) struct RekeyReq {
     /// The address, as the device kept it.
     pub(crate) address: String,
-    /// Standard base64 of the 16-byte salt of the vault re-sealed under the
-    /// NEW handle. With `sealed_entropy`, or neither.
-    #[serde(default)]
-    pub(crate) vault_salt: Option<String>,
-    /// Standard base64 of the 44-byte vault re-sealed under the NEW handle.
-    #[serde(default)]
-    pub(crate) sealed_entropy: Option<String>,
 }
 
 /// What a handle change does to the recovery email, computed before the
@@ -1042,8 +912,6 @@ pub(crate) struct RekeyPlan {
     old_email_key: Option<[u8; 32]>,
     /// `email_key` of the address under the NEW handle.
     new_email_key: [u8; 32],
-    /// The vault to store, already wrapped at rest: `(vault_salt, body_enc)`.
-    vault: Option<([u8; VAULT_SALT_LEN], Vec<u8>)>,
 }
 
 /// How a re-key inside the bind's transaction ended.
@@ -1051,8 +919,7 @@ pub(crate) struct RekeyPlan {
 pub(crate) enum RekeyOutcome {
     /// The account has no recovery email: nothing to do.
     Nothing,
-    /// The key now names the new handle (and the vault was replaced or
-    /// removed).
+    /// The key now names the new handle.
     Rekeyed,
     /// The address under the previous handle is not the stored key's. The
     /// caller rolls the whole bind back.
@@ -1065,9 +932,7 @@ pub(crate) enum RekeyOutcome {
 ///
 /// `503 recovery-email-disabled` when the feature is off (the server could
 /// not check the address, and dropping the email against the client's stated
-/// wish would be worse than refusing); `400 address-invalid`; `400` for a
-/// salt without a blob, the reverse, or either of the wrong size;
-/// [`ApiError::Internal`].
+/// wish would be worse than refusing); `400 address-invalid`.
 pub(crate) fn rekey_plan(
     state: &AppState,
     previous_handle: Option<&[u8; HANDLE_LEN]>,
@@ -1079,38 +944,9 @@ pub(crate) fn rekey_plan(
         StatusCode::BAD_REQUEST,
         CODE_ADDRESS_INVALID,
     ))?;
-    let vault = match (req.vault_salt.as_deref(), req.sealed_entropy.as_deref()) {
-        (None, None) => None,
-        (Some(salt), Some(sealed)) => {
-            let salt: [u8; VAULT_SALT_LEN] = B64
-                .decode(salt)
-                .ok()
-                .and_then(|bytes| <[u8; VAULT_SALT_LEN]>::try_from(bytes.as_slice()).ok())
-                .ok_or(ApiError::BadInput("vault_salt must be 16 bytes, base64"))?;
-            let sealed = B64
-                .decode(sealed)
-                .ok()
-                .filter(|bytes| bytes.len() == SEALED_ENTROPY_LEN)
-                .ok_or(ApiError::BadInput(
-                    "sealed_entropy must be the 44-byte blob of a 12-word phrase, base64",
-                ))?;
-            let body_enc =
-                lakko_crypto::aead::seal_with_key(&on.vault_key, &sealed).map_err(|e| {
-                    tracing::error!(error = %e, "recovery email: vault seal failed");
-                    ApiError::Internal
-                })?;
-            Some((salt, body_enc))
-        },
-        _ => {
-            return Err(ApiError::BadInput(
-                "vault_salt and sealed_entropy go together",
-            ))
-        },
-    };
     Ok(RekeyPlan {
         old_email_key: previous_handle.map(|old| on.config.email_key(old, &address)),
         new_email_key: on.config.email_key(new_handle, &address),
-        vault,
     })
 }
 
@@ -1120,10 +956,8 @@ pub(crate) fn rekey_plan(
 ///
 /// With no `recovery_emails` row there is nothing to move. Otherwise the
 /// address under the previous handle must be the stored key's (compared
-/// without an early exit); then the key is rewritten under the new handle,
-/// the vault is replaced by the one sent (never for a phrase-protected
-/// account) or removed (the old one was sealed under the old handle), and
-/// the account's challenges and tickets are dropped. No notice: the
+/// without an early exit); then the key is rewritten under the new handle
+/// and the account's challenges and tickets are dropped. No notice: the
 /// recovery email is the same one.
 ///
 /// # Errors
@@ -1159,30 +993,6 @@ pub(crate) async fn rekey_for_handle_change(
         .bind(&account_id[..])
         .execute(&mut **tx)
         .await?;
-    let phrase_saved: bool = sqlx::query_scalar("SELECT phrase_saved FROM accounts WHERE id = ?")
-        .bind(&account_id[..])
-        .fetch_one(&mut **tx)
-        .await?;
-    match plan.vault.as_ref().filter(|_| !phrase_saved) {
-        Some((salt, body_enc)) => {
-            sqlx::query(
-                "INSERT INTO email_vaults (account_id, vault_salt, body_enc) VALUES (?, ?, ?) \
-                 ON DUPLICATE KEY UPDATE vault_salt = VALUES(vault_salt), \
-                    body_enc = VALUES(body_enc), created_at = NOW(3)",
-            )
-            .bind(&account_id[..])
-            .bind(&salt[..])
-            .bind(body_enc.as_slice())
-            .execute(&mut **tx)
-            .await?;
-        },
-        None => {
-            sqlx::query("DELETE FROM email_vaults WHERE account_id = ?")
-                .bind(&account_id[..])
-                .execute(&mut **tx)
-                .await?;
-        },
-    }
     for statement in [
         "DELETE FROM email_tickets WHERE account_id = ?",
         "DELETE FROM email_challenges WHERE account_id = ?",
@@ -1196,12 +1006,15 @@ pub(crate) async fn rekey_for_handle_change(
 }
 
 /// `DELETE /recovery-email {fresh_grant}` — bearer + fresh-auth grant.
-/// Removes the key and the vault. `removed` says whether there was one.
+/// Removes the key. `removed` says whether there was one. Refused `409
+/// {"error":"last-factor"}` when the account has a recovery email and no
+/// confirmed authenticator and no passkey (ADR-0075, amended 2026-11-26),
+/// checked under the account row's lock.
 ///
 /// # Errors
 ///
-/// `503 recovery-email-disabled`, [`ApiError::FreshAuthRequired`],
-/// [`ApiError::Db`].
+/// `503 recovery-email-disabled`, [`ApiError::FreshAuthRequired`], `409
+/// last-factor`, [`ApiError::Db`].
 #[axum::debug_handler]
 pub(crate) async fn remove(
     State(state): State<AppState>,
@@ -1218,6 +1031,8 @@ pub(crate) async fn remove(
         .await
         .map_err(ApiError::Db)?;
     lock_account(&mut tx, &account_id).await?;
+    crate::factors::refuse_if_last(&mut tx, &account_id, crate::factors::Leaving::RecoveryEmail)
+        .await?;
     let removed = delete_rows(&mut tx, &account_id)
         .await
         .map_err(ApiError::Db)?;
@@ -1242,199 +1057,6 @@ async fn lock_account(
         .await
         .map_err(ApiError::Db)?
         .ok_or(ApiError::InvalidCredential)
-}
-
-/// Body of `PUT /recovery-email/vault`.
-#[derive(Deserialize)]
-pub(crate) struct PutVaultReq {
-    /// The account's login handle: 32 bytes, base64url without padding. The
-    /// server stores only a keyed hash of it, so it cannot recompute
-    /// `email_key` without being handed the handle; it checks that this is
-    /// the one bound to the session's account.
-    pub(crate) handle: String,
-    /// The address the account already confirmed, as the device kept it.
-    pub(crate) address: String,
-    /// Standard base64 of the 16-byte salt the client sealed the vault with.
-    pub(crate) vault_salt: String,
-    /// Standard base64 of the 44-byte email vault.
-    pub(crate) sealed_entropy: String,
-}
-
-/// `PUT /recovery-email/vault` — bearer, NO fresh-auth grant (ADR-0075,
-/// amended 2026-10-13). A device of the account that kept the address stores
-/// a vault again after a key reset or a rotation dropped it. No letter is
-/// sent: the address is the one already confirmed, which the server checks
-/// by recomputing `email_key` from the bound handle and the address.
-///
-/// Order: the feature (`503`); the body (`400`, `address-invalid` for a
-/// refused address); [`Scope::EmailVaultStore`] for the account (`429`),
-/// before anything is compared, so a session cannot test addresses freely;
-/// the handle is the account's bound one (`409 username-required` /
-/// `handle-mismatch`); then one transaction under the account row's lock:
-/// a stored key exists (`409 no-recovery-email`) and equals the recomputed
-/// one, compared without an early exit (`403 address-mismatch`); no phrase
-/// is saved (`409 phrase-saved`); no vault exists (`409 vault-exists`); the
-/// vault is stored under the client's salt, wrapped at rest.
-///
-/// It can only add a vault where there is none, never replace one, and it
-/// writes no notice. A vault sealing the wrong entropy fails the restore's
-/// bundle check on the client: a recovery that does not work, not a
-/// takeover.
-///
-/// # Errors
-///
-/// As listed; [`ApiError::Db`]; [`ApiError::Internal`].
-#[axum::debug_handler]
-pub(crate) async fn put_vault(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthenticatedAccount>,
-    Json(req): Json<PutVaultReq>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let on = enabled(&state)?;
-    let account_id = auth.0;
-    let handle = crate::login_handle::decode_handle(&req.handle)?;
-    let address = normalise_address(&req.address).ok_or(ApiError::Coded(
-        StatusCode::BAD_REQUEST,
-        CODE_ADDRESS_INVALID,
-    ))?;
-    let vault_salt: [u8; VAULT_SALT_LEN] = B64
-        .decode(&req.vault_salt)
-        .ok()
-        .and_then(|bytes| <[u8; VAULT_SALT_LEN]>::try_from(bytes.as_slice()).ok())
-        .ok_or(ApiError::BadInput("vault_salt must be 16 bytes, base64"))?;
-    let sealed = B64
-        .decode(&req.sealed_entropy)
-        .ok()
-        .filter(|bytes| bytes.len() == SEALED_ENTROPY_LEN)
-        .ok_or(ApiError::BadInput(
-            "sealed_entropy must be the 44-byte blob of a 12-word phrase, base64",
-        ))?;
-
-    crate::limits::charge_name(
-        &state.db,
-        &state.limits,
-        Scope::EmailVaultStore,
-        &account_id,
-    )
-    .await?;
-
-    require_own_handle(&state, &on, &account_id, &handle).await?;
-    let candidate = on.config.email_key(&handle, &address);
-    let body_enc = lakko_crypto::aead::seal_with_key(&on.vault_key, &sealed).map_err(|e| {
-        tracing::error!(error = %e, "recovery email: vault seal failed");
-        ApiError::Internal
-    })?;
-
-    let mut conn = crate::session::read_committed_conn(&state.db)
-        .await
-        .map_err(ApiError::Db)?;
-    let mut tx = sqlx::Acquire::begin(&mut conn)
-        .await
-        .map_err(ApiError::Db)?;
-    let phrase_saved: Option<bool> =
-        sqlx::query_scalar("SELECT phrase_saved FROM accounts WHERE id = ? FOR UPDATE")
-            .bind(&account_id[..])
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(ApiError::Db)?;
-    let phrase_saved = phrase_saved.ok_or(ApiError::InvalidCredential)?;
-    let stored: Option<[u8; 32]> = sqlx::query_scalar::<_, Vec<u8>>(
-        "SELECT email_key FROM recovery_emails WHERE account_id = ?",
-    )
-    .bind(&account_id[..])
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(ApiError::Db)?
-    .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok());
-    let Some(stored) = stored else {
-        return Err(ApiError::Coded(
-            StatusCode::CONFLICT,
-            CODE_NO_RECOVERY_EMAIL,
-        ));
-    };
-    if !ct_eq(&candidate, &stored) {
-        return Err(ApiError::Coded(
-            StatusCode::FORBIDDEN,
-            CODE_ADDRESS_MISMATCH,
-        ));
-    }
-    if phrase_saved {
-        return Err(ApiError::Coded(StatusCode::CONFLICT, CODE_PHRASE_SAVED));
-    }
-    // Under the account row's lock every writer of this account's vault
-    // waits, so the read and the insert see the same state.
-    let has_vault: Option<i64> =
-        sqlx::query_scalar("SELECT 1 FROM email_vaults WHERE account_id = ?")
-            .bind(&account_id[..])
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(ApiError::Db)?;
-    if has_vault.is_some() {
-        return Err(ApiError::Coded(StatusCode::CONFLICT, CODE_VAULT_EXISTS));
-    }
-    sqlx::query("INSERT INTO email_vaults (account_id, vault_salt, body_enc) VALUES (?, ?, ?)")
-        .bind(&account_id[..])
-        .bind(&vault_salt[..])
-        .bind(body_enc.as_slice())
-        .execute(&mut *tx)
-        .await
-        .map_err(ApiError::Db)?;
-    tx.commit().await.map_err(ApiError::Db)?;
-    tracing::info!("recovery email: vault stored again for the confirmed address");
-    Ok(Json(serde_json::json!({ "vault": true })))
-}
-
-/// `DELETE /recovery-email/vault {fresh_grant}` — bearer + fresh-auth grant.
-/// The account becomes phrase-protected: its email vault is deleted, it is
-/// marked so that it never gets one again, and its devices get the "recovery
-/// phrase saved" notice (once). The `email_key` is kept: a mailed code still
-/// changes the password.
-///
-/// For an account whose phrase was never in a vault (a sign-up that chose
-/// "Save a recovery phrase"). An account that HAD a vault saves a phrase by
-/// rotating its keys with `phrase_saved: true` ([`crate::key_rotate`]), since
-/// a copy of the vault taken earlier still opens the old phrase.
-///
-/// Not gated on the pepper: a phrase is saved on a server that sends no mail
-/// too.
-///
-/// # Errors
-///
-/// [`ApiError::FreshAuthRequired`], [`ApiError::Db`].
-#[axum::debug_handler]
-pub(crate) async fn remove_vault(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthenticatedAccount>,
-    Json(req): Json<GrantReq>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let account_id = auth.0;
-    crate::session::require_fresh_grant(&state, &account_id, req.fresh_grant.as_deref()).await?;
-    let mut conn = crate::session::read_committed_conn(&state.db)
-        .await
-        .map_err(ApiError::Db)?;
-    let mut tx = sqlx::Acquire::begin(&mut conn)
-        .await
-        .map_err(ApiError::Db)?;
-    lock_account(&mut tx, &account_id).await?;
-    let vault_removed = sqlx::query("DELETE FROM email_vaults WHERE account_id = ?")
-        .bind(&account_id[..])
-        .execute(&mut *tx)
-        .await
-        .map_err(ApiError::Db)?
-        .rows_affected()
-        > 0;
-    crate::account_notices::mark_phrase_saved(&mut tx, &account_id, now_ms())
-        .await
-        .map_err(ApiError::Db)?;
-    tx.commit().await.map_err(ApiError::Db)?;
-    tracing::info!(
-        vault_removed,
-        "recovery email: account marked phrase-protected"
-    );
-    Ok(Json(serde_json::json!({
-        "vault_removed": vault_removed,
-        "phrase_saved": true,
-    })))
 }
 
 // ---------------------------------------------------------------------------
@@ -1545,7 +1167,6 @@ pub(crate) async fn recover_start(
             purpose: PURPOSE_RECOVER,
             code_key: if send { real_code_key } else { random() },
             pending_key: None,
-            vault_salt: None,
             handle_tag: on.config.handle_tag(&handle),
         },
         now,
@@ -1589,7 +1210,7 @@ pub(crate) struct RecoverVerifyRes {
     /// URL-safe base64 of the 32-byte ticket: single use, ten minutes.
     pub(crate) ticket: String,
     /// The account has an authenticator: `recover/totp` must pass before
-    /// `open` or the password routes answer.
+    /// the password routes answer.
     pub(crate) totp_required: bool,
     /// Seconds the ticket is good for.
     pub(crate) expires_in_secs: u32,
@@ -1684,7 +1305,7 @@ pub(crate) async fn recover_verify(
 }
 
 // ---------------------------------------------------------------------------
-// Recover: tickets, totp, open
+// Recover: tickets, totp
 // ---------------------------------------------------------------------------
 
 /// A live ticket as the routes read it.
@@ -1693,7 +1314,6 @@ struct Ticket {
     account_id: [u8; 16],
     totp_required: bool,
     totp_passed: bool,
-    password_mode: bool,
 }
 
 impl Ticket {
@@ -1716,8 +1336,8 @@ async fn load_ticket(
         .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
         .ok_or_else(ticket_refused)?;
     let key = config.hash_ticket(&ticket);
-    let row: Option<(Vec<u8>, bool, bool, bool)> = sqlx::query_as(
-        "SELECT account_id, totp_required, totp_passed, password_mode \
+    let row: Option<(Vec<u8>, bool, bool)> = sqlx::query_as(
+        "SELECT account_id, totp_required, totp_passed \
          FROM email_tickets WHERE ticket_key = ? AND expires_at_ms > ?",
     )
     .bind(&key[..])
@@ -1725,13 +1345,12 @@ async fn load_ticket(
     .fetch_optional(&state.db)
     .await
     .map_err(ApiError::Db)?;
-    row.and_then(|(account, totp_required, totp_passed, password_mode)| {
+    row.and_then(|(account, totp_required, totp_passed)| {
         Some(Ticket {
             key,
             account_id: <[u8; 16]>::try_from(account.as_slice()).ok()?,
             totp_required,
             totp_passed,
-            password_mode,
         })
     })
     .ok_or_else(ticket_refused)
@@ -1811,116 +1430,18 @@ pub(crate) async fn recover_totp(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-/// Body of `POST /recovery-email/recover/open` and of the password start.
-#[derive(Deserialize)]
-pub(crate) struct RecoverOpenReq {
-    /// The ticket `verify` returned.
-    pub(crate) ticket: String,
-}
-
-/// `POST /recovery-email/recover/open` — anonymous, per-address limited.
-///
-/// With an email vault: charges [`Scope::EmailVaultOpen`] for the account,
-/// then in one transaction spends the ticket and writes the "account opened
-/// by email" notice, and answers `{"mode":"vault","vault_salt",
-/// "sealed_entropy"}` (both standard base64). The client opens the vault
-/// with the username and address the person typed and continues with the
-/// ordinary phrase restore.
-///
-/// Without one: marks the ticket for the password routes and answers
-/// `{"mode":"password"}`.
-///
-/// Either way only after the authenticator step, when the ticket requires
-/// it (`403 totp-required`).
-///
-/// # Errors
-///
-/// `401 ticket-refused`, `403 totp-required`, `429 too-many-attempts`;
-/// [`ApiError::Db`]; [`ApiError::Internal`].
-#[axum::debug_handler]
-pub(crate) async fn recover_open(
-    State(state): State<AppState>,
-    Json(req): Json<RecoverOpenReq>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let on = enabled(&state)?;
-    let ticket = load_ticket(&state, &on.config, &req.ticket).await?;
-    if !ticket.cleared() {
-        return Err(ApiError::Coded(StatusCode::FORBIDDEN, CODE_TOTP_REQUIRED));
-    }
-    let account_id = ticket.account_id;
-    let vault: Option<(Vec<u8>, Vec<u8>)> =
-        sqlx::query_as("SELECT vault_salt, body_enc FROM email_vaults WHERE account_id = ?")
-            .bind(&account_id[..])
-            .fetch_optional(&state.db)
-            .await
-            .map_err(ApiError::Db)?;
-    let Some((vault_salt, body_enc)) = vault else {
-        sqlx::query("UPDATE email_tickets SET password_mode = 1 WHERE ticket_key = ?")
-            .bind(&ticket.key[..])
-            .execute(&state.db)
-            .await
-            .map_err(ApiError::Db)?;
-        return Ok(Json(serde_json::json!({ "mode": "password" })));
-    };
-
-    crate::limits::charge_name(&state.db, &state.limits, Scope::EmailVaultOpen, &account_id)
-        .await?;
-    let sealed = lakko_crypto::aead::open_with_key(&on.vault_key, &body_enc).map_err(|e| {
-        tracing::error!(error = %e, "recovery email: vault open failed");
-        ApiError::Internal
-    })?;
-
-    let mut conn = crate::session::read_committed_conn(&state.db)
-        .await
-        .map_err(ApiError::Db)?;
-    let mut tx = sqlx::Acquire::begin(&mut conn)
-        .await
-        .map_err(ApiError::Db)?;
-    let spent = sqlx::query(
-        "DELETE FROM email_tickets WHERE ticket_key = ? \
-         AND (totp_required = 0 OR totp_passed = 1)",
-    )
-    .bind(&ticket.key[..])
-    .execute(&mut *tx)
-    .await
-    .map_err(ApiError::Db)?
-    .rows_affected();
-    if spent != 1 {
-        return Err(ticket_refused());
-    }
-    crate::account_notices::write(
-        &mut tx,
-        &account_id,
-        NoticeKind::AccountOpenedByEmail,
-        now_ms(),
-    )
-    .await
-    .map_err(ApiError::Db)?;
-    tx.commit().await.map_err(ApiError::Db)?;
-
-    tracing::info!("recovery email: vault released");
-    Ok(Json(serde_json::json!({
-        "mode": "vault",
-        "vault_salt": B64.encode(vault_salt),
-        "sealed_entropy": B64.encode(sealed),
-    })))
-}
-
 // ---------------------------------------------------------------------------
-// Recover: password mode
+// Recover: the password
 // ---------------------------------------------------------------------------
 
-/// The gates of both password routes: the authenticator step (`403
-/// totp-required`), then that `open` answered the password mode for this
-/// ticket (`409 wrong-mode`).
-fn require_password_mode(ticket: &Ticket) -> Result<(), ApiError> {
-    if !ticket.cleared() {
-        return Err(ApiError::Coded(StatusCode::FORBIDDEN, CODE_TOTP_REQUIRED));
+/// The gate of both password routes: the authenticator step, when the
+/// ticket requires it (`403 totp-required`).
+fn require_cleared(ticket: &Ticket) -> Result<(), ApiError> {
+    if ticket.cleared() {
+        Ok(())
+    } else {
+        Err(ApiError::Coded(StatusCode::FORBIDDEN, CODE_TOTP_REQUIRED))
     }
-    if !ticket.password_mode {
-        return Err(ApiError::Coded(StatusCode::CONFLICT, CODE_WRONG_MODE));
-    }
-    Ok(())
 }
 
 /// Body of `POST /recovery-email/recover/password/start`.
@@ -1939,8 +1460,8 @@ pub(crate) struct PasswordStartReq {
 ///
 /// # Errors
 ///
-/// `401 ticket-refused`, `403 totp-required`, `409 wrong-mode`, `400` for a
-/// request that does not decode; [`ApiError::Db`].
+/// `401 ticket-refused`, `403 totp-required`, `400` for a request that does
+/// not decode; [`ApiError::Db`].
 #[axum::debug_handler]
 pub(crate) async fn password_start(
     State(state): State<AppState>,
@@ -1949,7 +1470,7 @@ pub(crate) async fn password_start(
     let on = enabled(&state)?;
     let request = decode_registration_request(&req.new_password_request)?;
     let ticket = load_ticket(&state, &on.config, &req.ticket).await?;
-    require_password_mode(&ticket)?;
+    require_cleared(&ticket)?;
     let response = opaque_registration_start(
         &state.opaque_setup,
         &ticket.account_id,
@@ -1989,8 +1510,8 @@ pub(crate) struct PasswordFinishRes {
 /// `POST /recovery-email/recover/password/finish` — anonymous, per-address
 /// limited. One transaction under the account row's lock:
 ///
-/// 1. the ticket is spent (it must be cleared and in password mode; of two
-///    finishes one deletes it);
+/// 1. the ticket is spent (it must be cleared; of two finishes one deletes
+///    it);
 /// 2. the recall anchor is captured ([`crate::recall::capture_anchor`]),
 ///    BEFORE the envelope changes, so the password a recall asks for is the
 ///    one in force before this;
@@ -2005,8 +1526,8 @@ pub(crate) struct PasswordFinishRes {
 ///
 /// # Errors
 ///
-/// `401 ticket-refused`, `403 totp-required`, `409 wrong-mode`, `400`;
-/// [`ApiError::Db`]; [`ApiError::Internal`].
+/// `401 ticket-refused`, `403 totp-required`, `400`; [`ApiError::Db`];
+/// [`ApiError::Internal`].
 #[axum::debug_handler]
 pub(crate) async fn password_finish(
     State(state): State<AppState>,
@@ -2019,7 +1540,7 @@ pub(crate) async fn password_finish(
         .serialize()
         .to_vec();
     let ticket = load_ticket(&state, &on.config, &req.ticket).await?;
-    require_password_mode(&ticket)?;
+    require_cleared(&ticket)?;
     let account_id = ticket.account_id;
     // ADR-0099 section 4: a suspended account's password is not replaced and
     // the ticket is not spent; the account lands in suspended mode.
@@ -2050,7 +1571,7 @@ pub(crate) async fn password_finish(
             .map_err(ApiError::Db)?;
     let key_generation = key_generation.ok_or_else(ticket_refused)?;
     let spent = sqlx::query(
-        "DELETE FROM email_tickets WHERE ticket_key = ? AND password_mode = 1 \
+        "DELETE FROM email_tickets WHERE ticket_key = ? \
          AND (totp_required = 0 OR totp_passed = 1)",
     )
     .bind(&ticket.key[..])
@@ -2104,6 +1625,191 @@ pub(crate) async fn password_finish(
         account_id_b64,
         session,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// The reset factor (ADR-0073, amended 2026-11-26)
+// ---------------------------------------------------------------------------
+
+/// Body of `POST /account/keys/reset/factor/email/start`.
+#[derive(Deserialize)]
+pub(crate) struct ResetStartReq {
+    /// The `k1` fresh-auth grant of a PASSWORD sign-in.
+    #[serde(default)]
+    pub(crate) fresh_grant: Option<String>,
+    /// The account's login handle: 32 bytes, base64url without padding.
+    pub(crate) handle: String,
+    /// The address as the person typed it.
+    pub(crate) address: String,
+    /// The device's language tag, for the letter. Optional.
+    #[serde(default)]
+    pub(crate) lang: Option<String>,
+}
+
+/// `POST /account/keys/reset/factor/email/start` — bearer + a fresh-auth
+/// grant minted by the password.
+///
+/// Order: the grant (`403 fresh-auth-required`, nothing charged), the
+/// feature (`503`), the body (`400`), [`Scope::EmailLetterHandle`] for the
+/// handle and [`Scope::EmailLetterAccount`] for the bearer's account (`429
+/// email-rate-limited`), then the comparison and the challenge. The answer is
+/// the same whether the typed pair is the account's: on a match a challenge
+/// of purpose `reset` carries the hash of a code that is mailed (after the
+/// answer); otherwise it carries random bytes no code matches. Both replace
+/// the bearer's live reset challenge, if any.
+///
+/// # Errors
+///
+/// As listed; [`ApiError::Db`].
+#[axum::debug_handler]
+pub(crate) async fn reset_factor_start(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthenticatedAccount>,
+    Json(req): Json<ResetStartReq>,
+) -> Result<Json<RecoverStartRes>, ApiError> {
+    let account_id = auth.0;
+    crate::session::require_password_grant(&state, &account_id, req.fresh_grant.as_deref()).await?;
+    let on = enabled(&state)?;
+    let handle = crate::login_handle::decode_handle(&req.handle)?;
+    let address = normalise_address(&req.address).ok_or(ApiError::Coded(
+        StatusCode::BAD_REQUEST,
+        CODE_ADDRESS_INVALID,
+    ))?;
+    crate::limits::charge_name(&state.db, &state.limits, Scope::EmailLetterHandle, &handle).await?;
+    crate::limits::charge_name(
+        &state.db,
+        &state.limits,
+        Scope::EmailLetterAccount,
+        &account_id,
+    )
+    .await?;
+
+    let resolved = crate::login_handle::resolve(&state.db, &on.handle_pepper, &handle).await?;
+    let stored: Option<[u8; 32]> = sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT email_key FROM recovery_emails WHERE account_id = ?",
+    )
+    .bind(&account_id[..])
+    .fetch_optional(&state.db)
+    .await
+    .map_err(ApiError::Db)?
+    .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok());
+    let candidate = on.config.email_key(&handle, &address);
+    let reference = stored.unwrap_or_else(|| on.config.dummy_email_key(&handle));
+    // Every operand is evaluated; `&` not `&&`.
+    #[allow(clippy::needless_bitwise_bool)]
+    let send = ct_eq(&candidate, &reference)
+        & stored.is_some()
+        & resolved.bound
+        & (resolved.account_id == account_id);
+
+    let id: [u8; 16] = random();
+    let code = generate_code();
+    let real_code_key = on.config.hash_code(&id, &code);
+    let now = now_ms();
+    put_challenge(
+        &state.db,
+        &NewChallenge {
+            id,
+            account_id: &account_id,
+            purpose: PURPOSE_RESET,
+            code_key: if send { real_code_key } else { random() },
+            pending_key: None,
+            handle_tag: on.config.handle_tag(&handle),
+        },
+        now,
+    )
+    .await
+    .map_err(ApiError::Db)?;
+
+    if send {
+        let config = on.config.clone();
+        let letter = Letter {
+            to: address,
+            code,
+            language: clean_language(req.lang),
+        };
+        // After the answer, so the relay's latency is not the caller's.
+        tokio::spawn(async move {
+            if let Err(e) = config.sender.send(letter).await {
+                tracing::warn!(error = %e, "recovery email: a reset letter was not sent");
+            }
+        });
+    }
+    Ok(Json(RecoverStartRes {
+        challenge_id: URL_SAFE_NO_PAD.encode(id),
+        resend_after_secs: RESEND_AFTER_SECS,
+        expires_in_secs: ttl_secs(CODE_TTL_MS),
+    }))
+}
+
+/// Body of `POST /account/keys/reset/factor/email/finish`.
+#[derive(Deserialize)]
+pub(crate) struct ResetFinishReq {
+    /// The `k1` fresh-auth grant of a PASSWORD sign-in.
+    #[serde(default)]
+    pub(crate) fresh_grant: Option<String>,
+    /// The `challenge_id` the start returned.
+    pub(crate) challenge_id: String,
+    /// The six digits from the letter.
+    pub(crate) code: String,
+}
+
+/// `POST /account/keys/reset/factor/email/finish` — bearer + a fresh-auth
+/// grant minted by the password. On the right code for a live, real reset
+/// challenge of the bearer's account the challenge is consumed and a reset
+/// factor grant minted (`factor` `e`). Everything else (a wrong code, a
+/// decoy, an unknown, expired, spent or another account's challenge) is the
+/// one `401 {"error":"factor-refused"}`; five tries per code. A live
+/// challenge charges [`Scope::EmailVerify`] for the handle it was opened for.
+///
+/// # Errors
+///
+/// As above; `403 fresh-auth-required`; `503 recovery-email-disabled`;
+/// [`ApiError::Db`].
+#[axum::debug_handler]
+pub(crate) async fn reset_factor_finish(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthenticatedAccount>,
+    Json(req): Json<ResetFinishReq>,
+) -> Result<Json<crate::session::ResetFactorGrant>, ApiError> {
+    let account_id = auth.0;
+    let generation =
+        crate::session::require_password_grant(&state, &account_id, req.fresh_grant.as_deref())
+            .await?;
+    let on = enabled(&state)?;
+    let now = now_ms();
+    let challenge = match decode_challenge_id(&req.challenge_id) {
+        Some(id) => load_challenge(&state.db, &id, PURPOSE_RESET, now)
+            .await
+            .map_err(ApiError::Db)?
+            .filter(|c| c.account_id == account_id)
+            .map(|c| (id, c)),
+        None => None,
+    };
+    let Some((id, challenge)) = challenge else {
+        return Err(crate::reset_factor::factor_refused());
+    };
+    crate::limits::charge_name(
+        &state.db,
+        &state.limits,
+        Scope::EmailVerify,
+        &challenge.handle_tag,
+    )
+    .await?;
+    let CodeOutcome::Accepted(_) =
+        check_code(&state.db, &on.config, &id, challenge, &req.code, now)
+            .await
+            .map_err(ApiError::Db)?
+    else {
+        return Err(crate::reset_factor::factor_refused());
+    };
+    tracing::info!("reset factor: mailed code accepted");
+    Ok(Json(crate::session::issue_reset_factor_grant(
+        &state,
+        &account_id,
+        generation,
+        lakko_auth_token::ResetFactor::Email,
+    )?))
 }
 
 // ---------------------------------------------------------------------------

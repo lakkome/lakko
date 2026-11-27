@@ -292,29 +292,6 @@ impl OprfBlinder {
         })
     }
 
-    /// ADR-0101 section 7 - blind the channel recovery input of the 16-byte
-    /// `channelId` (`channelRecoveryOprfInput`) for `POST
-    /// /auth/channel-recovery/evaluate`. `blindedB64` is standard base64
-    /// (auth takes URL-safe base64: re-encode); finalize with the
-    /// evaluation re-encoded to standard base64, and derive the key from
-    /// `output` with `ChannelRecoveryKey.fromOprfOutput`.
-    ///
-    /// # Errors
-    ///
-    /// Throws on a channel id that is not 16 bytes, or on an OPRF blinding
-    /// failure.
-    #[wasm_bindgen(js_name = blindChannelRecovery)]
-    pub fn blind_channel_recovery(channel_id: &[u8]) -> Result<OprfBlinder, JsError> {
-        let id = <[u8; 16]>::try_from(channel_id)
-            .map_err(|_| JsError::new("channelRecovery.keyLength: channelId must be 16 bytes"))?;
-        let input = lakko_channels::recovery::channel_recovery_oprf_input(&id);
-        let (blinder, blinded_b64) = InnerBlinder::blind_bytes(&input).map_err(discovery_err)?;
-        Ok(Self {
-            inner: Mutex::new(Some(blinder)),
-            blinded_b64,
-        })
-    }
-
     /// Base64-encoded blinded element — the `blinded` field of
     /// `/discovery/oprf`'s request body.
     #[wasm_bindgen(getter, js_name = blindedB64)]

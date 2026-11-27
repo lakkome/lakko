@@ -94,7 +94,6 @@ pub mod discovery;
 pub mod donation;
 pub mod ds_proof;
 pub mod ds_statement;
-pub mod email_vault;
 pub mod feed;
 pub mod group_contact_request;
 pub mod handles;
@@ -111,6 +110,7 @@ pub mod mls;
 pub mod mnemonic;
 pub mod moderation;
 pub mod open_items;
+pub mod owned_channels;
 pub mod pairing;
 pub mod passkey_vault;
 pub mod phrase_check;
@@ -121,9 +121,11 @@ pub mod push;
 pub mod push_wake;
 pub mod reach_plan;
 pub mod reaction_rules;
+pub mod recovery_email;
 pub mod recovery_payload;
 pub mod release;
 pub mod reset_return;
+pub mod reset_seal;
 pub mod scoped_discovery;
 pub mod sframe;
 pub mod sfu_signaling;
@@ -159,7 +161,6 @@ pub use contacts::{
     PerRelationship, StrangerInbox, WasmProfile,
 };
 pub use discovery::{login_handle, normalize_username, validate_username, OprfBlinder};
-pub use email_vault::{email_vault_open, email_vault_seal, normalize_recovery_email};
 pub use mls::{AddMember, Group, GroupKind, Identity, ProcessedMessage, ProcessedMessageKind};
 pub use mnemonic::RecoveryMnemonic;
 pub use passkey_vault::{passkey_vault_open, passkey_vault_seal};
@@ -167,6 +168,7 @@ pub use phrase_check::{phrase_check_random_positions, phrase_check_words};
 pub use pow_solver::{PowProof, PowSolver};
 pub use presence::{current_epoch, derive_token, PresenceToken, PresenceTracker};
 pub use push::PushPayload;
+pub use recovery_email::normalize_recovery_email;
 pub use storage::{
     EncryptedStore, GroupStateStore, InMemoryStore, LocalMessage, MessageKind, MessageStore, Table,
 };

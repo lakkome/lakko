@@ -46,6 +46,11 @@
 //! - `GET  /transparency/root`           — anon current signed root
 //! - `GET  /transparency/proof/{idx}`    — anon inclusion proof
 //! - `GET  /transparency/latest/{username_hash_b64}` — anon latest entry
+//! - `POST /transparency/announcement/append` — service-secret-authed seal-announcement
+//!   leaf append (ADR-0101 section 10; `403` not signed by the account's latest key,
+//!   `409` a `seq` not above the logged ones)
+//! - `GET  /transparency/announcement/{username_hash_b64}/{generation}` — anon newest
+//!   announcement leaf of a generation (`404` when none)
 //! - `GET  /transparency/operator-key`   — anon operator pubkey to pin
 
 #![forbid(unsafe_code)]
@@ -339,6 +344,10 @@ pub(crate) fn build_app(state: AppState) -> Router {
 
     let protected = Router::new()
         .route("/transparency/append", post(handlers::append))
+        .route(
+            "/transparency/announcement/append",
+            post(handlers::append_announcement),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             service_auth::require_service_secret,
@@ -353,6 +362,10 @@ pub(crate) fn build_app(state: AppState) -> Router {
         .route(
             "/transparency/latest/{username_hash_b64}",
             get(handlers::latest),
+        )
+        .route(
+            "/transparency/announcement/{username_hash_b64}/{generation}",
+            get(handlers::announcement),
         )
         .route("/transparency/operator-key", get(handlers::operator_key));
 

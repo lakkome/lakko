@@ -36,6 +36,10 @@
 - **Amended 2026-11-26 (maintainer; designed, not built):** a reset needs
   the password and a second factor (authenticator, mailed code or passkey);
   see "Amended 2026-11-26" below.
+- **Amended 2026-11-26 (second; maintainer; designed, not built):** peers
+  honour a reset only when it is sealed by a key the account published
+  before it (ADR-0101 section 10); an unsealed reset is a new account under
+  the same username; see "Amended 2026-11-26 (second)" below.
 - **Amended by [ADR-0078](0078-servers-cannot-link-accounts.md) phase 6 (2026-10-16):**
   the key-reset attestation is version 2, 145 bytes, without
   `device_group_journal_id` (auth would otherwise have to learn the
@@ -2439,9 +2443,9 @@ checked before anything is charged), then answers `{reset_grant,
 reset_grant_expires_at_ms}` or one `401 {"error":"factor-refused"}` (a wrong
 code, a decoy or spent challenge, no such factor on the account; the client
 offers only the factors the account has), or `429` with
-`retry_after_secs`. The mail-protected case: the email factor does not open
-the email vault; the client offers the mailed-code restore of ADR-0075
-section 7 beside it (UX 15.1b).
+`retry_after_secs`. (The mail-protected case written here first, where
+the client offered the email vault's restore beside the email factor, is
+gone: ADR-0075 removed the vault on 2026-11-26.)
 
 **The grant opens one more route (settled 2026-11-26, maintainer).**
 `POST /account/owned-channels-secret {reset_grant}` (bearer) answers the
@@ -2503,6 +2507,112 @@ TOTP enrolment refused without a fresh-auth grant; the last-factor refusals
 on the three routes, and none after a reset or a recall; startup refused
 without the authenticator key; `lakko-auth-token` round trips and the cross-
 kind refusals for `f1` and the method field, in `token_verify`.
+
+**As built in the services, 2026-11-27 (S7; `services/auth`, DB-tested
+against a local MariaDB, not deployed, no client uses it yet).** The routes
+and their bodies are as the table above states; chosen where this section
+left a detail open:
+
+- `services/auth/src/reset_factor.rs` (authenticator, passkey),
+  `recovery_email.rs` (`reset_factor_start` / `reset_factor_finish`),
+  `session.rs` (`require_password_grant`, `issue_reset_factor_grant`,
+  `require_reset_grant`), `factors.rs` (the last-factor rule),
+  `owned_channels.rs`. `AppState` gains `reset_factor_grant_ttl_ms`.
+- Every factor route answers `{reset_grant, reset_grant_expires_at_ms}`. The
+  order in each: the password-minted fresh-auth grant (`403
+  fresh-auth-required`), then the feature (`503` for the email routes
+  without the peppers, for the authenticator route in a state without its
+  key), then the counters, then the factor (`401 factor-refused`).
+- The email start files its challenge (purpose 3, `reset`) under the
+  bearer's own account whether the typed pair matches or not, so a miss
+  replaces a live reset challenge of that account; it charges
+  `EmailLetterHandle` for the handle and `EmailLetterAccount` for the
+  bearer's account and answers `429 email-rate-limited` when either is
+  spent (the bearer is known, so this is no oracle). A handle that is not
+  the bearer's own is a miss.
+- The passkey route consumes the action grant for
+  `SHA-256("lakko/action/reset-keys/v1" ‖ account_id)`; `/auth/action/*` is
+  unchanged (it treats the hash as opaque).
+- `Scope::ResetFactor` is 26 (`LAKKO_AUTH_LIMIT_RESET_FACTOR`, 5 per 900 s).
+- The reset's `finish` answers `403 reset-factor-required` when its grant
+  lost the row lock to a concurrent reset. A reset factor grant obtained
+  earlier and still inside its lifetime at the account's current generation
+  is accepted, by construction; "obtained earlier" in the test list above is
+  covered as a grant of an earlier generation (refused).
+- `POST /totp/enroll/start` now takes a JSON body `{fresh_grant}` (it took
+  none) and `/finish` `{code, fresh_grant}`; either method's grant passes.
+- The last-factor rule (`factors::is_last`) refuses only when the factor
+  being removed exists and nothing else does. On `DELETE
+  /webauthn/credentials/{id}` it runs before the ADR-0014 action grant is
+  consumed (a refused delete keeps the grant) and again under the account
+  row's lock. `DELETE /auth/login-handle` is not covered (the amendment
+  names the `PUT`); it still drops the recovery email.
+- `LAKKO_TOTP_ENC_KEY` unset or blank refuses startup
+  (`totp::parse_totp_enc_key`).
+- Tests: `services/auth/src/reset_factor_tests.rs` (seven DB-gated route
+  tests), the TOTP enrolment test, the reset tests of `opaque.rs` and
+  `recall_tests.rs` moved onto the factor grant, the last-factor cases in
+  `recovery_email_tests.rs`. Auth suite on 2026-11-27: 257 unit and route
+  tests plus 2 fork-guard tests, with the database.
+
+## Amended 2026-11-26 (second): peers honour only a sealed reset
+
+Maintainer decision, 2026-11-26. Designed, not built. The mechanism is
+[ADR-0101](0101-reaching-a-reset-account.md) section 10 (the reset seal)
+and 11 (an unsealed reset); UX `identity-recovery.md` 15.1c, 16.2 rule 5,
+16.11. Where this section and the earlier ones differ, this one holds.
+
+**Why.** R.2 accepts a reset on three things the operator controls: the
+`KeyResetAttestation` (signed with auth's attest key), the generation, and
+the KT log entry. The operator can therefore mint a reset for any account
+without the password or a factor, and since ADR-0101 the account's contacts
+would hand its chats, groups and history to the operator's key. The second
+factor of the amendment above is checked by the same server and does not
+change this.
+
+**R.2 gains rule 4.** After rules 1 to 3:
+
+4. the reset is **sealed**: the previous generation's seal announcement
+   verifies under the key this device holds, is the newest one this device
+   and the log know for that generation, and lists the seal key that signed
+   the reset seal over `(account_ref, announcement_seq, g-1, g, the fetched
+   key)` (formats in ADR-0101 section 10).
+
+| Outcome | When | What the client does |
+|---|---|---|
+| **accepted (sealed)** | 1 to 4 hold | as R.2's "accepted": re-pin, R.5 to R.7, no UI |
+| **unsealed** | 1 to 3 hold, 4 does not (no seal, an invalid one, or one whose key the announcement does not list) | no re-pin onto the old contact, nothing moved, nothing returned; the account is treated as a new account under the same username (ADR-0101 section 11; UX 16.11) |
+| **refused**, **no verdict** | as before | as before |
+
+The previous `accepted` row of R.2 is the sealed row. A build with the KT
+log `off` checks the announcement against the held key and the highest
+`seq` this device kept, and states the rollback residual of ADR-0101
+section 10.
+
+**What changes outside the client.** `services/auth`: nothing beyond the
+amendment above; the reset seal is made by the client and the server never
+sees a seal secret. `services/discovery`: the identity bundle gains two
+opaque columns, `reset_seals` (the newest announcement of the current
+generation, and after a reset also of the previous one) and `reset_seal`
+(beside `key_reset_attest` on an attested change), never parsed, forwarded
+to the KT append. `services/transparency`: a leaf kind for the announcement.
+The reset's own order (section 2.3) gains one step before `finish`: make the
+reset seal; and one after the publish: publish the new generation's
+announcement.
+
+**The account's own old devices.** On a reset they did not make they check
+rule 4 against their own account: unsealed keeps ADR-0074's staged wipe and
+"Was it you?" as built; sealed is the owner's (password and a factor).
+
+**Invariant #6** changes: a reset is honoured as the same identity only under
+a seal published before it; an unsealed reset is a new account.
+
+**As built in the services, 2026-11-27 (S7).** Discovery and the
+transparency service are built as ADR-0101 section 10's "As built in the
+services" note states, with one reversal of the text above: discovery
+decodes and checks the announcement and the reset seal instead of storing
+them unparsed, because the KT leaf needs the announcement's generation and
+`seq`. `services/auth` changed nothing for the seal.
 
 ## What the build changed / found (phase 1, 2026-10-03)
 

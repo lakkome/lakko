@@ -17,9 +17,22 @@ pub enum Error {
         size: u64,
     },
 
+    /// The leaf at this index is a seal-announcement leaf, not an identity
+    /// entry (ADR-0101 section 10).
+    #[error("leaf index {index} is not an identity entry")]
+    NotAnIdentityLeaf {
+        /// Requested leaf index.
+        index: u64,
+    },
+
     /// An inclusion proof failed verification.
     #[error("inclusion proof did not verify against the given root")]
     InclusionProofMismatch,
+
+    /// A seal-announcement leaf is not before the reset leaf it must precede
+    /// (ADR-0101 section 10).
+    #[error("seal announcement leaf is not before the reset leaf")]
+    AnnouncementNotBeforeReset,
 
     /// A consistency proof failed verification.
     #[error("consistency proof did not verify between the two roots")]

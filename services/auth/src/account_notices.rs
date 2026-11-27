@@ -17,8 +17,8 @@
 //! and sets `since_ms` to thirty days ago. Rows are pruned after
 //! [`RETENTION_MS`] (60 days).
 //!
-//! The route is not gated on the recovery-email pepper: a "recovery phrase
-//! saved" notice is written on a server that sends no mail too.
+//! The route is not gated on the recovery-email pepper: an account that
+//! added no email gets no notice, but asking costs nothing.
 //!
 //! [ADR-0075]: ../../../docs/adr/0075-recovery-email.md
 
@@ -44,16 +44,16 @@ pub(crate) const RETENTION_MS: i64 = 60 * 86_400_000;
 const PRUNE_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// What a notice says. The discriminant is stored in `account_notices.kind`;
-/// never renumber.
+/// never renumber. 2 ("account opened by email") and 6 ("recovery phrase
+/// saved") belonged to the removed email vault (ADR-0075, amended
+/// 2026-11-26) and are not reused; another device learns that a phrase was
+/// saved from the account's seal announcement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum NoticeKind {
     /// The password was replaced with a mailed code
     /// (`/recovery-email/recover/password/finish`).
     PasswordChangedByEmail = 1,
-    /// The email vault left the server in answer to a mailed code
-    /// (`/recovery-email/recover/open`, vault mode).
-    AccountOpenedByEmail = 2,
     /// A recovery email was added.
     EmailAdded = 3,
     /// The recovery email was replaced with another address.
@@ -61,8 +61,6 @@ pub(crate) enum NoticeKind {
     /// The recovery email was removed (by the person, or by a change of
     /// username).
     EmailRemoved = 5,
-    /// A recovery phrase was saved for the account.
-    PhraseSaved = 6,
 }
 
 impl NoticeKind {
@@ -70,22 +68,18 @@ impl NoticeKind {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::PasswordChangedByEmail => "password-changed-by-email",
-            Self::AccountOpenedByEmail => "account-opened-by-email",
             Self::EmailAdded => "recovery-email-added",
             Self::EmailReplaced => "recovery-email-replaced",
             Self::EmailRemoved => "recovery-email-removed",
-            Self::PhraseSaved => "recovery-phrase-saved",
         }
     }
 
     const fn from_db(kind: u8) -> Option<Self> {
         Some(match kind {
             1 => Self::PasswordChangedByEmail,
-            2 => Self::AccountOpenedByEmail,
             3 => Self::EmailAdded,
             4 => Self::EmailReplaced,
             5 => Self::EmailRemoved,
-            6 => Self::PhraseSaved,
             _ => return None,
         })
     }
@@ -110,31 +104,6 @@ pub(crate) async fn write(
         .execute(&mut **tx)
         .await
         .map(|_| ())
-}
-
-/// Mark the account phrase-protected (`accounts.phrase_saved`) and, when it
-/// was not already, write the "recovery phrase saved" notice. The caller's
-/// transaction holds the account row's lock and has deleted the email vault.
-///
-/// # Errors
-///
-/// Any `sqlx::Error`.
-pub(crate) async fn mark_phrase_saved(
-    tx: &mut Transaction<'_, MySql>,
-    account_id: &[u8; 16],
-    at_ms: i64,
-) -> Result<(), sqlx::Error> {
-    let newly =
-        sqlx::query("UPDATE accounts SET phrase_saved = 1 WHERE id = ? AND phrase_saved = 0")
-            .bind(&account_id[..])
-            .execute(&mut **tx)
-            .await?
-            .rows_affected()
-            == 1;
-    if newly {
-        write(tx, account_id, NoticeKind::PhraseSaved, at_ms).await?;
-    }
-    Ok(())
 }
 
 /// Query of `GET /account/notices`.
@@ -267,17 +236,17 @@ mod tests {
     fn kinds_are_pinned_and_round_trip() {
         let all = [
             (NoticeKind::PasswordChangedByEmail, 1u8),
-            (NoticeKind::AccountOpenedByEmail, 2),
             (NoticeKind::EmailAdded, 3),
             (NoticeKind::EmailReplaced, 4),
             (NoticeKind::EmailRemoved, 5),
-            (NoticeKind::PhraseSaved, 6),
         ];
         for (kind, stored) in all {
             assert_eq!(kind as u8, stored);
             assert_eq!(NoticeKind::from_db(stored), Some(kind));
         }
-        assert_eq!(NoticeKind::from_db(0), None);
-        assert_eq!(NoticeKind::from_db(7), None);
+        // 2 and 6 are retired, never reused.
+        for retired in [0u8, 2, 6, 7] {
+            assert_eq!(NoticeKind::from_db(retired), None);
+        }
     }
 }

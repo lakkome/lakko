@@ -1063,7 +1063,7 @@ mod tests {
 
     /// Every domain separator in this crate, written out so a new kind that
     /// reuses or prefixes one fails here.
-    const ALL_DOMAINS: [&[u8]; 10] = [
+    const ALL_DOMAINS: [&[u8]; 14] = [
         b"lakko/device-attest/v1",
         b"lakko/genesis-attest/v1",
         b"lakko/backup-head/v1",
@@ -1074,6 +1074,10 @@ mod tests {
         b"lakko/handle-cert/v1",
         DOMAIN_METHOD,
         DOMAIN_PHONE,
+        crate::reset_seal::SEAL_ANNOUNCEMENT_DOMAIN,
+        crate::reset_seal::RESET_SEAL_DOMAIN,
+        b"lakko/auth/identity-proof/v1",
+        b"lakko/supporters-list/v1",
     ];
 
     #[test]

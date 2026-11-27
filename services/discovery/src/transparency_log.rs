@@ -90,6 +90,17 @@ struct AppendReq<'a> {
     /// only on the genesis/reset arm).
     #[serde(skip_serializing_if = "Option::is_none")]
     genesis_attest_b64: Option<&'a str>,
+    /// ADR-0101 section 10: the reset seal of an attested reset, a sidecar of
+    /// the reset's identity leaf (never part of the leaf's bytes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reset_seal_b64: Option<&'a str>,
+}
+
+/// Body of `POST /transparency/announcement/append` (ADR-0101 section 10).
+#[derive(Serialize)]
+struct AnnouncementReq<'a> {
+    username_hash_b64: &'a str,
+    announcement_b64: &'a str,
 }
 
 impl TransparencyClient {
@@ -134,8 +145,10 @@ impl TransparencyClient {
         is_reset: bool,
         leaf_auth: Option<&[u8]>,
         genesis_attest: Option<&[u8]>,
+        reset_seal: Option<&[u8]>,
     ) -> bool {
         let username_hash = account_username_hash(account_id);
+        let reset_seal_b64 = reset_seal.map(|a| B64.encode(a));
         // G-30 #2 (ADR-0019): re-encode the stored leaf authorisation as
         // base64-standard for the append body. Opaque pass-through — the
         // bytes are never parsed here (invariant #2).
@@ -149,6 +162,7 @@ impl TransparencyClient {
             is_reset,
             leaf_auth_b64: leaf_auth_b64.as_deref(),
             genesis_attest_b64: genesis_attest_b64.as_deref(),
+            reset_seal_b64: reset_seal_b64.as_deref(),
         };
         let url = format!("{}/transparency/append", self.base_url);
 
@@ -188,6 +202,45 @@ impl TransparencyClient {
             },
         }
     }
+
+    /// Append an account's seal announcement to the transparency log as an
+    /// announcement leaf (ADR-0101 section 10). The transparency service
+    /// derives the leaf (generation, `seq`, the announcement's hash) and
+    /// checks the announcement's signature under the account's latest
+    /// identity leaf. `true` only on a 2xx; fail-open like
+    /// [`Self::append_key_change`], the reconciler retries.
+    pub(crate) async fn append_announcement(&self, account_id: &[u8], announcement: &[u8]) -> bool {
+        let username_hash = account_username_hash(account_id);
+        let body = AnnouncementReq {
+            username_hash_b64: &B64.encode(username_hash),
+            announcement_b64: &B64.encode(announcement),
+        };
+        let url = format!("{}/transparency/announcement/append", self.base_url);
+        match self
+            .http
+            .post(&url)
+            .bearer_auth(&*self.secret_b64)
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => true,
+            Ok(resp) => {
+                tracing::warn!(
+                    status = %resp.status(),
+                    "transparency announcement append non-2xx; the reconciler retries",
+                );
+                false
+            },
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "transparency announcement append failed; the reconciler retries",
+                );
+                false
+            },
+        }
+    }
 }
 
 /// KT-log S2.5 — the per-sweep batch size for the reconciler scan. Each
@@ -200,7 +253,13 @@ const RECONCILE_BATCH: i64 = 256;
 /// genesis_attest?)`. `leaf_auth` (G-30 #2, ADR-0019) and `genesis_attest`
 /// (ADR-0036) are nullable and carried verbatim into the backfill append —
 /// opaque to discovery (invariant #2).
-type ReconcileRow = (Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
+type ReconcileRow = (
+    Vec<u8>,
+    Vec<u8>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+);
 
 /// Spawn the KT-log S2.5 reconciliation sweep — a background task that
 /// eventually appends every account's CURRENT published identity to the
@@ -255,7 +314,11 @@ pub(crate) fn spawn_transparency_reconciler(
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            job_run(jobs::KT_RECONCILE, &reconcile_once(&pool, &client).await);
+            let identities = reconcile_once(&pool, &client).await;
+            // ADR-0101 section 10: then the announcements whose identity leaf
+            // is logged (the log checks one under the account's latest key).
+            let announcements = reconcile_announcements(&pool, &client).await;
+            job_run(jobs::KT_RECONCILE, &identities.and(announcements));
         }
     })
 }
@@ -307,7 +370,8 @@ async fn reconcile_once(
     // backfilled entry keeps its leaf authorisation + genesis attestation;
     // opaque to discovery (invariant #2).
     let rows: Vec<ReconcileRow> = match sqlx::query_as(
-        "SELECT account_id, signature_pubkey, leaf_auth, genesis_attest FROM identity_bundles \
+        "SELECT account_id, signature_pubkey, leaf_auth, genesis_attest, reset_seal \
+         FROM identity_bundles \
          WHERE logged_pubkey IS NULL OR logged_pubkey <> signature_pubkey \
          LIMIT ?",
     )
@@ -328,7 +392,7 @@ async fn reconcile_once(
 
     let mut reconciled: u64 = 0;
     let mut append_failures: u64 = 0;
-    for (account_id, signature_pubkey, leaf_auth, genesis_attest) in &rows {
+    for (account_id, signature_pubkey, leaf_auth, genesis_attest, reset_seal) in &rows {
         // is_reset = false: conservative backfill (see fn docs) — a lost
         // reset-marker makes a client re-verify out-of-band (fail-SAFE).
         // leaf_auth (G-30 #2) + genesis_attest (ADR-0036) are forwarded
@@ -340,6 +404,7 @@ async fn reconcile_once(
                 false,
                 leaf_auth.as_deref(),
                 genesis_attest.as_deref(),
+                reset_seal.as_deref(),
             )
             .await;
         crate::metrics::kt_append(crate::metrics::KtAppendKind::Reconcile, confirmed);
@@ -383,6 +448,45 @@ async fn reconcile_once(
         scanned = rows.len(),
         "KT-log S2.5 reconciliation sweep complete",
     );
+    Ok(())
+}
+
+/// One sweep of the announcements the log has not confirmed (ADR-0101
+/// section 10): each account's current announcement whose `seq` is above
+/// `logged_seals_seq`, once its current identity key is logged. Only the
+/// current one: a previous generation's announcement appended after the
+/// reset leaf would sit at an index above it and seal nothing.
+async fn reconcile_announcements(
+    pool: &sqlx::MySqlPool,
+    client: &TransparencyClient,
+) -> Result<(), sqlx::Error> {
+    let rows: Vec<(Vec<u8>, Vec<u8>, u64)> = sqlx::query_as(
+        "SELECT account_id, reset_seals, reset_seals_seq FROM identity_bundles \
+         WHERE reset_seals IS NOT NULL AND reset_seals_seq IS NOT NULL \
+           AND (logged_seals_seq IS NULL OR logged_seals_seq < reset_seals_seq) \
+           AND logged_pubkey = signature_pubkey \
+         LIMIT ?",
+    )
+    .bind(RECONCILE_BATCH)
+    .fetch_all(pool)
+    .await?;
+    let mut failures: u64 = 0;
+    for (account_id, announcement, seq) in &rows {
+        let confirmed = client.append_announcement(account_id, announcement).await;
+        crate::metrics::kt_append(crate::metrics::KtAppendKind::Reconcile, confirmed);
+        if confirmed {
+            crate::identity_bundle::mark_logged_seals(pool, account_id, *seq).await;
+        } else {
+            failures += 1;
+        }
+    }
+    if !rows.is_empty() {
+        tracing::info!(
+            scanned = rows.len(),
+            failures,
+            "KT-log announcement reconciliation sweep complete",
+        );
+    }
     Ok(())
 }
 

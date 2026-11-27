@@ -12,6 +12,10 @@
 - **Amended 2026-11-26 (maintainer; designed, not built):** D7 is replaced
   by D9: one of a recovery email, an authenticator app or a passkey is
   required at sign-up; see "Amended 2026-11-26" below.
+- **Amended 2026-11-26 (second; maintainer; designed, not built):** the
+  email vault is removed, D3 and D4 and the exception to invariant #2 are
+  withdrawn, and a mailed code never returns keys; see "Amended 2026-11-26
+  (second)" below.
 - **Context:** account recovery, Part 6 (after
   [ADR-0072](0072-recovery-model-simplification.md),
   [ADR-0073](0073-account-key-reset.md) and
@@ -50,9 +54,10 @@ messages come only from another device.
   a saved phrase and the person may save one later in Settings.
 - **D3.** While **no phrase is saved**, a mailed code restores **full
   access**: the same keys, contacts and chats. The person is told plainly
-  that this protection is only as strong as the mailbox.
+  that this protection is only as strong as the mailbox. *(Withdrawn
+  2026-11-26: the email vault is removed.)*
 - **D4.** The exception to invariant #2 that D3 requires is accepted
-  (section 2).
+  (section 2). *(Withdrawn 2026-11-26 with D3.)*
 - **D5.** Once **a phrase is saved**, a mailed code changes the password
   only; a key reset remains possible afterwards as its own action.
 - **D6.** A person who holds the phrase can **take the account back for a
@@ -597,6 +602,110 @@ groups still come back from contacts after a reset.
 **Invariants.** #1 and #2 unchanged (an authenticator secret is an ACCESS
 verifier in the OPAQUE-envelope trust class, ADR-0018; a passkey is a public
 key). No `lakko-mls` change.
+
+## Amended 2026-11-26 (second): the email vault is removed
+
+Maintainer decision, 2026-11-26. Designed, not built. Where this section
+and anything above it differ, this one holds; it supersedes, in the first
+2026-11-26 amendment, the bullet "The email as a reset factor" (its vault
+re-seal) and the paragraph "Owned channels and the two account modes".
+
+**Why.** The vault was sealed under a key stretched from the login handle,
+the address and a server-held salt. The operator sees the address at
+enrolment and at every recovery, and can guess it (usernames are public,
+addresses follow from them often enough), and holds the salt and the
+at-rest key: the vault was in effect protected by server secrets only. With
+ADR-0101 (contacts give a reset account its conversations back) the same
+operator could also have minted resets; ADR-0101 section 10 closes that with
+a reset seal, and a vault the operator can open would undo it.
+
+**Decision.**
+
+- **D3 and D4 are withdrawn.** A mailed code never returns keys. The
+  exception to invariant #2 of section 2 is **withdrawn**; its text in
+  CLAUDE.md is the maintainer's to remove.
+- **One kind of account.** The two modes of section 1 collapse: for every
+  account a mailed code gives a new password (D5, now for every account),
+  signs in, and serves as a second factor for a key reset (ADR-0073,
+  amended 2026-11-26). Keys come back from another device, a passkey that
+  restores keys, or the phrase; conversations come back after a reset only
+  when the reset is sealed (ADR-0101 section 10).
+- **Section 3 (saving a phrase changes the keys) is withdrawn:** no copy of
+  the phrase ever left the device, so saving it shows the words, checks
+  three, and republishes the account's seal announcement with a phrase seal
+  (ADR-0101 section 10). No rotation.
+- **Section 8 (recall with the phrase) applies to every account:** nobody
+  gets the words by email any more. It serves, in practice, a person who
+  saved the phrase.
+- **D6, D8 and D9 stand.**
+
+**Removed in the build** (flag day; nothing deployed for users):
+
+- `services/auth`: the `email_vaults` table, `vault_salt` in
+  `email_challenges`, the columns `accounts.phrase_in_vault` and
+  `accounts.phrase_saved`; the routes `PUT /recovery-email/vault`,
+  `DELETE /recovery-email/vault`, `POST /recovery-email/recover/open` (a
+  verified code, and the authenticator code when required, lead straight to
+  `/recovery-email/recover/password/{start,finish}` under the ticket),
+  `GET /account/phrase` and `POST /account/phrase/saved`; `vault_salt` in the
+  enrol start answer and `sealed_entropy` in the enrol finish body; `vault`
+  and `phrase_saved` in `GET /recovery-email` (which answers `{available,
+  enabled, totp}`); `phrase_saved` in `/account/keys/rotate/finish`; the
+  `409 phrase-saved` and `409 phrase-save-needs-rotation` refusals; the
+  notice kinds `AccountOpenedByEmail` (2) and `PhraseSaved` (6), retired and
+  not reused (another device learns that a phrase was saved from the seal
+  announcement); `Scope::EmailVaultOpen` (20) and `Scope::EmailVaultStore`
+  (21), retired and not reused. The recovery email is on with
+  `LAKKO_AUTH_EMAIL_PEPPER` and `LAKKO_AUTH_HANDLE_PEPPER`;
+  `LAKKO_VAULT_ENC_KEY` stays for the passkey vault only.
+- `lakko-mnemonic`: `vault::seal_entropy_under_email`,
+  `open_entropy_under_email`, `EMAIL_VAULT_SALT_LEN`,
+  `EMAIL_VAULT_SEALED_LEN`; on both FFI surfaces `emailVaultSeal` and
+  `emailVaultOpen`. `normalizeRecoveryEmail` stays (it builds the address
+  the server's `email_key` is made from).
+- The clients: the vault seal at enrolment, the vault re-seal after a reset
+  or a rotation, the vault open on recovery, every "mail-protected" branch
+  and its copy (UX `identity-recovery.md` 19, amended 2026-11-26).
+
+**What "a phrase is saved" means now.** The account's current seal
+announcement lists a phrase seal. The server keeps no flag; every client
+reads the announcement (its own account's, from the bundle it publishes).
+
+**Stated cost.** A person who forgets the password, saved no phrase and has
+no passkey that keeps the chats can still get in (a mailed code) and reset,
+but the reset is unsealed: the account starts over and its conversations
+and owned channels do not come back. The app says so in advance (UX 19.1d).
+
+**Invariants.** #2: the section 2 exception is withdrawn. #1 unchanged (the
+server still keeps only `email_key`). No `lakko-mls` change.
+
+**As built in the services, 2026-11-27 (S7; `services/auth`, DB-tested
+against a local MariaDB, not deployed; the clients still call the removed
+routes until S8 / S9).** Migration `0045_remove_email_vault.sql` drops
+`email_vaults`, `email_challenges.vault_salt`, `email_tickets.password_mode`,
+`accounts.phrase_saved`, `accounts.phrase_in_vault` and
+`recall_anchors.mail_protected`, and deletes stored notices of kinds 2 and
+6. Removed as listed above, plus what followed from it:
+
+- `enrol/start` answers `{challenge_id, resend_after_secs, expires_in_secs}`,
+  `enrol/finish` takes `{challenge_id, code}` and answers `{enabled}`,
+  `GET /recovery-email` answers `{available, enabled, totp}`.
+- `recover/verify` answers `{ticket, totp_required, expires_in_secs}` as
+  before; the password routes need only that the authenticator step, when
+  required, passed (`403 totp-required`); `409 wrong-mode` is gone with the
+  ticket's mode.
+- `PUT /auth/login-handle`'s `recovery_email` object is `{address}`.
+- The recall's phrase arm serves every anchor that kept a recovery envelope
+  (it was refused for an account that had a vault at capture).
+- `src/phrase_saved.rs` is deleted; a key rotation no longer takes
+  `phrase_saved` (an unknown field in the body is ignored).
+- The recovery email is on with `LAKKO_AUTH_EMAIL_PEPPER` and
+  `LAKKO_AUTH_HANDLE_PEPPER`.
+- The last factor: `DELETE /recovery-email` and a handle change that would
+  drop the email answer `409 {"error":"last-factor"}` when the account has
+  no confirmed authenticator and no passkey (ADR-0073's note of the same
+  date has the rule).
+- The email as a reset factor: ADR-0073's note of the same date.
 
 ## References
 

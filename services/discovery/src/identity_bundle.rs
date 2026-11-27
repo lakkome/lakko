@@ -85,6 +85,9 @@ type IdentityBundleRow = (
     Option<Vec<u8>>,
     Option<Vec<u8>>,
     Option<u64>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
 );
 
 fn decode_fixed<const N: usize>(
@@ -286,6 +289,17 @@ pub(crate) struct UploadRequest {
     /// X25519 key can check it belongs to the identity key it trusts.
     #[serde(default)]
     pub(crate) x25519_binding: Option<String>,
+    /// ADR-0101 section 10: standard base64 of the account's newest seal
+    /// announcement, signed by `signature_pubkey`. Checked
+    /// ([`crate::reset_seals`]) and stored; absent keeps the stored one.
+    #[serde(default)]
+    pub(crate) reset_seals: Option<String>,
+    /// ADR-0101 section 10: standard base64 of the 214-byte reset seal of an
+    /// attested reset. Read only on an attested key change that is a reset;
+    /// checked against the row's announcement and stored beside
+    /// `key_reset_attest`.
+    #[serde(default)]
+    pub(crate) reset_seal: Option<String>,
 }
 
 /// The refusal of an upload whose X25519 binding is absent or invalid.
@@ -418,6 +432,20 @@ async fn upload_decided(
     // proof is verified in the transaction before anything is stored.
     let leaf_auth = leaf_auth.or_else(|| supersession_proof.clone());
 
+    // ADR-0101 section 10: the seal announcement and the reset seal, checked
+    // against the uploaded key and the session's account here, and against
+    // the row under its lock below.
+    let announcement = crate::reset_seals::verified_announcement(
+        payload.reset_seals.as_deref(),
+        &account_id,
+        &signature_pubkey,
+    )?;
+    let reset_seal = crate::reset_seals::verified_seal(
+        payload.reset_seal.as_deref(),
+        &account_id,
+        &signature_pubkey,
+    )?;
+
     // ADR-0073: the one attestation discovery parses. Verified here — the
     // signature under the pinned key, the session account's `account_ref`,
     // the uploaded key — and compared against the row's generation inside
@@ -445,12 +473,15 @@ async fn upload_decided(
                 .map(|(claims, bytes)| (claims.key_generation, bytes.as_slice())),
             conversation_link: conversation_link.as_deref(),
             x25519_binding: Some(&x25519_binding),
+            reset_seals: announcement.as_ref(),
+            reset_seal: reset_seal.as_ref(),
         },
         leaf_auth.as_deref(),
         genesis_attest.as_deref(),
         generation.0,
     )
     .await?;
+    let (decision, seals) = decision;
 
     tracing::info!("identity bundle upserted",);
 
@@ -465,6 +496,16 @@ async fn upload_decided(
     // `logged_pubkey` marker to the just-logged key, so the reconciler
     // skips this account. A failed marker UPDATE is fine (the reconciler
     // heals it) — warn + proceed; NEVER fail the upload because of it.
+    // ADR-0101 section 10: the previous generation's announcement goes into
+    // the log BEFORE the reset's identity leaf when it was not logged yet, so
+    // a peer finds it at an index below the reset.
+    if let (Some((bytes, seq)), Some(client)) = (&seals.previous, state.transparency.as_ref()) {
+        let confirmed = client.append_announcement(&account_id, bytes).await;
+        crate::metrics::kt_append(crate::metrics::KtAppendKind::Upload, confirmed);
+        if confirmed {
+            mark_logged_seals(&state.db, &account_id, *seq).await;
+        }
+    }
     if let (LogAppendDecision::Append { is_reset }, Some(client)) =
         (decision, state.transparency.as_ref())
     {
@@ -488,6 +529,7 @@ async fn upload_decided(
                 is_reset,
                 leaf_auth.as_deref(),
                 genesis_attest.as_deref(),
+                seals.reset_seal.as_deref(),
             )
             .await;
         crate::metrics::kt_append(crate::metrics::KtAppendKind::Upload, confirmed);
@@ -495,8 +537,32 @@ async fn upload_decided(
             mark_logged_pubkey(&state.db, &account_id, &signature_pubkey).await;
         }
     }
+    // The newly stored announcement, after the identity leaf it is signed by.
+    if let (Some((bytes, seq)), Some(client)) = (&seals.current, state.transparency.as_ref()) {
+        let confirmed = client.append_announcement(&account_id, bytes).await;
+        crate::metrics::kt_append(crate::metrics::KtAppendKind::Upload, confirmed);
+        if confirmed {
+            mark_logged_seals(&state.db, &account_id, *seq).await;
+        }
+    }
 
     Ok(decision)
+}
+
+/// Best-effort advance of the `logged_seals_seq` marker after a confirmed
+/// announcement append (ADR-0101 section 10); the reconciler heals a miss.
+pub(crate) async fn mark_logged_seals(db: &sqlx::MySqlPool, account_id: &[u8], seq: u64) {
+    let result = sqlx::query(
+        "UPDATE identity_bundles SET logged_seals_seq = GREATEST(COALESCE(logged_seals_seq, 0), ?) \
+         WHERE account_id = ?",
+    )
+    .bind(seq)
+    .bind(account_id)
+    .execute(db)
+    .await;
+    if let Err(e) = result {
+        tracing::warn!(error = %e, "failed to advance logged_seals_seq; the reconciler heals it");
+    }
 }
 
 /// KT-log S2.5 — best-effort advance of the `logged_pubkey` marker after a
@@ -596,6 +662,27 @@ pub(crate) struct Evidence<'a> {
     /// anything is stored; replaced with the X25519 key on every upload.
     /// `None` only from tests that drive the store directly.
     pub(crate) x25519_binding: Option<&'a [u8]>,
+    /// ADR-0101 section 10: the uploaded seal announcement, its signature and
+    /// account already checked ([`crate::reset_seals::verified_announcement`]).
+    pub(crate) reset_seals: Option<&'a crate::reset_seals::Announcement>,
+    /// ADR-0101 section 10: the uploaded reset seal and its bytes, its own
+    /// signature, account and key already checked.
+    pub(crate) reset_seal: Option<&'a (lakko_attest::ResetSeal, Vec<u8>)>,
+}
+
+/// What an upload leaves for the KT log beside the identity leaf
+/// (ADR-0101 section 10).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SealLog {
+    /// The previous generation's announcement and its `seq`, when the
+    /// generation moved and the log has not confirmed it yet: appended before
+    /// the identity leaf.
+    pub(crate) previous: Option<(Vec<u8>, u64)>,
+    /// A newly stored announcement and its `seq`: appended after.
+    pub(crate) current: Option<(Vec<u8>, u64)>,
+    /// The reset seal stored with an attested reset, carried to the identity
+    /// leaf as a sidecar.
+    pub(crate) reset_seal: Option<Vec<u8>>,
 }
 
 impl Evidence<'_> {
@@ -734,7 +821,7 @@ async fn apply_identity_upload_gated(
     leaf_auth: Option<&[u8]>,
     genesis_attest: Option<&[u8]>,
     token_generation: u64,
-) -> Result<LogAppendDecision, RouteError> {
+) -> Result<(LogAppendDecision, SealLog), RouteError> {
     const MAX_ATTEMPTS: u32 = 3;
     for _ in 0..MAX_ATTEMPTS {
         match try_apply_identity_once(
@@ -766,10 +853,19 @@ async fn apply_identity_upload_gated(
     ))
 }
 
-/// `(signature_pubkey, key_generation, cooldown_remaining_secs, previous_signature_pubkey)`
-/// of the row an upload meets; `cooldown_remaining_secs` is `0` outside the
-/// cool-down window.
-type ExistingRow = (Vec<u8>, u64, i64, Option<Vec<u8>>);
+/// `(signature_pubkey, key_generation, cooldown_remaining_secs,
+/// previous_signature_pubkey, reset_seals, previous_reset_seals,
+/// logged_seals_seq)` of the row an upload meets; `cooldown_remaining_secs`
+/// is `0` outside the cool-down window.
+type ExistingRow = (
+    Vec<u8>,
+    u64,
+    i64,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<u64>,
+);
 
 /// A single attempt of the gated upsert. Read-compare-conditional-write under
 /// a row lock so the check is race-free. A database error drops the
@@ -826,8 +922,9 @@ async fn try_apply_identity_once(
     leaf_auth: Option<&[u8]>,
     genesis_attest: Option<&[u8]>,
     token_generation: u64,
-) -> Result<LogAppendDecision, AttemptError> {
+) -> Result<(LogAppendDecision, SealLog), AttemptError> {
     let mut tx = db.begin().await?;
+    let mut seals = SealLog::default();
 
     // Row lock + the facts we need: the current key, the stored generation,
     // and how many whole seconds of the cool-down window are left after the
@@ -842,7 +939,7 @@ async fn try_apply_identity_once(
                 ? - TIMESTAMPDIFF(SECOND, last_unproven_key_change_at, NOW(3)), \
                 0 \
             ) AS SIGNED), \
-            previous_signature_pubkey \
+            previous_signature_pubkey, reset_seals, previous_reset_seals, logged_seals_seq \
          FROM identity_bundles WHERE account_id = ? FOR UPDATE",
     )
     .bind(cooldown_secs)
@@ -864,6 +961,20 @@ async fn try_apply_identity_once(
                 return Err(proof_refused());
             }
             let attested = evidence.key_reset_attest;
+            // ADR-0101 section 10: an announcement on a first publish is at
+            // the generation the row starts at. A reset seal on a first
+            // publish has no announcement to match and is not stored.
+            let first_generation = attested.map_or(1u64, |(g, _)| g);
+            let announcement = match evidence.reset_seals {
+                Some(a) => match crate::reset_seals::admit(a, first_generation, None, None) {
+                    Ok(_) => Some(a),
+                    Err(refusal) => {
+                        tx.rollback().await?;
+                        return Err(AttemptError::Refused(refusal));
+                    },
+                },
+                None => None,
+            };
             // A duplicate key here (a concurrent first publish won) and the
             // gap-lock deadlock both surface as a lost race for the caller to
             // retry.
@@ -871,8 +982,9 @@ async fn try_apply_identity_once(
                 "INSERT INTO identity_bundles \
                     (account_id, signature_pubkey, x25519_pubkey, supersession_proof, \
                      leaf_auth, genesis_attest, key_generation, key_reset_attest, \
-                     conversation_link, account_target, x25519_binding) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     conversation_link, account_target, x25519_binding, reset_seals, \
+                     reset_seals_seq) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(account_id)
             .bind(signature_pubkey)
@@ -886,17 +998,28 @@ async fn try_apply_identity_once(
             .bind(evidence.conversation_link)
             .bind(&account_target(signature_pubkey)[..])
             .bind(evidence.x25519_binding)
+            .bind(announcement.map(|a| a.bytes.as_slice()))
+            .bind(announcement.map(|a| a.seq))
             .execute(&mut *tx)
             .await?;
             if attested.is_some() {
                 delete_keypackages(&mut tx, account_id).await?;
             }
+            seals.current = announcement.map(|a| (a.bytes.clone(), a.seq));
             // A first publish is a key change from "nothing" to a key, and
             // is never a fresh-start reset → Append{is_reset:false}
             // (decision D).
             LogAppendDecision::Append { is_reset: false }
         },
-        Some((current, stored_generation, cooldown_remaining, previous)) => {
+        Some((
+            current,
+            stored_generation,
+            cooldown_remaining,
+            previous,
+            stored_seals,
+            stored_previous_seals,
+            logged_seals_seq,
+        )) => {
             // ADR-0073: the generation floor, before any change is judged.
             if crate::key_reset::floor_decision(Some(stored_generation), token_generation) {
                 tx.rollback().await?;
@@ -960,6 +1083,67 @@ async fn try_apply_identity_once(
                 },
             };
 
+            // ADR-0101 section 10. The generation the row is at after this
+            // upload; when it moves, the current announcement becomes the
+            // previous generation's.
+            let target_generation = attested_generation.unwrap_or(stored_generation);
+            let moves = attested_generation.is_some();
+            let (current_slot, previous_slot) = if moves {
+                (None, stored_seals.as_deref())
+            } else {
+                (stored_seals.as_deref(), stored_previous_seals.as_deref())
+            };
+            let admitted_announcement = match evidence.reset_seals {
+                Some(a) => {
+                    match crate::reset_seals::admit(
+                        a,
+                        target_generation,
+                        current_slot,
+                        previous_slot,
+                    ) {
+                        Ok(true) => Some(a),
+                        Ok(false) => None,
+                        Err(refusal) => {
+                            tx.rollback().await?;
+                            return Err(AttemptError::Refused(refusal));
+                        },
+                    }
+                },
+                None => None,
+            };
+            // A reset seal rides only on an attested reset (not a proven
+            // rotation), and must seal this very step under the announcement
+            // the row holds now.
+            let stored_seal: Option<&[u8]> =
+                match (attested_generation, proven, evidence.reset_seal) {
+                    (Some(to), false, Some((seal, bytes))) => {
+                        if !crate::reset_seals::seal_matches(
+                            seal,
+                            stored_seals.as_deref(),
+                            stored_generation,
+                            to,
+                        ) {
+                            tx.rollback().await?;
+                            return Err(AttemptError::Refused(RouteError::Code(
+                                StatusCode::BAD_REQUEST,
+                                crate::reset_seals::CODE_SEAL_INVALID,
+                            )));
+                        }
+                        Some(bytes.as_slice())
+                    },
+                    _ => None,
+                };
+            if moves {
+                let previous_seq = crate::reset_seals::stored_seq(stored_seals.as_deref());
+                if let (Some(bytes), Some(seq)) = (stored_seals.as_ref(), previous_seq) {
+                    if logged_seals_seq.map_or(true, |logged| seq > logged) {
+                        seals.previous = Some((bytes.clone(), seq));
+                    }
+                }
+            }
+            seals.current = admitted_announcement.map(|a| (a.bytes.clone(), a.seq));
+            seals.reset_seal = stored_seal.map(<[u8]>::to_vec);
+
             // On any key change, the OLD current becomes `previous` (kept as
             // an audit column; nothing reads it since the heal was retired).
             // The attestation and the generation are written only when an
@@ -987,7 +1171,11 @@ async fn try_apply_identity_once(
                     last_unproven_key_change_at = IF(?, NOW(3), last_unproven_key_change_at), \
                     conversation_link           = IF(?, ?, COALESCE(?, conversation_link)), \
                     continuity_binding          = IF(?, NULL, continuity_binding), \
-                    continuity_expires_at_ms    = IF(?, NULL, continuity_expires_at_ms) \
+                    continuity_expires_at_ms    = IF(?, NULL, continuity_expires_at_ms), \
+                    previous_reset_seals        = IF(?, reset_seals, previous_reset_seals), \
+                    reset_seals                 = IF(?, ?, IF(?, NULL, reset_seals)), \
+                    reset_seals_seq             = IF(?, ?, IF(?, NULL, reset_seals_seq)), \
+                    reset_seal                  = IF(?, ?, reset_seal) \
                  WHERE account_id = ?",
             )
             .bind(signature_pubkey)
@@ -1010,6 +1198,20 @@ async fn try_apply_identity_once(
             // names the key that signed it.
             .bind(i64::from(key_changed))
             .bind(i64::from(key_changed))
+            // ADR-0101 section 10: on a generation move the announcement
+            // becomes the previous one; a newly admitted one replaces the
+            // current; a key change replaces the reset seal (with none when
+            // it carries none). MariaDB evaluates the SET list left to right,
+            // so `previous_reset_seals` reads the value before this update.
+            .bind(i64::from(moves))
+            .bind(i64::from(admitted_announcement.is_some()))
+            .bind(admitted_announcement.map(|a| a.bytes.as_slice()))
+            .bind(i64::from(moves))
+            .bind(i64::from(admitted_announcement.is_some()))
+            .bind(admitted_announcement.map(|a| a.seq))
+            .bind(i64::from(moves))
+            .bind(i64::from(key_changed))
+            .bind(stored_seal)
             .bind(account_id)
             .execute(&mut *tx)
             .await?;
@@ -1031,7 +1233,7 @@ async fn try_apply_identity_once(
     };
 
     tx.commit().await?;
-    Ok(decision)
+    Ok((decision, seals))
 }
 
 /// The account target of a signature key (ADR-0099 step 5): what
@@ -1442,6 +1644,20 @@ pub(crate) struct FetchResponse {
     /// again against the attested new key it accepted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) continuity_binding_b64: Option<String>,
+    /// ADR-0101 section 10: standard base64 of the account's newest seal
+    /// announcement of its current generation, omitted when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reset_seals: Option<String>,
+    /// ADR-0101 section 10: standard base64 of the newest announcement of the
+    /// previous generation (kept after a reset or a proven rotation), the one
+    /// a peer checks the reset against; omitted when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) previous_reset_seals: Option<String>,
+    /// ADR-0101 section 10: standard base64 of the 214-byte seal of the
+    /// latest attested reset, omitted when none (an unsealed reset, or no
+    /// reset).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reset_seal: Option<String>,
 }
 
 /// `GET /discovery/identity/{account_id_b64url}` — fetch.
@@ -1477,7 +1693,8 @@ pub(crate) async fn fetch(
     let row: Option<IdentityBundleRow> = sqlx::query_as(
         "SELECT signature_pubkey, x25519_pubkey, supersession_proof, key_generation, \
                 key_reset_attest, conversation_link, x25519_binding, \
-                continuity_binding, continuity_expires_at_ms \
+                continuity_binding, continuity_expires_at_ms, \
+                reset_seals, previous_reset_seals, reset_seal \
          FROM identity_bundles WHERE account_id = ?",
     )
     .bind(&bytes[..])
@@ -1501,6 +1718,9 @@ pub(crate) async fn fetch(
         x25519_binding,
         continuity_binding,
         continuity_expires_at_ms,
+        reset_seals,
+        previous_reset_seals,
+        reset_seal,
     ) = row.ok_or((
         StatusCode::NOT_FOUND,
         "identity bundle not found".to_string(),
@@ -1537,6 +1757,9 @@ pub(crate) async fn fetch(
             continuity_expires_at_ms,
             crate::continuity::now_unix_ms(),
         ),
+        reset_seals: reset_seals.map(|a| B64.encode(&a)),
+        previous_reset_seals: previous_reset_seals.map(|a| B64.encode(&a)),
+        reset_seal: reset_seal.map(|a| B64.encode(&a)),
     }))
 }
 
@@ -1680,6 +1903,8 @@ mod tests {
             key_reset_attest: None,
             conversation_link: link,
             x25519_binding: None,
+            reset_seals: None,
+            reset_seal: None,
         };
 
         let Ok(url) = std::env::var("LAKKO_DISCOVERY_TEST_DATABASE_URL") else {
@@ -1748,6 +1973,8 @@ mod tests {
                 key_reset_attest: Some((2, &reset_att)),
                 conversation_link: None,
                 x25519_binding: None,
+                reset_seals: None,
+                reset_seal: None,
             },
             Some(&self_sig),
             None,
@@ -1832,6 +2059,8 @@ mod tests {
             key_reset_attest: None,
             conversation_link: None,
             x25519_binding: None,
+            reset_seals: None,
+            reset_seal: None,
         };
 
         // Read the stored genesis_attest back (nullable column -> Option).
@@ -1887,7 +2116,7 @@ mod tests {
         )
         .await
         .unwrap_or_else(|_| panic!("first publish"));
-        assert_eq!(first, LogAppendDecision::Append { is_reset: false });
+        assert_eq!(first.0, LogAppendDecision::Append { is_reset: false });
         assert_eq!(
             stored_attest(&pool, &acct).await.as_deref(),
             Some(&att1[..]),
@@ -1910,7 +2139,7 @@ mod tests {
         )
         .await
         .unwrap_or_else(|_| panic!("non-rotation re-upload"));
-        assert_eq!(again, LogAppendDecision::Skip);
+        assert_eq!(again.0, LogAppendDecision::Skip);
         assert_eq!(
             stored_attest(&pool, &acct).await.as_deref(),
             Some(&att1[..]),
@@ -1933,6 +2162,8 @@ mod tests {
                 key_reset_attest: Some((2, &reset_att)),
                 conversation_link: None,
                 x25519_binding: None,
+                reset_seals: None,
+                reset_seal: None,
             },
             Some(&self_sig),
             Some(&att2),
@@ -1940,7 +2171,7 @@ mod tests {
         )
         .await
         .unwrap_or_else(|_| panic!("reset with a fresh attestation"));
-        assert_eq!(reset, LogAppendDecision::Append { is_reset: true });
+        assert_eq!(reset.0, LogAppendDecision::Append { is_reset: true });
         assert_eq!(
             stored_attest(&pool, &acct).await.as_deref(),
             Some(&att2[..]),
@@ -1952,6 +2183,306 @@ mod tests {
             .execute(&pool)
             .await
             .expect("cleanup row");
+        pool.close().await;
+    }
+
+    /// ADR-0101 section 10: the announcement is admitted at the row's
+    /// generation with a strictly higher `seq`, moves to the previous slot
+    /// when the generation moves, and a reset seal is stored only when it
+    /// seals that very step under the row's announcement.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines, clippy::items_after_statements)]
+    async fn seal_announcements_and_the_reset_seal_follow_the_generation() {
+        use lakko_attest::{
+            key_reset_account_ref, password_seal_key, ResetSeal, SealAnnouncement, SealEntry,
+            SealKind,
+        };
+        use lakko_crypto::signing::SigningKey;
+        use sqlx::mysql::MySqlPoolOptions;
+
+        const COOLDOWN: i64 = 3600;
+        let Ok(url) = std::env::var("LAKKO_DISCOVERY_TEST_DATABASE_URL") else {
+            eprintln!("skipping seal_announcements: LAKKO_DISCOVERY_TEST_DATABASE_URL unset");
+            return;
+        };
+        let pool = MySqlPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("connect test DB");
+        crate::anon_token_route_tests::migrate_once(&pool).await;
+
+        let acct = [0xB7u8; ACCOUNT_ID_LEN];
+        let old_key = SigningKey::from_seed(&[0x41; 32]);
+        let new_key = SigningKey::from_seed(&[0x42; 32]);
+        let k1 = old_key.verifying_key().to_bytes();
+        let k2 = new_key.verifying_key().to_bytes();
+        let x25519 = [0x33u8; X25519_PUBKEY_LEN];
+        let seal_key = password_seal_key(&[0x5E; 64]);
+        let announce = |key: &SigningKey, generation: u64, seq: u64| {
+            let bytes = SealAnnouncement::new(
+                key_reset_account_ref(&acct),
+                generation,
+                seq,
+                1,
+                vec![SealEntry {
+                    kind: SealKind::Password,
+                    tag: [0; 16],
+                    seal_pk: seal_key.verifying_key().to_bytes(),
+                }],
+            )
+            .sign(key)
+            .unwrap();
+            crate::reset_seals::verified_announcement(
+                Some(&B64.encode(&bytes)),
+                &acct,
+                &key.verifying_key().to_bytes(),
+            )
+            .unwrap()
+            .unwrap()
+        };
+        let seal_for = |seq: u64, to: [u8; 32]| {
+            let seal = ResetSeal {
+                account_ref: key_reset_account_ref(&acct),
+                announcement_seq: seq,
+                from_generation: 1,
+                to_generation: 2,
+                new_signature_pubkey: to,
+                kind: SealKind::Password,
+                seal_pk: seal_key.verifying_key().to_bytes(),
+            };
+            let bytes = seal.sign(&seal_key).unwrap().to_vec();
+            crate::reset_seals::verified_seal(Some(&B64.encode(&bytes)), &acct, &to)
+                .unwrap()
+                .unwrap()
+        };
+        fn ev<'a>(
+            seals: Option<&'a crate::reset_seals::Announcement>,
+            seal: Option<&'a (lakko_attest::ResetSeal, Vec<u8>)>,
+            attest: Option<(u64, &'a [u8])>,
+        ) -> Evidence<'a> {
+            Evidence {
+                supersession_proof: None,
+                key_reset_attest: attest,
+                conversation_link: None,
+                x25519_binding: None,
+                reset_seals: seals,
+                reset_seal: seal,
+            }
+        }
+        type Stored = (
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            Option<u64>,
+        );
+        let stored = || async {
+            let row: Stored = sqlx::query_as(
+                "SELECT reset_seals, previous_reset_seals, reset_seal, reset_seals_seq \
+                 FROM identity_bundles WHERE account_id = ?",
+            )
+            .bind(&acct[..])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            row
+        };
+        let refusal = |r: Result<(LogAppendDecision, SealLog), AttemptError>| match r {
+            Err(AttemptError::Refused(RouteError::Code(st, code))) => (st, code),
+            _ => panic!("expected a refusal"),
+        };
+        sqlx::query("DELETE FROM identity_bundles WHERE account_id = ?")
+            .bind(&acct[..])
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // A first publish with the genesis announcement.
+        let a1 = announce(&old_key, 1, 1);
+        let (_, log) = try_apply_identity_once(
+            &pool,
+            COOLDOWN,
+            &acct,
+            &k1,
+            &x25519,
+            ev(Some(&a1), None, None),
+            None,
+            None,
+            1,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("first publish"));
+        assert_eq!(log.current, Some((a1.bytes.clone(), 1)));
+        assert_eq!(stored().await.0, Some(a1.bytes.clone()));
+
+        // The same bytes again: a no-op. A lower or equal seq: stale. Another
+        // generation: invalid.
+        let (_, log) = try_apply_identity_once(
+            &pool,
+            COOLDOWN,
+            &acct,
+            &k1,
+            &x25519,
+            ev(Some(&a1), None, None),
+            None,
+            None,
+            1,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("retry"));
+        assert_eq!(log, SealLog::default());
+        let a1b = announce(&old_key, 1, 1);
+        assert_eq!(a1b.bytes, a1.bytes, "deterministic signatures");
+        let other_same_seq = {
+            let bytes = SealAnnouncement::new(
+                key_reset_account_ref(&acct),
+                1,
+                1,
+                99,
+                vec![SealEntry {
+                    kind: SealKind::Password,
+                    tag: [0; 16],
+                    seal_pk: seal_key.verifying_key().to_bytes(),
+                }],
+            )
+            .sign(&old_key)
+            .unwrap();
+            crate::reset_seals::verified_announcement(Some(&B64.encode(&bytes)), &acct, &k1)
+                .unwrap()
+                .unwrap()
+        };
+        let (st, code) = refusal(
+            try_apply_identity_once(
+                &pool,
+                COOLDOWN,
+                &acct,
+                &k1,
+                &x25519,
+                ev(Some(&other_same_seq), None, None),
+                None,
+                None,
+                1,
+            )
+            .await,
+        );
+        assert_eq!(
+            (st, code),
+            (StatusCode::CONFLICT, crate::reset_seals::CODE_SEALS_STALE)
+        );
+        let (st, code) = refusal(
+            try_apply_identity_once(
+                &pool,
+                COOLDOWN,
+                &acct,
+                &k1,
+                &x25519,
+                ev(Some(&announce(&old_key, 2, 7)), None, None),
+                None,
+                None,
+                1,
+            )
+            .await,
+        );
+        assert_eq!(
+            (st, code),
+            (
+                StatusCode::BAD_REQUEST,
+                crate::reset_seals::CODE_SEALS_INVALID
+            )
+        );
+        // A newer one of this generation replaces it.
+        let a3 = announce(&old_key, 1, 3);
+        try_apply_identity_once(
+            &pool,
+            COOLDOWN,
+            &acct,
+            &k1,
+            &x25519,
+            ev(Some(&a3), None, None),
+            None,
+            None,
+            1,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("newer"));
+        assert_eq!(stored().await.3, Some(3));
+
+        // An attested reset whose seal names an older announcement: refused,
+        // nothing moved.
+        static ATT: [u8; 145] = [0x77; 145];
+        let stale_seal = seal_for(1, k2);
+        let (st, code) = refusal(
+            try_apply_identity_once(
+                &pool,
+                COOLDOWN,
+                &acct,
+                &k2,
+                &x25519,
+                ev(None, Some(&stale_seal), Some((2, &ATT))),
+                None,
+                None,
+                1,
+            )
+            .await,
+        );
+        assert_eq!(
+            (st, code),
+            (
+                StatusCode::BAD_REQUEST,
+                crate::reset_seals::CODE_SEAL_INVALID
+            )
+        );
+        assert_eq!(stored().await.0, Some(a3.bytes.clone()));
+
+        // The sealed reset, with the new generation's announcement: the old
+        // announcement becomes the previous one (and is owed to the log
+        // first), the seal is stored and carried to the identity leaf.
+        let seal = seal_for(3, k2);
+        let b1 = announce(&new_key, 2, 4);
+        let (decision, log) = try_apply_identity_once(
+            &pool,
+            COOLDOWN,
+            &acct,
+            &k2,
+            &x25519,
+            ev(Some(&b1), Some(&seal), Some((2, &ATT))),
+            None,
+            None,
+            1,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("sealed reset"));
+        assert_eq!(decision, LogAppendDecision::Append { is_reset: true });
+        assert_eq!(log.previous, Some((a3.bytes.clone(), 3)));
+        assert_eq!(log.current, Some((b1.bytes.clone(), 4)));
+        assert_eq!(log.reset_seal.as_deref(), Some(seal.1.as_slice()));
+        let (current, previous, stored_seal, seq) = stored().await;
+        assert_eq!(current, Some(b1.bytes.clone()));
+        assert_eq!(previous, Some(a3.bytes.clone()));
+        assert_eq!(stored_seal, Some(seal.1.clone()));
+        assert_eq!(seq, Some(4));
+        // A seq the previous generation used is stale at the new one too.
+        let (st, _) = refusal(
+            try_apply_identity_once(
+                &pool,
+                COOLDOWN,
+                &acct,
+                &k2,
+                &x25519,
+                ev(Some(&announce(&new_key, 2, 3)), None, None),
+                None,
+                None,
+                2,
+            )
+            .await,
+        );
+        assert_eq!(st, StatusCode::CONFLICT);
+
+        sqlx::query("DELETE FROM identity_bundles WHERE account_id = ?")
+            .bind(&acct[..])
+            .execute(&pool)
+            .await
+            .unwrap();
         pool.close().await;
     }
 }

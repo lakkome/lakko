@@ -110,7 +110,9 @@ pub struct InclusionProof {
 /// re-implement with a persistent storage layer (append-only segment file
 /// or RocksDB) when wiring into `services/discovery` in Phase 2.
 pub struct InMemoryLog {
-    entries: Vec<LogEntry>,
+    /// The identity entry at each index; `None` for a seal-announcement leaf
+    /// (ADR-0101 section 10), whose bytes are only in `leaf_bytes`.
+    entries: Vec<Option<LogEntry>>,
     /// Pre-computed canonical bytes per entry, used as Merkle leaves.
     leaf_bytes: Vec<Vec<u8>>,
     operator: signing::SigningKey,
@@ -145,25 +147,56 @@ impl InMemoryLog {
     /// Append `entry` to the end of the log. Returns the leaf index.
     pub fn append(&mut self, entry: LogEntry) -> u64 {
         let bytes = entry.canonical_bytes();
-        self.entries.push(entry);
+        self.entries.push(Some(entry));
         self.leaf_bytes.push(bytes);
         (self.entries.len() - 1) as u64
+    }
+
+    /// Append a seal-announcement leaf (ADR-0101 section 10) to the end of
+    /// the log. Returns the leaf index. Its bytes are
+    /// [`AnnouncementLeaf::canonical_bytes`](crate::AnnouncementLeaf::canonical_bytes);
+    /// [`Self::entry`] at its index answers [`Error::NotAnIdentityLeaf`].
+    pub fn append_announcement(&mut self, leaf: &crate::reset_seals::AnnouncementLeaf) -> u64 {
+        self.entries.push(None);
+        self.leaf_bytes.push(leaf.canonical_bytes());
+        (self.entries.len() - 1) as u64
+    }
+
+    /// The Merkle leaf bytes at `index`, of either kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::IndexOutOfBounds`] if `index >= size()`.
+    pub fn leaf_bytes(&self, index: u64) -> Result<&[u8]> {
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| self.leaf_bytes.get(i))
+            .map(Vec::as_slice)
+            .ok_or(Error::IndexOutOfBounds {
+                index,
+                size: self.size(),
+            })
     }
 
     /// Read a previously appended entry.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::IndexOutOfBounds`] if `index >= size()`.
+    /// Returns [`Error::IndexOutOfBounds`] if `index >= size()`, and
+    /// [`Error::NotAnIdentityLeaf`] for a seal-announcement leaf.
     pub fn entry(&self, index: u64) -> Result<&LogEntry> {
         let i = usize::try_from(index).map_err(|_| Error::IndexOutOfBounds {
             index,
             size: self.size(),
         })?;
-        self.entries.get(i).ok_or(Error::IndexOutOfBounds {
-            index,
-            size: self.size(),
-        })
+        self.entries
+            .get(i)
+            .ok_or(Error::IndexOutOfBounds {
+                index,
+                size: self.size(),
+            })?
+            .as_ref()
+            .ok_or(Error::NotAnIdentityLeaf { index })
     }
 
     /// Current Merkle tree root.
@@ -454,5 +487,41 @@ mod tests {
             signature: lakko_crypto::signing::Signature::from_bytes(&[0u8; 64]).unwrap(),
         };
         crate::verify_root_consistency(&old, &new, &proof).expect("root consistency");
+    }
+
+    #[test]
+    fn an_announcement_leaf_sits_beside_identity_entries_and_proves_before_a_reset() {
+        let mut log = InMemoryLog::new(signing::SigningKey::generate());
+        let user = lakko_crypto::hash::blake3(b"alice");
+        log.append(LogEntry {
+            username_hash: user,
+            identity_pubkey: vec![0x0A; 32],
+            version: 1,
+        });
+        let leaf =
+            crate::reset_seals::AnnouncementLeaf::for_announcement(user, 1, 4, b"announcement");
+        let idx = log.append_announcement(&leaf);
+        let reset = log.append(LogEntry {
+            username_hash: user,
+            identity_pubkey: vec![0x0B; 32],
+            version: 2,
+        });
+        assert_eq!((idx, reset, log.size()), (1, 2, 3));
+        assert!(matches!(
+            log.entry(idx),
+            Err(Error::NotAnIdentityLeaf { index: 1 })
+        ));
+        assert_eq!(
+            log.leaf_bytes(idx).unwrap(),
+            leaf.canonical_bytes().as_slice()
+        );
+        assert!(log.leaf_bytes(3).is_err());
+        let root = log.sign_current_root(9);
+        let proof = log.prove_inclusion(idx).unwrap();
+        crate::reset_seals::verify_announcement_before_reset(&leaf, &proof, reset, &root)
+            .expect("before the reset");
+        // The identity entries still prove.
+        let p0 = log.prove_inclusion(0).unwrap();
+        verify_inclusion(log.entry(0).unwrap(), &p0, &root).expect("identity entry");
     }
 }

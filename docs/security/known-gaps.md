@@ -3616,3 +3616,44 @@ account's lineage seed, which every device of the account holds.
     completes the deletion effects.
   - The binding does not make the identity key right: the pin, the KT log
     and the supersession gates do, with the existing first-contact residual.
+
+### G-60: The operator can take an account's conversations: a key reset is accepted on the server's word, and the email vault opens under server secrets - OPEN (minted 2026-11-26; the fix is designed, not built)
+
+- Status: **open**, minted 2026-11-26 when the maintainer reviewed
+  [ADR-0101](../adr/0101-reaching-a-reset-account.md) after its walk. The
+  decisions that close it are recorded the same day: ADR-0101 sections 10
+  and 11, the second 2026-11-26 amendments of
+  [ADR-0073](../adr/0073-account-key-reset.md) and
+  [ADR-0075](../adr/0075-recovery-email.md), UX `identity-recovery.md`
+  15.1c, 16.2 rule 5, 16.11, 19.1d. Nothing of the fix is built.
+- **Part 1, the reset.** ADR-0073 R.2 accepts a reset on the auth
+  service's `KeyResetAttestation`, the key generation and the KT log entry,
+  all three produced by the operator. The operator holds the attest signing
+  key, so it can mint a reset for any account without its password or a
+  second factor and publish a key of its own. Since ADR-0101 (built in
+  `fa44cb8cb`) every contact's device then re-pins that key with no UI and
+  hands it the account's one-to-ones, groups, recent history, profile and
+  channel subscriptions. The second factor added to the reset on 2026-11-26
+  is checked by the same server and does not change this.
+- **Part 2, the email vault.** ADR-0075's vault holds the phrase entropy of
+  an account without a saved phrase, sealed under a key stretched from the
+  login handle, the address and a server-held salt, wrapped again under
+  `LAKKO_VAULT_ENC_KEY`. The operator sees the address at enrolment and at
+  every recovery and can guess it, and holds the salt and the wrap key, so it
+  can open the vault and hold the account's keys. ADR-0075 stated this as an
+  exception to invariant #2; it is now judged unacceptable.
+- **Closing (designed):** (1) peers move anything only for a reset sealed
+  by a key the account announced under its old key before the reset (its
+  password through the OPAQUE export key, a passkey's WebAuthn `prf` output,
+  or the phrase), published in the identity bundle and the KT log; a reset
+  without a seal is a new account under the same username. (2) The email
+  vault is removed; a mailed code never returns keys, and the invariant #2
+  exception is withdrawn.
+- **Residuals of the design:** the operator holds the OPAQUE state and can
+  guess the password offline (one OPRF evaluation and an Argon2id stretch
+  per guess; a long password, a passkey seal or a phrase seal resists it);
+  it can strip a seal and turn a sealed reset into an unsealed one (an
+  availability loss, not a takeover); without a KT log or a witness in the
+  build, an older seal announcement can be served to a device that never saw
+  a newer one; the announcement shows anyone who looks up the account
+  whether a phrase is saved and how many sealing passkeys it has.

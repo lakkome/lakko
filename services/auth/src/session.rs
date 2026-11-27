@@ -41,7 +41,7 @@ use axum::response::Json;
 use axum::Extension;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use lakko_auth_token::{VerifiedToken, DEVICE_ID_LEN, UNBOUND_DEVICE_ID};
+use lakko_auth_token::{GrantMethod, ResetFactor, VerifiedToken, DEVICE_ID_LEN, UNBOUND_DEVICE_ID};
 use serde::{Deserialize, Serialize};
 use sqlx::{MySql, MySqlPool};
 
@@ -422,11 +422,13 @@ pub(crate) struct FreshGrant {
 }
 
 /// Mint a fresh-auth grant for `account_id` at `key_generation` with the
-/// configured TTL from now. The ONLY callers are the password login's finish
-/// handler, after `ServerLogin::finish` accepted the password proof, the
-/// passkey login's finish handler, after the assertion verified, and the
+/// configured TTL from now, naming how the person proved who they are
+/// (ADR-0073, amended 2026-11-26: the reset factor routes accept only
+/// [`GrantMethod::Password`]). The ONLY callers are the password login's
+/// finish handler, after `ServerLogin::finish` accepted the password proof,
+/// the passkey login's finish handler, after the assertion verified, the
 /// signup's finish handler, after the account and its password envelope
-/// committed.
+/// committed, and the recall's finish, which sets a new password.
 ///
 /// # Errors
 ///
@@ -435,11 +437,17 @@ pub(crate) fn issue_fresh_grant(
     state: &AppState,
     account_id: &[u8; 16],
     key_generation: u64,
+    method: GrantMethod,
 ) -> Result<FreshGrant, ApiError> {
     let fresh_grant_expires_at_ms = now_ms().saturating_add(state.fresh_grant_ttl_ms);
     let fresh_grant = state
         .session_token_secret
-        .issue_fresh_grant(account_id, key_generation, fresh_grant_expires_at_ms)
+        .issue_fresh_grant(
+            account_id,
+            key_generation,
+            method,
+            fresh_grant_expires_at_ms,
+        )
         .map_err(|e| {
             tracing::error!(error = %e, "fresh-auth grant issuance failed");
             ApiError::Internal
@@ -479,6 +487,35 @@ pub(crate) async fn require_fresh_grant(
     account_id: &[u8; 16],
     grant: Option<&str>,
 ) -> Result<u64, ApiError> {
+    fresh_grant_checked(state, account_id, grant)
+        .await
+        .map(|(generation, _)| generation)
+}
+
+/// [`require_fresh_grant`] for a route that accepts only a grant minted by
+/// the PASSWORD (`/login/finish`, `/signup/finish`, the recall's finish):
+/// the reset factor routes (ADR-0073, amended 2026-11-26). A passkey-minted
+/// grant is refused with the same `403 fresh-auth-required`.
+///
+/// # Errors
+///
+/// As [`require_fresh_grant`].
+pub(crate) async fn require_password_grant(
+    state: &AppState,
+    account_id: &[u8; 16],
+    grant: Option<&str>,
+) -> Result<u64, ApiError> {
+    match fresh_grant_checked(state, account_id, grant).await? {
+        (generation, GrantMethod::Password) => Ok(generation),
+        (_, GrantMethod::Passkey) => Err(ApiError::FreshAuthRequired),
+    }
+}
+
+async fn fresh_grant_checked(
+    state: &AppState,
+    account_id: &[u8; 16],
+    grant: Option<&str>,
+) -> Result<(u64, GrantMethod), ApiError> {
     let grant = grant.ok_or(ApiError::FreshAuthRequired)?;
     let verified = state
         .session_token_secret
@@ -497,6 +534,92 @@ pub(crate) async fn require_fresh_grant(
         .ok_or(ApiError::FreshAuthRequired)?;
     if verified.key_generation != current {
         return Err(ApiError::FreshAuthRequired);
+    }
+    Ok((current, verified.method))
+}
+
+/// The `403` body of a reset route reached without a live reset factor grant.
+pub(crate) const CODE_RESET_FACTOR_REQUIRED: &str = "reset-factor-required";
+
+/// A reset factor grant as it rides on the wire, the whole answer of the
+/// reset factor routes (ADR-0073, amended 2026-11-26).
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ResetFactorGrant {
+    /// The `f1` reset factor grant: opaque to the client, sent back as
+    /// `reset_grant` to `POST /account/keys/reset/{start,finish}` and
+    /// `POST /account/owned-channels-secret`.
+    pub(crate) reset_grant: String,
+    /// Absolute unix-millisecond expiry of `reset_grant`.
+    pub(crate) reset_grant_expires_at_ms: i64,
+}
+
+/// Mint a reset factor grant for `account_id` at `key_generation`,
+/// confirmed by `factor`. The ONLY callers are the four reset factor routes
+/// (`crate::reset_factor`), after the fresh-auth grant of the password and
+/// the factor itself were accepted.
+///
+/// # Errors
+///
+/// [`ApiError::Internal`] when the token crate refuses.
+pub(crate) fn issue_reset_factor_grant(
+    state: &AppState,
+    account_id: &[u8; 16],
+    key_generation: u64,
+    factor: ResetFactor,
+) -> Result<ResetFactorGrant, ApiError> {
+    let reset_grant_expires_at_ms = now_ms().saturating_add(state.reset_factor_grant_ttl_ms);
+    let reset_grant = state
+        .session_token_secret
+        .issue_factor_grant(
+            account_id,
+            key_generation,
+            factor,
+            reset_grant_expires_at_ms,
+        )
+        .map_err(|e| {
+            tracing::error!(error = %e, "reset factor grant issuance failed");
+            ApiError::Internal
+        })?;
+    Ok(ResetFactorGrant {
+        reset_grant,
+        reset_grant_expires_at_ms,
+    })
+}
+
+/// Check the reset factor grant a request carries, as
+/// [`require_fresh_grant`] checks a fresh-auth grant: present, well-formed,
+/// tagged by us, unexpired, issued for `account_id` and at the account's
+/// current key generation. Returns that generation; the key reset compares
+/// it again under the row lock, which is what spends the grant.
+///
+/// # Errors
+///
+/// `403 {"error":"reset-factor-required"}` for every refusal;
+/// [`ApiError::Db`] on the read.
+pub(crate) async fn require_reset_grant(
+    state: &AppState,
+    account_id: &[u8; 16],
+    grant: Option<&str>,
+) -> Result<u64, ApiError> {
+    let refused = || ApiError::Coded(StatusCode::FORBIDDEN, CODE_RESET_FACTOR_REQUIRED);
+    let grant = grant.ok_or_else(refused)?;
+    let verified = state
+        .session_token_secret
+        .verify_factor_grant(grant, now_ms())
+        .map_err(|e| {
+            tracing::debug!(error = %e, "reset factor grant refused");
+            refused()
+        })?;
+    if &verified.account_id != account_id {
+        tracing::warn!("reset factor grant of another account presented");
+        return Err(refused());
+    }
+    let current = key_generation_of(&state.db, account_id)
+        .await
+        .map_err(ApiError::Db)?
+        .ok_or_else(refused)?;
+    if verified.key_generation != current {
+        return Err(refused());
     }
     Ok(current)
 }

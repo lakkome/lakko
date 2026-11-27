@@ -1083,12 +1083,9 @@ Send again (in 0:45)        Use a different address
 - The address is pre-filled when this device kept it (ADR-0075, amended
   2026-10-13), otherwise typed. The answer to `Send code` is the same
   whether or not the address is the account's, as in 19.3.
-- On a **mail-protected account** (no phrase saved, 19.1), the email row
-  carries one more line under it: "A code to this address can also bring
-  your keys back without a reset." with `Use my email instead`
-  (`proof.reset.factor.email_restores`, `.use_email_instead`), which leaves
-  the reset and runs the code route of 19.3 with the username filled in.
-  The reset stays possible from the row itself.
+- ~~On a **mail-protected account** (no phrase saved, 19.1), the email row
+  carries one more line under it ... `Use my email instead` ...~~ Removed
+  2026-11-26 with the email vault: no mailed code brings keys back.
 
 **Passkey**, expanded: one button `Use passkey`. It opens the platform's
 own passkey sheet (the one system surface allowed here, 17.1) with
@@ -1158,18 +1155,71 @@ After the reset:
   has none left, so after the new-phrase or "Your account has new keys"
   state of 15.4 the device shows the protect step of 19.1a before the app,
   with no way past it (19.1c).
-- When the factor was a code by email, the device still holds the address
-  that was typed, so it stores the new phrase's email vault for a
-  mail-protected account at once (the reset dropped the old one), with no
-  second letter. It forgets the address when the screen closes, as 19.2
-  says.
+- ~~When the factor was a code by email, the device ... stores the new
+  phrase's email vault~~ Removed 2026-11-26 with the email vault.
 - The channels the account owns come back by themselves after the reset
   (ADR-0101 section 7, amended 2026-11-26): the password and the confirmed
   factor together open the list of them; neither does alone. Nothing is
   shown while that runs; each channel appears in the list when it is back.
-  A phrase-protected account whose password was changed by a mailed code
-  on a device without the keys, with no device holding the keys since, gets
-  no owned channel back (19.10).
+  When the password was changed by a mailed code on a device without the
+  keys, with no device holding the keys since, the owned channels come back
+  only if a passkey that keeps the chats sealed the reset (its own lock
+  opens the list, ADR-0101 section 7 item 3a); otherwise none does (19.10),
+  and the reset is unsealed (15.1c).
+- The new keys publish the account's protection again (ADR-0101 section
+  10) with the current password in it; the passkeys were deleted and the
+  new phrase is not saved, so the notice of 19.1d applies until a phrase or
+  a passkey that keeps the chats is added.
+
+### 15.1c Will this reset bring things back? (added 2026-11-26)
+
+Status: designed, not built. Maintainer's decision of 2026-11-26
+(ADR-0101 section 10). Contacts move the chats, return the history, the
+profile and the channel subscriptions only for a **sealed** reset: one
+signed by something the account set up before the reset and published under
+its old keys. The seals an account can have: its current password (every
+account), each passkey that keeps the chats (19.1d), and the recovery phrase
+once saved. A reset without a seal is **unsealed**: it still works and takes
+the username, but the account starts over and the person reaches contacts
+again by contact requests.
+
+The device knows which it is before the person types the word: once the
+factor of 15.1b is confirmed it checks whether the password just typed (or
+the passkey just used) matches a seal the account published. It never asks
+the server whether the reset will be sealed.
+
+The line stands between the confirmed factor and `Type RESET to confirm`,
+and replaces the warning bullet "Chats, groups and channels come back from
+your contacts' devices..." of 15.1:
+
+**Sealed:**
+
+> Your chats, groups and channels will come back from your contacts'
+> devices, with the messages they still have, newest first.
+
+(`restore_identity.reset.sealed`)
+
+**Unsealed:**
+
+> This reset starts your account over. Your chats, groups and the channels
+> you own will not come back. You keep your username, and you can send your
+> contacts new requests.
+
+(`restore_identity.reset.unsealed`, in the `--warning` colour.) When the
+account has a passkey that keeps the chats and it was not the factor used, a
+line follows: "Use a passkey that keeps your chats to bring them back." with
+`Use passkey` (`restore_identity.reset.unsealed_use_passkey`), which runs the
+passkey factor of 15.1b again; a seal from it makes the line the sealed one.
+
+Why a reset is unsealed, in practice: the password was changed by a mailed
+code on a device without the keys and no device holding the keys has been
+opened with it since (19.3); no passkey keeps the chats; no phrase was saved.
+The notice of 19.1d tells the person this in advance.
+
+What the person sees after an unsealed reset: 15.4 as for any reset, then
+the app with no conversations and no owned channels. Contacts see what 16.11
+says.
+
 
 ### 15.2 The signed-out screen (every other device)
 
@@ -1415,7 +1465,11 @@ who looks.
 
 **The cost, accepted by the maintainer.** Someone who takes over Anna's
 account (her password and her second factor) and resets its keys looks like
-Anna to everyone until someone compares the safety number. This is what the
+Anna to everyone until someone compares the safety number. Since 2026-11-26
+the server cannot do this on its own: a reset moves
+conversations only when it is sealed by Anna's own password, passkey or
+phrase (16.2 rule 5); an unsealed one is 16.11, the one case in this
+section where the other person sees something. This is what the
 mainstream messengers do. What Lakko has on top: the reset is signed by the
 server for that account, it is recorded in the public key log, and it is
 loud for the real Anna, whose devices are signed out with "your account keys
@@ -1460,6 +1514,13 @@ are true:
    verified. A build with no key log configured skips this step, which is
    every build today: the log is not deployed, and until it is the reset
    rests on the server's signed statement alone (ADR, R.2 and decision D3).
+5. **(added 2026-11-26)** the reset is **sealed**: it carries a signature,
+   by a seal key the account published under the old keys before the reset
+   (its password, a passkey that keeps the chats, or its phrase), over the
+   new keys. Rules 1 to 4 are the server's word; this one is the account's,
+   and the server cannot produce it (ADR-0101 section 10). When 1 to 4 hold
+   and 5 does not, the reset is not refused: it is **unsealed**, and 16.11
+   applies instead of 16.4 to 16.7.
 
 Then the device takes the new keys as the contact's, keeps the old ones only
 as "this is who wrote the messages already on screen" (so old bubbles still
@@ -1723,6 +1784,41 @@ Open, stated plainly:
 - **Per device.** Each device of the other person accepts the reset for
   itself; nothing about it travels between their devices except which
   session continues which conversation.
+
+### 16.11 A contact started over: an unsealed reset (added 2026-11-26)
+
+Status: designed, not built. Maintainer's decision of 2026-11-26 (ADR-0101
+section 10). Rule 5 of 16.2 fails while rules 1 to 4 hold: the reset is
+real at the server but carries no seal the account published before it.
+The server alone can produce such a reset, and so can whoever holds the
+password and the mailbox. The device therefore treats it as **a new account
+under the same username**, and nothing moves:
+
+- **The one-to-one** keeps its history and its place. Its composer is
+  replaced by one line, "@name started over with a new account. Messages
+  here are no longer delivered." (`contacts.started_over.closed`), because
+  the account's old devices are gone and nothing sent there would arrive.
+  The call buttons are hidden. No banner, no row in the chat list changes.
+- **Groups** are not moved, nobody is evicted on this account's behalf, and
+  no successor is founded. The old leaves stay until an owner or admin
+  removes them by hand; messages they would have read go to devices that no
+  longer exist.
+- **Channels** the person subscribed to or published in are not returned.
+- **No history, no profile, no channel seeds** are sent.
+- **A contact request** from the new keys is shown as an ordinary request
+  card (16.6's silent answer does not apply), with one more line under the
+  name: "Lakko could not confirm this is the same person as before. Accept
+  only if you are sure it is them." (`contacts.started_over.request_note`). Accepting it
+  starts a new one-to-one with the new keys; the old one stays as above.
+  Declining changes nothing.
+- The safety number section of the contact (16.1) shows the old number for
+  the old conversation and the new one for the new conversation.
+
+**Decided 2026-11-26 (maintainer).** The closed line (in place of the
+composer, which is removed) and the request note are shown. They are the
+**only exception** to 16.1's rule that a contact's reset shows nothing: here
+the device could not confirm it is the same person, which is the one thing
+the rest of section 16 relies on. A sealed reset stays silent.
 
 ## 17. Proving it is you: reset, delete, add a device, and the new-device notice
 
@@ -2564,11 +2660,14 @@ What was decided:
 - The 12 words are **not shown at sign-up**. A person may save them later.
 - A person may add one email address. The server keeps only a one-way value
   made from the **username and the address together**, never the address.
-- **While no phrase is saved**, a code mailed to that address brings the
+- ~~**While no phrase is saved**, a code mailed to that address brings the
   person all the way back: a new password and, on any device, their keys,
   contacts and chats. The app says plainly that this is only as safe as the
-  mailbox.
-- **Once a phrase is saved**, the mailed code gives a new password only.
+  mailbox.~~ **Withdrawn 2026-11-26 (maintainer):** the email vault is
+  removed (ADR-0075, amended that day). A mailed code never brings keys.
+- **A mailed code gives a new password only**, for every account, and serves
+  as a second way to confirm it is you for a key reset (15.1b). (Until
+  2026-11-26 this held only once a phrase was saved.)
 - A person who holds the phrase can **take the account back** for about a
   month after someone reset its keys.
 - Adding an email can be skipped, with a warning. **Superseded 2026-11-26:**
@@ -2576,17 +2675,23 @@ What was decided:
   sign-up; the phrase is an optional extra and does not count (19.1a).
 - When the account has an authenticator, its code is asked for as well.
 
-### 19.1 The two kinds of account, in the app's words
+### 19.1 One kind of account (rewritten 2026-11-26)
 
-| | No phrase saved | Phrase saved |
-|---|---|---|
-| Settings > Account shows | "Protected by your email" (or, without an email, the 19.1c line naming the account's factor; "Not protected" is gone since 2026-11-26) | "Protected by your recovery phrase" |
-| A mailed code gives | New password and everything back | New password only |
-| On a new device after the code | The app, with contacts and chats | **Restore your keys** (section 8) |
-| Three-word row (section 2) | Absent | Present on a device that holds the account |
+Until 2026-11-26 this table set an account without a saved phrase (whose
+mailed code brought the keys back) against one with a saved phrase. With the
+email vault removed (ADR-0075, amended 2026-11-26) there is one kind:
 
-Past messages come back only from another device, in both kinds, as today.
-No screen promises otherwise.
+| | Every account |
+|---|---|
+| A mailed code gives | A new password, and confirms a key reset (15.1b). Never the keys. |
+| On a new device after the code | **Restore your keys** (section 8) |
+| What brings the keys back | Another device, a passkey that restores keys, the recovery phrase |
+| What brings the chats back after a reset | A reset the account sealed in advance (15.1c): with the current password, a passkey that keeps the chats, or the phrase |
+| Settings > Account status line | 19.1c |
+| Three-word row (section 2) | Present on a device that holds the account, once the phrase was saved |
+
+Past messages come back from another device, or from contacts after a sealed
+reset (ADR-0101). No screen promises more.
 
 ### 19.1a Sign-up
 
@@ -2659,8 +2764,11 @@ Optional
   can be opened again only from Settings.
 - **The phrase.** `Also save a recovery phrase` runs 19.5 and returns here
   with the row marked `Done`; it no longer ends the step by itself (it did
-  before 2026-11-26). When the phrase is saved first and an email after,
-  the email is the password-only kind of 19.1 (no vault), as today.
+  before 2026-11-26). Since the email vault was removed (2026-11-26) the
+  order no longer matters: an email never holds the keys.
+- **The honest notice** of 19.1d stands under the rows, below the
+  authenticator-only note when both apply, as soon as a factor is `Done`
+  and neither a phrase nor a passkey that keeps the chats is.
 - **Copy changes.** `protect.body` gains "Choose at least one."; the
   passkey row's body is unchanged; the phrase row's body drops "Stronger,
   and nothing to do with email." for "The strongest way back." (the
@@ -2775,13 +2883,77 @@ keys.
   "...If you lose it and your recovery phrase, ...",
   `protect.totp_only.remove_notice_phrase`). The note is not shown anywhere
   else: not on the chat list, not as a banner.
-- **Settings > Account** status line names the strongest way back the
-  account has: "Protected by your recovery phrase", else "Protected by your
-  email", else "Protected by your authenticator app"
-  (`protect.status.totp`), else "Protected by a passkey"
-  (`protect.status.passkey`).
+- **Settings > Account** status line (amended 2026-11-26, after the email
+  vault was removed): "Your chats are kept by your recovery phrase" when a
+  phrase is saved, else "Your chats are kept by a passkey" when a passkey
+  keeps them (19.1d), else "Your chats are kept by your password only"
+  (`protect.status.phrase`, `protect.status.passkey_seal`,
+  `protect.status.password_only`), the last one in the `--warning` colour
+  with the 19.1d actions. `protect.status.email` and `protect.status.totp`
+  are not used.
 - **Guest accounts** (ADR-0032) have no username and see none of this;
   `Create account` after a call ends on the step of 19.1a like any sign-up.
+
+### 19.1d When the chats hang on the password alone (added 2026-11-26)
+
+Status: designed, not built. Maintainer's decision of 2026-11-26.
+
+**What decides it.** After a key reset, contacts give the chats back only
+when the reset is sealed by something the account set up before
+(ADR-0101 section 10, UX 15.1c): the password as it is now, a passkey that
+keeps the chats, or the recovery phrase. The password is the one that is
+easy to lose. An account is **kept by the password only** when it has a
+second way in (19.1a) but no saved phrase and no passkey that keeps the
+chats.
+
+**A passkey that keeps the chats** is one whose authenticator gave Lakko a
+secret of its own when the passkey was added (the WebAuthn `prf`
+extension). Lakko learns this when the passkey is created, not before.
+Where it is expected, from what the platforms document and nothing measured
+here: Apple platform passkeys from iOS 18 / macOS 15; Android passkeys on API
+34 and above (below it the request is dropped at creation, ADR-0072);
+browsers depending on the browser and the authenticator. A passkey that did
+not give the secret still signs in and still confirms a reset (15.1b); its
+row in Settings > Security > Passkeys says "Does not keep your chats."
+(`settings.passkeys.no_seal`).
+
+**The notice.** One copy, in the `--warning` colour with the warning icon:
+
+> **Your chats depend on your password**
+> If you forget your password and lose your devices, your chats will not
+> come back. Save a recovery phrase or add a passkey to keep them.
+>
+> [ Save a recovery phrase ]   [ Add a passkey ]
+
+(`protect.password_only.title`, `.body`, `.save_phrase`, `.add_passkey`.)
+`Add a passkey` is shown only where this device or browser can create
+passkeys. If the passkey it creates does not keep the chats, the notice
+stays and gains one line, "This passkey signs you in but does not keep your
+chats." (`protect.password_only.passkey_no_seal`).
+
+**Where it shows:**
+
+1. **The sign-up step** (19.1a), under the rows, once a second way in is
+   `Done` and while neither a phrase nor a passkey that keeps the chats is.
+   It does not block `Continue`.
+2. **Settings > Security > Recovery** (10.1), at the top, for as long as
+   the account is kept by the password only. It cannot be dismissed. The
+   status line of Settings > Account (19.1c) says the same in one line.
+3. **Once after a sign-in on a device**, the first time the app opens
+   there: the app's own dialog (`LakkoDialog`) with the same title and body,
+   `Save a recovery phrase` as the main action and `Not now` (plain), which
+   closes it for good on this device. Not after a key reset: the reset's
+   own screens already said what was kept (15.1c).
+
+Nowhere else: not on the chat list, not as a banner, not in a notification.
+
+**When it goes.** As soon as the account's published protection (ADR-0101
+section 10) lists a saved phrase or a passkey that keeps the chats, on every
+device, at its next look at the account's own protection. Removing that
+phrase is not possible; deleting that passkey brings the notice back.
+
+Accessibility: the notice is announced once when it appears; its two
+buttons are ordinary buttons in reading order.
 
 ### 19.2 Adding the address
 
@@ -2798,7 +2970,6 @@ Lakko does not keep your address. You will type it again,
 together with your username, when you need a code.
 
 Anyone who can read this mailbox can get into your account.
-Save a recovery phrase to change that.
 
 [ Send code ]
 ```
@@ -2855,8 +3026,12 @@ once: "A recovery email was added to your account." / "...was replaced" /
 Account > Recovery email on that device).
 
 
-The last two lines of the form are shown only while no phrase is saved.
-When the account has an authenticator the form adds: "You will also need a
+The line "Anyone who can read this mailbox..." is shown on every account
+(amended 2026-11-26: "Save a recovery phrase to change that." is removed;
+with the email vault gone a phrase no longer changes what the mailbox
+reaches, which is a new password, sign-in and confirming a reset, never the
+keys; a reset confirmed only by the mailbox and a new password is unsealed,
+15.1c, so it does not move the chats). When the account has an authenticator the form adds: "You will also need a
 code from your authenticator app. If it is on the phone you lose, the email
 will not be enough."
 
@@ -2889,12 +3064,13 @@ Step 3, only when the account has an authenticator: its 6-digit code, with
 
 Step 4, "Choose a new password", then:
 
-- **No phrase saved:** a progress line "Bringing back your account" and the
-  app, as after typing the phrase today. If the keys cannot be opened (the
-  address typed differs in a way the check let through, or the stored copy
-  is damaged) the person is signed in and sees **Restore your keys**.
-- **Phrase saved:** signed in; on a device without keys, **Restore your
-  keys**.
+- Signed in; on a device without keys, **Restore your keys** (section 8).
+  (Amended 2026-11-26: the "No phrase saved" branch that brought the keys
+  back from the email vault is removed with the vault.) A password changed
+  here, on a device without the keys, is not yet the password that seals a
+  reset (15.1c) or locks the owned channels: a device that holds the keys
+  takes it over at its next password sign-in. Until then, a reset is
+  unsealed unless a passkey keeps the chats.
 
 Rules:
 
@@ -2933,10 +3109,16 @@ stay as they are. Your other devices stay signed in.
 [ Show my 12 words ]
 ```
 
-The paragraph "This gives your account new keys..." appears only on an account
-that ever had an email vault (ADR-0075 section 3, amended 2026-11-01). On every
-other account saving a phrase changes no key: the screen shows the words the
-device already holds.
+**Amended 2026-11-26:** the paragraph "This gives your account new keys..."
+and the key change behind it are removed with the email vault (no copy of the
+phrase ever left the device), and the first paragraph loses its second
+sentence: "12 words that only you keep. They bring back your keys on a new
+device, and your chats after a reset." (`protect.phrase.save.body`, text
+changed). Saving a phrase changes no key: the screen shows the words the
+device already holds. When the three-word check passes, the device
+publishes the account's protection again with the phrase in it (ADR-0101
+section 10), which ends the notice of 19.1d. The bullets below that speak of
+"the new keys" no longer apply.
 
 - Needs the proof of 17.1. Then the existing phrase screens: the words in
   the grid, the confirmation of three of them, "I wrote them down".
@@ -2948,8 +3130,8 @@ device already holds.
   of that last call the three-word screen stays, with "We could not finish.
   Nothing changed." and `Try again`. A person who leaves before then has saved
   nothing, and the row in Settings stays as it was.
-- Afterwards Settings shows "Protected by your recovery phrase" and `Show
-  phrase` (behind 17.1). There is no way back to an account without one.
+- Afterwards Settings shows "Your chats are kept by your recovery phrase"
+  (19.1c) and `Show phrase` (behind 17.1). There is no way back to an account without one.
 - Other devices of the account show once: "A recovery phrase was saved for
   your account." with `OK` / `This was not me`.
 
@@ -2971,10 +3153,16 @@ On <date>, on another device.
 [ It was me ]     [ It was not me ]
 ```
 
+(Amended 2026-11-26: the second notice is removed with the email vault; a
+mailed code no longer opens the account with its keys, so only the first
+one remains. The "A recovery phrase was saved" notice of 19.5 is shown from
+the account's published protection, not from a server notice.)
+
 `It was not me` opens one screen with, in order: choose a new password (this
 device holds the keys, so it asks nothing else), `Remove recovery email`,
-and, when no phrase is saved, `Save a recovery phrase` with the line "This
-gives your account new keys, so whoever opened it loses it." When the keys
+and, when no phrase is saved, `Save a recovery phrase` (amended
+2026-11-26: without the line about new keys; with the vault gone, whoever
+came in by email got no keys to lose). When the keys
 were reset after the change, the device shows "Was it you?" of 18.4 instead.
 
 Contacts see nothing.
@@ -3001,8 +3189,11 @@ signed out, the authenticator and passkeys are cleared. The same costs as
 18.9 apply and the form says them. After the month the words are simply
 "not this account's phrase".
 
-Not offered for an account without a saved phrase: there the person who came
-in by email holds the same words.
+~~Not offered for an account without a saved phrase: there the person who came
+in by email holds the same words.~~ Amended 2026-11-26: with the email vault
+removed nobody gets the words by email, so the choice is offered to every
+account; in practice it serves only a person who saved the phrase, since
+nobody else has seen the words.
 
 ### 19.8 Data the UI needs
 
@@ -3032,13 +3223,14 @@ has no link).
 
 ### 19.10 Deliberately not built, and open
 
-- **An account without a saved phrase is as safe as its mailbox, and the
-  operator of the server could open it.** The sign-up and email screens say
-  the first in the person's terms; the second is in the security documents.
-- When someone else opens such an account by email, both hold the same
-  keys. `It was not me` is a race the owner can lose.
-- With a saved phrase, the mailbox still reaches the password and, on a new
-  device, a key reset. 19.7 and 18.4 are the answer.
+- ~~**An account without a saved phrase is as safe as its mailbox, and the
+  operator of the server could open it.**~~ ~~When someone else opens such
+  an account by email, both hold the same keys.~~ Both withdrawn 2026-11-26
+  with the email vault: no mailed code returns keys, for any account.
+- The mailbox still reaches the password and, with it and the mailbox as the
+  second way in, a key reset. Such a reset is unsealed (15.1c): it takes the
+  username and starts the account over, and contacts keep their chats away
+  from it. 19.7 and 18.4 are the answer for the owner.
 - ~~No email and no phrase: no way back. The app says so twice (19.1a).~~
   Since 2026-11-26 every account has an email, an authenticator or a
   passkey (19.1a, 19.1c), and with the password any one of them resets the
@@ -3046,17 +3238,24 @@ has no link).
 - **What the second factor costs (2026-11-26).** A person whose only factor
   is an authenticator app on the phone they lost, with no recovery email,
   no passkey elsewhere and no phrase, can no longer reset: the account is
-  lost. The maintainer allowed the authenticator as the only factor with a
+  lost.
+- **What the seal costs (2026-11-26).** A person who forgot the password,
+  has no saved phrase and no passkey that keeps the chats, gets a new
+  password by mail and resets: the reset is unsealed, the account starts
+  over, and the chats, groups and owned channels do not come back. 19.1d
+  says so in advance. The maintainer allowed the authenticator as the only factor with a
   warning (19.1a, 19.1c); nothing else can be done about it without making
   the password enough again.
 - **Owned channels** (ADR-0101 section 7, settled 2026-11-26) are under two
   locks: the password with a second factor, and the account keys. A device
   with the keys always opens them. A reset with the password and a factor
-  opens them. A mail-protected account (no phrase saved) that lost every
-  device and forgot the password gets its keys back by mailed code and so
-  its channels. A phrase-protected account that lost the phrase, every
-  device and the password loses its owned channels; its chats and groups
-  still come back from contacts after a reset.
+  opens them when the password is the one the list was locked with, or
+  when a passkey that keeps the chats sealed it (each such passkey has its
+  own lock, decided 2026-11-26). The
+  route through a mailed code that brought the keys back is gone with the
+  email vault (2026-11-26). An account that lost the phrase, every device
+  and the password loses its owned channels, and its reset is unsealed, so
+  its chats and groups do not come back either.
 - An authenticator on the lost phone blocks the email route.
 - Changing the username turns the recovery email off. A forgotten address or
   username cannot be looked up.

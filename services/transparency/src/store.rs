@@ -38,8 +38,8 @@
 
 use lakko_attest::verify_genesis_fresh;
 use lakko_transparency::{
-    verify_leaf_genesis, verify_supersession, InMemoryLog, InclusionProof, LogEntry, SignedRoot,
-    TreeHash, WITNESS_COSIG_LEN,
+    verify_leaf_genesis, verify_supersession, AnnouncementLeaf, InMemoryLog, InclusionProof,
+    LogEntry, SignedRoot, TreeHash, WITNESS_COSIG_LEN,
 };
 use sqlx::MySqlPool;
 use tokio::sync::Mutex;
@@ -72,6 +72,10 @@ pub(crate) enum StoreError {
     /// fabricated / unauthorised leaf. Maps to HTTP 403.
     #[error("leaf authorisation rejected: {0}")]
     Unauthorised(&'static str),
+    /// An announcement whose `seq` is not above every one the account has
+    /// logged (ADR-0101 section 10). Maps to HTTP 409.
+    #[error("announcement seq is not above the logged ones")]
+    Stale,
 }
 
 /// One replayed `log_entries` row: `(idx, username_hash,
@@ -80,9 +84,21 @@ pub(crate) enum StoreError {
 type LeafRow = (u64, Vec<u8>, Vec<u8>, u64, i8);
 
 /// One `latest`-query row: `(idx, identity_pubkey, version, is_reset,
-/// leaf_auth, genesis_attest)`. `is_reset` → `i8`; `leaf_auth` +
-/// `genesis_attest` VARBINARY NULL → `Option<Vec<u8>>` (G-30 #2 / ADR-0036).
-type LatestRow = (u64, Vec<u8>, u64, i8, Option<Vec<u8>>, Option<Vec<u8>>);
+/// leaf_auth, genesis_attest, reset_seal)`. `is_reset` → `i8`; the sidecars
+/// VARBINARY NULL → `Option<Vec<u8>>` (G-30 #2 / ADR-0036 / ADR-0101).
+type LatestRow = (
+    u64,
+    Vec<u8>,
+    u64,
+    i8,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+);
+
+/// One replayed `log_announcements` row: `(idx, username_hash,
+/// key_generation, seq, announcement_hash)` (ADR-0101 section 10).
+type AnnouncementRow = (u64, Vec<u8>, u64, u64, Vec<u8>);
 
 /// The inputs to the ADR-0036 S4 auth-attested genesis gate, bundled so the
 /// [`LogStore::append`] argument list stays within bounds.
@@ -145,6 +161,23 @@ pub(crate) struct LatestEntry {
     /// client can verify the account-authenticated genesis binding on a first
     /// observation (`verify_genesis_binding`).
     pub(crate) genesis_attest: Option<Vec<u8>>,
+    /// ADR-0101 section 10: the reset seal stored with a reset leaf, or
+    /// `None` (an unsealed reset, or not a reset).
+    pub(crate) reset_seal: Option<Vec<u8>>,
+}
+
+/// The newest seal-announcement leaf of one account and generation
+/// (ADR-0101 section 10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AnnouncementEntry {
+    /// The leaf index (== `/proof` idx).
+    pub(crate) idx: u64,
+    /// The generation it was made at.
+    pub(crate) key_generation: u64,
+    /// Its `seq`.
+    pub(crate) seq: u64,
+    /// The announcement bytes as appended.
+    pub(crate) announcement: Vec<u8>,
 }
 
 /// The last witness-co-signed root + its co-signature BUNDLE (ADR-0020 Sprint 4;
@@ -188,15 +221,49 @@ impl LogStore {
         )
         .fetch_all(pool)
         .await?;
+        // ADR-0101 section 10: the seal-announcement leaves share the index
+        // sequence; replay both kinds in index order.
+        let announcements: Vec<AnnouncementRow> = sqlx::query_as(
+            "SELECT idx, username_hash, key_generation, seq, announcement_hash \
+             FROM log_announcements ORDER BY idx ASC",
+        )
+        .fetch_all(pool)
+        .await?;
+        let mut identities = rows.into_iter().peekable();
+        let mut announced = announcements.into_iter().peekable();
 
         let mut log = InMemoryLog::new(operator);
-        for (db_idx, username_hash, identity_pubkey, version, _is_reset) in rows {
-            let entry = LogEntry {
-                username_hash: clamp_hash(&username_hash),
-                identity_pubkey,
-                version,
+        loop {
+            let take_identity = match (identities.peek(), announced.peek()) {
+                (None, None) => break,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (Some(i), Some(a)) => i.0 < a.0,
             };
-            let assigned = log.append(entry);
+            let (db_idx, assigned) = if take_identity {
+                let Some((db_idx, username_hash, identity_pubkey, version, _)) = identities.next()
+                else {
+                    break;
+                };
+                let entry = LogEntry {
+                    username_hash: clamp_hash(&username_hash),
+                    identity_pubkey,
+                    version,
+                };
+                (db_idx, log.append(entry))
+            } else {
+                let Some((db_idx, username_hash, key_generation, seq, hash)) = announced.next()
+                else {
+                    break;
+                };
+                let leaf = AnnouncementLeaf {
+                    username_hash: clamp_hash(&username_hash),
+                    key_generation,
+                    seq,
+                    announcement_hash: clamp_hash(&hash),
+                };
+                (db_idx, log.append_announcement(&leaf))
+            };
             if assigned != db_idx {
                 // The replay must reconstruct the SAME index sequence the
                 // rows were written under; otherwise the Merkle leaf
@@ -276,6 +343,7 @@ impl LogStore {
     /// Returns [`StoreError::Db`] if the latest-entry query, the
     /// `MAX`-query, or the INSERT fails, or [`StoreError::Unauthorised`] if the
     /// leaf authorisation or (ADR-0036 S4) the genesis attestation is rejected.
+    #[cfg(test)]
     pub(crate) async fn append(
         &self,
         pool: &MySqlPool,
@@ -286,6 +354,49 @@ impl LogStore {
         genesis: GenesisAttestGate<'_>,
         now_unix_secs: i64,
     ) -> Result<AppendResult, StoreError> {
+        self.append_with_seal(
+            pool,
+            username_hash,
+            identity_pubkey,
+            is_reset,
+            leaf_auth,
+            genesis,
+            None,
+            now_unix_secs,
+        )
+        .await
+    }
+
+    /// [`Self::append`] with the reset seal sidecar of ADR-0101 section 10:
+    /// on a reset leaf (`is_reset`) the 214-byte seal is checked (its own
+    /// signature, and that it seals exactly `identity_pubkey`) and stored in
+    /// `log_entries.reset_seal`, never in the leaf's bytes; an invalid one is
+    /// refused like an invalid leaf authorisation. Ignored on a non-reset
+    /// leaf. Whether its seal key was announced is the peer's question.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::append`].
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(crate) async fn append_with_seal(
+        &self,
+        pool: &MySqlPool,
+        username_hash: [u8; 32],
+        identity_pubkey: Vec<u8>,
+        is_reset: bool,
+        leaf_auth: Option<&[u8]>,
+        genesis: GenesisAttestGate<'_>,
+        reset_seal: Option<&[u8]>,
+        now_unix_secs: i64,
+    ) -> Result<AppendResult, StoreError> {
+        let reset_seal = reset_seal.filter(|_| is_reset);
+        if let Some(seal) = reset_seal {
+            let opened = lakko_attest::ResetSeal::open(seal)
+                .map_err(|_| StoreError::Unauthorised("reset seal did not verify"))?;
+            if opened.new_signature_pubkey.as_slice() != identity_pubkey.as_slice() {
+                return Err(StoreError::Unauthorised("reset seal names another key"));
+            }
+        }
         let mut log = self.inner.lock().await;
 
         // KT-log S2.5 idempotency: read the latest entry for this
@@ -407,8 +518,9 @@ impl LogStore {
         // leaf the DB does not — fatal-ish, see module docs.
         let insert = sqlx::query(
             "INSERT INTO log_entries \
-             (idx, username_hash, identity_pubkey, version, is_reset, leaf_auth, genesis_attest) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+             (idx, username_hash, identity_pubkey, version, is_reset, leaf_auth, genesis_attest, \
+              reset_seal) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(idx)
         .bind(&entry.username_hash[..])
@@ -417,6 +529,7 @@ impl LogStore {
         .bind(is_reset)
         .bind(leaf_auth)
         .bind(genesis.attestation)
+        .bind(reset_seal)
         .execute(pool)
         .await;
 
@@ -586,6 +699,7 @@ impl LogStore {
     /// # Errors
     ///
     /// Returns [`StoreError::Log`] if `idx >= size()`.
+    #[cfg(test)]
     pub(crate) async fn proof(&self, idx: u64) -> Result<(LogEntry, InclusionProof), StoreError> {
         let log = self.inner.lock().await;
         let entry = log.entry(idx)?.clone();
@@ -614,22 +728,159 @@ impl LogStore {
         // `leaf_auth` + `genesis_attest` VARBINARY NULL → `Option<Vec<u8>>`
         // (G-30 #2 / ADR-0036 S4).
         let row: Option<LatestRow> = sqlx::query_as(
-            "SELECT idx, identity_pubkey, version, is_reset, leaf_auth, genesis_attest \
+            "SELECT idx, identity_pubkey, version, is_reset, leaf_auth, genesis_attest, \
+                    reset_seal \
              FROM log_entries WHERE username_hash = ? ORDER BY version DESC LIMIT 1",
         )
         .bind(&username_hash[..])
         .fetch_optional(pool)
         .await?;
         Ok(row.map(
-            |(idx, identity_pubkey, version, is_reset, leaf_auth, genesis_attest)| LatestEntry {
-                idx,
-                version,
-                identity_pubkey,
-                is_reset: is_reset != 0,
-                leaf_auth,
-                genesis_attest,
+            |(idx, identity_pubkey, version, is_reset, leaf_auth, genesis_attest, reset_seal)| {
+                LatestEntry {
+                    idx,
+                    version,
+                    identity_pubkey,
+                    is_reset: is_reset != 0,
+                    leaf_auth,
+                    genesis_attest,
+                    reset_seal,
+                }
             },
         ))
+    }
+
+    /// The leaf bytes at `idx`, of either kind, and their inclusion proof
+    /// against the current tree (what `GET /transparency/proof/{idx}` serves).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Log`] if `idx >= size()`.
+    pub(crate) async fn leaf_proof(
+        &self,
+        idx: u64,
+    ) -> Result<(Vec<u8>, InclusionProof), StoreError> {
+        let log = self.inner.lock().await;
+        let bytes = log.leaf_bytes(idx)?.to_vec();
+        let proof = log.prove_inclusion(idx)?;
+        Ok((bytes, proof))
+    }
+
+    /// Append an account's seal announcement as an announcement leaf
+    /// (ADR-0101 section 10). Under the log's lock: the announcement must
+    /// verify under the account's latest identity key in this log
+    /// ([`StoreError::Unauthorised`] otherwise, and when the account has no
+    /// identity leaf yet); the same announcement again returns its existing
+    /// index (a retry); a `seq` not above every one the account has logged is
+    /// [`StoreError::Stale`]. The leaf names the generation and `seq` the
+    /// announcement carries and commits its bytes by hash.
+    ///
+    /// # Errors
+    ///
+    /// As above; [`StoreError::Db`].
+    pub(crate) async fn append_announcement(
+        &self,
+        pool: &MySqlPool,
+        username_hash: [u8; 32],
+        announcement: &[u8],
+    ) -> Result<u64, StoreError> {
+        let mut log = self.inner.lock().await;
+        let latest: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT identity_pubkey FROM log_entries \
+             WHERE username_hash = ? ORDER BY version DESC LIMIT 1",
+        )
+        .bind(&username_hash[..])
+        .fetch_optional(pool)
+        .await?;
+        let key = latest
+            .as_deref()
+            .and_then(|k| <[u8; 32]>::try_from(k).ok())
+            .and_then(|k| signing::VerifyingKey::from_bytes(&k).ok())
+            .ok_or(StoreError::Unauthorised(
+                "no identity leaf for the announcement",
+            ))?;
+        let claims = lakko_attest::SealAnnouncement::open(announcement, &key)
+            .map_err(|_| StoreError::Unauthorised("announcement did not verify"))?;
+        let leaf = AnnouncementLeaf::for_announcement(
+            username_hash,
+            claims.key_generation,
+            claims.seq,
+            announcement,
+        );
+        let existing: Option<u64> = sqlx::query_scalar(
+            "SELECT idx FROM log_announcements WHERE username_hash = ? AND announcement_hash = ?",
+        )
+        .bind(&username_hash[..])
+        .bind(&leaf.announcement_hash[..])
+        .fetch_optional(pool)
+        .await?;
+        if let Some(idx) = existing {
+            crate::metrics::append(crate::metrics::AppendOutcome::Unchanged);
+            return Ok(idx);
+        }
+        let highest: Option<u64> =
+            sqlx::query_scalar("SELECT MAX(seq) FROM log_announcements WHERE username_hash = ?")
+                .bind(&username_hash[..])
+                .fetch_one(pool)
+                .await?;
+        if highest.is_some_and(|h| claims.seq <= h) {
+            return Err(StoreError::Stale);
+        }
+        let idx = log.append_announcement(&leaf);
+        let insert = sqlx::query(
+            "INSERT INTO log_announcements \
+             (idx, username_hash, key_generation, seq, announcement_hash, announcement) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(idx)
+        .bind(&username_hash[..])
+        .bind(claims.key_generation)
+        .bind(claims.seq)
+        .bind(&leaf.announcement_hash[..])
+        .bind(announcement)
+        .execute(pool)
+        .await;
+        if let Err(e) = insert {
+            tracing::error!(
+                idx,
+                error = %e,
+                "FATAL: log_announcements INSERT failed after in-memory append — \
+                 in-memory tree and DB are now out of sync; restart to re-sync"
+            );
+            return Err(StoreError::Db(e));
+        }
+        crate::metrics::append(crate::metrics::AppendOutcome::Appended);
+        crate::metrics::log_size(log.size());
+        Ok(idx)
+    }
+
+    /// The newest announcement leaf (highest `seq`) of `username_hash` at
+    /// `key_generation`, or `None` (ADR-0101 section 10). Read-only against
+    /// the durable rows, like [`Self::latest`].
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Db`].
+    pub(crate) async fn announcement(
+        &self,
+        pool: &MySqlPool,
+        username_hash: [u8; 32],
+        key_generation: u64,
+    ) -> Result<Option<AnnouncementEntry>, StoreError> {
+        let row: Option<(u64, u64, Vec<u8>)> = sqlx::query_as(
+            "SELECT idx, seq, announcement FROM log_announcements \
+             WHERE username_hash = ? AND key_generation = ? ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(&username_hash[..])
+        .bind(key_generation)
+        .fetch_optional(pool)
+        .await?;
+        Ok(row.map(|(idx, seq, announcement)| AnnouncementEntry {
+            idx,
+            key_generation,
+            seq,
+            announcement,
+        }))
     }
 
     /// The operator's verifying key — clients pin this out-of-band.
@@ -1746,6 +1997,7 @@ mod tests {
                 is_reset: true,
                 leaf_auth: None,
                 genesis_attest: None,
+                reset_seal: None,
             }
         );
 
@@ -1764,6 +2016,7 @@ mod tests {
                 is_reset: false,
                 leaf_auth: None,
                 genesis_attest: None,
+                reset_seal: None,
             }
         );
 
@@ -1771,6 +2024,182 @@ mod tests {
             .execute(&pool)
             .await
             .expect("clear log_entries");
+        pool.close().await;
+    }
+
+    /// ADR-0101 section 10: an announcement leaf is appended only under the
+    /// account's latest identity key with a rising `seq`, a retry returns its
+    /// index, the newest per generation is served, and a reload replays both
+    /// leaf kinds into the same tree; a reset leaf keeps its seal sidecar.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn announcements_append_serve_and_replay() {
+        use lakko_attest::{
+            key_reset_account_ref, password_seal_key, ResetSeal, SealAnnouncement, SealEntry,
+            SealKind,
+        };
+        use sqlx::mysql::MySqlPoolOptions;
+
+        let Ok(url) = std::env::var("LAKKO_TRANSPARENCY_TEST_DATABASE_URL") else {
+            eprintln!(
+                "skipping announcements_append_serve_and_replay: \
+                 LAKKO_TRANSPARENCY_TEST_DATABASE_URL unset"
+            );
+            return;
+        };
+        let pool = MySqlPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("connect test DB");
+        crate::MIGRATIONS.run(&pool).await.expect("run migrations");
+        for clear in ["DELETE FROM log_entries", "DELETE FROM log_announcements"] {
+            sqlx::query(clear).execute(&pool).await.expect("clear");
+        }
+
+        let operator = signing::SigningKey::from_seed(&[0x0F; 32]);
+        let store = LogStore::from_log(InMemoryLog::new(operator.clone()));
+        let account = [0x31u8; 16];
+        let user = lakko_transparency::account_username_hash(&account);
+        let old_key = signing::SigningKey::from_seed(&[0x41; 32]);
+        let new_key = signing::SigningKey::from_seed(&[0x42; 32]);
+        let seal_key = password_seal_key(&[0x5E; 64]);
+        let announce = |key: &signing::SigningKey, generation: u64, seq: u64| {
+            SealAnnouncement::new(
+                key_reset_account_ref(&account),
+                generation,
+                seq,
+                1,
+                vec![SealEntry {
+                    kind: SealKind::Password,
+                    tag: [0; 16],
+                    seal_pk: seal_key.verifying_key().to_bytes(),
+                }],
+            )
+            .sign(key)
+            .unwrap()
+        };
+
+        // No identity leaf yet: refused.
+        let a1 = announce(&old_key, 1, 1);
+        assert!(matches!(
+            store.append_announcement(&pool, user, &a1).await,
+            Err(StoreError::Unauthorised(_))
+        ));
+        store
+            .append(
+                &pool,
+                user,
+                old_key.verifying_key().to_bytes().to_vec(),
+                false,
+                None,
+                GenesisAttestGate::default(),
+                0,
+            )
+            .await
+            .expect("identity v1");
+        // Signed by another key: refused.
+        assert!(matches!(
+            store
+                .append_announcement(&pool, user, &announce(&new_key, 1, 1))
+                .await,
+            Err(StoreError::Unauthorised(_))
+        ));
+        let i1 = store
+            .append_announcement(&pool, user, &a1)
+            .await
+            .expect("a1");
+        assert_eq!(i1, 1);
+        assert_eq!(
+            store.append_announcement(&pool, user, &a1).await.unwrap(),
+            1
+        );
+        let a3 = announce(&old_key, 1, 3);
+        let i3 = store
+            .append_announcement(&pool, user, &a3)
+            .await
+            .expect("a3");
+        assert!(matches!(
+            store
+                .append_announcement(&pool, user, &announce(&old_key, 1, 2))
+                .await,
+            Err(StoreError::Stale)
+        ));
+
+        // The sealed reset leaf; its seal is a sidecar.
+        let seal = ResetSeal {
+            account_ref: key_reset_account_ref(&account),
+            announcement_seq: 3,
+            from_generation: 1,
+            to_generation: 2,
+            new_signature_pubkey: new_key.verifying_key().to_bytes(),
+            kind: SealKind::Password,
+            seal_pk: seal_key.verifying_key().to_bytes(),
+        }
+        .sign(&seal_key)
+        .unwrap();
+        // A seal naming another key is refused.
+        assert!(matches!(
+            store
+                .append_with_seal(
+                    &pool,
+                    user,
+                    vec![0x55; 32],
+                    true,
+                    None,
+                    GenesisAttestGate::default(),
+                    Some(&seal),
+                    0,
+                )
+                .await,
+            Err(StoreError::Unauthorised(_))
+        ));
+        let reset = store
+            .append_with_seal(
+                &pool,
+                user,
+                new_key.verifying_key().to_bytes().to_vec(),
+                true,
+                None,
+                GenesisAttestGate::default(),
+                Some(&seal),
+                0,
+            )
+            .await
+            .expect("reset leaf");
+        let latest = store.latest(&pool, user).await.unwrap().unwrap();
+        assert_eq!(latest.reset_seal.as_deref(), Some(seal.as_slice()));
+        let b4 = announce(&new_key, 2, 4);
+        store
+            .append_announcement(&pool, user, &b4)
+            .await
+            .expect("b4");
+
+        // Served: the newest of each generation.
+        let g1 = store.announcement(&pool, user, 1).await.unwrap().unwrap();
+        assert_eq!(
+            (g1.idx, g1.seq, g1.announcement.as_slice()),
+            (i3, 3, a3.as_slice())
+        );
+        let g2 = store.announcement(&pool, user, 2).await.unwrap().unwrap();
+        assert_eq!(g2.seq, 4);
+        assert!(store.announcement(&pool, user, 3).await.unwrap().is_none());
+
+        // The proof served for the announcement leaf proves it before the
+        // reset leaf, and a reload rebuilds the same root.
+        let root = store.signed_root(9).await;
+        let (leaf_bytes, proof) = store.leaf_proof(i3).await.unwrap();
+        let leaf = lakko_transparency::AnnouncementLeaf::for_announcement(user, 1, 3, &a3);
+        assert_eq!(leaf_bytes, leaf.canonical_bytes());
+        lakko_transparency::verify_announcement_before_reset(&leaf, &proof, reset.idx, &root)
+            .expect("announcement before reset");
+        let reloaded = LogStore::load(&pool, operator).await.expect("reload");
+        assert_eq!(reloaded.signed_root(9).await.tree_root, root.tree_root);
+        assert_eq!(reloaded.size().await, 5);
+
+        for clear in ["DELETE FROM log_entries", "DELETE FROM log_announcements"] {
+            sqlx::query(clear).execute(&pool).await.expect("clear");
+        }
         pool.close().await;
     }
 }

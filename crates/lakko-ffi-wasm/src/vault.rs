@@ -233,6 +233,15 @@ impl VaultRef {
             inner: CoreVaultRef::Devices,
         }
     }
+
+    /// An owned-channels vault (ADR-0101 section 7): the list or one of its
+    /// locks. Use with `vaultKeysFromRoot`, whose root tells them apart.
+    #[wasm_bindgen(js_name = ownedChannels)]
+    pub fn owned_channels() -> VaultRef {
+        Self {
+            inner: CoreVaultRef::OwnedChannels,
+        }
+    }
 }
 
 // --- keys ---------------------------------------------------------------
@@ -261,6 +270,27 @@ pub fn vault_keys(account_identity: &Identity) -> VaultKeys {
     VaultKeys {
         root: VaultRoot::from_account_seed(seed.as_bytes()),
     }
+}
+
+/// The vault keys of one owned-channels vault from its 32-byte root
+/// (ADR-0101 section 7): a lock root or the list key `R`. Use with
+/// `VaultRef.ownedChannels()`.
+///
+/// # Errors
+///
+/// Throws `keyLength: ...` when the root is not 32 bytes.
+#[wasm_bindgen(js_name = vaultKeysFromRoot)]
+pub fn vault_keys_from_root(root: &[u8]) -> Result<VaultKeys, JsError> {
+    let root: [u8; 32] = root.try_into().map_err(|_| {
+        JsError::new(&format!(
+            "keyLength: root must be 32 bytes, got {}",
+            root.len()
+        ))
+    })?;
+    let root = SecretBytes::new(root);
+    Ok(VaultKeys {
+        root: VaultRoot::from_root(root.as_bytes()),
+    })
 }
 
 impl VaultKeys {

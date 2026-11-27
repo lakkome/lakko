@@ -160,8 +160,9 @@ impl Window {
 /// What a name counter counts. The discriminant is stored in
 /// `auth_name_limits.scope`; never renumber. 6, 7 and 8 belonged to the
 /// removed phone / email one-time-code factor, and 5 to the removed
-/// server-side three-word verifier (`/vault/recover/finish`); they stay
-/// unused.
+/// server-side three-word verifier (`/vault/recover/finish`); 20 and 21 to
+/// the removed email vault (ADR-0075, amended 2026-11-26); 25 to the removed
+/// channel-recovery OPRF (ADR-0101 section 7, item 10). They stay unused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum Scope {
@@ -219,14 +220,6 @@ pub(crate) enum Scope {
     /// `POST /recovery-email/recover/verify`, keyed on the login handle the
     /// challenge was opened for: wrong codes across challenges.
     EmailVerify = 19,
-    /// `POST /recovery-email/recover/open`, keyed on the account: how often
-    /// its email vault may leave the server.
-    EmailVaultOpen = 20,
-    /// `PUT /recovery-email/vault`, keyed on the signed-in account (ADR-0075,
-    /// amended 2026-10-13). Charged before the typed address is compared
-    /// with the stored key: without it a session could test addresses
-    /// against the account as fast as it can send them.
-    EmailVaultStore = 21,
     /// `POST /auth/login-handle/check`, keyed on the signed-in account
     /// (ADR-0076 section 2). Its own counter, not [`Self::HandleBind`]'s:
     /// every device asks at every session landing, and the bind's five a day
@@ -240,14 +233,20 @@ pub(crate) enum Scope {
     /// (ADR-0097). Charged only for a code that exists, after the lookup:
     /// an unknown code has no counter to spend and answers `404` anyway.
     SupporterCode = 24,
-    /// `POST /auth/channel-recovery/evaluate`, keyed on the signed-in
-    /// account (ADR-0101 section 7). Charged after the element decodes and
-    /// before it is evaluated.
-    ChannelRecovery = 25,
+    /// `POST /account/keys/reset/factor/totp`, keyed on the signed-in
+    /// account (ADR-0073, amended 2026-11-26): authenticator codes offered as
+    /// a reset factor. Charged after the fresh-auth grant of the password,
+    /// before the code is checked.
+    ResetFactor = 26,
+    /// `POST /account/owned-channels-secret`, keyed on the signed-in account
+    /// (ADR-0101 section 7, item 1): how often the server half of the
+    /// owned-channels password lock is released. Charged only after the
+    /// reset factor grant was accepted.
+    OwnedChannelsSecret = 27,
 }
 
 impl Scope {
-    pub(crate) const ALL: [Self; 21] = [
+    pub(crate) const ALL: [Self; 20] = [
         Self::LoginPassword,
         Self::LoginRecovery,
         Self::PasswordReset,
@@ -263,12 +262,11 @@ impl Scope {
         Self::EmailLetterHandle,
         Self::EmailLetterAccount,
         Self::EmailVerify,
-        Self::EmailVaultOpen,
-        Self::EmailVaultStore,
         Self::HandleCheck,
         Self::AnonCredential,
         Self::SupporterCode,
-        Self::ChannelRecovery,
+        Self::ResetFactor,
+        Self::OwnedChannelsSecret,
     ];
 
     /// Position in [`Self::ALL`] (the stored discriminants have a gap, so
@@ -290,12 +288,11 @@ impl Scope {
             Self::EmailLetterHandle => 12,
             Self::EmailLetterAccount => 13,
             Self::EmailVerify => 14,
-            Self::EmailVaultOpen => 15,
-            Self::EmailVaultStore => 16,
-            Self::HandleCheck => 17,
-            Self::AnonCredential => 18,
-            Self::SupporterCode => 19,
-            Self::ChannelRecovery => 20,
+            Self::HandleCheck => 15,
+            Self::AnonCredential => 16,
+            Self::SupporterCode => 17,
+            Self::ResetFactor => 18,
+            Self::OwnedChannelsSecret => 19,
         }
     }
 
@@ -317,12 +314,11 @@ impl Scope {
             Self::EmailLetterHandle => "email_letter_handle",
             Self::EmailLetterAccount => "email_letter_account",
             Self::EmailVerify => "email_verify",
-            Self::EmailVaultOpen => "email_vault_open",
-            Self::EmailVaultStore => "email_vault_store",
             Self::HandleCheck => "handle_check",
             Self::AnonCredential => "anon_credential",
             Self::SupporterCode => "supporter_code",
-            Self::ChannelRecovery => "channel_recovery",
+            Self::ResetFactor => "reset_factor",
+            Self::OwnedChannelsSecret => "owned_channels_secret",
         }
     }
 
@@ -343,12 +339,11 @@ impl Scope {
             Self::EmailLetterHandle => "LAKKO_AUTH_LIMIT_EMAIL_LETTER_HANDLE",
             Self::EmailLetterAccount => "LAKKO_AUTH_LIMIT_EMAIL_LETTER_ACCOUNT",
             Self::EmailVerify => "LAKKO_AUTH_LIMIT_EMAIL_VERIFY",
-            Self::EmailVaultOpen => "LAKKO_AUTH_LIMIT_EMAIL_VAULT_OPEN",
-            Self::EmailVaultStore => "LAKKO_AUTH_LIMIT_EMAIL_VAULT_STORE",
             Self::HandleCheck => "LAKKO_AUTH_LIMIT_HANDLE_CHECK",
             Self::AnonCredential => "LAKKO_AUTH_LIMIT_ANON_CREDENTIAL",
             Self::SupporterCode => "LAKKO_AUTH_LIMIT_SUPPORTER_CODE",
-            Self::ChannelRecovery => "LAKKO_AUTH_LIMIT_CHANNEL_RECOVERY",
+            Self::ResetFactor => "LAKKO_AUTH_LIMIT_RESET_FACTOR",
+            Self::OwnedChannelsSecret => "LAKKO_AUTH_LIMIT_OWNED_CHANNELS_SECRET",
         }
     }
 
@@ -360,11 +355,11 @@ impl Scope {
             | Self::LoginRecovery
             | Self::PasswordReset
             | Self::DeviceGrantMint => Window::new(10, 900),
-            Self::TotpRecover | Self::Recall => Window::new(5, 900),
+            // ADR-0073 (amended 2026-11-26): the reset's authenticator factor
+            // shares the TOTP recovery's five codes in fifteen minutes.
+            Self::TotpRecover | Self::Recall | Self::ResetFactor => Window::new(5, 900),
             Self::DeviceRequestTarget => Window::new(5, 600),
-            // The email vault's five releases a day per account (ADR-0075
-            // section 10) share the handle bind's figure.
-            Self::HandleBind | Self::EmailVaultOpen => Window::new(5, 86_400),
+            Self::HandleBind => Window::new(5, 86_400),
             // A person redeems a supporter code once and retries a lost
             // response a few times; it shares the replace's figure.
             Self::RecoveryReplace | Self::SupporterCode => Window::new(10, 3600),
@@ -374,17 +369,14 @@ impl Scope {
             // day per account; fifteen code guesses an hour per name (three
             // challenges' worth).
             Self::EmailLetterHandle => Window::new(5, 3600),
-            // Ten vault stores a day per account share the letter figure.
-            Self::EmailLetterAccount | Self::EmailVaultStore => Window::new(10, 86_400),
+            // ADR-0101 section 7: ten releases of `S` a day per account share
+            // the letter figure.
+            Self::EmailLetterAccount | Self::OwnedChannelsSecret => Window::new(10, 86_400),
             Self::EmailVerify => Window::new(15, 3600),
             // One question per device per landing, with room to spare.
             Self::HandleCheck => Window::new(120, 3600),
             // A device asks once a period, a few devices and retries a day.
             Self::AnonCredential => Window::new(30, 86_400),
-            // A device evaluates once per channel it owns or recovers, after
-            // a reset and at its next owner pass; sixty an hour leaves room
-            // for an owner of many channels.
-            Self::ChannelRecovery => Window::new(60, 3600),
         }
     }
 
@@ -401,11 +393,10 @@ impl Scope {
             | Self::Recall
             | Self::KeyRotate
             | Self::EmailVerify
-            | Self::EmailVaultOpen
-            | Self::EmailVaultStore
             | Self::HandleCheck
             | Self::AnonCredential
-            | Self::ChannelRecovery => CODE_TOO_MANY_ATTEMPTS,
+            | Self::ResetFactor
+            | Self::OwnedChannelsSecret => CODE_TOO_MANY_ATTEMPTS,
             Self::EmailLetterHandle | Self::EmailLetterAccount => CODE_EMAIL_RATE_LIMITED,
             Self::DeviceRequestTarget => CODE_DEVICE_REQUEST_LIMITED,
             Self::HandleBind => CODE_HANDLE_BIND_LIMITED,
@@ -1191,10 +1182,12 @@ mod tests {
         // were the removed one-time-code factor's. None is reused. 14 is the
         // ADR-0074 recall (listed after 15: it was added later); 16 is the
         // key rotation; 23 the ADR-0092 anonymous credential, 24 the
-        // ADR-0097 supporter code, 25 the ADR-0101 channel recovery.
+        // ADR-0097 supporter code. 20 and 21 (the email vault) and 25 (the
+        // channel-recovery OPRF) are retired; 26 is the reset factor and 27
+        // the owned-channels secret (ADR-0073 / ADR-0101, 2026-11-26).
         assert_eq!(
             pinned,
-            vec![1, 2, 3, 4, 9, 10, 11, 12, 13, 15, 14, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]
+            vec![1, 2, 3, 4, 9, 10, 11, 12, 13, 15, 14, 16, 17, 18, 19, 22, 23, 24, 26, 27]
         );
         for (i, s) in Scope::ALL.iter().enumerate() {
             assert_eq!(s.index(), i);

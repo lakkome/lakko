@@ -137,3 +137,24 @@ path = "fuzz_targets/supporters_list_open.rs"
 test = false
 doc = false
 bench = false
+
+# The seal announcement (ADR-0101 section 10): the account's seal public
+# keys, signed by its identity key and served by discovery beside the
+# identity bundle, which a hostile operator controls. Bounded, canonical,
+# up to 641 bytes; whatever decodes must re-encode to itself.
+[[bin]]
+name = "reset_seals_open"
+path = "fuzz_targets/reset_seals_open.rs"
+test = false
+doc = false
+bench = false
+
+# The reset seal (ADR-0101 section 10): a key reset's new account key signed
+# by an announced seal key, carried in the attested publish and the KT reset
+# leaf, both served by the operator. Fixed 214 bytes.
+[[bin]]
+name = "reset_seal_open"
+path = "fuzz_targets/reset_seal_open.rs"
+test = false
+doc = false
+bench = false

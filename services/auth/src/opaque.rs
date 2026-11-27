@@ -495,6 +495,12 @@ pub(crate) struct SignupFinishResponse {
     /// shared [`crate::session::SessionPair`].
     #[serde(flatten)]
     pub(crate) grant: crate::session::FreshGrant,
+    /// Base64url (no padding) of the account's 32-byte server half `S` of the
+    /// owned-channels password lock (ADR-0101 section 7, item 1): released
+    /// here, where the account was created in this very exchange, and
+    /// otherwise only to `POST /account/owned-channels-secret` with a reset
+    /// factor grant.
+    pub(crate) owned_channels_secret: String,
 }
 
 /// `POST /signup/finish`, counted as a signup step (ADR-0096); the flow is
@@ -634,11 +640,18 @@ async fn signup_finish_answer(
     // The password was set in this exchange: mint the fresh-auth grant at
     // the generation the pair was issued under (a guest signup is this same
     // route, so it gets one too).
-    let grant = crate::session::issue_fresh_grant(&state, &account_id, session.key_generation)?;
+    let grant = crate::session::issue_fresh_grant(
+        &state,
+        &account_id,
+        session.key_generation,
+        lakko_auth_token::GrantMethod::Password,
+    )?;
+    let owned_channels_secret = crate::owned_channels::signup_secret(&state, &account_id)?;
     Ok(Json(SignupFinishResponse {
         ok: true,
         session,
         grant,
+        owned_channels_secret,
     }))
 }
 
@@ -1084,7 +1097,7 @@ async fn login_finish_inner(
     // a session. The password sign-in's refusal carries the fresh-auth grant
     // it would have minted (the only use left for it is deleting the account).
     let landing_grant = if expected_kind == KIND_PASSWORD {
-        crate::suspension::LandingGrant::Fresh
+        crate::suspension::LandingGrant::Fresh(lakko_auth_token::GrantMethod::Password)
     } else {
         crate::suspension::LandingGrant::None
     };
@@ -1144,8 +1157,12 @@ async fn login_finish_answer(
     Json(payload): Json<LoginFinishRequest>,
 ) -> Result<Json<PasswordLoginFinishResponse>, OpaqueError> {
     let (account_id, login) = login_finish_inner(&state, payload, KIND_PASSWORD).await?;
-    let grant =
-        crate::session::issue_fresh_grant(&state, &account_id, login.session.key_generation)?;
+    let grant = crate::session::issue_fresh_grant(
+        &state,
+        &account_id,
+        login.session.key_generation,
+        lakko_auth_token::GrantMethod::Password,
+    )?;
     Ok(Json(PasswordLoginFinishResponse { login, grant }))
 }
 
@@ -2086,7 +2103,10 @@ mod signup_login_limits_e2e_tests {
             anon_cred: None,
             handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
             recovery_email: None,
-            channel_recovery: None,
+            owned_channels: Some(std::sync::Arc::new(
+                crate::owned_channels::OwnedChannelsMaster::from_bytes([0x0C; 32]),
+            )),
+            reset_factor_grant_ttl_ms: 600_000,
             limits: Arc::new(limits),
         }
     }
@@ -2632,7 +2652,23 @@ mod signup_login_limits_e2e_tests {
             .unwrap();
         assert_eq!(verified.account_id, id);
         assert_eq!(verified.key_generation, 1);
+        assert_eq!(verified.method, lakko_auth_token::GrantMethod::Password);
         assert_eq!(v["key_generation"].as_u64(), Some(1));
+        // ADR-0101 section 7: the signup answer carries the account's server
+        // half of the owned-channels password lock.
+        let expected = state
+            .owned_channels
+            .as_ref()
+            .expect("a test state has a master")
+            .server_half_b64(&id);
+        assert_eq!(v["owned_channels_secret"].as_str(), Some(expected.as_str()));
+        assert_eq!(
+            URL_SAFE_NO_PAD
+                .decode(v["owned_channels_secret"].as_str().unwrap())
+                .unwrap()
+                .len(),
+            32
+        );
         (id, v["session_token"].as_str().unwrap().to_string(), grant)
     }
 
@@ -2830,7 +2866,12 @@ mod signup_login_limits_e2e_tests {
         assert_eq!(st, StatusCode::OK);
         let fresh = state
             .session_token_secret
-            .issue_fresh_grant(&a, 1, crate::session::now_ms() + 60_000)
+            .issue_fresh_grant(
+                &a,
+                1,
+                lakko_auth_token::GrantMethod::Password,
+                crate::session::now_ms() + 60_000,
+            )
             .unwrap();
         let (st, _) = delete_account(&state, &a_token, Some(&fresh)).await;
         assert_eq!(st, StatusCode::NO_CONTENT);
@@ -3086,7 +3127,12 @@ mod signup_login_limits_e2e_tests {
         let verified = state.session_token_secret.verify(token, now).unwrap();
         state
             .session_token_secret
-            .issue_fresh_grant(&verified.account_id, verified.key_generation, now + 60_000)
+            .issue_fresh_grant(
+                &verified.account_id,
+                verified.key_generation,
+                lakko_auth_token::GrantMethod::Password,
+                now + 60_000,
+            )
             .unwrap()
     }
 
@@ -3363,9 +3409,32 @@ mod signup_login_limits_e2e_tests {
     // Reset the account keys (ADR-0073 section 2 and 3)
     // ------------------------------------------------------------------
 
-    /// Run the two reset calls with `token` and the key-reset `grant` for
-    /// `seed` and `pubkey`; returns the finish answer (or the start's, when
-    /// that is refused).
+    /// The reset factor grant these tests reset with: a usable fresh-auth
+    /// `grant` becomes an `f1` grant for the same account and generation
+    /// (the factor routes have their own tests in `reset_factor_tests`), and
+    /// anything else is sent as it is, so the reset refuses it as before.
+    fn as_reset_grant(state: &crate::AppState, grant: Option<&str>) -> Option<String> {
+        let grant = grant?;
+        let now = crate::session::now_ms();
+        Some(
+            match state.session_token_secret.verify_fresh_grant(grant, now) {
+                Ok(v) => state
+                    .session_token_secret
+                    .issue_factor_grant(
+                        &v.account_id,
+                        v.key_generation,
+                        lakko_auth_token::ResetFactor::Authenticator,
+                        now + 60_000,
+                    )
+                    .unwrap(),
+                Err(_) => grant.to_string(),
+            },
+        )
+    }
+
+    /// Run the two reset calls with `token` and the reset factor grant made
+    /// from `grant` ([`as_reset_grant`]) for `seed` and `pubkey`; returns the
+    /// finish answer (or the start's, when that is refused).
     async fn reset_keys(
         state: &crate::AppState,
         token: &str,
@@ -3373,13 +3442,14 @@ mod signup_login_limits_e2e_tests {
         seed: &[u8],
         pubkey: &[u8; 32],
     ) -> (StatusCode, Bytes) {
+        let grant = as_reset_grant(state, grant);
         let (cs, req) = reg_start(seed);
         let (st, body) = send_json(
             state,
             Method::POST,
             "/account/keys/reset/start",
             Some(token),
-            Some(&serde_json::json!({ "fresh_grant": grant, "recovery_request": req })),
+            Some(&serde_json::json!({ "reset_grant": grant, "recovery_request": req })),
         )
         .await;
         if st != StatusCode::OK {
@@ -3393,7 +3463,7 @@ mod signup_login_limits_e2e_tests {
             "/account/keys/reset/finish",
             Some(token),
             Some(&serde_json::json!({
-                "fresh_grant": grant,
+                "reset_grant": grant,
                 "recovery_upload": upload,
                 "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode(pubkey),
                 "identity_proof_b64": proof_for(token, pubkey),
@@ -3412,6 +3482,7 @@ mod signup_login_limits_e2e_tests {
         seed: &[u8],
         pubkey: &[u8; 32],
     ) -> (StatusCode, Bytes) {
+        let grant = as_reset_grant(state, grant);
         let cs = ClientRegistration::<LakkoCipherSuite>::start(&mut OsRng, seed).unwrap();
         let response = ServerRegistration::<LakkoCipherSuite>::start(
             &state.opaque_setup,
@@ -3426,7 +3497,7 @@ mod signup_login_limits_e2e_tests {
             "/account/keys/reset/finish",
             Some(token),
             Some(&serde_json::json!({
-                "fresh_grant": grant,
+                "reset_grant": grant,
                 "recovery_upload": upload,
                 "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode(pubkey),
                 "identity_proof_b64": proof_for(token, pubkey),
@@ -4103,7 +4174,7 @@ mod signup_login_limits_e2e_tests {
             "/account/keys/reset/start",
             Some(&b_token),
             Some(&serde_json::json!({
-                "account_id": a_b64, "fresh_grant": b_grant, "recovery_request": req,
+                "account_id": a_b64, "reset_grant": as_reset_grant(&state, Some(&b_grant)), "recovery_request": req,
             })),
         )
         .await;
@@ -4118,7 +4189,7 @@ mod signup_login_limits_e2e_tests {
             Some(&b_token),
             Some(&serde_json::json!({
                 "account_id": a_b64,
-                "fresh_grant": b_grant,
+                "reset_grant": as_reset_grant(&state, Some(&b_grant)),
                 "recovery_upload": upload,
                 "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode(key_8b),
                 "identity_proof_b64": proof_for(&b_token, &key_8b),
@@ -4142,8 +4213,8 @@ mod signup_login_limits_e2e_tests {
         // Malformed bodies are a 400 and change nothing: a bad upload, a
         // bad key.
         for body in [
-            serde_json::json!({ "fresh_grant": a_grant, "recovery_upload": "AAAA", "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode([1u8; 32]) }),
-            serde_json::json!({ "fresh_grant": a_grant, "recovery_upload": "AAAA", "new_signature_pubkey_b64": "AAAA" }),
+            serde_json::json!({ "reset_grant": as_reset_grant(&state, Some(&a_grant)), "recovery_upload": "AAAA", "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode([1u8; 32]) }),
+            serde_json::json!({ "reset_grant": as_reset_grant(&state, Some(&a_grant)), "recovery_upload": "AAAA", "new_signature_pubkey_b64": "AAAA" }),
         ] {
             let (st, _) = send_json(
                 &state,
@@ -4169,7 +4240,7 @@ mod signup_login_limits_e2e_tests {
             "/account/keys/reset/finish",
             Some(&a_token),
             Some(&serde_json::json!({
-                "fresh_grant": a_grant,
+                "reset_grant": as_reset_grant(&state, Some(&a_grant)),
                 "recovery_upload": upload,
                 "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode([1u8; 31]),
             })),
@@ -4220,7 +4291,7 @@ mod signup_login_limits_e2e_tests {
             Method::POST,
             "/account/keys/reset/start",
             Some(&a_token),
-            Some(&serde_json::json!({ "fresh_grant": grant1, "recovery_request": "%%%" })),
+            Some(&serde_json::json!({ "reset_grant": as_reset_grant(&state, Some(&grant1)), "recovery_request": "%%%" })),
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
@@ -4270,7 +4341,7 @@ mod signup_login_limits_e2e_tests {
             "/account/keys/reset/finish",
             Some(&a_token2),
             Some(&serde_json::json!({
-                "fresh_grant": grant2,
+                "reset_grant": as_reset_grant(&state, Some(&grant2)),
                 "recovery_upload": upload,
                 "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode(key_9c),
                 "identity_proof_b64": proof_for(&a_token2, &key_9c),
@@ -4353,6 +4424,12 @@ mod signup_login_limits_e2e_tests {
         assert_eq!(err_code(body), "fresh-auth-required", "{what}");
     }
 
+    /// The reset routes' refusal (ADR-0073, amended 2026-11-26).
+    fn assert_reset_factor_required(st: StatusCode, body: &[u8], what: &str) {
+        assert_eq!(st, StatusCode::FORBIDDEN, "{what}");
+        assert_eq!(err_code(body), "reset-factor-required", "{what}");
+    }
+
     /// A session alone resets nothing. Without a grant, and with every kind
     /// of unusable grant, both calls answer `403 fresh-auth-required`; the
     /// generation, the passkeys and the recovery credential stay as they
@@ -4384,11 +4461,15 @@ mod signup_login_limits_e2e_tests {
 
         let now = crate::session::now_ms();
         let secret = &state.session_token_secret;
-        let expired = secret.issue_fresh_grant(&a, 1, now - 1).unwrap();
-        let future_generation = secret.issue_fresh_grant(&a, 2, now + 60_000).unwrap();
+        let expired = secret
+            .issue_fresh_grant(&a, 1, lakko_auth_token::GrantMethod::Password, now - 1)
+            .unwrap();
+        let future_generation = secret
+            .issue_fresh_grant(&a, 2, lakko_auth_token::GrantMethod::Password, now + 60_000)
+            .unwrap();
         let foreign_secret = lakko_auth_token::TokenSecret::new(vec![9u8; 64])
             .unwrap()
-            .issue_fresh_grant(&a, 1, now + 60_000)
+            .issue_fresh_grant(&a, 1, lakko_auth_token::GrantMethod::Password, now + 60_000)
             .unwrap();
         let access_as_grant = secret.issue(&a, 1, &[0u8; 32], 0, now + 60_000).unwrap();
         let refresh_as_grant = secret
@@ -4413,10 +4494,10 @@ mod signup_login_limits_e2e_tests {
         ];
         for (what, grant) in &bad {
             let (st, body) = reset_keys(&state, &a_token, *grant, &new_seed, &pk(0xBA)).await;
-            assert_password_required(st, &body, &format!("start with {what}"));
+            assert_reset_factor_required(st, &body, &format!("start with {what}"));
             let (st, body) =
                 reset_finish_only(&state, &a_token, *grant, &a, &new_seed, &pk(0xBA)).await;
-            assert_password_required(st, &body, &format!("finish with {what}"));
+            assert_reset_factor_required(st, &body, &format!("finish with {what}"));
         }
         // The grant is checked before the body: a session without the
         // password learns nothing else about the route.
@@ -4428,10 +4509,10 @@ mod signup_login_limits_e2e_tests {
             Some(&serde_json::json!({ "recovery_request": "%%%" })),
         )
         .await;
-        assert_password_required(st, &body, "a malformed start without a grant");
+        assert_reset_factor_required(st, &body, "a malformed start without a grant");
         // A's own grant under B's session is another account's grant there.
         let (st, body) = reset_keys(&state, &b_token, Some(&a_grant), &new_seed, &pk(0xBA)).await;
-        assert_password_required(st, &body, "A's grant with B's session");
+        assert_reset_factor_required(st, &body, "A's grant with B's session");
 
         // Nothing changed.
         assert_eq!(
@@ -4489,10 +4570,10 @@ mod signup_login_limits_e2e_tests {
 
         for (what, old) in [("the spent grant", &grant), ("its sibling", &sibling)] {
             let (st, body) = reset_keys(&state, &token2, Some(old), &[0xC3u8; 64], &pk(0xCB)).await;
-            assert_password_required(st, &body, &format!("start with {what}"));
+            assert_reset_factor_required(st, &body, &format!("start with {what}"));
             let (st, body) =
                 reset_finish_only(&state, &token2, Some(old), &a, &[0xC3u8; 64], &pk(0xCB)).await;
-            assert_password_required(st, &body, &format!("finish with {what}"));
+            assert_reset_factor_required(st, &body, &format!("finish with {what}"));
         }
         // A refreshed session carries no grant either.
         let (st, body) = refresh(&state, &refresh2).await;
@@ -4594,7 +4675,7 @@ mod signup_login_limits_e2e_tests {
                     &[
                         ("service", "auth"),
                         ("route", "/account/keys/reset/start"),
-                        ("code", "fresh-auth-required"),
+                        ("code", "reset-factor-required"),
                     ],
                 ),
             ]
@@ -4645,7 +4726,17 @@ mod signup_login_limits_e2e_tests {
         assert!(by_phrase.get("fresh_grant_expires_at_ms").is_none());
         let phrase_token = by_phrase["session_token"].as_str().unwrap();
         let (st, body) = reset_keys(&state, phrase_token, None, &[0xE2u8; 64], &pk(0xEA)).await;
-        assert_password_required(st, &body, "a recovery-login session");
+        assert_reset_factor_required(st, &body, "a recovery-login session");
+        // Nor reach a reset factor (ADR-0073, amended 2026-11-26).
+        let (st, body) = send_json(
+            &state,
+            Method::POST,
+            "/account/keys/reset/factor/totp",
+            Some(phrase_token),
+            Some(&serde_json::json!({ "code": "123456" })),
+        )
+        .await;
+        assert_password_required(st, &body, "a reset factor from a recovery-login session");
 
         // A wrong password finishes nowhere, so mints nothing.
         assert_eq!(password_login(&state, &ha, b"wrong").await, Err(()));
@@ -4703,19 +4794,37 @@ mod signup_login_limits_e2e_tests {
             ("garbage", Some("k1.nope".into())),
             (
                 "expired",
-                Some(secret.issue_fresh_grant(a, 1, now - 1).unwrap()),
+                Some(
+                    secret
+                        .issue_fresh_grant(a, 1, lakko_auth_token::GrantMethod::Password, now - 1)
+                        .unwrap(),
+                ),
             ),
             ("another account's", Some(other.to_string())),
             (
                 "a generation the account is not at",
-                Some(secret.issue_fresh_grant(a, 2, now + 60_000).unwrap()),
+                Some(
+                    secret
+                        .issue_fresh_grant(
+                            a,
+                            2,
+                            lakko_auth_token::GrantMethod::Password,
+                            now + 60_000,
+                        )
+                        .unwrap(),
+                ),
             ),
             (
                 "tagged under another secret",
                 Some(
                     lakko_auth_token::TokenSecret::new(vec![9u8; 64])
                         .unwrap()
-                        .issue_fresh_grant(a, 1, now + 60_000)
+                        .issue_fresh_grant(
+                            a,
+                            1,
+                            lakko_auth_token::GrantMethod::Password,
+                            now + 60_000,
+                        )
                         .unwrap(),
                 ),
             ),

@@ -43,11 +43,22 @@
 //!   days (default 30); slides on every `POST /auth/session/refresh`.
 //! - `LAKKO_FRESH_GRANT_TTL_SECS` — validity window in seconds of the
 //!   fresh-auth grant a password sign-in, a passkey sign-in or a signup
-//!   returns (default 600; chosen, not measured). Reset account keys, delete
-//!   account, add a device and add a passkey each require a live one (`403
-//!   fresh-auth-required` otherwise), with one exception: deleting an account
-//!   that has a passkey is authorised by the ADR-0014 passkey action grant
-//!   alone, and the fresh-auth grant is not read.
+//!   returns (default 600; chosen, not measured). Delete account, add a
+//!   device, add a passkey and add an authenticator each require a live one
+//!   (`403 fresh-auth-required` otherwise), with one exception: deleting an
+//!   account that has a passkey is authorised by the ADR-0014 passkey action
+//!   grant alone, and the fresh-auth grant is not read. The grant names how
+//!   it was minted (password or passkey); the reset factor routes accept
+//!   only the password's.
+//! - `LAKKO_RESET_FACTOR_GRANT_TTL_SECS` — validity window in seconds of the
+//!   reset factor grant a reset factor route returns (default 600; chosen,
+//!   not measured; ADR-0073, amended 2026-11-26).
+//! - `LAKKO_TOTP_ENC_KEY` — base64 of the 32-byte key the authenticator
+//!   secrets are sealed under at rest. **Required** at startup since ADR-0073
+//!   (amended 2026-11-26).
+//! - `LAKKO_AUTH_OWNED_CHANNELS_SECRET` — 64 hex characters, the master of
+//!   every account's server half of the owned-channels password lock
+//!   (ADR-0101 section 7). **Required** at startup.
 //! - `LAKKO_WEBAUTHN_RP_ID`     — WebAuthn relying-party identifier
 //!   (eTLD+1, e.g. `lakko.me`). Optional. Unset = passkey routes
 //!   return 503.
@@ -78,8 +89,8 @@
 //!   warning at startup. Losing it unbinds every handle.
 //! - `LAKKO_AUTH_EMAIL_PEPPER` — 64 hex characters keying the stored
 //!   recovery-email value (ADR-0075). Optional; unset (or without
-//!   `LAKKO_VAULT_ENC_KEY` / `LAKKO_AUTH_HANDLE_PEPPER`) = the enrol, remove
-//!   and recover routes answer 503 `recovery-email-disabled` and
+//!   `LAKKO_AUTH_HANDLE_PEPPER`) = the enrol, remove, recover and email
+//!   reset-factor routes answer 503 `recovery-email-disabled` and
 //!   `GET /recovery-email/available` answers `{"available": false}`. Losing
 //!   it turns every account's recovery email off.
 //! - `LAKKO_AUTH_SMTP_HOST` / `_PORT` / `_TLS` (`starttls` | `implicit`) /
@@ -88,7 +99,7 @@
 //!   sender: nothing is delivered, and neither the address nor the code is
 //!   logged.
 //! - `LAKKO_AUTH_LIMIT_EMAIL_LETTER_HANDLE` / `_EMAIL_LETTER_ACCOUNT` /
-//!   `_EMAIL_VERIFY` / `_EMAIL_VAULT_OPEN` / `_EMAIL_VAULT_STORE` and `LAKKO_AUTH_IP_LIMIT_EMAIL` —
+//!   `_EMAIL_VERIFY` and `LAKKO_AUTH_IP_LIMIT_EMAIL` —
 //!   the recovery email's limits, each `N/SECS` (defaults chosen, not
 //!   measured; see `src/limits.rs`).
 //! - `LAKKO_AUTH_INTERNAL_BIND` — the internal moderation listener (ADR-0099
@@ -147,9 +158,10 @@
 //!   `429 handle-bind-limited` per account, per address, and within the minimum interval
 //!   between handle changes)
 //!   Since ADR-0076 a bind that CHANGES the handle needs `fresh_grant` in the body (`403
-//!   fresh-auth-required`), and with `previous_handle` + `recovery_email {address,
-//!   vault_salt?, sealed_entropy?}` it moves the recovery email to the new handle instead of
-//!   dropping it (`403 address-mismatch`, `409 handle-mismatch`).
+//!   fresh-auth-required`), and with `previous_handle` + `recovery_email {address}` it moves
+//!   the recovery email to the new handle instead of dropping it (`403 address-mismatch`,
+//!   `409 handle-mismatch`); dropping it when it is the last second factor is `409
+//!   last-factor`.
 //! - `POST /auth/login-handle/check` — `{state: "same" | "other" | "none"}` for the handle a
 //!   device holds against its account's bound one (ADR-0076, bearer-auth)
 //! - `DELETE /auth/login-handle`     — remove it (ADR-0054 S5, bearer-auth)
@@ -158,12 +170,21 @@
 //! - `POST /account/keys/reset/start` / `/finish` — reset the account keys: bump the key
 //!   generation, replace the recovery credential, delete passkeys / vaults / grants /
 //!   requests, mint the key-reset attestation, issue a fresh pair (ADR-0073 section 2,
-//!   bearer-auth AND a `fresh_grant` from a password or passkey sign-in made just
-//!   now, else `403 fresh-auth-required`; amended 2026-10-04 and 2026-10-06, when
-//!   `DELETE /account` (header `x-lakko-fresh-grant`, for an account without a passkey;
-//!   an account with one needs the passkey action grant instead), `POST /device/authorize/start`
-//!   and `POST /device/requests/{id}/{pake,result}` (body `fresh_grant`) gained the
-//!   same gate)
+//!   bearer-auth AND a `reset_grant`, else `403 reset-factor-required`; amended
+//!   2026-11-26). `DELETE /account` (header `x-lakko-fresh-grant`, for an account without a
+//!   passkey; an account with one needs the passkey action grant instead),
+//!   `POST /device/authorize/start`, `POST /device/requests/{id}/{pake,result}` and
+//!   `POST /totp/enroll/{start,finish}` (body `fresh_grant`) need a fresh-auth grant
+//! - `POST /account/keys/reset/factor/totp` `{fresh_grant, code}`,
+//!   `/factor/email/start` `{fresh_grant, handle, address, lang?}`,
+//!   `/factor/email/finish` `{fresh_grant, challenge_id, code}`, `/factor/passkey`
+//!   `{fresh_grant}` — the reset's second factor (ADR-0073, amended 2026-11-26): a
+//!   password-minted fresh-auth grant (`403 fresh-auth-required`) and the factor (`401
+//!   factor-refused`) -> `{reset_grant, reset_grant_expires_at_ms}` (the email start
+//!   answers `{challenge_id, resend_after_secs, expires_in_secs}` whatever was typed)
+//! - `POST /account/owned-channels-secret` `{reset_grant}` -> `{owned_channels_secret}`: the
+//!   server half `S` of the owned-channels password lock (ADR-0101 section 7; bearer; the
+//!   grant is not spent; `Scope::OwnedChannelsSecret`). `/signup/finish` answers it too
 //! - `POST /auth/session/logout`     — raise the session floor of the caller's own device, so
 //!   its access token and refresh credentials stop at auth at once (ADR-0074 section 2.1,
 //!   bearer-auth, no body)
@@ -196,21 +217,12 @@
 //!   (ADR-0075, anonymous) -> `{available}`
 //! - `POST /recovery-email/enrol/start` / `/finish` — add or replace the account's recovery
 //!   email with a mailed code (ADR-0075 section 6, bearer-auth; the start also needs a
-//!   `fresh_grant` and the account's own bound `handle`; the finish optionally stores the
-//!   44-byte email vault)
-//! - `GET  /recovery-email`          — `{available, enabled, vault, phrase_saved, totp}` for the
-//!   session's account (bearer-auth)
-//! - `DELETE /recovery-email`        — remove the recovery email and the vault (bearer-auth +
-//!   `fresh_grant`)
-//! - `PUT  /recovery-email/vault`    — store an email vault where the account has none, for the
-//!   address it already confirmed (ADR-0075 amended 2026-10-13; bearer-auth, NO fresh-auth
-//!   grant; body `handle`, `address`, `vault_salt`, `sealed_entropy`; `403 address-mismatch`,
-//!   `409 no-recovery-email` / `phrase-saved` / `vault-exists`)
-//! - `DELETE /recovery-email/vault`  — the account becomes phrase-protected: delete the vault,
-//!   mark the account, write the notice (bearer-auth + `fresh_grant`)
+//!   `fresh_grant` and the account's own bound `handle`)
+//! - `GET  /recovery-email`          — `{available, enabled, totp}` for the session's account
+//!   (bearer-auth)
+//! - `DELETE /recovery-email`        — remove the recovery email (bearer-auth + `fresh_grant`;
+//!   `409 last-factor` when it is the account's last second factor)
 //! - `GET  /account/notices?after=`  — what happened to the account, for its own devices
-//! - `GET  /account/phrase`           — `{saved, rotation_needed}`: whether saving a phrase takes a key rotation
-//! - `POST /account/phrase/saved`     — the owner saved a phrase that was never in a vault (fresh-auth grant)
 //!   (ADR-0075 section 9, bearer-auth; kept 60 days)
 //! - `POST /recovery-email/recover/start` — mail a code if the handle and address belong
 //!   together; one answer for a match and a miss (ADR-0075 section 7, anonymous)
@@ -218,18 +230,15 @@
 //!   uniform `401 code-refused` (anonymous)
 //! - `POST /recovery-email/recover/totp` — the authenticator code, when the account has one
 //!   (anonymous, under the ticket)
-//! - `POST /recovery-email/recover/open` — the email vault (`mode: "vault"`, ticket spent) or
-//!   `mode: "password"` (anonymous, under the ticket)
 //! - `POST /recovery-email/recover/password/start` / `/finish` — choose a new password under
-//!   the ticket (password mode): captures the recall anchor, replaces the envelope, lands a
-//!   session pair and mints NO fresh-auth grant (anonymous)
+//!   the ticket: captures the recall anchor, replaces the envelope, lands a session pair and
+//!   mints NO fresh-auth grant (anonymous)
 //!
-//! Since ADR-0075 the recall (`POST /account/recall/{status,start,finish}`) also has a phrase
-//! arm: `status` takes an optional `handle` and answers `account_id_b64` and `phrase_arm`,
-//! and `start` takes `proof: "phrase"` (a login against the anchored RECOVERY envelope),
-//! refused for an account that had an email vault when the anchor was captured. A key
-//! rotation (`/account/keys/rotate/finish`) takes `phrase_saved: true` for "Save a recovery
-//! phrase".
+//! The email vault is removed (ADR-0075, amended 2026-11-26): a mailed code never returns
+//! keys. Since ADR-0075 the recall (`POST /account/recall/{status,start,finish}`) also has a
+//! phrase arm: `status` takes an optional `handle` and answers `account_id_b64` and
+//! `phrase_arm`, and `start` takes `proof: "phrase"` (a login against the anchored RECOVERY
+//! envelope); since the vault's removal it serves every account.
 //!
 //! Since ADR-0074 every session-landing route also takes an optional `device_id_b64` (the
 //! device the pair names), and `POST /auth/genesis/attest` records the account's identity
@@ -243,12 +252,12 @@ mod anon_credential;
 mod anon_tokens;
 mod backup_head;
 mod call_jwt;
-mod channel_recovery;
 mod device_authorize;
 mod device_request;
 mod devices;
 #[cfg(test)]
 mod devices_tests;
+mod factors;
 mod genesis_attest;
 mod identity_target;
 mod key_reset;
@@ -258,8 +267,8 @@ mod login_handle;
 mod mail;
 mod metrics;
 mod opaque;
+mod owned_channels;
 mod passkey_vault;
-mod phrase_saved;
 mod pow;
 mod purge;
 mod recall;
@@ -268,6 +277,9 @@ mod recall_tests;
 mod recovery_email;
 #[cfg(test)]
 mod recovery_email_tests;
+mod reset_factor;
+#[cfg(test)]
+mod reset_factor_tests;
 mod room_cap;
 mod session;
 mod supporter_codes;
@@ -320,6 +332,11 @@ const DEFAULT_REFRESH_TOKEN_TTL_DAYS: u64 = 30;
 /// short enough that a grant lifted from a device is soon worthless. Override via
 /// `LAKKO_FRESH_GRANT_TTL_SECS`.
 const DEFAULT_FRESH_GRANT_TTL_SECS: u64 = 600;
+
+/// Default reset-factor-grant TTL — 10 minutes (ADR-0073, amended
+/// 2026-11-26; chosen, not measured). Override via
+/// `LAKKO_RESET_FACTOR_GRANT_TTL_SECS`.
+const DEFAULT_RESET_FACTOR_GRANT_TTL_SECS: u64 = 600;
 
 /// Migrations directory (relative to crate root). `sqlx::migrate!` reads it
 /// at compile time and embeds the SQL in the binary.
@@ -384,9 +401,9 @@ pub(crate) struct AppState {
     pub(crate) turn: Option<Arc<turn::TurnConfig>>,
     /// ADR-0018 factor (c) — server-static AEAD key encrypting TOTP
     /// secrets at rest (`totp_secrets.secret_enc`). Loaded from
-    /// `LAKKO_TOTP_ENC_KEY` (base64, exactly 32 bytes after decode);
-    /// `None` when unset, in which case the three `/totp/*` routes
-    /// return 503 — loud refusal, no silent fallback.
+    /// `LAKKO_TOTP_ENC_KEY` (base64, exactly 32 bytes after decode),
+    /// required at startup since ADR-0073 (amended 2026-11-26); `None` only
+    /// in a test state, where the `/totp/*` routes return 503.
     pub(crate) totp_enc_key: Option<Arc<[u8; 32]>>,
     /// ADR-0072 — the key that wraps the passkey blobs at rest (`LAKKO_VAULT_ENC_KEY`). `None` disables the
     /// `/vault/passkey*` routes (503).
@@ -419,14 +436,20 @@ pub(crate) struct AppState {
     pub(crate) limits: Arc<limits::Limits>,
     /// ADR-0075 — the recovery email: the pepper keying `email_key` (and the
     /// subkeys derived from it) and the mail sender. `None` when
-    /// `LAKKO_AUTH_EMAIL_PEPPER` is unset: the enrol, remove and recover
-    /// routes answer 503 `recovery-email-disabled`. The feature also needs
-    /// `vault_enc_key` and `handle_pepper`.
+    /// `LAKKO_AUTH_EMAIL_PEPPER` is unset: the enrol, remove, recover and
+    /// reset-factor routes answer 503 `recovery-email-disabled`. The feature
+    /// also needs `handle_pepper`.
     pub(crate) recovery_email: Option<Arc<recovery_email::Config>>,
-    /// ADR-0101 section 7: the master of the per-account channel recovery
-    /// OPRF key (`LAKKO_AUTH_CHANNEL_RECOVERY_SECRET`). `None`: the route
-    /// answers `503 channel-recovery-disabled`.
-    pub(crate) channel_recovery: Option<Arc<channel_recovery::ChannelRecoveryMaster>>,
+    /// ADR-0101 section 7: the master of every account's server half `S`
+    /// of the owned-channels password lock
+    /// (`LAKKO_AUTH_OWNED_CHANNELS_SECRET`). Required at startup, so `main`
+    /// always sets it; `None` only in a test state, where `/signup/finish`
+    /// and `POST /account/owned-channels-secret` answer `500`.
+    pub(crate) owned_channels: Option<Arc<owned_channels::OwnedChannelsMaster>>,
+    /// Reset-factor-grant TTL in milliseconds
+    /// (`LAKKO_RESET_FACTOR_GRANT_TTL_SECS` x 1_000; ADR-0073, amended
+    /// 2026-11-26): how long after a second factor the keys may be reset.
+    pub(crate) reset_factor_grant_ttl_ms: i64,
 }
 
 #[tokio::main]
@@ -518,6 +541,13 @@ async fn main() -> Result<()> {
     let fresh_grant_ttl_ms: i64 = i64::try_from(fresh_grant_ttl_secs)
         .unwrap_or(i64::MAX / 1_000)
         .saturating_mul(1_000);
+    let reset_factor_grant_ttl_secs: u64 = std::env::var("LAKKO_RESET_FACTOR_GRANT_TTL_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_RESET_FACTOR_GRANT_TTL_SECS);
+    let reset_factor_grant_ttl_ms: i64 = i64::try_from(reset_factor_grant_ttl_secs)
+        .unwrap_or(i64::MAX / 1_000)
+        .saturating_mul(1_000);
 
     // Phase 2a2 — optional WebAuthn config. Unset env vars leave the
     // four `/webauthn/*` routes returning 503; the rest of the
@@ -566,15 +596,11 @@ async fn main() -> Result<()> {
         );
     }
 
-    // ADR-0018 factor (c) — TOTP secret-encryption key. Loud-fail on a
-    // malformed value (bad base64 / wrong length); soft-disable when the
-    // env var is simply unset (the /totp/* routes then return 503).
+    // ADR-0018 factor (c) — TOTP secret-encryption key. Required since
+    // ADR-0073 (amended 2026-11-26): the authenticator is always offered at
+    // sign-up and as a reset factor. Loud-fail when unset or malformed.
     let totp_enc_key = totp::load_totp_enc_key().context("load LAKKO_TOTP_ENC_KEY")?;
-    if totp_enc_key.is_some() {
-        tracing::info!("totp endpoints enabled");
-    } else {
-        tracing::info!("totp endpoints disabled (LAKKO_TOTP_ENC_KEY not set)");
-    }
+    tracing::info!("totp endpoints enabled");
 
     // ADR-0072 — the passkey-vault at-rest wrapping key. Loud-fail on a
     // malformed value; soft-disable when unset (the /vault/passkey* routes
@@ -646,11 +672,11 @@ async fn main() -> Result<()> {
     // the worker off (rows still queue).
     let purge_config = purge::PurgeConfig::from_env().context("load the account purge config")?;
 
-    // ADR-0101 section 7 — the channel recovery master. Loud-fail when
-    // malformed; dormant (with a warning) when unset.
-    let channel_recovery =
-        channel_recovery::load_master().context("load LAKKO_AUTH_CHANNEL_RECOVERY_SECRET")?;
-    channel_recovery::log_startup(channel_recovery.as_ref());
+    // ADR-0101 section 7 — the master of the owned-channels server half.
+    // Required: loud-fail when unset or malformed.
+    let owned_channels =
+        owned_channels::load_master().context("load LAKKO_AUTH_OWNED_CHANNELS_SECRET")?;
+    tracing::info!("owned-channels server half enabled");
 
     let state = AppState {
         db: pool.clone(),
@@ -664,7 +690,7 @@ async fn main() -> Result<()> {
         call_jwt_signing: Arc::new(call_jwt_signing),
         attest_key: Arc::new(attest_key),
         turn: turn_config.map(Arc::new),
-        totp_enc_key: totp_enc_key.map(Arc::new),
+        totp_enc_key: Some(Arc::new(totp_enc_key)),
         vault_enc_key: vault_enc_key.map(Arc::new),
         room_cap: Arc::new(room_cap),
         backup_head_mint_rate,
@@ -672,7 +698,8 @@ async fn main() -> Result<()> {
         anon_cred: anon_cred.map(Arc::new),
         handle_pepper: handle_pepper.map(Arc::new),
         recovery_email: recovery_email.map(Arc::new),
-        channel_recovery: channel_recovery.map(Arc::new),
+        owned_channels: Some(Arc::new(owned_channels)),
+        reset_factor_grant_ttl_ms,
         limits: limits.clone(),
     };
 
@@ -806,9 +833,10 @@ fn build_app(state: AppState) -> Router {
             "/device/authorize/start",
             post(device_authorize::start).route_layer(ip(limits::Category::Attempt)),
         )
-        // ADR-0018 factor (c) — TOTP enrollment. Bearer-auth: the caller
-        // is an already-logged-in account adding an authenticator factor.
-        // The matching `/totp/recover` is anonymous (public router).
+        // ADR-0018 factor (c) — TOTP enrollment. Bearer-auth AND a fresh-auth
+        // grant in the body (ADR-0073, amended 2026-11-26): a bare session
+        // must not plant a factor. The matching `/totp/recover` is anonymous
+        // (public router).
         .route("/totp/enroll/start", post(totp::enroll_start))
         .route("/totp/enroll/finish", post(totp::enroll_finish))
         // ADR-0072 decision 6 — the phrase entropy sealed under a passkey's
@@ -863,6 +891,33 @@ fn build_app(state: AppState) -> Router {
         // where the passkey may be gone too.
         .route("/account/keys/reset/start", post(key_reset::start))
         .route("/account/keys/reset/finish", post(key_reset::finish))
+        // ADR-0073 (amended 2026-11-26) — the reset's second factor: each
+        // route needs a fresh-auth grant minted by the password and mints an
+        // `f1` reset factor grant the reset routes require. The email start
+        // can send a letter, so it shares the email address bucket.
+        .route(
+            "/account/keys/reset/factor/totp",
+            post(reset_factor::totp),
+        )
+        .route(
+            "/account/keys/reset/factor/email/start",
+            post(recovery_email::reset_factor_start).route_layer(ip(limits::Category::Email)),
+        )
+        .route(
+            "/account/keys/reset/factor/email/finish",
+            post(recovery_email::reset_factor_finish),
+        )
+        .route(
+            "/account/keys/reset/factor/passkey",
+            post(reset_factor::passkey),
+        )
+        // ADR-0101 section 7 — the server half `S` of the owned-channels
+        // password lock, for the device about to reset (the reset factor
+        // grant, not spent).
+        .route(
+            "/account/owned-channels-secret",
+            post(owned_channels::secret),
+        )
         // ADR-0074 section 3.4 — rotate the account keys and keep the other
         // devices. Bearer + fresh-auth grant + a supersession proof by the
         // identity key auth has recorded: someone who holds only the
@@ -882,8 +937,8 @@ fn build_app(state: AppState) -> Router {
         // ADR-0075 sections 6 and 9 — the recovery email of the session's
         // account: add or replace it (a mailed code; the start needs a
         // fresh-auth grant and sends the letter, so it is also limited per
-        // address), remove it, read its state, mark the account
-        // phrase-protected, and the notices the account's devices show.
+        // address), remove it, read its state, and the notices the account's
+        // devices show.
         .route(
             "/recovery-email/enrol/start",
             post(recovery_email::enrol_start).route_layer(ip(limits::Category::Email)),
@@ -896,15 +951,7 @@ fn build_app(state: AppState) -> Router {
             "/recovery-email",
             get(recovery_email::status).delete(recovery_email::remove),
         )
-        .route(
-            "/recovery-email/vault",
-            put(recovery_email::put_vault).delete(recovery_email::remove_vault),
-        )
         .route("/account/notices", get(account_notices::list))
-        // ADR-0075 section 3, amended 2026-11-01 - saving a phrase that was
-        // never sealed in an email vault changes no key.
-        .route("/account/phrase", get(phrase_saved::status))
-        .route("/account/phrase/saved", post(phrase_saved::mark))
         .route("/auth/session/bind-device", post(session::bind_device))
         .route("/account/devices/revoke", post(devices::revoke))
         .route_layer(axum::middleware::from_fn_with_state(
@@ -970,19 +1017,6 @@ fn build_app(state: AppState) -> Router {
     // storage-tier rollback). Bearer-auth ONLY (the same session-token
     // middleware) — holding a valid session token IS proof the caller
     // OPAQUE-authenticated as `account_id`.
-    // ADR-0101 section 7 — `POST /auth/channel-recovery/evaluate` evaluates
-    // a blinded channel id under the account's recovery OPRF key. Bearer-auth
-    // ONLY; a suspended account is refused by the middleware.
-    let channel_recovery_routes = Router::new()
-        .route(
-            "/auth/channel-recovery/evaluate",
-            post(channel_recovery::evaluate),
-        )
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            webauthn::require_session,
-        ));
-
     let backup_head_routes = Router::new()
         .route("/auth/backup/head", post(backup_head::backup_head))
         .route_layer(axum::middleware::from_fn_with_state(
@@ -1143,10 +1177,6 @@ fn build_app(state: AppState) -> Router {
             post(recovery_email::recover_totp).route_layer(ip(limits::Category::Attempt)),
         )
         .route(
-            "/recovery-email/recover/open",
-            post(recovery_email::recover_open).route_layer(ip(limits::Category::Attempt)),
-        )
-        .route(
             "/recovery-email/recover/password/start",
             post(recovery_email::password_start).route_layer(ip(limits::Category::Attempt)),
         )
@@ -1167,7 +1197,6 @@ fn build_app(state: AppState) -> Router {
         .merge(call_jwt_routes)
         .merge(genesis_routes)
         .merge(backup_head_routes)
-        .merge(channel_recovery_routes)
         // ADR-0054 — the anonymous-token public key for (context, epoch).
         // ANONYMOUS: a client checks the issuance proof against this key,
         // fetched independently of the issuance response.

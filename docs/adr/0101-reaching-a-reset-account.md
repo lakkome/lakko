@@ -12,8 +12,11 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 - **Amended 2026-11-26 (maintainer; designed, not built):** section 7
   "Owner" rewritten (owned channels come back from a list under two locks,
   one opened by the password, a server half and a second factor, one by the
-  account keys, with no subscriber or publisher taking part; open points
-  settled the same day); the build plan for
+  account keys, and a lock per passkey that keeps the chats, with no subscriber or publisher taking part; open points
+  settled the same day); sections 10 and 11 added the same day (a reset moves
+  anything only under a reset seal the account published before it; an
+  unsealed reset is a new account under the same username), with the
+  ADR-0075 email vault removed; the build plan for
   that and for the two decisions taken with it (a second factor at sign-up,
   ADR-0075 amendment; a second factor for the reset, ADR-0073 amendment) is
   "Plan amended 2026-11-26" below.
@@ -129,9 +132,11 @@ one, announced in the attested identity bundle for a window.**
      **list key** `R`, and each channel's **recovery key** is derived from
      `R`. `R` is kept under **two locks**: a **password lock**, which the
      account password and a second factor open together, and a **keys
-     lock**, which the account keys open. A device that holds the keys uses
-     the keys lock; the device that reset the keys, which holds nothing but
-     the password and a factor, uses the password lock.
+     lock**, which the account keys open; and, since the decision on open
+     question 6 (2026-11-26), under a **passkey lock** for each passkey that
+     keeps the chats (section 10). A device that holds the keys uses the
+     keys lock; the device that reset the keys uses the lock of what sealed
+     its reset: the password lock, or the passkey lock of the passkey used.
 
      1. **The server half `S`.** Per account, never stored: `S =
         BLAKE3-derive-key("lakko/auth/owned-channels/v1", master ‖
@@ -176,7 +181,16 @@ one, announced in the attested identity bundle for a window.**
         7 and the pairing state bundle carry the predecessors), and a
         rotation, which keeps the DeviceGroup, then keeps this lock too and
         re-locks nothing. A key reset clears the predecessors and gives a new
-        lineage seed: the resetting device makes a new keys lock (item 5).
+        lineage seed: the resetting device makes a new keys lock (item 8).
+        **3a. The passkey locks** *(decided 2026-11-26 on open question 6: it
+        follows from the maintainer's rule that a passkey with a seal brings
+        everything back).* For each passkey that keeps the chats, `lock_pk =
+        BLAKE3-derive-key("lakko/channels/owned-lock-passkey/v1", prf_output
+        ‖ S)`, the `prf_output` being the one its seal key comes from
+        (section 10), so one evaluation serves both. `S` is in the input for
+        the reason it is in the password lock: the passkey alone, a stolen
+        one included, does not open the list; it takes the password and a
+        factor (which the passkey can be) to get `S`, as for the reset.
      4. **Where they live.** Three ADR-0064 vaults on `services/storage`,
         through the existing routes, unchanged (a claim spends one
         `vault-claim` token, writes at version current + 1, every read and
@@ -189,23 +203,27 @@ one, announced in the attested identity bundle for a window.**
         | Vault | Root | Head plaintext |
         |---|---|---|
         | password lock | `lock_pw` | `R(32)` |
-        | keys lock | `lock_keys` | `R(32) ‖ S(32) ‖ the password lock's root (32)` |
-        | list | `R` | the list |
+        | keys lock | `lock_keys` | `R(32) ‖ S(32)` |
+        | passkey lock, one per passkey that keeps the chats | `lock_pk` | `R(32)` |
+        | list | `R` | the lock roots, then the list |
 
         The keys lock carries `S`, so a device with the keys can make the
-        password lock again after a password change without a second factor,
-        and the current password lock's root, so it can delete the old one.
+        password lock or a passkey lock again without a second factor. The
+        list names the current lock roots, so whoever holds `R` can delete a
+        stale lock.
         Chosen over a new route because these routes already do all of this;
         the ADR-0064 account vaults are not used because their names come
         from the current account seed, which the reset replaces.
 
-        The list's plaintext: `version(1)=0x01 ‖ count(1, 0..=64) ‖ count ×
-        entry`, entry = `channel_id(16) ‖ read_key_len(1, 0|32) ‖ read_key ‖
+        The list's plaintext: `version(1)=0x01 ‖ password_lock_root(32) ‖
+        passkey_lock_count(1, 0..=8) ‖ passkey_lock_count × (tag(16) ‖
+        root(32)) ‖ count(1, 0..=64) ‖ count × entry` (the `tag` is the
+        passkey's tag in the seal announcement), entry = `channel_id(16) ‖ read_key_len(1, 0|32) ‖ read_key ‖
         admission_count(1, 0..=8) ‖ admission_count × (admission_version(4
         BE) ‖ seed(32)) ‖ epoch_count(1, 0..=4) ‖ epoch_count × (epoch_id(4
         BE) ‖ seed(32))`, bounded and exact on decode, with a fuzz target. An
-        entry is at most 483 bytes, 64 entries at most 30,914 bytes; the list
-        is always padded to one size, 32 KiB, so the storage service learns
+        entry is at most 483 bytes, 64 entries at most 30,912 bytes, the lock
+        roots at most 417 bytes; the list is always padded to one size, 32 KiB, so the storage service learns
         no count. The 64 channels, 8 admission versions, 4 epoch seeds and
         32 KiB are chosen, not measured. Four epoch seeds is the ADR-0031
         retention, so the owner reads what a returning subscriber reads, and
@@ -236,12 +254,16 @@ one, announced in the attested identity bundle for a window.**
         vault-version-conflict`, reads, merges (by channel id; newer epochs
         and admission versions kept, a deleted channel dropped) and writes
         again. No DeviceGroup message is needed: every device of the account
-        holds the lineage seed.
+        holds the lineage seed. When a passkey that keeps the chats is added
+        on a device with the keys (which has its `prf` output from the
+        creation and `S` from the keys lock), that device makes its passkey
+        lock and records the root in the list; when a passkey is removed,
+        the device that removed it deletes its lock.
      7. **A password change.** Whichever device first holds both the account
         keys and the new password's export key makes the new password lock
         (`lock_pw` from the new `export_key` and the `S` of the keys lock),
-        writes `R` into it, records its root in the keys lock and deletes
-        the old one. That is the device that changed the password when it
+        writes `R` into it, records its root in the list and deletes the old
+        one. That is the device that changed the password when it
         has the keys (Settings, `/password/reset/*` on the phrase; recall,
         ADR-0074); otherwise (a mailed code on a device without the keys,
         ADR-0075 section 7) that device keeps the new export key under its
@@ -251,8 +273,10 @@ one, announced in the attested identity bundle for a window.**
         exist.
      8. **After a reset.** The resetting device signed in with the password
         and confirmed a factor (ADR-0073, amended 2026-11-26). Before the
-        reset spends the factor grant it fetches `S`; it then opens the
-        password lock, `R` and the list, and for each entry: derives the
+        reset spends the factor grant it fetches `S`; it then opens the lock
+        of what sealed the reset (the password lock, or the passkey lock of
+        the passkey whose `prf` output signed the seal), `R` and the list,
+        and for each entry: derives the
         recovery key, signs an owner change to the owner key its new account
         seed derives, and sends it (a `401` means the channel's recovery key
         is not this one: the entry is dropped); re-founds the PublisherGroup
@@ -261,12 +285,15 @@ one, announced in the attested identity bundle for a window.**
         checked with the listed admission seeds), re-issues the channel
         metadata, records the channel as `Owner` in its subscription
         register, and writes the list with the new epoch seed. It makes a new
-        keys lock under its new lineage seed. The old keys lock stays on the
+        keys lock under its new lineage seed, makes the password lock again
+        if the reset was sealed by a passkey and its export key names no
+        password lock, and deletes every passkey lock the list names (the
+        reset deleted the passkeys). The old keys lock stays on the
         storage service: only the old seed opens it, and a recall device
         (ADR-0074), which holds that seed, uses it. Co-publishers are invited
         again (decision A). No subscriber or publisher takes part, no
         mailbox is written, no member card is needed.
-     9. **Account deletion** deletes the three vaults (signed) before
+     9. **Account deletion** deletes the list and every lock (signed) before
         `DELETE /account`.
      10. **Removed** (built on 2026-11-25, flag day, nothing deployed for
         users): `POST /auth/channel-recovery/evaluate`,
@@ -282,9 +309,10 @@ one, announced in the attested identity bundle for a window.**
      | Situation | Lock | Owned channels |
      |---|---|---|
      | A device of the account with the keys | keys | yes |
-     | Lost every device and the phrase, knows the password, has a factor: a reset | password | yes |
-     | Mail-protected account (no phrase saved), lost every device, forgot the password: the mailed code restores the keys from the email vault (ADR-0075 section 7) | keys | yes, without a reset |
-     | Phrase-protected account, lost the phrase, every device and the password: the mailed code gives a new password only, and the password lock was made with the old one | none | **lost**; the account's chats and groups still come back from contacts after the reset (sections 1 to 6, 9) |
+     | Lost every device and the phrase, knows the password the list was locked with, has a factor: a sealed reset (item 10) | password | yes |
+     | ~~Mail-protected account ... the mailed code restores the keys from the email vault~~ | | Withdrawn 2026-11-26 with the email vault (ADR-0075, amended) |
+     | Lost the phrase, every device and the password: the mailed code gives a new password only, the password lock was made with the old one, and the reset is unsealed (item 11) | none | **lost**, and the chats and groups do not come back either |
+     | A passkey that keeps the chats seals the reset, also when the password was changed without the keys | that passkey's lock | yes (decided on open question 6) |
      | Only the password, no factor | none | no: a password sign-in does not release `S` |
      | Auth alone | none | no: it holds `S`, not the export key |
 
@@ -295,18 +323,53 @@ one, announced in the attested identity bundle for a window.**
      the TOTP secrets and mail it already controls it could already reset
      the account and become it toward every contact; opening the list then
      adds nothing. The keys lock needs the account keys, which the operator
-     can reach only for a mail-protected account through the email vault,
-     the stated exception to invariant #2 of ADR-0075, where it already gets
-     the whole account. Compared with the 2026-11-25 text this removes a
+     does not have: the email vault, through which it could reach them, is
+     removed (2026-11-26). Compared with the 2026-11-25 text this removes a
      capability: the auth OPRF key let the operator take any channel whose
-     id it knew.
+     id it knew. The same guessed password also makes a password seal
+     (item 10); that is the one capability the operator keeps, at the cost
+     of an offline search, and a passkey or phrase seal does not depend on
+     it.
 
-     The storage service learns that three small vaults exist (the list
-     always 32 KiB), when each is written (channel created or deleted, a
+     The storage service learns that a few small vaults exist (the list
+     always 32 KiB, three locks plus one per passkey that keeps the chats), when each is written (channel created or deleted, a
      rotation, an admission seed, a password change, a reset) and read, and
      from which address; it cannot tell they belong together or to whom. An
      attacker who reset the account and then replaced a channel's recovery
      key keeps that channel after a recall.
+
+     *As built in the core, 2026-11-27 (S6; `lakko-channels::owned`,
+     `lakko-vault`, both FFI surfaces; host-tested only, no client uses it
+     yet).* Chosen where this section left a detail open: the encoded list
+     is always exactly 32 764 bytes (the content, then zero bytes), so with
+     the vault's 4-byte length frame it fills the 32 KiB bucket exactly;
+     decode refuses any other length and any non-zero padding byte. The list
+     is canonical: passkey locks strictly ascending by tag, entries by
+     channel id, admission seeds by `(admission_version, seed)` (two seeds of
+     one version may coexist, as ADR-0090 allows), epoch seeds by epoch;
+     anything else is refused. The lock heads carry no version byte: exactly
+     `R` (32 bytes) or `R ‖ S` (64 bytes). The merge after a `409`
+     (`OwnedChannelsList::merge`) keeps the writing device's value on a tie
+     (an epoch seed of the same epoch, the read key, the password lock root,
+     a passkey lock of the same tag) and, past 64 entries, the writing
+     device's own entries first. `lakko-vault` names these vaults by
+     `VaultRoot::from_root` over reference tag `0x04`. The recovery key is
+     `BLAKE3-derive-key("lakko/channels/recovery-key/v2", R ‖ channel_id)`.
+
+     *As built in the services, 2026-11-27 (S7; `services/auth`,
+     DB-tested against a local MariaDB, not deployed).* `S` is
+     `owned_channels.rs`: `LAKKO_AUTH_OWNED_CHANNELS_SECRET` (64 hex) is
+     required at startup; `/signup/finish` answers `owned_channels_secret`
+     (base64url, 32 bytes) beside the session pair and the fresh-auth grant;
+     `POST /account/owned-channels-secret {reset_grant}` (bearer) answers
+     `{owned_channels_secret}`, refuses a missing or unusable grant with
+     `403 {"error":"reset-factor-required"}` before anything is charged, and
+     counts accepted calls with `Scope::OwnedChannelsSecret` (27, 10 a day,
+     `LAKKO_AUTH_LIMIT_OWNED_CHANNELS_SECRET`). The channel-recovery OPRF
+     route, `LAKKO_AUTH_CHANNEL_RECOVERY_SECRET` and `Scope::ChannelRecovery`
+     (25, retired) are deleted; `services/channels` changed only in a test
+     (`recovery_owner.rs` derives its recovery keys with
+     `ChannelRecoveryKey::from_list_key`).
 
 8. **The profile comes back.** Profile envelope version 5 (flag day) adds
    an Ed25519 signature by the account identity key over the envelope. A
@@ -329,6 +392,210 @@ one, announced in the attested identity bundle for a window.**
    the posts the channels service retains open again; a returning owner
    takes the newest 4 from its own list (section 7, amended 2026-11-26).
    Only what the sender still holds comes back.
+
+10. **The reset seal** *(maintainer's decision, 2026-11-26; designed, not
+   built).*
+
+   **Why.** Sections 1 to 9 move an account's conversations, history,
+   profile and channel subscriptions to its new keys on a reset that a peer
+   accepts by ADR-0073 R.2: the auth service's `KeyResetAttestation`, the
+   generation, and the KT log entry the operator writes. All three are the
+   operator's. The operator holds the attest signing key, so it can mint a
+   reset for any account, without the password and without a factor,
+   publish a key of its own, and every contact's device then silently hands
+   it the account's chats, groups and recent history (sections 4, 7, 9).
+   The second factor of ADR-0073's 2026-11-26 amendment does not help: it is
+   checked by the same server. Separately, the ADR-0075 email vault was
+   sealed under the login handle, the address and a server-held salt; the
+   operator sees the address at enrolment and at recovery and can guess it
+   (usernames are public), so it could open the vault: in effect protected
+   by server secrets only. ADR-0075 is amended the same day to remove the
+   vault.
+
+   **Rule.** A peer moves anything (sections 4, 5, 7, 8, 9) only for a
+   **sealed** reset: one whose new key is signed by a **seal key** the
+   account announced, under its old account key, before the reset. A reset
+   that passes R.2 without a valid seal is **unsealed** (item 11).
+
+   **Seal keys.** Ed25519, each from a secret the server never holds:
+
+   | Kind | Seed | Who can make it |
+   |---|---|---|
+   | 1 password | `BLAKE3-derive-key("lakko/account/reset-seal/password/v1", export_key)`, the 64-byte OPAQUE export key of `KIND_PASSWORD` | the device that ran the password registration or a password sign-in |
+   | 2 passkey | `BLAKE3-derive-key("lakko/account/reset-seal/passkey/v1", prf_output)`, the WebAuthn `prf` output for a salt of its own, `SHA-256("lakko/account/reset-seal/passkey-prf/v1")`, distinct from the passkey vault's salt | the passkey's authenticator, when it supports `prf` |
+   | 3 phrase | `BLAKE3-derive-key("lakko/account/reset-seal/phrase/v1", phrase_seed)`, the 64-byte BIP39 seed | whoever holds the 12 words |
+
+   *Password.* The operator cannot derive the export key without the
+   password, but it holds the OPAQUE server state (the OPRF key and the
+   envelope), so it can run an **offline guessing attack**: each guess costs
+   one OPRF evaluation and the client's key stretching, Argon2id with the
+   `argon2` 0.5 defaults (19 MiB of memory, 2 passes, 1 lane; read from
+   `crates/lakko-auth-client/src/cipher_suite.rs` and the crate source; the
+   time per guess is not measured here). A long password resists it; a
+   passkey seal or a phrase seal does not depend on the password at all.
+   *Passkey.* Only a passkey whose authenticator returns a `prf` output at
+   creation can seal. Expected from platform documentation, not measured:
+   Apple platform passkeys from iOS 18 / macOS 15; Android from API 34
+   (below it the request is dropped at registration, ADR-0072); browsers
+   depending on the browser and the authenticator. Lakko learns it when the
+   passkey is created; one that returned none still signs in and confirms a
+   reset, and UX `identity-recovery.md` 19.1d says it does not keep the
+   chats. *Phrase.* A phrase holder normally restores the keys instead of
+   resetting; the phrase seal serves a person who has the phrase but wants
+   new keys (keys suspected leaked) with continuity.
+
+   **The seal announcement**, signed by the current account key:
+
+   ```text
+   "lakko/account/reset-seals/v1\0" ‖ version(1)=0x01 ‖ account_ref(32)
+     ‖ key_generation(8 BE) ‖ seq(8 BE) ‖ issued_at_ms(8 BE)
+     ‖ count(1, 1..=10) ‖ count × (kind(1) ‖ tag(16) ‖ seal_pk(32))
+     ‖ sig(64)
+   ```
+
+   `account_ref` is the key-reset attestation's (`BLAKE3-derive-key(
+   "lakko/key-reset/account-ref/v1", account_id)`). Exactly one kind-1
+   entry; up to 8 kind-2 entries, `tag` = the first 16 bytes of `SHA-256`
+   of the credential id, so a removed passkey's seal can be dropped; at most
+   one kind-3 entry; `tag` all zero for kinds 1 and 3. `seq` strictly
+   increases per account across generations. At most 641 bytes. The bounds
+   (8 passkeys, 641 bytes) are chosen. Bounded, exact, fail-closed codec in
+   `lakko-attest` with a fuzz target.
+
+   *Published* in the identity bundle (`services/discovery`, opaque column
+   `reset_seals`, never parsed, uploaded with the bundle under the session)
+   and appended to the KT log as a leaf of its own kind for the account's
+   `username_hash`, so its history is witnessed (ADR-0039). Discovery keeps
+   the newest announcement per generation and, after a reset, also serves the
+   newest of the previous generation (`previous_reset_seals`).
+
+   *Republished* by a device that holds the account keys: after the password
+   changes on it (it has the new export key), after a passkey is added (with
+   its `prf` output) or removed, after a phrase is saved, after an ADR-0074
+   rotation (the new key signs, `seq` continues), and after a reset (the new
+   key at generation `g`, with the password seal; the passkeys were deleted
+   and the new phrase is not saved). A password changed on a device without
+   the keys (a mailed code, ADR-0075 section 7) is not announced until a
+   device with the keys takes it over at its next password sign-in.
+
+   **The reset seal**, signed by one announced seal key:
+
+   ```text
+   "lakko/account/reset-seal/v1\0" ‖ version(1)=0x01 ‖ account_ref(32)
+     ‖ announcement_seq(8 BE) ‖ from_generation(8 BE) ‖ to_generation(8 BE)
+     ‖ new_signature_pubkey(32) ‖ kind(1) ‖ seal_pk(32) ‖ sig(64)
+   ```
+
+   Carried in the reset's attested publish (discovery, opaque column
+   `reset_seal` beside `key_reset_attest`) and in the KT reset leaf. The
+   server can strip it, which makes the reset unsealed: an availability
+   loss, never a takeover (the ADR-0016 carrier argument).
+
+   *Made by the resetting device* before `POST /account/keys/reset/finish`,
+   from what the reset already asks for (ADR-0073, amended 2026-11-26): the
+   export key of the password sign-in (kind 1); the `prf` output of the
+   passkey factor's assertion, requested in the same gesture (kind 2); or a
+   typed phrase (kind 3). It reads its own current announcement from
+   discovery, checks that its seal key is listed, and signs over the next
+   generation and the new key it minted.
+
+   **The peer's check**, ADR-0073 R.2 rule 4 (amended there): holding the
+   old key `K` and the generation `g-1` it accepted,
+   1. the previous announcement verifies under `K`, names this account's
+      `account_ref` and generation `g-1`, its `seq` is at least the highest
+      this device has seen for the account (kept per contact), and the KT
+      log shows it as the newest announcement leaf of `g-1` before the reset
+      leaf (the verified path, the witness gate when pinned);
+   2. the reset seal names that `account_ref` and `seq`, `from = g-1`,
+      `to = g` (the attested generation) and the fetched key; its `seal_pk`
+      is listed in the announcement under its `kind`; the signature
+      verifies.
+   Both hold: **sealed**, sections 4 to 9 run. R.2 holds and these do not:
+   **unsealed** (item 11). Without a log in the build, the announcement
+   rests on `K`'s signature and the `seq` floor this device kept; rolling
+   back to an older announcement then needs a seal key from it (an older
+   password or a removed passkey) and is the stated residual.
+
+   **The account's own devices** apply the same check to their own account
+   on a reset they did not make: an unsealed reset keeps ADR-0074's "Was it
+   you?" and recall as today; a sealed one is the owner's (password and a
+   factor).
+
+   *As built in the core, 2026-11-27 (S6; `lakko-attest::reset_seal`,
+   `lakko-transparency::reset_seals`, `lakko-contacts::reset_verdict`, both
+   FFI surfaces; host-tested only, no client uses it yet).* Chosen where this
+   section left a detail open: the domain separators are part of the wire
+   (the only reading under which the announcement's 641-byte maximum adds
+   up), so an announcement is 200 to 641 bytes and a reset seal 214. An
+   announcement's entries are strictly ascending by `(kind, tag)`, so it has
+   one encoding and two passkey entries cannot share a tag; a seal key, and
+   the reset's new key, that is not a valid Ed25519 point or is of small
+   order is refused. A reset seal's `to_generation` must be exactly
+   `from_generation + 1`. The KT announcement leaf is
+   `"lakko/transparency/reset-seals-leaf/v1\0" ‖ username_hash ‖
+   key_generation(8 BE) ‖ seq(8 BE) ‖ BLAKE3(announcement)` (119 bytes): it
+   commits the announcement by hash, and its ASCII separator keeps it apart
+   from an identity leaf, which opens with a 32-byte hash. The check proves
+   the served announcement is included, for this account and generation, at
+   an index below the reset leaf's; "the newest" rests on the operator, the
+   witnesses and the device's `seq` floor, as stated above. The R.2 table
+   with rule 4 is written once, in `lakko_contacts::reset_verdict`, and the
+   three clients' copies are to call it (`resetVerdict` on both FFI
+   surfaces).
+
+   *As built in the services, 2026-11-27 (S7; `services/discovery`,
+   `services/transparency`, DB-tested against a local MariaDB, not
+   deployed).* Chosen where this section left a detail open, and one place
+   where it is reversed: **discovery decodes and checks both artefacts**
+   instead of storing them unparsed, because the KT leaf needs the
+   announcement's generation and `seq`, which only the announcement carries.
+   `POST /discovery/identity` takes `reset_seals` and `reset_seal` (standard
+   base64). An announcement must verify under the uploaded identity key,
+   name the session account's `account_ref`, be at the generation the row is
+   at after the upload, and have a `seq` above every one the row has held
+   (`400 reset-seals-invalid`, `409 reset-seals-stale`; the same bytes again
+   are a no-op; absent keeps the stored one). A reset seal is read only on an
+   attested key change that is a reset (not a proven rotation) and must
+   verify under its own seal key, name the account and the uploaded key,
+   seal exactly `stored generation -> attested generation`, and name the
+   row's current announcement by `seq`, which lists its key under its kind
+   (`400 reset-seal-invalid`); a reset without one stores none. When the
+   generation moves (a reset or a proven rotation) the current announcement
+   becomes `previous_reset_seals`. Migration `0043` adds `reset_seals`,
+   `reset_seals_seq`, `previous_reset_seals`, `reset_seal` and
+   `logged_seals_seq`; `GET /discovery/identity/{id}` serves `reset_seals`,
+   `previous_reset_seals` and `reset_seal` (standard base64, each omitted
+   when none). The KT log: every newly stored announcement is appended
+   (`POST /transparency/announcement/append`, service-secret gated) after the
+   identity leaf it is signed by; on a reset the previous generation's
+   announcement is appended BEFORE the reset's identity leaf when the log has
+   not confirmed it yet; the reset seal rides the identity append as a
+   sidecar (`reset_seal_b64`, `log_entries.reset_seal`, served by
+   `/transparency/latest` as `reset_seal_b64`); the reconciler appends the
+   current announcement of an account whose identity leaf is logged. The
+   transparency service checks an announcement under the account's latest
+   identity key in the log (`403`) and refuses a `seq` not above the logged
+   ones (`409`); the leaves sit in `log_announcements` (migration `0006`,
+   append-only, sharing the index sequence with `log_entries`; the replay at
+   boot merges the two by index); `GET /transparency/announcement/{username_hash}/{generation}`
+   answers the newest leaf of that generation `{idx, key_generation, seq,
+   announcement_b64}` and `GET /transparency/proof/{idx}` serves either leaf
+   kind's bytes and audit path. `lakko-transparency::InMemoryLog` gained
+   `append_announcement` and `leaf_bytes` for it (`entry` answers
+   `NotAnIdentityLeaf` at an announcement's index).
+
+11. **An unsealed reset is a new account under the same username** *(maintainer,
+   2026-11-26).* The reset still works (password and a factor, ADR-0073):
+   the server gives the account new keys and the username stays. Peers do
+   not re-pin silently, move no conversation, return no history, profile,
+   epoch seeds or channel subscriptions, and admit nobody; the person's
+   devices start empty and reach contacts by ordinary contact requests,
+   which contacts accept or not (UX 16.11). The owned channels do not come
+   back either: the password lock of section 7 was made with the password
+   the account had when it was last announced (an unsealed reset is, in
+   practice, one after a password changed without the keys), and the keys
+   lock needs the old keys. The new account publishes its own announcement
+   at generation `g`, so its next reset can be sealed.
 
 No `lakko-mls` change. No DS change. A discovery migration (one nullable
 column and a sweep), one codec in `lakko-contacts` with a fuzz target, the
@@ -360,6 +627,18 @@ binding sign / verify on both FFI surfaces, the three clients.
   to the account; it sees when they are written and read and from which
   address. No owner return crosses a mailbox, so the continuity mailbox no
   longer counts owned channels.
+- **The reset seal (2026-11-26, section 10).** The operator can no longer
+  give itself an account's conversations by minting a reset: a reset without
+  a seal moves nothing. What it keeps: an offline guessing attack on the
+  password from the OPAQUE state (each guess one OPRF evaluation and an
+  Argon2id stretch), whose success gives a password seal; it cannot seal
+  with a passkey or the phrase. What it learns: the seal announcements are
+  public artefacts (public keys, a count of passkeys that keep the chats,
+  whether a phrase is saved, and when each changed), served by discovery
+  and logged in the KT log, so anyone who can look up the account learns
+  them too. It still sees the unsealed reset happen and can strip a seal to
+  turn a sealed reset into an unsealed one (an availability loss for the
+  person, not a takeover).
 
 ## Alternatives
 
@@ -412,6 +691,16 @@ binding sign / verify on both FFI surfaces, the three clients.
   the lost-everything case. Neutral: three small vaults per account on the
   storage service, the list written about once a day per channel (each
   rotation); one per-account derivation and one route in auth.
+- **Amended 2026-11-26 (second): the reset seal.** Positive: a reset moves
+  conversations only with the account's own password, passkey or phrase, so
+  neither the operator nor whoever only reads the mailbox can take an
+  account's contacts with it; the email vault, the one place the operator
+  could open, is gone. Negative: forgetting the password without a phrase or
+  a passkey that keeps the chats now loses the chats too (the 19.1d notice
+  says so in advance); a seal announcement tells anyone who looks up the
+  account whether it saved a phrase and how many sealing passkeys it has.
+  Neutral: one more signed artefact per account in the bundle and the log,
+  republished on a few account changes.
 
 ## Open questions
 
@@ -430,6 +719,20 @@ binding sign / verify on both FFI surfaces, the three clients.
 5. **Decided 2026-11-26 (maintainer):** the authenticator app may be an
    account's only second factor, with a warning that losing it loses the
    account (UX `identity-recovery.md` 19.1a and 19.1c).
+6. ~~(2026-11-26) A third lock per passkey that keeps the chats.~~
+   **Decided 2026-11-26: yes.** Decided by the coordinator as following from
+   the maintainer's rule that a passkey with a seal brings everything back:
+   a reset sealed by a passkey after the password was changed without the
+   keys would otherwise bring the chats back but not the owned channels.
+   Written into section 7 (item 3a, the table of item 4, items 6, 8, 9 and
+   the case table); `S` is in the lock's input so a stolen passkey alone
+   opens nothing.
+7. ~~(2026-11-26) What contacts see after an unsealed reset.~~ **Decided
+   2026-11-26 (maintainer): shown.** After an **unsealed** reset the old
+   one-to-one shows one closed line in place of the composer, and the new
+   contact request carries a note that the device could not confirm it is
+   the same person (UX 16.11). This is the only exception to the rule that
+   a contact's reset shows nothing (UX 16.1): a sealed reset stays silent.
 
 ## Plan
 
@@ -443,35 +746,43 @@ binding sign / verify on both FFI surfaces, the three clients.
 
 ## Plan amended 2026-11-26
 
-The three decisions of 2026-11-26 are planned here, in one place, rather
-than in a new ADR: the second factor for the reset exists because of this
-ADR's return (whoever resets now gets the account's conversations, channels
-and history back), the factor at sign-up exists so every account can pass
-that reset, and the owned-channels list is this ADR's section 7. The
-mechanisms are written where they belong: the reset factor in ADR-0073
-("Amended 2026-11-26"), the sign-up factor in ADR-0075 ("Amended
-2026-11-26"), the list in section 7 above. S1 to S4 above were built in
+The decisions of 2026-11-26 are planned here, in one place, rather than in a
+new ADR: the second factor for the reset exists because of this ADR's return
+(whoever resets now gets the account's conversations, channels and history
+back), the factor at sign-up exists so every account can pass that reset,
+the owned-channels list is this ADR's section 7, and the reset seal
+(section 10) decides when this ADR's return happens at all. The mechanisms
+are written where they belong: the reset factor and the seal check in
+ADR-0073 ("Amended 2026-11-26" and "Amended 2026-11-26 (second)"), the
+sign-up factor and the removal of the email vault in ADR-0075, the list and
+the seal in sections 7, 10 and 11 above. S1 to S4 above were built in
 commit `fa44cb8cb`; S5 was walked on the test stack on 2026-11-26 (web and
-iOS), where the owned channel did not come back. Section 7 item 8 lists what
-of S1 to S4 is now removed.
+iOS), where the owned channel did not come back. Section 7 item 10 lists
+what of S1 to S4 is now removed.
 
 | Sprint | Content |
 |---|---|
-| S6 core | `lakko-auth-token`: the fresh-auth grant names how it was minted (password or passkey); the reset factor grant (`f1`). `lakko-vault`: reference tag `0x04` and a `VaultRoot` from a given root. `lakko-channels`: the two lock derivations, the keys-lock and password-lock head codecs, the owned-channels list codec (bounds, proptests, fuzz target `owned_channels_decode`), `ChannelRecoveryKey` from `R`, the OPRF input removed. `lakko-contacts`: the owner role removed from the channel return. Both FFI surfaces, the OPRF blinder removed. |
-| S7 services | `services/auth`: the reset factor routes (authenticator, email with a reset purpose, passkey through an ADR-0014 reset action), the reset routes on the factor grant, the authenticator setup under the fresh-auth grant, the last-factor refusals, the authenticator key required at startup, the channel-recovery route and scope removed; `S` (the environment secret required at startup, the `/signup/finish` field, `POST /account/owned-channels-secret`, its scope). `services/storage` and `services/channels`: no change. DB-gated route tests for every refusal. |
-| S8 web, desktop | UX 19.1a to 19.1c (the required step, the authenticator setup, the landing rule, the last-factor dialog) and 15.1b (the reset factor section, the "cannot reset" panel); the authenticator-only warning (19.1a, 19.1c); the three owned-channels vaults (made at sign-up or at a guest's claim; the list written on create, delete, rotation and admission seed; recovery keys registered from `R`; the password lock made again after a password change; after a reset `S`, the password lock, the retake and a new keys lock; deleted with the account); owner-return sending and the OPRF call removed. |
+| S6 core | `lakko-auth-token`: the fresh-auth grant names how it was minted (password or passkey); the reset factor grant (`f1`). `lakko-attest`: the seal announcement and the reset seal (sign, verify, bounds, goldens, proptests, fuzz targets `reset_seals_open` and `reset_seal_open`), the three seal-key derivations. `lakko-vault`: reference tag `0x04` and a `VaultRoot` from a given root. `lakko-channels`: the three lock derivations (password, keys, passkey), the lock head codecs, the owned-channels list codec with its lock-root header (bounds, proptests, fuzz target `owned_channels_decode`), `ChannelRecoveryKey` from `R`, the OPRF input removed. `lakko-transparency`: the announcement leaf kind and the "newest announcement of a generation before the reset" check. `lakko-contacts`: the owner role removed from the channel return; the R.2 verdict gains `Sealed` / `Unsealed`. `lakko-mnemonic`: `seal_entropy_under_email` / `open_entropy_under_email` removed. Both FFI surfaces (the email vault functions and the OPRF blinder removed; seal sign / verify and the verdict added). |
+| S7 services | `services/auth`: the reset factor routes (authenticator, email with a reset purpose, passkey through an ADR-0014 reset action), the reset routes on the factor grant, the authenticator setup under the fresh-auth grant, the last-factor refusals, the authenticator key required at startup, the channel-recovery route and scope removed; `S` (the environment secret required at startup, the `/signup/finish` field, `POST /account/owned-channels-secret`, its scope); the email vault removed (ADR-0075, amended: tables, columns, routes, scopes). `services/discovery`: the opaque `reset_seals` (current and previous generation) and `reset_seal` columns, carried to the KT append. `services/transparency`: the announcement leaf. `services/storage` and `services/channels`: no change. DB-gated route tests for every refusal. |
+| S8 web, desktop | UX 19.1a to 19.1d (the required step, the authenticator setup, the landing rule, the last-factor dialog, the honest notice) and 15.1b, 15.1c (the reset factor section, sealed or unsealed before the word, the "cannot reset" panel); 16.11 (unsealed reset at a contact: the closed line in place of the composer, the note on the new request); the seal announcement published at sign-up and on every change that alters it; the reset seal made from the password, the passkey `prf` or the phrase; the owned-channels list and its locks (made at sign-up or at a guest's claim; a passkey lock made when a passkey that keeps the chats is added and deleted when it is removed; the list written on create, delete, rotation and admission seed; recovery keys registered from `R`; the password lock made again after a password change; after a reset `S`, the lock of what sealed it, the retake, a new keys lock and the old passkey locks deleted; deleted with the account); owner-return sending, the OPRF call and every email-vault path removed. |
 | S9 iOS, Android | The same, in parallel. |
-| S10 walk | Sign-up with each of the three factors on each client; a reset with each factor, a wrong code and the lockout; an account with no factor; a public and a private owned channel back after a reset with every subscriber device closed; a password change, then a reset. |
+| S10 walk | Sign-up with each of the three factors on each client; a sealed reset (password; a passkey that keeps the chats) and an unsealed one (after a mailed-code password change), and what a contact sees for each; a reset with a wrong code and the lockout; an account with no factor; a public and a private owned channel back after a reset sealed by the password and after one sealed by a passkey following a mailed-code password change, with every subscriber device closed; the honest notice appearing and going. |
 
-Security invariants touched: **#2** (holds: the list is sealed by the
-client; the password-derived root and the recovery keys never reach a
+Security invariants touched: **#2** (strengthened: the ADR-0075 exception
+is withdrawn with the email vault, the maintainer edits its text in
+CLAUDE.md; the owned-channels list is sealed by the client, the
+password-derived root, the recovery keys and the seal secrets never reach a
 server; the reset's email factor shows the address to the server when the
-letter is sent, as ADR-0075 already states), **#5** (improved: owner
-returns no longer cross mailboxes; the owned-channels vaults name no
-account), **#6** and **#7** (unchanged; `R` and `S` are kept only on the
-storage service under the two locks, and in memory while used). No `lakko-mls` change; G-39 does not grow.
-`services/auth` and the channel recovery derivation change: a
-`lakko-security` pass is due before merge.
+letter is sent, as ADR-0075 states), **#4** (an attested reset without a
+seal moves nothing), **#5** (improved: owner returns no longer cross
+mailboxes; the owned-channels vaults name no account), **#6** (changed: an
+identity rotation by reset is honoured by peers only under a seal the
+account published before it; an unsealed reset is a new account, not a
+rotation), **#7** (unchanged; `R` and `S` are kept only on the storage
+service under the two locks, and in memory while used). No `lakko-mls`
+change; G-39 does not grow. Known gap **G-60** (minted 2026-11-26) tracks
+the problem until this is built. `services/auth`, discovery, the KT log and
+the reset acceptance change: a `lakko-security` pass is due before merge.
 
 ## References
 

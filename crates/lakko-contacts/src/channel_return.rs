@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! A channel return: what a device of a channel's owner or a publisher (or,
-//! for an owner, a subscriber) sends a person who reset their keys, so the
-//! channel comes back to them by itself ([ADR-0101] section 7).
+//! A channel return: what a device of a channel's owner or a publisher sends
+//! a subscriber or a publisher who reset their keys, so the channel comes
+//! back to them by itself ([ADR-0101] section 7). An owner returns by itself
+//! from its own owned-channels list since 2026-11-26 (`lakko_channels::owned`);
+//! the owner role (byte 3) of this envelope is removed and refused.
 //!
 //! ## Where it travels
 //!
@@ -47,7 +49,7 @@
 //!
 //! ```text
 //! CHANNEL_RETURN_DOMAIN_V1 ("lakko/channel-return/v1\0")
-//!   ‖ version(1)=0x01 ‖ channel_id(16) ‖ role(1: 1 subscriber, 2 publisher, 3 owner)
+//!   ‖ version(1)=0x01 ‖ channel_id(16) ‖ role(1: 1 subscriber, 2 publisher; 3 retired)
 //!   ‖ old_binding_sig(64) ‖ old_subscriber_pk(32) ‖ profile_hash(32)
 //!   ‖ invitation_len(2 BE) ‖ invitation
 //!   ‖ seed_count(1) ‖ seed_count × (epoch(4 BE) ‖ seed(32))
@@ -127,8 +129,6 @@ pub enum ChannelReturnRole {
     /// A publisher: the owner's device admits the new identity's devices on
     /// the PublisherGroup; the Welcome follows separately.
     Publisher,
-    /// The owner: recover the channel with the channel recovery key.
-    Owner,
 }
 
 impl ChannelReturnRole {
@@ -138,7 +138,6 @@ impl ChannelReturnRole {
         match self {
             Self::Subscriber => 1,
             Self::Publisher => 2,
-            Self::Owner => 3,
         }
     }
 
@@ -146,12 +145,12 @@ impl ChannelReturnRole {
     ///
     /// # Errors
     ///
-    /// [`ChannelReturnError::UnknownRole`] for any other byte.
+    /// [`ChannelReturnError::UnknownRole`] for any other byte, the retired
+    /// owner byte 3 included (ADR-0101 section 7, amended 2026-11-26).
     pub const fn from_byte(byte: u8) -> CoreResult<Self, ChannelReturnError> {
         match byte {
             1 => Ok(Self::Subscriber),
             2 => Ok(Self::Publisher),
-            3 => Ok(Self::Owner),
             other => Err(ChannelReturnError::UnknownRole(other)),
         }
     }
@@ -212,7 +211,7 @@ pub enum ChannelReturnError {
     /// The version byte is not [`CHANNEL_RETURN_VERSION_V1`].
     #[error("channel return carries unknown schema version {0:#04x}")]
     UnknownVersion(u8),
-    /// The role byte is not 1, 2 or 3.
+    /// The role byte is not 1 or 2 (3, the owner, was retired 2026-11-26).
     #[error("channel return names unknown role {0:#04x}")]
     UnknownRole(u8),
     /// The invitation is longer than [`CHANNEL_RETURN_MAX_INVITATION_LEN`].
@@ -663,12 +662,14 @@ mod tests {
             decode_channel_return(&[CHANNEL_RETURN_DOMAIN_V1, &[7]].concat()),
             Err(ChannelReturnError::UnknownVersion(7))
         );
-        let mut role = wire.clone();
-        role[d + 1 + 16] = 4;
-        assert_eq!(
-            decode_channel_return(&role),
-            Err(ChannelReturnError::UnknownRole(4))
-        );
+        for retired_or_unknown in [3u8, 4, 0] {
+            let mut role = wire.clone();
+            role[d + 1 + 16] = retired_or_unknown;
+            assert_eq!(
+                decode_channel_return(&role),
+                Err(ChannelReturnError::UnknownRole(retired_or_unknown))
+            );
+        }
         for cut in d..wire.len() {
             assert_eq!(
                 decode_channel_return(&wire[..cut]),
@@ -729,7 +730,7 @@ mod tests {
 
         #[test]
         fn any_valid_return_round_trips(
-            role in 1u8..=3,
+            role in 1u8..=2,
             inv in proptest::collection::vec(any::<u8>(), 0..64),
             epochs in proptest::collection::btree_set(any::<u32>(), 0..8),
         ) {

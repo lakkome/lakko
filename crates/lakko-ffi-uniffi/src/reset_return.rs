@@ -14,16 +14,16 @@
 //!   continuity-mailbox row (`FfiMailboxKind.channelReturn`).
 //! - The history request (`lakko_contacts::history_request`), answered with
 //!   the ADR-0091 gap history unchanged.
-//! - The channel recovery key (`lakko_channels::recovery`).
+//! - The channel recovery key (`lakko_channels::recovery`), derived from the
+//!   owned-channels list key `R` since 2026-11-26 (the OPRF input and
+//!   `fromOprfOutput` are removed; the list and its locks are in
+//!   `owned_channels.rs`).
 //!
 //! Every refusal is [`FfiError::ResetReturn`] with `"<code>: <reason>"`.
 
 use std::sync::Arc;
 
-use lakko_channels::recovery::{
-    channel_recovery_oprf_input as rust_oprf_input, ChannelRecoveryKey as RustRecoveryKey,
-    RECOVERY_PROOF_HEADER_NAME,
-};
+use lakko_channels::recovery::{ChannelRecoveryKey as RustRecoveryKey, RECOVERY_PROOF_HEADER_NAME};
 use lakko_contacts::channel_epoch_seeds::ChannelEpochSeed;
 use lakko_contacts::channel_return::{
     compose_channel_return as rust_compose_return, decode_channel_return as rust_decode_return,
@@ -128,8 +128,6 @@ pub enum FfiChannelReturnRole {
     Subscriber,
     /// A publisher: an owner device admits the new devices.
     Publisher,
-    /// The owner: recover the channel with its recovery key.
-    Owner,
 }
 
 impl From<FfiChannelReturnRole> for ChannelReturnRole {
@@ -137,7 +135,6 @@ impl From<FfiChannelReturnRole> for ChannelReturnRole {
         match r {
             FfiChannelReturnRole::Subscriber => Self::Subscriber,
             FfiChannelReturnRole::Publisher => Self::Publisher,
-            FfiChannelReturnRole::Owner => Self::Owner,
         }
     }
 }
@@ -147,7 +144,6 @@ impl From<ChannelReturnRole> for FfiChannelReturnRole {
         match r {
             ChannelReturnRole::Subscriber => Self::Subscriber,
             ChannelReturnRole::Publisher => Self::Publisher,
-            ChannelReturnRole::Owner => Self::Owner,
         }
     }
 }
@@ -362,14 +358,20 @@ impl ChannelRecoveryKey {
         }))
     }
 
-    /// The key from the VOPRF output auth evaluated over
-    /// `channelRecoveryOprfInput(channelId)`.
+    /// The key of `channel_id` from the owned-channels list key `R`
+    /// (ADR-0101 section 7 item 5).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::ResetReturn`] `keyLength`.
     #[uniffi::constructor]
-    #[must_use]
-    pub fn from_oprf_output(oprf_output: Vec<u8>) -> Arc<Self> {
-        Arc::new(Self {
-            inner: RustRecoveryKey::from_oprf_output(&oprf_output),
-        })
+    pub fn from_list_key(list_key: Vec<u8>, channel_id: Vec<u8>) -> Result<Arc<Self>, FfiError> {
+        Ok(Arc::new(Self {
+            inner: RustRecoveryKey::from_list_key(
+                &array::<32>(&list_key, "listKey")?,
+                &array::<16>(&channel_id, "channelId")?,
+            ),
+        }))
     }
 
     /// The 32-byte public key to register with `services/channels`.
@@ -399,17 +401,6 @@ impl ChannelRecoveryKey {
             )
             .encode())
     }
-}
-
-/// The VOPRF input a device blinds to ask auth for `channel_id`'s recovery
-/// seed.
-///
-/// # Errors
-///
-/// [`FfiError::ResetReturn`] `keyLength`.
-#[uniffi::export]
-pub fn channel_recovery_oprf_input(channel_id: Vec<u8>) -> Result<Vec<u8>, FfiError> {
-    Ok(rust_oprf_input(&array::<16>(&channel_id, "channelId")?))
 }
 
 /// The request header the owner-change proof travels in.
@@ -477,7 +468,7 @@ mod tests {
             .to_bytes();
         let ret = FfiChannelReturn {
             channel_id: channel.to_vec(),
-            role: FfiChannelReturnRole::Owner,
+            role: FfiChannelReturnRole::Publisher,
             old_binding_sig: sig.to_vec(),
             old_subscriber_pk: sub.to_vec(),
             profile_hash: hash.to_vec(),
@@ -525,7 +516,7 @@ mod tests {
 
     #[test]
     fn a_recovery_owner_change_signed_here_verifies_in_the_core() {
-        let key = ChannelRecoveryKey::from_oprf_output(vec![0x41; 64]);
+        let key = ChannelRecoveryKey::from_list_key(vec![0x41; 32], vec![0x0C; 16]).unwrap();
         let new_owner = SigningKey::from_seed(&[0x22; 32])
             .verifying_key()
             .to_bytes();
@@ -539,10 +530,7 @@ mod tests {
             Ok(())
         );
         assert!(ChannelRecoveryKey::from_seed(vec![1; 31]).is_err());
-        assert_eq!(
-            channel_recovery_oprf_input(vec![0x0C; 16]).unwrap().len(),
-            49
-        );
+        assert!(ChannelRecoveryKey::from_list_key(vec![1; 31], vec![0; 16]).is_err());
         assert_eq!(
             channel_recovery_proof_header_name(),
             "x-lakko-channel-recovery-proof"

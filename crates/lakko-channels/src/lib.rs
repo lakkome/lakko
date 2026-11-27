@@ -132,6 +132,7 @@ pub mod invite;
 pub mod listing;
 pub mod member_card;
 pub mod meta;
+pub mod owned;
 pub mod owner;
 pub mod poll;
 pub mod post;
@@ -191,6 +192,11 @@ pub use meta::{
     ALLOWED_REACTIONS_MAX, CHANNEL_META_DOMAIN_V1, CHANNEL_META_MAX_LEN, CHANNEL_META_MIN_LEN,
     CHANNEL_META_VERSION_V3,
 };
+pub use owned::{
+    decode_keys_lock, decode_list_key_lock, encode_keys_lock, encode_list_key_lock, keys_lock_root,
+    passkey_lock_root, password_lock_root, AdmissionSeed, EpochSeed, OwnedChannel,
+    OwnedChannelsError, OwnedChannelsList, PasskeyLock, OWNED_CHANNELS_LIST_LEN,
+};
 pub use owner::{
     channel_owner_seed, owner_handover_body, parse_owner_handover_body, verify_owner_proof,
     ChannelOwnerSigner, OwnerHandoverError, OwnerProof, OwnerProofError, OwnerRequest,
@@ -216,10 +222,9 @@ pub use reaction::{
     REACTION_KEY_INFO_V1, REACTION_LABEL_LEN,
 };
 pub use recovery::{
-    channel_recovery_oprf_input, recovery_owner_change_bytes, verify_recovery_owner_change,
-    ChannelRecoveryKey, RecoveryOwnerProof, RecoveryProofError, CHANNEL_RECOVERY_KEY_DOMAIN,
-    CHANNEL_RECOVERY_OPRF_INPUT_DOMAIN, RECOVERY_OWNER_CHANGE_DOMAIN, RECOVERY_PROOF_HEADER_NAME,
-    RECOVERY_PROOF_MAX_HEADER_LEN,
+    recovery_owner_change_bytes, verify_recovery_owner_change, ChannelRecoveryKey,
+    RecoveryOwnerProof, RecoveryProofError, CHANNEL_RECOVERY_KEY_DOMAIN,
+    RECOVERY_OWNER_CHANGE_DOMAIN, RECOVERY_PROOF_HEADER_NAME, RECOVERY_PROOF_MAX_HEADER_LEN,
 };
 pub use rotation_policy::{RotationPolicy, RotationState, DEFAULT_INTERVAL_MS, DEFAULT_MAX_POSTS};
 pub use seed::{ContentKeySeed, CONTENT_KEY_SEED_LEN, EXPORTER_LABEL_V1};
@@ -247,6 +252,14 @@ pub const CHANNEL_ID_LEN: usize = 16;
 /// part of the supported API.
 #[doc(hidden)]
 pub mod fuzz_api {
+    /// Decode `bytes` as an owned-channels list (ADR-0101 section 7). `None`
+    /// when it does not decode; `Some(true)` when it re-encodes to the
+    /// identical bytes, which the harness asserts.
+    #[must_use]
+    pub fn owned_channels_decode(bytes: &[u8]) -> Option<bool> {
+        crate::owned::fuzz_decode(bytes)
+    }
+
     /// Run the member-card binding parser (ADR-0060 section 3) on an
     /// arbitrary card plaintext under a fixed channel and subscriber key:
     /// `Some(profile length)` when the binding verifies. The AEAD keeps a

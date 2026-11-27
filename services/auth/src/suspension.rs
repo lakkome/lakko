@@ -256,8 +256,9 @@ pub(crate) enum LandingGrant {
     /// device redeem, recovery-email password, refresh).
     None,
     /// The password or passkey sign-in: the route mints one on success, and
-    /// the refusal carries one too, for `DELETE /account`.
-    Fresh,
+    /// the refusal carries one too, for `DELETE /account`. Names how the
+    /// person signed in, as the grant does.
+    Fresh(lakko_auth_token::GrantMethod),
 }
 
 /// The landing-route gate: `Ok(())` when the account is not suspended, else
@@ -286,10 +287,11 @@ pub(crate) async fn refuse_landing_if_suspended(
     tracing::info!("landing refused: the account is suspended");
     let grant = match grant {
         LandingGrant::None => None,
-        LandingGrant::Fresh => Some(crate::session::issue_fresh_grant(
+        LandingGrant::Fresh(method) => Some(crate::session::issue_fresh_grant(
             state,
             account_id,
             key_generation,
+            method,
         )?),
     };
     Err(ApiError::AccountSuspended(Some(Box::new(suspended_body(

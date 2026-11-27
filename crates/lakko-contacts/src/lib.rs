@@ -180,6 +180,7 @@ pub mod reach_plan;
 pub mod registrar_seed;
 pub mod rejoin_present;
 pub mod request;
+pub mod reset_verdict;
 pub mod safety;
 pub mod shared_channels;
 pub mod username;
@@ -505,6 +506,10 @@ pub use registrar_seed::{
 pub use request::{
     compose, decode_and_verify, open_envelope, ContactRequest, LinkAnswer, OpenedRequest,
     ACCOUNT_ID_LEN, LINK_ANSWER_LEN,
+};
+pub use reset_verdict::{
+    reset_verdict, AttestCheck, LogCheck, LogStatus, ResetRefusal, ResetVerdict, ResetVerdictInput,
+    SealLog, SealSignature, LOG_OFF_ACCEPTS_RESET,
 };
 pub use safety::{
     safety_number, safety_number_bytes, SAFETY_NUMBER_DIGITS, SAFETY_NUMBER_DIGITS_PER_GROUP,

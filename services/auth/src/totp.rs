@@ -92,17 +92,31 @@ type RecoverRow = (
 /// Load the TOTP secret-encryption key from `LAKKO_TOTP_ENC_KEY`.
 ///
 /// `Ok(Some(_))` when the env var is present and decodes to exactly 32 bytes;
-/// `Ok(None)` when it is unset (the `/totp/*` routes then return 503);
-/// `Err` (loud-fail at startup) when it is present but malformed.
+/// Required at startup since ADR-0073 (amended 2026-11-26): the sign-up
+/// step always offers the authenticator, and it is a reset factor. The `503`
+/// arm of the `/totp/*` routes stays for a state built without a key, which
+/// `main` never builds.
 ///
 /// # Errors
 ///
-/// Returns an error when the env var is set but is not valid base64 or does
-/// not decode to exactly 32 bytes.
-pub(crate) fn load_totp_enc_key() -> anyhow::Result<Option<[u8; 32]>> {
-    let raw = match std::env::var("LAKKO_TOTP_ENC_KEY") {
-        Ok(v) if !v.trim().is_empty() => v,
-        _ => return Ok(None),
+/// Returns an error when the env var is unset or blank, is not valid base64,
+/// or does not decode to exactly 32 bytes.
+pub(crate) fn load_totp_enc_key() -> anyhow::Result<[u8; 32]> {
+    parse_totp_enc_key(std::env::var("LAKKO_TOTP_ENC_KEY").ok().as_deref())
+}
+
+/// [`load_totp_enc_key`] over the variable's value (`None` when unset), so
+/// the "required at startup" rule is testable without the process
+/// environment.
+fn parse_totp_enc_key(value: Option<&str>) -> anyhow::Result<[u8; 32]> {
+    let raw = match value {
+        Some(v) if !v.trim().is_empty() => v,
+        _ => {
+            return Err(anyhow::anyhow!(
+                "LAKKO_TOTP_ENC_KEY must be set (base64 of 32 bytes): the authenticator is \
+                 always offered at sign-up and as a reset factor (ADR-0073, amended 2026-11-26)"
+            ))
+        },
     };
     let bytes = STANDARD
         .decode(raw.trim())
@@ -113,7 +127,7 @@ pub(crate) fn load_totp_enc_key() -> anyhow::Result<Option<[u8; 32]>> {
             bytes.len()
         )
     })?;
-    Ok(Some(key))
+    Ok(key)
 }
 
 /// Resolve the configured TOTP key or return the 503 (`ApiError::Disabled`)
@@ -256,11 +270,25 @@ pub(crate) struct EnrollStartRes {
     pub secret_b32: String,
 }
 
+/// `POST /totp/enroll/start` request (ADR-0073, amended 2026-11-26).
+#[derive(Deserialize)]
+pub(crate) struct EnrollStartReq {
+    /// The `k1` fresh-auth grant (either method): a bare session must not
+    /// plant a factor that a person knowing the password then uses to reset
+    /// the keys. Optional on the wire so its absence is the `403
+    /// fresh-auth-required` every other refusal gets.
+    #[serde(default)]
+    pub fresh_grant: Option<String>,
+}
+
 /// `POST /totp/enroll/finish` request — the first code the authenticator
-/// produced, proving it holds the secret.
+/// produced, proving it holds the secret, and the fresh-auth grant.
 #[derive(Deserialize)]
 pub(crate) struct EnrollFinishReq {
     pub code: String,
+    /// As in [`EnrollStartReq`].
+    #[serde(default)]
+    pub fresh_grant: Option<String>,
 }
 
 /// `POST /totp/recover` request.
@@ -294,8 +322,9 @@ pub(crate) struct RecoverRes {
 
 /// `POST /totp/enroll/start` — mint + store an unconfirmed TOTP secret.
 ///
-/// Bearer-auth (the already-logged-in account); the body is ignored.
-/// Re-enrolling BEFORE
+/// Bearer-auth (the already-logged-in account) AND a live fresh-auth grant
+/// in the body (`{fresh_grant}`; ADR-0073, amended 2026-11-26: `403
+/// fresh-auth-required` otherwise, checked first). Re-enrolling BEFORE
 /// confirmation replaces the pending secret; re-enrolling AFTER confirmation
 /// is refused (`409`) so a stolen session cannot silently swap the
 /// authenticator out from under the user.
@@ -303,9 +332,11 @@ pub(crate) struct RecoverRes {
 pub(crate) async fn enroll_start(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthenticatedAccount>,
+    Json(req): Json<EnrollStartReq>,
 ) -> Result<Json<EnrollStartRes>, ApiError> {
     let key = require_key(&state)?;
     let account_id = auth.0;
+    crate::session::require_fresh_grant(&state, &account_id, req.fresh_grant.as_deref()).await?;
 
     // Refuse a swap of an ALREADY-confirmed authenticator.
     let existing: Option<(Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,)> =
@@ -361,6 +392,7 @@ pub(crate) async fn enroll_finish(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let key = require_key(&state)?;
     let account_id = auth.0;
+    crate::session::require_fresh_grant(&state, &account_id, req.fresh_grant.as_deref()).await?;
     let code = parse_code(&req.code)?;
 
     let row: Option<(
@@ -744,6 +776,20 @@ mod tests {
     }
 
     #[test]
+    fn startup_is_refused_without_the_authenticator_key() {
+        for missing in [None, Some(""), Some("  ")] {
+            let err = parse_totp_enc_key(missing).unwrap_err().to_string();
+            assert!(err.contains("must be set"), "{err}");
+        }
+        assert!(parse_totp_enc_key(Some("not base64 !!")).is_err());
+        assert!(parse_totp_enc_key(Some(&STANDARD.encode([0u8; 31]))).is_err());
+        assert_eq!(
+            parse_totp_enc_key(Some(&STANDARD.encode([7u8; 32]))).unwrap(),
+            [7u8; 32]
+        );
+    }
+
+    #[test]
     fn load_key_rejects_wrong_length() {
         // 31 bytes base64 → error; we can only test the decode+len logic
         // by calling the helper indirectly through env, so test the core
@@ -812,7 +858,10 @@ mod totp_e2e_tests {
             anon_cred: None,
             handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
             recovery_email: None,
-            channel_recovery: None,
+            owned_channels: Some(std::sync::Arc::new(
+                crate::owned_channels::OwnedChannelsMaster::from_bytes([0x0C; 32]),
+            )),
+            reset_factor_grant_ttl_ms: 600_000,
             limits: Arc::new(crate::limits::Limits::defaults()),
         };
         (state, token_secret)
@@ -916,13 +965,43 @@ mod totp_e2e_tests {
         // ADR-0054 S5: recovery names the account by its login handle.
         let (handle, known_b64) = crate::login_handle::random_handle();
         crate::login_handle::bind_for_test(&pool, &account_id, &handle).await;
+        let grant = ts
+            .issue_fresh_grant(
+                &account_id,
+                1,
+                lakko_auth_token::GrantMethod::Passkey,
+                now_ms() + 60_000,
+            )
+            .unwrap();
 
-        // (2) enroll/start -> secret; compute the current code; enroll/finish.
+        // (1b) ADR-0073 (amended 2026-11-26): without a fresh-auth grant a
+        // session cannot plant an authenticator.
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({ "fresh_grant": "k1.x" }),
+        ] {
+            let (st, answer) = json_post(&state, "/totp/enroll/start", Some(&bearer), body).await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            assert_eq!(
+                std::str::from_utf8(&answer).unwrap(),
+                r#"{"error":"fresh-auth-required"}"#
+            );
+        }
+        let pending: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM totp_secrets WHERE account_id = ?")
+                .bind(account_id.as_slice())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(pending, 0, "a refused start stores nothing");
+
+        // (2) enroll/start -> secret; compute the current code; enroll/finish
+        // (a passkey-minted grant is enough to add a factor).
         let (st, body) = json_post(
             &state,
             "/totp/enroll/start",
             Some(&bearer),
-            serde_json::json!({}),
+            serde_json::json!({ "fresh_grant": grant }),
         )
         .await;
         assert_eq!(st, StatusCode::OK);
@@ -931,11 +1010,20 @@ mod totp_e2e_tests {
         let secret = base32_decode(secret_b32);
         let code = format!("{:06}", verify_code_now(&secret));
 
+        // The finish needs the grant too.
         let (st, _) = json_post(
             &state,
             "/totp/enroll/finish",
             Some(&bearer),
             serde_json::json!({ "code": code }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "enroll/finish without a grant");
+        let (st, _) = json_post(
+            &state,
+            "/totp/enroll/finish",
+            Some(&bearer),
+            serde_json::json!({ "code": code, "fresh_grant": grant }),
         )
         .await;
         assert_eq!(st, StatusCode::OK, "enroll/finish confirms");
@@ -945,7 +1033,7 @@ mod totp_e2e_tests {
             &state,
             "/totp/enroll/start",
             Some(&bearer),
-            serde_json::json!({}),
+            serde_json::json!({ "fresh_grant": grant }),
         )
         .await;
         assert_eq!(st, StatusCode::CONFLICT, "swap of confirmed TOTP refused");

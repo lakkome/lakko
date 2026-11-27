@@ -92,6 +92,10 @@ pub(crate) struct AppendReq {
     /// is then refused — the anti-squatting gate). Ignored for rotations.
     #[serde(default)]
     pub genesis_attest_b64: Option<String>,
+    /// ADR-0101 section 10: standard base64 of the 214-byte reset seal of a
+    /// reset leaf (`is_reset`), stored as a sidecar; ignored otherwise.
+    #[serde(default)]
+    pub reset_seal_b64: Option<String>,
 }
 
 /// `POST /transparency/append` response body.
@@ -203,9 +207,17 @@ async fn append_checked(
         None => None,
     };
 
+    let reset_seal: Option<Vec<u8>> =
+        match req.reset_seal_b64.as_deref() {
+            Some(s) => Some(B64.decode(s.as_bytes()).map_err(|_| {
+                invalid((StatusCode::BAD_REQUEST, "reset_seal_b64 not valid base64"))
+            })?),
+            None => None,
+        };
+
     let result = state
         .store
-        .append(
+        .append_with_seal(
             &state.db,
             username_hash,
             identity_pubkey,
@@ -216,6 +228,7 @@ async fn append_checked(
                 key: state.genesis_attest_key.as_ref(),
                 required: state.require_genesis_attest,
             },
+            reset_seal.as_deref(),
             now_unix_secs_i64(),
         )
         .await
@@ -323,7 +336,7 @@ pub(crate) async fn proof(
     State(state): State<AppState>,
     Path(idx): Path<u64>,
 ) -> Result<Json<ProofRes>, (StatusCode, &'static str)> {
-    let (entry, proof) = state.store.proof(idx).await.map_err(|e| {
+    let (leaf, proof) = state.store.leaf_proof(idx).await.map_err(|e| {
         tracing::debug!(idx, error = %e, "proof request out of range");
         (StatusCode::NOT_FOUND, "no entry at that index")
     })?;
@@ -335,7 +348,7 @@ pub(crate) async fn proof(
 
     Ok(Json(ProofRes {
         idx: proof.leaf_index,
-        leaf_b64: B64.encode(entry.canonical_bytes()),
+        leaf_b64: B64.encode(leaf),
         audit_path: proof.audit_path.iter().map(|h| B64.encode(h)).collect(),
         log_size,
     }))
@@ -398,6 +411,10 @@ pub(crate) struct LatestRes {
     /// on a first observation to confirm the account authorised the genesis key.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub genesis_attest_b64: Option<String>,
+    /// ADR-0101 section 10: standard base64 of the reset seal stored with a
+    /// reset leaf (absent for an unsealed reset or a non-reset leaf).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reset_seal_b64: Option<String>,
 }
 
 /// Return the latest entry for the account-key carried in the path
@@ -440,6 +457,121 @@ pub(crate) async fn latest(
         is_reset: entry.is_reset,
         leaf_auth_b64: entry.leaf_auth.map(|a| B64.encode(a)),
         genesis_attest_b64: entry.genesis_attest.map(|a| B64.encode(a)),
+        reset_seal_b64: entry.reset_seal.map(|a| B64.encode(a)),
+    }))
+}
+
+// ----------------------------------------------------------------
+// POST /transparency/announcement/append (ADR-0101 section 10)
+// ----------------------------------------------------------------
+
+/// Body of `POST /transparency/announcement/append` (service-secret gated:
+/// discovery only).
+#[derive(Debug, Deserialize)]
+pub(crate) struct AnnouncementAppendReq {
+    /// Standard base64 of the 32-byte `account_username_hash`.
+    pub username_hash_b64: String,
+    /// Standard base64 of the seal announcement as the account signed it.
+    pub announcement_b64: String,
+}
+
+/// Answer of `POST /transparency/announcement/append`.
+#[derive(Debug, Serialize)]
+pub(crate) struct AnnouncementAppendRes {
+    /// The leaf index (the existing one for a retry).
+    pub idx: u64,
+}
+
+/// `POST /transparency/announcement/append`: append (or find) the
+/// announcement leaf. `400` malformed, `403` an announcement that does not
+/// verify under the account's latest identity key (or no identity leaf),
+/// `409` a `seq` not above the logged ones, `500` a store failure.
+pub(crate) async fn append_announcement(
+    State(state): State<AppState>,
+    Json(req): Json<AnnouncementAppendReq>,
+) -> Result<Json<AnnouncementAppendRes>, (StatusCode, &'static str)> {
+    let username_hash: [u8; 32] = B64
+        .decode(req.username_hash_b64.as_bytes())
+        .ok()
+        .and_then(|v| <[u8; 32]>::try_from(v.as_slice()).ok())
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "username_hash must be 32 bytes, base64",
+        ))?;
+    let announcement = B64
+        .decode(req.announcement_b64.as_bytes())
+        .ok()
+        .filter(|a| a.len() <= lakko_attest::SEAL_ANNOUNCEMENT_MAX_LEN)
+        .ok_or((StatusCode::BAD_REQUEST, "announcement_b64 malformed"))?;
+    let idx = state
+        .store
+        .append_announcement(&state.db, username_hash, &announcement)
+        .await
+        .map_err(|e| match e {
+            crate::store::StoreError::Unauthorised(detail) => {
+                tracing::warn!(detail, "announcement append refused");
+                crate::metrics::append(AppendOutcome::Refused);
+                (StatusCode::FORBIDDEN, "announcement rejected")
+            },
+            crate::store::StoreError::Stale => {
+                crate::metrics::append(AppendOutcome::Refused);
+                (StatusCode::CONFLICT, "announcement seq not newer")
+            },
+            other => {
+                tracing::error!(error = %other, "announcement append failed");
+                crate::metrics::append(AppendOutcome::Error);
+                (StatusCode::INTERNAL_SERVER_ERROR, "append failed")
+            },
+        })?;
+    Ok(Json(AnnouncementAppendRes { idx }))
+}
+
+// ----------------------------------------------------------------
+// GET /transparency/announcement/{username_hash_b64}/{generation}
+// ----------------------------------------------------------------
+
+/// Answer of `GET /transparency/announcement/{username_hash}/{generation}`:
+/// the newest announcement leaf of that account and generation.
+#[derive(Debug, Serialize)]
+pub(crate) struct AnnouncementRes {
+    /// The leaf index; its audit path is `GET /transparency/proof/{idx}`.
+    pub idx: u64,
+    /// The generation.
+    pub key_generation: u64,
+    /// Its `seq`.
+    pub seq: u64,
+    /// Standard base64 of the announcement bytes.
+    pub announcement_b64: String,
+}
+
+/// `GET /transparency/announcement/{username_hash_b64}/{generation}`: open,
+/// `404` when the account logged none at that generation. "The newest" rests
+/// on this service answering truthfully, kept honest by the witnesses and by
+/// each device's `seq` floor (ADR-0101 section 10).
+pub(crate) async fn announcement(
+    State(state): State<AppState>,
+    Path((username_hash_b64, generation)): Path<(String, u64)>,
+) -> Result<Json<AnnouncementRes>, (StatusCode, &'static str)> {
+    let username_hash: [u8; 32] = decode_b64_any(&username_hash_b64)
+        .and_then(|v| <[u8; 32]>::try_from(v.as_slice()).ok())
+        .ok_or((StatusCode::BAD_REQUEST, "username_hash must be 32 bytes"))?;
+    let entry = state
+        .store
+        .announcement(&state.db, username_hash, generation)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "announcement lookup failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "announcement lookup failed",
+            )
+        })?
+        .ok_or((StatusCode::NOT_FOUND, "no announcement for that generation"))?;
+    Ok(Json(AnnouncementRes {
+        idx: entry.idx,
+        key_generation: entry.key_generation,
+        seq: entry.seq,
+        announcement_b64: B64.encode(entry.announcement),
     }))
 }
 

@@ -339,7 +339,9 @@ pub(crate) async fn list_credentials(
 /// Delete a single credential. Idempotent — deleting a nonexistent
 /// or already-deleted row returns 200. The account_id binding
 /// guards cross-account deletion (a session token issued for one
-/// account cannot wipe another account's credential).
+/// account cannot wipe another account's credential). The account's last
+/// second factor is refused `409 {"error":"last-factor"}` (ADR-0073, amended
+/// 2026-11-26), before the action grant is consumed.
 #[axum::debug_handler]
 pub(crate) async fn delete_credential(
     State(state): State<AppState>,
@@ -371,6 +373,18 @@ pub(crate) async fn delete_credential(
     // calling delete. Recompute the action hash the ceremony bound to and
     // consume the grant atomically; refuse if none is present — a stolen
     // session token alone (no passkey gesture) cannot pass this gate.
+    // ADR-0073 (amended 2026-11-26): the last second factor stays. Checked
+    // first without a lock, so a refused delete does not spend the person's
+    // action grant, and again under the account row's lock below.
+    {
+        let mut probe = state.db.begin().await.map_err(ApiError::Db)?;
+        crate::factors::refuse_if_last(
+            &mut probe,
+            &auth.0,
+            crate::factors::Leaving::Passkey(&credential_id),
+        )
+        .await?;
+    }
     let action_hash = crate::webauthn_action::delete_credential_action_hash(&credential_id);
     let consumed =
         crate::webauthn_action::consume_action_grant(&state.db, &auth.0, &action_hash).await?;
@@ -385,6 +399,17 @@ pub(crate) async fn delete_credential(
     // length), so the delete is explicit. Blob first, then the credential:
     // the same order as `passkey_vault::passkey_put` checks them.
     let mut tx = state.db.begin().await.map_err(ApiError::Db)?;
+    sqlx::query("SELECT 1 FROM accounts WHERE id = ? FOR UPDATE")
+        .bind(auth.0.as_slice())
+        .execute(&mut *tx)
+        .await
+        .map_err(ApiError::Db)?;
+    crate::factors::refuse_if_last(
+        &mut tx,
+        &auth.0,
+        crate::factors::Leaving::Passkey(&credential_id),
+    )
+    .await?;
     sqlx::query("DELETE FROM passkey_vaults WHERE account_id = ? AND credential_id = ?")
         .bind(auth.0.as_slice())
         .bind(&credential_id)
@@ -844,7 +869,7 @@ async fn auth_finish_answer(
         &account_id,
         key_generation,
         &device_id,
-        crate::suspension::LandingGrant::Fresh,
+        crate::suspension::LandingGrant::Fresh(lakko_auth_token::GrantMethod::Passkey),
     )
     .await?;
 
@@ -853,7 +878,12 @@ async fn auth_finish_answer(
     // the passkey assertion just verified, a fresh-auth grant at that same
     // generation (amended 2026-10-06).
     let session = crate::session::issue_pair_at(&state, &account_id, key_generation, &device_id)?;
-    let grant = crate::session::issue_fresh_grant(&state, &account_id, session.key_generation)?;
+    let grant = crate::session::issue_fresh_grant(
+        &state,
+        &account_id,
+        session.key_generation,
+        lakko_auth_token::GrantMethod::Passkey,
+    )?;
 
     Ok(Json(AuthFinishRes {
         account_id_b64: URL_SAFE_NO_PAD.encode(account_id),

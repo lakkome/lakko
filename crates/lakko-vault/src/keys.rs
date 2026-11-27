@@ -27,12 +27,20 @@
 //! ## `ref_bytes`
 //!
 //! ```text
-//! conversation := 0x01 || kind(1) || id_len(1) || id(1..=64)
-//! index        := 0x02
-//! devices      := 0x03
+//! conversation   := 0x01 || kind(1) || id_len(1) || id(1..=64)
+//! index          := 0x02
+//! devices        := 0x03
+//! owned channels := 0x04
 //! ```
 //!
-//! The leading tag keeps the three shapes apart: a conversation id can never
+//! `0x04` names the owned-channels vaults of ADR-0101 section 7 (the list and
+//! its locks). Those vaults are not named under the account's
+//! `vault_root`: each has a root of its own, given directly to
+//! [`VaultRoot::from_root`] (a lock root, or the list key `R`), because the
+//! account seed they would otherwise come from is the one a key reset
+//! replaces. The same four derivations then run over `root || 0x04`.
+//!
+//! The leading tag keeps the four shapes apart: a conversation id can never
 //! spell the index or the devices vault. `vault_root` is a fixed 32 bytes, so
 //! `vault_root || ref_bytes` is unambiguous, and the length byte lets the same
 //! encoding sit inside a saved record ([`crate::record`]).
@@ -84,6 +92,8 @@ pub const REF_TAG_CONVERSATION: u8 = 0x01;
 pub const REF_TAG_INDEX: u8 = 0x02;
 /// The whole `ref_bytes` of the devices vault.
 pub const REF_TAG_DEVICES: u8 = 0x03;
+/// The whole `ref_bytes` of an owned-channels vault (ADR-0101 section 7).
+pub const REF_TAG_OWNED_CHANNELS: u8 = 0x04;
 
 /// Longest `ref_bytes`: tag, kind, length byte and a full id.
 pub const MAX_REF_BYTES: usize = 3 + MAX_CONVERSATION_ID_LEN;
@@ -229,6 +239,10 @@ pub enum VaultRef {
     Index,
     /// The vault of the account's own device group (ADR-0064 section 5).
     Devices,
+    /// An owned-channels vault: the list or one of its locks (ADR-0101
+    /// section 7). Used with a [`VaultRoot::from_root`], whose root tells
+    /// the vaults apart.
+    OwnedChannels,
 }
 
 impl VaultRef {
@@ -239,6 +253,7 @@ impl VaultRef {
             Self::Conversation(conversation) => conversation.ref_bytes(),
             Self::Index => vec![REF_TAG_INDEX],
             Self::Devices => vec![REF_TAG_DEVICES],
+            Self::OwnedChannels => vec![REF_TAG_OWNED_CHANNELS],
         }
     }
 }
@@ -289,6 +304,15 @@ impl VaultRoot {
             VAULT_ROOT_CONTEXT,
             account_identity_seed,
         )))
+    }
+
+    /// A root given directly, not derived from an account seed: the
+    /// owned-channels lock roots and the list key `R` of ADR-0101 section 7
+    /// (`lakko_channels::owned`). Whoever holds it can name, read and
+    /// rewrite that vault.
+    #[must_use]
+    pub fn from_root(root: &[u8; KEY_LEN]) -> Self {
+        Self(SecretBytes::new(*root))
     }
 
     /// The name of the vault on the storage service. Not secret: it is what
@@ -366,6 +390,7 @@ mod tests {
         assert_eq!(VaultRef::from(channel).ref_bytes(), [0x01, 0x03, 0x01, 7]);
         assert_eq!(VaultRef::Index.ref_bytes(), [0x02]);
         assert_eq!(VaultRef::Devices.ref_bytes(), [0x03]);
+        assert_eq!(VaultRef::OwnedChannels.ref_bytes(), [0x04]);
         let longest = ConversationRef::new(RefKind::Group, &[0; MAX_CONVERSATION_ID_LEN]).unwrap();
         assert_eq!(longest.ref_bytes().len(), MAX_REF_BYTES);
     }
@@ -400,9 +425,10 @@ mod tests {
         let mut ids = vec![
             root.vault_id(&VaultRef::Index),
             root.vault_id(&VaultRef::Devices),
+            root.vault_id(&VaultRef::OwnedChannels),
         ];
         for kind in [RefKind::OneToOne, RefKind::Group, RefKind::Channel] {
-            for id in [&[0x02u8][..], &[0x03], &[0x01], &[0x01, 0x02]] {
+            for id in [&[0x02u8][..], &[0x03], &[0x04], &[0x01], &[0x01, 0x02]] {
                 ids.push(root.vault_id(&ConversationRef::new(kind, id).unwrap().into()));
             }
         }
@@ -443,6 +469,30 @@ mod tests {
             root.blob_delete_seed(&blob_id).as_bytes(),
             &blake3_derive_key_from_material("lakko/blob/delete/v1", &blob_material)
         );
+    }
+
+    #[test]
+    fn a_given_root_is_used_as_is_over_the_owned_channels_tag() {
+        let given = [0x6D; 32];
+        let root = VaultRoot::from_root(&given);
+        assert_eq!(root.0.as_bytes(), &given);
+        let mut material = given.to_vec();
+        material.push(REF_TAG_OWNED_CHANNELS);
+        assert_eq!(
+            root.vault_id(&VaultRef::OwnedChannels),
+            blake3_derive_key_from_material("lakko/vault/id/v1", &material)
+        );
+        // Two roots name two vaults; neither is any account's vault.
+        let other = VaultRoot::from_root(&[0x6E; 32]);
+        assert_ne!(
+            root.vault_id(&VaultRef::OwnedChannels),
+            other.vault_id(&VaultRef::OwnedChannels)
+        );
+        assert_ne!(
+            root.vault_id(&VaultRef::OwnedChannels),
+            VaultRoot::from_account_seed(&given).vault_id(&VaultRef::OwnedChannels)
+        );
+        assert_eq!(format!("{root:?}"), "VaultRoot(<redacted>)");
     }
 
     // Pinned outputs for the fixed seed 0x42 x 32. A change to a context

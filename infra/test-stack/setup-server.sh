@@ -242,12 +242,29 @@ if ! grep -q '^LAKKO_AUTH_SUPPORTER_CODE_PEPPER=' $ENV_FILE; then
   echo "supporter-code pepper added to the env file"
 fi
 
-# Channel recovery (ADR-0101) arrived later: an older env file gains the
-# secret the per-account channel recovery key is derived from, generated once
-# and then kept (regenerating it makes every registered recovery key useless).
-if ! grep -q '^LAKKO_AUTH_CHANNEL_RECOVERY_SECRET=' $ENV_FILE; then
-  echo "LAKKO_AUTH_CHANNEL_RECOVERY_SECRET=$(openssl rand -hex 32)" >> $ENV_FILE
-  echo "channel recovery secret added to the env file"
+# The channel-recovery OPRF secret (ADR-0101, 2026-11-25) is removed: drop
+# its line from an env file that still has it.
+if grep -q '^LAKKO_AUTH_CHANNEL_RECOVERY_SECRET=' $ENV_FILE; then
+  sed -i '/^LAKKO_AUTH_CHANNEL_RECOVERY_SECRET=/d' $ENV_FILE
+  echo "channel recovery secret removed from the env file"
+fi
+
+# Owned channels (ADR-0101 section 7): auth refuses to start without the
+# master of every account's server half of the owned-channels password lock.
+# Generated once and then kept: regenerating it makes every password lock on
+# this stack unopenable (the keys lock still opens the list).
+if ! grep -q '^LAKKO_AUTH_OWNED_CHANNELS_SECRET=' $ENV_FILE; then
+  echo "LAKKO_AUTH_OWNED_CHANNELS_SECRET=$(openssl rand -hex 32)" >> $ENV_FILE
+  echo "owned-channels secret added to the env file"
+fi
+
+# The authenticator key is required since ADR-0073 (amended 2026-11-26): auth
+# refuses to start without it. Every env file this script wrote has one; an
+# older hand-made one gains it here, generated once and then kept
+# (regenerating it makes every stored authenticator secret unreadable).
+if ! grep -q '^LAKKO_TOTP_ENC_KEY=' $ENV_FILE; then
+  echo "LAKKO_TOTP_ENC_KEY=$(openssl rand -base64 32)" >> $ENV_FILE
+  echo "authenticator key added to the env file"
 fi
 
 # The recovery email (ADR-0075) arrived later: an older env file gains the

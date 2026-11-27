@@ -30,13 +30,13 @@ test = false
 doc = false
 bench = false
 
-# The email-vault open path (ADR-0075): the sealed blob is served by the
-# server in the answer to a mailed code, so its bytes are attacker-chosen.
-# Opened under a fixed stretched key (no Argon2id per input); the same bytes
-# also drive the recovery-address rule and its idempotence.
+# The recovery-address rule (ADR-0075 section 4): an address typed by a
+# person or sent to auth is normalised on both sides, and a normalised
+# address must normalise to itself. (Until 2026-11-26 this target was
+# `email_vault_open`; the email vault is removed.)
 [[bin]]
-name = "email_vault_open"
-path = "fuzz_targets/email_vault_open.rs"
+name = "recovery_email_normalize"
+path = "fuzz_targets/recovery_email_normalize.rs"
 test = false
 doc = false
 bench = false

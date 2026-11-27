@@ -3344,7 +3344,7 @@ mod tests {
         assert_eq!(
             a.recovery_email().unwrap(),
             Some(
-                crate::email_vault::normalize_recovery_email("  Alice@Example.COM ".into())
+                crate::recovery_email::normalize_recovery_email("  Alice@Example.COM ".into())
                     .unwrap()
             )
         );

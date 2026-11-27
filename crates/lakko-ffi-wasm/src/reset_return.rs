@@ -10,15 +10,15 @@
 //!   `dsContinuityMailboxSigner`.
 //! - The channel return (`MailboxKind.ChannelReturn` rows).
 //! - The history request, answered with the ADR-0091 gap history.
-//! - The channel recovery key.
+//! - The channel recovery key, derived from the owned-channels list key `R`
+//!   since 2026-11-26 (`fromListKey`; `fromOprfOutput` and
+//!   `channelRecoveryOprfInput` are removed; the list and its locks are in
+//!   `owned_channels.rs`).
 //!
 //! Every refusal throws a string `"<area>.<code>: <reason>"` (`continuity`,
 //! `channelReturn`, `historyRequest`, `channelRecovery`).
 
-use lakko_channels::recovery::{
-    channel_recovery_oprf_input as rust_oprf_input, ChannelRecoveryKey as RustRecoveryKey,
-    RECOVERY_PROOF_HEADER_NAME,
-};
+use lakko_channels::recovery::{ChannelRecoveryKey as RustRecoveryKey, RECOVERY_PROOF_HEADER_NAME};
 use lakko_contacts::channel_epoch_seeds::ChannelEpochSeed;
 use lakko_contacts::channel_return::{
     compose_channel_return as rust_compose_return, decode_channel_return as rust_decode_return,
@@ -120,8 +120,6 @@ pub enum ChannelReturnRole {
     Subscriber = 1,
     /// A publisher: an owner device admits the new devices.
     Publisher = 2,
-    /// The owner: recover the channel with its recovery key.
-    Owner = 3,
 }
 
 impl From<ChannelReturnRole> for RustRole {
@@ -129,7 +127,6 @@ impl From<ChannelReturnRole> for RustRole {
         match r {
             ChannelReturnRole::Subscriber => Self::Subscriber,
             ChannelReturnRole::Publisher => Self::Publisher,
-            ChannelReturnRole::Owner => Self::Owner,
         }
     }
 }
@@ -139,7 +136,6 @@ impl From<RustRole> for ChannelReturnRole {
         match r {
             RustRole::Subscriber => Self::Subscriber,
             RustRole::Publisher => Self::Publisher,
-            RustRole::Owner => Self::Owner,
         }
     }
 }
@@ -394,14 +390,20 @@ impl ChannelRecoveryKey {
         })
     }
 
-    /// The key from the VOPRF output auth evaluated over
-    /// `channelRecoveryOprfInput(channelId)`.
-    #[wasm_bindgen(js_name = fromOprfOutput)]
-    #[must_use]
-    pub fn from_oprf_output(oprf_output: &[u8]) -> ChannelRecoveryKey {
-        Self {
-            inner: RustRecoveryKey::from_oprf_output(oprf_output),
-        }
+    /// The key of `channelId` from the owned-channels list key `R`
+    /// (ADR-0101 section 7 item 5).
+    ///
+    /// # Errors
+    ///
+    /// `channelRecovery.keyLength`.
+    #[wasm_bindgen(js_name = fromListKey)]
+    pub fn from_list_key(list_key: &[u8], channel_id: &[u8]) -> Result<ChannelRecoveryKey, String> {
+        Ok(Self {
+            inner: RustRecoveryKey::from_list_key(
+                &array::<32>("channelRecovery", "listKey", list_key)?,
+                &array::<16>("channelRecovery", "channelId", channel_id)?,
+            ),
+        })
     }
 
     /// The 32-byte public key to register with `services/channels`.
@@ -433,21 +435,6 @@ impl ChannelRecoveryKey {
             )
             .encode())
     }
-}
-
-/// The VOPRF input a device blinds to ask auth for `channelId`'s recovery
-/// seed.
-///
-/// # Errors
-///
-/// `channelRecovery.keyLength`.
-#[wasm_bindgen(js_name = channelRecoveryOprfInput)]
-pub fn channel_recovery_oprf_input(channel_id: &[u8]) -> Result<Vec<u8>, String> {
-    Ok(rust_oprf_input(&array::<16>(
-        "channelRecovery",
-        "channelId",
-        channel_id,
-    )?))
 }
 
 /// The request header the owner-change proof travels in.
@@ -520,9 +507,9 @@ mod tests {
 
     #[test]
     fn a_recovery_header_parses_in_the_core() {
-        let key = ChannelRecoveryKey::from_oprf_output(&[0x41; 64]);
+        let key = ChannelRecoveryKey::from_list_key(&[0x41; 32], &[0x0C; 16]).unwrap();
         let header = key.sign_owner_change(&[0x0C; 16], &[0x22; 32], 5).unwrap();
         assert!(lakko_channels::recovery::RecoveryOwnerProof::parse(&header).is_ok());
-        assert_eq!(channel_recovery_oprf_input(&[0x0C; 16]).unwrap().len(), 49);
+        assert!(ChannelRecoveryKey::from_list_key(&[0x41; 31], &[0x0C; 16]).is_err());
     }
 }

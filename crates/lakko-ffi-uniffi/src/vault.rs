@@ -129,6 +129,10 @@ pub enum VaultRef {
     Index,
     /// The vault of the account's own device group.
     Devices,
+    /// An owned-channels vault (ADR-0101 section 7): the list or one of its
+    /// locks. Use it with [`vault_keys_from_root`], whose root tells the
+    /// vaults apart. Appended last.
+    OwnedChannels,
 }
 
 const fn ref_kind_to_core(kind: FolderConversationKind) -> RefKind {
@@ -165,6 +169,7 @@ fn vault_to_core(vault: &VaultRef) -> Result<CoreVaultRef, FfiError> {
         },
         VaultRef::Index => CoreVaultRef::Index,
         VaultRef::Devices => CoreVaultRef::Devices,
+        VaultRef::OwnedChannels => CoreVaultRef::OwnedChannels,
     })
 }
 
@@ -194,6 +199,22 @@ pub fn vault_keys(account_identity: &Identity) -> Arc<VaultKeys> {
     Arc::new(VaultKeys {
         root: VaultRoot::from_account_seed(seed.as_bytes()),
     })
+}
+
+/// The vault keys of one owned-channels vault from its 32-byte root
+/// (ADR-0101 section 7): a lock root (`ownedPasswordLockRoot`,
+/// `ownedKeysLockRoot`, `ownedPasskeyLockRoot`) or the list key `R`. Use
+/// with `VaultRef.ownedChannels`.
+///
+/// # Errors
+///
+/// [`FfiError::Vault`] `keyLength` when the root is not 32 bytes.
+#[uniffi::export]
+pub fn vault_keys_from_root(root: Vec<u8>) -> Result<Arc<VaultKeys>, FfiError> {
+    let root = SecretBytes::new(fixed::<32>(&root, "keyLength", "root")?);
+    Ok(Arc::new(VaultKeys {
+        root: VaultRoot::from_root(root.as_bytes()),
+    }))
 }
 
 impl VaultKeys {

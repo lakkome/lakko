@@ -10,6 +10,8 @@
 //! - [`log::LogEntry`] — `(username_hash, identity_pubkey, version)` binding
 //! - [`log::SignedRoot`] — Ed25519-signed root the operator publishes
 //! - [`log::InclusionProof`] — audit-path proof for a single entry
+//! - [`reset_seals`] — the seal-announcement leaf (ADR-0101 section 10)
+//!   and the check that the served announcement precedes the reset leaf
 //! - [`log::InMemoryLog`] — in-memory append-only log for tests / Phase-0.5
 //!   skeleton; production storage lands in Phase 2 when wired into
 //!   `services/discovery`
@@ -26,6 +28,7 @@ pub mod error;
 pub mod leaf_auth;
 pub mod log;
 pub mod merkle;
+pub mod reset_seals;
 pub mod supersession;
 pub mod witness;
 
@@ -40,6 +43,10 @@ pub use log::{
     InMemoryLog, InclusionProof, LogEntry, SignedRoot,
 };
 pub use merkle::{consistency_proof, verify_consistency, TreeHash};
+pub use reset_seals::{
+    verify_announcement_before_reset, AnnouncementLeaf, ANNOUNCEMENT_LEAF_DOMAIN,
+    ANNOUNCEMENT_LEAF_LEN,
+};
 pub use supersession::{
     verify_supersession, verify_supersession_chain, PinnedIdentity, RotatedIdentity,
     RotationEvidence, SupersessionProof, MAX_VALIDITY_SECS, SUPERSESSION_PROOF_LEN,

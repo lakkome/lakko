@@ -445,7 +445,10 @@ mod device_authorize_e2e_tests {
             anon_cred: None,
             handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
             recovery_email: None,
-            channel_recovery: None,
+            owned_channels: Some(std::sync::Arc::new(
+                crate::owned_channels::OwnedChannelsMaster::from_bytes([0x0C; 32]),
+            )),
+            reset_factor_grant_ttl_ms: 600_000,
             limits: Arc::new(crate::limits::Limits::defaults()),
         };
         (state, token_secret)
@@ -555,7 +558,7 @@ mod device_authorize_e2e_tests {
         // The person signed in on this device just now.
         let start_body = serde_json::to_vec(&serde_json::json!({
             "fresh_grant": token_secret
-                .issue_fresh_grant(&account_id, 1, now_ms() + 60_000)
+                .issue_fresh_grant(&account_id, 1, lakko_auth_token::GrantMethod::Password, now_ms() + 60_000)
                 .expect("mint fresh-auth grant"),
         }))
         .unwrap();

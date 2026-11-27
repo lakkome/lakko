@@ -26,7 +26,9 @@
 //!   bind and a re-bind of the held handle do not. With `recovery_email`
 //!   (and `previous_handle`) a change moves the recovery email to the new
 //!   handle instead of dropping it (`403 address-mismatch`, `409
-//!   handle-mismatch`; either refuses the whole bind).
+//!   handle-mismatch`; either refuses the whole bind). A change that would
+//!   drop the recovery email when it is the account's last second factor is
+//!   `409 {"error":"last-factor"}` (ADR-0075, amended 2026-11-26).
 //! - **`POST /auth/login-handle/check {handle}`** — bearer. `{"state":
 //!   "same" | "other" | "none"}` for the session's own account. A handle another
 //!   account holds is `409 {"error":"handle-taken"}` and changes nothing.
@@ -47,9 +49,9 @@
 //!
 //! **A change of handle turns the recovery email off** (ADR-0075 section 6):
 //! re-binding to another handle, or removing the handle, deletes the
-//! account's `recovery_emails` and `email_vaults` rows (and its challenges
-//! and tickets) in the same transaction and writes the "recovery email
-//! removed" notice. Both were derived from the old name.
+//! account's `recovery_emails` row (and its challenges and tickets) in the
+//! same transaction and writes the "recovery email removed" notice: its key
+//! was derived from the old name.
 //!
 //! **Without the pepper** (`LAKKO_AUTH_HANDLE_PEPPER` unset) every name route
 //! and both handle routes answer `503 {"error":"login-by-name-disabled"}`,
@@ -266,6 +268,10 @@ pub(crate) enum BindOutcome {
     /// A first bind past the cap carried a `beta-place` token that was
     /// already spent; nothing changed (`403 supporter-code-used`, ADR-0097).
     SupporterCodeUsed,
+    /// The change would drop the recovery email without moving it, and it is
+    /// the account's last second factor; nothing changed (`409 last-factor`,
+    /// ADR-0075, amended 2026-11-26).
+    LastFactor,
 }
 
 /// Attempts at a bind that lost a race: a concurrent bind of the same
@@ -392,6 +398,7 @@ async fn take_supporter_place(
 /// accounts binding at once could be rolled back with `1213 Deadlock found`;
 /// that was reachable from `PUT /auth/login-handle` (every signup binds a
 /// first handle), not only from the tests that found it.
+#[allow(clippy::too_many_lines)] // one transaction, read top to bottom
 async fn bind_once(
     pool: &MySqlPool,
     account_id: &[u8; ACCOUNT_ID_LEN],
@@ -481,12 +488,26 @@ async fn bind_once(
     }
     if let Some(current) = current.as_deref() {
         // ADR-0075 section 6: the recovery email was made from the old name
-        // (the server's `email_key` and the client's vault key both take the
-        // handle), so a change of handle turns it off in this transaction,
+        // (the server's `email_key` takes the handle), so a change of handle
+        // turns it off in this transaction,
         // unless the bind carries the confirmed address (ADR-0076 section
         // 2): then the key is moved to the new handle here, with no letter.
         match terms.rekey.as_ref() {
-            None => crate::recovery_email::drop_for_handle_change(&mut tx, account_id).await?,
+            None => {
+                // ADR-0075 (amended 2026-11-26): the last second factor stays;
+                // the change must carry the address to keep it.
+                if crate::factors::is_last(
+                    &mut tx,
+                    account_id,
+                    crate::factors::Leaving::RecoveryEmail,
+                )
+                .await?
+                {
+                    // Rolled back on drop: the handle written above too.
+                    return Ok(BindOutcome::LastFactor);
+                }
+                crate::recovery_email::drop_for_handle_change(&mut tx, account_id).await?;
+            },
             Some(plan) => {
                 // The server stores only the keyed handle, so the client
                 // names the old one; it must be the one the account holds.
@@ -636,6 +657,12 @@ pub(crate) async fn put(
             return Err(ApiError::Coded(
                 axum::http::StatusCode::FORBIDDEN,
                 "address-mismatch",
+            ));
+        },
+        BindOutcome::LastFactor => {
+            return Err(ApiError::Coded(
+                axum::http::StatusCode::CONFLICT,
+                crate::factors::CODE_LAST_FACTOR,
             ));
         },
         BindOutcome::RegistrationClosed => {

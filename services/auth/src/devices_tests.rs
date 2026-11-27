@@ -81,7 +81,10 @@ fn build_state(pool: MySqlPool, limits: Limits) -> AppState {
         anon_cred: None,
         handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
         recovery_email: None,
-        channel_recovery: None,
+        owned_channels: Some(std::sync::Arc::new(
+            crate::owned_channels::OwnedChannelsMaster::from_bytes([0x0C; 32]),
+        )),
+        reset_factor_grant_ttl_ms: 600_000,
         limits: Arc::new(limits),
     }
 }
@@ -103,7 +106,7 @@ fn pair(state: &AppState, account: &[u8; 16], device: &[u8; 32]) -> SessionPair 
 }
 
 fn grant(state: &AppState, account: &[u8; 16]) -> String {
-    crate::session::issue_fresh_grant(state, account, 1)
+    crate::session::issue_fresh_grant(state, account, 1, lakko_auth_token::GrantMethod::Password)
         .expect("grant")
         .fresh_grant
 }

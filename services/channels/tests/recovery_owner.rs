@@ -140,8 +140,10 @@ async fn scenario(addr: SocketAddr) {
     create(&client, addr, &id, &hex_id).await;
     let old = ChannelOwnerSigner::from_account_seed(&OLD_SEED, &id);
     let new = ChannelOwnerSigner::from_account_seed(&NEW_SEED, &id);
-    let recovery = ChannelRecoveryKey::from_oprf_output(&[0x41; 64]);
-    let stranger = ChannelRecoveryKey::from_oprf_output(&[0x42; 64]);
+    // ADR-0101 section 7: a recovery key derived from the owned-channels
+    // list key `R` and the channel id.
+    let recovery = ChannelRecoveryKey::from_list_key(&[0x41; 32], &id);
+    let stranger = ChannelRecoveryKey::from_list_key(&[0x42; 32], &id);
     let new_key = owner_handover_body(&new.verifying_key()).to_vec();
     let new_key_arr: [u8; 32] = new_key.clone().try_into().unwrap();
     let owner_path = format!("/v1/channels/{hex_id}/owner");

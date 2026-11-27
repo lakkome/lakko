@@ -169,6 +169,12 @@ pub(crate) enum IdentityRefusal {
     ProofInvalid,
     /// `x25519-binding-invalid`.
     X25519BindingInvalid,
+    /// `reset-seals-invalid` (ADR-0101 section 10).
+    ResetSealsInvalid,
+    /// `reset-seals-stale`.
+    ResetSealsStale,
+    /// `reset-seal-invalid`.
+    ResetSealInvalid,
     /// A code not in this list.
     Other,
 }
@@ -186,6 +192,9 @@ impl IdentityRefusal {
             k::CODE_COOLING_DOWN => Self::CoolingDown,
             k::CODE_PROOF_INVALID => Self::ProofInvalid,
             crate::identity_bundle::CODE_X25519_BINDING_INVALID => Self::X25519BindingInvalid,
+            crate::reset_seals::CODE_SEALS_INVALID => Self::ResetSealsInvalid,
+            crate::reset_seals::CODE_SEALS_STALE => Self::ResetSealsStale,
+            crate::reset_seals::CODE_SEAL_INVALID => Self::ResetSealInvalid,
             _ => Self::Other,
         }
     }
@@ -200,6 +209,9 @@ impl IdentityRefusal {
             Self::CoolingDown => "identity_changed_too_recently",
             Self::ProofInvalid => "supersession_proof_invalid",
             Self::X25519BindingInvalid => "x25519_binding_invalid",
+            Self::ResetSealsInvalid => "reset_seals_invalid",
+            Self::ResetSealsStale => "reset_seals_stale",
+            Self::ResetSealInvalid => "reset_seal_invalid",
             Self::Other => "refused_other",
         }
     }

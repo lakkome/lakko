@@ -43,3 +43,7 @@ base64 = "0.22"
 hex = "0.4"
 # Already in the tree through lakko-contacts; test-only.
 proptest = "1"
+# Test-only: pins that an owned-channels list seals to the vault's 32 KiB
+# bucket (ADR-0101 section 7). lakko-vault depends only on lakko-crypto,
+# thiserror and base64.
+lakko-vault.workspace = true

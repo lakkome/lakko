@@ -8,31 +8,31 @@
 //!
 //! The channel owner key ([`crate::owner`]) is derived from the account
 //! seed, so an ADR-0073 key reset loses it and nobody else holds it. ADR-0101
-//! gives the owner a second key bound to the **account**, not to its keys:
-//! the channel recovery key. Its seed is a VOPRF evaluation by
-//! `services/auth` under a per-account key, requested by a signed-in device
-//! with the channel id blinded (S2), so the same account gets the same seed
-//! for the same channel before and after a reset, and auth never learns the
-//! channel id.
+//! gives the owner a second key that survives the reset: the channel
+//! recovery key, derived from the account's owned-channels **list key** `R`
+//! ([`crate::owned`]), which the account keeps on the storage service under
+//! locks a reset leaves openable (the password lock with the server half
+//! `S`, a passkey lock).
 //!
-//! At channel creation (and for an existing channel at the owner device's
-//! next pass) the owner registers the recovery public key with
-//! `services/channels` beside the owner key. After a reset, the new
-//! identity's device evaluates the recovery seed for each channel it learns
-//! of; where the derived key equals the registered one, it signs an
-//! owner change naming its new owner key, which `services/channels` verifies
-//! with [`verify_recovery_owner_change`] against the stored recovery key.
+//! At channel creation (and for an existing channel whose registered key
+//! differs, at the owner device's next publisher pass) the owner registers
+//! the recovery public key with `services/channels` beside the owner key.
+//! After a reset, the resetting device opens the list, derives each
+//! channel's recovery key, and signs an owner change naming its new owner
+//! key, which `services/channels` verifies with
+//! [`verify_recovery_owner_change`] against the stored recovery key.
 //!
-//! ## Derivations
+//! ## Derivation (amended 2026-11-26)
 //!
 //! ```text
-//! oprf_input    = CHANNEL_RECOVERY_OPRF_INPUT_DOMAIN ‖ channel_id(16)
-//! recovery_seed = BLAKE3-derive-key("lakko/channels/recovery-key/v1", oprf_output)
+//! recovery_seed = BLAKE3-derive-key("lakko/channels/recovery-key/v2", R(32) ‖ channel_id(16))
 //! recovery_key  = Ed25519 from recovery_seed
 //! ```
 //!
-//! The VOPRF input and the output-to-seed step are defined here once so the
-//! three clients cannot drift; the evaluation itself is auth's (S2).
+//! `R` never changes, so neither a password change nor a rotation
+//! re-registers anything. The 2026-11-25 derivation (`.../v1` over a VOPRF
+//! output auth evaluated under a per-account key) is removed with its OPRF
+//! input: it let the operator take any channel whose id it knew.
 //!
 //! ## The owner-change proof
 //!
@@ -59,13 +59,9 @@ use thiserror::Error;
 use crate::owner::OWNER_PROOF_WINDOW_MS;
 use crate::CHANNEL_ID_LEN;
 
-/// Prefix of the VOPRF input a device blinds to ask auth for a channel's
-/// recovery seed. Frozen.
-pub const CHANNEL_RECOVERY_OPRF_INPUT_DOMAIN: &[u8] = b"lakko/channels/recovery-input/v1\x00";
-
-/// BLAKE3 derive-key context turning the VOPRF output into the recovery
-/// seed. Frozen.
-pub const CHANNEL_RECOVERY_KEY_DOMAIN: &str = "lakko/channels/recovery-key/v1";
+/// BLAKE3 derive-key context of a channel's recovery seed, over the list key
+/// `R` and the channel id. Frozen.
+pub const CHANNEL_RECOVERY_KEY_DOMAIN: &str = "lakko/channels/recovery-key/v2";
 
 /// Domain separator of the owner-change proof's signed bytes. Frozen.
 pub const RECOVERY_OWNER_CHANGE_DOMAIN: &[u8] = b"lakko/channels/recovery-owner-change/v1\x00";
@@ -79,15 +75,6 @@ pub const RECOVERY_PROOF_MAX_HEADER_LEN: usize = 128;
 const VERSION: &str = "v1";
 const SIGNATURE_LEN: usize = 64;
 const KEY_LEN: usize = 32;
-
-/// The VOPRF input for `channel_id`: what a device blinds.
-#[must_use]
-pub fn channel_recovery_oprf_input(channel_id: &[u8; CHANNEL_ID_LEN]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(CHANNEL_RECOVERY_OPRF_INPUT_DOMAIN.len() + CHANNEL_ID_LEN);
-    out.extend_from_slice(CHANNEL_RECOVERY_OPRF_INPUT_DOMAIN);
-    out.extend_from_slice(channel_id);
-    out
-}
 
 /// Why an owner-change proof was refused. The server maps every variant to
 /// one response.
@@ -172,12 +159,17 @@ impl ChannelRecoveryKey {
         }
     }
 
-    /// The recovery key from the VOPRF output auth evaluated for the
-    /// channel: `BLAKE3-derive-key(CHANNEL_RECOVERY_KEY_DOMAIN, oprf_output)`.
+    /// The recovery key of `channel_id` from the account's owned-channels
+    /// list key `R`: `BLAKE3-derive-key(CHANNEL_RECOVERY_KEY_DOMAIN, R ‖
+    /// channel_id)`.
     #[must_use]
-    pub fn from_oprf_output(oprf_output: &[u8]) -> Self {
+    pub fn from_list_key(list_key: &[u8; KEY_LEN], channel_id: &[u8; CHANNEL_ID_LEN]) -> Self {
+        let mut material = [0u8; KEY_LEN + CHANNEL_ID_LEN];
+        material[..KEY_LEN].copy_from_slice(list_key);
+        material[KEY_LEN..].copy_from_slice(channel_id);
         let mut seed =
-            hash::blake3_derive_key_from_material(CHANNEL_RECOVERY_KEY_DOMAIN, oprf_output);
+            hash::blake3_derive_key_from_material(CHANNEL_RECOVERY_KEY_DOMAIN, &material);
+        material.fill(0);
         let key = Self::from_seed(&seed);
         seed.fill(0);
         key
@@ -309,7 +301,7 @@ mod tests {
 
     #[test]
     fn a_signed_owner_change_verifies_and_nothing_else_does() {
-        let key = ChannelRecoveryKey::from_oprf_output(&[0x41; 64]);
+        let key = ChannelRecoveryKey::from_list_key(&[0x41; 32], &CHANNEL);
         let rk = key.verifying_key().to_bytes();
         let proof = key.sign_owner_change(&CHANNEL, &new_owner(), NOW);
         assert_eq!(
@@ -328,7 +320,7 @@ mod tests {
             verify_recovery_owner_change(&proof, &CHANNEL, &other_owner, &rk, NOW),
             Err(RecoveryProofError::BadSignature)
         );
-        let other_rk = ChannelRecoveryKey::from_oprf_output(&[0x42; 64])
+        let other_rk = ChannelRecoveryKey::from_list_key(&[0x42; 32], &CHANNEL)
             .verifying_key()
             .to_bytes();
         assert_eq!(
@@ -359,25 +351,27 @@ mod tests {
     }
 
     #[test]
-    fn the_seed_is_the_derivation_and_the_input_is_pinned() {
-        let from_output = ChannelRecoveryKey::from_oprf_output(&[0x41; 64]);
-        let seed = hash::blake3_derive_key_from_material(CHANNEL_RECOVERY_KEY_DOMAIN, &[0x41; 64]);
+    fn the_seed_is_the_derivation_over_the_list_key_and_channel() {
+        let key = ChannelRecoveryKey::from_list_key(&[0x41; 32], &CHANNEL);
+        let mut material = [0x41u8; 48];
+        material[32..].copy_from_slice(&CHANNEL);
+        let seed =
+            hash::blake3_derive_key_from_material("lakko/channels/recovery-key/v2", &material);
         assert_eq!(
-            from_output.verifying_key().to_bytes(),
+            key.verifying_key().to_bytes(),
             ChannelRecoveryKey::from_seed(&seed)
                 .verifying_key()
                 .to_bytes()
         );
-        let input = channel_recovery_oprf_input(&CHANNEL);
-        assert_eq!(
-            &input[..CHANNEL_RECOVERY_OPRF_INPUT_DOMAIN.len()],
-            CHANNEL_RECOVERY_OPRF_INPUT_DOMAIN
-        );
-        assert_eq!(&input[CHANNEL_RECOVERY_OPRF_INPUT_DOMAIN.len()..], &CHANNEL);
+        // Another channel of the same list, another list: another key.
+        let other_channel = ChannelRecoveryKey::from_list_key(&[0x41; 32], &[0x0D; 16]);
+        let other_list = ChannelRecoveryKey::from_list_key(&[0x40; 32], &CHANNEL);
+        assert_ne!(key.verifying_key(), other_channel.verifying_key());
+        assert_ne!(key.verifying_key(), other_list.verifying_key());
         // Distinct from the owner key's derivation context and proof domain.
         assert_ne!(CHANNEL_RECOVERY_KEY_DOMAIN, crate::owner::OWNER_KEY_DOMAIN);
         assert!(!RECOVERY_OWNER_CHANGE_DOMAIN.starts_with(crate::owner::OWNER_PROOF_DOMAIN));
-        let dbg = format!("{from_output:?}");
+        let dbg = format!("{key:?}");
         assert!(dbg.contains("verifying_key"));
     }
 

@@ -148,6 +148,16 @@
 //! only.
 //!
 //! [ADR-0097]: ../../../docs/adr/0097-supporter-codes-and-list.md
+//!
+//! # Seal announcement and reset seal
+//!
+//! The twelfth and thirteenth formats, [`SealAnnouncement`] and [`ResetSeal`]
+//! (see the [`reset_seal`] module, [ADR-0101] section 10): the account's
+//! seal public keys, signed by its identity key, and a key reset's new
+//! account key, signed by one announced seal key. Client-signed and
+//! client-verified; each carries its domain separator on the wire.
+//!
+//! [ADR-0101]: ../../../docs/adr/0101-reaching-a-reset-account.md
 
 #![forbid(unsafe_code)]
 
@@ -159,6 +169,7 @@ pub mod handle_cert;
 pub mod identity_proof;
 pub mod key_reset;
 pub mod release_manifest;
+pub mod reset_seal;
 pub mod supporters_list;
 pub mod username_cert;
 
@@ -195,6 +206,12 @@ pub use key_reset::{
 pub use release_manifest::{
     release_status, release_status_for, verify_release_manifest, ReleaseManifest,
     ReleaseManifestError, UpdateStatus, RELEASE_MANIFEST_LEN,
+};
+pub use reset_seal::{
+    check_reset_seal, passkey_prf_salt, passkey_seal_key, passkey_seal_tag, password_seal_key,
+    phrase_seal_key, ResetSeal, ResetSealError, SealAnnouncement, SealCheckInput, SealEntry,
+    SealKind, SealRefusal, SealedReset, RESET_SEAL_LEN, SEAL_ANNOUNCEMENT_MAX_LEN,
+    SEAL_ANNOUNCEMENT_MIN_LEN,
 };
 pub use supporters_list::{
     verify_supporters_list, SupportersList, SupportersListError, MAX_SUPPORTERS,
@@ -434,6 +451,59 @@ pub mod fuzz_api {
         }
         accepted |= DonationPhone::open(bytes, &vk).is_ok();
         accepted
+    }
+
+    /// Drive the seal-announcement parser and verifier on attacker-chosen
+    /// bytes (ADR-0101 section 10): an announcement is served by discovery
+    /// beside the identity bundle, which a hostile operator controls, so the
+    /// bytes reach [`crate::SealAnnouncement::decode_unverified`] and the
+    /// verify before anything is trusted. Asserts that whatever decodes
+    /// re-encodes to the identical bytes (the encoding is canonical) once
+    /// re-signed under a fixed key, and that the fixed key never verifies
+    /// the input. Returns `true` on a (vanishingly rare) acceptance.
+    #[must_use]
+    pub fn open_reset_seals(bytes: &[u8]) -> bool {
+        let sk = SigningKey::from_seed(&[0x11; 32]);
+        let vk = sk.verifying_key();
+        if let Ok(decoded) = crate::SealAnnouncement::decode_unverified(bytes) {
+            let resigned = decoded.sign(&sk);
+            let len = bytes.len();
+            assert_eq!(
+                resigned
+                    .as_ref()
+                    .map(|w| (w.len(), w[..len - 64] == bytes[..len - 64])),
+                Ok((len, true)),
+                "a decoded announcement did not re-encode to its own bytes"
+            );
+        }
+        crate::SealAnnouncement::open(bytes, &vk).is_ok()
+    }
+
+    /// Drive the reset-seal parser and verifier on attacker-chosen bytes
+    /// (ADR-0101 section 10): the seal rides the reset's attested publish
+    /// and the KT reset leaf, both served by the operator. Asserts that
+    /// whatever decodes re-encodes to the identical body. Returns `true`
+    /// when the seal verifies under the key it names, which the fuzzer
+    /// cannot produce without signing.
+    #[must_use]
+    pub fn open_reset_seal(bytes: &[u8]) -> bool {
+        if let Ok(decoded) = crate::ResetSeal::decode_unverified(bytes) {
+            let probe = SigningKey::from_seed(&[0x11; 32]);
+            let resigned = crate::ResetSeal {
+                seal_pk: probe.verifying_key().to_bytes(),
+                ..decoded.clone()
+            }
+            .sign(&probe);
+            if let Ok(wire) = resigned {
+                let split = crate::RESET_SEAL_LEN - 64 - 32;
+                assert_eq!(
+                    &wire[..split],
+                    &bytes[..split],
+                    "a decoded seal did not re-encode"
+                );
+            }
+        }
+        crate::ResetSeal::open(bytes).is_ok()
     }
 
     /// Try to [`HandleCertificate::open`] the bytes against a FIXED verifying

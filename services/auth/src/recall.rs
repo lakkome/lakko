@@ -131,11 +131,11 @@
 //! recovery envelope instead of the password one. Everything else is the
 //! same: the statement by the anchor's key, the counters, the finish.
 //!
-//! The arm exists only for an account that had **no email vault** when the
-//! anchor was captured (`recall_anchors.mail_protected = 0`). With a vault,
-//! whoever recovers by mail holds the same phrase as the owner, so the
-//! phrase proves nothing; there the answer is the uniform `recall-refused`,
-//! and the owner has the password arm from an old device.
+//! The arm exists for every anchor that kept a recovery envelope. It was
+//! refused for an account that had an email vault when the anchor was
+//! captured (whoever recovered by mail held the same phrase); the vault is
+//! gone (ADR-0075, amended 2026-11-26), so nobody gets the words by email and
+//! the arm serves every account.
 //!
 //! A device with no cached account id names the account by **login handle**
 //! on `status` (`handle`): the statement it signs then carries the first 16
@@ -310,8 +310,7 @@ pub(crate) async fn capture_anchor(
     };
 
     // ADR-0075 section 8: the recovery envelope in force now (what the
-    // phrase arm is checked against) and whether the account has an email
-    // vault (with one, the phrase arm is refused).
+    // phrase arm is checked against).
     let recovery: Option<Vec<u8>> = sqlx::query_scalar(
         "SELECT registration_bytes FROM opaque_registrations \
          WHERE account_id = ? AND kind = ? FOR UPDATE",
@@ -320,11 +319,6 @@ pub(crate) async fn capture_anchor(
     .bind(KIND_RECOVERY)
     .fetch_optional(&mut **tx)
     .await?;
-    let mail_protected: Option<i64> =
-        sqlx::query_scalar("SELECT 1 FROM email_vaults WHERE account_id = ? FOR UPDATE")
-            .bind(&account_id[..])
-            .fetch_optional(&mut **tx)
-            .await?;
 
     // Above every row the account still has, so a later standing never
     // outranks an earlier one.
@@ -338,16 +332,15 @@ pub(crate) async fn capture_anchor(
     sqlx::query(
         "INSERT INTO recall_anchors \
             (account_id, seq, identity_pubkey, password_registration, \
-             recovery_registration, mail_protected, key_generation, \
+             recovery_registration, key_generation, \
              created_at_ms, expires_at_ms) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&account_id[..])
     .bind(seq)
     .bind(&current_key[..])
     .bind(&password)
     .bind(recovery.as_deref())
-    .bind(mail_protected.is_some())
     .bind(key_generation)
     .bind(now)
     .bind(expires_at_ms)
@@ -440,8 +433,6 @@ struct Anchor {
     password_registration: Vec<u8>,
     /// The recovery envelope in force at capture (ADR-0075 section 8).
     recovery_registration: Option<Vec<u8>>,
-    /// The account had an email vault at capture: no phrase arm.
-    mail_protected: bool,
     created_at_ms: i64,
     expires_at_ms: i64,
     attempts: u32,
@@ -451,15 +442,11 @@ impl Anchor {
     /// The envelope the phrase arm logs in against, when the arm exists for
     /// this anchor.
     fn phrase_envelope(&self) -> Option<&[u8]> {
-        if self.mail_protected {
-            None
-        } else {
-            self.recovery_registration.as_deref()
-        }
+        self.recovery_registration.as_deref()
     }
 }
 
-type AnchorRow = (u64, Vec<u8>, Vec<u8>, Option<Vec<u8>>, bool, i64, i64, u32);
+type AnchorRow = (u64, Vec<u8>, Vec<u8>, Option<Vec<u8>>, i64, i64, u32);
 
 fn anchor_from_row(row: AnchorRow) -> Option<Anchor> {
     let (
@@ -467,7 +454,6 @@ fn anchor_from_row(row: AnchorRow) -> Option<Anchor> {
         key,
         password_registration,
         recovery_registration,
-        mail_protected,
         created_at_ms,
         expires_at_ms,
         attempts,
@@ -477,7 +463,6 @@ fn anchor_from_row(row: AnchorRow) -> Option<Anchor> {
         identity_pubkey: <[u8; 32]>::try_from(key.as_slice()).ok()?,
         password_registration,
         recovery_registration,
-        mail_protected,
         created_at_ms,
         expires_at_ms,
         attempts,
@@ -493,7 +478,7 @@ async fn live_anchor(
 ) -> Result<Option<Anchor>, sqlx::Error> {
     let row: Option<AnchorRow> = sqlx::query_as(
         "SELECT seq, identity_pubkey, password_registration, recovery_registration, \
-                mail_protected, created_at_ms, expires_at_ms, attempts \
+                created_at_ms, expires_at_ms, attempts \
          FROM recall_anchors WHERE account_id = ? AND seq = ? AND expires_at_ms > ?",
     )
     .bind(&account_id[..])
@@ -701,7 +686,7 @@ pub(crate) async fn status(
 
     let rows: Vec<AnchorRow> = sqlx::query_as(
         "SELECT seq, identity_pubkey, password_registration, recovery_registration, \
-                mail_protected, created_at_ms, expires_at_ms, attempts \
+                created_at_ms, expires_at_ms, attempts \
          FROM recall_anchors WHERE account_id = ? AND expires_at_ms > ? ORDER BY seq LIMIT ?",
     )
     .bind(&account_id[..])
@@ -1177,8 +1162,12 @@ async fn replay_outcome(
         outcome.key_generation,
         &outcome.device_id,
     )?;
-    let grant =
-        crate::session::issue_fresh_grant(state, &input.account_id, outcome.key_generation)?;
+    let grant = crate::session::issue_fresh_grant(
+        state,
+        &input.account_id,
+        outcome.key_generation,
+        lakko_auth_token::GrantMethod::Password,
+    )?;
     tracing::info!(
         key_generation = outcome.key_generation,
         "recall finish answered again from its recorded outcome",
@@ -1443,7 +1432,7 @@ pub(crate) async fn finish(
     //    key this displaces.
     crate::identity_target::claim(&mut tx, &account_id, &input.new_signature_pubkey, now).await?;
     sqlx::query(
-        "UPDATE accounts SET identity_version = LAST_INSERT_ID(identity_version + 1), phrase_in_vault = 0, \
+        "UPDATE accounts SET identity_version = LAST_INSERT_ID(identity_version + 1), \
          identity_pubkey = ?, identity_target = ? WHERE id = ?",
     )
     .bind(&input.new_signature_pubkey[..])
@@ -1503,7 +1492,12 @@ pub(crate) async fn finish(
     .sign(&state.attest_key.signing);
     let session =
         crate::session::issue_pair_at(&state, &account_id, key_generation, &input.device_id)?;
-    let grant = crate::session::issue_fresh_grant(&state, &account_id, key_generation)?;
+    let grant = crate::session::issue_fresh_grant(
+        &state,
+        &account_id,
+        key_generation,
+        lakko_auth_token::GrantMethod::Password,
+    )?;
     //    The outcome, so that this very request can be answered again if its
     //    answer is lost (the module doc). In the same transaction: a recall
     //    that committed always has its record.

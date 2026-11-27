@@ -150,6 +150,10 @@
 //! - `GET    /.well-known/lakko-username-cert-key` — the certificate verifying key (ADR-0060)
 //! - `POST   /discovery/identity`           — upsert public identity bundle (Phase 1.16d3a)
 //! - `GET    /discovery/identity/{acct}`    — fetch public identity bundle (Phase 1.16d3a)
+//!   Since ADR-0101 section 10 the upload takes `reset_seals` (the account's seal
+//!   announcement; `400 reset-seals-invalid`, `409 reset-seals-stale`) and, on an attested
+//!   reset, `reset_seal` (`400 reset-seal-invalid`), and the fetch serves `reset_seals`,
+//!   `previous_reset_seals` and `reset_seal` (`src/reset_seals.rs`)
 //! - `PUT    /discovery/identity/continuity` — store the ADR-0101 continuity binding (session)
 //! - `POST   /discovery/keypackage`         — upsert one device's MLS KeyPackage (ADR-0050)
 //! - `DELETE /discovery/keypackage/device/{dev}` — remove one device's KeyPackage (ADR-0050)
@@ -195,6 +199,7 @@ mod moderation;
 mod oprf;
 mod rate_limit;
 mod registry;
+mod reset_seals;
 mod transparency_log;
 mod visibility;
 

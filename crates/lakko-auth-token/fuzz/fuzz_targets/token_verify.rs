@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! Fuzz target — `TokenSecret::verify` + `TokenSecret::verify_refresh` +
-//! `TokenSecret::verify_fresh_grant` + `TokenSecret::verify_restricted` (the
+//! `TokenSecret::verify_fresh_grant` + `TokenSecret::verify_factor_grant` +
+//! `TokenSecret::verify_restricted` (the f1 reset-factor-grant parser too; the
 //! v3 access-token, r2 refresh-credential, k1 fresh-auth-grant and s1
 //! restricted-session parsers + verifiers, `fuzz_api::verify_token`, ADR-0073,
 //! ADR-0074 and ADR-0099). The fuzz input is an

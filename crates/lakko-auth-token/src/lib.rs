@@ -7,22 +7,32 @@
 //!
 //! # Wire format
 //!
-//! Four credentials, dotted strings ([ADR-0073] section 3.1 and its
-//! 2026-10-04 amendment; [ADR-0074] section 0.4 for the device and the issue
-//! time; [ADR-0099] section 4 for the restricted session):
+//! Five credentials, dotted strings ([ADR-0073] section 3.1 and its
+//! 2026-10-04 and 2026-11-26 amendments; [ADR-0074] section 0.4 for the
+//! device and the issue time; [ADR-0099] section 4 for the restricted
+//! session):
 //!
 //! ```text
-//! access      = v3.<account_id>.<key_generation>.<device_id>.<issued_at_ms>.<expires_at_ms>.<tag>
-//! refresh     = r2.<account_id>.<key_generation>.<device_id>.<issued_at_ms>.<expires_at_ms>.<tag>
-//! restricted  = s1.<account_id>.<key_generation>.<device_id>.<issued_at_ms>.<expires_at_ms>.<tag>
-//! fresh grant = k1.<account_id>.<key_generation>.<expires_at_ms>.<tag>
+//! access       = v3.<account_id>.<key_generation>.<device_id>.<issued_at_ms>.<expires_at_ms>.<tag>
+//! refresh      = r2.<account_id>.<key_generation>.<device_id>.<issued_at_ms>.<expires_at_ms>.<tag>
+//! restricted   = s1.<account_id>.<key_generation>.<device_id>.<issued_at_ms>.<expires_at_ms>.<tag>
+//! fresh grant  = k1.<account_id>.<key_generation>.<method>.<expires_at_ms>.<tag>
+//! factor grant = f1.<account_id>.<key_generation>.<factor>.<expires_at_ms>.<tag>
 //! ```
 //!
 //! Where:
 //!
-//! - `v3` / `r2` / `s1` / `k1` is the version marker, which also tells the kinds
-//!   apart. `v1`, `v2` and `r1` are refused: there are no users and no tokens
-//!   to keep valid, so each was retired on a flag day.
+//! - `v3` / `r2` / `s1` / `k1` / `f1` is the version marker, which also tells
+//!   the kinds apart. `v1`, `v2` and `r1` are refused, and so is the
+//!   five-part `k1` that named no method: there are no users and no tokens to
+//!   keep valid, so each was retired on a flag day.
+//! - `method` (fresh grant only) is how the person proved who they are:
+//!   `p` a password (`/login/finish`, `/signup/finish`), `w` a passkey
+//!   (`/webauthn/auth/finish`) ([`GrantMethod`]). The reset factor routes of
+//!   ADR-0073's 2026-11-26 amendment accept only `p`.
+//! - `factor` (factor grant only) is the second factor a key reset was
+//!   confirmed with: `t` an authenticator code, `e` a mailed code, `w` a
+//!   passkey assertion ([`ResetFactor`]).
 //! - `account_id` is base64url-no-pad of the raw 16-byte UUIDv7 account id
 //!   (RFC 4648 section 5).
 //! - `key_generation` is the account's key generation the credential was
@@ -50,6 +60,10 @@
 //! "lakko/fresh-auth-grant/v1", secret)`, for the same reason: a grant is
 //! neither a bearer nor a refresh credential, and neither of those is a grant.
 //! A grant names no device: it is proof about the person, not the device.
+//! The reset factor grant (`f1`) is tagged under a fifth key,
+//! `BLAKE3-derive-key("lakko/key-reset-factor-grant/v1", secret)`, and is
+//! accepted only by auth's key-reset routes and
+//! `POST /account/owned-channels-secret` (ADR-0073, amended 2026-11-26).
 //! The restricted-session tag is computed under a fourth key,
 //! `BLAKE3-derive-key("lakko/suspended-session/v1", secret)`: a restricted
 //! session is what a suspended account holds instead of an access token, and
@@ -166,8 +180,83 @@ pub const RESTRICTED_KEY_DOMAIN: &str = "lakko/suspended-session/v1";
 /// and a restricted session.
 const SESSION_SEGMENTS: usize = 7;
 
-/// Number of dot-separated segments in a fresh-auth grant.
-const GRANT_SEGMENTS: usize = 5;
+/// Version marker of a reset factor grant ([ADR-0073], amended 2026-11-26).
+/// [`TokenSecret::verify_factor_grant`] refuses any other marker.
+pub const FACTOR_GRANT_VERSION: &str = "f1";
+
+/// BLAKE3 derive-key context of the factor-grant key: `factor_grant_key =
+/// BLAKE3-derive-key(FACTOR_GRANT_KEY_DOMAIN, secret)`.
+pub const FACTOR_GRANT_KEY_DOMAIN: &str = "lakko/key-reset-factor-grant/v1";
+
+/// Number of dot-separated segments in a fresh-auth grant and in a reset
+/// factor grant.
+const GRANT_SEGMENTS: usize = 6;
+
+/// How the person proved who they are when a fresh-auth grant was minted
+/// (ADR-0073, amended 2026-11-26). Signed into the grant as one letter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GrantMethod {
+    /// The account password (`/login/finish`, `/signup/finish`). Wire `p`.
+    Password,
+    /// A passkey assertion (`/webauthn/auth/finish`). Wire `w`.
+    Passkey,
+}
+
+impl GrantMethod {
+    /// The one-letter wire form. Frozen.
+    #[must_use]
+    pub const fn letter(self) -> &'static str {
+        match self {
+            Self::Password => "p",
+            Self::Passkey => "w",
+        }
+    }
+
+    /// Read the wire letter; anything else is `None`.
+    #[must_use]
+    pub fn from_letter(letter: &str) -> Option<Self> {
+        match letter {
+            "p" => Some(Self::Password),
+            "w" => Some(Self::Passkey),
+            _ => None,
+        }
+    }
+}
+
+/// The second factor a key reset was confirmed with (ADR-0073, amended
+/// 2026-11-26). Signed into the factor grant as one letter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ResetFactor {
+    /// A code from the account's confirmed authenticator. Wire `t`.
+    Authenticator,
+    /// A code mailed to the account's recovery email. Wire `e`.
+    Email,
+    /// An assertion by one of the account's passkeys. Wire `w`.
+    Passkey,
+}
+
+impl ResetFactor {
+    /// The one-letter wire form. Frozen.
+    #[must_use]
+    pub const fn letter(self) -> &'static str {
+        match self {
+            Self::Authenticator => "t",
+            Self::Email => "e",
+            Self::Passkey => "w",
+        }
+    }
+
+    /// Read the wire letter; anything else is `None`.
+    #[must_use]
+    pub fn from_letter(letter: &str) -> Option<Self> {
+        match letter {
+            "t" => Some(Self::Authenticator),
+            "e" => Some(Self::Email),
+            "w" => Some(Self::Passkey),
+            _ => None,
+        }
+    }
+}
 
 /// What a verified access token or refresh credential says: which account,
 /// under which key generation, for which device, and when it was issued. The
@@ -195,14 +284,28 @@ impl VerifiedToken {
     }
 }
 
-/// What a verified fresh-auth grant says: which account, and under which key
-/// generation it was issued.
+/// What a verified fresh-auth grant says: which account, under which key
+/// generation it was issued, and how the person proved who they are.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VerifiedGrant {
     /// The raw 16-byte account id the grant was issued for.
     pub account_id: [u8; ACCOUNT_ID_LEN],
     /// The key generation the grant was issued under.
     pub key_generation: u64,
+    /// The password or a passkey.
+    pub method: GrantMethod,
+}
+
+/// What a verified reset factor grant says: which account, under which key
+/// generation it was issued, and which second factor confirmed it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VerifiedFactorGrant {
+    /// The raw 16-byte account id the grant was issued for.
+    pub account_id: [u8; ACCOUNT_ID_LEN],
+    /// The key generation the grant was issued under.
+    pub key_generation: u64,
+    /// The second factor.
+    pub factor: ResetFactor,
 }
 
 /// Shared HMAC secret. Loaded once at service startup from the
@@ -218,6 +321,7 @@ pub struct TokenSecret {
     refresh_key: [u8; 32],
     fresh_grant_key: [u8; 32],
     restricted_key: [u8; 32],
+    factor_grant_key: [u8; 32],
 }
 
 impl TokenSecret {
@@ -237,11 +341,13 @@ impl TokenSecret {
         let refresh_key = blake3::derive_key(REFRESH_KEY_DOMAIN, &bytes);
         let fresh_grant_key = blake3::derive_key(FRESH_GRANT_KEY_DOMAIN, &bytes);
         let restricted_key = blake3::derive_key(RESTRICTED_KEY_DOMAIN, &bytes);
+        let factor_grant_key = blake3::derive_key(FACTOR_GRANT_KEY_DOMAIN, &bytes);
         Ok(Self {
             bytes,
             refresh_key,
             fresh_grant_key,
             restricted_key,
+            factor_grant_key,
         })
     }
 
@@ -354,9 +460,10 @@ impl TokenSecret {
     }
 
     /// Issue a fresh-auth grant for the given account at `key_generation`,
-    /// tagged under the derived fresh-grant key. Auth mints one only in the
-    /// answer of a successful password or passkey login; only its
-    /// fresh-auth-gated routes accept it ([`Self::verify_fresh_grant`]).
+    /// minted by `method`, tagged under the derived fresh-grant key. Auth
+    /// mints one only in the answer of a successful password or passkey
+    /// login; only its fresh-auth-gated routes accept it
+    /// ([`Self::verify_fresh_grant`]).
     ///
     /// # Errors
     ///
@@ -366,14 +473,45 @@ impl TokenSecret {
         &self,
         account_id: &[u8],
         key_generation: u64,
+        method: GrantMethod,
         expires_at_ms: i64,
     ) -> Result<String, TokenError> {
-        check_account_id(account_id)?;
-        let account_id_b64 = URL_SAFE_NO_PAD.encode(account_id);
-        let message =
-            format!("{FRESH_GRANT_VERSION}.{account_id_b64}.{key_generation}.{expires_at_ms}");
-        let tag = compute_tag(&self.fresh_grant_key, message.as_bytes());
-        Ok(format!("{message}.{}", URL_SAFE_NO_PAD.encode(tag)))
+        issue_grant(
+            &self.fresh_grant_key,
+            FRESH_GRANT_VERSION,
+            account_id,
+            key_generation,
+            method.letter(),
+            expires_at_ms,
+        )
+    }
+
+    /// Issue a reset factor grant for the given account at `key_generation`,
+    /// confirmed by `factor`, tagged under the derived factor-grant key
+    /// (ADR-0073, amended 2026-11-26). Auth mints one only on its reset
+    /// factor routes; only the key-reset routes and
+    /// `POST /account/owned-channels-secret` accept it
+    /// ([`Self::verify_factor_grant`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TokenError::WrongAccountIdLength`] if `account_id`
+    /// is not exactly [`ACCOUNT_ID_LEN`] bytes.
+    pub fn issue_factor_grant(
+        &self,
+        account_id: &[u8],
+        key_generation: u64,
+        factor: ResetFactor,
+        expires_at_ms: i64,
+    ) -> Result<String, TokenError> {
+        issue_grant(
+            &self.factor_grant_key,
+            FACTOR_GRANT_VERSION,
+            account_id,
+            key_generation,
+            factor.letter(),
+            expires_at_ms,
+        )
     }
 
     /// Verify an access token at the given wall-clock instant.
@@ -425,14 +563,17 @@ impl TokenSecret {
     /// Verify a fresh-auth grant at the given wall-clock instant, under the
     /// derived fresh-grant key. Same error vocabulary as [`Self::verify`]; an
     /// access token or a refresh credential presented here is
-    /// [`TokenError::Malformed`] (its segment count differs) and a five-part
-    /// string with another marker is [`TokenError::UnsupportedVersion`].
+    /// [`TokenError::Malformed`] (its segment count differs), a six-part
+    /// string with another marker (a reset factor grant included) is
+    /// [`TokenError::UnsupportedVersion`], and an unknown method letter is
+    /// [`TokenError::Malformed`].
     ///
     /// This checks the grant itself (shape, tag, expiry). The CALLER must
     /// still compare the returned account id with the bearer's and the
     /// returned key generation with the account's current one (equal, not
     /// merely not-lower): that comparison is what makes a key reset spend
-    /// the grant, and what refuses a grant from before a reset.
+    /// the grant, and what refuses a grant from before a reset. A route that
+    /// accepts only one method checks [`VerifiedGrant::method`].
     ///
     /// # Errors
     ///
@@ -442,41 +583,41 @@ impl TokenSecret {
         token: &str,
         now_ms: i64,
     ) -> Result<VerifiedGrant, TokenError> {
-        let segments: Vec<&str> = token.split('.').collect();
-        if segments.len() != GRANT_SEGMENTS {
-            return Err(TokenError::Malformed(format!(
-                "expected {GRANT_SEGMENTS} dot-segments"
-            )));
-        }
-        if segments[0] != FRESH_GRANT_VERSION {
-            return Err(TokenError::UnsupportedVersion(segments[0].to_string()));
-        }
-        let account_id = decode_account_id(segments[1])?;
-        let key_generation = parse_u64(segments[2], "key_generation")?;
-        let expires_at_ms = parse_i64(segments[3], "expires_at")?;
-        let tag = decode_tag(segments[4])?;
-
-        // The message is rebuilt from the PARSED integers, so a non-canonical
-        // spelling of a value ("007") is the same credential as its canonical
-        // one, never a different credential. The tag is checked before the
-        // expiry so the two failures are one observable result.
-        let message = format!(
-            "{FRESH_GRANT_VERSION}.{}.{key_generation}.{expires_at_ms}",
-            segments[1]
-        );
-        let expected = compute_tag(&self.fresh_grant_key, message.as_bytes());
-        if expected.ct_eq(&tag).unwrap_u8() != 1 {
-            return Err(TokenError::BadSignature);
-        }
-        if expires_at_ms <= now_ms {
-            return Err(TokenError::Expired {
-                expires_at_ms,
-                now_ms,
-            });
-        }
+        let (account_id, key_generation, letter) =
+            verify_grant(&self.fresh_grant_key, FRESH_GRANT_VERSION, token, now_ms)?;
+        let method = GrantMethod::from_letter(letter)
+            .ok_or_else(|| TokenError::Malformed("unknown grant method".to_string()))?;
         Ok(VerifiedGrant {
             account_id,
             key_generation,
+            method,
+        })
+    }
+
+    /// Verify a reset factor grant at the given wall-clock instant, under the
+    /// derived factor-grant key. Same error vocabulary as
+    /// [`Self::verify_fresh_grant`]; a fresh-auth grant presented here is
+    /// [`TokenError::UnsupportedVersion`].
+    ///
+    /// The caller compares the account and the generation as for a
+    /// fresh-auth grant.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::verify`].
+    pub fn verify_factor_grant(
+        &self,
+        token: &str,
+        now_ms: i64,
+    ) -> Result<VerifiedFactorGrant, TokenError> {
+        let (account_id, key_generation, letter) =
+            verify_grant(&self.factor_grant_key, FACTOR_GRANT_VERSION, token, now_ms)?;
+        let factor = ResetFactor::from_letter(letter)
+            .ok_or_else(|| TokenError::Malformed("unknown reset factor".to_string()))?;
+        Ok(VerifiedFactorGrant {
+            account_id,
+            key_generation,
+            factor,
         })
     }
 
@@ -570,6 +711,71 @@ impl TokenSecret {
     }
 }
 
+/// Issue a six-part grant: `version.account_id.key_generation.letter.expires.tag`.
+fn issue_grant(
+    key: &[u8],
+    version: &str,
+    account_id: &[u8],
+    key_generation: u64,
+    letter: &str,
+    expires_at_ms: i64,
+) -> Result<String, TokenError> {
+    check_account_id(account_id)?;
+    let account_id_b64 = URL_SAFE_NO_PAD.encode(account_id);
+    let message = format!("{version}.{account_id_b64}.{key_generation}.{letter}.{expires_at_ms}");
+    let tag = compute_tag(key, message.as_bytes());
+    Ok(format!("{message}.{}", URL_SAFE_NO_PAD.encode(tag)))
+}
+
+/// Verify a six-part grant under `key` with marker `version`. Returns the
+/// account, the generation and the one-letter field, still unread (each kind
+/// reads its own letter). The letter is bound by the tag, so it is checked
+/// for shape only here.
+fn verify_grant<'a>(
+    key: &[u8],
+    version: &str,
+    token: &'a str,
+    now_ms: i64,
+) -> Result<([u8; ACCOUNT_ID_LEN], u64, &'a str), TokenError> {
+    let segments: Vec<&str> = token.split('.').collect();
+    if segments.len() != GRANT_SEGMENTS {
+        return Err(TokenError::Malformed(format!(
+            "expected {GRANT_SEGMENTS} dot-segments"
+        )));
+    }
+    if segments[0] != version {
+        return Err(TokenError::UnsupportedVersion(segments[0].to_string()));
+    }
+    let account_id = decode_account_id(segments[1])?;
+    let key_generation = parse_u64(segments[2], "key_generation")?;
+    let letter = segments[3];
+    if letter.len() != 1 || !letter.bytes().all(|b| b.is_ascii_lowercase()) {
+        return Err(TokenError::Malformed("grant letter".to_string()));
+    }
+    let expires_at_ms = parse_i64(segments[4], "expires_at")?;
+    let tag = decode_tag(segments[5])?;
+
+    // The message is rebuilt from the PARSED integers, so a non-canonical
+    // spelling of a value ("007") is the same credential as its canonical
+    // one, never a different credential. The tag is checked before the
+    // expiry so the two failures are one observable result.
+    let message = format!(
+        "{version}.{}.{key_generation}.{letter}.{expires_at_ms}",
+        segments[1]
+    );
+    let expected = compute_tag(key, message.as_bytes());
+    if expected.ct_eq(&tag).unwrap_u8() != 1 {
+        return Err(TokenError::BadSignature);
+    }
+    if expires_at_ms <= now_ms {
+        return Err(TokenError::Expired {
+            expires_at_ms,
+            now_ms,
+        });
+    }
+    Ok((account_id, key_generation, letter))
+}
+
 fn check_account_id(account_id: &[u8]) -> Result<(), TokenError> {
     if account_id.len() == ACCOUNT_ID_LEN {
         Ok(())
@@ -643,6 +849,7 @@ impl std::fmt::Debug for TokenSecret {
             .field("refresh_key_len", &self.refresh_key.len())
             .field("fresh_grant_key_len", &self.fresh_grant_key.len())
             .field("restricted_key_len", &self.restricted_key.len())
+            .field("factor_grant_key_len", &self.factor_grant_key.len())
             .finish()
     }
 }
@@ -679,7 +886,8 @@ pub enum TokenError {
     /// Version segment did not match the kind being verified
     /// ([`VERSION`] for an access token, [`REFRESH_VERSION`] for a refresh
     /// credential, [`RESTRICTED_VERSION`] for a restricted session,
-    /// [`FRESH_GRANT_VERSION`] for a fresh-auth grant).
+    /// [`FRESH_GRANT_VERSION`] for a fresh-auth grant,
+    /// [`FACTOR_GRANT_VERSION`] for a reset factor grant).
     #[error("unsupported token version: {0}")]
     UnsupportedVersion(String),
     /// Token expired (or was issued for the past — either way the
@@ -705,8 +913,8 @@ pub mod fuzz_api {
     use super::{TokenSecret, MIN_SECRET_LEN};
 
     /// Drive [`TokenSecret::verify`], [`TokenSecret::verify_refresh`],
-    /// [`TokenSecret::verify_fresh_grant`] AND
-    /// [`TokenSecret::verify_restricted`] on an attacker-controlled
+    /// [`TokenSecret::verify_fresh_grant`], [`TokenSecret::verify_factor_grant`]
+    /// AND [`TokenSecret::verify_restricted`] on an attacker-controlled
     /// credential string.
     ///
     /// A client or peer presents an access token to a service on every
@@ -735,8 +943,9 @@ pub mod fuzz_api {
         let access = secret.verify(token, 0).is_ok();
         let refresh = secret.verify_refresh(token, 0).is_ok();
         let grant = secret.verify_fresh_grant(token, 0).is_ok();
+        let factor = secret.verify_factor_grant(token, 0).is_ok();
         let restricted = secret.verify_restricted(token, 0).is_ok();
-        access || refresh || grant || restricted
+        access || refresh || grant || factor || restricted
     }
 }
 
@@ -1096,13 +1305,23 @@ mod tests {
         let secret = test_secret();
         let account_id = sample_account_id();
         let grant = secret
-            .issue_fresh_grant(&account_id, 4, FAR_FUTURE)
+            .issue_fresh_grant(&account_id, 4, GrantMethod::Password, FAR_FUTURE)
             .unwrap();
         assert!(grant.starts_with("k1."));
-        assert_eq!(grant.matches('.').count(), 4);
+        assert_eq!(grant.matches('.').count(), 5);
+        assert!(grant.contains(".4.p."));
         let got = secret.verify_fresh_grant(&grant, NOW).unwrap();
         assert_eq!(&got.account_id[..], &account_id[..]);
         assert_eq!(got.key_generation, 4);
+        assert_eq!(got.method, GrantMethod::Password);
+        let by_passkey = secret
+            .issue_fresh_grant(&account_id, 4, GrantMethod::Passkey, FAR_FUTURE)
+            .unwrap();
+        assert!(by_passkey.contains(".4.w."));
+        assert_eq!(
+            secret.verify_fresh_grant(&by_passkey, NOW).unwrap().method,
+            GrantMethod::Passkey
+        );
     }
 
     #[test]
@@ -1111,7 +1330,9 @@ mod tests {
         let id = sample_account_id();
         let access = access(&secret, 1);
         let refresh = refresh(&secret, 1);
-        let grant = secret.issue_fresh_grant(&id, 1, FAR_FUTURE).unwrap();
+        let grant = secret
+            .issue_fresh_grant(&id, 1, GrantMethod::Password, FAR_FUTURE)
+            .unwrap();
 
         // The shapes differ (five segments against seven), so each kind is
         // refused at the other's verifier before any tag is looked at.
@@ -1136,7 +1357,7 @@ mod tests {
         // is refused by the tag, and a session-shaped string tagged under
         // the grant key likewise: the three keys are distinct.
         let id_b64 = URL_SAFE_NO_PAD.encode(&id);
-        let grant_message = format!("k1.{id_b64}.1.{FAR_FUTURE}");
+        let grant_message = format!("k1.{id_b64}.1.p.{FAR_FUTURE}");
         for key in [&secret.bytes[..], &secret.refresh_key[..]] {
             let tag = URL_SAFE_NO_PAD.encode(compute_tag(key, grant_message.as_bytes()));
             assert!(matches!(
@@ -1167,7 +1388,9 @@ mod tests {
         let id = sample_account_id();
 
         // Expired (the boundary instant is already expired).
-        let grant = secret.issue_fresh_grant(&id, 1, 1_000).unwrap();
+        let grant = secret
+            .issue_fresh_grant(&id, 1, GrantMethod::Password, 1_000)
+            .unwrap();
         assert!(matches!(
             secret.verify_fresh_grant(&grant, 1_000).unwrap_err(),
             TokenError::Expired { .. }
@@ -1176,7 +1399,9 @@ mod tests {
 
         // Bad tag: another secret, a flipped tag, a rewritten account, a
         // rewritten generation, a rewritten expiry.
-        let grant = secret.issue_fresh_grant(&id, 1, FAR_FUTURE).unwrap();
+        let grant = secret
+            .issue_fresh_grant(&id, 1, GrantMethod::Password, FAR_FUTURE)
+            .unwrap();
         let other = TokenSecret::new(vec![1u8; MIN_SECRET_LEN]).unwrap();
         assert!(matches!(
             other.verify_fresh_grant(&grant, NOW).unwrap_err(),
@@ -1189,8 +1414,9 @@ mod tests {
         for (index, value) in [
             (1, evil_id.as_str()),
             (2, "2"),
-            (3, far.as_str()),
-            (4, zero_tag.as_str()),
+            (3, "w"),
+            (4, far.as_str()),
+            (5, zero_tag.as_str()),
         ] {
             let mut tampered = parts.clone();
             tampered[index] = value;
@@ -1214,11 +1440,15 @@ mod tests {
         for bad in [
             "",
             "k1",
-            "k1.aaa.1.1",
-            "k1.aaa.1.1.AAAA.extra",
-            "k1.!@#.1.1.AAAA",
-            "k1.AAAAAAAAAAAAAAAAAAAAAA.x.1.AAAA",
-            "k1.AAAAAAAAAAAAAAAAAAAAAA.1.x.AAAA",
+            "k1.aaa.1.p.1",
+            "k1.aaa.1.p.1.AAAA.extra",
+            "k1.!@#.1.p.1.AAAA",
+            "k1.AAAAAAAAAAAAAAAAAAAAAA.x.p.1.AAAA",
+            "k1.AAAAAAAAAAAAAAAAAAAAAA.1.p.x.AAAA",
+            "k1.AAAAAAAAAAAAAAAAAAAAAA.1.p.1.AAAA",
+            "k1.AAAAAAAAAAAAAAAAAAAAAA.1.pp.1.AAAA",
+            "k1.AAAAAAAAAAAAAAAAAAAAAA.1.P.1.AAAA",
+            // The retired five-part grant that named no method.
             "k1.AAAAAAAAAAAAAAAAAAAAAA.1.1.AAAA",
         ] {
             assert!(
@@ -1238,7 +1468,9 @@ mod tests {
         assert_eq!(got.key_generation, 1);
 
         assert!(matches!(
-            secret.issue_fresh_grant(&[0u8; 8], 1, 1_000).unwrap_err(),
+            secret
+                .issue_fresh_grant(&[0u8; 8], 1, GrantMethod::Password, 1_000)
+                .unwrap_err(),
             TokenError::WrongAccountIdLength { .. }
         ));
     }
@@ -1263,9 +1495,14 @@ mod tests {
         let id = sample_account_id();
         let access = secret.issue(&id, 1, &DEVICE, 0, 1).unwrap();
         let refresh = secret.issue_refresh(&id, 1, &DEVICE, 0, 1).unwrap();
-        let grant = secret.issue_fresh_grant(&id, 1, 1).unwrap();
+        let grant = secret
+            .issue_fresh_grant(&id, 1, GrantMethod::Password, 1)
+            .unwrap();
         let restricted = secret.issue_restricted(&id, 1, &DEVICE, 0, 1).unwrap();
-        for good in [&access, &refresh, &grant, &restricted] {
+        let factor = secret
+            .issue_factor_grant(&id, 1, ResetFactor::Email, 1)
+            .unwrap();
+        for good in [&access, &refresh, &grant, &restricted, &factor] {
             assert!(fuzz_api::verify_token(good.as_bytes()));
         }
         assert!(!fuzz_api::verify_token(b"v3.a.b.c.d.e.f"));
@@ -1310,7 +1547,9 @@ mod tests {
 
         let access = access(&secret, 1);
         let refresh = refresh(&secret, 1);
-        let grant = secret.issue_fresh_grant(&id, 1, FAR_FUTURE).unwrap();
+        let grant = secret
+            .issue_fresh_grant(&id, 1, GrantMethod::Password, FAR_FUTURE)
+            .unwrap();
         assert!(matches!(
             secret.verify_restricted(&access, NOW).unwrap_err(),
             TokenError::UnsupportedVersion(v) if v == "v3"
@@ -1386,5 +1625,147 @@ mod tests {
             !debug.contains("AB"),
             "Debug impl leaked secret bytes: {debug}"
         );
+    }
+
+    #[test]
+    fn factor_grant_round_trip_carries_account_generation_and_factor() {
+        let secret = test_secret();
+        let id = sample_account_id();
+        for (factor, letter) in [
+            (ResetFactor::Authenticator, "t"),
+            (ResetFactor::Email, "e"),
+            (ResetFactor::Passkey, "w"),
+        ] {
+            let grant = secret
+                .issue_factor_grant(&id, 3, factor, FAR_FUTURE)
+                .unwrap();
+            assert!(grant.starts_with("f1."));
+            assert_eq!(grant.matches('.').count(), 5);
+            assert!(grant.contains(&format!(".3.{letter}.")));
+            let got = secret.verify_factor_grant(&grant, NOW).unwrap();
+            assert_eq!(&got.account_id[..], &id[..]);
+            assert_eq!(got.key_generation, 3);
+            assert_eq!(got.factor, factor);
+            assert_eq!(ResetFactor::from_letter(letter), Some(factor));
+        }
+        for (method, letter) in [(GrantMethod::Password, "p"), (GrantMethod::Passkey, "w")] {
+            assert_eq!(method.letter(), letter);
+            assert_eq!(GrantMethod::from_letter(letter), Some(method));
+        }
+        assert_eq!(GrantMethod::from_letter("t"), None);
+        assert_eq!(ResetFactor::from_letter("p"), None);
+    }
+
+    /// A factor grant is not a fresh-auth grant and the reverse, even though
+    /// the two share their shape: the marker refuses it, and a relabelled
+    /// one keeps a tag under the other key.
+    #[test]
+    fn factor_grant_and_fresh_grant_do_not_cross() {
+        let secret = test_secret();
+        let id = sample_account_id();
+        let fresh = secret
+            .issue_fresh_grant(&id, 1, GrantMethod::Password, FAR_FUTURE)
+            .unwrap();
+        let factor = secret
+            .issue_factor_grant(&id, 1, ResetFactor::Passkey, FAR_FUTURE)
+            .unwrap();
+        assert!(matches!(
+            secret.verify_factor_grant(&fresh, NOW).unwrap_err(),
+            TokenError::UnsupportedVersion(v) if v == "k1"
+        ));
+        assert!(matches!(
+            secret.verify_fresh_grant(&factor, NOW).unwrap_err(),
+            TokenError::UnsupportedVersion(v) if v == "f1"
+        ));
+        // A passkey factor grant relabelled as a fresh grant would read as a
+        // passkey-method grant: its tag is under the factor key.
+        let relabelled = format!("k1{}", factor.strip_prefix("f1").unwrap());
+        assert!(matches!(
+            secret.verify_fresh_grant(&relabelled, NOW).unwrap_err(),
+            TokenError::BadSignature
+        ));
+        let relabelled = format!("f1{}", fresh.strip_prefix("k1").unwrap());
+        assert!(matches!(
+            secret.verify_factor_grant(&relabelled, NOW).unwrap_err(),
+            TokenError::BadSignature
+        ));
+        // Every other kind is refused by the shape.
+        for other in [
+            access(&secret, 1),
+            refresh(&secret, 1),
+            secret
+                .issue_restricted(&id, 1, &DEVICE, ISSUED, FAR_FUTURE)
+                .unwrap(),
+        ] {
+            assert!(matches!(
+                secret.verify_factor_grant(&other, NOW).unwrap_err(),
+                TokenError::Malformed(_)
+            ));
+        }
+        assert!(matches!(
+            secret.verify(&factor, NOW).unwrap_err(),
+            TokenError::Malformed(_)
+        ));
+        assert!(matches!(
+            secret.verify_restricted(&factor, NOW).unwrap_err(),
+            TokenError::Malformed(_)
+        ));
+    }
+
+    #[test]
+    fn factor_grant_refusals_and_key() {
+        let secret = test_secret();
+        let id = sample_account_id();
+        let grant = secret
+            .issue_factor_grant(&id, 1, ResetFactor::Authenticator, 1_000)
+            .unwrap();
+        assert!(matches!(
+            secret.verify_factor_grant(&grant, 1_000).unwrap_err(),
+            TokenError::Expired { .. }
+        ));
+        assert!(secret.verify_factor_grant(&grant, 999).is_ok());
+        let other = TokenSecret::new(vec![1u8; MIN_SECRET_LEN]).unwrap();
+        assert!(matches!(
+            other.verify_factor_grant(&grant, 0).unwrap_err(),
+            TokenError::BadSignature
+        ));
+        // Rewriting the factor letter breaks the tag; an unknown letter is
+        // refused as malformed only after the tag held, which it cannot.
+        let parts: Vec<&str> = grant.split('.').collect();
+        for letter in ["e", "w", "x"] {
+            let mut tampered = parts.clone();
+            tampered[3] = letter;
+            assert!(matches!(
+                secret
+                    .verify_factor_grant(&tampered.join("."), 0)
+                    .unwrap_err(),
+                TokenError::BadSignature
+            ));
+        }
+        // A well-tagged grant with an unknown letter.
+        let id_b64 = URL_SAFE_NO_PAD.encode(&id);
+        let message = format!("f1.{id_b64}.1.x.{FAR_FUTURE}");
+        let tag = URL_SAFE_NO_PAD.encode(compute_tag(&secret.factor_grant_key, message.as_bytes()));
+        assert!(matches!(
+            secret
+                .verify_factor_grant(&format!("{message}.{tag}"), NOW)
+                .unwrap_err(),
+            TokenError::Malformed(_)
+        ));
+        assert!(matches!(
+            secret
+                .issue_factor_grant(&[0u8; 8], 1, ResetFactor::Email, 1)
+                .unwrap_err(),
+            TokenError::WrongAccountIdLength { .. }
+        ));
+        let raw = vec![7u8; MIN_SECRET_LEN];
+        let s7 = TokenSecret::new(raw.clone()).unwrap();
+        assert_eq!(
+            s7.factor_grant_key,
+            blake3::derive_key("lakko/key-reset-factor-grant/v1", &raw)
+        );
+        for k in [s7.fresh_grant_key, s7.refresh_key, s7.restricted_key] {
+            assert_ne!(s7.factor_grant_key, k);
+        }
     }
 }

@@ -351,7 +351,10 @@ mod tests {
             anon_cred: None,
             handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
             recovery_email: None,
-            channel_recovery: None,
+            owned_channels: Some(std::sync::Arc::new(
+                crate::owned_channels::OwnedChannelsMaster::from_bytes([0x0C; 32]),
+            )),
+            reset_factor_grant_ttl_ms: 600_000,
             limits: Arc::new(crate::limits::Limits::defaults()),
         }
     }

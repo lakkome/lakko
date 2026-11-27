@@ -63,7 +63,6 @@ pub mod discovery;
 pub mod donation;
 pub mod ds_proof;
 pub mod ds_statement;
-pub mod email_vault;
 pub mod feed;
 pub mod group_contact_request;
 pub mod handles;
@@ -79,6 +78,7 @@ pub mod mailbox;
 pub mod mnemonic;
 pub mod moderation;
 pub mod open_items;
+pub mod owned_channels;
 pub mod pairing;
 pub mod passkey_vault;
 pub mod phrase_check;
@@ -87,9 +87,11 @@ pub mod publisher_devices;
 pub mod push_wake;
 pub mod reach_plan;
 pub mod reaction_rules;
+pub mod recovery_email;
 pub mod recovery_payload;
 pub mod release;
 pub mod reset_return;
+pub mod reset_seal;
 pub mod scoped_discovery;
 pub mod sframe;
 pub mod sfu_signaling;
@@ -704,16 +706,13 @@ pub enum FfiError {
     // ADR-0075 email vault and recovery address — appended, for the
     // ordinal reason above.
     // ------------------------------------------------------------------
-    /// The email vault did not open under this login handle, address and
-    /// salt: a wrong address, a wrong username or a damaged blob. Which of
-    /// them is deliberately not reported.
+    /// Retired 2026-11-26 with the email vault (ADR-0075, amended): never
+    /// produced. Kept for the ordinal reason above.
     #[error("the email vault did not open")]
     EmailVaultNotOpened,
 
-    /// An email-vault call was handed malformed input, or a primitive
-    /// refused. The message is `"<code>: <reason>"` with the stable codes
-    /// `bad-handle-length`, `bad-salt-length`, `bad-sealed-length`, `kdf`,
-    /// `seal`.
+    /// Retired 2026-11-26 with the email vault (ADR-0075, amended): never
+    /// produced. Kept for the ordinal reason above.
     #[error("{0}")]
     EmailVault(String),
 
@@ -935,6 +934,25 @@ pub enum FfiError {
     /// `seedLength` for a wrong-length argument.
     #[error("{0}")]
     ResetReturn(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0101 section 10 (the reset seal) and section 7 (the owned-channels
+    // list), amended 2026-11-26. APPENDED last: a `flat_error` lowers by
+    // ordinal.
+    // ------------------------------------------------------------------
+    /// A seal key, seal announcement or reset seal was refused
+    /// (`reset_seal.rs`). The message is `"<code>: <reason>"` with the
+    /// frozen codes of `lakko_attest::reset_seal::ResetSealError`, or
+    /// `keyLength` / `badKey` / `credentialId` for a malformed argument.
+    #[error("{0}")]
+    ResetSeal(String),
+
+    /// An owned-channels list or lock head was refused
+    /// (`owned_channels.rs`). The message is `"<code>: <reason>"` with the
+    /// frozen codes of `lakko_channels::owned::OwnedChannelsError`, or
+    /// `keyLength` for a wrong-length argument.
+    #[error("{0}")]
+    OwnedChannels(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {

@@ -275,29 +275,6 @@ impl OprfBlinder {
         })
     }
 
-    /// ADR-0101 section 7 - blind the channel recovery input of the 16-byte
-    /// `channel_id` (`channel_recovery_oprf_input`) for `POST
-    /// /auth/channel-recovery/evaluate`. `blinded_b64()` is standard base64
-    /// (auth takes URL-safe base64: re-encode); finalize with the evaluation
-    /// re-encoded to standard base64 and derive the key from its `output`
-    /// with `ChannelRecoveryKey::from_oprf_output`.
-    ///
-    /// # Errors
-    ///
-    /// [`FfiError::Discovery`] for a channel id that is not 16 bytes, or on
-    /// an OPRF blind failure.
-    #[uniffi::constructor]
-    pub fn blind_channel_recovery(channel_id: Vec<u8>) -> Result<Self, FfiError> {
-        let id = <[u8; 16]>::try_from(channel_id.as_slice())
-            .map_err(|_| FfiError::Discovery("channelId must be 16 bytes".to_string()))?;
-        let input = lakko_channels::recovery::channel_recovery_oprf_input(&id);
-        let (blinder, blinded_b64) = InnerBlinder::blind_bytes(&input)?;
-        Ok(Self {
-            inner: Mutex::new(Some(blinder)),
-            blinded_b64,
-        })
-    }
-
     /// Blind one name term (ADR-0060 §5) in the name OPRF namespace, apart
     /// from `@name`s. A publisher blinds each of
     /// [`name_search_terms`]; the finalised hash is one search term of an

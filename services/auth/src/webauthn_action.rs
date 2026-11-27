@@ -1103,7 +1103,10 @@ mod action_grant_e2e_tests {
             anon_cred: None,
             handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
             recovery_email: None,
-            channel_recovery: None,
+            owned_channels: Some(std::sync::Arc::new(
+                crate::owned_channels::OwnedChannelsMaster::from_bytes([0x0C; 32]),
+            )),
+            reset_factor_grant_ttl_ms: 600_000,
             limits: Arc::new(crate::limits::Limits::defaults()),
         };
         (state, token_secret)
@@ -1347,6 +1350,10 @@ mod action_grant_e2e_tests {
         assert_eq!(left_a, 0, "pk_a must be gone");
 
         // ---- Negative: deleting an existing credential WITHOUT a grant 403s. ----
+        // pk_b is now the account's last passkey; an authenticator beside it
+        // keeps the last-factor rule (ADR-0073, amended 2026-11-26) out of
+        // this check.
+        crate::totp::enroll_for_test(&pool, &[0x55; 32], &account_id).await;
         let cred_b = pk_b.cred_id().as_ref().to_vec();
         let cred_b_b64 = URL_SAFE_NO_PAD.encode(&cred_b);
         let (st, _b) = send(
