@@ -23,6 +23,8 @@ class ContinuityRuntimeTest {
     private class Port(
         var own: String? = "me",
         val superseded: Map<String, String> = mapOf("old" to "ACCT"),
+        /** ADR-0101 section 11 - the retired keys a SEALED reset moves for. */
+        val movable: Set<String> = superseded.keys,
         val facts: MutableMap<String, ContinuityFacts> = HashMap(),
         var state: StoredClaims = NO_CLAIMS,
         var cursor: Long? = null,
@@ -39,6 +41,7 @@ class ContinuityRuntimeTest {
 
         override fun ownPersonKeyB64() = own
         override fun supersededKeys() = superseded
+        override fun mayMove(supersededKeyB64: String) = supersededKeyB64 in movable
         override fun currentKeyOf(accountIdB64: String) = "new"
         override fun facts(groupIdHex: String) = facts[groupIdHex]
         override fun claimState(oldGroupIdHex: String) = state
@@ -99,6 +102,18 @@ class ContinuityRuntimeTest {
         }
         assertEquals(ContinuityStep.NOTHING, continueConversation(repairable, old))
         assertTrue(repairable.calls.isEmpty())
+    }
+
+    @Test
+    fun `nothing is continued toward a reset that was not sealed`() = runTest {
+        // ADR-0101 section 11: the retired key is known (no traffic is taken
+        // from it) but its reset was unsealed, refused or not judged yet: no
+        // successor is prepared, claimed or built.
+        val p = Port(successorId = succ, movable = emptySet()).also { it.facts[old] = chat() }
+        assertEquals(ContinuityStep.NOTHING, continueConversation(p, old))
+        assertTrue(p.calls.isEmpty())
+        // The same conversation after a SEALED reset is continued.
+        assertEquals(ContinuityStep.CLAIMED, continueConversation(port(), old))
     }
 
     @Test

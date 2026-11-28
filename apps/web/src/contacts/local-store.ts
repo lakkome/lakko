@@ -1287,6 +1287,11 @@ export function acceptedResetOfKey(
   const record = load(ownerOf(owner));
   for (const [accountIdB64, pin] of Object.entries(record.pins)) {
     if (pin.pinnedSignaturePubkeyB64 !== currentKeyB64) continue;
+    // ADR-0101 section 11 (walk of 2026-11-28): the account has since reset
+    // again WITHOUT a seal. Its earlier sealed reset no longer opens
+    // anything: no continuity key, no history answer, no channel return
+    // reaches the account's keys from here, whatever it now publishes.
+    if (pin.startedOver !== undefined) return null;
     if (
       pin.resetSignedAtMs === undefined ||
       pin.acceptedKeyGeneration === undefined ||
@@ -1301,6 +1306,26 @@ export function acceptedResetOfKey(
     };
   }
   return null;
+}
+
+/**
+ * ADR-0101 sections 4 to 9 (walk of 2026-11-28): the retired keys whose
+ * account this device may still SEND things to under an accepted reset -
+ * {@link loadSupersededKeys} without the accounts that have since reset
+ * again without a seal (a pending started-over record). Every peer action
+ * of a key reset (channel returns, the profile carried, successor
+ * conversations, the owner's role restored) reads this, never the full map:
+ * only a SEALED reset moves anything, and an unsealed one after it stops
+ * what the sealed one opened. Receive-side drops keep the full map.
+ */
+export function loadMovableSupersededKeys(owner?: string): Map<string, string> {
+  const record = load(ownerOf(owner));
+  const out = new Map<string, string>();
+  for (const [accountIdB64, pin] of Object.entries(record.pins)) {
+    if (pin.startedOver !== undefined) continue;
+    for (const k of pin.supersededKeysB64 ?? []) out.set(k, accountIdB64);
+  }
+  return out;
 }
 
 /** ADR-0073 R.5 / R.6: every key an accepted reset retired, across all

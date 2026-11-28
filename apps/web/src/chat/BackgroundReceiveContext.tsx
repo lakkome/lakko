@@ -154,6 +154,7 @@ import {
   accountIdB64OfKey,
   loadAccepted,
   loadKeyAliases,
+  loadMovableSupersededKeys,
   loadSupersededKeys,
   readPin,
 } from "../contacts/local-store";
@@ -742,7 +743,9 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         adminKeysB64 = [];
         roleChangePending = true;
       }
-      for (const [supersededKeyB64, accountOfKey] of superseded) {
+      // ADR-0101 section 11: never toward an account that has since reset
+      // again without a seal (`loadMovableSupersededKeys`).
+      for (const [supersededKeyB64, accountOfKey] of loadMovableSupersededKeys()) {
         const newKeyB64 = readPin(accountOfKey)?.pinnedSignaturePubkeyB64;
         if (newKeyB64 === undefined) continue;
         const step = adminRestoreStep({
@@ -865,7 +868,10 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
 
   const continuityPort: ContinuityPort = {
     ownPersonKeyB64: () => ownPersonKeyB64(chats.identity()),
-    supersededKeys: () => loadSupersededKeys(),
+    // ADR-0101 sections 5 to 9 and 11 (walk of 2026-11-28): conversations
+    // move only toward an account whose last reset was SEALED; one that has
+    // since reset again without a seal moves nothing.
+    supersededKeys: () => loadMovableSupersededKeys(),
     currentKeyOf: (accountIdB64) => readPin(accountIdB64)?.pinnedSignaturePubkeyB64 ?? null,
     facts: continuityFacts,
     claimState: (oldGroupIdB64) => groupClosed.stateOf(oldGroupIdB64) ?? NO_CLAIMS,
@@ -1114,7 +1120,9 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       const successor = chats.get(successorGroupIdB64);
       if (account === null || secrets === null || successor === undefined) return;
       if (profileCarriedInto(account, successorGroupIdB64)) return;
-      const keys = [...loadSupersededKeys()].filter(([, acct]) => acct === accountIdB64).map(([k]) => k);
+      // ADR-0101 section 11: no profile goes to an account that has since
+      // reset again without a seal.
+      const keys = [...loadMovableSupersededKeys()].filter(([, acct]) => acct === accountIdB64).map(([k]) => k);
       const envelope = newestHeldEnvelope(keys, (k) => profiles.heldEnvelopeOf(k));
       if (envelope !== null) await chat.sendMessage(secrets, successor.group, envelope);
       markProfileCarried(account, successorGroupIdB64);
@@ -1179,7 +1187,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   /** One continuity pass over one group this device holds. */
   async function continueFor(entry: ActiveGroup): Promise<void> {
     if (activeAccount === null || continuityInFlight.has(entry.groupIdB64)) return;
-    if (loadSupersededKeys().size === 0) return;
+    if (loadMovableSupersededKeys().size === 0) return;
     continuityInFlight.add(entry.groupIdB64);
     try {
       const step = await continueConversation(continuityPort, entry.groupIdB64);
@@ -1356,7 +1364,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         console.warn("[continuity] old push subscription not retired", err);
       });
     }
-    if (loadSupersededKeys().size === 0) return;
+    if (loadMovableSupersededKeys().size === 0) return;
     for (const entry of chats.groups()) {
       void groupClosed
         .rejudge(entry)

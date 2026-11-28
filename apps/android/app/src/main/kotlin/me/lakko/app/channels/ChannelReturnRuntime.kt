@@ -31,7 +31,9 @@ import uniffi.lakko_ffi_uniffi.FfiChannelReturnRole
 
 /** What the runtime needs from the contacts layer (the accepted resets). */
 public interface ResetContactsPort {
-    /** Every key an accepted reset retired -> its account id (base64). */
+    /** Every key a SEALED reset retired that may still move -> its account
+     *  id (base64): never a key of a relationship that ended with an
+     *  unsealed reset ([me.lakko.app.contacts.movableSupersededKeysOf]). */
     public fun supersededKeys(): Map<String, String>
 
     /** The key this device trusts for an account now, or `null`. */
@@ -329,7 +331,15 @@ public object ChannelReturnRuntime {
         val store = HeldReturnsStore.onDevice(context)
         val held = store.read(account)
         if (held.isEmpty()) return
-        val previous = me.lakko.app.auth.ResetContinuityStore.onDevice(context).load(account)?.previousKeyB64
+        val own = me.lakko.app.auth.ResetContinuityStore.onDevice(context).load(account)
+        // ADR-0101 section 11: after an UNSEALED reset of this account no
+        // return is acted on; any that slipped through are dropped.
+        if (!me.lakko.app.auth.acceptsChannelReturns(own)) {
+            store.drop(account, held)
+            Log.i(TAG, "channel returns dropped after an unsealed reset: ${held.size}")
+            return
+        }
+        val previous = own?.previousKeyB64
         val done = ArrayList<String>()
         for (envB64 in held) {
             val env = try {

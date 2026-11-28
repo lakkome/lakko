@@ -136,7 +136,9 @@ public final class PeerPinStore {
             sealSeqFloor: UInt64? = nil,
             startedOver: StartedOver? = nil,
             startedOverKeysB64: [String]? = nil,
-            startedOverAtMs: [String: Int64]? = nil
+            startedOverAtMs: [String: Int64]? = nil,
+            sealedResetGeneration: UInt64? = nil,
+            retiredBeforeStartOverB64: [String]? = nil
         ) {
             self.pinnedSignaturePubkeyB64 = pinnedSignaturePubkeyB64
             self.rotationMarker = rotationMarker
@@ -151,6 +153,8 @@ public final class PeerPinStore {
             self.startedOver = startedOver
             self.startedOverKeysB64 = startedOverKeysB64
             self.startedOverAtMs = startedOverAtMs
+            self.sealedResetGeneration = sealedResetGeneration
+            self.retiredBeforeStartOverB64 = retiredBeforeStartOverB64
         }
 
         /// ADR-0073 R.2 rule 2 - the key generation this device last
@@ -192,6 +196,21 @@ public final class PeerPinStore {
         /// attestation mint time), UNIX milliseconds: what the pairing state
         /// bundle carries (alignment item F). Optional so older rows decode.
         public var startedOverAtMs: [String: Int64]?
+        /// ADR-0101 sections 10-11 (2026-11-28) - the generation a SEALED
+        /// reset this device accepted moved the account to
+        /// (``acceptReset(_:retiredPredecessorsB64:)``, reached only from a
+        /// sealed verdict). Every action toward a reset person reads it
+        /// (``sealedResetInForce(_:)``): the accepted generation counts only
+        /// when a sealed reset reached it. Adopting the new keys of an
+        /// unsealed reset never sets it. `nil` when none.
+        public var sealedResetGeneration: UInt64?
+        /// ADR-0101 section 11 (2026-11-28) - the keys retired before this
+        /// device accepted the new keys of an unsealed reset (the earlier
+        /// relationship's superseded keys and the keys that started over).
+        /// A later sealed reset of the NEW account moves only what that
+        /// relationship holds: these never count again
+        /// (``actionableSupersededKeys(_:)``).
+        public var retiredBeforeStartOverB64: [String]?
     }
 
     /// An unsealed reset, as the pin remembers it.
@@ -347,7 +366,9 @@ public final class PeerPinStore {
             sealSeqFloor: existing?.sealSeqFloor,
             startedOver: existing?.startedOver,
             startedOverKeysB64: existing?.startedOverKeysB64,
-            startedOverAtMs: existing?.startedOverAtMs
+            startedOverAtMs: existing?.startedOverAtMs,
+            sealedResetGeneration: existing?.sealedResetGeneration,
+            retiredBeforeStartOverB64: existing?.retiredBeforeStartOverB64
         )
         saveMap(map)
         return .set
@@ -543,7 +564,9 @@ public final class PeerPinStore {
             // reset closed stay closed.
             startedOver: nil,
             startedOverKeysB64: existing?.startedOverKeysB64,
-            startedOverAtMs: existing?.startedOverAtMs)
+            startedOverAtMs: existing?.startedOverAtMs,
+            sealedResetGeneration: reset.keyGeneration,
+            retiredBeforeStartOverB64: existing?.retiredBeforeStartOverB64)
         saveMap(map)
         return .accepted
     }
@@ -639,7 +662,13 @@ public final class PeerPinStore {
             // older one served again is still an old one.
             sealSeqFloor: pin.sealSeqFloor,
             startedOverKeysB64: pin.startedOverKeysB64,
-            startedOverAtMs: pin.startedOverAtMs)
+            startedOverAtMs: pin.startedOverAtMs,
+            // ADR-0101 section 11 — a new relationship: no sealed reset is in
+            // force for the adopted generation, and nothing retired before it
+            // is ever acted on for the new account.
+            sealedResetGeneration: nil,
+            retiredBeforeStartOverB64: Self.union(
+                pin.retiredBeforeStartOverB64, pin.supersededKeysB64, pin.startedOverKeysB64))
         saveMap(map)
         return true
     }
@@ -685,6 +714,66 @@ public final class PeerPinStore {
         map[accountIdB64] = pin
         saveMap(map)
         return true
+    }
+
+    // MARK: - ADR-0101 sections 10-11: what a peer may act on
+
+    /// The accepted reset of an account as every ADR-0101 action toward the
+    /// reset person reads it (channel returns, continuity-mailbox writes,
+    /// successors, history answers, the carried profile).
+    public struct SealedReset: Equatable {
+        public let keyGeneration: UInt64
+        /// The attestation's `signed_at`, UNIX milliseconds.
+        public let signedAtMs: Int64
+    }
+
+    /// The account's accepted reset, only when a SEALED reset reached the
+    /// generation this device accepts now and no unsealed reset is pending
+    /// (UX 16.11: nothing is sent to an account after an unsealed reset: a
+    /// server alone can make one). Fail closed: no sealed record, an adopted
+    /// unsealed generation, a pending unsealed reset, or no `signed_at` is
+    /// `nil`. Once this device accepted the new keys of an unsealed reset,
+    /// that is a new relationship: a LATER sealed reset of the new account
+    /// counts again, for what it retired only (``actionableSupersededKeys(_:)``).
+    public static func sealedResetInForce(_ pin: AccountPubkeyPin) -> SealedReset? {
+        guard pin.startedOver == nil,
+              let generation = pin.acceptedKeyGeneration, generation > 0,
+              pin.sealedResetGeneration == generation,
+              let signedAt = pin.resetSignedAtMs else { return nil }
+        return SealedReset(keyGeneration: generation, signedAtMs: signedAt)
+    }
+
+    /// ``sealedResetInForce(_:)`` of the account's pin.
+    public func sealedResetInForce(accountIdB64: String) -> SealedReset? {
+        loadMap()[accountIdB64].flatMap(Self.sealedResetInForce)
+    }
+
+    /// The superseded keys of a pin an ADR-0101 action may act on: none
+    /// while no sealed reset is in force; otherwise every superseded key but
+    /// those retired before this device accepted the new keys of an
+    /// unsealed reset (the earlier relationship's) and the keys that started
+    /// over.
+    public static func actionableSupersededKeys(_ pin: AccountPubkeyPin) -> [String] {
+        guard sealedResetInForce(pin) != nil else { return [] }
+        let excluded = Set((pin.retiredBeforeStartOverB64 ?? []) + (pin.startedOverKeysB64 ?? []))
+        return (pin.supersededKeysB64 ?? []).filter { !excluded.contains($0) }
+    }
+
+    /// ``loadSupersededKeys()`` restricted to what the ADR-0101 actions act
+    /// on (``actionableSupersededKeys(_:)``). The full map stays what rows
+    /// and claims from retired keys are refused by.
+    public func loadSupersededKeysOfSealedResets() -> [String: String] {
+        var out: [String: String] = [:]
+        for (accountIdB64, pin) in loadMap() {
+            for key in Self.actionableSupersededKeys(pin) { out[key] = accountIdB64 }
+        }
+        return out
+    }
+
+    private static func union(_ lists: [String]?...) -> [String]? {
+        var out: [String] = []
+        for key in lists.compactMap({ $0 }).joined() where !out.contains(key) { out.append(key) }
+        return out.isEmpty ? nil : out
     }
 
     /// Whether `keyB64` is a key an unsealed reset left behind.

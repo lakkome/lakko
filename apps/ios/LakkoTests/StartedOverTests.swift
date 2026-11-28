@@ -560,3 +560,143 @@ private struct StartedOverNoSession: SessionPersistence {
     func putSessionToken(_ token: PersistedSessionToken, accountIdB64: String) throws {}
     func deleteSessionToken(accountIdB64: String) {}
 }
+
+/// ADR-0101 sections 10-11 / UX 16.11 (2026-11-28) — nothing moves to an
+/// account after an UNSEALED reset: every action a peer takes toward a reset
+/// person (channel returns, continuity-mailbox writes, successors, history
+/// answers) reads ``PeerPinStore/sealedResetInForce(_:)``, which holds only
+/// while a SEALED reset reached the accepted generation and the account never
+/// started over. Seen live: after the person's new keys were accepted, the
+/// earlier sealed reset's window made a channel return go to the new account.
+@MainActor
+final class UnsealedResetMovesNothingTests: XCTestCase {
+
+    private let account = "YWNjdA=="
+    private let k0 = base64Encode(Data(repeating: 0x10, count: 32))
+    private let k1 = base64Encode(Data(repeating: 0x11, count: 32))
+    private let k2 = base64Encode(Data(repeating: 0x12, count: 32))
+    private let now: Int64 = 1_800_000_000_000
+    private var suite = ""
+
+    override func setUp() {
+        super.setUp()
+        suite = "lakko.tests.unsealed-moves-nothing.\(UUID().uuidString)"
+    }
+
+    override func tearDown() {
+        UserDefaults().removePersistentDomain(forName: suite)
+        super.tearDown()
+    }
+
+    private func pins() -> PeerPinStore {
+        let store = PeerPinStore(defaults: UserDefaults(suiteName: suite)!, ownerAccountIdB64: "b3duZXI=")
+        store.setPin(accountIdB64: account, pinnedSignaturePubkeyB64: k0, rotationMarker: 10, keyGeneration: 1)
+        return store
+    }
+
+    private func sealedReset(_ store: PeerPinStore, held: String, new: String, generation: UInt64) {
+        XCTAssertEqual(
+            store.acceptReset(PeerPinStore.AcceptedReset(
+                accountIdB64: account, heldKeyB64: held, newKeyB64: new, keyGeneration: generation,
+                signedAtMs: now - 1000, nowMs: now, announcementSeq: 1)),
+            .accepted)
+    }
+
+    func testASealedResetStillProducesTheReturn() {
+        let store = pins()
+        sealedReset(store, held: k0, new: k1, generation: 2)
+        XCTAssertEqual(
+            store.sealedResetInForce(accountIdB64: account),
+            PeerPinStore.SealedReset(keyGeneration: 2, signedAtMs: now - 1000))
+        XCTAssertEqual(ChannelReturnRuntime.liveGeneration(account, pins: store, nowMs: now), 2)
+        XCTAssertEqual(ChannelReturnRuntime.liveSupersededKeys(pins: store, nowMs: now), [k0: account])
+        XCTAssertEqual(
+            ReachCenter.shared.acceptedContinuity(ofNewKey: base64Decode(k1)!, nowMs: now, pins: store)?.keyGeneration,
+            2, "the continuity mailbox is written to")
+    }
+
+    func testNoVerdictOrARefusedResetProducesNothing() {
+        // A first pin at a generation, no reset accepted (refused, or no
+        // verdict yet: `acceptReset` runs only on a sealed verdict).
+        let store = pins()
+        XCTAssertNil(store.sealedResetInForce(accountIdB64: account))
+        XCTAssertNil(ChannelReturnRuntime.liveGeneration(account, pins: store, nowMs: now))
+        XCTAssertTrue(ChannelReturnRuntime.liveSupersededKeys(pins: store, nowMs: now).isEmpty)
+        XCTAssertNil(ReachCenter.shared.acceptedContinuity(ofNewKey: base64Decode(k0)!, nowMs: now, pins: store))
+    }
+
+    func testAnUnsealedResetProducesNothing() {
+        let store = pins()
+        store.noteStartedOver(accountIdB64: account, heldKeyB64: k0, newKeyB64: k1, keyGeneration: 2, signedAtMs: now)
+        XCTAssertNil(store.sealedResetInForce(accountIdB64: account))
+        XCTAssertNil(ChannelReturnRuntime.liveGeneration(account, pins: store, nowMs: now))
+        XCTAssertNil(ReachCenter.shared.acceptedContinuity(ofNewKey: base64Decode(k1)!, nowMs: now, pins: store))
+    }
+
+    /// The walk of 2026-11-28: a sealed reset (k0 -> k1), then an unsealed one
+    /// (k1 -> k2), then the new keys accepted as a new contact. The earlier
+    /// sealed reset's window must not make anything go to the new account.
+    func testAStartedOverAccountProducesNothingAfterItsNewKeysAreAccepted() {
+        let store = pins()
+        sealedReset(store, held: k0, new: k1, generation: 2)
+        store.noteStartedOver(accountIdB64: account, heldKeyB64: k1, newKeyB64: k2, keyGeneration: 3, signedAtMs: now)
+        XCTAssertNil(store.sealedResetInForce(accountIdB64: account), "a pending unsealed reset")
+        XCTAssertTrue(store.adoptStartedOver(accountIdB64: account, newKeyB64: k2, nowMs: now))
+        XCTAssertEqual(store.readPin(accountIdB64: account)?.acceptedKeyGeneration, 3)
+        XCTAssertNil(store.sealedResetInForce(accountIdB64: account), "the adopted generation is no sealed one")
+        XCTAssertNil(ChannelReturnRuntime.liveGeneration(account, pins: store, nowMs: now))
+        XCTAssertTrue(
+            ChannelReturnRuntime.liveSupersededKeys(pins: store, nowMs: now).isEmpty, "no channel return")
+        XCTAssertTrue(store.loadSupersededKeysOfSealedResets().isEmpty, "no successor, no profile carried")
+        XCTAssertEqual(store.loadSupersededKeys(), [k0: account], "the retired key is still refused")
+        XCTAssertNil(
+            ReachCenter.shared.acceptedContinuity(ofNewKey: base64Decode(k2)!, nowMs: now, pins: store),
+            "nothing is written to its continuity mailbox")
+    }
+
+    /// Once the new keys were accepted, the account is a new relationship: a
+    /// LATER sealed reset of the new account moves things as any sealed reset
+    /// does, but only what it retired (never the earlier relationship's keys
+    /// or the keys that started over).
+    func testALaterSealedResetOfTheNewAccountMovesWhatItRetiredOnly() {
+        let store = pins()
+        sealedReset(store, held: k0, new: k1, generation: 2)
+        store.noteStartedOver(accountIdB64: account, heldKeyB64: k1, newKeyB64: k2, keyGeneration: 3, signedAtMs: now)
+        XCTAssertTrue(store.adoptStartedOver(accountIdB64: account, newKeyB64: k2, nowMs: now))
+        let k3 = base64Encode(Data(repeating: 0x13, count: 32))
+        sealedReset(store, held: k2, new: k3, generation: 4)
+        XCTAssertEqual(store.sealedResetInForce(accountIdB64: account)?.keyGeneration, 4)
+        XCTAssertEqual(ChannelReturnRuntime.liveGeneration(account, pins: store, nowMs: now), 4)
+        XCTAssertEqual(
+            ChannelReturnRuntime.liveSupersededKeys(pins: store, nowMs: now), [k2: account],
+            "the return for the new account's retired key; k0 and k1 never count again")
+        XCTAssertEqual(
+            ReachCenter.shared.acceptedContinuity(ofNewKey: base64Decode(k3)!, nowMs: now, pins: store)?.keyGeneration,
+            4, "its continuity mailbox is written to")
+        XCTAssertEqual(Set(store.loadSupersededKeys().keys), [k0, k2], "both retired keys are still refused")
+    }
+
+    func testAProvenRotationAfterASealedResetKeepsItInForce() {
+        let store = pins()
+        sealedReset(store, held: k0, new: k1, generation: 2)
+        store.setPin(accountIdB64: account, pinnedSignaturePubkeyB64: k2, rotationMarker: 99_999_999_999_999)
+        XCTAssertEqual(store.sealedResetInForce(accountIdB64: account)?.keyGeneration, 2)
+    }
+
+    func testTheOwnUnsealedResetActsOnNothingThatArrives() {
+        XCTAssertTrue(ResetContinuityRules.ownResetUnsealed(
+            ResetContinuity(expiresAtMs: now, previousKeyB64: k0, keyGeneration: 2, sealed: false)))
+        XCTAssertFalse(ResetContinuityRules.ownResetUnsealed(
+            ResetContinuity(expiresAtMs: now, previousKeyB64: k0, keyGeneration: 2, sealed: true)))
+        XCTAssertFalse(ResetContinuityRules.ownResetUnsealed(
+            ResetContinuity(expiresAtMs: now, previousKeyB64: k0, keyGeneration: 2)), "a record that does not say")
+        XCTAssertFalse(ResetContinuityRules.ownResetUnsealed(nil))
+        let defaults = UserDefaults(suiteName: suite)!
+        let records = ResetContinuityStore(defaults: defaults)
+        records.write(
+            ResetContinuity(expiresAtMs: now, previousKeyB64: k0, keyGeneration: 2, sealed: true),
+            accountIdB64: account)
+        records.markUnsealed(accountIdB64: account)
+        XCTAssertEqual(records.read(accountIdB64: account)?.sealed, false, "the seal was refused at publish")
+    }
+}

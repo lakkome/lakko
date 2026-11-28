@@ -70,6 +70,9 @@ extension ContactsRepository {
     func continuityWindowOpen(accountIdB64: String, identity: Identity) async -> Bool {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         if let own = ResetContinuityStore().read(accountIdB64: accountIdB64) {
+            // ADR-0101 section 11 — after an unsealed reset of its own this
+            // device reads nothing there: peers send nothing to it.
+            if ResetContinuityRules.ownResetUnsealed(own) { return false }
             return ResetContinuityRules.mailboxReadable(expiresAtMs: own.expiresAtMs, nowMs: now)
         }
         if let held = continuityWindow.cached(accountIdB64: accountIdB64, nowMs: now) {
@@ -106,6 +109,7 @@ extension ContactsRepository {
     func noteReturnedConversationIfInsideWindow(groupIdHex: String, accountIdB64: String) {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         guard let own = ResetContinuityStore().read(accountIdB64: accountIdB64),
+              !ResetContinuityRules.ownResetUnsealed(own),
               ResetContinuityRules.mailboxReadable(expiresAtMs: own.expiresAtMs, nowMs: now),
               let groupId = ChatRepository.hexToBytes(groupIdHex) else { return }
         HistoryReturnStore().noteReturned(groupIdB64: base64Encode(groupId), accountIdB64: accountIdB64)

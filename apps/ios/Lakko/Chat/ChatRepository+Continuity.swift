@@ -678,7 +678,8 @@ extension ChatRepository {
               prepared.successorGroupIdB64 == successorGroupIdB64 else { return }
         let marks = continuityStore
         if marks.wasResent(oldGroupIdB64: oldB64) { return }
-        guard let signedAtMs = continuityPins.readPin(accountIdB64: accountIdB64)?.resetSignedAtMs else {
+        // ADR-0101 sections 10-11 — only for a SEALED reset in force.
+        guard let signedAtMs = continuityPins.sealedResetInForce(accountIdB64: accountIdB64)?.signedAtMs else {
             return
         }
         let stored = old.messages
@@ -1154,7 +1155,12 @@ final class RepositoryContinuityPort: ContinuityPort {
 
     func ownPersonKeyB64() -> String? { repository.ownPersonKeyB64() }
 
-    func supersededKeys() -> [String: String] { repository.supersededKeyMap() }
+    /// ADR-0101 sections 10-11 (2026-11-28) — only the accounts whose SEALED
+    /// reset is in force are continued (successors, the carried profile, the
+    /// re-sends): nothing moves to an account after an unsealed reset. The
+    /// full map still holds sends into a group with a retired key
+    /// (``ChatRepository/supersededKeyMap()``).
+    func supersededKeys() -> [String: String] { pins.loadSupersededKeysOfSealedResets() }
 
     func currentKeyOf(accountIdB64: String) -> String? {
         pins.readPin(accountIdB64: accountIdB64)?.pinnedSignaturePubkeyB64
@@ -1194,7 +1200,9 @@ final class RepositoryContinuityPort: ContinuityPort {
         let target = await ContinuityTargetRefresh.refresh(
             accountIdB64: accountIdB64, attestedKeyB64: pin.pinnedSignaturePubkeyB64, ownAccountIdB64: own)
         return ContinuityTargets.newIdentityReachable(
-            ordinaryCandidates: 0, continuity: target, resetSignedAtMs: pin.resetSignedAtMs,
+            ordinaryCandidates: 0, continuity: target,
+            // Only a SEALED reset in force opens a way in (ADR-0101 sections 10-11).
+            resetSignedAtMs: PeerPinStore.sealedResetInForce(pin)?.signedAtMs,
             nowMs: ChatRepository.nowMs())
     }
 

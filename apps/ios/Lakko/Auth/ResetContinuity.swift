@@ -41,12 +41,23 @@ public struct ResetContinuity: Codable, Equatable, Sendable {
     public var keyGeneration: UInt64
     /// The announcement (claim, reach key, binding) landed.
     public var announced: Bool
+    /// ADR-0101 section 11 (2026-11-28) — whether the reset carried a seal:
+    /// `false` when it was made with none, or its seal was refused and it
+    /// was published without one. Peers move nothing to an unsealed reset,
+    /// so this device acts on nothing that arrives for it as if they had
+    /// (``ResetContinuityRules/ownResetUnsealed(_:)``). `nil` in a record
+    /// written before this was kept.
+    public var sealed: Bool?
 
-    public init(expiresAtMs: Int64, previousKeyB64: String?, keyGeneration: UInt64, announced: Bool = false) {
+    public init(
+        expiresAtMs: Int64, previousKeyB64: String?, keyGeneration: UInt64, announced: Bool = false,
+        sealed: Bool? = nil
+    ) {
         self.expiresAtMs = expiresAtMs
         self.previousKeyB64 = previousKeyB64
         self.keyGeneration = keyGeneration
         self.announced = announced
+        self.sealed = sealed
     }
 }
 
@@ -65,6 +76,15 @@ public enum ResetContinuityRules {
     public static func announcementOwed(_ record: ResetContinuity?, nowMs: Int64) -> Bool {
         guard let record, !record.announced, record.expiresAtMs > 0 else { return false }
         return nowMs < record.expiresAtMs
+    }
+
+    /// ADR-0101 section 11 — this device's own reset was made without a seal
+    /// (or published without one). Nothing a peer sends for it is acted on:
+    /// its continuity mailbox is not read, a held channel return is dropped,
+    /// a conversation joined is not a returned one. Only an explicit `false`
+    /// counts; a record that does not say is treated as before.
+    public static func ownResetUnsealed(_ record: ResetContinuity?) -> Bool {
+        record?.sealed == false
     }
 
     /// Whether the continuity mailbox is read at `nowMs`.
@@ -139,6 +159,14 @@ public struct ResetContinuityStore {
         let expiry = ResetContinuityRules.expiryMs(signedAtMs: signedAtMs)
         guard record.expiresAtMs != expiry else { return }
         record.expiresAtMs = expiry
+        write(record, accountIdB64: accountIdB64)
+    }
+
+    /// The reset was published without its seal after all (the directory
+    /// refused the seal): the record says unsealed.
+    public func markUnsealed(accountIdB64: String) {
+        guard var record = read(accountIdB64: accountIdB64), record.sealed != false else { return }
+        record.sealed = false
         write(record, accountIdB64: accountIdB64)
     }
 

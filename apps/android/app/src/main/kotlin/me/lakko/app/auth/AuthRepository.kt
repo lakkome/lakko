@@ -6291,6 +6291,8 @@ public class AuthRepository(
                 previousKeyB64 = previousKeyB64,
                 keyGeneration = reset.keyGeneration.toString(),
                 announced = false,
+                // ADR-0101 section 11: an unsealed reset gets nothing back.
+                sealed = resetSeal != null,
             ),
         )
         owedStore.markPhraseOwed(accountIdB64, OwedPhraseOrigin.FreshIdentity)

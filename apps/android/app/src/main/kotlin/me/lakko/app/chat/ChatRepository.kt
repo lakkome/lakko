@@ -9432,6 +9432,19 @@ public class ChatRepository(
         return keys
     }
 
+    /** ADR-0101 section 11 - the retired keys a SEALED reset moves for
+     *  ([me.lakko.app.contacts.movableSupersededKeysOf]): what a successor,
+     *  a re-admission, a history page or a returned profile may act on.
+     *  [supersededKeys] stays what is dropped and refused. */
+    internal fun movableSupersededKeys(): Map<String, String> {
+        val account = currentAccountIdB64.get() ?: return emptyMap()
+        return try {
+            me.lakko.app.contacts.movableSupersededKeysOf(resetLedgerStore.loadAll(account))
+        } catch (_: Throwable) {
+            emptyMap()
+        }
+    }
+
     /** The unrepairable key of each group as last computed (empty = none). */
     private val unrepairableCache = java.util.concurrent.ConcurrentHashMap<String, java.util.Optional<String>>()
 
@@ -10961,7 +10974,7 @@ public class ChatRepository(
     private fun lookupCandidatesFor(personKeysB64: List<String>): List<DeviceReadmission.LookupCandidate> {
         val account = keyPackageAccount.get() ?: return emptyList()
         val own = ownPersonKeyB64() ?: return emptyList()
-        val superseded = supersededKeys()
+        val movable = movableSupersededKeys()
         val directory = me.lakko.app.profile.ProfileDirectory.get(applicationContext)
         return DeviceReadmission.readmissionCandidates(
             rosterPersonKeysB64 = personKeysB64,
@@ -10969,7 +10982,7 @@ public class ChatRepository(
             contacts = me.lakko.app.contacts.AcceptedContactsStore.load(applicationContext, account.accountId).map { c ->
                 DeviceReadmission.LookupContact(outboxB64(c.request.fromPubkey), c.request.fromAccountId?.let { outboxB64(it) })
             },
-            accountOfRetiredKey = { superseded[it] },
+            accountOfRetiredKey = { movable[it] },
             profileAccountIdB64Of = { k ->
                 directory.profiles.get(k)?.accountIdHex?.let { hex -> hexToBytes(hex)?.let { outboxB64(it) } }
             },
@@ -11060,6 +11073,9 @@ public class ChatRepository(
         override fun ownPersonKeyB64(): String? = this@ChatRepository.ownPersonKeyB64()
 
         override fun supersededKeys(): Map<String, String> = this@ChatRepository.supersededKeys()
+
+        override fun mayMove(supersededKeyB64: String): Boolean =
+            supersededKeyB64 in this@ChatRepository.movableSupersededKeys()
 
         override fun currentKeyOf(accountIdB64: String): String? = pinnedKeysByAccount(setOf(accountIdB64))[accountIdB64]
 
@@ -11314,7 +11330,9 @@ public class ChatRepository(
             val record = groups[successorGroupIdHex] ?: return
             val carried = me.lakko.app.profile.CarriedProfileStore.onDevice(applicationContext)
             if (carried.carriedInto(account, successorGroupIdHex)) return
-            val keys = supersededKeys().filter { it.value == accountIdB64 }.keys.sorted()
+            // ADR-0101 section 11: never a profile of a relationship that
+            // ended with an unsealed reset.
+            val keys = movableSupersededKeys().filter { it.value == accountIdB64 }.keys.sorted()
             val envelope = me.lakko.app.profile.newestHeldEnvelope(keys) { profileDirectory.heldEnvelopeOf(it) }
             if (envelope != null) {
                 try {
@@ -13274,7 +13292,10 @@ public class ChatRepository(
         // against the pin or the binding this device verified, and
         // [DeviceReadmission.lookupStanding] decides whether its devices are
         // followed at all.
-        val superseded = supersededKeys()
+        // ADR-0101 section 11: a retired key is followed to its account's new
+        // devices only for a SEALED reset; a relationship that ended with an
+        // unsealed reset brings nobody in.
+        val movable = movableSupersededKeys()
         val directory = me.lakko.app.profile.ProfileDirectory.get(applicationContext)
         val candidates = DeviceReadmission.readmissionCandidates(
             rosterPersonKeysB64 = roster.map { it.personKey },
@@ -13285,7 +13306,7 @@ public class ChatRepository(
                     accountIdB64 = c.request.fromAccountId?.let { outboxB64(it) },
                 )
             },
-            accountOfRetiredKey = { superseded[it] },
+            accountOfRetiredKey = { movable[it] },
             profileAccountIdB64Of = { key ->
                 directory.profiles.get(key)?.accountIdHex?.let { hex -> hexToBytes(hex)?.let { outboxB64(it) } }
             },
@@ -13337,7 +13358,7 @@ public class ChatRepository(
             val standing = DeviceReadmission.lookupStanding(
                 rosterKeyB64 = candidate.rosterKeyB64,
                 pinnedChainB64 = chain,
-                supersededKeysB64 = supersededKeys().filterValues { it == candidate.accountIdB64 }.keys,
+                supersededKeysB64 = movableSupersededKeys().filterValues { it == candidate.accountIdB64 }.keys,
                 bindingKeyB64 = bindingKey,
                 bindingChainB64 = bindingKey?.let { provenChainEndingAt(it, provenLinks) }.orEmpty(),
             )
@@ -17417,7 +17438,8 @@ public class ChatRepository(
             val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
             val senderBytes = java.util.Base64.getDecoder().decode(senderKeyB64)
             val reset = runCatching { reach.acceptedResetOf?.invoke(senderBytes) }.getOrNull()
-            val retired = if (reset == null) emptySet() else supersededKeys().filter { it.value == reset.accountIdB64 }.keys
+            // ADR-0101 section 11: only keys a SEALED reset retired.
+            val retired = if (reset == null) emptySet() else movableSupersededKeys().filter { it.value == reset.accountIdB64 }.keys
             // The conversation's earlier group the requester's retired key was in.
             val lineage = lineageNow()
             val segments = lineage.segmentsOf(lineage.conversationOf(groupIdHex))

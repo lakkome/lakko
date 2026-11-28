@@ -21,16 +21,21 @@ extension ReachCenter {
     /// The accepted reset whose new (pinned) key is `newKey`, only while its
     /// continuity key is usable (counted from the attestation's `signed_at`
     /// this device verified). `nil` otherwise.
+    ///
+    /// ADR-0101 sections 10-11 (2026-11-28): only a SEALED reset in force
+    /// counts (``PeerPinStore/sealedResetInForce(_:)``). After an unsealed
+    /// reset nothing is written to the account's continuity mailbox, also
+    /// once its new keys were accepted as a new contact.
     func acceptedContinuity(ofNewKey newKey: Data, nowMs: Int64, pins: PeerPinStore = PeerPinStore())
         -> AcceptedContinuity? {
         let keyB64 = base64Encode(newKey)
         for (accountIdB64, pin) in pins.allPins() where pin.pinnedSignaturePubkeyB64 == keyB64 {
-            guard let generation = pin.acceptedKeyGeneration, generation > 0,
-                  let signedAt = pin.resetSignedAtMs,
-                  ContinuityTargets.continuityKeyUsable(signedAtMs: signedAt, nowMs: nowMs),
+            guard let sealed = PeerPinStore.sealedResetInForce(pin),
+                  ContinuityTargets.continuityKeyUsable(signedAtMs: sealed.signedAtMs, nowMs: nowMs),
                   let accountId = base64Decode(accountIdB64) else { continue }
             return AcceptedContinuity(
-                accountIdB64: accountIdB64, accountId: accountId, keyGeneration: generation, signedAtMs: signedAt)
+                accountIdB64: accountIdB64, accountId: accountId,
+                keyGeneration: sealed.keyGeneration, signedAtMs: sealed.signedAtMs)
         }
         return nil
     }

@@ -103,10 +103,13 @@ extension ChatRepository {
         guard let accountIdB64 = currentAccountIdB64, let identity = canonicalIdentity,
               let successor = groups[groupIdHex], let facts = continuityFacts(group: successor.group) else { return }
         let own = AuthorIdentity.own(group: successor.group)
+        // ADR-0101 sections 10-11 (2026-11-28) — only a requester whose
+        // SEALED reset is in force is answered: no history to an account
+        // after an unsealed reset.
         let pin = readmissionPins().allPins().first {
-            $0.value.pinnedSignaturePubkeyB64 == senderKeyB64 && ($0.value.acceptedKeyGeneration ?? 0) > 0
+            $0.value.pinnedSignaturePubkeyB64 == senderKeyB64 && PeerPinStore.sealedResetInForce($0.value) != nil
         }?.value
-        let retired = Set(pin?.supersededKeysB64 ?? [])
+        let retired = Set(pin.map(PeerPinStore.actionableSupersededKeys) ?? [])
         let earlier = olderSegments(headGroupIdHex: headGroupIdHex(of: groupIdHex)).filter { $0 != groupIdHex }
         let source = earlier.reversed().first { hex in
             guard let held = groups[hex], let earlierFacts = continuityFacts(group: held.group) else { return false }

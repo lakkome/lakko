@@ -59,6 +59,12 @@ public interface ContinuityPort {
     /** Every key an accepted reset retired -> its account id (base64). */
     public fun supersededKeys(): Map<String, String>
 
+    /** ADR-0101 section 11 - whether the conversation of [supersededKeyB64]
+     *  may be continued toward its account's current keys: only for a key a
+     *  SEALED reset retired, never for a relationship that ended with an
+     *  unsealed reset. Fail closed: the default moves nothing. */
+    public fun mayMove(supersededKeyB64: String): Boolean = false
+
     /** The key this device now trusts for an account, or `null`. */
     public fun currentKeyOf(accountIdB64: String): String?
 
@@ -230,6 +236,9 @@ private suspend fun runContinuity(port: ContinuityPort, oldGroupIdHex: String): 
         ownerKeyB64 = facts.ownerKeyB64,
         supersededKeys = superseded.keys,
     ) ?: return ContinuityStep.NOTHING
+    // ADR-0101 section 11: nothing is continued toward a person whose reset
+    // this device could not confirm as sealed.
+    if (!port.mayMove(unrepairableKeyB64)) return ContinuityStep.NOTHING
     val accountIdB64 = superseded[unrepairableKeyB64] ?: return ContinuityStep.NOTHING
     val state = port.claimState(oldGroupIdHex)
 

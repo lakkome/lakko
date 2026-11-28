@@ -19,7 +19,7 @@ import { readResetContinuity } from "../auth/reset-continuity";
 import { newestHeldEnvelope } from "../profile/returned-profile";
 import { DiscoveryClient } from "../discovery/client";
 import { DsClient } from "../ds/client";
-import { acceptedResetOfKey, loadSupersededKeys, readPin } from "../contacts/local-store";
+import { acceptedResetOfKey, loadMovableSupersededKeys, readPin } from "../contacts/local-store";
 import { sealRowFor } from "../contacts/mailbox-row";
 import { continuityCandidate, continuityFor, writeThroughCandidates } from "../reach/mailbox-write";
 import { refreshContinuityTarget } from "../reach/continuity-target";
@@ -177,12 +177,34 @@ export function clearSentReturns(s: Storage | undefined, accountIdB64: string): 
 /** The accepted reset's generation for an account, while its continuity key
  *  is still usable; `null` otherwise. */
 function liveGeneration(accountIdB64: string): number | null {
+  return liveGenerationAt(accountIdB64, Date.now());
+}
+
+function liveGenerationAt(accountIdB64: string, nowMs: number): number | null {
   const pin = readPin(accountIdB64);
   const key = pin?.pinnedSignaturePubkeyB64;
-  if (key === undefined) return null;
+  // ADR-0101 section 11: the account started over since; nothing returns.
+  if (key === undefined || pin?.startedOver !== undefined) return null;
   const reset = acceptedResetOfKey(key);
-  if (reset === null || continuityFor(base64Decode(key), Date.now()) === null) return null;
+  if (reset === null || continuityFor(base64Decode(key), nowMs) === null) return null;
   return reset.keyGeneration;
+}
+
+/**
+ * ADR-0101 sections 7 and 11 (walk of 2026-11-28): the retired keys a
+ * return may be sent for right now, each mapped to its account. Only a
+ * SEALED reset this device accepted puts a key here, and only while its
+ * continuity key is usable; an unsealed reset (a started-over record, even
+ * after an earlier sealed one), a refused one and one with no verdict yet
+ * put nothing (`loadMovableSupersededKeys`, `acceptedResetOfKey`). Fail
+ * closed: a key is here only on positive evidence. Reads the pin store.
+ */
+export function liveReturnTargets(nowMs: number = Date.now()): Map<string, string> {
+  const live = new Map<string, string>();
+  for (const [key, acct] of loadMovableSupersededKeys()) {
+    if (liveGenerationAt(acct, nowMs) !== null) live.set(key, acct);
+  }
+  return live;
 }
 
 /**
@@ -197,9 +219,7 @@ export async function sendChannelReturns(
   identity: WasmIdentity,
   ownKeysB64: ReadonlySet<string>,
 ): Promise<void> {
-  const superseded = loadSupersededKeys();
-  const live = new Map<string, string>();
-  for (const [key, acct] of superseded) if (liveGeneration(acct) !== null) live.set(key, acct);
+  const live = liveReturnTargets();
   if (live.size === 0) return;
   const wasm = await loadWasm();
   const sent = { ...readSent(storage(), accountIdB64) };
@@ -308,7 +328,7 @@ async function sendOneReturn(
     invitation,
     Uint32Array.from(seeds.epochs),
     seeds.seeds,
-    returnProfileFor(r.accountIdB64, loadSupersededKeys(), heldProfiles),
+    returnProfileFor(r.accountIdB64, loadMovableSupersededKeys(), heldProfiles),
   );
   await writeThroughCandidates([candidate], async (target, auth) =>
     ds.publishMailbox(target.address, sealRowFor(wasm, target, "channel-return", envelope), auth),

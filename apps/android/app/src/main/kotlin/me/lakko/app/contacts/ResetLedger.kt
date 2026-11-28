@@ -53,6 +53,14 @@ public data class ResetLedgerRow(
      *  new traffic and never moved (they are NOT superseded keys: R.5 to R.7
      *  do not run for them). */
     val startedOverKeysB64: List<String> = emptyList(),
+    /** ADR-0101 section 11 (2026-11-28): every key of the account's
+     *  relationship that ENDED with an unsealed reset (the keys it had
+     *  retired before, its previous keys and the key it started over from).
+     *  Nothing of that relationship moves to the account's keys after it:
+     *  no channel return, no successor, no re-admission, no history. A
+     *  later SEALED reset of the new account moves only what it retires
+     *  itself ([movableSupersededKeysOf]). */
+    val endedRelationshipKeysB64: List<String> = emptyList(),
 )
 
 /** An unsealed reset this device saw for an account (UX 16.11). */
@@ -82,6 +90,9 @@ public fun withStartedOver(row: ResetLedgerRow?, seen: StartedOver): ResetLedger
     return base.copy(
         startedOver = seen,
         startedOverKeysB64 = (base.startedOverKeysB64 + seen.oldKeyB64).distinct(),
+        endedRelationshipKeysB64 = (
+            base.endedRelationshipKeysB64 + base.supersededKeysB64 + base.previousKeysB64 + seen.oldKeyB64
+            ).distinct(),
     )
 }
 
@@ -229,12 +240,40 @@ public fun acceptedResetOfKey(
 ): AcceptedResetOfKey? {
     for ((accountIdB64, row) in rows) {
         if (pinnedKeyOf(accountIdB64) != currentKeyB64) continue
+        // ADR-0101 section 11: an unsealed reset seen since (an open
+        // record) ends whatever an earlier sealed reset moved: fail closed.
+        if (row.startedOver != null) return null
         val signedAt = row.resetSignedAtMs ?: return null
         val generation = row.acceptedKeyGeneration ?: return null
-        if (row.supersededKeysB64.isEmpty()) return null
+        if (movableKeysOf(row).isEmpty()) return null
         return AcceptedResetOfKey(accountIdB64, generation, signedAt)
     }
     return null
+}
+
+/** The keys a SEALED reset of [row]'s account retired that something may
+ *  still move for (ADR-0101 sections 7 to 9): none while an unsealed reset
+ *  is open, and never a key of a relationship that ended with one. */
+private fun movableKeysOf(row: ResetLedgerRow): List<String> =
+    if (row.startedOver != null) {
+        emptyList()
+    } else {
+        row.supersededKeysB64.filter { it !in row.endedRelationshipKeysB64 }
+    }
+
+/**
+ * ADR-0101 sections 7 to 11 - the retired keys a peer device may still act
+ * on toward the account's CURRENT keys (a channel return, a successor, a
+ * re-admission, a history page, a returned profile), mapped to the account
+ * id. Only what a SEALED reset retired: a key of a relationship that ended
+ * with an unsealed reset maps to nothing, and an account with an open
+ * unsealed reset contributes nothing. [supersededKeysOf] stays the list of
+ * keys that are no longer the person (what is dropped and refused).
+ */
+public fun movableSupersededKeysOf(rows: Map<String, ResetLedgerRow>): Map<String, String> {
+    val out = LinkedHashMap<String, String>()
+    for ((accountIdB64, row) in rows) for (k in movableKeysOf(row)) out[k] = accountIdB64
+    return out
 }
 
 /** Retired key -> the key the person is pinned under now: the display

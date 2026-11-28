@@ -368,8 +368,9 @@ describe("an unsealed reset AFTER a sealed one this device accepted", () => {
     });
     expect(acceptedResetOfKey(OLD)).not.toBeNull();
     unsealed({ keyGeneration: 3 });
-    // Pending: the earlier, sealed reset still stands for the old key.
-    expect(acceptedResetOfKey(OLD)).not.toBeNull();
+    // Pending (walk of 2026-11-28): the later reset is unsealed, so the
+    // earlier sealed one no longer opens anything for the old key either.
+    expect(acceptedResetOfKey(OLD)).toBeNull();
     expect(acceptedResetOfKey(NEW)).toBeNull();
     adoptStartedOver(ANNA, NEW, 1_700_001_000_000);
     // Adopted: nothing an accepted reset wrote is left to act on, so no

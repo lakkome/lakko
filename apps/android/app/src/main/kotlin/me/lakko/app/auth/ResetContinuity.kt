@@ -61,10 +61,21 @@ public data class ResetContinuity(
     public val keyGeneration: String,
     /** The announcement (claim, reach key, binding) landed. */
     public val announced: Boolean = false,
+    /** ADR-0101 section 11 - whether the reset carried a reset seal. An
+     *  unsealed reset is a new account to every peer: nothing is returned to
+     *  it, and a channel return that slips through is dropped here
+     *  ([acceptsChannelReturns]). `true` on a record written before. */
+    public val sealed: Boolean = true,
 ) {
     /** The record with the announcement marked done. */
     public fun withAnnounced(): ResetContinuity = copy(announced = true)
 }
+
+/** ADR-0101 section 11 - whether this device acts on channel returns read
+ *  from its continuity mailbox: not after an UNSEALED reset of its own (a
+ *  server alone can forge one, and no peer returns anything to it). No
+ *  record: nothing to judge, the returns are kept as before. */
+public fun acceptsChannelReturns(record: ResetContinuity?): Boolean = record?.sealed != false
 
 /** Whether the announcement is still owed at [nowMs] (never after the
  *  window: a binding for a past window is refused by everyone). */

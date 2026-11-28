@@ -117,14 +117,25 @@ enum ChannelReturnRuntime {
     }
 
     /// The accepted reset's generation for an account, while its continuity
-    /// key is still usable; `nil` otherwise.
-    static func liveGeneration(_ accountIdB64: String, pins: PeerPinStore = PeerPinStore()) -> UInt64? {
-        guard let pin = pins.readPin(accountIdB64: accountIdB64),
-              let generation = pin.acceptedKeyGeneration, generation > 0,
-              let signedAt = pin.resetSignedAtMs,
-              ContinuityTargets.continuityKeyUsable(
-                signedAtMs: signedAt, nowMs: Int64(Date().timeIntervalSince1970 * 1000)) else { return nil }
-        return generation
+    /// key is still usable; `nil` otherwise. ADR-0101 sections 10-11
+    /// (2026-11-28): only a SEALED reset in force counts
+    /// (``PeerPinStore/sealedResetInForce(_:)``): after an unsealed reset no
+    /// channel is returned, ever.
+    static func liveGeneration(
+        _ accountIdB64: String, pins: PeerPinStore = PeerPinStore(),
+        nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)
+    ) -> UInt64? {
+        guard let sealed = pins.sealedResetInForce(accountIdB64: accountIdB64),
+              ContinuityTargets.continuityKeyUsable(signedAtMs: sealed.signedAtMs, nowMs: nowMs) else { return nil }
+        return sealed.keyGeneration
+    }
+
+    /// The retired keys whose return is owed now: those of the accounts
+    /// with a live sealed reset (``liveGeneration(_:pins:nowMs:)``).
+    static func liveSupersededKeys(
+        pins: PeerPinStore = PeerPinStore(), nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)
+    ) -> [String: String] {
+        pins.loadSupersededKeysOfSealedResets().filter { liveGeneration($0.value, pins: pins, nowMs: nowMs) != nil }
     }
 
     /// For every channel this device publishes or reads, and every reset it
@@ -134,7 +145,7 @@ enum ChannelReturnRuntime {
         channels: ChannelsUiState, client: ChannelsClient, seed: Data, accountIdB64: String
     ) async {
         let pins = PeerPinStore()
-        let live = pins.loadSupersededKeys().filter { liveGeneration($0.value, pins: pins) != nil }
+        let live = liveSupersededKeys(pins: pins)
         guard !live.isEmpty else { return }
         let ownKeys = StateBundle.ownKeysB64(accountIdB64: accountIdB64)
         let sentStore = SentChannelReturnStore()
@@ -216,7 +227,7 @@ enum ChannelReturnRuntime {
                 // retired keys, verbatim (their device keeps it only if it
                 // verifies under its previous key).
                 profile: ChannelReturnRules.returnProfile(
-                    accountIdB64: ret.accountIdB64, superseded: PeerPinStore().loadSupersededKeys(),
+                    accountIdB64: ret.accountIdB64, superseded: PeerPinStore().loadSupersededKeysOfSealedResets(),
                     heldEnvelopeOf: { ProfileDirectory.shared.heldEnvelope(signatureKeyB64: $0) })))
             let row = try plan.target.seal(kind: .channelReturn, body: envelope)
             let ds = DsClient()
@@ -256,6 +267,13 @@ enum ChannelReturnRuntime {
         let store = HeldChannelReturnStore()
         let held = store.read(accountIdB64: accountIdB64)
         guard !held.isEmpty else { return }
+        // ADR-0101 section 11 — this device's own reset was unsealed: a
+        // return that slipped through is not acted on (no invitation card,
+        // no seed). Dropped.
+        if ResetContinuityRules.ownResetUnsealed(ResetContinuityStore().read(accountIdB64: accountIdB64)) {
+            store.drop(held, accountIdB64: accountIdB64)
+            return
+        }
         let previous = ResetContinuityStore().read(accountIdB64: accountIdB64)?.previousKeyB64
             .flatMap { base64Decode($0) }
         var done: [String] = []

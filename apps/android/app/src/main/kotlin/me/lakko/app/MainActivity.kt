@@ -2464,7 +2464,8 @@ private fun SessionRoot(
         val secrets = identitySecrets ?: return@LaunchedEffect
         if (guest != null) return@LaunchedEffect
         val contactsPort = object : me.lakko.app.channels.ResetContactsPort {
-            override fun supersededKeys(): Map<String, String> = contactsRepository.supersededKeys()
+            // ADR-0101 section 11: only what a SEALED reset retired moves.
+            override fun supersededKeys(): Map<String, String> = contactsRepository.movableSupersededKeys()
             override fun pinnedKeyB64Of(accountIdB64: String): String? = contactsRepository.pinnedKeyB64Of(accountIdB64)
             override fun liveResetGeneration(accountIdB64: String): Long? = contactsRepository.liveResetGeneration(accountIdB64)
             override suspend fun refreshContinuityTarget(accountIdB64: String): Boolean =

@@ -252,6 +252,10 @@ public class ContactsRepository(
 
     public fun supersededKeys(): Map<String, String> = supersededKeysOf(resetLedgerRows())
 
+    /** ADR-0101 section 11 - the retired keys a SEALED reset moves for
+     *  ([movableSupersededKeysOf]): what a channel return may act on. */
+    public fun movableSupersededKeys(): Map<String, String> = movableSupersededKeysOf(resetLedgerRows())
+
     // -----------------------------------------------------------------
     // ADR-0101 section 11 / UX 16.11 - a contact started over (an unsealed
     // reset). The only place a contact's reset shows anything.
@@ -4489,6 +4493,9 @@ public class ContactsRepository(
                         for (event in result.events) {
                             when (event) {
                                 is IncomingMailboxEvent.ChannelReturn -> {
+                                    // ADR-0101 section 11: an unsealed reset of
+                                    // this account takes no return, whoever sent it.
+                                    if (!me.lakko.app.auth.acceptsChannelReturns(resetContinuity?.load(accountIdB64))) continue
                                     // A storage refusal throws, which holds the cursor.
                                     me.lakko.app.channels.HeldReturnsStore.onDevice(context)
                                         .hold(accountIdB64, java.util.Base64.getEncoder().encodeToString(event.envelope))

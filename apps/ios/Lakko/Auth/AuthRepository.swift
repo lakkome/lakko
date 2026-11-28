@@ -6478,7 +6478,8 @@ public final class AuthRepository: ObservableObject {
         ResetContinuityStore().write(
             ResetContinuity(
                 expiresAtMs: 0, previousKeyB64: previousKeyB64,
-                keyGeneration: reset.session.keyGeneration),
+                keyGeneration: reset.session.keyGeneration,
+                sealed: resetSeal != nil),
             accountIdB64: accountIdB64)
         // ADR-0074 section 3.5: a reset makes every predecessor, proven or
         // not, a superseded key (web `deleteKeyRotationState` on the same
@@ -7453,6 +7454,7 @@ public final class AuthRepository: ObservableObject {
             try await upload(seal: resetSeal)
         } catch where SealUploadRefusal.isSealInvalid(error) {
             NSLog("[auth] the directory refused the reset seal; the reset is published without one")
+            ResetContinuityStore().markUnsealed(accountIdB64: base64Encode(accountId))
             try await upload(seal: nil)
         }
     }
