@@ -8530,7 +8530,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
-      "text": "你的联系人与你的聊天会保留。你的安全码会改变。",
+      "text": "你的安全码会改变。",
       "status": "machine"
     },
     "recovery_phrase.fresh.sign_in_to_finish": {
@@ -8681,10 +8681,6 @@
       "text": "请输入 {word}（英文字母）以确认",
       "status": "machine"
     },
-    "restore_identity.reset.effect_contacts": {
-      "text": "你的联系人与你的聊天会保留。你的安全码会改变。",
-      "status": "machine"
-    },
     "restore_identity.reset.effect_devices": {
       "text": "此账号的所有其他设备都会被退出登录并移除。它们会丢失此账号的聊天和联系人。",
       "status": "machine"
@@ -8693,8 +8689,24 @@
       "text": "此账号的所有通行密钥都会被删除。之后你可以重新添加通行密钥。",
       "status": "machine"
     },
-    "restore_identity.reset.effect_password": {
+    "restore_identity.reset.effect_safety_number": {
+      "text": "你的安全码会改变。",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password": {
+      "text": "你的密码仍然可用。",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_totp": {
       "text": "你的密码和身份验证器应用仍然可用。",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_email": {
+      "text": "你的密码和恢复邮箱仍然可用。",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_totp_email": {
+      "text": "你的密码、身份验证器应用和恢复邮箱仍然可用。",
       "status": "machine"
     },
     "restore_identity.reset.error.generic": {

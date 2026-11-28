@@ -44,6 +44,7 @@ import {
   type ResetFactorKind,
   type ResetSection,
 } from "./seal/reset-factor";
+import type { AccountFactors } from "./protect/factors";
 import type { ResetOutlook } from "./seal/seal-announcement";
 import { WebauthnClient, WebauthnHttpError, WebauthnNetworkError } from "./webauthn-client";
 import { t } from "../l10n";
@@ -90,6 +91,8 @@ export interface ResetFactors {
   readonly section: () => ResetSection;
   /** UX 15.1c, once a factor is confirmed; `null` while it is not known. */
   readonly outlook: () => ResetOutlook | null;
+  /** The account's factors; `null` while they are not known. */
+  readonly factors: () => AccountFactors | null;
   readonly gate: ProofGate;
   /** `Back` on the "cannot reset" panel. */
   backToRows(): void;
@@ -161,6 +164,7 @@ export function createResetFactors(options: {
   return {
     section,
     outlook: () => (confirmed() === null || outlook.loading ? null : (outlook() ?? null)),
+    factors: () => factors() ?? null,
     gate,
     backToRows: () => setCannotUse(false),
     view: {

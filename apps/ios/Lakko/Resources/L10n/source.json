@@ -9888,8 +9888,8 @@
       "security_critical": true
     },
     "recovery_phrase.fresh.safety_note": {
-      "text": "Your contacts keep their chats with you. Your safety number changes.",
-      "comment": "Consequence of resetting the account keys for the person's contacts.",
+      "text": "Your safety number changes.",
+      "comment": "Consequence of resetting the account keys for the person's contacts, on the screen with the new phrase. Says nothing about the chats: they come back only after a sealed reset (UX identity-recovery 15.1c).",
       "security_critical": true
     },
     "recovery_phrase.fresh.sign_in_to_finish": {
@@ -10209,11 +10209,6 @@
       "comment": "Label of the typed confirmation before resetting the account keys. {word} is the word to type, RESET, the same Latin letters in every language.",
       "security_critical": true
     },
-    "restore_identity.reset.effect_contacts": {
-      "text": "Your contacts keep their chats with you. Your safety number changes.",
-      "comment": "Consequence of resetting the account keys: the contacts. One bullet of the warning.",
-      "security_critical": true
-    },
     "restore_identity.reset.effect_devices": {
       "text": "Every other device of this account is signed out and removed. They lose their chats and contacts for this account.",
       "comment": "Consequence of resetting the account keys: the other devices. One bullet of the warning.",
@@ -10224,9 +10219,29 @@
       "comment": "Consequence of resetting the account keys: the passkeys. One bullet of the warning.",
       "security_critical": true
     },
-    "restore_identity.reset.effect_password": {
+    "restore_identity.reset.effect_safety_number": {
+      "text": "Your safety number changes.",
+      "comment": "Consequence of resetting the account keys for the person's contacts. One bullet of the warning (UX identity-recovery 15.1). Whether the chats come back is said by a separate line once the second confirmation is done (15.1c), so this bullet says nothing about the chats.",
+      "security_critical": true
+    },
+    "restore_identity.reset.keeps.password": {
+      "text": "Your password keeps working.",
+      "comment": "What a reset of the account keys leaves untouched, for an account with no authenticator app and no recovery email. One bullet of the warning. The passkeys are not named: the reset deletes them.",
+      "security_critical": true
+    },
+    "restore_identity.reset.keeps.password_totp": {
       "text": "Your password and your authenticator app keep working.",
-      "comment": "What a reset of the account keys leaves untouched. One bullet of the warning.",
+      "comment": "What a reset of the account keys leaves untouched, for an account with an authenticator app and no recovery email. One bullet of the warning.",
+      "security_critical": true
+    },
+    "restore_identity.reset.keeps.password_email": {
+      "text": "Your password and your recovery email keep working.",
+      "comment": "What a reset of the account keys leaves untouched, for an account with a recovery email and no authenticator app. One bullet of the warning.",
+      "security_critical": true
+    },
+    "restore_identity.reset.keeps.password_totp_email": {
+      "text": "Your password, your authenticator app and your recovery email keep working.",
+      "comment": "What a reset of the account keys leaves untouched, for an account with both an authenticator app and a recovery email. One bullet of the warning.",
       "security_critical": true
     },
     "restore_identity.reset.error.generic": {

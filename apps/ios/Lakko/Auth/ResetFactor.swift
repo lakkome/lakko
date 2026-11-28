@@ -102,6 +102,39 @@ public enum ResetFactorSection {
     }
 }
 
+/// UX 15.1, amended 2026-11-28 — the warning above the reset panel, pure.
+/// It describes a reset this account can do, so it is drawn only above the
+/// factor section, once the account's factors are known: never above a
+/// "cannot reset" panel (no factor, or `I cannot use any of these`), and not
+/// while the factors are still being read (the reset may turn out
+/// impossible). Whether the chats come back is not a bullet: the line of
+/// 15.1c says it.
+public enum ResetWarning {
+
+    /// The bullets, in order; `nil` when the warning is not drawn.
+    public static func bulletKeys(form: ResetFactorSection.Form, factors: AccountFactors?) -> [String]? {
+        guard case .section = form, let factors else { return nil }
+        return [
+            "restore_identity.reset.effect_devices",
+            "restore_identity.reset.effect_passkeys",
+            "restore_identity.reset.effect_safety_number",
+            keepsKey(factors: factors),
+        ]
+    }
+
+    /// The "keeps working" bullet: the password always, then the
+    /// authenticator app and the recovery email only when the account has
+    /// them. The passkeys are never named: the reset deletes them.
+    public static func keepsKey(factors: AccountFactors) -> String {
+        switch (factors.authenticator, factors.email) {
+        case (true, true): return "restore_identity.reset.keeps.password_totp_email"
+        case (true, false): return "restore_identity.reset.keeps.password_totp"
+        case (false, true): return "restore_identity.reset.keeps.password_email"
+        case (false, false): return "restore_identity.reset.keeps.password"
+        }
+    }
+}
+
 /// A confirmed factor: the reset factor grant the server minted. In memory
 /// only, never stored.
 public struct ResetFactorConfirmation: Equatable, Sendable {

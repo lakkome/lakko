@@ -8530,7 +8530,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
-      "text": "تبقى محادثات جهات اتصالك معك كما هي. رقم الأمان الخاص بك يتغيّر.",
+      "text": "رقم الأمان الخاص بك يتغيّر.",
       "status": "machine"
     },
     "recovery_phrase.fresh.sign_in_to_finish": {
@@ -8681,10 +8681,6 @@
       "text": "اكتب {word} بالأحرف اللاتينية للتأكيد",
       "status": "machine"
     },
-    "restore_identity.reset.effect_contacts": {
-      "text": "تبقى محادثات جهات اتصالك معك كما هي. رقم الأمان الخاص بك يتغيّر.",
-      "status": "machine"
-    },
     "restore_identity.reset.effect_devices": {
       "text": "يُسجَّل خروج كل جهاز آخر لهذا الحساب ويُزال. تفقد تلك الأجهزة دردشاتها وجهات اتصالها لهذا الحساب.",
       "status": "machine"
@@ -8693,8 +8689,24 @@
       "text": "يُحذف كل مفتاح مرور لهذا الحساب. يمكنك إضافة مفاتيح مرور مجددًا بعد ذلك.",
       "status": "machine"
     },
-    "restore_identity.reset.effect_password": {
+    "restore_identity.reset.effect_safety_number": {
+      "text": "رقم الأمان الخاص بك يتغيّر.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password": {
+      "text": "تبقى كلمة مرورك تعمل.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_totp": {
       "text": "تبقى كلمة مرورك وتطبيق المصادقة يعملان.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_email": {
+      "text": "تبقى كلمة مرورك وبريد الاسترداد يعملان.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_totp_email": {
+      "text": "تبقى كلمة مرورك وتطبيق المصادقة وبريد الاسترداد تعمل.",
       "status": "machine"
     },
     "restore_identity.reset.error.generic": {

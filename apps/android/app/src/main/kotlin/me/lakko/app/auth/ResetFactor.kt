@@ -86,6 +86,37 @@ public fun resetFactorDoneKey(factor: FactorKind): String = when (factor) {
 public fun resetCannotBodyKey(panel: ResetPanel): String =
     if (panel == ResetPanel.NoFactor) "proof.reset.no_factor.body_none" else "proof.reset.no_factor.body"
 
+/**
+ * The "keeps working" bullet of the warning (UX 15.1, amended 2026-11-28):
+ * the password always, then the authenticator app and the recovery email
+ * only when the account has them. The passkeys are never named: the reset
+ * deletes them.
+ */
+public fun resetKeepsKey(factors: AccountFactors): String = when {
+    factors.totp && factors.email -> "restore_identity.reset.keeps.password_totp_email"
+    factors.totp -> "restore_identity.reset.keeps.password_totp"
+    factors.email -> "restore_identity.reset.keeps.password_email"
+    else -> "restore_identity.reset.keeps.password"
+}
+
+/**
+ * The bullets of the warning above the reset panel, in order; `null` when
+ * it is not drawn. It describes a reset this account can do, so it is drawn
+ * only above the factor section: never above a "cannot reset" panel (no
+ * factor, or `I cannot use any of these`), and not while the factors are
+ * still being read (the reset may turn out impossible). Whether the chats
+ * come back is not a bullet: the line of 15.1c says it.
+ */
+public fun resetWarningKeys(panel: ResetPanel, factors: AccountFactors?): List<String>? {
+    if (panel != ResetPanel.Factors || factors == null) return null
+    return listOf(
+        "restore_identity.reset.effect_devices",
+        "restore_identity.reset.effect_passkeys",
+        "restore_identity.reset.effect_safety_number",
+        resetKeepsKey(factors),
+    )
+}
+
 /** A confirmed factor: what the panel shows and the reset sends. */
 public class ResetFactorConfirmed(
     public val factor: FactorKind,

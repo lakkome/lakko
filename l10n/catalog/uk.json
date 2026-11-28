@@ -8530,7 +8530,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
-      "text": "Ваші контакти збережуть чати з вами. Ваш код безпеки зміниться.",
+      "text": "Ваш код безпеки зміниться.",
       "status": "machine"
     },
     "recovery_phrase.fresh.sign_in_to_finish": {
@@ -8681,10 +8681,6 @@
       "text": "Введіть {word} латиницею для підтвердження",
       "status": "machine"
     },
-    "restore_identity.reset.effect_contacts": {
-      "text": "Ваші контакти збережуть чати з вами. Ваш код безпеки зміниться.",
-      "status": "machine"
-    },
     "restore_identity.reset.effect_devices": {
       "text": "Усі інші пристрої цього облікового запису виходять із нього та видаляються. Вони втрачають чати й контакти цього облікового запису.",
       "status": "machine"
@@ -8693,8 +8689,24 @@
       "text": "Усі ключі доступу цього облікового запису видаляються. Потім ви зможете додати ключі доступу знову.",
       "status": "machine"
     },
-    "restore_identity.reset.effect_password": {
+    "restore_identity.reset.effect_safety_number": {
+      "text": "Ваш код безпеки зміниться.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password": {
+      "text": "Ваш пароль продовжує працювати.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_totp": {
       "text": "Ваш пароль і застосунок-автентифікатор продовжують працювати.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_email": {
+      "text": "Ваш пароль і пошта для відновлення продовжують працювати.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_totp_email": {
+      "text": "Ваш пароль, застосунок-автентифікатор і пошта для відновлення продовжують працювати.",
       "status": "machine"
     },
     "restore_identity.reset.error.generic": {

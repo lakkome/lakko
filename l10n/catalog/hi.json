@@ -8530,7 +8530,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
-      "text": "आपके संपर्कों की आपके साथ चैट बनी रहती हैं। आपका सुरक्षा नंबर बदल जाता है।",
+      "text": "आपका सुरक्षा नंबर बदल जाता है।",
       "status": "machine"
     },
     "recovery_phrase.fresh.sign_in_to_finish": {
@@ -8681,10 +8681,6 @@
       "text": "पुष्टि के लिए अंग्रेज़ी अक्षरों में {word} टाइप करें",
       "status": "machine"
     },
-    "restore_identity.reset.effect_contacts": {
-      "text": "आपके संपर्कों की आपके साथ चैट बनी रहती हैं। आपका सुरक्षा नंबर बदल जाता है।",
-      "status": "machine"
-    },
     "restore_identity.reset.effect_devices": {
       "text": "इस अकाउंट के बाकी सभी डिवाइस लॉग आउट करके हटा दिए जाते हैं। उन पर इस अकाउंट की चैट और संपर्क खो जाते हैं।",
       "status": "machine"
@@ -8693,8 +8689,24 @@
       "text": "इस अकाउंट की सभी पासकी मिटा दी जाती हैं। बाद में आप पासकी फिर से जोड़ सकते हैं।",
       "status": "machine"
     },
-    "restore_identity.reset.effect_password": {
+    "restore_identity.reset.effect_safety_number": {
+      "text": "आपका सुरक्षा नंबर बदल जाता है।",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password": {
+      "text": "आपका पासवर्ड काम करता रहता है।",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_totp": {
       "text": "आपका पासवर्ड और ऑथेंटिकेटर ऐप काम करते रहते हैं।",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_email": {
+      "text": "आपका पासवर्ड और रिकवरी ईमेल काम करते रहते हैं।",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_totp_email": {
+      "text": "आपका पासवर्ड, ऑथेंटिकेटर ऐप और रिकवरी ईमेल काम करते रहते हैं।",
       "status": "machine"
     },
     "restore_identity.reset.error.generic": {

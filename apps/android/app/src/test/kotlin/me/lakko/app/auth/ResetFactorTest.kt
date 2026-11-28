@@ -49,6 +49,36 @@ class ResetFactorTest {
         assertEquals("proof.reset.no_factor.body_none", resetCannotBodyKey(ResetPanel.NoFactor))
     }
 
+    // ---- the warning above the panel (UX 15.1, amended 2026-11-28) ----------
+
+    @Test
+    fun `the warning is not drawn above a cannot-reset panel nor while the factors load`() {
+        assertNull(resetWarningKeys(resetPanel(factors(), saidCannot = false), factors()))
+        val some = factors(totp = true)
+        assertNull(resetWarningKeys(resetPanel(some, saidCannot = true), some))
+        assertNull(resetWarningKeys(resetPanel(null, saidCannot = false), null))
+    }
+
+    @Test
+    fun `the warning above the section names only what the account keeps`() {
+        val f = factors(totp = true, passkey = true)
+        assertEquals(
+            listOf(
+                "restore_identity.reset.effect_devices",
+                "restore_identity.reset.effect_passkeys",
+                "restore_identity.reset.effect_safety_number",
+                "restore_identity.reset.keeps.password_totp",
+            ),
+            resetWarningKeys(resetPanel(f, saidCannot = false), f),
+        )
+        assertEquals("restore_identity.reset.keeps.password", resetKeepsKey(factors(passkey = true)))
+        assertEquals("restore_identity.reset.keeps.password_email", resetKeepsKey(factors(email = true)))
+        assertEquals(
+            "restore_identity.reset.keeps.password_totp_email",
+            resetKeepsKey(factors(email = true, totp = true, passkey = true)),
+        )
+    }
+
     @Test
     fun `the rows are the factors the account has, in order, the passkey only where usable`() {
         val all = factors(email = true, totp = true, passkey = true)

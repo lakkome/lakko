@@ -8530,7 +8530,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
-      "text": "Kişileriniz sizinle olan sohbetlerini korur. Güvenlik numaranız değişir.",
+      "text": "Güvenlik numaranız değişir.",
       "status": "machine"
     },
     "recovery_phrase.fresh.sign_in_to_finish": {
@@ -8681,10 +8681,6 @@
       "text": "Onaylamak için {word} yazın",
       "status": "machine"
     },
-    "restore_identity.reset.effect_contacts": {
-      "text": "Kişileriniz sizinle olan sohbetlerini korur. Güvenlik numaranız değişir.",
-      "status": "machine"
-    },
     "restore_identity.reset.effect_devices": {
       "text": "Bu hesabın diğer tüm cihazlarının oturumu kapatılır ve cihazlar kaldırılır. Bu hesaba ait sohbetlerini ve kişilerini kaybederler.",
       "status": "machine"
@@ -8693,8 +8689,24 @@
       "text": "Bu hesabın tüm geçiş anahtarları silinir. Sonrasında yeniden geçiş anahtarı ekleyebilirsiniz.",
       "status": "machine"
     },
-    "restore_identity.reset.effect_password": {
+    "restore_identity.reset.effect_safety_number": {
+      "text": "Güvenlik numaranız değişir.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password": {
+      "text": "Şifreniz çalışmaya devam eder.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_totp": {
       "text": "Şifreniz ve kimlik doğrulayıcı uygulamanız çalışmaya devam eder.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_email": {
+      "text": "Şifreniz ve kurtarma e-postanız çalışmaya devam eder.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_totp_email": {
+      "text": "Şifreniz, kimlik doğrulayıcı uygulamanız ve kurtarma e-postanız çalışmaya devam eder.",
       "status": "machine"
     },
     "restore_identity.reset.error.generic": {

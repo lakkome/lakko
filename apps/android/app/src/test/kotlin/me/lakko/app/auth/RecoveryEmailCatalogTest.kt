@@ -90,7 +90,9 @@ class RecoveryEmailCatalogTest {
             "restore_identity.reset.unsealed_use_passkey", "restore_identity.reset.password_help",
             "restore_identity.reset.error.wrong_password", "restore_identity.reset.error.generic",
             "restore_identity.reset.effect_devices", "restore_identity.reset.effect_passkeys",
-            "restore_identity.reset.effect_contacts", "restore_identity.reset.effect_password",
+            "restore_identity.reset.effect_safety_number", "restore_identity.reset.keeps.password",
+            "restore_identity.reset.keeps.password_totp", "restore_identity.reset.keeps.password_email",
+            "restore_identity.reset.keeps.password_totp_email",
             "contacts.started_over.closed", "contacts.started_over.request_note",
             "common.copy", "common.back", "common.not_now", "common.continue", "common.checking",
             "recovery.passkey.waiting", "auth.password.label",
@@ -106,6 +108,9 @@ class RecoveryEmailCatalogTest {
             "recovery.email.restoring", "recovery.email.failed", "protect.phrase.save.effect",
             "protect.phrase.save.progress", "protect.phrase.save.finishing", "notice.opened_by_email.",
             "notice.secure.new_keys",
+            // 2026-11-28: the reset warning no longer claims the chats stay,
+            // nor names an authenticator the account may not have.
+            "restore_identity.reset.effect_contacts", "restore_identity.reset.effect_password",
         )
         val root = listOf("src/main/kotlin", "app/src/main/kotlin").map { File(it) }.first { it.exists() }
         val sources = root.walkTopDown().filter { it.isFile && it.extension == "kt" }.toList()

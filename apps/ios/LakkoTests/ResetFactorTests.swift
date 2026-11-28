@@ -65,6 +65,39 @@ final class ResetFactorTests: XCTestCase {
             .cannotReset(bodyKey: "proof.reset.no_factor.body", showsBack: true))
     }
 
+    // MARK: - The warning above the panel (UX 15.1, amended 2026-11-28)
+
+    func testTheWarningIsNotDrawnAboveACannotResetPanel() {
+        let none = factors(false, false, false)
+        let noneForm = ResetFactorSection.form(
+            factors: none, passkeysSupported: true, passwordProofLive: true, choseNone: false)
+        XCTAssertNil(ResetWarning.bulletKeys(form: noneForm, factors: none))
+        let some = factors(true, true, false)
+        let choseNoneForm = ResetFactorSection.form(
+            factors: some, passkeysSupported: true, passwordProofLive: false, choseNone: true)
+        XCTAssertNil(ResetWarning.bulletKeys(form: choseNoneForm, factors: some))
+        // While the factors are read the reset may turn out impossible.
+        XCTAssertNil(ResetWarning.bulletKeys(form: .loading, factors: nil))
+    }
+
+    func testTheWarningAboveTheSectionNamesOnlyWhatTheAccountKeeps() {
+        let f = factors(false, true, true)
+        let form = ResetFactorSection.form(
+            factors: f, passkeysSupported: true, passwordProofLive: false, choseNone: false)
+        XCTAssertEqual(
+            ResetWarning.bulletKeys(form: form, factors: f),
+            [
+                "restore_identity.reset.effect_devices",
+                "restore_identity.reset.effect_passkeys",
+                "restore_identity.reset.effect_safety_number",
+                "restore_identity.reset.keeps.password_totp",
+            ])
+        XCTAssertEqual(ResetWarning.keepsKey(factors: factors(false, false, true)), "restore_identity.reset.keeps.password")
+        XCTAssertEqual(ResetWarning.keepsKey(factors: factors(true, false, false)), "restore_identity.reset.keeps.password_email")
+        XCTAssertEqual(
+            ResetWarning.keepsKey(factors: factors(true, true, true)), "restore_identity.reset.keeps.password_totp_email")
+    }
+
     func testResetNeedsAConfirmedFactorAndTheWord() {
         let section = ResetFactorSection.Form.section(rows: [.email], showsPassword: false, titleKey: "t")
         XCTAssertTrue(ResetFactorSection.canReset(form: section, factorConfirmed: true, confirmation: " RESET "))

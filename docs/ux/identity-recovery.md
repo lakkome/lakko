@@ -902,11 +902,7 @@ What it does:
     removed. They lose their chats and contacts for this account.
   - Every passkey of this account is deleted. You can add
     passkeys again afterwards.
-  - Your contacts will see that your safety number changed and
-    must verify you again before messaging you securely.
-  - Chats, groups and channels come back from your contacts'
-    devices, with the messages they still have, newest first.
-    Channels you own come back by themselves.
+  - Your safety number changes.
   - Your password and your authenticator app keep working.
 
 Type RESET to confirm
@@ -921,7 +917,36 @@ Type RESET to confirm
 - Nothing is sent until the button is tapped. The device does not know how
   many other devices or passkeys the account has here (asking would be a
   lookup the server answers before a session on some paths, and the number
-  changes nothing about the decision), so the bullets are unconditional.
+  changes nothing about the decision), so those two bullets do not count
+  them.
+- **Amended 2026-11-28 (seen on the test stack: the list stood above the
+  "cannot reset" panel of an account with no second factor and named an
+  authenticator app the account did not have).** The warning (the lede,
+  `What it does:` and the bullets) describes a reset this account can do,
+  so it is drawn only above the section of 15.1b (its rows, or a confirmed
+  factor), once the account's factors are known. It is **not drawn** above
+  any "cannot reset" panel (an account with none of the three, `I cannot
+  use any of these`, the password unknown of 17.2), nor while the factors
+  are still being read; then the panel stands alone. On iOS the inline
+  heading `Reset account keys` goes with it; Android keeps it as the
+  screen's title.
+- The last bullet names what keeps working, only what the account has: the
+  password always, then the authenticator app and the recovery email when
+  present ("Your password keeps working." / "Your password and your
+  authenticator app keep working." / "Your password and your recovery email
+  keep working." / "Your password, your authenticator app and your recovery
+  email keep working.", `restore_identity.reset.keeps.password`,
+  `.password_totp`, `.password_email`, `.password_totp_email`). The
+  passkeys are never in it: the reset deletes them.
+- The contacts bullet says only "Your safety number changes."
+  (`restore_identity.reset.effect_safety_number`). Whether the chats come
+  back is said once, by the line of 15.1c, which is the only place that
+  knows whether the reset is sealed; the earlier "Your contacts keep their
+  chats with you" (`effect_contacts`) and the "Chats, groups and channels
+  come back..." bullet are gone, because an unsealed reset closes the old
+  one-to-ones. The new-phrase screen after a reset
+  (`recovery_phrase.fresh.safety_note`) says the same short sentence for
+  the same reason.
 - After the tap: a full-screen "Resetting..." with no cancel (the server
   step is one operation and cannot be half done), then section 9.1 in its
   new form (15.4).
@@ -1007,8 +1032,9 @@ minutes, or the field), **and** one of these, whichever the account has:
 The recovery phrase is not one of them: whoever has it restores the keys
 (section 8) and does not reset.
 
-The reset panel, top to bottom: the warning of 15.1 with its bullets, the
-section below, the typed word, the buttons.
+The reset panel, top to bottom: the warning of 15.1 with its bullets (only
+while this section is drawn, 15.1 as amended 2026-11-28), the section
+below, the typed word, the buttons.
 
 ```
 Confirm it is you
@@ -1118,7 +1144,8 @@ sign-in); email codes keep the letter and code limits of 19.2.
 
 **I cannot use any of these**, and an account that has none of the three,
 show the "cannot reset" panel in place of the section, the typed word and
-the button; the warning stays above it and `Cancel` stays:
+the button; `Cancel` stays. The warning of 15.1 is not drawn above it
+(amended 2026-11-28: it described a reset the account cannot do):
 
 ```
 The account keys cannot be reset
@@ -1193,7 +1220,9 @@ the server whether the reset will be sealed.
 
 The line stands between the confirmed factor and `Type RESET to confirm`,
 and replaces the warning bullet "Chats, groups and channels come back from
-your contacts' devices..." of 15.1:
+your contacts' devices..." of 15.1. It is the only place on the screen that
+says whether the chats come back: the warning's contacts bullet says only
+that the safety number changes (15.1, amended 2026-11-28).
 
 **Sealed:**
 
@@ -1751,7 +1780,12 @@ bullet changed with ADR-0101 (walk 2026-11-26): "Messages sent before today
 cannot be read with the new keys" was no longer true once conversations and
 their history come back from contacts' devices; it reads "Chats, groups and
 channels come back from your contacts' devices, with the messages they
-still have, newest first."
+still have, newest first." **Superseded 2026-11-28** (15.1): with sealed and
+unsealed resets (15.1c) both proposals overclaim for an unsealed reset; the
+contacts bullet and the new-phrase line read only "Your safety number
+changes." (`restore_identity.reset.effect_safety_number`,
+`recovery_phrase.fresh.safety_note`), and the line of 15.1c alone says
+whether the chats come back.
 
 ### 16.10 Cross-platform shape, and what is open
 

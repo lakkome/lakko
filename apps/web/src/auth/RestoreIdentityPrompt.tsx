@@ -34,6 +34,7 @@ import { isAbandoned } from "./binding-epoch";
 import {
   createResource,
   createSignal,
+  For,
   Match,
   Show,
   Switch,
@@ -79,7 +80,7 @@ import { resetSurfaceView } from "./fresh-auth";
 import { createResetFactors, ResetFactorSection, rowFailureOf } from "./ResetFactorSection";
 import { WaitNotice } from "./recover/FormNotices";
 import { createRetryCountdown } from "./recover/retry-countdown";
-import { ResetFactorRequiredError, resetSubmitEnabled } from "./seal/reset-factor";
+import { ResetFactorRequiredError, resetSubmitEnabled, resetWarning } from "./seal/reset-factor";
 
 /** The catalog key of the prompt's first line for a restore notice. */
 const NOTICE_KEYS = {
@@ -470,6 +471,8 @@ function LostEverythingPanel(props: {
       noPassword: noPassword(),
     });
   const section = () => factors.section();
+  const warning = () =>
+    resetWarning({ section: section(), factors: factors.factors(), passwordUnknown: surface().cannot });
   // The word and the button wait for the confirmed factor AND for the line
   // of 15.1c to be on screen: the person reads what the reset keeps first.
   const wordUsable = (): boolean => section().kind === "confirmed" && factors.outlook() !== null;
@@ -511,16 +514,20 @@ function LostEverythingPanel(props: {
     <details class="lk-disclosure">
       <summary>{t("restore_identity.lost.summary")}</summary>
       <div class="lk-disclosure-body lk-stack">
-        <div class="lk-alert danger" role="alert">
-          <p>{t("restore_identity.reset.lede")}</p>
-          <p>{t("restore_identity.reset.what_it_does")}</p>
-          <ul>
-            <li>{t("restore_identity.reset.effect_devices")}</li>
-            <li>{t("restore_identity.reset.effect_passkeys")}</li>
-            <li>{t("restore_identity.reset.effect_contacts")}</li>
-            <li>{t("restore_identity.reset.effect_password")}</li>
-          </ul>
-        </div>
+        {/* UX 15.1: the warning describes a reset this account can do, so
+            it is not drawn above a "cannot reset" panel, nor while the
+            account's factors are still being read. */}
+        <Show when={warning()}>
+          {(w) => (
+            <div class="lk-alert danger" role="alert">
+              <p>{t("restore_identity.reset.lede")}</p>
+              <p>{t("restore_identity.reset.what_it_does")}</p>
+              <ul>
+                <For each={w().bulletKeys}>{(key) => <li>{t(key)}</li>}</For>
+              </ul>
+            </div>
+          )}
+        </Show>
         <Switch>
           <Match when={surface().cannot}>
             {/* UX 17.2: the person does not know the password. */}

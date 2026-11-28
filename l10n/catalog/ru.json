@@ -8826,7 +8826,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
-      "text": "Ваши контакты сохранят чаты с вами. Ваш код безопасности изменится.",
+      "text": "Ваш код безопасности изменится.",
       "status": "machine"
     },
     "recovery_phrase.fresh.sign_in_to_finish": {
@@ -9121,10 +9121,6 @@
       "text": "Введите {word} латиницей для подтверждения",
       "status": "machine"
     },
-    "restore_identity.reset.effect_contacts": {
-      "text": "Ваши контакты сохранят чаты с вами. Ваш код безопасности изменится.",
-      "status": "machine"
-    },
     "restore_identity.reset.effect_devices": {
       "text": "Все остальные устройства этого аккаунта выходят из него и удаляются. Они теряют чаты и контакты этого аккаунта.",
       "status": "machine"
@@ -9133,8 +9129,24 @@
       "text": "Все ключи доступа этого аккаунта удаляются. Потом вы сможете добавить ключи доступа снова.",
       "status": "machine"
     },
-    "restore_identity.reset.effect_password": {
+    "restore_identity.reset.effect_safety_number": {
+      "text": "Ваш код безопасности изменится.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password": {
+      "text": "Ваш пароль продолжает работать.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_totp": {
       "text": "Ваш пароль и приложение-аутентификатор продолжают работать.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_email": {
+      "text": "Ваш пароль и почта для восстановления продолжают работать.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_totp_email": {
+      "text": "Ваш пароль, приложение-аутентификатор и почта для восстановления продолжают работать.",
       "status": "machine"
     },
     "restore_identity.reset.error.generic": {

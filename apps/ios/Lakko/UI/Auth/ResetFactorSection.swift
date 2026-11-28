@@ -181,6 +181,11 @@ final class ResetFactorModel: ObservableObject {
             passwordProofLive: passwordProofLive, choseNone: choseNone)
     }
 
+    /// UX 15.1 — the warning's bullets; `nil` when it is not drawn.
+    var warningBulletKeys: [String]? {
+        ResetWarning.bulletKeys(form: form, factors: factors)
+    }
+
     /// The confirmed factor, while its ten minutes last.
     var confirmed: ResetFactorConfirmation? {
         guard let factor = proof?.factor, factor.live(nowMs: ports.nowMs()) else { return nil }

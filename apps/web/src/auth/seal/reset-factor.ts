@@ -145,6 +145,51 @@ export function resetSection(input: {
   return { kind: "choose", showPassword: !input.passwordProofLive, rows };
 }
 
+/**
+ * The catalog key of the warning's "keeps working" bullet (UX 15.1, amended
+ * 2026-11-28): the password always, then the authenticator app and the
+ * recovery email only when the account has them. The passkeys are never
+ * named here: the reset deletes them.
+ */
+export function resetKeepsKey(factors: AccountFactors): string {
+  if (factors.totp && factors.email) return "restore_identity.reset.keeps.password_totp_email";
+  if (factors.totp) return "restore_identity.reset.keeps.password_totp";
+  if (factors.email) return "restore_identity.reset.keeps.password_email";
+  return "restore_identity.reset.keeps.password";
+}
+
+/** The warning above the reset panel: its bullets, in order. */
+export interface ResetWarning {
+  readonly bulletKeys: readonly string[];
+}
+
+/**
+ * Whether the warning of UX 15.1 is drawn, and with which bullets. It
+ * describes a reset this account can do, so it is drawn only above the
+ * factor section (the rows, or a confirmed factor) once the account's
+ * factors are known: never above a "cannot reset" panel (no factor, `I
+ * cannot use any of these`, or the password is unknown, 17.2), and not while
+ * the factors are still being read (the reset may turn out impossible).
+ * Whether the chats come back is not a bullet: the line of 15.1c says it.
+ */
+export function resetWarning(input: {
+  readonly section: ResetSection;
+  readonly factors: AccountFactors | null;
+  /** The "cannot reset" panel of 17.2 (the password is unknown) is up. */
+  readonly passwordUnknown: boolean;
+}): ResetWarning | null {
+  if (input.passwordUnknown || input.factors === null) return null;
+  if (input.section.kind !== "choose" && input.section.kind !== "confirmed") return null;
+  return {
+    bulletKeys: [
+      "restore_identity.reset.effect_devices",
+      "restore_identity.reset.effect_passkeys",
+      "restore_identity.reset.effect_safety_number",
+      resetKeepsKey(input.factors),
+    ],
+  };
+}
+
 /** `Reset account keys` is enabled only when a factor is confirmed and the
  *  word is typed. */
 export function resetSubmitEnabled(input: {

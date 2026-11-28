@@ -226,8 +226,9 @@ public fun RestoreIdentityPrompt(
 
         // ADR-0073 / docs/ux/identity-recovery.md 15.1 - the warning before a
         // reset of the account keys, with the typed confirmation. Nothing is
-        // sent until the button is tapped; the bullets are unconditional (the
-        // device does not know how many devices or passkeys the account has).
+        // sent until the button is tapped. The device does not know how many
+        // devices or passkeys the account has, so those bullets do not count
+        // them; the "keeps working" bullet follows the account's factors.
         RestoreWay.Neither -> if (state.busy) {
             // A full-screen "Resetting..." with no cancel: the server step is
             // one operation and cannot be half done.
@@ -240,15 +241,22 @@ public fun RestoreIdentityPrompt(
                 onBack = closeWay,
                 modifier = modifier,
             ) {
-                Lead(t("restore_identity.reset.lede"))
-                Spacer(Modifier.height(12.dp))
-                Text(t("restore_identity.reset.what_it_does"), style = MaterialTheme.typography.bodyMedium)
-                Spacer(Modifier.height(4.dp))
-                for (key in RESET_CONSEQUENCE_KEYS) {
-                    Text("\u2022 " + t(key), style = MaterialTheme.typography.bodyMedium)
-                }
-                Spacer(Modifier.height(16.dp))
                 val panel = factor.panel()
+                // UX 15.1 - the warning describes a reset this account can
+                // do: not drawn above a "cannot reset" panel, nor while the
+                // account's factors are still being read; the "keeps
+                // working" bullet names only what the account has.
+                val warning = me.lakko.app.auth.resetWarningKeys(panel, factor.factors)
+                if (warning != null) {
+                    Lead(t("restore_identity.reset.lede"))
+                    Spacer(Modifier.height(12.dp))
+                    Text(t("restore_identity.reset.what_it_does"), style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.height(4.dp))
+                    for (key in warning) {
+                        Text("\u2022 " + t(key), style = MaterialTheme.typography.bodyMedium)
+                    }
+                    Spacer(Modifier.height(16.dp))
+                }
                 when (panel) {
                     me.lakko.app.auth.ResetPanel.Loading -> {
                         // Nothing is offered until the account's factors
@@ -272,7 +280,7 @@ public fun RestoreIdentityPrompt(
                     }
                     me.lakko.app.auth.ResetPanel.CannotUse, me.lakko.app.auth.ResetPanel.NoFactor -> {
                         // UX 15.1b - in place of the section, the typed word
-                        // and the button; the warning stays above.
+                        // and the button; no warning above it (15.1).
                         ResetCannotPanel(panel = panel, onBack = { factor.saidCannot = false }, onCancel = closeWay)
                         Spacer(Modifier.height(16.dp))
                         return@AuthScaffold
@@ -369,12 +377,3 @@ public val RESET_CANNOT_OPTION_KEYS: List<String> = listOf(
     "proof.reset.cannot.option_passkey",
 )
 
-/** The consequence bullets of the warning, in the order of UX 15.1. */
-private val RESET_CONSEQUENCE_KEYS: List<String> = listOf(
-    "restore_identity.reset.effect_devices",
-    "restore_identity.reset.effect_passkeys",
-    "restore_identity.reset.effect_contacts",
-    // What comes back is said once a factor is confirmed (UX 15.1c): the
-    // sealed or the unsealed line, in place of the earlier bullet.
-    "restore_identity.reset.effect_password",
-)

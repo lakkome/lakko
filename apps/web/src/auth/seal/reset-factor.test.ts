@@ -10,8 +10,10 @@ import {
   emailCodeRefusal,
   resetFactorFailure,
   resetFactorRows,
+  resetKeepsKey,
   resetSection,
   resetSubmitEnabled,
+  resetWarning,
 } from "./reset-factor";
 
 const factors = (over: Partial<AccountFactors> = {}): AccountFactors => ({
@@ -139,5 +141,63 @@ describe("factor failures", () => {
     expect(emailCodeExpired(0, 600, 599_999)).toBe(false);
     expect(emailCodeExpired(0, 600, 600_000)).toBe(true);
     expect(emailCodeExpired(0, 0, 10_000_000)).toBe(false);
+  });
+});
+
+describe("the warning above the reset panel (UX 15.1, amended 2026-11-28)", () => {
+  const choose = { kind: "choose", showPassword: true, rows: ["totp"] } as const;
+
+  it("is not drawn above the cannot-reset panel of an account with no factor", () => {
+    const none = factors();
+    const section = resetSection({
+      factors: none,
+      passkeysSupported: true,
+      passwordProofLive: false,
+      confirmed: null,
+      cannotUse: false,
+    });
+    expect(section).toEqual({ kind: "no-factor", accountHasNone: true });
+    expect(resetWarning({ section, factors: none, passwordUnknown: false })).toBeNull();
+  });
+
+  it("is not drawn above `I cannot use any of these`", () => {
+    const f = factors({ totp: true });
+    const section = resetSection({
+      factors: f,
+      passkeysSupported: true,
+      passwordProofLive: false,
+      confirmed: null,
+      cannotUse: true,
+    });
+    expect(resetWarning({ section, factors: f, passwordUnknown: false })).toBeNull();
+  });
+
+  it("is not drawn while the password is unknown (17.2), nor while the factors load", () => {
+    expect(resetWarning({ section: choose, factors: factors({ totp: true }), passwordUnknown: true })).toBeNull();
+    expect(resetWarning({ section: { kind: "loading" }, factors: null, passwordUnknown: false })).toBeNull();
+    expect(
+      resetWarning({ section: { kind: "confirmed", factor: "totp" }, factors: null, passwordUnknown: false }),
+    ).toBeNull();
+  });
+
+  it("is drawn above the rows and above a confirmed factor, without a claim about the chats", () => {
+    const f = factors({ totp: true });
+    for (const section of [choose, { kind: "confirmed", factor: "totp" } as const]) {
+      expect(resetWarning({ section, factors: f, passwordUnknown: false })?.bulletKeys).toEqual([
+        "restore_identity.reset.effect_devices",
+        "restore_identity.reset.effect_passkeys",
+        "restore_identity.reset.effect_safety_number",
+        "restore_identity.reset.keeps.password_totp",
+      ]);
+    }
+  });
+
+  it("names only what the account has as still working, never the passkeys", () => {
+    expect(resetKeepsKey(factors({ passkeys: 1 }))).toBe("restore_identity.reset.keeps.password");
+    expect(resetKeepsKey(factors({ totp: true, passkeys: 3 }))).toBe("restore_identity.reset.keeps.password_totp");
+    expect(resetKeepsKey(factors({ email: true }))).toBe("restore_identity.reset.keeps.password_email");
+    expect(resetKeepsKey(factors({ email: true, totp: true }))).toBe(
+      "restore_identity.reset.keeps.password_totp_email",
+    );
   });
 });

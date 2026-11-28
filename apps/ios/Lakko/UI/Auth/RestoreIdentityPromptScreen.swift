@@ -309,13 +309,6 @@ public struct RestoreIdentityPromptScreen: View {
 
     // MARK: - Start over
 
-    /// UX 15.1 — the "What it does" bullets, in order.
-    private let resetEffects = [
-        "restore_identity.reset.effect_devices",
-        "restore_identity.reset.effect_passkeys",
-        "restore_identity.reset.effect_password",
-    ]
-
     /// The lost-everything fallback: not a primary action, and spelled out
     /// before the button.
     private var startOver: some View {
@@ -335,27 +328,30 @@ public struct RestoreIdentityPromptScreen: View {
 
             if showingStartOver {
                 VStack(alignment: .leading, spacing: 12) {
-                    // UX 15.1 — the warning: what a reset does, unconditional
-                    // (the device does not know how many other devices or
-                    // passkeys the account has, and the number changes
-                    // nothing about the decision).
-                    Text(l10n.t("restore_identity.lost.sub"))
-                        .font(.headline)
-                        .foregroundStyle(Color.lakkoText)
-                    Text(l10n.t("restore_identity.reset.lede"))
-                        .font(.subheadline)
-                        .foregroundStyle(Color.lakkoTextMuted)
-                    Text(l10n.t("restore_identity.reset.what_it_does"))
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(Color.lakkoText)
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(resetEffects, id: \.self) { key in
-                            HStack(alignment: .top, spacing: 8) {
-                                Text("\u{2022}")
-                                Text(l10n.t(key))
-                            }
+                    // UX 15.1 — the warning: what a reset does. It
+                    // describes a reset this account can do, so it is not
+                    // drawn above a "cannot reset" panel, nor while the
+                    // account's factors are still being read; the "keeps
+                    // working" bullet names only what the account has.
+                    if let bullets = viewModel.resetFactor.warningBulletKeys {
+                        Text(l10n.t("restore_identity.lost.sub"))
+                            .font(.headline)
+                            .foregroundStyle(Color.lakkoText)
+                        Text(l10n.t("restore_identity.reset.lede"))
                             .font(.subheadline)
                             .foregroundStyle(Color.lakkoTextMuted)
+                        Text(l10n.t("restore_identity.reset.what_it_does"))
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(Color.lakkoText)
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(bullets, id: \.self) { key in
+                                HStack(alignment: .top, spacing: 8) {
+                                    Text("\u{2022}")
+                                    Text(l10n.t(key))
+                                }
+                                .font(.subheadline)
+                                .foregroundStyle(Color.lakkoTextMuted)
+                            }
                         }
                     }
                     // UX 15.1b — "Confirm it is you": the password, then one

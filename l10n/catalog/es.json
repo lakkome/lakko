@@ -8530,7 +8530,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
-      "text": "Tus contactos conservan sus chats contigo. Tu número de seguridad cambia.",
+      "text": "Tu número de seguridad cambia.",
       "status": "machine"
     },
     "recovery_phrase.fresh.sign_in_to_finish": {
@@ -8681,10 +8681,6 @@
       "text": "Escribe {word} para confirmar",
       "status": "machine"
     },
-    "restore_identity.reset.effect_contacts": {
-      "text": "Tus contactos conservan sus chats contigo. Tu número de seguridad cambia.",
-      "status": "machine"
-    },
     "restore_identity.reset.effect_devices": {
       "text": "Se cierra la sesión en todos los demás dispositivos de esta cuenta y se quitan de ella. Pierden sus chats y contactos de esta cuenta.",
       "status": "machine"
@@ -8693,8 +8689,24 @@
       "text": "Se eliminan todas las llaves de acceso de esta cuenta. Después puedes volver a añadir llaves de acceso.",
       "status": "machine"
     },
-    "restore_identity.reset.effect_password": {
+    "restore_identity.reset.effect_safety_number": {
+      "text": "Tu número de seguridad cambia.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password": {
+      "text": "Tu contraseña sigue funcionando.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_totp": {
       "text": "Tu contraseña y tu app de autenticación siguen funcionando.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_email": {
+      "text": "Tu contraseña y tu correo de recuperación siguen funcionando.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_totp_email": {
+      "text": "Tu contraseña, tu app de autenticación y tu correo de recuperación siguen funcionando.",
       "status": "machine"
     },
     "restore_identity.reset.error.generic": {

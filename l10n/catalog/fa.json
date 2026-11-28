@@ -8530,7 +8530,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
-      "text": "گفتگوهای مخاطبانتان با شما سر جایشان می‌ماند. شمارهٔ امنیتی شما تغییر می‌کند.",
+      "text": "شمارهٔ امنیتی شما تغییر می‌کند.",
       "status": "machine"
     },
     "recovery_phrase.fresh.sign_in_to_finish": {
@@ -8681,10 +8681,6 @@
       "text": "برای تأیید، {word} را با حروف لاتین وارد کنید",
       "status": "machine"
     },
-    "restore_identity.reset.effect_contacts": {
-      "text": "گفتگوهای مخاطبانتان با شما سر جایشان می‌ماند. شمارهٔ امنیتی شما تغییر می‌کند.",
-      "status": "machine"
-    },
     "restore_identity.reset.effect_devices": {
       "text": "همه دستگاه‌های دیگر این حساب از آن خارج و حذف می‌شوند. آن‌ها گفتگوها و مخاطبان این حساب را از دست می‌دهند.",
       "status": "machine"
@@ -8693,8 +8689,24 @@
       "text": "همه کلیدهای عبور این حساب حذف می‌شوند. بعداً می‌توانید دوباره کلید عبور اضافه کنید.",
       "status": "machine"
     },
-    "restore_identity.reset.effect_password": {
+    "restore_identity.reset.effect_safety_number": {
+      "text": "شمارهٔ امنیتی شما تغییر می‌کند.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password": {
+      "text": "رمز عبور شما همچنان کار می‌کند.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_totp": {
       "text": "رمز عبور و برنامه احراز هویت شما همچنان کار می‌کنند.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_email": {
+      "text": "رمز عبور و ایمیل بازیابی شما همچنان کار می‌کنند.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_totp_email": {
+      "text": "رمز عبور، برنامه احراز هویت و ایمیل بازیابی شما همچنان کار می‌کنند.",
       "status": "machine"
     },
     "restore_identity.reset.error.generic": {

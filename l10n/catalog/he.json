@@ -8530,7 +8530,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
-      "text": "אנשי הקשר שלך שומרים על הצ׳אטים איתך. מספר הביטחון שלך משתנה.",
+      "text": "מספר הביטחון שלך משתנה.",
       "status": "machine"
     },
     "recovery_phrase.fresh.sign_in_to_finish": {
@@ -8681,10 +8681,6 @@
       "text": "הקלידו {word} באותיות לטיניות לאישור",
       "status": "machine"
     },
-    "restore_identity.reset.effect_contacts": {
-      "text": "אנשי הקשר שלך שומרים על הצ׳אטים איתך. מספר הביטחון שלך משתנה.",
-      "status": "machine"
-    },
     "restore_identity.reset.effect_devices": {
       "text": "כל מכשיר אחר של החשבון הזה מנותק ומוסר. המכשירים האלה מאבדים את הצ׳אטים ואת אנשי הקשר של החשבון הזה.",
       "status": "machine"
@@ -8693,8 +8689,24 @@
       "text": "כל מפתח גישה של החשבון הזה נמחק. אפשר להוסיף מפתחות גישה שוב אחר כך.",
       "status": "machine"
     },
-    "restore_identity.reset.effect_password": {
+    "restore_identity.reset.effect_safety_number": {
+      "text": "מספר הביטחון שלך משתנה.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password": {
+      "text": "הסיסמה שלכם ממשיכה לעבוד.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_totp": {
       "text": "הסיסמה ואפליקציית האימות שלכם ממשיכות לעבוד.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_email": {
+      "text": "הסיסמה והאימייל לשחזור שלכם ממשיכים לעבוד.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_totp_email": {
+      "text": "הסיסמה, אפליקציית האימות והאימייל לשחזור שלכם ממשיכים לעבוד.",
       "status": "machine"
     },
     "restore_identity.reset.error.generic": {

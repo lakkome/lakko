@@ -8530,7 +8530,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
-      "text": "Seus contatos mantêm as conversas com você. Seu número de segurança muda.",
+      "text": "Seu número de segurança muda.",
       "status": "machine"
     },
     "recovery_phrase.fresh.sign_in_to_finish": {
@@ -8681,10 +8681,6 @@
       "text": "Digite {word} para confirmar",
       "status": "machine"
     },
-    "restore_identity.reset.effect_contacts": {
-      "text": "Seus contatos mantêm as conversas com você. Seu número de segurança muda.",
-      "status": "machine"
-    },
     "restore_identity.reset.effect_devices": {
       "text": "Todos os outros dispositivos desta conta são desconectados e removidos. Eles perdem as conversas e os contatos desta conta.",
       "status": "machine"
@@ -8693,8 +8689,24 @@
       "text": "Todas as chaves de acesso desta conta são apagadas. Depois você pode adicionar chaves de acesso de novo.",
       "status": "machine"
     },
-    "restore_identity.reset.effect_password": {
+    "restore_identity.reset.effect_safety_number": {
+      "text": "Seu número de segurança muda.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password": {
+      "text": "Sua senha continua funcionando.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_totp": {
       "text": "Sua senha e seu app autenticador continuam funcionando.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_email": {
+      "text": "Sua senha e seu e-mail de recuperação continuam funcionando.",
+      "status": "machine"
+    },
+    "restore_identity.reset.keeps.password_totp_email": {
+      "text": "Sua senha, seu app autenticador e seu e-mail de recuperação continuam funcionando.",
       "status": "machine"
     },
     "restore_identity.reset.error.generic": {
