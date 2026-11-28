@@ -77,6 +77,11 @@ public class PasskeysViewModel(
         client.close()
     }
 
+    /** The last-factor dialog was closed. */
+    public fun closeLastFactor() {
+        mutableState.update { it.copy(lastFactor = false) }
+    }
+
     /** Re-bind the bearer token from the current
      *  [AuthRepository.identitySecrets]. Called on init + before
      *  every operation so a token rotation between two calls
@@ -292,6 +297,19 @@ public class PasskeysViewModel(
     ) {
         rebindSession()
         if (mutableState.value.busy) return
+        // UX 19.1c - the account's last second way in cannot be removed: the
+        // app says so before any passkey sheet. The server refuses it too.
+        val factors = repo.accountFactors.value
+        if (factors != null &&
+            me.lakko.app.auth.removalLeavesNoFactor(
+                factors,
+                me.lakko.app.auth.FactorKind.Passkey,
+                passkeyCount = mutableState.value.credentials.size,
+            )
+        ) {
+            mutableState.update { it.copy(lastFactor = true, message = null) }
+            return
+        }
         mutableState.update { it.copy(busy = true, message = null) }
         viewModelScope.launch {
             try {
@@ -315,6 +333,10 @@ public class PasskeysViewModel(
                     )
                 }
                 refresh()
+                // ADR-0101 sections 7 and 10: the account's published
+                // protection and its owned-channels locks follow the removal
+                // (a deleted passkey that kept the chats no longer does).
+                repo.refreshSealsAfter("passkey-removed")
             } catch (e: WebauthnUserCancelledError) {
                 mutableState.update {
                     it.copy(
@@ -323,8 +345,12 @@ public class PasskeysViewModel(
                     )
                 }
             } catch (e: WebauthnHttpError) {
-                mutableState.update {
-                    it.copy(busy = false, message = Message.Error(explain(e)))
+                if (me.lakko.app.auth.isLastFactor(e)) {
+                    mutableState.update { it.copy(busy = false, lastFactor = true) }
+                } else {
+                    mutableState.update {
+                        it.copy(busy = false, message = Message.Error(explain(e)))
+                    }
                 }
             } catch (e: Throwable) {
                 me.lakko.app.rethrowIfCancelled(e) {
@@ -412,6 +438,19 @@ public class PasskeysViewModel(
                 // account owns go before the account, best effort and
                 // bounded in time; keys from the lineage identity.
                 // ADR-0099: a suspended device without its chats holds no seed.
+                // ADR-0101 section 7 item 9 - the owned-channels list and
+                // its locks go with the account, the same way.
+                secrets.accountIdentitySeed?.let { seed ->
+                    me.lakko.app.channels.OwnedChannelsRuntime.deleteAllWithSeed(
+                        context = context,
+                        account = me.lakko.app.auth.base64Encode(secrets.accountId),
+                        lineageSeed = me.lakko.app.auth.conversationAccountSeedOf(
+                            context,
+                            me.lakko.app.auth.base64Encode(secrets.accountId),
+                            seed,
+                        ),
+                    )
+                }
                 secrets.accountIdentitySeed?.let { seed ->
                     me.lakko.app.channels.ChannelVaultHeads.deleteOwnedVaults(
                         me.lakko.app.auth.conversationAccountSeedOf(
@@ -667,6 +706,9 @@ public data class PasskeysUiState(
     /** [deleteError] says the passkey sheet was dismissed: drawn as a plain
      *  line, with no error styling. */
     val deleteCancelled: Boolean = false,
+    /** The passkey to remove is the account's last second way in (UX
+     *  19.1c): the app's own dialog says so; nothing was removed. */
+    val lastFactor: Boolean = false,
 )
 
 /** A "Restore keys with this passkey" waiting for the recovery phrase,

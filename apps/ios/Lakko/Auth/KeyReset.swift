@@ -306,8 +306,16 @@ public struct KeyResetPublishRecord: Codable, Equatable {
     public var keyPackageDone: Bool = false
     /// The DeviceGroup was re-founded and its journal re-rooted on the DS.
     public var deviceGroupDone: Bool = false
+    /// ADR-0101 section 10 — the 214-byte reset seal the resetting device
+    /// signed before `finish`, carried on the attested upload; `nil` for an
+    /// unsealed reset (and in a record written before the field existed).
+    public var resetSeal: Data?
 
-    public init(attestation: Data, keyGeneration: UInt64, signedAtMs: Int64, newSignaturePubkey: Data) {
+    public init(
+        attestation: Data, keyGeneration: UInt64, signedAtMs: Int64, newSignaturePubkey: Data,
+        resetSeal: Data? = nil
+    ) {
+        self.resetSeal = resetSeal
         self.attestation = attestation
         self.keyGeneration = keyGeneration
         self.signedAtMs = signedAtMs
@@ -322,6 +330,7 @@ public struct KeyResetPublishRecord: Codable, Equatable {
         case discoveryDone = "discovery_done"
         case keyPackageDone = "key_package_done"
         case deviceGroupDone = "device_group_done"
+        case resetSeal = "reset_seal"
     }
 }
 

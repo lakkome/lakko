@@ -108,6 +108,17 @@ public enum ExportKeyStore {
                 operation: "SecItemAdd"
             )
         }
+        // Every caller writes the export key of a password just proven
+        // (sign-up, a password sign-in, a password change, a recall): the
+        // account's password seal and its owned-channels password lock follow
+        // it at the next look on a device that holds the keys (ADR-0101),
+        // from memory only (``RunExportKey``, alignment item N).
+        let key = exportKey
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { RunExportKey.note(accountIdB64: accountIdB64, exportKey: key) }
+        } else {
+            Task { @MainActor in RunExportKey.note(accountIdB64: accountIdB64, exportKey: key) }
+        }
     }
 
     /// Read the cached export key for `accountIdB64`. Returns

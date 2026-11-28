@@ -2,26 +2,33 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * What the signed-in account's protection is, as last read from
- * `GET /recovery-email` (ADR-0075): one reactive value for the page, shared
- * by Settings > Account, the "Protect your account" step, the recovery
- * surfaces and the notices. Read at every session landing
- * (`AccountProtectionRuntime`) and after every change this device makes.
+ * What `GET /recovery-email` last said about the signed-in account
+ * (ADR-0075 as amended 2026-11-26: `{available, enabled, totp}`): one
+ * reactive value for the page, shared by Settings > Account, the "Protect
+ * your account" step, the recovery surfaces and the notices. Read at every
+ * session landing (`AccountNotices`) and after every change this device
+ * makes.
  *
- * The read also keeps the per-device "phrase-protected" flag in step
- * (`account-protection.ts`), which is what decides the three-word surfaces
- * while signed out.
+ * The per-device "phrase-protected" flag (`account-protection.ts`), which
+ * decides the three-word surfaces while signed out, is fed from the
+ * account's published protection ({@link syncPhraseFlagFromSeals}): the
+ * server keeps no "phrase saved" flag any more.
  */
 import { plainStore } from "./local";
 import { createSignal, type Accessor } from "solid-js";
 
 import {
   isPhraseProtected,
+  markProtectionLooked,
+  protectionLookedBefore,
   setPhraseProtected,
   type RecoveryEmailStatus,
 } from "./account-protection";
+import { phraseSavedElsewhere } from "./notices";
 import { RecoveryEmailClient } from "./recovery-email-client";
 import { registerAccountMemory } from "../account-memory";
+import { isSignupPhraseOwed, type MarkerStorage } from "../phrase-gate";
+import type { OwnSealFacts } from "../seal/own-seals";
 
 interface Held {
   readonly accountIdB64: string;
@@ -45,20 +52,68 @@ export function phraseProtectedHere(accountIdB64: string | null): boolean {
 
 /** Record what this device just learned or did. */
 export function adoptProtectionStatus(accountIdB64: string, status: RecoveryEmailStatus): void {
-  setPhraseProtected(plainStore(), accountIdB64, status.phraseSaved);
   setHeld({ accountIdB64, status });
+}
+
+/** The account's phrase was saved on this device (its protection was
+ *  published with the phrase in it): the flag is set at once. */
+export function notePhraseSaved(accountIdB64: string): void {
+  setPhraseProtected(plainStore(), accountIdB64, true);
+  markProtectionLooked(plainStore(), accountIdB64);
   setFlagVersion((v) => v + 1);
 }
 
-/** The account's phrase was saved on this device (the rotation's commit
- *  answered): the flag is set at once, before the next read. */
-export function notePhraseSaved(accountIdB64: string): void {
-  setPhraseProtected(plainStore(), accountIdB64, true);
-  const h = held();
-  if (h !== null && h.accountIdB64 === accountIdB64) {
-    setHeld({ accountIdB64, status: { ...h.status, phraseSaved: true, vault: false } });
+/**
+ * What the per-device "phrase-protected" flag becomes when the account's
+ * published protection is read. Pure.
+ *
+ *   - unknown facts change nothing;
+ *   - a listed phrase sets it;
+ *   - no listed phrase clears it, EXCEPT while new recovery words are owed
+ *     on this device: after a key reset or a rotation the new protection
+ *     lists no phrase yet, and the flag is what decides that the words are
+ *     shown at all (`newWordsShown`), so it must outlive the change until
+ *     they were acknowledged.
+ */
+export function phraseFlagAfterSeals(args: {
+  readonly facts: OwnSealFacts | null;
+  readonly flag: boolean;
+  readonly newWordsOwed: boolean;
+}): boolean {
+  if (args.facts === null) return args.flag;
+  if (args.facts.phrase) return true;
+  return args.newWordsOwed ? args.flag : false;
+}
+
+/**
+ * Keep the per-device flag in step with the published protection. Resolves
+ * whether a recovery phrase was saved on ANOTHER device since this one last
+ * looked (`notices.ts`, `phraseSavedElsewhere`): the caller shows the
+ * one-line notice once.
+ */
+export function syncPhraseFlagFromSeals(
+  accountIdB64: string,
+  facts: OwnSealFacts | null,
+  storage: MarkerStorage | undefined = plainStore(),
+): boolean {
+  if (facts === null) return false;
+  const flag = isPhraseProtected(storage, accountIdB64);
+  const savedElsewhere = phraseSavedElsewhere({
+    lookedBefore: protectionLookedBefore(storage, accountIdB64),
+    flag,
+    phraseListed: facts.phrase,
+  });
+  markProtectionLooked(storage, accountIdB64);
+  const next = phraseFlagAfterSeals({
+    facts,
+    flag,
+    newWordsOwed: isSignupPhraseOwed(storage, accountIdB64),
+  });
+  if (next !== flag) {
+    setPhraseProtected(storage, accountIdB64, next);
+    setFlagVersion((v) => v + 1);
   }
-  setFlagVersion((v) => v + 1);
+  return savedElsewhere;
 }
 
 let inflight: { readonly accountIdB64: string; readonly task: Promise<RecoveryEmailStatus | null> } | null =

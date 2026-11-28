@@ -23,13 +23,13 @@ import Foundation
 //   * `SessionLanding`       how this session was landed (it decides which
 //                            row of the reset screen opens first);
 //   * `FreshAuthRefusal`     the answers a surface tells apart;
-//   * `KeyResetProofGate`    what the reset warning screen shows and enables;
 //   * `PasswordChangeGate`   whether a password change may run.
 //
 // UX: `docs/ux/identity-recovery.md` section 17 and 15.1a.
 
 /// A fresh-auth grant as a sign-in's finish response carries it. The string
-/// is opaque to the client and is never parsed, stored or logged.
+/// is never stored or logged; the one thing the client reads from it is how
+/// it was minted (``method``, for the reset's factor section).
 public struct FreshAuthGrant: Equatable, Sendable {
     /// The opaque grant, sent back verbatim as `fresh_grant`.
     public let grant: String
@@ -92,6 +92,21 @@ struct FreshAuthHolder {
 
     /// Drop the proof: a key reset spent it, the server refused it, or the
     /// account signed out or was wiped.
+    /// The grant, only when a PASSWORD sign-in (or the sign-up) minted it:
+    /// the reset's factor routes accept no other (ADR-0073, amended
+    /// 2026-11-26). A live passkey-minted grant is left in place for the
+    /// actions that accept it.
+    mutating func livePassword(accountIdB64: String, nowMs: Int64) -> String? {
+        guard live(accountIdB64: accountIdB64, nowMs: nowMs) != nil, let held, held.grant.isPasswordMinted else {
+            return nil
+        }
+        return held.grant.grant
+    }
+
+    func holdsLivePassword(accountIdB64: String, nowMs: Int64) -> Bool {
+        holdsLive(accountIdB64: accountIdB64, nowMs: nowMs) && held?.grant.isPasswordMinted == true
+    }
+
     mutating func clear() {
         held = nil
     }
@@ -178,54 +193,6 @@ enum FreshAuthRefusal {
         if case .network = error as? AuthClientError { return true }
         if case .network = error as? WebauthnClientError { return true }
         return false
-    }
-}
-
-/// What the Reset account keys warning screen shows and enables (UX 15.1,
-/// 15.1a as amended, 17.2), pure.
-enum KeyResetProofGate {
-
-    /// Which form the warning screen takes under the warning's bullets.
-    enum Form: Equatable {
-        /// A proof is live: the typed word and the button, no block.
-        case noBlock
-        /// The proof block, then the typed word and the button.
-        case block
-        /// The "cannot reset" panel in place of the block, the word and the
-        /// button (signed in with the authenticator code, no usable passkey,
-        /// no proof), until `I know my password` switches to the block.
-        case cannotReset
-    }
-
-    static func form(
-        holdsLiveProof: Bool,
-        landing: SessionLanding?,
-        hasUsablePasskey: Bool,
-        choseKnowsPassword: Bool,
-        choseNoPassword: Bool
-    ) -> Form {
-        if holdsLiveProof { return .noBlock }
-        if hasUsablePasskey { return .block }
-        if choseNoPassword { return .cannotReset }
-        if landing == .authenticator, !choseKnowsPassword { return .cannotReset }
-        return .block
-    }
-
-    /// Whether the link `I do not know my password` is under the block: only
-    /// when no passkey can stand in for the password.
-    static func showsNoPasswordLink(form: Form, hasUsablePasskey: Bool) -> Bool {
-        form == .block && !hasUsablePasskey
-    }
-
-    /// Whether "Reset account keys" is enabled: the confirmation word
-    /// matches and the block (when drawn) has what it needs.
-    static func canSubmit(form: Form, blockReady: Bool, confirmation: String) -> Bool {
-        guard KeyResetConfirmation.matches(confirmation) else { return false }
-        switch form {
-        case .noBlock: return true
-        case .block: return blockReady
-        case .cannotReset: return false
-        }
     }
 }
 

@@ -104,6 +104,9 @@ public class RecallFinishUnanswered(
     public val request: RecallFinishRequest,
     public val firstSentAtMs: Long,
     cause: Throwable,
+    /** The new password's export key the request was made with, kept with
+     *  the request (ADR-0101 section 10). Secret. */
+    public val exportKey: ByteArray? = null,
 ) : RuntimeException("recall/finish was sent and no answer was read", cause)
 
 private const val NANOS_PER_MS: Long = 1_000_000L

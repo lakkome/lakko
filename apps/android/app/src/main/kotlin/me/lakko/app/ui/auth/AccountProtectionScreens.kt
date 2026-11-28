@@ -16,9 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
@@ -54,14 +52,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.lakko.app.auth.AccountNotice
 import me.lakko.app.auth.AccountNoticeShape
-import me.lakko.app.auth.AccountProtection
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.AuthState
+import me.lakko.app.auth.ChatsKeptBy
 import me.lakko.app.auth.EMAIL_CODE_DIGITS
 import me.lakko.app.auth.EmailRecoverFailure
+import me.lakko.app.auth.FactorKind
 import me.lakko.app.auth.FreshAuthRequired
 import me.lakko.app.auth.NotMeDestination
-import me.lakko.app.auth.PhraseSavePath
 import me.lakko.app.auth.PhraseSavedOutcome
 import me.lakko.app.auth.RecoveryEmailEnrolStart
 import me.lakko.app.auth.RecoveryEmailRow
@@ -69,11 +67,9 @@ import me.lakko.app.auth.RecoveryPhraseRow
 import me.lakko.app.auth.accountNoticeBodyKey
 import me.lakko.app.auth.accountNoticeShape
 import me.lakko.app.auth.accountNoticeTitleKey
-import me.lakko.app.auth.accountProtection
 import me.lakko.app.auth.formatCountdown
 import me.lakko.app.auth.normalizeEmailCode
 import me.lakko.app.auth.notMeDestination
-import me.lakko.app.auth.protectBannerVisible
 import me.lakko.app.auth.protectStepRows
 import me.lakko.app.auth.protectionStatusKey
 import me.lakko.app.auth.recoveryEmailEnrolFailureOf
@@ -81,10 +77,6 @@ import me.lakko.app.auth.recoveryEmailPlausible
 import me.lakko.app.auth.recoveryEmailRow
 import me.lakko.app.auth.recoveryPhraseRow
 import me.lakko.app.auth.secureAccountRows
-import me.lakko.app.chat.ChatRepository
-import me.lakko.app.devices.KeyRotationDevice
-import me.lakko.app.devices.SavePhraseOutcome
-import me.lakko.app.devices.savePhraseOutcome
 import me.lakko.app.l10n.LocalStrings
 import me.lakko.app.l10n.UiText
 import me.lakko.app.l10n.t
@@ -97,10 +89,11 @@ import me.lakko.app.ui.components.LkIcon
 import me.lakko.app.ui.components.LkIconSize
 
 /*
- * ADR-0075 / `docs/ux/identity-recovery.md` section 19 - the screens of an
- * account's protection: the "Protect your account" step of sign-up, the
- * recovery email form, "Save a recovery phrase", the Settings > Account rows
- * and the notices the account's other devices show. Every decision is a pure
+ * ADR-0075 (amended 2026-11-26) / `docs/ux/identity-recovery.md` section 19 -
+ * the screens of an account's protection: the required "Protect your
+ * account" step (19.1a, 19.1c), the recovery email form, "Save a recovery
+ * phrase", the honest notice of 19.1d, the Settings > Account rows and the
+ * notices the account's other devices show. Every decision is a pure
  * function in `me.lakko.app.auth` (`AccountProtection.kt`,
  * `EmailRecoverFlow.kt`, `AccountNotices.kt`); this file draws them.
  *
@@ -258,8 +251,6 @@ public fun RecoveryEmailScreen(
         error = null
         scope.launch {
             try {
-                // Seals the vault off the main thread (64 MiB Argon2id) when
-                // no phrase is saved, then sends the code.
                 repository.recoveryEmailEnrolFinish(start, address.trim(), digits)
                 address = ""
                 code = ""
@@ -309,11 +300,10 @@ public fun RecoveryEmailScreen(
             }
             Spacer(Modifier.height(12.dp))
             Lead(t("recovery_email.not_kept"))
-            // The mailbox warning only while no phrase is saved.
-            if (status?.phraseSaved != true) {
-                Spacer(Modifier.height(8.dp))
-                Lead(t("recovery_email.mailbox_warning"))
-            }
+            // On every account: the mailbox reaches a new password, a
+            // sign-in and the confirmation of a reset, never the keys.
+            Spacer(Modifier.height(8.dp))
+            Lead(t("recovery_email.mailbox_warning"))
             // The account has an authenticator: its code is asked for too.
             if (status?.totp == true) {
                 Spacer(Modifier.height(8.dp))
@@ -395,23 +385,17 @@ internal fun ResendRow(
 }
 
 /**
- * Save a recovery phrase (UX 19.5, ADR-0075 section 3 as amended 2026-11-01).
- * `GET /account/phrase` first, and no path is guessed when it fails.
- *
- * A phrase that was never in an email vault keeps the keys: the words the
- * device holds, the three-word check, then `POST /account/phrase/saved`.
- * Nothing counts as saved before that answer; a failure stays on the
- * three-word step with `Try again`, and a person who leaves has saved nothing.
- *
- * Otherwise (and on a `409` from that POST) the ADR-0074 key rotation with
- * `phrase_saved` on its server step, removing no device: the NEW words are
- * shown only once that step succeeded; until then a progress line, and on a
- * failure "We could not finish. Nothing changed." with `Try again`.
+ * Save a recovery phrase (UX 19.5, amended 2026-11-26). Saving a phrase
+ * changes no key: after the 17.1 proof the screen shows the words this
+ * device already holds, then the three-word check. When it passes the
+ * account's protection is published again with the phrase in it (ADR-0101
+ * section 10), which ends the notice of 19.1d. Nothing counts as saved
+ * before that landed; a failure stays on the three-word step with `Try
+ * again`, and a person who leaves has saved nothing.
  */
 @Composable
 public fun SaveRecoveryPhraseScreen(
     repository: AuthRepository,
-    chatRepository: ChatRepository?,
     onDone: () -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
@@ -421,28 +405,10 @@ public fun SaveRecoveryPhraseScreen(
     val proof = rememberProofController(repository, ProofSurface.SavePhrase)
     var working by remember { mutableStateOf(false) }
     var failed by remember { mutableStateOf(false) }
-    var waitUntilMs: Long? by remember { mutableStateOf(null) }
-    // Non-null once the key change went through: the words (or 15.4's
-    // withheld state) replace this screen.
-    var words: SavePhraseOutcome.ShowWords? by remember { mutableStateOf(null) }
-    // `null` until the server answered; nothing is decided without it.
-    var path: PhraseSavePath? by remember { mutableStateOf(null) }
-    // Non-null once the words the device already holds are on screen.
+    // Non-null once the words the device holds are on screen.
     var heldWords: String? by remember { mutableStateOf(null) }
     var finishing by remember { mutableStateOf(false) }
     var finishFailed by remember { mutableStateOf(false) }
-
-    suspend fun readPath() {
-        try {
-            path = repository.phraseSavePath()
-        } catch (cause: Throwable) {
-            if (cause is CancellationException) throw cause
-            Log.w(TAG, "WARN recovery phrase path not read: ${cause.javaClass.simpleName}")
-            failed = true
-        }
-    }
-
-    LaunchedEffect(Unit) { readPath() }
 
     val run: () -> Unit = run@{
         if (working) return@run
@@ -450,49 +416,19 @@ public fun SaveRecoveryPhraseScreen(
         failed = false
         scope.launch {
             try {
-                if (path == null) {
-                    // `Try again` after a failed read: read, then the person
-                    // sees what this path says before going on.
-                    readPath()
-                    return@launch
-                }
                 if (!proof.ensure(context)) return@launch
-                if (path == PhraseSavePath.KeepKeys) {
-                    val held = withContext(Dispatchers.IO) { repository.devicePhrase() }
-                    if (held != null) {
-                        proof.clear()
-                        heldWords = held
-                    } else {
-                        path = PhraseSavePath.Rotate
-                    }
-                    return@launch
-                }
-                val outcome = withContext(Dispatchers.IO) {
-                    repository.ensureIdentityKeyRecorded()
-                    val runner = KeyRotationDevice.runner(
-                        context = context,
-                        authRepository = repository,
-                        chatRepository = chatRepository,
-                        savingPhrase = true,
-                    ) ?: throw IllegalStateException("no session")
-                    val result = runner.savePhrase()
-                    savePhraseOutcome(result, runner.owed())
-                }
-                when (outcome) {
-                    is SavePhraseOutcome.ShowWords -> {
-                        proof.clear()
-                        words = outcome
-                    }
-                    SavePhraseOutcome.ShowProofBlock -> proof.onProofRefused()
-                    is SavePhraseOutcome.Failed -> {
-                        failed = true
-                        waitUntilMs = outcome.retryAfterSecs?.let { System.currentTimeMillis() + it * 1000L }
-                    }
-                    SavePhraseOutcome.Unsettled -> failed = true
+                val held = withContext(Dispatchers.IO) { repository.devicePhrase() }
+                if (held != null) {
+                    proof.clear()
+                    heldWords = held
+                } else {
+                    // A device with the account keys holds the words; one
+                    // that does not cannot save them.
+                    failed = true
                 }
             } catch (cause: Throwable) {
                 if (cause is CancellationException) throw cause
-                Log.w(TAG, "WARN recovery phrase not saved: ${cause.javaClass.simpleName}")
+                Log.w(TAG, "WARN recovery phrase not shown: ${cause.javaClass.simpleName}")
                 failed = true
             } finally {
                 working = false
@@ -500,8 +436,8 @@ public fun SaveRecoveryPhraseScreen(
         }
     }
 
-    // After the three words: the account counts as protected from the
-    // server's answer on, not before.
+    // After the three words: the phrase counts as saved once the account's
+    // protection was published with it, not before.
     val finishSave: () -> Unit = finishSave@{
         if (finishing) return@finishSave
         finishing = true
@@ -512,21 +448,14 @@ public fun SaveRecoveryPhraseScreen(
                 when (withContext(Dispatchers.IO) { repository.savePhraseKeepingKeys() }) {
                     PhraseSavedOutcome.Saved -> {
                         proof.clear()
-                        scope.launch { repository.refreshRecoveryEmail() }
                         onDone()
-                    }
-                    // This phrase was in an email vault after all: the words
-                    // on screen are not the ones to keep.
-                    PhraseSavedOutcome.NeedsRotation -> {
-                        path = PhraseSavePath.Rotate
-                        heldWords = null
                     }
                     PhraseSavedOutcome.ProofRequired -> proof.onProofRefused()
                     PhraseSavedOutcome.Failed -> finishFailed = true
                 }
             } catch (cause: Throwable) {
                 if (cause is CancellationException) throw cause
-                Log.w(TAG, "WARN recovery phrase not marked saved: ${cause.javaClass.simpleName}")
+                Log.w(TAG, "WARN recovery phrase not saved: ${cause.javaClass.simpleName}")
                 finishFailed = true
             } finally {
                 finishing = false
@@ -561,60 +490,22 @@ public fun SaveRecoveryPhraseScreen(
         return
     }
 
-    val shown = words
-    if (shown != null) {
-        me.lakko.app.ui.devices.RotatedPhraseScreen(
-            authRepository = repository,
-            chatRepository = chatRepository,
-            initiallyWithheld = shown.withheld,
-            onClosed = {
-                scope.launch { repository.refreshRecoveryEmail() }
-                onDone()
-            },
-            title = t("protect.phrase.title"),
-            lead = t("protect.phrase.save.body"),
-            withheldLine = t("protect.phrase.save.finishing"),
-        )
-        return
-    }
-
     BackHandler(enabled = !working) { onBack() }
-    val waitLeft = rememberRemainingMs(waitUntilMs)
     AuthScaffold(title = t("protect.phrase.title"), onBack = if (working) null else onBack, modifier = modifier) {
         Lead(t("protect.phrase.save.body"))
-        // Only where the keys change.
-        if (path == PhraseSavePath.Rotate) {
-            Spacer(Modifier.height(12.dp))
-            Lead(t("protect.phrase.save.effect"))
-        }
         Spacer(Modifier.height(16.dp))
         ProofBlock(
             controller = proof,
             onSubmit = run,
             onPasskey = { scope.launch { proof.provePasskey(context) } },
         )
-        if (working && path == PhraseSavePath.Rotate) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier
-                    .padding(vertical = 8.dp)
-                    .semantics { liveRegion = LiveRegionMode.Polite },
-            ) {
-                CircularProgressIndicator()
-                Text(t("protect.phrase.save.progress"))
-            }
-        }
         if (failed) FormError(t("protect.phrase.save.failed"))
-        if (waitLeft > 0L) {
-            FormError(t("recovery.error.rate_limited", mapOf("time" to formatCountdown(waitLeft))))
-        }
         Spacer(Modifier.height(24.dp))
         BusyButton(
             label = if (failed) t("common.try_again") else t("protect.phrase.save.show"),
-            busy = working || proof.view().working || (path == null && !failed),
+            busy = working || proof.view().working,
             busyLabel = t("common.checking"),
-            enabled = waitLeft <= 0L && (path == null || proof.view().mainEnabled),
+            enabled = proof.view().mainEnabled,
             onClick = run,
         )
         Spacer(Modifier.height(16.dp))
@@ -622,20 +513,102 @@ public fun SaveRecoveryPhraseScreen(
 }
 
 /**
- * "Protect your account" (UX 19.1a): the one step after sign-up. `Add an
- * email` (absent when the server cannot send mail or the account has no
- * username), `Save a recovery phrase`, and `Not now` behind the app's own
- * confirmation. Any of the three ends the step; the other stays in Settings.
+ * The honest notice of UX 19.1d, "Your chats depend on your password": one
+ * copy, in the warning colour with the warning icon. `Add a passkey` only
+ * where this device can create passkeys ([onAddPasskey] non-null);
+ * [passkeyNoSeal] adds the line about a passkey that signs in but does not
+ * keep the chats. It cannot be dismissed.
+ */
+@Composable
+public fun PasswordOnlyNotice(
+    onSavePhrase: () -> Unit,
+    onAddPasskey: (() -> Unit)?,
+    modifier: Modifier = Modifier,
+    passkeyNoSeal: Boolean = false,
+) {
+    WarningNote(
+        title = t("protect.password_only.title"),
+        body = t("protect.password_only.body"),
+        extra = if (passkeyNoSeal) t("protect.password_only.passkey_no_seal") else null,
+        modifier = modifier,
+        actions = {
+            Column {
+                OutlinedButton(onClick = onSavePhrase, modifier = Modifier.fillMaxWidth()) {
+                    Text(t("protect.password_only.save_phrase"))
+                }
+                if (onAddPasskey != null) {
+                    OutlinedButton(onClick = onAddPasskey, modifier = Modifier.fillMaxWidth()) {
+                        Text(t("protect.password_only.add_passkey"))
+                    }
+                }
+            }
+        },
+    )
+}
+
+/**
+ * The once-per-device dialog of UX 19.1d (its third place): the first time
+ * the app opens after a sign-in on a device, for an account kept by the
+ * password only. The app's own dialog; `Not now` closes it for good here,
+ * and `Save a recovery phrase` opens that screen above the app.
+ */
+@Composable
+public fun PasswordOnlyDialogHost(repository: AuthRepository) {
+    val due by repository.passwordOnlyDialog.collectAsStateWithLifecycle()
+    var saving by remember { mutableStateOf(false) }
+    if (saving) {
+        Dialog(
+            onDismissRequest = { saving = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Surface(modifier = Modifier.fillMaxSize()) {
+                SaveRecoveryPhraseScreen(
+                    repository = repository,
+                    onDone = { saving = false },
+                    onBack = { saving = false },
+                )
+            }
+        }
+        return
+    }
+    if (!due) return
+    LakkoDialog(
+        // Answered by one of its two buttons, never by a tap outside.
+        onDismissRequest = {},
+        title = t("protect.password_only.title"),
+        body = t("protect.password_only.body"),
+        confirm = LakkoDialogAction(t("protect.password_only.save_phrase")) {
+            repository.closePasswordOnlyDialog()
+            saving = true
+        },
+        cancel = LakkoDialogAction(t("common.not_now"), LakkoDialogTone.Ghost) {
+            repository.closePasswordOnlyDialog()
+        },
+    )
+}
+
+/**
+ * "Protect your account" (UX 19.1a), required since 2026-11-26: a second way
+ * to confirm it is you (a recovery email, an authenticator app or a passkey)
+ * before the app. The recovery phrase is an optional extra and does not
+ * count. There is no `Not now` and no way past the step but `Continue`,
+ * which is enabled once one of the first three rows is done.
+ *
+ * The same step, with the heading "Add a second way to get back in", is
+ * shown at a session landing to an account with a username and none of the
+ * three (19.1c): [afterSignup] `false`.
  */
 @Composable
 public fun ProtectAccountStep(
     repository: AuthRepository,
-    chatRepository: ChatRepository?,
     hasUsername: Boolean,
     modifier: Modifier = Modifier,
+    afterSignup: Boolean = true,
+    /** `Continue` went through: the step is over. */
+    onFinished: () -> Unit = {},
 ) {
+    val scope = rememberCoroutineScope()
     var sub: ProtectSub by remember { mutableStateOf(ProtectSub.Choose) }
-    var confirmingSkip by remember { mutableStateOf(false) }
     val mailAvailable by produceState<Boolean?>(initialValue = null, repository) {
         value = repository.mailAvailable()
     }
@@ -647,14 +620,19 @@ public fun ProtectAccountStep(
     // What was finished on this step; a row already true of the account is
     // marked the same way.
     var doneHere by remember { mutableStateOf(me.lakko.app.auth.ProtectStepDone()) }
+    var passkeyCancelled by remember { mutableStateOf(false) }
+    var finishing by remember { mutableStateOf(false) }
     val status by repository.recoveryEmail.collectAsStateWithLifecycle()
-    // The account may already have a passkey (a step shown again after a
-    // restart): asked once, `false` until it answered.
-    val hasPasskey by produceState(initialValue = false, repository) {
-        value = repository.accountHasPasskey() == true
-    }
-    val done = me.lakko.app.auth.protectStepDone(doneHere, status, hasPasskey)
-    val exit = me.lakko.app.auth.protectStepExit(done)
+    val factors by repository.accountFactors.collectAsStateWithLifecycle()
+    val seals by repository.sealView.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { repository.refreshAccountFactors() }
+    val done = me.lakko.app.auth.protectStepDone(
+        here = doneHere,
+        status = status,
+        hasPasskey = factors?.passkey == true,
+        phraseSaved = seals?.phrase != null || repository.phraseProtected(),
+    )
+    val passkeyKeepsChats = seals?.passkeys?.isNotEmpty() == true
 
     when (sub) {
         ProtectSub.Email -> {
@@ -668,23 +646,45 @@ public fun ProtectAccountStep(
             )
             return
         }
+        ProtectSub.Totp -> {
+            AuthenticatorSetupScreen(
+                repository = repository,
+                onDone = {
+                    doneHere = doneHere.copy(totp = true)
+                    sub = ProtectSub.Choose
+                },
+                onBack = { sub = ProtectSub.Choose },
+                modifier = modifier,
+            )
+            return
+        }
         ProtectSub.Passkey -> {
-            // The existing passkey creation flow (its own "also restore my
-            // keys" choice included), under sign-up's fresh grant.
+            // The existing passkey creation flow, under sign-up's proof.
             BackHandler(enabled = true) { sub = ProtectSub.Choose }
             SignupPasskeyOffer(
                 repository = repository,
                 onDone = { sub = ProtectSub.Choose },
                 modifier = modifier,
-                onAdded = { doneHere = doneHere.copy(passkey = true) },
+                onAdded = {
+                    passkeyCancelled = false
+                    doneHere = doneHere.copy(passkey = true)
+                },
+                onCancelled = {
+                    passkeyCancelled = true
+                    sub = ProtectSub.Choose
+                },
             )
             return
         }
         ProtectSub.Phrase -> {
             SaveRecoveryPhraseScreen(
                 repository = repository,
-                chatRepository = chatRepository,
-                onDone = { repository.finishProtectStep() },
+                // Back on the step with the row done; a saved phrase does
+                // not end the step by itself.
+                onDone = {
+                    doneHere = doneHere.copy(phrase = true)
+                    sub = ProtectSub.Choose
+                },
                 onBack = { sub = ProtectSub.Choose },
                 modifier = modifier,
             )
@@ -693,13 +693,15 @@ public fun ProtectAccountStep(
         ProtectSub.Choose -> Unit
     }
 
-    // The step has no way out but its three answers.
-    val leave: () -> Unit = {
-        if (exit == me.lakko.app.auth.ProtectStepExit.Continue) repository.finishProtectStep() else confirmingSkip = true
-    }
-    BackHandler(enabled = true) { leave() }
+    // The step has no way out but `Continue`.
+    BackHandler(enabled = true) {}
     val doneMark = t("protect.done")
-    AuthScaffold(title = t("protect.title"), onBack = null, modifier = modifier) {
+    val canContinue = me.lakko.app.auth.protectContinueEnabled(done)
+    AuthScaffold(
+        title = t(me.lakko.app.auth.protectStepTitleKey(afterSignup)),
+        onBack = null,
+        modifier = modifier,
+    ) {
         Lead(t("protect.body"))
         Spacer(Modifier.height(16.dp))
         if (rows.email) {
@@ -712,58 +714,103 @@ public fun ProtectAccountStep(
                 enabled = !done.email,
             )
         }
+        if (rows.totp) {
+            MethodRow(
+                icon = R.drawable.ic_lk_clock,
+                title = t("protect.totp.title") + if (done.totp) " · $doneMark" else "",
+                subtitle = t("protect.totp.body"),
+                onClick = { sub = ProtectSub.Totp },
+                enabled = !done.totp,
+            )
+        }
         if (rows.passkey) {
             MethodRow(
                 icon = R.drawable.ic_lk_passkey,
                 title = t("protect.passkey.title") + if (done.passkey) " · $doneMark" else "",
                 subtitle = t("protect.passkey.body"),
-                onClick = { sub = ProtectSub.Passkey },
+                onClick = {
+                    passkeyCancelled = false
+                    sub = ProtectSub.Passkey
+                },
                 enabled = !done.passkey,
             )
+            if (passkeyCancelled && !done.passkey) {
+                // No error styling: nothing went wrong.
+                Lead(
+                    t("protect.passkey.cancelled"),
+                    modifier = Modifier
+                        .padding(horizontal = 16.dp)
+                        .semantics { liveRegion = LiveRegionMode.Polite },
+                )
+            }
         }
         if (rows.phrase) {
+            Spacer(Modifier.height(12.dp))
+            Text(
+                t("protect.optional"),
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             MethodRow(
                 icon = R.drawable.ic_lk_key,
-                title = t("protect.phrase.title") + if (done.phrase) " · $doneMark" else "",
+                title = t("protect.phrase.title_optional") + if (done.phrase) " · $doneMark" else "",
                 subtitle = t("protect.phrase.body"),
                 onClick = { sub = ProtectSub.Phrase },
                 enabled = !done.phrase,
             )
         }
+        // The authenticator as the only one of the three: allowed, said.
+        me.lakko.app.auth.totpOnlyWarningKey(done.factors, done.phrase)?.let { key ->
+            Spacer(Modifier.height(12.dp))
+            WarningNote(body = t(key))
+        }
+        // The honest notice of 19.1d, below the authenticator-only note. It
+        // never blocks `Continue`.
+        if (me.lakko.app.auth.protectStepNoticeShown(done, passkeyKeepsChats)) {
+            Spacer(Modifier.height(12.dp))
+            PasswordOnlyNotice(
+                onSavePhrase = { sub = ProtectSub.Phrase },
+                onAddPasskey = if (rows.passkey && !done.passkey) ({ sub = ProtectSub.Passkey }) else null,
+                passkeyNoSeal = done.passkey && !passkeyKeepsChats,
+            )
+        }
         Spacer(Modifier.height(16.dp))
-        if (exit == me.lakko.app.auth.ProtectStepExit.Continue) {
-            BusyButton(label = t("protect.continue"), busy = false, onClick = leave)
-        } else {
-            TextButton(onClick = leave, modifier = Modifier.fillMaxWidth()) { Text(t("protect.skip")) }
+        // Disabled is drawn, never hidden, and read together with its line.
+        Column(modifier = Modifier.semantics(mergeDescendants = true) {}) {
+            BusyButton(
+                label = t("protect.continue"),
+                busy = finishing,
+                enabled = canContinue,
+                onClick = {
+                    if (!finishing) {
+                        finishing = true
+                        scope.launch {
+                            try {
+                                if (repository.finishProtectStep()) onFinished()
+                            } finally {
+                                finishing = false
+                            }
+                        }
+                    }
+                },
+            )
+            if (!canContinue) {
+                Spacer(Modifier.height(8.dp))
+                Lead(t("protect.continue_needs"))
+            }
         }
         Spacer(Modifier.height(16.dp))
     }
-
-    if (confirmingSkip) {
-        LakkoDialog(
-            onDismissRequest = { confirmingSkip = false },
-            title = t("protect.skip.confirm.title"),
-            body = t("protect.skip.confirm.body"),
-            confirm = if (rows.email) {
-                LakkoDialogAction(t("protect.email.title")) { confirmingSkip = false; sub = ProtectSub.Email }
-            } else {
-                LakkoDialogAction(t("protect.phrase.title")) { confirmingSkip = false; sub = ProtectSub.Phrase }
-            },
-            // Not Cancel: the person goes on without protection.
-            cancel = LakkoDialogAction(t("protect.skip.confirm.continue"), LakkoDialogTone.Ghost) {
-                confirmingSkip = false
-                repository.finishProtectStep()
-            },
-        )
-    }
 }
 
-private enum class ProtectSub { Choose, Email, Passkey, Phrase }
+private enum class ProtectSub { Choose, Email, Totp, Passkey, Phrase }
 
 /**
- * Settings > Account (UX 19.1): the status line, the no-protection banner,
- * the `Recovery email` row (On / Off; `Replace` and `Remove`; never the
- * address) and the `Recovery phrase` row.
+ * Settings > Account (UX 19.1c): the status line that says what keeps the
+ * chats (in the warning colour, with the 19.1d actions, when it is the
+ * password only), the `Recovery email` row (On / Off; `Replace` and
+ * `Remove`; never the server's copy of the address) and the `Recovery
+ * phrase` row. The last of the three second ways in cannot be removed.
  */
 @Composable
 public fun AccountProtectionSection(
@@ -772,107 +819,78 @@ public fun AccountProtectionSection(
     onOpenSavePhrase: () -> Unit,
     /** `Show phrase` lives on Settings > Security > Recovery. */
     onOpenShowPhrase: () -> Unit,
+    /** `Add a passkey` of the 19.1d actions: Settings > Security > Passkeys. */
+    onOpenPasskeys: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val status by repository.recoveryEmail.collectAsStateWithLifecycle()
     // The address this device holds (the account's devices keep it).
     val heldAddress by repository.recoveryAddress.collectAsStateWithLifecycle()
-    LaunchedEffect(Unit) { repository.refreshRecoveryEmail() }
+    val factors by repository.accountFactors.collectAsStateWithLifecycle()
+    val seals by repository.sealView.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) {
+        repository.refreshRecoveryEmail()
+        repository.refreshAccountFactors()
+    }
     val known = status ?: return
-    val addressHeld = heldAddress != null
-    // A device that holds the address re-seals by itself: nothing is asked.
-    val resealing = me.lakko.app.auth.resealNeeded(known.enabled, known.vault, known.phraseSaved, addressHeld)
-    val protection = if (resealing) AccountProtection.Email else accountProtection(known)
-    var bannerRevision by remember { mutableStateOf(0) }
-    // An account with a passkey has a way back in: no banner. Unknown until
-    // the passkey list answered, and until then the banner waits.
-    val hasPasskey by produceState<Boolean?>(initialValue = null, repository) {
-        value = repository.accountHasPasskey() ?: false
-    }
-    val bannerShown = remember(protection, bannerRevision, hasPasskey) {
-        hasPasskey != null && protectBannerVisible(
-            protection,
-            repository.protectBannerDismissedAtMs(),
-            System.currentTimeMillis(),
-            hasPasskey = hasPasskey == true,
-        )
-    }
-    val phraseOnDevice by produceState(initialValue = false, repository, known.phraseSaved) {
+    val phraseSaved = seals?.phrase != null || repository.phraseProtected()
+    // What keeps the chats: from the account's published protection; a
+    // device that could not read it says only what it knows for certain.
+    val kept: ChatsKeptBy? = seals?.keptBy ?: if (phraseSaved) ChatsKeptBy.Phrase else null
+    val phraseOnDevice by produceState(initialValue = false, repository, phraseSaved) {
         value = withContext(Dispatchers.IO) { repository.devicePhrase() != null }
     }
     var confirmingRemove by remember { mutableStateOf(false) }
+    var lastFactor by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf(false) }
     var removeLine: UiText? by remember { mutableStateOf(null) }
     val proof = rememberProofController(repository, ProofSurface.RecoveryEmail, key = "remove")
     val background = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background)
 
-    ListItem(
-        headlineContent = { Text(t(protectionStatusKey(protection))) },
-        leadingContent = {
-            LkIcon(
-                R.drawable.ic_lk_lock_shield,
-                contentDescription = null,
-                tint = if (protection == AccountProtection.None) {
-                    MaterialTheme.colorScheme.error
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-                size = LkIconSize.Row,
-            )
-        },
-        colors = background,
-    )
-    if (bannerShown) {
-        Surface(
-            color = MaterialTheme.colorScheme.errorContainer,
-            shape = MaterialTheme.shapes.medium,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp).fillMaxWidth(),
-        ) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                val prompt = me.lakko.app.auth.protectPrompt(known, addressHeld)
-                Text(t(prompt.title), color = MaterialTheme.colorScheme.onErrorContainer)
-                prompt.body?.let {
-                    Text(
-                        t(it),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                    )
-                }
-                Row {
-                    TextButton(
-                        onClick = {
-                            if (recoveryEmailRow(known, addressHeld) == RecoveryEmailRow.Absent) onOpenSavePhrase() else onOpenRecoveryEmail()
-                        },
-                    ) { Text(t("protect.banner.action")) }
-                    TextButton(
-                        onClick = {
-                            repository.dismissProtectBanner()
-                            bannerRevision += 1
-                        },
-                    ) { Text(t("common.dismiss")) }
+    if (kept != null) {
+        val warn = me.lakko.app.auth.passwordOnlyNoticeShown(factors?.any == true, kept)
+        ListItem(
+            headlineContent = {
+                Text(
+                    t(protectionStatusKey(kept)),
+                    color = if (warn) lakkoWarningColor() else MaterialTheme.colorScheme.onSurface,
+                )
+            },
+            leadingContent = {
+                LkIcon(
+                    if (warn) R.drawable.ic_lk_warning else R.drawable.ic_lk_lock_shield,
+                    contentDescription = null,
+                    tint = if (warn) lakkoWarningColor() else MaterialTheme.colorScheme.onSurfaceVariant,
+                    size = LkIconSize.Row,
+                )
+            },
+            colors = background,
+        )
+        if (warn) {
+            // The 19.1d actions under the one-line status.
+            Row(modifier = Modifier.padding(horizontal = 16.dp)) {
+                TextButton(onClick = onOpenSavePhrase) { Text(t("protect.password_only.save_phrase")) }
+                if (ProofController.PASSKEYS_SUPPORTED) {
+                    TextButton(onClick = onOpenPasskeys) { Text(t("protect.password_only.add_passkey")) }
                 }
             }
         }
     }
-    val emailRow = recoveryEmailRow(known, addressHeld)
+    val emailRow = recoveryEmailRow(known)
     if (emailRow != RecoveryEmailRow.Absent) {
         val on = emailRow == RecoveryEmailRow.On
         ListItem(
             headlineContent = { Text(t("recovery_email.title")) },
             supportingContent = {
+                // A device that holds the address shows it, in plain text
+                // under the row title; one that does not shows On.
+                val shown = heldAddress
                 Text(
-                    t(
-                        when (emailRow) {
-                            RecoveryEmailRow.On -> "recovery_email.status.on"
-                            RecoveryEmailRow.AddAgain -> "recovery_email.add_again.title"
-                            else -> "recovery_email.status.off"
-                        },
-                    ).let { line ->
-                        // A device that holds the address shows it, in plain
-                        // text under the row title; one that does not shows On.
-                        val shown = heldAddress
-                        if (emailRow == RecoveryEmailRow.On && shown != null) "\u2066$shown\u2069" else line
+                    if (on && shown != null) {
+                        "⁦$shown⁩"
+                    } else {
+                        t(if (on) "recovery_email.status.on" else "recovery_email.status.off")
                     },
                 )
             },
@@ -885,14 +903,27 @@ public fun AccountProtectionSection(
         if (on) {
             Row(modifier = Modifier.padding(horizontal = 16.dp)) {
                 TextButton(onClick = onOpenRecoveryEmail, enabled = !removing) { Text(t("recovery_email.replace")) }
-                TextButton(onClick = { confirmingRemove = true }, enabled = !removing) {
+                TextButton(
+                    onClick = {
+                        // The last of the three cannot be removed: the app
+                        // says so before anything is sent. The server
+                        // refuses it too.
+                        val now = factors
+                        if (now != null && me.lakko.app.auth.removalLeavesNoFactor(now, FactorKind.Email, passkeyCount = 0)) {
+                            lastFactor = true
+                        } else {
+                            confirmingRemove = true
+                        }
+                    },
+                    enabled = !removing,
+                ) {
                     Text(t("recovery_email.remove"), color = MaterialTheme.colorScheme.error)
                 }
             }
             removeLine?.let { FormError(it, modifier = Modifier.padding(horizontal = 16.dp)) }
         }
     }
-    when (recoveryPhraseRow(phraseSaved = known.phraseSaved, phraseOnDevice = phraseOnDevice)) {
+    when (recoveryPhraseRow(phraseSaved = phraseSaved, phraseOnDevice = phraseOnDevice)) {
         RecoveryPhraseRow.Save -> ListItem(
             headlineContent = { Text(t("protect.phrase.title")) },
             supportingContent = { Text(t("protect.phrase.body")) },
@@ -921,6 +952,8 @@ public fun AccountProtectionSection(
         )
     }
 
+    if (lastFactor) LastFactorDialog(onClose = { lastFactor = false })
+
     if (confirmingRemove) {
         val remove: () -> Unit = remove@{
             if (removing) return@remove
@@ -937,13 +970,22 @@ public fun AccountProtectionSection(
                 } catch (cause: Throwable) {
                     if (cause is CancellationException) throw cause
                     Log.w(TAG, "WARN recovery email not removed: ${cause.javaClass.simpleName}")
-                    val failure = recoveryEmailEnrolFailureOf(finishing = false, err = cause)
-                    removeLine = (failure as? EmailRecoverFailure.Line)?.text ?: UiText("common.error.unavailable")
                     confirmingRemove = false
+                    if (me.lakko.app.auth.isLastFactor(cause)) {
+                        lastFactor = true
+                    } else {
+                        val failure = recoveryEmailEnrolFailureOf(finishing = false, err = cause)
+                        removeLine = (failure as? EmailRecoverFailure.Line)?.text ?: UiText("common.error.unavailable")
+                    }
                 } finally {
                     removing = false
                 }
             }
+        }
+        // The line a removal adds when the authenticator would be the only
+        // second way in afterwards (19.1c).
+        val totpOnlyKey = factors?.let {
+            me.lakko.app.auth.removalTotpOnlyNoticeKey(it, FactorKind.Email, passkeyCount = 0, phraseSaved = phraseSaved)
         }
         LakkoDialog(
             onDismissRequest = { if (!removing) confirmingRemove = false },
@@ -959,6 +1001,10 @@ public fun AccountProtectionSection(
                 confirmingRemove = false
             },
         ) {
+            if (totpOnlyKey != null) {
+                WarningNote(body = t(totpOnlyKey))
+                Spacer(Modifier.height(12.dp))
+            }
             ProofBlock(
                 controller = proof,
                 onSubmit = remove,
@@ -967,6 +1013,19 @@ public fun AccountProtectionSection(
         }
     }
     HorizontalDivider()
+}
+
+/** "Add another way to get back in first. This is the last one this account
+ *  has." (UX 19.1c), the app's own dialog with `OK`. */
+@Composable
+public fun LastFactorDialog(onClose: () -> Unit) {
+    LakkoDialog(
+        onDismissRequest = onClose,
+        title = null,
+        body = t("protect.last_factor"),
+        confirm = LakkoDialogAction(t("common.ok"), onClick = onClose),
+        cancel = null,
+    )
 }
 
 /** The platform's medium date in the interface language. */
@@ -985,7 +1044,7 @@ private fun noticeDate(atMs: Long): String {
  * recovery email form, above the app.
  */
 @Composable
-public fun AccountNoticeHost(repository: AuthRepository, chatRepository: ChatRepository?) {
+public fun AccountNoticeHost(repository: AuthRepository) {
     val notices by repository.accountNotices.collectAsStateWithLifecycle()
     var destination: NotMeDestination? by remember { mutableStateOf(null) }
 
@@ -998,7 +1057,6 @@ public fun AccountNoticeHost(repository: AuthRepository, chatRepository: ChatRep
             Surface(modifier = Modifier.fillMaxSize()) {
                 SecureAccountScreen(
                     repository = repository,
-                    chatRepository = chatRepository,
                     onClose = { destination = null },
                 )
             }
@@ -1033,19 +1091,20 @@ public fun AccountNoticeHost(repository: AuthRepository, chatRepository: ChatRep
 /**
  * `It was not me` (UX 19.6): in order, choose a new password (this device
  * holds the keys, so nothing else is asked), `Remove recovery email`, and -
- * only while no phrase is saved - `Save a recovery phrase`.
+ * only while no phrase is saved - `Save a recovery phrase` (no key changes).
  */
 @Composable
 private fun SecureAccountScreen(
     repository: AuthRepository,
-    chatRepository: ChatRepository?,
     onClose: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val status by repository.recoveryEmail.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { repository.refreshRecoveryEmail() }
-    val rows = secureAccountRows(status)
+    val seals by repository.sealView.collectAsStateWithLifecycle()
+    val rows = secureAccountRows(status, phraseSaved = seals?.phrase != null || repository.phraseProtected())
+    var lastFactor by remember { mutableStateOf(false) }
     var passwordSaved by remember { mutableStateOf(false) }
     var savingPhrase by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf(false) }
@@ -1055,12 +1114,13 @@ private fun SecureAccountScreen(
     if (savingPhrase) {
         SaveRecoveryPhraseScreen(
             repository = repository,
-            chatRepository = chatRepository,
             onDone = { savingPhrase = false },
             onBack = { savingPhrase = false },
         )
         return
     }
+
+    if (lastFactor) LastFactorDialog(onClose = { lastFactor = false })
 
     AuthScaffold(title = t("notice.secure.title"), onBack = onClose) {
         if (rows.newPassword) {
@@ -1094,8 +1154,13 @@ private fun SecureAccountScreen(
                         } catch (cause: Throwable) {
                             if (cause is CancellationException) throw cause
                             Log.w(TAG, "WARN recovery email not removed: ${cause.javaClass.simpleName}")
-                            val failure = recoveryEmailEnrolFailureOf(finishing = false, err = cause)
-                            removeLine = (failure as? EmailRecoverFailure.Line)?.text ?: UiText("common.error.unavailable")
+                            if (me.lakko.app.auth.isLastFactor(cause)) {
+                                // The account's last second way in (19.1c).
+                                lastFactor = true
+                            } else {
+                                val failure = recoveryEmailEnrolFailureOf(finishing = false, err = cause)
+                                removeLine = (failure as? EmailRecoverFailure.Line)?.text ?: UiText("common.error.unavailable")
+                            }
                         } finally {
                             removing = false
                         }
@@ -1106,8 +1171,6 @@ private fun SecureAccountScreen(
         }
         if (rows.savePhrase) {
             Spacer(Modifier.height(16.dp))
-            Lead(t("notice.secure.new_keys"))
-            Spacer(Modifier.height(8.dp))
             OutlinedButton(onClick = { savingPhrase = true }, modifier = Modifier.fillMaxWidth()) {
                 Text(t("protect.phrase.title"))
             }

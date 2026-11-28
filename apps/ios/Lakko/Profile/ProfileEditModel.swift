@@ -181,7 +181,10 @@ struct ProfileSavePorts {
     /// Change the username (ADR-0076); throws ``FreshAuthRequired`` when a
     /// proof is needed, ``UsernameRenameFailed`` on a refusal. Returns the
     /// canonical new name.
-    var rename: @MainActor (String) async throws -> String
+    /// `recoveryAddress` is the address typed for the change when the
+    /// recovery email is the account's last second way in and this device
+    /// holds none (UX 19.1c); `nil` otherwise.
+    var rename: @MainActor (_ name: String, _ recoveryAddress: String?) async throws -> String
     /// Publish the profile (name and photo) and re-send it everywhere.
     var publish: @MainActor (_ name: String?, _ avatar: ProfileAvatar?) async throws -> Void
     /// A rename this device started is still owed (ADR-0076).
@@ -191,6 +194,10 @@ struct ProfileSavePorts {
     /// A rename would turn the recovery email off (this device does not hold
     /// the address): the warning the old rename screen showed.
     var renameTurnsOffRecoveryEmail: @MainActor () -> Bool = { false }
+    /// UX 19.1c — the recovery email is the account's last second way in
+    /// and this device holds no address: the username field asks for it,
+    /// so the email moves to the new name.
+    var renameAsksForRecoveryEmail: @MainActor () -> Bool = { false }
 }
 
 // MARK: - View model
@@ -202,6 +209,9 @@ final class ProfileEditModel: ObservableObject {
     @Published private(set) var pending = ProfilePending()
     @Published var nameEdit = InlineFieldEdit()
     @Published var usernameEdit = InlineFieldEdit()
+    /// The recovery email typed for a username change (UX 19.1c); never
+    /// stored by this screen.
+    @Published var recoveryAddress = ""
     @Published private(set) var saving = false
     @Published private(set) var notice: UiText?
     @Published private(set) var error: UiText?
@@ -399,9 +409,23 @@ final class ProfileEditModel: ObservableObject {
         // 2. The username.
         if case .changed(let name) = pending.username {
             do {
-                let canonical = try await ports.rename(name)
+                var carried: String?
+                if ports.renameAsksForRecoveryEmail() {
+                    // The address moves the recovery email to the new name;
+                    // without it the change would take the account's last
+                    // second way in, and is not sent.
+                    guard let address = try? normalizeRecoveryEmail(address: recoveryAddress) else {
+                        afterSave = nil
+                        error = .key("recovery_email.invalid")
+                        usernameEdit.open(current: name)
+                        return
+                    }
+                    carried = address
+                }
+                let canonical = try await ports.rename(name, carried)
                 saved.username = canonical
                 pending.username = .unchanged
+                recoveryAddress = ""
             } catch is FreshAuthRequired {
                 needsProof = true
                 return
@@ -474,6 +498,9 @@ final class ProfileEditModel: ObservableObject {
     // MARK: Owed rename (what the old rename screen left to a landing)
 
     var renameTurnsOffRecoveryEmail: Bool { ports.renameTurnsOffRecoveryEmail() }
+
+    /// The username field also asks for the recovery email (UX 19.1c).
+    var renameAsksForRecoveryEmail: Bool { ports.renameAsksForRecoveryEmail() }
 
     /// On open: a rename started earlier and not finished is finished here;
     /// when its rollback needs a proof, the proof block opens for it.

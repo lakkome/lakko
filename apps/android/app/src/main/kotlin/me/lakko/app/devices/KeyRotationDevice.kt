@@ -87,8 +87,7 @@ internal object KeyRotationDevice {
             override suspend fun commit(
                 freshGrant: String,
                 revokeDeviceId: ByteArray?,
-                phraseSaved: Boolean,
-            ): CommitAnswer.Committed = authRepository.rotationCommit(freshGrant, revokeDeviceId, phraseSaved)
+            ): CommitAnswer.Committed = authRepository.rotationCommit(freshGrant, revokeDeviceId)
 
             override suspend fun resolveLostCommit(): LostCommit = authRepository.rotationResolveLostCommit()
 

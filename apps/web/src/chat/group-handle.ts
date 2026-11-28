@@ -397,17 +397,25 @@ export function channelHandleSeed(
   return groupHandleSeed(wasm, currentIdentity, journal);
 }
 
-function channelSubject(
+/** The subject of a public channel's record. Exported for its test. */
+export function channelSubject(
   wasm: Wasm,
   lineageIdentity: WasmIdentity,
   channelId: Uint8Array,
   facts: PublicChannelFacts,
+  /** The read key the channel actually uses, when the caller knows it. */
+  readKey?: Uint8Array | null,
 ): RecordSubject {
   return {
     kind: "channel",
     id: channelId,
-    // Section 6: the read key a public record carries, from the lineage seed.
-    key: wasm.channelReadKey(lineageIdentity, channelId),
+    // Section 6: the read key a public record carries. The channel's read
+    // key never changes, so a channel this account took back after a key
+    // reset (ADR-0101 section 7) keeps the key its FIRST owner seed derived:
+    // the caller passes the key this device holds for the channel
+    // (`channelReadKeyHere`). Without one it is derived from the lineage
+    // seed, which is the same value for a channel this identity founded.
+    key: readKey ?? wasm.channelReadKey(lineageIdentity, channelId),
     name: facts.name,
     description: facts.description,
     // A channel's band is counted by the channels service (unused here).
@@ -438,6 +446,12 @@ export interface ChannelHandleArgs {
   readonly handle: string;
   /** Section 7: a private channel's name answers no lookup and has no record. */
   readonly isPublic: boolean;
+  /** The read key this device holds for the channel
+   *  (`channels/channel-access.ts` `channelReadKeyHere`), which a public
+   *  record must carry. Absent or `null`: derived from the lineage seed
+   *  (wrong for a channel taken back after a key reset, whose read key is
+   *  the one its first owner seed derived). */
+  readonly readKey?: Uint8Array | null;
   readonly facts: PublicChannelFacts;
 }
 
@@ -463,7 +477,7 @@ export async function replaceChannelHandle(
     let record: Uint8Array | null = null;
     let terms: Uint8Array[] = [];
     if (args.isPublic) {
-      const subject = channelSubject(wasm, args.lineageIdentity, args.channelId, args.facts);
+      const subject = channelSubject(wasm, args.lineageIdentity, args.channelId, args.facts, args.readKey);
       ({ record, terms } = await recordContent(wasm, subject, next.normalized, next.output, next.lookupKey));
     }
     const hash = wasm.handleContentHash(record ?? undefined, concat(terms));
@@ -508,6 +522,38 @@ export async function rekeyChannelHandle(args: {
     };
   } finally {
     oldSeed.fill(0);
+    seed.fill(0);
+  }
+}
+
+/**
+ * ADR-0101 section 7 item 4 - after a retake, move a channel's name from the
+ * handle key its owned-channels list entry carried (`oldSeed`, the previous
+ * account's) to the key the new account's root derives. The caller wipes
+ * `oldSeed`.
+ */
+export async function rekeyChannelHandleFromSeed(args: {
+  readonly wasm: Wasm;
+  readonly oldSeed: Uint8Array;
+  readonly lineageIdentity: WasmIdentity;
+  readonly currentIdentity: WasmIdentity;
+  readonly channelId: Uint8Array;
+  readonly handle: string;
+  readonly isPublic: boolean;
+}): Promise<ChannelHandleWrite> {
+  const { wasm } = args;
+  const pair = await namePair(args.handle);
+  const seed = channelHandleSeed(wasm, args.lineageIdentity, args.currentIdentity, args.channelId);
+  try {
+    const statement = wasm.signHandleRekey(args.oldSeed, pair.lookupKey, wasm.handleWritePublicKey(seed));
+    const result = await handleWrite("rekey", statement);
+    return {
+      handle: pair.normalized,
+      isPublic: args.isPublic,
+      leaseUntilMs: result?.leaseUntilMs ?? 0,
+      certificate: result?.certificate ?? null,
+    };
+  } finally {
     seed.fill(0);
   }
 }
@@ -563,7 +609,7 @@ async function channelWrite(route: "claim" | "update", args: ChannelHandleArgs):
     let record: Uint8Array | null = null;
     let terms: Uint8Array[] = [];
     if (args.isPublic) {
-      const subject = channelSubject(wasm, args.lineageIdentity, args.channelId, args.facts);
+      const subject = channelSubject(wasm, args.lineageIdentity, args.channelId, args.facts, args.readKey);
       ({ record, terms } = await recordContent(wasm, subject, pair.normalized, pair.output, pair.lookupKey));
     }
     const hash = wasm.handleContentHash(record ?? undefined, concat(terms));

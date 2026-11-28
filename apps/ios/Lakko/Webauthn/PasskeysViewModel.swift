@@ -49,6 +49,27 @@ public final class PasskeysViewModel: ObservableObject {
     @Published public private(set) var message: StatusMessage?
     /// A3 — the prepared data-export file, ready for a share sheet once set.
     @Published public private(set) var exportFileUrl: URL?
+    /// UX 19.1c — the passkey is the account's last second way in: the
+    /// app's own dialog says so, and nothing is removed.
+    @Published public var lastFactorRefused = false
+    /// The removal would leave the authenticator app as the only second way
+    /// in: the app's own confirmation carries the note first
+    /// (``AuthenticatorOnly/removalNoticeKey(removing:passkeyCount:factors:phraseSaved:)``).
+    @Published public var confirmingRemoval: PendingRemoval?
+
+    /// A removal waiting for its confirmation.
+    public struct PendingRemoval: Identifiable {
+        public let credential: CredentialSummary
+        public let noticeKey: String
+        public var id: String { credential.credential_id_b64 }
+    }
+
+    /// The account's other second ways in, read before a removal that would
+    /// take the last passkey; `nil` when they could not be read (the server
+    /// still refuses the last one).
+    var readFactors: @MainActor () async -> RecoveryEmailStatus? = { nil }
+    private let sealsStore = AccountSealsStore()
+    private var sealsSink: AnyCancellable?
 
     /// Kept as ``UiText`` so a message on screen follows a live language
     /// switch (ADR-0061).
@@ -115,6 +136,15 @@ public final class PasskeysViewModel: ObservableObject {
         addProofSink = addProof.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
+        readFactors = { [weak authRepository] in
+            guard let token = authRepository?.identitySecrets?.sessionToken else { return nil }
+            return try? await AuthClient().recoveryEmailStatus(sessionToken: token)
+        }
+        // A passkey's row says whether it keeps the chats; that is known
+        // once the account's protection was published with it.
+        sealsSink = NotificationCenter.default.publisher(for: AccountSealsStore.changed)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
     /// Re-bind the session token from the current ``AuthRepository``
@@ -177,6 +207,16 @@ public final class PasskeysViewModel: ObservableObject {
             return
         }
         knownNoPrf = PasskeyNoPrfStore().load(accountIdB64: account.accountIdB64)
+    }
+
+    /// UX 19.1d — "Does not keep your chats." on a passkey's row: the
+    /// account's published protection is known on this device and lists no
+    /// seal for this passkey. `false` while nothing is known.
+    func showsNoSeal(for cred: CredentialSummary) -> Bool {
+        guard let accountIdB64 = authRepository.identitySecrets.map({ base64Encode($0.accountId) }),
+              let seals = sealsStore.read(accountIdB64: accountIdB64),
+              let credentialId = base64UrlDecodeNoPad(cred.credential_id_b64) else { return false }
+        return !seals.passkeyKeepsChats(credentialId: credentialId)
     }
 
     /// The label of one passkey's row.
@@ -343,6 +383,28 @@ public final class PasskeysViewModel: ObservableObject {
 
     // MARK: - Delete
 
+    /// `Remove` on a passkey's row. The last second way in is refused in
+    /// the app's own dialog (UX 19.1c); a removal that would leave only the
+    /// authenticator app is confirmed first, with the note; any other goes
+    /// straight to the passkey gesture.
+    public func removeTapped(_ cred: CredentialSummary) async {
+        guard !isBusy else { return }
+        let status = credentials.count <= 1 ? await readFactors() : nil
+        let factors = status.flatMap { AccountFactors.of(status: $0, hasPasskey: !credentials.isEmpty) }
+        if LastFactor.refusesPasskeyRemoval(passkeyCount: credentials.count, factors: factors) {
+            lastFactorRefused = true
+            return
+        }
+        let accountIdB64 = authRepository.identitySecrets.map { base64Encode($0.accountId) }
+        if let noticeKey = AuthenticatorOnly.removalNoticeKey(
+            removing: .passkey, passkeyCount: credentials.count, factors: factors,
+            phraseSaved: accountIdB64.flatMap { sealsStore.read(accountIdB64: $0)?.phraseSaved } ?? false) {
+            confirmingRemoval = PendingRemoval(credential: cred, noticeKey: noticeKey)
+            return
+        }
+        await deleteCredential(cred)
+    }
+
     public func deleteCredential(_ cred: CredentialSummary) async {
         rebindSession()
         isBusy = true
@@ -359,6 +421,11 @@ public final class PasskeysViewModel: ObservableObject {
             _ = try await client.assertAction(actionHashB64: actionHashB64)
             try await client.deleteCredential(credentialIdB64: cred.credential_id_b64)
             message = .ok(.key("settings.passkeys.removed", texts: ["name": cred.nickname]))
+            // Its seal and its owned-channels lock go with it (ADR-0101
+            // sections 7 and 10).
+            if let credentialId = base64UrlDecodeNoPad(cred.credential_id_b64) {
+                PasskeySeals.onRemoved?(credentialId, max(0, credentials.count - 1))
+            }
             await refresh()
         } catch let error as WebauthnAssertion.AssertionError {
             switch error {
@@ -369,7 +436,12 @@ public final class PasskeysViewModel: ObservableObject {
                 message = .error(.key("settings.passkeys.error.generic"))
             }
         } catch let error as WebauthnClientError {
-            message = .error(Self.explain(error))
+            if LastFactor.isRefusal(error) {
+                // The server refused it as the last second way in.
+                lastFactorRefused = true
+            } else {
+                message = .error(Self.explain(error))
+            }
         } catch {
             NSLog("[passkeys] WARN removal failed: \(error)")
             message = .error(.key("settings.passkeys.error.generic"))
@@ -432,6 +504,14 @@ public final class PasskeysViewModel: ObservableObject {
                 accountIdB64: base64Encode(secrets.accountId),
                 // A suspended account signed in without its keys holds no seed.
                 currentSeed: authRepository.identitySecrets?.accountIdentitySeed)
+            // ADR-0101 section 7 item 9 — the owned-channels list and its
+            // locks go with the account, best effort and bounded likewise.
+            if let seed = authRepository.identitySecrets?.accountIdentitySeed {
+                let accountIdB64 = base64Encode(secrets.accountId)
+                await ChannelVaultHead.bounded(seconds: ChannelVaultHead.accountDeletionBudgetSeconds) {
+                    await OwnedChannels.shared.deleteAll(accountIdB64: accountIdB64, currentSeed: seed)
+                }
+            }
             await OwnLinks.revokeAll(
                 accountIdB64: base64Encode(secrets.accountId),
                 discovery: DiscoveryClient(

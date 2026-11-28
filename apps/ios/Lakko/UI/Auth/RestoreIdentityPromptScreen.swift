@@ -111,7 +111,6 @@ public struct RestoreIdentityPromptScreen: View {
             }
         }
         .task { await viewModel.loadPasskeysWithKeys() }
-        .task { await viewModel.loadProtection() }
         .task {
             // G-56 (UX 8a) — every 5 minutes while this screen is in the
             // foreground the device looks for the earlier keys itself (the
@@ -132,8 +131,6 @@ public struct RestoreIdentityPromptScreen: View {
         .onChange(of: method) { _, _ in
             // A stale error from another method should not linger.
             viewModel.clearError()
-            // Nothing typed for the email code outlives its form.
-            if method != .email { viewModel.email.backToStart() }
         }
         .onChange(of: showingStartOver) { _, showing in
             // UX 15.1a — the password is never kept after the panel closes.
@@ -189,12 +186,6 @@ public struct RestoreIdentityPromptScreen: View {
 
     private func row(for method: RestoreIdentityPromptViewModel.Method) -> RecoveryMethodRow {
         switch method {
-        case .email:
-            return RecoveryMethodRow(
-                id: method.rawValue,
-                icon: .envelope,
-                title: l10n.t("recovery.email.row.title"),
-                detail: l10n.t("recovery.email.row.body"))
         case .device:
             return RecoveryMethodRow(
                 id: method.rawValue,
@@ -235,11 +226,6 @@ public struct RestoreIdentityPromptScreen: View {
         AuthTitle(title: row(for: picked).title)
 
         switch picked {
-        case .email:
-            EmailRecoverSection(model: viewModel.email, onBackToList: {
-                viewModel.email.backToStart()
-                method = nil
-            })
         case .device:
             deviceForm
         case .passkey:
@@ -327,52 +313,8 @@ public struct RestoreIdentityPromptScreen: View {
     private let resetEffects = [
         "restore_identity.reset.effect_devices",
         "restore_identity.reset.effect_passkeys",
-        "restore_identity.reset.effect_contacts",
-        "restore_identity.reset.effect_messages",
         "restore_identity.reset.effect_password",
     ]
-
-    /// UX 17.2 — "The account keys cannot be reset without your password or
-    /// a passkey": text only (each option is a row of this screen, one tap
-    /// back through Cancel), no disabled reset button, no promise of a later
-    /// way.
-    private var cannotResetPanel: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(l10n.t("proof.reset.cannot.title"))
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Color.lakkoText)
-            Text(l10n.t("proof.reset.cannot.body"))
-                .font(.subheadline)
-                .foregroundStyle(Color.lakkoTextMuted)
-            Text(l10n.t("proof.reset.cannot.what_you_can_do"))
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(Color.lakkoText)
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach([
-                    "proof.reset.cannot.option_device",
-                    "proof.reset.cannot.option_phrase",
-                    "proof.reset.cannot.option_passkey",
-                ], id: \.self) { key in
-                    HStack(alignment: .top, spacing: 8) {
-                        Text("\u{2022}")
-                        Text(l10n.t(key))
-                    }
-                    .font(.subheadline)
-                    .foregroundStyle(Color.lakkoTextMuted)
-                }
-            }
-            Text(l10n.t("proof.reset.cannot.otherwise"))
-                .font(.subheadline)
-                .foregroundStyle(Color.lakkoTextMuted)
-            Button(l10n.t("proof.know_password_link")) {
-                viewModel.resetKnowsPassword(true)
-            }
-            .buttonStyle(.plain)
-            .font(.body.weight(.medium))
-            .foregroundStyle(Color.lakkoAccent)
-            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-        }
-    }
 
     /// The lost-everything fallback: not a primary action, and spelled out
     /// before the button.
@@ -416,24 +358,11 @@ public struct RestoreIdentityPromptScreen: View {
                             .foregroundStyle(Color.lakkoTextMuted)
                         }
                     }
-                    if viewModel.resetForm == .cannotReset {
-                        // UX 17.2 — the panel replaces the block, the typed
-                        // word and the button; the warning above stays.
-                        cannotResetPanel
-                    } else {
-                        // UX 17.2 — the proof block (absent while a proof is
-                        // live), then the typed word, then the button.
-                        FreshAuthBlock(model: viewModel.resetProof, onSubmit: { returnKey(from: .password) })
-                        if viewModel.showsResetNoPasswordLink {
-                            Button(l10n.t("proof.no_password_link")) {
-                                viewModel.resetKnowsPassword(false)
-                            }
-                            .buttonStyle(.plain)
-                            .font(.footnote.weight(.medium))
-                            .foregroundStyle(Color.lakkoAccent)
-                            .frame(minHeight: 44, alignment: .leading)
-                            .disabled(viewModel.busy)
-                        }
+                    // UX 15.1b — "Confirm it is you": the password, then one
+                    // second factor the account has; or the "cannot reset"
+                    // panel in place of the section, the word and the button.
+                    ResetFactorSectionView(model: viewModel.resetFactor, username: viewModel.username)
+                    if !viewModel.resetCannot {
                         AuthTextField(
                             label: l10n.t(
                                 "restore_identity.reset.confirm_label",

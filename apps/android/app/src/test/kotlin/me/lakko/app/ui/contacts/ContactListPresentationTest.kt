@@ -226,4 +226,18 @@ class InviteLinkRowsTest {
         val shown = contactSections(filterContacts(listOf(invited, ContactRowModel(key = "k", name = "Anna", username = null)), "anna"))
         assertEquals(emptySet<String>(), listedPersonKeys(shown) { null })
     }
+
+    @Test
+    fun `the card of a started-over key never offers Add to contacts`() {
+        val sections = listOf(
+            uniffi.lakko_ffi_uniffi.InfoSection.MESSAGE,
+            uniffi.lakko_ffi_uniffi.InfoSection.ADD_CONTACT,
+        )
+        org.junit.Assert.assertEquals(
+            listOf(uniffi.lakko_ffi_uniffi.InfoSection.MESSAGE),
+            withoutAddForStartedOver(sections, keyStartedOver = true),
+        )
+        // Any other key keeps what the shared rule gave.
+        org.junit.Assert.assertEquals(sections, withoutAddForStartedOver(sections, keyStartedOver = false))
+    }
 }

@@ -110,11 +110,12 @@ import { boundContactsAccount } from "../contacts/local-store";
 import {
   installChannelReturnRunner,
   installHeldProfileSource,
-  registerOwedRecoveryKeys,
   runHeldChannelReturns,
   sendChannelReturns,
   settleRecoveredChannels,
 } from "./channel-return-runtime";
+import { dropOwnedChannelsSession, runOwnedChannelsPass } from "./owned/owned-runtime";
+import { installOwnedChannelsWake } from "./owned/owned-wake";
 import { offerReturnedOwnProfile } from "../profile/returned-profile";
 import { base64Encode as b64 } from "../auth/account-id";
 import { ownDeviceRoster } from "../devices/own-device-roster";
@@ -143,6 +144,7 @@ import {
   notePublisherSeedAt,
   anchorChannelEpoch,
   channelRotatesHere,
+  channelReadKeyHere,
   channelSeedFor,
   runOwedChannelType,
 } from "./channel-access";
@@ -189,6 +191,10 @@ import { useProfiles } from "../profile/ProfileContext";
  *  subscriber waits at most this long for a publisher device to let it in,
  *  and a public channel needs no pass to be read at all. Was 15 s. */
 export const PASS_INTERVAL_MS = 60_000;
+
+/** How long changes to the owned-channels list are gathered before one
+ *  write (chosen, not measured). */
+const OWNED_WAKE_DELAY_MS = 500;
 /** Between rotation-policy checks of one channel (the retired cron's 5 min). */
 export const ROTATION_CHECK_MS = 5 * 60 * 1000;
 /** ADR-0090 section 4: how long an owner device lets the channels service
@@ -762,7 +768,11 @@ async function sendReadKeys(wasm: Wasm, identity: WasmIdentity, idHex: string): 
     const ds = new DsClient();
     await withPublisherGroup(identity, idHex, async (group, device) => {
       const channelId = group.channelId();
-      const readKey = wasm.channelReadKey(identity, channelId);
+      // The channel's read key as this device holds it: the one the account
+      // seed derives, or, for a channel the account took back after a key
+      // reset, the one its owned-channels list carried (ADR-0101 section 7:
+      // the channel's readers and its public record hold that one).
+      const readKey = (await channelReadKeyHere(identity, idHex)) ?? wasm.channelReadKey(identity, channelId);
       let message: Uint8Array;
       try {
         const envelope = wasm.composeChannelReadKeyEnvelope(channelId, b64ToBytes(p.accountKeyB64), x, readKey);
@@ -1421,6 +1431,11 @@ export const ChannelPublisherLoops: Component = () => {
         await afterCommitLanded(lineage, l.channelIdHex, l.serverTargetEpoch).catch(() => undefined);
       }
     }
+    // ADR-0101 section 7 item 8: a retake owed after a key reset on this
+    // device continues first, so a channel it takes back is founded again by
+    // the step below in this same pass. Never throws.
+    const ownedAccount = boundContactsAccount();
+    if (ownedAccount !== null) await runOwnedChannelsPass({ accountIdB64: ownedAccount, lineage, current });
     // ADR-0090: an owned channel this device lists but holds no group for
     // takes its keys once a sibling admitted it, or is founded again here
     // (decision A); otherwise it stays a reader and waits. A reset that was
@@ -1671,12 +1686,14 @@ export const ChannelPublisherLoops: Component = () => {
         console.warn("[channels] publisher pass failed", err instanceof Error ? err.name : "");
       }
     }
-    // ADR-0101 section 7: every owned channel registers its recovery key;
-    // returns read from the continuity mailbox are acted on; returns this
-    // device owes reset people are sent. Each step never throws.
+    // ADR-0101 section 7: every owned channel registers its recovery key
+    // (derived from the owned-channels list key) and the list takes what
+    // this pass changed (a rotation, an admission seed); returns read from
+    // the continuity mailbox are acted on; returns this device owes reset
+    // people are sent. Each step never throws.
     const returnAccount = boundContactsAccount();
     if (returnAccount !== null) {
-      await registerOwedRecoveryKeys(returnAccount, current);
+      await runOwnedChannelsPass({ accountIdB64: returnAccount, lineage, current });
       await runHeldChannelReturns({
         accountIdB64: returnAccount,
         identity: ownerProofIdentity(current),
@@ -1694,13 +1711,46 @@ export const ChannelPublisherLoops: Component = () => {
     }
   }
 
+  // A wake that comes while a pass runs is not lost: one more pass follows
+  // (a channel the account took back during the pass is founded again then,
+  // not a minute later).
+  let again = false;
   const run = (): void => {
-    if (running) return;
+    if (running) {
+      again = true;
+      return;
+    }
     running = true;
     void pass().finally(() => {
       running = false;
+      if (again) {
+        again = false;
+        run();
+      }
     });
   };
+
+  // ADR-0101 section 7 item 6: a created or deleted channel, a rotation and
+  // a new admission seed write the owned-channels list now (the list step
+  // alone, coalesced), not at the next full pass.
+  let ownedWake: ReturnType<typeof setTimeout> | undefined;
+  const runOwned = (): void => {
+    if (ownedWake !== undefined) return;
+    ownedWake = setTimeout(() => {
+      ownedWake = undefined;
+      const lineage = chats.conversationAccountIdentity();
+      const current = chats.accountIdentity();
+      const account = boundContactsAccount();
+      if (lineage === null || current === null || account === null) return;
+      if (!channelsState.hydrated() || accountSuspended()) return;
+      void runOwnedChannelsPass({ accountIdB64: account, lineage, current });
+    }, OWNED_WAKE_DELAY_MS);
+  };
+
+  // The list key leaves memory with the session.
+  createEffect(() => {
+    if (chats.conversationAccountIdentity() === null) dropOwnedChannelsSession();
+  });
 
   createEffect(() => {
     if (chats.conversationAccountIdentity() !== null && channelsState.hydrated()) run();
@@ -1711,6 +1761,12 @@ export const ChannelPublisherLoops: Component = () => {
     // ADR-0101: a channel return the mailbox kept runs the pass now.
     installChannelReturnRunner(run);
     onCleanup(() => installChannelReturnRunner(null));
+    installOwnedChannelsWake(runOwned);
+    onCleanup(() => {
+      installOwnedChannelsWake(null);
+      if (ownedWake !== undefined) clearTimeout(ownedWake);
+      dropOwnedChannelsSession();
+    });
     // ADR-0101 section 8: a return carries the reset person's newest raw
     // profile this device holds.
     installHeldProfileSource((k) => profiles.heldEnvelopeOf(k));

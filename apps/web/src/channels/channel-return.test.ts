@@ -33,9 +33,9 @@ function memory(): { getItem(k: string): string | null; setItem(k: string, v: st
 }
 
 describe("the reset device's action", () => {
-  const base = { verified: true, hasInvitation: true, alreadyInRole: false, ownsAlready: false } as const;
+  const base = { verified: true, hasInvitation: true, alreadyInRole: false } as const;
   it("an unverified return is shown, never acted on silently and never dropped when it carries an invitation", () => {
-    for (const role of ["subscriber", "publisher", "owner"] as const) {
+    for (const role of ["subscriber", "publisher"] as const) {
       expect(channelReturnAction({ ...base, verified: false, role })).toBe("show-invitation");
       expect(channelReturnAction({ ...base, verified: false, role, hasInvitation: false })).toBe("drop");
     }
@@ -50,9 +50,45 @@ describe("the reset device's action", () => {
     expect(channelReturnAction({ ...base, role: "publisher", alreadyInRole: true })).toBe("add-seeds");
     expect(channelReturnAction({ ...base, role: "publisher", hasInvitation: false })).toBe("add-seeds");
   });
-  it("an owner recovers unless it owns already", () => {
-    expect(channelReturnAction({ ...base, role: "owner" })).toBe("recover-owner");
-    expect(channelReturnAction({ ...base, role: "owner", ownsAlready: true })).toBe("add-seeds");
+  it("no action takes a channel back as its owner: an owner returns from its own list", () => {
+    // ADR-0101 section 7, rewritten 2026-11-26: the owner role is gone.
+    const actions = new Set<string>();
+    for (const verified of [true, false]) {
+      for (const role of ["subscriber", "publisher"] as const) {
+        for (const hasInvitation of [true, false]) {
+          for (const alreadyInRole of [true, false]) {
+            actions.add(channelReturnAction({ verified, role, hasInvitation, alreadyInRole }));
+          }
+        }
+      }
+    }
+    expect([...actions].sort()).toEqual(["accept-publisher", "add-seeds", "drop", "show-invitation", "subscribe"]);
+  });
+  it("the core no longer has an owner role, and its decoder refuses role 3", () => {
+    expect(Object.keys(wasm.ChannelReturnRole).filter((k) => Number.isNaN(Number(k))).sort()).toEqual([
+      "Publisher",
+      "Subscriber",
+    ]);
+    // `... ‖ version ‖ channel_id(16) ‖ role(1) ‖ ...`: the role byte follows
+    // the channel id, which is filled with a byte the ASCII separator and
+    // the version cannot hold.
+    const envelope = wasm.composeChannelReturnEnvelope(
+      new Uint8Array(16).fill(0xc7),
+      wasm.ChannelReturnRole.Subscriber,
+      new Uint8Array(64),
+      new Uint8Array(32),
+      new Uint8Array(32),
+      new Uint8Array(0),
+      new Uint32Array(0),
+      new Uint8Array(0),
+      undefined,
+    );
+    const at = envelope.indexOf(0xc7) + 16;
+    expect(envelope[at]).toBe(wasm.ChannelReturnRole.Subscriber);
+    wasm.decodeChannelReturnEnvelope(envelope).free();
+    const forged = envelope.slice();
+    forged[at] = 3;
+    expect(() => wasm.decodeChannelReturnEnvelope(forged)).toThrow();
   });
 });
 
@@ -79,19 +115,14 @@ describe("who sends what", () => {
       ["publisher", "acctPub"],
     ]);
   });
-  it("a co-publisher sends subscriber returns, no publisher return, and an owner return for a reset owner", () => {
+  it("a co-publisher sends subscriber returns, no publisher return, and nothing for a reset owner", () => {
     const out = channelReturnsFor([ch({ ownRole: "publisher", ownerKeyB64: "OLD_OWNER" })], superseded, new Set(["ME"]));
-    expect(out.map((r) => [r.role, r.accountIdB64])).toEqual([
-      ["owner", "acctOwner"],
-      ["subscriber", "acctSub"],
-    ]);
+    expect(out.map((r) => [r.role, r.accountIdB64])).toEqual([["subscriber", "acctSub"]]);
   });
-  it("a subscriber sends only an owner return, and only with the owner's card", () => {
-    expect(
-      channelReturnsFor([ch({ ownRole: "subscriber", ownerKeyB64: "OLD_OWNER" })], superseded, new Set(["ME"])).map(
-        (r) => r.role,
-      ),
-    ).toEqual(["owner"]);
+  it("a subscriber sends nothing, the owner's card held or not", () => {
+    expect(channelReturnsFor([ch({ ownRole: "subscriber", ownerKeyB64: "OLD_OWNER" })], superseded, new Set(["ME"]))).toEqual(
+      [],
+    );
     expect(
       channelReturnsFor(
         [ch({ ownRole: "subscriber", ownerKeyB64: "OLD_OWNER", cards: [card("OLD_SUB")] })],
@@ -99,6 +130,13 @@ describe("who sends what", () => {
         new Set(["ME"]),
       ),
     ).toEqual([]);
+  });
+  it("nobody is sent a return in the owner role", () => {
+    for (const ownRole of ["owner", "publisher", "subscriber"] as const) {
+      const out = channelReturnsFor([ch({ ownRole, ownerKeyB64: "OLD_OWNER" })], superseded, new Set(["ME"]));
+      expect(out.every((r) => r.role === "subscriber" || r.role === "publisher")).toBe(true);
+      expect(out.some((r) => r.accountIdB64 === "acctOwner")).toBe(false);
+    }
   });
   it("nothing for this account's own keys", () => {
     expect(
@@ -180,15 +218,6 @@ describe("the wire, through the core", () => {
       other.free();
       sub.free();
     }
-  });
-});
-
-import { channelsOwingRecoveryKey } from "./channel-return-runtime";
-
-describe("the recovery key registrations owed", () => {
-  it("every owned channel not recorded, sorted", () => {
-    expect(channelsOwingRecoveryKey(["b", "a", "c"], new Set(["c"]))).toEqual(["a", "b"]);
-    expect(channelsOwingRecoveryKey([], new Set())).toEqual([]);
   });
 });
 

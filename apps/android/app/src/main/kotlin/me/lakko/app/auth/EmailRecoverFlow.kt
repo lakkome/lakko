@@ -13,9 +13,12 @@ import me.lakko.app.l10n.UiText
  *
  * The steps, in order: [EmailRecoverStep.Address] (username and address),
  * [EmailRecoverStep.Code] (always, whatever was typed), the authenticator
- * code only when the account has one, the new password, then the restore.
- * Nothing before the new password tells which kind of account this is: the
- * server is asked for the vault only after the person chose the password.
+ * code only when the account has one, the new password, then the sign-in.
+ *
+ * Since 2026-11-26 (ADR-0075, amended: the email vault is removed) a mailed
+ * code never brings keys: it gives a new password and a session, for every
+ * account. On a device without the account's keys "Restore your keys"
+ * follows.
  */
 public sealed interface EmailRecoverStep {
     /** Step 1: username and address. */
@@ -41,10 +44,6 @@ public sealed interface EmailRecoverStep {
 
     /** Step 4: "Choose a new password". */
     public data class NewPassword(val ticket: String) : EmailRecoverStep
-
-    /** "Bringing back your account": the vault is being opened and the
-     *  phrase restore runs, or the new password is being set. */
-    public data object Restoring : EmailRecoverStep
 
     /** The flow ended without a session; the person is back on the list of
      *  methods with [line] shown there. Nothing changed on the server. */
@@ -88,38 +87,6 @@ public fun afterEmailRecoverVerify(ticket: String, totpRequired: Boolean): Email
 public fun afterEmailRecoverTotp(ticket: String): EmailRecoverState =
     EmailRecoverState(step = EmailRecoverStep.NewPassword(ticket))
 
-/** What `recover/open` released. */
-public sealed interface EmailRecoverOpen {
-    /** No phrase saved: the sealed keys. The ticket is spent. */
-    public class Vault(public val vaultSalt: ByteArray, public val sealedEntropy: ByteArray) : EmailRecoverOpen
-
-    /** A phrase is saved: the new password only. */
-    public data object Password : EmailRecoverOpen
-}
-
-/** What the device does with the answer of `recover/open`. */
-public enum class EmailRecoverAction {
-    /** Open the vault with the typed username and address, rebuild the
-     *  phrase, and run the existing phrase restore with the new password. */
-    RestoreFromVault,
-
-    /** Set the new password under the ticket and land the session. */
-    SetPassword,
-}
-
-public fun emailRecoverAction(open: EmailRecoverOpen): EmailRecoverAction = when (open) {
-    is EmailRecoverOpen.Vault -> EmailRecoverAction.RestoreFromVault
-    EmailRecoverOpen.Password -> EmailRecoverAction.SetPassword
-}
-
-/**
- * The vault did not open under the typed username and address (the ticket is
- * already spent). Nothing was changed on the server: the person is told the
- * account could not be brought back and is back on "Get back in".
- */
-public fun afterEmailVaultNotOpened(): EmailRecoverState =
-    EmailRecoverState(step = EmailRecoverStep.Closed(UiText("recovery.email.failed")))
-
 /** Whether the code step's code has run out at [nowMs]. */
 public fun emailCodeExpired(step: EmailRecoverStep.Code, nowMs: Long): Boolean = nowMs >= step.expiresAtMs
 
@@ -143,7 +110,7 @@ public sealed interface EmailRecoverFailure {
 }
 
 /** Which request failed. */
-public enum class EmailRecoverCall { Start, Verify, Totp, Open, Password }
+public enum class EmailRecoverCall { Start, Verify, Totp, Password }
 
 /**
  * Classify a failure of [call]. A wrong code and a code that was never sent
@@ -170,7 +137,7 @@ public fun emailRecoverFailureOf(call: EmailRecoverCall, err: Throwable): EmailR
         "code-expired", "ticket-refused" -> EmailRecoverFailure.Restart(UiText("recovery_email.code.expired"))
         // The authenticator step was skipped: cannot happen through this
         // machine; treated as a dead ticket.
-        "totp-required", "wrong-mode" -> EmailRecoverFailure.Restart(UiText("recovery_email.code.expired"))
+        "totp-required" -> EmailRecoverFailure.Restart(UiText("recovery_email.code.expired"))
         else -> EmailRecoverFailure.Line(UiText("recovery.error.unavailable"))
     }
 }
@@ -220,20 +187,12 @@ public const val RECOVERY_EMAIL_DISABLED: String = "recovery-email-disabled"
 private const val HTTP_TOO_MANY: Int = 429
 private const val MILLIS: Long = 1_000L
 
-/** `enrol/start` answered: the code is on its way and the vault salt is known. */
+/** `enrol/start` answered: the code is on its way. */
 public class RecoveryEmailEnrolStart(
     public val challengeId: String,
-    /** The 16-byte salt the email vault is sealed with. */
-    public val vaultSalt: ByteArray,
     public val resendAfterSecs: Long,
     public val expiresInSecs: Long,
 )
-
-/** The email vault's salt (ADR-0075 section 2). */
-public const val EMAIL_VAULT_SALT_LEN: Int = 16
-
-/** The sealed phrase entropy: the passkey vault's 44-byte blob shape. */
-public const val EMAIL_VAULT_SEALED_LEN: Int = 44
 
 /**
  * Classify a failure of the enrol routes (UX 19.2's table). [finishing] is

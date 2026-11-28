@@ -25,7 +25,12 @@ export type KnownRequestCheck =
   | "refused"
   /** No verdict yet: the directory, the attest key or the key log could not
    *  be reached, or the account publishes nothing. */
-  | "inconclusive";
+  | "inconclusive"
+  /** ADR-0101 section 11 (UX 16.11): the account's keys were reset in a way
+   *  this device could not confirm (`ContactStartedOver`). The silent answer
+   *  of 16.6 does not apply: a request from the key the new account
+   *  publishes is LISTED, with a note, and the person decides. */
+  | "started-over";
 
 export type KnownRequestVerdict =
   /** The sender is not a contact: the ordinary request row. */
@@ -50,6 +55,12 @@ export type KnownRequestVerdict =
  * | yes                 | `inconclusive` | -                              | `wait`   |
  * | yes                 | `current`      | yes                            | `answer` |
  * | yes                 | `current`      | no                             | `drop`   |
+ * | yes                 | `started-over` | (is the new account's key) yes | `show`   |
+ * | yes                 | `started-over` | (is the new account's key) no  | `drop`   |
+ *
+ * For `started-over` the pin was NOT moved, so the comparison is against
+ * `startedOverKeyB64`, the key the new account publishes. Nothing is ever
+ * answered silently for it, whatever conversation this device holds.
  *
  * `answer` holds only while this device holds a live one-to-one with them
  * (`holdsOneToOne`, base scenario 7, 2026-11-22): the ack alone starts no
@@ -78,8 +89,16 @@ export function knownContactRequestVerdict(input: {
    *  unshown, and is answered silently once the chat is here; listed only
    *  after that. Absent: no. */
   readonly siblingMayAdmit?: boolean;
+  /** For `started-over`: the key the account's new self publishes (the
+   *  pending started-over record's), `null` when this device holds none. */
+  readonly startedOverKeyB64?: string | null;
 }): KnownRequestVerdict {
   if (!input.senderIsContact) return "show";
+  if (input.check === "started-over") {
+    return input.startedOverKeyB64 != null && input.startedOverKeyB64 === input.requestKeyB64
+      ? "show"
+      : "drop";
+  }
   if (input.check === "refused") return "drop";
   if (input.check === "inconclusive") return "wait";
   if (input.trustedKeyB64 !== input.requestKeyB64) return "drop";

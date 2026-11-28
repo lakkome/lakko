@@ -80,6 +80,30 @@ export interface LogVerifyResult {
   /** The `/latest` entry's `is_reset` marker when a latest entry was
    *  read (`confirmed` / `mismatch`); `null` otherwise. */
   isReset: boolean | null;
+  /** ADR-0101 section 10: the key-log half of the reset-seal rule, present
+   *  only when a {@link SealLogQuery} was given AND the identity verdict is
+   *  `confirmed` (the announcement is proven against the very root that
+   *  verdict rests on, below the identity leaf it confirmed). */
+  sealLog?: SealLogStatus;
+}
+
+/** Whether the served previous announcement is in the log before the reset
+ *  leaf (`verifySealAnnouncementInLog`). */
+export type SealLogStatus =
+  /** Its leaf is included under the verified root, below the reset leaf,
+   *  and it is the newest the log holds for that generation. */
+  | "proven"
+  /** The log was read and does not show it: no leaf for that generation, a
+   *  different announcement as the newest, or a proof that does not bind. */
+  | "not-proven"
+  /** The log could not be read for the announcement, or the proof was made
+   *  against another tree size than the verified root (asked again later). */
+  | "unreachable";
+
+/** What the reset-seal rule asks the log (ADR-0073 R.2 rule 4). */
+export interface SealLogQuery {
+  /** The bundle's `previous_reset_seals`, as served. */
+  readonly previousAnnouncement: Uint8Array;
 }
 
 /**
@@ -197,6 +221,31 @@ export interface VerifyDeps {
     accountId: Uint8Array;
     servedPubkey: Uint8Array;
   }) => void;
+  /**
+   * Seal-announcement inclusion override (TEST SEAM ONLY) - ADR-0101 section
+   * 10. When supplied, replaces the real wasm `verifySealAnnouncementInLog`
+   * call: it returns whether the proof holds, exactly the wasm contract.
+   * Production callers never pass this.
+   */
+  verifySealInLog?: (args: {
+    operatorKey: Uint8Array;
+    root: SignedRoot;
+    leafIndex: bigint;
+    proof: InclusionProof;
+    resetLeafIndex: bigint;
+    accountId: Uint8Array;
+    keyGeneration: bigint;
+    seq: bigint;
+    announcement: Uint8Array;
+  }) => boolean;
+  /**
+   * Seal-announcement decoder override (TEST SEAM ONLY): the generation and
+   * `seq` of the served announcement, or `null` when it does not decode.
+   * Production reads them with the wasm `decodeSealAnnouncement`.
+   */
+  decodeSealAnnouncement?: (
+    announcement: Uint8Array,
+  ) => { keyGeneration: bigint; seq: bigint } | null;
 }
 
 /**
@@ -208,11 +257,15 @@ export interface VerifyDeps {
  * @param publishedSignaturePubkey the 32-byte Ed25519 key discovery
  *                                returned for that account.
  * @param deps                    test injection seam (see `VerifyDeps`).
+ * @param seal                    ADR-0101 section 10: also prove the served
+ *                                previous seal announcement against the SAME
+ *                                verified root (`sealLog` of the result).
  */
 export async function verifyIdentityInLog(
   accountId: Uint8Array,
   publishedSignaturePubkey: Uint8Array,
   deps: VerifyDeps = {},
+  seal?: SealLogQuery,
 ): Promise<LogVerifyResult> {
   const client =
     deps.client !== undefined
@@ -382,6 +435,23 @@ export async function verifyIdentityInLog(
         }
       }
     }
+    // 7. ADR-0101 section 10 - the key-log half of the reset-seal rule. The
+    //    root is the one every gate above passed (no-rollback, the witness
+    //    quorum, the operator signature inside the inclusion check), and
+    //    the reset leaf is the identity leaf just confirmed.
+    if (seal !== undefined) {
+      const sealLog = await sealAnnouncementInLog({
+        client,
+        operatorKey,
+        root,
+        accountKey: ak,
+        accountId,
+        resetLeafIndex: latest.idx,
+        seal,
+        deps,
+      });
+      return { status: "confirmed", isReset, sealLog };
+    }
     return { status: "confirmed", isReset };
   } catch (err) {
     if (err instanceof TransparencyNetworkError) {
@@ -392,6 +462,97 @@ export async function verifyIdentityInLog(
     // does not block on it); the supersession/pin gate is the primary
     // trust.
     return { status: "unreachable", isReset: null };
+  }
+}
+
+/**
+ * ADR-0101 section 10, the peer's check 1 against the key log: the served
+ * previous announcement is the newest leaf the log holds for its generation
+ * and is included, under the already-verified `root`, at an index below the
+ * reset leaf's. Never throws.
+ *
+ *   * no leaf for the generation, another announcement as its newest, an
+ *     announcement that does not decode, a proof that does not bind:
+ *     `not-proven`;
+ *   * the log could not be read, or the proof was generated against another
+ *     tree size than the verified root (the log grew between the two
+ *     reads): `unreachable`, so the question is asked again instead of an
+ *     unsealed verdict being recorded on a race.
+ */
+async function sealAnnouncementInLog(args: {
+  client: TransparencyClient;
+  operatorKey: Uint8Array;
+  root: SignedRoot;
+  accountKey: Uint8Array;
+  accountId: Uint8Array;
+  resetLeafIndex: bigint;
+  seal: SealLogQuery;
+  deps: VerifyDeps;
+}): Promise<SealLogStatus> {
+  const { client, operatorKey, root, accountId, resetLeafIndex, seal, deps } = args;
+  try {
+    let decoded: { keyGeneration: bigint; seq: bigint } | null;
+    if (deps.decodeSealAnnouncement !== undefined) {
+      decoded = deps.decodeSealAnnouncement(seal.previousAnnouncement);
+    } else {
+      try {
+        const wasm = await loadWasm();
+        const a = wasm.decodeSealAnnouncement(seal.previousAnnouncement);
+        try {
+          decoded = { keyGeneration: a.keyGeneration, seq: a.seq };
+        } finally {
+          a.free();
+        }
+      } catch {
+        decoded = null;
+      }
+    }
+    if (decoded === null) return "not-proven";
+    const logged = await client.fetchAnnouncement(args.accountKey, decoded.keyGeneration);
+    if (logged === null) return "not-proven";
+    // "The newest": the log's newest leaf of that generation must be the
+    // very announcement the directory served.
+    if (!bytesEqual(logged.announcement, seal.previousAnnouncement)) return "not-proven";
+    if (logged.idx >= resetLeafIndex) return "not-proven";
+    const proof = await client.fetchProof(logged.idx);
+    if (proof.logSize !== root.logSize) return "unreachable";
+    let proven: boolean;
+    if (deps.verifySealInLog !== undefined) {
+      proven = deps.verifySealInLog({
+        operatorKey,
+        root,
+        leafIndex: logged.idx,
+        proof,
+        resetLeafIndex,
+        accountId,
+        keyGeneration: decoded.keyGeneration,
+        seq: decoded.seq,
+        announcement: seal.previousAnnouncement,
+      });
+    } else {
+      const wasm = await loadWasm();
+      try {
+        proven = wasm.verifySealAnnouncementInLog(
+          operatorKey,
+          root.treeRoot,
+          root.logSize,
+          root.timestampUnix,
+          root.signature,
+          logged.idx,
+          proof.auditPath,
+          resetLeafIndex,
+          accountId,
+          decoded.keyGeneration,
+          decoded.seq,
+          seal.previousAnnouncement,
+        );
+      } catch {
+        proven = false;
+      }
+    }
+    return proven ? "proven" : "not-proven";
+  } catch {
+    return "unreachable";
   }
 }
 

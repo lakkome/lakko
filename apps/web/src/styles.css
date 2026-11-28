@@ -3946,6 +3946,12 @@ a.ghost.small:hover {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+/* After a pointer press no bubble shows the ring: Safari lands the focus on
+   the bubble when a control inside it is clicked and then matches
+   `:focus-visible` (`ui/input-modality.ts`). */
+html[data-pointer-input] .lk-bubble:focus-visible {
+  outline: none;
+}
 .lk-bubble.incoming {
   background: var(--surface-sunken);
   color: var(--surface-fg);
@@ -6876,6 +6882,9 @@ button.lk-call-chip:focus-visible {
 .lk-call-chat-bubble:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
   outline-offset: 2px;
+}
+html[data-pointer-input] .lk-call-chat-bubble:focus-visible {
+  outline: none;
 }
 .lk-call-chat-item.own .lk-call-chat-bubble {
   background: var(--accent);
@@ -9888,6 +9897,9 @@ button.lk-card-row-button {
 .lk-channel-post-bubble:focus-visible {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent);
 }
+html[data-pointer-input] .lk-channel-post-bubble:focus-visible {
+  box-shadow: none;
+}
 .lk-channel-post-media {
   display: flex;
   flex-direction: column;
@@ -10622,4 +10634,60 @@ button.lk-card-row-button {
    the ordinary invitation card, inset like a list row. */
 .lk-returned-invitation {
   padding: var(--space-2, 8px) var(--space-3, 12px);
+}
+
+/* UX identity-recovery 19.1a, 19.1c, 19.1d: a warning note (the
+   authenticator as the only second way in; "Your chats depend on your
+   password"). The warning colour with the warning icon, never the danger
+   colour: nothing went wrong. */
+.lk-warning-note {
+  display: flex;
+  gap: var(--space-2, 8px);
+  align-items: flex-start;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  color: var(--surface-fg);
+  font-size: 13px;
+  line-height: 18px;
+  text-align: start;
+}
+.lk-warning-note-icon {
+  color: var(--warning);
+  flex: none;
+}
+.lk-warning-note-body {
+  min-width: 0;
+}
+p.lk-warning-note {
+  display: block;
+  margin: 0;
+}
+/* The Settings > Account status line when only the password keeps the
+   chats (19.1c). */
+.lk-status-warning {
+  color: var(--warning);
+}
+/* The optional caption above the recovery phrase row of the protect step,
+   and the line under its disabled Continue (19.1a). */
+.lk-protect-caption {
+  margin: var(--space-3, 12px) 0 var(--space-1, 4px);
+  font-size: 12px;
+  color: var(--surface-muted);
+}
+/* The authenticator key in groups of four (19.1b). */
+.lk-totp-key-value {
+  user-select: all;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* `docs/ux/identity-recovery.md` 16.11 - the line under the name of a
+   contact request from the new account of a contact who started over. A
+   plain note in the muted colour: it wraps, it is never an alarm. */
+.lk-request-note {
+  font-size: 13px;
+  color: var(--surface-muted);
+  white-space: normal;
+  margin-top: 2px;
 }

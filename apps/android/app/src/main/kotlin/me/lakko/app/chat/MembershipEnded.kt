@@ -317,11 +317,25 @@ internal sealed interface ComposerSlot {
  * the user's text, and this decides whether to show it, not what it should have
  * been.
  */
-internal fun composerState(state: MembershipState, draft: String, peerDeleted: Boolean = false): ComposerSlot {
+internal fun composerState(
+    state: MembershipState,
+    draft: String,
+    peerDeleted: Boolean = false,
+    /** ADR-0101 section 11 / UX 16.11 — the other person of this one-to-one
+     *  started over with a new account (an unsealed reset): the `@name` the
+     *  closed line names, or `null` when they did not. */
+    peerStartedOver: String? = null,
+): ComposerSlot {
     // ADR-0098 / UX `deleted-account.md` section 3 — a one-to-one whose other
     // person deleted their account: one line, no button, no draft block.
     if (peerDeleted && !membershipEnded(state)) {
         return ComposerSlot.Withdrawn(notice = PEER_DELETED_NOTICE, draft = null, draftLabel = null)
+    }
+    // UX 16.11 — the account's old devices are gone and nothing sent here
+    // would arrive: one closed line in place of the composer. A deleted
+    // account outranks it (there is no new account to speak of).
+    if (peerStartedOver != null && !membershipEnded(state)) {
+        return ComposerSlot.Withdrawn(notice = startedOverNotice(peerStartedOver), draft = null, draftLabel = null)
     }
     if (!membershipEnded(state)) return ComposerSlot.Composer
     val worthKeeping = draft.isNotBlank()
@@ -674,3 +688,12 @@ internal class SharedPrefsLeaveRecordStore(context: Context) : LeaveRecordStore 
 /** ADR-0098 — the line in place of the composer of a one-to-one whose other
  *  person deleted their account (`person.deleted.body`). */
 internal val PEER_DELETED_NOTICE: UiText = UiText("person.deleted.body")
+
+/**
+ * UX 16.11 — the one line in place of the composer of a one-to-one whose
+ * other person started over with a new account: "@name started over with a
+ * new account. Messages here are no longer delivered." [name] is what the
+ * header calls them (the `@username` when one is known).
+ */
+internal fun startedOverNotice(name: String): UiText =
+    UiText("contacts.started_over.closed", texts = mapOf("name" to name))

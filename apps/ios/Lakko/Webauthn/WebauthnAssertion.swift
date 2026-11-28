@@ -63,6 +63,8 @@ public final class WebauthnAssertion: NSObject {
         /// asked, the platform is older than iOS 18, or the passkey's
         /// provider evaluated nothing.
         public let prfOutput: Data?
+        /// The output for the second salt asked, or `nil`.
+        public var secondPrfOutput: Data? = nil
     }
 
     /// Drive a single passkey assertion round.
@@ -77,6 +79,7 @@ public final class WebauthnAssertion: NSObject {
         challenge: Data,
         allowedCredentials: [Data],
         prfSalt: Data? = nil,
+        secondPrfSalt: Data? = nil,
         presentationAnchor: ASPresentationAnchor
     ) async throws -> Result {
         let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(
@@ -91,7 +94,11 @@ public final class WebauthnAssertion: NSObject {
             }
         }
         if let prfSalt, #available(iOS 18.0, *) {
-            request.prf = .inputValues(.saltInput1(prfSalt))
+            if let secondPrfSalt {
+                request.prf = .inputValues(.init(saltInput1: prfSalt, saltInput2: secondPrfSalt))
+            } else {
+                request.prf = .inputValues(.saltInput1(prfSalt))
+            }
         }
         let controller = ASAuthorizationController(authorizationRequests: [request])
 
@@ -190,13 +197,18 @@ private final class ControllerBridge: NSObject,
             extensions: nil
         )
         var prfOutput: Data?
-        if #available(iOS 18.0, *), let first = assertion.prf?.first {
-            prfOutput = PasskeyVault.usablePrfOutput(first.withUnsafeBytes { Data($0) })
+        var secondPrfOutput: Data?
+        if #available(iOS 18.0, *), let prf = assertion.prf {
+            prfOutput = PasskeyVault.usablePrfOutput(prf.first.withUnsafeBytes { Data($0) })
+            secondPrfOutput = PasskeyVault.usablePrfOutput(prf.second.map { key in
+                key.withUnsafeBytes { Data($0) }
+            })
         }
         self.continuation?.resume(returning: WebauthnAssertion.Result(
             credential: json,
             credentialId: assertion.credentialID,
-            prfOutput: prfOutput
+            prfOutput: prfOutput,
+            secondPrfOutput: secondPrfOutput
         ))
     }
 

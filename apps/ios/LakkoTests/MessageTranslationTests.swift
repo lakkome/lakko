@@ -141,14 +141,38 @@ final class MessageTranslationTests: XCTestCase {
 
     // MARK: - The menu row and the bubble
 
-    func testAnIncomingMessageInAnotherLanguageOffersTranslateAndOwnDoesNot() async {
+    /// UX 3.1 as amended 2026-11-27: own messages are translated like
+    /// received ones.
+    func testAnIncomingAndAnOwnMessageInAnotherLanguageBothOfferTranslate() async {
         let (center, _) = makeCenter()
         let incoming = message(10, spanish)
-        center.observe(conversation: conversation, messages: [incoming])
+        let own = message(11, spanish, outgoing: true)
+        center.observe(conversation: conversation, messages: [incoming, own])
         _ = center.menuState(conversation: conversation, message: incoming)
         await eventually { center.menuState(conversation: conversation, message: incoming) == .translate }
-        XCTAssertEqual(center.menuState(conversation: conversation, message: message(11, spanish, outgoing: true)),
-                       .unavailable)
+        await eventually { center.menuState(conversation: conversation, message: own) == .translate }
+    }
+
+    /// UX 3.6: own messages never bring the bar.
+    func testOwnMessagesDoNotCountTowardTheBar() async {
+        let (center, _) = makeCenter()
+        let messages = (1...8).map { message(Int64($0), spanish, outgoing: true) }
+        center.observe(conversation: conversation, messages: messages)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertNil(center.bars[conversation])
+    }
+
+    /// UX 3.7 as amended 2026-11-27: automatic translation covers own messages.
+    func testAutomaticTranslationTranslatesOwnMessagesToo() async {
+        let engine = FakeTranslationEngine()
+        let (center, _) = makeCenter(translation: engine)
+        let own = message(12, spanish, outgoing: true)
+        center.setAutoTranslate(conversation: conversation, on: true, messages: [own])
+        center.observe(conversation: conversation, messages: [own])
+        await eventually {
+            if case .translated = center.phase(conversation: conversation, messageId: 12) { return true }
+            return false
+        }
     }
 
     func testTranslateShowsTheTranslationAndCopyCopiesIt() async {
@@ -364,10 +388,10 @@ extension MessageTranslationTests {
         XCTAssertNil(line)
     }
 
-    func testNoLanguageLineOnOwnMessagesOrWithoutText() async {
+    func testAnOwnMessageGetsTheLanguageLineAndNoLineWithoutText() async {
         let (center, _) = makeCenter()
         let own = await settledLine(center, message(10, spanish, outgoing: true))
-        XCTAssertNil(own)
+        XCTAssertEqual(own, .detected(source: "es", canTranslate: true))
         let empty = await settledLine(center, message(11, ""))
         XCTAssertNil(empty)
     }
@@ -392,13 +416,13 @@ extension MessageTranslationTests {
     func testNoLanguageLineWithTheTranslateSettingOff() {
         let spanish = line("es", 990, canTranslate: true)
         XCTAssertNil(MessageTranslationCenter.languageLine(
-            resolution: spanish, isOwn: false, enabled: false, readingLanguages: ["en"]))
+            resolution: spanish, enabled: false, readingLanguages: ["en"]))
         XCTAssertEqual(MessageTranslationCenter.languageLine(
-            resolution: spanish, isOwn: false, enabled: true, readingLanguages: ["en"]),
+            resolution: spanish, enabled: true, readingLanguages: ["en"]),
             .detected(source: "es", canTranslate: true))
         // The rule named no language: no line.
         XCTAssertNil(MessageTranslationCenter.languageLine(
-            resolution: line(nil, 200, canTranslate: false), isOwn: false, enabled: true, readingLanguages: ["en"]))
+            resolution: line(nil, 200, canTranslate: false), enabled: true, readingLanguages: ["en"]))
     }
 
     func testTheLanguageLineHasNoTranslateWhenTheDeviceCannotTranslateFromIt() async {

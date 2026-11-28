@@ -43,7 +43,8 @@ import { useLineage } from "./use-lineage";
 import { adoptTrayUpload } from "./tray-store";
 import { uploadTrayPart } from "./tray-upload";
 import { ContactsClient } from "../contacts/client";
-import { loadSupersededKeys } from "../contacts/local-store";
+import { loadStartedOverKeys, loadSupersededKeys } from "../contacts/local-store";
+import { startedOverClosesConversation } from "../contacts/started-over";
 import { DiscoveryClient } from "../discovery/client";
 import { conversationKindOf } from "./conversation-kind";
 import { ownPersonKeyB64 } from "./person-key";
@@ -210,6 +211,14 @@ export function UnsentOutboxProvider(props: { children: JSX.Element }): JSX.Elem
             rosterPersonKeysB64: roster(),
             ownPersonKeyB64: own(),
             supersededKeys: loadSupersededKeys(),
+          }),
+        // UX 16.11 (alignment item E): the old one-to-one of someone who
+        // started over takes nothing: its waiting messages read Not sent.
+        closed: () =>
+          startedOverClosesConversation({
+            isOneToOne: true,
+            peerKeyB64: oneToOnePeerKey(roster(), own()),
+            startedOverKeysB64: loadStartedOverKeys(),
           }),
         heldAtMs: Date.now(),
       });

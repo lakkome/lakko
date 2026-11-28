@@ -104,6 +104,7 @@ import { base64Decode, base64Encode } from "../auth/account-id";
 import {
   ContactsClient,
   ContactsError,
+  ContactStartedOver,
   decodeContactRequestBody,
   SupersessionRefused,
   type IncomingContactAck,
@@ -122,6 +123,7 @@ import {
   loadAccepted,
   loadKeyAliases,
   readPin,
+  startedOverOf,
 } from "./local-store";
 import { contactRowAction, isCurrentContactKey, type ContactRowAction } from "../reach/contact-row";
 import {
@@ -751,17 +753,41 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         pinKeysB64: pinKeysOf(accountKeysOf(fromAccountIdB64, accountIdB64)),
         bindingKeyB64: readVerifiedBinding(fromAccountIdB64, accountIdB64)?.keyB64 ?? null,
       }) ?? contactSignedBy(accepted, base64Encode(request.fromPubkey));
-    if (known === undefined) return false;
+    if (known === undefined) {
+      // UX 16.11 - not a contact here, but this device pins the account
+      // under ANOTHER key (a contact removed from the list, a person met in
+      // a group): the reset check runs now, so a request from the new
+      // account of someone who started over is listed with its note. The
+      // request is listed either way; nothing is answered or dropped here.
+      const pinned = readPin(fromAccountIdB64, accountIdB64)?.pinnedSignaturePubkeyB64;
+      if (pinned !== undefined && pinned !== base64Encode(request.fromPubkey)) {
+        try {
+          await client.checkContactIdentity(fromAccountId);
+        } catch {
+          // Refused, started over, inconclusive or offline: the store holds
+          // what was learned; the row is shown as an ordinary request.
+        }
+      }
+      return false;
+    }
     let check: KnownRequestCheck;
     try {
       const outcome = await client.checkContactIdentity(fromAccountId);
       check = outcome === "current" ? "current" : "inconclusive";
     } catch (err) {
-      check = err instanceof SupersessionRefused ? "refused" : "inconclusive";
+      check =
+        err instanceof ContactStartedOver
+          ? "started-over"
+          : err instanceof SupersessionRefused
+            ? "refused"
+            : "inconclusive";
     }
     const verdict = knownContactRequestVerdict({
       senderIsContact: true,
       check,
+      // UX 16.11: the pin was not moved; the key the new account publishes
+      // is the pending started-over record's.
+      startedOverKeyB64: startedOverOf(fromAccountIdB64, accountIdB64)?.newKeyB64 ?? null,
       requestKeyB64: base64Encode(request.fromPubkey),
       trustedKeyB64: readPin(base64Encode(fromAccountId), accountIdB64)?.pinnedSignaturePubkeyB64 ?? null,
       // Base scenario 7 - answered silently only while this device holds a

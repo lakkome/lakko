@@ -10,8 +10,10 @@ import LakkoCore
 // refusals.
 //
 // Encodings: `handle`, `challenge_id` and `ticket` are URL-safe base64
-// without padding; `vault_salt` (16 bytes), `sealed_entropy` (44 bytes) and
-// the OPAQUE messages are standard base64. The address and the codes are
+// without padding; the OPAQUE messages are standard base64. The email vault
+// (its salt, its sealed blob, its routes) was removed on 2026-11-26
+// (ADR-0075, amended): a mailed code gives a new password and confirms a
+// key reset, never the keys. The address and the codes are
 // request fields only: nothing here stores or logs them.
 
 // MARK: - Wire
@@ -88,26 +90,6 @@ struct EmailOkResponse: Codable, Equatable {
     let ok: Bool
 }
 
-struct EmailOpenResponse: Codable, Equatable {
-    let mode: String
-    let vaultSalt: String?
-    let sealedEntropy: String?
-
-    enum CodingKeys: String, CodingKey {
-        case mode
-        case vaultSalt = "vault_salt"
-        case sealedEntropy = "sealed_entropy"
-    }
-}
-
-/// What `POST /recovery-email/recover/open` came to.
-public enum EmailOpen: Equatable, Sendable {
-    /// The account has no saved phrase: the sealed keys. The ticket is spent.
-    case vault(salt: Data, sealed: Data)
-    /// A saved phrase (or no vault): the mailed code changes the password.
-    case password
-}
-
 struct EmailPasswordStartRequest: Codable, Equatable {
     let ticket: String
     let newPasswordRequest: String
@@ -150,69 +132,23 @@ struct EmailEnrolStartRequest: Codable, Equatable {
     }
 }
 
-struct EmailEnrolStartResponse: Codable, Equatable {
-    let challengeId: String
-    let vaultSalt: String
-    let resendAfterSecs: Int
-    let expiresInSecs: Int
-
-    enum CodingKeys: String, CodingKey {
-        case challengeId = "challenge_id"
-        case vaultSalt = "vault_salt"
-        case resendAfterSecs = "resend_after_secs"
-        case expiresInSecs = "expires_in_secs"
-    }
-}
-
-/// An enrolment's challenge and the salt the vault is sealed with.
-public struct EmailEnrolChallenge: Equatable, Sendable {
-    public let challenge: EmailChallenge
-    /// 16 bytes.
-    public let vaultSalt: Data
-
-    public init(challenge: EmailChallenge, vaultSalt: Data) {
-        self.challenge = challenge
-        self.vaultSalt = vaultSalt
-    }
-}
-
 struct EmailEnrolFinishRequest: Codable, Equatable {
     let challengeId: String
     let code: String
-    let sealedEntropy: String?
 
     enum CodingKeys: String, CodingKey {
         case challengeId = "challenge_id"
         case code
-        case sealedEntropy = "sealed_entropy"
     }
 }
 
+/// `POST /recovery-email/enrol/finish`: `{enabled}`.
 public struct EmailEnrolled: Codable, Equatable, Sendable {
     public let enabled: Bool
-    public let vault: Bool
 
-    public init(enabled: Bool, vault: Bool) {
+    public init(enabled: Bool) {
         self.enabled = enabled
-        self.vault = vault
     }
-}
-
-struct EmailVaultPutRequest: Codable, Equatable {
-    let handle: String
-    let address: String
-    let vaultSalt: String
-    let sealedEntropy: String
-
-    enum CodingKeys: String, CodingKey {
-        case handle, address
-        case vaultSalt = "vault_salt"
-        case sealedEntropy = "sealed_entropy"
-    }
-}
-
-struct EmailVaultPutResponse: Codable, Equatable {
-    let vault: Bool?
 }
 
 struct FreshGrantRequest: Codable, Equatable {
@@ -223,44 +159,6 @@ struct FreshGrantRequest: Codable, Equatable {
 
 struct EmailRemovedResponse: Codable, Equatable {
     let removed: Bool?
-}
-
-/// `GET /account/phrase` (ADR-0075 section 3, amended 2026-11-01): which way
-/// "Save a recovery phrase" goes. Answered on a server with no mail set up too,
-/// where `GET /recovery-email` is a `503`.
-public struct AccountPhraseStatus: Codable, Equatable, Sendable {
-    /// The owner saved a recovery phrase.
-    public let saved: Bool
-    /// The current phrase was ever sealed in an email vault: saving one takes
-    /// a key rotation.
-    public let rotationNeeded: Bool
-
-    public init(saved: Bool, rotationNeeded: Bool) {
-        self.saved = saved
-        self.rotationNeeded = rotationNeeded
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case saved
-        case rotationNeeded = "rotation_needed"
-    }
-}
-
-/// Reads the answer of `POST /account/phrase/saved`.
-enum PhraseSaveRefusal {
-
-    /// The body code of the refusal.
-    static let needsRotationCode = "phrase-save-needs-rotation"
-
-    /// `409 {"error":"phrase-save-needs-rotation"}`: the phrase was sealed in
-    /// an email vault since this device last read `GET /account/phrase`.
-    static func needsRotation(_ error: Error) -> Bool {
-        guard case .http(let status, _, let body) = error as? AuthClientError, status == 409 else {
-            return false
-        }
-        let json = (try? JSONSerialization.jsonObject(with: Data(body.utf8))) as? [String: Any]
-        return json?["error"] as? String == needsRotationCode
-    }
 }
 
 struct AccountNoticeWire: Codable, Equatable {
@@ -308,10 +206,9 @@ public enum RecoveryEmailRefusal: Equatable {
     case handleMismatch
     /// `409 username-required`: a guest account.
     case usernameRequired
-    /// `409 phrase-saved`: a vault was sent for a phrase-protected account.
-    case phraseSaved
-    /// `409 wrong-mode`.
-    case wrongMode
+    /// `409 last-factor`: the email is the account's last second way in
+    /// (UX 19.1c).
+    case lastFactor
     /// `502 mail-send-failed`.
     case mailSendFailed
     /// `503`: mail is not set up on this server.
@@ -336,8 +233,7 @@ public enum RecoveryEmailRefusal: Equatable {
         case (429, _): return .tooManyAttempts(retryAfterSecs: retry)
         case (409, "handle-mismatch"): return .handleMismatch
         case (409, "username-required"): return .usernameRequired
-        case (409, "phrase-saved"): return .phraseSaved
-        case (409, "wrong-mode"): return .wrongMode
+        case (409, LastFactor.code): return .lastFactor
         case (502, _): return .mailSendFailed
         case (503, "rate-limiter-unavailable"): return .failed
         case (503, _): return .unavailable
@@ -401,25 +297,6 @@ public extension AuthClient {
             body: EmailTicketCodeRequest(ticket: ticket, code: code))
     }
 
-    /// `POST /recovery-email/recover/open`.
-    func recoveryEmailRecoverOpen(ticket: String) async throws -> EmailOpen {
-        let endpoint = "/recovery-email/recover/open"
-        let response: EmailOpenResponse = try await post(
-            endpoint: endpoint, body: EmailTicketRequest(ticket: ticket))
-        switch response.mode {
-        case "password":
-            return .password
-        case "vault":
-            guard let salt = response.vaultSalt.flatMap(base64Decode),
-                  let sealed = response.sealedEntropy.flatMap(base64Decode) else {
-                throw AuthClientError.http(status: 200, endpoint: endpoint, body: "malformed vault in response")
-            }
-            return .vault(salt: salt, sealed: sealed)
-        default:
-            throw AuthClientError.http(status: 200, endpoint: endpoint, body: "unknown mode in response")
-        }
-    }
-
     /// `POST /recovery-email/recover/password/{start,finish}`: a new
     /// password under the ticket. Answers the session pair and the account
     /// id; no fresh-auth grant. The session names no device: the account is
@@ -446,54 +323,26 @@ public extension AuthClient {
         return RecoverResult(accountId: accountId, exportKey: output.exportKey(), session: finish.sessionPair)
     }
 
-    /// `POST /recovery-email/enrol/start` (bearer + fresh-auth grant).
+    /// `POST /recovery-email/enrol/start` (bearer, fresh-auth grant): ask
+    /// for a code at `address`, to add or replace the recovery email.
     func recoveryEmailEnrolStart(
         sessionToken: String, freshGrant: String, handle: Data, address: String, lang: String?
-    ) async throws -> EmailEnrolChallenge {
+    ) async throws -> EmailChallenge {
         try requireHandle(handle)
-        let endpoint = "/recovery-email/enrol/start"
-        let response: EmailEnrolStartResponse = try await post(
-            endpoint: endpoint,
+        return try await post(
+            endpoint: "/recovery-email/enrol/start",
             body: EmailEnrolStartRequest(
                 freshGrant: freshGrant, handle: base64UrlEncodeNoPad(handle), address: address, lang: lang),
             bearer: sessionToken)
-        guard let salt = base64Decode(response.vaultSalt) else {
-            throw AuthClientError.http(status: 200, endpoint: endpoint, body: "malformed vault_salt in response")
-        }
-        return EmailEnrolChallenge(
-            challenge: EmailChallenge(
-                challengeId: response.challengeId,
-                resendAfterSecs: response.resendAfterSecs,
-                expiresInSecs: response.expiresInSecs),
-            vaultSalt: salt)
     }
 
-    /// `POST /recovery-email/enrol/finish` (bearer). `sealedEntropy` is the
-    /// 44-byte vault for an account without a saved phrase, `nil` otherwise.
+    /// `POST /recovery-email/enrol/finish` (bearer): the mailed code.
     func recoveryEmailEnrolFinish(
-        sessionToken: String, challengeId: String, code: String, sealedEntropy: Data?
+        sessionToken: String, challengeId: String, code: String
     ) async throws -> EmailEnrolled {
         try await post(
             endpoint: "/recovery-email/enrol/finish",
-            body: EmailEnrolFinishRequest(
-                challengeId: challengeId, code: code, sealedEntropy: sealedEntropy.map(base64Encode)),
-            bearer: sessionToken)
-    }
-
-    /// `PUT /recovery-email/vault` (bearer, no fresh-auth grant): put the
-    /// email vault back for the address already confirmed. `vaultSalt` is 16
-    /// random bytes chosen here; `sealedEntropy` the 44-byte vault sealed
-    /// with it. Every well-formed request spends one of ten per day: never
-    /// called in a loop.
-    func recoveryEmailVaultPut(
-        sessionToken: String, handle: Data, address: String, vaultSalt: Data, sealedEntropy: Data
-    ) async throws {
-        try requireHandle(handle)
-        let _: EmailVaultPutResponse = try await send(
-            method: "PUT", endpoint: "/recovery-email/vault",
-            body: EmailVaultPutRequest(
-                handle: base64UrlEncodeNoPad(handle), address: address,
-                vaultSalt: base64Encode(vaultSalt), sealedEntropy: base64Encode(sealedEntropy)),
+            body: EmailEnrolFinishRequest(challengeId: challengeId, code: code),
             bearer: sessionToken)
     }
 
@@ -502,27 +351,6 @@ public extension AuthClient {
         let _: EmailRemovedResponse = try await send(
             method: "DELETE", endpoint: "/recovery-email",
             body: FreshGrantRequest(freshGrant: freshGrant), bearer: sessionToken)
-    }
-
-    /// `GET /account/phrase` (bearer).
-    func accountPhraseStatus(sessionToken: String) async throws -> AccountPhraseStatus {
-        var request = URLRequest(url: try buildURL(endpoint: "/account/phrase"))
-        request.httpMethod = "GET"
-        request.setValue("Bearer \(sessionToken)", forHTTPHeaderField: "Authorization")
-        return try await execute(endpoint: "/account/phrase", request: request)
-    }
-
-    /// `POST /account/phrase/saved` (bearer + fresh-auth grant) -> `204`. The
-    /// owner saved a phrase no email vault ever held; no key changes.
-    /// Idempotent. Refused `409 phrase-save-needs-rotation`
-    /// (``PhraseSaveRefusal``) and `403 fresh-auth-required`.
-    func markPhraseSaved(sessionToken: String, freshGrant: String) async throws {
-        var request = URLRequest(url: try buildURL(endpoint: "/account/phrase/saved"))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(sessionToken)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONEncoder().encode(FreshGrantRequest(freshGrant: freshGrant))
-        try await executeNoContent(endpoint: "/account/phrase/saved", request: request)
     }
 
     /// `GET /account/notices?after=<id>` or `?since_ms=<unix ms>` (bearer):

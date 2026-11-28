@@ -989,3 +989,182 @@ describe("witness quorum gate (ADR-0039, G-30 finding-1)", () => {
     });
   });
 });
+
+// ----------------------------------------------------------------------------
+// ADR-0101 section 10: the key-log half of the reset-seal rule
+// ----------------------------------------------------------------------------
+
+import * as realWasm from "../../wasm/lakko_ffi_wasm";
+import { passwordAnnouncement } from "../contacts/reset-seal-fixtures";
+import type { AnnouncementLeafEntry } from "./client";
+import type { SealLogStatus } from "./verify";
+
+describe("verifyIdentityInLog with a seal query (ADR-0101 section 10)", () => {
+  /** A REAL announcement of generation 1, seq 7, decoded by the real core. */
+  const announcement = (): Uint8Array =>
+    passwordAnnouncement(realWasm, {
+      accountId: ACCOUNT_ID,
+      signerSeed: 1,
+      keyGeneration: 1n,
+      seq: 7n,
+      exportKeyByte: 0x51,
+    });
+
+  function sealClient(impl: {
+    fetchAnnouncement?: (ak: Uint8Array, generation: bigint) => Promise<AnnouncementLeafEntry | null>;
+    fetchProof?: (idx: bigint) => Promise<InclusionProof>;
+    fetchLatest?: (ak: Uint8Array) => Promise<LatestEntry | null>;
+    fetchRoot?: () => Promise<SignedRoot>;
+  }): TransparencyClient {
+    const served = announcement();
+    return {
+      fetchRoot: impl.fetchRoot ?? vi.fn(async () => rootAt(10n)),
+      fetchLatest: impl.fetchLatest ?? vi.fn(async () => latestWith(SERVED_PUBKEY, true)),
+      fetchProof: impl.fetchProof ?? vi.fn(async () => PROOF_FIXTURE),
+      fetchAnnouncement:
+        impl.fetchAnnouncement ??
+        vi.fn(async () => ({ idx: 2n, keyGeneration: 1n, seq: 7n, announcement: served })),
+    } as unknown as TransparencyClient;
+  }
+
+  async function sealLog(
+    client: TransparencyClient,
+    extra: Partial<VerifyDeps> = {},
+    queried: Uint8Array = announcement(),
+  ): Promise<SealLogStatus | undefined> {
+    const result = await verifyIdentityInLog(
+      ACCOUNT_ID,
+      SERVED_PUBKEY,
+      {
+        client,
+        operatorKey: OPERATOR_KEY,
+        verifyInclusion: () => undefined,
+        verifySealInLog: () => true,
+        ...extra,
+      },
+      { previousAnnouncement: queried },
+    );
+    expect(result.status).toBe("confirmed");
+    return result.sealLog;
+  }
+
+  it("proven: the log's newest leaf of that generation is the served announcement, below the reset leaf", async () => {
+    const seen: unknown[] = [];
+    const client = sealClient({});
+    expect(
+      await sealLog(client, {
+        verifySealInLog: (args) => {
+          seen.push(args);
+          return true;
+        },
+      }),
+    ).toBe("proven");
+    // The proof is checked against the root the identity verdict rests on,
+    // for the announcement's own generation and seq (read by the core).
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      leafIndex: 2n,
+      resetLeafIndex: 3n,
+      keyGeneration: 1n,
+      seq: 7n,
+    });
+    expect((seen[0] as { root: SignedRoot }).root.logSize).toBe(10n);
+    expect(client.fetchAnnouncement).toHaveBeenCalledWith(expect.any(Uint8Array), 1n);
+    expect(client.fetchProof).toHaveBeenCalledWith(2n);
+  });
+
+  it("no seal query: the result carries no sealLog and the log is not asked", async () => {
+    const client = sealClient({});
+    const result = await verifyIdentityInLog(ACCOUNT_ID, SERVED_PUBKEY, {
+      client,
+      operatorKey: OPERATOR_KEY,
+      verifyInclusion: () => undefined,
+    });
+    expect(result).toEqual({ status: "confirmed", isReset: true });
+    expect(client.fetchAnnouncement).not.toHaveBeenCalled();
+  });
+
+  it("not-proven: the log holds no announcement for that generation", async () => {
+    expect(await sealLog(sealClient({ fetchAnnouncement: vi.fn(async () => null) }))).toBe("not-proven");
+  });
+
+  it("not-proven: the log's newest announcement is ANOTHER one (the directory served an older one)", async () => {
+    const newer = passwordAnnouncement(realWasm, {
+      accountId: ACCOUNT_ID,
+      signerSeed: 1,
+      keyGeneration: 1n,
+      seq: 8n,
+      exportKeyByte: 0x52,
+    });
+    const client = sealClient({
+      fetchAnnouncement: vi.fn(async () => ({ idx: 2n, keyGeneration: 1n, seq: 8n, announcement: newer })),
+    });
+    expect(await sealLog(client)).toBe("not-proven");
+    expect(client.fetchProof).toHaveBeenCalledTimes(1); // the identity leaf's only
+  });
+
+  it("not-proven: the announcement leaf is at or after the reset leaf", async () => {
+    const served = announcement();
+    for (const idx of [3n, 4n]) {
+      const client = sealClient({
+        fetchAnnouncement: vi.fn(async () => ({ idx, keyGeneration: 1n, seq: 7n, announcement: served })),
+      });
+      expect(await sealLog(client)).toBe("not-proven");
+    }
+  });
+
+  it("not-proven: the inclusion proof does not hold", async () => {
+    expect(await sealLog(sealClient({}), { verifySealInLog: () => false })).toBe("not-proven");
+  });
+
+  it("not-proven: bytes that are not an announcement", async () => {
+    const junk = new Uint8Array(200).fill(4);
+    const client = sealClient({});
+    expect(await sealLog(client, {}, junk)).toBe("not-proven");
+    expect(client.fetchAnnouncement).not.toHaveBeenCalled();
+  });
+
+  it("unreachable: the log cannot be read for the announcement", async () => {
+    const down = sealClient({
+      fetchAnnouncement: vi.fn(async () => {
+        throw new TransparencyNetworkError("/transparency/announcement", new Error("down"));
+      }),
+    });
+    expect(await sealLog(down)).toBe("unreachable");
+  });
+
+  it("unreachable: the proof was made against another tree size than the verified root", async () => {
+    // The log grew between the root read and the proof read: asked again
+    // later instead of an unsealed verdict being recorded on a race.
+    const proofs = vi
+      .fn<(idx: bigint) => Promise<InclusionProof>>()
+      .mockResolvedValueOnce(PROOF_FIXTURE)
+      .mockResolvedValueOnce({ ...PROOF_FIXTURE, idx: 2n, logSize: 11n });
+    expect(await sealLog(sealClient({ fetchProof: proofs }))).toBe("unreachable");
+  });
+
+  it("the real core refuses a proof that does not bind (no stub)", async () => {
+    // Without the seam the wasm `verifySealAnnouncementInLog` runs: the
+    // fixture root is not signed by the fixture operator key.
+    const result = await verifyIdentityInLog(
+      ACCOUNT_ID,
+      SERVED_PUBKEY,
+      { client: sealClient({}), operatorKey: OPERATOR_KEY, verifyInclusion: () => undefined },
+      { previousAnnouncement: announcement() },
+    );
+    expect(result.sealLog).toBe("not-proven");
+  });
+
+  it("is not reached when the identity verdict is not `confirmed`", async () => {
+    const client = sealClient({ fetchLatest: vi.fn(async () => latestWith(OTHER_PUBKEY, true)) });
+    const result = await verifyIdentityInLog(
+      ACCOUNT_ID,
+      SERVED_PUBKEY,
+      { client, operatorKey: OPERATOR_KEY, verifyInclusion: () => undefined },
+      { previousAnnouncement: announcement() },
+    );
+    expect(result.status).toBe("mismatch");
+    expect(result.sealLog).toBeUndefined();
+    expect(client.fetchAnnouncement).not.toHaveBeenCalled();
+  });
+});

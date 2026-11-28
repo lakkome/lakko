@@ -203,6 +203,11 @@ pub struct FfiOwnedChannel {
     pub channel_id: Vec<u8>,
     /// The 32-byte read key of a public channel.
     pub read_key: Option<Vec<u8>>,
+    /// The channel's 32-byte ADR-0087 handle write seed, when it has an
+    /// `@name`: a device that retakes the channel after a key reset signs
+    /// `rekey` with it to the handle key its new root derives.
+    #[uniffi(default = None)]
+    pub handle_seed: Option<Vec<u8>>,
     /// At most eight admission seeds.
     pub admission: Vec<FfiOwnedAdmissionSeed>,
     /// At most four epoch seeds.
@@ -265,6 +270,11 @@ fn to_core(list: &FfiOwnedChannelsList) -> Result<OwnedChannelsList, FfiError> {
                     .as_deref()
                     .map(|k| array::<32>(k, "readKey"))
                     .transpose()?,
+                handle_seed: c
+                    .handle_seed
+                    .as_deref()
+                    .map(|k| array::<32>(k, "handleSeed"))
+                    .transpose()?,
                 admission,
                 epochs,
             })
@@ -295,6 +305,7 @@ fn from_core(list: &OwnedChannelsList) -> FfiOwnedChannelsList {
             .map(|c| FfiOwnedChannel {
                 channel_id: c.channel_id.to_vec(),
                 read_key: c.read_key.map(|k| k.to_vec()),
+                handle_seed: c.handle_seed.map(|k| k.to_vec()),
                 admission: c
                     .admission
                     .iter()
@@ -363,7 +374,8 @@ pub fn merge_owned_channels_lists(
     ))
 }
 
-/// The list's fixed length (32 764).
+/// The list's fixed length (65 532: the 64 KiB vault bucket less its 4-byte
+/// length frame).
 #[uniffi::export]
 #[must_use]
 pub fn owned_channels_list_len() -> u32 {
@@ -392,6 +404,7 @@ mod tests {
                 FfiOwnedChannel {
                     channel_id: vec![5; 16],
                     read_key: None,
+                    handle_seed: Some(vec![6; 32]),
                     admission: vec![FfiOwnedAdmissionSeed {
                         version: 2,
                         seed: vec![7; 32],
@@ -410,6 +423,7 @@ mod tests {
                 FfiOwnedChannel {
                     channel_id: vec![4; 16],
                     read_key: Some(vec![8; 32]),
+                    handle_seed: None,
                     admission: vec![],
                     epochs: vec![],
                 },
@@ -425,6 +439,9 @@ mod tests {
         assert_eq!(back.channels[0].channel_id, vec![4; 16]);
         assert_eq!(back.passkey_locks[0].tag, vec![2; 16]);
         assert_eq!(back.channels[1].epochs[0].epoch_id, 3);
+        assert_eq!(back.channels[0].handle_seed, None);
+        assert_eq!(back.channels[1].handle_seed, Some(vec![6; 32]));
+        assert_eq!(owned_channels_list_len(), 65_532);
         let merged = merge_owned_channels_lists(back.clone(), back, vec![vec![4; 16]]).unwrap();
         assert_eq!(merged.channels.len(), 1);
 
@@ -454,5 +471,8 @@ mod tests {
         let mut dup = list();
         dup.channels[0].channel_id = vec![4; 16];
         assert!(encode_owned_channels_list(dup).is_err());
+        let mut short = list();
+        short.channels[0].handle_seed = Some(vec![6; 31]);
+        assert!(encode_owned_channels_list(short).is_err());
     }
 }

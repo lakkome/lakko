@@ -205,6 +205,15 @@ public struct IdentityUploadRequest: Codable, Equatable {
     /// which keeps it across a same-key re-upload and clears it on a key
     /// change that carries none. `nil` on every upload but a rotation's.
     public let conversationLink: String?
+    /// ADR-0101 section 10: standard base64 of the account's seal
+    /// announcement (200 to 641 bytes), signed by the uploaded identity key
+    /// at the generation the row is at after this upload, with a `seq` above
+    /// every one the row held. `nil` keeps the stored one. Discovery answers
+    /// `400 reset-seals-invalid` / `409 reset-seals-stale`.
+    public let resetSeals: String?
+    /// ADR-0101 section 10: standard base64 of the 214-byte reset seal, on
+    /// the attested upload of a key reset only. `400 reset-seal-invalid`.
+    public let resetSeal: String?
 
     public init(
         accountId: String,
@@ -215,8 +224,12 @@ public struct IdentityUploadRequest: Codable, Equatable {
         leafAuth: String? = nil,
         genesisAttest: String? = nil,
         keyResetAttest: String? = nil,
-        conversationLink: String? = nil
+        conversationLink: String? = nil,
+        resetSeals: String? = nil,
+        resetSeal: String? = nil
     ) {
+        self.resetSeals = resetSeals
+        self.resetSeal = resetSeal
         self.accountId = accountId
         self.signaturePubkey = signaturePubkey
         self.x25519Pubkey = x25519Pubkey
@@ -238,6 +251,8 @@ public struct IdentityUploadRequest: Codable, Equatable {
         case genesisAttest = "genesis_attest"
         case keyResetAttest = "key_reset_attest"
         case conversationLink = "conversation_link"
+        case resetSeals = "reset_seals"
+        case resetSeal = "reset_seal"
     }
 }
 
@@ -286,6 +301,17 @@ public struct IdentityFetchResponse: Codable, Equatable {
     /// unexpired. A peer verifies it under the attested new key before
     /// writing to the mailbox it names (``ContinuityTargets``).
     public let continuityBindingB64: String?
+    /// ADR-0101 section 10: standard base64 of the account's newest seal
+    /// announcement at the CURRENT generation; absent when it published
+    /// none. Verified locally under the account key.
+    public let resetSeals: String?
+    /// The newest announcement of the PREVIOUS generation, served after a
+    /// reset: what a peer checks the reset seal against, under the key it
+    /// held before the reset.
+    public let previousResetSeals: String?
+    /// The 214-byte reset seal of the account's latest reset; absent for an
+    /// unsealed one.
+    public let resetSeal: String?
 
     public init(
         signaturePubkey: String,
@@ -295,8 +321,14 @@ public struct IdentityFetchResponse: Codable, Equatable {
         keyGeneration: UInt64 = 1,
         keyResetAttest: String? = nil,
         conversationLink: String? = nil,
-        continuityBindingB64: String? = nil
+        continuityBindingB64: String? = nil,
+        resetSeals: String? = nil,
+        previousResetSeals: String? = nil,
+        resetSeal: String? = nil
     ) {
+        self.resetSeals = resetSeals
+        self.previousResetSeals = previousResetSeals
+        self.resetSeal = resetSeal
         self.continuityBindingB64 = continuityBindingB64
         self.signaturePubkey = signaturePubkey
         self.x25519Pubkey = x25519Pubkey
@@ -317,6 +349,9 @@ public struct IdentityFetchResponse: Codable, Equatable {
         keyResetAttest = try c.decodeIfPresent(String.self, forKey: .keyResetAttest)
         conversationLink = try c.decodeIfPresent(String.self, forKey: .conversationLink)
         continuityBindingB64 = try c.decodeIfPresent(String.self, forKey: .continuityBindingB64)
+        resetSeals = try c.decodeIfPresent(String.self, forKey: .resetSeals)
+        previousResetSeals = try c.decodeIfPresent(String.self, forKey: .previousResetSeals)
+        resetSeal = try c.decodeIfPresent(String.self, forKey: .resetSeal)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -328,6 +363,9 @@ public struct IdentityFetchResponse: Codable, Equatable {
         case keyResetAttest = "key_reset_attest"
         case conversationLink = "conversation_link"
         case continuityBindingB64 = "continuity_binding_b64"
+        case resetSeals = "reset_seals"
+        case previousResetSeals = "previous_reset_seals"
+        case resetSeal = "reset_seal"
     }
 }
 

@@ -23,15 +23,19 @@ import me.lakko.app.auth.MarkerStorage
  * optionally, the newest profile it holds for the person. It also carries an
  * INVITATION CARD: for a subscriber the channel's invitation card as "invite a
  * contact" mints it; for a publisher the one-use PUBLISHER card of "Add
- * publisher", whose request the owner's device approves without asking. An
- * owner return carries no invitation.
+ * publisher", whose request the owner's device approves without asking.
+ *
+ * An OWNER is never returned by anyone (rewritten 2026-11-26): the owner's
+ * device takes its channels back by itself from the account's own list
+ * (`OwnedChannels.kt`), with no subscriber or publisher taking part. The
+ * core's decoder refuses the owner role, and no return is planned for an
+ * owner.
  *
  * ## Who sends what ([channelReturnsFor])
  *
  * | this device                        | the reset account was           | sends role   |
  * |------------------------------------|---------------------------------|--------------|
  * | owner or publisher of the channel  | a subscriber with a member card | SUBSCRIBER   |
- * | anyone in the channel              | the owner (its card)            | OWNER        |
  * | an owner device                    | a publisher                     | PUBLISHER    |
  *
  * Each (channel, reset account, role) is sent once per reset generation.
@@ -46,7 +50,7 @@ import me.lakko.app.auth.MarkerStorage
  */
 
 /** The roles. */
-public enum class ChannelReturnRoleName { SUBSCRIBER, PUBLISHER, OWNER }
+public enum class ChannelReturnRoleName { SUBSCRIBER, PUBLISHER }
 
 /** What the reset device does with one decoded return. */
 public enum class ChannelReturnAction {
@@ -60,9 +64,6 @@ public enum class ChannelReturnAction {
     /** Already in the channel in that role: only the seeds are added. */
     ADD_SEEDS,
 
-    /** The owner: take the channel back with its recovery key. */
-    RECOVER_OWNER,
-
     /** Not verified, but it carries an invitation: shown as an ordinary
      *  invitation for the person to decide on. */
     SHOW_INVITATION,
@@ -74,24 +75,21 @@ public enum class ChannelReturnAction {
 /**
  * The reset device's rule over one decoded return.
  *
- * | verified | role       | invitation | already in that role | owns already | action           |
- * |----------|------------|------------|----------------------|--------------|------------------|
- * | no       | any        | yes        | -                    | -            | SHOW_INVITATION  |
- * | no       | any        | no         | -                    | -            | DROP             |
- * | yes      | subscriber | -          | yes                  | -            | ADD_SEEDS        |
- * | yes      | subscriber | yes        | no                   | -            | SUBSCRIBE        |
- * | yes      | subscriber | no         | no                   | -            | DROP             |
- * | yes      | publisher  | yes        | no                   | -            | ACCEPT_PUBLISHER |
- * | yes      | publisher  | otherwise  |                      | -            | ADD_SEEDS        |
- * | yes      | owner      | -          | -                    | yes          | ADD_SEEDS        |
- * | yes      | owner      | -          | -                    | no           | RECOVER_OWNER    |
+ * | verified | role       | invitation | already in that role | action           |
+ * |----------|------------|------------|----------------------|------------------|
+ * | no       | any        | yes        | -                    | SHOW_INVITATION  |
+ * | no       | any        | no         | -                    | DROP             |
+ * | yes      | subscriber | -          | yes                  | ADD_SEEDS        |
+ * | yes      | subscriber | yes        | no                   | SUBSCRIBE        |
+ * | yes      | subscriber | no         | no                   | DROP             |
+ * | yes      | publisher  | yes        | no                   | ACCEPT_PUBLISHER |
+ * | yes      | publisher  | otherwise  |                      | ADD_SEEDS        |
  */
 public fun channelReturnAction(
     verified: Boolean,
     role: ChannelReturnRoleName,
     hasInvitation: Boolean,
     alreadyInRole: Boolean,
-    ownsAlready: Boolean,
 ): ChannelReturnAction {
     if (!verified) return if (hasInvitation) ChannelReturnAction.SHOW_INVITATION else ChannelReturnAction.DROP
     return when (role) {
@@ -102,7 +100,6 @@ public fun channelReturnAction(
         }
         ChannelReturnRoleName.PUBLISHER ->
             if (hasInvitation && !alreadyInRole) ChannelReturnAction.ACCEPT_PUBLISHER else ChannelReturnAction.ADD_SEEDS
-        ChannelReturnRoleName.OWNER -> if (ownsAlready) ChannelReturnAction.ADD_SEEDS else ChannelReturnAction.RECOVER_OWNER
     }
 }
 
@@ -150,13 +147,9 @@ public fun channelReturnsFor(
 ): List<PlannedReturn> {
     val out = ArrayList<PlannedReturn>()
     for (ch in channels) {
-        fun cardOf(keyB64: String): ReturnCard? = ch.cards.firstOrNull { it.identityPkB64 == keyB64 }
+        // An owner is never returned: it takes its channels back by itself
+        // from its own list (ADR-0101 section 7, rewritten 2026-11-26).
         val owner = ch.ownerKeyB64
-        if (owner != null && owner !in ownKeysB64) {
-            val acct = superseded[owner]
-            val card = cardOf(owner)
-            if (acct != null && card != null) out += PlannedReturn(ch.idHex, ChannelReturnRoleName.OWNER, acct, card)
-        }
         if (ch.ownRole == ReturnOwnRole.SUBSCRIBER) continue
         val publishers = ch.publisherKeysB64.toSet()
         for (card in ch.cards) {
@@ -207,8 +200,7 @@ public fun newestSeeds(seeds: List<HeldSeed>): List<HeldSeed> {
 /**
  * Live walk 2026-11-26, D1 - the channels whose own member card this device
  * keeps current app-wide: every channel it publishes (owner and publisher
- * alike: the owner's card is what an owner return is planned from), never a
- * removed one. A channel this device only reads uploads its card from the
+ * alike), never a removed one. A channel this device only reads uploads its card from the
  * channel view. Distinct, in the order given. Pure.
  */
 public fun channelsOwingPublishingCard(
@@ -217,7 +209,9 @@ public fun channelsOwingPublishingCard(
     removed: (String) -> Boolean,
 ): List<String> = channels.distinct().filter { publishesHere(it) && !removed(it) }
 
-/** The owned channels still owing a recovery-key registration, sorted. */
+/** The owned channels still owing a recovery-key registration, sorted.
+ *  [registered] is the set registered from the owned-channels list key (a
+ *  channel registered under the removed scheme owes one again). */
 public fun channelsOwingRecoveryKey(owned: Collection<String>, registered: Set<String>): List<String> =
     owned.filter { it !in registered }.distinct().sorted()
 
@@ -321,7 +315,14 @@ public class RecoveryRegisteredStore(private val storage: MarkerStorage) {
     }
 
     public companion object {
-        public const val KEY_PREFIX: String = "channel-recovery-registered:"
+        /** `v2`: the key derived from the owned-channels list key (ADR-0101
+         *  section 7 item 5). The rows of the removed scheme
+         *  ([LEGACY_KEY_PREFIX]) are not read: every channel made before the
+         *  change registers again at its next pass. */
+        public const val KEY_PREFIX: String = "channel-recovery-registered-v2:"
+
+        /** The removed scheme's rows, wiped with the account. */
+        public const val LEGACY_KEY_PREFIX: String = "channel-recovery-registered:"
 
         public fun onDevice(context: Context): RecoveryRegisteredStore =
             RecoveryRegisteredStore(me.lakko.app.auth.ResetReturnStorage.plain(context))

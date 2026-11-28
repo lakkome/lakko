@@ -676,27 +676,25 @@ public class RecoverViewModel(
         }
         val user = (cachedUsername ?: snapshot.username).trim()
         val address = snapshot.emailAddress.trim()
-        mutableState.update {
-            it.copy(email = me.lakko.app.auth.EmailRecoverState(step = me.lakko.app.auth.EmailRecoverStep.Restoring, busy = true))
-        }
+        // The form stays, with `Save` showing its working word, until the
+        // session landed.
+        mutableState.update { it.copy(email = it.email.copy(busy = true, error = null)) }
         viewModelScope.launch {
             val passwordBytes = snapshot.password.toByteArray(Charsets.UTF_8)
             try {
-                val outcome = repo.emailRecoverFinish(user, address, step.ticket, passwordBytes)
-                val next = when (outcome) {
-                    AuthRepository.EmailRecoverOutcome.VaultNotOpened -> me.lakko.app.auth.afterEmailVaultNotOpened()
-                    // The repository flipped the auth state; the router
-                    // replaces this screen.
-                    else -> me.lakko.app.auth.EmailRecoverState()
-                }
-                closeEmail(next)
+                // A mailed code gives a new password and a session, never the
+                // keys: the repository flips the auth state (to the app on a
+                // device that holds the keys, else to "Restore your keys")
+                // and the router replaces this screen.
+                repo.emailRecoverFinish(user, address, step.ticket, passwordBytes)
+                closeEmail(me.lakko.app.auth.EmailRecoverState())
             } catch (err: Throwable) {
                 me.lakko.app.rethrowIfCancelled(err) {
                     mutableState.update { it.copy(email = it.email.copy(busy = false)) }
                 }
                 // The ticket may be spent: the flow ends on the list with
                 // the reason, never half-way.
-                val failure = me.lakko.app.auth.emailRecoverFailureOf(me.lakko.app.auth.EmailRecoverCall.Open, err)
+                val failure = me.lakko.app.auth.emailRecoverFailureOf(me.lakko.app.auth.EmailRecoverCall.Password, err)
                 val line = when (failure) {
                     is me.lakko.app.auth.EmailRecoverFailure.Line -> failure.text
                     is me.lakko.app.auth.EmailRecoverFailure.WrongCode -> failure.text

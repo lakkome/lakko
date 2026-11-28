@@ -124,7 +124,16 @@ data class SignupFinishResponse(
     val fresh_grant: String? = null,
     /** The proof's expiry as a unix-millisecond timestamp. */
     val fresh_grant_expires_at_ms: Long? = null,
-)
+    /** ADR-0101 section 7: base64url (no padding) of the account's 32-byte
+     *  server half `S` of the owned-channels password lock. Released here
+     *  (the account was created in this very exchange) and otherwise only
+     *  under the reset factor grant. Never stored in the clear, never
+     *  logged. */
+    val owned_channels_secret: String? = null,
+) {
+    /** The tokens, the grant and `S` never reach a log line. */
+    override fun toString(): String = "SignupFinishResponse(<redacted>)"
+}
 
 // ----------------------------------------------------------------------------
 // Login (services/auth/src/opaque.rs)
@@ -360,6 +369,8 @@ data class TotpEnrollFinishRequest(
     /** The first 6-digit code the authenticator produced, proving
      *  it holds the secret. */
     val code: String,
+    /** The fresh-auth grant (either method), required since 2026-11-26. */
+    val fresh_grant: String? = null,
 )
 
 /** `POST /totp/recover` request body. Anonymous (the caller lost
@@ -415,10 +426,6 @@ data class LoginHandleRequest(
 @Serializable
 data class LoginHandleRecoveryEmail(
     val address: String,
-    /** Standard base64 of the 16-byte salt of the vault sealed under the NEW
-     *  handle; with [sealed_entropy], or neither. */
-    val vault_salt: String? = null,
-    val sealed_entropy: String? = null,
 ) {
     /** The address never reaches a log line. */
     override fun toString(): String = "LoginHandleRecoveryEmail(<redacted>)"
@@ -477,8 +484,17 @@ data class SessionRefreshResponse(
  *  as signup builds its recovery half from the NEW 64-byte phrase seed. */
 @Serializable
 data class KeyResetStartRequest(
-    /** The fresh-auth proof; one grant serves both calls of one reset.
-     *  Absent or unusable: `403 fresh-auth-required`. */
+    /** The reset factor grant (ADR-0073, amended 2026-11-26): the password
+     *  and one second factor. One grant serves both calls of one reset.
+     *  Absent or unusable: `403 reset-factor-required`. */
+    val reset_grant: String,
+    val recovery_request: String,
+)
+
+/** `POST /account/keys/rotate/start` (bearer, ADR-0074): the rotation keeps
+ *  the fresh-auth grant. */
+@Serializable
+data class KeyRotateStartRequest(
     val fresh_grant: String,
     val recovery_request: String,
 )
@@ -491,8 +507,8 @@ data class KeyResetStartResponse(
 /** `POST /account/keys/reset/finish` (bearer). */
 @Serializable
 data class KeyResetFinishRequest(
-    /** The same fresh-auth proof `start` carried. */
-    val fresh_grant: String,
+    /** The same reset factor grant `start` carried. */
+    val reset_grant: String,
     /** base64(RegistrationUpload) for the new recovery credential. */
     val recovery_upload: String,
     /** base64url (no padding) of the NEW AccountIdentity Ed25519 public key
@@ -521,9 +537,6 @@ data class KeyRotateFinishRequest(
     val supersession_proof_b64: String,
     /** base64url (no padding) device ids, at most 8. */
     val revoke_device_ids_b64: List<String> = emptyList(),
-    /** ADR-0075 section 3: this rotation is "Save a recovery phrase". Sent
-     *  only when `true`. */
-    val phrase_saved: Boolean? = null,
 )
 
 /** `POST /account/keys/reset/finish` 200 body: the attestation and the pair
@@ -704,27 +717,7 @@ data class RecoveryEmailAvailableResponse(val available: Boolean = false)
 data class RecoveryEmailStatusResponse(
     val available: Boolean = false,
     val enabled: Boolean = false,
-    val vault: Boolean = false,
-    val phrase_saved: Boolean = false,
     val totp: Boolean = false,
-)
-
-/** `GET /account/phrase` (bearer, ADR-0075 section 3 as amended 2026-11-01).
- *  Answered on a server that sends no mail too. Both fields are required: a
- *  body without them is a failure, never a guessed path. */
-@Serializable
-data class AccountPhraseResponse(
-    /** The owner saved a recovery phrase. */
-    val saved: Boolean,
-    /** The current phrase was ever sealed in an email vault: saving it takes
-     *  a key rotation. */
-    val rotation_needed: Boolean,
-)
-
-/** `POST /account/phrase/saved` (bearer + fresh-auth grant). */
-@Serializable
-data class PhraseSavedRequest(
-    val fresh_grant: String,
 )
 
 /** `POST /recovery-email/enrol/start` (bearer). The address is sent as typed
@@ -744,8 +737,6 @@ data class RecoveryEmailEnrolStartRequest(
 @Serializable
 data class RecoveryEmailEnrolStartResponse(
     val challenge_id: String,
-    /** Standard base64 of the 16-byte vault salt. */
-    val vault_salt: String,
     val resend_after_secs: Long = 0,
     val expires_in_secs: Long = 0,
 )
@@ -755,31 +746,10 @@ data class RecoveryEmailEnrolStartResponse(
 data class RecoveryEmailEnrolFinishRequest(
     val challenge_id: String,
     val code: String,
-    /** Standard base64 of the 44-byte email vault; absent for an account
-     *  with a saved phrase. */
-    val sealed_entropy: String? = null,
 )
 
 @Serializable
-data class RecoveryEmailEnrolFinishResponse(val enabled: Boolean = false, val vault: Boolean = false)
-
-/** `PUT /recovery-email/vault` (bearer, no grant): install the vault for the
- *  address the account already confirmed (the automatic re-seal). */
-@Serializable
-data class RecoveryEmailVaultPutRequest(
-    val handle: String,
-    val address: String,
-    /** Standard base64 of 16 random bytes chosen by this device. */
-    val vault_salt: String,
-    /** Standard base64 of the 44-byte sealed entropy. */
-    val sealed_entropy: String,
-) {
-    /** The address never reaches a log line. */
-    override fun toString(): String = "RecoveryEmailVaultPutRequest(<redacted>)"
-}
-
-@Serializable
-data class RecoveryEmailVaultPutResponse(val vault: Boolean = false)
+data class RecoveryEmailEnrolFinishResponse(val enabled: Boolean = false)
 
 /** Body of `DELETE /recovery-email`. */
 @Serializable
@@ -820,18 +790,6 @@ data class EmailRecoverTotpRequest(val ticket: String, val code: String)
 
 @Serializable
 data class EmailRecoverOkResponse(val ok: Boolean = false)
-
-/** `POST /recovery-email/recover/open`. */
-@Serializable
-data class EmailRecoverTicketRequest(val ticket: String)
-
-@Serializable
-data class EmailRecoverOpenResponse(
-    /** `"vault"` or `"password"`. */
-    val mode: String,
-    val vault_salt: String? = null,
-    val sealed_entropy: String? = null,
-)
 
 /** `POST /recovery-email/recover/password/start`. */
 @Serializable
@@ -876,16 +834,61 @@ data class AccountNoticesResponse(
 @Serializable
 public data class SuspensionAppealRequest(val sealed_b64: String)
 
-/** Body of `POST /auth/channel-recovery/evaluate` (ADR-0101 section 7):
- *  URL-safe base64 (no padding) of one blinded element. */
-@Serializable
-data class ChannelRecoveryEvaluateRequest(
-    val blinded_element: String,
-)
+// -----------------------------------------------------------------
+// ADR-0073, amended 2026-11-26: the reset's second factor, and the server
+// half of the owned-channels password lock (ADR-0101 section 7)
+// -----------------------------------------------------------------
 
-/** Response of `POST /auth/channel-recovery/evaluate`: URL-safe base64 (no
- *  padding) of the evaluation. */
+/** `POST /totp/enroll/start` (bearer): the fresh-auth grant, either method. */
 @Serializable
-data class ChannelRecoveryEvaluateResponse(
-    val evaluation: String,
-)
+data class TotpEnrollStartRequest(val fresh_grant: String?)
+
+/** `POST /account/keys/reset/factor/totp` (bearer). The grant is the
+ *  PASSWORD sign-in's. */
+@Serializable
+data class ResetFactorTotpRequest(val fresh_grant: String?, val code: String) {
+    override fun toString(): String = "ResetFactorTotpRequest(<redacted>)"
+}
+
+/** `POST /account/keys/reset/factor/email/start` (bearer). */
+@Serializable
+data class ResetFactorEmailStartRequest(
+    val fresh_grant: String?,
+    /** base64url (no padding) of the account's 32-byte login handle. */
+    val handle: String,
+    val address: String,
+    val lang: String? = null,
+) {
+    /** The address and the grant never reach a log line. */
+    override fun toString(): String = "ResetFactorEmailStartRequest(<redacted>)"
+}
+
+/** `POST /account/keys/reset/factor/email/finish` (bearer). */
+@Serializable
+data class ResetFactorEmailFinishRequest(val fresh_grant: String?, val challenge_id: String, val code: String) {
+    override fun toString(): String = "ResetFactorEmailFinishRequest(<redacted>)"
+}
+
+/** `POST /account/keys/reset/factor/passkey` (bearer). */
+@Serializable
+data class ResetFactorPasskeyRequest(val fresh_grant: String?) {
+    override fun toString(): String = "ResetFactorPasskeyRequest(<redacted>)"
+}
+
+/** What every reset factor route answers. */
+@Serializable
+data class ResetFactorGrantResponse(val reset_grant: String, val reset_grant_expires_at_ms: Long) {
+    override fun toString(): String = "ResetFactorGrantResponse(<redacted>)"
+}
+
+/** `POST /account/owned-channels-secret` (bearer). */
+@Serializable
+data class OwnedChannelsSecretRequest(val reset_grant: String?) {
+    override fun toString(): String = "OwnedChannelsSecretRequest(<redacted>)"
+}
+
+/** base64url (no padding) of the account's 32-byte server half `S`. */
+@Serializable
+data class OwnedChannelsSecretResponse(val owned_channels_secret: String) {
+    override fun toString(): String = "OwnedChannelsSecretResponse(<redacted>)"
+}

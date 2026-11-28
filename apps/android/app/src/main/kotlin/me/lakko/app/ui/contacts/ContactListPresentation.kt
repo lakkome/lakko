@@ -268,3 +268,15 @@ public fun describeInviteLimit(maxUses: Long): UiText = when {
     maxUses <= 1L -> UiText("invite.uses.single")
     else -> UiText("invite.uses.up_to", counts = mapOf("count" to maxUses.toULong()))
 }
+
+/**
+ * UX 16.11 (alignment 2026-11-27): the card of a key recorded as started
+ * over (its account reset its keys without a seal; the old conversation is
+ * closed) never offers `Add to contacts`: that key belongs to an account that
+ * no longer exists. The person's new account is added by `@name`.
+ */
+public fun withoutAddForStartedOver(
+    sections: List<uniffi.lakko_ffi_uniffi.InfoSection>,
+    keyStartedOver: Boolean,
+): List<uniffi.lakko_ffi_uniffi.InfoSection> =
+    if (keyStartedOver) sections.filter { it != uniffi.lakko_ffi_uniffi.InfoSection.ADD_CONTACT } else sections

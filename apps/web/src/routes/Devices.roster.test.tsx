@@ -66,7 +66,6 @@ vi.mock("../devices/key-rotation-runtime", () => ({
 }));
 vi.mock("../devices/key-rotation", () => ({
   rotationCommitted: () => false,
-  rotationSavesPhrase: () => false,
   rotationStepLine: () => null,
 }));
 vi.mock("../devices/orchestrator", () => ({ prepareJoinFlow: vi.fn(), runScanFlow: vi.fn() }));

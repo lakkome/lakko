@@ -94,19 +94,26 @@ final class FreshAuthTests: XCTestCase {
         XCTAssertNil(FreshAuthGrant.from(grant: "", expiresAtMs: 5))
     }
 
-    func testBothResetCallsSendTheGrantInTheBody() throws {
+    /// ADR-0073, amended 2026-11-26 — both reset calls carry the reset
+    /// factor grant (the confirmed second factor), not the fresh-auth grant.
+    func testBothResetCallsSendTheResetGrantInTheBody() throws {
         let start = try JSONSerialization.jsonObject(
-            with: JSONEncoder().encode(KeyResetStartRequest(freshGrant: "g1", recoveryRequest: "req"))
+            with: JSONEncoder().encode(KeyResetStartRequest(resetGrant: "f1", recoveryRequest: "req"))
         ) as? [String: String]
-        XCTAssertEqual(start, ["fresh_grant": "g1", "recovery_request": "req"])
+        XCTAssertEqual(start, ["reset_grant": "f1", "recovery_request": "req"])
         let finish = try JSONSerialization.jsonObject(
             with: JSONEncoder().encode(
                 KeyResetFinishRequest(
-                    freshGrant: "g1", recoveryUpload: "up", newSignaturePubkeyB64: "pk", identityProofB64: "ip"))
+                    resetGrant: "f1", recoveryUpload: "up", newSignaturePubkeyB64: "pk", identityProofB64: "ip"))
         ) as? [String: String]
         XCTAssertEqual(finish, [
-            "fresh_grant": "g1", "recovery_upload": "up", "new_signature_pubkey_b64": "pk",
+            "reset_grant": "f1", "recovery_upload": "up", "new_signature_pubkey_b64": "pk",
             "identity_proof_b64": "ip"])
+        // A rotation still runs under the fresh-auth grant.
+        let rotate = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(KeyRotateStartRequest(freshGrant: "g1", recoveryRequest: "req"))
+        ) as? [String: String]
+        XCTAssertEqual(rotate, ["fresh_grant": "g1", "recovery_request": "req"])
     }
 
     // MARK: - The refusals
@@ -189,64 +196,6 @@ final class FreshAuthTests: XCTestCase {
         ) as? [String: String]
         XCTAssertEqual(register, ["user_name": "u", "nickname": "n", "fresh_grant": "g1"])
         XCTAssertEqual(WebauthnClient.freshGrantHeader, "x-lakko-fresh-grant")
-    }
-
-    // MARK: - The reset warning screen (UX 17.2)
-
-    private func form(
-        live: Bool = false, landing: SessionLanding? = .password, passkey: Bool = false,
-        knows: Bool = false, noPassword: Bool = false
-    ) -> KeyResetProofGate.Form {
-        KeyResetProofGate.form(
-            holdsLiveProof: live, landing: landing, hasUsablePasskey: passkey,
-            choseKnowsPassword: knows, choseNoPassword: noPassword)
-    }
-
-    func testALiveProofShowsNoBlockHoweverTheSessionWasLanded() {
-        for landing in [SessionLanding.password, .passkey, .authenticator, .other] {
-            XCTAssertEqual(form(live: true, landing: landing), .noBlock)
-        }
-        XCTAssertEqual(form(live: true, landing: nil), .noBlock)
-    }
-
-    func testWithoutAProofTheBlockIsShown() {
-        XCTAssertEqual(form(landing: .password), .block)
-        XCTAssertEqual(form(landing: .passkey), .block)
-        XCTAssertEqual(form(landing: .other), .block)
-        XCTAssertEqual(form(landing: nil), .block, "a relaunch restore knows no landing")
-    }
-
-    func testAnAuthenticatorSignInWithoutAPasskeyOpensOnThePanel() {
-        XCTAssertEqual(form(landing: .authenticator), .cannotReset)
-        XCTAssertEqual(form(landing: .authenticator, knows: true), .block, "I know my password")
-    }
-
-    func testAUsablePasskeyAlwaysGetsTheBlock() {
-        XCTAssertEqual(form(landing: .authenticator, passkey: true), .block)
-        XCTAssertEqual(form(landing: .other, passkey: true, noPassword: true), .block)
-    }
-
-    func testIDoNotKnowMyPasswordSwitchesToThePanel() {
-        XCTAssertEqual(form(landing: .password, noPassword: true), .cannotReset)
-        XCTAssertEqual(form(landing: .other, noPassword: true), .cannotReset)
-    }
-
-    func testTheNoPasswordLinkIsOnlyUnderABlockWithoutAPasskey() {
-        XCTAssertTrue(KeyResetProofGate.showsNoPasswordLink(form: .block, hasUsablePasskey: false))
-        XCTAssertFalse(KeyResetProofGate.showsNoPasswordLink(form: .block, hasUsablePasskey: true))
-        XCTAssertFalse(KeyResetProofGate.showsNoPasswordLink(form: .noBlock, hasUsablePasskey: false))
-        XCTAssertFalse(KeyResetProofGate.showsNoPasswordLink(form: .cannotReset, hasUsablePasskey: false))
-    }
-
-    func testResetNeedsTheWordAndWhatTheBlockNeeds() {
-        XCTAssertTrue(KeyResetProofGate.canSubmit(form: .noBlock, blockReady: false, confirmation: "RESET"))
-        XCTAssertFalse(KeyResetProofGate.canSubmit(form: .noBlock, blockReady: true, confirmation: "reset"))
-        XCTAssertFalse(KeyResetProofGate.canSubmit(form: .block, blockReady: false, confirmation: "RESET"))
-        XCTAssertTrue(KeyResetProofGate.canSubmit(form: .block, blockReady: true, confirmation: "RESET"))
-        XCTAssertFalse(KeyResetProofGate.canSubmit(form: .block, blockReady: true, confirmation: ""))
-        XCTAssertFalse(
-            KeyResetProofGate.canSubmit(form: .cannotReset, blockReady: true, confirmation: "RESET"),
-            "there is no reset button in the panel")
     }
 
     // MARK: - The password-change gate

@@ -197,6 +197,13 @@ extension ChatRepository {
               let row = record.messages.first(where: { $0.localId == localId }),
               row.ack == .waiting
         else { return .refused }
+        // Alignment item E (UX 16.11) — the person of this one-to-one
+        // started over: what waits here is never sent; it is `Not sent`.
+        if isStartedOverOneToOne(groupIdHex: groupIdHex) {
+            record.markFailed(localId: localId)
+            state = state.with(threads: buildThreadList())
+            return .refused
+        }
         // Section 7.3 — a media message's upload is the first part of its
         // send, and counts as the attempt.
         var ready = row

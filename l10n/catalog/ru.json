@@ -274,7 +274,7 @@
       "status": "machine"
     },
     "auth.signup.passkey.error": {
-      "text": "Не удалось добавить ключ доступа. Попробуйте ещё раз или выберите «Не сейчас».",
+      "text": "Не удалось добавить ключ доступа. Попробуйте ещё раз или выберите другой способ.",
       "status": "machine"
     },
     "auth.signup.passkey.lede": {
@@ -5057,6 +5057,14 @@
       "text": "Попросить снова",
       "status": "machine"
     },
+    "contacts.started_over.closed": {
+      "text": "{name} начинает заново с новым аккаунтом. Сообщения здесь больше не доставляются.",
+      "status": "machine"
+    },
+    "contacts.started_over.request_note": {
+      "text": "Lakko не удалось подтвердить, что это тот же человек, что и раньше. Принимайте запрос, только если уверены, что это действительно тот же человек.",
+      "status": "machine"
+    },
     "desktop.capture.body": {
       "text": "Разрешите доступ в настройках конфиденциальности системы и попробуйте снова.",
       "status": "machine"
@@ -7829,14 +7837,6 @@
       "text": "Почта для восстановления заменена.",
       "status": "machine"
     },
-    "notice.opened_by_email.body": {
-      "text": "{date}, на другом устройстве.",
-      "status": "machine"
-    },
-    "notice.opened_by_email.title": {
-      "text": "Ваш аккаунт открыли с помощью почты для восстановления",
-      "status": "machine"
-    },
     "notice.password_by_email.body": {
       "text": "{date} кто-то выбрал новый пароль с помощью вашей почты для восстановления.",
       "status": "machine"
@@ -7847,10 +7847,6 @@
     },
     "notice.phrase_saved": {
       "text": "Для вашего аккаунта сохранена фраза восстановления.",
-      "status": "machine"
-    },
-    "notice.secure.new_keys": {
-      "text": "Аккаунт получит новые ключи, и тот, кто его открыл, потеряет доступ.",
       "status": "machine"
     },
     "notice.secure.password_saved": {
@@ -8146,11 +8142,75 @@
       "status": "machine"
     },
     "proof.reset.cannot.title": {
-      "text": "Ключи аккаунта нельзя сбросить без пароля или ключа доступа",
+      "text": "Ключи аккаунта нельзя сбросить без пароля",
       "status": "machine"
     },
     "proof.reset.cannot.what_you_can_do": {
       "text": "Что можно сделать:",
+      "status": "machine"
+    },
+    "proof.reset.factor.heading": {
+      "text": "Подтвердите, что это вы",
+      "status": "machine"
+    },
+    "proof.reset.factor.title": {
+      "text": "Затем подтвердите одним из способов:",
+      "status": "machine"
+    },
+    "proof.reset.factor.title_no_password": {
+      "text": "Подтвердите одним из способов:",
+      "status": "machine"
+    },
+    "proof.reset.factor.totp": {
+      "text": "Приложение-аутентификатор",
+      "status": "machine"
+    },
+    "proof.reset.factor.email": {
+      "text": "Код из письма",
+      "status": "machine"
+    },
+    "proof.reset.factor.passkey": {
+      "text": "Ключ доступа",
+      "status": "machine"
+    },
+    "proof.reset.factor.none": {
+      "text": "Я не могу воспользоваться ни одним из них",
+      "status": "machine"
+    },
+    "proof.reset.factor.totp.prompt": {
+      "text": "Введите 6-значный код из приложения-аутентификатора.",
+      "status": "machine"
+    },
+    "proof.reset.factor.email.sent": {
+      "text": "Если это почта для восстановления {username}, код уже отправлен. Он действует 10 минут.",
+      "status": "machine"
+    },
+    "proof.reset.factor.passkey.use": {
+      "text": "Использовать ключ доступа",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.totp": {
+      "text": "Подтверждено приложением-аутентификатором.",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.email": {
+      "text": "Подтверждено кодом из письма.",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.passkey": {
+      "text": "Подтверждено ключом доступа.",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.title": {
+      "text": "Ключи аккаунта нельзя сбросить",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.body": {
+      "text": "Для сброса нужны пароль и ещё один способ подтвердить, что это вы: приложение-аутентификатор, почта для восстановления или ключ доступа.",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.body_none": {
+      "text": "У этого аккаунта нет второго способа подтвердить, что это вы, поэтому его ключи нельзя сбросить.",
       "status": "machine"
     },
     "proof.save_phrase.help": {
@@ -8161,16 +8221,12 @@
       "text": "Введите пароль, чтобы сменить имя пользователя.",
       "status": "machine"
     },
-    "protect.banner.action": {
-      "text": "Защитить",
-      "status": "machine"
-    },
-    "protect.banner.none": {
-      "text": "У этого аккаунта нет способа восстановления.",
+    "proof.add_totp.help": {
+      "text": "Введите пароль, чтобы настроить приложение-аутентификатор.",
       "status": "machine"
     },
     "protect.body": {
-      "text": "Если вы забудете пароль или потеряете это устройство, так вы снова войдёте.",
+      "text": "Если вы забудете пароль или потеряете это устройство, так вы снова войдёте. Выберите хотя бы один способ.",
       "status": "machine"
     },
     "protect.continue": {
@@ -8201,28 +8257,20 @@
       "text": "Создать ключ доступа",
       "status": "machine"
     },
+    "protect.passkey.cancelled": {
+      "text": "Ключ доступа не добавлен.",
+      "status": "machine"
+    },
     "protect.phrase.body": {
       "text": "12 слов, которые храните только вы. Самый надёжный способ вернуться.",
       "status": "machine"
     },
     "protect.phrase.save.body": {
-      "text": "12 слов, которые храните только вы. После этого код из письма сможет сменить пароль, но не откроет аккаунт.",
-      "status": "machine"
-    },
-    "protect.phrase.save.effect": {
-      "text": "Аккаунт получит новые ключи. Контакты и чаты останутся как есть. Другие ваши устройства останутся в аккаунте.",
+      "text": "12 слов, которые храните только вы. Они вернут ваши ключи на новом устройстве и чаты после сброса.",
       "status": "machine"
     },
     "protect.phrase.save.failed": {
       "text": "Не удалось завершить. Ничего не изменилось.",
-      "status": "machine"
-    },
-    "protect.phrase.save.finishing": {
-      "text": "У аккаунта новые ключи. Завершаем.",
-      "status": "machine"
-    },
-    "protect.phrase.save.progress": {
-      "text": "Меняем ключи аккаунта",
       "status": "machine"
     },
     "protect.phrase.save.show": {
@@ -8233,36 +8281,88 @@
       "text": "Сохранить фразу восстановления",
       "status": "machine"
     },
-    "protect.skip": {
-      "text": "Не сейчас",
-      "status": "machine"
-    },
-    "protect.skip.confirm.body": {
-      "text": "Если вы забудете пароль или потеряете это устройство, вы не сможете вернуться в этот аккаунт.",
-      "status": "machine"
-    },
-    "protect.skip.confirm.continue": {
-      "text": "Продолжить без защиты",
-      "status": "machine"
-    },
-    "protect.skip.confirm.title": {
-      "text": "Продолжить без защиты?",
-      "status": "machine"
-    },
-    "protect.status.email": {
-      "text": "Защищён вашей почтой",
-      "status": "machine"
-    },
-    "protect.status.none": {
-      "text": "Не защищён",
+    "protect.phrase.title_optional": {
+      "text": "Также сохранить фразу восстановления",
       "status": "machine"
     },
     "protect.status.phrase": {
-      "text": "Защищён фразой восстановления",
+      "text": "Ваши чаты сохраняет фраза восстановления",
+      "status": "machine"
+    },
+    "protect.status.passkey_seal": {
+      "text": "Ваши чаты сохраняет ключ доступа",
+      "status": "machine"
+    },
+    "protect.status.password_only": {
+      "text": "Ваши чаты сохраняет только пароль",
       "status": "machine"
     },
     "protect.title": {
       "text": "Защитите аккаунт",
+      "status": "machine"
+    },
+    "protect.totp.title": {
+      "text": "Использовать приложение-аутентификатор",
+      "status": "machine"
+    },
+    "protect.totp.body": {
+      "text": "6-значный код из приложения на телефоне. Если приложение есть только на этом устройстве, вы потеряете его вместе с устройством.",
+      "status": "machine"
+    },
+    "protect.optional": {
+      "text": "Необязательно",
+      "status": "machine"
+    },
+    "protect.continue_needs": {
+      "text": "Чтобы продолжить, выберите один из первых трёх способов.",
+      "status": "machine"
+    },
+    "protect.totp_only.warning": {
+      "text": "Если вы потеряете приложение-аутентификатор, вернуть этот аккаунт не получится. Добавьте ещё почту или ключ доступа.",
+      "status": "machine"
+    },
+    "protect.totp_only.warning_phrase": {
+      "text": "Если вы потеряете и приложение-аутентификатор, и фразу восстановления, вернуть этот аккаунт не получится.",
+      "status": "machine"
+    },
+    "protect.totp_only.remove_notice": {
+      "text": "Приложение-аутентификатор останется единственным другим способом подтвердить, что это вы. Если вы его потеряете, вернуть этот аккаунт не получится.",
+      "status": "machine"
+    },
+    "protect.totp_only.remove_notice_phrase": {
+      "text": "Приложение-аутентификатор останется единственным другим способом подтвердить, что это вы. Если вы потеряете его и фразу восстановления, вернуть этот аккаунт не получится.",
+      "status": "machine"
+    },
+    "protect.title_required": {
+      "text": "Добавьте второй способ вернуться в аккаунт",
+      "status": "machine"
+    },
+    "protect.last_factor": {
+      "text": "Сначала добавьте другой способ вернуться в аккаунт. Этот способ у аккаунта последний.",
+      "status": "machine"
+    },
+    "protect.username_email": {
+      "text": "Почта для восстановления переходит к новому имени пользователя. Введите её один раз.",
+      "status": "machine"
+    },
+    "protect.password_only.title": {
+      "text": "Ваши чаты зависят от пароля",
+      "status": "machine"
+    },
+    "protect.password_only.body": {
+      "text": "Если вы забудете пароль и потеряете устройства, чаты не вернутся. Чтобы они не пропали, сохраните фразу восстановления или добавьте ключ доступа.",
+      "status": "machine"
+    },
+    "protect.password_only.save_phrase": {
+      "text": "Сохранить фразу восстановления",
+      "status": "machine"
+    },
+    "protect.password_only.add_passkey": {
+      "text": "Добавить ключ доступа",
+      "status": "machine"
+    },
+    "protect.password_only.passkey_no_seal": {
+      "text": "С этим ключом доступа можно войти, но чаты он не сохраняет.",
       "status": "machine"
     },
     "recall.phrase.changed": {
@@ -8311,14 +8411,6 @@
     },
     "recovery.email.check.title": {
       "text": "Проверьте почту",
-      "status": "machine"
-    },
-    "recovery.email.failed": {
-      "text": "Не удалось вернуть аккаунт. Попробуйте ещё раз или выберите другой способ.",
-      "status": "machine"
-    },
-    "recovery.email.restoring": {
-      "text": "Возвращаем ваш аккаунт",
       "status": "machine"
     },
     "recovery.email.row.body": {
@@ -8565,16 +8657,8 @@
       "text": "{count, plural, one {Осталась # попытка} few {Остались # попытки} many {Осталось # попыток} other {Осталось # попытки}} до паузы на 15 минут.",
       "status": "machine"
     },
-    "recovery_email.add_again.body": {
-      "text": "Ключи аккаунта изменились. Введите адрес снова, чтобы код из письма мог вернуть аккаунт.",
-      "status": "machine"
-    },
-    "recovery_email.add_again.title": {
-      "text": "Добавьте почту снова",
-      "status": "machine"
-    },
     "recovery_email.body": {
-      "text": "Если вы забудете пароль, мы отправим код на этот адрес, чтобы вы смогли вернуться.",
+      "text": "Если вы забудете пароль, мы отправим код на этот адрес, чтобы вы смогли задать новый.",
       "status": "machine"
     },
     "recovery_email.code.expired": {
@@ -8618,7 +8702,7 @@
       "status": "machine"
     },
     "recovery_email.mailbox_warning": {
-      "text": "Тот, кто может читать этот ящик, сможет войти в ваш аккаунт. Сохраните фразу восстановления, чтобы это изменить.",
+      "text": "Тот, кто может читать этот ящик, сможет войти в ваш аккаунт.",
       "status": "machine"
     },
     "recovery_email.needs_username": {
@@ -8634,7 +8718,7 @@
       "status": "machine"
     },
     "recovery_email.remove.confirm.body": {
-      "text": "Вы не сможете вернуться в аккаунт через почту.",
+      "text": "Вы не сможете получить новый пароль через почту.",
       "status": "machine"
     },
     "recovery_email.remove.confirm.title": {
@@ -9045,10 +9129,6 @@
       "text": "Все остальные устройства этого аккаунта выходят из него и удаляются. Они теряют чаты и контакты этого аккаунта.",
       "status": "machine"
     },
-    "restore_identity.reset.effect_messages": {
-      "text": "Чаты, группы и каналы вернутся с устройств ваших контактов вместе с сообщениями, которые у них ещё есть, начиная с новых.",
-      "status": "machine"
-    },
     "restore_identity.reset.effect_passkeys": {
       "text": "Все ключи доступа этого аккаунта удаляются. Потом вы сможете добавить ключи доступа снова.",
       "status": "machine"
@@ -9087,6 +9167,18 @@
     },
     "restore_identity.reset.what_it_does": {
       "text": "Что произойдёт:",
+      "status": "machine"
+    },
+    "restore_identity.reset.sealed": {
+      "text": "Ваши чаты, группы и каналы вернутся с устройств ваших контактов вместе с сообщениями, которые у них ещё есть, начиная с новых.",
+      "status": "machine"
+    },
+    "restore_identity.reset.unsealed": {
+      "text": "Этот сброс начинает аккаунт заново. Ваши чаты, группы и каналы, которыми вы владеете, не вернутся. Имя пользователя останется за вами, и вы сможете отправить контактам новые запросы.",
+      "status": "machine"
+    },
+    "restore_identity.reset.unsealed_use_passkey": {
+      "text": "Чтобы вернуть чаты, используйте ключ доступа, который их сохраняет.",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -9849,6 +9941,10 @@
       "text": "Это устройство не умеет управлять ключами доступа.",
       "status": "machine"
     },
+    "settings.passkeys.no_seal": {
+      "text": "Не сохраняет чаты.",
+      "status": "machine"
+    },
     "settings.password.change": {
       "text": "Изменить пароль",
       "status": "machine"
@@ -9958,7 +10054,7 @@
       "status": "machine"
     },
     "settings.recovery.totp.done": {
-      "text": "Аутентификатор настроен. Код из приложения поможет вернуться в аккаунт.",
+      "text": "Аутентификатор настроен. Код из приложения теперь подтверждает, что это вы.",
       "status": "machine"
     },
     "settings.recovery.totp.error.generic": {
@@ -9991,6 +10087,14 @@
     },
     "settings.recovery.totp.unavailable": {
       "text": "Настройка аутентификатора сейчас недоступна.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.open_app": {
+      "text": "Открыть в приложении-аутентификаторе",
+      "status": "machine"
+    },
+    "settings.recovery.totp.on": {
+      "text": "Включено",
       "status": "machine"
     },
     "settings.recovery.words.not_on_this_device": {

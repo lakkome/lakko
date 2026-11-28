@@ -488,7 +488,7 @@
       "comment": "Name given to the passkey added at the end of signup; shown later in the list of passkeys, where it can be told apart from others."
     },
     "auth.signup.passkey.error": {
-      "text": "Could not add the passkey. Try again, or choose Not now.",
+      "text": "Could not add the passkey. Try again, or choose another way.",
       "comment": "Adding a passkey at the end of signup failed. 'Not now' is the button that skips the step."
     },
     "auth.signup.passkey.lede": {
@@ -5617,6 +5617,16 @@
       "text": "Ask again",
       "comment": "Beside a person in search who has not answered an earlier request."
     },
+    "contacts.started_over.closed": {
+      "text": "{name} started over with a new account. Messages here are no longer delivered.",
+      "comment": "Shown in place of the message field in a one-to-one chat after the other person reset their account in a way this device could not confirm; {name} is the person's @name or display name.",
+      "security_critical": true
+    },
+    "contacts.started_over.request_note": {
+      "text": "Lakko could not confirm this is the same person as before. Accept only if you are sure it is them.",
+      "comment": "Line under the name on a contact request that comes from an account that started over under a username this device already knew.",
+      "security_critical": true
+    },
     "desktop.capture.body": {
       "text": "Allow it in your system's privacy settings, then try again.",
       "comment": "Second line of the desktop screen shown when the operating system refused Lakko the microphone or camera."
@@ -8605,16 +8615,6 @@
       "comment": "Notice on the account's other devices.",
       "security_critical": true
     },
-    "notice.opened_by_email.body": {
-      "text": "On {date}, on another device.",
-      "comment": "{date} is a localized date and time.",
-      "security_critical": true
-    },
-    "notice.opened_by_email.title": {
-      "text": "Your account was opened with your recovery email",
-      "comment": "Title of a notice on the account's own devices.",
-      "security_critical": true
-    },
     "notice.password_by_email.body": {
       "text": "Someone used your recovery email to choose a new password on {date}.",
       "comment": "{date} is a localized date and time.",
@@ -8628,11 +8628,6 @@
     "notice.phrase_saved": {
       "text": "A recovery phrase was saved for your account.",
       "comment": "Notice on the account's other devices.",
-      "security_critical": true
-    },
-    "notice.secure.new_keys": {
-      "text": "This gives your account new keys, so whoever opened it loses it.",
-      "comment": "Under 'Save a recovery phrase' on the screen opened by 'It was not me'.",
       "security_critical": true
     },
     "notice.secure.password_saved": {
@@ -9147,13 +9142,84 @@
       "security_critical": true
     },
     "proof.reset.cannot.title": {
-      "text": "The account keys cannot be reset without your password or a passkey",
+      "text": "The account keys cannot be reset without your password",
       "comment": "Title shown in place of the reset form to a person who signed in with an authenticator code and does not know the password. There is no reset button in this state.",
       "security_critical": true
     },
     "proof.reset.cannot.what_you_can_do": {
       "text": "What you can do:",
       "comment": "Heading of the list of three ways to get the account's keys back, on the screen that says the keys cannot be reset without the password or a passkey."
+    },
+    "proof.reset.factor.heading": {
+      "text": "Confirm it is you",
+      "comment": "Heading of the section of the reset screen that asks for the password and one more confirmation."
+    },
+    "proof.reset.factor.title": {
+      "text": "Then confirm with one of these:",
+      "comment": "Line above the list of second confirmations on the reset screen, when the password field is shown above it."
+    },
+    "proof.reset.factor.title_no_password": {
+      "text": "Confirm with one of these:",
+      "comment": "The same line when no password field is shown (the password was typed less than ten minutes ago)."
+    },
+    "proof.reset.factor.totp": {
+      "text": "Authenticator app",
+      "comment": "Row in the list of second confirmations on the reset screen."
+    },
+    "proof.reset.factor.email": {
+      "text": "Code by email",
+      "comment": "Row in the list of second confirmations on the reset screen."
+    },
+    "proof.reset.factor.passkey": {
+      "text": "Passkey",
+      "comment": "Row in the list of second confirmations on the reset screen."
+    },
+    "proof.reset.factor.none": {
+      "text": "I cannot use any of these",
+      "comment": "Link under the list of second confirmations on the reset screen."
+    },
+    "proof.reset.factor.totp.prompt": {
+      "text": "Enter the 6-digit code from your authenticator app.",
+      "comment": "Line above the code field of the authenticator row on the reset screen."
+    },
+    "proof.reset.factor.email.sent": {
+      "text": "If this is the recovery email of {username}, a code is on its way. It works for 10 minutes.",
+      "comment": "Shown on the reset screen after Send code, whether or not the typed address is the account's; {username} is the account's @name.",
+      "security_critical": true
+    },
+    "proof.reset.factor.passkey.use": {
+      "text": "Use passkey",
+      "comment": "Button of the passkey row on the reset screen; opens the system passkey sheet."
+    },
+    "proof.reset.factor.done.totp": {
+      "text": "Confirmed with your authenticator app.",
+      "comment": "One line with a check mark that replaces the confirmation section of the reset screen once the code was accepted.",
+      "security_critical": true
+    },
+    "proof.reset.factor.done.email": {
+      "text": "Confirmed with a code by email.",
+      "comment": "The same line after a mailed code was accepted.",
+      "security_critical": true
+    },
+    "proof.reset.factor.done.passkey": {
+      "text": "Confirmed with a passkey.",
+      "comment": "The same line after a passkey was accepted.",
+      "security_critical": true
+    },
+    "proof.reset.no_factor.title": {
+      "text": "The account keys cannot be reset",
+      "comment": "Title of the panel shown on the reset screen when the person cannot use any second confirmation.",
+      "security_critical": true
+    },
+    "proof.reset.no_factor.body": {
+      "text": "Resetting needs your password and one more way to confirm it is you: your authenticator app, your recovery email or a passkey.",
+      "comment": "Body of that panel.",
+      "security_critical": true
+    },
+    "proof.reset.no_factor.body_none": {
+      "text": "This account has no second way to confirm it is you, so its keys cannot be reset.",
+      "comment": "Body of that panel for an account that has no authenticator app, no recovery email and no passkey.",
+      "security_critical": true
     },
     "proof.save_phrase.help": {
       "text": "Enter your password to save a recovery phrase.",
@@ -9163,17 +9229,13 @@
       "text": "Enter your password to change your username.",
       "comment": "Helper under the password field of the proof block on the change-username screen."
     },
-    "protect.banner.action": {
-      "text": "Protect it",
-      "comment": "Button on that banner."
-    },
-    "protect.banner.none": {
-      "text": "This account has no way back in.",
-      "comment": "Banner in Settings > Account for an account with no email and no saved phrase.",
+    "proof.add_totp.help": {
+      "text": "Enter your password to set up an authenticator app.",
+      "comment": "Helper under the password field shown before the authenticator setup in Settings when the person has not proven the password in the last ten minutes.",
       "security_critical": true
     },
     "protect.body": {
-      "text": "If you forget your password or lose this device, this is how you get back in.",
+      "text": "If you forget your password or lose this device, this is how you get back in. Choose at least one.",
       "comment": "Under the heading of the protect-your-account step. Says 'device', not 'phone': it shows in browsers too."
     },
     "protect.continue": {
@@ -9205,34 +9267,24 @@
       "text": "Create a passkey",
       "comment": "Row on the protect-your-account step."
     },
+    "protect.passkey.cancelled": {
+      "text": "No passkey was added.",
+      "comment": "Plain line under the passkey row on the 'Protect your account' step after the person closed the system passkey sheet. Not an error."
+    },
     "protect.phrase.body": {
       "text": "12 words only you keep. The strongest way back.",
       "comment": "Under 'Save a recovery phrase' on the protect-your-account step.",
       "security_critical": true
     },
     "protect.phrase.save.body": {
-      "text": "12 words that only you keep. After this, a code by email can change your password but cannot open your account.",
+      "text": "12 words that only you keep. They bring back your keys on a new device, and your chats after a reset.",
       "comment": "First paragraph of the 'Save a recovery phrase' screen.",
-      "security_critical": true
-    },
-    "protect.phrase.save.effect": {
-      "text": "This gives your account new keys. Your contacts and chats stay as they are. Your other devices stay signed in.",
-      "comment": "Second paragraph of that screen.",
       "security_critical": true
     },
     "protect.phrase.save.failed": {
       "text": "We could not finish. Nothing changed.",
       "comment": "The key change behind saving a phrase failed.",
       "security_critical": true
-    },
-    "protect.phrase.save.finishing": {
-      "text": "Your account has new keys. Finishing up.",
-      "comment": "Shown while the last steps of saving a phrase are still owed; the words appear after it.",
-      "security_critical": true
-    },
-    "protect.phrase.save.progress": {
-      "text": "Changing your account's keys",
-      "comment": "Progress line while 'Save a recovery phrase' is working."
     },
     "protect.phrase.save.show": {
       "text": "Show my 12 words",
@@ -9242,39 +9294,99 @@
       "text": "Save a recovery phrase",
       "comment": "Row title; also the title of the Settings screen that shows the 12 words for the first time."
     },
-    "protect.skip": {
-      "text": "Not now",
-      "comment": "Plain button that skips the protect-your-account step."
-    },
-    "protect.skip.confirm.body": {
-      "text": "If you forget your password or lose this device, you will not be able to get back into this account.",
-      "comment": "Body of the confirmation after 'Not now'. Says 'device', not 'phone': it shows in browsers too.",
-      "security_critical": true
-    },
-    "protect.skip.confirm.continue": {
-      "text": "Continue without",
-      "comment": "Plain button confirming the skip."
-    },
-    "protect.skip.confirm.title": {
-      "text": "Continue without protection?",
-      "comment": "Title of the confirmation after 'Not now'.",
-      "security_critical": true
-    },
-    "protect.status.email": {
-      "text": "Protected by your email",
-      "comment": "Status line in Settings > Account."
-    },
-    "protect.status.none": {
-      "text": "Not protected",
-      "comment": "Status line in Settings > Account."
+    "protect.phrase.title_optional": {
+      "text": "Also save a recovery phrase",
+      "comment": "Title of the optional recovery phrase row on the 'Protect your account' step."
     },
     "protect.status.phrase": {
-      "text": "Protected by your recovery phrase",
+      "text": "Your chats are kept by your recovery phrase",
       "comment": "Status line in Settings > Account."
+    },
+    "protect.status.passkey_seal": {
+      "text": "Your chats are kept by a passkey",
+      "comment": "Status line in Settings > Account when no recovery phrase is saved and a passkey of the account would bring the chats back after resetting the account keys."
+    },
+    "protect.status.password_only": {
+      "text": "Your chats are kept by your password only",
+      "comment": "Status line in Settings > Account, in the warning colour, when neither a recovery phrase nor a passkey would bring the chats back: only the current password does.",
+      "security_critical": true
     },
     "protect.title": {
       "text": "Protect your account",
       "comment": "Heading of the step after sign-up where the person chooses how to get back in later."
+    },
+    "protect.totp.title": {
+      "text": "Use an authenticator app",
+      "comment": "Row on the 'Protect your account' step, and the heading of the authenticator setup screen it opens."
+    },
+    "protect.totp.body": {
+      "text": "A 6-digit code from an app on your phone. If the app is only on this device, you lose it with the device.",
+      "comment": "Line under the 'Use an authenticator app' row on the 'Protect your account' step.",
+      "security_critical": true
+    },
+    "protect.optional": {
+      "text": "Optional",
+      "comment": "Caption above the recovery phrase row on the 'Protect your account' step: the phrase is an extra and does not count as one of the required ways."
+    },
+    "protect.continue_needs": {
+      "text": "Choose one of the first three to continue.",
+      "comment": "Line under the disabled Continue button on the 'Protect your account' step: one of email, authenticator app or passkey must be set up first."
+    },
+    "protect.totp_only.warning": {
+      "text": "If you lose your authenticator app, you will not be able to get this account back. Add an email or a passkey as well.",
+      "comment": "Warning (not an error) shown when the authenticator app is the account's only second way in and no recovery phrase is saved. On the sign-up step and at the top of Settings > Security > Recovery.",
+      "security_critical": true
+    },
+    "protect.totp_only.warning_phrase": {
+      "text": "If you lose both your authenticator app and your recovery phrase, you will not be able to get this account back.",
+      "comment": "The same warning when a recovery phrase is also saved.",
+      "security_critical": true
+    },
+    "protect.totp_only.remove_notice": {
+      "text": "Your authenticator app will be the only other way to confirm it is you. If you lose it, you will not be able to get this account back.",
+      "comment": "Added to the confirmation of removing a recovery email or a passkey when the authenticator app would be the only second way left and no recovery phrase is saved.",
+      "security_critical": true
+    },
+    "protect.totp_only.remove_notice_phrase": {
+      "text": "Your authenticator app will be the only other way to confirm it is you. If you lose it and your recovery phrase, you will not be able to get this account back.",
+      "comment": "The same line when a recovery phrase is saved.",
+      "security_critical": true
+    },
+    "protect.title_required": {
+      "text": "Add a second way to get back in",
+      "comment": "Heading of the 'Protect your account' step when it is shown before the app to an account that has no recovery email, no authenticator app and no passkey."
+    },
+    "protect.last_factor": {
+      "text": "Add another way to get back in first. This is the last one this account has.",
+      "comment": "Body of the dialog shown when the person tries to remove the recovery email or the last passkey and the account would be left with no second way in. One button: OK.",
+      "security_critical": true
+    },
+    "protect.username_email": {
+      "text": "Your recovery email moves to your new username. Type it once.",
+      "comment": "Line on the change-username screen above an email field, shown when the recovery email is the account's last second way in and this device does not remember the address."
+    },
+    "protect.password_only.title": {
+      "text": "Your chats depend on your password",
+      "comment": "Title of the notice shown when the account has no saved recovery phrase and no passkey that keeps the chats.",
+      "security_critical": true
+    },
+    "protect.password_only.body": {
+      "text": "If you forget your password and lose your devices, your chats will not come back. Save a recovery phrase or add a passkey to keep them.",
+      "comment": "Body of the same notice.",
+      "security_critical": true
+    },
+    "protect.password_only.save_phrase": {
+      "text": "Save a recovery phrase",
+      "comment": "Button on the notice 'Your chats depend on your password'."
+    },
+    "protect.password_only.add_passkey": {
+      "text": "Add a passkey",
+      "comment": "Button on the notice 'Your chats depend on your password'. Shown only where the device can create passkeys."
+    },
+    "protect.password_only.passkey_no_seal": {
+      "text": "This passkey signs you in but does not keep your chats.",
+      "comment": "Extra line on the notice after the person added a passkey that cannot bring the chats back.",
+      "security_critical": true
     },
     "recall.phrase.changed": {
       "text": "This account's keys were changed on {date}. Was that you?",
@@ -9329,14 +9441,6 @@
     "recovery.email.check.title": {
       "text": "Check your email",
       "comment": "Heading of the code step. Shown whatever was typed."
-    },
-    "recovery.email.failed": {
-      "text": "We could not bring back your account. Try again, or choose another way.",
-      "comment": "The keys kept for the account could not be opened after the code was accepted. Nothing was changed."
-    },
-    "recovery.email.restoring": {
-      "text": "Bringing back your account",
-      "comment": "Progress line while the keys are being restored after the code."
     },
     "recovery.email.row.body": {
       "text": "A code sent to your recovery email.",
@@ -9594,17 +9698,8 @@
       "comment": "Shown after a wrong answer on the three-words form; {count} is how many more wrong answers this device accepts before the form pauses for 15 minutes.",
       "security_critical": true
     },
-    "recovery_email.add_again.body": {
-      "text": "Your account's keys changed. Type your address again so a code by email can bring your account back.",
-      "comment": "Under that action.",
-      "security_critical": true
-    },
-    "recovery_email.add_again.title": {
-      "text": "Add your email again",
-      "comment": "Row and banner action when the account's keys changed and email can no longer bring the account back."
-    },
     "recovery_email.body": {
-      "text": "If you forget your password, we send a code to this address so you can get back in.",
+      "text": "If you forget your password, we send a code to this address so you can choose a new one.",
       "comment": "Under the title of the recovery email screen."
     },
     "recovery_email.code.expired": {
@@ -9648,7 +9743,7 @@
       "comment": "Under the address field when it does not parse."
     },
     "recovery_email.mailbox_warning": {
-      "text": "Anyone who can read this mailbox can get into your account. Save a recovery phrase to change that.",
+      "text": "Anyone who can read this mailbox can get into your account.",
       "comment": "Shown under the address field only while no recovery phrase is saved.",
       "security_critical": true
     },
@@ -9666,7 +9761,7 @@
       "comment": "Button: remove the recovery email."
     },
     "recovery_email.remove.confirm.body": {
-      "text": "You will not be able to get back in by email.",
+      "text": "You will not be able to get a new password by email.",
       "comment": "Body of the confirmation.",
       "security_critical": true
     },
@@ -10124,11 +10219,6 @@
       "comment": "Consequence of resetting the account keys: the other devices. One bullet of the warning.",
       "security_critical": true
     },
-    "restore_identity.reset.effect_messages": {
-      "text": "Chats, groups and channels come back from your contacts' devices, with the messages they still have, newest first.",
-      "comment": "Consequence of resetting the account keys: what comes back by itself afterwards (ADR-0101). Contacts' devices send back the conversations and the messages they still hold, the newest first. One bullet of the warning.",
-      "security_critical": true
-    },
     "restore_identity.reset.effect_passkeys": {
       "text": "Every passkey of this account is deleted. You can add passkeys again afterwards.",
       "comment": "Consequence of resetting the account keys: the passkeys. One bullet of the warning.",
@@ -10173,6 +10263,21 @@
     "restore_identity.reset.what_it_does": {
       "text": "What it does:",
       "comment": "Heading of the list of consequences in the warning before resetting the account keys.",
+      "security_critical": true
+    },
+    "restore_identity.reset.sealed": {
+      "text": "Your chats, groups and channels will come back from your contacts' devices, with the messages they still have, newest first.",
+      "comment": "Shown on the reset screen, between the confirmed second confirmation and the word to type, when this reset will bring the conversations back.",
+      "security_critical": true
+    },
+    "restore_identity.reset.unsealed": {
+      "text": "This reset starts your account over. Your chats, groups and the channels you own will not come back. You keep your username, and you can send your contacts new requests.",
+      "comment": "Shown in the warning colour in the same place when this reset will NOT bring the conversations back.",
+      "security_critical": true
+    },
+    "restore_identity.reset.unsealed_use_passkey": {
+      "text": "Use a passkey that keeps your chats to bring them back.",
+      "comment": "Follows the line above when the account has a passkey that would bring the chats back and it was not the confirmation used; a 'Use passkey' button follows.",
       "security_critical": true
     },
     "restore_identity.submit": {
@@ -11014,6 +11119,11 @@
       "text": "This device cannot manage passkeys.",
       "comment": "Desktop app: passkeys are not available on this device, so the passkey list cannot be shown."
     },
+    "settings.passkeys.no_seal": {
+      "text": "Does not keep your chats.",
+      "comment": "Line on a passkey's row in Settings > Security > Passkeys for a passkey that signs in but would not bring the chats back after resetting the account keys.",
+      "security_critical": true
+    },
     "settings.password.change": {
       "text": "Change password",
       "comment": "Button that opens the new-password form in Settings > Security."
@@ -11142,7 +11252,7 @@
       "comment": "The account already has an authenticator; the server refuses a silent swap."
     },
     "settings.recovery.totp.done": {
-      "text": "Authenticator set up. A code from the app can now get you back into your account.",
+      "text": "Authenticator set up. A code from the app now confirms it is you.",
       "comment": "Enrolment finished."
     },
     "settings.recovery.totp.error.generic": {
@@ -11178,6 +11288,14 @@
     "settings.recovery.totp.unavailable": {
       "text": "Authenticator setup is not available right now.",
       "comment": "The server has authenticator recovery switched off."
+    },
+    "settings.recovery.totp.open_app": {
+      "text": "Open in authenticator app",
+      "comment": "Button on the authenticator setup screen, phones only: hands the setup link to the authenticator app installed on the phone."
+    },
+    "settings.recovery.totp.on": {
+      "text": "On",
+      "comment": "State shown on the Authenticator app card in Settings once an authenticator is set up."
     },
     "settings.recovery.words.not_on_this_device": {
       "text": "Not available on this device: your recovery phrase is not saved here.",

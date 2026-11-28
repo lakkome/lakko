@@ -93,6 +93,24 @@ public object ChannelDiscovery {
         uniffi.lakko_ffi_uniffi.channelReadKey(identity, ChannelsComposer.channelIdFromHex(channelIdHex))
 
     /**
+     * ADR-0101 section 7 item 4 — the handle write seed a channel's @name is
+     * held by now: the journal root of the CURRENT account seed over the
+     * PublisherGroup id the LINEAGE identity [identity] derives (the rule of
+     * [writeHandle]). The owned-channels list carries it so a device that
+     * retakes the channel after a reset can sign `rekey` with it. The caller
+     * wipes it.
+     */
+    public fun handleWriteSeed(identity: uniffi.lakko_ffi_uniffi.Identity, channelIdHex: String): ByteArray {
+        val journalId = uniffi.lakko_ffi_uniffi.publisherGroupIdFor(identity, ChannelsComposer.channelIdFromHex(channelIdHex))
+        val currentSeed = ChannelOwnerSuccession.withOwnerIdentity(identity) { it.ed25519Seed() }
+        try {
+            return me.lakko.app.chat.groupHandleSeed(currentSeed, journalId)
+        } finally {
+            currentSeed.fill(0)
+        }
+    }
+
+    /**
      * ADR-0087 sections 1 to 4 — write a channel's @name on the handle
      * mechanism. One rule on all three clients (section 3 + ADR-0074): the
      * journal id is the PublisherGroup id the LINEAGE identity [identity]
@@ -165,7 +183,10 @@ public object ChannelDiscovery {
         val store = me.lakko.app.chat.GroupSettingsStore
         val oldSeed = store.owedRekeySeed(context, accountIdB64, channel.id) ?: return true
         try {
-            val held = channel.sharedMeta()?.fullRecord()?.handle
+            // A channel whose newest record is not read yet (a retake, before
+            // its epoch seeds opened the record) keeps the rekey owed.
+            val meta = channel.sharedMeta() ?: return false
+            val held = meta.fullRecord()?.handle
             if (held == null) {
                 store.saveOwedRekeySeed(context, accountIdB64, channel.id, null)
                 return true

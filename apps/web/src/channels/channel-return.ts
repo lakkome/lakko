@@ -21,15 +21,20 @@
  * without asking. The reset device opens either on the device with no
  * network (`openChannelInviteCardWith`) and goes through the ordinary path:
  * Subscribe, or Accept (the publisher request, whose Welcome lands like any
- * approved request). An owner return carries no invitation.
+ * approved request).
+ *
+ * An OWNER does not come back this way (rewritten 2026-11-26): it takes its
+ * own channels back from its owned-channels list (`owned/`), with no
+ * subscriber or publisher taking part. No device sends an owner return, the
+ * core's decoder refuses role 3, and a subscriber's device sends nothing.
  *
  * ## Who sends what ({@link channelReturnsFor})
  *
  * | this device                        | the reset account was           | sends role   |
  * |------------------------------------|---------------------------------|--------------|
  * | owner or publisher of the channel  | a subscriber with a member card | subscriber   |
- * | anyone in the channel              | the owner (its card)            | owner        |
  * | an owner device                    | a publisher                     | publisher    |
+ * | anyone                             | the owner                       | nothing      |
  *
  * Each (channel, reset account, role) is sent once per reset generation; the
  * record of what was sent is kept per account ({@link SentReturns}).
@@ -41,13 +46,12 @@
  * return is acted on without a prompt. An unverified one that carries an
  * invitation is SHOWN as the ordinary channel invitation card (Subscribe /
  * Accept by the person), never accepted silently and never dropped; one
- * without an invitation (an owner return) has nothing to show and is
- * dropped. Knowing the account id is not enough to subscribe someone to a
- * channel.
+ * without an invitation has nothing to show and is dropped. Knowing the
+ * account id is not enough to subscribe someone to a channel.
  */
 
 /** The roles, as the wire numbers them. */
-export type ChannelReturnRoleName = "subscriber" | "publisher" | "owner";
+export type ChannelReturnRoleName = "subscriber" | "publisher";
 
 /** What the reset device does with one decoded return. */
 export type ChannelReturnAction =
@@ -58,8 +62,6 @@ export type ChannelReturnAction =
   | "accept-publisher"
   /** Already in the channel in that role: only the seeds are added. */
   | "add-seeds"
-  /** The owner: take the channel back with its recovery key. */
-  | "recover-owner"
   /** Not verified, but it carries an invitation: shown as an ordinary
    *  invitation for the person to decide on. */
   | "show-invitation"
@@ -69,18 +71,16 @@ export type ChannelReturnAction =
 /**
  * The reset device's rule over one decoded return.
  *
- * | verified | role       | invitation | already in that role | owns already | action             |
- * |----------|------------|------------|----------------------|--------------|--------------------|
- * | no       | any        | yes        | -                    | -            | show-invitation    |
- * | no       | any        | no         | -                    | -            | drop               |
- * | yes      | subscriber | -          | yes (reading)        | -            | add-seeds          |
- * | yes      | subscriber | yes        | no                   | -            | subscribe          |
- * | yes      | subscriber | no         | no                   | -            | drop               |
- * | yes      | publisher  | -          | yes (publishing)     | -            | add-seeds          |
- * | yes      | publisher  | yes        | no                   | -            | accept-publisher   |
- * | yes      | publisher  | no         | no                   | -            | add-seeds          |
- * | yes      | owner      | -          | -                    | yes          | add-seeds          |
- * | yes      | owner      | -          | -                    | no           | recover-owner      |
+ * | verified | role       | invitation | already in that role | action             |
+ * |----------|------------|------------|----------------------|--------------------|
+ * | no       | any        | yes        | -                    | show-invitation    |
+ * | no       | any        | no         | -                    | drop               |
+ * | yes      | subscriber | -          | yes (reading)        | add-seeds          |
+ * | yes      | subscriber | yes        | no                   | subscribe          |
+ * | yes      | subscriber | no         | no                   | drop               |
+ * | yes      | publisher  | -          | yes (publishing)     | add-seeds          |
+ * | yes      | publisher  | yes        | no                   | accept-publisher   |
+ * | yes      | publisher  | no         | no                   | add-seeds          |
  */
 export function channelReturnAction(facts: {
   readonly verified: boolean;
@@ -89,7 +89,6 @@ export function channelReturnAction(facts: {
   /** Reading the channel (a subscriber return), publishing in it (a
    *  publisher return). */
   readonly alreadyInRole: boolean;
-  readonly ownsAlready: boolean;
 }): ChannelReturnAction {
   if (!facts.verified) return facts.hasInvitation ? "show-invitation" : "drop";
   switch (facts.role) {
@@ -98,8 +97,6 @@ export function channelReturnAction(facts: {
       return facts.hasInvitation ? "subscribe" : "drop";
     case "publisher":
       return facts.hasInvitation && !facts.alreadyInRole ? "accept-publisher" : "add-seeds";
-    case "owner":
-      return facts.ownsAlready ? "add-seeds" : "recover-owner";
   }
 }
 
@@ -115,11 +112,12 @@ export interface ReturnCard {
 /** One channel this device is in, as the peer side needs it. */
 export interface ReturnChannel {
   readonly idHex: string;
-  /** This device's role in it. */
+  /** This device's role in it. A subscriber's device sends nothing. */
   readonly ownRole: "owner" | "publisher" | "subscriber";
   /** The member cards this device holds for it. */
   readonly cards: readonly ReturnCard[];
-  /** Standard base64 of the owner's account key, when this device knows it. */
+  /** Standard base64 of the owner's account key, when this device knows it
+   *  (the owner's own card never brings a return). */
   readonly ownerKeyB64: string | null;
   /** Standard base64 of the publishers' account keys (owner excluded). */
   readonly publisherKeysB64: readonly string[];
@@ -150,13 +148,8 @@ export function channelReturnsFor(
 ): PlannedReturn[] {
   const out: PlannedReturn[] = [];
   for (const ch of channels) {
-    const cardOf = (keyB64: string): ReturnCard | null => ch.cards.find((c) => c.identityPkB64 === keyB64) ?? null;
-    // The owner reset: anyone in the channel holding the owner's card.
-    if (ch.ownerKeyB64 !== null && !ownKeysB64.has(ch.ownerKeyB64)) {
-      const acct = superseded.get(ch.ownerKeyB64);
-      const card = cardOf(ch.ownerKeyB64);
-      if (acct !== undefined && card !== null) out.push({ idHex: ch.idHex, role: "owner", accountIdB64: acct, card });
-    }
+    // A reset owner takes its channels back from its own list: nobody
+    // sends it a return, and a subscriber's device sends none at all.
     if (ch.ownRole === "subscriber") continue;
     const publishers = new Set(ch.publisherKeysB64);
     for (const card of ch.cards) {

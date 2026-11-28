@@ -274,7 +274,7 @@
       "status": "machine"
     },
     "auth.signup.passkey.error": {
-      "text": "Не вдалося додати ключ доступу. Спробуйте ще раз або виберіть «Не зараз».",
+      "text": "Не вдалося додати ключ доступу. Спробуйте ще раз або виберіть інший спосіб.",
       "status": "machine"
     },
     "auth.signup.passkey.lede": {
@@ -4889,6 +4889,14 @@
       "text": "Попросити знову",
       "status": "machine"
     },
+    "contacts.started_over.closed": {
+      "text": "{name} починає заново з новим обліковим записом. Повідомлення тут більше не доставляються.",
+      "status": "machine"
+    },
+    "contacts.started_over.request_note": {
+      "text": "Lakko не вдалося підтвердити, що це та сама людина, що й раніше. Приймайте запит, лише якщо впевнені, що це справді та сама людина.",
+      "status": "machine"
+    },
     "desktop.capture.body": {
       "text": "Дозвольте доступ у налаштуваннях конфіденційності системи й спробуйте ще раз.",
       "status": "machine"
@@ -7657,14 +7665,6 @@
       "text": "Пошту для відновлення замінено.",
       "status": "machine"
     },
-    "notice.opened_by_email.body": {
-      "text": "{date}, на іншому пристрої.",
-      "status": "machine"
-    },
-    "notice.opened_by_email.title": {
-      "text": "Ваш обліковий запис відкрито за допомогою пошти для відновлення",
-      "status": "machine"
-    },
     "notice.password_by_email.body": {
       "text": "{date} хтось вибрав новий пароль за допомогою вашої пошти для відновлення.",
       "status": "machine"
@@ -7675,10 +7675,6 @@
     },
     "notice.phrase_saved": {
       "text": "Для вашого облікового запису збережено фразу відновлення.",
-      "status": "machine"
-    },
-    "notice.secure.new_keys": {
-      "text": "Обліковий запис отримає нові ключі, і той, хто його відкрив, втратить доступ.",
       "status": "machine"
     },
     "notice.secure.password_saved": {
@@ -7854,11 +7850,75 @@
       "status": "machine"
     },
     "proof.reset.cannot.title": {
-      "text": "Ключі облікового запису неможливо скинути без пароля або ключа доступу",
+      "text": "Ключі облікового запису неможливо скинути без пароля",
       "status": "machine"
     },
     "proof.reset.cannot.what_you_can_do": {
       "text": "Що можна зробити:",
+      "status": "machine"
+    },
+    "proof.reset.factor.heading": {
+      "text": "Підтвердьте, що це ви",
+      "status": "machine"
+    },
+    "proof.reset.factor.title": {
+      "text": "Потім підтвердьте одним зі способів:",
+      "status": "machine"
+    },
+    "proof.reset.factor.title_no_password": {
+      "text": "Підтвердьте одним зі способів:",
+      "status": "machine"
+    },
+    "proof.reset.factor.totp": {
+      "text": "Застосунок-автентифікатор",
+      "status": "machine"
+    },
+    "proof.reset.factor.email": {
+      "text": "Код із листа",
+      "status": "machine"
+    },
+    "proof.reset.factor.passkey": {
+      "text": "Ключ доступу",
+      "status": "machine"
+    },
+    "proof.reset.factor.none": {
+      "text": "Я не можу скористатися жодним із них",
+      "status": "machine"
+    },
+    "proof.reset.factor.totp.prompt": {
+      "text": "Введіть 6-значний код із застосунку-автентифікатора.",
+      "status": "machine"
+    },
+    "proof.reset.factor.email.sent": {
+      "text": "Якщо це пошта для відновлення {username}, код уже надіслано. Він діє 10 хвилин.",
+      "status": "machine"
+    },
+    "proof.reset.factor.passkey.use": {
+      "text": "Використати ключ доступу",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.totp": {
+      "text": "Підтверджено застосунком-автентифікатором.",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.email": {
+      "text": "Підтверджено кодом із листа.",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.passkey": {
+      "text": "Підтверджено ключем доступу.",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.title": {
+      "text": "Ключі облікового запису неможливо скинути",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.body": {
+      "text": "Для скидання потрібні пароль і ще один спосіб підтвердити, що це ви: застосунок-автентифікатор, пошта для відновлення або ключ доступу.",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.body_none": {
+      "text": "Цей обліковий запис не має другого способу підтвердити, що це ви, тому його ключі неможливо скинути.",
       "status": "machine"
     },
     "proof.save_phrase.help": {
@@ -7869,16 +7929,12 @@
       "text": "Введіть пароль, щоб змінити ім’я користувача.",
       "status": "machine"
     },
-    "protect.banner.action": {
-      "text": "Захистити",
-      "status": "machine"
-    },
-    "protect.banner.none": {
-      "text": "Цей обліковий запис не має способу повернутися.",
+    "proof.add_totp.help": {
+      "text": "Введіть пароль, щоб налаштувати застосунок-автентифікатор.",
       "status": "machine"
     },
     "protect.body": {
-      "text": "Якщо ви забудете пароль або загубите цей пристрій, так ви знову ввійдете.",
+      "text": "Якщо ви забудете пароль або загубите цей пристрій, так ви знову ввійдете. Виберіть принаймні один спосіб.",
       "status": "machine"
     },
     "protect.continue": {
@@ -7909,28 +7965,20 @@
       "text": "Створити ключ доступу",
       "status": "machine"
     },
+    "protect.passkey.cancelled": {
+      "text": "Ключ доступу не додано.",
+      "status": "machine"
+    },
     "protect.phrase.body": {
       "text": "12 слів, які зберігаєте лише ви. Найнадійніший спосіб повернутися.",
       "status": "machine"
     },
     "protect.phrase.save.body": {
-      "text": "12 слів, які зберігаєте лише ви. Після цього код із листа зможе змінити пароль, але не відкриє обліковий запис.",
-      "status": "machine"
-    },
-    "protect.phrase.save.effect": {
-      "text": "Обліковий запис отримає нові ключі. Контакти й чати залишаться як є. Інші ваші пристрої залишаться в обліковому записі.",
+      "text": "12 слів, які зберігаєте лише ви. Вони повернуть ваші ключі на новому пристрої та чати після скидання.",
       "status": "machine"
     },
     "protect.phrase.save.failed": {
       "text": "Не вдалося завершити. Нічого не змінилося.",
-      "status": "machine"
-    },
-    "protect.phrase.save.finishing": {
-      "text": "Обліковий запис має нові ключі. Завершуємо.",
-      "status": "machine"
-    },
-    "protect.phrase.save.progress": {
-      "text": "Змінюємо ключі облікового запису",
       "status": "machine"
     },
     "protect.phrase.save.show": {
@@ -7941,36 +7989,88 @@
       "text": "Зберегти фразу відновлення",
       "status": "machine"
     },
-    "protect.skip": {
-      "text": "Не зараз",
-      "status": "machine"
-    },
-    "protect.skip.confirm.body": {
-      "text": "Якщо ви забудете пароль або загубите цей пристрій, ви не зможете повернутися до цього акаунта.",
-      "status": "machine"
-    },
-    "protect.skip.confirm.continue": {
-      "text": "Продовжити без захисту",
-      "status": "machine"
-    },
-    "protect.skip.confirm.title": {
-      "text": "Продовжити без захисту?",
-      "status": "machine"
-    },
-    "protect.status.email": {
-      "text": "Захищено вашою поштою",
-      "status": "machine"
-    },
-    "protect.status.none": {
-      "text": "Не захищено",
+    "protect.phrase.title_optional": {
+      "text": "Також зберегти фразу відновлення",
       "status": "machine"
     },
     "protect.status.phrase": {
-      "text": "Захищено фразою відновлення",
+      "text": "Ваші чати зберігає фраза відновлення",
+      "status": "machine"
+    },
+    "protect.status.passkey_seal": {
+      "text": "Ваші чати зберігає ключ доступу",
+      "status": "machine"
+    },
+    "protect.status.password_only": {
+      "text": "Ваші чати зберігає лише пароль",
       "status": "machine"
     },
     "protect.title": {
       "text": "Захистіть обліковий запис",
+      "status": "machine"
+    },
+    "protect.totp.title": {
+      "text": "Використати застосунок-автентифікатор",
+      "status": "machine"
+    },
+    "protect.totp.body": {
+      "text": "6-значний код із застосунку на телефоні. Якщо застосунок є лише на цьому пристрої, ви втратите його разом із пристроєм.",
+      "status": "machine"
+    },
+    "protect.optional": {
+      "text": "Необов’язково",
+      "status": "machine"
+    },
+    "protect.continue_needs": {
+      "text": "Щоб продовжити, виберіть один із перших трьох способів.",
+      "status": "machine"
+    },
+    "protect.totp_only.warning": {
+      "text": "Якщо ви втратите застосунок-автентифікатор, повернути цей обліковий запис не вдасться. Додайте ще пошту або ключ доступу.",
+      "status": "machine"
+    },
+    "protect.totp_only.warning_phrase": {
+      "text": "Якщо ви втратите і застосунок-автентифікатор, і фразу відновлення, повернути цей обліковий запис не вдасться.",
+      "status": "machine"
+    },
+    "protect.totp_only.remove_notice": {
+      "text": "Застосунок-автентифікатор залишиться єдиним іншим способом підтвердити, що це ви. Якщо ви його втратите, повернути цей обліковий запис не вдасться.",
+      "status": "machine"
+    },
+    "protect.totp_only.remove_notice_phrase": {
+      "text": "Застосунок-автентифікатор залишиться єдиним іншим способом підтвердити, що це ви. Якщо ви втратите його та фразу відновлення, повернути цей обліковий запис не вдасться.",
+      "status": "machine"
+    },
+    "protect.title_required": {
+      "text": "Додайте другий спосіб повернутися в обліковий запис",
+      "status": "machine"
+    },
+    "protect.last_factor": {
+      "text": "Спершу додайте інший спосіб повернутися в обліковий запис. Цей спосіб в облікового запису останній.",
+      "status": "machine"
+    },
+    "protect.username_email": {
+      "text": "Пошта для відновлення переходить до нового імені користувача. Введіть її один раз.",
+      "status": "machine"
+    },
+    "protect.password_only.title": {
+      "text": "Ваші чати залежать від пароля",
+      "status": "machine"
+    },
+    "protect.password_only.body": {
+      "text": "Якщо ви забудете пароль і втратите пристрої, чати не повернуться. Щоб вони не зникли, збережіть фразу відновлення або додайте ключ доступу.",
+      "status": "machine"
+    },
+    "protect.password_only.save_phrase": {
+      "text": "Зберегти фразу відновлення",
+      "status": "machine"
+    },
+    "protect.password_only.add_passkey": {
+      "text": "Додати ключ доступу",
+      "status": "machine"
+    },
+    "protect.password_only.passkey_no_seal": {
+      "text": "З цим ключем доступу можна увійти, але чати він не зберігає.",
       "status": "machine"
     },
     "recall.phrase.changed": {
@@ -8019,14 +8119,6 @@
     },
     "recovery.email.check.title": {
       "text": "Перевірте пошту",
-      "status": "machine"
-    },
-    "recovery.email.failed": {
-      "text": "Не вдалося повернути обліковий запис. Спробуйте ще раз або виберіть інший спосіб.",
-      "status": "machine"
-    },
-    "recovery.email.restoring": {
-      "text": "Повертаємо ваш обліковий запис",
       "status": "machine"
     },
     "recovery.email.row.body": {
@@ -8269,16 +8361,8 @@
       "text": "{count, plural, one {Залишилася # спроба} few {Залишилися # спроби} many {Залишилося # спроб} other {Залишилося # спроби}} до паузи на 15 хвилин.",
       "status": "machine"
     },
-    "recovery_email.add_again.body": {
-      "text": "Ключі облікового запису змінилися. Введіть адресу знову, щоб код із листа міг повернути обліковий запис.",
-      "status": "machine"
-    },
-    "recovery_email.add_again.title": {
-      "text": "Додайте пошту знову",
-      "status": "machine"
-    },
     "recovery_email.body": {
-      "text": "Якщо ви забудете пароль, ми надішлемо код на цю адресу, щоб ви могли повернутися.",
+      "text": "Якщо ви забудете пароль, ми надішлемо код на цю адресу, щоб ви могли задати новий.",
       "status": "machine"
     },
     "recovery_email.code.expired": {
@@ -8322,7 +8406,7 @@
       "status": "machine"
     },
     "recovery_email.mailbox_warning": {
-      "text": "Будь-хто, хто може читати цю скриньку, зможе увійти у ваш обліковий запис. Збережіть фразу відновлення, щоб це змінити.",
+      "text": "Будь-хто, хто може читати цю скриньку, зможе увійти у ваш обліковий запис.",
       "status": "machine"
     },
     "recovery_email.needs_username": {
@@ -8338,7 +8422,7 @@
       "status": "machine"
     },
     "recovery_email.remove.confirm.body": {
-      "text": "Ви не зможете повернутися в обліковий запис через пошту.",
+      "text": "Ви не зможете отримати новий пароль через пошту.",
       "status": "machine"
     },
     "recovery_email.remove.confirm.title": {
@@ -8605,10 +8689,6 @@
       "text": "Усі інші пристрої цього облікового запису виходять із нього та видаляються. Вони втрачають чати й контакти цього облікового запису.",
       "status": "machine"
     },
-    "restore_identity.reset.effect_messages": {
-      "text": "Чати, групи й канали повернуться з пристроїв ваших контактів разом із повідомленнями, які в них ще є, починаючи з нових.",
-      "status": "machine"
-    },
     "restore_identity.reset.effect_passkeys": {
       "text": "Усі ключі доступу цього облікового запису видаляються. Потім ви зможете додати ключі доступу знову.",
       "status": "machine"
@@ -8647,6 +8727,18 @@
     },
     "restore_identity.reset.what_it_does": {
       "text": "Що станеться:",
+      "status": "machine"
+    },
+    "restore_identity.reset.sealed": {
+      "text": "Ваші чати, групи й канали повернуться з пристроїв ваших контактів разом із повідомленнями, які в них ще є, починаючи з нових.",
+      "status": "machine"
+    },
+    "restore_identity.reset.unsealed": {
+      "text": "Це скидання починає обліковий запис заново. Ваші чати, групи та канали, якими ви володієте, не повернуться. Ім’я користувача залишиться за вами, і ви зможете надіслати контактам нові запити.",
+      "status": "machine"
+    },
+    "restore_identity.reset.unsealed_use_passkey": {
+      "text": "Щоб повернути чати, скористайтеся ключем доступу, який їх зберігає.",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -9337,6 +9429,10 @@
       "text": "Цей пристрій не може керувати ключами доступу.",
       "status": "machine"
     },
+    "settings.passkeys.no_seal": {
+      "text": "Не зберігає чати.",
+      "status": "machine"
+    },
     "settings.password.change": {
       "text": "Змінити пароль",
       "status": "machine"
@@ -9446,7 +9542,7 @@
       "status": "machine"
     },
     "settings.recovery.totp.done": {
-      "text": "Автентифікатор налаштовано. Код із застосунку допоможе повернутися в обліковий запис.",
+      "text": "Автентифікатор налаштовано. Код із застосунку тепер підтверджує, що це ви.",
       "status": "machine"
     },
     "settings.recovery.totp.error.generic": {
@@ -9479,6 +9575,14 @@
     },
     "settings.recovery.totp.unavailable": {
       "text": "Налаштування автентифікатора зараз недоступне.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.open_app": {
+      "text": "Відкрити в застосунку-автентифікаторі",
+      "status": "machine"
+    },
+    "settings.recovery.totp.on": {
+      "text": "Увімкнено",
       "status": "machine"
     },
     "settings.recovery.words.not_on_this_device": {

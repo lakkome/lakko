@@ -38,8 +38,7 @@ class ChannelReturnTest {
         role: ChannelReturnRoleName,
         hasInvitation: Boolean = true,
         alreadyInRole: Boolean = false,
-        ownsAlready: Boolean = false,
-    ) = channelReturnAction(verified, role, hasInvitation, alreadyInRole, ownsAlready)
+    ) = channelReturnAction(verified, role, hasInvitation, alreadyInRole)
 
     @Test
     fun `an unverified return is shown when it carries an invitation, dropped otherwise, never acted on`() {
@@ -64,9 +63,13 @@ class ChannelReturnTest {
     }
 
     @Test
-    fun `an owner recovers unless it owns already`() {
-        assertEquals(ChannelReturnAction.RECOVER_OWNER, action(role = ChannelReturnRoleName.OWNER))
-        assertEquals(ChannelReturnAction.ADD_SEEDS, action(role = ChannelReturnRoleName.OWNER, ownsAlready = true))
+    fun `there is no owner return - an owner takes its channels back from its own list`() {
+        // ADR-0101 section 7, rewritten 2026-11-26.
+        assertEquals(
+            listOf(ChannelReturnRoleName.SUBSCRIBER, ChannelReturnRoleName.PUBLISHER),
+            ChannelReturnRoleName.entries.toList(),
+        )
+        assertTrue(ChannelReturnAction.entries.none { it.name.contains("OWNER") })
     }
 
     private val superseded = mapOf("OLD_SUB" to "acctSub", "OLD_PUB" to "acctPub", "OLD_OWNER" to "acctOwner")
@@ -90,19 +93,18 @@ class ChannelReturnTest {
     }
 
     @Test
-    fun `a co-publisher sends subscriber returns, no publisher return, and an owner return for a reset owner`() {
+    fun `a co-publisher sends subscriber returns, no publisher return, and nothing for a reset owner`() {
         val out = channelReturnsFor(listOf(ch(ownRole = ReturnOwnRole.PUBLISHER, ownerKeyB64 = "OLD_OWNER")), superseded, setOf("ME"))
         assertEquals(
-            listOf(ChannelReturnRoleName.OWNER to "acctOwner", ChannelReturnRoleName.SUBSCRIBER to "acctSub"),
+            listOf(ChannelReturnRoleName.SUBSCRIBER to "acctSub"),
             out.map { it.role to it.accountIdB64 },
         )
     }
 
     @Test
-    fun `a subscriber sends only an owner return, and only with the owner's card`() {
-        assertEquals(
-            listOf(ChannelReturnRoleName.OWNER),
-            channelReturnsFor(listOf(ch(ownRole = ReturnOwnRole.SUBSCRIBER, ownerKeyB64 = "OLD_OWNER")), superseded, setOf("ME")).map { it.role },
+    fun `a subscriber sends nothing, with or without the owner's card`() {
+        assertTrue(
+            channelReturnsFor(listOf(ch(ownRole = ReturnOwnRole.SUBSCRIBER, ownerKeyB64 = "OLD_OWNER")), superseded, setOf("ME")).isEmpty(),
         )
         assertTrue(
             channelReturnsFor(
@@ -197,9 +199,9 @@ class ChannelReturnTest {
     }
 
     @Test
-    fun `an owner card in the list plans an owner return on a subscriber device that knows the owner`() {
-        // The owner's card is what the return is planned from: with it, a
-        // subscriber device sends one; without it, none (the defect D1).
+    fun `an owner card in the list plans nothing on a subscriber device`() {
+        // The reset owner is not returned by anyone: its own device takes
+        // the channel back with the recovery key its list holds.
         val owner = "T1dORVJfT0xEX0tFWQ=="
         val withCard = ReturnChannel(
             idHex = "c1",
@@ -208,8 +210,6 @@ class ChannelReturnTest {
             ownerKeyB64 = owner,
             publisherKeysB64 = emptyList(),
         )
-        val planned = channelReturnsFor(listOf(withCard), mapOf(owner to "acct"), setOf("bWU="))
-        assertEquals(listOf(ChannelReturnRoleName.OWNER), planned.map { it.role })
-        assertTrue(channelReturnsFor(listOf(withCard.copy(cards = emptyList())), mapOf(owner to "acct"), emptySet()).isEmpty())
+        assertTrue(channelReturnsFor(listOf(withCard), mapOf(owner to "acct"), setOf("bWU=")).isEmpty())
     }
 }

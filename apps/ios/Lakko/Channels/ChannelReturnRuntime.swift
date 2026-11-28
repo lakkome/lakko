@@ -24,14 +24,16 @@ enum ChannelReturnRuntime {
     private static var last: (channels: ChannelsUiState, client: ChannelsClient, seed: Data, accountIdB64: String)?
     private static var running = false
 
-    /// One pass, after the publisher pass: register owed recovery keys, act
-    /// on held returns, send the returns owed, settle recovered channels.
+    /// One pass, after the publisher pass: the owned-channels list and the
+    /// recovery keys it gives (``OwnedChannels``), then act on held returns,
+    /// send the returns owed, settle recovered channels.
     static func pass(channels: ChannelsUiState, client: ChannelsClient, seed: Data, accountIdB64: String) async {
         last = (channels, client, seed, accountIdB64)
         guard !running else { return }
         running = true
         defer { running = false }
-        await registerOwedRecoveryKeys(channels: channels, client: client, seed: seed, accountIdB64: accountIdB64)
+        await OwnedChannels.shared.pass(
+            channels: channels, client: client, seed: seed, accountIdB64: accountIdB64)
         await runHeldReturns(channels: channels, client: client, seed: seed, accountIdB64: accountIdB64)
         await sendReturns(channels: channels, client: client, seed: seed, accountIdB64: accountIdB64)
         settleRecovered(channels: channels, seed: seed, accountIdB64: accountIdB64)
@@ -55,37 +57,13 @@ enum ChannelReturnRuntime {
 
     // MARK: - The channel recovery key
 
-    struct RecoveryDisabled: Error {}
-
-    /// The channel's recovery key: its recovery input blinded here,
-    /// evaluated by auth under this account's per-account key (auth never
-    /// learns the channel id), finalised here. Throws ``RecoveryDisabled`` on
-    /// `503`.
-    static func deriveRecoveryKey(idHex: String) async throws -> ChannelRecoveryKey {
-        guard let token = AmbientSessionToken.shared.current, let channelId = ChannelsClient.hexToData(idHex) else {
-            throw ChannelsApiError(status: -1, code: "no-session", detail: "no session for the recovery key")
-        }
-        let blinder = try OprfBlinder.blindChannelRecovery(channelId: channelId)
-        guard let blinded = Data(base64Encoded: blinder.blindedB64()) else {
-            throw ChannelsApiError(status: -1, code: "bad-blind", detail: "blinded element not base64")
-        }
-        let evaluation: Data
-        do {
-            evaluation = try await AuthClient().channelRecoveryEvaluate(sessionToken: token, blindedElement: blinded)
-        } catch AuthClientError.http(let status, _, _) where status == 503 {
-            throw RecoveryDisabled()
-        }
-        var output = try blinder.finalize(evaluatedB64: evaluation.base64EncodedString()).output
-        defer { output.resetBytes(in: 0..<output.count) }
-        return ChannelRecoveryKey.fromOprfOutput(oprfOutput: output)
-    }
-
     /// Register the recovery key of every channel this device owns that has
     /// none recorded (a new channel is picked up at the first pass after its
-    /// creation). A `503` stops the pass quietly; any other failure leaves
-    /// the channel owing.
+    /// creation). The key is the one the owned-channels list key gives
+    /// (`recovery-key/v2`, ADR-0101 section 7 item 5); a failure leaves the
+    /// channel owing.
     static func registerOwedRecoveryKeys(
-        channels: ChannelsUiState, client: ChannelsClient, seed: Data, accountIdB64: String
+        channels: ChannelsUiState, client: ChannelsClient, seed: Data, accountIdB64: String, listKey: Data
     ) async {
         let store = ChannelRecoveryRegisteredStore()
         let owned = channels.keysByChannel.keys.filter {
@@ -94,12 +72,8 @@ enum ChannelReturnRuntime {
         let owing = ChannelReturnRules.owingRecoveryKey(owned: owned, registered: store.read(accountIdB64: accountIdB64))
         guard !owing.isEmpty, let owner = try? Identity.fromSeed(seed: seed) else { return }
         for idHex in owing {
-            let key: ChannelRecoveryKey
-            do {
-                key = try await deriveRecoveryKey(idHex: idHex)
-            } catch is RecoveryDisabled {
-                return
-            } catch {
+            guard let channelId = ChannelsClient.hexToData(idHex),
+                  let key = try? ChannelRecoveryKey.fromListKey(listKey: listKey, channelId: channelId) else {
                 continue
             }
             if await client.putRecoveryKey(channelIdHex: idHex, ownerIdentity: owner, recoveryPk: key.verifyingKey()) == 204 {
@@ -171,10 +145,10 @@ enum ChannelReturnRuntime {
             let ownRole: ReturnChannel.OwnRole = publishing
                 ? (ChannelPublisherLoops.rotates(channelId: idHex, channels: channels) ? .owner : .publisher)
                 : .subscriber
-            let ownerKeyB64 = ChannelReturnRules.ownerKeyB64(
-                extras: channels.extras(idHex), ownRole: ownRole)
-            // A subscriber only ever sends an owner return.
-            if ownRole == .subscriber, ownerKeyB64.map({ live[$0] == nil }) ?? true { continue }
+            // A subscriber's device sends no return (an owner comes back
+            // from its own list since 2026-11-26).
+            if ownRole == .subscriber { continue }
+            let ownerKeyB64 = ChannelReturnRules.ownerKeyB64(extras: channels.extras(idHex))
             guard let cards = try? await openCards(channelId: idHex, channels: channels) else { continue }
             let publishers = CoPublisherKeyBook.publishers(channelIdHex: idHex)
                 .compactMap { ChannelsClient.hexToData($0) }.map { base64Encode($0) }
@@ -227,8 +201,6 @@ enum ChannelReturnRuntime {
                     identity: identity, publisherGroup: group,
                     channelName: channels.channels.first { $0.id == ret.idHex }?.title,
                     accountIdB64: accountIdB64).card
-            case .owner:
-                break
             }
         } catch {
             return false
@@ -321,8 +293,7 @@ enum ChannelReturnRuntime {
             verified: verified, role: role, hasInvitation: !ret.invitation.isEmpty,
             alreadyInRole: role == .publisher
                 ? channels.keysByChannel[idHex] != nil
-                : channels.channels.contains { $0.id == idHex },
-            ownsAlready: channels.extras(idHex).accountRole == ChannelAccountRole.owner)
+                : channels.channels.contains { $0.id == idHex })
         func addSeeds() {
             let held = channels.subscribedSeeds(channelId: idHex)
             for s in ret.epochSeeds where held[s.epoch] == nil && s.seed.count == 32 {
@@ -365,17 +336,6 @@ enum ChannelReturnRuntime {
             guard await subscribe(facts: facts, channels: channels, client: client) else { return .retry }
             addSeeds()
             return .done
-        case .recoverOwner:
-            switch await recoverOwnedChannel(idHex: idHex, channels: channels, client: client, seed: seed,
-                                             accountIdB64: accountIdB64) {
-            case .owned:
-                addSeeds()
-                return .done
-            case .refused:
-                return .done
-            case .retry:
-                return .retry
-            }
         }
     }
 
@@ -409,7 +369,6 @@ enum ChannelReturnRuntime {
     /// does (``ChannelConversationModel/subscribe()``), without a screen.
     static func subscribe(facts: ChannelLinkFacts, channels: ChannelsUiState, client: ChannelsClient) async -> Bool {
         let idHex = facts.channelIdHex
-        channels.noteInviter(facts)
         if !channels.channels.contains(where: { $0.id == idHex }) {
             channels.addChannel(ChannelHandle(
                 id: idHex, localName: facts.name, localDescription: facts.description,
@@ -442,25 +401,23 @@ enum ChannelReturnRuntime {
 
     enum RecoveryOutcome { case owned, refused, retry }
 
-    /// Take a channel back with its recovery key: the key evaluated again
-    /// for this account, the owner key moved to the current identity's with
-    /// the recovery proof, and on `204` the channel goes into the list and
-    /// the register as owned, every reader the service lists stays let in,
-    /// and a fresh admission seed is minted; the publisher pass then founds
-    /// its PublisherGroup again (ADR-0090 decision A) and reseals. `401`:
-    /// not this account's, dropped silently.
+    /// Take a channel back with its recovery key (the one the owned-channels
+    /// list key gives for it): the owner key moved to the current identity's
+    /// with the recovery proof, and on `204` the channel goes into the list
+    /// and the register as owned, every reader the service lists stays let
+    /// in, the listed read key, admission seeds and epoch seeds are put back,
+    /// and (a channel with no listed admission seed) a fresh one is minted;
+    /// the publisher pass then founds its PublisherGroup again (ADR-0090
+    /// decision A) and reseals. `401`: the channel's recovery key is not
+    /// this one, the entry is dropped.
     static func recoverOwnedChannel(
-        idHex: String, channels: ChannelsUiState, client: ChannelsClient, seed: Data, accountIdB64: String
+        entry: FfiOwnedChannel, listKey: Data, channels: ChannelsUiState, client: ChannelsClient, seed: Data,
+        accountIdB64: String
     ) async -> RecoveryOutcome {
-        guard let identity = try? Identity.fromSeed(seed: seed), let channelId = ChannelsClient.hexToData(idHex) else {
-            return .retry
-        }
-        let key: ChannelRecoveryKey
-        do {
-            key = try await deriveRecoveryKey(idHex: idHex)
-        } catch is RecoveryDisabled {
-            return .refused
-        } catch {
+        let idHex = ChannelsComposer.bytesToHex(entry.channelId).lowercased()
+        let channelId = entry.channelId
+        guard let identity = try? Identity.fromSeed(seed: seed),
+              let key = try? ChannelRecoveryKey.fromListKey(listKey: listKey, channelId: channelId) else {
             return .retry
         }
         guard let newOwnerPk = try? ChannelsClient.ownerSigner(accountIdentity: identity, channelIdHex: idHex)
@@ -478,16 +435,23 @@ enum ChannelReturnRuntime {
                 id: idHex, localName: "", localDescription: "",
                 addedAtMs: UInt64(Date().timeIntervalSince1970 * 1000), handle: ""))
         }
-        // Every reader the service lists now stays let in: the re-founding's
-        // reseal reaches each of them.
+        // Every reader the service lists now stays let in when the entry
+        // carries nothing to judge a row with: the re-founding's reseal
+        // reaches each of them. A private channel whose entry lists
+        // admission seeds is judged row by row by its tickets instead
+        // (alignment item M, the web rule): mark 0, so the admission pass
+        // judges every row and removes one with no valid ticket (a reader
+        // let in before the channel went private).
         var through: UInt64 = 0
-        var after: UInt64 = 0
-        for _ in 0..<10_000 {
-            guard let page = try? await client.subscriberPage(
-                channelIdHex: idHex, after: after, accountIdentity: identity) else { break }
-            through = RecoveredChannelRules.highestSeq(page.rows.map(\.seq), held: through)
-            guard !page.rows.isEmpty, page.nextAfter > after else { break }
-            after = page.nextAfter
+        if OwnedChannelsRules.retakenAdmission(entry) == .everyoneListed {
+            var after: UInt64 = 0
+            for _ in 0..<10_000 {
+                guard let page = try? await client.subscriberPage(
+                    channelIdHex: idHex, after: after, accountIdentity: identity) else { break }
+                through = RecoveredChannelRules.highestSeq(page.rows.map(\.seq), held: through)
+                guard !page.rows.isEmpty, page.nextAfter > after else { break }
+                after = page.nextAfter
+            }
         }
         RecoveredChannelStore().mark(idHex, throughSeq: through, accountIdB64: accountIdB64)
         // Registered again under the new owner key at the next pass.
@@ -499,12 +463,28 @@ enum ChannelReturnRuntime {
             $0.subscriberRowsReadSeq = max($0.subscriberRowsReadSeq ?? 0, mark)
             $0.accountRole = ChannelAccountRole.owner
         }
-        // A fresh admission seed verifies the tickets of invitations made
-        // from now on (version 1: the lost version 0 is never reused).
+        // What the list kept: the read key of a public channel, the
+        // admission seeds a private channel's earlier tickets are checked
+        // with (ADR-0090 decision A), the newest epoch seeds (the posts the
+        // service retains open again, and with them the name).
+        if let readKey = entry.readKey, readKey.count == 32 {
+            channels.updateExtras(idHex) { $0.readKey = readKey }
+        }
+        for admission in entry.admission where admission.seed.count == 32 {
+            guard let version = UInt16(exactly: admission.version) else { continue }
+            ChannelInvites.putAdmissionSeed(channelIdHex: idHex, version: version, seed: admission.seed)
+        }
+        let heldSeeds = channels.subscribedSeeds(channelId: idHex)
+        for epoch in entry.epochs where heldSeeds[epoch.epochId] == nil && epoch.seed.count == 32 {
+            channels.setSubscribedSeed(channelId: idHex, epoch: epoch.epochId, seed: epoch.seed)
+        }
+        // A channel with no listed admission seed: a fresh one verifies the
+        // tickets of invitations made from now on (version 1: a lost version
+        // 0 is never reused).
         if ChannelInvites.admissionSeeds(channelIdHex: idHex).isEmpty {
             ChannelInvites.putAdmissionSeed(channelIdHex: idHex, version: 1, seed: generateChannelAdmissionSeed())
-            ChannelDeviceAdmission.syncAdmissionSeeds(channelId: idHex)
         }
+        ChannelDeviceAdmission.syncAdmissionSeeds(channelId: idHex)
         // The account's one subscriber key, and the subscription register
         // as owner.
         _ = channels.subscriberKeysForSubscribe(idHex)

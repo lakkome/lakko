@@ -29,6 +29,11 @@ public class FreshAuthProof(
     public val grant: String,
     /** Unix milliseconds; the proof is unusable at or after this. */
     public val expiresAtMs: Long,
+    /** ADR-0073, amended 2026-11-26: the proof was minted by a PASSWORD
+     *  sign-in (or the sign-up), not by a passkey. A key reset's factor
+     *  routes accept only such a proof; delete account, add a device and
+     *  add a passkey accept either. */
+    public val byPassword: Boolean = true,
 ) {
     override fun toString(): String = "FreshAuthProof(grant=<redacted>, expiresAtMs=$expiresAtMs)"
 }
@@ -45,13 +50,29 @@ public class FreshAuthHolder {
      *  grant, or one already expired, is not kept (and clears the slot: the
      *  older proof belongs to an older sign-in). */
     @Synchronized
-    public fun put(accountIdB64: String, grant: String?, expiresAtMs: Long?, nowMs: Long) {
+    public fun put(
+        accountIdB64: String,
+        grant: String?,
+        expiresAtMs: Long?,
+        nowMs: Long,
+        byPassword: Boolean = true,
+    ) {
         held = if (grant.isNullOrEmpty() || expiresAtMs == null || expiresAtMs <= nowMs) {
             null
         } else {
-            FreshAuthProof(accountIdB64 = accountIdB64, grant = grant, expiresAtMs = expiresAtMs)
+            FreshAuthProof(
+                accountIdB64 = accountIdB64,
+                grant = grant,
+                expiresAtMs = expiresAtMs,
+                byPassword = byPassword,
+            )
         }
     }
+
+    /** The live proof only when a PASSWORD minted it (the key reset's
+     *  factor routes, ADR-0073 amended 2026-11-26). */
+    public fun livePassword(accountIdB64: String, nowMs: Long): FreshAuthProof? =
+        live(accountIdB64, nowMs)?.takeIf { it.byPassword }
 
     /**
      * A sign-in of [accountIdB64] by a route that mints no proof (an

@@ -94,7 +94,12 @@ public fun PasskeysScreen(
     // A removal names its target on the button (docs/l10n/batch-2-settings.md).
     var removing by remember { mutableStateOf<CredentialSummary?>(null) }
 
-    LaunchedEffect(Unit) { viewModel.refresh() }
+    LaunchedEffect(Unit) {
+        viewModel.refresh()
+        viewModel.repository.refreshAccountFactors()
+    }
+    val seals by viewModel.repository.sealView.collectAsStateWithLifecycle()
+    val factors by viewModel.repository.accountFactors.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     // UX section 17 - a session alone may not add a passkey (a passkey is
     // itself a proof): the proof block sits above `Add passkey` while no
@@ -175,6 +180,10 @@ public fun PasskeysScreen(
                                 disabled = state.busy || state.repair != null,
                                 onRestore = { viewModel.restoreKeys(context, cred) },
                                 onDelete = { removing = cred },
+                                // UX 19.1d: known only once the account's
+                                // published protection was read.
+                                noSeal = seals != null && base64UrlOrNull(cred.credentialIdB64)
+                                    ?.let { viewModel.repository.passkeyKeepsChats(it) } == false,
                             )
                         }
                     }
@@ -288,7 +297,18 @@ public fun PasskeysScreen(
             },
         )
     }
+    if (state.lastFactor) me.lakko.app.ui.auth.LastFactorDialog(onClose = viewModel::closeLastFactor)
     removing?.let { cred ->
+        // The line a removal adds when the authenticator would be the only
+        // second way in afterwards (UX 19.1c).
+        val totpOnlyKey = factors?.let {
+            me.lakko.app.auth.removalTotpOnlyNoticeKey(
+                it,
+                me.lakko.app.auth.FactorKind.Passkey,
+                passkeyCount = state.credentials.size,
+                phraseSaved = seals?.phrase != null || viewModel.repository.phraseProtected(),
+            )
+        }
         LakkoDialog(
             onDismissRequest = { removing = null },
             title = t("settings.passkeys.remove.title"),
@@ -304,6 +324,11 @@ public fun PasskeysScreen(
                 removing = null
                 viewModel.deleteCredential(context, cred.credentialIdB64, cred.nickname)
             },
+            content = if (totpOnlyKey != null) {
+                { me.lakko.app.ui.auth.WarningNote(body = t(totpOnlyKey)) }
+            } else {
+                null
+            },
         )
     }
 }
@@ -316,6 +341,9 @@ private fun CredentialRow(
     disabled: Boolean,
     onRestore: () -> Unit,
     onDelete: () -> Unit,
+    /** This passkey signs in and confirms a reset but does not keep the
+     *  chats (UX 19.1d). */
+    noSeal: Boolean = false,
 ) {
     Column(
         modifier = Modifier
@@ -336,6 +364,13 @@ private fun CredentialRow(
             style = MaterialTheme.typography.bodyMedium,
             fontWeight = FontWeight.SemiBold,
         )
+        if (noSeal) {
+            Text(
+                t("settings.passkeys.no_seal"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         Text(
             metadataLine(summary, LocalStrings.current.language),
             style = MaterialTheme.typography.bodySmall,

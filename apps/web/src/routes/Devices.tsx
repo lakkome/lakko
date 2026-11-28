@@ -59,7 +59,6 @@ import {
 import { listDevices, type DeviceListItem } from "../devices/remove";
 import { useKeyRotation, type RotateResult } from "../devices/key-rotation-runtime";
 import { rotationCommitted, rotationStepLine, type RotationStepLine,
-  rotationSavesPhrase,
 } from "../devices/key-rotation";
 import { ownPairingHandle, parsePairingQrPayload } from "../devices/pairing";
 import { pairingConfirmTitle } from "../devices/pairing-copy";
@@ -430,8 +429,7 @@ function DevicesListView(props: {
   /** A rotation whose device was removed but whose keys were not changed. */
   const rotationLeftover = (): boolean => {
     const r = rotation.record();
-    // "Save a recovery phrase" removes no device: its record is not one.
-    return r !== null && !rotationSavesPhrase(r) && !rotationCommitted(r) && r.done.includes("remove");
+    return r !== null && !rotationCommitted(r) && r.done.includes("remove");
   };
   const activeLine = (): RotationStepLine | null => {
     const step = rotation.activeStep();

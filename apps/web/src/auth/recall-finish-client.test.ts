@@ -44,6 +44,7 @@ function pending(): RecallPendingFinish & { resigned: number[] } {
       resigned.push(atMs);
       return { ...base, statement_b64: `signed-at-${atMs}` } as RecallFinishRequest;
     },
+    exportKey: new Uint8Array(64),
     dispose: () => undefined,
     resigned,
   };

@@ -412,6 +412,8 @@ public final class ChatRepository: ObservableObject {
     var removeQuietNotifications: () -> Void = { QuietNotifications.removeDelivered() }
     /// Removes the ``ResetEvents`` subscription.
     var resetEventsUnsubscribe: (() -> Void)?
+    /// Alignment item E — the observer of ``StartedOverEvents``.
+    var startedOverObserver: NSObjectProtocol?
     /// The subscription that feeds ``applyLineage(_:)``; owned here so the
     /// composition root needs no cancellable bag of its own.
     var lineageWatch: AnyCancellable?
@@ -4691,6 +4693,12 @@ public final class ChatRepository: ObservableObject {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
         guard let row = record.messages.first(where: { $0.localId == localId }) else { return }
+        // Alignment item E — nothing goes into a one-to-one whose person
+        // started over; a waiting row there is `Not sent`.
+        if isStartedOverOneToOne(groupIdHex: groupIdHex) {
+            settleStartedOverSends(groupIdHex: groupIdHex)
+            return
+        }
         // `docs/ux/connection-state.md` section 7.2 — a tap on a waiting
         // message starts its conversation's pass now (the earlier waiting
         // messages go first).

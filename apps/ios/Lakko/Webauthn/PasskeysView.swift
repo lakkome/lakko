@@ -73,10 +73,15 @@ public struct PasskeysView: View {
                                         .font(.footnote)
                                         .foregroundStyle(.secondary)
                                     keysLine(for: cred)
+                                    if viewModel.showsNoSeal(for: cred) {
+                                        Text(l10n.t("settings.passkeys.no_seal"))
+                                            .font(.footnote)
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
                                 Spacer(minLength: 0)
                                 Button(role: .destructive) {
-                                    Task { await viewModel.deleteCredential(cred) }
+                                    Task { await viewModel.removeTapped(cred) }
                                 } label: {
                                     Text(l10n.t("common.remove"))
                                 }
@@ -183,6 +188,22 @@ public struct PasskeysView: View {
         .navigationTitle(l10n.t("settings.passkeys.title"))
         .navigationBarTitleDisplayMode(.inline)
         // UX 17.3 — the app's own dialog: it carries the proof block.
+        // UX 19.1c — the last second way in cannot be removed.
+        .lakkoDialog(isPresented: $viewModel.lastFactorRefused, title: l10n.t(LastFactor.messageKey)) {
+            [.primary(l10n.t("common.ok")) {}]
+        }
+        // ...and a removal that leaves only the authenticator app says so
+        // before it runs.
+        .lakkoDialog(item: $viewModel.confirmingRemoval) { pending in
+            LakkoDialogContent(
+                title: l10n.t(pending.noticeKey),
+                actions: [
+                    .danger(l10n.t("common.remove")) {
+                        Task { await viewModel.deleteCredential(pending.credential) }
+                    },
+                    .cancel(),
+                ])
+        }
         .sheet(isPresented: $confirmingDelete) {
             DeleteAccountDialog(viewModel: viewModel, onClose: { confirmingDelete = false })
                 .presentationDetents([.medium, .large])

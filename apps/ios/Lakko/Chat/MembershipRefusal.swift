@@ -477,8 +477,9 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
                 .Vault,
                 // ADR-0097 the signed supporters list.
                 .SupportersList,
-                // ADR-0101 the reset-return codecs.
-                .ResetReturn,
+                // ADR-0101 the reset-return codecs; section 10 the reset
+                // seal; section 7 the owned-channels list.
+                .ResetReturn, .ResetSeal, .OwnedChannels,
                 // ADR-0078 sealed mailbox rows and bindings; section 2 the
                 // sealed call relay and peer announcements; section 3 sealed
                 // push wakes and subscriptions.

@@ -506,16 +506,32 @@ describe("the grant stays in memory and reaches every gated route", () => {
   it("the retired wire names are gone from the client", () => {
     for (const file of ["./client.ts", "./wire.ts", "./webauthn-client.ts", "./AuthContext.tsx"]) {
       const src = read(file);
-      expect(src.includes("reset_grant"), file).toBe(false);
       expect(src.includes("password-required"), file).toBe(false);
     }
   });
 
-  it("the reset sends the grant on both calls", () => {
+  // ADR-0073, amended 2026-11-26: the reset takes the reset factor grant
+  // (the password and one second factor), never the fresh-auth grant; the
+  // name `reset_grant` is that grant's now. The rotation keeps `fresh_grant`.
+  it("the reset sends the reset factor grant on both calls, and never the fresh-auth grant", () => {
     const client = read("./client.ts");
     const start = client.indexOf("async resetAccountKeys(");
     const body = client.slice(start, client.indexOf("\n  }\n", start));
-    expect(body.match(/fresh_grant: freshGrant/g)?.length).toBe(2);
+    expect(body.match(/reset_grant: resetGrant/g)?.length).toBe(2);
+    expect(body.includes("fresh_grant")).toBe(false);
+    const rotate = client.slice(client.indexOf("async rotateAccountKeys("));
+    expect(rotate.slice(0, rotate.indexOf("\n  }\n")).match(/fresh_grant: args\.freshGrant/g)?.length).toBe(2);
+  });
+
+  it("each reset factor route carries the password's fresh-auth grant; S is asked with the reset grant", () => {
+    const client = read("./client.ts");
+    for (const route of ["totp", "email/start", "email/finish", "passkey"]) {
+      const at = client.indexOf(`"/account/keys/reset/factor/${route}"`);
+      expect(at, route).toBeGreaterThan(-1);
+    }
+    expect(client.match(/fresh_grant: (args\.)?freshGrant/g)?.length).toBeGreaterThanOrEqual(4);
+    const secret = client.slice(client.indexOf("async ownedChannelsSecret("));
+    expect(secret.slice(0, secret.indexOf("\n  }\n"))).toMatch(/reset_grant: resetGrant/);
   });
 
   it("both add-device answers and the authorize start carry it", () => {

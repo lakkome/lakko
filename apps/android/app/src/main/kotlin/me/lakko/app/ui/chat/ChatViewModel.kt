@@ -2246,6 +2246,20 @@ public class ChatViewModel(
     public fun oneToOnePeerDeleted(): Boolean =
         repo.oneToOnePeerKey(groupIdHex)?.let { profileNames.isDeleted(it) } == true
 
+    /**
+     * ADR-0101 section 11 / UX 16.11 — the name the closed line of this
+     * one-to-one uses when its other person's key is one of [startedOverKeys]
+     * (their account started over with a new one), else `null`: the
+     * `@username` when one is verified, else the name the header shows.
+     * `null` for a group.
+     */
+    public fun oneToOnePeerStartedOver(startedOverKeys: Set<String>): String? {
+        val key = repo.oneToOnePeerKey(groupIdHex) ?: return null
+        if (java.util.Base64.getEncoder().encodeToString(key) !in startedOverKeys) return null
+        val names = profileNames.resolve(key)
+        return names.verifiedUsername?.let { "@$it" } ?: names.primary
+    }
+
     /** ADR-0098 section 2 — the one-to-one is open: its other person is on
      *  screen, so the directory is asked about them when a check is due. */
     public fun noteOneToOnePeerOnScreen() {

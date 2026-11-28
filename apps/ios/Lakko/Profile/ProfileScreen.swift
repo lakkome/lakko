@@ -291,6 +291,22 @@ struct ProfileScreen: View {
                         .font(.footnote).foregroundStyle(Color.lakkoDanger)
                         .multilineTextAlignment(.center)
                 }
+                if model.renameAsksForRecoveryEmail {
+                    // UX 19.1c — the recovery email is the last second way
+                    // in: it moves to the new name, typed once.
+                    Text(l10n.t("protect.username_email"))
+                        .font(.footnote).foregroundStyle(Color.lakkoTextMuted)
+                        .multilineTextAlignment(.center)
+                    TextField(l10n.t("recovery_email.field"), text: $model.recoveryAddress)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.emailAddress)
+                        .textContentType(.emailAddress)
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 12)
+                        .background(
+                            RoundedRectangle(cornerRadius: LakkoRadius.control).fill(Color.lakkoSurface))
+                }
             }
         } else {
             Button {

@@ -917,6 +917,9 @@ export class DiscoveryClient {
     /** ADR-0074 section 3.7: the two-way conversation link a rotation mints.
      *  Raw bytes, or a string already in standard base64. */
     conversationLink?: Uint8Array | string,
+    /** ADR-0101 section 10: the account's seal announcement and, on a reset's
+     *  attested publish, the reset seal. Raw bytes. */
+    seals?: { readonly resetSeals?: Uint8Array; readonly resetSeal?: Uint8Array },
   ): Promise<void> {
     if (accountId.length !== 16) {
       throw new DiscoveryClientArgError("accountId must be 16 bytes");
@@ -998,6 +1001,8 @@ export class DiscoveryClient {
         : {}),
       ...(keyResetAttestB64 !== undefined ? { key_reset_attest: keyResetAttestB64 } : {}),
       ...(conversationLinkB64 !== undefined ? { conversation_link: conversationLinkB64 } : {}),
+      ...(seals?.resetSeals !== undefined ? { reset_seals: base64Encode(seals.resetSeals) } : {}),
+      ...(seals?.resetSeal !== undefined ? { reset_seal: base64Encode(seals.resetSeal) } : {}),
     });
     if (!resp.ok) {
       throw new DiscoveryHttpError(

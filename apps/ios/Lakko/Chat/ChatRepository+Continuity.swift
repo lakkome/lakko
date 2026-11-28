@@ -88,6 +88,33 @@ extension ChatRepository {
             unrepairableKeyB64: unrepairableKeyB64(groupIdHex: groupIdHex))
     }
 
+    /// Alignment item E (UX 16.11) — whether `groupIdHex` is a one-to-one
+    /// whose other person started over (an unsealed reset left their key
+    /// closed): nothing sent there would arrive.
+    func isStartedOverOneToOne(groupIdHex: String) -> Bool {
+        guard isOneToOne(groupIdHex: groupIdHex) else { return false }
+        return StartedOverChat.unsent(
+            oneToOne: true,
+            peerKeyB64: oneToOnePeerSignatureKey(groupIdHex: groupIdHex).map(base64Encode),
+            startedOverKeysB64: Set(PeerPinStore().loadStartedOverKeys().keys)) == .notSent
+    }
+
+    /// Every unsent row of the one-to-ones whose person started over becomes
+    /// `Not sent` (never sent; no Retry is offered there).
+    func settleStartedOverSends(groupIdHex: String? = nil) {
+        var changed = false
+        for (hex, record) in groups where groupIdHex == nil || hex == groupIdHex {
+            guard isStartedOverOneToOne(groupIdHex: hex) else { continue }
+            for row in record.messages
+            where row.direction == .outgoing && row.messageId <= 0 && row.localId != 0
+                && row.ack == .waiting {
+                record.markFailed(localId: row.localId)
+                changed = true
+            }
+        }
+        if changed { state = state.with(threads: buildThreadList()) }
+    }
+
     /// Whether `groupIdHex` is a DEAD SESSION: a one-to-one whose other
     /// person's reset this device accepted.
     func isDeadSession(groupIdHex: String) -> Bool {
@@ -121,6 +148,16 @@ extension ChatRepository {
         restoreHeldRows()
         mirrorLineage()
         continueAllSoon(force: true)
+        // Alignment item E — a person met as started over (now, or before a
+        // relaunch): what waits in the old one-to-one is `Not sent`.
+        if startedOverObserver == nil {
+            startedOverObserver = NotificationCenter.default.addObserver(
+                forName: StartedOverEvents.changed, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.settleStartedOverSends() }
+            }
+        }
+        settleStartedOverSends()
     }
 
     // MARK: - R.6: the receive rule

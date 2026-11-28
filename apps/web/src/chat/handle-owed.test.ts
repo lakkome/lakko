@@ -56,6 +56,11 @@ describe("owed @name writes", () => {
     expect(mergeOwed({ ...rekey, rekeyFrom: "k0" }, { ...rekey, rekeyFrom: "k1" }).rekeyFrom).toBe("k0");
     // A claim never reached the server: no re-key.
     expect(mergeOwed({ ...base, op: "claim" }, rekey).rekeyFrom).toBeUndefined();
+    // ADR-0101 section 7 item 4: a retake's seed rides the same way.
+    const retake = { ...base, reason: "rekey" as const, rekeyFromSeed: "seed" };
+    expect(mergeOwed(asked, retake)).toEqual({ ...asked, rekeyFromSeed: "seed" });
+    expect(mergeOwed(retake, asked).rekeyFromSeed).toBe("seed");
+    expect(mergeOwed({ ...base, op: "claim" }, retake).rekeyFromSeed).toBeUndefined();
   });
 
   it("retries what can pass and drops a refusal for good", () => {

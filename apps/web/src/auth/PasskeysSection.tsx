@@ -24,6 +24,13 @@
  *      restoring keys".
  *
  * Signing in with a passkey is `AuthContext.loginWithPasskey`.
+ *
+ * Since 2026-11-26 (UX 19.1c, 19.1d; ADR-0101 section 10): a passkey whose
+ * creation gave a secret for it also keeps the chats through a key reset
+ * (`auth.passkeySealAdded`); a row whose passkey does not says "Does not
+ * keep your chats."; removing the account's last second way in is refused
+ * with the app's own dialog, and a removal that would leave only the
+ * authenticator app says so in its confirmation.
  */
 import { AuthClient, AuthHttpError } from "./client";
 import { passkeyKeysLabel } from "../recovery/passkey-vault";
@@ -59,6 +66,20 @@ import {
   type CredentialSummary,
 } from "./webauthn-client";
 import { useWebauthnClient } from "./use-webauthn-client";
+import { errorCodeOfBody } from "./fresh-auth";
+import { ownSealFacts } from "./seal/own-seals";
+import {
+  accountFactors,
+  isLastFactorRefusal,
+  notePasskeyCount,
+  refreshFactors,
+  removeNoticeKey,
+} from "./protect/factors";
+import { refusedAsLastFactor, showLastFactorNotice } from "./protect/last-factor";
+import { passkeyRowSaysNoSeal, sealTagsOf } from "./protect/passkey-seal-tags";
+import { notePasskeyAdded } from "./protect/password-only-state";
+import { phraseProtectedHere } from "./protect/protection-state";
+import { loadWasm } from "../wasm";
 import { Icon } from "../ui/icons";
 import { t, type L10nArgs } from "../l10n";
 import { displayLocale } from "../l10n/display-locale";
@@ -119,6 +140,26 @@ export default function PasskeysSection(): JSX.Element {
     const st = auth.state();
     return st.kind === "session" ? st.account.accountId : null;
   };
+  // UX 19.1d: which passkeys keep the chats, from the account's published
+  // protection. Nothing is said while either side is not known.
+  const [sealTags] = createResource(
+    () => credentials() ?? null,
+    async (list): Promise<ReadonlyMap<string, string>> =>
+      sealTagsOf(
+        await loadWasm(),
+        list.map((c) => c.credential_id_b64),
+      ),
+  );
+  const noSeal = (cred: CredentialSummary): boolean =>
+    passkeyRowSaysNoSeal(ownSealFacts(accountIdB64()), sealTags()?.get(cred.credential_id_b64));
+  // The passkey list is one of the two reads behind the account's second
+  // ways in (`protect/factors.ts`): kept in step whenever it is read.
+  createEffect(() => {
+    const list = credentials();
+    const acct = accountIdB64();
+    if (list !== undefined && acct !== null) notePasskeyCount(acct, list.length);
+  });
+
   const [noPrfTick, setNoPrfTick] = createSignal(0);
   const noPrf = createMemo((): ReadonlySet<string> => {
     noPrfTick();
@@ -197,6 +238,15 @@ export default function PasskeysSection(): JSX.Element {
             ? { accountIdBytes: secrets.accountId, accountIdB64: st.account.accountId }
             : null,
       });
+      // ADR-0101 section 10 (UX 19.1d): the account's protection is
+      // published with this passkey in it when it gave a secret for that.
+      if (st.kind === "session") {
+        const keepsChats = await auth.passkeySealAdded({
+          credentialIdB64: added.credentialIdB64,
+          sealPrfOutput: added.sealPrfOutput,
+        });
+        notePasskeyAdded(st.account.accountId, keepsChats);
+      }
       // UX 10.2 (amended 2026-11-11): the keys are stored for the new
       // passkey with nothing to choose, when the platform can protect them.
       // "signin-only" is a creation that said the passkey cannot carry keys.
@@ -292,7 +342,18 @@ export default function PasskeysSection(): JSX.Element {
     // that is what is announced at the point of no return); the old string
     // had to stuff it into the question because a browser dialog renders one
     // string and a browser-supplied OK/Cancel pair.
-    if (!(await requestConfirm(removePasskeyConfirmation(cred)))) {
+    // UX 19.1c: the last second way in cannot be removed; a removal that
+    // would leave only the authenticator app says so before its buttons.
+    const acctId = accountIdB64();
+    const factors = accountFactors(acctId);
+    if (await refusedAsLastFactor(factors, "passkey")) return;
+    const confirmation = removePasskeyConfirmation(cred);
+    const noticeKey = removeNoticeKey(factors, "passkey", phraseProtectedHere(acctId));
+    const request =
+      noticeKey === null
+        ? confirmation
+        : { ...confirmation, body: [confirmation.body, t(noticeKey)].filter((p) => p !== null).join(" ") };
+    if (!(await requestConfirm(request))) {
       return;
     }
     setBusy(true);
@@ -308,9 +369,21 @@ export default function PasskeysSection(): JSX.Element {
       await c.deleteCredential(cred.credential_id_b64);
       const acct = accountIdB64();
       if (acct !== null) removeNoPrfPasskey(deviceStorage(), acct, cred.credential_id_b64);
+      // ADR-0101 section 10: its seal leaves the account's protection.
+      await auth.passkeySealRemoved(cred.credential_id_b64);
       setMessage({ kind: "ok", key: "settings.passkeys.removed", args: { name: cred.nickname } });
       setRefreshTrigger((n) => n + 1);
     } catch (err) {
+      if (
+        err instanceof WebauthnHttpError &&
+        isLastFactorRefusal({ status: err.status, errorCode: errorCodeOfBody(err.body) })
+      ) {
+        // The facts were stale or unknown: the server kept the last one.
+        const token = auth.identitySecrets()?.sessionToken ?? null;
+        if (acctId !== null && token !== null) void refreshFactors(acctId, token);
+        await showLastFactorNotice("passkey");
+        return;
+      }
       setMessage(errorMessage(err));
     } finally {
       setBusy(false);
@@ -357,6 +430,9 @@ export default function PasskeysSection(): JSX.Element {
                             : t("settings.passkeys.label.signin_only")}
                         </strong>
                       </span>
+                      <Show when={noSeal(cred)}>
+                        <span class="lk-card-row-sub">{t("settings.passkeys.no_seal")}</span>
+                      </Show>
                       <span class="lk-card-row-sub">
                         {cred.last_used_at_ms !== null
                           ? t("settings.passkeys.added_last_used", {

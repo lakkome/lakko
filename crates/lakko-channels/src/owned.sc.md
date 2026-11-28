@@ -29,28 +29,36 @@ transport are `lakko-vault`'s; the server half `S` is `services/auth`'s.
 - Lock heads: `encode_list_key_lock` / `decode_list_key_lock` hold `R`
   (exactly 32 bytes; password and passkey locks); `encode_keys_lock` /
   `decode_keys_lock` hold `R ‖ S` (exactly 64 bytes; the keys lock).
-- `OwnedChannelsList::encode` writes exactly 32 764 bytes, refusing a list
+- `OwnedChannelsList::encode` writes exactly 65 532 bytes, refusing a list
   that breaks a bound or the canonical order; `decode` reads exactly that and
   refuses everything else; `channel(id)` looks one up.
 - `OwnedChannelsList::merge(theirs, deleted)`: the merge after a `409` on the
   list vault. By channel id; the channels in `deleted` dropped; admission
   seeds unioned and the eight highest by `(version, seed)` kept; epoch seeds
   unioned by epoch (this side's seed on the same epoch) and the four highest
-  kept; a read key from either side, this side's first; this side's password
+  kept; a read key and a handle seed each from either side, this side's
+  first; this side's password
   lock root; passkey locks unioned by tag, this side's first, at most eight;
   past 64 channels this side's are kept first. The result is sorted and,
   for two valid lists, encodes.
 
 ## Wire layout
 
-`0x01 ‖ password_lock_root(32) ‖ lock_count(0..=8) ‖ lock_count × (tag(16) ‖
+`0x02 ‖ password_lock_root(32) ‖ lock_count(0..=8) ‖ lock_count × (tag(16) ‖
 root(32)) ‖ count(0..=64) ‖ count × entry ‖ zero padding`, with entry =
-`channel_id(16) ‖ read_key_len(0|32) ‖ read_key ‖ admission_count(0..=8) ‖
-admission_count × (version(4 BE) ‖ seed(32)) ‖ epoch_count(0..=4) ‖
-epoch_count × (epoch_id(4 BE) ‖ seed(32))`. An entry is at most 483 bytes;
-the content at most 31 331 bytes. The total is always 32 764 bytes, so with
-the vault's 4-byte length frame every list seals to the one 32 KiB bucket
-(asserted against `lakko_vault::seal::sealed_len` in a test).
+`channel_id(16) ‖ read_key_len(0|32) ‖ read_key ‖ handle_seed_len(0|32) ‖
+handle_seed ‖ admission_count(0..=8) ‖ admission_count × (version(4 BE) ‖
+seed(32)) ‖ epoch_count(0..=4) ‖ epoch_count × (epoch_id(4 BE) ‖ seed(32))`.
+An entry is at most 516 bytes; the content at most 33 443 bytes. The total is
+always 65 532 bytes, so with the vault's 4-byte length frame every list seals
+to the one 64 KiB bucket (asserted against `lakko_vault::seal::sealed_len` in
+a test). Version 1 (no handle seed, 32 764 bytes, the 32 KiB bucket) is
+refused: the fullest list with handle seeds does not fit 32 KiB.
+
+`handle_seed` is the channel's ADR-0087 handle write seed (`BLAKE3-derive-key(
+"lakko/handle/write/v1", journal_root_seed)` of the owning account), absent
+for a channel with no `@name`. A device that retakes the channel after a key
+reset signs `rekey` with it, moving the name to the key its new root derives.
 
 ## Invariants upheld
 
@@ -58,12 +66,13 @@ the vault's 4-byte length frame every list seals to the one 32 KiB bucket
   id, admission seeds by `(version, seed)` (two seeds may share a version, as
   ADR-0090 allows), epoch seeds by epoch; every padding byte zero.
 - Every count is checked against its bound before its items are read.
-- `Debug` never prints a root, a key or a seed.
+- `Debug` never prints a root, a key or a seed (a handle seed shows only as
+  `has_handle_seed`).
 
 ## Failure modes
 
 `OwnedChannelsError`: `badLength`, `unknownVersion`, `tooMany`,
-`badReadKey`, `notCanonical`, `badPadding` (also a read past the content),
+`badReadKey`, `badHandleSeed`, `notCanonical`, `badPadding` (also a read past the content),
 each with a frozen `code()`. No path panics.
 
 ## What this module does NOT do
@@ -87,4 +96,5 @@ arbitrary valid lists.
 
 ADR-0101 section 7 (items 2 to 8). Tests:
 `contexts_and_sizes_are_pinned`, `the_lock_roots_are_the_documented_derivations_and_differ`,
-`decode_refuses_every_bad_shape`, `merge_keeps_the_newest_and_drops_the_deleted`.
+`the_fullest_list_fits_and_round_trips`, `decode_refuses_every_bad_shape`,
+`debug_never_prints_a_seed`, `merge_keeps_the_newest_and_drops_the_deleted`.

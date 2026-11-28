@@ -27,7 +27,7 @@ import { base64Decode, base64Encode } from "../auth/account-id";
 import { channelIdFromHex } from "../channels/composer";
 import { knockKeyFor } from "../contacts/client";
 import { channelsActions, channelsState } from "../state/channels-state";
-import { channelAvatarOf, channelHandleOf } from "../channels/channel-access";
+import { channelAvatarOf, channelHandleOf, channelReadKeyHere } from "../channels/channel-access";
 import { loadWasm } from "../wasm";
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 import { useChats, type ActiveGroup } from "./ChatContext";
@@ -39,6 +39,7 @@ import type { StoredConversationHandle } from "./group-settings-envelope";
 import {
   claimGroupHandle,
   rekeyChannelHandle,
+  rekeyChannelHandleFromSeed,
   rekeyGroupHandle,
   handleNeedsRenewal,
   HANDLE_RENEWALS_PER_SESSION,
@@ -288,6 +289,12 @@ export function GroupHandleRuntime(): JSX.Element {
 
   async function runChannel(owed: OwedHandle): Promise<OwedOutcome> {
     let o = owed;
+    // ADR-0101 section 7 item 4: a retaken channel's PublisherGroup is
+    // founded again by the publisher pass, so the name waits for it rather
+    // than being dropped as not owned.
+    if (owed.rekeyFromSeed !== undefined && !ownsChannel(o.id)) {
+      return channelsState.channels().some((c) => c.id === o.id) ? "retry" : { dropped: "no-channel" };
+    }
     if (!ownsChannel(o.id)) return { dropped: "not-owner" };
     // ADR-0087 section 3 (coordinator rule): the PublisherGroup id from the
     // lineage identity, the handle key from the CURRENT identity's root.
@@ -305,9 +312,13 @@ export function GroupHandleRuntime(): JSX.Element {
       o = { ...o, handle: held };
     }
     if (o.handle.length === 0) o = { ...o, handle: held };
-    if (o.handle.length === 0) return "done";
     const wasm = await loadWasm();
     const channelId = channelIdFromHex(o.id);
+    if (owed.rekeyFromSeed !== undefined) {
+      const step = await rekeyRetakenChannel(wasm, owed.rekeyFromSeed, lineage, current, channelId, o, isPublic);
+      if (step !== "moved") return step;
+    }
+    if (o.handle.length === 0) return "done";
     // ADR-0074: after a rotation the name moves to the new current
     // identity's handle key first.
     if (owed.rekeyFrom !== undefined) {
@@ -338,6 +349,9 @@ export function GroupHandleRuntime(): JSX.Element {
       channelId,
       handle: o.handle,
       isPublic,
+      // The key the channel really uses (a channel taken back after a key
+      // reset keeps its first read key, ADR-0101 section 7).
+      readKey: isPublic ? await channelReadKeyHere(lineage, o.id) : null,
       facts: {
         name: (meta?.name ?? channel.localName).trim(),
         description: (meta?.description ?? channel.localDescription).trim(),
@@ -353,6 +367,55 @@ export function GroupHandleRuntime(): JSX.Element {
       leaseUntilMs: written.leaseUntilMs,
     });
     return "done";
+  }
+
+  /**
+   * ADR-0101 section 7 item 4, one owed step: the name the retaken channel
+   * holds moves from the listed handle key to the new root's. The name is
+   * read off the channel's newest record, which the retaking device reads
+   * from the posts the listed epoch seeds open: until it is read the step
+   * waits; a record that names no `@name` ends it.
+   */
+  async function rekeyRetakenChannel(
+    wasm: Awaited<ReturnType<typeof loadWasm>>,
+    oldSeedB64: string,
+    lineage: WasmIdentity,
+    current: WasmIdentity,
+    channelId: Uint8Array,
+    o: OwedHandle,
+    isPublic: boolean,
+  ): Promise<OwedOutcome | "moved"> {
+    if (o.handle.length === 0) {
+      if (channelsState.metaByChannel().get(o.id) === undefined) return "retry";
+      await clearOwedRekey("channel", o.id);
+      return "done";
+    }
+    let oldSeed: Uint8Array;
+    try {
+      oldSeed = base64Decode(oldSeedB64);
+    } catch {
+      await clearOwedRekey("channel", o.id);
+      return { dropped: "bad-seed" };
+    }
+    try {
+      await rekeyChannelHandleFromSeed({
+        wasm,
+        oldSeed,
+        lineageIdentity: lineage,
+        currentIdentity: current,
+        channelId,
+        handle: o.handle,
+        isPublic,
+      });
+    } catch (err) {
+      // Refused for good: the name may already be under the new key (an
+      // answer lost on the way back); the update that follows tells.
+      if (owedOutcomeOf(err) === "retry") throw err;
+    } finally {
+      oldSeed.fill(0);
+    }
+    await clearOwedRekey("channel", o.id);
+    return "moved";
   }
 
   async function runOne(o: OwedHandle): Promise<void> {

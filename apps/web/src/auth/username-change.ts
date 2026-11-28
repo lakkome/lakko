@@ -12,11 +12,10 @@
  *   a. the new handle is derived;
  *   b. `PUT /auth/login-handle` moves the account's handle (fresh-auth grant,
  *      the previous handle, and the recovery email re-keyed when this device
- *      holds the address: with a vault freshly sealed under the NEW handle
- *      when no phrase is saved);
+ *      holds the address or the person just typed it). No vault rides along
+ *      since 2026-11-26 (ADR-0075, second amendment);
  *   c. discovery `username/replace`. When it fails (the name is taken, or
- *      anything else), the OLD handle is bound back the same way, the vault
- *      re-sealed under the old handle;
+ *      anything else), the OLD handle is bound back the same way;
  *   d. the certificate is kept and the name saved on this device (the
  *      session, the own-username register);
  *   e. the publishers follow by themselves (their inputs changed).
@@ -46,10 +45,17 @@ export function renameEmail(hasRecoveryEmail: boolean, addressHeld: boolean): Re
   return addressHeld ? "kept" : "dropped";
 }
 
-/** Whether the rename seals a vault: the recovery email is kept and no
- *  phrase is saved (a phrase-protected account has no vault). */
-export function renameSealsVault(email: RenameEmail, phraseSaved: boolean): boolean {
-  return email === "kept" && !phraseSaved;
+/**
+ * Whether the username screen asks for the recovery email before the change
+ * (UX 19.1c, `protect.username_email`): the email is the account's LAST
+ * second way in and this device holds no address to carry into the change.
+ * The server would refuse the change otherwise (`409 last-factor`), since a
+ * rename without the address drops the email. `lastFactor` is
+ * `removingLeavesNone(factors, "email")` (`protect/factors.ts`); unknown
+ * factors ask for nothing here and the server decides.
+ */
+export function renameNeedsAddress(email: RenameEmail, lastFactor: boolean): boolean {
+  return email === "dropped" && lastFactor;
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +164,10 @@ export type RenameFailure =
   /** `403 address-mismatch`: the address this device holds is not the
    *  account's. It is cleared, so the next rename carries no address. */
   | { readonly kind: "address-mismatch" }
+  /** `409 last-factor`: the change would drop the recovery email, which is
+   *  the account's last second way in. Nothing changed; the username screen
+   *  asks for the address (`protect.username_email`). */
+  | { readonly kind: "last-factor" }
   | { readonly kind: "offline" }
   | { readonly kind: "error" };
 
@@ -173,6 +183,7 @@ export function bindFailure(answer: Answer): RenameFailure {
   if (answer.status === 403 && answer.errorCode === "fresh-auth-required") return { kind: "proof-required" };
   if (answer.status === 403 && answer.errorCode === "address-mismatch") return { kind: "address-mismatch" };
   if (answer.status === 409 && answer.errorCode === "handle-taken") return { kind: "taken" };
+  if (answer.status === 409 && answer.errorCode === "last-factor") return { kind: "last-factor" };
   if (answer.status === 429) return { kind: "bind-limited", retryAfterSecs: answer.retryAfterSecs };
   return { kind: "error" };
 }
@@ -184,22 +195,15 @@ export function replaceFailure(answer: Answer): RenameFailure {
   return { kind: "error" };
 }
 
-/** The recovery email as a bind carries it. */
+/** The recovery email as a bind carries it: the address, so the stored
+ *  value moves to the new handle with no letter (ADR-0076 section 2). */
 export interface RenameEmailPart {
   readonly address: string;
-  /** Present only when a vault is sealed (no phrase saved). */
-  readonly vault?: { readonly salt: Uint8Array; readonly sealed: Uint8Array };
 }
 
 export interface RenamePorts {
   /** The handle of a name, in its wire form and its 32 bytes. */
   readonly handleFor: (username: string) => Promise<{ readonly bytes: Uint8Array; readonly wire: string }>;
-  /** Seal the current phrase under `handle` and the address, with a new
-   *  random salt, off the main thread. `null` when it could not be sealed. */
-  readonly sealVault: (
-    handle: Uint8Array,
-    address: string,
-  ) => Promise<{ readonly salt: Uint8Array; readonly sealed: Uint8Array } | null>;
   /** `PUT /auth/login-handle` as a change. Resolves `null` on success,
    *  else the answer. Never throws. */
   readonly bind: (args: {
@@ -225,22 +229,14 @@ export type RenameOutcome =
   | { readonly kind: "done"; readonly username: string }
   | { readonly kind: "failed"; readonly failure: RenameFailure; readonly rolledBack: boolean | null };
 
-/** The recovery email part of a bind to `handle`, sealing when asked. */
-async function emailPart(
-  ports: RenamePorts,
-  handle: Uint8Array,
-  email: { readonly address: string; readonly sealVault: boolean } | null,
-): Promise<RenameEmailPart | null | "unsealed"> {
-  if (email === null) return null;
-  if (!email.sealVault) return { address: email.address };
-  const vault = await ports.sealVault(handle, email.address);
-  return vault === null ? "unsealed" : { address: email.address, vault };
+/** The recovery email part of a bind. */
+function emailPart(email: { readonly address: string } | null): RenameEmailPart | null {
+  return email === null ? null : { address: email.address };
 }
 
 /**
  * Bind the OLD handle back after a refused replace: the same shape, with the
- * previous handle the new one and the vault re-sealed under the old handle.
- * Resolves whether it went through.
+ * previous handle the new one. Resolves whether it went through.
  */
 export async function rollbackRename(
   ports: RenamePorts,
@@ -248,19 +244,17 @@ export async function rollbackRename(
     readonly oldUsername: string;
     readonly newUsername: string;
     readonly grant: string;
-    readonly email: { readonly address: string; readonly sealVault: boolean } | null;
+    readonly email: { readonly address: string } | null;
   },
 ): Promise<boolean> {
   try {
     const oldHandle = await ports.handleFor(input.oldUsername);
     const newHandle = await ports.handleFor(input.newUsername);
-    const part = await emailPart(ports, oldHandle.bytes, input.email);
-    if (part === "unsealed") return false;
     const refused = await ports.bind({
       handle: oldHandle.wire,
       previousHandle: newHandle.wire,
       grant: input.grant,
-      email: part,
+      email: emailPart(input.email),
     });
     return refused === null;
   } catch {
@@ -274,9 +268,10 @@ export async function runRename(
     readonly oldUsername: string;
     readonly newUsername: string;
     readonly grant: string;
-    /** The recovery email to carry over, or `null` (none, or this device
-     *  does not hold the address: the server then drops it). */
-    readonly email: { readonly address: string; readonly sealVault: boolean } | null;
+    /** The recovery email to carry over (the address this device holds, or
+     *  the one the person just typed), or `null` (none: the server then
+     *  drops it, and refuses the change when it is the last second way in). */
+    readonly email: { readonly address: string } | null;
   },
 ): Promise<RenameOutcome> {
   const failed = (failure: RenameFailure, rolledBack: boolean | null = null): RenameOutcome => ({
@@ -286,17 +281,13 @@ export async function runRename(
   });
   let oldHandle: { readonly bytes: Uint8Array; readonly wire: string };
   let newHandle: { readonly bytes: Uint8Array; readonly wire: string };
-  let part: RenameEmailPart | null | "unsealed";
   try {
     oldHandle = await ports.handleFor(input.oldUsername);
     newHandle = await ports.handleFor(input.newUsername);
-    part = await emailPart(ports, newHandle.bytes, input.email);
   } catch {
     return failed({ kind: "error" });
   }
-  // Nothing is sent when the vault could not be sealed: a bind without it
-  // would leave a mail-protected account without its keys' copy.
-  if (part === "unsealed") return failed({ kind: "error" });
+  const part = emailPart(input.email);
 
   // b. Written before anything is sent.
   const owed: RenameOwed = { v: 1, oldUsername: input.oldUsername, newUsername: input.newUsername, phase: "binding" };

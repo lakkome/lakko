@@ -131,6 +131,16 @@ export interface IdentityUploadRequest {
    *  Omitted on a same-key upload (the row keeps what it holds); a key change
    *  that carries none clears it. */
   conversation_link?: string;
+  /** ADR-0101 section 10: standard base64 of the account's seal
+   *  announcement, signed by the uploaded identity key at the generation the
+   *  row is at after this upload, with a `seq` above every one the row held
+   *  (`400 reset-seals-invalid`, `409 reset-seals-stale`; the same bytes
+   *  again are a no-op). Omitted keeps the stored one. */
+  reset_seals?: string;
+  /** ADR-0101 section 10: standard base64 of the 214-byte reset seal, read
+   *  only on an attested key change that is a reset
+   *  (`400 reset-seal-invalid`). A reset without one is unsealed. */
+  reset_seal?: string;
 }
 
 /** Response body of `POST /discovery/identity`. */
@@ -174,6 +184,16 @@ export interface IdentityFetchResponse {
    *  verifies it under the attested new key before writing to the mailbox
    *  it names (`reach/continuity.ts`). */
   continuity_binding_b64?: string;
+  /** ADR-0101 section 10: standard base64 of the newest seal announcement of
+   *  the account's current generation; absent when it published none. */
+  reset_seals?: string;
+  /** The newest seal announcement of the generation BEFORE the account's
+   *  latest reset or rotation; absent when there is none. A peer checks a
+   *  reset seal against this one, under the key it holds. */
+  previous_reset_seals?: string;
+  /** The reset seal of the account's latest reset; absent for an unsealed
+   *  reset and for an account that never reset. */
+  reset_seal?: string;
 }
 
 /** Body of `PUT /discovery/identity/continuity` (ADR-0101 section 2). */

@@ -40,6 +40,11 @@ describe("the sign-up's protect step (ADR-0075, UX 19.1a)", () => {
 
   it("releases both guards once the person chose", () => {
     expect(sessionGuardView("session", false, false, false)).toBe("children");
+    // UX 19.1c (item G): the app waits for the factor read; the step and
+    // owed words still come first.
+    expect(sessionGuardView("session", false, false, false, false, true)).toBe("loading");
+    expect(sessionGuardView("session", false, false, true, false, true)).toBe("protect-account");
+    expect(sessionGuardView("anon", false, false, false, false, true)).toBe("redirect-login");
     expect(anonymousGuardView("session", false, false, false)).toBe("redirect-home");
   });
 
@@ -311,10 +316,9 @@ describe("a phrase the person typed clears the owed screen (ADR-0077 decision 3 
     expect(read("./recover/PhraseRecover.tsx")).toContain(
       'await auth.recover(phrase(), password(), canonicalUsername, "typed");',
     );
-    // Opened from the email vault.
-    expect(read("./recover/EmailRecover.tsx")).toContain(
-      'await auth.recover(phrase, password(), canonicalUsername, "vault");',
-    );
+    // A mailed code brings no phrase any more (the email vault was removed
+    // on 2026-11-26): the email flow restores nothing from one.
+    expect(read("./recover/EmailRecover.tsx")).not.toContain("auth.recover(");
     // This device's kept row, and a passkey's vault: still shown.
     expect(src).toContain('api.provideRecoveryPhrase(phrase, "device")');
     expect(src).toContain('api.provideRecoveryPhrase(phrase, "vault")');

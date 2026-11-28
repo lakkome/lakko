@@ -6,9 +6,13 @@
  * (ADR-0075 sections 6, 7 and 9), one method per route.
  *
  * Encodings: `handle`, `challenge_id` and `ticket` are URL-safe base64
- * without padding; `vault_salt` (16 bytes), `sealed_entropy` (44 bytes) and
- * the OPAQUE messages are standard base64. A refusal is `{"error": code}`
- * and throws `AuthHttpError`; no answer throws `AuthNetworkError`.
+ * without padding; the OPAQUE messages are standard base64. A refusal is
+ * `{"error": code}` and throws `AuthHttpError`; no answer throws
+ * `AuthNetworkError`.
+ *
+ * Amended 2026-11-26 (ADR-0075, second amendment): the email vault is gone.
+ * No route here takes or returns keys: a mailed code confirms the address,
+ * gives a new password, and nothing else.
  *
  * The address and the codes pass through here on their way to the server
  * and are never logged or kept.
@@ -33,33 +37,20 @@ export interface CodeSent {
   readonly expiresInSecs: number;
 }
 
-export interface EnrolStarted extends CodeSent {
-  /** Standard base64 of the 16-byte salt the email vault is sealed with. */
-  readonly vaultSalt: string;
-}
-
 export interface RecoverVerified {
   readonly ticket: string;
   readonly totpRequired: boolean;
-}
-
-/** What `recover/open` released. */
-export type RecoverOpened =
-  | { readonly mode: "vault"; readonly vaultSalt: string; readonly sealedEntropy: string }
-  | { readonly mode: "password" };
-
-/** What `GET /account/phrase` answers. */
-export interface PhraseStatus {
-  /** The account's owner saved a recovery phrase. */
-  readonly saved: boolean;
-  /** Saving one takes a key rotation: the phrase was ever in an email vault. */
-  readonly rotationNeeded: boolean;
 }
 
 /** The session `recover/password/finish` lands. It mints no fresh grant. */
 export interface EmailPasswordResult {
   readonly accountId: Uint8Array;
   readonly session: SessionPair;
+  /** The export key of the password just set (64 bytes). On a device that
+   *  holds the account's keys it is what the password's seal and the
+   *  owned-channels password lock are made from (ADR-0101 sections 7 and
+   *  10); a secret, memory only. */
+  readonly exportKey: Uint8Array;
 }
 
 function str(value: unknown, endpoint: string, field: string): string {
@@ -138,25 +129,6 @@ export class RecoveryEmailClient {
     return status;
   }
 
-  /** Bearer `GET /account/phrase`: which way this account saves a phrase. It
-   *  answers on a server that sends no mail too, where `/recovery-email` is
-   *  `503` (ADR-0075 section 3, amended 2026-11-01). */
-  async phraseStatus(sessionToken: string): Promise<PhraseStatus> {
-    const endpoint = "/account/phrase";
-    const res = await this.send("GET", endpoint, undefined, sessionToken);
-    if (typeof res["saved"] !== "boolean" || typeof res["rotation_needed"] !== "boolean") {
-      throw new AuthHttpError(200, endpoint, "not a phrase status body");
-    }
-    return { saved: res["saved"], rotationNeeded: res["rotation_needed"] };
-  }
-
-  /** Bearer `POST /account/phrase/saved`: the person checked the words this
-   *  device holds. `409 phrase-save-needs-rotation` when the phrase was ever
-   *  in an email vault. Idempotent. */
-  async markPhraseSaved(sessionToken: string, freshGrant: string): Promise<void> {
-    await this.send("POST", "/account/phrase/saved", { fresh_grant: freshGrant }, sessionToken);
-  }
-
   /** Bearer `POST /recovery-email/enrol/start`. */
   async enrolStart(args: {
     readonly sessionToken: string;
@@ -164,7 +136,7 @@ export class RecoveryEmailClient {
     readonly handle: string;
     readonly address: string;
     readonly lang: string;
-  }): Promise<EnrolStarted> {
+  }): Promise<CodeSent> {
     const endpoint = "/recovery-email/enrol/start";
     const res = await this.send(
       "POST",
@@ -174,55 +146,28 @@ export class RecoveryEmailClient {
     );
     return {
       challengeId: str(res["challenge_id"], endpoint, "challenge_id"),
-      vaultSalt: str(res["vault_salt"], endpoint, "vault_salt"),
       resendAfterSecs: secs(res["resend_after_secs"]),
       expiresInSecs: secs(res["expires_in_secs"]),
     };
   }
 
-  /** Bearer `POST /recovery-email/enrol/finish`. `sealedEntropy` (standard
-   *  base64, 44 bytes) only for an account without a saved phrase. */
+  /** Bearer `POST /recovery-email/enrol/finish`. */
   async enrolFinish(args: {
     readonly sessionToken: string;
     readonly challengeId: string;
     readonly code: string;
-    readonly sealedEntropy: string | null;
-  }): Promise<{ readonly enabled: boolean; readonly vault: boolean }> {
-    const body: Record<string, string> = { challenge_id: args.challengeId, code: args.code };
-    if (args.sealedEntropy !== null) body["sealed_entropy"] = args.sealedEntropy;
-    const res = await this.send("POST", "/recovery-email/enrol/finish", body, args.sessionToken);
-    return { enabled: res["enabled"] === true, vault: res["vault"] === true };
-  }
-
-  /**
-   * Bearer `PUT /recovery-email/vault`: put the email vault back after the
-   * account's keys changed (the automatic re-seal). No fresh-auth grant. The
-   * salt is the client's own (16 random bytes). Every well-formed request
-   * spends one of ten a day: never called in a loop.
-   */
-  async putVault(args: {
-    readonly sessionToken: string;
-    readonly handle: string;
-    readonly address: string;
-    /** Standard base64 of 16 bytes. */
-    readonly vaultSalt: string;
-    /** Standard base64 of the 44-byte blob. */
-    readonly sealedEntropy: string;
-  }): Promise<void> {
-    await this.send(
-      "PUT",
-      "/recovery-email/vault",
-      {
-        handle: args.handle,
-        address: args.address,
-        vault_salt: args.vaultSalt,
-        sealed_entropy: args.sealedEntropy,
-      },
+  }): Promise<{ readonly enabled: boolean }> {
+    const res = await this.send(
+      "POST",
+      "/recovery-email/enrol/finish",
+      { challenge_id: args.challengeId, code: args.code },
       args.sessionToken,
     );
+    return { enabled: res["enabled"] === true };
   }
 
-  /** Bearer `DELETE /recovery-email`. */
+  /** Bearer `DELETE /recovery-email`. `409 last-factor` when it is the
+   *  account's last second way in (`factors.ts`). */
   async remove(sessionToken: string, freshGrant: string): Promise<void> {
     await this.send("DELETE", "/recovery-email", { fresh_grant: freshGrant }, sessionToken);
   }
@@ -254,23 +199,8 @@ export class RecoveryEmailClient {
     await this.send("POST", "/recovery-email/recover/totp", { ticket, code }, null);
   }
 
-  /** `POST /recovery-email/recover/open`. In vault mode the ticket is spent. */
-  async recoverOpen(ticket: string): Promise<RecoverOpened> {
-    const endpoint = "/recovery-email/recover/open";
-    const res = await this.send("POST", endpoint, { ticket }, null);
-    if (res["mode"] === "vault") {
-      return {
-        mode: "vault",
-        vaultSalt: str(res["vault_salt"], endpoint, "vault_salt"),
-        sealedEntropy: str(res["sealed_entropy"], endpoint, "sealed_entropy"),
-      };
-    }
-    if (res["mode"] === "password") return { mode: "password" };
-    throw new AuthHttpError(200, endpoint, "unknown mode");
-  }
-
   /**
-   * Password mode: the OPAQUE registration of the new password under the
+   * The OPAQUE registration of the new password under the
    * ticket (`recover/password/{start,finish}`), landing a session.
    */
   async recoverPassword(args: {
@@ -288,10 +218,12 @@ export class RecoveryEmailClient {
       null,
     );
     const endpoint = "/recovery-email/recover/password/finish";
-    const upload = reg.finish(
+    const finished = reg.finish(
       args.newPassword,
       str(start["new_password_response"], "/recovery-email/recover/password/start", "new_password_response"),
-    ).uploadB64;
+    );
+    const upload = finished.uploadB64;
+    const exportKey = finished.exportKey;
     const body: Record<string, string> = { ticket: args.ticket, new_password_upload: upload };
     if (args.deviceIdB64 !== undefined) body["device_id_b64"] = args.deviceIdB64;
     const finish = await this.send("POST", endpoint, body, null);
@@ -302,7 +234,7 @@ export class RecoveryEmailClient {
       throw new AuthHttpError(200, endpoint, "account_id_b64 is not base64url");
     }
     if (accountId.length !== 16) throw new AuthHttpError(200, endpoint, "account_id_b64 is not 16 bytes");
-    return { accountId, session: sessionPairOf(finish as Partial<SessionPairWire>) };
+    return { accountId, session: sessionPairOf(finish as Partial<SessionPairWire>), exportKey };
   }
 
   /** Bearer `GET /account/notices?after=<id>`, or `?since_ms=<unix ms>` for

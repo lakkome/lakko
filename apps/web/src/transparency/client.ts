@@ -92,6 +92,18 @@ export interface InclusionProof {
   readonly logSize: bigint;
 }
 
+/** Decoded `GET /transparency/announcement/:account_key/:generation`
+ *  (ADR-0101 section 10): the newest seal announcement leaf the log holds
+ *  for the account at that generation. */
+export interface AnnouncementLeafEntry {
+  /** 0-based leaf index; its audit path is `fetchProof(idx)`. */
+  readonly idx: bigint;
+  readonly keyGeneration: bigint;
+  readonly seq: bigint;
+  /** The announcement bytes the leaf commits by hash. */
+  readonly announcement: Uint8Array;
+}
+
 /** Network-level failure (DNS, TLS, no route, …). Distinct from a
  *  parse failure so `verify.ts` can map both to `"unreachable"`. */
 export class TransparencyNetworkError extends Error {
@@ -124,6 +136,15 @@ interface RootResWire {
    *  the server has no cosigs. Replaces the pre-ADR-0039 singular
    *  `witness_cosig_b64`. */
   witness_cosigs_b64?: string[];
+}
+
+/** Wire shape of `GET /transparency/announcement/:key/:generation` (Rust
+ *  `AnnouncementRes`). */
+interface AnnouncementResWire {
+  idx: number;
+  key_generation: number;
+  seq: number;
+  announcement_b64: string;
 }
 
 /** Wire shape of `GET /transparency/latest/:key` (Rust `LatestRes`). */
@@ -204,6 +225,36 @@ export class TransparencyClient {
         wire.genesis_attest_b64.length > 0
           ? base64Decode(wire.genesis_attest_b64)
           : null,
+    };
+  }
+
+  /**
+   * `GET /transparency/announcement/:account_key/:generation` (ADR-0101
+   * section 10): the newest seal announcement leaf of that account and
+   * generation, or `null` on 404 (the account logged none at that
+   * generation). The account key rides URL-safe-no-pad like `fetchLatest`.
+   */
+  async fetchAnnouncement(
+    accountKey: Uint8Array,
+    generation: bigint,
+  ): Promise<AnnouncementLeafEntry | null> {
+    const slug = base64UrlEncodeNoPad(accountKey);
+    const endpoint = `/transparency/announcement/${slug}/${generation.toString()}`;
+    const wire = await this.getJsonOr404<AnnouncementResWire>(endpoint);
+    if (wire === null) return null;
+    if (
+      typeof wire.idx !== "number" ||
+      typeof wire.key_generation !== "number" ||
+      typeof wire.seq !== "number" ||
+      typeof wire.announcement_b64 !== "string"
+    ) {
+      throw new TransparencyHttpError(200, endpoint, "not an announcement body");
+    }
+    return {
+      idx: BigInt(wire.idx),
+      keyGeneration: BigInt(wire.key_generation),
+      seq: BigInt(wire.seq),
+      announcement: base64Decode(wire.announcement_b64),
     };
   }
 

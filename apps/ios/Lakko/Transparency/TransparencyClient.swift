@@ -15,6 +15,31 @@ public protocol TransparencyFetching {
     func fetchLatest(usernameHash: Data) async throws -> LatestEntry?
     /// `GET /transparency/proof/:idx`.
     func fetchProof(idx: UInt64) async throws -> InclusionProof
+    /// `GET /transparency/announcement/:account_key/:generation` (ADR-0101
+    /// section 10): the newest seal-announcement leaf of that generation;
+    /// `nil` on 404.
+    func fetchAnnouncement(usernameHash: Data, generation: UInt64) async throws -> AnnouncementLeaf?
+}
+
+public extension TransparencyFetching {
+    /// A log that predates announcement leaves (a test fake) serves none.
+    func fetchAnnouncement(usernameHash: Data, generation: UInt64) async throws -> AnnouncementLeaf? { nil }
+}
+
+/// One seal-announcement leaf of the key log (ADR-0101 section 10).
+public struct AnnouncementLeaf: Equatable {
+    public let idx: UInt64
+    public let keyGeneration: UInt64
+    public let seq: UInt64
+    /// The announcement itself (the leaf commits it by hash).
+    public let announcement: Data
+
+    public init(idx: UInt64, keyGeneration: UInt64, seq: UInt64, announcement: Data) {
+        self.idx = idx
+        self.keyGeneration = keyGeneration
+        self.seq = seq
+        self.announcement = announcement
+    }
 }
 
 /// URLSession-based client for `lakko-svc-transparency` (KT-log S3d).
@@ -122,6 +147,19 @@ public final class TransparencyClient: TransparencyFetching {
             leafAuth: wire.leafAuthB64.flatMap { base64Decode($0) },
             genesisAttest: wire.genesisAttestB64.flatMap { base64Decode($0) }
         )
+    }
+
+    /// `GET /transparency/announcement/:account_key/:generation`; `nil` on
+    /// 404 (no announcement of that generation is logged).
+    public func fetchAnnouncement(usernameHash: Data, generation: UInt64) async throws -> AnnouncementLeaf? {
+        let endpoint = "/transparency/announcement/\(base64UrlEncodeNoPad(usernameHash))/\(generation)"
+        guard let wire: AnnouncementResWire = try await getJsonOr404(endpoint: endpoint) else { return nil }
+        guard let announcement = base64Decode(wire.announcementB64) else {
+            throw TransparencyClientError.http(
+                status: 200, endpoint: "/transparency/announcement", detail: "announcement_b64 not valid base64")
+        }
+        return AnnouncementLeaf(
+            idx: wire.idx, keyGeneration: wire.keyGeneration, seq: wire.seq, announcement: announcement)
     }
 
     /// `GET /transparency/proof/:idx`.
@@ -369,6 +407,19 @@ private struct LatestResWire: Decodable {
         case isReset = "is_reset"
         case leafAuthB64 = "leaf_auth_b64"
         case genesisAttestB64 = "genesis_attest_b64"
+    }
+}
+
+private struct AnnouncementResWire: Decodable {
+    let idx: UInt64
+    let keyGeneration: UInt64
+    let seq: UInt64
+    let announcementB64: String
+
+    enum CodingKeys: String, CodingKey {
+        case idx, seq
+        case keyGeneration = "key_generation"
+        case announcementB64 = "announcement_b64"
     }
 }
 

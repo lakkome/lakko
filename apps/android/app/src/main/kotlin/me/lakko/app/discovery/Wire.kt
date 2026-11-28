@@ -282,6 +282,15 @@ data class IdentityUploadRequest(
      *  to and the key it publishes, each signing the other. Opaque to the
      *  server. */
     val conversation_link: String? = null,
+    /** ADR-0101 section 10: standard base64 of the account's seal
+     *  announcement, signed by the uploaded identity key at the generation
+     *  the row is at after this upload. Absent keeps the stored one. `400
+     *  reset-seals-invalid`, `409 reset-seals-stale`. */
+    val reset_seals: String? = null,
+    /** ADR-0101 section 10: standard base64 of the 214-byte reset seal of a
+     *  reset's attested publish (beside [key_reset_attest]); read on a reset
+     *  only. `400 reset-seal-invalid`. */
+    val reset_seal: String? = null,
 )
 
 /** Response body of `POST /discovery/identity`. */
@@ -323,6 +332,16 @@ data class IdentityFetchResponse(
      *  verifies it under the attested new key before writing to the mailbox
      *  it names ([me.lakko.app.reach.peerContinuityTarget]). */
     val continuity_binding_b64: String? = null,
+    /** ADR-0101 section 10: standard base64 of the newest seal announcement
+     *  of the CURRENT generation; absent when the account published none. */
+    val reset_seals: String? = null,
+    /** After a reset or a rotation: the newest announcement of the PREVIOUS
+     *  generation, the one a reset seal must be listed in. */
+    val previous_reset_seals: String? = null,
+    /** The reset seal of the latest reset, absent when it carried none (an
+     *  unsealed reset). Verified locally (`checkResetSeal`); the server can
+     *  only strip it. */
+    val reset_seal: String? = null,
 )
 
 /** Body of `PUT /discovery/identity/continuity` (ADR-0101 section 2). */

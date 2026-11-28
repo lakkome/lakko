@@ -287,6 +287,42 @@ public enum StateBundle {
         }
     }
 
+    /// Alignment item F (ADR-0101 sections 10 and 11) — the highest seal
+    /// announcement `seq` this device keeps for a contact, so a newly paired
+    /// device does not start at floor 0. Additive inside v4, absent when
+    /// empty; the same JSON on web, iOS and Android.
+    public struct CarriedSealFloor: Codable, Equatable, Sendable {
+        /// 32 lower-case hex characters of the 16-byte account id.
+        public let accountIdHex: String
+        public let seq: UInt64
+
+        public init(accountIdHex: String, seq: UInt64) {
+            self.accountIdHex = accountIdHex
+            self.seq = seq
+        }
+    }
+
+    /// Alignment item F (UX 16.11) — a contact's key an unsealed reset left
+    /// behind (the one-to-one with it is closed). Additive inside v4.
+    public struct CarriedStartedOver: Codable, Equatable, Sendable {
+        /// 32 lower-case hex characters of the 16-byte account id.
+        public let accountIdHex: String
+        /// Standard base64 of the 32-byte key of before the reset.
+        public let oldKeyB64: String
+        /// When it started over, UNIX milliseconds (0 when not recorded).
+        public let atMs: Int64
+
+        public init(accountIdHex: String, oldKeyB64: String, atMs: Int64) {
+            self.accountIdHex = accountIdHex
+            self.oldKeyB64 = oldKeyB64
+            self.atMs = atMs
+        }
+    }
+
+    /// At most this many of each (chosen, not measured; the pins cap).
+    public static let maxSealFloors = 2000
+    public static let maxStartedOver = 2000
+
     /// At most this many device cards (`MAX_LEAVES_PER_ACCOUNT`), and the
     /// envelope bounds (`lakko-contacts::device_card`).
     public static let maxDeviceCards = 8
@@ -343,6 +379,10 @@ public enum StateBundle {
         /// when empty; at most ``StateBundle/maxDeviceCards``, one per leaf
         /// key, ascending by key bytes.
         public var deviceCards: [CarriedDeviceCard]?
+        /// Alignment item F — absent (nil) when empty.
+        public var sealFloors: [CarriedSealFloor]?
+        /// Alignment item F — absent (nil) when empty.
+        public var startedOver: [CarriedStartedOver]?
 
         public init(
             contacts: [CarriedContact], pins: [CarriedPin], knownGroupIdsB64: [String],
@@ -389,7 +429,9 @@ public enum StateBundle {
               bundle.profiles.count <= maxProfiles,
               bundle.pendingContacts.count <= maxPendingContacts,
               validChannelSeeds(bundle.channelSeeds),
-              validDeviceCards(bundle.deviceCards ?? [])
+              validDeviceCards(bundle.deviceCards ?? []),
+              validSealFloors(bundle.sealFloors ?? []),
+              validStartedOver(bundle.startedOver ?? [])
         else { return nil }
         var groupIds = Set<String>()
         for entry in bundle.groupNames {
@@ -691,7 +733,94 @@ public enum StateBundle {
         var bundle = withChannelSeeds(fitted, channelSeeds)
         let cards = carriedDeviceCards(deviceCards)
         bundle.deviceCards = cards.isEmpty ? nil : cards
+        let floors = carriedSealFloors(pinStore)
+        bundle.sealFloors = floors.isEmpty ? nil : floors
+        let closed = carriedStartedOver(pinStore)
+        bundle.startedOver = closed.isEmpty ? nil : closed
         return bundle
+    }
+
+    /// Alignment item F — the floors this device keeps, by account id hex.
+    static func carriedSealFloors(_ pins: PeerPinStore) -> [CarriedSealFloor] {
+        pins.allPins()
+            .compactMap { accountIdB64, pin -> CarriedSealFloor? in
+                guard let seq = pin.sealSeqFloor, seq > 0,
+                      let id = Data(base64Encoded: accountIdB64), id.count == accountIdLength else { return nil }
+                return CarriedSealFloor(accountIdHex: hexEncode(id), seq: seq)
+            }
+            .sorted { $0.accountIdHex < $1.accountIdHex }
+            .prefix(maxSealFloors)
+            .map { $0 }
+    }
+
+    /// Alignment item F — the closed keys this device keeps.
+    static func carriedStartedOver(_ pins: PeerPinStore) -> [CarriedStartedOver] {
+        pins.startedOverRecords()
+            .compactMap { record -> CarriedStartedOver? in
+                guard let id = Data(base64Encoded: record.accountIdB64), id.count == accountIdLength,
+                      Data(base64Encoded: record.keyB64)?.count == signatureKeyLength else { return nil }
+                return CarriedStartedOver(accountIdHex: hexEncode(id), oldKeyB64: record.keyB64, atMs: record.atMs)
+            }
+            .prefix(maxStartedOver)
+            .map { $0 }
+    }
+
+    /// Alignment item F — the decoder's rule for `sealFloors` (the whole
+    /// bundle is refused on any violation, as for `deviceCards`): at most
+    /// ``maxSealFloors`` entries, each a 32-character lower-case hex account
+    /// id of 16 bytes, no account twice.
+    static func validSealFloors(_ entries: [CarriedSealFloor]) -> Bool {
+        guard entries.count <= maxSealFloors else { return false }
+        var seen = Set<String>()
+        for entry in entries {
+            guard validAccountIdHex(entry.accountIdHex), seen.insert(entry.accountIdHex).inserted else {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// Alignment item F — the decoder's rule for `startedOver`: at most
+    /// ``maxStartedOver`` entries, each an account id as above, a 32-byte
+    /// key in standard base64 and a time not below 0; no (account, key)
+    /// twice.
+    static func validStartedOver(_ entries: [CarriedStartedOver]) -> Bool {
+        guard entries.count <= maxStartedOver else { return false }
+        var seen = Set<String>()
+        for entry in entries {
+            guard validAccountIdHex(entry.accountIdHex),
+                  Data(base64Encoded: entry.oldKeyB64)?.count == signatureKeyLength,
+                  entry.atMs >= 0,
+                  seen.insert(entry.accountIdHex + "/" + entry.oldKeyB64).inserted else { return false }
+        }
+        return true
+    }
+
+    private static func validAccountIdHex(_ hex: String) -> Bool {
+        hex.count == 32 && hex == hex.lowercased() && hexDecode(hex)?.count == accountIdLength
+    }
+
+    /// Alignment item F — keep the higher `seq` per contact and add a
+    /// started-over record this device does not have. A bundle whose entries
+    /// are malformed never gets here (``decode(_:)`` refuses it). Returns
+    /// how many changed.
+    @discardableResult
+    static func applySealFacts(_ bundle: V4, pins: PeerPinStore) -> Int {
+        var changed = 0
+        for floor in (bundle.sealFloors ?? []).prefix(maxSealFloors) {
+            guard floor.accountIdHex.count == 32, let id = hexDecode(floor.accountIdHex),
+                  id.count == accountIdLength else { continue }
+            if pins.raiseSealSeqFloor(accountIdB64: base64Encode(id), seq: floor.seq) { changed += 1 }
+        }
+        for closed in (bundle.startedOver ?? []).prefix(maxStartedOver) {
+            guard closed.accountIdHex.count == 32, let id = hexDecode(closed.accountIdHex),
+                  id.count == accountIdLength,
+                  Data(base64Encoded: closed.oldKeyB64)?.count == signatureKeyLength else { continue }
+            if pins.addStartedOverKey(accountIdB64: base64Encode(id), keyB64: closed.oldKeyB64, atMs: closed.atMs) {
+                changed += 1
+            }
+        }
+        return changed
     }
 
     /// ADR-0080 amendment — whether one carried device-card entry is
@@ -1171,6 +1300,11 @@ public enum StateBundle {
                 provenStore.record(
                     oldKeyB64: edge.oldKeyB64, newKeyB64: edge.newKeyB64, evidence: .verifiedProof)
             }
+        }
+        // Alignment item F — the contacts' announcement floors and the keys
+        // their unsealed resets left behind, after the pins they sit under.
+        if applySealFacts(bundle, pins: pinStore) > 0 {
+            NotificationCenter.default.post(name: StartedOverEvents.changed, object: nil)
         }
         saveKnownGroupIds(bundle.knownGroupIdsB64, accountIdB64: accountIdB64)
         // ADR-0079 section 5 — the pending contacts, after the accepted ones

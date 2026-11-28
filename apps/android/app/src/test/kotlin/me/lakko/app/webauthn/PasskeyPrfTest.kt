@@ -35,6 +35,56 @@ class PasskeyPrfTest {
         assertEquals(32, PASSKEY_PRF_OUTPUT_LENGTH)
     }
 
+    @Test
+    fun `the reset seal's salt is the SHA-256 of its label, as the core computes it`() {
+        // ADR-0101 section 10 (`lakko-attest::reset_seal::passkey_prf_salt`).
+        // Every client must evaluate the same salt, or a passkey that keeps
+        // the chats on one of them would not on another.
+        assertEquals(
+            "556394c21f7893b053ac2e2fb837eaa3f781e39bddfd9d30f9710786227360fc",
+            RESET_SEAL_PRF_SALT.joinToString("") { "%02x".format(it) },
+        )
+        assertFalse("distinct from the passkey vault's", RESET_SEAL_PRF_SALT.contentEquals(PASSKEY_PRF_SALT))
+    }
+
+    @Test
+    fun `a second salt is asked in the same gesture, as eval second`() {
+        val eval = withPrfExtension(json("""{"challenge":"abc"}"""), secondSalt = RESET_SEAL_PRF_SALT)
+            .jsonObject["extensions"]!!.jsonObject["prf"]!!.jsonObject["eval"]!!.jsonObject
+        assertEquals(b64url.encodeToString(PASSKEY_PRF_SALT), eval["first"]!!.jsonPrimitive.content)
+        assertEquals(b64url.encodeToString(RESET_SEAL_PRF_SALT), eval["second"]!!.jsonPrimitive.content)
+        // One output asked: no `second` key at all.
+        val one = withPrfExtension(json("""{"challenge":"abc"}"""))
+            .jsonObject["extensions"]!!.jsonObject["prf"]!!.jsonObject["eval"]!!.jsonObject
+        assertEquals(setOf("first"), one.keys)
+        // The reset's own ceremony evaluates the seal salt as its first.
+        val reset = withPrfExtension(json("""{"challenge":"abc"}"""), salt = RESET_SEAL_PRF_SALT)
+            .jsonObject["extensions"]!!.jsonObject["prf"]!!.jsonObject["eval"]!!.jsonObject
+        assertEquals(b64url.encodeToString(RESET_SEAL_PRF_SALT), reset["first"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `the second output is read beside the first, and a passkey that gives none keeps no chats`() {
+        val first = ByteArray(32) { 1 }
+        val second = ByteArray(32) { 2 }
+        val both = prfResultOf(
+            response("""{"results":{"first":"${b64url.encodeToString(first)}","second":"${b64url.encodeToString(second)}"}}"""),
+        )
+        assertArrayEquals(first, both.output)
+        assertArrayEquals(second, both.second)
+        // The provider answered only the first (or, below API 34, nothing):
+        // the passkey signs in and confirms a reset, and seals none.
+        assertNull(prfResultOf(response("""{"results":{"first":"${b64url.encodeToString(first)}"}}""")).second)
+        assertNull(prfResultOf(response(null)).second)
+        // Another length is no output.
+        assertNull(
+            prfResultOf(
+                response("""{"results":{"first":"${b64url.encodeToString(first)}","second":"${b64url.encodeToString(ByteArray(16))}"}}"""),
+            ).second,
+        )
+    }
+
+    // ---- request ---------------------------------------------------------------
     // ---- request ---------------------------------------------------------------
 
     @Test

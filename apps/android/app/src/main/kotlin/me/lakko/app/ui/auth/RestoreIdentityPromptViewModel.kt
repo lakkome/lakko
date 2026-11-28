@@ -192,35 +192,36 @@ public class RestoreIdentityPromptViewModel(
     }
 
     /**
-     * ADR-0073 "Reset account keys" — the person has NO recovery phrase, NO
-     * other device and NO passkey that restores keys, and typed the
-     * confirmation. [AuthRepository.mintFreshIdentity] runs the reset; the
-     * repository flips the auth state to `SaveFreshPhrase` and the router
-     * shows the new phrase (or its "could not finish publishing" state). A
-     * failure BEFORE anything changed (UX 15.1) leaves the panel open with
-     * the sentence [resetFailureText] picks; a failure after the server step
-     * is the phrase screen's, never this panel's.
+     * ADR-0073 "Reset account keys" - the person has NO recovery phrase, NO
+     * other device and NO passkey that restores keys, confirmed a second
+     * factor and typed the confirmation. [AuthRepository.mintFreshIdentity]
+     * runs the reset; the repository flips the auth state and the router
+     * shows what follows (15.4). A failure BEFORE anything changed (UX 15.1)
+     * leaves the panel open with the sentence [resetFailureText] picks; a
+     * failure after the server step is the next screen's, never this
+     * panel's.
      *
-     * The fresh-auth proof (UX 17.2) is obtained by the screen's proof block
-     * BEFORE this is called. When it ran out in between (`403
-     * fresh-auth-required`) nothing was reset and [onProofRequired] tells the
-     * block to appear; that is not an error.
+     * The password and the second factor (UX 15.1b) are confirmed by the
+     * panel's factor section BEFORE this is called. When the confirmation
+     * ran out in between, or the server refused it (`403
+     * reset-factor-required`, `403 fresh-auth-required`), nothing was reset
+     * and [onFactorRequired] opens the section again; that is not an error.
      */
-    public fun startFresh(onProofRequired: () -> Unit = {}) {
+    public fun startFresh(onFactorRequired: () -> Unit = {}) {
         val snapshot = mutableState.value
         if (snapshot.busy) return
         mutableState.update { it.copy(busy = true, error = null) }
         viewModelScope.launch {
             try {
                 repo.mintFreshIdentity()
-                // Repository flipped to SaveFreshPhrase — the warning is over.
+                // The repository moved on - the warning is over.
                 mutableState.update { it.copy(busy = false, error = null) }
             } catch (err: Throwable) {
                 me.lakko.app.rethrowIfCancelled(err) {
                     mutableState.update { it.copy(busy = false) }
                 }
                 val failure = resetFailureOf(err)
-                if (failure == ResetFailure.ProofRequired) onProofRequired()
+                if (failure == ResetFailure.FactorRequired) onFactorRequired()
                 mutableState.update { afterResetFailure(it, failure) }
             }
         }
@@ -232,12 +233,7 @@ public class RestoreIdentityPromptViewModel(
         mutableState.update { it.copy(error = null) }
     }
 
-    /** How this session was landed, and whether the account has a passkey:
-     *  what picks the reset warning's first panel (UX 17.2). */
-    public fun authenticatorLanding(): Boolean =
-        repo.sessionLanding() == me.lakko.app.auth.SessionLanding.Authenticator
-
-    /** The repository, for the reset warning's proof block. */
+    /** The repository, for the reset warning's factor section. */
     public val repository: AuthRepository get() = repo
 
     override fun onCleared() {
@@ -246,36 +242,35 @@ public class RestoreIdentityPromptViewModel(
     }
 }
 
-/** What a failed reset means for the warning screen (UX 15.1 + 17.2).
+/** What a failed reset means for the warning screen (UX 15.1 + 15.1b).
  *  Nothing was reset in any of them. */
 public sealed interface ResetFailure {
-    /** A proof must be given now (no live proof, or `403
-     *  fresh-auth-required`): the block appears, no error. */
-    public data object ProofRequired : ResetFailure
+    /** The password and a second factor must be confirmed now (none is
+     *  live, or the server refused what was sent): the factor section opens
+     *  again, no error. */
+    public data object FactorRequired : ResetFailure
 
     /** Anything else: the form's error line ([resetFailureText]). */
     public class Other(public val text: UiText) : ResetFailure
 }
 
 /** Classify a failure of [AuthRepository.mintFreshIdentity]. A raw `403
- *  fresh-auth-required` reads as [ResetFailure.ProofRequired] too. */
+ *  reset-factor-required` or `403 fresh-auth-required` reads as
+ *  [ResetFailure.FactorRequired] too. */
 public fun resetFailureOf(err: Throwable): ResetFailure =
-    if (me.lakko.app.auth.isFreshAuthRequired(err)) ResetFailure.ProofRequired else ResetFailure.Other(resetFailureText(err))
+    if (me.lakko.app.auth.isResetFactorRequired(err) || me.lakko.app.auth.isFreshAuthRequired(err)) {
+        ResetFailure.FactorRequired
+    } else {
+        ResetFailure.Other(resetFailureText(err))
+    }
 
 /** The screen state after a failed reset: idle, with the error line only
  *  when something actually went wrong. */
 public fun afterResetFailure(state: RestoreIdentityUiState, failure: ResetFailure): RestoreIdentityUiState =
     when (failure) {
-        ResetFailure.ProofRequired -> state.copy(busy = false, error = null)
+        ResetFailure.FactorRequired -> state.copy(busy = false, error = null)
         is ResetFailure.Other -> state.copy(busy = false, error = failure.text)
     }
-
-/** Whether the reset button is enabled (UX 17.2): the confirmation word,
- *  and whatever the proof block still needs ([ProofBlockView.mainEnabled]:
- *  nothing when a proof is live, else a non-empty password, and the username
- *  too when this device does not know it). */
-public fun resetButtonEnabled(typedWord: String, proof: ProofBlockView): Boolean =
-    resetConfirmationMatches(typedWord) && proof.mainEnabled
 
 /**
  * The sentence for a reset that failed before anything changed (UX 15.1):

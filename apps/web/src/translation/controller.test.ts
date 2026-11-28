@@ -129,29 +129,41 @@ describe("the Translate row (UX 3.1, shared rule)", () => {
   it("is offered on someone else's message in a language the device translates", async () => {
     f.translationState.set("es>en", "ready");
     const c = controller();
-    c.offer(ref(1), "hola amigos", false);
+    c.offer(ref(1), "hola amigos");
     await flush();
-    expect(c.offer(ref(1), "hola amigos", false)).toBe("translate");
+    expect(c.offer(ref(1), "hola amigos")).toBe("translate");
   });
 
-  it("is not offered on own messages, in a reading language, or with the setting off", async () => {
+  it("is offered on own messages like received ones (UX 3.1, 2026-11-27)", async () => {
+    // The controller has no notion of an own message any more: the bubble
+    // asks the same question for both tones.
     f.translationState.set("es>en", "ready");
     const c = controller();
-    c.offer(ref(1), "hola amigos", false);
-    c.offer(ref(2), "hello there", false);
+    c.offer(ref(7), "hola amigos");
     await flush();
-    expect(c.offer(ref(1), "hola amigos", true)).toBe("none");
-    expect(c.offer(ref(2), "hello there", false)).toBe("none");
+    expect(c.offer(ref(7), "hola amigos")).toBe("translate");
+    expect(c.offer.length).toBe(2);
+    expect(c.autoTranslate.length).toBe(2);
+    expect(c.textLine.length).toBe(2);
+  });
+
+  it("is not offered in a reading language or with the setting off", async () => {
+    f.translationState.set("es>en", "ready");
+    const c = controller();
+    c.offer(ref(1), "hola amigos");
+    c.offer(ref(2), "hello there");
+    await flush();
+    expect(c.offer(ref(2), "hello there")).toBe("none");
     settings = { ...DEFAULT_SETTINGS, showTranslate: false };
-    expect(c.offer(ref(1), "hola amigos", false)).toBe("none");
+    expect(c.offer(ref(1), "hola amigos")).toBe("none");
   });
 
   it("opens with the picker when the language could not be told", async () => {
     f.translationState.set("de>en", "needs-pack");
     const c = controller();
-    c.offer(ref(3), "???", false);
+    c.offer(ref(3), "???");
     await flush();
-    expect(c.offer(ref(3), "???", false)).toBe("ask");
+    expect(c.offer(ref(3), "???")).toBe("ask");
     c.translate("text", ref(3), "???");
     await flush();
     expect(c.pickerRequest()?.use).toBe("translation");
@@ -249,20 +261,20 @@ describe("the Translate row (UX 3.1, shared rule)", () => {
   it("offers nothing at all on a browser without a translator", async () => {
     f.engines = { ...f.engines, translation: { ...f.engines.translation, present: false } };
     const c = controller();
-    c.offer(ref(1), "hola amigos", false);
+    c.offer(ref(1), "hola amigos");
     await flush();
-    expect(c.offer(ref(1), "hola amigos", false)).toBe("none");
+    expect(c.offer(ref(1), "hola amigos")).toBe("none");
   });
 });
 
 describe("the language line up front (UX 3.2, shared rule)", () => {
   /** The line once detection and the engine have answered (each a re-render). */
-  async function settled(c: TranslationController, r: MessageRef, text: string, own = false) {
+  async function settled(c: TranslationController, r: MessageRef, text: string) {
     for (let i = 0; i < 3; i++) {
-      c.textLine(r, text, own);
+      c.textLine(r, text);
       await flush();
     }
-    return c.textLine(r, text, own);
+    return c.textLine(r, text);
   }
 
   it("names the language of a message not in a reading language, with Translate", async () => {
@@ -293,12 +305,11 @@ describe("the language line up front (UX 3.2, shared rule)", () => {
     expect(await settled(c, ref(6), "W7 web to iphone")).toEqual({ phase: "none" });
   });
 
-  it("is not shown on own messages or messages without text", async () => {
+  it("is shown on own messages and not on messages without text", async () => {
     f.translationState.set("es>en", "ready");
     const c = controller();
-    await settled(c, ref(1), "hola amigos");
-    expect(c.textLine(ref(1), "hola amigos", true)).toEqual({ phase: "none" });
-    expect(c.textLine(ref(3), "   ", false)).toEqual({ phase: "none" });
+    expect(await settled(c, ref(1), "hola amigos")).toEqual({ phase: "detected", source: "es", canTranslate: true });
+    expect(c.textLine(ref(3), "   ")).toEqual({ phase: "none" });
   });
 
   it("is not shown for a reading language, confident or an unsure guess", async () => {
@@ -314,7 +325,7 @@ describe("the language line up front (UX 3.2, shared rule)", () => {
     const c = controller();
     expect(await settled(c, ref(1), "hola amigos")).toMatchObject({ phase: "detected" });
     settings = { ...DEFAULT_SETTINGS, showTranslate: false };
-    expect(c.textLine(ref(1), "hola amigos", false)).toEqual({ phase: "none" });
+    expect(c.textLine(ref(1), "hola amigos")).toEqual({ phase: "none" });
   });
 
   it("names a language the device cannot translate from, without Translate", async () => {
@@ -365,6 +376,26 @@ describe("the language line up front (UX 3.2, shared rule)", () => {
     // `Not Turkmen?` lists the close candidates first.
     expect(c.pickerRequest()?.candidates).toEqual(["tk", "da"]);
     expect(f.translateCalls).toHaveLength(0);
+  });
+
+  it("an own message is detected and offered, but its detection never feeds the conversation's languages", async () => {
+    f.translationState.set("it>en", "ready");
+    f.detections.set("ciao a tutti, come va oggi?", { tag: "it", permille: 950 });
+    const c = controller();
+    c.prefs(CONV);
+    await flush();
+    const own: MessageRef = { ...ref(30), own: true };
+    // Translated like a received one (UX 3.2 line and the menu row)...
+    expect(await settled(c, own, "ciao a tutti, come va oggi?")).toEqual({
+      phase: "detected",
+      source: "it",
+      canTranslate: true,
+    });
+    expect(c.offer(own, "ciao a tutti, come va oggi?")).toBe("translate");
+    // ...yet the conversation's languages count messages from others only.
+    expect(c.prefs(CONV).languages.detections).toEqual([]);
+    await settled(c, ref(31), "ciao a tutti, come va oggi?");
+    expect(c.prefs(CONV).languages.detections).toEqual([{ messageId: 31, tag: "it" }]);
   });
 
   it("names a near tie by the conversation's language, and nothing else", async () => {
@@ -453,7 +484,7 @@ describe("the language line up front (UX 3.2, shared rule)", () => {
     await settled(c, ref(1), "hola amigos");
     c.translate("text", ref(1), "hola amigos");
     await flush();
-    expect(c.textLine(ref(1), "hola amigos", false)).toEqual({ phase: "translated", source: "es", text: "hello friends" });
+    expect(c.textLine(ref(1), "hola amigos")).toEqual({ phase: "translated", source: "es", text: "hello friends" });
   });
 
   it("gives way to an automatic translation", async () => {
@@ -463,9 +494,9 @@ describe("the language line up front (UX 3.2, shared rule)", () => {
     await settled(c, ref(1), "hola amigos");
     c.setAutoTranslate(CONV, true);
     await flush();
-    c.autoTranslate(ref(1), "hola amigos", false);
+    c.autoTranslate(ref(1), "hola amigos");
     await flush();
-    expect(c.textLine(ref(1), "hola amigos", false).phase).toBe("translated");
+    expect(c.textLine(ref(1), "hola amigos").phase).toBe("translated");
   });
 
   it("detects each message once, sharing the menu row's detection", async () => {
@@ -474,11 +505,11 @@ describe("the language line up front (UX 3.2, shared rule)", () => {
     f.engines = { ...f.engines, detection: { ...f.engines.detection, detect: (t) => { calls++; return detect(t); } } };
     f.translationState.set("es>en", "ready");
     const c = controller();
-    c.offer(ref(1), "hola amigos", false);
-    c.textLine(ref(1), "hola amigos", false);
+    c.offer(ref(1), "hola amigos");
+    c.textLine(ref(1), "hola amigos");
     await flush();
-    c.textLine(ref(1), "hola amigos", false);
-    c.offer(ref(1), "hola amigos", false);
+    c.textLine(ref(1), "hola amigos");
+    c.offer(ref(1), "hola amigos");
     expect(calls).toBe(1);
   });
 });
@@ -663,11 +694,11 @@ describe("the conversation bar and automatic translation (UX 3.6 / 3.7)", () => 
     c.detected(ref(1), "hola amigos");
     c.translationState("es");
     await flush();
-    c.autoTranslate(ref(1), "hola amigos", false);
+    c.autoTranslate(ref(1), "hola amigos");
     await flush();
     expect(c.textView("text", ref(1)).phase).toBe("translated");
     c.showOriginal("text", ref(1));
-    c.autoTranslate(ref(1), "hola amigos", false);
+    c.autoTranslate(ref(1), "hola amigos");
     await flush();
     expect(f.translateCalls.length).toBe(1);
   });
@@ -695,7 +726,7 @@ describe("the conversation bar and automatic translation (UX 3.6 / 3.7)", () => 
     c.detected(ref(1), "hola amigos");
     c.translationState("es");
     await flush();
-    c.autoTranslate(ref(1), "hola amigos", false);
+    c.autoTranslate(ref(1), "hola amigos");
     await flush();
     expect(f.translateCalls).toEqual([]);
     expect(c.packRequest()).toBeNull();

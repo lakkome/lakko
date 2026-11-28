@@ -106,11 +106,15 @@ export function WaitingForNetwork(props: { onTap: () => void }): JSX.Element {
   );
 }
 
-export function NotSent(props: { onRetry: () => void }): JSX.Element {
+export function NotSent(props: { onRetry?: (() => void) | undefined }): JSX.Element {
+  // UX 16.11 (alignment item E): a conversation that takes nothing (its
+  // person started over) shows the ordinary state without a Retry.
+  if (props.onRetry === undefined) return <span>{t("chat.message.not_sent")}</span>;
+  const retry = props.onRetry;
   return (
     <button
       type="button"
-      onClick={() => props.onRetry()}
+      onClick={() => retry()}
       style={{
         border: "none",
         background: "transparent",

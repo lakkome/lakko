@@ -56,6 +56,10 @@ export interface KeyResetOwed {
    *  cool-down, ADR-0073 section 4.1; UX 15.4 "Waiting for the directory"),
    *  from the last refusal. Absent when the last attempt was not refused so. */
   readonly waitUntilMs?: number;
+  /** ADR-0101 section 10: standard base64 of the 214-byte reset seal the
+   *  attested publish carries, so a retry sends the same one. Absent for an
+   *  unsealed reset. A public artefact (a signature), not a secret. */
+  readonly resetSealB64?: string;
 }
 
 function markerKey(accountIdB64: string): string {
@@ -111,6 +115,9 @@ export function readKeyResetOwed(
         deviceGroup: parsed.done.deviceGroup === true,
       },
       ...(waitUntilMs !== undefined ? { waitUntilMs } : {}),
+      ...(typeof parsed.resetSealB64 === "string" && parsed.resetSealB64.length > 0
+        ? { resetSealB64: parsed.resetSealB64 }
+        : {}),
     };
   } catch {
     return null;
@@ -205,6 +212,7 @@ export function withDirectoryWait(record: KeyResetOwed, untilMs: number | null):
     newSignaturePubkeyB64: record.newSignaturePubkeyB64,
     signedAtMs: record.signedAtMs,
     done: record.done,
+    ...(record.resetSealB64 !== undefined ? { resetSealB64: record.resetSealB64 } : {}),
   };
   return untilMs === null ? rest : { ...rest, waitUntilMs: untilMs };
 }

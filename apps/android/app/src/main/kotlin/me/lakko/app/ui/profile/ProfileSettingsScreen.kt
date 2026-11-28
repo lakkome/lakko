@@ -286,6 +286,31 @@ public fun ProfileSettingsScreen(
         }
     }
 
+    // UX 19.1c: the recovery email is the last second way in and moves with
+    // the name; this device holds no address, so it is typed once.
+    viewModel.addressRequest?.let {
+        var address by remember { mutableStateOf("") }
+        val plausible = me.lakko.app.auth.recoveryEmailPlausible(address)
+        LakkoDialog(
+            onDismissRequest = { viewModel.answerAddress(null) },
+            title = t("username.change.title"),
+            body = t("protect.username_email"),
+            confirm = LakkoDialogAction(
+                label = t("common.save"),
+                enabled = plausible,
+                onClick = { viewModel.answerAddress(address.trim()) },
+            ),
+            focusCancelOnOpen = false,
+        ) {
+            me.lakko.app.ui.auth.EmailField(
+                value = address,
+                onValueChange = { address = it },
+                enabled = true,
+                onDone = { if (plausible) viewModel.answerAddress(address.trim()) },
+            )
+        }
+    }
+
     leaveAsk?.let { proceed ->
         LakkoDialog(
             onDismissRequest = { leaveAsk = null },

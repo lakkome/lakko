@@ -50,7 +50,6 @@ class LanguageDetectionTest {
         val input = SourceRules.offerInput(
             enabled = true,
             text = "Hoe gaat het met je vandaag",
-            isOwn = false,
             known = known,
             engineForKnown = TranslationEngineState.READY,
             anyEngine = true,
@@ -65,7 +64,6 @@ class LanguageDetectionTest {
         val input = SourceRules.offerInput(
             enabled = true,
             text = "ok",
-            isOwn = false,
             known = SourceRules.known(null, null, confident),
             engineForKnown = null,
             anyEngine = true,
@@ -203,16 +201,14 @@ class LanguageDetectionTest {
 
     @Test
     fun `the language line asks the menu row's rule with the engine set to can translate`() {
-        val input = SourceRules.languageLineInput(enabled = true, text = "hola", isOwn = false, detected = lang("es", 410))
+        val input = SourceRules.languageLineInput(enabled = true, text = "hola", detected = lang("es", 410))
         assertEquals(TranslationEngineState.READY, input.engineForDetected)
         assertTrue(input.anyEngine)
         assertEquals(lang("es", 410), input.detected)
         assertTrue(input.hasText)
-        assertFalse(input.isOwn)
-        // Own messages, empty text and the setting are the rule's to refuse.
-        assertTrue(SourceRules.languageLineInput(true, "hola", isOwn = true, detected = lang("es", 900)).isOwn)
-        assertFalse(SourceRules.languageLineInput(true, "  ", isOwn = false, detected = lang("es", 900)).hasText)
-        assertFalse(SourceRules.languageLineInput(false, "hola", isOwn = false, detected = lang("es", 900)).enabled)
+        // Empty text and the setting are the rule's to refuse.
+        assertFalse(SourceRules.languageLineInput(true, "  ", detected = lang("es", 900)).hasText)
+        assertFalse(SourceRules.languageLineInput(false, "hola", detected = lang("es", 900)).enabled)
     }
 
     private fun resolution(

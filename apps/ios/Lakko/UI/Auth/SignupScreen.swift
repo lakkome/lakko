@@ -186,26 +186,30 @@ public struct SignupScreen: View {
 }
 
 /// The step after sign-up, shown by the app root over the freshly landed
-/// session; `onDone` lets the session through (UX 19.1a).
+/// session; `onDone` lets the session through (UX 19.1a). The same step is
+/// shown at any later landing of an account with a username and no second
+/// way in (`required`, UX 19.1c).
 ///
-/// "Protect your account": `Add an email`, the passkey row, `Save a
-/// recovery phrase`. The recovery phrase is NOT shown here (ADR-0075 D2):
-/// the device keeps it unseen, and saving a phrase gives the account new
-/// keys and new words. The email and the passkey return to the step with
-/// their row marked done and `Continue` under the rows; saving a phrase
-/// lands in the app directly. The passkey row runs the existing passkey
-/// creation under sign-up's fresh grant; the keys are then stored for the
-/// passkey with nothing to choose, wherever the platform can carry them
-/// (UX `docs/ux/identity-recovery.md` 10.2).
+/// "Protect your account": a second way to confirm it is you is required:
+/// `Add an email`, `Use an authenticator app` or `Create a passkey`. Each
+/// runs its flow and returns here with its row marked done; `Continue` is
+/// the only way off the step and is enabled once one of the three is done.
+/// `Also save a recovery phrase` is an optional extra and returns here too.
+/// The passkey row runs the existing passkey creation under sign-up's fresh
+/// grant; the keys are then stored for the passkey with nothing to choose,
+/// wherever the platform can carry them (UX `docs/ux/identity-recovery.md`
+/// 10.2).
 struct SignupProtectScreen: View {
     @ObservedObject var authRepository: AuthRepository
     @ObservedObject var center: AccountProtectionCenter
-    let rotation: KeyRotationRunner
+    /// The landing rule put the step here (UX 19.1c).
+    var required = false
     let onDone: () -> Void
 
     private enum Step: Equatable {
         case protect
         case email
+        case authenticator
         case phrase
         case passkey
         /// The result line of the passkey step, then back to the step.
@@ -215,6 +219,9 @@ struct SignupProtectScreen: View {
     @State private var step: Step = .protect
     @State private var busy = false
     @State private var error: UiText?
+    /// The sheet of the passkey row was dismissed: one plain line under the
+    /// row, until the row is used again.
+    @State private var passkeyCancelled = false
     /// UX 17.1 — the proof block of the passkey step, the same one Settings
     /// > Passkeys draws. Absent while the proof of the signup finish is
     /// live; on screen once the step sat open past its ten minutes.
@@ -224,12 +231,12 @@ struct SignupProtectScreen: View {
     init(
         authRepository: AuthRepository,
         center: AccountProtectionCenter,
-        rotation: KeyRotationRunner,
+        required: Bool = false,
         onDone: @escaping () -> Void
     ) {
         self.authRepository = authRepository
         self.center = center
-        self.rotation = rotation
+        self.required = required
         self.onDone = onDone
         self._proof = StateObject(
             wrappedValue: FreshAuthProofModel(surface: .addPasskey, repository: authRepository))
@@ -253,12 +260,17 @@ struct SignupProtectScreen: View {
                 center: center,
                 hasUsername: account?.username.isEmpty == false,
                 onAddEmail: { step = .email },
+                onAddAuthenticator: { step = .authenticator },
                 onAddPasskey: {
                     error = nil
+                    passkeyCancelled = false
                     step = .passkey
                 },
                 onSavePhrase: { step = .phrase },
-                onLeave: onDone
+                onLeave: onDone,
+                required: required,
+                passkeyNote: passkeyCancelled
+                    ? (text: l10n.t(SignupPasskeyStep.cancelledKey), isError: false) : nil
             )
         case .email:
             // Sign-up counts as the proof: nothing more is asked here.
@@ -269,20 +281,18 @@ struct SignupProtectScreen: View {
                     .padding(.bottom, 16)
             }
             .background(Color.lakkoBackground.ignoresSafeArea())
+        case .authenticator:
+            AuthenticatorSetupScreen(
+                authRepository: authRepository, atSignUp: true,
+                onSetUp: { center.authenticatorAdded() },
+                onClose: { step = .protect })
         case .phrase:
+            // Saving a phrase changes no key (UX 19.5): the words the device
+            // holds are shown and confirmed, and the step is returned to.
             VStack(spacing: 0) {
                 SavePhraseScreen(
-                    authRepository: authRepository, center: center, rotation: rotation,
-                    // ADR-0075 section 3 — a phrase that was sealed in an
-                    // email vault on this step needs the key rotation, which
-                    // needs the DeviceGroup and the chats: nothing of the
-                    // session is mounted here, so the app opens on the same
-                    // screen in Settings.
-                    rotationNeedsSession: {
-                        center.savePhraseRequested = true
-                        onDone()
-                    },
-                    onDone: onDone)
+                    authRepository: authRepository, center: center,
+                    onDone: { step = .protect })
                 AuthLinkRow(title: l10n.t("common.back"), action: { step = .protect })
                     .padding(.bottom, 16)
             }
@@ -357,7 +367,10 @@ struct SignupProtectScreen: View {
             } catch {
                 switch SignupPasskeyStep.failure(error) {
                 case .stay:
-                    break
+                    // The system sheet was dismissed: back on the step, one
+                    // plain line under the passkey row.
+                    passkeyCancelled = true
+                    step = .protect
                 case .proofNeeded:
                     // The proof ran out between the two calls: the block
                     // appears, with no error styling. Nothing was added.
@@ -377,8 +390,12 @@ struct SignupProtectScreen: View {
 /// The pure decisions of the passkey row's sub-step.
 enum SignupPasskeyStep {
 
+    /// The line under the passkey row after a dismissed sheet.
+    static let cancelledKey = "protect.passkey.cancelled"
+
     enum Failure: Equatable {
-        /// The passkey sheet was dismissed: not an error, the step stays.
+        /// The passkey sheet was dismissed: not an error; back on the step
+        /// with ``cancelledKey`` under the passkey row.
         case stay
         /// `403 fresh-auth-required`: the proof block appears.
         case proofNeeded

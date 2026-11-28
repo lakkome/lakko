@@ -63,6 +63,7 @@ import { t } from "../l10n";
 import { namedActionKey } from "../ui/confirm-dialog";
 import { createLiveText } from "../l10n/live-text";
 import { computeSafetyNumber } from "./safety";
+import { withoutAddForStartedOver } from "./started-over";
 import { messageAction, type MessageAction } from "./message-action";
 import { safetyNumberRows } from "./safety-number-format";
 import { isBlockedKeyB64 } from "../moderation/block-registry";
@@ -124,6 +125,9 @@ export interface ContactDetailViewProps {
    * `Add to contacts` in place of Rename and Remove (amended 2026-10-24).
    */
   readonly isContact: boolean;
+  /** UX 16.11: the key is one an account left behind by an unsealed reset
+   *  (`started-over.ts`); its card offers no `Add to contacts`. */
+  readonly keyLeftBehind?: boolean;
   /** The person's account id, the name "Who can find me" has for them, or
    *  `null`: such a contact cannot be chosen, and has no switch there. */
   readonly accountIdHex: string | null;
@@ -206,14 +210,17 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
           props.isContact,
         )
       : // ADR-0099 step 3: a suspended account adds no contact and calls nobody.
-        sectionsWhileSuspended(
-          personInfoSections(uiRules(), {
-            membershipEnded: props.membershipEnded,
-            isContact: props.isContact,
-            contactsOfContactsOn: contactsOfContactsOn(),
-            isBlocked: blocked(),
-          }),
-          accountSuspended(),
+        withoutAddForStartedOver(
+          sectionsWhileSuspended(
+            personInfoSections(uiRules(), {
+              membershipEnded: props.membershipEnded,
+              isContact: props.isContact,
+              contactsOfContactsOn: contactsOfContactsOn(),
+              isBlocked: blocked(),
+            }),
+            accountSuspended(),
+          ),
+          props.keyLeftBehind === true,
         ),
   );
   const resolved = (): ReturnType<typeof profiles.resolve> =>

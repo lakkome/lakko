@@ -14,75 +14,33 @@ import org.junit.Test
  *  row by row (mirror of the web `reset-verdict` / `verified-binding` /
  *  `local-store` tables). */
 class ResetVerdictTest {
-    private val verified = AttestCheck.Verified(keyGeneration = 2, signedAtMs = 1_000)
-
-    private fun input(
-        attest: AttestCheck = verified,
-        log: LogCheck = LogCheck(LogVerifyStatus.OFF, null),
-        accepted: Long = 1,
-        bundleGeneration: Long = 2,
-        fetched: String = "new",
-    ) = ResetVerdictInput("old", accepted, fetched, bundleGeneration, attest, log)
-
     @Test
-    fun `row 1 and 2 - no attestation or an invalid one is refused`() {
-        assertEquals(ResetVerdict.Refused(ResetRefusal.UNCONFIRMED), resetVerdict(input(attest = AttestCheck.Absent)))
-        assertEquals(ResetVerdict.Refused(ResetRefusal.UNCONFIRMED), resetVerdict(input(attest = AttestCheck.Invalid)))
+    fun `the acceptance table is the core's - no copy of it is left in the app`() {
+        // ADR-0073 R.2 with rule 4: the production rule is `resetVerdict` on
+        // the UniFFI surface. The hand-written table this file used to test
+        // row by row is gone; what the gate does with each outcome is
+        // `ResetGateTest` and `StartedOverGateTest`.
+        val root = listOf("src/main/kotlin", "app/src/main/kotlin").map { java.io.File(it) }.first { it.exists() }
+        val rule = java.io.File(root, "me/lakko/app/contacts/ResetVerdict.kt").readText()
+        assertTrue(rule.contains("uniffi.lakko_ffi_uniffi.resetVerdict("))
+        assertFalse("no hand-written rule function", rule.contains("fun resetVerdict("))
+        assertFalse(rule.contains("logOffAcceptsReset"))
+        val client = java.io.File(root, "me/lakko/app/contacts/ContactsClient.kt").readText()
+        assertTrue(client.contains("private val resetRule: ResetRule = NativeResetRule"))
     }
 
     @Test
-    fun `row 3 - no attest key is no verdict`() {
-        assertEquals(ResetVerdict.NoVerdict, resetVerdict(input(attest = AttestCheck.NoKey)))
-    }
-
-    @Test
-    fun `row 4 - a generation that is not the bundle's or not above the accepted one is refused`() {
-        assertEquals(ResetVerdict.Refused(ResetRefusal.UNCONFIRMED), resetVerdict(input(bundleGeneration = 3)))
-        assertEquals(ResetVerdict.Refused(ResetRefusal.UNCONFIRMED), resetVerdict(input(accepted = 2)))
-        assertEquals(ResetVerdict.Refused(ResetRefusal.UNCONFIRMED), resetVerdict(input(accepted = 9)))
-    }
-
-    @Test
-    fun `row 5 - the log shows the key without a reset - unexplained`() {
-        val log = LogCheck(LogVerifyStatus.CONFIRMED, false)
-        assertEquals(ResetVerdict.Refused(ResetRefusal.UNEXPLAINED), resetVerdict(input(log = log)))
-        // The copy follows the log for an attestation refusal too.
-        assertEquals(
-            ResetVerdict.Refused(ResetRefusal.UNEXPLAINED),
-            resetVerdict(input(attest = AttestCheck.Absent, log = log)),
-        )
-    }
-
-    @Test
-    fun `row 6 - mismatch and rollback are refused`() {
-        for (status in listOf(LogVerifyStatus.MISMATCH, LogVerifyStatus.ROLLBACK)) {
-            assertEquals(ResetVerdict.Refused(ResetRefusal.UNCONFIRMED), resetVerdict(input(log = LogCheck(status, null))))
-        }
-    }
-
-    @Test
-    fun `row 7 - an unreachable or absent log is no verdict`() {
-        for (status in listOf(LogVerifyStatus.UNREACHABLE, LogVerifyStatus.ABSENT)) {
-            assertEquals(ResetVerdict.NoVerdict, resetVerdict(input(log = LogCheck(status, null))))
-        }
-    }
-
-    @Test
-    fun `row 8 - confirmed as a reset, or the log off, is accepted`() {
-        val accepted = ResetVerdict.Accepted(2, 1_000)
-        assertEquals(accepted, resetVerdict(input(log = LogCheck(LogVerifyStatus.CONFIRMED, true))))
-        assertEquals(accepted, resetVerdict(input()))
-        assertTrue(logOffAcceptsReset())
-        // `is_reset` unknown on a confirmed log is not a reset.
-        assertEquals(
+    fun `the outcomes are sealed, unsealed, refused and no verdict`() {
+        val all: List<ResetVerdict> = listOf(
+            ResetVerdict.Sealed(2, 1_000, 5),
+            ResetVerdict.Unsealed(2, 1_000),
             ResetVerdict.Refused(ResetRefusal.UNCONFIRMED),
-            resetVerdict(input(log = LogCheck(LogVerifyStatus.CONFIRMED, null))),
+            ResetVerdict.NoVerdict,
         )
-    }
-
-    @Test
-    fun `an unchanged key is never judged`() {
-        assertEquals(ResetVerdict.NoVerdict, resetVerdict(input(fetched = "old")))
+        assertEquals(4, all.map { it::class }.toSet().size)
+        // No seal could be checked: the rule reads that as no valid seal.
+        assertFalse(SealCheck.NONE.valid)
+        assertEquals(0L, SealCheck.NONE.announcementSeq)
     }
 
     @Test

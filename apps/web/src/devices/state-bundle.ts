@@ -68,12 +68,24 @@
  * newer than the card it holds for that key, so the device's own later card
  * wins. Display-only data, attributed by the confirming device (an own
  * device of the account), not by the card's subject.
+ *
+ * `sealFloors` and `startedOver` (2026-11-27, ADR-0101 sections 10 and 11;
+ * additive inside v4, absent when empty, the same JSON on all three
+ * clients): per contact the highest seal-announcement `seq` the confirming
+ * device kept (`{accountIdHex, seq}`), and every key a contact left behind
+ * by an unsealed reset (`{accountIdHex, oldKeyB64, atMs}`, `atMs` when the
+ * confirming device noticed it, 0 when not known). The receiving device
+ * keeps the higher `seq` per contact and adds a left-behind key it does not
+ * have, so a newly paired device holds the same floor and keeps the same
+ * old one-to-one closed.
  */
 import type { DeviceCipher } from "../auth/device-cipher";
 import { DsClient, DsHttpError, DsNetworkError } from "../ds/client";
 import {
+  addCarriedStartedOverKey,
   boundContactsAccount,
   loadAccepted,
+  raiseSealSeqFloor,
   readPin,
   recordCarriedProvenPredecessors,
   setPin,
@@ -227,6 +239,27 @@ export const MAX_CARRIED_DEVICE_CARDS = 8;
 export const DEVICE_CARD_ENVELOPE_MIN_BYTES = 44;
 export const DEVICE_CARD_ENVELOPE_MAX_BYTES = 270;
 
+/** ADR-0101 section 10: one contact's seal-announcement floor. */
+export interface CarriedSealFloor {
+  /** Lower-case hex of the 16-byte account id. */
+  readonly accountIdHex: string;
+  /** The highest announcement `seq` kept (a safe integer). */
+  readonly seq: number;
+}
+
+/** ADR-0101 section 11: one key a contact left behind (started over). */
+export interface CarriedStartedOver {
+  readonly accountIdHex: string;
+  /** Standard base64 of the 32-byte signature key left behind. */
+  readonly oldKeyB64: string;
+  /** When the sending device noticed it, unix ms; 0 when not known. */
+  readonly atMs: number;
+}
+
+/** At most this many of each; one more refuses the whole bundle. */
+export const MAX_CARRIED_SEAL_FLOORS = 10_000;
+export const MAX_CARRIED_STARTED_OVER = 10_000;
+
 /** The bundle. `v` is the only version there is. */
 export interface StateBundle {
   readonly v: 4;
@@ -250,6 +283,10 @@ export interface StateBundle {
    *  {@link MAX_CARRIED_DEVICE_CARDS}, one per leaf key, ascending by key
    *  bytes. */
   readonly deviceCards?: readonly CarriedDeviceCard[];
+  /** 2026-11-27: present only when non-empty, at most one per account. */
+  readonly sealFloors?: readonly CarriedSealFloor[];
+  /** 2026-11-27: present only when non-empty, one per (account, key). */
+  readonly startedOver?: readonly CarriedStartedOver[];
 }
 
 /** What the sending device adds beside the localStorage state (read from its
@@ -280,9 +317,12 @@ export function buildStateBundle(
 ): StateBundle {
   const contacts = loadAccepted(ownerAccountIdB64);
   const pins: CarriedPin[] = [];
+  const sealFloors: CarriedSealFloor[] = [];
+  const startedOver: CarriedStartedOver[] = [];
+  const seenAccounts = new Set<string>();
   for (const c of contacts) {
     const accountIdB64 = accountIdB64OfHex(c.accountIdHex);
-    if (accountIdB64 === null) continue;
+    if (accountIdB64 === null || c.accountIdHex === undefined) continue;
     const pin = readPin(accountIdB64, ownerAccountIdB64);
     if (pin === undefined) continue;
     pins.push({
@@ -291,6 +331,15 @@ export function buildStateBundle(
       rotationMarker: pin.rotationMarker,
       provenPredecessorsB64: carriedKeys(pin.provenPredecessorsB64 ?? []),
     });
+    const accountIdHex = c.accountIdHex.toLowerCase();
+    if (seenAccounts.has(accountIdHex)) continue;
+    seenAccounts.add(accountIdHex);
+    const floor = sealFloorNumber(pin.sealSeqFloor);
+    if (floor !== null && floor > 0) sealFloors.push({ accountIdHex, seq: floor });
+    for (const oldKeyB64 of pin.startedOverKeysB64 ?? []) {
+      if (!decodesTo(oldKeyB64, SIGNATURE_KEY_LENGTH)) continue;
+      startedOver.push({ accountIdHex, oldKeyB64, atMs: pin.startedOver?.noticedAtMs ?? 0 });
+    }
   }
   const seedsByChannel = extras.channelSeeds ?? new Map<string, ReadonlyMap<number, Uint8Array>>();
   const deviceCards = carriedDeviceCards(extras.deviceCards ?? []);
@@ -305,7 +354,68 @@ export function buildStateBundle(
     pendingContacts: carriedPending(extras.pendingContacts ?? []),
     channelSeeds: carriedChannelSeeds(seedsByChannel, MAX_CARRIED_SEEDS_PER_CHANNEL),
     ...(deviceCards.length > 0 ? { deviceCards } : {}),
+    ...(sealFloors.length > 0 ? { sealFloors: sealFloors.slice(0, MAX_CARRIED_SEAL_FLOORS) } : {}),
+    ...(startedOver.length > 0 ? { startedOver: startedOver.slice(0, MAX_CARRIED_STARTED_OVER) } : {}),
   }, seedsByChannel);
+}
+
+/** A stored floor as a JSON-safe number, or `null` past 2^53. Pure. */
+function sealFloorNumber(stored: string | undefined): number | null {
+  if (stored === undefined) return 0;
+  let n: bigint;
+  try {
+    n = BigInt(stored);
+  } catch {
+    return null;
+  }
+  return n >= 0n && n <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(n) : null;
+}
+
+const ACCOUNT_HEX = /^[0-9a-f]{32}$/;
+
+/** `sealFloors`: absent is none; else at most one well-formed entry per
+ *  account, or `null` (the whole bundle is refused). */
+function decodeSealFloors(raw: unknown): CarriedSealFloor[] | null {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw) || raw.length > MAX_CARRIED_SEAL_FLOORS) return null;
+  const out: CarriedSealFloor[] = [];
+  const seen = new Set<string>();
+  for (const e of raw as unknown[]) {
+    if (typeof e !== "object" || e === null) return null;
+    const r = e as Record<string, unknown>;
+    const accountIdHex = r["accountIdHex"];
+    const seq = r["seq"];
+    if (typeof accountIdHex !== "string" || !ACCOUNT_HEX.test(accountIdHex)) return null;
+    if (typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < 0) return null;
+    if (seen.has(accountIdHex)) return null;
+    seen.add(accountIdHex);
+    out.push({ accountIdHex, seq });
+  }
+  return out;
+}
+
+/** `startedOver`: absent is none; else well-formed entries with no
+ *  (account, key) twice, or `null`. */
+function decodeStartedOver(raw: unknown): CarriedStartedOver[] | null {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw) || raw.length > MAX_CARRIED_STARTED_OVER) return null;
+  const out: CarriedStartedOver[] = [];
+  const seen = new Set<string>();
+  for (const e of raw as unknown[]) {
+    if (typeof e !== "object" || e === null) return null;
+    const r = e as Record<string, unknown>;
+    const accountIdHex = r["accountIdHex"];
+    const oldKeyB64 = r["oldKeyB64"];
+    const atMs = r["atMs"];
+    if (typeof accountIdHex !== "string" || !ACCOUNT_HEX.test(accountIdHex)) return null;
+    if (typeof oldKeyB64 !== "string" || !decodesTo(oldKeyB64, SIGNATURE_KEY_LENGTH)) return null;
+    if (typeof atMs !== "number" || !Number.isSafeInteger(atMs) || atMs < 0) return null;
+    const key = `${accountIdHex}:${oldKeyB64}`;
+    if (seen.has(key)) return null;
+    seen.add(key);
+    out.push({ accountIdHex, oldKeyB64, atMs });
+  }
+  return out;
 }
 
 /** ADR-0080 amendment: well-formed entries only, the first per leaf key,
@@ -684,6 +794,10 @@ export function decodeStateBundle(bytes: Uint8Array): StateBundle | null {
   if (channelSeeds === null) return null;
   const deviceCards = decodeDeviceCards(o["deviceCards"]);
   if (deviceCards === null) return null;
+  const sealFloors = decodeSealFloors(o["sealFloors"]);
+  if (sealFloors === null) return null;
+  const startedOver = decodeStartedOver(o["startedOver"]);
+  if (startedOver === null) return null;
   return {
     v: 4,
     contacts,
@@ -695,6 +809,8 @@ export function decodeStateBundle(bytes: Uint8Array): StateBundle | null {
     pendingContacts,
     channelSeeds,
     ...(deviceCards.length > 0 ? { deviceCards } : {}),
+    ...(sealFloors.length > 0 ? { sealFloors } : {}),
+    ...(startedOver.length > 0 ? { startedOver } : {}),
   };
 }
 
@@ -793,6 +909,26 @@ export function applyStateBundle(
       );
     } catch {
       /* an unreadable pin store proves nothing; the gate records it later */
+    }
+  }
+  // ADR-0101 section 10: the higher floor per contact (the store never
+  // lowers it). Section 11: a left-behind key this device does not hold.
+  for (const f of bundle.sealFloors ?? []) {
+    const accountIdB64 = accountIdB64OfHex(f.accountIdHex);
+    if (accountIdB64 === null) continue;
+    try {
+      raiseSealSeqFloor(accountIdB64, BigInt(f.seq), ownerAccountIdB64);
+    } catch {
+      /* an unreadable pin store raises nothing */
+    }
+  }
+  for (const so of bundle.startedOver ?? []) {
+    const accountIdB64 = accountIdB64OfHex(so.accountIdHex);
+    if (accountIdB64 === null) continue;
+    try {
+      addCarriedStartedOverKey(accountIdB64, so.oldKeyB64, ownerAccountIdB64);
+    } catch {
+      /* as above */
     }
   }
   saveKnownGroupIds(bundle.knownGroupIdsB64, ownerAccountIdB64);

@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { AuthHttpError, AuthNetworkError } from "../client";
+import { AuthNetworkError } from "../client";
 import { answerOf, RecoveryEmailClient } from "./recovery-email-client";
 
 interface Call {
@@ -36,15 +36,9 @@ const json = (body: unknown, status = 200, headers: Record<string, string> = {})
 const HANDLE = "h".repeat(43);
 
 describe("the recovery-email routes", () => {
-  it("GET /recovery-email carries the bearer and reads the four facts", async () => {
-    const c = client(() => json({ available: true, enabled: true, vault: true, phrase_saved: false }));
-    expect(await c.client.status("tok")).toEqual({
-      available: true,
-      enabled: true,
-      vault: true,
-      phraseSaved: false,
-      totp: false,
-    });
+  it("GET /recovery-email carries the bearer and reads the three facts", async () => {
+    const c = client(() => json({ available: true, enabled: true, totp: true }));
+    expect(await c.client.status("tok")).toEqual({ available: true, enabled: true, totp: true });
     expect(c.calls[0]).toMatchObject({
       url: "/api/auth/recovery-email",
       method: "GET",
@@ -59,9 +53,7 @@ describe("the recovery-email routes", () => {
   });
 
   it("enrol/start sends the grant, the handle, the address and the language", async () => {
-    const c = client(() =>
-      json({ challenge_id: "cid", vault_salt: "c2FsdA==", resend_after_secs: 45, expires_in_secs: 600 }),
-    );
+    const c = client(() => json({ challenge_id: "cid", resend_after_secs: 45, expires_in_secs: 600 }));
     const sent = await c.client.enrolStart({
       sessionToken: "tok",
       freshGrant: "k1.grant",
@@ -69,7 +61,8 @@ describe("the recovery-email routes", () => {
       address: "name@example.com",
       lang: "ru",
     });
-    expect(sent).toEqual({ challengeId: "cid", vaultSalt: "c2FsdA==", resendAfterSecs: 45, expiresInSecs: 600 });
+    // No salt comes back: nothing is sealed under the address any more.
+    expect(sent).toEqual({ challengeId: "cid", resendAfterSecs: 45, expiresInSecs: 600 });
     expect(c.calls[0]).toMatchObject({
       url: "/api/auth/recovery-email/enrol/start",
       method: "POST",
@@ -78,12 +71,12 @@ describe("the recovery-email routes", () => {
     });
   });
 
-  it("enrol/finish sends the vault only when there is one", async () => {
-    const c = client(() => json({ enabled: true, vault: true }));
-    await c.client.enrolFinish({ sessionToken: "tok", challengeId: "cid", code: "123456", sealedEntropy: "AAAA" });
-    await c.client.enrolFinish({ sessionToken: "tok", challengeId: "cid", code: "123456", sealedEntropy: null });
-    expect(c.calls[0]?.body).toEqual({ challenge_id: "cid", code: "123456", sealed_entropy: "AAAA" });
-    expect(c.calls[1]?.body).toEqual({ challenge_id: "cid", code: "123456" });
+  it("enrol/finish sends the challenge and the code, and nothing else", async () => {
+    const c = client(() => json({ enabled: true }));
+    expect(await c.client.enrolFinish({ sessionToken: "tok", challengeId: "cid", code: "123456" })).toEqual({
+      enabled: true,
+    });
+    expect(c.calls[0]?.body).toEqual({ challenge_id: "cid", code: "123456" });
   });
 
   it("DELETE /recovery-email carries the grant in its body", async () => {
@@ -96,27 +89,17 @@ describe("the recovery-email routes", () => {
     });
   });
 
-  it("PUT /recovery-email/vault carries the handle, the address, the client's salt and the blob, and no grant", async () => {
-    const c = client(() => json({ vault: true }));
-    await c.client.putVault({
-      sessionToken: "tok",
-      handle: HANDLE,
-      address: "name@example.com",
-      vaultSalt: "c2FsdHNhbHRzYWx0c2FsdA==",
-      sealedEntropy: "AAAA",
-    });
-    expect(c.calls[0]).toMatchObject({
-      url: "/api/auth/recovery-email/vault",
-      method: "PUT",
-      headers: { authorization: "Bearer tok" },
-      body: {
-        handle: HANDLE,
-        address: "name@example.com",
-        vault_salt: "c2FsdHNhbHRzYWx0c2FsdA==",
-        sealed_entropy: "AAAA",
-      },
-    });
-    expect(Object.keys(c.calls[0]?.body as object).includes("fresh_grant")).toBe(false);
+  it("a removal of the last second way in is refused with its own code", async () => {
+    const c = client(() => json({ error: "last-factor" }, 409));
+    const err = await c.client.remove("tok", "k1.grant").catch((e: unknown) => e);
+    expect(answerOf(err)).toMatchObject({ status: 409, errorCode: "last-factor" });
+  });
+
+  it("has no vault, open or phrase route left", () => {
+    const names = Object.getOwnPropertyNames(RecoveryEmailClient.prototype);
+    for (const gone of ["putVault", "recoverOpen", "phraseStatus", "markPhraseSaved"]) {
+      expect(names).not.toContain(gone);
+    }
   });
 
   it("the recover routes are anonymous and carry what the server names", async () => {
@@ -127,8 +110,7 @@ describe("the recovery-email routes", () => {
       if (call.url.endsWith("/recover/verify")) {
         return json({ ticket: "tkt", totp_required: true, expires_in_secs: 600 });
       }
-      if (call.url.endsWith("/recover/totp")) return json({ ok: true });
-      return json({ mode: "vault", vault_salt: "c2FsdA==", sealed_entropy: "c2VhbGVk" });
+      return json({ ok: true });
     });
     expect(await c.client.recoverStart(HANDLE, "name@example.com", "en")).toEqual({
       challengeId: "cid",
@@ -137,28 +119,12 @@ describe("the recovery-email routes", () => {
     });
     expect(await c.client.recoverVerify("cid", "123456")).toEqual({ ticket: "tkt", totpRequired: true });
     await c.client.recoverTotp("tkt", "654321");
-    expect(await c.client.recoverOpen("tkt")).toEqual({
-      mode: "vault",
-      vaultSalt: "c2FsdA==",
-      sealedEntropy: "c2VhbGVk",
-    });
     expect(c.calls.map((x) => x.body)).toEqual([
       { handle: HANDLE, address: "name@example.com", lang: "en" },
       { challenge_id: "cid", code: "123456" },
       { ticket: "tkt", code: "654321" },
-      { ticket: "tkt" },
     ]);
     for (const call of c.calls) expect(call.headers["authorization"]).toBeUndefined();
-  });
-
-  it("open answers the password-only mode with nothing else", async () => {
-    const c = client(() => json({ mode: "password" }));
-    expect(await c.client.recoverOpen("tkt")).toEqual({ mode: "password" });
-  });
-
-  it("an answer that is not one of the two modes is refused", async () => {
-    const c = client(() => json({ mode: "something" }));
-    await expect(c.client.recoverOpen("tkt")).rejects.toBeInstanceOf(AuthHttpError);
   });
 
   it("GET /account/notices asks from the cursor", async () => {
@@ -194,7 +160,7 @@ describe("what a failure says", () => {
   it("the error of a refused request never repeats the address or the code", async () => {
     const c = client(() => json({ error: "code-refused" }, 401));
     const err = (await c.client
-      .enrolFinish({ sessionToken: "tok", challengeId: "cid", code: "123456", sealedEntropy: null })
+      .enrolFinish({ sessionToken: "tok", challengeId: "cid", code: "123456" })
       .catch((e: unknown) => e)) as Error;
     expect(err.message.includes("123456")).toBe(false);
     const c2 = client(() => json({ error: "address-invalid" }, 400));

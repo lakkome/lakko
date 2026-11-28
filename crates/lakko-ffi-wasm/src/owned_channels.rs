@@ -14,7 +14,9 @@
 //!   `encodeOwnedKeysLock` / `decodeOwnedKeysLock` (`R ‖ S`, 64 bytes; the
 //!   decoder returns the 64 bytes: `R` first, then `S`).
 //! - The list: `new OwnedChannelsList(passwordLockRoot)`, `addPasskeyLock`,
-//!   `addChannel`, `removeChannel`, the getters, `encode()`,
+//!   `addChannel` (its last, optional argument the channel's ADR-0087 handle
+//!   write seed), `removeChannel`, the getters (`handleSeed(index)` among
+//!   them), `encode()`,
 //!   `OwnedChannelsList.decode(bytes)`, `merge(theirs, deletedIds)`. Every
 //!   part is kept sorted, so a client may add in any order; a repeated item
 //!   is refused at `encode()`.
@@ -141,7 +143,8 @@ pub fn decode_owned_keys_lock(head: &[u8]) -> Result<Vec<u8>, String> {
     Ok([r.as_bytes().as_slice(), s.as_bytes().as_slice()].concat())
 }
 
-/// The list's fixed length (32 764).
+/// The list's fixed length (65 532: the 64 KiB vault bucket less its 4-byte
+/// length frame).
 #[wasm_bindgen(js_name = ownedChannelsListLen)]
 #[must_use]
 pub fn owned_channels_list_len() -> u32 {
@@ -241,12 +244,15 @@ impl OwnedChannelsList {
     }
 
     /// Add (or replace, by id) a channel. `admissionSeeds` and `epochSeeds`
-    /// hold 32 bytes per version / epoch.
+    /// hold 32 bytes per version / epoch. `handleSeed` is the channel's
+    /// 32-byte ADR-0087 handle write seed, when it has an `@name`: a device
+    /// that retakes the channel after a key reset signs `rekey` with it.
     ///
     /// # Errors
     ///
     /// `ownedChannels.keyLength`.
     #[wasm_bindgen(js_name = addChannel)]
+    #[allow(clippy::too_many_arguments)]
     pub fn add_channel(
         &mut self,
         channel_id: &[u8],
@@ -255,6 +261,7 @@ impl OwnedChannelsList {
         admission_seeds: &[u8],
         epoch_ids: &[u32],
         epoch_seeds: &[u8],
+        handle_seed: Option<Vec<u8>>,
     ) -> Result<(), String> {
         let mut admission = seed_rows(admission_versions, admission_seeds, |version, seed| {
             AdmissionSeed { version, seed }
@@ -270,6 +277,10 @@ impl OwnedChannelsList {
             read_key: read_key
                 .as_deref()
                 .map(|k| array::<32>(k, "readKey"))
+                .transpose()?,
+            handle_seed: handle_seed
+                .as_deref()
+                .map(|k| array::<32>(k, "handleSeed"))
                 .transpose()?,
             admission,
             epochs,
@@ -377,6 +388,16 @@ impl OwnedChannelsList {
         Ok(self.at(index)?.read_key.map(|k| k.to_vec()))
     }
 
+    /// The handle write seed of channel `index`, when it has an `@name`.
+    ///
+    /// # Errors
+    ///
+    /// `ownedChannels.index`.
+    #[wasm_bindgen(js_name = handleSeed)]
+    pub fn handle_seed(&self, index: u32) -> Result<Option<Vec<u8>>, String> {
+        Ok(self.at(index)?.handle_seed.map(|k| k.to_vec()))
+    }
+
     /// The admission versions of channel `index`.
     ///
     /// # Errors
@@ -444,9 +465,10 @@ mod tests {
             &[7; 32],
             &[9, 3],
             &[[1u8; 32], [2; 32]].concat(),
+            Some(vec![6; 32]),
         )
         .unwrap();
-        list.add_channel(&[4; 16], Some(vec![8; 32]), &[], &[], &[], &[])
+        list.add_channel(&[4; 16], Some(vec![8; 32]), &[], &[], &[], &[], None)
             .unwrap();
         let wire = list.encode().unwrap();
         assert_eq!(wire.len(), owned_channels_list_len() as usize);
@@ -455,10 +477,16 @@ mod tests {
         assert_eq!(back.channel_id(0).unwrap(), vec![4; 16]);
         assert_eq!(back.epoch_ids(1).unwrap(), vec![3, 9]);
         assert_eq!(back.epoch_seeds(1).unwrap()[..32], [2; 32]);
+        assert_eq!(back.handle_seed(0).unwrap(), None);
+        assert_eq!(back.handle_seed(1).unwrap(), Some(vec![6; 32]));
+        assert_eq!(owned_channels_list_len(), 65_532);
         let merged = back.merge(&back, &[4; 16]).unwrap();
         assert_eq!(merged.channel_count(), 1);
         assert!(list
-            .add_channel(&[1; 16], None, &[1], &[0; 31], &[], &[])
+            .add_channel(&[1; 16], None, &[1], &[0; 31], &[], &[], None)
+            .is_err());
+        assert!(list
+            .add_channel(&[1; 16], None, &[], &[], &[], &[], Some(vec![0; 31]))
             .is_err());
         let keys =
             decode_owned_keys_lock(&encode_owned_keys_lock(&[1; 32], &[2; 32]).unwrap()).unwrap();

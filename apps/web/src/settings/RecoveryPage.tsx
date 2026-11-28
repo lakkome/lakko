@@ -20,13 +20,30 @@
  * password (a guest) gets a plain confirmation instead. The gate keeps a
  * passer-by at an unlocked browser from reading the words off the screen;
  * it is not what protects the stored phrase (the device key is).
+ *
+ * Since 2026-11-26 (19.1c, 19.1d) the page opens with up to two notes in
+ * the warning colour, neither dismissible: "the authenticator app is your
+ * only second way in" while that is so, and "Your chats depend on your
+ * password" while neither a saved phrase nor a passkey keeps them.
  */
-import { createResource, createSignal, onCleanup, Show, type JSX } from "solid-js";
-import { A } from "@solidjs/router";
+import { createResource, createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
+import { A, useNavigate } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
 import { showPhraseOffered, threeWordsShown } from "../auth/protect/account-protection";
 import { phraseProtectedHere } from "../auth/protect/protection-state";
+import { accountFactors, refreshFactors, totpOnlyWarningKey } from "../auth/protect/factors";
+import {
+  passwordOnlyNoticeApplies,
+  passwordOnlyOffersPasskey,
+  passwordOnlyShownIn,
+} from "../auth/protect/password-only";
+import { passkeyAddedWithoutSeal } from "../auth/protect/password-only-state";
+import { PasswordOnlyNotice, WarningNote } from "../auth/protect/PasswordOnlyNotice";
+import { SavePhrasePanel } from "../auth/protect/SavePhrasePanel";
+import { ownSealFacts } from "../auth/seal/own-seals";
+import { WebauthnClient } from "../auth/webauthn-client";
+import { ModalLayer } from "../ui/ModalLayer";
 import { phraseRevealStep, publishOwedView } from "../auth/key-reset-owed";
 import { createPublishWaitClock, directoryCooldownOf } from "../auth/publish-wait-clock";
 import { AuthClient } from "../auth/client";
@@ -45,8 +62,35 @@ import { addedNotice, badgeVisible } from "../devices/added-notice";
 import { DevicesAttention } from "../devices/DeviceAddedNotice";
 import { t } from "../l10n";
 
+const PASSKEYS_SUPPORTED = WebauthnClient.isWebauthnAvailable();
+
 export function RecoveryPage(): JSX.Element {
   const auth = useAuth();
+  const navigate = useNavigate();
+  const accountId = (): string | null => {
+    const st = auth.state();
+    return st.kind === "session" ? st.account.accountId : null;
+  };
+  const hasUsername = (): boolean => {
+    const st = auth.state();
+    return st.kind === "session" && st.account.username.trim().length > 0;
+  };
+  const factors = () => accountFactors(accountId());
+  const seals = () => ownSealFacts(accountId());
+  onMount(() => {
+    const id = accountId();
+    const token = auth.identitySecrets()?.sessionToken ?? null;
+    if (id !== null && token !== null) void refreshFactors(id, token);
+  });
+  // UX 19.1c: the authenticator app is the only second way in.
+  const totpOnly = (): string | null =>
+    totpOnlyWarningKey(factors(), seals()?.phrase === true || phraseProtectedHere(accountId()));
+  // UX 19.1d, place 2.
+  const passwordOnly = (): boolean =>
+    passwordOnlyShownIn("settings-recovery", {
+      applies: passwordOnlyNoticeApplies(factors(), seals()),
+    });
+  const [savingPhrase, setSavingPhrase] = createSignal(false);
   // Whether this device holds the phrase. Only the fact is kept here; the
   // words are read again when the person asks to see them.
   const [phraseSaved] = createResource(async () => (await auth.devicePhrase()) !== null);
@@ -77,6 +121,28 @@ export function RecoveryPage(): JSX.Element {
       <div class="lk-page-head">
         <h1>{t("settings.recovery.title")}</h1>
       </div>
+
+      <Show when={totpOnly()}>{(key) => <WarningNote text={t(key())} />}</Show>
+      <Show when={passwordOnly()}>
+        <PasswordOnlyNotice
+          onSavePhrase={() => setSavingPhrase(true)}
+          onAddPasskey={
+            passwordOnlyOffersPasskey(PASSKEYS_SUPPORTED, hasUsername())
+              ? () => navigate(paths.settingsSection("security"))
+              : undefined
+          }
+          passkeyNoSeal={passkeyAddedWithoutSeal(accountId())}
+        />
+      </Show>
+      <ModalLayer
+        open={savingPhrase()}
+        title={t("protect.phrase.title")}
+        onClose={() => setSavingPhrase(false)}
+      >
+        <Show when={savingPhrase()}>
+          <SavePhrasePanel onSaved={() => setSavingPhrase(false)} onCancel={() => setSavingPhrase(false)} />
+        </Show>
+      </ModalLayer>
 
       <section class="lk-card">
         <h2>{t("settings.recovery.group.keys")}</h2>

@@ -17,6 +17,9 @@ struct AddedPasskey: Equatable {
     /// `false` an explicit "cannot carry keys" (also a system older than
     /// iOS 18, which has no PRF API), `nil` nothing said.
     let prfSupported: Bool?
+    /// The passkey's secret at the reset-seal salt (ADR-0101 section 10),
+    /// when creation gave it: a passkey that keeps the chats.
+    var sealPrfOutput: Data? = nil
 
     /// Whether the platform can protect keys with this passkey at all.
     var canCarryKeys: Bool {
@@ -55,6 +58,7 @@ enum PasskeyAdder {
             userName: start.options.publicKey.user.name,
             userID: userId,
             prfSalt: PasskeyVault.prfSalt,
+            secondPrfSalt: resetSealPasskeyPrfSalt(),
             excludedCredentials: (start.options.publicKey.excludeCredentials ?? [])
                 .compactMap { try? base64UrlDecode($0.id) },
             presentationAnchor: presentationAnchor
@@ -84,8 +88,26 @@ enum PasskeyAdder {
             prfOutput: registered.prfOutput,
             prfSupported: PasskeyVault.reportedPrfSupport(
                 registrationReported: registered.prfSupported,
-                prfApiAvailable: PasskeysViewModel.prfApiAvailable)
+                prfApiAvailable: PasskeysViewModel.prfApiAvailable),
+            sealPrfOutput: registered.secondPrfOutput
         )
+    }
+}
+
+/// ADR-0101 section 10 and section 7 — what follows a passkey's secret for
+/// the reset seal becoming known (the passkey keeps the chats: the account's
+/// protection is published again with it, and its owned-channels lock is
+/// made), and a passkey's removal (its seal and its lock go). Set by the
+/// composition root; nothing happens while unset (tests).
+@MainActor
+enum PasskeySeals {
+    static var onSealed: ((_ credentialId: Data, _ prfOutput: Data) -> Void)?
+    static var onRemoved: ((_ credentialId: Data, _ remaining: Int) -> Void)?
+
+    static func sealed(credentialIdB64: String, prfOutput: Data?) {
+        guard let prfOutput = PasskeyVault.usablePrfOutput(prfOutput),
+              let credentialId = base64UrlDecodeNoPad(credentialIdB64) else { return }
+        onSealed?(credentialId, prfOutput)
     }
 }
 
@@ -108,7 +130,8 @@ struct PasskeyKeysEnrollment {
     var identitySeed: () -> Data?
     /// One more passkey prompt, limited to the credential: its id and PRF
     /// output.
-    var evaluatePrf: (_ credentialIdB64: String) async throws -> (credentialId: Data, prfOutput: Data?)
+    var evaluatePrf: (_ credentialIdB64: String) async throws
+        -> (credentialId: Data, prfOutput: Data?, sealPrfOutput: Data?)
     /// `PUT /vault/passkey`. `false` when the server has no vault key.
     var store: (_ credentialId: Data, _ sealed: Data) async throws -> Bool
     /// Keep a typed phrase that proved to be the account's on this device.
@@ -166,6 +189,10 @@ struct PasskeyKeysEnrollment {
                 return .refused("settings.passkeys.keys_choice.error.other_passkey")
             }
             prfOutput = PasskeyVault.usablePrfOutput(extras.prfOutput)
+            // The same gesture gave the passkey's secret for the reset seal.
+            await MainActor.run {
+                PasskeySeals.sealed(credentialIdB64: credentialIdB64, prfOutput: extras.sealPrfOutput)
+            }
         }
         guard let prfOutput else {
             rememberNoPrf(credentialIdB64)
@@ -183,6 +210,10 @@ struct PasskeyKeysEnrollment {
     /// 10.2 steps 2 to 4). Never throws: every failure is an outcome, and
     /// the passkey itself is added whatever it is.
     func storeAfterAdd(_ added: AddedPasskey) async -> PasskeyKeysAddOutcome {
+        // A passkey that gave its secret at creation keeps the chats.
+        await MainActor.run {
+            PasskeySeals.sealed(credentialIdB64: added.credentialIdB64, prfOutput: added.sealPrfOutput)
+        }
         guard added.canCarryKeys else {
             rememberNoPrf(added.credentialIdB64)
             return .noPrf

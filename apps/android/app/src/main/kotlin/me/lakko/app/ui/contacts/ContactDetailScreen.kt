@@ -216,8 +216,11 @@ public fun ContactDetailScreen(
     val personKeyB64 = contactKeyB64
     val deleted = personKeyB64 != null && nameVersion.let { directory.isDeleted(personKeyB64) }
     LaunchedEffect(personKeyB64) { personKeyB64?.let(directory::noteOnScreen) }
-    val sections = remember(membershipEnded, isContact, contactsOfContactsOn, isBlocked, suspendedReadOnlyInfo, deleted, groupIdHex) {
-        if (deleted) {
+    // UX 16.11 — a key whose account started over is never added back.
+    val startedOverKeys by contactsRepository.startedOverKeys.collectAsStateWithLifecycle()
+    val keyStartedOver = personKeyB64 != null && personKeyB64 in startedOverKeys
+    val sections = remember(membershipEnded, isContact, contactsOfContactsOn, isBlocked, suspendedReadOnlyInfo, deleted, groupIdHex, keyStartedOver) {
+        withoutAddForStartedOver(keyStartedOver = keyStartedOver, sections = if (deleted) {
             deletedPersonInfoSections(hasOneToOne = groupIdHex != null, isContact = isContact)
         } else {
             me.lakko.app.ui.suspension.readOnlySections(suspended = suspendedReadOnlyInfo, sections =
@@ -229,7 +232,7 @@ public fun ContactDetailScreen(
                     isBlocked = isBlocked,
                 ),
             ))
-        }
+        })
     }
     // Read through `nameVersion` so a profile or a username arriving later
     // renames in place.

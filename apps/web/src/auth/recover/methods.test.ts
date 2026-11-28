@@ -141,29 +141,35 @@ describe("the restore prompt's rows", () => {
 });
 
 // ADR-0075 (alignment J): Restore your keys reads how the account is protected.
-describe("the restore prompt and the recovery email", () => {
-  const ids = (protection: { enabled: boolean; vault: boolean; phraseSaved: boolean } | null): string[] =>
-    restoreIdentityMethods({ passkeysSupported: true, passkeysWithKeys: 1, protection }).map((m) => m.id);
+describe("the restore prompt after the email vault was removed (2026-11-26)", () => {
+  const ids = (phraseSaved: boolean | null | undefined): string[] =>
+    restoreIdentityMethods({
+      passkeysSupported: true,
+      passkeysWithKeys: 1,
+      ...(phraseSaved === undefined ? {} : { phraseSaved }),
+    }).map((m) => m.id);
 
-  it("changes nothing while the account's protection is not known", () => {
+  it("changes nothing while it is not known whether a phrase is saved", () => {
     expect(ids(null)).toEqual(["device", "passkey", "phrase"]);
+    expect(ids(undefined)).toEqual(["device", "passkey", "phrase"]);
+  });
+
+  it("hides the 12-word phrase row only when the protection is known to list no phrase", () => {
+    expect(ids(false)).toEqual(["device", "passkey"]);
+    expect(ids(true)).toEqual(["device", "passkey", "phrase"]);
+  });
+
+  it("never offers Email code: a mailed code gives a new password and restores nothing", () => {
+    for (const phraseSaved of [null, false, true]) expect(ids(phraseSaved)).not.toContain("email");
+    // Whatever `GET /recovery-email` said is ignored here.
     expect(
-      restoreIdentityMethods({ passkeysSupported: true, passkeysWithKeys: 1 }).map((m) => m.id),
+      restoreIdentityMethods({
+        passkeysSupported: true,
+        passkeysWithKeys: 1,
+        protection: { available: true, enabled: true, totp: false },
+      }).map((m) => m.id),
     ).toEqual(["device", "passkey", "phrase"]);
-  });
-
-  it("hides the 12-word phrase row when no phrase is saved", () => {
-    expect(ids({ enabled: false, vault: false, phraseSaved: false })).toEqual(["device", "passkey"]);
-  });
-
-  it("adds Email code, first, when the account has an email and its vault", () => {
-    expect(ids({ enabled: true, vault: true, phraseSaved: false })).toEqual(["email", "device", "passkey"]);
+    // The row still resolves for the recovery screen's own list.
     expect(restoreMethod("email").title).toBe("Email code");
-  });
-
-  it("does not offer the email without its vault: a mailed code would restore nothing", () => {
-    expect(ids({ enabled: true, vault: false, phraseSaved: false })).toEqual(["device", "passkey"]);
-    // A phrase-protected account with an email: the phrase, never the code.
-    expect(ids({ enabled: true, vault: false, phraseSaved: true })).toEqual(["device", "passkey", "phrase"]);
   });
 });

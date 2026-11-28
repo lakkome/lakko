@@ -4,39 +4,81 @@
 import XCTest
 @testable import Lakko
 
-/// ADR-0073 R.2 — the acceptance rule for a contact's attested key reset, the
-/// verified binding of a member this device never pinned, the re-pin and the
-/// contact row after it. The cases are the tables of
-/// `apps/web/src/contacts/reset-verdict.test.ts` and
-/// `verified-binding.test.ts`.
+/// ADR-0073 R.2 with rule 4 (ADR-0101 section 10) — the acceptance rule for a
+/// contact's attested key reset, the verified binding of a member this device
+/// never pinned, the re-pin and the contact row after it. The table itself is
+/// the core's (`lakko_contacts::reset_verdict`, reached through the FFI); the
+/// cases below are its rows asked through the Swift shapes `ContactsClient`
+/// gathers, so a mapping that hands the rule the wrong input fails here.
 final class ResetVerdictTests: XCTestCase {
 
     private let old = "b2xk"
     private let new = "bmV3"
+
+    private let sealedBy = SealCheck(valid: true, announcementSeq: 7)
 
     private func input(
         accepted: UInt64 = 1,
         bundle: UInt64 = 2,
         attest: AttestCheck = .verified(keyGeneration: 2, signedAtMs: 1_000),
         log: LogCheck = LogCheck(status: .off, isReset: nil),
-        fetched: String? = nil
+        fetched: String? = nil,
+        seal: SealCheck? = nil
     ) -> ResetVerdictInput {
         ResetVerdictInput(
             heldKeyB64: old, acceptedGeneration: accepted, fetchedKeyB64: fetched ?? new,
-            bundleGeneration: bundle, attest: attest, log: log)
+            bundleGeneration: bundle, attest: attest, log: log, seal: seal ?? sealedBy)
     }
 
     // MARK: - resetVerdict
 
-    func testAcceptsAVerifiedAttestationAtAHigherGenerationWithTheLogOff() {
-        XCTAssertTrue(logOffAcceptsReset(), "decision D3 at the ADR default")
-        XCTAssertEqual(resetVerdict(input()), .accepted(keyGeneration: 2, signedAtMs: 1_000))
+    func testRules1To4WithTheLogOffAreTheSamePerson() {
+        XCTAssertEqual(
+            resetVerdict(input()), .sealed(keyGeneration: 2, signedAtMs: 1_000, announcementSeq: 7))
     }
 
-    func testAcceptsWhenTheLogConfirmsTheKeyAsAReset() {
+    /// ADR-0101 section 10 — rules 1 to 3 without a seal: a new account
+    /// under the same username. Never the same person, never a refusal.
+    func testAResetWithoutASealIsUnsealed() {
         XCTAssertEqual(
-            resetVerdict(input(log: LogCheck(status: .confirmed, isReset: true))),
-            .accepted(keyGeneration: 2, signedAtMs: 1_000))
+            resetVerdict(input(seal: SealCheck.none)), .unsealed(keyGeneration: 2, signedAtMs: 1_000))
+        XCTAssertEqual(
+            resetVerdict(input(seal: SealCheck(valid: false, refusal: "seqBelowFloor"))),
+            .unsealed(keyGeneration: 2, signedAtMs: 1_000))
+        // The default of the Swift shape is "no seal": an input built
+        // without one can never read as sealed.
+        let bare = ResetVerdictInput(
+            heldKeyB64: old, acceptedGeneration: 1, fetchedKeyB64: new, bundleGeneration: 2,
+            attest: .verified(keyGeneration: 2, signedAtMs: 1_000), log: LogCheck(status: .off, isReset: nil))
+        XCTAssertEqual(resetVerdict(bare), .unsealed(keyGeneration: 2, signedAtMs: 1_000))
+    }
+
+    /// With a key log configured the seal counts only when the log holds
+    /// the announcement; an unreachable log decides nothing.
+    func testWithALogTheSealNeedsItsAnnouncementInTheLog() {
+        let confirmed = LogCheck(status: .confirmed, isReset: true)
+        XCTAssertEqual(
+            resetVerdict(input(log: confirmed, seal: SealCheck(valid: true, announcementSeq: 7, log: .proven))),
+            .sealed(keyGeneration: 2, signedAtMs: 1_000, announcementSeq: 7))
+        XCTAssertEqual(
+            resetVerdict(input(log: confirmed, seal: SealCheck(valid: true, announcementSeq: 7, log: .notProven))),
+            .unsealed(keyGeneration: 2, signedAtMs: 1_000))
+        XCTAssertEqual(
+            resetVerdict(input(log: confirmed, seal: SealCheck(valid: true, announcementSeq: 7, log: .unreachable))),
+            .noVerdict)
+        // With the log off its half is ignored.
+        XCTAssertEqual(
+            resetVerdict(input(seal: SealCheck(valid: true, announcementSeq: 7, log: .notProven))),
+            .sealed(keyGeneration: 2, signedAtMs: 1_000, announcementSeq: 7))
+    }
+
+    /// A seal never rescues a reset the server's word does not carry.
+    func testASealDoesNotStandInForRules1To3() {
+        XCTAssertEqual(resetVerdict(input(attest: .absent)), .refused(.unconfirmed))
+        XCTAssertEqual(resetVerdict(input(attest: .invalid)), .refused(.unconfirmed))
+        XCTAssertEqual(resetVerdict(input(accepted: 2)), .refused(.unconfirmed))
+        XCTAssertEqual(
+            resetVerdict(input(log: LogCheck(status: .mismatch, isReset: true))), .refused(.unconfirmed))
     }
 
     func testRow1NoAttestationIsRefusedWhateverTheLogSays() {
@@ -95,11 +137,15 @@ final class ResetVerdictTests: XCTestCase {
         XCTAssertEqual(resetVerdict(input(fetched: old)), .noVerdict)
     }
 
+    func testAKeyThatIsNotBase64IsNothingToJudge() {
+        XCTAssertEqual(resetVerdict(input(fetched: "not base64 !")), .noVerdict)
+    }
+
     func testWithNoRecordedGenerationOnlyAGenerationAboveZeroIsAccepted() {
         XCTAssertEqual(
             resetVerdict(input(
                 accepted: 0, bundle: 1, attest: .verified(keyGeneration: 1, signedAtMs: 5))),
-            .accepted(keyGeneration: 1, signedAtMs: 5))
+            .sealed(keyGeneration: 1, signedAtMs: 5, announcementSeq: 7))
         XCTAssertEqual(
             resetVerdict(input(
                 accepted: 0, bundle: 0, attest: .verified(keyGeneration: 0, signedAtMs: 5))),

@@ -85,11 +85,9 @@ impl From<RustOffer> for TranslateOffer {
 /// ignored.
 #[wasm_bindgen(js_name = translationOffered)]
 #[must_use]
-#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
 pub fn translation_offered(
     enabled: bool,
     has_text: bool,
-    is_own: bool,
     detected_tag: &str,
     detected_permille: u16,
     engine_for_detected: TranslationEngineState,
@@ -103,7 +101,6 @@ pub fn translation_offered(
     let input = RustOfferInput {
         enabled,
         has_text,
-        is_own,
         detected,
         engine_for_detected: engine_for_detected.into(),
         any_engine,
@@ -591,7 +588,6 @@ mod tests {
             translation_offered(
                 true,
                 true,
-                false,
                 "es",
                 950,
                 TranslationEngineState::Ready,
@@ -604,7 +600,6 @@ mod tests {
             translation_offered(
                 true,
                 true,
-                false,
                 "",
                 0,
                 TranslationEngineState::Unavailable,

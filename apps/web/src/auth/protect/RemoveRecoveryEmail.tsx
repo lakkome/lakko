@@ -5,6 +5,12 @@
  * "Remove recovery email?" (docs/ux/identity-recovery.md section 19.2): the
  * one confirmation, in the app's own dialog, with the proof block of
  * section 17.1 when no proof is live.
+ *
+ * Since 2026-11-26 (19.1c): when the email is the account's last second way
+ * in the removal is refused (`last-factor.ts`; the caller checks before it
+ * opens this, and a server `409 last-factor` closes it with the same
+ * dialog), and when it would leave only the authenticator app the
+ * confirmation says so.
  */
 import { plainStore } from "./local";
 import { createSignal, onCleanup, Show, type JSX } from "solid-js";
@@ -16,8 +22,10 @@ import { ProofBlock } from "../ProofBlock";
 import { t } from "../../l10n";
 import { rememberAddress } from "./address-register";
 import { emailFailure, emailFailureKey } from "./email-flow";
+import { accountFactors, refreshFactors, removeNoticeKey } from "./factors";
+import { showLastFactorNotice } from "./last-factor";
 import { markOwnAction } from "./notices";
-import { refreshProtection } from "./protection-state";
+import { phraseProtectedHere } from "./protection-state";
 import { answerOf, RecoveryEmailClient } from "./recovery-email-client";
 
 export function RemoveRecoveryEmail(props: {
@@ -53,11 +61,18 @@ export function RemoveRecoveryEmail(props: {
       await new RecoveryEmailClient().remove(token, grant);
       // The account has no recovery email: its devices forget the address.
       rememberAddress(s.account.accountId, null);
-      void refreshProtection(s.account.accountId, token);
+      void refreshFactors(s.account.accountId, token);
       props.onRemoved();
     } catch (err) {
       const answer = answerOf(err);
       const read = answer === null ? ({ kind: "error" } as const) : emailFailure("remove", answer);
+      if (read.kind === "last-factor") {
+        // The facts were stale or unknown: the server kept the last one.
+        void refreshFactors(s.account.accountId, token);
+        props.onCancel();
+        await showLastFactorNotice("email");
+        return;
+      }
       if (read.kind === "proof-required" || read.kind === "rate-limited") {
         // Drops the refused grant and shows the block, or starts the wait.
         gate.failed(err, grant);
@@ -73,9 +88,26 @@ export function RemoveRecoveryEmail(props: {
     }
   }
 
+  const accountId = (): string | null => {
+    const s = auth.state();
+    return s.kind === "session" ? s.account.accountId : null;
+  };
+  /** Removing it would leave only the authenticator app (19.1c). */
+  const totpOnlyLine = (): string | null => {
+    const key = removeNoticeKey(accountFactors(accountId()), "email", phraseProtectedHere(accountId()));
+    return key === null ? null : t(key);
+  };
+
   return (
     <div class="lk-stack">
       <p>{t("recovery_email.remove.confirm.body")}</p>
+      <Show when={totpOnlyLine()}>
+        {(line) => (
+          <p class="lk-warning-note" role="note">
+            {line()}
+          </p>
+        )}
+      </Show>
       <ProofBlock gate={gate} />
       <Show when={error() !== null}>
         <div class="form-error" role="alert">

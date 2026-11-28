@@ -182,8 +182,17 @@ public struct SignupFinishResponse: Codable, Equatable, SessionPairCarrying {
     public let freshGrant: String?
     /// Absolute unix-millisecond expiry of ``freshGrant``.
     public let freshGrantExpiresAtMs: Int64?
+    /// ADR-0101 section 7: the account's server half `S` of the
+    /// owned-channels password lock (URL-safe base64 without padding, 32
+    /// bytes). Released here, where the account was created in this very
+    /// exchange, and otherwise only after the password and a second factor.
+    /// Kept in memory until the locks are made; never stored on the device.
+    public let ownedChannelsSecret: String?
 
-    public init(ok: Bool, session: SessionPair, freshGrant: FreshAuthGrant? = nil) {
+    public init(
+        ok: Bool, session: SessionPair, freshGrant: FreshAuthGrant? = nil, ownedChannelsSecret: String? = nil
+    ) {
+        self.ownedChannelsSecret = ownedChannelsSecret
         self.freshGrant = freshGrant?.grant
         self.freshGrantExpiresAtMs = freshGrant?.expiresAtMs
         self.ok = ok
@@ -203,6 +212,7 @@ public struct SignupFinishResponse: Codable, Equatable, SessionPairCarrying {
         case keyGeneration = "key_generation"
         case freshGrant = "fresh_grant"
         case freshGrantExpiresAtMs = "fresh_grant_expires_at_ms"
+        case ownedChannelsSecret = "owned_channels_secret"
     }
 }
 
@@ -562,9 +572,31 @@ public struct TotpEnrollFinishRequest: Codable, Equatable {
     /// The first 6-digit code the authenticator produced, proving it
     /// holds the secret.
     public let code: String
+    /// The fresh-auth grant (ADR-0073, amended 2026-11-26): an authenticator
+    /// is one of the reset's factors, so a bare session must not add one.
+    public let freshGrant: String
 
-    public init(code: String) {
+    public init(code: String, freshGrant: String) {
         self.code = code
+        self.freshGrant = freshGrant
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case code
+        case freshGrant = "fresh_grant"
+    }
+}
+
+/// `POST /totp/enroll/start` request body (bearer): the fresh-auth grant.
+public struct TotpEnrollStartRequest: Codable, Equatable {
+    public let freshGrant: String
+
+    public init(freshGrant: String) {
+        self.freshGrant = freshGrant
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case freshGrant = "fresh_grant"
     }
 }
 
@@ -648,23 +680,13 @@ public struct LoginHandleBindRequest: Codable, Equatable {
 }
 
 /// The `recovery_email` part of a handle change (ADR-0076 section 2): the
-/// confirmed address, and, only while no phrase is saved, the email vault
-/// sealed under the NEW handle with a fresh salt (both standard base64).
+/// confirmed address. The server moves its stored key to the new handle with
+/// no letter. (The email vault it also carried was removed on 2026-11-26.)
 public struct LoginHandleRecoveryEmail: Codable, Equatable {
     public let address: String
-    public let vaultSalt: String?
-    public let sealedEntropy: String?
 
-    public init(address: String, vaultSalt: Data? = nil, sealedEntropy: Data? = nil) {
+    public init(address: String) {
         self.address = address
-        self.vaultSalt = vaultSalt.map { $0.base64EncodedString() }
-        self.sealedEntropy = sealedEntropy.map { $0.base64EncodedString() }
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case address
-        case vaultSalt = "vault_salt"
-        case sealedEntropy = "sealed_entropy"
     }
 }
 
@@ -792,11 +814,30 @@ public struct DeviceRevokeRequest: Codable, Equatable {
 
 /// `POST /account/keys/reset/start` request body (bearer).
 public struct KeyResetStartRequest: Codable, Equatable {
-    /// The fresh-auth grant a sign-in minted, verbatim. Without a
-    /// valid one the server answers `403 fresh-auth-required`.
-    public let freshGrant: String
+    /// The reset factor grant (ADR-0073, amended 2026-11-26): minted by one
+    /// of the `/account/keys/reset/factor/*` routes after the password and a
+    /// second factor. Without a valid one the server answers
+    /// `403 reset-factor-required`; a fresh-auth grant alone is refused.
+    public let resetGrant: String
     /// base64(RegistrationRequest) from `OpaqueRegister.startRecovery(seed:)`
     /// over the NEW phrase seed.
+    public let recoveryRequest: String
+
+    public init(resetGrant: String, recoveryRequest: String) {
+        self.resetGrant = resetGrant
+        self.recoveryRequest = recoveryRequest
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case resetGrant = "reset_grant"
+        case recoveryRequest = "recovery_request"
+    }
+}
+
+/// `POST /account/keys/rotate/start` request body (bearer): a rotation
+/// keeps the fresh-auth grant (the account key proves the rest).
+public struct KeyRotateStartRequest: Codable, Equatable {
+    public let freshGrant: String
     public let recoveryRequest: String
 
     public init(freshGrant: String, recoveryRequest: String) {
@@ -825,8 +866,8 @@ public struct KeyResetStartResponse: Codable, Equatable {
 
 /// `POST /account/keys/reset/finish` request body (bearer).
 public struct KeyResetFinishRequest: Codable, Equatable {
-    /// The same fresh-auth grant the start call carried.
-    public let freshGrant: String
+    /// The same reset factor grant the start call carried.
+    public let resetGrant: String
     /// base64(RegistrationUpload): the new recovery credential.
     public let recoveryUpload: String
     /// URL-safe base64 (no pad) of the NEW AccountIdentity Ed25519 public
@@ -836,17 +877,17 @@ public struct KeyResetFinishRequest: Codable, Equatable {
     public let identityProofB64: String
 
     public init(
-        freshGrant: String, recoveryUpload: String, newSignaturePubkeyB64: String,
+        resetGrant: String, recoveryUpload: String, newSignaturePubkeyB64: String,
         identityProofB64: String
     ) {
-        self.freshGrant = freshGrant
+        self.resetGrant = resetGrant
         self.recoveryUpload = recoveryUpload
         self.newSignaturePubkeyB64 = newSignaturePubkeyB64
         self.identityProofB64 = identityProofB64
     }
 
     enum CodingKeys: String, CodingKey {
-        case freshGrant = "fresh_grant"
+        case resetGrant = "reset_grant"
         case recoveryUpload = "recovery_upload"
         case newSignaturePubkeyB64 = "new_signature_pubkey_b64"
         case identityProofB64 = "identity_proof_b64"
@@ -900,18 +941,14 @@ public struct KeyRotateFinishRequest: Codable, Equatable {
     /// URL-safe base64 (no pad) device ids (at most 8) that get a session
     /// floor in the same transaction: a removal that raced the commit.
     public let revokeDeviceIdsB64: [String]
-    /// ADR-0075 section 3 — `true` when this rotation is "Save a recovery
-    /// phrase"; absent otherwise.
-    public let phraseSaved: Bool?
     /// ADR-0099 F3 — `signIdentityProof` by the NEW key over the account id.
     public let identityProofB64: String
 
     public init(
         freshGrant: String, recoveryUpload: String, newSignaturePubkeyB64: String,
-        supersessionProofB64: String, revokeDeviceIdsB64: [String], phraseSaved: Bool? = nil,
+        supersessionProofB64: String, revokeDeviceIdsB64: [String],
         identityProofB64: String
     ) {
-        self.phraseSaved = phraseSaved
         self.identityProofB64 = identityProofB64
         self.freshGrant = freshGrant
         self.recoveryUpload = recoveryUpload
@@ -926,7 +963,6 @@ public struct KeyRotateFinishRequest: Codable, Equatable {
         case newSignaturePubkeyB64 = "new_signature_pubkey_b64"
         case supersessionProofB64 = "supersession_proof_b64"
         case revokeDeviceIdsB64 = "revoke_device_ids_b64"
-        case phraseSaved = "phrase_saved"
         case identityProofB64 = "identity_proof_b64"
     }
 }
@@ -952,29 +988,80 @@ public struct SessionUpgradeRequest: Codable, Equatable {
 }
 
 // ----------------------------------------------------------------------------
-// Channel recovery key (ADR-0101 section 7)
+// The reset's second factor (ADR-0073, amended 2026-11-26) and the server
+// half of the owned-channels password lock (ADR-0101 section 7)
 // ----------------------------------------------------------------------------
 
-/// `POST /auth/channel-recovery/evaluate` request body (bearer).
-public struct ChannelRecoveryEvaluateRequest: Codable, Equatable {
-    /// URL-safe base64 (no pad) of the blinded element.
-    public let blindedElement: String
+/// The answer of every `/account/keys/reset/factor/*` route that confirms a
+/// factor: the reset factor grant and its expiry.
+public struct ResetFactorGrantResponse: Codable, Equatable {
+    public let resetGrant: String
+    public let resetGrantExpiresAtMs: Int64
 
-    public init(blindedElement: String) {
-        self.blindedElement = blindedElement
+    public init(resetGrant: String, resetGrantExpiresAtMs: Int64) {
+        self.resetGrant = resetGrant
+        self.resetGrantExpiresAtMs = resetGrantExpiresAtMs
     }
 
     enum CodingKeys: String, CodingKey {
-        case blindedElement = "blinded_element"
+        case resetGrant = "reset_grant"
+        case resetGrantExpiresAtMs = "reset_grant_expires_at_ms"
     }
 }
 
-/// `POST /auth/channel-recovery/evaluate` response body.
-public struct ChannelRecoveryEvaluateResponse: Codable, Equatable {
-    /// URL-safe base64 (no pad) of the evaluation.
-    public let evaluation: String
+/// `POST /account/keys/reset/factor/totp` (bearer).
+struct ResetFactorTotpRequest: Codable, Equatable {
+    let freshGrant: String
+    let code: String
 
-    public init(evaluation: String) {
-        self.evaluation = evaluation
+    enum CodingKeys: String, CodingKey {
+        case freshGrant = "fresh_grant"
+        case code
     }
+}
+
+/// `POST /account/keys/reset/factor/email/start` (bearer).
+struct ResetFactorEmailStartRequest: Codable, Equatable {
+    let freshGrant: String
+    let handle: String
+    let address: String
+    let lang: String?
+
+    enum CodingKeys: String, CodingKey {
+        case freshGrant = "fresh_grant"
+        case handle, address, lang
+    }
+}
+
+/// `POST /account/keys/reset/factor/email/finish` (bearer).
+struct ResetFactorEmailFinishRequest: Codable, Equatable {
+    let freshGrant: String
+    let challengeId: String
+    let code: String
+
+    enum CodingKeys: String, CodingKey {
+        case freshGrant = "fresh_grant"
+        case challengeId = "challenge_id"
+        case code
+    }
+}
+
+/// `POST /account/keys/reset/factor/passkey` (bearer).
+struct ResetFactorPasskeyRequest: Codable, Equatable {
+    let freshGrant: String
+
+    enum CodingKeys: String, CodingKey { case freshGrant = "fresh_grant" }
+}
+
+/// `POST /account/owned-channels-secret` (bearer).
+struct OwnedChannelsSecretRequest: Codable, Equatable {
+    let resetGrant: String
+
+    enum CodingKeys: String, CodingKey { case resetGrant = "reset_grant" }
+}
+
+struct OwnedChannelsSecretResponse: Codable, Equatable {
+    let ownedChannelsSecret: String
+
+    enum CodingKeys: String, CodingKey { case ownedChannelsSecret = "owned_channels_secret" }
 }

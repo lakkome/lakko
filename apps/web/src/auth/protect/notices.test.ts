@@ -19,6 +19,8 @@ import {
   noticeView,
   NOTICE_KINDS,
   parseNoticePage,
+  PHRASE_SAVED_NOTICE,
+  phraseSavedElsewhere,
   planNotices,
   readNoticeCursor,
   readSelfMarks,
@@ -48,7 +50,7 @@ describe("reading GET /account/notices", () => {
     const page = parseNoticePage({
       notices: [
         { id: 5, kind: "something-new", at_ms: NOW },
-        { id: 6, kind: "recovery-phrase-saved", at_ms: NOW },
+        { id: 6, kind: "recovery-email-replaced", at_ms: NOW },
       ],
       next_after: 6,
       more: true,
@@ -66,7 +68,7 @@ describe("reading GET /account/notices", () => {
 
 describe("which notices a device shows", () => {
   it("shows those above its cursor, oldest first, each once", () => {
-    const all = [n(7, "recovery-email-removed"), n(3, "recovery-email-added"), n(5, "recovery-phrase-saved")];
+    const all = [n(7, "recovery-email-removed"), n(3, "recovery-email-added"), n(5, "recovery-email-replaced")];
     expect(noticesToShow(all, 3, []).map((x) => x.id)).toEqual([5, 7]);
     // Answered ones are behind the cursor and never come back.
     expect(noticesToShow(all, 7, [])).toEqual([]);
@@ -140,9 +142,9 @@ describe("one notice per marker (alignment E)", () => {
   it("a used marker is forgotten, so it never hides a later notice", () => {
     const local = new MemoryStorage();
     markOwnAction(local, "alice", "recovery-email-added", NOW);
-    markOwnAction(local, "alice", "recovery-phrase-saved", NOW);
+    markOwnAction(local, "alice", "recovery-email-removed", NOW);
     consumeSelfMarks(local, "alice", [mark]);
-    expect(readSelfMarks(local, "alice")).toEqual([{ kind: "recovery-phrase-saved", atMs: NOW }]);
+    expect(readSelfMarks(local, "alice")).toEqual([{ kind: "recovery-email-removed", atMs: NOW }]);
   });
 });
 
@@ -155,7 +157,7 @@ describe("one landing", () => {
   it("a device with no cursor is new: it starts at the newest notice and shows nothing older", () => {
     const plan = planNotices({
       cursor: 0,
-      notices: [n(3, "recovery-phrase-saved", NOW - 5000), n(7, "password-changed-by-email", NOW - 1000)],
+      notices: [n(3, "recovery-email-added", NOW - 5000), n(7, "password-changed-by-email", NOW - 1000)],
       nextAfter: 7,
       marks: [],
       firstLanding: true,
@@ -179,7 +181,7 @@ describe("one landing", () => {
   it("the first landing shows what came back, minus its own action, and keeps a cursor", () => {
     const plan = planNotices({
       cursor: 0,
-      notices: [n(2, "recovery-email-added", NOW + 100), n(3, "account-opened-by-email")],
+      notices: [n(2, "recovery-email-added", NOW + 100), n(3, "recovery-email-removed")],
       nextAfter: 3,
       marks: [{ kind: "recovery-email-added", atMs: NOW }],
     });
@@ -203,7 +205,7 @@ describe("one landing", () => {
   it("a device with a cursor shows what came after it", () => {
     const plan = planNotices({
       cursor: 2,
-      notices: [n(3, "account-opened-by-email"), n(4, "password-changed-by-email")],
+      notices: [n(3, "recovery-email-removed"), n(4, "password-changed-by-email")],
       nextAfter: 4,
       marks: [],
     });
@@ -242,17 +244,59 @@ describe("what a notice says", () => {
       bodyKey: "notice.password_by_email.body",
       dated: true,
     });
-    expect(t(noticeView("account-opened-by-email").titleKey ?? "")).toBe(
-      "Your account was opened with your recovery email",
-    );
+    expect(t(noticeView("password-changed-by-email").titleKey ?? "")).toBe("Your password was changed");
   });
 
-  it("the four others are one line", () => {
+  it("'account opened by email' and 'phrase saved' are no server notices any more", () => {
+    expect([...NOTICE_KINDS]).toEqual([
+      "password-changed-by-email",
+      "recovery-email-added",
+      "recovery-email-replaced",
+      "recovery-email-removed",
+    ]);
+    // A stored notice of either retired kind is dropped like any unknown kind.
+    const page = parseNoticePage({
+      notices: [
+        { id: 4, kind: "account-opened-by-email", at_ms: NOW },
+        { id: 5, kind: "recovery-phrase-saved", at_ms: NOW },
+        { id: 6, kind: "recovery-email-added", at_ms: NOW },
+      ],
+      next_after: 6,
+      more: false,
+    });
+    expect(page?.notices.map((x) => x.id)).toEqual([6]);
+    expect(page?.nextAfter).toBe(6);
+  });
+
+  it("the three others are one line", () => {
     expect(t(noticeView("recovery-email-added").bodyKey)).toBe("A recovery email was added to your account.");
     expect(t(noticeView("recovery-email-replaced").bodyKey)).toBe("Your recovery email was replaced.");
     expect(t(noticeView("recovery-email-removed").bodyKey)).toBe("Your recovery email was removed.");
-    expect(t(noticeView("recovery-phrase-saved").bodyKey)).toBe("A recovery phrase was saved for your account.");
     for (const kind of NOTICE_KINDS) expect(noticeView(kind).bodyKey.length).toBeGreaterThan(0);
+  });
+});
+
+describe("a recovery phrase saved on another device (UX 19.5, from the published protection)", () => {
+  it("is one line", () => {
+    expect(PHRASE_SAVED_NOTICE.titleKey).toBeNull();
+    expect(t(PHRASE_SAVED_NOTICE.bodyKey)).toBe("A recovery phrase was saved for your account.");
+  });
+
+  it("is told when the protection lists a phrase this device had not seen listed", () => {
+    expect(phraseSavedElsewhere({ lookedBefore: true, flag: false, phraseListed: true })).toBe(true);
+  });
+
+  it("is not told to the device that saved it, nor again later", () => {
+    expect(phraseSavedElsewhere({ lookedBefore: true, flag: true, phraseListed: true })).toBe(false);
+  });
+
+  it("is not told to a new device about a phrase saved before it existed", () => {
+    expect(phraseSavedElsewhere({ lookedBefore: false, flag: false, phraseListed: true })).toBe(false);
+  });
+
+  it("is not told while nothing is listed or nothing is known", () => {
+    expect(phraseSavedElsewhere({ lookedBefore: true, flag: false, phraseListed: false })).toBe(false);
+    expect(phraseSavedElsewhere({ lookedBefore: true, flag: false, phraseListed: null })).toBe(false);
   });
 });
 
@@ -303,10 +347,10 @@ describe("the per-device stores", () => {
   it("remembers this device's own actions by kind and time", () => {
     const local = new MemoryStorage();
     markOwnAction(local, "alice", "recovery-email-added", NOW);
-    markOwnAction(local, "alice", "recovery-phrase-saved", NOW + 5);
+    markOwnAction(local, "alice", "recovery-email-removed", NOW + 5);
     expect(readSelfMarks(local, "alice")).toEqual([
       { kind: "recovery-email-added", atMs: NOW },
-      { kind: "recovery-phrase-saved", atMs: NOW + 5 },
+      { kind: "recovery-email-removed", atMs: NOW + 5 },
     ]);
     expect(readSelfMarks(local, "bob")).toEqual([]);
   });

@@ -299,6 +299,20 @@ class MainActivity : ComponentActivity() {
         // ADR-0079 section 4 — the contacts runtime reads the synced
         // link-record register (auto-accept, the link list, revocations).
         contactsRepository.deviceGroupSync = deviceGroupSync
+        // UX 16.11 - nothing waiting is ever sent into the old one-to-one
+        // of a person who started over.
+        chatRepository.startedOverKeys = { contactsRepository.startedOverKeys.value }
+        me.lakko.app.devices.StateBundle.resetFactsApplied = { contactsRepository.noteStartedOver() }
+        lifecycleScope.launch {
+            contactsRepository.startedOverKeys.collect { keys ->
+                if (keys.isNotEmpty()) chatRepository.failSendsIntoStartedOver()
+            }
+        }
+        // ADR-0101 section 10 - a reset of this account made elsewhere is
+        // judged by the same rule a contact runs: sealed is the owner's.
+        authRepository.ownResetVerdict = { accountId, heldKeyB64, generation, seqFloor ->
+            contactsRepository.ownResetVerdict(accountId, heldKeyB64, generation, seqFloor)
+        }
         // ADR-0075 (amended 2026-10-13) - the account's devices keep the
         // recovery address in one register of the synced state.
         authRepository.recoveryAddressPort = object : me.lakko.app.auth.RecoveryAddressPort {
@@ -1094,27 +1108,50 @@ private fun AppRoot(
         }
     }
     if (sessionAccount != null) {
-        // ADR-0075 / UX 19.1a - "Protect your account", the one step after
-        // sign-up. Drawn ABOVE the session root, which keeps running
-        // underneath: "Save a recovery phrase" changes the account keys and
-        // needs the device list the session root opens.
+        // ADR-0075 (amended 2026-11-26) / UX 19.1a, 19.1c - "Protect your
+        // account": required after sign-up, and at every session landing for
+        // an account with a username and none of the three second ways in
+        // (a recovery email, an authenticator app, a passkey). Drawn ABOVE
+        // the session root, which keeps running underneath; there is no way
+        // past it but its `Continue`.
         val protectOwed by authRepository.protectStepOwed.collectAsStateWithLifecycle()
-        if (protectOwed) {
+        val accountFactors by authRepository.accountFactors.collectAsStateWithLifecycle()
+        val hasUsername = sessionAccount.username.isNotBlank()
+        // Latched: the step stays until `Continue`, so the person may add a
+        // second factor after the first before going on.
+        var factorStepOpen by remember(sessionAccount.accountIdB64) { mutableStateOf(false) }
+        if (me.lakko.app.auth.factorStepRequired(hasUsername, accountFactors)) factorStepOpen = true
+        // UX 19.1c without a flash (alignment 2026-11-27): once per landing
+        // the app is not shown until the factor read answers, at most 3 s.
+        var factorReadWaited by remember(sessionAccount.accountIdB64) { mutableStateOf(false) }
+        LaunchedEffect(sessionAccount.accountIdB64) {
+            me.lakko.app.auth.awaitFactorRead(authRepository.accountFactors)
+            factorReadWaited = true
+        }
+        if (protectOwed || factorStepOpen) {
             androidx.compose.material3.Surface(modifier = Modifier.fillMaxSize()) {
                 InsetRoot {
                     me.lakko.app.ui.auth.ProtectAccountStep(
                         repository = authRepository,
-                        chatRepository = chatRepository,
-                        hasUsername = sessionAccount.username.isNotBlank(),
+                        hasUsername = hasUsername,
+                        afterSignup = protectOwed,
+                        onFinished = { factorStepOpen = false },
                     )
                 }
             }
         } else {
+            // UX 19.1d, place 3 - once per device after a sign-in: "Your
+            // chats depend on your password".
+            me.lakko.app.ui.auth.PasswordOnlyDialogHost(repository = authRepository)
             // UX 19.2 / 19.5 / 19.6 - what happened to the account elsewhere.
-            me.lakko.app.ui.auth.AccountNoticeHost(repository = authRepository, chatRepository = chatRepository)
+            me.lakko.app.ui.auth.AccountNoticeHost(repository = authRepository)
             // A session that landed with no username and whose backup named
             // none asks for it (`auth/UsernamePrompt.kt`).
             me.lakko.app.ui.auth.UsernamePromptHost(repository = authRepository)
+            // A guest (no username) is never shown the step: nothing to wait for.
+            if (hasUsername && me.lakko.app.auth.landingCoverShown(factorReadWaited, protectStepShown = false)) {
+                androidx.compose.material3.Surface(modifier = Modifier.fillMaxSize()) {}
+            }
         }
     }
 
@@ -2209,6 +2246,7 @@ private fun SessionRoot(
     }
     val publisherChannels by channelsState.keysByChannel.collectAsStateWithLifecycle()
     me.lakko.app.channels.SubscriberAdmission.appContext = LocalContext.current.applicationContext
+    me.lakko.app.channels.OwnedChannelsRuntime.appContext = LocalContext.current.applicationContext
     me.lakko.app.channels.ChannelRemovalWatch.notice = { id, name -> chatRepository.noteChannelEndHeard(id, name) }
     // ADR-0087 section 14.1 — the channel invitation card in a chat.
     val inviteCardContext = LocalContext.current.applicationContext
@@ -2430,6 +2468,10 @@ private fun SessionRoot(
             override suspend fun refreshContinuityTarget(accountIdB64: String): Boolean =
                 contactsRepository.refreshContinuityTarget(accountIdB64) != null
         }
+        // ADR-0101 section 7 - whatever the owned-channels locks hang on
+        // changed (the password, a passkey, a reset published): the next
+        // pass writes them again.
+        authRepository.ownedChannelsDuty = { me.lakko.app.channels.OwnedChannelsRuntime.notifyChanged() }
         lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
             while (true) {
                 if (channelsState.boundAccount != null) {
@@ -3145,6 +3187,7 @@ private fun SessionRoot(
                                 onOpenRecoveryEmail = { navController.navigate(Routes.RECOVERY_EMAIL) },
                                 onOpenSavePhrase = { navController.navigate(Routes.SAVE_PHRASE) },
                                 onOpenShowPhrase = { navController.navigate(Routes.RECOVERY) },
+                                onOpenPasskeys = { navController.navigate(Routes.PASSKEYS) },
                             )
                         },
                     )
@@ -3161,7 +3204,6 @@ private fun SessionRoot(
                 composable(Routes.SAVE_PHRASE) {
                     me.lakko.app.ui.auth.SaveRecoveryPhraseScreen(
                         repository = authRepository,
-                        chatRepository = chatRepository,
                         onDone = { navController.popBackStack() },
                         onBack = { navController.popBackStack() },
                     )
@@ -3482,7 +3524,9 @@ private fun SessionRoot(
 
                                     override suspend fun changeUsername(
                                         newUsername: String,
-                                    ): me.lakko.app.auth.RenameResult = authRepository.changeUsername(newUsername)
+                                        recoveryAddress: String?,
+                                    ): me.lakko.app.auth.RenameResult =
+                                        authRepository.changeUsername(newUsername, recoveryAddress)
 
                                     override fun publish(
                                         name: String?,
@@ -3624,6 +3668,7 @@ private fun SessionRoot(
                         onBack = { navController.popBackStack() },
                         onOpenPasskeys = { navController.navigate(Routes.PASSKEYS) },
                         onOpenDevices = { navController.navigate(Routes.DEVICES) },
+                        onOpenSavePhrase = { navController.navigate(Routes.SAVE_PHRASE) },
                     )
                 }
                 composable(Routes.PASSWORD) {

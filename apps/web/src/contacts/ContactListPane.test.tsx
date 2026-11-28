@@ -84,6 +84,44 @@ describe("an incoming request", () => {
   });
 });
 
+describe("a request from the new account of a contact who started over (UX 16.11)", () => {
+  const request = {
+    messageId: 9,
+    fromPubkey: new Uint8Array(32).fill(2),
+    intro: "It is me again",
+    createdAt: "2026-11-27T10:00:00Z",
+  } as never;
+
+  it("is an ordinary card with one more line under the name; Accept and Decline stay", () => {
+    const onAccept = vi.fn();
+    const onDecline = vi.fn();
+    mount({ pending: () => [request], onAccept, onDecline, startedOverNote: () => true });
+    const note = one<HTMLElement>(".lk-request-note");
+    expect(note.textContent?.trim()).toBe(t("contacts.started_over.request_note"));
+    expect(note.getAttribute("role")).toBe("note");
+    // Under the name, above the intro.
+    const body = note.parentElement as HTMLElement;
+    const order = Array.from(body.children).map((c) => c.className);
+    expect(order.indexOf("lk-row-title")).toBeLessThan(order.indexOf("lk-request-note"));
+    expect(order.indexOf("lk-request-note")).toBeLessThan(order.indexOf("lk-request-intro"));
+    const labels = all<HTMLButtonElement>("button").map((b) => b.textContent?.trim());
+    expect(labels).toContain(t("contacts.request.accept"));
+    expect(labels).toContain(t("contacts.request.decline"));
+    all<HTMLButtonElement>("button")
+      .find((b) => b.textContent?.trim() === t("contacts.request.accept"))!
+      .click();
+    expect(onAccept).toHaveBeenCalledTimes(1);
+  });
+
+  it("every other request carries no such line", () => {
+    mount({ pending: () => [request], startedOverNote: () => false });
+    expect(present(".lk-request-note")).toBe(false);
+    mount({ pending: () => [request] });
+    expect(present(".lk-request-note")).toBe(false);
+    expect(document.body.textContent).not.toContain(t("contacts.started_over.request_note"));
+  });
+});
+
 describe("Contacts list pane: one search field (UX 6.1)", () => {
   it("offers Share invite link and no Add by username form", () => {
     mount();

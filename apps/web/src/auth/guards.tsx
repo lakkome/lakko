@@ -54,6 +54,7 @@ export function RequireSession(props: { children: JSX.Element }): JSX.Element {
       auth.newPasswordOffered(),
       auth.protectStepOwed(),
       auth.isGuest(),
+      auth.factorsPending(),
     );
   return (
     <SignedOutGate>

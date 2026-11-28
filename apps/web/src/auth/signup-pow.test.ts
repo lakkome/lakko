@@ -167,14 +167,21 @@ describe("every other auth route lost its proof of work", () => {
     expect(seen[0]?.body).not.toHaveProperty("pow");
   });
 
-  it.each([
-    ["/totp/enroll/start", (c: AuthClient) => c.totpEnrollStart("tok")],
-  ])("%s: the session only, no body", async (path, run) => {
+  // ADR-0073, amended 2026-11-26: adding a factor needs the fresh-auth
+  // grant, so the enrolment start carries it (it took no body before).
+  it("/totp/enroll/start: the session and the fresh-auth grant, no pow field", async () => {
     const seen = stubFetch(() => ({ status: 401, json: {} }));
-    await run(new AuthClient("/api/auth")).catch(() => undefined);
-    expect(seen.map((s) => s.url)).toEqual([`/api/auth${path}`]);
+    await new AuthClient("/api/auth").totpEnrollStart("tok", "grant-1").catch(() => undefined);
+    expect(seen.map((s) => s.url)).toEqual(["/api/auth/totp/enroll/start"]);
     expect(seen[0]?.authorization).toBe("Bearer tok");
-    expect(seen[0]?.body).toBeNull();
+    expect(seen[0]?.body).toEqual({ fresh_grant: "grant-1" });
+  });
+
+  it("/totp/enroll/finish: the code and the fresh-auth grant", async () => {
+    const seen = stubFetch(() => ({ status: 401, json: {} }));
+    await new AuthClient("/api/auth").totpEnrollFinish("tok", "123456", "grant-1").catch(() => undefined);
+    expect(seen.map((s) => s.url)).toEqual(["/api/auth/totp/enroll/finish"]);
+    expect(seen[0]?.body).toEqual({ code: "123456", fresh_grant: "grant-1" });
   });
 
   it("/device/authorize/start: the session and the fresh-auth grant, no pow field", async () => {

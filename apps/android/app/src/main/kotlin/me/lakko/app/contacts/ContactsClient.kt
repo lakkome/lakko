@@ -25,6 +25,7 @@ import me.lakko.app.transparency.LastSeenRootStore
 import me.lakko.app.transparency.LogVerifyStatus
 import me.lakko.app.transparency.TransparencyClient
 import me.lakko.app.transparency.TransparencyConfig
+import me.lakko.app.transparency.TransparencyNetworkError
 import me.lakko.app.transparency.verifyIdentityInLog
 import me.lakko.app.transparency.verifyRotationChain
 import uniffi.lakko_ffi_uniffi.ContactAck
@@ -173,6 +174,23 @@ public class ContactsClient(
     /** ADR-0073 R.2 step 3 - the VERIFIED key-log answer for the served key.
      *  The default runs [verifyIdentityInLog]; a test injects the answer. */
     private val resetLogCheck: (suspend (accountId: ByteArray, servedPubkey: ByteArray) -> LogCheck)? = null,
+    /** ADR-0073 R.2 with rule 4 - the rule itself. The default is the
+     *  core's (`resetVerdict` over UniFFI); a test injects a fake, since the
+     *  host JVM loads no native library. */
+    private val resetRule: ResetRule = NativeResetRule,
+    /** Rule 4's signature half: the bundle's reset seal against the previous
+     *  generation's announcement under the held key. The default runs the
+     *  core's `checkResetSeal`; a test injects the answer. */
+    private val resetSealCheck: ((input: ResetSealInput) -> SealCheck)? = null,
+    /** Rule 4's key-log half. The default reads the log through the
+     *  verified path ([verifiedSealLogCheck]); a test injects the answer. */
+    private val resetSealLogCheck: (suspend (input: ResetSealInput, announcementSeq: Long) -> SealLogCheck)? = null,
+    /**
+     * ADR-0101 section 11 - told when an UNSEALED reset was recorded for an
+     * account (nothing was re-pinned or moved). The contacts repository
+     * closes the old one-to-one's composer from it (UX 16.11).
+     */
+    private val onStartedOver: (accountIdB64: String) -> Unit = {},
     /** ADR-0078 - the binding check and sealing of mailbox rows; a test
      *  injects a fake (the host JVM loads no native library). */
     private val mailboxCrypto: MailboxCrypto = NativeMailboxCrypto,
@@ -244,7 +262,12 @@ public class ContactsClient(
         // G-4 (ADR-0016) rule #2, ADR-0073 R.2 and the additive KT-log layer:
         // the bundle's AccountIdentity key against what this device holds,
         // BEFORE its keys seal a ContactRequest ([gateIdentity]).
-        gateIdentity(recipientAccountId, bundle)
+        // UX 16.11 (alignment 2026-11-27): a person who started over (an
+        // unsealed reset) is added by @name as a NEW account: the person
+        // asked for this name, so its new key becomes the pin, as an
+        // accepted request from it would make it. The old one-to-one stays
+        // closed; nothing of it moves.
+        val startedOver = gateForOutgoingRequest(recipientAccountId, bundle)
 
         val recipientSignaturePub = base64Decode(bundle.signature_pubkey)
         // Nothing is sealed to an X25519 key the account's signature key did
@@ -270,8 +293,26 @@ public class ContactsClient(
             messageId = publish.messageId,
             createdAt = publish.createdAt,
             recipientSignaturePubkey = recipientSignaturePub,
+            startedOver = startedOver,
         )
     }
+
+    /**
+     * The gate an outgoing contact request by @name runs ([gateIdentity]),
+     * with one difference (UX 16.11, alignment 2026-11-27): a person who
+     * started over is the account the person asked for by name, so the NEW
+     * account's key is adopted as a new contact's pin ([adoptStartedOverAccount])
+     * and the request goes to it. The old one-to-one stays closed. `true`
+     * when that happened. Every other refusal propagates.
+     */
+    internal suspend fun gateForOutgoingRequest(accountId: ByteArray, bundle: IdentityFetchResponse): Boolean =
+        try {
+            gateIdentity(accountId, bundle)
+            false
+        } catch (so: ContactStartedOver) {
+            adoptStartedOverAccount(base64Encode(accountId), bundle.signature_pubkey) ?: throw so
+            true
+        }
 
     /**
      * Resolve `@username -> (accountId, signaturePubkey)` through the SAME
@@ -400,8 +441,12 @@ public class ContactsClient(
                     throw refused
                 }
                 ResetVerdict.NoVerdict -> throw IdentityCheckInconclusive(accountIdB64)
-                // Accepted and re-pinned: the log check ran inside the verdict.
-                is ResetVerdict.Accepted -> return
+                // ADR-0101 section 11: a new account under the same username.
+                // Nothing was re-pinned; the keys of the fetched bundle are
+                // NOT this contact's and are not used.
+                is ResetVerdict.Unsealed -> throw ContactStartedOver(accountIdB64)
+                // Sealed and re-pinned: the log check ran inside the verdict.
+                is ResetVerdict.Sealed -> return
             }
         }
         checkTransparencyLog(
@@ -448,18 +493,25 @@ public class ContactsClient(
      * the ledger row are written and [onResetAccepted] is told; nothing is
      * shown anywhere. Never throws.
      */
-    private suspend fun judgeReset(
+    /**
+     * R.2 with rule 4 over one fetched bundle, with no side effect: the
+     * attestation, the key log, the reset seal against the previous
+     * generation's announcement under [heldKeyB64], and the core's verdict.
+     * [seqFloor] is the highest announcement number this device has seen for
+     * the account. Used for a contact ([judgeReset]) and for this account's
+     * own reset made elsewhere ([ownResetVerdict]).
+     */
+    private suspend fun gatherResetVerdict(
         accountId: ByteArray,
         bundle: IdentityFetchResponse,
-        heldKeyB64: String?,
+        heldKeyB64: String,
         acceptedGeneration: Long,
-    ): ResetVerdict {
-        val accountIdB64 = base64Encode(accountId)
-        if (heldKeyB64 == null) return ResetVerdict.NoVerdict
+        seqFloor: Long,
+    ): Triple<ResetVerdict, SealCheck, LogCheck> {
         val servedPubkey = try {
             base64Decode(bundle.signature_pubkey)
         } catch (_: IllegalArgumentException) {
-            return ResetVerdict.Refused(ResetRefusal.UNCONFIRMED)
+            return Triple(ResetVerdict.Refused(ResetRefusal.UNCONFIRMED), SealCheck.NONE, LogCheck(LogVerifyStatus.UNREACHABLE, null))
         }
         val attest = try {
             (resetAttestCheck ?: ::checkResetAttestation)(accountId, servedPubkey, bundle.key_reset_attest)
@@ -475,7 +527,39 @@ public class ContactsClient(
         } catch (_: Throwable) {
             LogCheck(LogVerifyStatus.UNREACHABLE, null)
         }
-        val verdict = resetVerdict(
+        // Rule 4 (ADR-0101 section 10): the reset seal against the previous
+        // generation's announcement, under the key this device HOLDS. Asked
+        // only for an attestation that verified; anything that goes wrong
+        // here is "no seal", which is unsealed, never accepted.
+        var seal = SealCheck.NONE
+        var sealLog = SealLogCheck.NOT_PROVEN
+        if (attest is AttestCheck.Verified) {
+            val sealInput = ResetSealInput(
+                accountId = accountId,
+                heldKeyB64 = heldKeyB64,
+                fetchedKey = servedPubkey,
+                acceptedGeneration = acceptedGeneration,
+                attestedGeneration = attest.keyGeneration,
+                previousAnnouncementB64 = bundle.previous_reset_seals,
+                resetSealB64 = bundle.reset_seal,
+                seqFloor = seqFloor,
+            )
+            seal = try {
+                (resetSealCheck ?: ::checkSealWithCore)(sealInput)
+            } catch (_: Throwable) {
+                SealCheck.NONE
+            }
+            if (seal.valid && log.status != LogVerifyStatus.OFF) {
+                sealLog = try {
+                    (resetSealLogCheck ?: ::verifiedSealLogCheck)(sealInput, seal.announcementSeq)
+                } catch (cancel: kotlinx.coroutines.CancellationException) {
+                    throw cancel
+                } catch (_: Throwable) {
+                    SealLogCheck.UNREACHABLE
+                }
+            }
+        }
+        val verdict = resetRule.verdict(
             ResetVerdictInput(
                 heldKeyB64 = heldKeyB64,
                 acceptedGeneration = acceptedGeneration,
@@ -483,9 +567,46 @@ public class ContactsClient(
                 bundleGeneration = bundle.key_generation,
                 attest = attest,
                 log = log,
+                seal = seal,
+                sealLog = sealLog,
             ),
         )
-        if (verdict !is ResetVerdict.Accepted) return verdict
+        return Triple(verdict, seal, log)
+    }
+
+    private suspend fun judgeReset(
+        accountId: ByteArray,
+        bundle: IdentityFetchResponse,
+        heldKeyB64: String?,
+        acceptedGeneration: Long,
+    ): ResetVerdict {
+        val accountIdB64 = base64Encode(accountId)
+        if (heldKeyB64 == null) return ResetVerdict.NoVerdict
+        val ledgerRow = resetLedger.load(ownerAccountIdB64, accountIdB64)
+        val (verdict, seal, log) = gatherResetVerdict(
+            accountId,
+            bundle,
+            heldKeyB64,
+            acceptedGeneration,
+            seqFloor = ledgerRow?.sealSeqFloor ?: 0L,
+        )
+        if (verdict is ResetVerdict.Unsealed) {
+            // ADR-0101 section 11: recorded, and nothing else. The pin, the
+            // accepted generation and the retired keys stay as they are; no
+            // listener of an accepted reset is told, so nothing moves.
+            recordStartedOver(
+                accountIdB64,
+                StartedOver(
+                    oldKeyB64 = heldKeyB64,
+                    newKeyB64 = bundle.signature_pubkey,
+                    keyGeneration = verdict.keyGeneration,
+                    signedAtMs = verdict.signedAtMs,
+                ),
+                sealRefusal = seal.refusal,
+            )
+            return verdict
+        }
+        if (verdict !is ResetVerdict.Sealed) return verdict
         val pin = pinStore.readPin(accountIdB64)
         val plan = acceptResetPlan(
             pin = pin,
@@ -504,6 +625,7 @@ public class ContactsClient(
                 keyGeneration = verdict.keyGeneration,
                 signedAtMs = verdict.signedAtMs,
                 nowMs = System.currentTimeMillis(),
+                announcementSeq = verdict.announcementSeq,
             ),
         )
         when (plan) {
@@ -550,6 +672,163 @@ public class ContactsClient(
             }
         }
         return verdict
+    }
+
+    /**
+     * ADR-0101 section 10 "The account's own devices": this account's keys
+     * were reset elsewhere. The same rule a contact runs, over the account's
+     * own row, with the key this device holds ([heldKeyB64]), the generation
+     * of its session ([acceptedGeneration]) and the highest announcement
+     * number it has seen ([seqFloor]). Nothing is recorded. [ResetVerdict.Sealed]
+     * means the owner reset (no "Was it you?"); anything else keeps the
+     * recall. Network failures are [ResetVerdict.NoVerdict].
+     */
+    public suspend fun ownResetVerdict(
+        accountId: ByteArray,
+        heldKeyB64: String,
+        acceptedGeneration: Long,
+        seqFloor: Long,
+    ): ResetVerdict {
+        val bundle = try {
+            discovery.identityFetch(accountId)
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            return ResetVerdict.NoVerdict
+        } ?: return ResetVerdict.NoVerdict
+        if (bundle.signature_pubkey == heldKeyB64) return ResetVerdict.NoVerdict
+        return try {
+            gatherResetVerdict(accountId, bundle, heldKeyB64, acceptedGeneration, seqFloor).first
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            ResetVerdict.NoVerdict
+        }
+    }
+
+    /** ADR-0101 section 11 - keep the unsealed reset in the ledger and tell
+     *  the repository. Never throws. */
+    private fun recordStartedOver(accountIdB64: String, seen: StartedOver, sealRefusal: String?) {
+        try {
+            val next = withStartedOver(resetLedger.load(ownerAccountIdB64, accountIdB64), seen) ?: return
+            resetLedger.save(ownerAccountIdB64, accountIdB64, next)
+        } catch (_: Throwable) {
+            return
+        }
+        // The code only (`noSeal`, `sealKeyNotAnnounced`, ...): no id, no key.
+        runCatching { Log.i("lakko-contacts", "ADR-0101: an unsealed key reset was recorded (${sealRefusal ?: "unsealed"})") }
+        try {
+            onStartedOver(accountIdB64)
+        } catch (cause: Throwable) {
+            runCatching { Log.w("lakko-contacts", "unsealed reset not announced: ${cause.javaClass.simpleName}") }
+        }
+    }
+
+    /**
+     * UX 16.11 - the person accepted the new account's contact request: the
+     * recorded new key becomes the account's pin, as for any new contact, at
+     * the reset's generation. Returns the adopted key (standard base64), or
+     * `null` when no unsealed reset is recorded for [accountIdB64] or its new
+     * key is not [expectedKeyB64] (the request must be from exactly the key
+     * the attestation named). The old key stays closed
+     * ([ResetLedgerRow.startedOverKeysB64]); nothing is moved or returned.
+     */
+    public fun adoptStartedOverAccount(accountIdB64: String, expectedKeyB64: String): String? {
+        val (row, open) = adoptStartedOver(resetLedger.load(ownerAccountIdB64, accountIdB64)) ?: return null
+        if (open.newKeyB64 != expectedKeyB64) return null
+        val held = pinStore.readPin(accountIdB64)
+        val marker = resetRepinMarker(held?.rotationMarker ?: 0L, System.currentTimeMillis())
+        resetLedger.save(ownerAccountIdB64, accountIdB64, row)
+        if (pinStore.setPin(accountIdB64, open.newKeyB64, marker) != SetPinResult.Set) return null
+        pinStore.recordLogVersion(accountIdB64, null)
+        verifiedBindings.drop(ownerAccountIdB64, accountIdB64)
+        return open.newKeyB64
+    }
+
+    /** The unsealed reset recorded for [accountIdB64] and still open (the
+     *  person has not accepted the new account), or `null`. */
+    public fun startedOverOf(accountIdB64: String): StartedOver? =
+        resetLedger.load(ownerAccountIdB64, accountIdB64)?.startedOver
+
+    /** Rule 4's signature half with the core (`checkResetSeal`). */
+    private fun checkSealWithCore(input: ResetSealInput): SealCheck {
+        val previous = input.previousAnnouncementB64?.takeIf { it.isNotEmpty() }?.let { base64Decode(it) }
+        val resetSeal = input.resetSealB64?.takeIf { it.isNotEmpty() }?.let { base64Decode(it) }
+        val out = uniffi.lakko_ffi_uniffi.checkResetSeal(
+            previousAnnouncement = previous,
+            resetSeal = resetSeal,
+            heldAccountKey = base64Decode(input.heldKeyB64),
+            accountId = input.accountId,
+            acceptedGeneration = input.acceptedGeneration.coerceAtLeast(0L).toULong(),
+            attestedGeneration = input.attestedGeneration.coerceAtLeast(0L).toULong(),
+            fetchedKey = input.fetchedKey,
+            seqFloor = input.seqFloor.coerceAtLeast(0L).toULong(),
+        )
+        return SealCheck(valid = out.valid, announcementSeq = out.announcementSeq.toLong(), refusal = out.refusal)
+    }
+
+    /**
+     * Rule 4's key-log half (ADR-0101 section 10): the previous generation's
+     * announcement the directory served is in the operator-signed log, for
+     * this account and generation, at an index below the reset's leaf. Read
+     * through the same gates as the identity check (no-rollback, the witness
+     * quorum when pinned). Only asked when the build has a key log.
+     */
+    private suspend fun verifiedSealLogCheck(input: ResetSealInput, announcementSeq: Long): SealLogCheck {
+        val operatorKey = TransparencyConfig.pinnedOperatorKey() ?: return SealLogCheck.NOT_PROVEN
+        val announcement = input.previousAnnouncementB64?.let { base64Decode(it) } ?: return SealLogCheck.NOT_PROVEN
+        val client = try {
+            transparencyClientFactory()
+        } catch (_: Throwable) {
+            return SealLogCheck.UNREACHABLE
+        } ?: return SealLogCheck.NOT_PROVEN
+        return client.use { c ->
+            try {
+                val root = c.fetchRoot()
+                if (!lastSeenRoot.checkAndAdvance(root.logSize.toLong())) return@use SealLogCheck.NOT_PROVEN
+                if (!me.lakko.app.transparency.rootPassesWitnessGate(
+                        root,
+                        TransparencyConfig.pinnedWitnessKeys(),
+                        TransparencyConfig.witnessThreshold(),
+                    )
+                ) {
+                    return@use SealLogCheck.NOT_PROVEN
+                }
+                val usernameHash = me.lakko.app.transparency.NativeAccountKeyDeriver.derive(input.accountId)
+                val resetLeaf = c.fetchLatest(usernameHash) ?: return@use SealLogCheck.NOT_PROVEN
+                val previousGeneration = (input.attestedGeneration - 1).coerceAtLeast(0L).toULong()
+                val leaf = c.fetchAnnouncement(usernameHash, previousGeneration) ?: return@use SealLogCheck.NOT_PROVEN
+                // The log's newest announcement of that generation must be the
+                // one the directory served: same number, same bytes.
+                if (leaf.seq.toLong() != announcementSeq || !leaf.announcement.contentEquals(announcement)) {
+                    return@use SealLogCheck.NOT_PROVEN
+                }
+                val proof = c.fetchProof(leaf.idx)
+                // A proof made for a later tree than the root read above does
+                // not verify against it: not proven now, asked again later.
+                val proven = uniffi.lakko_ffi_uniffi.verifySealAnnouncementInLog(
+                    operatorPubkey = operatorKey,
+                    treeRoot = root.treeRoot,
+                    logSize = root.logSize,
+                    timestampUnix = root.timestampUnix,
+                    rootSignature = root.signature,
+                    leafIndex = leaf.idx,
+                    auditPath = proof.auditPath,
+                    resetLeafIndex = resetLeaf.idx,
+                    accountId = input.accountId,
+                    keyGeneration = previousGeneration,
+                    seq = leaf.seq,
+                    announcement = announcement,
+                )
+                if (proven) SealLogCheck.PROVEN else SealLogCheck.NOT_PROVEN
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (_: TransparencyNetworkError) {
+                SealLogCheck.UNREACHABLE
+            } catch (_: Throwable) {
+                SealLogCheck.NOT_PROVEN
+            }
+        }
     }
 
     /** R.2 step 1: the bundle's attestation under the trusted attest key (the
@@ -1801,6 +2080,9 @@ public data class SendResult(
     /** ADR-0084 — the recipient's verified signature key the request was
      *  sealed to (the Sent row shows the photo held for it), or `null`. */
     val recipientSignaturePubkey: ByteArray? = null,
+    /** UX 16.11 - the request went to the NEW account of a person who
+     *  started over (its key was adopted for this request). */
+    val startedOver: Boolean = false,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -1927,6 +2209,12 @@ public data class IncomingContactRequest(
      *  was listed (not live on this device), or `null`. A row that names any
      *  other chat since has one: the request is no longer asking. */
     val asksPastChatHex: String? = null,
+    /** UX 16.11 — the request is from the NEW keys of an account that
+     *  started over (an unsealed reset): its card carries one more line,
+     *  "Lakko could not confirm this is the same person as before." Accepting
+     *  it starts a new one-to-one; the old one stays closed. Not part of
+     *  equality. */
+    val startedOverNote: Boolean = false,
 ) {
     /** The DS stamp ([createdAt], server-set) as Unix ms, or `null` when it
      *  does not parse. For a request through an invite link it decides the
@@ -2249,10 +2537,37 @@ public class SupersessionRefused(
  * Never a refusal: an action that needs the answer does not proceed, and
  * says nothing about the contact.
  */
-public class IdentityCheckInconclusive(
+public open class IdentityCheckInconclusive(
     /** base64 of the account id whose check has no verdict. */
     public val accountIdB64: String,
 ) : RuntimeException("identity check inconclusive")
+
+/**
+ * ADR-0101 section 11 / UX 16.11 - the account's keys were reset WITHOUT a
+ * seal this device could check: a new account under the same username. The
+ * contact this device holds is unchanged (nothing was re-pinned, nothing
+ * moves, nothing is returned), and the fetched keys are not its keys.
+ *
+ * A kind of [IdentityCheckInconclusive], so every caller that changes
+ * nothing on "no verdict" changes nothing here either; the callers that
+ * show something for it (the closed line of the old one-to-one, the note on
+ * the new account's contact request) ask for this type.
+ */
+public class ContactStartedOver(accountIdB64: String) : IdentityCheckInconclusive(accountIdB64)
+
+/** What rule 4 reads of one fetched bundle. */
+public class ResetSealInput(
+    public val accountId: ByteArray,
+    public val heldKeyB64: String,
+    public val fetchedKey: ByteArray,
+    public val acceptedGeneration: Long,
+    public val attestedGeneration: Long,
+    /** The bundle's `previous_reset_seals` and `reset_seal` (standard base64). */
+    public val previousAnnouncementB64: String?,
+    public val resetSealB64: String?,
+    /** The highest announcement number this device has seen for the account. */
+    public val seqFloor: Long,
+)
 
 /**
  * KT-log S3e — thrown when the transparency log's signed root reports a

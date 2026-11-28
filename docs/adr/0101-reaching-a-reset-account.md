@@ -215,17 +215,21 @@ one, announced in the attested identity bundle for a window.**
         the ADR-0064 account vaults are not used because their names come
         from the current account seed, which the reset replaces.
 
-        The list's plaintext: `version(1)=0x01 ‖ password_lock_root(32) ‖
+        The list's plaintext: `version(1)=0x02 ‖ password_lock_root(32) ‖
         passkey_lock_count(1, 0..=8) ‖ passkey_lock_count × (tag(16) ‖
         root(32)) ‖ count(1, 0..=64) ‖ count × entry` (the `tag` is the
         passkey's tag in the seal announcement), entry = `channel_id(16) ‖ read_key_len(1, 0|32) ‖ read_key ‖
+        handle_seed_len(1, 0|32) ‖ handle_seed ‖
         admission_count(1, 0..=8) ‖ admission_count × (admission_version(4
         BE) ‖ seed(32)) ‖ epoch_count(1, 0..=4) ‖ epoch_count × (epoch_id(4
-        BE) ‖ seed(32))`, bounded and exact on decode, with a fuzz target. An
-        entry is at most 483 bytes, 64 entries at most 30,912 bytes, the lock
-        roots at most 417 bytes; the list is always padded to one size, 32 KiB, so the storage service learns
+        BE) ‖ seed(32))`, bounded and exact on decode, with a fuzz target. Each
+        entry carries the channel's ADR-0087 handle write seed, so the
+        retaking device signs `rekey` from the old handle key to the one its
+        new root derives. An
+        entry is at most 516 bytes, 64 entries at most 33,024 bytes, the lock
+        roots at most 417 bytes; the list is always padded to one size, 64 KiB, so the storage service learns
         no count. The 64 channels, 8 admission versions, 4 epoch seeds and
-        32 KiB are chosen, not measured. Four epoch seeds is the ADR-0031
+        64 KiB are chosen, not measured. Four epoch seeds is the ADR-0031
         retention, so the owner reads what a returning subscriber reads, and
         the newest epoch opens the channel's name and description, which the
         publisher re-issues after every rotation (ADR-0051). The admission
@@ -332,7 +336,7 @@ one, announced in the attested identity bundle for a window.**
      it.
 
      The storage service learns that a few small vaults exist (the list
-     always 32 KiB, three locks plus one per passkey that keeps the chats), when each is written (channel created or deleted, a
+     always 64 KiB, three locks plus one per passkey that keeps the chats), when each is written (channel created or deleted, a
      rotation, an admission seed, a password change, a reset) and read, and
      from which address; it cannot tell they belong together or to whom. An
      attacker who reset the account and then replaced a channel's recovery
@@ -341,8 +345,10 @@ one, announced in the attested identity bundle for a window.**
      *As built in the core, 2026-11-27 (S6; `lakko-channels::owned`,
      `lakko-vault`, both FFI surfaces; host-tested only, no client uses it
      yet).* Chosen where this section left a detail open: the encoded list
-     is always exactly 32 764 bytes (the content, then zero bytes), so with
-     the vault's 4-byte length frame it fills the 32 KiB bucket exactly;
+     is always exactly 65 532 bytes (the content, then zero bytes), so with
+     the vault's 4-byte length frame it fills the 64 KiB bucket exactly
+     (32 KiB until 2026-11-27, when the handle seed made the fullest list
+     33 443 bytes);
      decode refuses any other length and any non-zero padding byte. The list
      is canonical: passkey locks strictly ascending by tag, entries by
      channel id, admission seeds by `(admission_version, seed)` (two seeds of
@@ -783,6 +789,439 @@ service under the two locks, and in memory while used). No `lakko-mls`
 change; G-39 does not grow. Known gap **G-60** (minted 2026-11-26) tracks
 the problem until this is built. `services/auth`, discovery, the KT log and
 the reset acceptance change: a `lakko-security` pass is due before merge.
+
+### As built on Android, 2026-11-27 (S9; `apps/android`)
+
+Built against the S6 core and the S7 services; the host unit suite passes
+(`:app:testDebugUnitTest`), nothing was run on a device, an emulator or
+against a server, and the native library was not rebuilt (`just
+build-android` is needed for a device run). Where the spec or this ADR was
+silent, the smallest consistent thing was chosen:
+
+- **A passkey's seal secret.** Asked as the PRF extension's `eval.second`
+  (the salt of section 10) beside the passkey vault's `eval.first`, at
+  passkey creation and at "Restore keys with this passkey"; the reset's own
+  passkey ceremony asks it as `eval.first`. Below API 34 Android drops the
+  request at creation (ADR-0072), so such a passkey confirms a reset and
+  never seals one; its row says "Does not keep your chats.".
+- **Which password seal a device asserts.** Its own export key's only when
+  the account has no announcement of this generation, when it is the
+  announced one, or when the device obtained the export key after the
+  announcement was signed (the time is kept beside the export key); a device
+  with an older cached key carries the announced seal forward. The
+  comparison is between two devices' clocks (chosen, not measured). The
+  owned-channels password lock follows the same answer: it is made only
+  from the export key whose seal the announcement lists.
+- **When the announcement is published.** At every session landing, when
+  the "Protect your account" step is finished (a sign-up's landing can run
+  before the account's first directory row exists), after a password change,
+  a passkey added or removed, a saved phrase, a key rotation and a reset's
+  publish.
+- **An unsealed reset at a contact.** The gate answers a distinct
+  "started over" (a subclass of the inconclusive answer, so no caller treats
+  it as the same person); the ledger row keeps the old key as closed. The
+  new account's key is pinned only when the person accepts its request. The
+  old contact row and one-to-one stay, so Contacts can show the person
+  twice. Adopting the new account from an outgoing add by name is not built.
+- **A phrase-sealed reset and the owned channels.** The phrase opens the
+  keys lock (item 1 of section 7) through the identity the phrase derives,
+  which is the lineage identity only for an account that never rotated its
+  keys; after a rotation a phrase-sealed reset returns the chats and not the
+  owned channels.
+- **The retake.** `R`, `S` and the list are read before the reset's server
+  step and kept in the device's encrypted file until the new keys lock
+  holds them (the web client writes the new keys lock first; the result
+  after a crash is the same). A retaken private channel lets in every
+  currently listed subscriber row, as the S4 owner return did; tickets are
+  not checked again against the listed admission seeds. The passkey locks of
+  before the reset are deleted at the first pass after the new announcement
+  was read.
+- **The landing rule** is applied once the account's factors were read:
+  the app is on screen for that moment. Factors that cannot be read (offline)
+  show no step.
+- **The reset panel.** A factor row's control (the code field, `Send code`,
+  `Use passkey`) waits until the password is typed or proven; the `RESET`
+  field is enabled once a factor is confirmed. The web client had not built
+  this panel when this was written.
+- **Not exercised:** the key-log half of rule 4 (no build pins a key log),
+  the bindings to the native core (`NativeSealCore`, `NativeOwnedCore`,
+  `NativeResetRule`), and every screen.
+
+*Alignment pass, 2026-11-27 (after S8/S9; host unit suite only, nothing run
+on a device or against a server).* Several S9 choices above are replaced:
+
+- **Own messages are translated** like received ones (UX 3.1, 3.7 as
+  amended): no ownership argument reaches the offer rule; own messages are
+  detected and translated automatically; only incoming messages feed the
+  conversation's languages and the bar.
+- **The password seal** is put forward only from an export key a password
+  ceremony produced in this run (`ExportKeyStore.producedThisRun`, memory
+  only); the clock comparison is gone. A cached key never fills in a missing
+  announcement. The export key a reset writes back counts only when it came
+  from the proof block.
+- **The account's own devices** judge a reset made elsewhere by the core
+  rule over the account's own row (`ContactsClient.ownResetVerdict`, the
+  held key, the session's generation, this device's announcement floor):
+  sealed is the owner's (full wipe, no "Was it you?"); anything else,
+  including no answer, keeps the recall.
+- **A recall** keeps the old keys lock's root in the recall record (record
+  version 2; the root is read from the lineage identity before the staged
+  wipe), and the channel pass opens that lock and takes the owned channels
+  back through the old `R` and `S`; the recall keeps the new password's
+  export key, so the announcement published after the recall carries its
+  seal.
+- **Durability:** a passkey's lock secret and its not-yet-announced seal
+  entry are kept (encrypted file, plain public entry) until written; a lock
+  write that loses is retried and, still lost, fails the pass (the list
+  never names a missing lock). `R`, `S` and the retake state were already
+  kept in the encrypted file.
+- **The handle seed:** each owned channel with an `@name` carries its
+  handle write seed in the list; a retake records it as an owed `rekey`,
+  sent by the publisher pass once the channel's record is read.
+- **A retaken private channel** (admission seeds listed, no read key) judges
+  every row by its ticket from mark 0 (web's rule); a reader with no valid
+  ticket is removed.
+- **Started-over person:** adding by `@name` adopts the new account's key
+  and sends the request to it; the Sent row carries the 16.11 note; the old
+  one-to-one stays closed. What waited to be sent into the old one-to-one
+  turns "Not sent" at once, is never sent, and the closed chat offers no
+  Retry.
+- **The pairing state bundle** carries `sealFloors` and `startedOver`
+  (absent when empty); a receiving device keeps the higher floor and adds a
+  closed key it does not hold.
+- **The landing rule** waits for the factor read once per landing, at most
+  3 s, behind a plain cover; a guest does not wait.
+- **One safety number per conversation** (16.11): already holds on Android,
+  since each contact row, the old and the new account's, computes its number
+  over its own key.
+- **Not exercised:** the recall retake and the own-device verdict against a
+  server; the owed handle `rekey` after a retake (no host test drives the
+  publisher pass).
+
+### As built on iOS, 2026-11-27 (S9; `apps/ios`)
+
+Built against the S6 core and the S7 services, with `LakkoCore.xcframework`
+and the extension framework rebuilt first. The app builds and the unit suite
+was run on a simulator (counts in the commit that lands this); nothing was
+run on a device or against a server, no passkey ceremony was executed, and
+no screen was walked. Where the spec or this ADR was silent, the smallest
+consistent thing was chosen (the web client had built none of this when it
+was written, so nothing could be matched):
+
+- **A passkey's seal secret.** Asked as a second PRF salt (the salt of
+  section 10) beside the passkey vault's, at passkey creation and at
+  "Restore keys with this passkey", and as the only salt in the reset's own
+  passkey ceremony. The PRF extension exists from iOS 18; below it a passkey
+  signs in and confirms a reset and never seals one, its row says "Does not
+  keep your chats.", and a reset on such a device is sealed by the password
+  or not at all. A secret that could not be published when it was given is
+  kept in memory and published at the next successful look; it is never
+  stored, so a process that ends first leaves that passkey not keeping the
+  chats.
+- **Which password seal a device asserts.** A mark beside the export key
+  says "made by the password just now" (set by sign-up, a password sign-in
+  and a password change; cleared once the announcement and the owned-channels
+  password lock both took it). A landing replaces the announced password seal
+  only while the mark stands; otherwise it only fills in an account that has
+  no announcement at its generation. Residual: a device whose cached export
+  key is stale can fill in a missing announcement with an old password's
+  seal (a reset from the current password is then unsealed until a device
+  that holds the keys signs in with it).
+- **When the announcement is published.** At every session landing, when
+  the "Protect your account" step is left, after a password change, a
+  passkey that gave its secret or was removed, a saved phrase, a key rotation
+  (once the directory holds the new key: the password and passkey seals of
+  the previous generation are carried, the phrase is not) and a reset's
+  publish. The new words of a reset or a rotation are listed once the person
+  confirmed them on the device (an owed mark survives a restart).
+- **The reset seal.** Signed by the password's export key when the
+  announcement lists it, else by the passkey used as the factor when it
+  lists that one. A reset sealed by a typed recovery phrase is **not built**
+  (the reset panel has no phrase field); the phrase seal is published and
+  not yet usable from iOS. If discovery refuses the seal (`400
+  reset-seal-invalid`) the publish goes again without it, as an unsealed
+  reset, instead of leaving the account without a published key.
+- **An unsealed reset at a contact.** The gate answers a distinct "started
+  over" that no caller treats as the same person. The pin stays on the old
+  key; the old key is recorded as closed (not as a superseded key, so
+  nothing is returned on its strength). The new account's key becomes the
+  pin only when the person accepts a contact request signed by it; a request
+  from any other key of that account is refused. A group member known only
+  by a verified binding records nothing. The old contact row and one-to-one
+  stay, so Contacts can show the person twice.
+- **The announcement floor** is kept for accounts this device pins, and
+  survives the adoption of a new account's key.
+- **The key-log half of rule 4** is asked (`GET
+  /transparency/announcement/...`) and handed to the core's rule; no build
+  pins a key log, so it has never run.
+- **The owned channels.** `S` from sign-up is kept under the device's
+  Keychain until the locks exist (a guest makes them when it chooses its
+  password), and the reset's `S` with what sealed it likewise from the reset
+  until the channels were taken back: section 7 says "in memory while used",
+  which a crash between the two steps would turn into owned channels that
+  never come back. The password lock is made again with the password under
+  the same mark as the announcement. A list entry a storage or channels
+  failure could not take back stays in the list; one the channels service
+  refuses is dropped. A retaken private channel is not walked.
+- **The landing rule** is applied once the account's factors were read; the
+  app is on screen for that moment, and factors that cannot be read show no
+  step. Once the step stands only its `Continue` takes it away.
+- **A saved phrase on the account's other devices.** The server keeps no
+  notice for it any more: a device says "A recovery phrase was saved" once
+  when the account's announcement first lists the phrase.
+- **Removing a passkey** had no confirmation on iOS (the passkey sheet is
+  one); the app's own dialog is shown only when the removal would leave the
+  authenticator app as the only second way in, carrying that note.
+- **`Open in authenticator app`** hands the `otpauth://` link to the
+  system; when no app takes it nothing is shown (no copy exists for it).
+- **Not built on iOS:** the reset sealed by a typed phrase (above); the
+  account's own devices judging a reset they did not make by its seal (every
+  such reset still shows ADR-0074's "Was it you?", sealed or not); a recall
+  device taking the owned channels back through the old keys lock (a
+  recalled account's owned channels do not come back on iOS); the retry of a
+  passkey's owned-channels lock after a failed write; adopting a
+  started-over account from an outgoing add by name.
+
+*Alignment pass on iOS, 2026-11-27 (later the same day).* Unit-tested
+only (the counts are in the commit that lands this); nothing was run on a
+device or against a server and no screen was walked. What changed against
+the list above:
+
+- **Own messages are translated** like received ones (UX 3.1, 3.7): the
+  menu row, the language line and automatic translation; the conversation
+  bar and the conversation's usual language still count incoming messages
+  only (`MessageTranslationCenter`).
+- **The password seal and lock come only from this run's export key**
+  (`RunExportKey`, in memory): the persisted "made just now" mark is gone, a
+  landing with no password proven in this run only reads the announcement,
+  and the owned-channels password lock (also at a guest's or a pending
+  sign-up's lock making) uses the same key.
+- **A reset of this account made elsewhere is judged by its seal**: the
+  device writes its recall record first, then asks the core's rule
+  (`ContactsClient.judgeOwnAccountReset`, at most 10 s, chosen); sealed: the
+  ADR-0073 sign-out and wipe, the record destroyed, no "Was it you?";
+  unsealed, refused or no answer: the recall as before. The announcement
+  floor used for the device's own account is 0 (the device keeps no `seq`
+  of its own account's announcements).
+- **A recall takes the owned channels back** through the old keys lock: the
+  recall record keeps that lock's 32-byte root (taken from the lineage seed
+  before the staged wipe); after the account is taken back the device keeps
+  the new password's export key (the announcement follows at the landing)
+  and a carry naming the old keys lock; the retake opens it (it holds `R`
+  and `S`), makes the new keys lock and the password lock under the new
+  password. A recall by phrase uses the phrase's own identity as the
+  lineage, so an account that rotated its keys before gets nothing back
+  that way.
+- **Durability**: the reset's carry (`S` and what sealed it) is written
+  before the server step and removed if nothing was reset; the retake makes
+  the new keys lock first (a later attempt opens it again), records each
+  channel taken back or dropped (Keychain, removed when all settled) and
+  keeps the carry while one waits; a passkey lock to make or delete is owed
+  under the Keychain until written.
+- **The handle seed**: each list entry carries the channel's handle write
+  seed (`ChannelSettings`' derivation; the predecessor's while a rotation's
+  rekey is owed); after a retake the device owes the `rekey` from it to the
+  key its new root derives, waits for the channel's metadata record to name
+  the `@name`, then writes the name's row again under the new key and posts
+  the record with the new handle block; `401` or `404` ends it.
+- **A retaken private channel** whose entry lists admission seeds is judged
+  row by row by its tickets (mark 0, the admission pass removes a reader
+  with no valid ticket); a public one, or one with no listed seed, keeps
+  every listed reader.
+- **Adding a started-over person by `@name`** (typed, or from search) takes
+  their new account: the pin moves to the new keys, the old one-to-one
+  stays closed, and the Sent row carries the 16.11 note. Adding them to a
+  group by name still refuses.
+- **The old conversation's person card** (a key an unsealed reset left
+  behind) offers no `Add to contacts`, also after the contact was removed
+  (`StartedOverCard`): that account no longer exists.
+- **What waits for the old one-to-one** is `Not sent`, never sent, with no
+  Retry (waiting rows are settled when the person is met as started over,
+  and at every bootstrap).
+- **The pairing state bundle** carries `sealFloors` and `startedOver` (the
+  agreed JSON, absent when empty); the receiver keeps the higher `seq` under
+  a pin it holds and adds a closed key it lacks; a malformed entry refuses
+  the whole bundle (the ADR-0080 `deviceCards` rule, as on Android). The time of a closed key is the reset's attestation time, 0 for
+  a key recorded before this build.
+- **The landing rule without a flash**: the app's content waits until the
+  factor read answered (at most 3 s, chosen); the step is decided only from
+  an answer, so a failed read shows the app and no step.
+- **One safety number per conversation** (UX 16.11, last bullet) holds on
+  iOS by construction: the old and the new account are two contact rows,
+  each showing the number of its own key.
+
+## As built on web (S8, 2026-11-27)
+
+Web and the desktop app (the same code; the desktop host forwards every
+`/api/<service>/` path already, so it needed no change). Unit-tested only:
+`npx tsc --noEmit` clean and `npx vitest run` 848 files, 10118 tests, all
+passing, on 2026-11-27. Nothing was walked on screen, against a server or in
+a second browser, and no passkey ceremony was executed. iOS and Android are
+S9.
+
+**Where it is.** `apps/web/src/auth/seal/` (the announcement and the reset
+seal over the wasm core, `seal-announcement.ts`; publishing and reading,
+`seal-runtime.ts`; when a device publishes and touches the owned-channels
+locks, `account-seal-jobs.ts`; the reset's factor rules,
+`reset-factor.ts`; what the account's published protection lists, for the
+page, `own-seals.ts`); `apps/web/src/channels/owned/` (the list, its locks,
+the retake); `auth/ResetFactorSection.tsx` and `auth/RestoreIdentityPrompt.tsx`
+(UX 15.1b, 15.1c); `auth/protect/` (UX 19.1a to 19.1d);
+`contacts/reset-verdict.ts`, `contacts/started-over.ts` and
+`transparency/verify.ts` (the peer side, UX 16.11).
+
+**Chosen where sections 7, 10 and 11 or the UX spec left a detail open.**
+
+1. *The password entry is made only from an export key a password
+   registration or sign-in produced on that page* (sign-up, a password
+   sign-in, the proof block, a password change, a mailed-code password change
+   on a device that holds the keys). The export key a device caches may be a
+   previous password's, so a plain landing only reads the announcement. A
+   password sign-in on a device without the keys keeps its export key in
+   memory and takes the password over if the keys arrive on that page;
+   otherwise the next password sign-in on a device with the keys does.
+2. *Entries are carried only from an announcement that opened under the
+   account's own key.* The next announcement is the directory's current one
+   (opened under the current key) with the entries this device can speak for
+   replaced. After a rotation the directory has none under the new key, so
+   the device carries from the announcement it kept, opened under a
+   predecessor key it holds; whichever device of the account lands first
+   does it, and a listed phrase entry is made again from the phrase the
+   device holds now. An announcement that does not open contributes only its
+   `seq`, as a floor.
+3. *`seq`* is one above the greatest of the directory's current and
+   previous announcements and the one this device kept (plain storage,
+   `lakko:seal-announcement:<account>`; public bytes).
+4. *A deleted passkey whose seal could not be withdrawn* (the directory was
+   unreachable) is owed (`lakko:seal-removals:<account>`) and withdrawn at
+   the next landing.
+5. *The server half `S` is kept under the device key*
+   (`lakko:owned-server-half:<account>`) from the moment it arrives until
+   the vaults are made; a guest keeps it until its first password. After a
+   reset it is kept the same way until the retake answered.
+6. *The reset* asks for `S` first, then makes the seal, then resets. The
+   device holds no account key, so it opens the account's current
+   announcement under the key the directory publishes: that decides the
+   line of UX 15.1c and which secret signs, never what a peer accepts. The
+   seal is kept in the "publish owed" record so a retry sends the same one.
+   When the directory answers `400 reset-seal-invalid` the new keys are
+   published without it (an unsealed reset rather than a publish that never
+   lands).
+7. *After the reset's publish* the new generation's announcement is
+   published at once when the page holds the password's export key, else at
+   the next password sign-in. The retake runs when the new account lands.
+   After a reload, a password-sealed retake continues with the cached export
+   key and the kept `S`; a passkey-sealed one cannot (its secret was in
+   memory only) and the owned channels then stay with the old account.
+8. *The reset section* (UX 15.1b). The word and the button are usable only
+   once a factor is confirmed and the 15.1c line is on screen; while the
+   published protection cannot be read the section shows the offline line
+   with `Try again` and claims neither outcome. The email row needs the
+   account's username on this device (the code is addressed by its login
+   handle). A mailed code is counted on the device: after five refusals the
+   row returns to `Send code`, and a code past its lifetime is not sent.
+   `proof.reset.cannot.title` now reads "...without your password" (a
+   passkey no longer stands in for it).
+9. *The peer side.* A proven rotation raises the accepted generation (the
+   core requires the previous announcement's generation to equal it). A
+   later fetch that shows a valid seal upgrades an unsealed verdict. An
+   outgoing request to a started-over account is refused with the existing
+   "could not confirm" line; only an incoming request can be accepted.
+10. *The owned-channels list.* Writes are a reconcile by the publisher pass
+   (it compares what the device holds with the list as last read); only
+   epochs the channel reached are listed; a listed read key means public and
+   the writing device's value wins, absence included; `404` and `410` on the
+   owner change also drop the entry; at a retake of a private channel every
+   listed row is judged by its ticket; more than 64 channels are ranked by
+   this device's own rotation record.
+11. *The landing rule* (UX 19.1c) reads the factors after the session is on
+   screen, so an account with none sees the app for one request before the
+   step replaces it.
+12. *"A phrase is saved"* is the phrase entry of the account's announcement;
+   the per-device flag follows it. On the restore prompt, where the device
+   holds no keys, it is read from the announcement opened under the
+   published key, for display only.
+
+**Not built on web.**
+
+- The pairing state bundle does not carry a contact's `seq` floor or its
+  started-over record (a change to a format the three clients share). A
+  newly paired device starts with floor 0, and an old one-to-one with a
+  person whose new account was already accepted is not closed there.
+- One safety number per conversation in the contact view (UX 16.11, last
+  bullet): the view computes one per contact.
+- Messages already queued for the old one-to-one before an unsealed reset
+  was noticed are still sent into it.
+- A reset made elsewhere and seen by the account's own old device is handled
+  as before ("Was it you?" and recall); the sealed case is not told apart.
+- A recall (ADR-0074) publishes no announcement by itself; the next password
+  sign-in does.
+- A retaken channel's `@name` is held by a handle key derived from the old
+  account seed; the list carries that handle write seed (section 7 item 4), so the
+  retaking device signs `rekey` to the key its new root derives (decided
+  2026-11-27).
+- An account made before this build has no list and no announcement until a
+  password sign-in on a device with its keys (the announcement) and never
+  gets a list unless `S` is in hand (sign-up, or a reset).
+
+### As built on web, alignment of 2026-11-27
+
+The same day's alignment of the three clients; web and the desktop app.
+Unit-tested only (`npx tsc --noEmit`, `npx vitest run`; nothing walked on
+screen or against a server). Five items of the "Not built on web" list
+above are built now; the list stays as the S8 record.
+
+- **Own messages are translated like received ones** (UX 3.1 / 3.2 / 3.7 as
+  amended): the `isOwn` input is gone from the shared offer rule and from
+  every web call; the conversation bar still counts incoming messages only.
+- **The handle write seed in the owned-channels list** (list v2, 64 KiB):
+  every entry carries the seed discovery holds the channel's `@name` under;
+  while a retake still owes its `rekey` that is the listed (old) seed, else
+  the one this device derives. A retake records the `rekey` from the listed
+  seed to the new root's key as an owed `@name` write (`handle-owed.ts`
+  `rekeyFromSeed`, in the sealed per-account row), run by the `@name`
+  runtime once the channel's record has been read and its PublisherGroup
+  founded again, retried until it lands.
+- **A sealed reset made elsewhere is the owner's**
+  (`auth/own-reset-verdict.ts` over `contacts/reset-judge.ts`, the core's
+  table with this device's old key and generation): no recall record, no
+  "Was it you?", the full wipe. Unsealed, refused or unreadable keeps the
+  recall; the recall screen judges again at every check, so a reset that
+  could not be read at sign-out still ends without the question once it can.
+- **A recall takes the owned channels back** through the keys lock of the
+  OLD keys: the recall record (version 2, `recall-record.ts`) keeps that
+  lock's root, a phrase recall derives it from the phrase, and the retake
+  opens it (`OwnedChannelsStore.openWithKeysRoot`) where no seal secret does.
+  The recall publishes the new password's seal announcement with its new
+  keys (the export key of the new password's OPAQUE registration).
+- **Durability.** What sealed a reset, the export key in force and the old
+  keys-lock root are kept under the device key until the retake answered
+  (`auth/seal/owed-secrets-store.ts`), so a passkey-sealed retake survives a
+  reload. A passkey's seal or lock, a deleted passkey's lock and the
+  password lock that failed are owed and tried again at every landing until
+  they land; an owed password lock is used again only while the account's
+  announcement lists that password. An unsealed reset (no seal, no old
+  keys root) now brings nothing back at once instead of staying owed.
+- **Adding someone who started over by `@name` or from a search result**
+  adopts the new account as the contact (the pin moves; the old one-to-one
+  stays closed), and the request's row under Sent carries the 16.11 note.
+- **Messages waiting to be sent into the old one-to-one** read `Not sent`
+  (without `Retry`) once its person started over, and are never sent.
+- **The pairing state bundle** carries `sealFloors` and `startedOver`
+  (additive inside v4, absent when empty; shared JSON vector in
+  `devices/state-bundle-seals.test.ts`).
+- **The landing rule without a flash:** after a landing the app waits for
+  the factor read (at most 3 s, chosen) before it is shown; the step is
+  shown only when the read answered with no factor.
+- **One safety number per conversation** holds by construction: after the
+  new account is accepted the old one-to-one finds no contact row, so its
+  header opens the card of its own peer key (the old number); the new chat
+  and the contact show the new one. That card (over a key the account left
+  behind) offers no `Add to contacts`: the key's account no longer exists.
+- **Own messages' detections never feed the conversation's languages**
+  (spec 3.1, as on iOS and Android): an own message is detected and
+  translated, but only messages from others are counted, so a short own
+  "ok" never shifts the guess.
 
 ## References
 

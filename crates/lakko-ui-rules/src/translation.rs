@@ -209,16 +209,18 @@ pub fn reads_language(reading_languages: &[String], tag: &str) -> bool {
 }
 
 /// Inputs to [`translation_offered`] for one message.
-// Four independent facts about one message; an enum would merge them.
-#[allow(clippy::struct_excessive_bools)]
+///
+/// There is no "the person wrote it" input: the person's own messages are
+/// offered `Translate` exactly like received ones (UX sections 3.1 and 3.7,
+/// maintainer decision 2026-11-27). Own messages still stay out of the
+/// conversation bar, which is the caller's to enforce by passing only incoming
+/// messages in [`ConversationBarInput::recent_incoming`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranslateOfferInput {
     /// Settings: `Show Translate button`.
     pub enabled: bool,
     /// The message has text (a caption, or a transcript that exists).
     pub has_text: bool,
-    /// The person wrote it.
-    pub is_own: bool,
     /// What the detector found, if it found anything.
     pub detected: Option<DetectedLanguage>,
     /// The engine's answer for translating from the detected language into the
@@ -231,8 +233,8 @@ pub struct TranslateOfferInput {
 
 /// Whether the message menu offers `Translate` (UX section 3.1).
 ///
-/// - Never for the person's own message, a message with no text, or with the
-///   setting off.
+/// - Never for a message with no text, or with the setting off. The person's
+///   own messages are offered like received ones.
 /// - A confident detection decides: a reading language gets nothing, any other
 ///   language gets the row when the engine can do it, now or after a pack.
 /// - A guess (below [`DETECTION_CONFIDENT_PERMILLE`]) that lands on a reading
@@ -247,7 +249,7 @@ pub fn translation_offered(
     input: &TranslateOfferInput,
     reading_languages: &[String],
 ) -> TranslateOffer {
-    if !input.enabled || !input.has_text || input.is_own {
+    if !input.enabled || !input.has_text {
         return TranslateOffer::None;
     }
     let ask = if input.any_engine {
@@ -378,7 +380,6 @@ mod tests {
         TranslateOfferInput {
             enabled: true,
             has_text: true,
-            is_own: false,
             detected,
             engine_for_detected: EngineState::Ready,
             any_engine: true,
@@ -426,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_offered_for_own_empty_or_switched_off_messages() {
+    fn nothing_is_offered_for_empty_or_switched_off_messages() {
         let reading = reading(&["en"]);
         let base = offer_input(Some(det("es", 990)));
         assert_eq!(
@@ -434,10 +435,6 @@ mod tests {
             TranslateOffer::Translate
         );
         for input in [
-            TranslateOfferInput {
-                is_own: true,
-                ..base.clone()
-            },
             TranslateOfferInput {
                 has_text: false,
                 ..base.clone()

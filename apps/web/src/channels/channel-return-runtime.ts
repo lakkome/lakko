@@ -2,15 +2,19 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0101 section 7 - the channel runtime of a key reset: the recovery key
- * every owned channel registers, the returns a peer sends a reset person,
- * and what the reset device does with the returns it read. The rules are in
+ * ADR-0101 section 7 - the channel runtime of a key reset for SUBSCRIBERS
+ * and PUBLISHERS: the returns a peer sends a reset person, and what the
+ * reset device does with the returns it read. The rules are in
  * `channel-return.ts`; this module is the I/O around them, driven from the
  * publisher pass (`ChannelPublisherLoops.tsx`).
+ *
+ * An OWNER comes back by itself from its owned-channels list (`owned/`,
+ * rewritten 2026-11-26): no owner return is sent or acted on here, and the
+ * recovery key is derived from the list key there. What stays here of the
+ * owner's side is the last step of a retaken channel
+ * ({@link settleRecoveredChannels}).
  */
-import { AuthClient, AuthHttpError } from "../auth/client";
 import { base64Decode, base64Encode } from "../auth/account-id";
-import { sessionTokens } from "../auth/session-token-provider";
 import { readResetContinuity } from "../auth/reset-continuity";
 import { newestHeldEnvelope } from "../profile/returned-profile";
 import { DiscoveryClient } from "../discovery/client";
@@ -21,32 +25,17 @@ import { continuityCandidate, continuityFor, writeThroughCandidates } from "../r
 import { refreshContinuityTarget } from "../reach/continuity-target";
 import { publicOrigin } from "../platform";
 import { loadWasm, type Wasm } from "../wasm";
-import type {
-  ChannelRecoveryKey as RecoveryKey,
-  ChannelReturn as ReturnHandle,
-} from "../../wasm/lakko_ffi_wasm";
+import type { ChannelReturn as ReturnHandle } from "../../wasm/lakko_ffi_wasm";
 import { channelsActions, channelsState } from "../state/channels-state";
 import { channelRotatesHere, subscribeToChannel } from "./channel-access";
-import {
-  channelOwnerKeyOf,
-  listMemberCards,
-  listSubscriberPage,
-  putChannelOwnerByRecovery,
-  putChannelRecoveryKey,
-} from "./api";
-import {
-  clearRecoveredChannel,
-  highestSeq,
-  markRecoveredChannel,
-  readRecoveredChannels,
-  recoveredVisibility,
-} from "./recovered-channels";
-import { channelIdFromHex, freshSubscriberKeys, type WasmIdentity } from "./composer";
+import { listMemberCards } from "./api";
+import { clearRecoveredChannel, readRecoveredChannels, recoveredVisibility } from "./recovered-channels";
+import { channelIdFromHex, type WasmIdentity } from "./composer";
 import { mintChannelInviteCard, openChannelInviteCardWith } from "./channel-invites";
 import { acceptPublisherInvite, mintPublisherInviteLink, removePublisher } from "./channel-publishers";
 import { keepReturnedInvitation } from "./returned-invitations";
 import { channelSubscriptionPort } from "./channel-subscription-register";
-import { markFoundedAlone } from "./founded-alone-marker";
+import { clearRecoveryRegistered as clearRegisteredRecoveryKeys } from "./owned/owned-facts";
 import {
   channelReturnAction,
   channelReturnsFor,
@@ -96,110 +85,14 @@ function storage(): Storage | undefined {
 }
 
 // ----------------------------------------------------------------------------
-// The channel recovery key
+// The channel recovery key (moved to `owned/`)
 // ----------------------------------------------------------------------------
 
-/** Thrown when auth has no recovery master configured. */
-export class ChannelRecoveryDisabledError extends Error {
-  override name = "ChannelRecoveryDisabledError";
-}
-
-/**
- * The channel's recovery key: the channel recovery input of `idHex`
- * blinded here, evaluated by auth under this account's per-account key
- * (auth never learns the channel id), finalised here. Throws
- * {@link ChannelRecoveryDisabledError} on `503`, the auth error otherwise.
- */
-export async function deriveChannelRecoveryKey(idHex: string): Promise<RecoveryKey> {
-  const wasm = await loadWasm();
-  const token = sessionTokens.peek();
-  if (token === null) throw new Error("no session for the channel recovery key");
-  const blinder = wasm.OprfBlinder.blindChannelRecovery(channelIdFromHex(idHex));
-  let evaluation: Uint8Array;
-  try {
-    evaluation = await new AuthClient().channelRecoveryEvaluate(token, base64Decode(blinder.blindedB64));
-  } catch (err) {
-    blinder.free();
-    if (err instanceof AuthHttpError && err.status === 503) throw new ChannelRecoveryDisabledError();
-    throw err;
-  }
-  const result = blinder.finalize(base64Encode(evaluation));
-  try {
-    const output = result.output;
-    try {
-      return wasm.ChannelRecoveryKey.fromOprfOutput(output);
-    } finally {
-      output.fill(0);
-    }
-  } finally {
-    result.free();
-  }
-}
-
-function registeredKey(accountIdB64: string): string {
-  return `lakko:channel-recovery-registered:${accountIdB64}`;
-}
-
-/** The owned channels whose recovery key landed, per account. */
-export function readRecoveryRegistered(s: Storage | undefined, accountIdB64: string): Set<string> {
-  try {
-    const raw = s?.getItem(registeredKey(accountIdB64));
-    const parsed = raw === null || raw === undefined ? [] : (JSON.parse(raw) as unknown);
-    return new Set(Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : []);
-  } catch {
-    return new Set();
-  }
-}
-
-function markRecoveryRegistered(s: Storage | undefined, accountIdB64: string, idHex: string): void {
-  const held = readRecoveryRegistered(s, accountIdB64);
-  held.add(idHex);
-  try {
-    s?.setItem(registeredKey(accountIdB64), JSON.stringify([...held].sort()));
-  } catch {
-    /* registered again next pass: the PUT is idempotent */
-  }
-}
-
-/** Wipe. */
+/** Wipe the record of which owned channels registered their recovery key
+ *  (kept in `owned/owned-facts.ts`; the rows of the removed OPRF-derived key
+ *  go too). The account wipe calls it under this name. */
 export function clearRecoveryRegistered(s: Storage | undefined, accountIdB64: string): void {
-  try {
-    s?.removeItem(registeredKey(accountIdB64));
-  } catch {
-    /* nothing recorded either */
-  }
-}
-
-/** The owned channels still owing a registration. Pure. */
-export function channelsOwingRecoveryKey(owned: readonly string[], registered: ReadonlySet<string>): string[] {
-  return owned.filter((id) => !registered.has(id)).sort();
-}
-
-/**
- * ADR-0101 section 7 - register the recovery key of every channel this
- * device owns that has none recorded (at creation the first pass after it
- * does it, so creation and existing channels take one path). A `503` (no
- * recovery configured on this server) stops the pass quietly; any other
- * failure leaves the channel owing. Never throws.
- */
-export async function registerOwedRecoveryKeys(accountIdB64: string, owner: WasmIdentity): Promise<void> {
-  const owned = [...channelsState.keysByChannel().keys()].filter((id) => channelRotatesHere(id));
-  const owing = channelsOwingRecoveryKey(owned, readRecoveryRegistered(storage(), accountIdB64));
-  for (const idHex of owing) {
-    let key: RecoveryKey;
-    try {
-      key = await deriveChannelRecoveryKey(idHex);
-    } catch (err) {
-      if (err instanceof ChannelRecoveryDisabledError) return;
-      continue;
-    }
-    try {
-      const status = await putChannelRecoveryKey(idHex, owner, key.verifyingKey());
-      if (status === 204) markRecoveryRegistered(storage(), accountIdB64, idHex);
-    } finally {
-      key.free();
-    }
-  }
+  clearRegisteredRecoveryKeys(s, accountIdB64);
 }
 
 // ----------------------------------------------------------------------------
@@ -316,13 +209,13 @@ export async function sendChannelReturns(
     const idHex = ch.id;
     const access = channelsActions.accessOf(idHex);
     const publishing = channelsState.keysByChannel().has(idHex);
-    const ownRole: ReturnChannel["ownRole"] = publishing ? (channelRotatesHere(idHex) ? "owner" : "publisher") : "subscriber";
+    // A subscriber's device sends no return (an owner takes its channels
+    // back from its own list): no card is read for it.
+    if (!publishing) continue;
+    const ownRole: ReturnChannel["ownRole"] = channelRotatesHere(idHex) ? "owner" : "publisher";
     const reg = channelSubscriptionPort()?.get(idHex);
     const ownerKeyB64 =
       reg?.subscribed === true && reg.ownerAccountKey.length === 32 ? base64Encode(reg.ownerAccountKey) : null;
-    // A subscriber only ever sends an owner return: skip the card read when
-    // the owner is not a reset this device accepted.
-    if (ownRole === "subscriber" && (ownerKeyB64 === null || !live.has(ownerKeyB64))) continue;
     let cards: OpenedReturnCard[];
     try {
       cards = await openCards(wasm, idHex);
@@ -438,13 +331,12 @@ function roleOf(wasm: Wasm, role: ChannelReturnRoleName): number {
       return wasm.ChannelReturnRole.Subscriber;
     case "publisher":
       return wasm.ChannelReturnRole.Publisher;
-    case "owner":
-      return wasm.ChannelReturnRole.Owner;
   }
 }
 
+/** The role of a decoded return (the core's decoder refuses every role but
+ *  these two). */
 function roleName(wasm: Wasm, role: number): ChannelReturnRoleName {
-  if (role === wasm.ChannelReturnRole.Owner) return "owner";
   if (role === wasm.ChannelReturnRole.Publisher) return "publisher";
   return "subscriber";
 }
@@ -460,7 +352,7 @@ const ACCEPT_SETTLE_MS = 20_000;
 /** What the reset side needs from its caller. */
 export interface ResetSidePorts {
   readonly accountIdB64: string;
-  /** The current account identity (owns a recovered channel). */
+  /** The current account identity (a publisher request is made with it). */
   readonly identity: WasmIdentity;
   /** Offer a returned profile envelope (verified by the caller against the
    *  previous key). */
@@ -523,7 +415,6 @@ async function actOnReturn(
 ): Promise<"done" | "retry"> {
   const idHex = [...ret.channelId].map((b) => b.toString(16).padStart(2, "0")).join("");
   const invitation = ret.invitation;
-  const reg = channelSubscriptionPort()?.get(idHex);
   const action = channelReturnAction({
     verified,
     role: roleName(wasm, ret.role),
@@ -532,7 +423,6 @@ async function actOnReturn(
       roleName(wasm, ret.role) === "publisher"
         ? channelsState.keysByChannel().has(idHex)
         : channelsState.channels().some((c) => c.id === idHex),
-    ownsAlready: reg?.subscribed === true && reg.role === "owner",
   });
   const epochs = ret.epochs;
   const seeds = ret.seeds;
@@ -593,98 +483,18 @@ async function actOnReturn(
       addSeeds();
       return "done";
     }
-    case "recover-owner": {
-      const outcome = await recoverOwnedChannel(ports, idHex);
-      if (outcome === "owned") addSeeds();
-      return outcome === "retry" ? "retry" : "done";
-    }
   }
 }
 
 /**
- * ADR-0101 section 7, owner - take a channel back with its recovery key:
- * the key is evaluated again for this account, the owner key moved to the
- * current identity's with the recovery proof, and on `204` the channel goes
- * into the list and the register as owned, so the publisher pass founds its
- * PublisherGroup again at the id the new seed derives (ADR-0090 decision A)
- * and reseals. `401` (not this account's, or no recovery key registered):
- * dropped silently. Never throws.
- */
-export async function recoverOwnedChannel(
-  ports: Pick<ResetSidePorts, "accountIdB64" | "identity">,
-  idHex: string,
-): Promise<"owned" | "refused" | "retry"> {
-  let key: RecoveryKey;
-  try {
-    key = await deriveChannelRecoveryKey(idHex);
-  } catch (err) {
-    return err instanceof ChannelRecoveryDisabledError ? "refused" : "retry";
-  }
-  let status: number | null;
-  try {
-    const newOwnerPk = await channelOwnerKeyOf(ports.identity, idHex);
-    const header = key.signOwnerChange(channelIdFromHex(idHex), newOwnerPk, BigInt(Date.now()));
-    status = await putChannelOwnerByRecovery(idHex, header, ports.identity);
-  } finally {
-    key.free();
-  }
-  if (status === null || status >= 500) return "retry";
-  if (status !== 204) return "refused";
-  if (!channelsState.channels().some((c) => c.id === idHex)) {
-    channelsActions.addChannel({ id: idHex, localName: "", localDescription: "", addedAtMs: Date.now() });
-  }
-  // Every reader the service lists now stays let in: the re-founding's
-  // reseal reaches each of them (`recovered-channels.ts`). A fresh admission
-  // seed verifies the tickets of invitations made from now on.
-  let throughSeq = 0;
-  try {
-    for (let after = 0; ; ) {
-      const page = await listSubscriberPage(idHex, ports.identity, after);
-      throughSeq = highestSeq(page.entries, throughSeq);
-      if (page.entries.length === 0 || page.nextAfter <= after) break;
-      after = page.nextAfter;
-    }
-  } catch {
-    // The owner key is ours now; the listing is tried again by the next
-    // return of this channel (the mark only ever rises).
-  }
-  markRecoveredChannel(ports.accountIdB64, idHex, throughSeq);
-  const wasm = await loadWasm();
-  await channelsActions.updateAccessDurable(idHex, (r) => ({
-    ...r,
-    admittedThroughSeq: Math.max(r.admittedThroughSeq, throughSeq),
-    admissionMarkSet: true as const,
-    admissionSeeds:
-      r.admissionSeeds.length > 0
-        ? r.admissionSeeds
-        : [{ version: 1, seedB64: base64Encode(wasm.generateChannelAdmissionSeed()) }],
-  }));
-  const port = channelSubscriptionPort();
-  if (port !== null) {
-    const fresh = await freshSubscriberKeys();
-    await port
-      .set(idHex, {
-        role: "owner",
-        subscriberSecret: fresh.secret,
-        readKey: new Uint8Array(0),
-        publisherGroupIdHex: "",
-        ownerAccountKey: new Uint8Array(0),
-        name: "",
-        handle: "",
-      })
-      .catch(() => false);
-  }
-  // This device holds the account's DeviceGroup alone after the reset: the
-  // pass may found the channel's group again here.
-  markFoundedAlone(ports.accountIdB64);
-  return "owned";
-}
-
-/**
- * ADR-0101 section 7 - a recovered channel takes its type from its newest
- * metadata record once one is held (a public channel's read key is the one
- * the current account seed derives; its old readers keep their per-key
- * envelopes), and the recovery mark goes. Never throws.
+ * ADR-0101 section 7 item 8 - the last step of a channel the account took
+ * back from its owned-channels list (`owned/owned-runtime.ts` marks it
+ * recovered): once its PublisherGroup is founded again here, the recovery
+ * mark goes. The mark stays until then because the re-founding reads it
+ * (which rows stay let in, `recovered-channels.ts`). A retaken channel whose
+ * list entry said neither public nor private takes its type from its newest
+ * metadata record once one is held (then a public channel's read key is the
+ * one the current account seed derives). Never throws.
  */
 export async function settleRecoveredChannels(accountIdB64: string, lineage: WasmIdentity): Promise<void> {
   const recovered = readRecoveredChannels(accountIdB64);
@@ -693,6 +503,8 @@ export async function settleRecoveredChannels(accountIdB64: string, lineage: Was
   const wasm = await loadWasm();
   for (const idHex of ids) {
     try {
+      // Not founded again yet: the re-founding still needs the mark.
+      if (!channelsState.keysByChannel().has(idHex)) continue;
       const access = channelsActions.accessOf(idHex);
       if (access.visibility !== null) {
         clearRecoveredChannel(accountIdB64, idHex);

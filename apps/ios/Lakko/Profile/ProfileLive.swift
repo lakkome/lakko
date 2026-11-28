@@ -32,7 +32,9 @@ extension ProfileEditModel {
             .eraseToAnyPublisher()
         let ports = ProfileSavePorts(
             upload: { media in try await ProfileAvatarUpload.upload(media) },
-            rename: { typed in try await authRepository.renameUsername(to: typed) },
+            rename: { typed, address in
+                try await authRepository.renameUsername(to: typed, recoveryAddress: address)
+            },
             publish: { name, avatar in
                 try ProfileAvatarUpload.checkComposes(name: name, avatar: avatar)
                 let previous = directory.ownProfile?.avatar
@@ -46,10 +48,19 @@ extension ProfileEditModel {
             finishOwedRename: { await authRepository.finishOwedRename() },
             renameTurnsOffRecoveryEmail: {
                 guard let protection else { return false }
+                // Not when the address is asked for: it then moves with
+                // the name.
+                guard !UsernameRename.asksForAddress(
+                    factors: protection.factors, addressHeld: protection.addressHeld != nil) else { return false }
                 return UsernameRename.warnings(
                     recoveryEmailEnabled: protection.status?.enabled == true,
                     addressHeld: protection.addressHeld != nil
                 ).recoveryEmailTurnedOff
+            },
+            renameAsksForRecoveryEmail: {
+                guard let protection else { return false }
+                return UsernameRename.asksForAddress(
+                    factors: protection.factors, addressHeld: protection.addressHeld != nil)
             })
         return ProfileEditModel(saved: saved, ports: ports, savedChanges: changes)
     }

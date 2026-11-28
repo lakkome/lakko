@@ -128,23 +128,39 @@ public fun ownUsernameSync(
 
 /** What the bind carries for the recovery email. */
 public enum class RenameRecoveryEmail {
-    /** No recovery email, or this device does not hold the address: the
-     *  bind carries none (a recovery email is then dropped by the server). */
+    /** No recovery email, or this device does not hold the address and the
+     *  account has another second way in: the bind carries none (a recovery
+     *  email is then dropped by the server). */
     None,
 
-    /** The address alone: a phrase is saved, the account has no vault. */
-    AddressOnly,
+    /** The address: the email moves to the new name with no letter. */
+    Address,
 
-    /** The address and a vault freshly sealed under the target handle. */
-    AddressAndVault,
+    /**
+     * UX 19.1c - the email is the account's LAST second way in and this
+     * device holds no address: the username screen asks for it before the
+     * change ("Your recovery email moves to your new username. Type it
+     * once."). Nothing is sent without it: the server would refuse the
+     * change (`409 last-factor`).
+     */
+    AskAddress,
 }
 
-public fun renameRecoveryEmail(hasRecoveryEmail: Boolean, addressHeld: Boolean, phraseSaved: Boolean): RenameRecoveryEmail =
-    when {
-        !hasRecoveryEmail || !addressHeld -> RenameRecoveryEmail.None
-        phraseSaved -> RenameRecoveryEmail.AddressOnly
-        else -> RenameRecoveryEmail.AddressAndVault
-    }
+/**
+ * The plan for the recovery email of a rename. [addressHeld] is an address
+ * this device keeps or the person just typed. Since the email vault was
+ * removed (ADR-0075, amended 2026-11-26) nothing but the address travels.
+ */
+public fun renameRecoveryEmail(
+    hasRecoveryEmail: Boolean,
+    addressHeld: Boolean,
+    emailIsLastFactor: Boolean,
+): RenameRecoveryEmail = when {
+    !hasRecoveryEmail -> RenameRecoveryEmail.None
+    addressHeld -> RenameRecoveryEmail.Address
+    emailIsLastFactor -> RenameRecoveryEmail.AskAddress
+    else -> RenameRecoveryEmail.None
+}
 
 // ---------------------------------------------------------------------------
 // The rename: one resumable operation
@@ -194,13 +210,23 @@ public sealed interface RenameResult {
     public data class Done(val username: String) : RenameResult
 
     /** Nothing changed (the bind was refused, or it was rolled back). */
-    public data class Refused(val line: UiText, val needsProof: Boolean = false) :
-        RenameResult
+    public data class Refused(
+        val line: UiText,
+        val needsProof: Boolean = false,
+        /** UX 19.1c: the recovery email is the account's last second way in
+         *  and must be typed once so it moves with the name. [line] is then
+         *  the helper of the address field, not an error. */
+        val needsRecoveryAddress: Boolean = false,
+    ) : RenameResult
 
     /** A step has no answer or could not be undone; the record stays and
      *  the next landing finishes or rolls back. */
     public data class Pending(val line: UiText) : RenameResult
 }
+
+/** UX 19.1c: the rename needs the recovery address typed before anything is
+ *  sent (the email is the account's last second way in). */
+public class RenameNeedsRecoveryAddress : Exception("the recovery email must move with the username")
 
 /** The line a failed rename shows. */
 public fun renameFailureLine(err: Throwable): UiText = when {
@@ -278,6 +304,14 @@ public class UsernameRenameRunner(
                     return RenameResult.Pending(renameFailureLine(cause))
                 }
                 store.clear(accountIdB64)
+                if (cause is RenameNeedsRecoveryAddress || isLastFactor(cause)) {
+                    // Nothing was sent (or the server refused to drop the
+                    // last second way in): ask for the address once.
+                    return RenameResult.Refused(
+                        line = UiText("protect.username_email"),
+                        needsRecoveryAddress = true,
+                    )
+                }
                 return RenameResult.Refused(line = renameFailureLine(cause), needsProof = needsProof)
             }
             owed = save(owed.copy(bound = true))

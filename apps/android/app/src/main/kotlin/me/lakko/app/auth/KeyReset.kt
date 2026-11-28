@@ -53,7 +53,34 @@ public class KeyResetOwed(
     public val discoveryPublished: Boolean = false,
     /** `PUT /ds/group/{device_group}/reset` with the attestation landed. */
     public val deviceGroupReset: Boolean = false,
+    /** ADR-0101 section 10: standard base64 of the 214-byte reset seal the
+     *  resetting device signed before the server step, uploaded with the
+     *  attestation. `null` for an unsealed reset (and for a recall). A
+     *  public artifact, like the attestation. */
+    public val resetSealB64: String? = null,
+    /** The number of the announcement the reset was sealed under (or the
+     *  highest the device read before an unsealed reset): the new
+     *  generation's first announcement is numbered above it. */
+    public val previousSealSeq: Long? = null,
 ) {
+    public val resetSeal: ByteArray? get() = resetSealB64?.let { base64Decode(it) }
+
+    /** The same debt with [signedAtMs] corrected or a step marked. */
+    public fun copy(
+        signedAtMs: Long = this.signedAtMs,
+        discoveryPublished: Boolean = this.discoveryPublished,
+        deviceGroupReset: Boolean = this.deviceGroupReset,
+    ): KeyResetOwed = KeyResetOwed(
+        attestationB64 = attestationB64,
+        keyGeneration = keyGeneration,
+        signedAtMs = signedAtMs,
+        newSignaturePubkeyB64 = newSignaturePubkeyB64,
+        discoveryPublished = discoveryPublished,
+        deviceGroupReset = deviceGroupReset,
+        resetSealB64 = resetSealB64,
+        previousSealSeq = previousSealSeq,
+    )
+
     public val attestation: ByteArray get() = base64Decode(attestationB64)
 
     public val newSignaturePubkey: ByteArray get() = base64Decode(newSignaturePubkeyB64)
@@ -293,14 +320,8 @@ public class KeyResetOwedStore(private val storage: MarkerStorage) {
     public fun markStep(accountIdB64: String, step: KeyResetStep) {
         val owed = load(accountIdB64) ?: return
         val next = when (step) {
-            KeyResetStep.DiscoveryPublish -> KeyResetOwed(
-                owed.attestationB64, owed.keyGeneration, owed.signedAtMs, owed.newSignaturePubkeyB64,
-                discoveryPublished = true, deviceGroupReset = owed.deviceGroupReset,
-            )
-            KeyResetStep.DeviceGroupReset -> KeyResetOwed(
-                owed.attestationB64, owed.keyGeneration, owed.signedAtMs, owed.newSignaturePubkeyB64,
-                discoveryPublished = owed.discoveryPublished, deviceGroupReset = true,
-            )
+            KeyResetStep.DiscoveryPublish -> owed.copy(discoveryPublished = true)
+            KeyResetStep.DeviceGroupReset -> owed.copy(deviceGroupReset = true)
             KeyResetStep.Done -> owed
         }
         save(accountIdB64, next)

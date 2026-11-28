@@ -55,6 +55,9 @@ struct DeviceOwnerGate {
 ///     app.
 struct RecoverySettingsScreen: View {
     @ObservedObject var authRepository: AuthRepository
+    /// What protects the account (UX 19.1c, 19.1d): the two notes at the
+    /// top, and whether the authenticator is on.
+    @ObservedObject var center: AccountProtectionCenter
     /// Push a route on the Settings stack.
     var onOpen: (TabRoute) -> Void = { _ in }
     var gate: DeviceOwnerGate = .live
@@ -109,6 +112,20 @@ struct RecoverySettingsScreen: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
+                // UX 19.1c — the authenticator is the only second way in:
+                // the note stands here for as long as it is, and cannot be
+                // dismissed.
+                if let warning = center.authenticatorOnlyWarning {
+                    ProtectWarningNote(text: l10n.t(warning.key))
+                }
+                // UX 19.1d place 2 — the chats depend on the password.
+                if center.passwordOnly {
+                    PasswordOnlyNoticeView(
+                        showsPasskeyNoSeal: PasswordOnlyNotice.showsPasskeyNoSeal(
+                            factors: center.factors, seals: center.seals),
+                        onSavePhrase: { onOpen(.savePhrase) },
+                        onAddPasskey: account?.username.isEmpty == false ? { onOpen(.passkeys) } : nil)
+                }
                 card(titleKey: "settings.recovery.group.keys") {
                     if phraseProtected {
                         phraseRow
@@ -123,13 +140,9 @@ struct RecoverySettingsScreen: View {
                         wordsRow
                     }
                 }
-                if let session = DeviceSession.current(authRepository) {
+                if DeviceSession.current(authRepository) != nil {
                     card(titleKey: nil) {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Label(l10n.t("settings.recovery.totp.title"), icon: .lockRotation)
-                                .font(.headline)
-                            TotpEnrollView(sessionToken: session.sessionToken)
-                        }
+                        authenticatorRow
                     }
                 } else {
                     Text(l10n.t("settings.recovery.sign_in_first"))
@@ -143,6 +156,7 @@ struct RecoverySettingsScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .task {
             credentialOwed = authRepository.sessionPublishOwed
+            await center.refresh()
             await loadPasskeyCounts()
         }
         // The words leave the screen when the app does.
@@ -252,6 +266,43 @@ struct RecoverySettingsScreen: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    /// The authenticator app (UX 19.1b): `On` once set up, else the row
+    /// that opens the setup screen.
+    @ViewBuilder
+    private var authenticatorRow: some View {
+        let on = center.status?.totp == true
+        Button { if !on { onOpen(.authenticator) } } label: {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(l10n.t("settings.recovery.totp.title"), icon: .lockRotation)
+                        .font(.headline)
+                        .foregroundStyle(Color.lakkoText)
+                    Text(l10n.t("settings.recovery.totp.lede"))
+                        .font(.footnote)
+                        .foregroundStyle(Color.lakkoTextMuted)
+                        .multilineTextAlignment(.leading)
+                    if !on {
+                        Text(l10n.t("settings.recovery.totp.set_up"))
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Color.lakkoAccent)
+                    }
+                }
+                Spacer()
+                if on {
+                    Text(l10n.t("settings.recovery.totp.on"))
+                        .font(.subheadline)
+                        .foregroundStyle(Color.lakkoTextMuted)
+                } else {
+                    LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
+                        .foregroundStyle(Color.lakkoTextMuted)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(on)
     }
 
     /// Informational: the three-word check needs no setup and has no switch.

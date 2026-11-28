@@ -274,7 +274,7 @@
       "status": "machine"
     },
     "auth.signup.passkey.error": {
-      "text": "No se pudo añadir la llave de acceso. Inténtalo de nuevo o elige «Ahora no».",
+      "text": "No se pudo añadir la llave de acceso. Inténtalo de nuevo o elige otra forma.",
       "status": "machine"
     },
     "auth.signup.passkey.lede": {
@@ -4889,6 +4889,14 @@
       "text": "Volver a pedir",
       "status": "machine"
     },
+    "contacts.started_over.closed": {
+      "text": "{name} empezó de nuevo con una cuenta nueva. Los mensajes de aquí ya no se entregan.",
+      "status": "machine"
+    },
+    "contacts.started_over.request_note": {
+      "text": "Lakko no pudo confirmar que sea la misma persona de antes. Acepta solo si tienes la certeza de que es esa persona.",
+      "status": "machine"
+    },
     "desktop.capture.body": {
       "text": "Permítelo en los ajustes de privacidad del sistema y vuelve a intentarlo.",
       "status": "machine"
@@ -7657,14 +7665,6 @@
       "text": "Se reemplazó tu correo de recuperación.",
       "status": "machine"
     },
-    "notice.opened_by_email.body": {
-      "text": "{date}, en otro dispositivo.",
-      "status": "machine"
-    },
-    "notice.opened_by_email.title": {
-      "text": "Tu cuenta se abrió con tu correo de recuperación",
-      "status": "machine"
-    },
     "notice.password_by_email.body": {
       "text": "{date}: alguien usó tu correo de recuperación para elegir una contraseña nueva.",
       "status": "machine"
@@ -7675,10 +7675,6 @@
     },
     "notice.phrase_saved": {
       "text": "Se guardó una frase de recuperación para tu cuenta.",
-      "status": "machine"
-    },
-    "notice.secure.new_keys": {
-      "text": "Esto da claves nuevas a tu cuenta, así que quien la abrió la pierde.",
       "status": "machine"
     },
     "notice.secure.password_saved": {
@@ -7854,11 +7850,75 @@
       "status": "machine"
     },
     "proof.reset.cannot.title": {
-      "text": "Las claves de la cuenta no se pueden restablecer sin tu contraseña o una llave de acceso",
+      "text": "Las claves de la cuenta no se pueden restablecer sin tu contraseña",
       "status": "machine"
     },
     "proof.reset.cannot.what_you_can_do": {
       "text": "Qué puedes hacer:",
+      "status": "machine"
+    },
+    "proof.reset.factor.heading": {
+      "text": "Confirma que eres tú",
+      "status": "machine"
+    },
+    "proof.reset.factor.title": {
+      "text": "Después, confirma con una de estas opciones:",
+      "status": "machine"
+    },
+    "proof.reset.factor.title_no_password": {
+      "text": "Confirma con una de estas opciones:",
+      "status": "machine"
+    },
+    "proof.reset.factor.totp": {
+      "text": "App de autenticación",
+      "status": "machine"
+    },
+    "proof.reset.factor.email": {
+      "text": "Código por correo",
+      "status": "machine"
+    },
+    "proof.reset.factor.passkey": {
+      "text": "Llave de acceso",
+      "status": "machine"
+    },
+    "proof.reset.factor.none": {
+      "text": "No puedo usar ninguna de estas opciones",
+      "status": "machine"
+    },
+    "proof.reset.factor.totp.prompt": {
+      "text": "Introduce el código de 6 dígitos de tu app de autenticación.",
+      "status": "machine"
+    },
+    "proof.reset.factor.email.sent": {
+      "text": "Si este es el correo de recuperación de {username}, un código va de camino. Sirve durante 10 minutos.",
+      "status": "machine"
+    },
+    "proof.reset.factor.passkey.use": {
+      "text": "Usar llave de acceso",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.totp": {
+      "text": "Confirmado con tu app de autenticación.",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.email": {
+      "text": "Confirmado con un código por correo.",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.passkey": {
+      "text": "Confirmado con una llave de acceso.",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.title": {
+      "text": "Las claves de la cuenta no se pueden restablecer",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.body": {
+      "text": "Para restablecerlas hacen falta tu contraseña y una forma más de confirmar que eres tú: tu app de autenticación, tu correo de recuperación o una llave de acceso.",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.body_none": {
+      "text": "Esta cuenta no tiene una segunda forma de confirmar que eres tú, así que sus claves no se pueden restablecer.",
       "status": "machine"
     },
     "proof.save_phrase.help": {
@@ -7869,16 +7929,12 @@
       "text": "Escribe tu contraseña para cambiar tu nombre de usuario.",
       "status": "machine"
     },
-    "protect.banner.action": {
-      "text": "Proteger",
-      "status": "machine"
-    },
-    "protect.banner.none": {
-      "text": "Esta cuenta no tiene forma de volver a entrar.",
+    "proof.add_totp.help": {
+      "text": "Introduce tu contraseña para configurar una app de autenticación.",
       "status": "machine"
     },
     "protect.body": {
-      "text": "Si olvidas tu contraseña o pierdes este dispositivo, así es como vuelves a entrar.",
+      "text": "Si olvidas tu contraseña o pierdes este dispositivo, así es como vuelves a entrar. Elige al menos una opción.",
       "status": "machine"
     },
     "protect.continue": {
@@ -7909,28 +7965,20 @@
       "text": "Crear una llave de acceso",
       "status": "machine"
     },
+    "protect.passkey.cancelled": {
+      "text": "No se añadió ninguna llave de acceso.",
+      "status": "machine"
+    },
     "protect.phrase.body": {
       "text": "12 palabras que solo guardas tú. La forma más segura de volver.",
       "status": "machine"
     },
     "protect.phrase.save.body": {
-      "text": "12 palabras que solo tú guardas. Después de esto, un código por correo puede cambiar tu contraseña, pero no puede abrir tu cuenta.",
-      "status": "machine"
-    },
-    "protect.phrase.save.effect": {
-      "text": "Esto da claves nuevas a tu cuenta. Tus contactos y chats quedan como están. Tus otros dispositivos siguen con la sesión iniciada.",
+      "text": "12 palabras que solo tú guardas. Recuperan tus claves en un dispositivo nuevo y tus chats después de un restablecimiento.",
       "status": "machine"
     },
     "protect.phrase.save.failed": {
       "text": "No pudimos terminar. No cambió nada.",
-      "status": "machine"
-    },
-    "protect.phrase.save.finishing": {
-      "text": "Tu cuenta tiene claves nuevas. Terminando.",
-      "status": "machine"
-    },
-    "protect.phrase.save.progress": {
-      "text": "Cambiando las claves de tu cuenta",
       "status": "machine"
     },
     "protect.phrase.save.show": {
@@ -7941,36 +7989,88 @@
       "text": "Guardar una frase de recuperación",
       "status": "machine"
     },
-    "protect.skip": {
-      "text": "Ahora no",
-      "status": "machine"
-    },
-    "protect.skip.confirm.body": {
-      "text": "Si olvidas tu contraseña o pierdes este dispositivo, no podrás volver a entrar en esta cuenta.",
-      "status": "machine"
-    },
-    "protect.skip.confirm.continue": {
-      "text": "Continuar sin protección",
-      "status": "machine"
-    },
-    "protect.skip.confirm.title": {
-      "text": "¿Continuar sin protección?",
-      "status": "machine"
-    },
-    "protect.status.email": {
-      "text": "Protegida por tu correo",
-      "status": "machine"
-    },
-    "protect.status.none": {
-      "text": "Sin protección",
+    "protect.phrase.title_optional": {
+      "text": "Guardar también una frase de recuperación",
       "status": "machine"
     },
     "protect.status.phrase": {
-      "text": "Protegida por tu frase de recuperación",
+      "text": "Tu frase de recuperación conserva tus chats",
+      "status": "machine"
+    },
+    "protect.status.passkey_seal": {
+      "text": "Una llave de acceso conserva tus chats",
+      "status": "machine"
+    },
+    "protect.status.password_only": {
+      "text": "Solo tu contraseña conserva tus chats",
       "status": "machine"
     },
     "protect.title": {
       "text": "Protege tu cuenta",
+      "status": "machine"
+    },
+    "protect.totp.title": {
+      "text": "Usar una app de autenticación",
+      "status": "machine"
+    },
+    "protect.totp.body": {
+      "text": "Un código de 6 dígitos de una app en tu teléfono. Si la app solo está en este dispositivo, la pierdes con el dispositivo.",
+      "status": "machine"
+    },
+    "protect.optional": {
+      "text": "Opcional",
+      "status": "machine"
+    },
+    "protect.continue_needs": {
+      "text": "Elige una de las tres primeras opciones para continuar.",
+      "status": "machine"
+    },
+    "protect.totp_only.warning": {
+      "text": "Si pierdes tu app de autenticación, no podrás recuperar esta cuenta. Añade también un correo o una llave de acceso.",
+      "status": "machine"
+    },
+    "protect.totp_only.warning_phrase": {
+      "text": "Si pierdes tanto tu app de autenticación como tu frase de recuperación, no podrás recuperar esta cuenta.",
+      "status": "machine"
+    },
+    "protect.totp_only.remove_notice": {
+      "text": "Tu app de autenticación será la única otra forma de confirmar que eres tú. Si la pierdes, no podrás recuperar esta cuenta.",
+      "status": "machine"
+    },
+    "protect.totp_only.remove_notice_phrase": {
+      "text": "Tu app de autenticación será la única otra forma de confirmar que eres tú. Si la pierdes junto con tu frase de recuperación, no podrás recuperar esta cuenta.",
+      "status": "machine"
+    },
+    "protect.title_required": {
+      "text": "Añade una segunda forma de volver a entrar",
+      "status": "machine"
+    },
+    "protect.last_factor": {
+      "text": "Añade primero otra forma de volver a entrar. Esta es la última que tiene esta cuenta.",
+      "status": "machine"
+    },
+    "protect.username_email": {
+      "text": "Tu correo de recuperación pasa a tu nuevo nombre de usuario. Escríbelo una vez.",
+      "status": "machine"
+    },
+    "protect.password_only.title": {
+      "text": "Tus chats dependen de tu contraseña",
+      "status": "machine"
+    },
+    "protect.password_only.body": {
+      "text": "Si olvidas tu contraseña y pierdes tus dispositivos, tus chats no volverán. Guarda una frase de recuperación o añade una llave de acceso para conservarlos.",
+      "status": "machine"
+    },
+    "protect.password_only.save_phrase": {
+      "text": "Guardar una frase de recuperación",
+      "status": "machine"
+    },
+    "protect.password_only.add_passkey": {
+      "text": "Añadir una llave de acceso",
+      "status": "machine"
+    },
+    "protect.password_only.passkey_no_seal": {
+      "text": "Esta llave de acceso inicia tu sesión, pero no conserva tus chats.",
       "status": "machine"
     },
     "recall.phrase.changed": {
@@ -8019,14 +8119,6 @@
     },
     "recovery.email.check.title": {
       "text": "Revisa tu correo",
-      "status": "machine"
-    },
-    "recovery.email.failed": {
-      "text": "No pudimos traer de vuelta tu cuenta. Inténtalo de nuevo o elige otra forma.",
-      "status": "machine"
-    },
-    "recovery.email.restoring": {
-      "text": "Trayendo de vuelta tu cuenta",
       "status": "machine"
     },
     "recovery.email.row.body": {
@@ -8269,16 +8361,8 @@
       "text": "{count, plural, one {Queda # intento} other {Quedan # intentos}} antes de una pausa de 15 minutos.",
       "status": "machine"
     },
-    "recovery_email.add_again.body": {
-      "text": "Las claves de tu cuenta cambiaron. Escribe tu dirección otra vez para que un código por correo pueda traer de vuelta tu cuenta.",
-      "status": "machine"
-    },
-    "recovery_email.add_again.title": {
-      "text": "Añade tu correo otra vez",
-      "status": "machine"
-    },
     "recovery_email.body": {
-      "text": "Si olvidas tu contraseña, enviamos un código a esta dirección para que puedas volver a entrar.",
+      "text": "Si olvidas tu contraseña, enviamos un código a esta dirección para que puedas elegir una nueva.",
       "status": "machine"
     },
     "recovery_email.code.expired": {
@@ -8322,7 +8406,7 @@
       "status": "machine"
     },
     "recovery_email.mailbox_warning": {
-      "text": "Cualquiera que pueda leer este buzón puede entrar en tu cuenta. Guarda una frase de recuperación para cambiarlo.",
+      "text": "Cualquiera que pueda leer este buzón puede entrar en tu cuenta.",
       "status": "machine"
     },
     "recovery_email.needs_username": {
@@ -8338,7 +8422,7 @@
       "status": "machine"
     },
     "recovery_email.remove.confirm.body": {
-      "text": "No podrás volver a entrar por correo.",
+      "text": "No podrás obtener una contraseña nueva por correo.",
       "status": "machine"
     },
     "recovery_email.remove.confirm.title": {
@@ -8605,10 +8689,6 @@
       "text": "Se cierra la sesión en todos los demás dispositivos de esta cuenta y se quitan de ella. Pierden sus chats y contactos de esta cuenta.",
       "status": "machine"
     },
-    "restore_identity.reset.effect_messages": {
-      "text": "Los chats, grupos y canales vuelven desde los dispositivos de tus contactos, con los mensajes que aún tienen, empezando por los más recientes.",
-      "status": "machine"
-    },
     "restore_identity.reset.effect_passkeys": {
       "text": "Se eliminan todas las llaves de acceso de esta cuenta. Después puedes volver a añadir llaves de acceso.",
       "status": "machine"
@@ -8647,6 +8727,18 @@
     },
     "restore_identity.reset.what_it_does": {
       "text": "Qué hace:",
+      "status": "machine"
+    },
+    "restore_identity.reset.sealed": {
+      "text": "Tus chats, grupos y canales volverán desde los dispositivos de tus contactos, con los mensajes que aún tienen, empezando por los más recientes.",
+      "status": "machine"
+    },
+    "restore_identity.reset.unsealed": {
+      "text": "Este restablecimiento empieza tu cuenta de nuevo. Tus chats, tus grupos y los canales que son tuyos no volverán. Conservas tu nombre de usuario y puedes enviar nuevas solicitudes a tus contactos.",
+      "status": "machine"
+    },
+    "restore_identity.reset.unsealed_use_passkey": {
+      "text": "Usa una llave de acceso que conserve tus chats para recuperarlos.",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -9337,6 +9429,10 @@
       "text": "Este dispositivo no puede gestionar llaves de acceso.",
       "status": "machine"
     },
+    "settings.passkeys.no_seal": {
+      "text": "No conserva tus chats.",
+      "status": "machine"
+    },
     "settings.password.change": {
       "text": "Cambiar contraseña",
       "status": "machine"
@@ -9446,7 +9542,7 @@
       "status": "machine"
     },
     "settings.recovery.totp.done": {
-      "text": "App de autenticación configurada. Un código de la app ahora puede devolverte el acceso a tu cuenta.",
+      "text": "App de autenticación configurada. Un código de la app ahora confirma que eres tú.",
       "status": "machine"
     },
     "settings.recovery.totp.error.generic": {
@@ -9479,6 +9575,14 @@
     },
     "settings.recovery.totp.unavailable": {
       "text": "La configuración de la app de autenticación no está disponible ahora.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.open_app": {
+      "text": "Abrir en la app de autenticación",
+      "status": "machine"
+    },
+    "settings.recovery.totp.on": {
+      "text": "Activada",
       "status": "machine"
     },
     "settings.recovery.words.not_on_this_device": {

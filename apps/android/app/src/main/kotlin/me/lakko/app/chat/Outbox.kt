@@ -699,6 +699,21 @@ public class OutboxQueue(
     /** What an attempt did, with the refusal behind a "Not sent". */
     private class Attempt(val outcome: ResendOutcome, val cause: Throwable? = null)
 
+    /**
+     * UX 16.11 (alignment 2026-11-27): the one-to-one of [groupIdHex] closed
+     * because its person started over: every waiting entry turns into "Not
+     * sent" at once (the deliverer refuses it from now on, so nothing of it
+     * is ever sent). Returns how many were turned.
+     */
+    public fun failWaiting(groupIdHex: String): Int {
+        val waiting = waitingOf(groupIdHex)
+        for (localId in waiting) {
+            update(groupIdHex, localId) { it.copy(state = OutboxState.FAILED) }
+            rows.setAck(groupIdHex, localId, Ack.FAILED)
+        }
+        return waiting.size
+    }
+
     private fun waitingOf(groupIdHex: String): List<Long> = synchronized(lock) {
         entries.values.asSequence()
             .filter { it.groupIdHex == groupIdHex && it.state == OutboxState.WAITING }

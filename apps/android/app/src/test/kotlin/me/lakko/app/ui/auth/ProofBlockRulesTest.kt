@@ -202,6 +202,8 @@ class ProofBlockRulesTest {
             ProofSurface.RecoveryEmail to "chat.record.cancelled",
             ProofSurface.SavePhrase to "chat.record.cancelled",
             ProofSurface.ChangeUsername to "chat.record.cancelled",
+            // UX 19.1b: the same.
+            ProofSurface.AddTotp to "chat.record.cancelled",
         )
         assertEquals(ProofSurface.entries.toSet(), expected.keys)
         for ((surface, key) in expected) {

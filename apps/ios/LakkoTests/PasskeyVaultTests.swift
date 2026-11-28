@@ -187,7 +187,8 @@ final class PasskeyVaultTests: XCTestCase {
                 evaluatePrf: { id in
                     self.prfAsked.append(id)
                     if let error = self.prfError { throw error }
-                    return self.prf ?? (Data(), nil)
+                    let answer = self.prf ?? (Data(), nil)
+                    return (answer.0, answer.1, nil)
                 },
                 store: { id, sealed in
                     self.stored.append((id, sealed))

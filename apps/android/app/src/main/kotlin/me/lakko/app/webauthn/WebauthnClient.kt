@@ -255,7 +255,12 @@ public class WebauthnClient(
         val start = startRegistration(userName, nickname, freshGrant)
         val publicKey = start.options.publicKeyField()
         return when (
-            val outcome = registration.register(context, publicKey, prfSalt = PASSKEY_PRF_SALT)
+            val outcome = registration.register(
+                context,
+                publicKey,
+                prfSalt = PASSKEY_PRF_SALT,
+                prfSecondSalt = RESET_SEAL_PRF_SALT,
+            )
         ) {
             is WebauthnRegistration.Outcome.Success -> {
                 val finish = finishRegistration(
@@ -268,6 +273,7 @@ public class WebauthnClient(
                     credentialIdB64 = finish.credentialIdB64,
                     prfOutput = outcome.value.prfOutput,
                     prfEnabled = outcome.value.prfEnabled,
+                    sealPrfOutput = outcome.value.prfSecondOutput,
                 )
             }
             WebauthnRegistration.Outcome.Cancelled -> throw WebauthnUserCancelledError()
@@ -356,6 +362,7 @@ public class WebauthnClient(
         registration: WebauthnRegistration,
         prfSalt: ByteArray?,
         onlyCredentialIdB64: String?,
+        prfSecondSalt: ByteArray? = null,
     ): Pair<ActionFinishResponse, WebauthnRegistration.Ceremony> {
         val start = startAction(actionHashB64)
         val publicKey = start.options.publicKeyField()
@@ -365,6 +372,7 @@ public class WebauthnClient(
                 publicKey,
                 prfSalt = prfSalt,
                 onlyCredentialIdB64 = onlyCredentialIdB64,
+                prfSecondSalt = prfSecondSalt,
             )
         ) {
             is WebauthnRegistration.Outcome.Success -> finishAction(
@@ -399,11 +407,45 @@ public class WebauthnClient(
             registration = registration,
             prfSalt = PASSKEY_PRF_SALT,
             onlyCredentialIdB64 = credentialIdB64,
+            prfSecondSalt = RESET_SEAL_PRF_SALT,
         )
         return PasskeyCeremonyExtras(
             // The server's verified answer names the credential that signed.
             credentialIdB64 = finish.credentialIdB64,
             prfOutput = ceremony.prfOutput,
+            sealPrfOutput = ceremony.prfSecondOutput,
+        )
+    }
+
+    /**
+     * The passkey factor of a key reset (ADR-0073, amended 2026-11-26): the
+     * action ceremony bound to "reset this account's keys", by any of the
+     * account's passkeys, with the reset seal's PRF evaluation asked for in
+     * the same gesture (ADR-0101 section 10). On success the server holds a
+     * single-use action grant that `POST /account/keys/reset/factor/passkey`
+     * consumes. [PasskeyCeremonyExtras.sealPrfOutput] is `null` for a
+     * passkey that does not keep the chats: it still confirms the reset.
+     *
+     * @throws WebauthnUserCancelledError when the sheet was dismissed.
+     */
+    public suspend fun assertResetKeys(
+        context: android.content.Context,
+        accountId: ByteArray,
+        registration: WebauthnRegistration = WebauthnRegistration(),
+    ): PasskeyCeremonyExtras {
+        val (finish, ceremony) = assertActionCeremony(
+            context = context,
+            actionHashB64 = actionHashForResetKeys(accountId),
+            registration = registration,
+            // The seal's salt is the only one needed here, so it is the
+            // first: every provider that evaluates PRF answers `first`.
+            prfSalt = RESET_SEAL_PRF_SALT,
+            onlyCredentialIdB64 = null,
+        )
+        return PasskeyCeremonyExtras(
+            credentialIdB64 = finish.credentialIdB64,
+            prfOutput = null,
+            sealPrfOutput = ceremony.prfOutput,
         )
     }
 
@@ -679,6 +721,9 @@ public class PasskeyAdded(
     public val credentialIdB64: String,
     public val prfOutput: ByteArray?,
     public val prfEnabled: Boolean?,
+    /** The PRF output at the reset seal's salt, when the creation gave one
+     *  (ADR-0101 section 10). Never sent anywhere. */
+    public val sealPrfOutput: ByteArray? = null,
 )
 
 /** What [WebauthnClient.evaluatePrfFor] yields. */
@@ -686,6 +731,8 @@ public class PasskeyCeremonyExtras(
     /** The passkey that answered (base64url, no padding). */
     public val credentialIdB64: String,
     public val prfOutput: ByteArray?,
+    /** The PRF output at the reset seal's salt, or `null`. */
+    public val sealPrfOutput: ByteArray? = null,
 )
 
 @Serializable
@@ -776,6 +823,10 @@ public const val ACTION_DOMAIN_DELETE_ACCOUNT: String =
 public const val ACTION_DOMAIN_PASSKEY_RESTORES_KEYS: String =
     "lakko/action/passkey-restores-keys/v1"
 
+/** Domain separator of the key reset's passkey factor (ADR-0073, amended
+ *  2026-11-26). Same string as `services/auth` and the web client. */
+public const val ACTION_DOMAIN_RESET_KEYS: String = "lakko/action/reset-keys/v1"
+
 /** `action_hash = SHA-256(domain_utf8 || identifier)`, URL-safe
  *  base64 with no padding and no wrap. */
 private fun deriveActionHash(domain: String, identifier: ByteArray): String {
@@ -812,6 +863,11 @@ public fun actionHashForRemoveDevice(signaturePublicKey: ByteArray): String =
  *  [accountId] (A3). Matches `services/auth`'s `delete_account_action_hash`. */
 public fun actionHashForDeleteAccount(accountId: ByteArray): String =
     deriveActionHash(ACTION_DOMAIN_DELETE_ACCOUNT, accountId)
+
+/** Action hash for confirming a key reset of the account [accountId] (its
+ *  raw 16 bytes). Matches `services/auth`'s `reset_keys_action_hash`. */
+public fun actionHashForResetKeys(accountId: ByteArray): String =
+    deriveActionHash(ACTION_DOMAIN_RESET_KEYS, accountId)
 
 /** Action hash for reading the PRF output of the passkey [credentialIdB64]
  *  inside a session. The identifier is the credential id BYTES. */

@@ -139,7 +139,10 @@ import { clearHeldReturns } from "../channels/channel-return";
 import { clearHistoryStates } from "../chat/history-return";
 import { clearHistoryServed } from "../chat/history-served";
 import { clearRecoveredChannels } from "../channels/recovered-channels";
-import { clearRecoveryRegistered, clearSentReturns } from "../channels/channel-return-runtime";
+import { clearSentReturns } from "../channels/channel-return-runtime";
+import { clearOwnedChannelsFacts } from "../channels/owned";
+import { clearSealJobFacts } from "./seal/account-seal-jobs";
+import { clearSealFacts } from "./seal/seal-runtime";
 import { clearGenesisRecorded, clearKnownDeviceId } from "./session-device";
 import { clearBindingConfirmed } from "./own-binding-republish";
 import { clearNoPrfPasskeys } from "./passkey-no-prf";
@@ -342,7 +345,15 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // registrations, the kept invitations, the continuity mailbox cursor.
     { name: "channel-returns-held", run: () => clearHeldReturns(storage, accountIdB64) },
     { name: "channel-returns-sent", run: () => clearSentReturns(storage, accountIdB64) },
-    { name: "channel-recovery-registered", run: () => clearRecoveryRegistered(storage, accountIdB64) },
+    // ADR-0101 section 7 (amended 2026-11-26): the owned-channels list's
+    // per-account markers (ids and flags; the list key is never stored),
+    // the recovery-key registrations among them (current and retired rows).
+    { name: "owned-channels", run: () => clearOwnedChannelsFacts(storage, accountIdB64) },
+    // ADR-0101 sections 7 and 10: the announcement this device kept (public
+    // bytes), the seal removals still owed, the retake marker and the
+    // owned-channels server half kept under the device key.
+    { name: "seal-announcement", run: () => clearSealFacts(storage, accountIdB64) },
+    { name: "seal-jobs", run: () => clearSealJobFacts(storage, accountIdB64) },
     {
       name: "channel-return-invitations",
       run: () => storage?.removeItem(`lakko:channel-return-invitations:${accountIdB64}`),

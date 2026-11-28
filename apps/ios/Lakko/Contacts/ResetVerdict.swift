@@ -2,23 +2,32 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 
 // ADR-0073 "Phase 2 revised: silent continuity", R.2 - the acceptance rule
-// for a contact's account-key RESET, as one pure decision.
+// for a contact's account-key RESET, with rule 4 (amended 2026-11-26, the
+// second time; ADR-0101 section 10).
 //
-// iOS mirror of `apps/web/src/contacts/reset-verdict.ts`; the table is the
-// same and so are the cases in `ResetVerdictTests`.
+// The table is written ONCE, in `lakko_contacts::reset_verdict`, and reached
+// here through the core's `resetVerdict(input:)`. This file holds only the
+// Swift shapes `ContactsClient` gathers and the mapping to and from the
+// core's; the hand-written copy of the table this file carried until
+// 2026-11-27 is gone.
 //
 // A reset is a key change with NO supersession proof (with one, ADR-0016's
 // path runs and this file is never asked: a proven rotation is not a reset).
-// It is accepted, silently, when the directory serves an auth-signed
-// key-reset attestation for exactly this account and this key, at a
-// generation strictly above the one this device last accepted, and the key
-// log (when one is configured) agrees. Anything negative is the existing
-// fail-closed refusal; anything not yet known is no verdict at all.
+// Rules 1 to 3 are the server's word: an auth-signed key-reset attestation
+// for exactly this account and this key, at a generation strictly above the
+// one this device last accepted, and the key log (when one is configured)
+// agreeing. Rule 4 is the account's: the reset carries a seal by a key the
+// account announced under its OLD key before the reset. All four: `sealed`,
+// the same person, everything moves. Rules 1 to 3 without 4: `unsealed`, a
+// new account under the same username, nothing moves (ADR-0101 section 11).
+// Anything negative is the fail-closed refusal; anything not yet known is no
+// verdict at all.
 //
-// Free of the core, storage and the network: `ContactsClient` gathers the
-// inputs and acts on the outcome.
+// Free of storage and the network: `ContactsClient` gathers the inputs and
+// acts on the outcome.
 
 /// What the caller learned by running `verifyKeyResetAttestation` over the
 /// bundle's `key_reset_attest` under the trusted attest key.
@@ -33,6 +42,16 @@ public enum AttestCheck: Equatable {
     case noKey
     /// It verified for this account id and the fetched key.
     case verified(keyGeneration: UInt64, signedAtMs: Int64)
+
+    var ffi: FfiAttestCheck {
+        switch self {
+        case .absent: return .absent
+        case .invalid: return .invalid
+        case .noKey: return .noKey
+        case .verified(let keyGeneration, let signedAtMs):
+            return .verified(keyGeneration: keyGeneration, signedAtMs: signedAtMs)
+        }
+    }
 }
 
 /// The verified key-log answer for the fetched key (`verifyIdentityInLog`).
@@ -47,16 +66,56 @@ public struct LogCheck: Equatable {
     }
 }
 
+extension LogVerifyStatus {
+    var ffi: FfiLogStatus {
+        switch self {
+        case .confirmed: return .confirmed
+        case .absent: return .absent
+        case .rollback: return .rollback
+        case .mismatch: return .mismatch
+        case .unreachable: return .unreachable
+        case .off: return .off
+        }
+    }
+}
+
 /// Which refusal copy the action shows (`contacts.identity_changed.*`).
-public enum ResetRefusal: Equatable {
+public enum ResetRefusal: Equatable, Sendable {
     /// The key log shows the new key and does NOT record a reset.
     case unexplained
     /// Everything else that is negative.
     case unconfirmed
 }
 
-public enum ResetVerdict: Equatable {
-    case accepted(keyGeneration: UInt64, signedAtMs: Int64)
+/// The seal half of rule 4, as `ContactsClient` gathered it.
+public struct SealCheck: Equatable {
+    /// The signature half (`checkResetSeal`): the previous generation's
+    /// announcement verifies under the held key and lists the key that
+    /// signed the reset seal over the fetched key.
+    public let valid: Bool
+    /// The previous announcement's `seq` when valid: the new floor.
+    public let announcementSeq: UInt64
+    /// The core's refusal code when not valid, for the log line only.
+    public let refusal: String?
+    /// The key-log half (ignored by the rule when the build has no log).
+    public let log: FfiSealLog
+
+    public init(valid: Bool, announcementSeq: UInt64 = 0, refusal: String? = nil, log: FfiSealLog = .notProven) {
+        self.valid = valid
+        self.announcementSeq = announcementSeq
+        self.refusal = refusal
+        self.log = log
+    }
+
+    /// No seal at all: the bundle carried none, or it could not be read.
+    public static let none = SealCheck(valid: false, refusal: "noSeal")
+}
+
+public enum ResetVerdict: Equatable, Sendable {
+    /// Rules 1 to 4: the same person. Re-pin and move everything.
+    case sealed(keyGeneration: UInt64, signedAtMs: Int64, announcementSeq: UInt64)
+    /// Rules 1 to 3 without 4: a new account under the same username.
+    case unsealed(keyGeneration: UInt64, signedAtMs: Int64)
     case refused(ResetRefusal)
     case noVerdict
 }
@@ -74,6 +133,7 @@ public struct ResetVerdictInput: Equatable {
     public let bundleGeneration: UInt64
     public let attest: AttestCheck
     public let log: LogCheck
+    public let seal: SealCheck
 
     public init(
         heldKeyB64: String,
@@ -81,7 +141,8 @@ public struct ResetVerdictInput: Equatable {
         fetchedKeyB64: String,
         bundleGeneration: UInt64,
         attest: AttestCheck,
-        log: LogCheck
+        log: LogCheck,
+        seal: SealCheck = .none
     ) {
         self.heldKeyB64 = heldKeyB64
         self.acceptedGeneration = acceptedGeneration
@@ -89,68 +150,40 @@ public struct ResetVerdictInput: Equatable {
         self.bundleGeneration = bundleGeneration
         self.attest = attest
         self.log = log
+        self.seal = seal
     }
 }
 
-/// The refusal copy for a negative verdict: `unexplained` only when the log
-/// itself, read to the end, shows the key without a reset.
-private func refusal(for log: LogCheck) -> ResetVerdict {
-    .refused(log.status == .confirmed && log.isReset == false ? .unexplained : .unconfirmed)
-}
-
-/// R.2, in the order the checks decide:
+/// R.2 with rule 4: the core's table (`lakko_contacts::reset_verdict`).
 ///
-/// | # | attestation | generation                  | key log                        | verdict                 |
-/// |---|-------------|-----------------------------|--------------------------------|-------------------------|
-/// | 1 | absent      | -                           | any                            | refused                 |
-/// | 2 | invalid     | -                           | any                            | refused                 |
-/// | 3 | no-key      | -                           | any                            | no-verdict              |
-/// | 4 | verified    | != bundle's, or <= accepted | any                            | refused                 |
-/// | 5 | verified    | ok                          | confirmed, `is_reset` false    | refused (`unexplained`) |
-/// | 6 | verified    | ok                          | mismatch / rollback            | refused                 |
-/// | 7 | verified    | ok                          | unreachable / absent           | no-verdict              |
-/// | 8 | verified    | ok                          | confirmed + `is_reset`, or off | accepted                |
-///
-/// A refusal's copy is `unexplained` exactly when the log is `confirmed`
-/// without `is_reset`, `unconfirmed` otherwise. Row 8's `off` arm is decision
-/// D3 (``logOffAcceptsReset()``).
-///
-/// Callers must not ask for an unchanged key; one that does is answered
-/// `noVerdict` (nothing to accept, nothing to refuse).
+/// A key that is not base64 can be neither held nor fetched: no verdict
+/// (nothing to accept, nothing to refuse). Callers must not ask for an
+/// unchanged key; one that does is answered `noVerdict` by the core.
 public func resetVerdict(_ input: ResetVerdictInput) -> ResetVerdict {
-    if input.fetchedKeyB64 == input.heldKeyB64 { return .noVerdict }
-    let keyGeneration: UInt64
-    let signedAtMs: Int64
-    switch input.attest {
-    case .absent, .invalid:
-        return refusal(for: input.log)
-    case .noKey:
-        return .noVerdict
-    case .verified(let generation, let signed):
-        keyGeneration = generation
-        signedAtMs = signed
-    }
-    if keyGeneration != input.bundleGeneration || keyGeneration <= input.acceptedGeneration {
-        return refusal(for: input.log)
-    }
-    let accepted = ResetVerdict.accepted(keyGeneration: keyGeneration, signedAtMs: signedAtMs)
-    switch input.log.status {
-    case .confirmed:
-        return input.log.isReset == true ? accepted : refusal(for: input.log)
-    case .off:
-        return logOffAcceptsReset() ? accepted : .refused(.unconfirmed)
-    case .mismatch, .rollback:
-        return refusal(for: input.log)
-    case .unreachable, .absent:
+    guard let held = Data(base64Encoded: input.heldKeyB64),
+          let fetched = Data(base64Encoded: input.fetchedKeyB64) else { return .noVerdict }
+    let answer = LakkoCore.resetVerdict(input: FfiResetVerdictInput(
+        heldKey: held,
+        acceptedGeneration: input.acceptedGeneration,
+        fetchedKey: fetched,
+        bundleGeneration: input.bundleGeneration,
+        attest: input.attest.ffi,
+        logStatus: input.log.status.ffi,
+        logIsReset: input.log.isReset,
+        seal: FfiSealCheck(
+            valid: input.seal.valid, announcementSeq: input.seal.announcementSeq, kind: nil,
+            refusal: input.seal.refusal),
+        sealLog: input.seal.log))
+    switch answer {
+    case .sealed(let keyGeneration, let signedAtMs, let announcementSeq):
+        return .sealed(keyGeneration: keyGeneration, signedAtMs: signedAtMs, announcementSeq: announcementSeq)
+    case .unsealed(let keyGeneration, let signedAtMs):
+        return .unsealed(keyGeneration: keyGeneration, signedAtMs: signedAtMs)
+    case .refused(let why):
+        return .refused(why == .unexplained ? .unexplained : .unconfirmed)
+    case .noVerdict:
         return .noVerdict
     }
-}
-
-/// Decision D3 (R.10): with no key log configured in the build, a reset is
-/// accepted on the attestation alone. `false` would refuse every reset until
-/// the log is deployed.
-public func logOffAcceptsReset() -> Bool {
-    true
 }
 
 /// The rotation marker of the re-pin (R.2 "The re-pin"): never backwards, in

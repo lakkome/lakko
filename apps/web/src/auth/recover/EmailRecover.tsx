@@ -9,19 +9,15 @@
  *   2. the code. This step looks and behaves the same for a matching pair, a
  *      wrong pair, an unknown username and an account with no email;
  *   3. the authenticator code, only when the account has an authenticator;
- *   4. a new password. Only now does the server say which kind of account
- *      this is (`recover/open`):
- *        - with an email vault (no phrase saved): the vault is opened with
- *          the typed username and address, off the main thread, the phrase
- *          rebuilt, and the EXISTING phrase restore runs
- *          (`AuthContext.recover`: the bundle check, the recovery login with
- *          the new password, the backup restore);
- *        - without one (a phrase is saved): the new password is registered
- *          under the ticket and the session lands; on a device without the
- *          account's keys the guard then shows "Restore your keys".
+ *   4. a new password: registered under the ticket, and the session
+ *      lands. On a device without the account's keys the guard then shows
+ *      "Restore your keys".
  *
- * When the vault does not open, `recovery.email.failed` is shown with the
- * way back to the Get back in list; nothing was changed on the server.
+ * Amended 2026-11-26 (ADR-0075, second amendment): a mailed code never
+ * brings keys. The email vault and the step that released it are gone; there
+ * is one kind of account. A password changed here, on a device without the
+ * keys, is not yet the password that keeps the chats through a key reset: a
+ * device that holds the keys takes it over at its next password sign-in.
  *
  * Every decision is `protect/email-flow.ts`. The address and the codes live
  * in this component's memory only and are never logged.
@@ -31,8 +27,8 @@ import { plainStore } from "../protect/local";
 import { createSignal, Match, onCleanup, Show, Switch, type JSX } from "solid-js";
 
 import { useAuth } from "../AuthContext";
-import { base64Decode, base64Encode } from "../account-id";
-import { recoverErrorMessage, screenText } from "../auth-error-copy";
+import { base64Encode } from "../account-id";
+import { screenText } from "../auth-error-copy";
 import { nameTargetFor } from "../login-handle";
 import { newPasswordProblem, MIN_PASSWORD_LENGTH } from "../password-rules";
 import { normalizeTotpCode } from "../totp-code";
@@ -49,15 +45,14 @@ import {
   type RecoverEvent,
   type RecoverState,
 } from "../protect/email-flow";
-import { runEmailVault } from "../protect/email-vault";
-import { markOwnAction, type NoticeKind } from "../protect/notices";
+import { markOwnAction } from "../protect/notices";
 import { answerOf, RecoveryEmailClient } from "../protect/recovery-email-client";
 import { currentLanguage, t } from "../../l10n";
 import { requireValidUsername } from "../../profile/username-field";
 import { PasswordField } from "../../ui/PasswordField";
 import { loadWasm } from "../../wasm";
 import { WaitNotice } from "./FormNotices";
-import { attemptsRetryAfterSecs, createRetryCountdown } from "./retry-countdown";
+import { createRetryCountdown } from "./retry-countdown";
 import { UsernameField } from "./UsernameField";
 
 export function EmailRecover(props: {
@@ -83,22 +78,13 @@ export function EmailRecover(props: {
   const [password, setPassword] = createSignal("");
   const [confirm, setConfirm] = createSignal("");
   /** A line that is the form's own (a password that does not pass the
-   *  rule, a failed phrase restore). */
+   *  rule). */
   const [ownError, setOwnError] = createSignal<string | null>(null);
   const wait = createRetryCountdown();
   let codeInput: HTMLInputElement | undefined;
   // The username this run was started for, canonical.
   let canonicalUsername = "";
-  // The phrase the vault held, kept until the restore landed: the ticket
-  // is spent once the vault left the server, so a retry repeats only the
-  // phrase restore.
-  let openedPhrase: string | null = null;
-  // When this device asked for the account to be opened or its password
-  // changed: the notice the server writes is then its own action.
-  let actedAtMs = 0;
-  let actedKind: NoticeKind | null = null;
   onCleanup(() => {
-    openedPhrase = null;
     setAddress("");
     setCode("");
     setTotp("");
@@ -218,39 +204,7 @@ export function EmailRecover(props: {
     }
   }
 
-  /** The notice this device's own action caused is not shown to it, and
-   *  the address the person just typed is kept by the account's devices
-   *  (it was accepted: the vault opened under it). */
-  function rememberOwnAction(): void {
-    const s = auth.state();
-    if (actedKind === null || s.kind === "anon" || s.kind === "loading") return;
-    markOwnAction(plainStore(), s.account.accountId, actedKind, actedAtMs);
-    rememberAddress(s.account.accountId, address());
-  }
-
-  /** The existing phrase restore, with the phrase the vault held. */
-  async function restoreWithPhrase(phrase: string): Promise<void> {
-    try {
-      // Opened from the email vault, never typed: an owed phrase screen
-      // stays owed.
-      await auth.recover(phrase, password(), canonicalUsername, "vault");
-      openedPhrase = null;
-      rememberOwnAction();
-      setPassword("");
-      setConfirm("");
-      dispatch({ type: "landed" });
-      props.onDone();
-    } catch (err) {
-      // Overtaken by another session on this device: nothing to report.
-      if (isAbandoned(err)) return;
-      const secs = attemptsRetryAfterSecs(err);
-      if (secs !== null) wait.startFor(secs);
-      else setOwnError(recoverErrorMessage(err));
-      dispatch({ type: "restore-failed" });
-    }
-  }
-
-  /** Step 4. */
+  /** Step 4: the code gives a new password and a session, nothing else. */
   async function finish(): Promise<void> {
     const current = state();
     if (current.step !== "password" || current.working || wait.waiting()) return;
@@ -260,51 +214,10 @@ export function EmailRecover(props: {
       setOwnError(problem);
       return;
     }
-    dispatch({ type: "opening" });
-    // The vault already left the server on an earlier try: only the phrase
-    // restore is repeated.
-    if (current.vaultOpened && openedPhrase !== null) {
-      dispatch({ type: "vault-opened" });
-      await restoreWithPhrase(openedPhrase);
-      return;
-    }
-    let opened: Awaited<ReturnType<RecoveryEmailClient["recoverOpen"]>>;
-    actedAtMs = Date.now();
-    try {
-      opened = await client.recoverOpen(current.ticket);
-    } catch (err) {
-      fail("recover-open", err);
-      return;
-    }
-    if (opened.mode === "vault") {
-      actedKind = "account-opened-by-email";
-      let result: Awaited<ReturnType<typeof runEmailVault>>;
-      try {
-        const target = await nameTargetFor(canonicalUsername);
-        result = await runEmailVault({
-          kind: "open",
-          loginHandle: target.handle.bytes,
-          address: address(),
-          vaultSalt: base64Decode(opened.vaultSalt),
-          sealed: base64Decode(opened.sealedEntropy),
-        });
-      } catch {
-        result = { kind: "not-opened" };
-      }
-      if (result.kind !== "opened") {
-        // The ticket is spent and the keys did not come out. Nothing was
-        // changed on the server.
-        dispatch({ type: "vault-not-opened" });
-        return;
-      }
-      openedPhrase = result.phrase;
-      dispatch({ type: "vault-opened" });
-      await restoreWithPhrase(result.phrase);
-      return;
-    }
-    // Password mode: a phrase is saved (or the account has no vault). The
-    // code gives a new password and a session, nothing else.
-    actedKind = "password-changed-by-email";
+    dispatch({ type: "submitted" });
+    // When this device asked for the password to be changed: the notice the
+    // server writes is then its own action.
+    const actedAtMs = Date.now();
     try {
       const landed = await client.recoverPassword({
         ticket: current.ticket,
@@ -315,17 +228,22 @@ export function EmailRecover(props: {
         })(),
       });
       const landedB64 = base64Encode(landed.accountId);
-      const kind = actedKind;
       const typed = address();
       setPassword("");
       setConfirm("");
       // Written once the landing opened the account's stores: before that a
       // write would be dropped for an account wiped earlier on this page.
-      await auth.landEmailPasswordRecovery(canonicalUsername, landed.accountId, landed.session, () => {
-        markOwnAction(plainStore(), landedB64, kind, actedAtMs);
-        // The mailed code was accepted for this address.
-        rememberAddress(landedB64, typed);
-      });
+      await auth.landEmailPasswordRecovery(
+        canonicalUsername,
+        landed.accountId,
+        landed.session,
+        () => {
+          markOwnAction(plainStore(), landedB64, "password-changed-by-email", actedAtMs);
+          // The mailed code was accepted for this address.
+          rememberAddress(landedB64, typed);
+        },
+        landed.exportKey,
+      );
       dispatch({ type: "landed" });
       // On a device without the account's keys the guard shows "Restore
       // your keys" on this very state change; otherwise the app opens.
@@ -356,16 +274,6 @@ export function EmailRecover(props: {
         <div class="lk-stack">
           <p class="form-error" role="alert">
             {t("recovery_email.unavailable")}
-          </p>
-          <button type="button" onClick={props.onBack}>
-            {t("recovery.methods.back_to_list")}
-          </button>
-        </div>
-      </Match>
-      <Match when={state().step === "not-opened"}>
-        <div class="lk-stack">
-          <p class="form-error" role="alert">
-            {t("recovery.email.failed")}
           </p>
           <button type="button" onClick={props.onBack}>
             {t("recovery.methods.back_to_list")}
@@ -448,7 +356,7 @@ export function EmailRecover(props: {
         </form>
       </Match>
       <Match when={passwordStep()}>
-        {(current) => (
+        {(_current) => (
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -479,11 +387,6 @@ export function EmailRecover(props: {
               )}
             </Show>
             <WaitNotice remainingMs={wait.remainingMs} />
-            <Show when={current().phase === "restoring"}>
-              <p class="form-info" role="status" aria-live="polite">
-                <span class="lakko-spinner" aria-hidden="true" /> {t("recovery.email.restoring")}
-              </p>
-            </Show>
             <button class="primary" type="submit" disabled={working() || wait.waiting()}>
               {working() ? t("common.checking") : t("recovery.email.save")}
             </button>
@@ -492,7 +395,7 @@ export function EmailRecover(props: {
       </Match>
       <Match when={state().step === "landed"}>
         <p class="form-info" role="status">
-          {t("recovery.email.restoring")}
+          {t("common.loading")}
         </p>
       </Match>
       <Match when={true}>

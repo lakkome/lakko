@@ -37,8 +37,10 @@ public interface ProfileSaveDeps {
     /** Whether a fresh-auth proof is live now (a username change needs one). */
     public fun proofLive(): Boolean
 
-    /** The existing rename operation (ADR-0076). */
-    public suspend fun changeUsername(newUsername: String): RenameResult
+    /** The existing rename operation (ADR-0076). [recoveryAddress] is the
+     *  recovery email the person typed so it moves with the name (UX 19.1c),
+     *  or `null`. */
+    public suspend fun changeUsername(newUsername: String, recoveryAddress: String? = null): RenameResult
 
     /** Store and republish the own profile with [name] and [avatar]. */
     public fun publish(name: String?, avatar: AvatarRefs?)
@@ -83,6 +85,13 @@ public class ProfileEditViewModel : ViewModel() {
     /** The proof block is asked for; completed `true` when a proof is live,
      *  `false` when the person closed it. */
     public var proofRequest: CompletableDeferred<Boolean>? by mutableStateOf(null)
+        private set
+
+    /** UX 19.1c: the recovery email is the account's last second way in and
+     *  this device holds no address: the screen asks for it once, so it
+     *  moves to the new name. Completed with the typed address, or `null`
+     *  when the person closed the dialog (nothing changes). */
+    public var addressRequest: CompletableDeferred<String?>? by mutableStateOf(null)
         private set
 
     private var savedLineJob: Job? = null
@@ -145,6 +154,13 @@ public class ProfileEditViewModel : ViewModel() {
         proofRequest = null
     }
 
+    /** The typed recovery address, or `null` for a closed dialog. Never
+     *  kept: it goes to the rename and nowhere else. */
+    public fun answerAddress(address: String?) {
+        addressRequest?.complete(address)
+        addressRequest = null
+    }
+
     /** §5 — run the save in order; [onDone] gets the outcome. */
     public fun save(deps: ProfileSaveDeps, onDone: (SaveOutcome) -> Unit = {}) {
         val start = edit ?: return
@@ -192,6 +208,7 @@ public class ProfileEditViewModel : ViewModel() {
             val wanted = edit?.let { pendingUsername(it.username.value) }
                 ?: return SaveOutcome.Failed(UiText("profile.save.error.generic"))
             var attempts = 0
+            var recoveryAddress: String? = null
             while (true) {
                 attempts += 1
                 if (!deps.proofLive()) {
@@ -199,12 +216,20 @@ public class ProfileEditViewModel : ViewModel() {
                     proofRequest = ask
                     if (!ask.await()) return SaveOutcome.Stopped
                 }
-                when (val result = deps.changeUsername(wanted)) {
+                when (val result = deps.changeUsername(wanted, recoveryAddress)) {
                     is RenameResult.Done -> {
                         edit = edit?.let { it.copy(username = InlineField(result.username)) }
                         break
                     }
                     is RenameResult.Refused -> when {
+                        result.needsRecoveryAddress && recoveryAddress == null -> {
+                            // Asked once, before anything was changed.
+                            val ask = CompletableDeferred<String?>()
+                            addressRequest = ask
+                            recoveryAddress = ask.await() ?: return SaveOutcome.Stopped
+                            attempts = 0
+                            continue
+                        }
                         result.needsProof && attempts < 2 -> continue
                         result.line.key == TAKEN_KEY -> {
                             edit = edit?.let { it.copy(username = it.username.opened()) }

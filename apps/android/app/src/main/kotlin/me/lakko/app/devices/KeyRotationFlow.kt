@@ -102,10 +102,6 @@ public class KeyRotationOwed(
     /** Section 3.5a rule 5: the links the old key issued were revoked and
      *  the unanswered contact requests re-sent from the new key. */
     public val oldGrantsSpent: Boolean = false,
-    /** ADR-0075 section 3: this rotation is "Save a recovery phrase". No
-     *  device is removed ([deviceIdB64Url] is empty) and `rotate/finish`
-     *  carries `phrase_saved: true`. */
-    public val phraseSaved: Boolean = false,
 ) {
     /** Whether this rotation removes a device first. */
     public val removesDevice: Boolean get() = deviceIdB64Url.isNotEmpty()
@@ -136,7 +132,7 @@ public class KeyRotationOwed(
         deviceIdB64Url, startedAtMs, epochBeforeRemoval, removalWon, prepared, announced, announcedAtEpoch,
         commitSent, committed, attestationB64, keyGeneration, adopted, identityPublished, publishWithoutProof,
         keyPackagePublished, deviceGroupRootMoved, journalsMoved, channelsMoved, reachRekeyed, backupSealed,
-        profileResent, oldGrantsSpent, phraseSaved,
+        profileResent, oldGrantsSpent,
     )
 }
 
@@ -458,8 +454,6 @@ public interface KeyRotationPorts : RotationAnnouncePort {
         freshGrant: String,
         /** `null` for a rotation that removes no device. */
         revokeDeviceId: ByteArray?,
-        /** ADR-0075 section 3: "Save a recovery phrase". */
-        phraseSaved: Boolean,
     ): CommitAnswer.Committed
 
     /** Ask whether a commit whose answer was lost landed. */
@@ -601,35 +595,6 @@ public class KeyRotationRunner(
         advance(owed)
     }
 
-    /**
-     * ADR-0075 section 3 / UX 19.5 - "Save a recovery phrase": change the
-     * account keys, removing no device, and mark the account
-     * phrase-protected in the same server step. Also its `Try again`. A
-     * rotation already owed for a device that passed its commit finishes
-     * first; one that did not is replaced.
-     */
-    public suspend fun savePhrase(): RotationResult = lock.withLock {
-        var owed = store.load(accountIdB64)?.takeIf { it.phraseSaved && !it.removesDevice }
-        if (owed == null) {
-            store.load(accountIdB64)?.let { other ->
-                if (!rotationCanBeAbandoned(other)) return@withLock advance(other)
-                ports.discardPrepared()
-            }
-            if (ports.freshGrant() == null) {
-                return@withLock RotationResult.NotStarted(NotStartedReason.ProofRequired)
-            }
-            owed = KeyRotationOwed(
-                deviceIdB64Url = "",
-                startedAtMs = clock(),
-                removalWon = true,
-                phraseSaved = true,
-            )
-            // Before anything is sent.
-            store.save(accountIdB64, owed)
-        }
-        advance(owed)
-    }
-
     /** Continue an owed rotation that passed its commit. One that did not
      *  waits for the person (it needs a proof). */
     public suspend fun resume(): RotationResult? = lock.withLock {
@@ -732,7 +697,7 @@ public class KeyRotationRunner(
                     // Before `finish` can reach the server.
                     owed = save(owed.with(commitSent = true))
                     val answer = try {
-                        ports.commit(grant, deviceId, owed.phraseSaved)
+                        ports.commit(grant, deviceId)
                     } catch (cancel: CancellationException) {
                         throw cancel
                     } catch (cause: Throwable) {
@@ -921,41 +886,3 @@ private const val ROTATE_HTTP_CONFLICT: Int = 409
 private const val ROTATE_HTTP_FORBIDDEN: Int = 403
 private const val ROTATE_HTTP_TOO_MANY: Int = 429
 
-/** What the "Save a recovery phrase" screen does after one run (UX 19.5). */
-public sealed interface SavePhraseOutcome {
-    /** The key change went through: show the NEW words; [withheld] while
-     *  the publish of the new keys is still owed. */
-    public data class ShowWords(val withheld: Boolean) : SavePhraseOutcome
-
-    /** The proof ran out: the block appears again, no error. */
-    public data object ShowProofBlock : SavePhraseOutcome
-
-    /** "We could not finish. Nothing changed." with `Try again`;
-     *  [retryAfterSecs] when the server stated a wait. */
-    public data class Failed(val retryAfterSecs: Long?) : SavePhraseOutcome
-
-    /** `rotate/finish` was sent and its answer is not known yet: nothing is
-     *  shown (the words on this device may still be the old ones); the run
-     *  settles by itself and `Try again` asks again. */
-    public data object Unsettled : SavePhraseOutcome
-}
-
-/**
- * The pure mapping of a save-phrase run. The new words are shown ONLY once
- * the server step succeeded ([owed] is committed, or the run is done); a run
- * that stopped before that changed nothing.
- */
-public fun savePhraseOutcome(result: RotationResult, owed: KeyRotationOwed?): SavePhraseOutcome = when (result) {
-    RotationResult.Done -> SavePhraseOutcome.ShowWords(withheld = false)
-    is RotationResult.Pending -> when {
-        owed == null -> SavePhraseOutcome.ShowWords(withheld = false)
-        owed.committed -> SavePhraseOutcome.ShowWords(withheld = rotationWithholdsPhrase(owed))
-        else -> SavePhraseOutcome.Unsettled
-    }
-    is RotationResult.NotRemoved -> SavePhraseOutcome.Failed(null)
-    is RotationResult.NotStarted -> when (val reason = result.reason) {
-        NotStartedReason.ProofRequired -> SavePhraseOutcome.ShowProofBlock
-        is NotStartedReason.RateLimited -> SavePhraseOutcome.Failed(reason.retryAfterSecs)
-        else -> SavePhraseOutcome.Failed(null)
-    }
-}

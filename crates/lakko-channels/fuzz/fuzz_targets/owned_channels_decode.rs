@@ -4,8 +4,9 @@
 //! Fuzz target — the owned-channels list decoder (ADR-0101 section 7, via
 //! `fuzz_api::owned_channels_decode`). The input is padded or cut to the
 //! list's fixed length so the fuzzer explores the content rather than the
-//! length gate (which a separate short input still reaches). Whatever
-//! decodes must re-encode to the identical bytes.
+//! length gate (which a separate short input still reaches). Version 2
+//! (65 532 bytes, entries with a handle seed). Whatever decodes must
+//! re-encode to the identical bytes.
 
 #![no_main]
 

@@ -274,7 +274,7 @@
       "status": "machine"
     },
     "auth.signup.passkey.error": {
-      "text": "Não foi possível adicionar a chave de acesso. Tente novamente ou escolha \"Agora não\".",
+      "text": "Não foi possível adicionar a chave de acesso. Tente novamente ou escolha outra forma.",
       "status": "machine"
     },
     "auth.signup.passkey.lede": {
@@ -4889,6 +4889,14 @@
       "text": "Pedir de novo",
       "status": "machine"
     },
+    "contacts.started_over.closed": {
+      "text": "{name} recomeçou com uma conta nova. As mensagens daqui não são mais entregues.",
+      "status": "machine"
+    },
+    "contacts.started_over.request_note": {
+      "text": "O Lakko não conseguiu confirmar que esta é a mesma pessoa de antes. Aceite só se tiver certeza de que é ela.",
+      "status": "machine"
+    },
     "desktop.capture.body": {
       "text": "Permita nas configurações de privacidade do sistema e tente novamente.",
       "status": "machine"
@@ -7657,14 +7665,6 @@
       "text": "Seu e-mail de recuperação foi substituído.",
       "status": "machine"
     },
-    "notice.opened_by_email.body": {
-      "text": "{date}, em outro dispositivo.",
-      "status": "machine"
-    },
-    "notice.opened_by_email.title": {
-      "text": "Sua conta foi aberta com seu e-mail de recuperação",
-      "status": "machine"
-    },
     "notice.password_by_email.body": {
       "text": "{date}: alguém usou seu e-mail de recuperação para escolher uma nova senha.",
       "status": "machine"
@@ -7675,10 +7675,6 @@
     },
     "notice.phrase_saved": {
       "text": "Uma frase de recuperação foi salva para sua conta.",
-      "status": "machine"
-    },
-    "notice.secure.new_keys": {
-      "text": "Isso dá novas chaves à sua conta, então quem a abriu perde o acesso.",
       "status": "machine"
     },
     "notice.secure.password_saved": {
@@ -7854,11 +7850,75 @@
       "status": "machine"
     },
     "proof.reset.cannot.title": {
-      "text": "As chaves da conta não podem ser redefinidas sem sua senha ou uma chave de acesso",
+      "text": "As chaves da conta não podem ser redefinidas sem sua senha",
       "status": "machine"
     },
     "proof.reset.cannot.what_you_can_do": {
       "text": "O que você pode fazer:",
+      "status": "machine"
+    },
+    "proof.reset.factor.heading": {
+      "text": "Confirme que é você",
+      "status": "machine"
+    },
+    "proof.reset.factor.title": {
+      "text": "Depois, confirme com uma destas opções:",
+      "status": "machine"
+    },
+    "proof.reset.factor.title_no_password": {
+      "text": "Confirme com uma destas opções:",
+      "status": "machine"
+    },
+    "proof.reset.factor.totp": {
+      "text": "App autenticador",
+      "status": "machine"
+    },
+    "proof.reset.factor.email": {
+      "text": "Código por e-mail",
+      "status": "machine"
+    },
+    "proof.reset.factor.passkey": {
+      "text": "Chave de acesso",
+      "status": "machine"
+    },
+    "proof.reset.factor.none": {
+      "text": "Não consigo usar nenhuma destas opções",
+      "status": "machine"
+    },
+    "proof.reset.factor.totp.prompt": {
+      "text": "Digite o código de 6 dígitos do seu app autenticador.",
+      "status": "machine"
+    },
+    "proof.reset.factor.email.sent": {
+      "text": "Se este for o e-mail de recuperação de {username}, um código está a caminho. Ele vale por 10 minutos.",
+      "status": "machine"
+    },
+    "proof.reset.factor.passkey.use": {
+      "text": "Usar chave de acesso",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.totp": {
+      "text": "Confirmado com seu app autenticador.",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.email": {
+      "text": "Confirmado com um código por e-mail.",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.passkey": {
+      "text": "Confirmado com uma chave de acesso.",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.title": {
+      "text": "As chaves da conta não podem ser redefinidas",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.body": {
+      "text": "A redefinição exige sua senha e mais uma forma de confirmar que é você: seu app autenticador, seu e-mail de recuperação ou uma chave de acesso.",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.body_none": {
+      "text": "Esta conta não tem uma segunda forma de confirmar que é você, então as chaves dela não podem ser redefinidas.",
       "status": "machine"
     },
     "proof.save_phrase.help": {
@@ -7869,16 +7929,12 @@
       "text": "Digite sua senha para alterar seu nome de usuário.",
       "status": "machine"
     },
-    "protect.banner.action": {
-      "text": "Proteger",
-      "status": "machine"
-    },
-    "protect.banner.none": {
-      "text": "Esta conta não tem como voltar a entrar.",
+    "proof.add_totp.help": {
+      "text": "Digite sua senha para configurar um app autenticador.",
       "status": "machine"
     },
     "protect.body": {
-      "text": "Se você esquecer sua senha ou perder este dispositivo, é assim que você volta a entrar.",
+      "text": "Se você esquecer sua senha ou perder este dispositivo, é assim que você volta a entrar. Escolha pelo menos uma opção.",
       "status": "machine"
     },
     "protect.continue": {
@@ -7909,28 +7965,20 @@
       "text": "Criar uma chave de acesso",
       "status": "machine"
     },
+    "protect.passkey.cancelled": {
+      "text": "Nenhuma chave de acesso foi adicionada.",
+      "status": "machine"
+    },
     "protect.phrase.body": {
       "text": "12 palavras que só você guarda. A forma mais segura de voltar.",
       "status": "machine"
     },
     "protect.phrase.save.body": {
-      "text": "12 palavras que só você guarda. Depois disso, um código por e-mail pode alterar sua senha, mas não pode abrir sua conta.",
-      "status": "machine"
-    },
-    "protect.phrase.save.effect": {
-      "text": "Isso dá novas chaves à sua conta. Seus contatos e conversas ficam como estão. Seus outros dispositivos continuam conectados.",
+      "text": "12 palavras que só você guarda. Elas trazem de volta suas chaves em um novo dispositivo e suas conversas depois de uma redefinição.",
       "status": "machine"
     },
     "protect.phrase.save.failed": {
       "text": "Não foi possível concluir. Nada mudou.",
-      "status": "machine"
-    },
-    "protect.phrase.save.finishing": {
-      "text": "Sua conta tem novas chaves. Finalizando.",
-      "status": "machine"
-    },
-    "protect.phrase.save.progress": {
-      "text": "Alterando as chaves da sua conta",
       "status": "machine"
     },
     "protect.phrase.save.show": {
@@ -7941,36 +7989,88 @@
       "text": "Salvar uma frase de recuperação",
       "status": "machine"
     },
-    "protect.skip": {
-      "text": "Agora não",
-      "status": "machine"
-    },
-    "protect.skip.confirm.body": {
-      "text": "Se você esquecer sua senha ou perder este dispositivo, não conseguirá voltar a esta conta.",
-      "status": "machine"
-    },
-    "protect.skip.confirm.continue": {
-      "text": "Continuar sem proteção",
-      "status": "machine"
-    },
-    "protect.skip.confirm.title": {
-      "text": "Continuar sem proteção?",
-      "status": "machine"
-    },
-    "protect.status.email": {
-      "text": "Protegida pelo seu e-mail",
-      "status": "machine"
-    },
-    "protect.status.none": {
-      "text": "Sem proteção",
+    "protect.phrase.title_optional": {
+      "text": "Salvar também uma frase de recuperação",
       "status": "machine"
     },
     "protect.status.phrase": {
-      "text": "Protegida pela sua frase de recuperação",
+      "text": "Suas conversas são mantidas pela sua frase de recuperação",
+      "status": "machine"
+    },
+    "protect.status.passkey_seal": {
+      "text": "Suas conversas são mantidas por uma chave de acesso",
+      "status": "machine"
+    },
+    "protect.status.password_only": {
+      "text": "Suas conversas são mantidas só pela sua senha",
       "status": "machine"
     },
     "protect.title": {
       "text": "Proteja sua conta",
+      "status": "machine"
+    },
+    "protect.totp.title": {
+      "text": "Usar um app autenticador",
+      "status": "machine"
+    },
+    "protect.totp.body": {
+      "text": "Um código de 6 dígitos de um app no seu celular. Se o app estiver só neste dispositivo, você o perde junto com o dispositivo.",
+      "status": "machine"
+    },
+    "protect.optional": {
+      "text": "Opcional",
+      "status": "machine"
+    },
+    "protect.continue_needs": {
+      "text": "Escolha uma das três primeiras opções para continuar.",
+      "status": "machine"
+    },
+    "protect.totp_only.warning": {
+      "text": "Se você perder seu app autenticador, não conseguirá recuperar esta conta. Adicione também um e-mail ou uma chave de acesso.",
+      "status": "machine"
+    },
+    "protect.totp_only.warning_phrase": {
+      "text": "Se você perder tanto seu app autenticador quanto sua frase de recuperação, não conseguirá recuperar esta conta.",
+      "status": "machine"
+    },
+    "protect.totp_only.remove_notice": {
+      "text": "Seu app autenticador será a única outra forma de confirmar que é você. Se você perdê-lo, não conseguirá recuperar esta conta.",
+      "status": "machine"
+    },
+    "protect.totp_only.remove_notice_phrase": {
+      "text": "Seu app autenticador será a única outra forma de confirmar que é você. Se você perdê-lo junto com sua frase de recuperação, não conseguirá recuperar esta conta.",
+      "status": "machine"
+    },
+    "protect.title_required": {
+      "text": "Adicione uma segunda forma de voltar a entrar",
+      "status": "machine"
+    },
+    "protect.last_factor": {
+      "text": "Adicione primeiro outra forma de voltar a entrar. Esta é a última que esta conta tem.",
+      "status": "machine"
+    },
+    "protect.username_email": {
+      "text": "Seu e-mail de recuperação passa para seu novo nome de usuário. Digite-o uma vez.",
+      "status": "machine"
+    },
+    "protect.password_only.title": {
+      "text": "Suas conversas dependem da sua senha",
+      "status": "machine"
+    },
+    "protect.password_only.body": {
+      "text": "Se você esquecer sua senha e perder seus dispositivos, suas conversas não voltarão. Salve uma frase de recuperação ou adicione uma chave de acesso para mantê-las.",
+      "status": "machine"
+    },
+    "protect.password_only.save_phrase": {
+      "text": "Salvar uma frase de recuperação",
+      "status": "machine"
+    },
+    "protect.password_only.add_passkey": {
+      "text": "Adicionar uma chave de acesso",
+      "status": "machine"
+    },
+    "protect.password_only.passkey_no_seal": {
+      "text": "Esta chave de acesso faz você entrar, mas não mantém suas conversas.",
       "status": "machine"
     },
     "recall.phrase.changed": {
@@ -8019,14 +8119,6 @@
     },
     "recovery.email.check.title": {
       "text": "Confira seu e-mail",
-      "status": "machine"
-    },
-    "recovery.email.failed": {
-      "text": "Não foi possível trazer sua conta de volta. Tente novamente ou escolha outra forma.",
-      "status": "machine"
-    },
-    "recovery.email.restoring": {
-      "text": "Trazendo sua conta de volta",
       "status": "machine"
     },
     "recovery.email.row.body": {
@@ -8269,16 +8361,8 @@
       "text": "{count, plural, one {Resta # tentativa} other {Restam # tentativas}} antes de uma pausa de 15 minutos.",
       "status": "machine"
     },
-    "recovery_email.add_again.body": {
-      "text": "As chaves da sua conta mudaram. Digite seu endereço de novo para que um código por e-mail possa trazer sua conta de volta.",
-      "status": "machine"
-    },
-    "recovery_email.add_again.title": {
-      "text": "Adicione seu e-mail de novo",
-      "status": "machine"
-    },
     "recovery_email.body": {
-      "text": "Se você esquecer a senha, enviamos um código para este endereço para você voltar a entrar.",
+      "text": "Se você esquecer a senha, enviamos um código para este endereço para você escolher uma nova.",
       "status": "machine"
     },
     "recovery_email.code.expired": {
@@ -8322,7 +8406,7 @@
       "status": "machine"
     },
     "recovery_email.mailbox_warning": {
-      "text": "Qualquer pessoa que consiga ler esta caixa de e-mail pode entrar na sua conta. Salve uma frase de recuperação para mudar isso.",
+      "text": "Qualquer pessoa que consiga ler esta caixa de e-mail pode entrar na sua conta.",
       "status": "machine"
     },
     "recovery_email.needs_username": {
@@ -8338,7 +8422,7 @@
       "status": "machine"
     },
     "recovery_email.remove.confirm.body": {
-      "text": "Você não poderá voltar a entrar por e-mail.",
+      "text": "Você não poderá obter uma nova senha por e-mail.",
       "status": "machine"
     },
     "recovery_email.remove.confirm.title": {
@@ -8605,10 +8689,6 @@
       "text": "Todos os outros dispositivos desta conta são desconectados e removidos. Eles perdem as conversas e os contatos desta conta.",
       "status": "machine"
     },
-    "restore_identity.reset.effect_messages": {
-      "text": "Conversas, grupos e canais voltam dos dispositivos dos seus contatos, com as mensagens que eles ainda têm, das mais recentes para as mais antigas.",
-      "status": "machine"
-    },
     "restore_identity.reset.effect_passkeys": {
       "text": "Todas as chaves de acesso desta conta são apagadas. Depois você pode adicionar chaves de acesso de novo.",
       "status": "machine"
@@ -8647,6 +8727,18 @@
     },
     "restore_identity.reset.what_it_does": {
       "text": "O que isso faz:",
+      "status": "machine"
+    },
+    "restore_identity.reset.sealed": {
+      "text": "Suas conversas, grupos e canais voltarão dos dispositivos dos seus contatos, com as mensagens que eles ainda têm, das mais recentes para as mais antigas.",
+      "status": "machine"
+    },
+    "restore_identity.reset.unsealed": {
+      "text": "Esta redefinição recomeça sua conta do zero. Suas conversas, seus grupos e os canais que são seus não voltarão. Você mantém seu nome de usuário e pode enviar novos pedidos aos seus contatos.",
+      "status": "machine"
+    },
+    "restore_identity.reset.unsealed_use_passkey": {
+      "text": "Use uma chave de acesso que mantenha suas conversas para trazê-las de volta.",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -9337,6 +9429,10 @@
       "text": "Este dispositivo não consegue gerenciar chaves de acesso.",
       "status": "machine"
     },
+    "settings.passkeys.no_seal": {
+      "text": "Não mantém suas conversas.",
+      "status": "machine"
+    },
     "settings.password.change": {
       "text": "Alterar senha",
       "status": "machine"
@@ -9446,7 +9542,7 @@
       "status": "machine"
     },
     "settings.recovery.totp.done": {
-      "text": "Autenticador configurado. Um código do app agora pode devolver o acesso à sua conta.",
+      "text": "Autenticador configurado. Um código do app agora confirma que é você.",
       "status": "machine"
     },
     "settings.recovery.totp.error.generic": {
@@ -9479,6 +9575,14 @@
     },
     "settings.recovery.totp.unavailable": {
       "text": "A configuração do autenticador não está disponível agora.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.open_app": {
+      "text": "Abrir no app autenticador",
+      "status": "machine"
+    },
+    "settings.recovery.totp.on": {
+      "text": "Ativado",
       "status": "machine"
     },
     "settings.recovery.words.not_on_this_device": {

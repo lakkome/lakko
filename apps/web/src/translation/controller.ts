@@ -65,6 +65,11 @@ export interface MessageRef {
   /** The DS id of the message's latest edit or delete op, 0 when never edited
    *  (`MessageOpState.lastOpId`). */
   readonly lastOpId: number;
+  /** This account's own message. It is translated like a received one
+   *  (UX 3.1, 2026-11-27) but its detection never feeds the conversation's
+   *  languages: only messages from others count (spec 3.1, as on iOS and
+   *  Android), so a short own "ok" never shifts the guess. */
+  readonly own?: boolean;
 }
 
 /** A translation slot: the message's text, or its transcript. */
@@ -348,6 +353,7 @@ export class TranslationController {
 
   /** A confident detection is recorded for its message, once per message id. */
   private rememberConfident(ref: MessageRef, d: Detection | null): void {
+    if (ref.own === true) return;
     const r = this.deps.rules();
     if (d === null || r === null || d.permille < r.translationDetectionConfidentPermille()) return;
     const known = this.prefsNow(ref.conversation).languages.detections.find((x) => x.messageId === ref.messageId);
@@ -361,16 +367,16 @@ export class TranslationController {
   // ----- the menu row --------------------------------------------------------
 
   /** UX 3.1 — the `Translate` row (shared rule). */
-  offer(ref: MessageRef, text: string, isOwn: boolean): Offer {
+  offer(ref: MessageRef, text: string): Offer {
     const r = this.deps.rules();
     if (r === null || !this.translationPresent) return "none";
-    const detected = isOwn || text.length === 0 ? null : this.effectiveDetection(ref, text);
+    // Own messages are offered like received ones (UX 3.1, 2026-11-27).
+    const detected = text.length === 0 ? null : this.effectiveDetection(ref, text);
     const engineForDetected =
       detected === null ? "unavailable" : (this.translationState(detected.tag) ?? "unavailable");
     return offerFor(r, {
       enabled: this.deps.settings().showTranslate,
       hasText: text.trim().length > 0,
-      isOwn,
       detected,
       engineForDetected,
       anyEngine: this.anyEngine(),
@@ -384,19 +390,18 @@ export class TranslationController {
    * `resolveTranslationSource`, the same call {@link sourceFor} makes), so
    * "hola, qué tal?" read as an unsure Catalan on a device that translates
    * Spanish shows `Spanish · Translate`. The menu row's rule then decides
-   * whether that language is one to name (not own, has text, setting on, not
+   * whether that language is one to name (has text, setting on, not
    * a reading language); asked with the engine fact set to "can translate" so
    * that an engine that cannot translate hides the button, not the line.
    */
-  languageLine(ref: MessageRef, text: string, isOwn: boolean): TextView {
+  languageLine(ref: MessageRef, text: string): TextView {
     const r = this.deps.rules();
-    if (r === null || isOwn || text.trim().length === 0) return { phase: "none" };
+    if (r === null || text.trim().length === 0) return { phase: "none" };
     const res = this.resolution(ref, text);
     if (res === null || res.lineTag === null) return { phase: "none" };
     const named = offerFor(r, {
       enabled: this.deps.settings().showTranslate,
       hasText: true,
-      isOwn,
       detected: { tag: res.lineTag, permille: res.linePermille },
       engineForDetected: "ready",
       anyEngine: true,
@@ -448,9 +453,9 @@ export class TranslationController {
 
   /** The quiet line under a message's text: the translation's own line when
    *  there is one (manual or automatic), else the language line up front. */
-  textLine(ref: MessageRef, text: string, isOwn: boolean): TextView {
+  textLine(ref: MessageRef, text: string): TextView {
     const v = this.textView("text", ref);
-    return v.phase === "none" ? this.languageLine(ref, text, isOwn) : v;
+    return v.phase === "none" ? this.languageLine(ref, text) : v;
   }
 
   // ----- translating a message ----------------------------------------------
@@ -806,13 +811,13 @@ export class TranslationController {
   // ----- automatic translation -------------------------------------------------
 
   /**
-   * UX 3.7 — translate an incoming message as it is shown, when the
+   * UX 3.7 — translate a message (own ones included) as it is shown, when the
    * conversation asks for it and the language is ready now. A message the
    * person put back to its original stays so; a language that needs a pack is
    * left for the person to choose.
    */
-  autoTranslate(ref: MessageRef, text: string, isOwn: boolean): void {
-    if (isOwn || text.trim().length === 0) return;
+  autoTranslate(ref: MessageRef, text: string): void {
+    if (text.trim().length === 0) return;
     const r = this.deps.rules();
     if (r === null || !this.prefs(ref.conversation).autoTranslate) return;
     const key = messageKey("text", ref.conversation, ref.messageId);

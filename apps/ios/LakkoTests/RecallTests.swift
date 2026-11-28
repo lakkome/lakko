@@ -532,7 +532,8 @@ final class RecallFlowTests: XCTestCase {
         phraseProtected: Bool = true,
         recalls: InMemoryRecallRecordStore = InMemoryRecallRecordStore(),
         server: Server = Server(),
-        clock: Clock = Clock()
+        clock: Clock = Clock(),
+        ownResetVerdict: ResetVerdict = .noVerdict
     ) -> Harness {
         let store = SessionStore(defaults: defaults("recall-session"))
         let persistence = Persistence()
@@ -579,6 +580,7 @@ final class RecallFlowTests: XCTestCase {
             logoutOwed: InMemoryLogoutOwedStore(),
             earlierKeysInputs: skipEarlierKeysGate
         )
+        repository.judgeOwnReset = { _, _, _ in ownResetVerdict }
         return Harness(
             repository: repository, store: store, persistence: persistence, directory: directory,
             server: server, recalls: recalls, wiped: wiped, tokens: tokens, clock: clock, markers: markers)
@@ -760,7 +762,10 @@ final class RecallFlowTests: XCTestCase {
             "the 32-byte Ed25519 seed of the account identity, not the phrase seed")
         XCTAssertEqual(record.oldSeed.count, 32)
         XCTAssertNil(h.tokens.current, "the superseded pair is gone at once")
-        XCTAssertNotNil(h.repository.recall)
+        // Alignment item A: "Was it you?" once the reset was judged not
+        // sealed (here: no verdict).
+        let asked = await waitUntil { h.repository.recall != nil }
+        XCTAssertTrue(asked)
         XCTAssertNil(h.repository.keysSignOut, "not the signed-out screen")
 
         let open = await waitUntil { h.repository.recall?.canTakeBack == true }
@@ -774,6 +779,29 @@ final class RecallFlowTests: XCTestCase {
         // A second signal changes nothing.
         h.repository.handleKeysSuperseded(accountIdB64: accountIdB64)
         XCTAssertEqual(h.recalls.puts, 1)
+    }
+
+    /// Alignment item A (ADR-0101 section 10, "The account's own devices"):
+    /// a reset of this account made elsewhere and SEALED by the account is
+    /// the owner's. No "Was it you?": the device signs out and is wiped as
+    /// for the ADR-0073 landing rule, and the record written while it asked
+    /// is destroyed. An unsealed one keeps the recall.
+    func testASealedResetMadeElsewhereSignsThisDeviceOutWithNoRecall() async {
+        let h = device(ownResetVerdict: .sealed(keyGeneration: 2, signedAtMs: 900_000, announcementSeq: 3))
+        h.repository.handleKeysSuperseded(accountIdB64: accountIdB64)
+        let done = await waitUntil { h.repository.keysSignOut == .removed }
+        XCTAssertTrue(done)
+        XCTAssertNil(h.repository.recall, "no Was it you?")
+        XCTAssertNil(h.recalls.record, "nothing is kept to take back")
+        XCTAssertEqual(h.repository.keysSignOutCause, .keysReset)
+        XCTAssertEqual(h.wiped.full, [accountIdB64])
+        XCTAssertEqual(h.wiped.staged, [])
+
+        let unsealed = device(ownResetVerdict: .unsealed(keyGeneration: 2, signedAtMs: 900_000))
+        unsealed.repository.handleKeysSuperseded(accountIdB64: accountIdB64)
+        let asked = await waitUntil { unsealed.repository.recall != nil }
+        XCTAssertTrue(asked, "an unsealed reset keeps Was it you?")
+        XCTAssertNotNil(unsealed.recalls.record)
     }
 
     func testADeviceThatNeverHeldTheKeysKeepsNothingAndShowsTheSignedOutScreen() async {
@@ -956,6 +984,8 @@ final class RecallFlowTests: XCTestCase {
         h.repository.handleKeysSuperseded(accountIdB64: accountIdB64)
         XCTAssertEqual(h.recalls.record, record, "the first record is kept: the date it learned does not move")
         XCTAssertEqual(h.recalls.puts, 1)
+        // Alignment item A: "Was it you?" once the reset was judged.
+        _ = await waitUntil { h.repository.recall != nil }
         XCTAssertEqual(h.repository.recall?.learnedAtMs, 500_000)
         let staged = await waitUntil { h.wiped.staged == [self.accountIdB64] }
         XCTAssertTrue(staged)

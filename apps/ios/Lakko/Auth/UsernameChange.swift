@@ -109,18 +109,26 @@ public enum UsernameRename {
     }
 
     /// What the bind carries for the recovery email: nothing when the
-    /// account has none or this device does not hold the address (the email
-    /// is then dropped); else the address, with a vault sealed under the
-    /// new handle only while no phrase is saved.
+    /// account has none or no address is at hand (the email is then
+    /// dropped); else the address, which the server moves to the new name
+    /// with no letter. (The email vault it also carried is gone since
+    /// 2026-11-26.)
     public enum EmailCarry: Equatable {
         case none
-        case addressOnly
-        case addressAndVault
+        case address
     }
 
-    public static func emailCarry(recoveryEmailEnabled: Bool, addressHeld: Bool, phraseSaved: Bool) -> EmailCarry {
-        guard recoveryEmailEnabled, addressHeld else { return .none }
-        return phraseSaved ? .addressOnly : .addressAndVault
+    public static func emailCarry(recoveryEmailEnabled: Bool, addressHeld: Bool) -> EmailCarry {
+        recoveryEmailEnabled && addressHeld ? .address : .none
+    }
+
+    /// UX 19.1c — the recovery email is the account's LAST second way in
+    /// and this device holds no address: the username screen asks for it
+    /// before the change (`protect.username_email`), since a change that
+    /// dropped it would be refused (`409 last-factor`).
+    public static func asksForAddress(factors: AccountFactors?, addressHeld: Bool) -> Bool {
+        guard let factors, factors.email, factors.count == 1 else { return false }
+        return !addressHeld
     }
 
     // MARK: The owed record

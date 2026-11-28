@@ -103,26 +103,22 @@ final class UsernameChangeTests: XCTestCase {
 
     func testWhatTheBindCarriesForTheRecoveryEmail() {
         typealias U = UsernameRename
-        XCTAssertEqual(U.emailCarry(recoveryEmailEnabled: false, addressHeld: true, phraseSaved: false), .none)
-        XCTAssertEqual(U.emailCarry(recoveryEmailEnabled: true, addressHeld: false, phraseSaved: false), .none)
-        // A vault only while no phrase is saved.
-        XCTAssertEqual(
-            U.emailCarry(recoveryEmailEnabled: true, addressHeld: true, phraseSaved: false), .addressAndVault)
-        XCTAssertEqual(U.emailCarry(recoveryEmailEnabled: true, addressHeld: true, phraseSaved: true), .addressOnly)
+        XCTAssertEqual(U.emailCarry(recoveryEmailEnabled: false, addressHeld: true), .none)
+        XCTAssertEqual(U.emailCarry(recoveryEmailEnabled: true, addressHeld: false), .none)
+        // The address alone: no vault travels with it since 2026-11-26.
+        XCTAssertEqual(U.emailCarry(recoveryEmailEnabled: true, addressHeld: true), .address)
 
         // The wire: the grant, the previous handle, the re-key.
         let body = LoginHandleBindRequest(
             handle: "new", freshGrant: "g", previousHandle: "old",
-            recoveryEmail: LoginHandleRecoveryEmail(
-                address: "a@b.example", vaultSalt: Data(repeating: 1, count: 16),
-                sealedEntropy: Data(repeating: 2, count: 44)))
+            recoveryEmail: LoginHandleRecoveryEmail(address: "a@b.example"))
         let json = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(body))) as? [String: Any]
         XCTAssertEqual(json?["fresh_grant"] as? String, "g")
         XCTAssertEqual(json?["previous_handle"] as? String, "old")
         let email = json?["recovery_email"] as? [String: Any]
         XCTAssertEqual(email?["address"] as? String, "a@b.example")
-        XCTAssertNotNil(email?["vault_salt"])
-        XCTAssertNotNil(email?["sealed_entropy"])
+        XCTAssertNil(email?["vault_salt"])
+        XCTAssertNil(email?["sealed_entropy"])
         // A first bind sends the handle alone.
         let first = (try? JSONSerialization.jsonObject(
             with: JSONEncoder().encode(LoginHandleBindRequest(handle: "h")))) as? [String: Any]

@@ -10,17 +10,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -35,13 +32,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import me.lakko.app.auth.AuthClient
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.AuthState
 import me.lakko.app.auth.PhraseRevealGate
@@ -52,7 +47,6 @@ import me.lakko.app.auth.threeWordsSettingsLine
 import me.lakko.app.l10n.UiText
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
-import me.lakko.app.ui.devices.QrTextImageComposable
 import me.lakko.app.R
 import me.lakko.app.ui.components.LkIcon
 import me.lakko.app.ui.components.LkIconSize
@@ -78,6 +72,8 @@ public fun RecoveryScreen(
     modifier: Modifier = Modifier,
     onOpenPasskeys: () -> Unit = {},
     onOpenDevices: () -> Unit = {},
+    /** `Save a recovery phrase` of the 19.1d notice. */
+    onOpenSavePhrase: () -> Unit = {},
 ) {
     val authState by authRepository.state.collectAsStateWithLifecycle()
     val identitySecrets by authRepository.identitySecrets.collectAsStateWithLifecycle()
@@ -155,10 +151,31 @@ public fun RecoveryScreen(
             }
 
             // ADR-0075 / UX 19.1 - the phrase and the three words exist only
-            // for an account whose owner saved the phrase.
+            // for an account whose owner saved the phrase (read from the
+            // account's published protection, else the flag this device kept).
             val protection by authRepository.recoveryEmail.collectAsStateWithLifecycle()
-            val phraseProtected = protection?.phraseSaved
-                ?: remember(account.accountIdB64) { authRepository.phraseProtected() }
+            val factors by authRepository.accountFactors.collectAsStateWithLifecycle()
+            val seals by authRepository.sealView.collectAsStateWithLifecycle()
+            LaunchedEffect(account.accountIdB64) { authRepository.refreshAccountFactors() }
+            val phraseProtected = seals?.phrase != null ||
+                remember(account.accountIdB64, seals) { authRepository.phraseProtected() }
+            // UX 19.1c - the authenticator as the account's only second way
+            // in: said at the top for as long as it stays so; not dismissable.
+            factors?.let { me.lakko.app.auth.totpOnlyWarningKey(it, phraseProtected) }?.let { key ->
+                me.lakko.app.ui.auth.WarningNote(
+                    body = t(key),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+            }
+            // UX 19.1d, place 2 - "Your chats depend on your password", for
+            // as long as the account is kept by the password only.
+            if (me.lakko.app.auth.passwordOnlyNoticeShown(factors?.any == true, seals?.keptBy)) {
+                me.lakko.app.ui.auth.PasswordOnlyNotice(
+                    onSavePhrase = onOpenSavePhrase,
+                    onAddPasskey = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) onOpenPasskeys else null,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+            }
             SectionLabel(t("settings.recovery.group.keys"))
             if (phraseProtected) {
                 RecoveryPhraseRow(
@@ -215,7 +232,7 @@ public fun RecoveryScreen(
                 expanded = authenticatorOpen,
                 onToggle = { authenticatorOpen = !authenticatorOpen },
             ) {
-                TotpEnrollSection(sessionToken = secrets.sessionToken)
+                TotpCard(authRepository = authRepository, enabled = protection?.totp == true)
             }
         }
     }
@@ -557,41 +574,16 @@ private fun ExpandableRow(
     }
 }
 
-// ---- Authenticator (TOTP) enrollment — ADR-0018 factor (c) -------
-
-/** UI state machine for [TotpEnrollSection]. */
-private sealed interface TotpUi {
-    data object Idle : TotpUi
-    data object Starting : TotpUi
-    data class Confirm(
-        val otpauthUri: String,
-        val secretB32: String,
-        val code: String,
-        val busy: Boolean,
-        val error: UiText?,
-    ) : TotpUi
-    data object Done : TotpUi
-    data object AlreadyEnabled : TotpUi
-    data object Unavailable : TotpUi
-    data class Error(val message: UiText) : TotpUi
-}
+// ---- Authenticator app - UX 19.1b ---------------------------------
 
 /**
- * Enroll an authenticator app as an ACCESS-recovery factor:
- * `/totp/enroll/start` renders the `otpauth://` QR (RAW TEXT —
- * authenticator apps parse the URI straight out of the QR) + the
- * manual-entry secret; `/totp/enroll/finish` confirms with a live
- * 6-digit code. Mirror of the web `TotpEnrollView`.
- *
- * There is no server "status" endpoint — the Enable button renders
- * by default and a 409 from either call flips the card to "already
- * enabled" (honest lazy state derivation, same as web).
+ * The authenticator card: "On" for an account that has one, else `Set up`,
+ * which opens the one setup screen (the same as on the sign-up step) above
+ * this one. The screen needs the 17.1 proof and draws its block itself.
  */
 @Composable
-private fun TotpEnrollSection(sessionToken: String) {
-    val scope = rememberCoroutineScope()
-    var ui: TotpUi by remember { mutableStateOf(TotpUi.Idle) }
-
+private fun TotpCard(authRepository: AuthRepository, enabled: Boolean) {
+    var setupOpen by remember { mutableStateOf(false) }
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -601,141 +593,32 @@ private fun TotpEnrollSection(sessionToken: String) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-
-        when (val s = ui) {
-            TotpUi.Idle -> Button(
-                onClick = {
-                    ui = TotpUi.Starting
-                    scope.launch {
-                        ui = try {
-                            val res = AuthClient().use { client ->
-                                client.totpEnrollStart(sessionToken)
-                            }
-                            TotpUi.Confirm(
-                                otpauthUri = res.otpauthUri,
-                                secretB32 = res.secretB32,
-                                code = "",
-                                busy = false,
-                                error = null,
-                            )
-                        } catch (err: me.lakko.app.auth.AuthHttpError) {
-                            when (err.status) {
-                                409 -> TotpUi.AlreadyEnabled
-                                503 -> TotpUi.Unavailable
-                                else -> TotpUi.Error(enrollFailure(err, TOTP_GENERIC))
-                            }
-                        } catch (err: Throwable) {
-                            me.lakko.app.rethrowIfCancelled(err)
-                            TotpUi.Error(enrollFailure(err, TOTP_GENERIC))
-                        }
-                    }
-                },
-            ) { Text(t("settings.recovery.totp.set_up")) }
-
-            TotpUi.Starting -> CircularProgressIndicator()
-
-            is TotpUi.Confirm -> {
-                Text(
-                    t("settings.recovery.totp.scan"),
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                QrTextImageComposable(text = s.otpauthUri)
-                Text(
-                    t("settings.recovery.totp.key", mapOf("key" to s.secretB32)),
-                    style = MaterialTheme.typography.bodySmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                OutlinedTextField(
-                    value = s.code,
-                    onValueChange = { v -> ui = s.copy(code = v, error = null) },
-                    label = { Text(t("recovery.totp.code_label")) },
-                    singleLine = true,
-                    enabled = !s.busy,
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Number,
-                        imeAction = ImeAction.Done,
-                    ),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                if (s.error != null) {
-                    Text(
-                        s.error.text(),
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                Button(
-                    onClick = {
-                        val normalized = me.lakko.app.auth.normalizeTotpCode(s.code)
-                        if (normalized == null) {
-                            ui = s.copy(
-                                error = UiText("recovery.totp.error.enter_code"),
-                            )
-                            return@Button
-                        }
-                        ui = s.copy(busy = true, error = null)
-                        scope.launch {
-                            ui = try {
-                                AuthClient().use { client ->
-                                    client.totpEnrollFinish(sessionToken, normalized)
-                                }
-                                TotpUi.Done
-                            } catch (err: me.lakko.app.auth.AuthHttpError) {
-                                when (err.status) {
-                                    429 -> s.copy(
-                                        busy = false,
-                                        error = enrollFailure(err, TOTP_GENERIC),
-                                    )
-                                    401 -> s.copy(
-                                        busy = false,
-                                        error = UiText("settings.recovery.totp.error.wrong"),
-                                    )
-                                    409 -> TotpUi.AlreadyEnabled
-                                    else -> TotpUi.Error(enrollFailure(err, TOTP_GENERIC))
-                                }
-                            } catch (err: Throwable) {
-                                me.lakko.app.rethrowIfCancelled(err)
-                                TotpUi.Error(enrollFailure(err, TOTP_GENERIC))
-                            }
-                        }
-                    },
-                    enabled = !s.busy,
-                ) { Text(if (s.busy) t("common.confirming") else t("common.confirm")) }
-            }
-
-            TotpUi.Done -> Text(
-                t("settings.recovery.totp.done"),
-                color = MaterialTheme.colorScheme.primary,
+        if (enabled) {
+            Text(
+                t("settings.recovery.totp.on"),
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
             )
-
-            TotpUi.AlreadyEnabled -> Text(
-                t("settings.recovery.totp.already_enabled"),
-                style = MaterialTheme.typography.bodyMedium,
-            )
-
-            TotpUi.Unavailable -> Text(
-                t("settings.recovery.totp.unavailable"),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.error,
-            )
-
-            is TotpUi.Error -> Column(
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text(
-                    s.message.text(),
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodySmall,
+        } else {
+            Button(onClick = { setupOpen = true }) { Text(t("settings.recovery.totp.set_up")) }
+        }
+    }
+    if (setupOpen) {
+        androidx.compose.ui.window.Dialog(
+            onDismissRequest = { setupOpen = false },
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            androidx.compose.material3.Surface(modifier = Modifier.fillMaxSize()) {
+                me.lakko.app.ui.auth.AuthenticatorSetupScreen(
+                    repository = authRepository,
+                    onDone = { setupOpen = false },
+                    onBack = { setupOpen = false },
+                    showDoneLine = true,
                 )
-                Button(onClick = { ui = TotpUi.Idle }) { Text(t("common.try_again")) }
             }
         }
     }
 }
-
-private val TOTP_GENERIC = UiText("settings.recovery.totp.error.generic")
 
 /**
  * What an enrolment failure reads as (ADR-0061: from its kind, never from

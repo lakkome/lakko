@@ -806,6 +806,10 @@ public final class DiscoveryClient {
     /// ADR-0074 section 3.7: `conversationLink`, when non-`nil`, is the RAW
     /// 201-byte link a rotation mints. A key change that carries none clears
     /// the stored one.
+    ///
+    /// ADR-0101 section 10: `resetSeals` is the RAW seal announcement (the
+    /// stored one is kept when `nil`), `resetSeal` the RAW 214-byte reset
+    /// seal on the attested upload of a reset.
     public func uploadIdentityBundle(
         accountId: Data,
         signaturePubkey: Data,
@@ -815,7 +819,9 @@ public final class DiscoveryClient {
         leafAuth: Data? = nil,
         genesisAttest: Data? = nil,
         keyResetAttest: Data? = nil,
-        conversationLink: Data? = nil
+        conversationLink: Data? = nil,
+        resetSeals: Data? = nil,
+        resetSeal: Data? = nil
     ) async throws {
         guard accountId.count == Self.accountIdLength else {
             throw DiscoveryClientError.argument(
@@ -843,7 +849,9 @@ public final class DiscoveryClient {
                 leafAuth: leafAuth.map { base64Encode($0) },
                 genesisAttest: genesisAttest.map { base64Encode($0) },
                 keyResetAttest: keyResetAttest.map { base64Encode($0) },
-                conversationLink: conversationLink.map { base64Encode($0) }
+                conversationLink: conversationLink.map { base64Encode($0) },
+                resetSeals: resetSeals.map { base64Encode($0) },
+                resetSeal: resetSeal.map { base64Encode($0) }
             )
         )
         guard resp.ok else {

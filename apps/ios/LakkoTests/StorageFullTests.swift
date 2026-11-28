@@ -90,7 +90,7 @@ final class StorageFullTests: XCTestCase {
         let count = Count()
         let ports = ProfileSavePorts(
             upload: { _ in throw AttachmentBridgeError.storageFull },
-            rename: { $0 },
+            rename: { name, _ in name },
             publish: { _, _ in count.published += 1 })
         let m = ProfileEditModel(saved: ProfileSaved(name: "Alice", username: "alice"), ports: ports)
         m.usePhoto(PendingAvatarMedia(stillJPEG: Data(repeating: 1, count: 10), stillSide: 640))

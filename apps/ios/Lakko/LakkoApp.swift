@@ -424,7 +424,20 @@ struct LakkoApp: App {
             accountProtection.landed(accountIdB64: accountIdB64)
         }
         auth.onProtectionChanged = {
-            Task { await accountProtection.refresh() }
+            Task {
+                await accountProtection.refresh()
+                // ...and the account's published protection with it.
+                await accountProtection.readSeals(.landing)
+            }
+        }
+        // ADR-0101 section 10 — a passkey gave its own secret (it keeps the
+        // chats), or was deleted: the account's protection is published
+        // again, and the passkey's owned-channels lock follows.
+        PasskeySeals.onSealed = { credentialId, prfOutput in
+            accountProtection.passkeyAdded(credentialId: credentialId, prfOutput: prfOutput)
+        }
+        PasskeySeals.onRemoved = { credentialId, remaining in
+            accountProtection.passkeyRemoved(credentialId: credentialId, remaining: remaining)
         }
         // G-56 — the chat layer refused to bind a device whose account's
         // earlier keys have not reached it: the session parks.
@@ -950,6 +963,12 @@ struct AppRoot: View, Equatable {
     /// ADR-0075 D2 — a sign-up just landed: "Protect your account" comes
     /// before the app. The phrase is not shown at sign-up.
     @State private var pendingSignupProtect = false
+    /// Mirror of ``AccountProtectionCenter/factorStepRequired`` (UX 19.1c):
+    /// received rather than observed, as ``deviceRemoved`` is.
+    @State private var factorStepRequired = false
+    /// Mirror of ``AccountProtectionCenter/landingSettled`` (alignment item
+    /// G): the account whose factor read answered, or whose wait ran out.
+    @State private var landingSettled: String?
 
     /// The choice made on the signed-out invite page (UX contact-invite-link
     /// section 3, "Signed out"): the sign-in or sign-up screen it opened.
@@ -1004,6 +1023,12 @@ struct AppRoot: View, Equatable {
             // minutes; a normal pair ends suspended mode silently.
             .task(id: suspension.account) {
                 await suspension.runChecks()
+            }
+            .onReceive(services.accountProtection.$factorStepRequired.removeDuplicates()) { required in
+                if factorStepRequired != required { factorStepRequired = required }
+            }
+            .onReceive(services.accountProtection.$landingSettled.removeDuplicates()) { settled in
+                if landingSettled != settled { landingSettled = settled }
             }
             .onReceive(services.deviceGroupSync.$deviceRemoved.removeDuplicates()) { removed in
                 if deviceRemoved != removed { deviceRemoved = removed }
@@ -1200,22 +1225,39 @@ struct AppRoot: View, Equatable {
                 CallKitCallRegistry.shared.reset()
             }
 
-        case .session(let account) where pendingSignupProtect || authRepository.protectStepOwed:
-            // The step after sign-up (UX 19.1a), and after a guest account was
-            // kept (`docs/ux/call-links.md` section 9): the session is live,
-            // and "Protect your account" comes before the app. Nothing else
-            // of the session mounts until the person is through it. The
-            // recovery phrase is not shown on either route (ADR-0075 D2).
+        case .session(let account)
+            where pendingSignupProtect || authRepository.protectStepOwed || factorStepRequired:
+            // The step after sign-up (UX 19.1a), after a guest account was
+            // kept (`docs/ux/call-links.md` section 9), and at any landing of
+            // an account with a username and no second way in (UX 19.1c):
+            // the session is live, and "Protect your account" comes before
+            // the app. Nothing else of the session mounts until the person
+            // is through it; `Continue` is the only way off it.
             SignupProtectScreen(
                 authRepository: authRepository,
                 center: services.accountProtection,
-                rotation: services.keyRotation,
+                required: factorStepRequired && !pendingSignupProtect && !authRepository.protectStepOwed,
                 onDone: {
                     pendingSignupProtect = false
                     authRepository.dismissProtectStep()
+                    services.accountProtection.factorStepDone()
                 }
             )
             .id(account.accountIdB64)
+
+        case .session(let account)
+            where !authRepository.isGuest && !account.username.isEmpty
+                && landingSettled != account.accountIdB64:
+            // Alignment item G (UX 19.1c) — the app is not shown before the
+            // account's factor read answered, so an account that needs
+            // "Protect your account" never sees the app for a moment first.
+            // At most `landingWaitNanos`; then the app shows.
+            Color.lakkoBackground
+                .ignoresSafeArea()
+                .task(id: account.accountIdB64) {
+                    try? await Task.sleep(nanoseconds: AccountProtectionCenter.landingWaitNanos)
+                    services.accountProtection.settleLanding(accountIdB64: account.accountIdB64)
+                }
 
         case .session where deviceRemoved:
             // UX 18.2 — another device removed this one. `content` shows the
@@ -1417,6 +1459,8 @@ enum TabRoute: Hashable {
     case recoveryEmail(remove: Bool)
     /// Settings > Account > Save a recovery phrase.
     case savePhrase
+    /// Settings > Security > Recovery > Authenticator app (UX 19.1b).
+    case authenticator
     /// `It was not me` on an account notice.
     case secureAccount
     /// Settings > Security > Password: choose a new password from a device
@@ -1870,6 +1914,8 @@ private struct SessionRoot: View, Equatable {
     @State private var contactsPath: [TabRoute] = []
     @State private var callsPath: [TabRoute] = []
     @State private var settingsPath: [TabRoute] = []
+    /// Mirror of ``AccountProtectionCenter/passwordOnlyDialogDue``.
+    @State private var passwordOnlyDialog = false
 
     init(account: SessionAccount, services: AppServices) {
         self.account = account
@@ -2057,6 +2103,32 @@ private struct SessionRoot: View, Equatable {
             services.accountProtection.savePhraseRequested = false
             selectedTab = .settings
             setSettingsPath([.savePhrase])
+        }
+        // UX 19.1d place 3 — once after a sign-in on this device, the first
+        // time the app opens: the chats depend on the password. `Not now`
+        // (or either action) closes it for good here.
+        .onReceive(services.accountProtection.$passwordOnlyDialogDue.removeDuplicates()) { due in
+            if passwordOnlyDialog != due { passwordOnlyDialog = due }
+        }
+        .lakkoDialog(
+            isPresented: Binding(
+                get: { passwordOnlyDialog },
+                set: { shown in
+                    if !shown, passwordOnlyDialog { services.accountProtection.closePasswordOnlyDialog() }
+                }),
+            title: Localization.text(PasswordOnlyNotice.titleKey),
+            message: Localization.text(PasswordOnlyNotice.bodyKey)
+        ) {
+            [
+                .primary(Localization.text(PasswordOnlyNotice.savePhraseKey)) {
+                    services.accountProtection.closePasswordOnlyDialog()
+                    selectedTab = .settings
+                    setSettingsPath([.savePhrase])
+                },
+                .cancel(Localization.text("common.not_now")) {
+                    services.accountProtection.closePasswordOnlyDialog()
+                },
+            ]
         }
         .onReceive(NewDeviceNoticeCenter.shared.$openDevicesRequested) { requested in
             guard requested else { return }
@@ -2432,7 +2504,6 @@ private struct SessionRoot: View, Equatable {
             push(.channel(channelId: channel.channelIdHex), on: tab)
             return
         }
-        channelsState.noteInviter(channel)
         switch channel.access {
         case .public(let readKey):
             FoundChannelReadKeys.put(channel.channelIdHex, readKey)
@@ -2790,6 +2861,7 @@ private struct SessionRoot: View, Equatable {
         case .recoveryFactors:
             RecoverySettingsScreen(
                 authRepository: authRepository,
+                center: services.accountProtection,
                 onOpen: { push($0, on: tab) }
             )
         case .protectAccount:
@@ -2797,9 +2869,17 @@ private struct SessionRoot: View, Equatable {
                 center: services.accountProtection,
                 hasUsername: !account.username.isEmpty,
                 onAddEmail: { push(.recoveryEmail(remove: false), on: tab) },
+                onAddAuthenticator: { push(.authenticator, on: tab) },
                 onAddPasskey: { push(.passkeys, on: tab) },
                 onSavePhrase: { push(.savePhrase, on: tab) }
             )
+        case .authenticator:
+            // UX 19.1b — the same screen the sign-up step shows.
+            AuthenticatorSetupScreen(
+                authRepository: authRepository, atSignUp: false,
+                onSetUp: { services.accountProtection.authenticatorAdded() },
+                onClose: { pop(.authenticator, from: tab) })
+            .navigationBarBackButtonHidden(true)
         case .recoveryEmail(let remove):
             RecoveryEmailScreen(
                 authRepository: authRepository,
@@ -2811,7 +2891,6 @@ private struct SessionRoot: View, Equatable {
             SavePhraseScreen(
                 authRepository: authRepository,
                 center: services.accountProtection,
-                rotation: services.keyRotation,
                 onDone: { pop(.savePhrase, from: tab) }
             )
         case .secureAccount:
@@ -2924,7 +3003,6 @@ private struct SessionRoot: View, Equatable {
                         replaceTop(route, with: .channel(channelId: channel.channelIdHex), in: tab)
                         return
                     }
-                    channelsState.noteInviter(channel)
                     switch channel.access {
                     case .public(let readKey):
                         FoundChannelReadKeys.put(channel.channelIdHex, readKey)

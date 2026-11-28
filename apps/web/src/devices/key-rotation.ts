@@ -90,15 +90,8 @@ export const MAX_REVOKE_DEVICE_IDS = 8;
 /** The owed record. Public material only. */
 export interface RotationOwed {
   readonly v: 1;
-  /** The removed device's id (URL-safe base64, 43 chars). Empty for a
-   *  rotation that removes no device ({@link RotationOwed.purpose}). */
+  /** The removed device's id (URL-safe base64, 43 chars). */
   readonly deviceIdB64: string;
-  /** ADR-0075 section 3: "Save a recovery phrase". The same operation with
-   *  no device to remove (the `remove` step is done from the start), and
-   *  `phrase_saved: true` on the commit, which makes the account
-   *  phrase-protected and deletes its email vault. Absent for the rotation
-   *  that follows a removal. */
-  readonly purpose?: "save-phrase";
   readonly startedAtMs: number;
   /** Steps that have their answer. */
   readonly done: readonly RotationStep[];
@@ -127,16 +120,6 @@ export interface RotationOwed {
 
 export function newRotation(deviceIdB64: string, nowMs: number): RotationOwed {
   return { v: 1, deviceIdB64, startedAtMs: nowMs, done: [] };
-}
-
-/** The record of "Save a recovery phrase": no device is removed. */
-export function newSavePhraseRotation(nowMs: number): RotationOwed {
-  return { v: 1, deviceIdB64: "", purpose: "save-phrase", startedAtMs: nowMs, done: ["remove"] };
-}
-
-/** Whether the rotation is the one "Save a recovery phrase" runs. */
-export function rotationSavesPhrase(record: RotationOwed): boolean {
-  return record.purpose === "save-phrase";
 }
 
 /** The device ids that ride the commit: the removed device, or none. */
@@ -774,12 +757,10 @@ export function readRotation(storage: MarkerStorage | undefined, accountIdB64: s
     if (
       r.v !== 1 ||
       typeof r.deviceIdB64 !== "string" ||
-      (r.purpose !== undefined && r.purpose !== "save-phrase") ||
-      // A device id, or none for the rotation that saves a phrase (whose
-      // `remove` step is done from the start).
-      !(r.purpose === "save-phrase"
-        ? r.deviceIdB64 === "" && Array.isArray(r.done) && r.done.includes("remove")
-        : /^[A-Za-z0-9_-]{43}$/.test(r.deviceIdB64)) ||
+      // A record of the removed "save a phrase" rotation (it carried a
+      // `purpose` and no device id) cannot drive anything any more.
+      (r as { purpose?: unknown }).purpose !== undefined ||
+      !/^[A-Za-z0-9_-]{43}$/.test(r.deviceIdB64) ||
       typeof r.startedAtMs !== "number" ||
       !Array.isArray(r.done) ||
       !r.done.every(isStep) ||

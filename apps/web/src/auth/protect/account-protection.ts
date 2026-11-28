@@ -2,13 +2,19 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * How an account is protected against a forgotten password or a lost device
- * (ADR-0075 section 1, `docs/ux/identity-recovery.md` 19.1), decided from
- * the three facts `GET /recovery-email` reports, and what Settings > Account
- * shows for it. Pure; the stores at the end hold three per-device facts in
- * plain storage (none of them a secret, none of them the address).
+ * What `GET /recovery-email` reports about the signed-in account and what
+ * Settings > Account shows for it (ADR-0075 as amended 2026-11-26,
+ * `docs/ux/identity-recovery.md` 19.1 and 19.1c). Pure; the stores at the end
+ * hold two per-device facts in plain storage (neither a secret, neither the
+ * address).
+ *
+ * There is one kind of account since the email vault was removed: a mailed
+ * code gives a new password and confirms a key reset, never the keys.
+ * Whether a recovery phrase is saved is no server flag any more: it is what
+ * the account's published protection lists (`seal/own-seals.ts`).
  */
 import type { MarkerStorage } from "../phrase-gate";
+import type { ChatsKeptBy } from "../seal/own-seals";
 
 /** What `GET /recovery-email` says about the session's account. */
 export interface RecoveryEmailStatus {
@@ -16,48 +22,27 @@ export interface RecoveryEmailStatus {
   readonly available: boolean;
   /** The account has a recovery email. Never the address. */
   readonly enabled: boolean;
-  /** The account has an email vault: a mailed code brings its keys back. */
-  readonly vault: boolean;
-  /** The owner saved a recovery phrase. */
-  readonly phraseSaved: boolean;
-  /** The account has an authenticator: its code is asked for as well as the
-   *  mailed one. `false` when the server did not say. */
+  /** The account has a confirmed authenticator: its code is asked for as
+   *  well as the mailed one, and it is one of the account's second ways in.
+   *  `false` when the server did not say. */
   readonly totp: boolean;
 }
 
-/** The three kinds of account of ADR-0075 section 1. */
-export type AccountProtection = "email" | "phrase" | "none";
-
 /**
- * The account's mode. A saved phrase wins: from then on the mailed code
- * changes the password only. Without one, the email protects the account
- * only while its vault exists: after a key reset or a recall the server
- * drops the vault, and the account is unprotected until the email is added
- * again (which seals the new phrase).
+ * The catalog key of the Settings > Account status line (UX 19.1c): what
+ * keeps the account's chats through a key reset. `null` while that is not
+ * known: no line is drawn rather than a wrong one.
  */
-export function accountProtection(
-  enabled: boolean,
-  vault: boolean,
-  phraseSaved: boolean,
-): AccountProtection {
-  if (phraseSaved) return "phrase";
-  return enabled && vault ? "email" : "none";
-}
-
-/** The mode of a status answer. */
-export function protectionOf(status: RecoveryEmailStatus): AccountProtection {
-  return accountProtection(status.enabled, status.vault, status.phraseSaved);
-}
-
-/** The catalog key of the Settings > Account status line. */
-export function protectionStatusKey(mode: AccountProtection): string {
-  switch (mode) {
-    case "email":
-      return "protect.status.email";
+export function chatsKeptStatusKey(keptBy: ChatsKeptBy | null): string | null {
+  switch (keptBy) {
     case "phrase":
       return "protect.status.phrase";
-    case "none":
-      return "protect.status.none";
+    case "passkey":
+      return "protect.status.passkey_seal";
+    case "password":
+      return "protect.status.password_only";
+    case null:
+      return null;
   }
 }
 
@@ -65,29 +50,16 @@ export function protectionStatusKey(mode: AccountProtection): string {
 export function parseRecoveryEmailStatus(body: unknown): RecoveryEmailStatus | null {
   if (typeof body !== "object" || body === null) return null;
   const b = body as Record<string, unknown>;
-  if (
-    typeof b["available"] !== "boolean" ||
-    typeof b["enabled"] !== "boolean" ||
-    typeof b["vault"] !== "boolean" ||
-    typeof b["phrase_saved"] !== "boolean"
-  ) {
-    return null;
-  }
-  return {
-    available: b["available"],
-    enabled: b["enabled"],
-    vault: b["vault"],
-    phraseSaved: b["phrase_saved"],
-    totp: b["totp"] === true,
-  };
+  if (typeof b["available"] !== "boolean" || typeof b["enabled"] !== "boolean") return null;
+  return { available: b["available"], enabled: b["enabled"], totp: b["totp"] === true };
 }
 
 // ---------------------------------------------------------------------------
-// Settings > Account: the two rows and the banner
+// Settings > Account: the two rows
 // ---------------------------------------------------------------------------
 
 /** What the `Recovery email` row offers. */
-export type EmailRowAction = "add" | "addAgain" | "replace" | "remove" | "choose-username";
+export type EmailRowAction = "add" | "replace" | "remove" | "choose-username";
 
 export interface ProtectionRows {
   /** The `Recovery email` row. Absent when mail is not set up on this
@@ -96,67 +68,32 @@ export interface ProtectionRows {
     readonly on: boolean;
     readonly actions: readonly EmailRowAction[];
   } | null;
-  /** The `Recovery phrase` row: `show` for a phrase-protected account,
-   *  `save` for every other one. */
+  /** The `Recovery phrase` row: `show` once the phrase was saved, `save`
+   *  for every other account. */
   readonly phrase: "show" | "save";
 }
 
 /**
  * The rows for a status. `hasUsername` is `false` for a guest account, which
  * must choose a username before it can add an email (the stored value is
- * made from the username).
+ * made from the username). `phraseSaved` is what the account's published
+ * protection lists.
  */
 export function protectionRows(
   status: RecoveryEmailStatus,
   hasUsername: boolean,
-  addressHeld = false,
+  phraseSaved: boolean,
 ): ProtectionRows {
-  const phrase = status.phraseSaved ? "show" : "save";
+  const phrase = phraseSaved ? "show" : "save";
   if (!status.available && !status.enabled) return { email: null, phrase };
   if (!hasUsername) return { email: { on: false, actions: ["choose-username"] }, phrase };
   if (!status.enabled) {
     return { email: { on: false, actions: status.available ? ["add"] : [] }, phrase };
   }
   const actions: EmailRowAction[] = [];
-  if (status.available) {
-    // The email is on but its vault is gone (a key reset or a rotation, with
-    // no phrase saved) and this device does not hold the address: adding it
-    // again seals the new phrase. A device that holds the address puts the
-    // vault back by itself (`reseal.ts`) and offers Replace as usual.
-    if (emailNeedsAddingAgain(status, addressHeld)) actions.push("addAgain");
-    else actions.push("replace");
-  }
+  if (status.available) actions.push("replace");
   actions.push("remove");
   return { email: { on: true, actions }, phrase };
-}
-
-/** The banner returns this long after it was dismissed (UX 19.1a). */
-export const PROTECT_BANNER_RETURN_MS = 30 * 24 * 60 * 60 * 1000;
-
-/**
- * Whether "This account has no way back in." is shown: an unprotected
- * account that has no passkey, never dismissed or dismissed at least 30 days
- * ago. A passkey is a way back in, so an account with at least one is never
- * shown it (nor its 30-day return). `hasPasskey` is `null` while the passkey
- * list is not known, which keeps the banner away rather than flashing it. A
- * clock that went backwards keeps it hidden.
- */
-export function protectBannerShown(
-  mode: AccountProtection,
-  dismissedAtMs: number | null,
-  nowMs: number,
-  hasPasskey: boolean | null,
-  /** The email is on, its vault is missing, and this device holds the
-   *  address: it is putting the vault back by itself (`reseal.ts`), or
-   *  waiting to. The account is about to be protected again, so the banner
-   *  is not shown. */
-  resealPending = false,
-): boolean {
-  if (mode !== "none") return false;
-  if (resealPending) return false;
-  if (hasPasskey !== false) return false;
-  if (dismissedAtMs === null) return true;
-  return nowMs - dismissedAtMs >= PROTECT_BANNER_RETURN_MS;
 }
 
 /**
@@ -174,18 +111,13 @@ export function threeWordsShown(phraseProtectedOnDevice: boolean): boolean {
  * this device (a rotation that removed a device, a key reset, a recall):
  * only to a phrase-protected account. The owner of any other account was
  * never shown words, so none are shown now: the change completes silently as
- * far as the phrase goes, and the account reads "Not protected" until the
- * email is added again. A guest account (no username) is never shown any.
+ * far as the phrase goes. "Phrase-protected" is what the account's published
+ * protection listed BEFORE the change (the per-device flag, which is not
+ * cleared while new words are owed). A guest account (no username) is never
+ * shown any.
  */
 export function newWordsShown(phraseProtectedOnDevice: boolean, hasUsername: boolean): boolean {
   return phraseProtectedOnDevice && hasUsername;
-}
-
-/** The email is on but its vault is gone, no phrase is saved, and this
- *  device does not hold the address: the row and the banner ask for it
- *  again. A device that holds it re-seals the vault by itself. */
-export function emailNeedsAddingAgain(status: RecoveryEmailStatus, addressHeld = false): boolean {
-  return status.enabled && !status.vault && !status.phraseSaved && !addressHeld;
 }
 
 /**
@@ -194,21 +126,7 @@ export function emailNeedsAddingAgain(status: RecoveryEmailStatus, addressHeld =
  * holds; replacing starts empty, since a new address is being typed.
  */
 export function emailFormPrefill(action: EmailRowAction, heldAddress: string | null): string {
-  return action === "add" || action === "addAgain" ? (heldAddress ?? "") : "";
-}
-
-/** The banner's two lines: the add-again state, or the ordinary one (which
- *  has no second line). */
-export function protectBannerKeys(
-  status: RecoveryEmailStatus,
-  addressHeld = false,
-): {
-  readonly titleKey: string;
-  readonly bodyKey: string | null;
-} {
-  return emailNeedsAddingAgain(status, addressHeld)
-    ? { titleKey: "recovery_email.add_again.title", bodyKey: "recovery_email.add_again.body" }
-    : { titleKey: "protect.banner.none", bodyKey: null };
+  return action === "add" ? (heldAddress ?? "") : "";
 }
 
 /** Whether `Show phrase` exists in Settings: a phrase-protected account
@@ -225,17 +143,14 @@ function flagKey(accountIdB64: string): string {
   return `lakko:phrase-protected:${accountIdB64}`;
 }
 
-function bannerKey(accountIdB64: string): string {
-  return `lakko:protect-banner-dismissed:${accountIdB64}`;
-}
-
 function stepKey(accountIdB64: string): string {
   return `lakko:protect-step-owed:${accountIdB64}`;
 }
 
-/** Record whether the account is phrase-protected, as this device last
- *  learned it (the phrase was saved here, or `GET /recovery-email` said so
- *  at a landing). */
+/** Record whether the account's recovery phrase is saved, as this device
+ *  last learned it: the phrase was saved here, or the account's published
+ *  protection said so at a landing (`protection-state.ts`). Kept in plain
+ *  storage so the three-word surfaces work while signed out. */
 export function setPhraseProtected(
   storage: MarkerStorage | undefined,
   accountIdB64: string,
@@ -254,26 +169,6 @@ export function isPhraseProtected(storage: MarkerStorage | undefined, accountIdB
     return storage?.getItem(flagKey(accountIdB64)) === "1";
   } catch {
     return false;
-  }
-}
-
-/** When the no-protection banner was dismissed, unix ms, or `null`. */
-export function bannerDismissedAt(storage: MarkerStorage | undefined, accountIdB64: string): number | null {
-  try {
-    const raw = storage?.getItem(bannerKey(accountIdB64)) ?? null;
-    if (raw === null) return null;
-    const ms = Number(raw);
-    return Number.isFinite(ms) ? ms : null;
-  } catch {
-    return null;
-  }
-}
-
-export function dismissBanner(storage: MarkerStorage | undefined, accountIdB64: string, nowMs: number): void {
-  try {
-    storage?.setItem(bannerKey(accountIdB64), String(nowMs));
-  } catch {
-    // Storage blocked: the banner is back after a reload.
   }
 }
 
@@ -303,12 +198,60 @@ export function clearProtectStepOwed(storage: MarkerStorage | undefined, account
   }
 }
 
+function sealsLookedKey(accountIdB64: string): string {
+  return `lakko:protection-looked:${accountIdB64}`;
+}
+
+/** This device read the account's published protection at least once
+ *  (`notices.ts`, `phraseSavedElsewhere`: a device that never looked is
+ *  new and is told nothing about a phrase saved before it existed). */
+export function markProtectionLooked(storage: MarkerStorage | undefined, accountIdB64: string): void {
+  try {
+    storage?.setItem(sealsLookedKey(accountIdB64), "1");
+  } catch {
+    // Storage blocked: the device stays "new" and is told nothing.
+  }
+}
+
+export function protectionLookedBefore(storage: MarkerStorage | undefined, accountIdB64: string): boolean {
+  try {
+    return storage?.getItem(sealsLookedKey(accountIdB64)) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function passwordOnlyDialogKey(accountIdB64: string): string {
+  return `lakko:password-only-dialog-seen:${accountIdB64}`;
+}
+
+/** The "Your chats depend on your password" dialog (UX 19.1d, place 3) was
+ *  shown on this device, or is not to be shown (the sign-up step or a key
+ *  reset on this device already said it): it never opens here again. */
+export function markPasswordOnlyDialogSeen(storage: MarkerStorage | undefined, accountIdB64: string): void {
+  try {
+    storage?.setItem(passwordOnlyDialogKey(accountIdB64), "1");
+  } catch {
+    // Storage blocked: the dialog may be shown once more after a reload.
+  }
+}
+
+export function passwordOnlyDialogSeen(storage: MarkerStorage | undefined, accountIdB64: string): boolean {
+  try {
+    return storage?.getItem(passwordOnlyDialogKey(accountIdB64)) === "1";
+  } catch {
+    // Storage blocked: never nag on every load.
+    return true;
+  }
+}
+
 /** Forget every per-device fact of the account (sign-out wipe). */
 export function clearProtectionFacts(storage: MarkerStorage | undefined, accountIdB64: string): void {
   try {
     storage?.removeItem(flagKey(accountIdB64));
-    storage?.removeItem(bannerKey(accountIdB64));
     storage?.removeItem(stepKey(accountIdB64));
+    storage?.removeItem(passwordOnlyDialogKey(accountIdB64));
+    storage?.removeItem(sealsLookedKey(accountIdB64));
   } catch {
     // Storage blocked: nothing was recorded either.
   }

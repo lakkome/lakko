@@ -274,7 +274,7 @@
       "status": "machine"
     },
     "auth.signup.passkey.error": {
-      "text": "تعذّرت إضافة مفتاح المرور. حاول مجددًا، أو اختر «ليس الآن».",
+      "text": "تعذّرت إضافة مفتاح المرور. حاول مجددًا، أو اختر طريقة أخرى.",
       "status": "machine"
     },
     "auth.signup.passkey.lede": {
@@ -4889,6 +4889,14 @@
       "text": "اطلب مرة أخرى",
       "status": "machine"
     },
+    "contacts.started_over.closed": {
+      "text": "أصبح لدى {name} حساب جديد بعد البدء من جديد. لم تعد الرسائل هنا تُسلَّم.",
+      "status": "machine"
+    },
+    "contacts.started_over.request_note": {
+      "text": "تعذّر على Lakko التأكد من أن هذا هو الشخص نفسه كما في السابق. اقبل فقط إذا كنت متأكدًا من أنه الشخص نفسه.",
+      "status": "machine"
+    },
     "desktop.capture.body": {
       "text": "اسمح به في إعدادات الخصوصية في نظامك، ثم حاول مرة أخرى.",
       "status": "machine"
@@ -7657,14 +7665,6 @@
       "text": "استُبدل بريد الاسترداد الخاص بك.",
       "status": "machine"
     },
-    "notice.opened_by_email.body": {
-      "text": "{date}، على جهاز آخر.",
-      "status": "machine"
-    },
-    "notice.opened_by_email.title": {
-      "text": "فُتح حسابك باستخدام بريد الاسترداد",
-      "status": "machine"
-    },
     "notice.password_by_email.body": {
       "text": "استخدم شخص ما بريد الاسترداد الخاص بك لاختيار كلمة مرور جديدة في {date}.",
       "status": "machine"
@@ -7675,10 +7675,6 @@
     },
     "notice.phrase_saved": {
       "text": "حُفظت عبارة استرداد لحسابك.",
-      "status": "machine"
-    },
-    "notice.secure.new_keys": {
-      "text": "يمنح هذا حسابك مفاتيح جديدة، فيفقد من فتحه الوصول إليه.",
       "status": "machine"
     },
     "notice.secure.password_saved": {
@@ -7854,11 +7850,75 @@
       "status": "machine"
     },
     "proof.reset.cannot.title": {
-      "text": "لا يمكن إعادة تعيين مفاتيح الحساب من دون كلمة مرورك أو مفتاح مرور",
+      "text": "لا يمكن إعادة تعيين مفاتيح الحساب من دون كلمة مرورك",
       "status": "machine"
     },
     "proof.reset.cannot.what_you_can_do": {
       "text": "ما يمكنك فعله:",
+      "status": "machine"
+    },
+    "proof.reset.factor.heading": {
+      "text": "أكِّد أنك أنت",
+      "status": "machine"
+    },
+    "proof.reset.factor.title": {
+      "text": "ثم أكِّد بإحدى هذه الطرق:",
+      "status": "machine"
+    },
+    "proof.reset.factor.title_no_password": {
+      "text": "أكِّد بإحدى هذه الطرق:",
+      "status": "machine"
+    },
+    "proof.reset.factor.totp": {
+      "text": "تطبيق المصادقة",
+      "status": "machine"
+    },
+    "proof.reset.factor.email": {
+      "text": "رمز عبر البريد الإلكتروني",
+      "status": "machine"
+    },
+    "proof.reset.factor.passkey": {
+      "text": "مفتاح مرور",
+      "status": "machine"
+    },
+    "proof.reset.factor.none": {
+      "text": "لا أستطيع استخدام أيٍّ منها",
+      "status": "machine"
+    },
+    "proof.reset.factor.totp.prompt": {
+      "text": "أدخل الرمز المكوّن من 6 أرقام من تطبيق المصادقة.",
+      "status": "machine"
+    },
+    "proof.reset.factor.email.sent": {
+      "text": "إذا كان هذا بريد الاسترداد لـ {username}، فهناك رمز في طريقه إليك. يصلح لمدة 10 دقائق.",
+      "status": "machine"
+    },
+    "proof.reset.factor.passkey.use": {
+      "text": "استخدام مفتاح المرور",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.totp": {
+      "text": "تم التأكيد بتطبيق المصادقة.",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.email": {
+      "text": "تم التأكيد برمز عبر البريد الإلكتروني.",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.passkey": {
+      "text": "تم التأكيد بمفتاح مرور.",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.title": {
+      "text": "لا يمكن إعادة تعيين مفاتيح الحساب",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.body": {
+      "text": "تتطلب إعادة التعيين كلمة مرورك وطريقة أخرى للتأكد من أنك أنت: تطبيق المصادقة، أو بريد الاسترداد، أو مفتاح مرور.",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.body_none": {
+      "text": "ليس لهذا الحساب طريقة ثانية للتأكد من أنك أنت، لذا لا يمكن إعادة تعيين مفاتيحه.",
       "status": "machine"
     },
     "proof.save_phrase.help": {
@@ -7869,16 +7929,12 @@
       "text": "أدخل كلمة مرورك لتغيير اسم المستخدم.",
       "status": "machine"
     },
-    "protect.banner.action": {
-      "text": "حماية",
-      "status": "machine"
-    },
-    "protect.banner.none": {
-      "text": "لا توجد طريقة للعودة إلى هذا الحساب.",
+    "proof.add_totp.help": {
+      "text": "أدخل كلمة المرور لإعداد تطبيق مصادقة.",
       "status": "machine"
     },
     "protect.body": {
-      "text": "إذا نسيت كلمة المرور أو فقدت هذا الجهاز، فهكذا تعود إلى حسابك.",
+      "text": "إذا نسيت كلمة المرور أو فقدت هذا الجهاز، فهكذا تعود إلى حسابك. اختر طريقة واحدة على الأقل.",
       "status": "machine"
     },
     "protect.continue": {
@@ -7909,28 +7965,20 @@
       "text": "إنشاء مفتاح مرور",
       "status": "machine"
     },
+    "protect.passkey.cancelled": {
+      "text": "لم يُضَف أي مفتاح مرور.",
+      "status": "machine"
+    },
     "protect.phrase.body": {
       "text": "12 كلمة تحتفظ بها أنت فقط. أقوى طريقة للعودة.",
       "status": "machine"
     },
     "protect.phrase.save.body": {
-      "text": "12 كلمة تحتفظ بها أنت وحدك. بعد ذلك، يمكن لرمز عبر البريد الإلكتروني تغيير كلمة مرورك لكنه لا يستطيع فتح حسابك.",
-      "status": "machine"
-    },
-    "protect.phrase.save.effect": {
-      "text": "يمنح هذا حسابك مفاتيح جديدة. تبقى جهات اتصالك ودردشاتك كما هي. تبقى أجهزتك الأخرى مسجّلة الدخول.",
+      "text": "12 كلمة تحتفظ بها أنت وحدك. تعيد مفاتيحك على جهاز جديد، ودردشاتك بعد إعادة التعيين.",
       "status": "machine"
     },
     "protect.phrase.save.failed": {
       "text": "تعذّر الإكمال. لم يتغيّر شيء.",
-      "status": "machine"
-    },
-    "protect.phrase.save.finishing": {
-      "text": "لحسابك مفاتيح جديدة. جارٍ الإنهاء.",
-      "status": "machine"
-    },
-    "protect.phrase.save.progress": {
-      "text": "جارٍ تغيير مفاتيح حسابك",
       "status": "machine"
     },
     "protect.phrase.save.show": {
@@ -7941,36 +7989,88 @@
       "text": "حفظ عبارة استرداد",
       "status": "machine"
     },
-    "protect.skip": {
-      "text": "ليس الآن",
-      "status": "machine"
-    },
-    "protect.skip.confirm.body": {
-      "text": "إذا نسيت كلمة المرور أو فقدت هذا الجهاز، فلن تتمكن من العودة إلى هذا الحساب.",
-      "status": "machine"
-    },
-    "protect.skip.confirm.continue": {
-      "text": "متابعة بدون حماية",
-      "status": "machine"
-    },
-    "protect.skip.confirm.title": {
-      "text": "المتابعة بدون حماية؟",
-      "status": "machine"
-    },
-    "protect.status.email": {
-      "text": "محمي ببريدك الإلكتروني",
-      "status": "machine"
-    },
-    "protect.status.none": {
-      "text": "غير محمي",
+    "protect.phrase.title_optional": {
+      "text": "حفظ عبارة استرداد أيضًا",
       "status": "machine"
     },
     "protect.status.phrase": {
-      "text": "محمي بعبارة الاسترداد",
+      "text": "دردشاتك محفوظة بعبارة الاسترداد",
+      "status": "machine"
+    },
+    "protect.status.passkey_seal": {
+      "text": "دردشاتك محفوظة بمفتاح مرور",
+      "status": "machine"
+    },
+    "protect.status.password_only": {
+      "text": "دردشاتك محفوظة بكلمة مرورك فقط",
       "status": "machine"
     },
     "protect.title": {
       "text": "احمِ حسابك",
+      "status": "machine"
+    },
+    "protect.totp.title": {
+      "text": "استخدام تطبيق مصادقة",
+      "status": "machine"
+    },
+    "protect.totp.body": {
+      "text": "رمز من 6 أرقام من تطبيق على هاتفك. إذا كان التطبيق على هذا الجهاز فقط، فستفقده مع الجهاز.",
+      "status": "machine"
+    },
+    "protect.optional": {
+      "text": "اختياري",
+      "status": "machine"
+    },
+    "protect.continue_needs": {
+      "text": "اختر واحدة من الطرق الثلاث الأولى للمتابعة.",
+      "status": "machine"
+    },
+    "protect.totp_only.warning": {
+      "text": "إذا فقدت تطبيق المصادقة، فلن تتمكن من استعادة هذا الحساب. أضِف بريدًا إلكترونيًا أو مفتاح مرور أيضًا.",
+      "status": "machine"
+    },
+    "protect.totp_only.warning_phrase": {
+      "text": "إذا فقدت تطبيق المصادقة وعبارة الاسترداد معًا، فلن تتمكن من استعادة هذا الحساب.",
+      "status": "machine"
+    },
+    "protect.totp_only.remove_notice": {
+      "text": "سيصبح تطبيق المصادقة الطريقة الأخرى الوحيدة للتأكد من أنك أنت. إذا فقدته، فلن تتمكن من استعادة هذا الحساب.",
+      "status": "machine"
+    },
+    "protect.totp_only.remove_notice_phrase": {
+      "text": "سيصبح تطبيق المصادقة الطريقة الأخرى الوحيدة للتأكد من أنك أنت. إذا فقدته وفقدت عبارة الاسترداد، فلن تتمكن من استعادة هذا الحساب.",
+      "status": "machine"
+    },
+    "protect.title_required": {
+      "text": "أضِف طريقة ثانية للعودة إلى حسابك",
+      "status": "machine"
+    },
+    "protect.last_factor": {
+      "text": "أضِف طريقة أخرى للعودة إلى حسابك أولًا. هذه آخر طريقة لدى هذا الحساب.",
+      "status": "machine"
+    },
+    "protect.username_email": {
+      "text": "ينتقل بريد الاسترداد إلى اسم المستخدم الجديد. اكتبه مرة واحدة.",
+      "status": "machine"
+    },
+    "protect.password_only.title": {
+      "text": "دردشاتك تعتمد على كلمة مرورك",
+      "status": "machine"
+    },
+    "protect.password_only.body": {
+      "text": "إذا نسيت كلمة المرور وفقدت أجهزتك، فلن تعود دردشاتك. احفظ عبارة استرداد أو أضِف مفتاح مرور للاحتفاظ بها.",
+      "status": "machine"
+    },
+    "protect.password_only.save_phrase": {
+      "text": "حفظ عبارة استرداد",
+      "status": "machine"
+    },
+    "protect.password_only.add_passkey": {
+      "text": "إضافة مفتاح مرور",
+      "status": "machine"
+    },
+    "protect.password_only.passkey_no_seal": {
+      "text": "مفتاح المرور هذا يسجّل دخولك، لكنه لا يحفظ دردشاتك.",
       "status": "machine"
     },
     "recall.phrase.changed": {
@@ -8019,14 +8119,6 @@
     },
     "recovery.email.check.title": {
       "text": "تحقّق من بريدك الإلكتروني",
-      "status": "machine"
-    },
-    "recovery.email.failed": {
-      "text": "تعذّرت استعادة حسابك. حاول مجددًا أو اختر طريقة أخرى.",
-      "status": "machine"
-    },
-    "recovery.email.restoring": {
-      "text": "جارٍ استعادة حسابك",
       "status": "machine"
     },
     "recovery.email.row.body": {
@@ -8269,16 +8361,8 @@
       "text": "{count, plural, zero {لم تبقَ أي محاولة} one {بقيت محاولة واحدة} two {بقيت محاولتان} few {بقيت # محاولات} many {بقيت # محاولة} other {بقيت # محاولة}} قبل توقف لمدة 15 دقيقة.",
       "status": "machine"
     },
-    "recovery_email.add_again.body": {
-      "text": "تغيّرت مفاتيح حسابك. اكتب عنوانك مجددًا ليتمكّن رمز عبر البريد الإلكتروني من استعادة حسابك.",
-      "status": "machine"
-    },
-    "recovery_email.add_again.title": {
-      "text": "أضف بريدك الإلكتروني مجددًا",
-      "status": "machine"
-    },
     "recovery_email.body": {
-      "text": "إذا نسيت كلمة مرورك، نرسل رمزًا إلى هذا العنوان لتتمكن من العودة إلى حسابك.",
+      "text": "إذا نسيت كلمة مرورك، نرسل رمزًا إلى هذا العنوان لتتمكن من اختيار كلمة مرور جديدة.",
       "status": "machine"
     },
     "recovery_email.code.expired": {
@@ -8322,7 +8406,7 @@
       "status": "machine"
     },
     "recovery_email.mailbox_warning": {
-      "text": "أي شخص يستطيع قراءة صندوق البريد هذا يستطيع الدخول إلى حسابك. احفظ عبارة استرداد لتغيير ذلك.",
+      "text": "أي شخص يستطيع قراءة صندوق البريد هذا يستطيع الدخول إلى حسابك.",
       "status": "machine"
     },
     "recovery_email.needs_username": {
@@ -8338,7 +8422,7 @@
       "status": "machine"
     },
     "recovery_email.remove.confirm.body": {
-      "text": "لن تتمكن من العودة إلى حسابك عبر البريد الإلكتروني.",
+      "text": "لن تتمكن من الحصول على كلمة مرور جديدة عبر البريد الإلكتروني.",
       "status": "machine"
     },
     "recovery_email.remove.confirm.title": {
@@ -8605,10 +8689,6 @@
       "text": "يُسجَّل خروج كل جهاز آخر لهذا الحساب ويُزال. تفقد تلك الأجهزة دردشاتها وجهات اتصالها لهذا الحساب.",
       "status": "machine"
     },
-    "restore_identity.reset.effect_messages": {
-      "text": "تعود المحادثات والمجموعات والقنوات من أجهزة جهات اتصالك، مع الرسائل التي لا تزال لديهم، بدءًا بالأحدث.",
-      "status": "machine"
-    },
     "restore_identity.reset.effect_passkeys": {
       "text": "يُحذف كل مفتاح مرور لهذا الحساب. يمكنك إضافة مفاتيح مرور مجددًا بعد ذلك.",
       "status": "machine"
@@ -8647,6 +8727,18 @@
     },
     "restore_identity.reset.what_it_does": {
       "text": "ما الذي يفعله:",
+      "status": "machine"
+    },
+    "restore_identity.reset.sealed": {
+      "text": "ستعود دردشاتك ومجموعاتك وقنواتك من أجهزة جهات اتصالك، مع الرسائل التي لا تزال لديهم، بدءًا بالأحدث.",
+      "status": "machine"
+    },
+    "restore_identity.reset.unsealed": {
+      "text": "إعادة التعيين هذه تبدأ حسابك من جديد. لن تعود دردشاتك ومجموعاتك والقنوات التي تملكها. تحتفظ باسم المستخدم، ويمكنك إرسال طلبات جديدة إلى جهات اتصالك.",
+      "status": "machine"
+    },
+    "restore_identity.reset.unsealed_use_passkey": {
+      "text": "استخدم مفتاح مرور يحفظ دردشاتك لاستعادتها.",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -9337,6 +9429,10 @@
       "text": "لا يستطيع هذا الجهاز إدارة مفاتيح المرور.",
       "status": "machine"
     },
+    "settings.passkeys.no_seal": {
+      "text": "لا يحفظ دردشاتك.",
+      "status": "machine"
+    },
     "settings.password.change": {
       "text": "تغيير كلمة المرور",
       "status": "machine"
@@ -9446,7 +9542,7 @@
       "status": "machine"
     },
     "settings.recovery.totp.done": {
-      "text": "تم إعداد تطبيق المصادقة. يمكن الآن لرمز من التطبيق أن يعيدك إلى حسابك.",
+      "text": "تم إعداد تطبيق المصادقة. رمز من التطبيق يؤكد الآن أنك أنت.",
       "status": "machine"
     },
     "settings.recovery.totp.error.generic": {
@@ -9479,6 +9575,14 @@
     },
     "settings.recovery.totp.unavailable": {
       "text": "إعداد تطبيق المصادقة غير متاح الآن.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.open_app": {
+      "text": "فتح في تطبيق المصادقة",
+      "status": "machine"
+    },
+    "settings.recovery.totp.on": {
+      "text": "تشغيل",
       "status": "machine"
     },
     "settings.recovery.words.not_on_this_device": {

@@ -84,6 +84,14 @@ export interface ContactListPaneProps {
    *  request arrived inside: `""` for a group with no name, `null` for a
    *  request from the inbox (no line). */
   readonly viaGroupName?: (request: IncomingContactRequest) => string | null;
+  /** `docs/ux/identity-recovery.md` 16.11 - the request comes from the new
+   *  account of a contact who started over (`started-over.ts`): one more
+   *  line under the name says the device could not confirm it is the same
+   *  person. */
+  readonly startedOverNote?: (request: IncomingContactRequest) => boolean;
+  /** UX 16.11, item D: a sent request to someone who started over carries
+   *  the same note as an incoming one. */
+  readonly sentStartedOverNote?: (record: SentRequestRecord) => boolean;
   readonly onDecline: (request: IncomingContactRequest) => void;
   readonly sent: () => readonly SentRequestRecord[];
   readonly onDismissSent: (record: SentRequestRecord) => void;
@@ -256,6 +264,13 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                     <Show when={props.viaGroupName?.(req) === ""}>
                       <span class="lk-row-sub">{t("contacts.request.via_unnamed_group")}</span>
                     </Show>
+                    {/* UX 16.11 - under the name, above the intro: a plain
+                        note, never a banner or an alarm. */}
+                    <Show when={props.startedOverNote?.(req) === true}>
+                      <span class="lk-request-note" role="note">
+                        {t("contacts.started_over.request_note")}
+                      </span>
+                    </Show>
                     <span class="lk-request-intro">
                       {req.intro !== null && req.intro !== "" ? req.intro : t("contacts.request.no_intro")}
                     </span>
@@ -374,6 +389,11 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                       <span class="lk-row-title">{sentRowLines(record).title}</span>
                       <Show when={sentRowLines(record).username}>
                         {(u) => <span class="lk-row-sub">{u()}</span>}
+                      </Show>
+                      <Show when={props.sentStartedOverNote?.(record) === true}>
+                        <span class="lk-request-note" role="note">
+                          {t("contacts.started_over.request_note")}
+                        </span>
                       </Show>
                       <span class="lk-row-sub">{t("contacts.list.sent_waiting")}</span>
                     </div>

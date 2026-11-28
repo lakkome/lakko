@@ -60,26 +60,10 @@ class EmailRecoverFlowTest {
     }
 
     @Test
-    fun `the vault restores through the phrase path and the password mode sets a password`() {
-        val vault = EmailRecoverOpen.Vault(ByteArray(EMAIL_VAULT_SALT_LEN), ByteArray(EMAIL_VAULT_SEALED_LEN))
-        assertEquals(EmailRecoverAction.RestoreFromVault, emailRecoverAction(vault))
-        assertEquals(EmailRecoverAction.SetPassword, emailRecoverAction(EmailRecoverOpen.Password))
-    }
-
-    @Test
-    fun `a vault that does not open ends on the list with the unavailable line`() {
-        val closed = afterEmailVaultNotOpened()
-        assertEquals(EmailRecoverStep.Closed(UiText("recovery.email.failed")), closed.step)
-        assertFalse(closed.busy)
-    }
-
-    @Test
-    fun `the new password comes before anything asks what the code brings`() {
-        // start -> code -> (authenticator) -> NEW PASSWORD. The machine has
-        // no step between the accepted code and the password, and the
-        // answer of `recover/open` enters only afterwards
-        // ([emailRecoverAction] takes it; no step before the password does),
-        // so nothing before the password step can depend on the account's kind.
+    fun `the flow ends on the new password and every account reaches the same step`() {
+        // start -> code -> (authenticator) -> NEW PASSWORD, and nothing
+        // after it: a mailed code gives a new password and a session, never
+        // the keys (the email vault was removed 2026-11-26).
         val code = afterEmailRecoverStart("c", 45, 600, 0L)
         assertTrue(code.step is EmailRecoverStep.Code)
         val withoutTotp = afterEmailRecoverVerify("t", totpRequired = false)
@@ -87,16 +71,8 @@ class EmailRecoverFlowTest {
         val withTotp = afterEmailRecoverVerify("t", totpRequired = true)
         assertEquals(EmailRecoverStep.Totp("t"), withTotp.step)
         assertEquals(EmailRecoverStep.NewPassword("t"), afterEmailRecoverTotp("t").step)
-        // The two kinds of account reach the identical password step.
+        // With or without an authenticator: the identical password step.
         assertEquals(withoutTotp, afterEmailRecoverTotp("t"))
-        // Only then: the vault restore or the password finish.
-        assertEquals(
-            setOf(EmailRecoverAction.RestoreFromVault, EmailRecoverAction.SetPassword),
-            setOf(
-                emailRecoverAction(EmailRecoverOpen.Vault(ByteArray(16), ByteArray(44))),
-                emailRecoverAction(EmailRecoverOpen.Password),
-            ),
-        )
     }
 
     @Test
@@ -134,11 +110,11 @@ class EmailRecoverFlowTest {
 
     @Test
     fun `a dead ticket or an expired code starts over`() {
-        for (code in listOf("ticket-refused", "code-expired", "totp-required", "wrong-mode")) {
+        for (code in listOf("ticket-refused", "code-expired", "totp-required")) {
             assertEquals(
                 code,
                 EmailRecoverFailure.Restart(UiText("recovery_email.code.expired")),
-                emailRecoverFailureOf(EmailRecoverCall.Open, http(401, code)),
+                emailRecoverFailureOf(EmailRecoverCall.Password, http(401, code)),
             )
         }
         val step = EmailRecoverStep.Code("c", resendAtMs = 10L, expiresAtMs = 100L)

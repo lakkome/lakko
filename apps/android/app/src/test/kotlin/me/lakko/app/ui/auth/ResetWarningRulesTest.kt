@@ -6,6 +6,7 @@ package me.lakko.app.ui.auth
 import me.lakko.app.auth.AuthHttpError
 import me.lakko.app.auth.AuthNetworkError
 import me.lakko.app.auth.FreshAuthRequired
+import me.lakko.app.auth.ResetFactorRequired
 import me.lakko.app.l10n.UiText
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -15,54 +16,32 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
 
-/** UX 15.1 + 17.2: the reset warning's state decisions. */
+/** UX 15.1 + 15.1b: what a failed reset leaves on the warning screen. The
+ *  factor section's own rules are `me.lakko.app.auth.ResetFactorTest`. */
 class ResetWarningRulesTest {
 
-    private fun view(
-        proofLive: Boolean,
-        password: String = "",
-        usernameKnown: Boolean = true,
-        username: String = "",
-        hasUsablePasskey: Boolean = false,
-    ) = proofBlockView(
-        proofLive = proofLive,
-        hasUsablePasskey = hasUsablePasskey,
-        usernameKnown = usernameKnown,
-        state = ProofBlockState(password = password, username = username),
-        nowMs = 0L,
-    )
-
     @Test
-    fun `with a live proof the word alone enables the button`() {
-        assertTrue(resetButtonEnabled("RESET", view(proofLive = true)))
-        assertTrue(resetButtonEnabled(" RESET ", view(proofLive = true)))
-        assertFalse(resetButtonEnabled("reset", view(proofLive = true)))
-        assertFalse(resetButtonEnabled("", view(proofLive = true)))
+    fun `the typed word must be RESET, surrounding whitespace ignored`() {
+        assertTrue(resetConfirmationMatches("RESET"))
+        assertTrue(resetConfirmationMatches(" RESET "))
+        assertFalse(resetConfirmationMatches("reset"))
+        assertFalse(resetConfirmationMatches(""))
     }
 
     @Test
-    fun `without a live proof the button waits for both the password and the word`() {
-        assertFalse(resetButtonEnabled("RESET", view(proofLive = false, password = "")))
-        assertFalse(resetButtonEnabled("", view(proofLive = false, password = "hunter2")))
-        assertTrue(resetButtonEnabled("RESET", view(proofLive = false, password = "hunter2")))
-    }
-
-    @Test
-    fun `with an unknown username the button waits for the name too`() {
-        assertFalse(resetButtonEnabled("RESET", view(false, "hunter2", usernameKnown = false, username = "")))
-        assertFalse(resetButtonEnabled("RESET", view(false, "hunter2", usernameKnown = false, username = "  ")))
-        assertFalse(resetButtonEnabled("RESET", view(false, "", usernameKnown = false, username = "alice")))
-        assertTrue(resetButtonEnabled("RESET", view(false, "hunter2", usernameKnown = false, username = "alice")))
-        // A live proof never waits for a typed name.
-        assertTrue(resetButtonEnabled("RESET", view(true, usernameKnown = false)))
-    }
-
-    @Test
-    fun `a missing or refused proof is the proof-required failure`() {
-        assertSame(ResetFailure.ProofRequired, resetFailureOf(FreshAuthRequired()))
+    fun `a missing or refused confirmation opens the factor section again`() {
+        // No live confirmation on this device.
+        assertSame(ResetFailure.FactorRequired, resetFailureOf(ResetFactorRequired()))
+        // The server refused the one sent.
         assertSame(
-            ResetFailure.ProofRequired,
-            resetFailureOf(AuthHttpError(403, "/account/keys/reset/finish", "{}", code = "fresh-auth-required")),
+            ResetFailure.FactorRequired,
+            resetFailureOf(AuthHttpError(403, "/account/keys/reset/finish", "{}", code = "reset-factor-required")),
+        )
+        // The password proof behind it ran out.
+        assertSame(ResetFailure.FactorRequired, resetFailureOf(FreshAuthRequired()))
+        assertSame(
+            ResetFailure.FactorRequired,
+            resetFailureOf(AuthHttpError(403, "/account/keys/reset/start", "{}", code = "fresh-auth-required")),
         )
     }
 
@@ -79,9 +58,9 @@ class ResetWarningRulesTest {
     }
 
     @Test
-    fun `proof required leaves the screen idle with no error styling`() {
+    fun `factor required leaves the screen idle with no error styling`() {
         val before = RestoreIdentityUiState(busy = true, error = UiText("stale"))
-        val after = afterResetFailure(before, ResetFailure.ProofRequired)
+        val after = afterResetFailure(before, ResetFailure.FactorRequired)
         assertFalse(after.busy)
         assertNull(after.error)
     }
@@ -99,61 +78,12 @@ class ResetWarningRulesTest {
         assertFalse(RestoreIdentityUiState(phrase = "abandon ability").toString().contains("abandon"))
     }
 
-    // ------------------------------------------------------------ the panel
-
     @Test
-    fun `a proof in the last ten minutes shows 15-1 with no block`() {
-        for (passkey in listOf(true, false)) {
-            for (totp in listOf(true, false)) {
-                assertEquals(
-                    ResetPanel.NoBlock,
-                    resetPanel(
-                        proofLive = true,
-                        hasUsablePasskey = passkey,
-                        authenticatorLanding = totp,
-                        knowsPassword = false,
-                        saidNoPassword = true,
-                    ),
-                )
-            }
-        }
-    }
-
-    @Test
-    fun `no proof with a usable passkey shows the block and never the cannot panel`() {
-        assertEquals(ResetPanel.Block, resetPanel(false, true, authenticatorLanding = true, knowsPassword = false, saidNoPassword = false))
-        assertEquals(ResetPanel.Block, resetPanel(false, true, authenticatorLanding = false, knowsPassword = false, saidNoPassword = true))
-    }
-
-    @Test
-    fun `no proof and no passkey shows the block with the no-password link`() {
-        val panel = resetPanel(false, false, authenticatorLanding = false, knowsPassword = false, saidNoPassword = false)
-        assertEquals(ResetPanel.Block, panel)
-        assertTrue(resetShowsNoPasswordLink(panel, hasUsablePasskey = false))
-        assertFalse(resetShowsNoPasswordLink(ResetPanel.Block, hasUsablePasskey = true))
-        assertFalse(resetShowsNoPasswordLink(ResetPanel.NoBlock, hasUsablePasskey = false))
-        assertFalse(resetShowsNoPasswordLink(ResetPanel.Cannot, hasUsablePasskey = false))
-    }
-
-    @Test
-    fun `an authenticator sign-in with no passkey opens on the cannot panel first`() {
-        assertEquals(
-            ResetPanel.Cannot,
-            resetPanel(false, false, authenticatorLanding = true, knowsPassword = false, saidNoPassword = false),
-        )
-        // `I know my password` switches to the block.
-        assertEquals(
-            ResetPanel.Block,
-            resetPanel(false, false, authenticatorLanding = true, knowsPassword = true, saidNoPassword = false),
-        )
-    }
-
-    @Test
-    fun `I do not know my password shows the cannot panel whatever the landing`() {
-        assertEquals(
-            ResetPanel.Cannot,
-            resetPanel(false, false, authenticatorLanding = false, knowsPassword = false, saidNoPassword = true),
-        )
+    fun `restore your keys lists no email row, and nothing optional when only the earlier keys are missing`() {
+        assertEquals(RestoreRows(passkey = true, phrase = true), restoreRowsFor(false, passkeyOffered = true, phrase = true))
+        assertEquals(RestoreRows(passkey = false, phrase = false), restoreRowsFor(false, passkeyOffered = false, phrase = false))
+        // UX 8a: a passkey and the phrase bring the keys this device has.
+        assertEquals(RestoreRows(passkey = false, phrase = false), restoreRowsFor(true, passkeyOffered = true, phrase = true))
     }
 
     @Test
@@ -166,5 +96,10 @@ class ResetWarningRulesTest {
             ),
             RESET_CANNOT_OPTION_KEYS,
         )
+    }
+
+    @Test
+    fun `setting up an authenticator has its own proof helper`() {
+        assertEquals("proof.add_totp.help", proofCopy(ProofSurface.AddTotp).helper)
     }
 }

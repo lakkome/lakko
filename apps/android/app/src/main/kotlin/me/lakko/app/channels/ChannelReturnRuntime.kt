@@ -18,9 +18,11 @@ import uniffi.lakko_ffi_uniffi.FfiChannelReturn
 import uniffi.lakko_ffi_uniffi.FfiChannelReturnRole
 
 /*
- * ADR-0101 section 7 - the channel runtime of a key reset: the recovery key
- * every owned channel registers, the returns a peer sends a reset person, and
- * what the reset device does with the returns it read. The rules are in
+ * ADR-0101 section 7 - the channel runtime of a key reset: the account's
+ * own list of the channels it owns and its locks (`OwnedChannelsRuntime`),
+ * the returns a peer sends a reset SUBSCRIBER or PUBLISHER, and what the
+ * reset device does with the returns it read. An owner is returned by nobody
+ * (rewritten 2026-11-26): its device takes its channels back from the list. The rules are in
  * `ChannelReturn.kt`; this is the I/O around them. Mirror of
  * `apps/web/src/channels/channel-return-runtime.ts`, driven from its own
  * app-wide loop in the session shell (the publisher loop runs only on a
@@ -41,9 +43,6 @@ public interface ResetContactsPort {
     /** Fetch and keep the account's continuity mailbox; whether one is held. */
     public suspend fun refreshContinuityTarget(accountIdB64: String): Boolean
 }
-
-/** Auth has no channel recovery configured (`503`). */
-public class ChannelRecoveryDisabled : Exception("channel recovery is not configured on this server")
 
 /** What a recovery attempt came to. */
 public enum class RecoveryOutcome { OWNED, REFUSED, RETRY }
@@ -74,10 +73,11 @@ public object ChannelReturnRuntime {
     private val acceptScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
 
     /**
-     * One pass: register the recovery key of every owned channel that has
-     * none recorded, act on the returns read from the continuity mailbox,
-     * send the returns this device owes reset people, and settle recovered
-     * channels whose type is known again. Each step never throws.
+     * One pass: the owned-channels list and its locks (after a reset, the
+     * listed channels are taken back first; the recovery key of every owned
+     * channel is registered from the list key), the returns read from the
+     * continuity mailbox, the returns this device owes reset people, and the
+     * recovered channels whose type is known again. Each step never throws.
      */
     public suspend fun pass(
         context: Context,
@@ -89,7 +89,7 @@ public object ChannelReturnRuntime {
     ) {
         mutex.withLock {
             val account = state.boundAccount ?: return
-            step("recovery keys") { registerOwedRecoveryKeys(context, state, client, account, sessionToken) }
+            step("owned channels") { OwnedChannelsRuntime.pass(context, state, client, account) }
             step("own cards") { keepPublishingCardsCurrent(context, state, client) }
             step("held returns") { runHeldReturns(context, state, client, account, sessionToken) }
             if (contacts != null) step("send returns") { sendReturns(context, state, client, account, contacts, ownKeysB64) }
@@ -107,89 +107,9 @@ public object ChannelReturnRuntime {
         }
     }
 
-    // ------------------------------------------------------------------
-    // The recovery key
-    // ------------------------------------------------------------------
-
-    /**
-     * The channel's recovery key: the channel recovery input blinded here,
-     * evaluated by auth under this account's per-account key (auth never
-     * learns the channel id), finalised here. Throws
-     * [ChannelRecoveryDisabled] on `503`, the auth error otherwise.
-     */
-    public suspend fun deriveRecoveryKey(idHex: String, sessionToken: String): ChannelRecoveryKey {
-        uniffi.lakko_ffi_uniffi.OprfBlinder.blindChannelRecovery(ChannelsComposer.channelIdFromHex(idHex)).use { blinder ->
-            val evaluation = try {
-                me.lakko.app.auth.AuthClient().use { c ->
-                    c.channelRecoveryEvaluate(sessionToken, java.util.Base64.getDecoder().decode(blinder.blindedB64()))
-                }
-            } catch (e: me.lakko.app.auth.AuthHttpError) {
-                if (e.status == HTTP_UNAVAILABLE) throw ChannelRecoveryDisabled()
-                throw e
-            }
-            val output = blinder.finalize(java.util.Base64.getEncoder().encodeToString(evaluation)).output
-            try {
-                return ChannelRecoveryKey.fromOprfOutput(output)
-            } finally {
-                output.fill(0)
-            }
-        }
-    }
-
-    /** The channels this device owns: it publishes them and no co-publisher
-     *  group id marks them. */
-    private fun ownedChannels(state: ChannelsUiState): List<String> =
-        state.keysByChannel.value.keys.filter { state.publishesHere(it) && state.joinedGroupIdOf(it) == null }
-
-    /**
-     * Register the recovery key of every channel this device owns that has
-     * none recorded (a new channel is picked up at the first pass after its
-     * creation, so new and existing channels take one path). A `503` stops
-     * the pass quietly; any other failure leaves the channel owing.
-     */
-    private suspend fun registerOwedRecoveryKeys(
-        context: Context,
-        state: ChannelsUiState,
-        client: ChannelsClient,
-        account: String,
-        sessionToken: suspend () -> String?,
-    ) {
-        val store = RecoveryRegisteredStore.onDevice(context)
-        val owing = channelsOwingRecoveryKey(ownedChannels(state), store.read(account))
-        if (owing.isEmpty()) return
-        val token = sessionToken() ?: return
-        val pub = state.publisher ?: return
-        for (idHex in owing) {
-            val key = try {
-                deriveRecoveryKey(idHex, token)
-            } catch (cancel: kotlinx.coroutines.CancellationException) {
-                throw cancel
-            } catch (_: ChannelRecoveryDisabled) {
-                return
-            } catch (_: Throwable) {
-                continue
-            }
-            try {
-                pub.withIdentity(persist = false) { ChannelsClient.ownerSigner(it, idHex) }.use { owner ->
-                    client.putRecoveryKey(idHex, owner, key.verifyingKey())
-                }
-                store.mark(account, idHex)
-            } catch (cancel: kotlinx.coroutines.CancellationException) {
-                throw cancel
-            } catch (e: Throwable) {
-                Log.i(TAG, "a channel recovery key was not registered yet: ${e.javaClass.simpleName}")
-            } finally {
-                key.close()
-            }
-        }
-    }
-
     /**
      * Live walk 2026-11-26, D1 - the owner's and every publisher's own member
-     * card, app-wide: an owner return is planned from the owner's card, so a
-     * channel whose owner never opened it after the account's reader key was
-     * registered had none and never came back after the owner's reset. Each
-     * channel this device publishes ([channelsOwingPublishingCard]) uploads
+     * card, app-wide. Each channel this device publishes ([channelsOwingPublishingCard]) uploads
      * its card under the account's reader key ([ChannelMemberCards.refreshPublisherCard],
      * the "Members can find me" rule applied there); an unchanged card is
      * not uploaded again ([cardUploadDue]).
@@ -279,15 +199,11 @@ public object ChannelReturnRuntime {
         for (handle in state.channels.value) {
             val idHex = handle.id
             val publishing = state.publishesHere(idHex)
-            val ownRole = when {
-                !publishing -> ReturnOwnRole.SUBSCRIBER
-                state.joinedGroupIdOf(idHex) == null -> ReturnOwnRole.OWNER
-                else -> ReturnOwnRole.PUBLISHER
-            }
+            // A subscriber sends nothing: an owner is returned by nobody.
+            if (!publishing) continue
+            val ownRole = if (state.joinedGroupIdOf(idHex) == null) ReturnOwnRole.OWNER else ReturnOwnRole.PUBLISHER
             val ownerKeyB64 = registers.firstOrNull { it.subscribed && it.channelIdHex.equals(idHex, ignoreCase = true) }
                 ?.ownerAccountKey?.takeIf { it.size == 32 }?.let { enc.encodeToString(it) }
-            // A subscriber only ever sends an owner return.
-            if (ownRole == ReturnOwnRole.SUBSCRIBER && (ownerKeyB64 == null || ownerKeyB64 !in live)) continue
             val publishers = ChannelPublisherLoop.peek(state)?.publishers?.value?.get(idHex).orEmpty()
                 .filter { !it.owner }.map { enc.encodeToString(it.accountKey) }
             val cards = try {
@@ -348,7 +264,6 @@ public object ChannelReturnRuntime {
             // brings is approved without asking (the owner's "Add publisher").
             ChannelReturnRoleName.PUBLISHER ->
                 me.lakko.app.ui.channels.mintCoPublisherLink(state, handle.id, context).card ?: return false
-            ChannelReturnRoleName.OWNER -> ByteArray(0)
         }
         val held = HashMap<UInt, ByteArray>(state.subscribedSeeds(handle.id))
         for ((epoch, seed) in state.heldEpochSeeds(handle.id)) held.putIfAbsent(epoch, seed)
@@ -391,13 +306,11 @@ public object ChannelReturnRuntime {
     private fun ffiRole(role: ChannelReturnRoleName): FfiChannelReturnRole = when (role) {
         ChannelReturnRoleName.SUBSCRIBER -> FfiChannelReturnRole.SUBSCRIBER
         ChannelReturnRoleName.PUBLISHER -> FfiChannelReturnRole.PUBLISHER
-        ChannelReturnRoleName.OWNER -> FfiChannelReturnRole.OWNER
     }
 
     private fun roleName(role: FfiChannelReturnRole): ChannelReturnRoleName = when (role) {
         FfiChannelReturnRole.SUBSCRIBER -> ChannelReturnRoleName.SUBSCRIBER
         FfiChannelReturnRole.PUBLISHER -> ChannelReturnRoleName.PUBLISHER
-        FfiChannelReturnRole.OWNER -> ChannelReturnRoleName.OWNER
     }
 
     // ------------------------------------------------------------------
@@ -442,7 +355,7 @@ public object ChannelReturnRuntime {
                 continue
             }
             try {
-                if (actOnReturn(context, state, client, account, decoded, verified, sessionToken) != RecoveryOutcome.RETRY) {
+                if (actOnReturn(context, state, client, account, decoded, verified) != RecoveryOutcome.RETRY) {
                     done += envB64
                 }
             } catch (cancel: kotlinx.coroutines.CancellationException) {
@@ -463,17 +376,9 @@ public object ChannelReturnRuntime {
         account: String,
         ret: FfiChannelReturn,
         verified: Boolean,
-        sessionToken: suspend () -> String?,
     ): RecoveryOutcome {
         val idHex = ChannelsComposer.bytesToHex(ret.channelId)
         val role = roleName(ret.role)
-        val register = try {
-            ChannelSubscriptionSync.activePort()?.registers()?.firstOrNull {
-                it.subscribed && it.channelIdHex.equals(idHex, ignoreCase = true)
-            }
-        } catch (_: Throwable) {
-            null
-        }
         val action = channelReturnAction(
             verified = verified,
             role = role,
@@ -483,7 +388,6 @@ public object ChannelReturnRuntime {
             } else {
                 state.channels.value.any { it.id == idHex }
             },
-            ownsAlready = register?.role == ChannelAccountRole.OWNER,
         )
         val addSeeds = {
             state.addCarriedSeeds(mapOf(idHex to ret.epochSeeds.filter { it.seed.size == 32 }.associate { it.epoch to it.seed }))
@@ -542,41 +446,32 @@ public object ChannelReturnRuntime {
                 }
                 kotlinx.coroutines.withTimeoutOrNull(ACCEPT_SETTLE_MS) { accepting.await() } ?: RecoveryOutcome.OWNED
             }
-            ChannelReturnAction.RECOVER_OWNER -> {
-                val outcome = recoverOwnedChannel(context, state, client, account, idHex, sessionToken)
-                if (outcome == RecoveryOutcome.OWNED) addSeeds()
-                outcome
-            }
         }
     }
 
     /**
-     * ADR-0101 section 7, owner - take a channel back with its recovery key:
-     * evaluate it again for this account, move the owner key to the current
-     * identity's with the recovery proof, and on `204` list the channel, keep
-     * every reader the service lists now ([RecoveredChannelsStore], the
-     * admission mark), mint a fresh admission seed, write the register as
-     * owner and mark this device as founding alone, so the publisher pass
-     * founds the PublisherGroup again at the id the new seed derives
-     * (ADR-0090 decision A) and reseals. `401`: dropped silently.
+     * ADR-0101 section 7 item 8 - take one listed channel back with its
+     * recovery [key] (derived from the list key; closed here): move the
+     * owner key to the current identity's with the recovery proof, and on
+     * `204` list the channel, install what the list kept for it (the read
+     * key, the admission seeds, the newest epoch seeds), keep every reader
+     * the service lists now ([RecoveredChannelsStore], the admission mark),
+     * write the register as owner and mark this device as founding alone, so
+     * the publisher pass founds the PublisherGroup again at the id the new
+     * seed derives (ADR-0090 decision A), rotates and reseals. `401`: the
+     * channel's recovery key is not this one; the entry is dropped.
      */
     public suspend fun recoverOwnedChannel(
         context: Context,
         state: ChannelsUiState,
         client: ChannelsClient,
         account: String,
-        idHex: String,
-        sessionToken: suspend () -> String?,
+        entry: OwnedEntry,
+        key: ChannelRecoveryKey,
     ): RecoveryOutcome {
-        val token = sessionToken() ?: return RecoveryOutcome.RETRY
-        val pub = state.publisher ?: return RecoveryOutcome.RETRY
-        val key = try {
-            deriveRecoveryKey(idHex, token)
-        } catch (cancel: kotlinx.coroutines.CancellationException) {
-            throw cancel
-        } catch (_: ChannelRecoveryDisabled) {
-            return RecoveryOutcome.REFUSED
-        } catch (_: Throwable) {
+        val idHex = entry.channelIdHex
+        val pub = state.publisher ?: run {
+            key.close()
             return RecoveryOutcome.RETRY
         }
         try {
@@ -597,11 +492,28 @@ public object ChannelReturnRuntime {
         if (state.channels.value.none { it.id == idHex }) {
             state.addChannel(ChannelHandle(id = idHex, localName = "", localDescription = "", addedAtMs = System.currentTimeMillis().toULong()))
         }
-        // Every reader the service lists now stays let in: the re-founding's
-        // reseal reaches each of them. A fresh admission seed verifies the
-        // tickets of invitations made from now on.
+        // What the list kept: the read key of a public channel, the admission
+        // seeds (the tickets of links made before the reset still verify),
+        // and the newest epoch seeds (the posts the service retains open
+        // again, and the newest one carries the channel's name).
+        entry.readKey?.let { ChannelReadKeys.put(context, account, idHex, it) }
+        for (a in entry.admission) {
+            if (a.version in 0..0xFFFF) ChannelAdmissionKeys.put(context, account, idHex, a.version.toUShort(), a.seed)
+        }
+        state.addCarriedSeeds(
+            mapOf(idHex to entry.epochs.filter { it.seed.size == 32 && it.epoch in 0..0xFFFFFFFFL }.associate { it.epoch.toUInt() to it.seed }),
+        )
+        // Section 7 item 8 (web `retakenChannel`): a private channel whose
+        // entry lists admission seeds has every row judged again by its
+        // ticket under those seeds (mark 0), so a reader let in before the
+        // channel went private, with no ticket, is removed. Otherwise every
+        // reader the service lists now stays let in (the entry carries
+        // nothing to judge a row with): the re-founding's reseal reaches
+        // each of them. A fresh admission seed verifies the tickets of
+        // invitations made from now on.
+        val admission = retakeAdmission(entry)
         var throughSeq = 0L
-        try {
+        if (admission == RetakeAdmission.EVERYONE_LISTED) try {
             var after = 0L
             while (true) {
                 val page = ChannelPublisherSigners.derive(pub, idHex).use { client.subscriberPage(idHex, it, after) }
@@ -615,7 +527,23 @@ public object ChannelReturnRuntime {
             // The owner key is ours now; the mark only ever rises at a later
             // return of this channel.
         }
-        RecoveredChannelsStore.onDevice(context).mark(account, idHex, throughSeq)
+        RecoveredChannelsStore.onDevice(context).mark(
+            account,
+            idHex,
+            throughSeq,
+            judgedByTickets = admission == RetakeAdmission.TICKETS,
+        )
+        // Section 7 item 4: the @name is held by the old account's handle
+        // key; the list carried its seed, so the move to the key the new
+        // root derives is owed until it lands (the rotation's owed rekey,
+        // sent by the publisher pass).
+        entry.handleSeed?.takeIf { it.size == 32 }?.let { seed ->
+            try {
+                me.lakko.app.chat.GroupSettingsStore.saveOwedRekeySeed(context, account, idHex, seed)
+            } catch (e: Throwable) {
+                Log.w(TAG, "the retaken channel's handle rekey was not recorded: ${e.javaClass.simpleName}")
+            }
+        }
         ChannelAdmissionMark.raise(context, account, idHex, throughSeq, markSet = true)
         ChannelAdmissionKeys.currentOrMint(context, account, idHex).second.fill(0)
         val keys = ChannelSubscriptionSync.keyForSubscribing(state, idHex)
@@ -628,7 +556,7 @@ public object ChannelReturnRuntime {
                     subscribed = true,
                     role = ChannelAccountRole.OWNER,
                     subscriberSecret = keys.secret.copyOf(),
-                    readKey = ByteArray(0),
+                    readKey = entry.readKey?.copyOf() ?: ByteArray(0),
                     publisherGroupId = ByteArray(0),
                     name = "",
                     handle = "",
@@ -658,11 +586,13 @@ public object ChannelReturnRuntime {
      *  its admission pass lets every row in (web `settleRecoveredChannels`). */
     public fun recoveredTypeUnknown(context: Context, state: ChannelsUiState, idHex: String): Boolean {
         val account = state.boundAccount ?: return false
-        if (idHex !in RecoveredChannelsStore.onDevice(context).read(account)) return false
+        val recovered = RecoveredChannelsStore.onDevice(context).read(account)[idHex] ?: return false
+        // A private channel retaken with its admission seeds is judged by
+        // tickets, whatever its newest record says yet.
+        if (recovered.judgedByTickets) return false
         val handle = state.channels.value.firstOrNull { it.id == idHex } ?: return true
         return handle.sharedUpdatedAtMs == null
     }
 
-    private const val HTTP_UNAVAILABLE: Int = 503
     private const val HTTP_SERVER_ERROR: Int = 500
 }

@@ -535,6 +535,9 @@ internal suspend fun createChannel(
         ),
     )
     state.setKeys(id, keys)
+    // ADR-0101 section 7 - a channel this account owns is in its
+    // owned-channels list from creation.
+    me.lakko.app.channels.OwnedChannelsRuntime.channelChanged(id)
     // ADR-0090 decision A — a channel founded here is never founded again by
     // a pending re-founding of this device.
     state.boundAccount?.let { acct ->

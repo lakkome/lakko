@@ -274,7 +274,7 @@
       "status": "machine"
     },
     "auth.signup.passkey.error": {
-      "text": "无法添加通行密钥。请重试，或选择“暂不”。",
+      "text": "无法添加通行密钥。请重试，或选择其他方式。",
       "status": "machine"
     },
     "auth.signup.passkey.lede": {
@@ -4889,6 +4889,14 @@
       "text": "再次请求",
       "status": "machine"
     },
+    "contacts.started_over.closed": {
+      "text": "{name} 已用新账号重新开始。此处的消息不会再送达。",
+      "status": "machine"
+    },
+    "contacts.started_over.request_note": {
+      "text": "Lakko 无法确认这是之前的同一个人。只有在你确定是对方本人时才接受。",
+      "status": "machine"
+    },
     "desktop.capture.body": {
       "text": "请在系统隐私设置中允许，然后重试。",
       "status": "machine"
@@ -7657,14 +7665,6 @@
       "text": "你的恢复邮箱已更换。",
       "status": "machine"
     },
-    "notice.opened_by_email.body": {
-      "text": "{date}，在另一台设备上。",
-      "status": "machine"
-    },
-    "notice.opened_by_email.title": {
-      "text": "有人用你的恢复邮箱打开了你的账号",
-      "status": "machine"
-    },
     "notice.password_by_email.body": {
       "text": "{date}，有人用你的恢复邮箱设置了新密码。",
       "status": "machine"
@@ -7675,10 +7675,6 @@
     },
     "notice.phrase_saved": {
       "text": "已为你的账号保存恢复短语。",
-      "status": "machine"
-    },
-    "notice.secure.new_keys": {
-      "text": "这会为你的账号更换新密钥，打开它的人将失去访问权。",
       "status": "machine"
     },
     "notice.secure.password_saved": {
@@ -7854,11 +7850,75 @@
       "status": "machine"
     },
     "proof.reset.cannot.title": {
-      "text": "没有密码或通行密钥，无法重置账号密钥",
+      "text": "没有密码，无法重置账号密钥",
       "status": "machine"
     },
     "proof.reset.cannot.what_you_can_do": {
       "text": "你可以：",
+      "status": "machine"
+    },
+    "proof.reset.factor.heading": {
+      "text": "确认是你本人",
+      "status": "machine"
+    },
+    "proof.reset.factor.title": {
+      "text": "然后用以下任一方式确认：",
+      "status": "machine"
+    },
+    "proof.reset.factor.title_no_password": {
+      "text": "用以下任一方式确认：",
+      "status": "machine"
+    },
+    "proof.reset.factor.totp": {
+      "text": "身份验证器应用",
+      "status": "machine"
+    },
+    "proof.reset.factor.email": {
+      "text": "邮件验证码",
+      "status": "machine"
+    },
+    "proof.reset.factor.passkey": {
+      "text": "通行密钥",
+      "status": "machine"
+    },
+    "proof.reset.factor.none": {
+      "text": "这些我都无法使用",
+      "status": "machine"
+    },
+    "proof.reset.factor.totp.prompt": {
+      "text": "请输入身份验证器应用中的 6 位验证码。",
+      "status": "machine"
+    },
+    "proof.reset.factor.email.sent": {
+      "text": "如果这是 {username} 的恢复邮箱，验证码已在发送途中。验证码 10 分钟内有效。",
+      "status": "machine"
+    },
+    "proof.reset.factor.passkey.use": {
+      "text": "使用通行密钥",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.totp": {
+      "text": "已通过身份验证器应用确认。",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.email": {
+      "text": "已通过邮件验证码确认。",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.passkey": {
+      "text": "已通过通行密钥确认。",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.title": {
+      "text": "无法重置账号密钥",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.body": {
+      "text": "重置需要你的密码，以及另一种确认是你本人的方式：身份验证器应用、恢复邮箱或通行密钥。",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.body_none": {
+      "text": "此账号没有第二种确认是你本人的方式，因此无法重置其密钥。",
       "status": "machine"
     },
     "proof.save_phrase.help": {
@@ -7869,16 +7929,12 @@
       "text": "输入密码以更改用户名。",
       "status": "machine"
     },
-    "protect.banner.action": {
-      "text": "保护",
-      "status": "machine"
-    },
-    "protect.banner.none": {
-      "text": "此账号没有任何找回方式。",
+    "proof.add_totp.help": {
+      "text": "请输入密码以设置身份验证器应用。",
       "status": "machine"
     },
     "protect.body": {
-      "text": "如果你忘记密码或丢失这台设备，可以通过这种方式重新进入。",
+      "text": "如果你忘记密码或丢失这台设备，可以通过这种方式重新进入。请至少选择一项。",
       "status": "machine"
     },
     "protect.continue": {
@@ -7909,28 +7965,20 @@
       "text": "创建通行密钥",
       "status": "machine"
     },
+    "protect.passkey.cancelled": {
+      "text": "未添加通行密钥。",
+      "status": "machine"
+    },
     "protect.phrase.body": {
       "text": "只有你保管的 12 个单词。最可靠的找回方式。",
       "status": "machine"
     },
     "protect.phrase.save.body": {
-      "text": "只有你保管的 12 个词。此后，邮件验证码可以更改你的密码，但无法打开你的账号。",
-      "status": "machine"
-    },
-    "protect.phrase.save.effect": {
-      "text": "这会为你的账号更换新密钥。你的联系人和聊天保持不变。你的其他设备保持登录。",
+      "text": "只有你保管的 12 个词。它们可以在新设备上恢复你的密钥，并在重置后恢复你的聊天。",
       "status": "machine"
     },
     "protect.phrase.save.failed": {
       "text": "无法完成。没有任何更改。",
-      "status": "machine"
-    },
-    "protect.phrase.save.finishing": {
-      "text": "你的账号已有新的密钥。即将完成。",
-      "status": "machine"
-    },
-    "protect.phrase.save.progress": {
-      "text": "正在更换账号密钥",
       "status": "machine"
     },
     "protect.phrase.save.show": {
@@ -7941,36 +7989,88 @@
       "text": "保存恢复短语",
       "status": "machine"
     },
-    "protect.skip": {
-      "text": "暂不",
-      "status": "machine"
-    },
-    "protect.skip.confirm.body": {
-      "text": "如果你忘记密码或丢失这台设备，将无法回到这个帐户。",
-      "status": "machine"
-    },
-    "protect.skip.confirm.continue": {
-      "text": "不保护并继续",
-      "status": "machine"
-    },
-    "protect.skip.confirm.title": {
-      "text": "不保护就继续吗？",
-      "status": "machine"
-    },
-    "protect.status.email": {
-      "text": "由你的邮箱保护",
-      "status": "machine"
-    },
-    "protect.status.none": {
-      "text": "未受保护",
+    "protect.phrase.title_optional": {
+      "text": "另外保存恢复短语",
       "status": "machine"
     },
     "protect.status.phrase": {
-      "text": "由你的恢复短语保护",
+      "text": "你的聊天由恢复短语保留",
+      "status": "machine"
+    },
+    "protect.status.passkey_seal": {
+      "text": "你的聊天由通行密钥保留",
+      "status": "machine"
+    },
+    "protect.status.password_only": {
+      "text": "你的聊天仅由密码保留",
       "status": "machine"
     },
     "protect.title": {
       "text": "保护你的账号",
+      "status": "machine"
+    },
+    "protect.totp.title": {
+      "text": "使用身份验证器应用",
+      "status": "machine"
+    },
+    "protect.totp.body": {
+      "text": "来自你手机上某个应用的 6 位验证码。如果该应用只在这台设备上，设备丢失时它也会一起丢失。",
+      "status": "machine"
+    },
+    "protect.optional": {
+      "text": "可选",
+      "status": "machine"
+    },
+    "protect.continue_needs": {
+      "text": "请从前三项中选择一项以继续。",
+      "status": "machine"
+    },
+    "protect.totp_only.warning": {
+      "text": "如果你丢失了身份验证器应用，将无法找回此账号。请再添加一个邮箱或通行密钥。",
+      "status": "machine"
+    },
+    "protect.totp_only.warning_phrase": {
+      "text": "如果你同时丢失了身份验证器应用和恢复短语，将无法找回此账号。",
+      "status": "machine"
+    },
+    "protect.totp_only.remove_notice": {
+      "text": "身份验证器应用将成为确认是你本人的唯一其他方式。如果丢失它，你将无法找回此账号。",
+      "status": "machine"
+    },
+    "protect.totp_only.remove_notice_phrase": {
+      "text": "身份验证器应用将成为确认是你本人的唯一其他方式。如果同时丢失它和恢复短语，你将无法找回此账号。",
+      "status": "machine"
+    },
+    "protect.title_required": {
+      "text": "添加第二种重新登录的方式",
+      "status": "machine"
+    },
+    "protect.last_factor": {
+      "text": "请先添加另一种重新登录的方式。这是此账号仅剩的一种。",
+      "status": "machine"
+    },
+    "protect.username_email": {
+      "text": "你的恢复邮箱会转到新的用户名下。请输入一次邮箱地址。",
+      "status": "machine"
+    },
+    "protect.password_only.title": {
+      "text": "你的聊天依赖于密码",
+      "status": "machine"
+    },
+    "protect.password_only.body": {
+      "text": "如果你忘记密码并丢失了设备，你的聊天将无法恢复。保存恢复短语或添加通行密钥即可保留聊天。",
+      "status": "machine"
+    },
+    "protect.password_only.save_phrase": {
+      "text": "保存恢复短语",
+      "status": "machine"
+    },
+    "protect.password_only.add_passkey": {
+      "text": "添加通行密钥",
+      "status": "machine"
+    },
+    "protect.password_only.passkey_no_seal": {
+      "text": "此通行密钥可让你登录，但不会保留你的聊天。",
       "status": "machine"
     },
     "recall.phrase.changed": {
@@ -8019,14 +8119,6 @@
     },
     "recovery.email.check.title": {
       "text": "查看你的邮箱",
-      "status": "machine"
-    },
-    "recovery.email.failed": {
-      "text": "无法恢复你的账号。请重试，或选择其他方式。",
-      "status": "machine"
-    },
-    "recovery.email.restoring": {
-      "text": "正在恢复你的账号",
       "status": "machine"
     },
     "recovery.email.row.body": {
@@ -8269,16 +8361,8 @@
       "text": "还剩 {count, plural, other {# 次尝试机会}}，之后将暂停 15 分钟。",
       "status": "machine"
     },
-    "recovery_email.add_again.body": {
-      "text": "你的账号密钥已更改。请重新输入你的地址，以便邮件验证码能恢复你的账号。",
-      "status": "machine"
-    },
-    "recovery_email.add_again.title": {
-      "text": "重新添加你的邮箱",
-      "status": "machine"
-    },
     "recovery_email.body": {
-      "text": "如果你忘记密码，我们会向这个地址发送验证码，方便你重新登录。",
+      "text": "如果你忘记密码，我们会向这个地址发送验证码，方便你设置新密码。",
       "status": "machine"
     },
     "recovery_email.code.expired": {
@@ -8322,7 +8406,7 @@
       "status": "machine"
     },
     "recovery_email.mailbox_warning": {
-      "text": "任何能读取此邮箱的人都能进入你的账号。保存恢复短语即可改变这一点。",
+      "text": "任何能读取此邮箱的人都能进入你的账号。",
       "status": "machine"
     },
     "recovery_email.needs_username": {
@@ -8338,7 +8422,7 @@
       "status": "machine"
     },
     "recovery_email.remove.confirm.body": {
-      "text": "你将无法通过邮箱重新登录。",
+      "text": "你将无法通过邮箱获取新密码。",
       "status": "machine"
     },
     "recovery_email.remove.confirm.title": {
@@ -8605,10 +8689,6 @@
       "text": "此账号的所有其他设备都会被退出登录并移除。它们会丢失此账号的聊天和联系人。",
       "status": "machine"
     },
-    "restore_identity.reset.effect_messages": {
-      "text": "聊天、群组和频道会从你的联系人的设备上恢复，带回他们仍保存的消息，最新的在前。",
-      "status": "machine"
-    },
     "restore_identity.reset.effect_passkeys": {
       "text": "此账号的所有通行密钥都会被删除。之后你可以重新添加通行密钥。",
       "status": "machine"
@@ -8647,6 +8727,18 @@
     },
     "restore_identity.reset.what_it_does": {
       "text": "会发生什么：",
+      "status": "machine"
+    },
+    "restore_identity.reset.sealed": {
+      "text": "你的聊天、群组和频道会从你的联系人的设备上恢复，带回他们仍保存的消息，最新的在前。",
+      "status": "machine"
+    },
+    "restore_identity.reset.unsealed": {
+      "text": "这次重置会让你的账号从头开始。你的聊天、群组和你拥有的频道都不会恢复。你会保留用户名，并且可以向联系人发送新的请求。",
+      "status": "machine"
+    },
+    "restore_identity.reset.unsealed_use_passkey": {
+      "text": "使用可保留聊天的通行密钥即可恢复聊天。",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -9337,6 +9429,10 @@
       "text": "此设备无法管理通行密钥。",
       "status": "machine"
     },
+    "settings.passkeys.no_seal": {
+      "text": "不会保留你的聊天。",
+      "status": "machine"
+    },
     "settings.password.change": {
       "text": "更改密码",
       "status": "machine"
@@ -9446,7 +9542,7 @@
       "status": "machine"
     },
     "settings.recovery.totp.done": {
-      "text": "身份验证器已设置。应用中的验证码现在可以帮你找回账号。",
+      "text": "身份验证器已设置。应用中的验证码现在可以确认是你本人。",
       "status": "machine"
     },
     "settings.recovery.totp.error.generic": {
@@ -9479,6 +9575,14 @@
     },
     "settings.recovery.totp.unavailable": {
       "text": "身份验证器设置目前不可用。",
+      "status": "machine"
+    },
+    "settings.recovery.totp.open_app": {
+      "text": "在身份验证器应用中打开",
+      "status": "machine"
+    },
+    "settings.recovery.totp.on": {
+      "text": "开",
       "status": "machine"
     },
     "settings.recovery.words.not_on_this_device": {

@@ -5578,6 +5578,11 @@ public class ChatRepository(
             retryHeld(groupIdHex, localId)
             return DeliverOutcome.Handed
         }
+        // UX 16.11 (alignment 2026-11-27) — the person of this one-to-one
+        // started over (an unsealed reset): their old devices are gone, so
+        // nothing waiting here is ever sent. "Not sent", and the closed chat
+        // offers no Retry.
+        if (startedOverOneToOne(groupIdHex)) return DeliverOutcome.Refused(null)
         // ADR-0092 section 3.4 — an anonymous poll sealed under a roster that
         // has since changed cannot go as it is.
         if (!retryableAsIs(row.content) { hash -> ringBytesIfMatches(rosterAccountKeysOf(record.group), hash) != null }) {
@@ -9486,6 +9491,39 @@ public class ChatRepository(
      */
     internal fun deadOneToOne(groupIdHex: String): Boolean =
         isDeadSession(conversationKindOf(groupKind(groupIdHex)), unrepairableKeyOf(groupIdHex))
+
+    /**
+     * UX 16.11 — the keys whose one-to-one closed because the account
+     * started over (standard base64). Wired by the activity to the contacts
+     * repository; empty until then.
+     */
+    @Volatile
+    public var startedOverKeys: () -> Set<String> = { emptySet() }
+
+    /** UX 16.11 — [groupIdHex] is a one-to-one whose other person's key is
+     *  one of [startedOverKeys]. */
+    internal fun startedOverOneToOne(groupIdHex: String): Boolean {
+        val keys = startedOverKeys()
+        if (keys.isEmpty()) return false
+        val peer = oneToOnePeerKey(groupIdHex) ?: return false
+        return java.util.Base64.getEncoder().encodeToString(peer) in keys
+    }
+
+    /**
+     * UX 16.11 (alignment 2026-11-27) — a person was found to have started
+     * over: what waits to be sent into their old one-to-one turns "Not sent"
+     * now and is never sent. Idempotent; called whenever [startedOverKeys]
+     * changes.
+     */
+    public fun failSendsIntoStartedOver() {
+        val keys = startedOverKeys()
+        if (keys.isEmpty()) return
+        for (groupIdHex in groups.keys.toList()) {
+            if (!startedOverOneToOne(groupIdHex)) continue
+            val turned = outbox.failWaiting(groupIdHex)
+            if (turned > 0) android.util.Log.i("ChatRepository", "UX 16.11: $turned waiting sends of a closed one-to-one marked not sent")
+        }
+    }
 
     /**
      * R.7 case 1 — apply an edit, a delete or a reaction of this account on

@@ -548,19 +548,12 @@ struct EmailRecoverSection: View {
     }
 
     var body: some View {
-        if model.state.leaveToList {
-            // The keys could not be opened: one sentence and the way back
-            // to the list.
-            line
-            AuthSecondaryButton(title: l10n.t("recovery.methods.back_to_list"), action: onBackToList)
-        } else {
-            switch model.state.step {
-            case .start: startStep
-            case .code: codeStep
-            case .totp: totpStep
-            case .newPassword: passwordStep
-            case .restoring: progress("recovery.email.restoring")
-            }
+        switch model.state.step {
+        case .start: startStep
+        case .code: codeStep
+        case .totp: totpStep
+        case .newPassword: passwordStep
+        case .restoring: progress("common.saving")
         }
     }
 

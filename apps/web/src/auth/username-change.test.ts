@@ -9,8 +9,8 @@ import {
   clearRenameStores,
   readRenameOwed,
   renameEmail,
+  renameNeedsAddress,
   renameResume,
-  renameSealsVault,
   replaceFailure,
   rollbackRename,
   runRename,
@@ -39,11 +39,13 @@ describe("how the recovery email fares", () => {
     expect(renameEmail(true, false)).toBe("dropped");
   });
 
-  it("a vault is sealed only when the email is kept and no phrase is saved", () => {
-    expect(renameSealsVault("kept", false)).toBe(true);
-    expect(renameSealsVault("kept", true)).toBe(false);
-    expect(renameSealsVault("dropped", false)).toBe(false);
-    expect(renameSealsVault("none", false)).toBe(false);
+  it("the screen asks for the address only when the email is the last second way in and none is held (UX 19.1c)", () => {
+    expect(renameNeedsAddress("dropped", true)).toBe(true);
+    // Another way stays: the rename may turn the email off, as before.
+    expect(renameNeedsAddress("dropped", false)).toBe(false);
+    // The device holds the address: it is carried without asking.
+    expect(renameNeedsAddress("kept", true)).toBe(false);
+    expect(renameNeedsAddress("none", true)).toBe(false);
   });
 });
 
@@ -52,6 +54,8 @@ describe("reading the answers", () => {
     expect(bindFailure(answer(403, "fresh-auth-required"))).toEqual({ kind: "proof-required" });
     expect(bindFailure(answer(403, "address-mismatch"))).toEqual({ kind: "address-mismatch" });
     expect(bindFailure(answer(409, "handle-taken"))).toEqual({ kind: "taken" });
+    // The change would drop the account's last second way in.
+    expect(bindFailure(answer(409, "last-factor"))).toEqual({ kind: "last-factor" });
     expect(bindFailure(answer(429, "handle-bind-limited", 120))).toEqual({ kind: "bind-limited", retryAfterSecs: 120 });
     expect(bindFailure(answer(null))).toEqual({ kind: "offline" });
     expect(bindFailure(answer(409, "handle-mismatch"))).toEqual({ kind: "error" });
@@ -77,22 +81,14 @@ interface Harness {
 function harness(script: {
   bind?: (Answer | null)[];
   replace?: Answer | "ok";
-  seal?: boolean;
 } = {}): Harness {
   const calls: string[] = [];
   const binds: Parameters<RenamePorts["bind"]>[0][] = [];
   const owed: (RenameOwed | null)[] = [];
   const finished: string[] = [];
   const bindAnswers = [...(script.bind ?? [])];
-  let seals = 0;
   const ports: RenamePorts = {
     handleFor: async (username) => ({ bytes: new TextEncoder().encode(username), wire: `h(${username})` }),
-    sealVault: async (handle, address) => {
-      calls.push(`seal:${new TextDecoder().decode(handle)}`);
-      if (script.seal === false) return null;
-      seals += 1;
-      return { salt: new Uint8Array(16).fill(seals), sealed: new TextEncoder().encode(`${address}|${seals}`) };
-    },
     bind: async (args) => {
       calls.push(`bind:${args.handle}`);
       binds.push(args);
@@ -111,7 +107,7 @@ function harness(script: {
   };
   return { ports, calls, binds, owed, finished };
 }
-const input = (email: { address: string; sealVault: boolean } | null = null) => ({
+const input = (email: { address: string } | null = null) => ({
   oldUsername: "alice",
   newUsername: "alicia",
   grant: "k1.grant",
@@ -129,27 +125,20 @@ describe("the rename, in order", () => {
     expect(h.owed.map((r) => r?.phase ?? null)).toEqual(["binding", "replaced", null]);
   });
 
-  it("carries the recovery email with a vault sealed under the NEW handle when no phrase is saved", async () => {
+  it("carries the address alone, for every account: no vault rides along", async () => {
     const h = harness();
-    await runRename(h.ports, input({ address: "name@example.com", sealVault: true }));
-    expect(h.calls[0]).toBe("seal:alicia");
-    expect(h.binds[0]?.email?.address).toBe("name@example.com");
-    expect(h.binds[0]?.email?.vault).toBeDefined();
-  });
-
-  it("carries the address alone for a phrase-protected account", async () => {
-    const h = harness();
-    await runRename(h.ports, input({ address: "name@example.com", sealVault: false }));
-    expect(h.calls.some((c) => c.startsWith("seal"))).toBe(false);
+    await runRename(h.ports, input({ address: "name@example.com" }));
+    expect(h.calls).toEqual(["bind:h(alicia)", "replace:alicia", "finish:alicia"]);
     expect(h.binds[0]?.email).toEqual({ address: "name@example.com" });
+    expect(Object.keys(h.binds[0]?.email ?? {})).toEqual(["address"]);
   });
 
-  it("sends nothing when the vault could not be sealed", async () => {
-    const h = harness({ seal: false });
-    const out = await runRename(h.ports, input({ address: "name@example.com", sealVault: true }));
-    expect(out).toEqual({ kind: "failed", failure: { kind: "error" }, rolledBack: null });
-    expect(h.binds).toEqual([]);
-    expect(h.owed).toEqual([]);
+  it("a change that would drop the last second way in is refused and changed nothing", async () => {
+    const h = harness({ bind: [answer(409, "last-factor")] });
+    const out = await runRename(h.ports, input());
+    expect(out).toEqual({ kind: "failed", failure: { kind: "last-factor" }, rolledBack: null });
+    expect(h.calls).toEqual(["bind:h(alicia)"]);
+    expect(last(h.owed)).toBeNull();
   });
 
   it("a refused bind changed nothing: no replace, no record", async () => {
@@ -169,14 +158,13 @@ describe("the rename, in order", () => {
 });
 
 describe("the rollback", () => {
-  it("a taken name binds the OLD handle back, the same shape reversed, the vault re-sealed under the old handle", async () => {
+  it("a taken name binds the OLD handle back, the same shape reversed, the address carried again", async () => {
     const h = harness({ replace: answer(409, "username-taken") });
-    const out = await runRename(h.ports, input({ address: "name@example.com", sealVault: true }));
+    const out = await runRename(h.ports, input({ address: "name@example.com" }));
     expect(out).toEqual({ kind: "failed", failure: { kind: "taken" }, rolledBack: true });
-    expect(h.calls).toEqual(["seal:alicia", "bind:h(alicia)", "replace:alicia", "seal:alice", "bind:h(alice)"]);
+    expect(h.calls).toEqual(["bind:h(alicia)", "replace:alicia", "bind:h(alice)"]);
     expect(h.binds[1]).toMatchObject({ handle: "h(alice)", previousHandle: "h(alicia)", grant: "k1.grant" });
-    // A new seal, not the one made for the new handle.
-    expect(h.binds[1]?.email?.vault?.sealed).not.toEqual(h.binds[0]?.email?.vault?.sealed);
+    expect(h.binds[1]?.email).toEqual({ address: "name@example.com" });
     expect(h.finished).toEqual([]);
     expect(last(h.owed)).toBeNull();
   });

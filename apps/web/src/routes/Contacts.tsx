@@ -74,10 +74,15 @@ import { InviteLinksPanel } from "../contacts/InviteLinksPanel";
 import {
   loadAccepted,
   restoreRemovedContact,
+  startedOverOf,
+  loadStartedOverKeys,
+  accountIdB64OfHex,
+  readPin,
   subscribeAcceptedChanged,
   upsertAccepted,
   type AcceptedContact,
 } from "../contacts/local-store";
+import { requestCarriesStartedOverNote, sentRequestCarriesStartedOverNote } from "../contacts/started-over";
 import { useMailbox } from "../contacts/MailboxContext";
 import {
   forgetSentRequest,
@@ -713,6 +718,26 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
         viaGroupName={(req) =>
           req.viaGroupIdB64 === undefined ? null : (groupNames.nameOf(req.viaGroupIdB64)?.trim() ?? "")
         }
+        startedOverNote={(req) => {
+          // UX 16.11 - read again whenever the contacts store changes (the
+          // reset check that records the fact may land after the row).
+          accepted();
+          return requestCarriesStartedOverNote({
+            requestKeyB64: base64Encode(req.fromPubkey),
+            pendingNewKeyB64:
+              req.fromAccountId === null
+                ? null
+                : (startedOverOf(base64Encode(req.fromAccountId))?.newKeyB64 ?? null),
+          });
+        }}
+        sentStartedOverNote={(record) => {
+          accepted();
+          const accountIdB64 = accountIdB64OfHex(record.recipientAccountIdHex);
+          return sentRequestCarriesStartedOverNote({
+            requestKeyB64: record.recipientKeyB64 ?? null,
+            leftBehindKeysB64: accountIdB64 === null ? [] : (readPin(accountIdB64)?.startedOverKeysB64 ?? []),
+          });
+        }}
         onDecline={onDecline}
         sent={sent}
         onDismissSent={onDismissSent}
@@ -784,6 +809,10 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
               // next opened.
               membershipEnded={chatMembershipEnded(c())}
               isContact={selectedIsContact()}
+              keyLeftBehind={(() => {
+                accepted();
+                return loadStartedOverKeys().has(c().signaturePubkeyB64);
+              })()}
               accountIdHex={c().accountIdHex ?? null}
               onAddContact={() => onAddBack(c())}
               onDeleteChat={

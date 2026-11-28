@@ -60,6 +60,21 @@ describe("oneToOneSendVerdict", () => {
     });
     expect(verdict).toBe("give-up");
   });
+
+  it("a one-to-one whose person started over takes nothing: Not sent at once, never held (UX 16.11)", async () => {
+    let startedOver = false;
+    const verdict = await oneToOneSendVerdict({
+      // The check is what notices the unsealed reset.
+      check: async () => {
+        startedOver = true;
+      },
+      unrepairableKey: () => "peer",
+      closed: () => startedOver,
+      heldAtMs: 1_000,
+      now: () => 1_000,
+    });
+    expect(verdict).toBe("give-up");
+  });
 });
 
 describe("the peer and the unrepairable key", () => {

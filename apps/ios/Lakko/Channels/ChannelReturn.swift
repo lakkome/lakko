@@ -18,7 +18,6 @@ import LakkoCore
 // | this device                        | the reset account was           | sends role |
 // |------------------------------------|---------------------------------|------------|
 // | owner or publisher of the channel  | a subscriber with a member card | subscriber |
-// | anyone in the channel              | the owner (its card)            | owner      |
 // | an owner device                    | a publisher                     | publisher  |
 //
 // The reset device verifies the old card binding against its own previous
@@ -27,16 +26,18 @@ import LakkoCore
 //
 // iOS mirror of `apps/web/src/channels/channel-return.ts`.
 
+/// The role a return names. There is no owner role since 2026-11-26: an
+/// owner takes its channels back from its own list (``OwnedChannels``), with
+/// no subscriber or publisher taking part, and the core's decoder refuses
+/// the old owner return.
 public enum ChannelReturnRoleName: String, Codable, Equatable, Sendable {
     case subscriber
     case publisher
-    case owner
 
     init(_ ffi: FfiChannelReturnRole) {
         switch ffi {
         case .subscriber: self = .subscriber
         case .publisher: self = .publisher
-        case .owner: self = .owner
         }
     }
 
@@ -44,7 +45,6 @@ public enum ChannelReturnRoleName: String, Codable, Equatable, Sendable {
         switch self {
         case .subscriber: return .subscriber
         case .publisher: return .publisher
-        case .owner: return .owner
         }
     }
 }
@@ -57,8 +57,6 @@ public enum ChannelReturnAction: Equatable, Sendable {
     case acceptPublisher
     /// Already in the channel in that role: only the seeds are added.
     case addSeeds
-    /// The owner: take the channel back with its recovery key.
-    case recoverOwner
     /// Not verified, but it carries an invitation: shown as an ordinary
     /// invitation for the person to decide on.
     case showInvitation
@@ -112,21 +110,19 @@ public struct PlannedReturn: Equatable, Sendable {
 }
 
 public enum ChannelReturnRules {
-    /// | verified | role       | invitation | already in role | owns already | action          |
-    /// |----------|------------|------------|-----------------|--------------|-----------------|
-    /// | no       | any        | yes        | -               | -            | showInvitation  |
-    /// | no       | any        | no         | -               | -            | drop            |
-    /// | yes      | subscriber | -          | yes             | -            | addSeeds        |
-    /// | yes      | subscriber | yes        | no              | -            | subscribe       |
-    /// | yes      | subscriber | no         | no              | -            | drop            |
-    /// | yes      | publisher  | -          | yes             | -            | addSeeds        |
-    /// | yes      | publisher  | yes        | no              | -            | acceptPublisher |
-    /// | yes      | publisher  | no         | no              | -            | addSeeds        |
-    /// | yes      | owner      | -          | -               | yes          | addSeeds        |
-    /// | yes      | owner      | -          | -               | no           | recoverOwner    |
+    /// | verified | role       | invitation | already in role | action          |
+    /// |----------|------------|------------|-----------------|-----------------|
+    /// | no       | any        | yes        | -               | showInvitation  |
+    /// | no       | any        | no         | -               | drop            |
+    /// | yes      | subscriber | -          | yes             | addSeeds        |
+    /// | yes      | subscriber | yes        | no              | subscribe       |
+    /// | yes      | subscriber | no         | no              | drop            |
+    /// | yes      | publisher  | -          | yes             | addSeeds        |
+    /// | yes      | publisher  | yes        | no              | acceptPublisher |
+    /// | yes      | publisher  | no         | no              | addSeeds        |
     public static func action(
         verified: Bool, role: ChannelReturnRoleName, hasInvitation: Bool,
-        alreadyInRole: Bool, ownsAlready: Bool
+        alreadyInRole: Bool
     ) -> ChannelReturnAction {
         guard verified else { return hasInvitation ? .showInvitation : .drop }
         switch role {
@@ -135,8 +131,6 @@ public enum ChannelReturnRules {
             return hasInvitation ? .subscribe : .drop
         case .publisher:
             return hasInvitation && !alreadyInRole ? .acceptPublisher : .addSeeds
-        case .owner:
-            return ownsAlready ? .addSeeds : .recoverOwner
         }
     }
 
@@ -148,11 +142,9 @@ public enum ChannelReturnRules {
     ) -> [PlannedReturn] {
         var out: [PlannedReturn] = []
         for ch in channels {
-            func cardOf(_ key: String) -> ReturnCard? { ch.cards.first { $0.identityPkB64 == key } }
-            if let owner = ch.ownerKeyB64, !ownKeysB64.contains(owner),
-               let acct = superseded[owner], let card = cardOf(owner) {
-                out.append(PlannedReturn(idHex: ch.idHex, role: .owner, accountIdB64: acct, card: card))
-            }
+            // A subscriber's device sends nothing: an owner comes back by
+            // itself (``OwnedChannels``), and only a publishing device holds
+            // the list of who reads.
             if ch.ownRole == .subscriber { continue }
             let publishers = Set(ch.publisherKeysB64)
             for card in ch.cards {
@@ -214,18 +206,12 @@ public enum ChannelReturnRules {
         return ProfileReturn.newestHeldEnvelope(keysB64: keys, heldEnvelopeOf: heldEnvelopeOf)
     }
 
-    /// The owner key a channel's returns are planned with (D1, live walk
-    /// 2026-11-26). The account key recorded for the channel's owner (a
-    /// co-publisher's register carries it); on a subscriber's device, which
-    /// is told no owner, the key that signed the invitation it subscribed
-    /// with: an owner return to a key that turns out not to be the owner's
-    /// fails the reset device's recovery-key check and is dropped there.
-    /// Never the inviter for a device that publishes: its owner key decides
-    /// which cards get publisher and subscriber returns. Pure.
-    static func ownerKeyB64(extras: ChannelExtras, ownRole: ReturnChannel.OwnRole) -> String? {
-        if let key = extras.ownerAccountKey, key.count == 32 { return base64Encode(key) }
-        guard ownRole == .subscriber, let inviter = extras.inviterAccountKey, inviter.count == 32 else { return nil }
-        return base64Encode(inviter)
+    /// The owner's account key of a channel, where this device knows it (a
+    /// co-publisher's register carries it): a card of the owner gets neither
+    /// a subscriber nor a publisher return. Pure.
+    static func ownerKeyB64(extras: ChannelExtras) -> String? {
+        guard let key = extras.ownerAccountKey, key.count == 32 else { return nil }
+        return base64Encode(key)
     }
 
     /// The owned channels still owing a recovery-key registration. Pure.
@@ -312,7 +298,10 @@ public struct SentChannelReturnStore {
 
 /// The owned channels whose recovery key landed, per account.
 public struct ChannelRecoveryRegisteredStore {
-    static let prefix = "lakko.channel-recovery-registered.v1."
+    /// `v2`: the recovery key comes from the owned-channels list key since
+    /// 2026-11-26, so every owned channel registers again (the keys made
+    /// through the removed auth evaluation are not this account's any more).
+    static let prefix = "lakko.channel-recovery-registered.v2."
 
     private let defaults: UserDefaults
 
@@ -342,19 +331,5 @@ public struct ChannelRecoveryRegisteredStore {
 
     public func clear(accountIdB64: String) {
         defaults.removeObject(forKey: Self.prefix + accountIdB64)
-    }
-}
-
-@MainActor
-extension ChannelsUiState {
-    /// ADR-0101 section 7 (D1) — keep who signed the invitation a subscribe
-    /// is made with, for the owner return; a key already recorded stays
-    /// (the first invitation subscribed with), and a channel this device
-    /// publishes records nothing.
-    func noteInviter(_ facts: ChannelLinkFacts) {
-        guard let key = facts.inviterAccountKey, key.count == 32,
-              keysByChannel[facts.channelIdHex] == nil,
-              extras(facts.channelIdHex).inviterAccountKey == nil else { return }
-        updateExtras(facts.channelIdHex) { $0.inviterAccountKey = key }
     }
 }

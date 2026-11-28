@@ -54,6 +54,8 @@ private data class StoredSentRequest(
     val recipientKeyB64: String? = null,
     /** The name the person was found under; absent before it was kept. */
     val recipientName: String? = null,
+    /** UX 16.11 - sent to the new account of a person who started over. */
+    val startedOverNote: Boolean = false,
 )
 
 private val sentJson = Json { ignoreUnknownKeys = true }
@@ -77,6 +79,7 @@ internal fun encodeSentRequests(sent: List<SentContactRequest>): ByteArray =
                 sentAtMs = it.sentAtMs,
                 recipientKeyB64 = it.recipientKeyB64,
                 recipientName = it.recipientName,
+                startedOverNote = it.startedOverNote,
             )
         },
     ).toByteArray(Charsets.UTF_8)
@@ -94,6 +97,7 @@ internal fun decodeSentRequests(bytes: ByteArray): List<SentContactRequest>? =
                 sentAtMs = it.sentAtMs,
                 recipientKeyB64 = it.recipientKeyB64,
                 recipientName = it.recipientName,
+                startedOverNote = it.startedOverNote,
             )
         }
     } catch (_: Exception) {

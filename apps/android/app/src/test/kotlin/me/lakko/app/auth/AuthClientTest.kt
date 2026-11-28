@@ -483,7 +483,7 @@ class AuthClientTest {
     }
 
     @Test
-    fun `totp enroll start sends no body, device authorize start carries the fresh-auth proof`() = runTest {
+    fun `totp enroll start and device authorize start both carry the fresh-auth proof`() = runTest {
         val captured = mutableListOf<CapturedRequest>()
         client(
             responses = listOf(
@@ -492,12 +492,14 @@ class AuthClientTest {
             ),
             captured = captured,
         ).use { client ->
-            client.totpEnrollStart("tok")
+            client.totpEnrollStart("tok", freshGrant = "FG")
             assertEquals("G", client.deviceAuthorizeStart("tok", "PROOF"))
         }
         assertEquals(2, captured.size)
         assertTrue(captured[0].url.endsWith("/totp/enroll/start"))
-        assertNull(captured[0].body)
+        // UX 19.1b: an authenticator is one of the reset's factors, so a
+        // bare session may not set one up.
+        assertEquals("FG", captured[0].body?.get("fresh_grant")?.jsonPrimitive?.content)
         assertTrue(captured[1].url.endsWith("/device/authorize/start"))
         // UX 17.4: the route had no body before; it carries the proof now.
         assertEquals("PROOF", captured[1].body?.get("fresh_grant")?.jsonPrimitive?.content)

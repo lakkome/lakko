@@ -38,6 +38,10 @@ public enum class ProofSurface {
 
     /** ADR-0076 - change the username. */
     ChangeUsername,
+
+    /** UX 19.1b - set up an authenticator app (one of the reset's factors,
+     *  so a bare session may not add one). */
+    AddTotp,
 }
 
 /** The per-surface lines of the block (UX 17.2-17.4). */
@@ -111,6 +115,12 @@ public fun proofCopy(surface: ProofSurface): ProofCopy = when (surface) {
         wrongPassword = "restore_identity.reset.error.wrong_password",
         cancelled = "chat.record.cancelled",
         generic = "common.error.unavailable",
+    )
+    ProofSurface.AddTotp -> ProofCopy(
+        helper = "proof.add_totp.help",
+        wrongPassword = "restore_identity.reset.error.wrong_password",
+        cancelled = "chat.record.cancelled",
+        generic = "settings.recovery.totp.error.generic",
     )
     // UX 18.6.
     ProofSurface.RemoveDevice -> ProofCopy(
@@ -319,45 +329,8 @@ public fun afterProofRequired(state: ProofBlockState): ProofBlockState =
 // Per-surface decisions
 // ---------------------------------------------------------------------------
 
-/** What the reset warning shows under its bullets (UX 17.2). */
-public enum class ResetPanel {
-    /** 15.1 as it was: the typed word and the button, no block. */
-    NoBlock,
-
-    /** The block, then the word and the button. */
-    Block,
-
-    /** The "cannot reset" panel, in place of the block, the word and the
-     *  button. */
-    Cannot,
-}
-
-/**
- * Which panel the reset warning opens on (UX 17.2).
- *
- * @param authenticatorLanding this session was landed with the
- *   authenticator code.
- * @param knowsPassword the person tapped `I know my password`.
- * @param saidNoPassword the person tapped `I do not know my password`.
- */
-public fun resetPanel(
-    proofLive: Boolean,
-    hasUsablePasskey: Boolean,
-    authenticatorLanding: Boolean,
-    knowsPassword: Boolean,
-    saidNoPassword: Boolean,
-): ResetPanel = when {
-    proofLive -> ResetPanel.NoBlock
-    hasUsablePasskey -> ResetPanel.Block
-    saidNoPassword -> ResetPanel.Cannot
-    authenticatorLanding && !knowsPassword -> ResetPanel.Cannot
-    else -> ResetPanel.Block
-}
-
-/** Whether the reset panel shows the `I do not know my password` link: only
- *  under a block that has no passkey route. */
-public fun resetShowsNoPasswordLink(panel: ResetPanel, hasUsablePasskey: Boolean): Boolean =
-    panel == ResetPanel.Block && !hasUsablePasskey
+// The reset warning's own panel (the password, then one second factor, UX
+// 15.1b) is `me.lakko.app.auth.ResetFactor.kt`: it is not this block.
 
 /** What the delete dialog shows between its body and its actions (UX 17.3). */
 public enum class DeletePanel {

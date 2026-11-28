@@ -78,6 +78,39 @@ protocol AccountDirectory {
 }
 
 extension AccountDirectory {
+    /// ADR-0101 section 10 — the attested publish of a key reset with its
+    /// reset seal (`nil` for an unsealed reset). A directory that knows no
+    /// seals (a test fake) publishes the bundle without one.
+    func publishResetIdentityBundle(
+        accountId: Data,
+        signaturePubkey: Data,
+        x25519Pubkey: Data,
+        x25519Binding: Data,
+        leafAuth: Data?,
+        keyResetAttest: Data?,
+        resetSeal: Data?,
+        sessionToken: String
+    ) async throws {
+        try await publishIdentityBundle(
+            accountId: accountId, signaturePubkey: signaturePubkey, x25519Pubkey: x25519Pubkey,
+            x25519Binding: x25519Binding, leafAuth: leafAuth, genesisAttest: nil,
+            keyResetAttest: keyResetAttest, sessionToken: sessionToken)
+    }
+
+    /// ADR-0101 section 10 — publish the account's seal announcement: the
+    /// same identity bundle again, with the announcement. A directory that
+    /// knows no seals (a test fake) refuses.
+    func publishSealAnnouncement(
+        accountId: Data,
+        signaturePubkey: Data,
+        x25519Pubkey: Data,
+        x25519Binding: Data,
+        announcement: Data,
+        sessionToken: String
+    ) async throws {
+        throw DiscoveryClientError.argument("this directory cannot publish a seal announcement")
+    }
+
     /// A directory that predates the rotation (a test fake) refuses it.
     func publishRotatedIdentityBundle(
         accountId: Data,
@@ -132,6 +165,44 @@ struct DiscoveryAccountDirectory: AccountDirectory {
             leafAuth: leafAuth,
             genesisAttest: genesisAttest,
             keyResetAttest: keyResetAttest
+        )
+    }
+
+    func publishResetIdentityBundle(
+        accountId: Data,
+        signaturePubkey: Data,
+        x25519Pubkey: Data,
+        x25519Binding: Data,
+        leafAuth: Data?,
+        keyResetAttest: Data?,
+        resetSeal: Data?,
+        sessionToken: String
+    ) async throws {
+        try await DiscoveryClient(sessionToken: sessionToken).uploadIdentityBundle(
+            accountId: accountId,
+            signaturePubkey: signaturePubkey,
+            x25519Pubkey: x25519Pubkey,
+            x25519Binding: x25519Binding,
+            leafAuth: leafAuth,
+            keyResetAttest: keyResetAttest,
+            resetSeal: resetSeal
+        )
+    }
+
+    func publishSealAnnouncement(
+        accountId: Data,
+        signaturePubkey: Data,
+        x25519Pubkey: Data,
+        x25519Binding: Data,
+        announcement: Data,
+        sessionToken: String
+    ) async throws {
+        try await DiscoveryClient(sessionToken: sessionToken).uploadIdentityBundle(
+            accountId: accountId,
+            signaturePubkey: signaturePubkey,
+            x25519Pubkey: x25519Pubkey,
+            x25519Binding: x25519Binding,
+            resetSeals: announcement
         )
     }
 

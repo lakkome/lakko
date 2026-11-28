@@ -106,8 +106,9 @@ class RecallTest {
     @Test
     fun `the record holds the account id, the 32-byte signing seed, the name and the time, and nothing else`() {
         val bytes = RecallRecordCodec.encode(record())
-        // version + id + seed + time + name length + name.
-        assertEquals(1 + 16 + 32 + 8 + 2 + "alice".length, bytes.size)
+        // version + id + seed + time + name length + name + root length
+        // (version 2: no owned-channels keys lock root here).
+        assertEquals(1 + 16 + 32 + 8 + 2 + "alice".length + 1, bytes.size)
         val back = RecallRecordCodec.decode(bytes)!!
         assertArrayEquals(accountId, back.accountId)
         assertArrayEquals(seed, back.oldAccountSeed)
@@ -480,5 +481,48 @@ class RecallTest {
         assertTrue(
             recallOffersPhrase(ui(RecallStage.Form, RecallAvailability.Open(status().copy(phraseArm = true)))),
         )
+    }
+
+    // ---- alignment 2026-11-27 (ADR-0101 sections 7 and 10) ------------------
+
+    @Test
+    fun `a sealed reset made elsewhere is the owner's - the full wipe, no recall`() {
+        assertEquals(
+            SupersededWipe.Full,
+            supersededWipeFor(KeyResetSignOut.Kind.Reset, holdsAccountKeys = true, sealed = true),
+        )
+        // Unsealed keeps "Was it you?" and the recall, as before.
+        assertEquals(
+            SupersededWipe.StagedKeepingRecall,
+            supersededWipeFor(KeyResetSignOut.Kind.Reset, holdsAccountKeys = true, sealed = false),
+        )
+    }
+
+    @Test
+    fun `only a sealed verdict makes the reset the owner's`() {
+        assertTrue(ownResetIsSealed(me.lakko.app.contacts.ResetVerdict.Sealed(2, 1L, 3L)))
+        assertFalse(ownResetIsSealed(me.lakko.app.contacts.ResetVerdict.Unsealed(2, 1L)))
+        assertFalse(
+            ownResetIsSealed(me.lakko.app.contacts.ResetVerdict.Refused(me.lakko.app.contacts.ResetRefusal.UNCONFIRMED)),
+        )
+        assertFalse(ownResetIsSealed(me.lakko.app.contacts.ResetVerdict.NoVerdict))
+    }
+
+    @Test
+    fun `the record keeps the old owned-channels keys lock root`() {
+        val root = ByteArray(32) { 0x5a }
+        val bytes = RecallRecordCodec.encode(RecallRecord(accountId.copyOf(), seed.copyOf(), "alice", 7L, root.copyOf()))
+        val back = RecallRecordCodec.decode(bytes)!!
+        assertArrayEquals(root, back.ownedKeysLockRoot)
+        assertEquals("alice", back.username)
+        // Without a root it still round-trips.
+        assertNull(RecallRecordCodec.decode(RecallRecordCodec.encode(record()))!!.ownedKeysLockRoot)
+        // A root of another length is refused.
+        val bad = bytes.copyOf()
+        bad[bytes.size - 33] = 16
+        assertNull(RecallRecordCodec.decode(bad))
+        // The version-1 layout is not read.
+        val v1 = bytes.copyOf(bytes.size - 33).also { it[0] = 1 }
+        assertNull(RecallRecordCodec.decode(v1))
     }
 }

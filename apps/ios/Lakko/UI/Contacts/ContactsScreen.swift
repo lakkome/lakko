@@ -416,6 +416,14 @@ private struct SentRequestRow: View {
                         .font(.subheadline)
                         .foregroundStyle(Color.lakkoTextMuted)
                 }
+                if request.startedOver == true {
+                    // UX 16.11 (alignment item D) — added by name after the
+                    // person started over: the note an incoming request
+                    // from their new account carries.
+                    Text(l10n.t(StartedOverRequest.noteKey))
+                        .font(.subheadline)
+                        .foregroundStyle(Color.lakkoText)
+                }
                 Text(l10n.t("contacts.list.sent_waiting"))
                     .font(.footnote)
                     .foregroundStyle(Color.lakkoTextMuted)
@@ -599,6 +607,13 @@ struct IncomingRequestRow: View {
                         Text(line)
                             .font(.subheadline)
                             .foregroundStyle(Color.lakkoTextMuted)
+                    }
+                    if request.startedOver == true {
+                        // UX 16.11 — the keys of a person who started over:
+                        // Lakko could not confirm it is the same person.
+                        Text(l10n.t(StartedOverRequest.noteKey))
+                            .font(.subheadline)
+                            .foregroundStyle(Color.lakkoText)
                     }
                     if let via = Self.viaLine(viaGroupIdHex: request.viaGroupIdHex, groupName: viaGroupName) {
                         Text(l10n.t(via.key, texts: via.texts))

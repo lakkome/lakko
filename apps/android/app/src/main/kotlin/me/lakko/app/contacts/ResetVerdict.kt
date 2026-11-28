@@ -6,21 +6,31 @@ package me.lakko.app.contacts
 import me.lakko.app.transparency.LogVerifyStatus
 
 /**
- * ADR-0073 "Phase 2 revised: silent continuity", R.2 - the acceptance rule
- * for a contact's account-key RESET, as one pure decision.
+ * ADR-0073 R.2 with rule 4 (amended 2026-11-26, the second time) - the
+ * acceptance rule for a contact's account-key RESET.
  *
- * A reset is a key change with NO supersession proof (with one, ADR-0016's
- * path runs and this file is never asked: a proven rotation is not a
- * reset). It is accepted, silently, when the directory serves an
- * auth-signed key-reset attestation for exactly this account and this key,
- * at a generation strictly above the one this device last accepted, and the
- * key log (when one is configured) agrees. Anything negative is the
- * existing fail-closed refusal; anything not yet known is no verdict at
- * all.
+ * The table is the core's, written once in `lakko_contacts::reset_verdict`
+ * and reached through [ResetRule] (`resetVerdict` on the UniFFI surface);
+ * this file used to carry a hand-written copy of it and no longer does. What
+ * is left here is the vocabulary [ContactsClient] gathers the inputs in and
+ * reads the outcome in, and the conversion to and from the generated
+ * records.
  *
- * Free of the native library, storage and the network so the host suite
- * runs the whole table; [ContactsClient] gathers the inputs and acts on the
- * outcome. Mirror of `apps/web/src/contacts/reset-verdict.ts` (R.12).
+ * Four outcomes:
+ *
+ *   - **sealed**: rules 1 to 4 hold. The same person: re-pin, and everything
+ *     ADR-0101 moves (conversations, profile, history, channel returns) runs.
+ *     Nothing is shown.
+ *   - **unsealed**: rules 1 to 3 hold and rule 4 does not (no seal, an
+ *     invalid one, or one whose key the previous announcement does not
+ *     list). A new account under the same username (ADR-0101 section 11, UX
+ *     16.11): no re-pin onto the old contact, nothing moved, nothing
+ *     returned.
+ *   - **refused**: the fail-closed refusal, as before.
+ *   - **no verdict**: something could not be reached; nothing changes.
+ *
+ * The host JVM loads no native library, so its suite injects a fake rule
+ * and tests what [ContactsClient] does with each outcome.
  */
 
 /** What the caller learned by running `verifyKeyResetAttestation` over the
@@ -47,6 +57,26 @@ public data class LogCheck(
     val isReset: Boolean?,
 )
 
+/** Rule 4's signature half (`checkResetSeal`): whether the reset seal is
+ *  signed by a key the previous generation's announcement lists. */
+public data class SealCheck(
+    val valid: Boolean,
+    /** The previous announcement's number when valid (0 otherwise). */
+    val announcementSeq: Long = 0L,
+    /** The core's refusal code when not valid, for a log line. */
+    val refusal: String? = null,
+) {
+    public companion object {
+        /** No seal could be checked (nothing served, or the check threw). */
+        public val NONE: SealCheck = SealCheck(valid = false, refusal = "noSeal")
+    }
+}
+
+/** Rule 4's key-log half: the served announcement is in the log, for this
+ *  account and generation, before the reset's leaf. Ignored by the rule
+ *  when the build has no key log. */
+public enum class SealLogCheck { PROVEN, NOT_PROVEN, UNREACHABLE }
+
 /** Which refusal copy the action shows (`contacts.identity_changed.*`). */
 public enum class ResetRefusal {
     /** The key log shows the new key and does NOT record a reset. */
@@ -57,7 +87,13 @@ public enum class ResetRefusal {
 }
 
 public sealed interface ResetVerdict {
-    public data class Accepted(val keyGeneration: Long, val signedAtMs: Long) : ResetVerdict
+    /** The same person. [announcementSeq] is the new floor of the account's
+     *  announcement numbers. */
+    public data class Sealed(val keyGeneration: Long, val signedAtMs: Long, val announcementSeq: Long) : ResetVerdict
+
+    /** A new account under the same username. */
+    public data class Unsealed(val keyGeneration: Long, val signedAtMs: Long) : ResetVerdict
+
     public data class Refused(val why: ResetRefusal) : ResetVerdict
     public data object NoVerdict : ResetVerdict
 }
@@ -75,68 +111,82 @@ public data class ResetVerdictInput(
     val bundleGeneration: Long,
     val attest: AttestCheck,
     val log: LogCheck,
+    val seal: SealCheck = SealCheck.NONE,
+    val sealLog: SealLogCheck = SealLogCheck.NOT_PROVEN,
 )
 
-/** The refusal copy for a negative verdict: `unexplained` only when the log
- *  itself, read to the end, shows the key without a reset. */
-private fun refusalFor(log: LogCheck): ResetVerdict =
-    ResetVerdict.Refused(
-        if (log.status == LogVerifyStatus.CONFIRMED && log.isReset == false) {
-            ResetRefusal.UNEXPLAINED
-        } else {
-            ResetRefusal.UNCONFIRMED
-        },
-    )
-
-/**
- * R.2, in the order the checks decide:
- *
- * | # | attestation | generation                  | key log                        | verdict                 |
- * |---|-------------|-----------------------------|--------------------------------|-------------------------|
- * | 1 | absent      | -                           | any                            | refused                 |
- * | 2 | invalid     | -                           | any                            | refused                 |
- * | 3 | no-key      | -                           | any                            | no-verdict              |
- * | 4 | verified    | != bundle's, or <= accepted | any                            | refused                 |
- * | 5 | verified    | ok                          | confirmed, `is_reset` false    | refused (`unexplained`) |
- * | 6 | verified    | ok                          | mismatch / rollback            | refused                 |
- * | 7 | verified    | ok                          | unreachable / absent           | no-verdict              |
- * | 8 | verified    | ok                          | confirmed + `is_reset`, or off | accepted                |
- *
- * A refusal's copy is `unexplained` exactly when the log is `confirmed`
- * without `is_reset`, `unconfirmed` otherwise. Row 8's `off` arm is decision
- * D3 ([logOffAcceptsReset]).
- *
- * Callers must not ask for an unchanged key; one that does is answered
- * `no-verdict` (nothing to accept, nothing to refuse).
- */
-public fun resetVerdict(input: ResetVerdictInput): ResetVerdict {
-    if (input.fetchedKeyB64 == input.heldKeyB64) return ResetVerdict.NoVerdict
-    val attest = when (val a = input.attest) {
-        AttestCheck.Absent, AttestCheck.Invalid -> return refusalFor(input.log)
-        AttestCheck.NoKey -> return ResetVerdict.NoVerdict
-        is AttestCheck.Verified -> a
-    }
-    if (attest.keyGeneration < 0 ||
-        attest.keyGeneration != input.bundleGeneration ||
-        attest.keyGeneration <= input.acceptedGeneration
-    ) {
-        return refusalFor(input.log)
-    }
-    val accepted = ResetVerdict.Accepted(attest.keyGeneration, attest.signedAtMs)
-    return when (input.log.status) {
-        LogVerifyStatus.CONFIRMED -> if (input.log.isReset == true) accepted else refusalFor(input.log)
-        LogVerifyStatus.OFF -> if (logOffAcceptsReset()) accepted else ResetVerdict.Refused(ResetRefusal.UNCONFIRMED)
-        LogVerifyStatus.MISMATCH, LogVerifyStatus.ROLLBACK -> refusalFor(input.log)
-        LogVerifyStatus.UNREACHABLE, LogVerifyStatus.ABSENT -> ResetVerdict.NoVerdict
-    }
+/** R.2 with rule 4. The production rule is the core's ([NativeResetRule]). */
+public fun interface ResetRule {
+    public fun verdict(input: ResetVerdictInput): ResetVerdict
 }
 
-/**
- * Decision D3 (R.10): with no key log configured in the build, a reset is
- * accepted on the attestation alone. `false` would refuse every reset until
- * the log is deployed.
- */
-public fun logOffAcceptsReset(): Boolean = true
+/** `lakko_contacts::reset_verdict` over UniFFI. */
+public object NativeResetRule : ResetRule {
+    override fun verdict(input: ResetVerdictInput): ResetVerdict {
+        val held = try {
+            java.util.Base64.getDecoder().decode(input.heldKeyB64)
+        } catch (_: IllegalArgumentException) {
+            return ResetVerdict.Refused(ResetRefusal.UNCONFIRMED)
+        }
+        val fetched = try {
+            java.util.Base64.getDecoder().decode(input.fetchedKeyB64)
+        } catch (_: IllegalArgumentException) {
+            return ResetVerdict.Refused(ResetRefusal.UNCONFIRMED)
+        }
+        val out = uniffi.lakko_ffi_uniffi.resetVerdict(
+            uniffi.lakko_ffi_uniffi.FfiResetVerdictInput(
+                heldKey = held,
+                acceptedGeneration = input.acceptedGeneration.coerceAtLeast(0L).toULong(),
+                fetchedKey = fetched,
+                bundleGeneration = input.bundleGeneration.coerceAtLeast(0L).toULong(),
+                attest = when (val a = input.attest) {
+                    AttestCheck.Absent -> uniffi.lakko_ffi_uniffi.FfiAttestCheck.Absent
+                    AttestCheck.Invalid -> uniffi.lakko_ffi_uniffi.FfiAttestCheck.Invalid
+                    AttestCheck.NoKey -> uniffi.lakko_ffi_uniffi.FfiAttestCheck.NoKey
+                    is AttestCheck.Verified ->
+                        if (a.keyGeneration < 0) {
+                            uniffi.lakko_ffi_uniffi.FfiAttestCheck.Invalid
+                        } else {
+                            uniffi.lakko_ffi_uniffi.FfiAttestCheck.Verified(a.keyGeneration.toULong(), a.signedAtMs)
+                        }
+                },
+                logStatus = when (input.log.status) {
+                    LogVerifyStatus.CONFIRMED -> uniffi.lakko_ffi_uniffi.FfiLogStatus.CONFIRMED
+                    LogVerifyStatus.ABSENT -> uniffi.lakko_ffi_uniffi.FfiLogStatus.ABSENT
+                    LogVerifyStatus.ROLLBACK -> uniffi.lakko_ffi_uniffi.FfiLogStatus.ROLLBACK
+                    LogVerifyStatus.MISMATCH -> uniffi.lakko_ffi_uniffi.FfiLogStatus.MISMATCH
+                    LogVerifyStatus.UNREACHABLE -> uniffi.lakko_ffi_uniffi.FfiLogStatus.UNREACHABLE
+                    LogVerifyStatus.OFF -> uniffi.lakko_ffi_uniffi.FfiLogStatus.OFF
+                },
+                logIsReset = input.log.isReset,
+                seal = uniffi.lakko_ffi_uniffi.FfiSealCheck(
+                    valid = input.seal.valid,
+                    announcementSeq = input.seal.announcementSeq.coerceAtLeast(0L).toULong(),
+                    kind = null,
+                    refusal = input.seal.refusal,
+                ),
+                sealLog = when (input.sealLog) {
+                    SealLogCheck.PROVEN -> uniffi.lakko_ffi_uniffi.FfiSealLog.PROVEN
+                    SealLogCheck.NOT_PROVEN -> uniffi.lakko_ffi_uniffi.FfiSealLog.NOT_PROVEN
+                    SealLogCheck.UNREACHABLE -> uniffi.lakko_ffi_uniffi.FfiSealLog.UNREACHABLE
+                },
+            ),
+        )
+        return when (out) {
+            is uniffi.lakko_ffi_uniffi.FfiResetVerdict.Sealed ->
+                ResetVerdict.Sealed(out.keyGeneration.toLong(), out.signedAtMs, out.announcementSeq.toLong())
+            is uniffi.lakko_ffi_uniffi.FfiResetVerdict.Unsealed ->
+                ResetVerdict.Unsealed(out.keyGeneration.toLong(), out.signedAtMs)
+            is uniffi.lakko_ffi_uniffi.FfiResetVerdict.Refused -> ResetVerdict.Refused(
+                when (out.why) {
+                    uniffi.lakko_ffi_uniffi.FfiResetRefusal.UNEXPLAINED -> ResetRefusal.UNEXPLAINED
+                    uniffi.lakko_ffi_uniffi.FfiResetRefusal.UNCONFIRMED -> ResetRefusal.UNCONFIRMED
+                },
+            )
+            uniffi.lakko_ffi_uniffi.FfiResetVerdict.NoVerdict -> ResetVerdict.NoVerdict
+        }
+    }
+}
 
 /**
  * The rotation marker of the re-pin (R.2 "The re-pin"): never backwards, in

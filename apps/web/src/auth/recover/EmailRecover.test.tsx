@@ -2,20 +2,25 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * "Email code" on Get back in (docs/ux/identity-recovery.md section 19.3),
- * as wiring: which request each step sends, and what the person is shown
- * for each answer. The step machine itself is `protect/email-flow.test.ts`;
- * this drives the real component over a scripted client, the real wasm core
- * (the username and address rules, the login handle) and a fake vault core.
- * No request leaves the process.
+ * "Email code" on Get back in (docs/ux/identity-recovery.md section 19.3 as
+ * amended 2026-11-26), as wiring: which request each step sends, and what
+ * the person is shown for each answer. A mailed code gives a new password
+ * and never keys: nothing is opened and no phrase restore runs. The step
+ * machine itself is `protect/email-flow.test.ts`; this drives the real
+ * component over a scripted client and the real wasm core (the username and
+ * address rules, the login handle). No request leaves the process.
  */
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 const auth = {
   state: vi.fn(() => ({ kind: "anon" as const })),
   recover: vi.fn(async (_phrase: string, _password: string, _username?: string) => undefined),
   landEmailPasswordRecovery: vi.fn(async () => undefined),
   landingDeviceIdFor: vi.fn(() => undefined),
+  // Not a suspended account (ADR-0099): the failure is shown as it is.
+  landSuspendedFrom: vi.fn(async (_err: unknown, _username: string) => false),
 };
 vi.mock("../AuthContext", () => ({ useAuth: () => auth }));
 
@@ -23,16 +28,11 @@ import { createSignal } from "solid-js";
 
 import { all, initWasm, installLocalStorage, one, present, renderUi, settle } from "../../test/ui";
 import { AuthHttpError } from "../client";
-import { setEmailVaultRuntimeForTests } from "../protect/email-vault";
-import type { EmailVaultCore } from "../protect/email-vault-job";
 import type { RecoveryEmailClient } from "../protect/recovery-email-client";
-import { loadWasm } from "../../wasm";
 import { EmailRecover } from "./EmailRecover";
 
-const PHRASE = "legal winner thank year wave sausage worth useful legal winner thank yellow";
-
 type Script = Partial<{
-  [K in "recoverStart" | "recoverVerify" | "recoverTotp" | "recoverOpen" | "recoverPassword"]: (
+  [K in "recoverStart" | "recoverVerify" | "recoverTotp" | "recoverPassword"]: (
     ...args: never[]
   ) => Promise<unknown>;
 }>;
@@ -50,7 +50,6 @@ function scripted(script: Script): { client: RecoveryEmailClient; calls: string[
     recoverStart: route("recoverStart", () => ({ challengeId: "cid", resendAfterSecs: 45, expiresInSecs: 600 })),
     recoverVerify: route("recoverVerify", () => ({ ticket: "tkt", totpRequired: false })),
     recoverTotp: route("recoverTotp", () => undefined),
-    recoverOpen: route("recoverOpen", () => ({ mode: "password" })),
     recoverPassword: route("recoverPassword", () => ({
       accountId: new Uint8Array(16).fill(1),
       session: {
@@ -63,17 +62,6 @@ function scripted(script: Script): { client: RecoveryEmailClient; calls: string[
     })),
   } as unknown as RecoveryEmailClient;
   return { client, calls };
-}
-
-function vaultCore(opens: boolean): EmailVaultCore {
-  return {
-    RecoveryMnemonic: { fromPhrase: (phrase) => ({ phrase, free: () => undefined }) },
-    emailVaultSeal: () => new Uint8Array(44),
-    emailVaultOpen: () => {
-      if (!opens) throw new Error("not-opened: the vault did not open");
-      return { phrase: PHRASE, free: () => undefined };
-    },
-  };
 }
 
 function type(el: HTMLInputElement, value: string): void {
@@ -129,10 +117,7 @@ beforeEach(() => {
   for (const fn of Object.values(auth)) fn.mockClear();
   auth.state.mockImplementation(() => ({ kind: "anon" as const }));
   auth.recover.mockImplementation(async () => undefined);
-  setEmailVaultRuntimeForTests({ workerFactory: null, core: async () => vaultCore(true) });
-});
-afterEach(() => {
-  setEmailVaultRuntimeForTests({ workerFactory: null, core: () => loadWasm() });
+  auth.landSuspendedFrom.mockImplementation(async () => false);
 });
 
 describe("step 2 is the same whatever was typed", () => {
@@ -183,72 +168,50 @@ describe("the authenticator step", () => {
     await enterCode("123456");
     expect(m.calls).toEqual(["recoverStart", "recoverVerify"]);
     expect(all('input[autocomplete="new-password"]')).toHaveLength(2);
-    // Nothing was opened yet: which kind of account this is, is not known.
-    expect(m.calls.includes("recoverOpen")).toBe(false);
   });
 });
 
 describe("after the new password", () => {
-  it("password mode: registers the password under the ticket and lands the session", async () => {
+  it("registers the password under the ticket and lands the session", async () => {
     const m = mount();
     await toCodeStep("Alice", "alice@example.com");
     await enterCode("123456");
     await choosePassword("correct horse battery");
-    expect(m.calls).toEqual(["recoverStart", "recoverVerify", "recoverOpen", "recoverPassword"]);
+    expect(m.calls).toEqual(["recoverStart", "recoverVerify", "recoverPassword"]);
     expect(auth.landEmailPasswordRecovery).toHaveBeenCalledTimes(1);
-    // The canonical username, and no phrase restore.
+    // The canonical username.
     expect(auth.landEmailPasswordRecovery.mock.calls[0]?.[0 as never]).toBe("alice");
+  });
+
+  it("brings back no keys: no phrase restore runs", async () => {
+    mount();
+    await toCodeStep("alice", "alice@example.com");
+    await enterCode("123456");
+    await choosePassword("correct horse battery");
     expect(auth.recover).not.toHaveBeenCalled();
   });
 
-  it("vault mode: opens the vault and runs the existing phrase restore with the new password", async () => {
+  it("a refused password step says so and lands nothing", async () => {
     const m = mount({
-      recoverOpen: async () => ({ mode: "vault", vaultSalt: "AAAAAAAAAAAAAAAAAAAAAA==", sealedEntropy: "AAAA" }),
+      recoverPassword: async () => {
+        throw new AuthHttpError(401, "/recovery-email/recover/password/finish", '{"error":"code-refused"}');
+      },
     });
     await toCodeStep("alice", "alice@example.com");
     await enterCode("123456");
     await choosePassword("correct horse battery");
-    // Opened from the vault, never typed: an owed phrase screen stays owed.
-    expect(auth.recover).toHaveBeenCalledWith(PHRASE, "correct horse battery", "alice", "vault");
-    expect(m.calls.includes("recoverPassword")).toBe(false);
     expect(auth.landEmailPasswordRecovery).not.toHaveBeenCalled();
-    expect(m.done).toHaveBeenCalledTimes(1);
-  });
-
-  it("a vault that does not open: the account was not brought back, nothing else is sent", async () => {
-    setEmailVaultRuntimeForTests({ workerFactory: null, core: async () => vaultCore(false) });
-    const m = mount({
-      recoverOpen: async () => ({ mode: "vault", vaultSalt: "AAAAAAAAAAAAAAAAAAAAAA==", sealedEntropy: "AAAA" }),
-    });
-    await toCodeStep("alice", "alice@example.com");
-    await enterCode("123456");
-    await choosePassword("correct horse battery");
-    expect(one('[role="alert"]').textContent).toBe(
-      "We could not bring back your account. Try again, or choose another way.",
-    );
-    expect(auth.recover).not.toHaveBeenCalled();
-    expect(m.calls.includes("recoverPassword")).toBe(false);
     expect(m.done).not.toHaveBeenCalled();
-    // The one control leads back to Get back in.
-    one<HTMLButtonElement>("button").click();
-    expect(m.back).toHaveBeenCalledTimes(1);
+    expect(present('[role="alert"]')).toBe(true);
   });
+});
 
-  it("a restore that did not finish is retried without asking the server for the vault again", async () => {
-    auth.recover.mockImplementationOnce(async () => {
-      throw new Error("offline");
-    });
-    const m = mount({
-      recoverOpen: async () => ({ mode: "vault", vaultSalt: "AAAAAAAAAAAAAAAAAAAAAA==", sealedEntropy: "AAAA" }),
-    });
-    await toCodeStep("alice", "alice@example.com");
-    await enterCode("123456");
-    await choosePassword("correct horse battery");
-    expect(m.done).not.toHaveBeenCalled();
-    await submit();
-    expect(m.calls.filter((c) => c === "recoverOpen")).toHaveLength(1);
-    expect(auth.recover).toHaveBeenCalledTimes(2);
-    expect(m.done).toHaveBeenCalledTimes(1);
+describe("what is gone", () => {
+  it("the screen opens nothing held for the account and derives no key from the address", () => {
+    const source = readFileSync(resolve(__dirname, "EmailRecover.tsx"), "utf8");
+    expect(source).not.toContain("recoverOpen");
+    expect(source).not.toContain("email-vault");
+    expect(source).not.toContain("auth.recover(");
   });
 });
 

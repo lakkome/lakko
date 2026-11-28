@@ -1663,6 +1663,9 @@ public class ChannelPublisherLoop private constructor(
         // ADR-0090 section 4 — any commit that changes the seed restarts the
         // rotation clock.
         state.saveRotationState(channelId, StoredRotationState(System.currentTimeMillis().toULong(), 0u))
+        // ADR-0101 section 7 - the new epoch's seed joins the owned-channels
+        // list (a no-op for a channel this account does not own).
+        OwnedChannelsRuntime.channelChanged(channelId)
         reissueRecordOwed(recordOwed, channelId) { ChannelMetaPublisher.reissue(state, client, channelId) }
         state.publisher?.let { if (isOwner(channelId)) filePublicSeedIfDue(it, channelId) }
     }
@@ -1871,6 +1874,9 @@ public class ChannelPublisherLoop private constructor(
                 }
             }
             endHere(channelId)
+            // ADR-0101 section 7 - the channel leaves the owned-channels
+            // list (and stays out of a merge with another device's copy).
+            state.boundAccount?.let { OwnedChannelsRuntime.channelDeleted(it, channelId) }
         }
     }
 

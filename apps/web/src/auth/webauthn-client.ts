@@ -290,6 +290,9 @@ export const ACTION_DOMAIN_DELETE_ACCOUNT = "lakko/action/delete-account/v1";
  *  question 4); the ceremony is what yields the passkey's PRF output inside
  *  a signed-in session, and it is bound to the action it serves. */
 export const ACTION_DOMAIN_PASSKEY_RESTORES_KEYS = "lakko/action/passkey-restores-keys/v1";
+/** ADR-0073, amended 2026-11-26: a passkey as the reset's second factor.
+ *  Matches `services/auth::reset_factor::ACTION_DOMAIN_RESET_KEYS`. */
+export const ACTION_DOMAIN_RESET_KEYS = "lakko/action/reset-keys/v1";
 
 export interface ActionStartRequest {
   /** URL-safe base64 of the 32-byte action hash. */
@@ -363,7 +366,7 @@ export class WebauthnClient {
    */
   async registerPasskey(
     req: RegisterStartRequest,
-    opts: { prfSalt?: Uint8Array } = {},
+    opts: { prfSalt?: Uint8Array; sealPrfSalt?: Uint8Array } = {},
   ): Promise<RegisterFinishResponse & PasskeyCeremonyExtras> {
     if (!WebauthnClient.isWebauthnAvailable()) {
       throw new WebauthnUnsupportedError();
@@ -373,8 +376,11 @@ export class WebauthnClient {
       req,
     );
     const publicKey = decodeCreationOptions(start.options.publicKey);
-    if (opts.prfSalt !== undefined) {
-      publicKey.extensions = { ...(publicKey.extensions ?? {}), ...prfExtensionInput(opts.prfSalt) };
+    if (opts.prfSalt !== undefined || opts.sealPrfSalt !== undefined) {
+      publicKey.extensions = {
+        ...(publicKey.extensions ?? {}),
+        ...prfExtensionInput(opts.prfSalt, opts.sealPrfSalt),
+      };
     }
     let cred: Credential | null;
     try {
@@ -395,7 +401,7 @@ export class WebauthnClient {
         credential: encodeRegisterCredential(pk),
       },
     );
-    return { ...finish, ...ceremonyExtras(pk) };
+    return { ...finish, ...ceremonyExtras(pk, opts) };
   }
 
   /** `GET /webauthn/credentials` — bearer-auth required. */
@@ -473,6 +479,9 @@ export class WebauthnClient {
       /** ADR-0072 decision 6: evaluate the PRF extension with this salt so the
        *  assertion also yields the credential's 32-byte secret. */
       prfSalt?: Uint8Array;
+      /** ADR-0101 section 10: also evaluate the PRF at the reset-seal salt
+       *  in the same gesture (`sealPrfOutput` of the result). */
+      sealPrfSalt?: Uint8Array;
       /** ADR-0074 section 0.4: this device's id (URL-safe base64, no
        *  padding), when it is known for the account being signed in to;
        *  the session then names the device from the start. */
@@ -489,8 +498,11 @@ export class WebauthnClient {
         : { account_id_b64: accountIdToWire(options.accountIdB64) },
     );
     const publicKey = decodeRequestOptions(start.options.publicKey);
-    if (options.prfSalt !== undefined) {
-      publicKey.extensions = { ...(publicKey.extensions ?? {}), ...prfExtensionInput(options.prfSalt) };
+    if (options.prfSalt !== undefined || options.sealPrfSalt !== undefined) {
+      publicKey.extensions = {
+        ...(publicKey.extensions ?? {}),
+        ...prfExtensionInput(options.prfSalt, options.sealPrfSalt),
+      };
     }
     let cred: Credential | null;
     try {
@@ -517,7 +529,7 @@ export class WebauthnClient {
     return {
       ...finish,
       account_id_b64: accountIdFromWire(finish.account_id_b64),
-      ...ceremonyExtras(pk),
+      ...ceremonyExtras(pk, options),
     };
   }
 
@@ -545,6 +557,9 @@ export class WebauthnClient {
       /** Evaluate the PRF extension with this salt, so the assertion also
        *  yields the credential's 32-byte secret (never sent to the server). */
       prfSalt?: Uint8Array;
+      /** ADR-0101 section 10: also evaluate the PRF at the reset-seal salt
+       *  in the same gesture (`sealPrfOutput` of the result). */
+      sealPrfSalt?: Uint8Array;
       /** Offer only this credential (base64url, no pad) in the sheet. */
       onlyCredentialIdB64?: string;
     } = {},
@@ -562,8 +577,11 @@ export class WebauthnClient {
         { type: "public-key", id: base64urlToBuffer(options.onlyCredentialIdB64) },
       ];
     }
-    if (options.prfSalt !== undefined) {
-      publicKey.extensions = { ...(publicKey.extensions ?? {}), ...prfExtensionInput(options.prfSalt) };
+    if (options.prfSalt !== undefined || options.sealPrfSalt !== undefined) {
+      publicKey.extensions = {
+        ...(publicKey.extensions ?? {}),
+        ...prfExtensionInput(options.prfSalt, options.sealPrfSalt),
+      };
     }
     let cred: Credential | null;
     try {
@@ -583,7 +601,7 @@ export class WebauthnClient {
         credential: encodeAuthCredential(pk),
       },
     );
-    return { ...finish, ...ceremonyExtras(pk) };
+    return { ...finish, ...ceremonyExtras(pk, options) };
   }
 
   /**
@@ -612,6 +630,7 @@ export class WebauthnClient {
       credentialId: result.credentialId,
       prfOutput: result.prfOutput,
       prfEnabled: result.prfEnabled,
+      sealPrfOutput: result.sealPrfOutput,
     };
   }
 
@@ -734,6 +753,12 @@ export async function actionHashForDeleteAccount(
   accountId: Uint8Array,
 ): Promise<string> {
   return deriveActionHash(ACTION_DOMAIN_DELETE_ACCOUNT, accountId);
+}
+
+/** Action hash for confirming a key reset of the account identified by its
+ *  raw 16-byte `accountId` with one of its passkeys. */
+export async function actionHashForResetKeys(accountId: Uint8Array): Promise<string> {
+  return deriveActionHash(ACTION_DOMAIN_RESET_KEYS, accountId);
 }
 
 /** An account id in the client's form (standard base64, padded) or
@@ -910,32 +935,62 @@ export interface PasskeyCeremonyExtras {
    *  when it does not, `null` when the browser said nothing (an assertion,
    *  or no PRF support at all). */
   readonly prfEnabled: boolean | null;
+  /** ADR-0101 section 10: the PRF `second` output, evaluated at the
+   *  reset-seal salt when the ceremony was given a `sealPrfSalt`; `null`
+   *  when it was not asked for or the authenticator gave none. A secret:
+   *  never sent to a server, never stored. */
+  readonly sealPrfOutput: Uint8Array | null;
 }
 
-function ceremonyExtras(cred: PublicKeyCredential): PasskeyCeremonyExtras {
+function prfBytes(value: ArrayBuffer | ArrayBufferView | undefined): Uint8Array | null {
+  if (value === undefined) return null;
+  const bytes =
+    value instanceof ArrayBuffer
+      ? new Uint8Array(value)
+      : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  return bytes.length === 32 ? new Uint8Array(bytes) : null;
+}
+
+/**
+ * Read the two PRF outputs back in the order the inputs were given
+ * ({@link prfExtensionInput}): with a vault salt the vault output is `first`
+ * and the seal output `second`; with a seal salt alone the seal output is
+ * `first`.
+ */
+function ceremonyExtras(
+  cred: PublicKeyCredential,
+  asked: { readonly prfSalt?: Uint8Array | undefined; readonly sealPrfSalt?: Uint8Array | undefined } = {},
+): PasskeyCeremonyExtras {
   const results = cred.getClientExtensionResults() as {
-    prf?: { enabled?: boolean; results?: { first?: ArrayBuffer | ArrayBufferView } };
+    prf?: {
+      enabled?: boolean;
+      results?: { first?: ArrayBuffer | ArrayBufferView; second?: ArrayBuffer | ArrayBufferView };
+    };
   };
-  const first = results.prf?.results?.first;
-  let prfOutput: Uint8Array | null = null;
-  if (first !== undefined) {
-    const bytes =
-      first instanceof ArrayBuffer
-        ? new Uint8Array(first)
-        : new Uint8Array(first.buffer, first.byteOffset, first.byteLength);
-    prfOutput = bytes.length === 32 ? new Uint8Array(bytes) : null;
-  }
+  const first = prfBytes(results.prf?.results?.first);
+  const second = prfBytes(results.prf?.results?.second);
+  const sealOnly = asked.prfSalt === undefined && asked.sealPrfSalt !== undefined;
   const enabled = results.prf?.enabled;
   return {
     credentialId: new Uint8Array(cred.rawId),
-    prfOutput,
+    prfOutput: sealOnly ? null : first,
     prfEnabled: typeof enabled === "boolean" ? enabled : null,
+    sealPrfOutput: asked.sealPrfSalt === undefined ? null : sealOnly ? first : second,
   };
 }
 
-/** The extension inputs that ask the authenticator to evaluate PRF. */
-function prfExtensionInput(salt: Uint8Array): AuthenticationExtensionsClientInputs {
-  return { prf: { eval: { first: salt } } } as unknown as AuthenticationExtensionsClientInputs;
+/** The extension inputs that ask the authenticator to evaluate PRF: the
+ *  vault salt as `first` and the reset-seal salt as `second` (one gesture
+ *  serves both), or whichever one was given as `first`. */
+function prfExtensionInput(
+  salt: Uint8Array | undefined,
+  sealSalt?: Uint8Array,
+): AuthenticationExtensionsClientInputs {
+  const evalInput =
+    salt !== undefined && sealSalt !== undefined
+      ? { first: salt, second: sealSalt }
+      : { first: salt ?? sealSalt };
+  return { prf: { eval: evalInput } } as unknown as AuthenticationExtensionsClientInputs;
 }
 
 /** The client extension results the server receives. The PRF output is a

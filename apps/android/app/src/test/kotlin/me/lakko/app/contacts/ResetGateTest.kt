@@ -13,6 +13,7 @@ import me.lakko.app.discovery.IdentityFetchResponse
 import me.lakko.app.ds.DsClient
 import me.lakko.app.transparency.LogVerifyStatus
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -35,11 +36,16 @@ class ResetGateTest {
     private val ledger = InMemoryResetLedgerStore()
     private val bindings = InMemoryVerifiedBindingStore()
     private val events = ArrayList<ResetAccepted>()
+    private val startedOver = ArrayList<String>()
 
     private fun client(
         attest: AttestCheck = AttestCheck.Verified(2, 777),
         log: LogCheck = LogCheck(LogVerifyStatus.OFF, null),
         predecessors: List<String> = emptyList(),
+        // Rule 4: a reset sealed under the announcement numbered 5, unless a
+        // test says otherwise.
+        seal: SealCheck = SealCheck(valid = true, announcementSeq = 5),
+        sealLog: SealLogCheck = SealLogCheck.PROVEN,
     ): ContactsClient = ContactsClient(
         discovery = DiscoveryClient(baseUrl = "http://test.invalid", engine = MockEngine { respond("", HttpStatusCode.OK) }),
         ds = DsClient(baseUrl = "http://test.invalid", engine = MockEngine { respond("", HttpStatusCode.OK) }),
@@ -51,6 +57,10 @@ class ResetGateTest {
         provenPredecessorsOf = { _, _ -> predecessors },
         onResetAccepted = { events += it },
         resetAttestCheck = { _, _, _ -> attest },
+        resetRule = CoreResetRuleDouble,
+        resetSealCheck = { seal },
+        resetSealLogCheck = { _, _ -> sealLog },
+        onStartedOver = { startedOver += it },
         resetLogCheck = { _, _ -> log },
     )
 
@@ -227,6 +237,8 @@ class ResetGateTest {
             verifiedBindings = bindings,
             onResetAccepted = { events += it },
             resetAttestCheck = { _, _, _ -> AttestCheck.Verified(2, 1) },
+            resetRule = CoreResetRuleDouble,
+            resetSealCheck = { SealCheck(valid = true, announcementSeq = 5) },
             resetLogCheck = { _, _ -> LogCheck(LogVerifyStatus.OFF, null) },
         )
         c.use {
@@ -246,5 +258,183 @@ class ResetGateTest {
             }
         }
         assertEquals(1, events.size)
+    }
+
+    // ---- rule 4: sealed or a new account (ADR-0101 sections 10 and 11) -----
+
+    @Test
+    fun `a sealed reset raises the floor of the account's announcement numbers`() = runTest {
+        client().use {
+            it.gateIdentity(accountId, bundle(keyA))
+            it.gateIdentity(accountId, bundle(keyB, generation = 2, attest = "AAAA"))
+        }
+        assertEquals(5L, ledger.load("me", accountIdB64)?.sealSeqFloor)
+        assertTrue(startedOver.isEmpty())
+    }
+
+    @Test
+    fun `an unsealed reset re-pins nothing, moves nothing and is recorded as a new account`() = runTest {
+        client(seal = SealCheck(valid = false, refusal = "noSeal")).use {
+            it.gateIdentity(accountId, bundle(keyA))
+            try {
+                it.gateIdentity(accountId, bundle(keyB, generation = 2, attest = "AAAA"))
+                fail("an unsealed reset must not pass as the same person")
+            } catch (e: ContactStartedOver) {
+                // Nothing went wrong: a different account now holds the name.
+            }
+            // Seen again: recorded once, told once more at most, never accepted.
+            try {
+                it.gateIdentity(accountId, bundle(keyB, generation = 2, attest = "AAAA"))
+                fail("still not the same person")
+            } catch (_: ContactStartedOver) {
+            }
+            assertEquals(keyB, it.startedOverOf(accountIdB64)?.newKeyB64)
+        }
+        // The old pin and the accepted generation stay; no key is retired.
+        assertEquals(keyA, pins.readPin(accountIdB64)?.pinnedSignaturePubkeyB64)
+        val row = ledger.load("me", accountIdB64)!!
+        assertEquals(1L, row.acceptedKeyGeneration)
+        assertTrue(row.supersededKeysB64.isEmpty())
+        assertNull("no reset was accepted", row.resetSignedAtMs)
+        assertEquals(StartedOver(oldKeyB64 = keyA, newKeyB64 = keyB, keyGeneration = 2, signedAtMs = 777), row.startedOver)
+        // No accepted-reset listener heard anything: nothing is moved or returned.
+        assertTrue(events.isEmpty())
+        assertEquals(listOf(accountIdB64), startedOver.distinct())
+    }
+
+    @Test
+    fun `with a key log, a valid seal whose announcement the log does not hold is unsealed`() = runTest {
+        val logOn = LogCheck(LogVerifyStatus.CONFIRMED, true)
+        client(log = logOn, sealLog = SealLogCheck.NOT_PROVEN).use {
+            it.gateIdentity(accountId, bundle(keyA))
+            try {
+                it.gateIdentity(accountId, bundle(keyB, generation = 2, attest = "AAAA"))
+                fail("not proven in the log is not sealed")
+            } catch (_: ContactStartedOver) {
+            }
+        }
+        assertEquals(keyA, pins.readPin(accountIdB64)?.pinnedSignaturePubkeyB64)
+        assertTrue(events.isEmpty())
+    }
+
+    @Test
+    fun `a log that could not be asked about the announcement decides nothing`() = runTest {
+        val logOn = LogCheck(LogVerifyStatus.CONFIRMED, true)
+        client(log = logOn, sealLog = SealLogCheck.UNREACHABLE).use {
+            it.gateIdentity(accountId, bundle(keyA))
+            try {
+                it.gateIdentity(accountId, bundle(keyB, generation = 2, attest = "AAAA"))
+                fail("no verdict")
+            } catch (e: IdentityCheckInconclusive) {
+                assertFalse("not a started-over account either", e is ContactStartedOver)
+            }
+        }
+        assertEquals(keyA, pins.readPin(accountIdB64)?.pinnedSignaturePubkeyB64)
+        assertNull(ledger.load("me", accountIdB64)?.startedOver)
+        assertTrue(events.isEmpty() && startedOver.isEmpty())
+    }
+
+    @Test
+    fun `accepting the new account's request pins its key and keeps the old one closed`() = runTest {
+        client(seal = SealCheck.NONE).use {
+            it.gateIdentity(accountId, bundle(keyA))
+            runCatching { it.gateIdentity(accountId, bundle(keyB, generation = 2, attest = "AAAA")) }
+            // Only the key the attestation named is adopted.
+            assertNull(it.adoptStartedOverAccount(accountIdB64, expectedKeyB64 = "someone-else"))
+            assertEquals(keyA, pins.readPin(accountIdB64)?.pinnedSignaturePubkeyB64)
+            assertEquals(keyB, it.adoptStartedOverAccount(accountIdB64, expectedKeyB64 = keyB))
+            assertNull("adopted: no longer open", it.startedOverOf(accountIdB64))
+        }
+        assertEquals(keyB, pins.readPin(accountIdB64)?.pinnedSignaturePubkeyB64)
+        val row = ledger.load("me", accountIdB64)!!
+        assertEquals(2L, row.acceptedKeyGeneration)
+        assertEquals(listOf(keyA), row.startedOverKeysB64)
+        // An adopted new account is not an accepted reset: nothing is ever
+        // returned to it on the old account's behalf.
+        assertNull(row.resetSignedAtMs)
+        assertTrue(row.supersededKeysB64.isEmpty())
+        assertTrue(events.isEmpty())
+    }
+
+    // ---- alignment 2026-11-27 ------------------------------------------------
+
+    @Test
+    fun `adding a started-over person by name makes the new account a new contact`() = runTest {
+        client(seal = SealCheck.NONE).use {
+            it.gateIdentity(accountId, bundle(keyA))
+            // The add by @name meets the unsealed reset: the new key is
+            // adopted and the request goes to it.
+            assertTrue(it.gateForOutgoingRequest(accountId, bundle(keyB, generation = 2, attest = "AAAA")))
+            // A second request to the same name passes the gate plainly.
+            assertFalse(it.gateForOutgoingRequest(accountId, bundle(keyB, generation = 2, attest = "AAAA")))
+        }
+        assertEquals(keyB, pins.readPin(accountIdB64)?.pinnedSignaturePubkeyB64)
+        val row = ledger.load("me", accountIdB64)!!
+        // The old one-to-one stays closed; nothing is moved or returned.
+        assertEquals(listOf(keyA), row.startedOverKeysB64)
+        assertNull(row.resetSignedAtMs)
+        assertTrue(events.isEmpty())
+    }
+
+    @Test
+    fun `an outgoing add by name still refuses an unattested key change`() = runTest {
+        client(attest = AttestCheck.Absent).use {
+            it.gateIdentity(accountId, bundle(keyA))
+            try {
+                it.gateForOutgoingRequest(accountId, bundle(keyB, generation = 2))
+                fail("an unproven change is refused, not adopted")
+            } catch (e: SupersessionRefused) {
+                // fail closed
+            }
+        }
+        assertEquals(keyA, pins.readPin(accountIdB64)?.pinnedSignaturePubkeyB64)
+    }
+
+    private val jsonHeaders = io.ktor.http.headersOf(io.ktor.http.HttpHeaders.ContentType, "application/json")
+
+    private fun ownClient(served: IdentityFetchResponse?, seal: SealCheck): ContactsClient = ContactsClient(
+        discovery = DiscoveryClient(
+            baseUrl = "http://test.invalid",
+            engine = MockEngine {
+                if (served == null) {
+                    respond("{}", HttpStatusCode.NotFound, jsonHeaders)
+                } else {
+                    respond(kotlinx.serialization.json.Json.encodeToString(IdentityFetchResponse.serializer(), served), HttpStatusCode.OK, jsonHeaders)
+                }
+            },
+        ),
+        ds = DsClient(baseUrl = "http://test.invalid", engine = MockEngine { respond("", HttpStatusCode.OK) }),
+        pinStore = pins,
+        transparencyClientFactory = { null },
+        ownerAccountIdB64 = "me",
+        resetLedger = ledger,
+        verifiedBindings = bindings,
+        resetAttestCheck = { _, _, _ -> AttestCheck.Verified(2, 777) },
+        resetRule = CoreResetRuleDouble,
+        resetSealCheck = { seal },
+        resetSealLogCheck = { _, _ -> SealLogCheck.PROVEN },
+        resetLogCheck = { _, _ -> LogCheck(LogVerifyStatus.OFF, null) },
+    )
+
+    @Test
+    fun `this account's own reset elsewhere is judged by the same rule and records nothing`() = runTest {
+        val served = bundle(keyB, generation = 2, attest = "AAAA")
+        ownClient(served, SealCheck(valid = true, announcementSeq = 5)).use {
+            assertTrue(it.ownResetVerdict(accountId, keyA, acceptedGeneration = 1, seqFloor = 0) is ResetVerdict.Sealed)
+        }
+        ownClient(served, SealCheck(valid = false, refusal = "noSeal")).use {
+            assertTrue(it.ownResetVerdict(accountId, keyA, acceptedGeneration = 1, seqFloor = 0) is ResetVerdict.Unsealed)
+        }
+        // The same key served, or no row: nothing to judge.
+        ownClient(bundle(keyA), SealCheck(valid = true, announcementSeq = 5)).use {
+            assertEquals(ResetVerdict.NoVerdict, it.ownResetVerdict(accountId, keyA, 1, 0))
+        }
+        ownClient(null, SealCheck(valid = true, announcementSeq = 5)).use {
+            assertEquals(ResetVerdict.NoVerdict, it.ownResetVerdict(accountId, keyA, 1, 0))
+        }
+        // Nothing of the own account is written to the contacts' ledger or pins.
+        assertNull(ledger.load("me", accountIdB64))
+        assertNull(pins.readPin(accountIdB64))
+        assertTrue(startedOver.isEmpty())
     }
 }

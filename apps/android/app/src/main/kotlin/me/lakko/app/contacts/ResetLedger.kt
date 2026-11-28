@@ -39,7 +39,79 @@ public data class ResetLedgerRow(
     val supersededKeysB64: List<String> = emptyList(),
     /** The latest accepted attestation's `signed_at`, UNIX milliseconds. */
     val resetSignedAtMs: Long? = null,
+    /** ADR-0101 section 10: the highest seal-announcement number this device
+     *  has seen for the account. A previous announcement numbered below it
+     *  is a rollback and seals nothing (`checkResetSeal`'s `seq_floor`). */
+    val sealSeqFloor: Long = 0L,
+    /** ADR-0101 section 11 / UX 16.11: the account reset its keys WITHOUT a
+     *  seal this device could check: a new account under the same username.
+     *  `null` for every account that did not. */
+    val startedOver: StartedOver? = null,
+    /** The keys of this account's earlier selves that started over (an
+     *  unsealed reset): the one-to-one with such a key is closed, and the
+     *  key is a display alias of its stored history only. Never accepted for
+     *  new traffic and never moved (they are NOT superseded keys: R.5 to R.7
+     *  do not run for them). */
+    val startedOverKeysB64: List<String> = emptyList(),
 )
+
+/** An unsealed reset this device saw for an account (UX 16.11). */
+@Serializable
+public data class StartedOver(
+    /** The key this device held (and still pins until the person accepts
+     *  the new account), standard base64. */
+    val oldKeyB64: String,
+    /** The attested key of the new account. */
+    val newKeyB64: String,
+    val keyGeneration: Long,
+    /** The attestation's `signed_at`, UNIX milliseconds. */
+    val signedAtMs: Long,
+)
+
+/**
+ * The row after an UNSEALED reset was seen (ADR-0101 section 11): the reset
+ * is recorded, nothing is re-pinned, nothing is retired or superseded, the
+ * accepted generation stays. A later unsealed reset of the same account
+ * replaces the record (the newest new key is the one a request is judged
+ * against). `null` when [row] already records exactly this.
+ */
+public fun withStartedOver(row: ResetLedgerRow?, seen: StartedOver): ResetLedgerRow? {
+    val base = row ?: ResetLedgerRow()
+    if (base.startedOver == seen && seen.oldKeyB64 in base.startedOverKeysB64) return null
+    if (base.startedOver != null && seen.keyGeneration < base.startedOver.keyGeneration) return null
+    return base.copy(
+        startedOver = seen,
+        startedOverKeysB64 = (base.startedOverKeysB64 + seen.oldKeyB64).distinct(),
+    )
+}
+
+/**
+ * The person accepted the new account (its contact request, UX 16.11): the
+ * new key becomes the account's pin as for any new contact, at the reset's
+ * generation, and the open record goes. The old key stays in
+ * [ResetLedgerRow.startedOverKeysB64], so the old one-to-one stays closed.
+ * `null` when no started-over record is open.
+ */
+public fun adoptStartedOver(row: ResetLedgerRow?): Pair<ResetLedgerRow, StartedOver>? {
+    val open = row?.startedOver ?: return null
+    return row.copy(
+        acceptedKeyGeneration = open.keyGeneration,
+        // Not an accepted reset: no continuity key is derived for this
+        // account and nothing is returned to it ([acceptedResetOfKey]).
+        resetSignedAtMs = null,
+        startedOver = null,
+        // A new account: the numbering of its announcements starts over too.
+        sealSeqFloor = 0L,
+    ) to open
+}
+
+/** Every key whose one-to-one is closed because its account started over,
+ *  across all accounts, mapped to the account id (UX 16.11). */
+public fun startedOverKeysOf(rows: Map<String, ResetLedgerRow>): Map<String, String> {
+    val out = LinkedHashMap<String, String>()
+    for ((accountIdB64, row) in rows) for (k in row.startedOverKeysB64) out[k] = accountIdB64
+    return out
+}
 
 /** What an accepted reset carries into the store. */
 public data class AcceptedReset(
@@ -51,6 +123,9 @@ public data class AcceptedReset(
     val keyGeneration: Long,
     val signedAtMs: Long,
     val nowMs: Long,
+    /** ADR-0101 section 10: the number of the announcement the reset was
+     *  sealed under: the account's new floor. */
+    val announcementSeq: Long = 0L,
 )
 
 /** Outcome of [acceptResetPlan]. */
@@ -109,11 +184,14 @@ public fun acceptResetPlan(
     }
     return AcceptResetPlan.Accepted(
         marker = marker,
-        row = ResetLedgerRow(
+        row = (row ?: ResetLedgerRow()).copy(
             acceptedKeyGeneration = reset.keyGeneration,
             previousKeysB64 = previous,
             supersededKeysB64 = superseded,
             resetSignedAtMs = reset.signedAtMs,
+            sealSeqFloor = maxOf(row?.sealSeqFloor ?: 0L, reset.announcementSeq),
+            // A sealed reset is the same person again: no open record.
+            startedOver = null,
         ),
         retiredKeysB64 = retired,
     )

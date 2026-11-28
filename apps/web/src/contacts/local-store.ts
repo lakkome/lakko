@@ -187,6 +187,36 @@ export interface AccountPubkeyPin {
    *  is shown. Emptied by an accepted reset: a reset makes every
    *  predecessor, proven or not, a superseded key. */
   provenPredecessorsB64?: string[];
+  /** ADR-0101 section 10 (the peer's check 1): the highest seal
+   *  announcement `seq` this device has seen for the account, as a decimal
+   *  string (a u64). Never lowered. A reset whose previous announcement is
+   *  below it is not sealed. */
+  sealSeqFloor?: string;
+  /** ADR-0101 section 11 (UX 16.11): the account's keys changed by a reset
+   *  this device could NOT confirm (an unsealed reset), and the person has
+   *  not decided about the new account yet. The pin still names the old
+   *  key: nothing was re-pinned, moved or returned. Cleared when the person
+   *  accepts a request from the new key ({@link adoptStartedOver}) or the
+   *  reset later proves sealed ({@link acceptReset}). */
+  startedOver?: StartedOverRecord;
+  /** Every account key this account held before an unsealed reset, base64
+   *  (the pin it left behind and that pin's proven predecessors). A
+   *  one-to-one whose other person is bound to one of these is closed
+   *  (`started-over.ts`). Kept after the person accepted the new account,
+   *  so the old conversation stays closed. Never trusted for anything. */
+  startedOverKeysB64?: string[];
+}
+
+/** An unsealed reset this device noticed (ADR-0101 section 11). */
+export interface StartedOverRecord {
+  /** The key the directory publishes for the account now. */
+  newKeyB64: string;
+  /** The attested generation of the reset. */
+  keyGeneration: number;
+  /** The attestation's `signed_at`, unix milliseconds. */
+  signedAtMs: number;
+  /** When this device noticed, unix milliseconds. */
+  noticedAtMs: number;
 }
 
 /** Mirror of `transparency/verify.ts::LogVerifyStatus` — duplicated
@@ -310,7 +340,36 @@ function isAccountPubkeyPin(p: unknown): p is AccountPubkeyPin {
   if (pp !== undefined && !isStringArray(pp)) {
     delete (p as { provenPredecessorsB64?: unknown }).provenPredecessorsB64;
   }
+  // ADR-0101: a junk floor reads as 0 (then only the held key's signature
+  // decides); a junk started-over record or key list is dropped.
+  const sf = (p as AccountPubkeyPin).sealSeqFloor;
+  if (sf !== undefined && (typeof sf !== "string" || !/^[0-9]{1,20}$/.test(sf))) {
+    delete (p as { sealSeqFloor?: unknown }).sealSeqFloor;
+  }
+  const so = (p as AccountPubkeyPin).startedOver as unknown;
+  if (so !== undefined && !isStartedOverRecord(so)) {
+    delete (p as { startedOver?: unknown }).startedOver;
+  }
+  const sk2 = (p as AccountPubkeyPin).startedOverKeysB64;
+  if (sk2 !== undefined && !isStringArray(sk2)) {
+    delete (p as { startedOverKeysB64?: unknown }).startedOverKeysB64;
+  }
   return true;
+}
+
+function isStartedOverRecord(v: unknown): v is StartedOverRecord {
+  if (typeof v !== "object" || v === null) return false;
+  const r = v as StartedOverRecord;
+  return (
+    typeof r.newKeyB64 === "string" &&
+    r.newKeyB64.length > 0 &&
+    typeof r.keyGeneration === "number" &&
+    Number.isFinite(r.keyGeneration) &&
+    typeof r.signedAtMs === "number" &&
+    Number.isFinite(r.signedAtMs) &&
+    typeof r.noticedAtMs === "number" &&
+    Number.isFinite(r.noticedAtMs)
+  );
 }
 
 function emptyRecord(): PersistedV3 {
@@ -658,6 +717,12 @@ export function setPin(
      *  accepted-generation baseline when the pin holds none; never lowers
      *  or replaces a held one (only {@link acceptReset} raises it). */
     readonly keyGeneration?: number;
+    /** ADR-0101 section 10: the generation a PROVEN rotation moved the
+     *  account to (the bundle's, confirmed by the attestation beside the
+     *  proof). Raises the accepted generation when it is above the held
+     *  one, so the next reset's seal is checked against the generation the
+     *  account is really at. Only read together with `proven`. */
+    readonly provenGeneration?: number;
   } = {},
 ): SetPinResult {
   const account = ownerOf(owner);
@@ -686,11 +751,19 @@ export function setPin(
   // first observation of a bundle's generation is its baseline. A re-pin to
   // a DIFFERENT key retires the old one into `previousKeysB64` (the old
   // leaves in shared groups still resolve to it).
-  const carriedGeneration =
+  let carriedGeneration =
     existing?.acceptedKeyGeneration ??
     (options.keyGeneration !== undefined && Number.isSafeInteger(options.keyGeneration)
       ? options.keyGeneration
       : undefined);
+  if (
+    options.proven === true &&
+    options.provenGeneration !== undefined &&
+    Number.isSafeInteger(options.provenGeneration) &&
+    options.provenGeneration > (carriedGeneration ?? 0)
+  ) {
+    carriedGeneration = options.provenGeneration;
+  }
   const keyChanged =
     existing !== undefined && existing.pinnedSignaturePubkeyB64 !== pinnedSignaturePubkeyB64;
   const previousKeys = [...(existing?.previousKeysB64 ?? [])];
@@ -731,6 +804,13 @@ export function setPin(
         : {}),
       ...(carriedResetSignedAt !== undefined ? { resetSignedAtMs: carriedResetSignedAt } : {}),
       ...(provenPredecessors.length > 0 ? { provenPredecessorsB64: provenPredecessors } : {}),
+      // ADR-0101: the seal floor and the started-over facts travel with the
+      // account across every re-pin.
+      ...(existing?.sealSeqFloor !== undefined ? { sealSeqFloor: existing.sealSeqFloor } : {}),
+      ...(existing?.startedOver !== undefined ? { startedOver: existing.startedOver } : {}),
+      ...(existing?.startedOverKeysB64 !== undefined && existing.startedOverKeysB64.length > 0
+        ? { startedOverKeysB64: existing.startedOverKeysB64 }
+        : {}),
     },
   };
   save(account, { ...current, pins: nextPins });
@@ -836,6 +916,13 @@ export function acceptReset(reset: AcceptedReset, owner?: string): AcceptResetRe
   delete pin.isReset;
   delete pin.pinnedLogVersion;
   delete pin.provenPredecessorsB64;
+  // ADR-0101: the reset proved sealed after all (a seal the directory had
+  // not served before): it is the same person, so nothing of theirs is
+  // "started over" any more; the old conversation moves like any other.
+  delete pin.startedOver;
+  const stillStartedOver = (existing?.startedOverKeysB64 ?? []).filter((k) => !retired.includes(k));
+  if (stillStartedOver.length > 0) pin.startedOverKeysB64 = stillStartedOver;
+  else delete pin.startedOverKeysB64;
   const rowIndex = current.accepted.findIndex(
     (c) =>
       accountIdB64OfHex(c.accountIdHex) === reset.accountIdB64 ||
@@ -872,6 +959,273 @@ export function acceptReset(reset: AcceptedReset, owner?: string): AcceptResetRe
  *  (0 when it never recorded one). */
 export function acceptedGenerationOf(accountIdB64: string, owner?: string): number {
   return readPin(accountIdB64, owner)?.acceptedKeyGeneration ?? 0;
+}
+
+// ----------------------------------------------------------------------------
+// ADR-0101 section 10: the seal announcement floor
+// ----------------------------------------------------------------------------
+
+function parseSeq(value: string | undefined): bigint {
+  if (value === undefined || !/^[0-9]{1,20}$/.test(value)) return 0n;
+  try {
+    return BigInt(value);
+  } catch {
+    return 0n;
+  }
+}
+
+/** The highest seal announcement `seq` this device has seen for the account
+ *  (0 when none, or when the account is not pinned). */
+export function sealSeqFloorOf(accountIdB64: string, owner?: string): bigint {
+  return parseSeq(readPin(accountIdB64, owner)?.sealSeqFloor);
+}
+
+/**
+ * Raise the account's seal announcement floor to `seq`. Never lowers it;
+ * a no-op when the account is not pinned (the floor travels with the pin).
+ * Returns whether it was raised.
+ */
+export function raiseSealSeqFloor(accountIdB64: string, seq: bigint, owner?: string): boolean {
+  const account = ownerOf(owner);
+  if (account === null || seq < 0n) return false;
+  const current = load(account);
+  const existing = current.pins[accountIdB64];
+  if (existing === undefined) return false;
+  if (seq <= parseSeq(existing.sealSeqFloor)) return false;
+  const pin: AccountPubkeyPin = { ...existing, sealSeqFloor: seq.toString() };
+  save(account, { ...current, pins: { ...current.pins, [accountIdB64]: pin } });
+  return true;
+}
+
+// ----------------------------------------------------------------------------
+// ADR-0101 section 11 (UX 16.11): an unsealed reset is a new account
+// ----------------------------------------------------------------------------
+
+/** What an unsealed reset carries into the store. */
+export interface UnsealedReset {
+  readonly accountIdB64: string;
+  /** The key this device held for the account (its pin). */
+  readonly heldKeyB64: string;
+  /** Keys proven as predecessors of the held key where no pin holds them
+   *  (a verified binding's conversation key). */
+  readonly heldPredecessorsB64?: readonly string[];
+  readonly newKeyB64: string;
+  readonly keyGeneration: number;
+  readonly signedAtMs: number;
+  readonly nowMs: number;
+}
+
+/** Outcome of {@link recordStartedOver}. */
+export type RecordStartedOverResult =
+  /** Recorded now (or the record's new key was updated). */
+  | "recorded"
+  /** The same reset was recorded already: no write. */
+  | "already"
+  /** The account is not pinned under the held key: nothing written. */
+  | "no-pin"
+  | "no-account";
+
+/**
+ * ADR-0101 section 11. The verdict was `unsealed`; this is the only write.
+ *
+ * The pin is NOT moved: the old key stays the key this device trusts for
+ * the old contact, no key is superseded, no reset time is recorded, so
+ * nothing of ADR-0073 R.5 to R.7 or ADR-0101 sections 4 to 9 can run for
+ * this account (they all read {@link loadSupersededKeys} and
+ * {@link acceptedResetOfKey}). What is kept is the fact itself: the keys the
+ * account left behind (which close the old one-to-one) and the key the new
+ * account publishes (which marks its contact request).
+ */
+export function recordStartedOver(reset: UnsealedReset, owner?: string): RecordStartedOverResult {
+  const account = ownerOf(owner);
+  if (account === null) return "no-account";
+  const current = load(account);
+  const existing = current.pins[reset.accountIdB64];
+  if (existing === undefined || existing.pinnedSignaturePubkeyB64 !== reset.heldKeyB64) return "no-pin";
+  if (reset.newKeyB64 === reset.heldKeyB64) return "no-pin";
+  const left = [...(existing.startedOverKeysB64 ?? [])];
+  const leave = (k: string): void => {
+    if (k.length > 0 && k !== reset.newKeyB64 && !left.includes(k)) left.push(k);
+  };
+  for (const k of existing.provenPredecessorsB64 ?? []) leave(k);
+  leave(existing.pinnedSignaturePubkeyB64);
+  for (const k of reset.heldPredecessorsB64 ?? []) leave(k);
+  const held = existing.startedOver;
+  const sameRecord =
+    held !== undefined &&
+    held.newKeyB64 === reset.newKeyB64 &&
+    held.keyGeneration === reset.keyGeneration &&
+    left.length === (existing.startedOverKeysB64 ?? []).length;
+  if (sameRecord) return "already";
+  const pin: AccountPubkeyPin = {
+    ...existing,
+    startedOver: {
+      newKeyB64: reset.newKeyB64,
+      keyGeneration: reset.keyGeneration,
+      signedAtMs: reset.signedAtMs,
+      noticedAtMs: held?.noticedAtMs ?? reset.nowMs,
+    },
+    startedOverKeysB64: left,
+  };
+  save(account, { ...current, pins: { ...current.pins, [reset.accountIdB64]: pin } });
+  notifyAcceptedChanged("edited");
+  return "recorded";
+}
+
+/** The pending unsealed reset of an account, or `undefined`. */
+export function startedOverOf(accountIdB64: string, owner?: string): StartedOverRecord | undefined {
+  return readPin(accountIdB64, owner)?.startedOver;
+}
+
+/**
+ * The new account behind a started-over record rotated its key BY PROOF
+ * before the person decided: the record follows it (the caller verified the
+ * supersession proof under the record's key). Returns whether it changed.
+ */
+export function moveStartedOverKey(
+  accountIdB64: string,
+  fromKeyB64: string,
+  toKeyB64: string,
+  owner?: string,
+): boolean {
+  const account = ownerOf(owner);
+  if (account === null) return false;
+  const current = load(account);
+  const existing = current.pins[accountIdB64];
+  const record = existing?.startedOver;
+  if (existing === undefined || record === undefined) return false;
+  if (record.newKeyB64 !== fromKeyB64 || toKeyB64 === fromKeyB64) return false;
+  if (toKeyB64 === existing.pinnedSignaturePubkeyB64) return false;
+  const pin: AccountPubkeyPin = { ...existing, startedOver: { ...record, newKeyB64: toKeyB64 } };
+  save(account, { ...current, pins: { ...current.pins, [accountIdB64]: pin } });
+  notifyAcceptedChanged("edited");
+  return true;
+}
+
+/**
+ * Every key an account left behind by an unsealed reset, across all
+ * accounts, mapped to the account id it belonged to. A one-to-one whose
+ * other person is bound to one of these is closed (UX 16.11).
+ */
+export function loadStartedOverKeys(owner?: string): Map<string, string> {
+  const record = load(ownerOf(owner));
+  const out = new Map<string, string>();
+  for (const [accountIdB64, pin] of Object.entries(record.pins)) {
+    for (const k of pin.startedOverKeysB64 ?? []) out.set(k, accountIdB64);
+  }
+  return out;
+}
+
+/**
+ * Alignment of 2026-11-27, item F: the pairing state bundle carried a key a
+ * contact left behind by an unsealed reset (another device of this account
+ * noticed it). It joins the account's left-behind keys, so the old
+ * one-to-one is closed here too. Never the pinned key's new account record:
+ * the bundle carries no new key, only what is closed. Returns whether it
+ * was added (a pin is needed; none, or a key already listed, adds nothing).
+ */
+export function addCarriedStartedOverKey(accountIdB64: string, oldKeyB64: string, owner?: string): boolean {
+  const account = ownerOf(owner);
+  if (account === null || oldKeyB64.length === 0) return false;
+  const current = load(account);
+  const existing = current.pins[accountIdB64];
+  if (existing === undefined) return false;
+  const left = existing.startedOverKeysB64 ?? [];
+  if (left.includes(oldKeyB64)) return false;
+  const pin: AccountPubkeyPin = { ...existing, startedOverKeysB64: [...left, oldKeyB64] };
+  save(account, { ...current, pins: { ...current.pins, [accountIdB64]: pin } });
+  notifyAcceptedChanged("edited");
+  return true;
+}
+
+/** Outcome of {@link adoptStartedOver}. */
+export type AdoptStartedOverResult =
+  /** The pin now names the new account's key. */
+  | "adopted"
+  /** No pending record names `newKeyB64` for the account: nothing written. */
+  | "none"
+  | "no-account";
+
+/**
+ * UX 16.11: the person ACCEPTED a contact request from the new account of
+ * someone who started over. The pin moves to the new key because the person
+ * decided, not because the device confirmed anything.
+ *
+ * Unlike {@link acceptReset} this retires nothing: no key becomes
+ * superseded and no reset time is recorded (those of an earlier, sealed
+ * reset of the old account are dropped too), so no conversation moves, no
+ * leaf is evicted and nothing is returned. The old keys stay display
+ * aliases (the old conversation keeps the person's name) and stay in
+ * `startedOverKeysB64` (the old conversation stays closed). The contact ROW
+ * is re-keyed to the new key, keeping its rename and losing its link to the
+ * old chat; the accept then links it to the new one-to-one.
+ */
+export function adoptStartedOver(
+  accountIdB64: string,
+  newKeyB64: string,
+  nowMs: number,
+  owner?: string,
+): AdoptStartedOverResult {
+  const account = ownerOf(owner);
+  if (account === null) return "no-account";
+  const current = load(account);
+  const existing = current.pins[accountIdB64];
+  const record = existing?.startedOver;
+  if (existing === undefined || record === undefined || record.newKeyB64 !== newKeyB64) return "none";
+  const oldKeys = [...(existing.provenPredecessorsB64 ?? []), existing.pinnedSignaturePubkeyB64];
+  const previousKeys = [...(existing.previousKeysB64 ?? [])];
+  for (const k of oldKeys) if (k !== newKeyB64 && !previousKeys.includes(k)) previousKeys.push(k);
+  const pin: AccountPubkeyPin = {
+    ...existing,
+    pinnedSignaturePubkeyB64: newKeyB64,
+    rotationMarker: Math.max(existing.rotationMarker, Math.floor(nowMs / 1000)),
+    acceptedKeyGeneration: Math.max(existing.acceptedKeyGeneration ?? 0, record.keyGeneration),
+    previousKeysB64: previousKeys,
+  };
+  // What described the old key does not describe the new account.
+  delete pin.startedOver;
+  delete pin.logStatus;
+  delete pin.isReset;
+  delete pin.pinnedLogVersion;
+  delete pin.provenPredecessorsB64;
+  delete pin.sealSeqFloor;
+  // An EARLIER reset of the old account that this device accepted (sealed)
+  // must not make the new key read as "the key an accepted reset produced"
+  // ({@link acceptedResetOfKey}): the continuity key, the history answer and
+  // the channel returns all hang on that, and none of them is owed to an
+  // account this device could not confirm. The keys that reset retired are
+  // earlier selves of the same person: conversations still bound to them
+  // are closed like the rest, never moved to the new account.
+  delete pin.resetSignedAtMs;
+  const leftBehind = [...(existing.startedOverKeysB64 ?? [])];
+  for (const k of existing.supersededKeysB64 ?? []) {
+    if (k !== newKeyB64 && !leftBehind.includes(k)) leftBehind.push(k);
+  }
+  delete pin.supersededKeysB64;
+  if (leftBehind.length > 0) pin.startedOverKeysB64 = leftBehind;
+  const rowIndex = current.accepted.findIndex(
+    (c) => accountIdB64OfHex(c.accountIdHex) === accountIdB64 || oldKeys.includes(c.signaturePubkeyB64),
+  );
+  let accepted = current.accepted;
+  if (rowIndex !== -1) {
+    const row = current.accepted[rowIndex] as AcceptedContact;
+    // The row's own alias list is NOT given the old key: those aliases say
+    // "an older one-to-one with this key is still their conversation"
+    // (`contact-conversation.ts`), which is exactly what an unsealed reset
+    // is not. The old conversation keeps the person's name through the
+    // pin's `previousKeysB64` ({@link loadKeyAliases}).
+    const next: AcceptedContact = { ...row, signaturePubkeyB64: newKeyB64 };
+    // The X25519 key and the chat link belonged to the old account; the
+    // accept writes the new chat's link.
+    delete next.x25519PubkeyB64;
+    delete next.groupIdB64;
+    accepted = current.accepted
+      .filter((c, i) => i === rowIndex || c.signaturePubkeyB64 !== newKeyB64)
+      .map((c) => (c === row ? next : c));
+  }
+  save(account, { ...current, accepted, pins: { ...current.pins, [accountIdB64]: pin } });
+  notifyAcceptedChanged("edited");
+  return "adopted";
 }
 
 /**

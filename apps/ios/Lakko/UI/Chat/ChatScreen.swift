@@ -1069,6 +1069,7 @@ public struct ChatScreen: View {
                                 // composer is gated on.
                                 actionsAvailable: viewModel.messageActionsAvailable,
                                 sendActionsAvailable: viewModel.sendActionsAvailable,
+                                retryAvailable: !viewModel.peerStartedOver,
                                 quotedAuthorDeleted: viewModel.quotedAuthorDeleted(entry.message),
                                 // ADR-0024 — "Sent" / "Read" glyph on our own
                                 // messages, derived from the other members'
@@ -2550,6 +2551,10 @@ struct MessageRow: View {
     /// React, Edit and Delete would each send to nobody. Copy, Save, Forward
     /// and Pin for me stay.
     var sendActionsAvailable: Bool = true
+    /// Alignment item E (UX 16.11) — `false` in a one-to-one whose person
+    /// started over: an unsent row stays `Not sent` with no Retry, since
+    /// nothing sent there would arrive.
+    var retryAvailable: Bool = true
     /// ADR-0098 — the message this one quotes was written by a deleted
     /// account: the quote names them `Deleted account`.
     var quotedAuthorDeleted: Bool = false
@@ -3463,7 +3468,7 @@ struct MessageRow: View {
             }
             // The action sits next to the message it belongs to, which is the
             // only place that can say WHICH message failed.
-            if message.ack == .failed, outboxMediaKey == nil {
+            if message.ack == .failed, outboxMediaKey == nil, retryAvailable {
                 Button { onRetrySend(message.localId) } label: {
                     Text(l10n.t("common.retry")).lakkoTouchTarget()
                 }

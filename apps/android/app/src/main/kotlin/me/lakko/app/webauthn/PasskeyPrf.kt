@@ -39,6 +39,17 @@ import kotlinx.serialization.json.put
  *  before the sign-in that needs it. */
 public val PASSKEY_PRF_SALT: ByteArray = "lakko/passkey-vault/prf/v1".toByteArray(Charsets.UTF_8)
 
+/**
+ * The PRF salt a passkey's reset seal key is evaluated at (ADR-0101 section
+ * 10): `SHA-256("lakko/account/reset-seal/passkey-prf/v1")`, distinct from
+ * the passkey vault's salt. The same bytes as the core's
+ * `resetSealPasskeyPrfSalt()` (pinned by a test against the SHA-256 of the
+ * label, since the host suite has no native core).
+ */
+public val RESET_SEAL_PRF_SALT: ByteArray =
+    java.security.MessageDigest.getInstance("SHA-256")
+        .digest("lakko/account/reset-seal/passkey-prf/v1".toByteArray(Charsets.UTF_8))
+
 /** The length of a usable PRF output. Anything else is treated as none. */
 public const val PASSKEY_PRF_OUTPUT_LENGTH: Int = 32
 
@@ -59,11 +70,24 @@ internal fun base64UrlOrNull(text: String): ByteArray? = try {
  * server's start response) with the PRF evaluation for [salt] added. Other
  * extensions the server asked for are kept.
  */
-public fun withPrfExtension(publicKey: JsonElement, salt: ByteArray = PASSKEY_PRF_SALT): JsonElement {
+public fun withPrfExtension(
+    publicKey: JsonElement,
+    salt: ByteArray = PASSKEY_PRF_SALT,
+    /** A second salt evaluated in the same gesture (`eval.second`): the
+     *  reset seal's ([RESET_SEAL_PRF_SALT], ADR-0101 section 10) beside the
+     *  passkey vault's. `null` asks for one output. */
+    secondSalt: ByteArray? = null,
+): JsonElement {
     val options = publicKey as? JsonObject ?: return publicKey
     val existing = options["extensions"] as? JsonObject
     val prf = buildJsonObject {
-        put("eval", buildJsonObject { put("first", base64UrlNoPad(salt)) })
+        put(
+            "eval",
+            buildJsonObject {
+                put("first", base64UrlNoPad(salt))
+                if (secondSalt != null) put("second", base64UrlNoPad(secondSalt))
+            },
+        )
     }
     val extensions = JsonObject((existing ?: JsonObject(emptyMap())) + ("prf" to prf))
     return JsonObject(options + ("extensions" to extensions))
@@ -95,6 +119,9 @@ public class PrfResult(
      *  supports PRF (the output may only come at the next use), `false` when
      *  it does not, `null` when the provider said nothing. */
     public val enabled: Boolean?,
+    /** The 32-byte `second` output, or `null` (not asked, not returned, or
+     *  of another length). */
+    public val second: ByteArray? = null,
 )
 
 /** Read `clientExtensionResults.prf` of a registration or assertion
@@ -109,9 +136,15 @@ public fun prfResultOf(credential: JsonElement): PrfResult {
     val bytes = first?.let(::base64UrlOrNull)
     val output = bytes?.takeIf { it.size == PASSKEY_PRF_OUTPUT_LENGTH }
     if (output == null) bytes?.fill(0)
+    val secondText = ((prf["results"] as? JsonObject)?.get("second") as? JsonPrimitive)
+        ?.takeIf { it.isString }
+        ?.content
+    val secondBytes = secondText?.let(::base64UrlOrNull)
+    val second = secondBytes?.takeIf { it.size == PASSKEY_PRF_OUTPUT_LENGTH }
+    if (second == null) secondBytes?.fill(0)
     // A JSON boolean only: the string "true" is not an answer.
     val enabled = (prf["enabled"] as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull
-    return PrfResult(output = output, enabled = enabled)
+    return PrfResult(output = output, enabled = enabled, second = second)
 }
 
 /**

@@ -38,21 +38,30 @@
 //! ## The list
 //!
 //! ```text
-//! list    = version(1)=0x01 ‖ password_lock_root(32)
+//! list    = version(1)=0x02 ‖ password_lock_root(32)
 //!           ‖ passkey_lock_count(1, 0..=8) ‖ passkey_lock_count × (tag(16) ‖ root(32))
 //!           ‖ count(1, 0..=64) ‖ count × entry ‖ zero padding
 //! entry   = channel_id(16) ‖ read_key_len(1, 0|32) ‖ read_key
+//!           ‖ handle_seed_len(1, 0|32) ‖ handle_seed
 //!           ‖ admission_count(1, 0..=8) ‖ admission_count × (admission_version(4 BE) ‖ seed(32))
 //!           ‖ epoch_count(1, 0..=4) ‖ epoch_count × (epoch_id(4 BE) ‖ seed(32))
 //! ```
 //!
 //! **Chosen 2026-11-26 (recorded in the ADR's as-built note):**
 //!
-//! - The list is always exactly [`OWNED_CHANNELS_LIST_LEN`] = 32 764 bytes,
+//! - The list is always exactly [`OWNED_CHANNELS_LIST_LEN`] = 65 532 bytes,
 //!   the content followed by zero bytes, so that with the vault's 4-byte
-//!   length frame it fills the 32 KiB bucket exactly: every list is sealed to
+//!   length frame it fills the 64 KiB bucket exactly: every list is sealed to
 //!   the one size the ADR names. Decode refuses any other length and any
-//!   non-zero padding byte.
+//!   non-zero padding byte. (Version 1 was 32 764 bytes for the 32 KiB
+//!   bucket; the handle seed, decided 2026-11-27, does not fit there: the
+//!   fullest list is 33 443 bytes.)
+//! - Each entry carries the channel's ADR-0087 handle write seed
+//!   (`handle_seed = BLAKE3-derive-key("lakko/handle/write/v1",
+//!   journal_root_seed)` of the account that owned the channel when it was
+//!   listed), so a device that retakes the channel after a key reset can sign
+//!   `rekey` from the old handle key to the one its new root derives. Absent
+//!   for a channel with no `@name`.
 //! - Canonical order, refused otherwise: passkey locks strictly ascending by
 //!   tag, entries strictly ascending by channel id, admission seeds strictly
 //!   ascending by `(admission_version, seed)` (ADR-0090 lets two seeds share
@@ -85,8 +94,9 @@ pub const KEY_LEN: usize = 32;
 /// announcement).
 pub const PASSKEY_TAG_LEN: usize = 16;
 
-/// The list's version byte.
-pub const OWNED_CHANNELS_VERSION: u8 = 0x01;
+/// The list's version byte. Version 1 (no handle seed, 32 764 bytes) is
+/// refused; nothing was deployed with it.
+pub const OWNED_CHANNELS_VERSION: u8 = 0x02;
 /// Most passkey locks.
 pub const MAX_PASSKEY_LOCKS: usize = 8;
 /// Most channels listed.
@@ -101,14 +111,17 @@ pub const LIST_KEY_LOCK_LEN: usize = KEY_LEN;
 /// Length of the keys lock head (`R ‖ S`).
 pub const KEYS_LOCK_LEN: usize = 2 * KEY_LEN;
 
-/// The exact length of an encoded list: 32 KiB less the vault's 4-byte
-/// length frame, so the sealed object is the 32 KiB bucket. Chosen.
-pub const OWNED_CHANNELS_LIST_LEN: usize = 32 * 1024 - 4;
+/// The exact length of an encoded list: 64 KiB less the vault's 4-byte
+/// length frame, so the sealed object is the 64 KiB bucket (the largest
+/// power-of-two bucket of `lakko_vault::seal`). Chosen.
+pub const OWNED_CHANNELS_LIST_LEN: usize = 64 * 1024 - 4;
 
 const PASSKEY_LOCK_LEN: usize = PASSKEY_TAG_LEN + KEY_LEN;
 const SEED_ROW_LEN: usize = 4 + KEY_LEN;
-/// Longest entry: 483 bytes.
+/// Longest entry: 516 bytes.
 pub const MAX_ENTRY_LEN: usize = CHANNEL_ID_LEN
+    + 1
+    + KEY_LEN
     + 1
     + KEY_LEN
     + 1
@@ -119,7 +132,7 @@ pub const MAX_ENTRY_LEN: usize = CHANNEL_ID_LEN
 pub const MAX_CONTENT_LEN: usize =
     1 + KEY_LEN + 1 + MAX_PASSKEY_LOCKS * PASSKEY_LOCK_LEN + 1 + MAX_OWNED_CHANNELS * MAX_ENTRY_LEN;
 
-const _: () = assert!(MAX_ENTRY_LEN == 483);
+const _: () = assert!(MAX_ENTRY_LEN == 516);
 const _: () = assert!(MAX_CONTENT_LEN <= OWNED_CHANNELS_LIST_LEN);
 
 /// Why a list or a lock head did not encode or decode.
@@ -128,7 +141,7 @@ pub enum OwnedChannelsError {
     /// Not the exact length the format has.
     #[error("wrong length")]
     BadLength,
-    /// The version byte is not `1`.
+    /// The version byte is not `2`.
     #[error("unknown version")]
     UnknownVersion,
     /// A count is above its bound.
@@ -137,6 +150,9 @@ pub enum OwnedChannelsError {
     /// A read key length is neither 0 nor 32.
     #[error("read key length is neither 0 nor 32")]
     BadReadKey,
+    /// A handle seed length is neither 0 nor 32.
+    #[error("handle seed length is neither 0 nor 32")]
+    BadHandleSeed,
     /// Items are out of order or repeated.
     #[error("items out of order or repeated")]
     NotCanonical,
@@ -154,6 +170,7 @@ impl OwnedChannelsError {
             Self::UnknownVersion => "unknownVersion",
             Self::TooMany => "tooMany",
             Self::BadReadKey => "badReadKey",
+            Self::BadHandleSeed => "badHandleSeed",
             Self::NotCanonical => "notCanonical",
             Self::BadPadding => "badPadding",
         }
@@ -284,6 +301,8 @@ pub struct OwnedChannel {
     pub channel_id: [u8; CHANNEL_ID_LEN],
     /// The read key of a public channel.
     pub read_key: Option<[u8; KEY_LEN]>,
+    /// The channel's ADR-0087 handle write seed, when it has an `@name`.
+    pub handle_seed: Option<[u8; KEY_LEN]>,
     /// Admission seeds, ascending by `(version, seed)`, at most eight.
     pub admission: Vec<AdmissionSeed>,
     /// Epoch seeds, ascending by epoch, at most four.
@@ -330,6 +349,7 @@ impl core::fmt::Debug for OwnedChannel {
         f.debug_struct("OwnedChannel")
             .field("channel_id", &self.channel_id)
             .field("has_read_key", &self.read_key.is_some())
+            .field("has_handle_seed", &self.handle_seed.is_some())
             .field("admission", &self.admission)
             .field("epochs", &self.epochs)
             .finish()
@@ -365,6 +385,13 @@ impl OwnedChannel {
     fn encode_into(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.channel_id);
         match &self.read_key {
+            Some(k) => {
+                out.push(32);
+                out.extend_from_slice(k);
+            },
+            None => out.push(0),
+        }
+        match &self.handle_seed {
             Some(k) => {
                 out.push(32);
                 out.extend_from_slice(k);
@@ -463,6 +490,11 @@ impl OwnedChannelsList {
                 32 => Some(cur.array::<KEY_LEN>()?),
                 _ => return Err(OwnedChannelsError::BadReadKey),
             };
+            let handle_seed = match cur.byte()? {
+                0 => None,
+                32 => Some(cur.array::<KEY_LEN>()?),
+                _ => return Err(OwnedChannelsError::BadHandleSeed),
+            };
             let n = usize::from(cur.byte()?);
             if n > MAX_ADMISSION_SEEDS {
                 return Err(OwnedChannelsError::TooMany);
@@ -488,6 +520,7 @@ impl OwnedChannelsList {
             channels.push(OwnedChannel {
                 channel_id,
                 read_key,
+                handle_seed,
                 admission,
                 epochs,
             });
@@ -514,8 +547,8 @@ impl OwnedChannelsList {
     /// wanted to write, `theirs` what it read back, `deleted` the channels
     /// this device deleted. By channel id: admission seeds unioned, the eight
     /// highest kept; epoch seeds unioned by epoch (this device's seed wins on
-    /// the same epoch), the four highest kept; a read key kept from either
-    /// side, this device's first. The password lock root is this device's;
+    /// the same epoch), the four highest kept; a read key and a handle seed
+    /// each kept from either side, this device's first. The password lock root is this device's;
     /// passkey locks unioned by tag, this device's first, at most eight.
     /// Past 64 channels this device's are kept first. The result is sorted.
     #[must_use]
@@ -579,6 +612,7 @@ fn merge_channel(mine: &OwnedChannel, theirs: &OwnedChannel) -> OwnedChannel {
     OwnedChannel {
         channel_id: mine.channel_id,
         read_key: mine.read_key.or(theirs.read_key),
+        handle_seed: mine.handle_seed.or(theirs.handle_seed),
         admission,
         epochs,
     }
@@ -635,6 +669,7 @@ mod tests {
         OwnedChannel {
             channel_id: [id; 16],
             read_key: Some([id; 32]),
+            handle_seed: Some([id ^ 0x55; 32]),
             admission: (0..8u32)
                 .map(|v| AdmissionSeed {
                     version: v,
@@ -674,19 +709,23 @@ mod tests {
             OWNED_LOCK_PASSKEY_CONTEXT,
             "lakko/channels/owned-lock-passkey/v1"
         );
-        assert_eq!(OWNED_CHANNELS_LIST_LEN, 32_764);
-        // The ADR's own arithmetic: 30 912 bytes of entries, 417 of lock roots.
-        assert_eq!(MAX_OWNED_CHANNELS * MAX_ENTRY_LEN, 30_912);
+        assert_eq!(OWNED_CHANNELS_VERSION, 2);
+        assert_eq!(OWNED_CHANNELS_LIST_LEN, 65_532);
+        // 33 024 bytes of entries, 417 of lock roots, 33 443 at most in all,
+        // which does not fit the 32 KiB bucket version 1 used.
+        assert_eq!(MAX_OWNED_CHANNELS * MAX_ENTRY_LEN, 33_024);
         assert_eq!(KEY_LEN + 1 + MAX_PASSKEY_LOCKS * PASSKEY_LOCK_LEN, 417);
-        // Every list seals to the 32 KiB bucket, and one byte more would not.
+        assert_eq!(MAX_CONTENT_LEN, 33_443);
+        const { assert!(MAX_CONTENT_LEN > 32 * 1024 - 4) };
+        // Every list seals to the 64 KiB bucket, and one byte more would not.
         let overhead = lakko_vault::seal::OBJECT_OVERHEAD_BYTES;
         assert_eq!(
             lakko_vault::seal::sealed_len(OWNED_CHANNELS_LIST_LEN),
-            Some(32 * 1024 + overhead)
+            Some(64 * 1024 + overhead)
         );
         assert_ne!(
             lakko_vault::seal::sealed_len(OWNED_CHANNELS_LIST_LEN + 1),
-            Some(32 * 1024 + overhead)
+            Some(64 * 1024 + overhead)
         );
     }
 
@@ -745,7 +784,11 @@ mod tests {
         let list = full_list();
         let wire = list.encode().unwrap();
         assert_eq!(wire.len(), OWNED_CHANNELS_LIST_LEN);
+        // The fullest list uses exactly the worst-case content length.
+        let content_end = wire.iter().rposition(|b| *b != 0).unwrap() + 1;
+        assert_eq!(content_end, MAX_CONTENT_LEN);
         assert_eq!(OwnedChannelsList::decode(&wire).unwrap(), list);
+        assert_eq!(list.channels[5].handle_seed, Some([5 ^ 0x55; 32]));
         let empty = OwnedChannelsList {
             password_lock_root: [0; 32],
             passkey_locks: vec![],
@@ -763,8 +806,16 @@ mod tests {
             OwnedChannelsList::decode(&good[1..]),
             Err(OwnedChannelsError::BadLength)
         );
+        // One byte over the fixed length is refused, even a zero byte.
+        let mut over = good.clone();
+        over.push(0);
+        assert_eq!(
+            OwnedChannelsList::decode(&over),
+            Err(OwnedChannelsError::BadLength)
+        );
+        // Version 1 (no handle seed) is refused.
         let mut v = good.clone();
-        v[0] = 2;
+        v[0] = 1;
         assert_eq!(
             OwnedChannelsList::decode(&v),
             Err(OwnedChannelsError::UnknownVersion)
@@ -790,6 +841,13 @@ mod tests {
             OwnedChannelsList::decode(&v),
             Err(OwnedChannelsError::BadReadKey)
         );
+        // A handle seed length of 31.
+        let mut v = good.clone();
+        v[first_entry + 16 + 1 + 32] = 31;
+        assert_eq!(
+            OwnedChannelsList::decode(&v),
+            Err(OwnedChannelsError::BadHandleSeed)
+        );
         // A non-zero padding byte.
         let mut v = good.clone();
         let last = v.len() - 1;
@@ -811,6 +869,17 @@ mod tests {
         let mut v = full_list();
         v.channels.swap(0, 1);
         assert_eq!(v.encode(), Err(OwnedChannelsError::NotCanonical));
+    }
+
+    #[test]
+    fn debug_never_prints_a_seed() {
+        let list = full_list();
+        let text = format!("{list:?}");
+        assert!(text.contains("has_handle_seed: true"));
+        // The handle seed of channel 0 is 0x55 repeated; neither it nor the
+        // read key bytes appear.
+        assert!(!text.contains("85, 85, 85"));
+        assert!(!text.contains("seed: ["));
     }
 
     #[test]
@@ -849,6 +918,7 @@ mod tests {
                 OwnedChannel {
                     channel_id: [1; 16],
                     read_key: None,
+                    handle_seed: None,
                     admission: vec![],
                     epochs: vec![EpochSeed {
                         epoch_id: 7,
@@ -858,6 +928,7 @@ mod tests {
                 OwnedChannel {
                     channel_id: [3; 16],
                     read_key: None,
+                    handle_seed: None,
                     admission: vec![],
                     epochs: vec![],
                 },
@@ -873,6 +944,7 @@ mod tests {
                 OwnedChannel {
                     channel_id: [1; 16],
                     read_key: Some([9; 32]),
+                    handle_seed: Some([8; 32]),
                     admission: vec![AdmissionSeed {
                         version: 1,
                         seed: [1; 32],
@@ -887,6 +959,7 @@ mod tests {
                 OwnedChannel {
                     channel_id: [2; 16],
                     read_key: None,
+                    handle_seed: None,
                     admission: vec![],
                     epochs: vec![],
                 },
@@ -912,6 +985,7 @@ mod tests {
         );
         let one = &merged.channels[0];
         assert_eq!(one.read_key, Some([9; 32]));
+        assert_eq!(one.handle_seed, Some([8; 32]));
         assert_eq!(one.admission.len(), 1);
         assert_eq!(
             one.epochs.iter().map(|e| e.epoch_id).collect::<Vec<_>>(),
@@ -937,10 +1011,12 @@ mod tests {
             versions in proptest::collection::btree_set(any::<u32>(), 0..=8),
             epochs in proptest::collection::btree_set(any::<u32>(), 0..=4),
             read in any::<bool>(),
+            handle in any::<bool>(),
         ) {
             let channels: Vec<OwnedChannel> = ids.into_iter().map(|id| OwnedChannel {
                 channel_id: id,
                 read_key: read.then_some([3; 32]),
+                handle_seed: handle.then_some([4; 32]),
                 admission: versions.iter().map(|v| AdmissionSeed { version: *v, seed: [1; 32] }).collect(),
                 epochs: epochs.iter().map(|e| EpochSeed { epoch_id: *e, seed: [2; 32] }).collect(),
             }).collect();

@@ -49,6 +49,22 @@ public object ExportKeyStore {
 
     private const val PREFS_NAME = "lakko-export-key"
     private const val KEY_PREFIX = "export-key-v1:"
+    private const val AT_PREFIX = "export-key-at:"
+
+    /**
+     * ADR-0101 section 10 (alignment 2026-11-27, the web rule): the accounts
+     * whose stored export key a password ceremony produced IN THIS PROCESS
+     * (sign-up, a password sign-in, a password change, a mailed-code
+     * password change). Only such a key may put a password seal into the
+     * account's announcement; a cached one from an earlier run may be a
+     * previous password's (changed on another device since). Memory only,
+     * so a restart forgets it until the next password sign-in.
+     */
+    private val producedThisRun: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /** Whether the export key stored for [accountIdB64] was produced by a
+     *  password ceremony in this run. */
+    public fun producedThisRun(accountIdB64: String): Boolean = accountIdB64 in producedThisRun
 
     /** Fixed export-key length pinned by the OPAQUE ciphersuite:
      *  `EXPORT_KEY_LEN` in `crates/lakko-auth-client/src/cipher_suite.rs`
@@ -68,6 +84,9 @@ public object ExportKeyStore {
         context: Context,
         accountIdB64: String,
         exportKey: ByteArray,
+        /** `true` when a password ceremony produced [exportKey] just now;
+         *  `false` when it is a cached key written back. */
+        producedNow: Boolean = true,
     ) {
         require(exportKey.size == EXPORT_KEY_LENGTH) {
             "export key must be $EXPORT_KEY_LENGTH bytes (got ${exportKey.size})"
@@ -76,7 +95,11 @@ public object ExportKeyStore {
         openPrefs(context)
             .edit()
             .putString(KEY_PREFIX + accountIdB64, encoded)
+            // The time an earlier build kept beside the key is not read any
+            // more ([producedThisRun] replaced it).
+            .remove(AT_PREFIX + accountIdB64)
             .apply()
+        if (producedNow) producedThisRun += accountIdB64 else producedThisRun -= accountIdB64
     }
 
     /**
@@ -104,7 +127,8 @@ public object ExportKeyStore {
      * absent. Called from `forgetDevice`.
      */
     public fun deleteExportKey(context: Context, accountIdB64: String) {
-        openPrefs(context).edit().remove(KEY_PREFIX + accountIdB64).apply()
+        producedThisRun -= accountIdB64
+        openPrefs(context).edit().remove(KEY_PREFIX + accountIdB64).remove(AT_PREFIX + accountIdB64).apply()
     }
 
     // -----------------------------------------------------------------

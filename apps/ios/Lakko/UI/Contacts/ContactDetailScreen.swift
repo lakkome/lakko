@@ -135,7 +135,7 @@ struct ContactDetailScreen: View {
         // while a one-to-one exists, Remove contact while on the list, and
         // nothing else (no call, no safety number, no rename, no add, no
         // block, no report).
-        let sections = resolved.isDeletedAccount
+        let ruled = resolved.isDeletedAccount
             ? deletedPersonInfoSections(hasOneToOne: chat != nil, isContact: isContact)
             : SuspendedInfo.withoutSending(personInfoSections(
                 caps: PersonInfoCapabilities(
@@ -143,6 +143,10 @@ struct ContactDetailScreen: View {
                     isContact: isContact,
                     contactsOfContactsOn: reach.setting.mode == .some && reach.setting.contactsOfContacts,
                     isBlocked: isBlocked)), suspended: accountSuspended)
+        // UX 16.11 — a key an unsealed reset left behind: that account no
+        // longer exists, so its card offers no `Add to contacts`.
+        let sections = StartedOverCard.sections(
+            ruled, keyStartedOver: PeerPinStore().isStartedOverKey(base64Encode(contact.request.fromPubkey)))
         List {
             Section {
                 VStack(spacing: 8) {

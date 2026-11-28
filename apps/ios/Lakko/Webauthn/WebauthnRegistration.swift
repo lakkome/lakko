@@ -107,6 +107,9 @@ public final class WebauthnRegistration: NSObject {
         /// `true` supported, `false` not supported, `nil` nothing reported
         /// (no salt asked, or a platform older than iOS 18).
         public let prfSupported: Bool?
+        /// The output for the SECOND salt asked (the reset-seal salt,
+        /// ADR-0101 section 10), when the provider evaluated it at creation.
+        public var secondPrfOutput: Data? = nil
     }
 
     /// Run a single registration round. Holds onto an internal
@@ -118,6 +121,7 @@ public final class WebauthnRegistration: NSObject {
         userName: String,
         userID: Data,
         prfSalt: Data? = nil,
+        secondPrfSalt: Data? = nil,
         excludedCredentials: [Data] = [],
         presentationAnchor: ASPresentationAnchor
     ) async throws -> Result {
@@ -130,7 +134,11 @@ public final class WebauthnRegistration: NSObject {
             userID: userID
         )
         if let prfSalt, #available(iOS 18.0, *) {
-            request.prf = .inputValues(.saltInput1(prfSalt))
+            if let secondPrfSalt {
+                request.prf = .inputValues(.init(saltInput1: prfSalt, saltInput2: secondPrfSalt))
+            } else {
+                request.prf = .inputValues(.saltInput1(prfSalt))
+            }
         }
         // The account's existing passkeys (the server's `excludeCredentials`):
         // a provider that holds one refuses instead of creating a second, or
@@ -261,10 +269,14 @@ private final class ControllerBridge: NSObject,
             extensions: nil
         )
         var prfOutput: Data?
+        var secondPrfOutput: Data?
         var prfSupported: Bool?
         if #available(iOS 18.0, *), let prf = registration.prf {
             prfSupported = prf.isSupported
             prfOutput = PasskeyVault.usablePrfOutput(prf.first.map { key in
+                key.withUnsafeBytes { Data($0) }
+            })
+            secondPrfOutput = PasskeyVault.usablePrfOutput(prf.second.map { key in
                 key.withUnsafeBytes { Data($0) }
             })
         }
@@ -272,7 +284,8 @@ private final class ControllerBridge: NSObject,
             credential: json,
             credentialId: registration.credentialID,
             prfOutput: prfOutput,
-            prfSupported: prfSupported
+            prfSupported: prfSupported,
+            secondPrfOutput: secondPrfOutput
         ))
     }
 

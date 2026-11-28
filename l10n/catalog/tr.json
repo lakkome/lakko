@@ -274,7 +274,7 @@
       "status": "machine"
     },
     "auth.signup.passkey.error": {
-      "text": "Geçiş anahtarı eklenemedi. Tekrar deneyin veya \"Şimdi değil\" seçeneğini belirleyin.",
+      "text": "Geçiş anahtarı eklenemedi. Tekrar deneyin veya başka bir yol seçin.",
       "status": "machine"
     },
     "auth.signup.passkey.lede": {
@@ -4889,6 +4889,14 @@
       "text": "Yeniden iste",
       "status": "machine"
     },
+    "contacts.started_over.closed": {
+      "text": "{name} yeni bir hesapla baştan başladı. Buradaki mesajlar artık iletilmiyor.",
+      "status": "machine"
+    },
+    "contacts.started_over.request_note": {
+      "text": "Lakko, bunun öncekiyle aynı kişi olduğunu doğrulayamadı. Yalnızca o olduğundan eminseniz kabul edin.",
+      "status": "machine"
+    },
     "desktop.capture.body": {
       "text": "Sistemin gizlilik ayarlarından izin verin, sonra yeniden deneyin.",
       "status": "machine"
@@ -7657,14 +7665,6 @@
       "text": "Kurtarma e-postanız değiştirildi.",
       "status": "machine"
     },
-    "notice.opened_by_email.body": {
-      "text": "{date}, başka bir cihazda.",
-      "status": "machine"
-    },
-    "notice.opened_by_email.title": {
-      "text": "Hesabınız kurtarma e-postanızla açıldı",
-      "status": "machine"
-    },
     "notice.password_by_email.body": {
       "text": "{date} tarihinde biri kurtarma e-postanızı kullanarak yeni bir şifre seçti.",
       "status": "machine"
@@ -7675,10 +7675,6 @@
     },
     "notice.phrase_saved": {
       "text": "Hesabınız için bir kurtarma ifadesi kaydedildi.",
-      "status": "machine"
-    },
-    "notice.secure.new_keys": {
-      "text": "Bu, hesabınıza yeni anahtarlar verir; böylece hesabı açan kişi erişimini kaybeder.",
       "status": "machine"
     },
     "notice.secure.password_saved": {
@@ -7854,11 +7850,75 @@
       "status": "machine"
     },
     "proof.reset.cannot.title": {
-      "text": "Hesap anahtarları şifreniz veya bir geçiş anahtarı olmadan sıfırlanamaz",
+      "text": "Hesap anahtarları şifreniz olmadan sıfırlanamaz",
       "status": "machine"
     },
     "proof.reset.cannot.what_you_can_do": {
       "text": "Yapabilecekleriniz:",
+      "status": "machine"
+    },
+    "proof.reset.factor.heading": {
+      "text": "Siz olduğunuzu doğrulayın",
+      "status": "machine"
+    },
+    "proof.reset.factor.title": {
+      "text": "Ardından bunlardan biriyle doğrulayın:",
+      "status": "machine"
+    },
+    "proof.reset.factor.title_no_password": {
+      "text": "Bunlardan biriyle doğrulayın:",
+      "status": "machine"
+    },
+    "proof.reset.factor.totp": {
+      "text": "Kimlik doğrulayıcı uygulaması",
+      "status": "machine"
+    },
+    "proof.reset.factor.email": {
+      "text": "E-postayla kod",
+      "status": "machine"
+    },
+    "proof.reset.factor.passkey": {
+      "text": "Geçiş anahtarı",
+      "status": "machine"
+    },
+    "proof.reset.factor.none": {
+      "text": "Bunların hiçbirini kullanamıyorum",
+      "status": "machine"
+    },
+    "proof.reset.factor.totp.prompt": {
+      "text": "Kimlik doğrulayıcı uygulamanızdaki 6 haneli kodu girin.",
+      "status": "machine"
+    },
+    "proof.reset.factor.email.sent": {
+      "text": "Bu adres {username} hesabının kurtarma e-postasıysa bir kod yolda. Kod 10 dakika geçerlidir.",
+      "status": "machine"
+    },
+    "proof.reset.factor.passkey.use": {
+      "text": "Geçiş anahtarı kullan",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.totp": {
+      "text": "Kimlik doğrulayıcı uygulamanızla doğrulandı.",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.email": {
+      "text": "E-postayla gelen bir kodla doğrulandı.",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.passkey": {
+      "text": "Bir geçiş anahtarıyla doğrulandı.",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.title": {
+      "text": "Hesap anahtarları sıfırlanamaz",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.body": {
+      "text": "Sıfırlama için şifreniz ve siz olduğunuzu doğrulamanın bir yolu daha gerekir: kimlik doğrulayıcı uygulamanız, kurtarma e-postanız veya bir geçiş anahtarı.",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.body_none": {
+      "text": "Bu hesabın siz olduğunuzu doğrulamak için ikinci bir yolu yok, bu yüzden anahtarları sıfırlanamaz.",
       "status": "machine"
     },
     "proof.save_phrase.help": {
@@ -7869,16 +7929,12 @@
       "text": "Kullanıcı adınızı değiştirmek için şifrenizi girin.",
       "status": "machine"
     },
-    "protect.banner.action": {
-      "text": "Koru",
-      "status": "machine"
-    },
-    "protect.banner.none": {
-      "text": "Bu hesaba geri dönmenin bir yolu yok.",
+    "proof.add_totp.help": {
+      "text": "Kimlik doğrulayıcı uygulaması kurmak için şifrenizi girin.",
       "status": "machine"
     },
     "protect.body": {
-      "text": "Şifrenizi unutursanız ya da bu cihazı kaybederseniz, hesabınıza bu şekilde geri dönersiniz.",
+      "text": "Şifrenizi unutursanız ya da bu cihazı kaybederseniz, hesabınıza bu şekilde geri dönersiniz. En az birini seçin.",
       "status": "machine"
     },
     "protect.continue": {
@@ -7909,28 +7965,20 @@
       "text": "Geçiş anahtarı oluştur",
       "status": "machine"
     },
+    "protect.passkey.cancelled": {
+      "text": "Geçiş anahtarı eklenmedi.",
+      "status": "machine"
+    },
     "protect.phrase.body": {
       "text": "Yalnızca sizin sakladığınız 12 sözcük. Geri dönmenin en güçlü yolu.",
       "status": "machine"
     },
     "protect.phrase.save.body": {
-      "text": "Yalnızca sizin sakladığınız 12 kelime. Bundan sonra e-postayla gelen bir kod şifrenizi değiştirebilir ama hesabınızı açamaz.",
-      "status": "machine"
-    },
-    "protect.phrase.save.effect": {
-      "text": "Bu, hesabınıza yeni anahtarlar verir. Kişileriniz ve sohbetleriniz olduğu gibi kalır. Diğer cihazlarınızda oturum açık kalır.",
+      "text": "Yalnızca sizin sakladığınız 12 kelime. Yeni bir cihazda anahtarlarınızı, sıfırlamadan sonra da sohbetlerinizi geri getirir.",
       "status": "machine"
     },
     "protect.phrase.save.failed": {
       "text": "Tamamlanamadı. Hiçbir şey değişmedi.",
-      "status": "machine"
-    },
-    "protect.phrase.save.finishing": {
-      "text": "Hesabınızın yeni anahtarları var. Tamamlanıyor.",
-      "status": "machine"
-    },
-    "protect.phrase.save.progress": {
-      "text": "Hesabınızın anahtarları değiştiriliyor",
       "status": "machine"
     },
     "protect.phrase.save.show": {
@@ -7941,36 +7989,88 @@
       "text": "Kurtarma ifadesi kaydet",
       "status": "machine"
     },
-    "protect.skip": {
-      "text": "Şimdi değil",
-      "status": "machine"
-    },
-    "protect.skip.confirm.body": {
-      "text": "Şifrenizi unutursanız ya da bu cihazı kaybederseniz, bu hesaba geri dönemezsiniz.",
-      "status": "machine"
-    },
-    "protect.skip.confirm.continue": {
-      "text": "Korumasız devam et",
-      "status": "machine"
-    },
-    "protect.skip.confirm.title": {
-      "text": "Korumasız devam edilsin mi?",
-      "status": "machine"
-    },
-    "protect.status.email": {
-      "text": "E-postanızla korunuyor",
-      "status": "machine"
-    },
-    "protect.status.none": {
-      "text": "Korunmuyor",
+    "protect.phrase.title_optional": {
+      "text": "Ayrıca bir kurtarma ifadesi kaydet",
       "status": "machine"
     },
     "protect.status.phrase": {
-      "text": "Kurtarma ifadenizle korunuyor",
+      "text": "Sohbetlerinizi kurtarma ifadeniz koruyor",
+      "status": "machine"
+    },
+    "protect.status.passkey_seal": {
+      "text": "Sohbetlerinizi bir geçiş anahtarı koruyor",
+      "status": "machine"
+    },
+    "protect.status.password_only": {
+      "text": "Sohbetlerinizi yalnızca şifreniz koruyor",
       "status": "machine"
     },
     "protect.title": {
       "text": "Hesabınızı koruyun",
+      "status": "machine"
+    },
+    "protect.totp.title": {
+      "text": "Kimlik doğrulayıcı uygulaması kullan",
+      "status": "machine"
+    },
+    "protect.totp.body": {
+      "text": "Telefonunuzdaki bir uygulamadan 6 haneli kod. Uygulama yalnızca bu cihazdaysa cihazla birlikte onu da kaybedersiniz.",
+      "status": "machine"
+    },
+    "protect.optional": {
+      "text": "İsteğe bağlı",
+      "status": "machine"
+    },
+    "protect.continue_needs": {
+      "text": "Devam etmek için ilk üçünden birini seçin.",
+      "status": "machine"
+    },
+    "protect.totp_only.warning": {
+      "text": "Kimlik doğrulayıcı uygulamanızı kaybederseniz bu hesabı geri alamazsınız. Ayrıca bir e-posta veya geçiş anahtarı ekleyin.",
+      "status": "machine"
+    },
+    "protect.totp_only.warning_phrase": {
+      "text": "Hem kimlik doğrulayıcı uygulamanızı hem de kurtarma ifadenizi kaybederseniz bu hesabı geri alamazsınız.",
+      "status": "machine"
+    },
+    "protect.totp_only.remove_notice": {
+      "text": "Kimlik doğrulayıcı uygulamanız, siz olduğunuzu doğrulamanın diğer tek yolu olacak. Onu kaybederseniz bu hesabı geri alamazsınız.",
+      "status": "machine"
+    },
+    "protect.totp_only.remove_notice_phrase": {
+      "text": "Kimlik doğrulayıcı uygulamanız, siz olduğunuzu doğrulamanın diğer tek yolu olacak. Onu ve kurtarma ifadenizi kaybederseniz bu hesabı geri alamazsınız.",
+      "status": "machine"
+    },
+    "protect.title_required": {
+      "text": "Hesabınıza geri dönmek için ikinci bir yol ekleyin",
+      "status": "machine"
+    },
+    "protect.last_factor": {
+      "text": "Önce hesabınıza geri dönmenin başka bir yolunu ekleyin. Bu, bu hesabın sahip olduğu son yol.",
+      "status": "machine"
+    },
+    "protect.username_email": {
+      "text": "Kurtarma e-postanız yeni kullanıcı adınıza taşınır. Adresi bir kez yazın.",
+      "status": "machine"
+    },
+    "protect.password_only.title": {
+      "text": "Sohbetleriniz şifrenize bağlı",
+      "status": "machine"
+    },
+    "protect.password_only.body": {
+      "text": "Şifrenizi unutur ve cihazlarınızı kaybederseniz sohbetleriniz geri gelmez. Onları korumak için bir kurtarma ifadesi kaydedin veya bir geçiş anahtarı ekleyin.",
+      "status": "machine"
+    },
+    "protect.password_only.save_phrase": {
+      "text": "Kurtarma ifadesi kaydet",
+      "status": "machine"
+    },
+    "protect.password_only.add_passkey": {
+      "text": "Geçiş anahtarı ekle",
+      "status": "machine"
+    },
+    "protect.password_only.passkey_no_seal": {
+      "text": "Bu geçiş anahtarı giriş yapmanızı sağlar ama sohbetlerinizi korumaz.",
       "status": "machine"
     },
     "recall.phrase.changed": {
@@ -8019,14 +8119,6 @@
     },
     "recovery.email.check.title": {
       "text": "E-postanızı kontrol edin",
-      "status": "machine"
-    },
-    "recovery.email.failed": {
-      "text": "Hesabınız geri getirilemedi. Tekrar deneyin veya başka bir yol seçin.",
-      "status": "machine"
-    },
-    "recovery.email.restoring": {
-      "text": "Hesabınız geri getiriliyor",
       "status": "machine"
     },
     "recovery.email.row.body": {
@@ -8269,16 +8361,8 @@
       "text": "15 dakikalık aradan önce {count, plural, one {# deneme kaldı} other {# deneme kaldı}}.",
       "status": "machine"
     },
-    "recovery_email.add_again.body": {
-      "text": "Hesabınızın anahtarları değişti. E-postayla gelen bir kodun hesabınızı geri getirebilmesi için adresinizi yeniden yazın.",
-      "status": "machine"
-    },
-    "recovery_email.add_again.title": {
-      "text": "E-postanızı yeniden ekleyin",
-      "status": "machine"
-    },
     "recovery_email.body": {
-      "text": "Şifrenizi unutursanız hesabınıza geri dönebilmeniz için bu adrese bir kod göndeririz.",
+      "text": "Şifrenizi unutursanız yeni bir şifre seçebilmeniz için bu adrese bir kod göndeririz.",
       "status": "machine"
     },
     "recovery_email.code.expired": {
@@ -8322,7 +8406,7 @@
       "status": "machine"
     },
     "recovery_email.mailbox_warning": {
-      "text": "Bu posta kutusunu okuyabilen herkes hesabınıza girebilir. Bunu değiştirmek için bir kurtarma ifadesi kaydedin.",
+      "text": "Bu posta kutusunu okuyabilen herkes hesabınıza girebilir.",
       "status": "machine"
     },
     "recovery_email.needs_username": {
@@ -8338,7 +8422,7 @@
       "status": "machine"
     },
     "recovery_email.remove.confirm.body": {
-      "text": "Hesabınıza e-postayla geri dönemezsiniz.",
+      "text": "E-postayla yeni bir şifre alamazsınız.",
       "status": "machine"
     },
     "recovery_email.remove.confirm.title": {
@@ -8605,10 +8689,6 @@
       "text": "Bu hesabın diğer tüm cihazlarının oturumu kapatılır ve cihazlar kaldırılır. Bu hesaba ait sohbetlerini ve kişilerini kaybederler.",
       "status": "machine"
     },
-    "restore_identity.reset.effect_messages": {
-      "text": "Sohbetler, gruplar ve kanallar, kişilerinizin cihazlarından, onlarda hâlâ bulunan mesajlarla birlikte, en yeniden başlayarak geri gelir.",
-      "status": "machine"
-    },
     "restore_identity.reset.effect_passkeys": {
       "text": "Bu hesabın tüm geçiş anahtarları silinir. Sonrasında yeniden geçiş anahtarı ekleyebilirsiniz.",
       "status": "machine"
@@ -8647,6 +8727,18 @@
     },
     "restore_identity.reset.what_it_does": {
       "text": "Ne yapar:",
+      "status": "machine"
+    },
+    "restore_identity.reset.sealed": {
+      "text": "Sohbetleriniz, gruplarınız ve kanallarınız, kişilerinizin cihazlarından, onlarda hâlâ bulunan mesajlarla birlikte, en yeniden başlayarak geri gelecek.",
+      "status": "machine"
+    },
+    "restore_identity.reset.unsealed": {
+      "text": "Bu sıfırlama hesabınızı baştan başlatır. Sohbetleriniz, gruplarınız ve sahibi olduğunuz kanallar geri gelmez. Kullanıcı adınız sizde kalır ve kişilerinize yeni istekler gönderebilirsiniz.",
+      "status": "machine"
+    },
+    "restore_identity.reset.unsealed_use_passkey": {
+      "text": "Sohbetlerinizi geri getirmek için onları koruyan bir geçiş anahtarı kullanın.",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -9337,6 +9429,10 @@
       "text": "Bu cihaz geçiş anahtarlarını yönetemiyor.",
       "status": "machine"
     },
+    "settings.passkeys.no_seal": {
+      "text": "Sohbetlerinizi korumaz.",
+      "status": "machine"
+    },
     "settings.password.change": {
       "text": "Şifreyi değiştir",
       "status": "machine"
@@ -9446,7 +9542,7 @@
       "status": "machine"
     },
     "settings.recovery.totp.done": {
-      "text": "Kimlik doğrulayıcı kuruldu. Uygulamadaki bir kod artık hesabınıza geri dönmenizi sağlayabilir.",
+      "text": "Kimlik doğrulayıcı kuruldu. Uygulamadaki bir kod artık siz olduğunuzu doğrular.",
       "status": "machine"
     },
     "settings.recovery.totp.error.generic": {
@@ -9479,6 +9575,14 @@
     },
     "settings.recovery.totp.unavailable": {
       "text": "Kimlik doğrulayıcı kurulumu şu anda kullanılamıyor.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.open_app": {
+      "text": "Kimlik doğrulayıcı uygulamasında aç",
+      "status": "machine"
+    },
+    "settings.recovery.totp.on": {
+      "text": "Açık",
       "status": "machine"
     },
     "settings.recovery.words.not_on_this_device": {

@@ -64,27 +64,27 @@ internal fun rememberBubbleTranslation(msg: ChatMessage, isOwn: Boolean): Bubble
     val detections by TranslationCenter.detections.collectAsStateWithLifecycle()
     // The menu's answer changes when this message's detection arrives.
     val detected = conversation?.let { detections[TranslationStoreState.messageKey(it, msg.messageId)] }
-    val offer = remember(conversation, readable, isOwn, settings, cap, store, detected) {
+    val offer = remember(conversation, readable, settings, cap, store, detected) {
         if (conversation == null) {
             TranslateOffer.NONE
         } else {
-            TranslationCenter.translateOffer(conversation, msg.messageId, readable, isOwn)
+            TranslationCenter.translateOffer(conversation, msg.messageId, readable)
         }
     }
     // UX 3.2 — before any translation, the message's language up front.
-    val languageLine = remember(conversation, readable, isOwn, settings, cap, detected) {
+    val languageLine = remember(conversation, readable, settings, cap, detected) {
         if (conversation == null || msg.text.isEmpty()) {
             null
         } else {
-            TranslationCenter.languageLine(conversation, msg.messageId, msg.text, isOwn)
+            TranslationCenter.languageLine(conversation, msg.messageId, msg.text)
         }
     }
     val autoOn = conversation != null && store.conversations[conversation]?.autoTranslate == true
     LaunchedEffect(conversation, readable) {
-        if (conversation != null && !isOwn) TranslationCenter.detect(conversation, msg.messageId, readable)
+        if (conversation != null) TranslationCenter.detect(conversation, msg.messageId, readable, incoming = !isOwn)
     }
     LaunchedEffect(conversation, opId, autoOn, readable) {
-        if (conversation != null && autoOn && !isOwn && readable.isNotBlank()) {
+        if (conversation != null && autoOn && readable.isNotBlank()) {
             TranslationCenter.autoTranslate(conversation, msg.messageId, opId, readable)
         }
     }

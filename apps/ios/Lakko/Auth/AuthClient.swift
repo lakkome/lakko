@@ -307,29 +307,6 @@ public final class AuthClient {
         return attestation
     }
 
-    // MARK: - Channel recovery key — ADR-0101 section 7
-
-    /// `POST /auth/channel-recovery/evaluate`: auth evaluates one blinded
-    /// element (the channel recovery input of a channel id it never learns)
-    /// under the account's per-account key. Bearer. Both elements are
-    /// URL-safe base64 without padding on the wire; this takes and returns
-    /// them as bytes. `503 channel-recovery-disabled` / `429` surface as
-    /// ``AuthClientError/http(status:endpoint:body:)``.
-    public func channelRecoveryEvaluate(sessionToken: String, blindedElement: Data) async throws -> Data {
-        guard !sessionToken.isEmpty else {
-            throw AuthClientError.argument("sessionToken must be non-empty")
-        }
-        let endpoint = "/auth/channel-recovery/evaluate"
-        let resp: ChannelRecoveryEvaluateResponse = try await post(
-            endpoint: endpoint,
-            body: ChannelRecoveryEvaluateRequest(blindedElement: base64UrlEncodeNoPad(blindedElement)),
-            bearer: sessionToken)
-        guard let evaluation = base64UrlDecodeNoPad(resp.evaluation) else {
-            throw AuthClientError.http(status: 200, endpoint: endpoint, body: "malformed evaluation in response")
-        }
-        return evaluation
-    }
-
     // MARK: - TOTP — ADR-0018 factor (c), authenticator-code recovery
 
     /// `POST /totp/enroll/start` — mint + store an (unconfirmed) TOTP
@@ -346,14 +323,20 @@ public final class AuthClient {
     /// CONFIRMED authenticator already exists (the server refuses a
     /// silent swap); a 503 means the server has TOTP disabled
     /// (`LAKKO_TOTP_ENC_KEY` unset).
+    ///
+    /// ADR-0073, amended 2026-11-26: the body carries the fresh-auth grant
+    /// (either method); without a valid one the answer is
+    /// `403 fresh-auth-required` and nothing is minted.
     public func totpEnrollStart(
-        sessionToken: String
+        sessionToken: String,
+        freshGrant: String
     ) async throws -> TotpEnrollStartResult {
-        guard !sessionToken.isEmpty else {
-            throw AuthClientError.argument("sessionToken must be non-empty")
+        guard !sessionToken.isEmpty, !freshGrant.isEmpty else {
+            throw AuthClientError.argument("sessionToken and freshGrant must be non-empty")
         }
-        let resp: TotpEnrollStartResponse = try await postNoBody(
+        let resp: TotpEnrollStartResponse = try await post(
             endpoint: "/totp/enroll/start",
+            body: TotpEnrollStartRequest(freshGrant: freshGrant),
             bearer: sessionToken
         )
         return TotpEnrollStartResult(
@@ -374,10 +357,11 @@ public final class AuthClient {
     /// user can simply retry with the next code.
     public func totpEnrollFinish(
         sessionToken: String,
-        code: String
+        code: String,
+        freshGrant: String
     ) async throws {
-        guard !sessionToken.isEmpty else {
-            throw AuthClientError.argument("sessionToken must be non-empty")
+        guard !sessionToken.isEmpty, !freshGrant.isEmpty else {
+            throw AuthClientError.argument("sessionToken and freshGrant must be non-empty")
         }
         guard let normalized = normalizeTotpCode(code) else {
             throw AuthClientError.argument("code must be 6 digits")
@@ -387,7 +371,7 @@ public final class AuthClient {
         // (JSONDecoder ignores unknown keys).
         let _: TotpEnrollFinishAck = try await post(
             endpoint: "/totp/enroll/finish",
-            body: TotpEnrollFinishRequest(code: normalized),
+            body: TotpEnrollFinishRequest(code: normalized, freshGrant: freshGrant),
             bearer: sessionToken
         )
     }
@@ -580,7 +564,9 @@ public final class AuthClient {
             recoveryPhrase: recoveryMnemonic?.phrase(),
             session: finishResp.sessionPair.naming(deviceId: deviceId),
             freshGrant: FreshAuthGrant.from(
-                grant: finishResp.freshGrant, expiresAtMs: finishResp.freshGrantExpiresAtMs)
+                grant: finishResp.freshGrant, expiresAtMs: finishResp.freshGrantExpiresAtMs),
+            ownedChannelsSecret: finishResp.ownedChannelsSecret
+                .flatMap { base64UrlDecodeNoPad($0) }.flatMap { $0.count == 32 ? $0 : nil }
         )
     }
 
@@ -938,6 +924,80 @@ public final class AuthClient {
         try await post(endpoint: "/account/keys/reset/finish", body: request, bearer: sessionToken)
     }
 
+    // MARK: - The reset's second factor (ADR-0073, amended 2026-11-26)
+
+    /// `POST /account/keys/reset/factor/totp` (bearer): a code from the
+    /// account's confirmed authenticator. `freshGrant` must be one a PASSWORD
+    /// sign-in minted (`403 fresh-auth-required` otherwise, nothing charged).
+    /// `401 factor-refused` for a wrong or used code, or an account with no
+    /// authenticator; `429` with `retry_after_secs` past five tries per
+    /// fifteen minutes.
+    public func resetFactorTotp(
+        sessionToken: String, freshGrant: String, code: String
+    ) async throws -> ResetFactorGrantResponse {
+        guard let normalized = normalizeTotpCode(code) else {
+            throw AuthClientError.argument("code must be 6 digits")
+        }
+        return try await post(
+            endpoint: "/account/keys/reset/factor/totp",
+            body: ResetFactorTotpRequest(freshGrant: freshGrant, code: normalized),
+            bearer: sessionToken)
+    }
+
+    /// `POST /account/keys/reset/factor/email/start` (bearer): ask for a
+    /// code at the account's recovery email. The answer has the same shape
+    /// whether or not the pair matches; a letter leaves only for a match.
+    public func resetFactorEmailStart(
+        sessionToken: String, freshGrant: String, handle: Data, address: String, lang: String?
+    ) async throws -> EmailChallenge {
+        try requireHandle(handle)
+        return try await post(
+            endpoint: "/account/keys/reset/factor/email/start",
+            body: ResetFactorEmailStartRequest(
+                freshGrant: freshGrant, handle: base64UrlEncodeNoPad(handle), address: address, lang: lang),
+            bearer: sessionToken)
+    }
+
+    /// `POST /account/keys/reset/factor/email/finish` (bearer): the mailed
+    /// code. `401 factor-refused` for a wrong code, a decoy or a spent
+    /// challenge; five tries per code.
+    public func resetFactorEmailFinish(
+        sessionToken: String, freshGrant: String, challengeId: String, code: String
+    ) async throws -> ResetFactorGrantResponse {
+        try await post(
+            endpoint: "/account/keys/reset/factor/email/finish",
+            body: ResetFactorEmailFinishRequest(freshGrant: freshGrant, challengeId: challengeId, code: code),
+            bearer: sessionToken)
+    }
+
+    /// `POST /account/keys/reset/factor/passkey` (bearer): consumes the
+    /// ADR-0014 action grant of `SHA-256("lakko/action/reset-keys/v1" ‖
+    /// account_id)`, obtained through `/auth/action/{start,finish}` by an
+    /// assertion of one of the account's passkeys.
+    public func resetFactorPasskey(
+        sessionToken: String, freshGrant: String
+    ) async throws -> ResetFactorGrantResponse {
+        try await post(
+            endpoint: "/account/keys/reset/factor/passkey",
+            body: ResetFactorPasskeyRequest(freshGrant: freshGrant),
+            bearer: sessionToken)
+    }
+
+    /// `POST /account/owned-channels-secret` (bearer): the account's server
+    /// half `S` of the owned-channels password lock (ADR-0101 section 7),
+    /// 32 bytes. Needs the reset factor grant and does not spend it, so the
+    /// resetting device asks for `S` and then resets.
+    /// `403 reset-factor-required` otherwise.
+    public func ownedChannelsSecret(sessionToken: String, resetGrant: String) async throws -> Data {
+        let endpoint = "/account/owned-channels-secret"
+        let answer: OwnedChannelsSecretResponse = try await post(
+            endpoint: endpoint, body: OwnedChannelsSecretRequest(resetGrant: resetGrant), bearer: sessionToken)
+        guard let secret = base64UrlDecodeNoPad(answer.ownedChannelsSecret), secret.count == 32 else {
+            throw AuthClientError.http(status: 200, endpoint: endpoint, body: "malformed owned_channels_secret")
+        }
+        return secret
+    }
+
     /// Reset the signed-in account's keys (ADR-0073 section 2): register a
     /// recovery credential made from `seed`, the 64-byte BIP39 seed of the
     /// NEW phrase, and bind `newSignaturePubkey`, the NEW AccountIdentity
@@ -945,9 +1005,9 @@ public final class AuthClient {
     ///
     /// ```text
     ///   client: OPAQUE recovery registration start (seed)
-    ///   POST /account/keys/reset/start   { fresh_grant, recovery_request }  -> { recovery_response }
+    ///   POST /account/keys/reset/start   { reset_grant, recovery_request }  -> { recovery_response }
     ///   client: OPAQUE recovery registration finish
-    ///   POST /account/keys/reset/finish  { fresh_grant, recovery_upload, new_signature_pubkey_b64 }
+    ///   POST /account/keys/reset/finish  { reset_grant, recovery_upload, new_signature_pubkey_b64 }
     ///                                    -> { key_reset_attest_b64, <session pair> }
     /// ```
     ///
@@ -961,9 +1021,12 @@ public final class AuthClient {
     ///
     /// The messages are built exactly as signup builds its recovery half.
     ///
-    /// `freshGrant` is the grant a password login minted (amended
-    /// 2026-10-04); one grant serves both calls. Without a valid one both
-    /// answer `403 {"error":"fresh-auth-required"}` and nothing is done.
+    /// `resetGrant` is the reset factor grant (amended 2026-11-26): the
+    /// password, proven by a password sign-in, AND one second factor the
+    /// account has (``resetFactorTotp(sessionToken:freshGrant:code:)`` and
+    /// its siblings mint it). One grant serves both calls. Without a valid
+    /// one both answer `403 {"error":"reset-factor-required"}` and nothing
+    /// is done.
     ///
     /// Throws ``AuthClientError/http(status:endpoint:body:)`` (`401`, `403`, `400`,
     /// `429 too-many-attempts`, `503 rate-limiter-unavailable`) or
@@ -973,7 +1036,7 @@ public final class AuthClient {
     /// `seed` seeds (which must be `newSignaturePubkey`) over `accountId`.
     public func resetAccountKeys(
         sessionToken: String,
-        freshGrant: String,
+        resetGrant: String,
         seed: Data,
         newSignaturePubkey: Data,
         accountId: Data
@@ -981,8 +1044,8 @@ public final class AuthClient {
         guard !sessionToken.isEmpty else {
             throw AuthClientError.argument("sessionToken must be non-empty")
         }
-        guard !freshGrant.isEmpty else {
-            throw AuthClientError.argument("freshGrant must be non-empty")
+        guard !resetGrant.isEmpty else {
+            throw AuthClientError.argument("resetGrant must be non-empty")
         }
         guard !seed.isEmpty else {
             throw AuthClientError.argument("seed must be non-empty")
@@ -995,7 +1058,7 @@ public final class AuthClient {
         let reg = try OpaqueRegister.startRecovery(seed: seed)
         let start = try await keyResetStart(
             sessionToken: sessionToken,
-            KeyResetStartRequest(freshGrant: freshGrant, recoveryRequest: reg.requestB64())
+            KeyResetStartRequest(resetGrant: resetGrant, recoveryRequest: reg.requestB64())
         )
         let upload = try reg.finish(
             secret: seed, serverResponseB64: start.recoveryResponse
@@ -1003,7 +1066,7 @@ public final class AuthClient {
         let finish = try await keyResetFinish(
             sessionToken: sessionToken,
             KeyResetFinishRequest(
-                freshGrant: freshGrant,
+                resetGrant: resetGrant,
                 recoveryUpload: upload,
                 newSignaturePubkeyB64: base64UrlEncodeNoPad(newSignaturePubkey),
                 identityProofB64: identityProof
@@ -1047,7 +1110,6 @@ public final class AuthClient {
         newSignaturePubkey: Data,
         supersessionProof: Data,
         revokeDeviceIds: [Data],
-        phraseSaved: Bool = false,
         accountId: Data
     ) async throws -> KeyResetResult {
         guard !sessionToken.isEmpty else {
@@ -1074,7 +1136,7 @@ public final class AuthClient {
         let reg = try OpaqueRegister.startRecovery(seed: seed)
         let start: KeyResetStartResponse = try await post(
             endpoint: "/account/keys/rotate/start",
-            body: KeyResetStartRequest(freshGrant: freshGrant, recoveryRequest: reg.requestB64()),
+            body: KeyRotateStartRequest(freshGrant: freshGrant, recoveryRequest: reg.requestB64()),
             bearer: sessionToken)
         let upload = try reg.finish(
             secret: seed, serverResponseB64: start.recoveryResponse
@@ -1087,7 +1149,6 @@ public final class AuthClient {
                 newSignaturePubkeyB64: base64UrlEncodeNoPad(newSignaturePubkey),
                 supersessionProofB64: base64UrlEncodeNoPad(supersessionProof),
                 revokeDeviceIdsB64: revokeDeviceIds.map(base64UrlEncodeNoPad),
-                phraseSaved: phraseSaved ? true : nil,
                 identityProofB64: identityProof),
             bearer: sessionToken)
         guard let attestation = base64UrlDecodeNoPad(finish.keyResetAttestB64),
@@ -1282,9 +1343,10 @@ public final class AuthClient {
             throw AuthClientError.http(
                 status: 200, endpoint: "/account/recall/start", body: "malformed server_nonce_b64 in response")
         }
-        let passwordUpload = try passwordReg.finish(
-            secret: attempt.newPassword, serverResponseB64: start.passwordResponse
-        ).uploadB64()
+        let passwordOut = try passwordReg.finish(
+            secret: attempt.newPassword, serverResponseB64: start.passwordResponse)
+        let passwordUpload = passwordOut.uploadB64()
+        let newExportKey = passwordOut.exportKey()
         let recoveryUpload = try recoveryReg.finish(
             secret: attempt.newSeed, serverResponseB64: start.recoveryResponse
         ).uploadB64()
@@ -1332,7 +1394,8 @@ public final class AuthClient {
         }
         return RecallLanded(
             reset: KeyResetResult(attestation: attestation, session: finish.sessionPair.naming(deviceId: deviceId)),
-            freshGrant: FreshAuthGrant.from(grant: finish.freshGrant, expiresAtMs: finish.freshGrantExpiresAtMs))
+            freshGrant: FreshAuthGrant.from(grant: finish.freshGrant, expiresAtMs: finish.freshGrantExpiresAtMs),
+            exportKey: newExportKey.count == ExportKeyStore.exportKeyLength ? newExportKey : nil)
     }
 
     // MARK: - The passkey vault: a passkey that restores keys
@@ -1741,14 +1804,20 @@ public struct SignupResult: Equatable {
     /// The fresh-auth grant the signup finish minted. Kept in memory only
     /// by the caller.
     public let freshGrant: FreshAuthGrant?
+    /// ADR-0101 section 7: the server half `S` of the owned-channels
+    /// password lock (32 bytes), released by the signup finish. In memory
+    /// only, until the locks are made.
+    public let ownedChannelsSecret: Data?
 
     public init(
         accountId: Data,
         exportKey: Data,
         recoveryPhrase: String? = nil,
         session: SessionPair,
-        freshGrant: FreshAuthGrant? = nil
+        freshGrant: FreshAuthGrant? = nil,
+        ownedChannelsSecret: Data? = nil
     ) {
+        self.ownedChannelsSecret = ownedChannelsSecret
         self.accountId = accountId
         self.exportKey = exportKey
         self.recoveryPhrase = recoveryPhrase

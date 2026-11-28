@@ -40,7 +40,11 @@ import { openMessageMenu } from "../chat/message-menu-registry";
 import { conversationReady } from "../chat/view-ready";
 import { AttachComposer, type AttachEditRequest } from "../attach/AttachComposer";
 import { checkWhenVisible, isDeletedAccount, personOnScreen } from "../people/person-status";
-import { deletedConversationSurface, type ConversationSurface } from "../people/deleted-surface";
+import {
+  closableSurface,
+  startedOverClosesConversation,
+  type ClosableSurface,
+} from "../contacts/started-over";
 import { ComposerTray } from "../chat/ComposerTray";
 import {
   backspaceRemovesLast,
@@ -223,7 +227,7 @@ import {
   runLongPollLoop,
   sleepCancellable,
 } from "../ds/long-poll-loop";
-import { ContactsClient, ContactsError, SupersessionRefused } from "../contacts/client";
+import { ContactsClient, ContactsError, ContactStartedOver, SupersessionRefused } from "../contacts/client";
 import { supersessionRefusedMessage } from "../contacts/supersession-message";
 import { DiscoveryClient } from "../discovery/client";
 import { boundX25519 } from "../discovery/x25519-binding";
@@ -231,6 +235,7 @@ import {
   accountIdB64OfKey,
   loadAccepted,
   loadKeyAliases,
+  loadStartedOverKeys,
   loadSupersededKeys,
   peerContactByMemberPubkeys,
   subscribeAcceptedChanged,
@@ -1729,8 +1734,33 @@ function ChatView(props: {
     const peer = peerKeyB64();
     return peer !== null && isDeletedAccount(peer);
   };
-  /** What the conversation offers (`people/deleted-surface.ts`). */
-  const surface = (): ConversationSurface => deletedConversationSurface(!isGroupChat(), peerDeleted());
+  /** `docs/ux/identity-recovery.md` 16.11: the contacts store changed (an
+   *  unsealed reset was noticed, or the person accepted the new account). */
+  const [startedOverVersion, setStartedOverVersion] = createSignal(0);
+  onMount(() => {
+    const unsubscribe = subscribeAcceptedChanged(() => setStartedOverVersion((v) => v + 1));
+    onCleanup(unsubscribe);
+  });
+  /** UX 16.11: this is the OLD one-to-one with a person who started over
+   *  with a new account (an unsealed reset). The history stays; nothing
+   *  sent here would be delivered. A new one-to-one with the same account
+   *  is bound to the new key and is an ordinary chat. */
+  const peerStartedOver = (): boolean => {
+    startedOverVersion();
+    return startedOverClosesConversation({
+      isOneToOne: !isGroupChat(),
+      peerKeyB64: peerKeyB64(),
+      startedOverKeysB64: loadStartedOverKeys(),
+    });
+  };
+  /** What the conversation offers, and the line that replaces its composer
+   *  (`contacts/started-over.ts`, over `people/deleted-surface.ts`). */
+  const surface = (): ClosableSurface =>
+    closableSurface({
+      isOneToOne: !isGroupChat(),
+      peerDeleted: peerDeleted(),
+      peerStartedOver: peerStartedOver(),
+    });
   // ADR-0098 section 2: an open one-to-one is on screen: its person is asked
   // about when the rule says it is due.
   createEffect(() => {
@@ -1841,6 +1871,10 @@ function ChatView(props: {
     const back = infoBackStep(screen);
     setSearchParams({ info: back === null ? undefined : infoParamOf(back) }, { replace: true });
   }
+
+  /** UX 16.11: the name in the closed line of a one-to-one whose other
+   *  person started over is the name the header shows. */
+  const startedOverName = (): string => resolvePeerName();
 
   /** The conversation's title: the same rule the chat list names its row
    *  by (`chat/conversation-title.ts`), so the header and the row never
@@ -5589,6 +5623,7 @@ function ChatView(props: {
       const verdict = await oneToOneSendVerdict({
         check: () => checkPeerIdentity(false),
         unrepairableKey: unrepairableKeyNow,
+        closed: peerStartedOver,
         heldAtMs,
       });
       if (verdict === "give-up") {
@@ -9631,6 +9666,7 @@ function ChatView(props: {
                   const r = row();
                   if (r.kind === "outgoing") retrySend(r.tempId);
                 }}
+                retryOffered={surface().composer}
                 onDeleteUnsent={() => {
                   const r = row();
                   if (r.kind === "outgoing") deleteUnsentRow(r.tempId);
@@ -9924,7 +9960,11 @@ function ChatView(props: {
           the composer is replaced by one line, no button. */}
       <Show when={!selecting() && !surface().composer}>
         <div class="lk-composer-deleted" role="note">
-          {t("person.deleted.body")}
+          {/* UX 16.11 - the same slot and style for a person who started
+              over with a new account: one line, no button, no banner. */}
+          {surface().closedLine === "started-over"
+            ? t("contacts.started_over.closed", { name: startedOverName() })
+            : t("person.deleted.body")}
         </div>
       </Show>
       <Show when={!selecting() && surface().composer}>
@@ -11683,6 +11723,9 @@ function errorText(err: unknown, fallbackKey: string): () => string {
     const loggedReset = err.loggedReset;
     return () => supersessionRefusedMessage(loggedReset);
   }
+  // ADR-0101 section 11: the person started over; nothing was done for the
+  // old contact. The same plain line as an unconfirmed change.
+  if (err instanceof ContactStartedOver) return () => supersessionRefusedMessage(null);
   if (err instanceof ContactsError) {
     const variant = err.variant;
     switch (variant.kind) {

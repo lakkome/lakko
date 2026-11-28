@@ -281,6 +281,13 @@ public object AccountLocalWipe {
         // registrations, the returned invitations, the history paging, the
         // recovered channels and the profiles carried into successors.
         Step("reset-return") { ctx, acct -> me.lakko.app.auth.ResetReturnStorage.wipeOnDevice(ctx, acct) },
+        // ADR-0101 sections 7 and 10 - the account's seal announcement as
+        // this device last read it, and the owned-channels pass state held
+        // in memory (the stored halves go with "reset-return" above).
+        Step("reset-seals") { ctx, acct ->
+            me.lakko.app.auth.SealStateStore.onDevice(ctx).clearAccount(acct)
+            me.lakko.app.channels.OwnedChannelsRuntime.forget(acct)
+        },
         Step("lineage-mirror") { ctx, acct -> me.lakko.app.chat.LineageMirror.deleteAccount(ctx, acct) },
         Step("held-sends") { ctx, acct -> me.lakko.app.chat.SealedHeldSendBackend.deleteAccount(ctx, acct) },
         // docs/ux/connection-state.md section 7.3 — the messages that never

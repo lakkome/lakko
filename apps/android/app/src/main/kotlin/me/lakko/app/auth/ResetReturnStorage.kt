@@ -29,6 +29,8 @@ public object ResetReturnStorage {
         CONTINUITY_CURSOR_PREFIX,
         me.lakko.app.channels.SentReturnsStore.KEY_PREFIX,
         me.lakko.app.channels.RecoveryRegisteredStore.KEY_PREFIX,
+        me.lakko.app.channels.RecoveryRegisteredStore.LEGACY_KEY_PREFIX,
+        me.lakko.app.channels.OwnedChannelsFactsStore.KEY_PREFIX,
         me.lakko.app.chat.HistoryReturnStore.KEY_PREFIX,
         me.lakko.app.channels.RecoveredChannelsStore.KEY_PREFIX,
         me.lakko.app.profile.CarriedProfileStore.KEY_PREFIX,
@@ -41,6 +43,8 @@ public object ResetReturnStorage {
     public val SECRET_PREFIXES: List<String> = listOf(
         me.lakko.app.channels.HeldReturnsStore.KEY_PREFIX,
         me.lakko.app.channels.ReturnedInvitationsStore.KEY_PREFIX,
+        me.lakko.app.channels.OwnedChannelsSecretStore.KEY_PREFIX,
+        me.lakko.app.channels.OwnedChannelsSecretStore.PASSKEYS_PREFIX,
     )
 
     /** The continuity mailbox's own cursor, per account. */

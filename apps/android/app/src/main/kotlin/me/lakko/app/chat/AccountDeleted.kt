@@ -72,11 +72,13 @@ internal fun verifyAccountDeletedWithCore(envelope: ByteArray, groupId: ByteArra
  * Whether the chat header hides its call and video buttons: a call already
  * occupies the slot, this device's membership ended, the conversation has no
  * call controls (a group of one), or — ADR-0098 — the other person of this
- * one-to-one deleted their account.
+ * one-to-one deleted their account, or — UX 16.11 — started over with a new
+ * account (their old devices are gone).
  */
 internal fun callButtonsHidden(
     callOccupied: Boolean,
     membershipEnded: Boolean,
     callControls: Boolean,
     peerDeleted: Boolean,
-): Boolean = callOccupied || membershipEnded || !callControls || peerDeleted
+    peerStartedOver: Boolean = false,
+): Boolean = callOccupied || membershipEnded || !callControls || peerDeleted || peerStartedOver

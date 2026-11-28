@@ -343,7 +343,7 @@ public object TranslationCenter {
     }
 
     /** UX 3.1 — whether the menu offers `Translate` for this message. */
-    public fun translateOffer(conversation: String, messageId: Long, text: String, isOwn: Boolean): TranslateOffer {
+    public fun translateOffer(conversation: String, messageId: Long, text: String): TranslateOffer {
         val key = TranslationStoreState.messageKey(conversation, messageId)
         val cap = mutableCapability.value
         val detected = knownSource(conversation, key)
@@ -353,7 +353,7 @@ public object TranslationCenter {
             scope.launch { pairState(canonicalLanguageTag(detected.tag) ?: detected.tag, target) }
         }
         return translationOffered(
-            SourceRules.offerInput(settings.value.showTranslate, text, isOwn, detected, pair, cap.translation),
+            SourceRules.offerInput(settings.value.showTranslate, text, detected, pair, cap.translation),
             reading(),
         )
     }
@@ -367,13 +367,13 @@ public object TranslationCenter {
      * ([SourceRules.languageLineInput]). Reads the detection the menu row
      * uses; never detects again.
      */
-    public fun languageLine(conversation: String, messageId: Long, text: String, isOwn: Boolean): TranslateLine? {
+    public fun languageLine(conversation: String, messageId: Long, text: String): TranslateLine? {
         val key = TranslationStoreState.messageKey(conversation, messageId)
         val resolution = resolution(conversation, key) ?: return null
         val tag = resolution.lineTag ?: return null
         val offer = translationOffered(
             SourceRules.languageLineInput(
-                settings.value.showTranslate, text, isOwn,
+                settings.value.showTranslate, text,
                 DetectedLanguage(tag, resolution.lineConfidencePermille),
             ),
             reading(),
@@ -478,13 +478,17 @@ public object TranslationCenter {
      * Run the detector on a shown message, once per version: again only when
      * its text changed (a no-op without a detector).
      */
-    public fun detect(conversation: String, messageId: Long, text: String) {
+    public fun detect(conversation: String, messageId: Long, text: String, incoming: Boolean = true) {
         val d = detector
         if (d === NoLanguageDetector || text.isBlank()) return
         val key = TranslationStoreState.messageKey(conversation, messageId)
         scope.launch {
             messageDetections.detect(key, text, d)
-            rememberConfident(conversation, messageId, detections.value[key]?.detected)
+            // Own messages are translated like received ones (UX 3.1, amended
+            // 2026-11-27), so they are detected too; only incoming ones count
+            // toward the conversation's languages, as they do toward the bar
+            // (UX 3.6: the language the others write in).
+            if (incoming) rememberConfident(conversation, messageId, detections.value[key]?.detected)
         }
     }
 

@@ -131,23 +131,51 @@ public final class ChatViewModel: ObservableObject {
     public var composerSlot: ComposerState {
         // ADR-0098 — a one-to-one with a deleted account: one line in the
         // composer's place, no draft, no button.
-        Self.composerSlot(peerDeleted: peerDeleted, membership: membership, draft: draft)
+        // UX 16.11 — a one-to-one with the keys a person had before they
+        // started over: one line likewise.
+        Self.composerSlot(
+            peerDeleted: peerDeleted,
+            startedOverNotice: peerStartedOver
+                ? Localization.text(StartedOverChat.closedKey, texts: ["name": conversationTitle]) : nil,
+            membership: membership, draft: draft)
     }
 
     /// The rule of ``composerSlot``, apart from the screen.
     nonisolated static func composerSlot(
-        peerDeleted: Bool, membership: MembershipState, draft: String
+        peerDeleted: Bool, startedOverNotice: String? = nil, membership: MembershipState, draft: String
     ) -> ComposerState {
         if peerDeleted {
             return .withdrawn(notice: ResolvedDisplayName.deletedBody, draft: nil, draftLabel: nil)
+        }
+        if let startedOverNotice {
+            return .withdrawn(notice: startedOverNotice, draft: nil, draftLabel: nil)
         }
         return composerState(membership, draft: draft)
     }
 
     /// ADR-0098 — the rule of ``hasSomeoneToCall``, apart from the screen.
-    nonisolated static func hasSomeoneToCall(peerDeleted: Bool, isGroup: Bool, people: Int?) -> Bool {
-        if peerDeleted { return false }
+    /// UX 16.11 — a person who started over cannot be called here either:
+    /// the devices this conversation reaches are gone.
+    nonisolated static func hasSomeoneToCall(
+        peerDeleted: Bool, peerStartedOver: Bool = false, isGroup: Bool, people: Int?
+    ) -> Bool {
+        if peerDeleted || peerStartedOver { return false }
         return GroupCallHostRules.hasSomeoneToCall(isGroup: isGroup, people: people)
+    }
+
+    /// UX 16.11 — the keys unsealed resets left behind (``PeerPinStore``),
+    /// read at open and whenever one is recorded.
+    @Published private var startedOverKeys: Set<String> = []
+
+    /// UX 16.11 — the other person of this one-to-one started over with a
+    /// new account, and this is the conversation with the keys of before:
+    /// the history stays, nothing sent here would arrive.
+    public var peerStartedOver: Bool {
+        guard !presentsAsGroup, !startedOverKeys.isEmpty, let peer = oneToOnePeerSignatureKey else {
+            return false
+        }
+        return StartedOverChat.bottom(
+            oneToOne: true, peerKeyB64: base64Encode(peer), startedOverKeysB64: startedOverKeys) == .closedLine
     }
 
     /// ADR-0098 — the other person of this one-to-one deleted their account.
@@ -169,7 +197,7 @@ public final class ChatViewModel: ObservableObject {
     /// ADR-0098 — whether Reply, React, Edit and Delete are offered: they all
     /// send, and a deleted person can receive nothing. Copy, Save, Forward
     /// and Pin for me stay.
-    public var sendActionsAvailable: Bool { !peerDeleted }
+    public var sendActionsAvailable: Bool { !peerDeleted && !peerStartedOver }
 
 
     /// ADR-0045 UX §6.2.5 — whether a message still carries Edit / Delete /
@@ -371,6 +399,15 @@ public final class ChatViewModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] newState in
                 self?.sync(state: newState)
+            }
+            .store(in: &cancellables)
+        // UX 16.11 — a contact who started over: this conversation closes
+        // the moment the device learns it.
+        startedOverKeys = Set(PeerPinStore().loadStartedOverKeys().keys)
+        NotificationCenter.default.publisher(for: StartedOverEvents.changed)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.startedOverKeys = Set(PeerPinStore().loadStartedOverKeys().keys)
             }
             .store(in: &cancellables)
         // The 1x1 call lives in the app-level ``CallHost`` (fed by every receive
@@ -904,7 +941,8 @@ public final class ChatViewModel: ObservableObject {
     var hasSomeoneToCall: Bool {
         // ADR-0098 — a deleted account cannot be called.
         Self.hasSomeoneToCall(
-            peerDeleted: peerDeleted, isGroup: isGroupChat, people: repository.memberCount(groupIdHex: groupIdHex))
+            peerDeleted: peerDeleted, peerStartedOver: peerStartedOver,
+            isGroup: isGroupChat, people: repository.memberCount(groupIdHex: groupIdHex))
     }
 
     /// What the toolbar call buttons do right now.
@@ -3049,6 +3087,9 @@ public final class ChatViewModel: ObservableObject {
 
     /// Send a message that did not get there. Drives the bubble's Retry.
     public func onRetrySend(localId: Int64) {
+        // Alignment item E — nothing is sent into a one-to-one whose person
+        // started over.
+        guard !peerStartedOver else { return }
         sendError = nil
         Task {
             do {

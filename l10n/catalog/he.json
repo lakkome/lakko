@@ -274,7 +274,7 @@
       "status": "machine"
     },
     "auth.signup.passkey.error": {
-      "text": "לא ניתן היה להוסיף את מפתח הגישה. נסו שוב, או בחרו „לא עכשיו”.",
+      "text": "לא ניתן היה להוסיף את מפתח הגישה. נסו שוב, או בחרו דרך אחרת.",
       "status": "machine"
     },
     "auth.signup.passkey.lede": {
@@ -4889,6 +4889,14 @@
       "text": "לבקש שוב",
       "status": "machine"
     },
+    "contacts.started_over.closed": {
+      "text": "החשבון של {name} התחיל מחדש כחשבון חדש. הודעות כאן כבר לא נמסרות.",
+      "status": "machine"
+    },
+    "contacts.started_over.request_note": {
+      "text": "Lakko לא הצליחה לוודא שזה אותו אדם כמו קודם. אשרו רק אם אתם בטוחים שזה אכן אותו אדם.",
+      "status": "machine"
+    },
     "desktop.capture.body": {
       "text": "אפשרו זאת בהגדרות הפרטיות של המערכת ונסו שוב.",
       "status": "machine"
@@ -7657,14 +7665,6 @@
       "text": "האימייל לשחזור שלכם הוחלף.",
       "status": "machine"
     },
-    "notice.opened_by_email.body": {
-      "text": "{date}, במכשיר אחר.",
-      "status": "machine"
-    },
-    "notice.opened_by_email.title": {
-      "text": "החשבון שלכם נפתח באמצעות האימייל לשחזור",
-      "status": "machine"
-    },
     "notice.password_by_email.body": {
       "text": "ב-{date} מישהו השתמש באימייל לשחזור שלכם כדי לבחור סיסמה חדשה.",
       "status": "machine"
@@ -7675,10 +7675,6 @@
     },
     "notice.phrase_saved": {
       "text": "ביטוי שחזור נשמר עבור החשבון שלכם.",
-      "status": "machine"
-    },
-    "notice.secure.new_keys": {
-      "text": "זה נותן לחשבון שלכם מפתחות חדשים, כך שמי שפתח אותו מאבד אותו.",
       "status": "machine"
     },
     "notice.secure.password_saved": {
@@ -7854,11 +7850,75 @@
       "status": "machine"
     },
     "proof.reset.cannot.title": {
-      "text": "אי אפשר לאפס את מפתחות החשבון בלי הסיסמה שלכם או מפתח גישה",
+      "text": "אי אפשר לאפס את מפתחות החשבון בלי הסיסמה שלכם",
       "status": "machine"
     },
     "proof.reset.cannot.what_you_can_do": {
       "text": "מה אפשר לעשות:",
+      "status": "machine"
+    },
+    "proof.reset.factor.heading": {
+      "text": "אשרו שזה אתם",
+      "status": "machine"
+    },
+    "proof.reset.factor.title": {
+      "text": "לאחר מכן אשרו באחת מהדרכים האלה:",
+      "status": "machine"
+    },
+    "proof.reset.factor.title_no_password": {
+      "text": "אשרו באחת מהדרכים האלה:",
+      "status": "machine"
+    },
+    "proof.reset.factor.totp": {
+      "text": "אפליקציית אימות",
+      "status": "machine"
+    },
+    "proof.reset.factor.email": {
+      "text": "קוד באימייל",
+      "status": "machine"
+    },
+    "proof.reset.factor.passkey": {
+      "text": "מפתח גישה",
+      "status": "machine"
+    },
+    "proof.reset.factor.none": {
+      "text": "אין לי אפשרות להשתמש באף אחת מהן",
+      "status": "machine"
+    },
+    "proof.reset.factor.totp.prompt": {
+      "text": "הזינו את הקוד בן 6 הספרות מאפליקציית האימות.",
+      "status": "machine"
+    },
+    "proof.reset.factor.email.sent": {
+      "text": "אם זה האימייל לשחזור של {username}, קוד נמצא בדרך. הוא תקף למשך 10 דקות.",
+      "status": "machine"
+    },
+    "proof.reset.factor.passkey.use": {
+      "text": "שימוש במפתח גישה",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.totp": {
+      "text": "אושר באמצעות אפליקציית האימות.",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.email": {
+      "text": "אושר באמצעות קוד באימייל.",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.passkey": {
+      "text": "אושר באמצעות מפתח גישה.",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.title": {
+      "text": "אי אפשר לאפס את מפתחות החשבון",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.body": {
+      "text": "איפוס דורש את הסיסמה שלכם ודרך נוספת לוודא שזה אתם: אפליקציית האימות, האימייל לשחזור או מפתח גישה.",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.body_none": {
+      "text": "לחשבון הזה אין דרך שנייה לוודא שזה אתם, ולכן אי אפשר לאפס את המפתחות שלו.",
       "status": "machine"
     },
     "proof.save_phrase.help": {
@@ -7869,16 +7929,12 @@
       "text": "הזינו את הסיסמה כדי לשנות את שם המשתמש.",
       "status": "machine"
     },
-    "protect.banner.action": {
-      "text": "הגנה",
-      "status": "machine"
-    },
-    "protect.banner.none": {
-      "text": "לחשבון הזה אין דרך חזרה.",
+    "proof.add_totp.help": {
+      "text": "הזינו את הסיסמה כדי להגדיר אפליקציית אימות.",
       "status": "machine"
     },
     "protect.body": {
-      "text": "אם תשכח/י את הסיסמה או תאבד/י את המכשיר הזה, כך תחזור/י לחשבון.",
+      "text": "אם תשכחו את הסיסמה או תאבדו את המכשיר הזה, כך תחזרו לחשבון. בחרו לפחות דרך אחת.",
       "status": "machine"
     },
     "protect.continue": {
@@ -7909,28 +7965,20 @@
       "text": "יצירת מפתח גישה",
       "status": "machine"
     },
+    "protect.passkey.cancelled": {
+      "text": "לא נוסף מפתח גישה.",
+      "status": "machine"
+    },
     "protect.phrase.body": {
       "text": "12 מילים שרק אתם שומרים. הדרך החזקה ביותר לחזור.",
       "status": "machine"
     },
     "protect.phrase.save.body": {
-      "text": "12 מילים שרק אתם שומרים. אחרי זה, קוד באימייל יכול לשנות את הסיסמה אבל לא יכול לפתוח את החשבון.",
-      "status": "machine"
-    },
-    "protect.phrase.save.effect": {
-      "text": "זה נותן לחשבון שלכם מפתחות חדשים. אנשי הקשר והצ׳אטים נשארים כמו שהם. המכשירים האחרים שלכם נשארים מחוברים.",
+      "text": "12 מילים שרק אתם שומרים. הן מחזירות את המפתחות שלכם במכשיר חדש, ואת הצ׳אטים אחרי איפוס.",
       "status": "machine"
     },
     "protect.phrase.save.failed": {
       "text": "לא הצלחנו לסיים. דבר לא השתנה.",
-      "status": "machine"
-    },
-    "protect.phrase.save.finishing": {
-      "text": "לחשבון שלכם יש מפתחות חדשים. מסיימים.",
-      "status": "machine"
-    },
-    "protect.phrase.save.progress": {
-      "text": "משנים את מפתחות החשבון שלכם",
       "status": "machine"
     },
     "protect.phrase.save.show": {
@@ -7941,36 +7989,88 @@
       "text": "שמירת ביטוי שחזור",
       "status": "machine"
     },
-    "protect.skip": {
-      "text": "לא עכשיו",
-      "status": "machine"
-    },
-    "protect.skip.confirm.body": {
-      "text": "אם תשכח/י את הסיסמה או תאבד/י את המכשיר הזה, לא תוכל/י לחזור לחשבון הזה.",
-      "status": "machine"
-    },
-    "protect.skip.confirm.continue": {
-      "text": "המשך ללא הגנה",
-      "status": "machine"
-    },
-    "protect.skip.confirm.title": {
-      "text": "להמשיך ללא הגנה?",
-      "status": "machine"
-    },
-    "protect.status.email": {
-      "text": "מוגן באמצעות האימייל שלכם",
-      "status": "machine"
-    },
-    "protect.status.none": {
-      "text": "לא מוגן",
+    "protect.phrase.title_optional": {
+      "text": "שמירת ביטוי שחזור בנוסף",
       "status": "machine"
     },
     "protect.status.phrase": {
-      "text": "מוגן באמצעות ביטוי השחזור שלכם",
+      "text": "הצ׳אטים שלכם נשמרים באמצעות ביטוי השחזור",
+      "status": "machine"
+    },
+    "protect.status.passkey_seal": {
+      "text": "הצ׳אטים שלכם נשמרים באמצעות מפתח גישה",
+      "status": "machine"
+    },
+    "protect.status.password_only": {
+      "text": "הצ׳אטים שלכם נשמרים באמצעות הסיסמה בלבד",
       "status": "machine"
     },
     "protect.title": {
       "text": "הגנו על החשבון שלכם",
+      "status": "machine"
+    },
+    "protect.totp.title": {
+      "text": "שימוש באפליקציית אימות",
+      "status": "machine"
+    },
+    "protect.totp.body": {
+      "text": "קוד בן 6 ספרות מאפליקציה בטלפון שלכם. אם האפליקציה נמצאת רק במכשיר הזה, תאבדו אותה יחד עם המכשיר.",
+      "status": "machine"
+    },
+    "protect.optional": {
+      "text": "לא חובה",
+      "status": "machine"
+    },
+    "protect.continue_needs": {
+      "text": "בחרו אחת משלוש האפשרויות הראשונות כדי להמשיך.",
+      "status": "machine"
+    },
+    "protect.totp_only.warning": {
+      "text": "אם תאבדו את אפליקציית האימות, לא תוכלו לקבל את החשבון הזה בחזרה. הוסיפו גם אימייל או מפתח גישה.",
+      "status": "machine"
+    },
+    "protect.totp_only.warning_phrase": {
+      "text": "אם תאבדו גם את אפליקציית האימות וגם את ביטוי השחזור, לא תוכלו לקבל את החשבון הזה בחזרה.",
+      "status": "machine"
+    },
+    "protect.totp_only.remove_notice": {
+      "text": "אפליקציית האימות תהיה הדרך האחרת היחידה לוודא שזה אתם. אם תאבדו אותה, לא תוכלו לקבל את החשבון הזה בחזרה.",
+      "status": "machine"
+    },
+    "protect.totp_only.remove_notice_phrase": {
+      "text": "אפליקציית האימות תהיה הדרך האחרת היחידה לוודא שזה אתם. אם תאבדו אותה ואת ביטוי השחזור, לא תוכלו לקבל את החשבון הזה בחזרה.",
+      "status": "machine"
+    },
+    "protect.title_required": {
+      "text": "הוסיפו דרך שנייה לחזור לחשבון",
+      "status": "machine"
+    },
+    "protect.last_factor": {
+      "text": "קודם הוסיפו דרך אחרת לחזור לחשבון. זו הדרך האחרונה שיש לחשבון הזה.",
+      "status": "machine"
+    },
+    "protect.username_email": {
+      "text": "האימייל לשחזור עובר לשם המשתמש החדש שלכם. הקלידו אותו פעם אחת.",
+      "status": "machine"
+    },
+    "protect.password_only.title": {
+      "text": "הצ׳אטים שלכם תלויים בסיסמה",
+      "status": "machine"
+    },
+    "protect.password_only.body": {
+      "text": "אם תשכחו את הסיסמה ותאבדו את המכשירים, הצ׳אטים שלכם לא יחזרו. שמרו ביטוי שחזור או הוסיפו מפתח גישה כדי לשמור עליהם.",
+      "status": "machine"
+    },
+    "protect.password_only.save_phrase": {
+      "text": "שמירת ביטוי שחזור",
+      "status": "machine"
+    },
+    "protect.password_only.add_passkey": {
+      "text": "הוספת מפתח גישה",
+      "status": "machine"
+    },
+    "protect.password_only.passkey_no_seal": {
+      "text": "מפתח הגישה הזה מחבר אתכם, אבל לא שומר על הצ׳אטים שלכם.",
       "status": "machine"
     },
     "recall.phrase.changed": {
@@ -8019,14 +8119,6 @@
     },
     "recovery.email.check.title": {
       "text": "בדקו את האימייל",
-      "status": "machine"
-    },
-    "recovery.email.failed": {
-      "text": "לא הצלחנו להחזיר את החשבון שלכם. נסו שוב או בחרו דרך אחרת.",
-      "status": "machine"
-    },
-    "recovery.email.restoring": {
-      "text": "מחזירים את החשבון שלכם",
       "status": "machine"
     },
     "recovery.email.row.body": {
@@ -8269,16 +8361,8 @@
       "text": "{count, plural, one {נותר ניסיון אחד} two {נותרו שני ניסיונות} other {נותרו # ניסיונות}} לפני השהיה של 15 דקות.",
       "status": "machine"
     },
-    "recovery_email.add_again.body": {
-      "text": "מפתחות החשבון שלכם השתנו. הקלידו שוב את הכתובת כדי שקוד באימייל יוכל להחזיר את החשבון.",
-      "status": "machine"
-    },
-    "recovery_email.add_again.title": {
-      "text": "הוסיפו שוב את האימייל",
-      "status": "machine"
-    },
     "recovery_email.body": {
-      "text": "אם תשכחו את הסיסמה, נשלח קוד לכתובת הזו כדי שתוכלו לחזור לחשבון.",
+      "text": "אם תשכחו את הסיסמה, נשלח קוד לכתובת הזו כדי שתוכלו לבחור סיסמה חדשה.",
       "status": "machine"
     },
     "recovery_email.code.expired": {
@@ -8322,7 +8406,7 @@
       "status": "machine"
     },
     "recovery_email.mailbox_warning": {
-      "text": "כל מי שיכול לקרוא את תיבת הדואר הזו יכול להיכנס לחשבון שלכם. שמרו ביטוי שחזור כדי לשנות זאת.",
+      "text": "כל מי שיכול לקרוא את תיבת הדואר הזו יכול להיכנס לחשבון שלכם.",
       "status": "machine"
     },
     "recovery_email.needs_username": {
@@ -8338,7 +8422,7 @@
       "status": "machine"
     },
     "recovery_email.remove.confirm.body": {
-      "text": "לא תוכלו לחזור לחשבון באמצעות אימייל.",
+      "text": "לא תוכלו לקבל סיסמה חדשה באמצעות אימייל.",
       "status": "machine"
     },
     "recovery_email.remove.confirm.title": {
@@ -8605,10 +8689,6 @@
       "text": "כל מכשיר אחר של החשבון הזה מנותק ומוסר. המכשירים האלה מאבדים את הצ׳אטים ואת אנשי הקשר של החשבון הזה.",
       "status": "machine"
     },
-    "restore_identity.reset.effect_messages": {
-      "text": "צ'אטים, קבוצות וערוצים חוזרים מהמכשירים של אנשי הקשר שלך, עם ההודעות שעדיין יש להם, מהחדשות ביותר.",
-      "status": "machine"
-    },
     "restore_identity.reset.effect_passkeys": {
       "text": "כל מפתח גישה של החשבון הזה נמחק. אפשר להוסיף מפתחות גישה שוב אחר כך.",
       "status": "machine"
@@ -8647,6 +8727,18 @@
     },
     "restore_identity.reset.what_it_does": {
       "text": "מה הפעולה עושה:",
+      "status": "machine"
+    },
+    "restore_identity.reset.sealed": {
+      "text": "הצ׳אטים, הקבוצות והערוצים שלכם יחזרו מהמכשירים של אנשי הקשר שלכם, עם ההודעות שעדיין יש להם, מהחדשות ביותר.",
+      "status": "machine"
+    },
+    "restore_identity.reset.unsealed": {
+      "text": "האיפוס הזה מתחיל את החשבון שלכם מחדש. הצ׳אטים, הקבוצות והערוצים שבבעלותכם לא יחזרו. שם המשתמש נשאר שלכם, ותוכלו לשלוח לאנשי הקשר בקשות חדשות.",
+      "status": "machine"
+    },
+    "restore_identity.reset.unsealed_use_passkey": {
+      "text": "השתמשו במפתח גישה ששומר על הצ׳אטים שלכם כדי להחזיר אותם.",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -9337,6 +9429,10 @@
       "text": "המכשיר הזה לא יכול לנהל מפתחות גישה.",
       "status": "machine"
     },
+    "settings.passkeys.no_seal": {
+      "text": "לא שומר על הצ׳אטים שלכם.",
+      "status": "machine"
+    },
     "settings.password.change": {
       "text": "שינוי סיסמה",
       "status": "machine"
@@ -9446,7 +9542,7 @@
       "status": "machine"
     },
     "settings.recovery.totp.done": {
-      "text": "אפליקציית האימות הוגדרה. קוד מהאפליקציה יוכל עכשיו להחזיר אתכם לחשבון.",
+      "text": "אפליקציית האימות הוגדרה. קוד מהאפליקציה מאשר עכשיו שזה אתם.",
       "status": "machine"
     },
     "settings.recovery.totp.error.generic": {
@@ -9479,6 +9575,14 @@
     },
     "settings.recovery.totp.unavailable": {
       "text": "הגדרת אפליקציית אימות לא זמינה כרגע.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.open_app": {
+      "text": "פתיחה באפליקציית האימות",
+      "status": "machine"
+    },
+    "settings.recovery.totp.on": {
+      "text": "פועלת",
       "status": "machine"
     },
     "settings.recovery.words.not_on_this_device": {

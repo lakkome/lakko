@@ -30,13 +30,20 @@ class AccountNoticesTest {
     fun `every wire kind is known and round-trips`() {
         assertEquals(
             setOf(
-                "password-changed-by-email", "account-opened-by-email", "recovery-email-added",
-                "recovery-email-replaced", "recovery-email-removed", "recovery-phrase-saved",
+                // Four the server sends; the phrase notice is derived on the
+                // device from the account's published protection and has a
+                // name the server never sends.
+                "password-changed-by-email", "recovery-email-added",
+                "recovery-email-replaced", "recovery-email-removed", AccountNoticeKind.PhraseSaved.wire,
             ),
             AccountNoticeKind.entries.map { it.wire }.toSet(),
         )
         for (kind in AccountNoticeKind.entries) assertEquals(kind, AccountNoticeKind.ofWire(kind.wire))
         assertNull(AccountNoticeKind.ofWire("something-new"))
+        // Retired with the email vault (2026-11-26): no longer a kind.
+        assertNull(AccountNoticeKind.ofWire("account-opened-by-email"))
+        assertNull(AccountNoticeKind.ofWire("recovery-phrase-saved"))
+        assertTrue(AccountNoticeKind.PhraseSaved.wire.startsWith("local:"))
     }
 
     @Test
@@ -159,9 +166,8 @@ class AccountNoticesTest {
     }
 
     @Test
-    fun `two kinds have a title and a dated body, the rest one line`() {
+    fun `the password notice has a title and a dated body, the rest one line`() {
         assertEquals(AccountNoticeShape.Alarm, accountNoticeShape(AccountNoticeKind.PasswordChangedByEmail))
-        assertEquals(AccountNoticeShape.Alarm, accountNoticeShape(AccountNoticeKind.AccountOpenedByEmail))
         for (kind in listOf(
             AccountNoticeKind.EmailAdded, AccountNoticeKind.EmailReplaced,
             AccountNoticeKind.EmailRemoved, AccountNoticeKind.PhraseSaved,
@@ -171,7 +177,6 @@ class AccountNoticesTest {
         }
         assertEquals("notice.password_by_email.title", accountNoticeTitleKey(AccountNoticeKind.PasswordChangedByEmail))
         assertEquals("notice.password_by_email.body", accountNoticeBodyKey(AccountNoticeKind.PasswordChangedByEmail))
-        assertEquals("notice.opened_by_email.body", accountNoticeBodyKey(AccountNoticeKind.AccountOpenedByEmail))
         assertEquals("notice.phrase_saved", accountNoticeTitleKey(AccountNoticeKind.PhraseSaved))
     }
 
@@ -184,18 +189,44 @@ class AccountNoticesTest {
 
     @Test
     fun `the secure screen offers save a phrase only while none is saved`() {
-        val mail = RecoveryEmailStatus(available = true, enabled = true, vault = true, phraseSaved = false)
-        assertEquals(SecureAccountRows(newPassword = true, removeEmail = true, savePhrase = true), secureAccountRows(mail))
+        val mail = RecoveryEmailStatus(available = true, enabled = true)
+        assertEquals(
+            SecureAccountRows(newPassword = true, removeEmail = true, savePhrase = true),
+            secureAccountRows(mail, phraseSaved = false),
+        )
         assertEquals(
             SecureAccountRows(newPassword = true, removeEmail = true, savePhrase = false),
-            secureAccountRows(mail.copy(vault = false, phraseSaved = true)),
+            secureAccountRows(mail, phraseSaved = true),
         )
         assertEquals(
             SecureAccountRows(newPassword = true, removeEmail = false, savePhrase = true),
-            secureAccountRows(mail.copy(enabled = false, vault = false)),
+            secureAccountRows(mail.copy(enabled = false), phraseSaved = false),
         )
         // Not read yet: the password row alone is certain.
-        assertEquals(SecureAccountRows(newPassword = true, removeEmail = false, savePhrase = true), secureAccountRows(null))
+        assertEquals(
+            SecureAccountRows(newPassword = true, removeEmail = false, savePhrase = true),
+            secureAccountRows(null, phraseSaved = false),
+        )
+    }
+
+    @Test
+    fun `a phrase saved on another device is told once, from the account's published protection`() {
+        fun view(phrase: Boolean) = SealAnnouncementView(
+            keyGeneration = 1,
+            seq = 1,
+            entries = buildList {
+                add(SealEntryView(SealKindName.PASSWORD, SEAL_TAG_NONE_HEX, "pw"))
+                if (phrase) add(SealEntryView(SealKindName.PHRASE, SEAL_TAG_NONE_HEX, "ph"))
+            },
+        )
+        assertTrue(phraseSavedElsewhere(before = view(false), now = view(true), savedHere = false))
+        // This device saved it: its own action is not told back to it.
+        assertFalse(phraseSavedElsewhere(before = view(false), now = view(true), savedHere = true))
+        // Already known, or still not saved.
+        assertFalse(phraseSavedElsewhere(before = view(true), now = view(true), savedHere = false))
+        assertFalse(phraseSavedElsewhere(before = view(false), now = view(false), savedHere = false))
+        // A first read has nothing to compare with.
+        assertFalse(phraseSavedElsewhere(before = null, now = view(true), savedHere = false))
     }
 
     @Test

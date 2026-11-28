@@ -372,6 +372,19 @@ private const val WITNESS_COSIG_LEN: Int = 105
  *   * pinned key set + a quorum of ≥ [threshold] distinct valid co-sigs →
  *     pass. Foreign / garbage / replayed co-sigs never inflate the tally.
  */
+/**
+ * Whether [root] passes the K-of-N witness gate (ADR-0039): `true` with no
+ * witness pinned (the operator-only posture), else only with a quorum of
+ * valid co-signatures over it. For a caller that reads a root of its own
+ * (the seal announcement's log check, ADR-0101 section 10).
+ */
+public fun rootPassesWitnessGate(
+    root: SignedRoot,
+    witnessKeys: List<ByteArray>,
+    threshold: Int,
+    witnessGate: WitnessGate = NativeWitnessGate,
+): Boolean = !witnessGateRefuses(root, witnessKeys, threshold, witnessGate)
+
 private fun witnessGateRefuses(
     root: SignedRoot,
     witnessKeys: List<ByteArray>,

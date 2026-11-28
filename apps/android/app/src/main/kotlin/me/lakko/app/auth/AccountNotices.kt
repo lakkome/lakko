@@ -13,11 +13,19 @@ import android.content.Context
  */
 public enum class AccountNoticeKind(public val wire: String) {
     PasswordChangedByEmail("password-changed-by-email"),
-    AccountOpenedByEmail("account-opened-by-email"),
     EmailAdded("recovery-email-added"),
     EmailReplaced("recovery-email-replaced"),
     EmailRemoved("recovery-email-removed"),
-    PhraseSaved("recovery-phrase-saved"),
+
+    /**
+     * "A recovery phrase was saved for your account." Since 2026-11-26 the
+     * server sends no such notice (ADR-0075, amended: kind 6 retired, and
+     * kind 2 "account opened by email" with the email vault): a device
+     * learns it from the account's published protection, when its own seal
+     * announcement gains a phrase seal this device did not add
+     * ([phraseSavedElsewhere]). The wire name is one the server never sends.
+     */
+    PhraseSaved("local:recovery-phrase-saved"),
     ;
 
     public companion object {
@@ -42,14 +50,13 @@ public enum class AccountNoticeShape {
 }
 
 public fun accountNoticeShape(kind: AccountNoticeKind): AccountNoticeShape = when (kind) {
-    AccountNoticeKind.PasswordChangedByEmail, AccountNoticeKind.AccountOpenedByEmail -> AccountNoticeShape.Alarm
+    AccountNoticeKind.PasswordChangedByEmail -> AccountNoticeShape.Alarm
     else -> AccountNoticeShape.Line
 }
 
 /** The catalog key of a notice's title (an alarm) or its one line. */
 public fun accountNoticeTitleKey(kind: AccountNoticeKind): String = when (kind) {
     AccountNoticeKind.PasswordChangedByEmail -> "notice.password_by_email.title"
-    AccountNoticeKind.AccountOpenedByEmail -> "notice.opened_by_email.title"
     AccountNoticeKind.EmailAdded -> "notice.email_added"
     AccountNoticeKind.EmailReplaced -> "notice.email_replaced"
     AccountNoticeKind.EmailRemoved -> "notice.email_removed"
@@ -59,7 +66,6 @@ public fun accountNoticeTitleKey(kind: AccountNoticeKind): String = when (kind) 
 /** The catalog key of an alarm's body (it takes `{date}`), or `null`. */
 public fun accountNoticeBodyKey(kind: AccountNoticeKind): String? = when (kind) {
     AccountNoticeKind.PasswordChangedByEmail -> "notice.password_by_email.body"
-    AccountNoticeKind.AccountOpenedByEmail -> "notice.opened_by_email.body"
     else -> null
 }
 
@@ -83,14 +89,29 @@ public data class SecureAccountRows(
 /**
  * The `It was not me` screen (section 19.6): the new password always, `Remove
  * recovery email` while the account has one, and `Save a recovery phrase`
- * only while none is saved (it gives the account new keys, so whoever opened
- * it loses it).
+ * only while none is saved. Since the email vault was removed whoever came
+ * in by email got no keys, so saving a phrase changes no key.
  */
-public fun secureAccountRows(status: RecoveryEmailStatus?): SecureAccountRows = SecureAccountRows(
-    newPassword = true,
-    removeEmail = status?.enabled == true,
-    savePhrase = status?.phraseSaved != true,
-)
+public fun secureAccountRows(status: RecoveryEmailStatus?, phraseSaved: Boolean): SecureAccountRows =
+    SecureAccountRows(
+        newPassword = true,
+        removeEmail = status?.enabled == true,
+        savePhrase = !phraseSaved,
+    )
+
+/**
+ * Whether "A recovery phrase was saved for your account." is shown on this
+ * device (UX 19.5): its account's announcement lists a phrase seal now, the
+ * one this device read before did not, and this device is not the one that
+ * saved it. A first read ([before] `null`) shows nothing: there is nothing
+ * to compare with.
+ */
+public fun phraseSavedElsewhere(
+    before: SealAnnouncementView?,
+    now: SealAnnouncementView,
+    savedHere: Boolean,
+): Boolean = before != null && before.keyGeneration == now.keyGeneration &&
+    before.phrase == null && now.phrase != null && !savedHere
 
 /** How close to this device's own action a notice of the same kind must be
  *  to count as that action: ten minutes, one notice per marker. */

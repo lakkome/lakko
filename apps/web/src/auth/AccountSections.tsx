@@ -8,6 +8,7 @@
  */
 import { revokeAllMintedLinks } from "../contacts/own-links";
 import { deleteOwnedChannelVaults } from "../channels/channel-vault-head";
+import { deleteOwnedChannelsVaults } from "../channels/owned";
 import { base64Encode } from "./account-id";
 import { createSignal, Show, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
@@ -374,6 +375,12 @@ export function DeleteAccountDialog(props: {
       // ADR-0064 section 1: the saved copies of the channels this account
       // owns, while the account still exists. Bounded; never throws.
       await deleteOwnedChannelVaults();
+      // ADR-0101 section 7 item 9: the list of the channels the account owns
+      // and every lock of it, signed, before the account goes. Bounded;
+      // never throws. A device that holds no keys has nothing to sign with:
+      // the vaults then stay on the storage service, unnamed and unopenable.
+      const lineage = chats.conversationAccountIdentity();
+      if (lineage !== null) await deleteOwnedChannelsVaults({ lineageIdentity: lineage });
       // The push tokens the cleanups will spend are bought first (auth issues
       // none once the account is gone). Then auth: it can refuse (the recall window), and then nothing else
       // is removed. After it, what only this device can remove from the

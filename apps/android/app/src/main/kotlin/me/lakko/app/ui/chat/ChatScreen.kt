@@ -350,6 +350,13 @@ public fun ChatScreen(
     val peerDeleted = remember(state.groupIdHex, nameVersion, otherMembers) {
         viewModel.oneToOnePeerDeleted()
     }
+    // ADR-0101 section 11 / UX 16.11 — the other person started over with a
+    // new account (an unsealed reset): one closed line replaces the composer
+    // and the call buttons go. The only place a contact's reset shows.
+    val startedOverKeys by contactsRepository.startedOverKeys.collectAsStateWithLifecycle()
+    val peerStartedOver = remember(state.groupIdHex, nameVersion, otherMembers, startedOverKeys) {
+        viewModel.oneToOnePeerStartedOver(startedOverKeys)
+    }
     LaunchedEffect(state.groupIdHex, otherMembers) { viewModel.noteOneToOnePeerOnScreen() }
     // docs/ux/conversation-info.md section 1 — WHICH info this conversation's
     // header opens, decided by what the conversation is. The rule is in
@@ -965,6 +972,7 @@ public fun ChatScreen(
                 membershipEnded = membershipEnded,
                 callControls = callControls,
                 peerDeleted = peerDeleted,
+                peerStartedOver = peerStartedOver != null,
             ) || suspendedReadOnly,
             onNavigateBack = onNavigateBack,
             // A live group call on this chat is JOINED rather than
@@ -1213,6 +1221,9 @@ public fun ChatScreen(
                     LocalBubbleReactions provides reactionContext,
                     LocalContentBubble provides contentBubbleContext,
                     LocalReplyWithdrawn provides peerDeleted,
+                    // UX 16.11 — a one-to-one closed because its person
+                    // started over offers no Retry: nothing is sent there.
+                    LocalSendRetryAllowed provides (peerStartedOver == null),
                     LocalQuotedAuthorDeleted provides { target -> nameVersion.let { viewModel.messageAuthorDeleted(target) } },
                 ) {
                 LazyColumn(
@@ -1258,7 +1269,7 @@ public fun ChatScreen(
                             ) {
                                 PendingMediaBubble(
                                     row = pendingRow,
-                                    onRetry = { viewModel.onRetrySend(pendingMediaMsg.localId) },
+                                    onRetry = { if (peerStartedOver == null) viewModel.onRetrySend(pendingMediaMsg.localId) },
                                     onDiscard = { viewModel.deleteUnsent(pendingMediaMsg.localId) },
                                 )
                             }
@@ -1603,7 +1614,9 @@ public fun ChatScreen(
                             }
                         },
                     )
-                } else when (val slot = me.lakko.app.chat.composerState(membership, state.draft, peerDeleted)) {
+                } else when (
+                    val slot = me.lakko.app.chat.composerState(membership, state.draft, peerDeleted, peerStartedOver)
+                ) {
             me.lakko.app.chat.ComposerSlot.Composer -> Composer(
                 recorder = recorder,
                 emojiInsert = pendingEmojiInsert,
@@ -2297,6 +2310,10 @@ internal fun DateSeparatorPill(label: String) {
  */
 internal val LocalOpenCallLink = androidx.compose.runtime.staticCompositionLocalOf<((String) -> Unit)?> { null }
 
+/** UX 16.11 — whether an unsent row of this conversation offers Retry
+ *  (`false` in a one-to-one closed because its person started over). */
+internal val LocalSendRetryAllowed = androidx.compose.runtime.staticCompositionLocalOf { true }
+
 /**
  * A call invitation in a conversation (`docs/ux/call-links.md` section 3): a
  * phone glyph, `Call invitation`, and `Join`, in the bubble's own colours.
@@ -2702,7 +2719,7 @@ internal fun Bubble(
                             onSave = onSave,
                             onPreview = onPreview,
                             openMenu = openMenu,
-                            onRetry = if (msg.ack == Ack.FAILED || msg.ack == Ack.WAITING) {
+                            onRetry = if ((msg.ack == Ack.FAILED || msg.ack == Ack.WAITING) && LocalSendRetryAllowed.current) {
                                 { onRetrySend(msg.localId) }
                             } else {
                                 null
@@ -2882,7 +2899,7 @@ internal fun Bubble(
                                                     readState = if (isOwn) readState else OwnReadState.None,
                                                     contentColor = contentColor,
                                                     fillWidth = false,
-                                                    onRetry = if (msg.ack == Ack.FAILED || msg.ack == Ack.WAITING) {
+                                                    onRetry = if ((msg.ack == Ack.FAILED || msg.ack == Ack.WAITING) && LocalSendRetryAllowed.current) {
                                                         { onRetrySend(msg.localId) }
                                                     } else {
                                                         null
@@ -2907,7 +2924,7 @@ internal fun Bubble(
                                                     readState = if (isOwn) readState else OwnReadState.None,
                                                     contentColor = Color.White,
                                                     fillWidth = false,
-                                                    onRetry = if (msg.ack == Ack.FAILED || msg.ack == Ack.WAITING) {
+                                                    onRetry = if ((msg.ack == Ack.FAILED || msg.ack == Ack.WAITING) && LocalSendRetryAllowed.current) {
                                                         { onRetrySend(msg.localId) }
                                                     } else {
                                                         null
@@ -2943,7 +2960,7 @@ internal fun Bubble(
                             time = time,
                             readState = if (isOwn) readState else OwnReadState.None,
                             contentColor = contentColor,
-                            onRetry = if (msg.ack == Ack.FAILED || msg.ack == Ack.WAITING) {
+                            onRetry = if ((msg.ack == Ack.FAILED || msg.ack == Ack.WAITING) && LocalSendRetryAllowed.current) {
                                 { onRetrySend(msg.localId) }
                             } else {
                                 null

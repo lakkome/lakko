@@ -90,7 +90,7 @@ class IdentityProofSentTest {
     fun `the reset, rotate and recall finish bodies carry the proof`() {
         val reset = json.encodeToString(
             KeyResetFinishRequest(
-                fresh_grant = "g",
+                reset_grant = "g",
                 recovery_upload = "u",
                 new_signature_pubkey_b64 = "k",
                 identity_proof_b64 = proofB64,

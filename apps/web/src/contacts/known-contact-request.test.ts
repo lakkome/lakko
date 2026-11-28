@@ -29,6 +29,33 @@ describe("knownContactRequestVerdict", () => {
   it("a refused change is dropped: nothing shown, nothing sent", () => {
     expect(knownContactRequestVerdict({ ...base, check: "refused", trustedKeyB64: "old" })).toBe("drop");
   });
+  it("UX 16.11: a request from the new account of a contact who started over is LISTED", () => {
+    // The pin still names the old key; the comparison is against the key the
+    // new account publishes. Holding a one-to-one changes nothing: the
+    // silent answer of 16.6 never applies.
+    for (const holdsOneToOne of [true, false, undefined]) {
+      expect(
+        knownContactRequestVerdict({
+          ...base,
+          check: "started-over",
+          trustedKeyB64: "old",
+          startedOverKeyB64: "new",
+          ...(holdsOneToOne === undefined ? {} : { holdsOneToOne }),
+          predatesContact: true,
+          siblingMayAdmit: true,
+        }),
+      ).toBe("show");
+    }
+  });
+  it("UX 16.11: a request from any OTHER key of a started-over account is dropped", () => {
+    expect(
+      knownContactRequestVerdict({ ...base, check: "started-over", trustedKeyB64: "old", startedOverKeyB64: "third" }),
+    ).toBe("drop");
+    expect(
+      knownContactRequestVerdict({ ...base, check: "started-over", trustedKeyB64: "old", startedOverKeyB64: null }),
+    ).toBe("drop");
+    expect(knownContactRequestVerdict({ ...base, check: "started-over", trustedKeyB64: "new" })).toBe("drop");
+  });
   it("no verdict yet: it waits, unshown", () => {
     expect(knownContactRequestVerdict({ ...base, check: "inconclusive", trustedKeyB64: "old" })).toBe("wait");
   });

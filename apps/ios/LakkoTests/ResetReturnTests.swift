@@ -154,21 +154,19 @@ final class ResetReturnTests: XCTestCase {
     // MARK: - Channel returns (channel-return.test.ts)
 
     func testAnUnverifiedReturnIsShownNeverActedOnSilently() {
-        for role in [ChannelReturnRoleName.subscriber, .publisher, .owner] {
+        for role in [ChannelReturnRoleName.subscriber, .publisher] {
             XCTAssertEqual(ChannelReturnRules.action(
-                verified: false, role: role, hasInvitation: true, alreadyInRole: false, ownsAlready: false),
+                verified: false, role: role, hasInvitation: true, alreadyInRole: false),
                 .showInvitation)
             XCTAssertEqual(ChannelReturnRules.action(
-                verified: false, role: role, hasInvitation: false, alreadyInRole: false, ownsAlready: false),
+                verified: false, role: role, hasInvitation: false, alreadyInRole: false),
                 .drop)
         }
     }
 
     func testTheVerifiedActions() {
-        func act(_ role: ChannelReturnRoleName, inv: Bool = true, inRole: Bool = false, owns: Bool = false)
-            -> ChannelReturnAction {
-            ChannelReturnRules.action(
-                verified: true, role: role, hasInvitation: inv, alreadyInRole: inRole, ownsAlready: owns)
+        func act(_ role: ChannelReturnRoleName, inv: Bool = true, inRole: Bool = false) -> ChannelReturnAction {
+            ChannelReturnRules.action(verified: true, role: role, hasInvitation: inv, alreadyInRole: inRole)
         }
         XCTAssertEqual(act(.subscriber), .subscribe)
         XCTAssertEqual(act(.subscriber, inRole: true), .addSeeds)
@@ -176,8 +174,15 @@ final class ResetReturnTests: XCTestCase {
         XCTAssertEqual(act(.publisher), .acceptPublisher)
         XCTAssertEqual(act(.publisher, inRole: true), .addSeeds)
         XCTAssertEqual(act(.publisher, inv: false), .addSeeds)
-        XCTAssertEqual(act(.owner), .recoverOwner)
-        XCTAssertEqual(act(.owner, owns: true), .addSeeds)
+    }
+
+    /// ADR-0101 section 7 (amended 2026-11-26): nobody returns a channel to
+    /// its OWNER. An owner comes back by itself, from its own list; there is
+    /// no owner role on the wire to send or to receive.
+    func testThereIsNoOwnerReturn() {
+        XCTAssertNil(ChannelReturnRoleName(rawValue: "owner"))
+        XCTAssertNotNil(ChannelReturnRoleName(rawValue: "subscriber"))
+        XCTAssertNotNil(ChannelReturnRoleName(rawValue: "publisher"))
     }
 
     private let card = { (k: String) in ReturnCard(identityPkB64: k, subscriberPkB64: "s" + k) }
@@ -191,24 +196,23 @@ final class ResetReturnTests: XCTestCase {
         XCTAssertEqual(out.map { [$0.role.rawValue, $0.accountIdB64] }, [["subscriber", "acctS"], ["publisher", "acctP"]])
     }
 
-    func testACoPublisherSendsSubscriberReturnsAndAnOwnerReturn() {
+    /// A co-publisher sends subscriber returns only: a publisher's new
+    /// devices are admitted by an owner device, and the owner's card gets
+    /// nothing at all.
+    func testACoPublisherSendsSubscriberReturnsAndNothingToTheOwner() {
         let ch = ReturnChannel(
             idHex: "c1", ownRole: .publisher, cards: [card("O"), card("S"), card("P")],
             ownerKeyB64: "O", publisherKeysB64: ["P", "ME"])
         let out = ChannelReturnRules.returnsFor(
             channels: [ch], superseded: ["O": "acctO", "S": "acctS", "P": "acctP"], ownKeysB64: ["ME"])
-        XCTAssertEqual(out.map { [$0.role.rawValue, $0.accountIdB64] }, [["owner", "acctO"], ["subscriber", "acctS"]])
+        XCTAssertEqual(out.map { [$0.role.rawValue, $0.accountIdB64] }, [["subscriber", "acctS"]])
     }
 
-    func testASubscriberSendsOnlyAnOwnerReturnAndOnlyWithTheOwnersCard() {
+    func testASubscriberSendsNothing() {
         let with = ReturnChannel(
             idHex: "c1", ownRole: .subscriber, cards: [card("O"), card("S")], ownerKeyB64: "O", publisherKeysB64: [])
-        XCTAssertEqual(ChannelReturnRules.returnsFor(
-            channels: [with], superseded: ["O": "acctO", "S": "acctS"], ownKeysB64: []).map(\.role), [.owner])
-        let without = ReturnChannel(
-            idHex: "c1", ownRole: .subscriber, cards: [card("S")], ownerKeyB64: "O", publisherKeysB64: [])
         XCTAssertTrue(ChannelReturnRules.returnsFor(
-            channels: [without], superseded: ["O": "acctO"], ownKeysB64: []).isEmpty)
+            channels: [with], superseded: ["O": "acctO", "S": "acctS"], ownKeysB64: []).isEmpty)
     }
 
     func testNothingForThisAccountsOwnKeysAndOncePerGeneration() {
@@ -575,30 +579,16 @@ final class ResetReturnTests: XCTestCase {
         XCTAssertTrue(store.read(accountIdB64: account).isEmpty)
     }
 
-    /// D1 — a subscriber is told no owner: the owner return goes to the
-    /// key that signed its invitation; a publishing device never uses it.
-    func testTheOwnerReturnTargetOfASubscriberIsItsInviter() {
-        let inviter = Data(repeating: 0x51, count: 32)
+    /// The owner's key of a channel is known only where a co-publisher's
+    /// register carries it; the inviter-key guess of 2026-11-26 is gone
+    /// with the owner return it fed.
+    func testTheOwnerKeyIsTheRegistersOrUnknown() {
         let owner = Data(repeating: 0x52, count: 32)
         var extras = ChannelExtras()
-        XCTAssertNil(ChannelReturnRules.ownerKeyB64(extras: extras, ownRole: .subscriber))
-        extras.inviterAccountKey = inviter
-        XCTAssertEqual(ChannelReturnRules.ownerKeyB64(extras: extras, ownRole: .subscriber), base64Encode(inviter))
-        XCTAssertNil(ChannelReturnRules.ownerKeyB64(extras: extras, ownRole: .publisher))
+        XCTAssertNil(ChannelReturnRules.ownerKeyB64(extras: extras))
         extras.ownerAccountKey = owner
-        XCTAssertEqual(ChannelReturnRules.ownerKeyB64(extras: extras, ownRole: .subscriber), base64Encode(owner))
-        XCTAssertEqual(ChannelReturnRules.ownerKeyB64(extras: extras, ownRole: .publisher), base64Encode(owner))
-        // A subscriber channel with the inviter as owner plans an owner
-        // return when that key reset and its card is listed.
-        let card = ReturnCard(identityPkB64: base64Encode(inviter), subscriberPkB64: "c3Vi")
-        let planned = ChannelReturnRules.returnsFor(
-            channels: [ReturnChannel(
-                idHex: "ab", ownRole: .subscriber, cards: [card],
-                ownerKeyB64: ChannelReturnRules.ownerKeyB64(
-                    extras: { var e = ChannelExtras(); e.inviterAccountKey = inviter; return e }(),
-                    ownRole: .subscriber),
-                publisherKeysB64: [])],
-            superseded: [base64Encode(inviter): "acct-anya"], ownKeysB64: [])
-        XCTAssertEqual(planned.map(\.role), [.owner])
+        XCTAssertEqual(ChannelReturnRules.ownerKeyB64(extras: extras), base64Encode(owner))
+        extras.ownerAccountKey = Data(repeating: 1, count: 5)
+        XCTAssertNil(ChannelReturnRules.ownerKeyB64(extras: extras), "a key of the wrong length is no key")
     }
 }

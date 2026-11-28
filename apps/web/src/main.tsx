@@ -26,6 +26,7 @@ import { bootstrapL10n, LANGUAGE_STORAGE_KEY } from "./l10n";
 import { publishNotificationStrings } from "./l10n/notification-strings";
 import { installOriginHistory } from "./routes/origin-history";
 import { installKeyboardViewport } from "./ui/keyboard-viewport";
+import { installInputModality } from "./ui/input-modality";
 import { browserActiveTabDeps, claimActiveTab, type ActiveTabClaim } from "./tab/active-tab";
 import { freezeTab } from "./tab/tab-state";
 import { runBeforeYield } from "./tab/before-yield";
@@ -75,6 +76,7 @@ bootstrapVideoSurfaces(document.documentElement, navigator);
 // renders. `routes/origin-history.ts`.
 installOriginHistory();
 installKeyboardViewport();
+installInputModality();
 
 // ADR-0061: resolve the interface language (stored choice, else the system
 // list, else English) and load its catalog. Until the core has loaded every

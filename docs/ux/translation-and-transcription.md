@@ -60,7 +60,6 @@ read (after Copy). It is offered when all of these hold:
 
 - the message has text (a caption counts; a voice message's transcript counts
   once it exists);
-- the message is not the person's own;
 - this device can translate from the message's language into the person's
   language (section 7).
 
@@ -95,10 +94,16 @@ Simplified from Traditional.
 Choosing it replaces the text in the bubble with the translation (3.2). On a
 message already showing a translation the row reads `Show original`.
 
-The language is also named up front: an incoming message whose detected
+Own messages are translated like received ones (maintainer, 2026-11-27): the
+row, the line and automatic translation (3.7) apply to them by the same rule,
+so a message the person wrote in a language they read stays clean, and one
+they wrote in another language (to someone who reads it) can be translated
+back. Until then own messages had none of the three.
+
+The language is also named up front: a message whose detected
 language is not one of the person's reading languages shows the quiet line
 `Spanish · Translate` under its text before anything is translated (3.2). The
-same rule as the row decides it (not own, has text, the setting on, not a
+same rule as the row decides it (has text, the setting on, not a
 reading language, and an unsure guess that is a reading language gets no line
 either, so a short "ok" stays clean). The language named is always the one
 `Translate` would start from, decided once for both by the order above, so
@@ -272,13 +277,16 @@ the top of the conversation:
   for that language. A different language may bring it back.
 
 "Most of the recent" is decided by one shared rule (ADR, data section). The bar
-is never shown for a language in the person's reading list (section 6).
+is never shown for a language in the person's reading list (section 6). Own
+messages do not count toward it: the bar is about the language the others
+write in.
 
 ### 3.7 Automatic translation in a conversation
 
 A per-conversation switch, `Translate automatically`, in the conversation's
 info screen ([`conversation-info.md`](conversation-info.md)) and turned on by
-the bar. While on, every incoming message in another language is translated as
+the bar. While on, every message in another language, own ones included
+(amended 2026-11-27), is translated as
 it is shown, each with its quiet line, each with `Show original`. Messages that
 are in a reading language are left alone. Turning it off shows every message in
 its original again.
@@ -355,8 +363,6 @@ languages this device can transcribe.
   translation, and nothing runs in the background to produce one.
 - Names, `@username`, group and channel names, links, the safety number, the
   recovery phrase.
-- Messages a person wrote themselves (translation; transcription of own voice
-  messages is allowed, 4.1).
 - Calls. Live captions are out of scope (section 10).
 
 ## 6. Settings > Language > Translation and transcription

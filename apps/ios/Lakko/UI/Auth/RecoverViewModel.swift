@@ -678,9 +678,6 @@ extension EmailRecoverModel.Ports {
             start: { _, _ in throw Unwired() },
             verify: { _, _ in throw Unwired() },
             totp: { _, _ in throw Unwired() },
-            open: { _ in throw Unwired() },
-            unseal: { _, _, _, _ in throw Unwired() },
-            restoreWithPhrase: { _, _, _ in throw Unwired() },
             changePassword: { _, _, _ in throw Unwired() },
             noteOwnAction: { _ in }
         )
@@ -706,17 +703,6 @@ extension EmailRecoverModel.Ports {
             },
             totp: { ticket, code in
                 try await AuthClient().recoveryEmailRecoverTotp(ticket: ticket, code: code)
-            },
-            open: { ticket in try await AuthClient().recoveryEmailRecoverOpen(ticket: ticket) },
-            unseal: { handle, address, salt, sealed in
-                try await EmailVaultWork.open(handle: handle, address: address, vaultSalt: salt, sealed: sealed)
-            },
-            restoreWithPhrase: { [weak repository] phrase, newPassword, username in
-                guard let repository else { throw SessionNotReady() }
-                // Opened from the email vault: never typed, never shown.
-                try await repository.recover(
-                    mnemonicPhrase: phrase, newPassword: newPassword, username: username,
-                    phraseHeldByPerson: false)
             },
             changePassword: { [weak repository] username, ticket, newPassword in
                 guard let repository else { throw SessionNotReady() }

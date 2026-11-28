@@ -123,15 +123,14 @@ internal object SourceRules {
     /**
      * The input of the shared offer rule for the language line (UX 3.2): the
      * menu row's facts with the engine set to "can translate", so the rule
-     * answers only whether the language is one to name (not own, has text,
+     * answers only whether the language is one to name (has text,
      * setting on, not a reading language, an unsure guess included). The
      * engine's answer decides the button in [languageLine].
      */
-    fun languageLineInput(enabled: Boolean, text: String, isOwn: Boolean, detected: DetectedLanguage): TranslateOfferInput =
+    fun languageLineInput(enabled: Boolean, text: String, detected: DetectedLanguage): TranslateOfferInput =
         TranslateOfferInput(
             enabled = enabled,
             hasText = text.isNotBlank(),
-            isOwn = isOwn,
             detected = detected,
             engineForDetected = TranslationEngineState.READY,
             anyEngine = true,
@@ -184,7 +183,6 @@ internal object SourceRules {
     fun offerInput(
         enabled: Boolean,
         text: String,
-        isOwn: Boolean,
         known: DetectedLanguage?,
         engineForKnown: TranslationEngineState?,
         anyEngine: Boolean,
@@ -192,7 +190,6 @@ internal object SourceRules {
         TranslateOfferInput(
             enabled = enabled,
             hasText = text.isNotBlank(),
-            isOwn = isOwn,
             detected = known,
             engineForDetected = engineForKnown ?: TranslationEngineState.UNAVAILABLE,
             anyEngine = anyEngine,

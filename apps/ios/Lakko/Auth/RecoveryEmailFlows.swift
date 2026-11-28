@@ -33,9 +33,8 @@ public enum RecoveryEmailLine: Equatable {
     case sendFailed
     /// "Email codes are not available right now."
     case unavailable
-    /// `recovery.email.failed`: the keys could not be opened with the
-    /// username and address typed.
-    case vaultNotOpened
+    /// `protect.last_factor`: the email is the account's last second way in.
+    case lastFactor
     /// "Choose a username first."
     case needsUsername
     case offline
@@ -51,7 +50,7 @@ public enum RecoveryEmailLine: Equatable {
         case .limited(let secs): return (secs ?? 0) > 0 ? nil : "common.error.too_many_attempts"
         case .sendFailed: return "recovery_email.send_failed"
         case .unavailable: return "recovery_email.unavailable"
-        case .vaultNotOpened: return "recovery.email.failed"
+        case .lastFactor: return LastFactor.messageKey
         case .needsUsername: return "recovery_email.needs_username"
         case .offline: return "common.error.offline"
         case .failed: return "common.error.unavailable"
@@ -110,6 +109,7 @@ public enum EmailEnrol {
         case .mailSendFailed: next.line = .sendFailed
         case .unavailable: next.line = .unavailable
         case .usernameRequired, .handleMismatch: next.line = .needsUsername
+        case .lastFactor: next.line = .lastFactor
         case .offline: next.line = .offline
         default: next.line = .failed
         }
@@ -177,10 +177,11 @@ public enum EmailEnrol {
 /// Getting back in with a mailed code (UX 19.3), pure.
 ///
 /// The order is fixed: start, the code, the authenticator code (when the
-/// account has one), the NEW PASSWORD, and only then `recover/open`, which
-/// says what the code brings (the keys, or the password alone). Nothing
-/// before the password step asks, so nothing before it can tell which kind
-/// of account this is.
+/// account has one), then the NEW PASSWORD. A mailed code gives a new
+/// password and nothing else (ADR-0075, amended 2026-11-26: the email vault
+/// is gone, so there is no `recover/open` and no account kind to tell
+/// apart); on a device without the keys the session then lands on "Restore
+/// your keys".
 public enum EmailRecover {
 
     public enum Step: Equatable {
@@ -192,24 +193,16 @@ public enum EmailRecover {
         case totp
         /// Step 4: "Choose a new password".
         case newPassword
-        /// "Bringing back your account": `recover/open`, then the vault
-        /// restore or the password finish.
+        /// The new password is being set (the password routes under the
+        /// ticket).
         case restoring
     }
 
     public struct State: Equatable {
         public var step: Step = .start
         public var line: RecoveryEmailLine?
-        /// The route is over on this surface: the person is left on **Get
-        /// back in** with ``line`` (the keys could not be opened).
-        public var leaveToList = false
-
         public init() {}
     }
-
-    /// Whether `recover/open` may be called in `state`: only once the new
-    /// password was submitted.
-    public static func mayOpen(_ state: State) -> Bool { state.step == .restoring }
 
     /// `recover/start` answered. The SAME transition for a matching pair, a
     /// wrong pair, an unknown username and an account with no email: the
@@ -271,8 +264,8 @@ public enum EmailRecover {
         return next
     }
 
-    /// A route that takes the ticket was refused (`recover/totp`,
-    /// `recover/open`, the password routes).
+    /// A route that takes the ticket was refused (`recover/totp`, the
+    /// password routes).
     public static func ticketRouteRefused(_ state: State, _ refusal: RecoveryEmailRefusal) -> State {
         var next = state
         switch refusal {
@@ -283,7 +276,7 @@ public enum EmailRecover {
             // There is no way past the authenticator.
             next.step = .totp
             next.line = nil
-        case .ticketRefused, .codeExpired, .wrongMode:
+        case .ticketRefused, .codeExpired:
             // The ticket ran out or was spent: a new letter.
             next = State()
             next.line = .codeExpired
@@ -303,21 +296,11 @@ public enum EmailRecover {
         return next
     }
 
-    /// The new password was submitted: from here `recover/open` runs.
+    /// The new password was submitted.
     public static func saving(_ state: State) -> State {
         var next = state
         if state.step == .newPassword { next.step = .restoring }
         next.line = nil
-        return next
-    }
-
-    /// The vault `recover/open` released did not open with the typed
-    /// username and address: the ticket is spent, the route is over.
-    public static func vaultNotOpened(_ state: State) -> State {
-        var next = State()
-        next.line = .vaultNotOpened
-        next.leaveToList = true
-        _ = state
         return next
     }
 
@@ -343,14 +326,10 @@ final class RecoveryEmailModel: ObservableObject {
         var sessionToken: @MainActor () -> String?
         /// The live fresh-auth grant, or `nil`.
         var grant: @MainActor () -> String?
-        /// Whether the account's phrase was saved.
-        var phraseSaved: @MainActor () -> Bool
         /// `normalizeRecoveryEmail`: throws for an address that is refused.
         var normalize: (String) throws -> String
-        var start: (_ token: String, _ grant: String, _ handle: Data, _ address: String) async throws -> EmailEnrolChallenge
-        /// Seal the email vault OFF the main thread (64 MiB Argon2id).
-        var seal: (_ handle: Data, _ address: String, _ vaultSalt: Data) async throws -> Data
-        var finish: (_ token: String, _ challengeId: String, _ code: String, _ sealed: Data?) async throws -> EmailEnrolled
+        var start: (_ token: String, _ grant: String, _ handle: Data, _ address: String) async throws -> EmailChallenge
+        var finish: (_ token: String, _ challengeId: String, _ code: String) async throws -> EmailEnrolled
         var remove: (_ token: String, _ grant: String) async throws -> Void
         /// The code was accepted for `address` (normalised): the account's
         /// devices keep it from here.
@@ -373,11 +352,10 @@ final class RecoveryEmailModel: ObservableObject {
     private let ports: Ports
     /// Whether an address is already on (the flow is then a replace).
     private let replacing: Bool
-    private var challenge: EmailEnrolChallenge?
-    private var sealing: Task<Data, Error>?
+    private var challenge: EmailChallenge?
 
-    /// - Parameter prefill: the address the form starts with
-    ///   (``EmailReseal/prefill(replacing:addressHeld:)``).
+    /// - Parameter prefill: the address the form starts with (nothing when
+    ///   an address is being replaced, else the one this device holds).
     init(
         ports: Ports, replacing: Bool, prefill: String = "",
         nowMs: @escaping () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
@@ -396,8 +374,6 @@ final class RecoveryEmailModel: ObservableObject {
 
     /// The surface closed: nothing typed is kept.
     func closed() {
-        sealing?.cancel()
-        sealing = nil
         challenge = nil
         address = ""
         code = ""
@@ -431,16 +407,7 @@ final class RecoveryEmailModel: ObservableObject {
             sentTo = normalized
             code = ""
             state = EmailEnrol.started(state)
-            resend.start(forSecs: max(0, started.challenge.resendAfterSecs))
-            // The vault is bound to the address being confirmed: sealed now,
-            // with this start's salt, sent with the code.
-            sealing?.cancel()
-            sealing = nil
-            if EnrolSealing.sealsVault(phraseSaved: ports.phraseSaved()) {
-                let seal = ports.seal
-                let salt = started.vaultSalt
-                sealing = Task { try await seal(handle, normalized, salt) }
-            }
+            resend.start(forSecs: max(0, started.resendAfterSecs))
         } catch {
             let refusal = RecoveryEmailRefusal.of(error)
             state = EmailEnrol.startRefused(state, refusal)
@@ -455,17 +422,7 @@ final class RecoveryEmailModel: ObservableObject {
         busy = true
         defer { busy = false }
         do {
-            var sealed: Data?
-            if let sealing { sealed = try await sealing.value }
-            let result: EmailEnrolled
-            do {
-                result = try await ports.finish(token, challenge.challenge.challengeId, digits, sealed)
-            } catch where RecoveryEmailRefusal.of(error) == .phraseSaved && sealed != nil {
-                // A phrase was saved on another device since this one last
-                // looked: the account gets no vault.
-                result = try await ports.finish(token, challenge.challenge.challengeId, digits, nil)
-            }
-            sealing = nil
+            let result = try await ports.finish(token, challenge.challengeId, digits)
             self.challenge = nil
             code = ""
             state = EmailEnrol.finished(state)
@@ -477,8 +434,6 @@ final class RecoveryEmailModel: ObservableObject {
             code = ""
             if state.step == .address, before.step == .code {
                 self.challenge = nil
-                sealing?.cancel()
-                sealing = nil
                 sentTo = nil
             }
             apply(refusal)
@@ -487,8 +442,6 @@ final class RecoveryEmailModel: ObservableObject {
 
     /// `Use a different address`.
     func useOtherAddress() {
-        sealing?.cancel()
-        sealing = nil
         challenge = nil
         sentTo = nil
         code = ""
@@ -546,14 +499,8 @@ final class EmailRecoverModel: ObservableObject {
         var start: (_ handle: Data, _ address: String) async throws -> EmailChallenge
         var verify: (_ challengeId: String, _ code: String) async throws -> EmailTicket
         var totp: (_ ticket: String, _ code: String) async throws -> Void
-        var open: (_ ticket: String) async throws -> EmailOpen
-        /// Open the vault OFF the main thread and give the phrase. Throws
-        /// when it does not open.
-        var unseal: (_ handle: Data, _ address: String, _ vaultSalt: Data, _ sealed: Data) async throws -> String
-        /// The existing phrase restore: the recovery login, the backup, the
-        /// new password. Lands the session.
-        var restoreWithPhrase: @MainActor (_ phrase: String, _ newPassword: Data, _ username: String) async throws -> Void
-        /// The password-only path. Lands the session.
+        /// The new password under the ticket. Lands the session (on a device
+        /// without the keys: "Restore your keys").
         var changePassword: @MainActor (_ username: String, _ ticket: String, _ newPassword: Data) async throws -> Void
         /// This device did what a notice will report.
         var noteOwnAction: @MainActor (AccountNoticeKind) -> Void
@@ -582,8 +529,6 @@ final class EmailRecoverModel: ObservableObject {
     private var normalizedAddress: String?
     private var challenge: EmailChallenge?
     private var ticket: String?
-    /// The phrase the vault gave, kept only until the restore ran.
-    private var phrase: String?
 
     init(
         ports: Ports, cachedUsername: String?,
@@ -609,7 +554,6 @@ final class EmailRecoverModel: ObservableObject {
         normalizedAddress = nil
         challenge = nil
         ticket = nil
-        phrase = nil
         address = ""
         code = ""
         totpCode = ""
@@ -698,10 +642,9 @@ final class EmailRecoverModel: ObservableObject {
         }
     }
 
-    /// Step 4: the new password. Only now is the server asked what the code
-    /// brings (`recover/open`): the keys, opened with the typed username and
-    /// address and restored through the existing phrase path, or the
-    /// password alone.
+    /// Step 4: the new password, set under the ticket. A mailed code gives
+    /// nothing else: on a device without the keys the session lands on
+    /// "Restore your keys".
     func save() async {
         guard !busy, state.step == .newPassword, let name, let normalizedAddress else { return }
         passwordError = nil
@@ -720,66 +663,18 @@ final class EmailRecoverModel: ObservableObject {
         busy = true
         defer { busy = false }
         state = EmailRecover.saving(state)
-
-        // A phrase already in hand (the restore failed for the network
-        // after the vault opened): the ticket is spent, only the restore
-        // is repeated.
-        if phrase == nil {
-            guard let ticket, EmailRecover.mayOpen(state) else {
-                state = EmailRecover.ticketRouteRefused(state, .ticketRefused)
-                return
-            }
-            let opened: EmailOpen
-            do {
-                opened = try await ports.open(ticket)
-            } catch {
-                refuseTicketRoute(error)
-                return
-            }
-            switch opened {
-            case .password:
-                ports.noteOwnAction(.passwordChangedByEmail)
-                do {
-                    try await ports.changePassword(name.canonical, ticket, newPassword)
-                    // The session landed: the router replaces this screen.
-                    ports.keepAddress(normalizedAddress)
-                    reset()
-                } catch {
-                    refuseTicketRoute(error)
-                }
-                return
-            case .vault(let salt, let sealed):
-                // The ticket is spent from here.
-                self.ticket = nil
-                ports.noteOwnAction(.accountOpenedByEmail)
-                do {
-                    phrase = try await ports.unseal(name.handle, normalizedAddress, salt, sealed)
-                } catch {
-                    NSLog("[recover] the keys could not be opened")
-                    let kept = username
-                    reset()
-                    username = kept
-                    state = EmailRecover.vaultNotOpened(state)
-                    return
-                }
-            }
+        guard let ticket else {
+            state = EmailRecover.ticketRouteRefused(state, .ticketRefused)
+            return
         }
-        guard let phrase else { return }
+        ports.noteOwnAction(.passwordChangedByEmail)
         do {
-            try await ports.restoreWithPhrase(phrase, newPassword, name.canonical)
+            try await ports.changePassword(name.canonical, ticket, newPassword)
+            // The session landed: the router replaces this screen.
             ports.keepAddress(normalizedAddress)
             reset()
         } catch {
-            let line: RecoveryEmailLine
-            if case .network = error as? AuthClientError {
-                line = .offline
-            } else if let secs = RetryCountdown.attemptsRetryAfterSecs(error) {
-                line = .limited(retryAfterSecs: secs)
-                wait.start(forSecs: secs)
-            } else {
-                line = .failed
-            }
-            state = EmailRecover.saveFailed(state, line: line)
+            refuseTicketRoute(error)
         }
     }
 
@@ -800,28 +695,5 @@ final class EmailRecoverModel: ObservableObject {
         default:
             break
         }
-    }
-}
-
-/// The live vault calls, each on a background thread: both run a 64 MiB
-/// Argon2id and must never run on the main actor.
-enum EmailVaultWork {
-
-    /// Seal `phrase`'s entropy under the username's handle and the address.
-    static func seal(phrase: String, handle: Data, address: String, vaultSalt: Data) async throws -> Data {
-        try await Task.detached(priority: .userInitiated) {
-            try emailVaultSeal(
-                mnemonic: try RecoveryMnemonic.fromPhrase(phrase: phrase),
-                loginHandle: handle, address: address, vaultSalt: vaultSalt)
-        }.value
-    }
-
-    /// Open a vault and give the phrase it holds.
-    static func open(handle: Data, address: String, vaultSalt: Data, sealed: Data) async throws -> String {
-        try await Task.detached(priority: .userInitiated) {
-            try emailVaultOpen(
-                loginHandle: handle, address: address, vaultSalt: vaultSalt, sealed: sealed
-            ).phrase()
-        }.value
     }
 }

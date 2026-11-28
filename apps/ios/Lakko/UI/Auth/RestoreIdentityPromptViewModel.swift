@@ -29,9 +29,6 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
 
     /// The routes of the prompt.
     public enum Method: String, Hashable, CaseIterable {
-        /// ADR-0075 — a code sent to the recovery email, while the server
-        /// holds the email vault: the same flow as in **Get back in**.
-        case email
         case device
         case passkey
         case phrase
@@ -47,11 +44,7 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     /// (and the username when the device knows none), or a passkey. Absent
     /// while a proof is live. Never pre-filled; cleared when the panel
     /// closes.
-    let resetProof: FreshAuthProofModel
-    /// UX 17.2 — `I know my password` on the "cannot reset" panel.
-    @Published public private(set) var resetChoseKnowsPassword: Bool = false
-    /// UX 17.2 — `I do not know my password` under the block.
-    @Published public private(set) var resetChoseNoPassword: Bool = false
+    let resetFactor: ResetFactorModel
     /// `true` from the tap on "Reset account keys" until the server step
     /// answered: the full-screen "Resetting..." with no cancel. Covers the
     /// password sign-in and the reset as one state.
@@ -107,12 +100,11 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
         self.username = username
         self.accountIdB64 = accountIdB64
         self.earlierKeys = earlierKeys
-        self.resetProof = FreshAuthProofModel(surface: .reset, repository: repository)
-        self.email = EmailRecoverModel(
-            ports: .live(repository: repository, noteOwnAction: noteOwnAction, keepAddress: keepAddress),
-            cachedUsername: username.isEmpty ? nil : username)
-        // The block's fields decide whether the button is enabled.
-        proofSink = resetProof.objectWillChange.sink { [weak self] _ in
+        self.resetFactor = ResetFactorModel(ports: .live(repository: repository))
+        _ = noteOwnAction
+        _ = keepAddress
+        // The section's state decides whether the button is enabled.
+        proofSink = resetFactor.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
     }
@@ -124,10 +116,9 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     /// depends only on whether the account has a passkey that carries keys.
     public var methods: [Method] {
         if earlierKeys { return [.device] }
-        let rows = RestoreKeysRows.decide(protection)
+        let rows = RestoreKeysRows.decide()
         return Method.allCases.filter { method in
             switch method {
-            case .email: return rows.showsEmailCode
             case .device: return true
             case .passkey:
                 return PasskeyVault.restoreOffersPasskey(
@@ -136,12 +127,6 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
             }
         }
     }
-
-    /// The account's protection (`GET /recovery-email`); `nil` until read.
-    @Published public private(set) var protection: RecoveryEmailStatus?
-
-    /// The email-code route, with the username pre-filled.
-    let email: EmailRecoverModel
 
     /// G-56 contract 4.2 — while the parked screen is in the foreground the
     /// device looks for the earlier keys every 5 minutes (chosen, not
@@ -152,12 +137,6 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     public func retryEarlierKeys() async {
         guard earlierKeys else { return }
         await repository.retryEarlierKeys()
-    }
-
-    /// Read the account's protection with the parked session.
-    public func loadProtection() async {
-        guard !earlierKeys else { return }
-        if let status = await repository.protectionForPendingRestore() { protection = status }
     }
 
     /// Ask which of the account's passkeys carry keys (with the parked
@@ -269,48 +248,30 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
         KeyResetConfirmation.matches(resetConfirmation)
     }
 
-    /// UX 17.2 — which form the warning screen takes under its bullets.
-    var resetForm: KeyResetProofGate.Form {
-        KeyResetProofGate.form(
-            holdsLiveProof: resetProof.proofLive,
-            landing: repository.sessionLanding,
-            hasUsablePasskey: resetProof.hasUsablePasskey,
-            choseKnowsPassword: resetChoseKnowsPassword,
-            choseNoPassword: resetChoseNoPassword)
-    }
-
-    /// Whether `I do not know my password` is under the block.
-    public var showsResetNoPasswordLink: Bool {
-        KeyResetProofGate.showsNoPasswordLink(
-            form: resetForm, hasUsablePasskey: resetProof.hasUsablePasskey)
-    }
-
-    /// Whether "Reset account keys" is enabled: the word, and the block's
-    /// fields when it is drawn.
+    /// Whether "Reset account keys" is enabled: a confirmed factor and the
+    /// typed word (UX 15.1b).
     public var canReset: Bool {
-        KeyResetProofGate.canSubmit(
-            form: resetForm, blockReady: resetProof.layout.ready, confirmation: resetConfirmation)
+        resetFactor.canReset(confirmation: resetConfirmation)
     }
 
-    /// `I know my password` / `I do not know my password`.
-    public func resetKnowsPassword(_ knows: Bool) {
-        resetChoseKnowsPassword = knows
-        resetChoseNoPassword = !knows
+    /// The form under the warning's bullets: the section, or the "cannot
+    /// reset" panel in place of the section, the word and the button.
+    var resetCannot: Bool {
+        if case .cannotReset = resetFactor.form { return true }
+        return false
     }
 
-    /// The warning panel opened: read whether a proof is live and whether a
-    /// passkey can stand in for the password.
+    /// The warning panel opened: ask which factors the account has and
+    /// whether a password proof is live.
     public func resetPanelOpened() {
-        Task { await resetProof.opened() }
+        Task { await resetFactor.opened() }
     }
 
     /// The warning panel closed (Cancel, collapse, the screen went away):
-    /// the password is not kept.
+    /// nothing typed or confirmed is kept.
     public func resetPanelClosed() {
-        resetProof.closed()
+        resetFactor.closed()
         resetConfirmation = ""
-        resetChoseKnowsPassword = false
-        resetChoseNoPassword = false
     }
 
     /// The person has NO other device, NO passkey that restores keys and NO
@@ -327,15 +288,16 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
         errorText = nil
         resetRetryAfterSecs = nil
         Task {
-            // The proof first (the block's own states say why not); the
-            // person sees one "Resetting..." for both.
-            guard await resetProof.ensure() else {
+            // The confirmed factor with what the device found about the
+            // seal; one that ran out opens the section again.
+            guard let proof = resetFactor.proof, resetFactor.confirmed != nil else {
+                resetFactor.confirmationExpired()
                 busy = false
                 resetting = false
                 return
             }
             do {
-                _ = try await repository.mintFreshIdentity()
+                _ = try await repository.mintFreshIdentity(proof: proof)
                 // Repository flipped to .saveFreshPhrase — clear busy.
                 busy = false
                 resetting = false
@@ -345,10 +307,11 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
                 resetting = false
                 // Overtaken by a sign-out or another sign-in: not a failure.
                 if error is StaleBindingError { return }
-                if FreshAuthRefusal.isRequired(error) {
-                    // The proof expired on the way: show the block with its
-                    // helper. Nothing went wrong, so no error styling.
-                    resetProof.proofExpired()
+                if error is ResetFactorRequired || FreshAuthRefusal.isRequired(error) {
+                    // The confirmation expired on the way: the section opens
+                    // again as it was. Nothing went wrong, so no error
+                    // styling.
+                    resetFactor.confirmationExpired()
                     return
                 }
                 NSLog("[restore] WARN key reset failed: \(error)")

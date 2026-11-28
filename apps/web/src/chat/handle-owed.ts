@@ -47,6 +47,12 @@ export interface OwedHandle {
    *  the server still holds the name under, after an ADR-0074 rotation. The
    *  `rekey` statement, signed with that root's handle key, runs first. */
   readonly rekeyFrom?: string;
+  /** ADR-0101 section 7 item 4: after a retake of an owned channel, the
+   *  handle write seed (standard base64, 32 bytes; secret, kept only in this
+   *  sealed row) the server still holds the channel's name under, from the
+   *  owned-channels list. The `rekey` statement signed with it runs first,
+   *  moving the name to the key the new account's root derives. */
+  readonly rekeyFromSeed?: string;
 }
 
 /** When a held name was last written by this account's device. */
@@ -84,11 +90,14 @@ export function mergeOwed(existing: OwedHandle | undefined, next: OwedHandle): O
   // The server holds the name under the OLDEST key not yet re-keyed from; a
   // claim never reached the server, so it is signed with the new key.
   const rekeyFrom = existing?.rekeyFrom ?? next.rekeyFrom;
-  if (merged.op === "claim" || rekeyFrom === undefined) {
-    const { rekeyFrom: _dropped, ...rest } = merged;
-    return rest;
-  }
-  return { ...merged, rekeyFrom };
+  const rekeyFromSeed = existing?.rekeyFromSeed ?? next.rekeyFromSeed;
+  const { rekeyFrom: _a, rekeyFromSeed: _b, ...rest } = merged;
+  if (merged.op === "claim") return rest;
+  return {
+    ...rest,
+    ...(rekeyFrom !== undefined ? { rekeyFrom } : {}),
+    ...(rekeyFromSeed !== undefined ? { rekeyFromSeed } : {}),
+  };
 }
 
 function mergeOp(existing: OwedHandle | undefined, next: OwedHandle): OwedHandle {
@@ -227,8 +236,9 @@ export async function clearOwedRekey(kind: HandleSubjectKind, id: string): Promi
   await opened;
   setOwedRows(
     owedRows().map((x) => {
-      if (keyOf(x.kind, x.id) !== keyOf(kind, id) || x.rekeyFrom === undefined) return x;
-      const { rekeyFrom: _done, ...rest } = x;
+      if (keyOf(x.kind, x.id) !== keyOf(kind, id)) return x;
+      if (x.rekeyFrom === undefined && x.rekeyFromSeed === undefined) return x;
+      const { rekeyFrom: _done, rekeyFromSeed: _doneSeed, ...rest } = x;
       return rest;
     }),
   );

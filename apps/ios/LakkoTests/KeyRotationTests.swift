@@ -645,16 +645,8 @@ final class KeyRotationRunnerTests: XCTestCase {
             handOverChannels: { _ in try step("channels") },
             rekeyReach: { try step("reach") },
             resendProfile: { try step("profile") },
-            commitSavingPhrase: { _, _, material, proof, accountId in
-                XCTAssertEqual(accountId.count, 16, "the identity proof names the account")
-                world.note("commit-saving-phrase")
-                if let error = world.commitError { throw error }
-                world.committed(revokes: [], proof: proof)
-                XCTAssertEqual(material.newSignaturePubkey, world.material.newSignaturePubkey)
-                return KeyResetResult(
-                    attestation: world.attestation, session: .fixture(access: "tok-new", generation: 4))
-            },
-            phraseWasSaved: { _ in world.note("phrase-saved") },
+            announceRotatedSeals: { world.note("announce-rotated") },
+            newWordsConfirmed: { _ in world.note("words-confirmed") },
             phraseProtected: { _ in world.phraseProtected },
             resealBackup: { try step("backup") },
             devicePhrase: { _ in world.phrase },
@@ -677,8 +669,10 @@ final class KeyRotationRunnerTests: XCTestCase {
         XCTAssertEqual(result, .rotated(phrase: world.material.phrase))
         XCTAssertEqual(
             world.events,
-            ["remove", "own-pending", "announce", "commit", "adopt", "discovery", "keypackage", "dg-root",
-             "journals", "channels", "reach", "profile", "backup"])
+            // ADR-0101 section 10: the account's protection is published
+            // at the new generation right after the directory upload.
+            ["remove", "own-pending", "announce", "commit", "adopt", "discovery", "announce-rotated",
+             "keypackage", "dg-root", "journals", "channels", "reach", "profile", "backup"])
         // The envelope left at the epoch the removal produced.
         XCTAssertEqual(world.sealedAt, [21])
         // This device's own copy was kept before the envelope left.
@@ -704,7 +698,9 @@ final class KeyRotationRunnerTests: XCTestCase {
         XCTAssertEqual(world.freshAuthDropped, 1, "a rotation spends the proof")
         // The words are still to be confirmed.
         XCTAssertEqual(runner.resume, .showWords)
+        XCTAssertFalse(world.events.contains("words-confirmed"), "the new phrase is not listed before that")
         runner.acknowledgePhrase()
+        XCTAssertEqual(world.events.last, "words-confirmed", "the confirmed words are listed from here")
         XCTAssertNil(store.load(accountIdB64: accountIdB64))
         XCTAssertEqual(runner.resume, .nothing)
     }
@@ -721,7 +717,10 @@ final class KeyRotationRunnerTests: XCTestCase {
         // The keys were changed and published all the same.
         XCTAssertTrue(world.events.contains("commit"))
         XCTAssertTrue(world.events.contains("backup"))
-        XCTAssertFalse(world.events.contains("commit-saving-phrase"), "phrase_saved is the save-phrase flow's")
+        // ADR-0101 section 10 — the account's protection is published at
+        // the new generation once the directory holds the new key.
+        XCTAssertTrue(world.events.contains("announce-rotated"))
+        XCTAssertFalse(world.events.contains("words-confirmed"), "no words, nothing to confirm")
         XCTAssertNil(runner.wordsToShow())
         XCTAssertEqual(runner.resume, .nothing, "nothing waits for words to be confirmed")
         XCTAssertNil(store.load(accountIdB64: accountIdB64))
@@ -742,122 +741,6 @@ final class KeyRotationRunnerTests: XCTestCase {
         XCTAssertNil(store.load(accountIdB64: accountIdB64))
         XCTAssertNil(runner.wordsToShow())
         XCTAssertEqual(runner.resume, .nothing)
-    }
-
-    func testSavingAPhraseShowsItsWordsEvenThoughTheAccountWasNotPhraseProtected() async throws {
-        let (runner, world, _) = try make()
-        world.phraseProtected = false
-        let result = await runner.savePhrase()
-        XCTAssertEqual(result, .rotated(phrase: world.material.phrase))
-    }
-
-    // MARK: - ADR-0075 section 3: "Save a recovery phrase"
-
-    func testSavingAPhraseRotatesWithoutRemovingADeviceAndShowsTheNewWordsLast() async throws {
-        let (runner, world, store) = try make()
-
-        let result = await runner.savePhrase()
-
-        // The new words come back only after the commit and the publish.
-        XCTAssertEqual(result, .rotated(phrase: world.material.phrase))
-        XCTAssertEqual(
-            world.events,
-            ["own-pending", "announce", "commit-saving-phrase", "phrase-saved", "adopt", "discovery",
-             "keypackage", "dg-root", "journals", "channels", "reach", "profile", "backup"])
-        XCTAssertFalse(world.events.contains("remove"), "no device is removed")
-        XCTAssertFalse(world.events.contains("commit"), "the commit carries phrase_saved")
-        XCTAssertEqual(world.committedRevokes, [[]], "no device is revoked with it")
-        XCTAssertEqual(world.roster, [own, target], "the other devices are kept")
-        XCTAssertEqual(world.freshAuthDropped, 1)
-        let record = try XCTUnwrap(store.load(accountIdB64: accountIdB64))
-        XCTAssertTrue(record.savesPhrase)
-        XCTAssertEqual(record.targetDeviceIdB64, "")
-        XCTAssertEqual(runner.resume, .showWords)
-        runner.acknowledgePhrase()
-        XCTAssertNil(store.load(accountIdB64: accountIdB64))
-    }
-
-    func testSavingAPhraseWithholdsTheWordsWhileThePublishIsOwed() async throws {
-        let (runner, world, _) = try make()
-        world.failing = ["discovery"]
-
-        let saved1 = await runner.savePhrase()
-        XCTAssertEqual(saved1, .rotatedPublishOwed)
-        XCTAssertNil(runner.wordsToShow(), "the words wait for the directory")
-
-        world.failing = []
-        await runner.resumeOwed()
-        XCTAssertEqual(runner.wordsToShow(), world.material.phrase)
-    }
-
-    func testAPhraseThatCouldNotBeSavedChangesNothingAndOwesNothing() async throws {
-        // The commit is refused: nothing changed on the server.
-        let (runner, world, store) = try make()
-        world.commitError = AuthClientError.http(
-            status: 403, endpoint: "/account/keys/rotate/finish", body: #"{"error":"account-key-required"}"#)
-        let saved2 = await runner.savePhrase()
-        XCTAssertEqual(saved2, .removedNotRotated(.accountKeyRequired))
-        XCTAssertNil(store.load(accountIdB64: accountIdB64), "nothing is owed")
-        XCTAssertEqual(runner.resume, .nothing, "no line about a removed device")
-        XCTAssertFalse(world.events.contains("phrase-saved"))
-        XCTAssertNil(world.phrase, "no new words exist on the device")
-
-        // The proof ran out: the block is asked for again, nothing is owed.
-        world.commitError = AuthClientError.http(
-            status: 403, endpoint: "/account/keys/rotate/start", body: #"{"error":"fresh-auth-required"}"#)
-        let saved3 = await runner.savePhrase()
-        XCTAssertEqual(saved3, .freshAuthRequired)
-        XCTAssertNil(store.load(accountIdB64: accountIdB64))
-
-        // No proof at all: nothing is sent.
-        world.commitError = nil
-        world.grant = nil
-        let before = world.events.count
-        let saved4 = await runner.savePhrase()
-        XCTAssertEqual(saved4, .freshAuthRequired)
-        XCTAssertEqual(world.events.count, before)
-    }
-
-    func testAnUnansweredPhraseCommitIsKeptWithoutTheRemovedDeviceLine() async throws {
-        let (runner, world, store) = try make()
-        world.commitError = AuthClientError.network(
-            endpoint: "/account/keys/rotate/finish", underlying: URLError(.timedOut))
-
-        let saved5 = await runner.savePhrase()
-        XCTAssertEqual(saved5, .removedNotRotated(.offline))
-        // Unknown whether it landed: the record stays, and says nothing.
-        XCTAssertEqual(store.load(accountIdB64: accountIdB64)?.phase, .announced)
-        XCTAssertEqual(runner.resume, .nothing)
-
-        // It did land: this device adopted its own envelope.
-        world.seed = world.material.seed
-        world.phrase = world.material.phrase
-        runner.reload()
-        XCTAssertEqual(runner.resume, .commitLandedUnseen)
-        await runner.resumeOwed()
-        XCTAssertTrue(world.events.contains("phrase-saved"), "the account is phrase-protected from here")
-        XCTAssertEqual(runner.wordsToShow(), world.material.phrase)
-    }
-
-    func testTheResumeOfATargetlessRecordNeverReadsAsARemovedDevice() {
-        var record = KeyRotationRecord(targetDeviceIdB64: "", startedAtMs: 1)
-        record.phraseSaved = true
-        record.phase = .removed
-        XCTAssertEqual(KeyRotationPlan.resume(record, heldAccountKey: nil), .nothing)
-        record.phase = .announced
-        record.newSignaturePubkey = Data(repeating: 1, count: 32)
-        XCTAssertEqual(KeyRotationPlan.resume(record, heldAccountKey: Data(repeating: 2, count: 32)), .nothing)
-        XCTAssertEqual(
-            KeyRotationPlan.resume(record, heldAccountKey: Data(repeating: 1, count: 32)), .commitLandedUnseen)
-        // A device rotation is unchanged.
-        var device = KeyRotationRecord(targetDeviceIdB64: "AAAA", startedAtMs: 1)
-        device.phase = .removed
-        XCTAssertEqual(KeyRotationPlan.resume(device, heldAccountKey: nil), .removedNotRotated)
-        // An older record without the field still decodes, as a device rotation.
-        let old = try? JSONDecoder().decode(
-            KeyRotationRecord.self,
-            from: Data(#"{"target_device_id":"AAAA","started_at_ms":1,"phase":"removed","discovery_done":false,"key_package_done":false,"device_group_root_done":false,"journals_done":false,"channels_done":false,"reach_done":false,"backup_done":false,"phrase_acknowledged":false}"#.utf8))
-        XCTAssertEqual(old?.savesPhrase, false)
     }
 
     func testTheOwedRecordIsWrittenBeforeAnythingIsSent() async throws {

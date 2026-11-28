@@ -4,12 +4,21 @@
 package me.lakko.app.auth
 
 import android.content.Context
+import kotlinx.coroutines.flow.first
 
 /**
- * ADR-0075 / `docs/ux/identity-recovery.md` section 19 - how an account is
- * protected, and everything the screens decide from it. Pure: the answer of
- * `GET /recovery-email` goes in, what a screen draws comes out, so a host
- * JVM test runs every rule.
+ * ADR-0075 (amended 2026-11-26, twice) / `docs/ux/identity-recovery.md`
+ * sections 19.1 to 19.1d - how an account is protected, and everything the
+ * screens decide from it. Pure: the server's answers and the account's own
+ * seal announcement go in, what a screen draws comes out, so a host JVM test
+ * runs every rule.
+ *
+ * One kind of account since the email vault was removed: a mailed code gives
+ * a new password and confirms a key reset, never the keys. Every account
+ * with a username has at least one second way in (a recovery email, an
+ * authenticator app, a passkey); the recovery phrase is an optional extra.
+ * What brings the chats back after a reset is what the account published in
+ * its seal announcement ([ChatsKeptBy], `auth/ResetSeals.kt`).
  */
 
 /** `GET /recovery-email` for the session's account. Never the address. */
@@ -18,86 +27,202 @@ public data class RecoveryEmailStatus(
     val available: Boolean,
     /** The account has a recovery email. */
     val enabled: Boolean,
-    /** The account has an email vault: a mailed code brings its keys back. */
-    val vault: Boolean,
-    /** The owner saved a recovery phrase: a mailed code changes the password
-     *  only. */
-    val phraseSaved: Boolean,
-    /** The account has an authenticator: its code is asked for as well. */
+    /** The account has a confirmed authenticator. */
     val totp: Boolean = false,
 )
 
 /**
  * Whether NEW words are shown after the account keys changed (a rotation, a
- * key reset, a recall): only to a phrase-protected account. An account
- * without a saved phrase is never shown words anywhere; its change completes
- * silently as far as the phrase goes.
+ * recall): only to an account whose owner saved the phrase. After a key
+ * reset the new phrase is not saved (ADR-0101 section 10), so no words are
+ * shown; the person saves a phrase from Settings when they want one.
  */
 public fun showsNewWords(phraseSaved: Boolean): Boolean = phraseSaved
 
-/** The no-protection banner's line and the email row's title: after the
- *  keys changed the server keeps the address value without a vault, and the
- *  person is asked to type the address again. */
-public data class ProtectPrompt(val title: String, val body: String?)
-
-public fun protectPrompt(status: RecoveryEmailStatus, addressHeld: Boolean = false): ProtectPrompt =
-    if (recoveryEmailRow(status, addressHeld) == RecoveryEmailRow.AddAgain) {
-        ProtectPrompt(title = "recovery_email.add_again.title", body = "recovery_email.add_again.body")
-    } else {
-        ProtectPrompt(title = "protect.banner.none", body = null)
-    }
-
 /** The rows of "Restore your keys" (section 8) that depend on the account. */
-public data class RestoreKeysRows(val phrase: Boolean, val emailCode: Boolean)
+public data class RestoreKeysRows(val phrase: Boolean)
 
 /**
  * Restore your keys on a signed-in device without keys: the 12-word phrase
- * row only for an account whose owner saved the phrase, and the `Email code`
- * row only while a mailed code brings the keys (an email AND its vault). A
- * status that could not be read keeps the phrase row (the words may exist)
- * and offers no email row.
+ * row only for an account whose owner saved the phrase ([phraseSaved], read
+ * from the account's published protection). Not known keeps the row (the
+ * words may exist). No mailed code brings keys, so there is no email row.
  */
-public fun restoreKeysRows(status: RecoveryEmailStatus?): RestoreKeysRows = when {
-    status == null -> RestoreKeysRows(phrase = true, emailCode = false)
-    else -> RestoreKeysRows(
-        phrase = status.phraseSaved,
-        emailCode = status.available && status.enabled && status.vault && !status.phraseSaved,
-    )
-}
+public fun restoreKeysRows(phraseSaved: Boolean?): RestoreKeysRows = RestoreKeysRows(phrase = phraseSaved ?: true)
 
-/** The three states of section 19.1. */
-public enum class AccountProtection {
-    /** No phrase saved; a mailed code brings everything back. */
-    Email,
+// ---------------------------------------------------------------------------
+// The three second ways in (19.1a, 19.1c)
+// ---------------------------------------------------------------------------
 
-    /** A phrase is saved. */
-    Phrase,
+/** One of the three. The phrase is not one of them. */
+public enum class FactorKind { Email, Totp, Passkey }
 
-    /** Neither: the password and the devices that hold it. */
-    None,
+/** Which of the three the account has. */
+public data class AccountFactors(val email: Boolean, val totp: Boolean, val passkey: Boolean) {
+    val any: Boolean get() = email || totp || passkey
+
+    /** The authenticator is the account's only second way in. */
+    val onlyTotp: Boolean get() = totp && !email && !passkey
+
+    /** The factors in the fixed order of the reset panel (15.1b). */
+    val inOrder: List<FactorKind>
+        get() = buildList {
+            if (totp) add(FactorKind.Totp)
+            if (email) add(FactorKind.Email)
+            if (passkey) add(FactorKind.Passkey)
+        }
 }
 
 /**
- * The account's mode. A saved phrase wins. Without one the account is
- * mail-protected only while the server holds BOTH the address value and the
- * vault: after a key reset or a recall the vault is gone (it sealed the old
- * phrase) and the account is unprotected until the email is added again.
+ * The account's factors from `GET /recovery-email` and the passkey list.
+ * `null` while either could not be read: nothing is decided from a guess
+ * (the landing rule shows no step, a removal is left to the server).
  */
-public fun accountProtection(enabled: Boolean, vault: Boolean, phraseSaved: Boolean): AccountProtection = when {
-    phraseSaved -> AccountProtection.Phrase
-    enabled && vault -> AccountProtection.Email
-    else -> AccountProtection.None
+public fun accountFactors(status: RecoveryEmailStatus?, hasPasskey: Boolean?): AccountFactors? {
+    if (status == null || hasPasskey == null) return null
+    return AccountFactors(email = status.enabled, totp = status.totp, passkey = hasPasskey)
 }
 
-public fun accountProtection(status: RecoveryEmailStatus): AccountProtection =
-    accountProtection(status.enabled, status.vault, status.phraseSaved)
+/**
+ * The landing rule (19.1c): an account with a username and none of the
+ * three is shown the protect step before the app, with no way past it. A
+ * guest (no username) never is; factors that could not be read decide
+ * nothing.
+ */
+public fun factorStepRequired(hasUsername: Boolean, factors: AccountFactors?): Boolean =
+    hasUsername && factors != null && !factors.any
+
+/** The landing rule without a flash (alignment 2026-11-27): how long the app
+ *  waits for the factor read before it shows the app anyway. Chosen, not
+ *  measured. */
+public const val FACTOR_READ_WAIT_MS: Long = 3_000L
+
+/**
+ * After a sign-in or at launch the app content is not shown before the
+ * factor read answers: wait for the first non-null [factors], at most
+ * [timeoutMs]. The answer, or `null` when it did not come in time (the app
+ * is then shown, and no step: only an answer with no factor shows it).
+ */
+public suspend fun awaitFactorRead(
+    factors: kotlinx.coroutines.flow.Flow<AccountFactors?>,
+    timeoutMs: Long = FACTOR_READ_WAIT_MS,
+): AccountFactors? = kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+    factors.first { it != null }
+}
+
+/** Whether the landing cover hides the app: the factor read has not
+ *  answered yet for this landing ([waited] is `false`), and no other step
+ *  (the protect step after sign-up) is drawn instead. */
+public fun landingCoverShown(waited: Boolean, protectStepShown: Boolean): Boolean = !waited && !protectStepShown
+
+/** The step's heading: sign-up, or an account found without a factor. */
+public fun protectStepTitleKey(afterSignup: Boolean): String =
+    if (afterSignup) "protect.title" else "protect.title_required"
+
+/** The server's refusal of removing the last of the three. */
+public const val LAST_FACTOR: String = "last-factor"
+
+private const val HTTP_CONFLICT_STATUS: Int = 409
+
+/** `409 last-factor` from `DELETE /recovery-email`, `DELETE
+ *  /webauthn/credentials/{id}` or a handle change that would drop the
+ *  recovery email. */
+public fun isLastFactor(err: Throwable): Boolean = when (err) {
+    is AuthHttpError -> err.status == HTTP_CONFLICT_STATUS && err.code == LAST_FACTOR
+    is me.lakko.app.webauthn.WebauthnHttpError ->
+        err.status == HTTP_CONFLICT_STATUS && me.lakko.app.anon.errorCodeOf(err.body) == LAST_FACTOR
+    else -> false
+}
+
+/**
+ * Whether removing one [removing] factor would leave the account with none
+ * of the three ([passkeyCount] passkeys now): the app's own dialog refuses
+ * it before anything is sent (`protect.last_factor`). The server refuses it
+ * too.
+ */
+public fun removalLeavesNoFactor(factors: AccountFactors, removing: FactorKind, passkeyCount: Int): Boolean =
+    !afterRemoval(factors, removing, passkeyCount).any
+
+/**
+ * The line a removal's confirmation adds when the authenticator would be
+ * the only second way in afterwards (19.1c), or `null`.
+ */
+public fun removalTotpOnlyNoticeKey(
+    factors: AccountFactors,
+    removing: FactorKind,
+    passkeyCount: Int,
+    phraseSaved: Boolean,
+): String? {
+    if (factors.onlyTotp || !afterRemoval(factors, removing, passkeyCount).onlyTotp) return null
+    return if (phraseSaved) "protect.totp_only.remove_notice_phrase" else "protect.totp_only.remove_notice"
+}
+
+private fun afterRemoval(factors: AccountFactors, removing: FactorKind, passkeyCount: Int): AccountFactors =
+    when (removing) {
+        FactorKind.Email -> factors.copy(email = false)
+        FactorKind.Totp -> factors.copy(totp = false)
+        FactorKind.Passkey -> factors.copy(passkey = factors.passkey && passkeyCount > 1)
+    }
+
+/**
+ * The authenticator-only warning (19.1a, 19.1c), in the warning colour:
+ * shown while the authenticator is the only one of the three. `null`
+ * otherwise.
+ */
+public fun totpOnlyWarningKey(factors: AccountFactors, phraseSaved: Boolean): String? = when {
+    !factors.onlyTotp -> null
+    phraseSaved -> "protect.totp_only.warning_phrase"
+    else -> "protect.totp_only.warning"
+}
+
+// ---------------------------------------------------------------------------
+// What keeps the chats (19.1c status line, 19.1d)
+// ---------------------------------------------------------------------------
+
+/** What would bring the chats back after a key reset, strongest first. */
+public enum class ChatsKeptBy {
+    /** A saved recovery phrase. */
+    Phrase,
+
+    /** A passkey that keeps the chats. */
+    PasskeySeal,
+
+    /** The password as it is now, and nothing else. */
+    PasswordOnly,
+}
+
+/** From the account's published protection (its seal announcement). */
+public fun chatsKeptBy(phraseSeal: Boolean, passkeySeal: Boolean): ChatsKeptBy = when {
+    phraseSeal -> ChatsKeptBy.Phrase
+    passkeySeal -> ChatsKeptBy.PasskeySeal
+    else -> ChatsKeptBy.PasswordOnly
+}
 
 /** The catalog key of the Settings > Account status line. */
-public fun protectionStatusKey(protection: AccountProtection): String = when (protection) {
-    AccountProtection.Email -> "protect.status.email"
-    AccountProtection.Phrase -> "protect.status.phrase"
-    AccountProtection.None -> "protect.status.none"
+public fun protectionStatusKey(kept: ChatsKeptBy): String = when (kept) {
+    ChatsKeptBy.Phrase -> "protect.status.phrase"
+    ChatsKeptBy.PasskeySeal -> "protect.status.passkey_seal"
+    ChatsKeptBy.PasswordOnly -> "protect.status.password_only"
 }
+
+/**
+ * The honest notice "Your chats depend on your password" (19.1d): the
+ * account has a second way in and is kept by the password only. `null`
+ * [kept] (the account's protection could not be read) shows nothing.
+ */
+public fun passwordOnlyNoticeShown(hasFactor: Boolean, kept: ChatsKeptBy?): Boolean =
+    hasFactor && kept == ChatsKeptBy.PasswordOnly
+
+/**
+ * The notice's third place: the app's own dialog, once after a sign-in on a
+ * device, the first time the app opens there. Never after a key reset (the
+ * reset's screens said what was kept) and never again once closed.
+ */
+public fun passwordOnlyDialogDue(
+    noticeShown: Boolean,
+    shownBefore: Boolean,
+    afterKeyReset: Boolean,
+): Boolean = noticeShown && !shownBefore && !afterKeyReset
 
 /** The `Recovery email` row of Settings > Account. */
 public enum class RecoveryEmailRow {
@@ -107,36 +232,15 @@ public enum class RecoveryEmailRow {
     /** `Off`, opening the add form. */
     Off,
 
-    /** The server keeps the address value but no vault and no phrase is
-     *  saved (a key reset or a recall dropped the vault): shown `Off`, and
-     *  adding the address again seals the new phrase. */
-    AddAgain,
-
     /** `On`, with `Replace` and `Remove`. */
     On,
 }
 
-public fun recoveryEmailRow(status: RecoveryEmailStatus, addressHeld: Boolean = false): RecoveryEmailRow = when {
+public fun recoveryEmailRow(status: RecoveryEmailStatus): RecoveryEmailRow = when {
     !status.available -> RecoveryEmailRow.Absent
     !status.enabled -> RecoveryEmailRow.Off
-    addAgainShown(status.enabled, status.vault, status.phraseSaved, addressHeld) -> RecoveryEmailRow.AddAgain
-    // A device that holds the address re-seals by itself: the row stays On.
     else -> RecoveryEmailRow.On
 }
-
-/**
- * ADR-0075 (amended 2026-10-13) - the automatic re-seal: the server keeps
- * the address value, holds no vault, no phrase is saved, and THIS device
- * holds the address. It then seals the current phrase and installs the vault
- * silently (`PUT /recovery-email/vault`).
- */
-public fun resealNeeded(enabled: Boolean, vault: Boolean, phraseSaved: Boolean, addressHeld: Boolean): Boolean =
-    enabled && !vault && !phraseSaved && addressHeld
-
-/** "Add your email again" is shown only where no device-held address can
- *  re-seal by itself. */
-public fun addAgainShown(enabled: Boolean, vault: Boolean, phraseSaved: Boolean, addressHeld: Boolean): Boolean =
-    enabled && !vault && !phraseSaved && !addressHeld
 
 /**
  * What the add form starts with: the held address when the account has no
@@ -146,31 +250,6 @@ public fun addAgainShown(enabled: Boolean, vault: Boolean, phraseSaved: Boolean,
  */
 public fun enrolPrefill(enabled: Boolean, heldAddress: String?): String =
     if (!enabled) heldAddress.orEmpty() else ""
-
-/** How one re-seal attempt ended. */
-public enum class ResealOutcome {
-    /** The vault is installed (or already was, or a phrase is saved): read
-     *  the status again. */
-    Settled,
-
-    /** The address this device holds is not the account's any more: clear
-     *  the register; the add-again state follows. */
-    AddressStale,
-
-    /** Anything else: tried again at the next landing, never in a loop. */
-    RetryLater,
-}
-
-/** Classify the answer of `PUT /recovery-email/vault` ([err] `null` = 200). */
-public fun resealOutcomeOf(err: Throwable?): ResealOutcome {
-    if (err == null) return ResealOutcome.Settled
-    val code = (err as? AuthHttpError)?.code
-    return when (code) {
-        "vault-exists", "phrase-saved" -> ResealOutcome.Settled
-        "address-mismatch" -> ResealOutcome.AddressStale
-        else -> ResealOutcome.RetryLater
-    }
-}
 
 /** The `Recovery phrase` row of Settings > Account. */
 public enum class RecoveryPhraseRow {
@@ -192,115 +271,71 @@ public fun recoveryPhraseRow(phraseSaved: Boolean, phraseOnDevice: Boolean): Rec
 
 /**
  * Whether a "three words" surface exists on this device (section 19.1): only
- * for a phrase-protected account. In a mail-protected account the words were
+ * for an account whose owner saved the phrase. Otherwise the words were
  * never shown to the person, so asking for three of them is a dead end.
  */
 public fun threeWordsSurfaceOffered(phraseSaved: Boolean): Boolean = phraseSaved
 
-/** `GET /account/phrase` for the session's account (ADR-0075 section 3 as
- *  amended 2026-11-01). */
-public data class AccountPhraseStatus(
-    /** The owner saved a recovery phrase. */
-    val saved: Boolean,
-    /** The current phrase was ever sealed in an email vault. */
-    val rotationNeeded: Boolean,
-)
-
-/** Which of the two ways "Save a recovery phrase" takes (UX 19.5). */
-public enum class PhraseSavePath {
-    /** Show the words the device holds; the keys stay. */
-    KeepKeys,
-
-    /** The ADR-0074 key rotation with `phrase_saved`, new words at the end. */
-    Rotate,
-}
-
-/**
- * The way "Save a recovery phrase" goes, decided from the server's answer.
- * The rotation unless the server says none is needed AND this device holds
- * the phrase AND no rotation of this device may already have reached the
- * server (the words it holds may be about to be replaced).
- */
-public fun phraseSavePath(rotationNeeded: Boolean, holdsPhrase: Boolean, rotationInFlight: Boolean): PhraseSavePath =
-    if (!rotationNeeded && holdsPhrase && !rotationInFlight) PhraseSavePath.KeepKeys else PhraseSavePath.Rotate
-
-/** How `POST /account/phrase/saved` ended. */
+/** How "Save a recovery phrase" ended (19.5, amended 2026-11-26: no key
+ *  changes; the account's protection is published again with the phrase). */
 public sealed interface PhraseSavedOutcome {
-    /** The account is phrase-protected. */
+    /** The phrase is in the account's published protection. */
     public data object Saved : PhraseSavedOutcome
 
-    /** `409`: the phrase was in an email vault after all; the rotation path. */
-    public data object NeedsRotation : PhraseSavedOutcome
-
-    /** No live proof: the block appears, nothing was sent or nothing counted. */
+    /** No live proof: the block appears, nothing counted. */
     public data object ProofRequired : PhraseSavedOutcome
 
     /** Offline, or anything else: "We could not finish." with `Try again`. */
     public data object Failed : PhraseSavedOutcome
 }
 
-/** The server's refusal of a phrase saved with no key change. */
-public const val PHRASE_SAVE_NEEDS_ROTATION: String = "phrase-save-needs-rotation"
-
-private const val HTTP_CONFLICT_STATUS: Int = 409
-
-/** Read a failed `POST /account/phrase/saved`. */
-public fun phraseSavedOutcomeOf(err: Throwable): PhraseSavedOutcome = when {
-    isFreshAuthRequired(err) -> PhraseSavedOutcome.ProofRequired
-    err is AuthHttpError && err.status == HTTP_CONFLICT_STATUS && err.code == PHRASE_SAVE_NEEDS_ROTATION ->
-        PhraseSavedOutcome.NeedsRotation
-    else -> PhraseSavedOutcome.Failed
-}
-
-/** What [savePhraseKeepingKeys] needs from the device and the server. */
+/** What [savePhraseKeepingKeys] needs from the device and the directory. */
 public interface PhraseKeptPorts {
-    /** The live fresh-auth grant, or `null`. */
-    public fun freshGrant(): String?
+    /** A fresh-auth proof is live (17.1). */
+    public fun proofLive(): Boolean
 
-    /** This device's own action: the notice it causes is not asked here. */
-    public fun markOwnAction()
+    /** Publish the account's seal announcement with the phrase seal in it;
+     *  throws when it did not land. */
+    public suspend fun publishWithPhrase()
 
-    /** `POST /account/phrase/saved`; throws what the client threw. */
-    public suspend fun markSaved(freshGrant: String)
-
-    /** The account is phrase-protected: keep the flag and tell the screens. */
+    /** The account's phrase is saved: keep the flag and tell the screens. */
     public fun storeSaved()
 }
 
 /**
- * The last step of "Save a recovery phrase" with the keys kept, after the
- * three words passed. Nothing counts as saved before the server answered.
+ * The last step of "Save a recovery phrase", after the three words passed.
+ * Nothing counts as saved before the account's protection was published with
+ * the phrase in it: a person who leaves before then has saved nothing.
  */
 public suspend fun savePhraseKeepingKeys(ports: PhraseKeptPorts): PhraseSavedOutcome {
-    val grant = ports.freshGrant() ?: return PhraseSavedOutcome.ProofRequired
-    ports.markOwnAction()
+    if (!ports.proofLive()) return PhraseSavedOutcome.ProofRequired
     try {
-        ports.markSaved(grant)
+        ports.publishWithPhrase()
     } catch (cancel: kotlinx.coroutines.CancellationException) {
         throw cancel
-    } catch (cause: Throwable) {
-        return phraseSavedOutcomeOf(cause)
+    } catch (_: Throwable) {
+        return PhraseSavedOutcome.Failed
     }
     ports.storeSaved()
     return PhraseSavedOutcome.Saved
 }
 
-/**
- * The enrol sealing rule (ADR-0075 section 6): the vault is sealed and sent
- * with `enrol/finish` only while no phrase is saved. A phrase-protected
- * account never gets a vault (the server answers `409 phrase-saved`).
- */
-public fun enrolSealsVault(phraseSaved: Boolean): Boolean = !phraseSaved
-
-/** The "Protect your account" step of sign-up (section 19.1a), in the
- *  order drawn: email, passkey, phrase. */
-public data class ProtectStepRows(val email: Boolean, val passkey: Boolean, val phrase: Boolean)
+/** The "Protect your account" step (section 19.1a), in the order drawn:
+ *  email, authenticator, passkey, then the optional phrase. */
+public data class ProtectStepRows(
+    val email: Boolean,
+    val totp: Boolean,
+    val passkey: Boolean,
+    val phrase: Boolean,
+)
 
 /**
  * The rows of the protect step: the email row is absent when the server
- * cannot send mail or the account has no username (a guest); the passkey row
- * only where this device can use passkeys (and the account has a username:
- * a passkey is registered under it); the phrase row is always there.
+ * cannot send mail or the account has no username (a guest); the
+ * authenticator row is ALWAYS there (the server refuses to start without
+ * it); the passkey row only where this device can use passkeys (and the
+ * account has a username: a passkey is registered under it); the phrase row
+ * is always there, under `Optional`.
  */
 public fun protectStepRows(
     mailAvailable: Boolean,
@@ -308,6 +343,7 @@ public fun protectStepRows(
     passkeysSupported: Boolean = false,
 ): ProtectStepRows = ProtectStepRows(
     email = mailAvailable && hasUsername,
+    totp = true,
     passkey = passkeysSupported && hasUsername,
     phrase = true,
 )
@@ -315,62 +351,47 @@ public fun protectStepRows(
 /** Which rows of the step are done (each is marked `protect.done`). */
 public data class ProtectStepDone(
     val email: Boolean = false,
+    val totp: Boolean = false,
     val passkey: Boolean = false,
     val phrase: Boolean = false,
 ) {
-    val any: Boolean get() = email || passkey || phrase
+    /** One of the first three is done: the only thing `Continue` asks. */
+    val factor: Boolean get() = email || totp || passkey
+
+    val factors: AccountFactors get() = AccountFactors(email = email, totp = totp, passkey = passkey)
 }
 
 /**
- * The done marks. The email row is done when the account has a recovery
- * email that works (`enabled && (vault || phraseSaved)`, read from
- * [status]); the passkey row when one was created on the step ([here]) or
- * the account already has one ([hasPasskey]); the phrase row when a phrase
- * is saved.
+ * The done marks: a row is done when its flow finished on the step ([here])
+ * or the account already has it ([status], [hasPasskey], [phraseSaved]).
  */
 public fun protectStepDone(
     here: ProtectStepDone,
     status: RecoveryEmailStatus?,
     hasPasskey: Boolean = false,
+    phraseSaved: Boolean = false,
 ): ProtectStepDone = ProtectStepDone(
-    email = status != null && status.enabled && (status.vault || status.phraseSaved),
+    email = here.email || status?.enabled == true,
+    totp = here.totp || status?.totp == true,
     passkey = here.passkey || hasPasskey,
-    phrase = here.phrase || status?.phraseSaved == true,
+    phrase = here.phrase || phraseSaved,
 )
 
-/** How the step is left. */
-public enum class ProtectStepExit {
-    /** Nothing is done: the plain `Not now`, behind the confirmation. */
-    NotNow,
-
-    /** A row is done: the primary `Continue`, no confirmation. */
-    Continue,
-}
-
-public fun protectStepExit(done: ProtectStepDone): ProtectStepExit =
-    if (done.any) ProtectStepExit.Continue else ProtectStepExit.NotNow
-
-/** How long a dismissed no-protection banner stays away. */
-public const val PROTECT_BANNER_RETURN_MS: Long = 30L * 24L * 60L * 60L * 1000L
+/**
+ * `Continue` is the only way off the step and is enabled only when one of
+ * the first three rows is done; a saved phrase alone does not enable it.
+ * Disabled is drawn with `protect.continue_needs` under it, never hidden.
+ */
+public fun protectContinueEnabled(done: ProtectStepDone): Boolean = done.factor
 
 /**
- * The one banner of an unprotected account (Settings > Account, section
- * 19.1a): shown while the account has no way back in, unless it was
- * dismissed less than 30 days ago. A clock set back never hides it longer.
+ * The honest notice on the step (19.1a, 19.1d): once a second way in is done
+ * and while neither a phrase nor a passkey that keeps the chats is.
+ * [passkeyKeepsChats] is what the passkey created on the step turned out to
+ * be. It never blocks `Continue`.
  */
-public fun protectBannerVisible(
-    protection: AccountProtection,
-    dismissedAtMs: Long?,
-    nowMs: Long,
-    /** The account has at least one passkey: it has a way back in, so the
-     *  banner (and its 30-day return) is not shown. */
-    hasPasskey: Boolean = false,
-): Boolean {
-    if (protection != AccountProtection.None || hasPasskey) return false
-    if (dismissedAtMs == null) return true
-    val since = nowMs - dismissedAtMs
-    return since < 0L || since >= PROTECT_BANNER_RETURN_MS
-}
+public fun protectStepNoticeShown(done: ProtectStepDone, passkeyKeepsChats: Boolean): Boolean =
+    done.factor && !done.phrase && !passkeyKeepsChats
 
 /** Why a typed address cannot be sent, by the core's rule
  *  (`normalize_recovery_email`): trimmed, one `@`, both sides non-empty, 3
@@ -401,11 +422,12 @@ public fun normalizeEmailCode(typed: String): String? {
  * What this device remembers about the account's protection: plain flags
  * and times, no secret, never the address.
  *
- *   - **phrase saved**: the account is phrase-protected, as last learned at
- *     a landing (`GET /recovery-email`) or set when the phrase was saved on
- *     or brought to this device. Gates every three-word surface and `Show
- *     phrase`.
- *   - **banner dismissed at**: when the no-protection banner was closed.
+ *   - **phrase saved**: the account's published protection lists a phrase
+ *     seal, as last read from the account's own seal announcement or set
+ *     when the phrase was saved on or brought to this device. Gates every
+ *     three-word surface and `Show phrase`.
+ *   - **password-only dialog shown**: the once-per-device dialog of 19.1d
+ *     was closed here.
  *   - **protect step owed**: sign-up finished and the "Protect your account"
  *     step was not answered yet (a restart shows it again).
  */
@@ -417,11 +439,11 @@ public class AccountProtectionStore(private val storage: MarkerStorage) {
         if (saved) write(accountIdB64, PHRASE_PREFIX + accountIdB64, "1") else drop(PHRASE_PREFIX + accountIdB64)
     }
 
-    public fun bannerDismissedAtMs(accountIdB64: String): Long? =
-        read(BANNER_PREFIX + accountIdB64)?.toLongOrNull()
+    /** The once-per-device dialog of 19.1d was closed on this device. */
+    public fun passwordOnlyDialogShown(accountIdB64: String): Boolean = read(DIALOG_PREFIX + accountIdB64) != null
 
-    public fun dismissBanner(accountIdB64: String, nowMs: Long): Unit =
-        write(accountIdB64, BANNER_PREFIX + accountIdB64, nowMs.toString())
+    public fun markPasswordOnlyDialogShown(accountIdB64: String): Unit =
+        write(accountIdB64, DIALOG_PREFIX + accountIdB64, "1")
 
     /** The guest chose a username and its first password is not set yet. */
     public fun firstPasswordOwed(accountIdB64: String): Boolean = read(FIRST_PASSWORD_PREFIX + accountIdB64) != null
@@ -439,7 +461,7 @@ public class AccountProtectionStore(private val storage: MarkerStorage) {
     /** Everything kept for [accountIdB64] (Forget device, a wipe). */
     public fun clearAccount(accountIdB64: String) {
         drop(PHRASE_PREFIX + accountIdB64)
-        drop(BANNER_PREFIX + accountIdB64)
+        drop(DIALOG_PREFIX + accountIdB64)
         drop(STEP_PREFIX + accountIdB64)
         drop(FIRST_PASSWORD_PREFIX + accountIdB64)
     }
@@ -471,7 +493,7 @@ public class AccountProtectionStore(private val storage: MarkerStorage) {
     public companion object {
         public const val PREFS_NAME: String = "lakko-account-protection"
         private const val PHRASE_PREFIX: String = "phrase-saved:"
-        private const val BANNER_PREFIX: String = "banner-dismissed:"
+        private const val DIALOG_PREFIX: String = "password-only-dialog:"
         private const val STEP_PREFIX: String = "protect-step-owed:"
         private const val FIRST_PASSWORD_PREFIX: String = "first-password-owed:"
 

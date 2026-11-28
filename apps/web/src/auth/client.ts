@@ -54,6 +54,9 @@ import type {
   GenesisAttestResponse,
   KeyResetFinishRequest,
   KeyRotateFinishRequest,
+  KeyRotateStartRequest,
+  OwnedChannelsSecretResponse,
+  ResetFactorGrantResponse,
   SessionRefreshUpgradeRequest,
   KeyResetFinishResponse,
   KeyResetStartRequest,
@@ -135,6 +138,17 @@ export interface SignupResult {
   /** The fresh-auth grant the signup finish minted (the password was typed
    *  just now), or `null`. Memory only. */
   freshGrant: FreshGrant | null;
+  /** ADR-0101 section 7: the account's 32-byte server half `S` of the
+   *  owned-channels password lock, released by `/signup/finish`; `null` when
+   *  the answer carried none or a malformed one. A secret: never logged. */
+  ownedChannelsSecret: Uint8Array | null;
+}
+
+/** A reset factor grant (ADR-0073, amended 2026-11-26): the password and
+ *  one second factor were proven. Opaque; memory only. */
+export interface ResetFactorGrant {
+  readonly grant: string;
+  readonly expiresAtMs: number;
 }
 
 /** Options for `AuthClient.signup`. */
@@ -278,6 +292,10 @@ export const ACCOUNT_STATEMENT_KIND_RECALL_START = 5;
 export interface RecallPendingFinish {
   /** The request as last sent (or to be sent). Resent byte for byte. */
   request: RecallFinishRequest;
+  /** The OPAQUE export key of the NEW password this request registers
+   *  (64 bytes): the recall's seal announcement and owned-channels password
+   *  lock are made from it (ADR-0101). Zeroed by `dispose`. */
+  readonly exportKey: Uint8Array;
   /** The same request with the statement signed at the server's time. */
   readonly resign: (signAtMs: number) => RecallFinishRequest;
   /** Zero the old seed copy the signer holds. */
@@ -618,26 +636,6 @@ export class AuthClient {
     return base64UrlDecodeNoPad(resp.genesis_attest_b64);
   }
 
-  /**
-   * ADR-0101 section 7 - `POST /auth/channel-recovery/evaluate`: auth
-   * evaluates one blinded element (the channel recovery input of a channel
-   * id it never learns) under the account's per-account key. Bearer. Both
-   * elements are URL-safe base64 without padding on the wire; this takes and
-   * returns them as bytes. `503 channel-recovery-disabled` / `429
-   * too-many-attempts` surface as `AuthHttpError`.
-   */
-  async channelRecoveryEvaluate(sessionToken: string, blindedElement: Uint8Array): Promise<Uint8Array> {
-    if (sessionToken.length === 0) {
-      throw new AuthClientArgError("sessionToken must be non-empty");
-    }
-    const resp = await this.post<{ blinded_element: string }, { evaluation: string }>(
-      "/auth/channel-recovery/evaluate",
-      { blinded_element: base64UrlEncodeNoPad(blindedElement) },
-      sessionToken,
-    );
-    return base64UrlDecodeNoPad(resp.evaluation);
-  }
-
   // -----------------------------------------------------------------
   // TOTP — ADR-0018 factor (c), authenticator-code recovery
   // -----------------------------------------------------------------
@@ -655,13 +653,16 @@ export class AuthClient {
    * exists (the server refuses a silent swap); a 503 means the
    * server has TOTP disabled (`LAKKO_TOTP_ENC_KEY` unset).
    */
-  async totpEnrollStart(sessionToken: string): Promise<TotpEnrollStartResult> {
+  async totpEnrollStart(sessionToken: string, freshGrant: string): Promise<TotpEnrollStartResult> {
     if (sessionToken.length === 0) {
       throw new AuthClientArgError("sessionToken must be non-empty");
     }
-    const resp = await this.post<undefined, TotpEnrollStartResponse>(
+    // ADR-0073, amended 2026-11-26: adding a factor needs the fresh-auth
+    // grant (`403 fresh-auth-required` without one), since the authenticator
+    // is one of the reset's second factors.
+    const resp = await this.post<{ fresh_grant: string }, TotpEnrollStartResponse>(
       "/totp/enroll/start",
-      undefined,
+      { fresh_grant: freshGrant },
       sessionToken,
     );
     return { otpauthUri: resp.otpauth_uri, secretB32: resp.secret_b32 };
@@ -677,7 +678,7 @@ export class AuthClient {
    * entry / clock skew beyond ±30 s); the pending enrollment stays
    * pending, so the user can simply retry with the next code.
    */
-  async totpEnrollFinish(sessionToken: string, code: string): Promise<void> {
+  async totpEnrollFinish(sessionToken: string, code: string, freshGrant: string): Promise<void> {
     if (sessionToken.length === 0) {
       throw new AuthClientArgError("sessionToken must be non-empty");
     }
@@ -685,9 +686,9 @@ export class AuthClient {
     if (normalized === null) {
       throw new AuthClientArgError("code must be 6 digits");
     }
-    await this.post<TotpEnrollFinishRequest, unknown>(
+    await this.post<TotpEnrollFinishRequest & { fresh_grant: string }, unknown>(
       "/totp/enroll/finish",
-      { code: normalized },
+      { code: normalized, fresh_grant: freshGrant },
       sessionToken,
     );
   }
@@ -857,6 +858,7 @@ export class AuthClient {
         ...(recoveryPhrase !== null ? { recoveryPhrase: recoveryPhrase.phrase } : {}),
         session: sessionPairOf(finishResp),
         freshGrant: freshGrantOf(finishResp),
+        ownedChannelsSecret: serverHalfOf(finishResp.owned_channels_secret),
       };
     }
   }
@@ -1134,17 +1136,18 @@ export class AuthClient {
    * pair is already superseded: install the returned one before any other
    * request.
    *
-   * `freshGrant` is the fresh-auth grant (`fresh-auth.ts`), sent on
-   * both calls; one grant serves both, and a successful finish spends it.
+   * `resetGrant` is the reset factor grant (ADR-0073, amended 2026-11-26:
+   * the password and one second factor), sent on both calls; one grant
+   * serves both, and a successful finish spends it.
    *
    * Throws `AuthHttpError` (`401` no session or superseded,
-   * `403 fresh-auth-required` no usable grant, `400` malformed,
+   * `403 reset-factor-required` no usable grant, `400` malformed,
    * `429 too-many-attempts` with `retryAfter`, `503 rate-limiter-unavailable`
    * or `key-reset-disabled`) or `AuthNetworkError`.
    */
   async resetAccountKeys(
     sessionToken: string,
-    freshGrant: string,
+    resetGrant: string,
     seed: Uint8Array,
     newSignaturePubkey: Uint8Array,
     /** The account's 16-byte id, which the identity proof (F3) names. */
@@ -1153,8 +1156,8 @@ export class AuthClient {
     if (sessionToken.length === 0) {
       throw new AuthClientArgError("sessionToken must be non-empty");
     }
-    if (freshGrant.length === 0) {
-      throw new AuthClientArgError("freshGrant must be non-empty");
+    if (resetGrant.length === 0) {
+      throw new AuthClientArgError("resetGrant must be non-empty");
     }
     if (seed.length === 0) {
       throw new AuthClientArgError("seed must be non-empty");
@@ -1172,14 +1175,14 @@ export class AuthClient {
     const reg = wasm.OpaqueRegister.startRecovery(seed);
     const start = await this.post<KeyResetStartRequest, KeyResetStartResponse>(
       "/account/keys/reset/start",
-      { fresh_grant: freshGrant, recovery_request: reg.requestB64 },
+      { reset_grant: resetGrant, recovery_request: reg.requestB64 },
       sessionToken,
     );
     const upload = reg.finish(seed, start.recovery_response).uploadB64;
     const finish = await this.post<KeyResetFinishRequest, KeyResetFinishResponse>(
       "/account/keys/reset/finish",
       {
-        fresh_grant: freshGrant,
+        reset_grant: resetGrant,
         recovery_upload: upload,
         new_signature_pubkey_b64: base64UrlEncodeNoPad(newSignaturePubkey),
         identity_proof_b64: identityProof,
@@ -1199,6 +1202,117 @@ export class AuthClient {
       attestationB64Url: finish.key_reset_attest_b64,
       session: sessionPairOf(finish),
     };
+  }
+
+  // -----------------------------------------------------------------
+  // The reset's second factor (ADR-0073, amended 2026-11-26)
+  // -----------------------------------------------------------------
+  //
+  // Each route is bearer, first requires a fresh-auth grant minted by a
+  // PASSWORD sign-in (`403 fresh-auth-required` otherwise, nothing charged),
+  // and answers a reset factor grant, one `401 {"error":"factor-refused"}`
+  // (a wrong code, a decoy or spent challenge, no such factor on the
+  // account) or `429` with `retry_after_secs`.
+
+  /** `POST /account/keys/reset/factor/totp {fresh_grant, code}`. */
+  async resetFactorTotp(sessionToken: string, freshGrant: string, code: string): Promise<ResetFactorGrant> {
+    const normalized = normalizeTotpCode(code);
+    if (normalized === null) throw new AuthClientArgError("code must be 6 digits");
+    return resetFactorGrantOf(
+      "/account/keys/reset/factor/totp",
+      await this.post<{ fresh_grant: string; code: string }, ResetFactorGrantResponse>(
+        "/account/keys/reset/factor/totp",
+        { fresh_grant: freshGrant, code: normalized },
+        sessionToken,
+      ),
+    );
+  }
+
+  /** `POST /account/keys/reset/factor/email/start`. The same answer whether
+   *  or not the typed address is the account's; a letter leaves only for a
+   *  match. `handle` is URL-safe base64 (no pad) of the login handle. */
+  async resetFactorEmailStart(args: {
+    readonly sessionToken: string;
+    readonly freshGrant: string;
+    readonly handle: string;
+    readonly address: string;
+    readonly lang: string;
+  }): Promise<{ readonly challengeId: string; readonly resendAfterSecs: number; readonly expiresInSecs: number }> {
+    const endpoint = "/account/keys/reset/factor/email/start";
+    const res = await this.post<
+      { fresh_grant: string; handle: string; address: string; lang: string },
+      { challenge_id?: unknown; resend_after_secs?: unknown; expires_in_secs?: unknown }
+    >(
+      endpoint,
+      { fresh_grant: args.freshGrant, handle: args.handle, address: args.address, lang: args.lang },
+      args.sessionToken,
+    );
+    if (typeof res.challenge_id !== "string" || res.challenge_id.length === 0) {
+      throw new AuthHttpError(200, endpoint, "challenge_id is missing");
+    }
+    const secs = (v: unknown): number =>
+      typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.ceil(v)) : 0;
+    return {
+      challengeId: res.challenge_id,
+      resendAfterSecs: secs(res.resend_after_secs),
+      expiresInSecs: secs(res.expires_in_secs),
+    };
+  }
+
+  /** `POST /account/keys/reset/factor/email/finish {fresh_grant,
+   *  challenge_id, code}`. Five tries per code. */
+  async resetFactorEmailFinish(args: {
+    readonly sessionToken: string;
+    readonly freshGrant: string;
+    readonly challengeId: string;
+    readonly code: string;
+  }): Promise<ResetFactorGrant> {
+    const endpoint = "/account/keys/reset/factor/email/finish";
+    return resetFactorGrantOf(
+      endpoint,
+      await this.post<
+        { fresh_grant: string; challenge_id: string; code: string },
+        ResetFactorGrantResponse
+      >(
+        endpoint,
+        { fresh_grant: args.freshGrant, challenge_id: args.challengeId, code: args.code },
+        args.sessionToken,
+      ),
+    );
+  }
+
+  /** `POST /account/keys/reset/factor/passkey {fresh_grant}`: consumes the
+   *  action grant an assertion for the reset-keys action just wrote
+   *  (`WebauthnClient.assertAction` with `actionHashForResetKeys`). */
+  async resetFactorPasskey(sessionToken: string, freshGrant: string): Promise<ResetFactorGrant> {
+    const endpoint = "/account/keys/reset/factor/passkey";
+    return resetFactorGrantOf(
+      endpoint,
+      await this.post<{ fresh_grant: string }, ResetFactorGrantResponse>(
+        endpoint,
+        { fresh_grant: freshGrant },
+        sessionToken,
+      ),
+    );
+  }
+
+  /**
+   * `POST /account/owned-channels-secret {reset_grant}` (ADR-0101 section 7):
+   * the account's server half `S` of the owned-channels password lock,
+   * released against a live reset factor grant, which it does not spend.
+   * `403 reset-factor-required` without one, `429 too-many-attempts` past
+   * ten a day. A secret: never logged, never stored in the clear.
+   */
+  async ownedChannelsSecret(sessionToken: string, resetGrant: string): Promise<Uint8Array> {
+    const endpoint = "/account/owned-channels-secret";
+    const res = await this.post<{ reset_grant: string }, OwnedChannelsSecretResponse>(
+      endpoint,
+      { reset_grant: resetGrant },
+      sessionToken,
+    );
+    const secret = serverHalfOf(res.owned_channels_secret);
+    if (secret === null) throw new AuthHttpError(200, endpoint, "owned_channels_secret is not 32 bytes");
+    return secret;
   }
 
   /**
@@ -1232,9 +1346,6 @@ export class AuthClient {
     readonly proof: Uint8Array;
     /** Devices whose removal raced the commit (at most 8). */
     readonly revokeDeviceIds: readonly Uint8Array[];
-    /** ADR-0075 section 3: the person is saving a recovery phrase; the
-     *  account becomes phrase-protected with this rotation. */
-    readonly phraseSaved?: boolean;
   }): Promise<KeyResetResult> {
     if (args.sessionToken.length === 0) throw new AuthClientArgError("sessionToken must be non-empty");
     if (args.freshGrant.length === 0) throw new AuthClientArgError("freshGrant must be non-empty");
@@ -1251,7 +1362,7 @@ export class AuthClient {
     const wasm = await loadWasm();
     const identityProof = identityProofOfSeedB64(wasm, args.newSeed, args.accountId, args.newSignaturePubkey);
     const reg = wasm.OpaqueRegister.startRecovery(args.newSeed);
-    const start = await this.post<KeyResetStartRequest, KeyResetStartResponse>(
+    const start = await this.post<KeyRotateStartRequest, KeyResetStartResponse>(
       "/account/keys/rotate/start",
       { fresh_grant: args.freshGrant, recovery_request: reg.requestB64 },
       args.sessionToken,
@@ -1266,7 +1377,6 @@ export class AuthClient {
         identity_proof_b64: identityProof,
         supersession_proof_b64: base64UrlEncodeNoPad(args.proof),
         revoke_device_ids_b64: args.revokeDeviceIds.map((id) => base64UrlEncodeNoPad(id)),
-        ...(args.phraseSaved === true ? { phrase_saved: true } : {}),
       },
       args.sessionToken,
     );
@@ -1474,7 +1584,9 @@ export class AuthClient {
       // more is sent; the attempt was counted at start.
       throw new RecallWrongPasswordError();
     }
-    const passwordUpload = passwordReg.finish(args.newPassword, start.password_response).uploadB64;
+    const passwordOut = passwordReg.finish(args.newPassword, start.password_response);
+    const passwordUpload = passwordOut.uploadB64;
+    const newExportKey = passwordOut.exportKey;
     const recoveryUpload = recoveryReg.finish(args.newSeed, start.recovery_response).uploadB64;
     const serverNonce = base64UrlDecodeNoPad(start.server_nonce_b64);
     const base = {
@@ -1512,7 +1624,11 @@ export class AuthClient {
     return {
       request: { ...base, statement_b64: sign(null) },
       resign: (signAtMs) => ({ ...base, statement_b64: sign(signAtMs) }),
-      dispose: () => oldAccountSeed.fill(0),
+      exportKey: newExportKey,
+      dispose: () => {
+        oldAccountSeed.fill(0);
+        newExportKey.fill(0);
+      },
     };
   }
 
@@ -1874,12 +1990,7 @@ export class AuthClient {
     change?: {
       readonly freshGrant: string;
       readonly previousHandle: string;
-      readonly recoveryEmail?: {
-        readonly address: string;
-        /** Standard base64; both absent when a phrase is saved. */
-        readonly vaultSalt?: string;
-        readonly sealedEntropy?: string;
-      };
+      readonly recoveryEmail?: { readonly address: string };
     },
     /** ADR-0097: a held supporter place (`x-lakko-anon-token` header
      *  value) for a first bind past the beta cap. */
@@ -1895,12 +2006,7 @@ export class AuthClient {
       body.fresh_grant = change.freshGrant;
       body.previous_handle = change.previousHandle;
       if (change.recoveryEmail !== undefined) {
-        body.recovery_email = {
-          address: change.recoveryEmail.address,
-          ...(change.recoveryEmail.vaultSalt !== undefined && change.recoveryEmail.sealedEntropy !== undefined
-            ? { vault_salt: change.recoveryEmail.vaultSalt, sealed_entropy: change.recoveryEmail.sealedEntropy }
-            : {}),
-        };
+        body.recovery_email = { address: change.recoveryEmail.address };
       }
     }
     await this.request<LoginHandlePutRequest, LoginHandlePutResponse>(
@@ -2093,4 +2199,26 @@ async function safeReadBody(response: Response): Promise<string> {
   } catch {
     return "<unreadable body>";
   }
+}
+
+/** The 32-byte owned-channels server half of an answer, or `null`. */
+function serverHalfOf(value: unknown): Uint8Array | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  try {
+    const bytes = base64UrlDecodeNoPad(value);
+    return bytes.length === 32 ? bytes : null;
+  } catch {
+    return null;
+  }
+}
+
+function resetFactorGrantOf(endpoint: string, res: ResetFactorGrantResponse): ResetFactorGrant {
+  if (typeof res.reset_grant !== "string" || res.reset_grant.length === 0) {
+    throw new AuthHttpError(200, endpoint, "reset_grant is missing");
+  }
+  const expiresAtMs = res.reset_grant_expires_at_ms;
+  if (typeof expiresAtMs !== "number" || !Number.isFinite(expiresAtMs) || expiresAtMs <= 0) {
+    throw new AuthHttpError(200, endpoint, "reset_grant_expires_at_ms is missing");
+  }
+  return { grant: res.reset_grant, expiresAtMs };
 }

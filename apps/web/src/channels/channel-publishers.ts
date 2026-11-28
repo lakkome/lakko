@@ -19,6 +19,7 @@
 import { createSignal } from "solid-js";
 
 import { loadWasm } from "../wasm";
+import { noteOwnedChannelsChanged } from "./owned/owned-wake";
 import { base64Encode } from "../auth/account-id";
 import { DiscoveryClient } from "../discovery/client";
 import { sessionTokens } from "../auth/session-token-provider";
@@ -505,6 +506,8 @@ export async function afterPublisherRemoved(identity: WasmIdentity, idHex: strin
         ? [...r.admissionSeeds, { version: next, seedB64: bytesToB64(wasm.generateChannelAdmissionSeed()) }]
         : r.admissionSeeds,
   }));
+  // ADR-0101 section 7 item 6: a minted admission seed is listed.
+  noteOwnedChannelsChanged();
 }
 
 /**

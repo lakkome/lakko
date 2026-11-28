@@ -174,6 +174,14 @@ public object StateBundle {
     )
 
     /** The bundle; `v` is always [VERSION]. */
+    /** ADR-0101 alignment (2026-11-27): the highest seal-announcement number
+     *  this device keeps for a contact (`sealFloors`). */
+    public data class CarriedSealFloor(val accountIdHex: String, val seq: Long)
+
+    /** ADR-0101 alignment (2026-11-27): a contact's key whose one-to-one is
+     *  closed because the account started over (`startedOver`). */
+    public data class CarriedStartedOver(val accountIdHex: String, val oldKeyB64: String, val atMs: Long)
+
     public data class Bundle(
         val contacts: List<CarriedContact>,
         val pins: List<CarriedPin>,
@@ -195,6 +203,11 @@ public object StateBundle {
          *  when non-empty; at most [MAX_DEVICE_CARDS], one per leaf key,
          *  ascending by key bytes. */
         val deviceCards: List<CarriedDeviceCard> = emptyList(),
+        /** Additive (absent when empty): per contact the highest seal
+         *  announcement number kept. */
+        val sealFloors: List<CarriedSealFloor> = emptyList(),
+        /** Additive (absent when empty): the started-over records. */
+        val startedOver: List<CarriedStartedOver> = emptyList(),
     )
 
     /** The one bundle version this build writes and reads (flag day: a
@@ -205,6 +218,10 @@ public object StateBundle {
      *  (`MAX_LEAVES_PER_ACCOUNT`), and the envelope bounds
      *  (`lakko-contacts::device_card`). */
     public const val MAX_DEVICE_CARDS: Int = 8
+
+    /** Bounds of the two ADR-0101 arrays (chosen, not measured). */
+    public const val MAX_SEAL_FLOORS: Int = 2000
+    public const val MAX_STARTED_OVER: Int = 2000
     private const val DEVICE_CARD_ENVELOPE_MIN_LEN: Int = 44
     private const val DEVICE_CARD_ENVELOPE_MAX_LEN: Int = 270
 
@@ -376,6 +393,37 @@ public object StateBundle {
                     }
                 },
             )
+            if (bundle.sealFloors.isNotEmpty()) {
+                put(
+                    "sealFloors",
+                    buildJsonArray {
+                        for (f in bundle.sealFloors) {
+                            add(
+                                buildJsonObject {
+                                    put("accountIdHex", f.accountIdHex)
+                                    put("seq", f.seq)
+                                },
+                            )
+                        }
+                    },
+                )
+            }
+            if (bundle.startedOver.isNotEmpty()) {
+                put(
+                    "startedOver",
+                    buildJsonArray {
+                        for (o in bundle.startedOver) {
+                            add(
+                                buildJsonObject {
+                                    put("accountIdHex", o.accountIdHex)
+                                    put("oldKeyB64", o.oldKeyB64)
+                                    put("atMs", o.atMs)
+                                },
+                            )
+                        }
+                    },
+                )
+            }
             if (bundle.deviceCards.isNotEmpty()) {
                 put(
                     "deviceCards",
@@ -466,8 +514,125 @@ public object StateBundle {
         } else {
             decodeDeviceCards(deviceCardsEl as? JsonArray ?: return null) ?: return null
         }
-        return Bundle(contacts, pins, groups, own, groupNames, profiles, pending, channelSeeds, deviceCards)
+        val sealFloors = when (val el = root["sealFloors"]) {
+            null -> emptyList()
+            else -> decodeSealFloors(el as? JsonArray ?: return null) ?: return null
+        }
+        val startedOver = when (val el = root["startedOver"]) {
+            null -> emptyList()
+            else -> decodeStartedOver(el as? JsonArray ?: return null) ?: return null
+        }
+        return Bundle(contacts, pins, groups, own, groupNames, profiles, pending, channelSeeds, deviceCards, sealFloors, startedOver)
     }
+
+    /** `sealFloors`, fail closed: a malformed entry or an account twice
+     *  refuses the bundle. */
+    private fun decodeSealFloors(arr: JsonArray): List<CarriedSealFloor>? {
+        if (arr.size > MAX_SEAL_FLOORS) return null
+        val out = ArrayList<CarriedSealFloor>(arr.size)
+        val seen = HashSet<String>()
+        for (el in arr) {
+            val r = el as? JsonObject ?: return null
+            val id = r.string("accountIdHex") ?: return null
+            if (!ACCOUNT_ID_HEX.matches(id) || !seen.add(id)) return null
+            val seq = r.integer("seq") ?: return null
+            if (seq < 0L) return null
+            out += CarriedSealFloor(id, seq)
+        }
+        return out
+    }
+
+    /** `startedOver`, fail closed: a malformed entry or a (account, key)
+     *  pair twice refuses the bundle. */
+    private fun decodeStartedOver(arr: JsonArray): List<CarriedStartedOver>? {
+        if (arr.size > MAX_STARTED_OVER) return null
+        val out = ArrayList<CarriedStartedOver>(arr.size)
+        val seen = HashSet<String>()
+        for (el in arr) {
+            val r = el as? JsonObject ?: return null
+            val id = r.string("accountIdHex") ?: return null
+            if (!ACCOUNT_ID_HEX.matches(id)) return null
+            val key = r.string("oldKeyB64") ?: return null
+            standardBase64OfLength(key, KEY_LEN) ?: return null
+            val at = r.integer("atMs") ?: return null
+            if (at < 0L || !seen.add("$id|$key")) return null
+            out += CarriedStartedOver(id, key, at)
+        }
+        return out
+    }
+
+    /**
+     * The two ADR-0101 arrays from the reset ledger [rows] (contact account
+     * id, standard base64 -> row): each contact's seal floor above 0, and
+     * every started-over key. Ascending by account id, then key; bounded.
+     */
+    internal fun carriedResetFacts(
+        rows: Map<String, me.lakko.app.contacts.ResetLedgerRow>,
+    ): Pair<List<CarriedSealFloor>, List<CarriedStartedOver>> {
+        val floors = ArrayList<CarriedSealFloor>()
+        val over = ArrayList<CarriedStartedOver>()
+        for ((accountB64, row) in rows) {
+            val idHex = try {
+                hexOf(Base64.getDecoder().decode(accountB64))
+            } catch (_: Throwable) {
+                continue
+            }
+            if (!ACCOUNT_ID_HEX.matches(idHex)) continue
+            if (row.sealSeqFloor > 0L) floors += CarriedSealFloor(idHex, row.sealSeqFloor)
+            for (key in row.startedOverKeysB64.distinct()) {
+                if (standardBase64OfLength(key, KEY_LEN) == null) continue
+                val at = row.startedOver?.takeIf { it.oldKeyB64 == key }?.signedAtMs ?: 0L
+                over += CarriedStartedOver(idHex, key, at.coerceAtLeast(0L))
+            }
+        }
+        return floors.sortedBy { it.accountIdHex }.take(MAX_SEAL_FLOORS) to
+            over.sortedWith(compareBy({ it.accountIdHex }, { it.oldKeyB64 })).take(MAX_STARTED_OVER)
+    }
+
+    /**
+     * Receiving side: the higher floor per contact, and every started-over
+     * key this device does not record yet (its old one-to-one closes). Rows
+     * of [ledger] under [owner]. Returns how many rows changed.
+     */
+    internal fun applyResetFacts(
+        ledger: me.lakko.app.contacts.ResetLedgerStore,
+        owner: String,
+        floors: List<CarriedSealFloor>,
+        startedOver: List<CarriedStartedOver>,
+    ): Int {
+        if (floors.isEmpty() && startedOver.isEmpty()) return 0
+        val rows = ledger.loadAll(owner).toMutableMap()
+        val changed = HashSet<String>()
+        for (f in floors) {
+            val account = bytesOfHex(f.accountIdHex)?.let { Base64.getEncoder().encodeToString(it) } ?: continue
+            val row = rows[account] ?: me.lakko.app.contacts.ResetLedgerRow()
+            if (f.seq > row.sealSeqFloor) {
+                rows[account] = row.copy(sealSeqFloor = f.seq)
+                changed += account
+            }
+        }
+        for (o in startedOver) {
+            val account = bytesOfHex(o.accountIdHex)?.let { Base64.getEncoder().encodeToString(it) } ?: continue
+            val row = rows[account] ?: me.lakko.app.contacts.ResetLedgerRow()
+            if (o.oldKeyB64 !in row.startedOverKeysB64) {
+                rows[account] = row.copy(startedOverKeysB64 = row.startedOverKeysB64 + o.oldKeyB64)
+                changed += account
+            }
+        }
+        for (account in changed) {
+            try {
+                ledger.save(owner, account, rows.getValue(account))
+            } catch (_: Throwable) {
+                // Read again from the contact's own row at the next check.
+            }
+        }
+        return changed.size
+    }
+
+    /** Told after a bundle changed the reset ledger (the contacts layer
+     *  re-reads the started-over keys). Set by the session shell. */
+    @Volatile
+    public var resetFactsApplied: (() -> Unit)? = null
 
     /** ADR-0080 amendment: whether one carried device-card entry is
      *  well-formed (a 32-byte key, an envelope of 44 to 270 bytes); the key
@@ -842,7 +1007,15 @@ public object StateBundle {
             android.util.Log.w("StateBundle", "channel seeds not read: ${cause.javaClass.simpleName}")
             emptyMap()
         }
-        return withChannelSeeds(fitted, seeds)
+        // ADR-0101 alignment: per contact the announcement floor and the
+        // started-over records (small, after the size cap).
+        val (floors, over) = try {
+            carriedResetFacts(me.lakko.app.contacts.SharedPrefsResetLedgerStore(context).loadAll(owner))
+        } catch (cause: Throwable) {
+            android.util.Log.w("StateBundle", "reset facts not read: ${cause.javaClass.simpleName}")
+            emptyList<CarriedSealFloor>() to emptyList()
+        }
+        return withChannelSeeds(fitted, seeds).copy(sealFloors = floors, startedOver = over)
     }
 
     /**
@@ -1739,6 +1912,19 @@ public object StateBundle {
             } catch (cause: Throwable) {
                 android.util.Log.w("StateBundle", "channel seeds not stored: ${cause.javaClass.simpleName}")
                 0
+            }
+        }
+        val resetFacts = try {
+            applyResetFacts(me.lakko.app.contacts.SharedPrefsResetLedgerStore(context), owner, bundle.sealFloors, bundle.startedOver)
+        } catch (cause: Throwable) {
+            android.util.Log.w("StateBundle", "reset facts not stored: ${cause.javaClass.simpleName}")
+            0
+        }
+        if (resetFacts > 0) {
+            try {
+                resetFactsApplied?.invoke()
+            } catch (_: Throwable) {
+                // The next identity check reads the ledger anyway.
             }
         }
         return Applied(

@@ -51,10 +51,19 @@ public struct LogVerifyResult: Equatable {
     /// The `/latest` entry's `is_reset` marker when a latest entry was
     /// read (`.confirmed` / `.mismatch`); `nil` otherwise.
     public let isReset: Bool?
+    /// ADR-0101 section 10 - on `.confirmed` only: the gated root the
+    /// inclusion was proven under and the index of the account's latest
+    /// leaf (the reset's leaf, when the entry is a reset). The seal check
+    /// proves the previous announcement under the same root, below that
+    /// index.
+    public let root: SignedRoot?
+    public let leafIndex: UInt64?
 
-    public init(status: LogVerifyStatus, isReset: Bool?) {
+    public init(status: LogVerifyStatus, isReset: Bool?, root: SignedRoot? = nil, leafIndex: UInt64? = nil) {
         self.status = status
         self.isReset = isReset
+        self.root = root
+        self.leafIndex = leafIndex
     }
 }
 
@@ -226,6 +235,10 @@ public struct TransparencyVerify {
     /// (or `nil` to simulate "key unobtainable"). Returning `nil` means the
     /// key could not be obtained; a served attestation then fails closed.
     private let genesisAttestKey: (() async -> Data?)?
+    /// Announcement-inclusion override (TEST SEAM ONLY) - ADR-0101 section
+    /// 10. When supplied it replaces the real `verifySealAnnouncementInLog`
+    /// call: a real Merkle proof needs the Rust log builder.
+    private let verifyAnnouncement: ((AnnouncementLeaf, InclusionProof, UInt64, SignedRoot) -> Bool)?
 
     /// Build a verifier from the build-time config (production path) or
     /// from injected dependencies (tests).
@@ -262,8 +275,10 @@ public struct TransparencyVerify {
         verifyInclusion: ((InclusionArgs) throws -> Void)? = nil,
         verifyChain: ((ChainArgs) throws -> Data)? = nil,
         verifyWitness: ((WitnessArgs) throws -> Void)? = nil,
-        genesisAttestKey: (() async -> Data?)? = nil
+        genesisAttestKey: (() async -> Data?)? = nil,
+        verifyAnnouncement: ((AnnouncementLeaf, InclusionProof, UInt64, SignedRoot) -> Bool)? = nil
     ) {
+        self.verifyAnnouncement = verifyAnnouncement
         self.client = client
         self.operatorKey = operatorKey
         self.witnessKeys = witnessKeys
@@ -511,7 +526,7 @@ public struct TransparencyVerify {
                     return LogVerifyResult(status: .mismatch, isReset: isReset)
                 }
             }
-            return LogVerifyResult(status: .confirmed, isReset: isReset)
+            return LogVerifyResult(status: .confirmed, isReset: isReset, root: root, leafIndex: latest.idx)
         } catch {
             // A network fault, a non-404 HTTP fault, or a malformed body
             // — the log is effectively unusable for this check.
@@ -686,6 +701,63 @@ public struct TransparencyVerify {
             // `.unreachable` (the caller does not block on it); the
             // standalone supersession/pin gate is primary.
             return RotationChainResult(status: .unreachable, isReset: nil, version: nil)
+        }
+    }
+
+    /// ADR-0101 section 10, rule 4, its key-log half: the previous
+    /// generation's announcement a peer checked the reset seal against is in
+    /// the log, for this account and generation, at an index BELOW the
+    /// reset's leaf, under the same gated root the identity check proved
+    /// the reset's leaf with.
+    ///
+    /// - Parameter identity: the answer of
+    ///   ``verifyIdentityInLog(accountId:publishedSignaturePubkey:)`` for the
+    ///   fetched key. Anything but `.confirmed` with its root and leaf index
+    ///   has nothing to prove against.
+    /// - Returns: `.proven`, `.notProven` (the log serves no such
+    ///   announcement, another one, or the proof does not hold), or
+    ///   `.unreachable`. With the integration off the answer is
+    ///   `.notProven`, which the rule ignores for a build with no log.
+    ///   Never throws.
+    public func verifySealAnnouncement(
+        accountId: Data,
+        generation: UInt64,
+        seq: UInt64,
+        announcement: Data,
+        identity: LogVerifyResult
+    ) async -> FfiSealLog {
+        guard let client, let operatorKey else { return .notProven }
+        guard identity.status == .confirmed, let root = identity.root, let resetLeaf = identity.leafIndex else {
+            return identity.status == .unreachable ? .unreachable : .notProven
+        }
+        do {
+            let accountKey = transparencyAccountKey(accountId: accountId)
+            guard let leaf = try await client.fetchAnnouncement(usernameHash: accountKey, generation: generation),
+                  leaf.keyGeneration == generation, leaf.seq == seq, leaf.announcement == announcement else {
+                return .notProven
+            }
+            let proof = try await client.fetchProof(idx: leaf.idx)
+            if let seam = verifyAnnouncement {
+                return seam(leaf, proof, resetLeaf, root) ? .proven : .notProven
+            }
+            let proven = try verifySealAnnouncementInLog(
+                operatorPubkey: operatorKey,
+                treeRoot: root.treeRoot,
+                logSize: root.logSize,
+                timestampUnix: root.timestampUnix,
+                rootSignature: root.signature,
+                leafIndex: leaf.idx,
+                auditPath: proof.auditPath,
+                resetLeafIndex: resetLeaf,
+                accountId: accountId,
+                keyGeneration: generation,
+                seq: seq,
+                announcement: announcement)
+            return proven ? .proven : .notProven
+        } catch is TransparencyClientError {
+            return .unreachable
+        } catch {
+            return .notProven
         }
     }
 

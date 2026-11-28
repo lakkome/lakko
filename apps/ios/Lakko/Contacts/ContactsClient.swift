@@ -201,12 +201,22 @@ public final class ContactsClient {
                 throw refused
             case .noVerdict:
                 throw IdentityCheckInconclusive(accountIdB64: accountIdB64)
-            case .accepted:
+            case .unsealed:
+                // ADR-0101 section 11: a new account under the same
+                // username. Nothing was re-pinned and nothing moves; the
+                // caller does not act on the fetched keys.
+                throw ContactStartedOver(accountIdB64: accountIdB64, newKeyB64: bundle.signaturePubkey)
+            case .sealed:
                 // Accepted and re-pinned: the log check already ran inside
                 // the verdict.
                 return
             }
         }
+
+        // ADR-0101 section 10: the key is one this device trusts (unchanged,
+        // or re-pinned by a proven rotation). Its newest announcement raises
+        // the floor a later reset is checked against.
+        recordSealFloor(accountIdB64: accountIdB64, bundle: bundle)
 
         // ADR-0074 section 3.5 — gate 1 passed. When the published key
         // differs from the pin taken BEFORE it ran, the gate accepted the
@@ -278,14 +288,34 @@ public final class ContactsClient {
         let logResult = await transparencyVerify.verifyIdentityInLog(
             accountId: accountId, publishedSignaturePubkey: servedPubkey)
         let log = LogCheck(status: logResult.status, isReset: logResult.isReset)
+        // Rule 4 (ADR-0101 section 10): the reset seal against the previous
+        // generation's announcement, under the key this device HOLDS.
+        let seal = await checkSeal(
+            accountId: accountId, bundle: bundle, heldKeyB64: heldKeyB64,
+            acceptedGeneration: acceptedGeneration, attest: attest, logResult: logResult)
         let verdict = resetVerdict(ResetVerdictInput(
             heldKeyB64: heldKeyB64,
             acceptedGeneration: acceptedGeneration,
             fetchedKeyB64: bundle.signaturePubkey,
             bundleGeneration: bundle.keyGeneration,
             attest: attest,
-            log: log))
-        guard case .accepted(let keyGeneration, let signedAtMs) = verdict else { return verdict }
+            log: log,
+            seal: seal))
+        if case .unsealed(let keyGeneration, let signedAtMs) = verdict {
+            // No identifiers: the refusal code says why rule 4 did not hold.
+            NSLog("ADR-0101: a contact's key reset carries no valid seal (%@); nothing is moved",
+                  seal.refusal ?? "log")
+            let noted = pinStore.noteStartedOver(
+                accountIdB64: accountIdB64, heldKeyB64: heldKeyB64, newKeyB64: bundle.signaturePubkey,
+                keyGeneration: keyGeneration, signedAtMs: signedAtMs)
+            if noted == .recorded {
+                StartedOverEvents.notify(accountIdB64: accountIdB64)
+            }
+            return verdict
+        }
+        guard case .sealed(let keyGeneration, let signedAtMs, let announcementSeq) = verdict else {
+            return verdict
+        }
         // ADR-0074 section 3.5 — a reset supersedes every key the account
         // held before it, the proven predecessors of the held key included.
         let retiredPredecessors = predecessors.load().predecessors(of: heldKeyB64)
@@ -296,7 +326,8 @@ public final class ContactsClient {
                 newKeyB64: bundle.signaturePubkey,
                 keyGeneration: keyGeneration,
                 signedAtMs: signedAtMs,
-                nowMs: Int64(Date().timeIntervalSince1970 * 1000)),
+                nowMs: Int64(Date().timeIntervalSince1970 * 1000),
+                announcementSeq: announcementSeq),
             retiredPredecessorsB64: retiredPredecessors)
         if written == .stale || written == .noAccount { return .refused(.unconfirmed) }
         predecessors.forgetPerson(currentKeyB64: heldKeyB64)
@@ -313,6 +344,91 @@ public final class ContactsClient {
                 signedAtMs: signedAtMs))
         }
         return verdict
+    }
+
+    /// ADR-0101 section 10, rule 4 — both halves: the signature half in the
+    /// core (`checkResetSeal`: the previous announcement verifies under the
+    /// held key at the generation this device accepted, at or above the
+    /// `seq` floor kept for the account, and lists the key that signed the
+    /// reset seal over the fetched key), and the key-log half when the
+    /// build has a log (the served announcement is included, for this
+    /// account and generation, below the reset's leaf). Never throws: a
+    /// malformed artefact is "no seal".
+    private func checkSeal(
+        accountId: Data,
+        bundle: IdentityFetchResponse,
+        heldKeyB64: String,
+        acceptedGeneration: UInt64,
+        attest: AttestCheck,
+        logResult: LogVerifyResult,
+        seqFloor: UInt64? = nil
+    ) async -> SealCheck {
+        guard case .verified(let attestedGeneration, _) = attest,
+              let held = base64Decode(heldKeyB64), let fetched = base64Decode(bundle.signaturePubkey) else {
+            return .none
+        }
+        let previous = bundle.previousResetSeals.flatMap { base64Decode($0) }
+        let seal = bundle.resetSeal.flatMap { base64Decode($0) }
+        guard let check = try? checkResetSeal(
+            previousAnnouncement: previous, resetSeal: seal, heldAccountKey: held, accountId: accountId,
+            acceptedGeneration: acceptedGeneration, attestedGeneration: attestedGeneration,
+            fetchedKey: fetched,
+            seqFloor: seqFloor ?? pinStore.sealSeqFloor(accountIdB64: base64Encode(accountId))) else {
+            return .none
+        }
+        guard check.valid, let previous else {
+            return SealCheck(valid: false, refusal: check.refusal ?? "noSeal")
+        }
+        let log = await transparencyVerify.verifySealAnnouncement(
+            accountId: accountId, generation: acceptedGeneration, seq: check.announcementSeq,
+            announcement: previous, identity: logResult)
+        return SealCheck(valid: true, announcementSeq: check.announcementSeq, log: log)
+    }
+
+    /// ADR-0101 section 10, "The account's own devices" (alignment item A):
+    /// the same R.2 table with rule 4, asked by a device of the account
+    /// about a reset of its OWN account it did not make. `heldKey` is this
+    /// device's account key, `acceptedGeneration` the generation it holds,
+    /// `seqFloor` the newest announcement `seq` it knows of its own account.
+    /// Nothing is written: no pin, no started-over record (the caller signs
+    /// out or keeps the recall). `noVerdict` when the directory could not be
+    /// read or still serves the held key.
+    public func judgeOwnAccountReset(
+        accountId: Data, bundle: IdentityFetchResponse, heldKey: Data, acceptedGeneration: UInt64, seqFloor: UInt64
+    ) async -> ResetVerdict {
+        guard let servedPubkey = base64Decode(bundle.signaturePubkey), servedPubkey != heldKey else {
+            return .noVerdict
+        }
+        let heldKeyB64 = base64Encode(heldKey)
+        let attest = await checkResetAttestation(accountId: accountId, servedPubkey: servedPubkey, bundle: bundle)
+        // Without a verified attestation the reset can be no one's sealed
+        // reset (rules 1 to 3): nothing more is asked.
+        guard case .verified = attest else { return .noVerdict }
+        let logResult = await transparencyVerify.verifyIdentityInLog(
+            accountId: accountId, publishedSignaturePubkey: servedPubkey)
+        let seal = await checkSeal(
+            accountId: accountId, bundle: bundle, heldKeyB64: heldKeyB64, acceptedGeneration: acceptedGeneration,
+            attest: attest, logResult: logResult, seqFloor: seqFloor)
+        return resetVerdict(ResetVerdictInput(
+            heldKeyB64: heldKeyB64,
+            acceptedGeneration: acceptedGeneration,
+            fetchedKeyB64: bundle.signaturePubkey,
+            bundleGeneration: bundle.keyGeneration,
+            attest: attest,
+            log: LogCheck(status: logResult.status, isReset: logResult.isReset),
+            seal: seal))
+    }
+
+    /// ADR-0101 section 10 — raise the announcement floor of an account this
+    /// device pins from the announcement its trusted key signed. An absent
+    /// or non-verifying one changes nothing.
+    private func recordSealFloor(accountIdB64: String, bundle: IdentityFetchResponse) {
+        guard let pin = pinStore.readPin(accountIdB64: accountIdB64),
+              pin.pinnedSignaturePubkeyB64 == bundle.signaturePubkey,
+              let raw = bundle.resetSeals.flatMap({ base64Decode($0) }),
+              let key = base64Decode(bundle.signaturePubkey),
+              let opened = try? openSealAnnouncement(announcement: raw, accountKey: key) else { return }
+        pinStore.raiseSealSeqFloor(accountIdB64: accountIdB64, seq: opened.seq)
     }
 
     /// R.2 step 1: the bundle's attestation under the trusted attest key (the
@@ -859,6 +975,50 @@ public final class ContactsClient {
 
     /// ADR-0060 — the identity bundle of an account a search found, through
     /// the same G-4 pin gate every other identity fetch takes.
+    /// Alignment item D (UX 16.11) — the identity gate for an ADD the person
+    /// asked for by name: a person who started over (an unsealed reset) is
+    /// added as the NEW account they are. The pin moves to the new keys as a
+    /// first pin would (the keys of before stay closed, so the old one-to-one
+    /// stays closed), and the gate runs again on them. Returns whether that
+    /// happened. Every other refusal stands.
+    @discardableResult
+    func verifyBundleForAdd(accountId: Data, bundle: IdentityFetchResponse) async throws -> Bool {
+        do {
+            try await verifyBundleAccountKey(accountId: accountId, bundle: bundle)
+            return false
+        } catch let startedOver as ContactStartedOver {
+            guard StartedOverAdd.adopt(
+                startedOver, pins: pinStore, nowMs: Int64(Date().timeIntervalSince1970 * 1000)) else {
+                throw startedOver
+            }
+            try await verifyBundleAccountKey(accountId: accountId, bundle: bundle)
+            return true
+        }
+    }
+
+    /// ``resolveVerifiedBundle(accountId:)`` for an add the person asked for
+    /// (search, a typed name): a started-over person is taken as their new
+    /// account (``verifyBundleForAdd(accountId:bundle:)``).
+    public func resolveVerifiedBundleForAdd(
+        accountId: Data
+    ) async throws -> (signaturePubkey: Data, x25519Pubkey: Data, startedOver: Bool) {
+        let bundle: IdentityFetchResponse?
+        do {
+            bundle = try await discovery.identityFetch(accountId: accountId)
+        } catch {
+            throw ContactsError.wrap(error)
+        }
+        guard let bundle else { throw ContactsError.noIdentityBundle(accountId) }
+        let startedOver = try await verifyBundleForAdd(accountId: accountId, bundle: bundle)
+        guard let sig = base64Decode(bundle.signaturePubkey) else {
+            throw ContactsError.wrap(ContactsError.simple("malformed identity bundle on the wire"))
+        }
+        guard let x = bundle.verifiedX25519Pubkey else {
+            throw ContactsError.wrap(ContactsError.simple("identity bundle carries no valid X25519 binding"))
+        }
+        return (sig, x, startedOver)
+    }
+
     public func resolveVerifiedBundle(
         accountId: Data
     ) async throws -> (signaturePubkey: Data, x25519Pubkey: Data) {
@@ -957,7 +1117,9 @@ public final class ContactsClient {
         // branch — we never send to an unverified rotated key. The
         // additive KT-log S3d inclusion check rides along inside (it
         // hard-fails only on a transparency-log rollback).
-        try await verifyBundleAccountKey(accountId: recipientAccountId, bundle: bundle)
+        // Alignment item D: a person who started over is added as their new
+        // account (the typed name is the person's choice).
+        let startedOver = try await verifyBundleForAdd(accountId: recipientAccountId, bundle: bundle)
 
         guard let recipientSignaturePub = base64Decode(bundle.signaturePubkey) else {
             throw ContactsError.wrap(
@@ -987,7 +1149,8 @@ public final class ContactsClient {
             recipientUsername: lookup.normalisedUsername,
             recipientAccountId: recipientAccountId,
             messageId: published.messageId,
-            createdAt: published.createdAt
+            createdAt: published.createdAt,
+            startedOver: startedOver
         )
     }
 
@@ -1537,17 +1700,23 @@ public struct SendResult: Equatable {
     public let messageId: Int64
     /// ISO-8601 timestamp from the DS.
     public let createdAt: String
+    /// Alignment item D (UX 16.11) — the person started over (an unsealed
+    /// reset) and the request went to the NEW account: the Sent row carries
+    /// the note an incoming request from them would.
+    public var startedOver: Bool = false
 
     public init(
         recipientUsername: String,
         recipientAccountId: Data,
         messageId: Int64,
-        createdAt: String
+        createdAt: String,
+        startedOver: Bool = false
     ) {
         self.recipientUsername = recipientUsername
         self.recipientAccountId = recipientAccountId
         self.messageId = messageId
         self.createdAt = createdAt
+        self.startedOver = startedOver
     }
 }
 
@@ -1591,6 +1760,10 @@ public struct IncomingContactRequest: Equatable, Codable {
     /// adopted (``ContactsRepository/reconciled(accepted:pending:samePerson:answered:)``).
     /// `nil` reads as `false` (a row stored before the field existed).
     public var asksForChat: Bool?
+    /// UX 16.11 (ADR-0101 section 11) — this request comes from the new keys
+    /// of an account whose reset carried no seal: the card says this device
+    /// could not confirm it is the same person. `nil` reads as `false`.
+    public var startedOver: Bool?
 
     public init(
         messageId: Int64,
@@ -1829,6 +2002,34 @@ public struct IdentityCheckInconclusive: Error, Equatable {
 
     public init(accountIdB64: String) {
         self.accountIdB64 = accountIdB64
+    }
+}
+
+/// ADR-0101 section 11 — the account's keys were reset with no seal the
+/// account published before: a new account under the same username. Nothing
+/// was re-pinned, nothing is moved and nothing is returned; the caller does
+/// not act on the fetched keys. The one-to-one with the old keys shows the
+/// closed line, and a contact request from the new keys is an ordinary
+/// request with a note (UX 16.11).
+public struct ContactStartedOver: Error, Equatable {
+    /// base64 of the account id.
+    public let accountIdB64: String
+    /// The key the directory serves since, standard base64.
+    public let newKeyB64: String
+
+    public init(accountIdB64: String, newKeyB64: String) {
+        self.accountIdB64 = accountIdB64
+        self.newKeyB64 = newKeyB64
+    }
+}
+
+/// An unsealed reset was recorded for a pinned account: surfaces that draw
+/// the one-to-one with it read the pin store again.
+public enum StartedOverEvents {
+    public static let changed = Notification.Name("me.lakko.contacts.started-over.changed")
+
+    public static func notify(accountIdB64: String) {
+        NotificationCenter.default.post(name: changed, object: nil, userInfo: ["accountIdB64": accountIdB64])
     }
 }
 

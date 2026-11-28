@@ -27,6 +27,11 @@ public enum class KnownRequestCheck {
     /** No verdict yet: the directory, the attest key or the key log could not
      *  be reached, or the account publishes nothing. */
     INCONCLUSIVE,
+
+    /** ADR-0101 section 11: the account reset its keys without a seal this
+     *  device could check ([ContactStartedOver]): a new account under the
+     *  same username. Nothing was re-pinned. */
+    STARTED_OVER,
 }
 
 public enum class KnownRequestVerdict {
@@ -43,6 +48,11 @@ public enum class KnownRequestVerdict {
 
     /** A contact, and there is no verdict yet: the request waits, unshown. */
     WAIT,
+
+    /** UX 16.11: the account started over and the request is from exactly
+     *  its new keys: the ordinary request row, with the note that Lakko
+     *  could not confirm it is the same person. Never answered silently. */
+    SHOW_STARTED_OVER,
 }
 
 /**
@@ -53,6 +63,8 @@ public enum class KnownRequestVerdict {
  * | yes                 | `INCONCLUSIVE` | -                              | `WAIT`   |
  * | yes                 | `CURRENT`      | yes                            | `ANSWER` |
  * | yes                 | `CURRENT`      | no                             | `DROP`   |
+ * | yes                 | `STARTED_OVER` | from the new account's key     | `SHOW_STARTED_OVER` |
+ * | yes                 | `STARTED_OVER` | from any other key             | `DROP`   |
  *
  * [trustedKeyB64] is the pin AFTER the check ran; `null` reads as "not the
  * trusted key".
@@ -78,8 +90,17 @@ public fun knownContactRequestVerdict(
      *  one to the chat with them ([siblingMayAdmit]): the request waits,
      *  unshown, and is answered silently once the chat is here. */
     siblingMayAdmit: Boolean = false,
+    /** With [KnownRequestCheck.STARTED_OVER]: the attested key of the new
+     *  account, or `null` when none is recorded. */
+    startedOverKeyB64: String? = null,
 ): KnownRequestVerdict = when {
     !senderIsContact -> KnownRequestVerdict.SHOW
+    check == KnownRequestCheck.STARTED_OVER ->
+        if (startedOverKeyB64 != null && startedOverKeyB64 == requestKeyB64) {
+            KnownRequestVerdict.SHOW_STARTED_OVER
+        } else {
+            KnownRequestVerdict.DROP
+        }
     check == KnownRequestCheck.REFUSED -> KnownRequestVerdict.DROP
     check == KnownRequestCheck.INCONCLUSIVE -> KnownRequestVerdict.WAIT
     trustedKeyB64 != requestKeyB64 -> KnownRequestVerdict.DROP

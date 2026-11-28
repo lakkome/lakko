@@ -10,7 +10,12 @@ import { JournalClaimFailedError } from "../ds/ownership";
 import { DsHttpError, DsNetworkError } from "../ds/client";
 import { DiscoveryNetworkError } from "../discovery/client";
 import { MailboxUnreachableError } from "../reach/mailbox-write";
-import { ContactsError, IdentityCheckInconclusive, SupersessionRefused } from "./client";
+import {
+  ContactsError,
+  ContactStartedOver,
+  IdentityCheckInconclusive,
+  SupersessionRefused,
+} from "./client";
 import { findInChain } from "./errors";
 
 export function startChatFailureReason(err: unknown): string {
@@ -25,6 +30,9 @@ export function startChatFailureReason(err: unknown): string {
   }
   if (findInChain(err, (v) => (v instanceof IdentityCheckInconclusive ? v : null)) !== null) {
     return "the identity check could not finish";
+  }
+  if (findInChain(err, (v) => (v instanceof ContactStartedOver ? v : null)) !== null) {
+    return "the person started over with a new account this device could not confirm";
   }
   const claim = findInChain(err, (v) => (v instanceof JournalClaimFailedError ? v : null));
   const http = findInChain(err, (v) => (v instanceof DsHttpError ? v : null));

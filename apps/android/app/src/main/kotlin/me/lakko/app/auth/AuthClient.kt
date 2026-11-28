@@ -318,26 +318,6 @@ public class AuthClient(
         return base64UrlDecodeNoPad(resp.genesis_attest_b64)
     }
 
-    /**
-     * ADR-0101 section 7 - `POST /auth/channel-recovery/evaluate`: auth
-     * evaluates one blinded element (the channel recovery input of a channel
-     * id it never learns) under the account's per-account key. Bearer. Both
-     * elements are URL-safe base64 without padding on the wire; this takes and
-     * returns them as bytes. `503 channel-recovery-disabled` / `429
-     * too-many-attempts` surface as [AuthHttpError].
-     */
-    public suspend fun channelRecoveryEvaluate(sessionToken: String, blindedElement: ByteArray): ByteArray {
-        if (sessionToken.isEmpty()) {
-            throw AuthClientArgError("sessionToken must be non-empty")
-        }
-        val resp: ChannelRecoveryEvaluateResponse = post(
-            "/auth/channel-recovery/evaluate",
-            ChannelRecoveryEvaluateRequest(blinded_element = base64UrlEncodeNoPad(blindedElement)),
-            bearer = sessionToken,
-        )
-        return base64UrlDecodeNoPad(resp.evaluation)
-    }
-
     // -----------------------------------------------------------------
     // TOTP — ADR-0018 factor (c), authenticator-code recovery
     // -----------------------------------------------------------------
@@ -347,7 +327,10 @@ public class AuthClient(
      * secret for this account (ADR-0018 factor (c), enrollment step
      * 1). Mirror of the web `AuthClient.totpEnrollStart`.
      *
-     * Bearer-authenticated (the already-logged-in account); no body.
+     * Bearer-authenticated, and under the fresh-auth grant since
+     * 2026-11-26 (ADR-0073, amended: the authenticator is one of the
+     * reset's factors, so a bare session must not plant one); `403
+     * fresh-auth-required` otherwise.
      * Returns the `otpauth://` provisioning URI (QR) + the base32
      * secret (manual entry). The enrollment only becomes usable for
      * recovery after [totpEnrollFinish] confirms it with a live code.
@@ -356,12 +339,12 @@ public class AuthClient(
      * exists (the server refuses a silent swap); a 503 means the
      * server has TOTP disabled (`LAKKO_TOTP_ENC_KEY` unset).
      */
-    public suspend fun totpEnrollStart(sessionToken: String): TotpEnrollStartResult {
+    public suspend fun totpEnrollStart(sessionToken: String, freshGrant: String?): TotpEnrollStartResult {
         if (sessionToken.isEmpty()) {
             throw AuthClientArgError("sessionToken must be non-empty")
         }
         val resp: TotpEnrollStartResponse =
-            postNoBody("/totp/enroll/start", bearer = sessionToken)
+            post("/totp/enroll/start", TotpEnrollStartRequest(fresh_grant = freshGrant), bearer = sessionToken)
         return TotpEnrollStartResult(
             otpauthUri = resp.otpauth_uri,
             secretB32 = resp.secret_b32,
@@ -380,7 +363,7 @@ public class AuthClient(
      * enrollment stays pending, so the user can simply retry with
      * the next code.
      */
-    public suspend fun totpEnrollFinish(sessionToken: String, code: String) {
+    public suspend fun totpEnrollFinish(sessionToken: String, code: String, freshGrant: String?) {
         if (sessionToken.isEmpty()) {
             throw AuthClientArgError("sessionToken must be non-empty")
         }
@@ -391,7 +374,7 @@ public class AuthClient(
         // non-null contract without inventing a DTO for it.
         post<TotpEnrollFinishRequest, JsonObject>(
             "/totp/enroll/finish",
-            TotpEnrollFinishRequest(code = normalized),
+            TotpEnrollFinishRequest(code = normalized, fresh_grant = freshGrant),
             bearer = sessionToken,
         )
     }
@@ -588,6 +571,7 @@ public class AuthClient(
                         ),
                         freshGrant = finishResp.fresh_grant,
                         freshGrantExpiresAtMs = finishResp.fresh_grant_expires_at_ms,
+                        ownedChannelsSecret = serverHalfOrNull(finishResp.owned_channels_secret),
                     )
                 } finally {
                     passwordOut.close()
@@ -1047,7 +1031,8 @@ public class AuthClient(
 
     public suspend fun resetAccountKeys(
         sessionToken: String,
-        freshGrant: String,
+        /** The reset factor grant (the password and one second factor). */
+        resetGrant: String,
         seed: ByteArray,
         newSignaturePubkey: ByteArray,
         /** ADR-0099 F3: `signIdentityProof` by the NEW key over the account id. */
@@ -1055,8 +1040,8 @@ public class AuthClient(
     ): KeyResetResult {
         requireSession(sessionToken)
         requireIdentityProof(identityProof)
-        if (freshGrant.isEmpty()) {
-            throw AuthClientArgError("freshGrant must be non-empty")
+        if (resetGrant.isEmpty()) {
+            throw AuthClientArgError("resetGrant must be non-empty")
         }
         if (seed.isEmpty()) {
             throw AuthClientArgError("seed must be non-empty")
@@ -1067,14 +1052,14 @@ public class AuthClient(
         OpaqueRegister.startRecovery(seed).use { reg ->
             val start: KeyResetStartResponse = post(
                 "/account/keys/reset/start",
-                KeyResetStartRequest(fresh_grant = freshGrant, recovery_request = reg.requestB64()),
+                KeyResetStartRequest(reset_grant = resetGrant, recovery_request = reg.requestB64()),
                 bearer = sessionToken,
             )
             val upload = reg.finish(seed, start.recovery_response).use { it.uploadB64() }
             val finish: KeyResetFinishResponse = post(
                 "/account/keys/reset/finish",
                 KeyResetFinishRequest(
-                    fresh_grant = freshGrant,
+                    reset_grant = resetGrant,
                     recovery_upload = upload,
                     new_signature_pubkey_b64 = base64UrlEncodeNoPad(newSignaturePubkey),
                     identity_proof_b64 = base64UrlEncodeNoPad(identityProof),
@@ -1239,8 +1224,10 @@ public class AuthClient(
                         throw RecallWrongPassword()
                     }
                     try {
-                        val passwordUpload = passwordReg.finish(newPassword, start.password_response)
-                            .use { it.uploadB64() }
+                        // ADR-0101 section 10: the new password's export key
+                        // makes the account's password seal after the recall.
+                        val (passwordUpload, newExportKey) = passwordReg.finish(newPassword, start.password_response)
+                            .use { it.uploadB64() to it.exportKey() }
                         val recoveryUpload = recoveryReg.finish(newSeed, start.recovery_response)
                             .use { it.uploadB64() }
                         val loginFinish = loginOut.finalizeB64()
@@ -1288,8 +1275,17 @@ public class AuthClient(
                         // nothing: sign at the server's time, once. From
                         // then on the request is fixed, and a lost answer is
                         // asked again with the SAME bytes (T5 item 25).
-                        return sendWithStaleStatementRetry { signAtMs ->
-                            sendRecallFinish(requestSignedAt(signAtMs))
+                        return try {
+                            sendWithStaleStatementRetry { signAtMs ->
+                                sendRecallFinish(requestSignedAt(signAtMs))
+                            }.withExportKey(newExportKey)
+                        } catch (unanswered: RecallFinishUnanswered) {
+                            throw RecallFinishUnanswered(
+                                unanswered.request,
+                                unanswered.firstSentAtMs,
+                                unanswered.cause ?: unanswered,
+                                exportKey = newExportKey,
+                            )
                         }
                     } finally {
                         loginOut.close()
@@ -1393,8 +1389,6 @@ public class AuthClient(
         revokeDeviceIds: List<ByteArray>,
         /** ADR-0099 F3: `signIdentityProof` by the NEW key over the account id. */
         identityProof: ByteArray,
-        /** ADR-0075 section 3: this rotation is "Save a recovery phrase". */
-        phraseSaved: Boolean = false,
     ): KeyResetResult {
         requireSession(sessionToken)
         requireIdentityProof(identityProof)
@@ -1412,7 +1406,7 @@ public class AuthClient(
         OpaqueRegister.startRecovery(seed).use { reg ->
             val start: KeyResetStartResponse = post(
                 "/account/keys/rotate/start",
-                KeyResetStartRequest(fresh_grant = freshGrant, recovery_request = reg.requestB64()),
+                KeyRotateStartRequest(fresh_grant = freshGrant, recovery_request = reg.requestB64()),
                 bearer = sessionToken,
             )
             val upload = reg.finish(seed, start.recovery_response).use { it.uploadB64() }
@@ -1425,7 +1419,6 @@ public class AuthClient(
                     identity_proof_b64 = base64UrlEncodeNoPad(identityProof),
                     supersession_proof_b64 = base64UrlEncodeNoPad(supersessionProof),
                     revoke_device_ids_b64 = revokeDeviceIds.map { base64UrlEncodeNoPad(it) },
-                    phrase_saved = if (phraseSaved) true else null,
                 ),
                 bearer = sessionToken,
             )
@@ -1524,38 +1517,13 @@ public class AuthClient(
         return RecoveryEmailStatus(
             available = res.available,
             enabled = res.enabled,
-            vault = res.vault,
-            phraseSaved = res.phrase_saved,
             totp = res.totp,
         )
     }
 
     /**
-     * `GET /account/phrase` (bearer, ADR-0075 section 3 as amended
-     * 2026-11-01): whether saving a recovery phrase takes a key rotation.
-     * Unlike [recoveryEmailStatus] it works on a server that sends no mail.
-     */
-    public suspend fun accountPhraseStatus(sessionToken: String): AccountPhraseStatus {
-        requireSession(sessionToken)
-        val res: AccountPhraseResponse = doRequest(HttpMethod.Get, "/account/phrase") {
-            header(HttpHeaders.Authorization, "Bearer $sessionToken")
-        }
-        return AccountPhraseStatus(saved = res.saved, rotationNeeded = res.rotation_needed)
-    }
-
-    /**
-     * `POST /account/phrase/saved` (bearer + fresh-auth grant): the account
-     * is phrase-protected and its keys stay. `204`; `403 fresh-auth-required`;
-     * `409 phrase-save-needs-rotation`. Idempotent.
-     */
-    public suspend fun markPhraseSaved(sessionToken: String, freshGrant: String) {
-        requireSession(sessionToken)
-        postNoContent("/account/phrase/saved", sessionToken, PhraseSavedRequest(fresh_grant = freshGrant))
-    }
-
-    /**
      * `POST /recovery-email/enrol/start` (bearer + fresh-auth grant): mail a
-     * code to [address] and get the salt the vault is sealed with.
+     * code to [address].
      *
      * @throws AuthHttpError `403 fresh-auth-required`, `400 address-invalid`,
      *   `409 handle-mismatch` / `username-required`, `429 email-rate-limited`,
@@ -1580,90 +1548,37 @@ public class AuthClient(
             ),
             bearer = sessionToken,
         )
-        val salt = try {
-            base64Decode(res.vault_salt)
-        } catch (_: IllegalArgumentException) {
-            throw AuthHttpError(HTTP_OK, "/recovery-email/enrol/start", "malformed vault_salt")
-        }
-        if (salt.size != EMAIL_VAULT_SALT_LEN) {
-            throw AuthHttpError(HTTP_OK, "/recovery-email/enrol/start", "vault salt of ${salt.size} bytes")
-        }
         return RecoveryEmailEnrolStart(
             challengeId = res.challenge_id,
-            vaultSalt = salt,
             resendAfterSecs = res.resend_after_secs,
             expiresInSecs = res.expires_in_secs,
         )
     }
 
     /**
-     * `POST /recovery-email/enrol/finish` (bearer): the mailed code, and the
-     * sealed vault for an account without a saved phrase. Returns whether a
-     * vault was stored.
+     * `POST /recovery-email/enrol/finish` (bearer): the mailed code. Returns
+     * whether the recovery email is on.
      *
-     * @throws AuthHttpError `401 code-refused`, `410 code-expired`, `409
-     *   phrase-saved`, `429 too-many-attempts`.
+     * @throws AuthHttpError `401 code-refused`, `410 code-expired`, `429
+     *   too-many-attempts`.
      */
     public suspend fun recoveryEmailEnrolFinish(
         sessionToken: String,
         challengeId: String,
         code: String,
-        sealedEntropy: ByteArray?,
     ): Boolean {
         requireSession(sessionToken)
-        if (sealedEntropy != null && sealedEntropy.size != EMAIL_VAULT_SEALED_LEN) {
-            throw AuthClientArgError("the email vault must be $EMAIL_VAULT_SEALED_LEN bytes")
-        }
         val res: RecoveryEmailEnrolFinishResponse = post(
             "/recovery-email/enrol/finish",
-            RecoveryEmailEnrolFinishRequest(
-                challenge_id = challengeId,
-                code = code,
-                sealed_entropy = sealedEntropy?.let { base64Encode(it) },
-            ),
+            RecoveryEmailEnrolFinishRequest(challenge_id = challengeId, code = code),
             bearer = sessionToken,
         )
-        return res.vault
-    }
-
-    /**
-     * `PUT /recovery-email/vault` (bearer, no fresh-auth grant): install the
-     * email vault for the address the account already confirmed. Every
-     * well-formed request spends one of ten a day: never call it in a loop.
-     *
-     * @throws AuthHttpError `409 vault-exists` / `phrase-saved` /
-     *   `no-recovery-email` / `username-required` / `handle-mismatch`, `403
-     *   address-mismatch`, `400 address-invalid`, `429 too-many-attempts`,
-     *   `503 recovery-email-disabled`.
-     */
-    public suspend fun recoveryEmailVaultPut(
-        sessionToken: String,
-        handle: ByteArray,
-        address: String,
-        vaultSalt: ByteArray,
-        sealedEntropy: ByteArray,
-    ) {
-        requireSession(sessionToken)
-        requireHandle(handle)
-        if (vaultSalt.size != EMAIL_VAULT_SALT_LEN) throw AuthClientArgError("the vault salt must be $EMAIL_VAULT_SALT_LEN bytes")
-        if (sealedEntropy.size != EMAIL_VAULT_SEALED_LEN) {
-            throw AuthClientArgError("the email vault must be $EMAIL_VAULT_SEALED_LEN bytes")
-        }
-        sendJson<RecoveryEmailVaultPutRequest, RecoveryEmailVaultPutResponse>(
-            HttpMethod.Put,
-            "/recovery-email/vault",
-            RecoveryEmailVaultPutRequest(
-                handle = base64UrlEncodeNoPad(handle),
-                address = address,
-                vault_salt = base64Encode(vaultSalt),
-                sealed_entropy = base64Encode(sealedEntropy),
-            ),
-            bearer = sessionToken,
-        )
+        return res.enabled
     }
 
     /** `DELETE /recovery-email` (bearer + fresh-auth grant): remove the
-     *  recovery email and the vault. */
+     *  recovery email. `409 last-factor` when it is the account's only
+     *  second way in ([isLastFactor]). */
     public suspend fun recoveryEmailRemove(sessionToken: String, freshGrant: String?) {
         requireSession(sessionToken)
         sendJson<RecoveryEmailGrantRequest, RecoveryEmailRemoveResponse>(
@@ -1717,27 +1632,6 @@ public class AuthClient(
         if (!res.ok) throw AuthHttpError(HTTP_OK, "/recovery-email/recover/totp", "server reported ok=false")
     }
 
-    /** `POST /recovery-email/recover/open`: the sealed keys (the ticket is
-     *  then spent) or the password-only mode. */
-    public suspend fun emailRecoverOpen(ticket: String): EmailRecoverOpen {
-        val endpoint = "/recovery-email/recover/open"
-        val res: EmailRecoverOpenResponse = post(endpoint, EmailRecoverTicketRequest(ticket = ticket))
-        return when (res.mode) {
-            "password" -> EmailRecoverOpen.Password
-            "vault" -> {
-                val salt = res.vault_salt?.let(::decodeOrNull)
-                val sealed = res.sealed_entropy?.let(::decodeOrNull)
-                if (salt == null || sealed == null ||
-                    salt.size != EMAIL_VAULT_SALT_LEN || sealed.size != EMAIL_VAULT_SEALED_LEN
-                ) {
-                    throw AuthHttpError(HTTP_OK, endpoint, "malformed vault")
-                }
-                EmailRecoverOpen.Vault(vaultSalt = salt, sealedEntropy = sealed)
-            }
-            else -> throw AuthHttpError(HTTP_OK, endpoint, "unknown mode")
-        }
-    }
-
     private fun recallStatusOf(res: RecallStatusResponse, byHandle: Boolean): RecallStatus = RecallStatus(
         anchorSeq = res.anchor_seq,
         expiresAtMs = res.expires_at_ms,
@@ -1776,7 +1670,13 @@ public class AuthClient(
                 "/recovery-email/recover/password/start",
                 EmailRecoverPasswordStartRequest(ticket = ticket, new_password_request = reg.requestB64()),
             )
-            val upload = reg.finish(newPassword, start.new_password_response).use { it.uploadB64() }
+            // ADR-0101 sections 7 and 10: the new password's export key seals
+            // a later reset and locks the owned channels; this device keeps
+            // it under its device key until a device with the keys takes the
+            // password over.
+            val (upload, exportKey) = reg.finish(newPassword, start.new_password_response).use {
+                it.uploadB64() to it.exportKey()
+            }
             val finish: EmailRecoverPasswordFinishResponse = post(
                 "/recovery-email/recover/password/finish",
                 EmailRecoverPasswordFinishRequest(
@@ -1799,8 +1699,131 @@ public class AuthClient(
                     refreshExpiresAtMs = finish.refresh_expires_at_ms,
                     keyGeneration = finish.key_generation,
                 ),
+                exportKey = exportKey,
             )
         }
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0073, amended 2026-11-26: the reset's second factor
+    // -----------------------------------------------------------------
+
+    private fun resetGrantOf(res: ResetFactorGrantResponse, endpoint: String): ResetFactorGrant {
+        if (res.reset_grant.isEmpty()) throw AuthHttpError(HTTP_OK, endpoint, "empty reset_grant")
+        return ResetFactorGrant(grant = res.reset_grant, expiresAtMs = res.reset_grant_expires_at_ms)
+    }
+
+    /**
+     * `POST /account/keys/reset/factor/totp` (bearer + the PASSWORD sign-in's
+     * fresh-auth grant): the authenticator's six digits.
+     *
+     * @throws AuthHttpError `403 fresh-auth-required` (checked first, nothing
+     *   charged), `429 too-many-attempts`, `401 factor-refused`.
+     */
+    public suspend fun resetFactorTotp(sessionToken: String, freshGrant: String?, code: String): ResetFactorGrant {
+        requireSession(sessionToken)
+        val normalized = normalizeTotpCode(code) ?: throw AuthClientArgError("code must be 6 digits")
+        val endpoint = "/account/keys/reset/factor/totp"
+        return resetGrantOf(
+            post(endpoint, ResetFactorTotpRequest(fresh_grant = freshGrant, code = normalized), bearer = sessionToken),
+            endpoint,
+        )
+    }
+
+    /**
+     * `POST /account/keys/reset/factor/email/start` (bearer + the password
+     * grant): the 19.3 shape, the same answer whether or not [address] is the
+     * account's; a letter leaves only for a match.
+     *
+     * @throws AuthHttpError `403 fresh-auth-required`, `429
+     *   email-rate-limited`, `502 mail-send-failed`, `503`.
+     */
+    public suspend fun resetFactorEmailStart(
+        sessionToken: String,
+        freshGrant: String?,
+        handle: ByteArray,
+        address: String,
+        lang: String?,
+    ): EmailRecoverStartResponse {
+        requireSession(sessionToken)
+        requireHandle(handle)
+        return post(
+            "/account/keys/reset/factor/email/start",
+            ResetFactorEmailStartRequest(
+                fresh_grant = freshGrant,
+                handle = base64UrlEncodeNoPad(handle),
+                address = address,
+                lang = lang,
+            ),
+            bearer = sessionToken,
+        )
+    }
+
+    /**
+     * `POST /account/keys/reset/factor/email/finish` (bearer + the password
+     * grant): the mailed code, five tries per code.
+     *
+     * @throws AuthHttpError `403 fresh-auth-required`, `401 factor-refused`,
+     *   `410 code-expired`, `429 too-many-attempts`.
+     */
+    public suspend fun resetFactorEmailFinish(
+        sessionToken: String,
+        freshGrant: String?,
+        challengeId: String,
+        code: String,
+    ): ResetFactorGrant {
+        requireSession(sessionToken)
+        val endpoint = "/account/keys/reset/factor/email/finish"
+        return resetGrantOf(
+            post(
+                endpoint,
+                ResetFactorEmailFinishRequest(fresh_grant = freshGrant, challenge_id = challengeId, code = code),
+                bearer = sessionToken,
+            ),
+            endpoint,
+        )
+    }
+
+    /**
+     * `POST /account/keys/reset/factor/passkey` (bearer + the password
+     * grant): consumes the account's action grant for the reset-keys action
+     * (written by `/auth/action/finish` after a passkey assertion).
+     *
+     * @throws AuthHttpError `403 fresh-auth-required`, `401 factor-refused`.
+     */
+    public suspend fun resetFactorPasskey(sessionToken: String, freshGrant: String?): ResetFactorGrant {
+        requireSession(sessionToken)
+        val endpoint = "/account/keys/reset/factor/passkey"
+        return resetGrantOf(post(endpoint, ResetFactorPasskeyRequest(fresh_grant = freshGrant), bearer = sessionToken), endpoint)
+    }
+
+    /**
+     * `POST /account/owned-channels-secret` (bearer + the reset factor
+     * grant, which is NOT spent): the account's server half `S` of the
+     * owned-channels password lock (ADR-0101 section 7). 32 bytes.
+     *
+     * @throws AuthHttpError `403 reset-factor-required`, `429
+     *   too-many-attempts`.
+     */
+    public suspend fun ownedChannelsSecret(sessionToken: String, resetGrant: String?): ByteArray {
+        requireSession(sessionToken)
+        val endpoint = "/account/owned-channels-secret"
+        val res: OwnedChannelsSecretResponse =
+            post(endpoint, OwnedChannelsSecretRequest(reset_grant = resetGrant), bearer = sessionToken)
+        return serverHalfOrNull(res.owned_channels_secret)
+            ?: throw AuthHttpError(HTTP_OK, endpoint, "malformed owned_channels_secret")
+    }
+
+    /** The 32-byte `S` of a base64url field, or `null` when absent or not 32
+     *  bytes. */
+    private fun serverHalfOrNull(field: String?): ByteArray? {
+        if (field.isNullOrEmpty()) return null
+        val bytes = try {
+            base64UrlDecodeNoPad(field)
+        } catch (_: IllegalArgumentException) {
+            return null
+        }
+        return bytes.takeIf { it.size == OWNED_CHANNELS_SECRET_LEN }
     }
 
     // -----------------------------------------------------------------
@@ -2285,6 +2308,11 @@ public data class SignupResult(
     val freshGrant: String? = null,
     /** The proof's expiry, unix milliseconds. */
     val freshGrantExpiresAtMs: Long? = null,
+    /** ADR-0101 section 7: the account's 32-byte server half `S` of the
+     *  owned-channels password lock, released in this answer only (and
+     *  later under the reset factor grant). `null` when the server sent
+     *  none or a malformed one. Never logged; not part of equality. */
+    val ownedChannelsSecret: ByteArray? = null,
 ) {
     /** Never print the credentials, the phrase or the grant. */
     override fun toString(): String = "SignupResult(<redacted>)"
@@ -2440,7 +2468,13 @@ public class RecallResult(
     public val reset: KeyResetResult,
     public val freshGrant: String?,
     public val freshGrantExpiresAtMs: Long?,
+    /** The NEW password's export key (64 bytes) when this process made the
+     *  request; `null` for a resend that did not carry it. Secret. */
+    public val exportKey: ByteArray? = null,
 ) {
+    /** The same answer, carrying [key]. */
+    public fun withExportKey(key: ByteArray?): RecallResult = RecallResult(reset, freshGrant, freshGrantExpiresAtMs, key)
+
     override fun toString(): String = "RecallResult(<redacted>)"
 }
 
@@ -2464,6 +2498,10 @@ public data class TotpEnrollStartResult(
 public data class TotpRecoverResult(
     val accountId: ByteArray,
     val session: SessionPair,
+    /** Only from a mailed-code password change: the NEW password's 64-byte
+     *  export key (ADR-0101 sections 7 and 10). Never logged; not part of
+     *  equality. */
+    val exportKey: ByteArray? = null,
 ) {
     val sessionToken: String get() = session.accessToken
 
@@ -2567,3 +2605,12 @@ public class AuthNetworkError(
     public val endpoint: String,
     cause: Throwable,
 ) : RuntimeException("auth $endpoint network error: $cause", cause)
+
+/** A reset factor grant (ADR-0073, amended 2026-11-26): the password and one
+ *  second factor, proven. Opaque; memory only; never logged. */
+public class ResetFactorGrant(public val grant: String, public val expiresAtMs: Long) {
+    override fun toString(): String = "ResetFactorGrant(<redacted>)"
+}
+
+/** The length of the owned-channels server half `S`. */
+public const val OWNED_CHANNELS_SECRET_LEN: Int = 32

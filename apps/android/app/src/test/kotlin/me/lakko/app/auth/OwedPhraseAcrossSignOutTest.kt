@@ -96,9 +96,11 @@ class OwedPhraseAcrossSignOutTest {
         val passkey = source.substringAfter("    private suspend fun keysFromPasskeyAssertion(")
             .substringBefore("\n    }\n")
         assertTrue("restoreFromPhrase(phrase, phraseHeldByPerson = false, wipes = wipes)" in passkey)
-        // The email vault: opened by the device, never shown.
+        // The email route no longer brings a phrase at all (the email vault
+        // was removed 2026-11-26): it sets a password and lands a session.
         val email = source.substringAfter("    public suspend fun emailRecoverFinish(").substringBefore("\n    }\n")
-        assertTrue("recover(phrase, newPassword, named.username, phraseHeldByPerson = false)" in email)
+        assertTrue("phraseHeldByPerson" !in email)
+        assertTrue("landAfterAccessRecovery(" in email)
         // Cleared before the landing shows what is owed, on both typed routes.
         for (route in listOf("    private suspend fun restoreFromPhrase(", "    public suspend fun recover(")) {
             val body = source.substringAfter(route).substringBefore("\n    }\n")

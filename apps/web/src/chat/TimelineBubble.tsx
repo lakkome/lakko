@@ -232,6 +232,9 @@ export interface BubbleHost {
    *  the bubble a failed take and a failed composer message are the same
    *  gesture, and the person cannot tell them apart. */
   onRetrySend: () => void;
+  /** `false`: the conversation takes nothing any more (UX 16.11), so a
+   *  `Not sent` row offers no Retry. */
+  retryOffered?: boolean;
   /** `docs/ux/connection-state.md` section 7.3 — delete this unsent row
    *  (waiting or `Not sent`): its menu offers Delete alone. Absent: no menu
    *  on an unsent row. */
@@ -668,6 +671,8 @@ function ChatBubbleBody(
           // ADR-0082 section 5 — the DS id of the latest edit op, 0 when
           // the message was never edited.
           lastOpId: state()?.lastOpId ?? 0,
+          // Own messages never feed the conversation's languages.
+          own: props.tone === "outgoing",
         };
   const textView = () => {
     const ref = messageRef();
@@ -681,7 +686,7 @@ function ChatBubbleBody(
     const v = textView();
     const ref = messageRef();
     if (translation === undefined || ref === null || isEditing() || isDeleted()) return v;
-    return translation.textLine(ref, displayText(), props.tone === "outgoing");
+    return translation.textLine(ref, displayText());
   };
   /** The text the bubble shows: the translation while it is shown. */
   const shownText = (): string => {
@@ -707,7 +712,7 @@ function ChatBubbleBody(
     const target = translateTarget();
     if (translation === undefined || ref === null || target === null) return null;
     if (translation.textView(target.slot, ref).phase === "translated") return "show-original";
-    return translation.offer(ref, target.text, props.tone === "outgoing") === "none" ? null : "translate";
+    return translation.offer(ref, target.text) === "none" ? null : "translate";
   };
   /** Copy is "the text I see" (UX 3.2): the translation while it is shown. */
   const copyableText = (): string | null => {
@@ -728,9 +733,9 @@ function ChatBubbleBody(
   // the device and only where its model is already present.
   createEffect(() => {
     const ref = messageRef();
-    if (translation === undefined || ref === null || isDeleted() || props.tone === "outgoing") return;
+    if (translation === undefined || ref === null || isDeleted()) return;
     const text = displayText();
-    if (text.length > 0) translation.offer(ref, text, false);
+    if (text.length > 0) translation.offer(ref, text);
   });
   // UX 3.7 — automatic translation as the message is shown.
   createEffect(() => {
@@ -738,7 +743,7 @@ function ChatBubbleBody(
     if (translation === undefined || ref === null || isDeleted() || isEditing()) return;
     const text = displayText();
     if (text.length === 0) return;
-    translation.autoTranslate(ref, text, props.tone === "outgoing");
+    translation.autoTranslate(ref, text);
   });
   /** The transcript host of one media attachment, or `undefined`. */
   const transcriptHost = (ref: AttachmentRefBytes): TranscriptHost | undefined => {
@@ -1012,7 +1017,7 @@ function ChatBubbleBody(
           </Show>
         }
       >
-        <NotSent onRetry={() => props.onRetrySend()} />
+        <NotSent onRetry={props.retryOffered === false ? undefined : () => props.onRetrySend()} />
       </Show>
         }
       >

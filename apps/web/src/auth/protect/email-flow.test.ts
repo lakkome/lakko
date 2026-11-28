@@ -9,7 +9,6 @@ import {
   emailFailureKey,
   ENROL_START,
   enrolReduce,
-  enrolSealsVault,
   normalizeEmailCode,
   RECOVER_START,
   recoverReduce,
@@ -90,10 +89,19 @@ describe("reading the server's answers", () => {
     for (const [status, code] of [
       [401, "ticket-refused"],
       [403, "totp-required"],
-      [409, "wrong-mode"],
     ] as const) {
-      expect(emailFailure("recover-open", answer(status, code))).toEqual({ kind: "start-over" });
+      expect(emailFailure("recover-password", answer(status, code))).toEqual({ kind: "start-over" });
     }
+  });
+
+  it("the removed ticket mode is no special answer any more", () => {
+    expect(emailFailure("recover-password", answer(409, "wrong-mode"))).toEqual({ kind: "error" });
+  });
+
+  it("removing the last second way in is its own answer, and the dialog says it, not a line", () => {
+    const f = emailFailure("remove", answer(409, "last-factor"));
+    expect(f).toEqual({ kind: "last-factor" });
+    expect(emailFailureKey(f)).toBeNull();
   });
 });
 
@@ -112,26 +120,16 @@ describe("codes and the resend clock", () => {
   });
 });
 
-describe("the email vault is sealed only while no phrase is saved", () => {
-  it("mail-protected: seal", () => {
-    expect(enrolSealsVault(false)).toBe(true);
-  });
-  it("phrase-protected: none", () => {
-    expect(enrolSealsVault(true)).toBe(false);
-  });
-});
-
 describe("adding the address", () => {
-  const sent = { type: "sent", challengeId: "c1", vaultSalt: "c2FsdA==", resendAfterSecs: 45, nowMs: NOW } as const;
+  const sent = { type: "sent", challengeId: "c1", resendAfterSecs: 45, nowMs: NOW } as const;
 
-  it("address, then the code step with the salt the vault is sealed with", () => {
+  it("address, then the code step, which carries no salt: nothing is sealed", () => {
     const s = [{ type: "submitted" } as const, sent].reduce(enrolReduce, ENROL_START);
     expect(s).toEqual({
       step: "code",
       working: false,
       failure: null,
       challengeId: "c1",
-      vaultSalt: "c2FsdA==",
       resendAtMs: NOW + 45_000,
       wrong: 0,
     });
@@ -160,8 +158,8 @@ describe("adding the address", () => {
   });
 
   it("ends done, and stays done", () => {
-    const done: EnrolState = enrolReduce(enrolReduce(ENROL_START, sent), { type: "finished", vault: true });
-    expect(done).toEqual({ step: "done", vault: true });
+    const done: EnrolState = enrolReduce(enrolReduce(ENROL_START, sent), { type: "finished" });
+    expect(done).toEqual({ step: "done" });
     expect(enrolReduce(done, { type: "submitted" })).toBe(done);
   });
 });
@@ -183,22 +181,13 @@ describe("getting back in with the code", () => {
 
   it("without an authenticator the code leads straight to the new password", () => {
     const s = run([started, { type: "verified", ticket: "t1", totpRequired: false }]);
-    expect(s).toEqual({
-      step: "password",
-      working: false,
-      failure: null,
-      ticket: "t1",
-      phase: "idle",
-      vaultOpened: false,
-    });
+    expect(s).toEqual({ step: "password", working: false, failure: null, ticket: "t1" });
   });
 
   it("with an authenticator its code is asked first, and there is no way past it", () => {
     const totp = run([started, { type: "verified", ticket: "t1", totpRequired: true }]);
     expect(totp).toEqual({ step: "totp", working: false, failure: null, ticket: "t1" });
     // Nothing but the accepted authenticator code reaches the password step.
-    expect(recoverReduce(totp, { type: "opening" })).toBe(totp);
-    expect(recoverReduce(totp, { type: "vault-opened" })).toBe(totp);
     expect(recoverReduce(totp, { type: "verified", ticket: "t2", totpRequired: false })).toBe(totp);
     const wrong = recoverReduce(totp, { type: "failed", failure: { kind: "code-wrong" } });
     expect(wrong.step).toBe("totp");
@@ -214,40 +203,22 @@ describe("getting back in with the code", () => {
 
   const atPassword = run([started, { type: "verified", ticket: "t1", totpRequired: false }]);
 
-  it("vault mode: opening, then restoring the account, then landed", () => {
-    const opening = recoverReduce(atPassword, { type: "opening" });
-    expect(opening).toMatchObject({ step: "password", working: true, phase: "opening" });
-    const restoring = recoverReduce(opening, { type: "vault-opened" });
-    expect(restoring).toMatchObject({ step: "password", working: true, phase: "restoring", vaultOpened: true });
-    expect(recoverReduce(restoring, { type: "landed" })).toEqual({ step: "landed" });
+  it("the new password is saved under the ticket and the session lands: no keys come with it", () => {
+    const saving = recoverReduce(atPassword, { type: "submitted" });
+    expect(saving).toMatchObject({ step: "password", working: true, failure: null });
+    expect(recoverReduce(saving, { type: "landed" })).toEqual({ step: "landed" });
   });
 
-  it("password mode: no vault is opened; the session lands", () => {
-    const opening = recoverReduce(atPassword, { type: "opening" });
-    const landed = recoverReduce(opening, { type: "landed" });
-    expect(landed).toEqual({ step: "landed" });
+  it("there is one kind of account: the password step has no mode, no vault and no phase", () => {
+    expect(Object.keys(atPassword).sort()).toEqual(["failure", "step", "ticket", "working"].sort());
   });
 
-  it("nothing before the new password tells which kind of account this is", () => {
-    // The states up to and including the idle password step have no field
-    // that differs between the two kinds.
-    expect(Object.keys(atPassword).sort()).toEqual(
-      ["failure", "phase", "step", "ticket", "vaultOpened", "working"].sort(),
-    );
-    expect(atPassword).toMatchObject({ phase: "idle", vaultOpened: false });
-  });
-
-  it("a vault that does not open ends on Get back in, and stays there", () => {
-    const notOpened = recoverReduce(recoverReduce(atPassword, { type: "opening" }), { type: "vault-not-opened" });
-    expect(notOpened).toEqual({ step: "not-opened" });
-    expect(recoverReduce(notOpened, { type: "submitted" })).toBe(notOpened);
-    expect(recoverReduce(notOpened, { type: "landed" })).toBe(notOpened);
-  });
-
-  it("a restore that did not finish keeps the opened vault for the retry", () => {
-    const restoring = run([{ type: "opening" }, { type: "vault-opened" }], atPassword);
-    const back = recoverReduce(restoring, { type: "restore-failed" });
-    expect(back).toMatchObject({ step: "password", working: false, phase: "idle", vaultOpened: true });
+  it("a refused password keeps the step, with its line, for another try", () => {
+    const refused = recoverReduce(recoverReduce(atPassword, { type: "submitted" }), {
+      type: "failed",
+      failure: { kind: "error" },
+    });
+    expect(refused).toEqual({ step: "password", working: false, failure: { kind: "error" }, ticket: "t1" });
   });
 
   it("a spent code or a lost ticket returns to step 1 with the line", () => {
@@ -277,17 +248,14 @@ describe("getting back in with the code", () => {
     expect(CODE_TRIES).toBe(5);
   });
 
-  it("nothing before the password step can open the account (alignment C)", () => {
-    // `opening` is the event the screen sends right before `recover/open`.
-    // It is accepted on the password step only.
-    const code = run([started]);
+  it("only an accepted code reaches the password step (alignment C)", () => {
+    // `verified` is taken on the code step only, and `totp-passed` on the
+    // authenticator step only: no other state turns into the password step.
     const totp = run([started, { type: "verified", ticket: "t1", totpRequired: true }]);
-    for (const early of [RECOVER_START, code, totp]) {
-      expect(recoverReduce(early, { type: "opening" })).toBe(early);
-      expect(recoverReduce(early, { type: "vault-opened" })).toBe(early);
-      expect(recoverReduce(early, { type: "vault-not-opened" })).toBe(early);
-    }
-    expect(recoverReduce(atPassword, { type: "opening" })).toMatchObject({ step: "password", phase: "opening" });
+    expect(recoverReduce(RECOVER_START, { type: "verified", ticket: "t", totpRequired: false })).toBe(RECOVER_START);
+    expect(recoverReduce(RECOVER_START, { type: "totp-passed" })).toBe(RECOVER_START);
+    expect(recoverReduce(run([started]), { type: "totp-passed" }).step).toBe("code");
+    expect(recoverReduce(totp, { type: "verified", ticket: "t2", totpRequired: false })).toBe(totp);
   });
 
   it("mail that is not set up ends the method", () => {

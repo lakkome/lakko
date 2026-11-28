@@ -66,11 +66,11 @@ class RecoveryEmailClientTest {
         client(
             seen,
             HttpStatusCode.OK to """{"available":true}""",
-            HttpStatusCode.OK to """{"available":true,"enabled":true,"vault":false,"phrase_saved":true,"totp":true}""",
+            HttpStatusCode.OK to """{"available":true,"enabled":true,"totp":true}""",
         ).use { c ->
             assertTrue(c.recoveryEmailAvailable())
             assertEquals(
-                RecoveryEmailStatus(available = true, enabled = true, vault = false, phraseSaved = true, totp = true),
+                RecoveryEmailStatus(available = true, enabled = true, totp = true),
                 c.recoveryEmailStatus("tok"),
             )
         }
@@ -83,68 +83,13 @@ class RecoveryEmailClientTest {
     }
 
     @Test
-    fun `the phrase status is a bearer GET of its own`() = runTest {
+    fun `enrol start sends the grant, the handle as base64url and the language`() = runTest {
         val seen = mutableListOf<Captured>()
-        val status = client(seen, HttpStatusCode.OK to """{"saved":false,"rotation_needed":true}""")
-            .use { it.accountPhraseStatus("tok") }
-        assertEquals(AccountPhraseStatus(saved = false, rotationNeeded = true), status)
-        assertEquals(HttpMethod.Get, seen.single().method)
-        assertTrue(seen.single().url.endsWith("/account/phrase"))
-        assertEquals("Bearer tok", seen.single().authorization)
-    }
-
-    @Test
-    fun `a phrase status without rotation_needed is a failure, not a guess`() = runTest {
-        val failed = try {
-            client(mutableListOf(), HttpStatusCode.OK to """{"saved":false}""").use { it.accountPhraseStatus("tok") }
-            false
-        } catch (cancel: kotlinx.coroutines.CancellationException) {
-            throw cancel
-        } catch (_: Throwable) {
-            // Whatever the client threw: the screen's failed state.
-            true
-        }
-        assertTrue("an answer with no path must not decide one", failed)
-    }
-
-    @Test
-    fun `marking the phrase saved sends the grant and reads the refusals`() = runTest {
-        val seen = mutableListOf<Captured>()
-        client(seen, HttpStatusCode.NoContent to "").use { it.markPhraseSaved("tok", "grant") }
-        assertEquals(HttpMethod.Post, seen.single().method)
-        assertTrue(seen.single().url.endsWith("/account/phrase/saved"))
-        assertEquals("Bearer tok", seen.single().authorization)
-        assertEquals("grant", seen.single().body!!["fresh_grant"]!!.jsonPrimitive.content)
-        assertEquals(1, seen.single().body!!.size)
-
-        suspend fun refusal(status: HttpStatusCode, body: String): Throwable = try {
-            client(mutableListOf(), status to body).use { it.markPhraseSaved("tok", "grant") }
-            error("refused")
-        } catch (err: AuthHttpError) {
-            err
-        }
-        assertEquals(
-            PhraseSavedOutcome.NeedsRotation,
-            phraseSavedOutcomeOf(refusal(HttpStatusCode.Conflict, """{"error":"phrase-save-needs-rotation"}""")),
-        )
-        assertEquals(
-            PhraseSavedOutcome.ProofRequired,
-            phraseSavedOutcomeOf(refusal(HttpStatusCode.Forbidden, """{"error":"fresh-auth-required"}""")),
-        )
-        assertEquals(PhraseSavedOutcome.Failed, phraseSavedOutcomeOf(refusal(HttpStatusCode.InternalServerError, "{}")))
-    }
-
-    @Test
-    fun `enrol start sends the grant, the handle as base64url and the language, and reads the salt`() = runTest {
-        val seen = mutableListOf<Captured>()
-        val salt = ByteArray(EMAIL_VAULT_SALT_LEN) { (0xFB + it % 5).toByte() }
         val start = client(
             seen,
-            HttpStatusCode.OK to
-                """{"challenge_id":"chal","vault_salt":"${base64Encode(salt)}","resend_after_secs":45,"expires_in_secs":600}""",
+            HttpStatusCode.OK to """{"challenge_id":"chal","resend_after_secs":45,"expires_in_secs":600}""",
         ).use { it.recoveryEmailEnrolStart("tok", "grant", handle, "name@example.com", "ru") }
         assertEquals("chal", start.challengeId)
-        assertTrue(salt.contentEquals(start.vaultSalt))
         assertEquals(45L, start.resendAfterSecs)
         assertEquals(600L, start.expiresInSecs)
         val body = seen.single().body!!
@@ -158,34 +103,15 @@ class RecoveryEmailClientTest {
     }
 
     @Test
-    fun `a salt of the wrong length is refused`() = runTest {
-        try {
-            client(
-                mutableListOf(),
-                HttpStatusCode.OK to """{"challenge_id":"c","vault_salt":"AAAA","resend_after_secs":1,"expires_in_secs":1}""",
-            ).use { it.recoveryEmailEnrolStart("tok", "grant", handle, "a@b", null) }
-            fail("a 3-byte salt must not be accepted")
-        } catch (err: AuthHttpError) {
-            assertEquals("/recovery-email/enrol/start", err.endpoint)
-        }
-    }
-
-    @Test
-    fun `enrol finish carries the vault only when one was sealed`() = runTest {
+    fun `enrol finish carries the challenge and the code and nothing derived from the phrase`() = runTest {
+        // The email vault is gone (ADR-0075, amended 2026-11-26): no copy of
+        // the phrase ever leaves the device.
         val seen = mutableListOf<Captured>()
-        val sealed = ByteArray(EMAIL_VAULT_SEALED_LEN) { it.toByte() }
-        client(
-            seen,
-            HttpStatusCode.OK to """{"enabled":true,"vault":true}""",
-            HttpStatusCode.OK to """{"enabled":true,"vault":false}""",
-        ).use { c ->
-            assertTrue(c.recoveryEmailEnrolFinish("tok", "chal", "123456", sealed))
-            assertFalse(c.recoveryEmailEnrolFinish("tok", "chal", "123456", null))
+        client(seen, HttpStatusCode.OK to """{"enabled":true}""").use { c ->
+            assertTrue(c.recoveryEmailEnrolFinish("tok", "chal", "123456"))
         }
-        assertEquals(base64Encode(sealed), seen[0].body!!["sealed_entropy"]!!.jsonPrimitive.content)
-        assertEquals("123456", seen[0].body!!["code"]!!.jsonPrimitive.content)
-        // Phrase mode: the field is absent, not null.
-        assertFalse(seen[1].body!!.containsKey("sealed_entropy"))
+        assertEquals(setOf("challenge_id", "code"), seen.single().body!!.keys)
+        assertEquals("123456", seen.single().body!!["code"]!!.jsonPrimitive.content)
     }
 
     @Test
@@ -249,39 +175,6 @@ class RecoveryEmailClientTest {
     }
 
     @Test
-    fun `open answers the vault or the password mode`() = runTest {
-        val salt = ByteArray(EMAIL_VAULT_SALT_LEN) { 3 }
-        val sealed = ByteArray(EMAIL_VAULT_SEALED_LEN) { 4 }
-        client(
-            mutableListOf(),
-            HttpStatusCode.OK to
-                """{"mode":"vault","vault_salt":"${base64Encode(salt)}","sealed_entropy":"${base64Encode(sealed)}"}""",
-            HttpStatusCode.OK to """{"mode":"password"}""",
-        ).use { c ->
-            val vault = c.emailRecoverOpen("tick") as EmailRecoverOpen.Vault
-            assertTrue(salt.contentEquals(vault.vaultSalt))
-            assertTrue(sealed.contentEquals(vault.sealedEntropy))
-            assertEquals(EmailRecoverOpen.Password, c.emailRecoverOpen("tick"))
-        }
-    }
-
-    @Test
-    fun `a malformed vault or an unknown mode is refused`() = runTest {
-        for (body in listOf(
-            """{"mode":"vault","vault_salt":"AAAA","sealed_entropy":"AAAA"}""",
-            """{"mode":"vault"}""",
-            """{"mode":"surprise"}""",
-        )) {
-            try {
-                client(mutableListOf(), HttpStatusCode.OK to body).use { it.emailRecoverOpen("tick") }
-                fail("accepted $body")
-            } catch (err: AuthHttpError) {
-                assertEquals("/recovery-email/recover/open", err.endpoint)
-            }
-        }
-    }
-
-    @Test
     fun `a wrong code is the one coded 401`() = runTest {
         try {
             client(mutableListOf(), HttpStatusCode.Unauthorized to """{"error":"code-refused"}""")
@@ -299,44 +192,119 @@ class RecoveryEmailClientTest {
     fun `the status flags default to false when a field is missing`() = runTest {
         val status = client(mutableListOf(), HttpStatusCode.OK to """{"available":true}""")
             .use { it.recoveryEmailStatus("tok") }
-        assertFalse(status.enabled || status.vault || status.phraseSaved || status.totp)
+        assertFalse(status.enabled || status.totp)
         assertTrue(Json.parseToJsonElement("""{"a":true}""").jsonObject["a"]!!.jsonPrimitive.boolean)
     }
 
+    // ---- 2026-11-26: the last factor, the authenticator, the reset's factor --
+
     @Test
-    fun `the re-seal is a PUT with the handle, the address, a salt and the vault, and no grant`() = runTest {
-        val seen = mutableListOf<Captured>()
-        val salt = ByteArray(EMAIL_VAULT_SALT_LEN) { (0xF9 + it % 7).toByte() }
-        val sealed = ByteArray(EMAIL_VAULT_SEALED_LEN) { (0xFA + it % 6).toByte() }
-        client(seen, HttpStatusCode.OK to """{"vault":true}""")
-            .use { it.recoveryEmailVaultPut("tok", handle, "name@example.com", salt, sealed) }
-        val request = seen.single()
-        assertEquals(HttpMethod.Put, request.method)
-        assertTrue(request.url.endsWith("/recovery-email/vault"))
-        assertEquals("Bearer tok", request.authorization)
-        val body = request.body!!
-        assertEquals(base64UrlEncodeNoPad(handle), body["handle"]!!.jsonPrimitive.content)
-        assertEquals("name@example.com", body["address"]!!.jsonPrimitive.content)
-        assertEquals(base64Encode(salt), body["vault_salt"]!!.jsonPrimitive.content)
-        assertEquals(base64Encode(sealed), body["sealed_entropy"]!!.jsonPrimitive.content)
-        assertFalse(body.containsKey("fresh_grant"))
+    fun `removing the account's last second way in is the coded 409`() = runTest {
+        try {
+            client(mutableListOf(), HttpStatusCode.Conflict to """{"error":"last-factor"}""")
+                .use { it.recoveryEmailRemove("tok", "grant") }
+            fail("409 must throw")
+        } catch (err: AuthHttpError) {
+            assertTrue(isLastFactor(err))
+        }
     }
 
     @Test
-    fun `the re-seal's refusals keep their codes`() = runTest {
-        for ((status, code, outcome) in listOf(
-            Triple(HttpStatusCode.Conflict, "vault-exists", ResealOutcome.Settled),
-            Triple(HttpStatusCode.Forbidden, "address-mismatch", ResealOutcome.AddressStale),
-            Triple(HttpStatusCode.TooManyRequests, "too-many-attempts", ResealOutcome.RetryLater),
-        )) {
-            try {
-                client(mutableListOf(), status to """{"error":"$code"}""").use {
-                    it.recoveryEmailVaultPut("tok", handle, "a@b", ByteArray(EMAIL_VAULT_SALT_LEN), ByteArray(EMAIL_VAULT_SEALED_LEN))
-                }
-                fail("$code must throw")
-            } catch (err: AuthHttpError) {
-                assertEquals(outcome, resealOutcomeOf(err))
-            }
+    fun `setting up an authenticator carries the fresh grant on both calls`() = runTest {
+        val seen = mutableListOf<Captured>()
+        client(
+            seen,
+            HttpStatusCode.OK to """{"otpauth_uri":"otpauth://totp/x","secret_b32":"ABCDEFGH"}""",
+            HttpStatusCode.OK to """{"enabled":true}""",
+        ).use { c ->
+            val start = c.totpEnrollStart("tok", "grant")
+            assertEquals("ABCDEFGH", start.secretB32)
+            c.totpEnrollFinish("tok", " 123456 ", "grant")
+        }
+        assertTrue(seen[0].url.endsWith("/totp/enroll/start"))
+        assertEquals("grant", seen[0].body!!["fresh_grant"]!!.jsonPrimitive.content)
+        assertTrue(seen[1].url.endsWith("/totp/enroll/finish"))
+        assertEquals("grant", seen[1].body!!["fresh_grant"]!!.jsonPrimitive.content)
+        assertEquals("123456", seen[1].body!!["code"]!!.jsonPrimitive.content)
+        assertTrue(seen.all { it.authorization == "Bearer tok" })
+    }
+
+    @Test
+    fun `the reset's factor routes carry the password grant and answer a reset grant`() = runTest {
+        val seen = mutableListOf<Captured>()
+        val answer = """{"reset_grant":"RG","reset_grant_expires_at_ms":9000}"""
+        client(
+            seen,
+            HttpStatusCode.OK to answer,
+            HttpStatusCode.OK to """{"challenge_id":"chal","resend_after_secs":45,"expires_in_secs":600}""",
+            HttpStatusCode.OK to answer,
+            HttpStatusCode.OK to answer,
+        ).use { c ->
+            val totp = c.resetFactorTotp("tok", "pw-grant", "123456")
+            assertEquals("RG", totp.grant)
+            assertEquals(9000L, totp.expiresAtMs)
+            assertEquals("chal", c.resetFactorEmailStart("tok", "pw-grant", handle, "name@example.com", null).challenge_id)
+            assertEquals("RG", c.resetFactorEmailFinish("tok", "pw-grant", "chal", "654321").grant)
+            assertEquals("RG", c.resetFactorPasskey("tok", "pw-grant").grant)
+        }
+        assertEquals(
+            listOf(
+                "/account/keys/reset/factor/totp",
+                "/account/keys/reset/factor/email/start",
+                "/account/keys/reset/factor/email/finish",
+                "/account/keys/reset/factor/passkey",
+            ),
+            seen.map { "/" + it.url.substringAfter("http://test.invalid/") },
+        )
+        assertTrue(seen.all { it.method == HttpMethod.Post && it.authorization == "Bearer tok" })
+        assertTrue(seen.all { it.body!!["fresh_grant"]!!.jsonPrimitive.content == "pw-grant" })
+        assertEquals("123456", seen[0].body!!["code"]!!.jsonPrimitive.content)
+        assertEquals(base64UrlEncodeNoPad(handle), seen[1].body!!["handle"]!!.jsonPrimitive.content)
+        assertEquals("name@example.com", seen[1].body!!["address"]!!.jsonPrimitive.content)
+        assertEquals("chal", seen[2].body!!["challenge_id"]!!.jsonPrimitive.content)
+        assertEquals(setOf("fresh_grant"), seen[3].body!!.keys)
+        // The grant never prints.
+        assertFalse(ResetFactorGrant("RG", 1L).toString().contains("RG"))
+    }
+
+    @Test
+    fun `a refused factor and a missing factor grant keep their codes`() = runTest {
+        try {
+            client(mutableListOf(), HttpStatusCode.Unauthorized to """{"error":"factor-refused"}""")
+                .use { it.resetFactorTotp("tok", "pw-grant", "000000") }
+            fail("401 must throw")
+        } catch (err: AuthHttpError) {
+            assertEquals(
+                ResetFactorFailure.WrongCode(me.lakko.app.l10n.UiText("settings.recovery.totp.error.wrong")),
+                resetFactorFailureOf(ResetFactorCall.Totp, err),
+            )
+        }
+        try {
+            client(mutableListOf(), HttpStatusCode.Forbidden to """{"error":"reset-factor-required"}""")
+                .use { it.ownedChannelsSecret("tok", null) }
+            fail("403 must throw")
+        } catch (err: AuthHttpError) {
+            assertTrue(isResetFactorRequired(err))
+        }
+    }
+
+    @Test
+    fun `the owned-channels server half is read with the reset grant and must be 32 bytes`() = runTest {
+        val seen = mutableListOf<Captured>()
+        val half = ByteArray(32) { (it + 1).toByte() }
+        val read = client(
+            seen,
+            HttpStatusCode.OK to """{"owned_channels_secret":"${base64UrlEncodeNoPad(half)}"}""",
+        ).use { it.ownedChannelsSecret("tok", "RG") }
+        assertTrue(half.contentEquals(read))
+        assertTrue(seen.single().url.endsWith("/account/owned-channels-secret"))
+        assertEquals("RG", seen.single().body!!["reset_grant"]!!.jsonPrimitive.content)
+        try {
+            client(mutableListOf(), HttpStatusCode.OK to """{"owned_channels_secret":"AAAA"}""")
+                .use { it.ownedChannelsSecret("tok", "RG") }
+            fail("a 3-byte half must not be accepted")
+        } catch (err: AuthHttpError) {
+            assertEquals("/account/owned-channels-secret", err.endpoint)
         }
     }
 
@@ -360,7 +328,7 @@ class RecoveryEmailClientTest {
                 handle = handle,
                 freshGrant = "grant",
                 previousHandle = previous,
-                recoveryEmail = LoginHandleRecoveryEmail(address = "name@example.com", vault_salt = "c2FsdA==", sealed_entropy = "dmF1bHQ="),
+                recoveryEmail = LoginHandleRecoveryEmail(address = "name@example.com"),
             )
         }
         val body = seen.single().body!!
@@ -368,18 +336,20 @@ class RecoveryEmailClientTest {
         assertEquals("grant", body["fresh_grant"]!!.jsonPrimitive.content)
         assertEquals(base64UrlEncodeNoPad(previous), body["previous_handle"]!!.jsonPrimitive.content)
         val email = body["recovery_email"]!!.jsonObject
+        // The address and nothing else: no vault travels any more.
+        assertEquals(setOf("address"), email.keys)
         assertEquals("name@example.com", email["address"]!!.jsonPrimitive.content)
-        assertEquals("c2FsdA==", email["vault_salt"]!!.jsonPrimitive.content)
-        assertEquals("dmF1bHQ=", email["sealed_entropy"]!!.jsonPrimitive.content)
     }
 
     @Test
-    fun `with a saved phrase the recovery email travels without a vault`() = runTest {
-        val seen = mutableListOf<Captured>()
-        client(seen, HttpStatusCode.OK to """{"bound":true}""").use {
-            it.bindLoginHandle("tok", handle, "grant", ByteArray(32) { 9 }, LoginHandleRecoveryEmail(address = "a@b"))
+    fun `a rename that would drop the last second way in is the coded 409`() = runTest {
+        try {
+            client(mutableListOf(), HttpStatusCode.Conflict to """{"error":"last-factor"}""")
+                .use { it.bindLoginHandle("tok", handle, "grant", ByteArray(32) { 9 }, null) }
+            fail("last-factor must throw")
+        } catch (err: AuthHttpError) {
+            assertTrue(isLastFactor(err))
         }
-        assertEquals(setOf("address"), seen.single().body!!["recovery_email"]!!.jsonObject.keys)
     }
 
     @Test

@@ -44,7 +44,8 @@ import {
 import { savePersistedAccount, loadPersistedAccount } from "./persisted-account";
 import { markSignupPhraseOwed } from "./phrase-gate";
 import {
-  dismissBanner,
+  markPasswordOnlyDialogSeen,
+  markProtectionLooked,
   markProtectStepOwed,
   setPhraseProtected,
 } from "./protect/account-protection";
@@ -258,7 +259,8 @@ function seedAccount(acct: string, acctUrl: string): void {
   // ADR-0075: how the account is protected as this device knows it, and
   // what it saw and did of the account's notices.
   setPhraseProtected(local, acct, true);
-  dismissBanner(local, acct, 1);
+  markPasswordOnlyDialogSeen(local, acct);
+  markProtectionLooked(local, acct);
   markProtectStepOwed(local, acct);
   startNoticeCursor(local, acct, 3);
   markOwnAction(local, acct, "recovery-email-added", 1);
@@ -342,6 +344,17 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko:channel-returns:${acct}`, JSON.stringify(["AAAA"]));
   put(`lakko:channel-returns-sent:${acct}`, JSON.stringify({ "c|subscriber|a": 2 }));
   put(`lakko:channel-recovery-registered:${acct}`, JSON.stringify(["c"]));
+  // ADR-0101 section 7 (amended 2026-11-26): the owned-channels markers.
+  put(`lakko:channel-recovery-registered-v2:${acct}`, JSON.stringify(["ab".repeat(16)]));
+  put(`lakko:owned-channels-deletes:${acct}`, JSON.stringify(["ab".repeat(16)]));
+  put(`lakko:owned-channels-retake:${acct}`, JSON.stringify({ done: [] }));
+  put(`lakko:owned-channels-records-owed:${acct}`, JSON.stringify(["ab".repeat(16)]));
+  // ADR-0101 sections 7 and 10: what the seal jobs keep.
+  put(`lakko:seal-announcement:${acct}`, "AAAA");
+  put(`lakko:seal-removals:${acct}`, JSON.stringify(["ab".repeat(16)]));
+  put(`lakko:owned-retake-owed:${acct}`, "1");
+  put(`lakko:owned-server-half:${acct}`, "AAAA");
+  put(`lakko:owned-owed-secrets:${acct}`, "AAAA");
   put(`lakko:channel-return-invitations:${acct}`, JSON.stringify({ c: "AAAA" }));
   put(`lakko:continuity-mailbox-cursor:${acct}`, "3");
   put(`lakko:history-return:${acct}`, JSON.stringify({ G: { before: "0", pages: 0, sentAtMs: 0, done: false } }));
@@ -720,8 +733,11 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.readmission.removed.v1:": "account",
   "lakko:signup-phrase-unacknowledged:": "account",
   "lakko:phrase-protected:": "account",
-  "lakko:protect-banner-dismissed:": "account",
   "lakko:protect-step-owed:": "account",
+  // UX 19.1d and 19.5 (2026-11-26): the password-only dialog was seen on
+  // this device; this device read the account's published protection.
+  "lakko:password-only-dialog-seen:": "account",
+  "lakko:protection-looked:": "account",
   "lakko:account-notices-seen:": "account",
   "lakko:account-notices-self:": "account",
   "lakko:three-words-budget:": "account",
@@ -769,6 +785,15 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko:channel-returns:": "account",
   "lakko:channel-returns-sent:": "account",
   "lakko:channel-recovery-registered:": "account",
+  "lakko:channel-recovery-registered-v2:": "account",
+  "lakko:owned-channels-deletes:": "account",
+  "lakko:owned-channels-retake:": "account",
+  "lakko:owned-channels-records-owed:": "account",
+  "lakko:seal-announcement:": "account",
+  "lakko:seal-removals:": "account",
+  "lakko:owned-retake-owed:": "account",
+  "lakko:owned-server-half:": "account",
+  "lakko:owned-owed-secrets:": "account",
   "lakko:channel-return-invitations:": "account",
   "lakko:continuity-mailbox-cursor:": "account",
   "lakko:history-return:": "account",

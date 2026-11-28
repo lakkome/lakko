@@ -274,7 +274,7 @@
       "status": "machine"
     },
     "auth.signup.passkey.error": {
-      "text": "افزودن کلید عبور ممکن نشد. دوباره تلاش کنید، یا «الان نه» را انتخاب کنید.",
+      "text": "افزودن کلید عبور ممکن نشد. دوباره تلاش کنید، یا راه دیگری انتخاب کنید.",
       "status": "machine"
     },
     "auth.signup.passkey.lede": {
@@ -4889,6 +4889,14 @@
       "text": "درخواست دوباره",
       "status": "machine"
     },
+    "contacts.started_over.closed": {
+      "text": "{name} با یک حساب جدید از نو شروع کرده است. پیام‌ها دیگر اینجا تحویل داده نمی‌شوند.",
+      "status": "machine"
+    },
+    "contacts.started_over.request_note": {
+      "text": "Lakko نتوانست تأیید کند که این همان فرد قبلی است. فقط در صورتی بپذیرید که مطمئن هستید خود اوست.",
+      "status": "machine"
+    },
     "desktop.capture.body": {
       "text": "آن را در تنظیمات حریم خصوصی سیستم مجاز کنید و دوباره تلاش کنید.",
       "status": "machine"
@@ -7657,14 +7665,6 @@
       "text": "ایمیل بازیابی شما جایگزین شد.",
       "status": "machine"
     },
-    "notice.opened_by_email.body": {
-      "text": "{date}، در دستگاهی دیگر.",
-      "status": "machine"
-    },
-    "notice.opened_by_email.title": {
-      "text": "حساب شما با ایمیل بازیابی‌تان باز شد",
-      "status": "machine"
-    },
     "notice.password_by_email.body": {
       "text": "در {date} کسی با ایمیل بازیابی شما رمز عبور جدیدی انتخاب کرد.",
       "status": "machine"
@@ -7675,10 +7675,6 @@
     },
     "notice.phrase_saved": {
       "text": "یک عبارت بازیابی برای حساب شما ذخیره شد.",
-      "status": "machine"
-    },
-    "notice.secure.new_keys": {
-      "text": "با این کار حساب شما کلیدهای جدید می‌گیرد و هر کسی که آن را باز کرده دسترسی‌اش را از دست می‌دهد.",
       "status": "machine"
     },
     "notice.secure.password_saved": {
@@ -7854,11 +7850,75 @@
       "status": "machine"
     },
     "proof.reset.cannot.title": {
-      "text": "بدون رمز عبور یا کلید عبور نمی‌توان کلیدهای حساب را بازنشانی کرد",
+      "text": "بدون رمز عبور نمی‌توان کلیدهای حساب را بازنشانی کرد",
       "status": "machine"
     },
     "proof.reset.cannot.what_you_can_do": {
       "text": "کارهایی که می‌توانید انجام دهید:",
+      "status": "machine"
+    },
+    "proof.reset.factor.heading": {
+      "text": "تأیید کنید که خودتان هستید",
+      "status": "machine"
+    },
+    "proof.reset.factor.title": {
+      "text": "سپس با یکی از این‌ها تأیید کنید:",
+      "status": "machine"
+    },
+    "proof.reset.factor.title_no_password": {
+      "text": "با یکی از این‌ها تأیید کنید:",
+      "status": "machine"
+    },
+    "proof.reset.factor.totp": {
+      "text": "برنامه احراز هویت",
+      "status": "machine"
+    },
+    "proof.reset.factor.email": {
+      "text": "کد ایمیلی",
+      "status": "machine"
+    },
+    "proof.reset.factor.passkey": {
+      "text": "کلید عبور",
+      "status": "machine"
+    },
+    "proof.reset.factor.none": {
+      "text": "نمی‌توانم از هیچ‌کدام استفاده کنم",
+      "status": "machine"
+    },
+    "proof.reset.factor.totp.prompt": {
+      "text": "کد ۶ رقمی برنامه احراز هویت خود را وارد کنید.",
+      "status": "machine"
+    },
+    "proof.reset.factor.email.sent": {
+      "text": "اگر این ایمیل بازیابی {username} باشد، کدی در راه است. این کد ۱۰ دقیقه اعتبار دارد.",
+      "status": "machine"
+    },
+    "proof.reset.factor.passkey.use": {
+      "text": "استفاده از کلید عبور",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.totp": {
+      "text": "با برنامه احراز هویت شما تأیید شد.",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.email": {
+      "text": "با کد ایمیلی تأیید شد.",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.passkey": {
+      "text": "با کلید عبور تأیید شد.",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.title": {
+      "text": "کلیدهای حساب را نمی‌توان بازنشانی کرد",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.body": {
+      "text": "بازنشانی به رمز عبور شما و یک راه دیگر برای تأیید اینکه خودتان هستید نیاز دارد: برنامه احراز هویت، ایمیل بازیابی یا یک کلید عبور.",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.body_none": {
+      "text": "این حساب راه دومی برای تأیید اینکه خودتان هستید ندارد، پس کلیدهایش را نمی‌توان بازنشانی کرد.",
       "status": "machine"
     },
     "proof.save_phrase.help": {
@@ -7869,16 +7929,12 @@
       "text": "برای تغییر نام کاربری، رمز عبور خود را وارد کنید.",
       "status": "machine"
     },
-    "protect.banner.action": {
-      "text": "محافظت",
-      "status": "machine"
-    },
-    "protect.banner.none": {
-      "text": "این حساب هیچ راهی برای بازگشت ندارد.",
+    "proof.add_totp.help": {
+      "text": "برای راه‌اندازی برنامه احراز هویت، رمز عبور خود را وارد کنید.",
       "status": "machine"
     },
     "protect.body": {
-      "text": "اگر رمز عبورتان را فراموش کنید یا این دستگاه را گم کنید، این‌طور دوباره وارد می‌شوید.",
+      "text": "اگر رمز عبورتان را فراموش کنید یا این دستگاه را گم کنید، این‌طور دوباره وارد می‌شوید. دست‌کم یکی را انتخاب کنید.",
       "status": "machine"
     },
     "protect.continue": {
@@ -7909,28 +7965,20 @@
       "text": "ساخت کلید عبور",
       "status": "machine"
     },
+    "protect.passkey.cancelled": {
+      "text": "کلید عبوری افزوده نشد.",
+      "status": "machine"
+    },
     "protect.phrase.body": {
       "text": "۱۲ کلمه که فقط شما نگه می‌دارید. مطمئن‌ترین راه بازگشت.",
       "status": "machine"
     },
     "protect.phrase.save.body": {
-      "text": "12 کلمه که فقط شما نگه می‌دارید. پس از این، کد ایمیلی می‌تواند رمز عبور شما را تغییر دهد اما نمی‌تواند حساب شما را باز کند.",
-      "status": "machine"
-    },
-    "protect.phrase.save.effect": {
-      "text": "با این کار حساب شما کلیدهای جدید می‌گیرد. مخاطبان و گفتگوهای شما همان‌طور که هستند می‌مانند. دستگاه‌های دیگرتان واردشده باقی می‌مانند.",
+      "text": "۱۲ کلمه که فقط شما نگه می‌دارید. کلیدهایتان را روی دستگاه جدید و گفتگوهایتان را پس از بازنشانی برمی‌گردانند.",
       "status": "machine"
     },
     "protect.phrase.save.failed": {
       "text": "تکمیل ممکن نشد. چیزی تغییر نکرد.",
-      "status": "machine"
-    },
-    "protect.phrase.save.finishing": {
-      "text": "حساب شما کلیدهای جدید دارد. در حال اتمام.",
-      "status": "machine"
-    },
-    "protect.phrase.save.progress": {
-      "text": "در حال تغییر کلیدهای حساب شما",
       "status": "machine"
     },
     "protect.phrase.save.show": {
@@ -7941,36 +7989,88 @@
       "text": "ذخیره عبارت بازیابی",
       "status": "machine"
     },
-    "protect.skip": {
-      "text": "الان نه",
-      "status": "machine"
-    },
-    "protect.skip.confirm.body": {
-      "text": "اگر رمز عبورتان را فراموش کنید یا این دستگاه را گم کنید، دیگر نمی‌توانید به این حساب برگردید.",
-      "status": "machine"
-    },
-    "protect.skip.confirm.continue": {
-      "text": "ادامه بدون محافظت",
-      "status": "machine"
-    },
-    "protect.skip.confirm.title": {
-      "text": "بدون محافظت ادامه می‌دهید؟",
-      "status": "machine"
-    },
-    "protect.status.email": {
-      "text": "با ایمیل شما محافظت می‌شود",
-      "status": "machine"
-    },
-    "protect.status.none": {
-      "text": "محافظت‌نشده",
+    "protect.phrase.title_optional": {
+      "text": "عبارت بازیابی هم ذخیره کنید",
       "status": "machine"
     },
     "protect.status.phrase": {
-      "text": "با عبارت بازیابی شما محافظت می‌شود",
+      "text": "گفتگوهای شما با عبارت بازیابی‌تان حفظ می‌شوند",
+      "status": "machine"
+    },
+    "protect.status.passkey_seal": {
+      "text": "گفتگوهای شما با یک کلید عبور حفظ می‌شوند",
+      "status": "machine"
+    },
+    "protect.status.password_only": {
+      "text": "گفتگوهای شما فقط با رمز عبورتان حفظ می‌شوند",
       "status": "machine"
     },
     "protect.title": {
       "text": "از حساب خود محافظت کنید",
+      "status": "machine"
+    },
+    "protect.totp.title": {
+      "text": "استفاده از برنامه احراز هویت",
+      "status": "machine"
+    },
+    "protect.totp.body": {
+      "text": "یک کد ۶ رقمی از برنامه‌ای روی گوشی شما. اگر برنامه فقط روی همین دستگاه باشد، با از دست دادن دستگاه آن را هم از دست می‌دهید.",
+      "status": "machine"
+    },
+    "protect.optional": {
+      "text": "اختیاری",
+      "status": "machine"
+    },
+    "protect.continue_needs": {
+      "text": "برای ادامه، یکی از سه مورد اول را انتخاب کنید.",
+      "status": "machine"
+    },
+    "protect.totp_only.warning": {
+      "text": "اگر برنامه احراز هویت خود را از دست بدهید، نمی‌توانید این حساب را پس بگیرید. یک ایمیل یا کلید عبور هم اضافه کنید.",
+      "status": "machine"
+    },
+    "protect.totp_only.warning_phrase": {
+      "text": "اگر هم برنامه احراز هویت و هم عبارت بازیابی خود را از دست بدهید، نمی‌توانید این حساب را پس بگیرید.",
+      "status": "machine"
+    },
+    "protect.totp_only.remove_notice": {
+      "text": "برنامه احراز هویت شما تنها راه دیگر برای تأیید اینکه خودتان هستید خواهد بود. اگر آن را از دست بدهید، نمی‌توانید این حساب را پس بگیرید.",
+      "status": "machine"
+    },
+    "protect.totp_only.remove_notice_phrase": {
+      "text": "برنامه احراز هویت شما تنها راه دیگر برای تأیید اینکه خودتان هستید خواهد بود. اگر آن و عبارت بازیابی خود را از دست بدهید، نمی‌توانید این حساب را پس بگیرید.",
+      "status": "machine"
+    },
+    "protect.title_required": {
+      "text": "راه دومی برای بازگشت به حساب اضافه کنید",
+      "status": "machine"
+    },
+    "protect.last_factor": {
+      "text": "ابتدا راه دیگری برای بازگشت به حساب اضافه کنید. این آخرین راهی است که این حساب دارد.",
+      "status": "machine"
+    },
+    "protect.username_email": {
+      "text": "ایمیل بازیابی شما به نام کاربری جدیدتان منتقل می‌شود. آن را یک بار وارد کنید.",
+      "status": "machine"
+    },
+    "protect.password_only.title": {
+      "text": "گفتگوهای شما به رمز عبورتان وابسته‌اند",
+      "status": "machine"
+    },
+    "protect.password_only.body": {
+      "text": "اگر رمز عبورتان را فراموش کنید و دستگاه‌هایتان را از دست بدهید، گفتگوهایتان برنمی‌گردند. برای حفظ آن‌ها یک عبارت بازیابی ذخیره کنید یا یک کلید عبور اضافه کنید.",
+      "status": "machine"
+    },
+    "protect.password_only.save_phrase": {
+      "text": "ذخیره عبارت بازیابی",
+      "status": "machine"
+    },
+    "protect.password_only.add_passkey": {
+      "text": "افزودن کلید عبور",
+      "status": "machine"
+    },
+    "protect.password_only.passkey_no_seal": {
+      "text": "این کلید عبور شما را وارد می‌کند اما گفتگوهایتان را حفظ نمی‌کند.",
       "status": "machine"
     },
     "recall.phrase.changed": {
@@ -8019,14 +8119,6 @@
     },
     "recovery.email.check.title": {
       "text": "ایمیل خود را بررسی کنید",
-      "status": "machine"
-    },
-    "recovery.email.failed": {
-      "text": "بازگرداندن حساب شما ممکن نشد. دوباره تلاش کنید یا راه دیگری انتخاب کنید.",
-      "status": "machine"
-    },
-    "recovery.email.restoring": {
-      "text": "در حال بازگرداندن حساب شما",
       "status": "machine"
     },
     "recovery.email.row.body": {
@@ -8269,16 +8361,8 @@
       "text": "{count, plural, one {# تلاش مانده} other {# تلاش مانده}} تا توقف پانزده‌دقیقه‌ای.",
       "status": "machine"
     },
-    "recovery_email.add_again.body": {
-      "text": "کلیدهای حساب شما تغییر کرد. نشانی خود را دوباره وارد کنید تا کد ایمیلی بتواند حساب شما را بازگرداند.",
-      "status": "machine"
-    },
-    "recovery_email.add_again.title": {
-      "text": "ایمیل خود را دوباره اضافه کنید",
-      "status": "machine"
-    },
     "recovery_email.body": {
-      "text": "اگر رمز عبور را فراموش کنید، کدی به این نشانی می‌فرستیم تا بتوانید به حساب برگردید.",
+      "text": "اگر رمز عبور را فراموش کنید، کدی به این نشانی می‌فرستیم تا بتوانید رمز عبور جدیدی انتخاب کنید.",
       "status": "machine"
     },
     "recovery_email.code.expired": {
@@ -8322,7 +8406,7 @@
       "status": "machine"
     },
     "recovery_email.mailbox_warning": {
-      "text": "هر کسی که بتواند این صندوق ایمیل را بخواند می‌تواند وارد حساب شما شود. برای تغییر این وضع، یک عبارت بازیابی ذخیره کنید.",
+      "text": "هر کسی که بتواند این صندوق ایمیل را بخواند می‌تواند وارد حساب شما شود.",
       "status": "machine"
     },
     "recovery_email.needs_username": {
@@ -8338,7 +8422,7 @@
       "status": "machine"
     },
     "recovery_email.remove.confirm.body": {
-      "text": "دیگر نمی‌توانید با ایمیل به حساب برگردید.",
+      "text": "دیگر نمی‌توانید با ایمیل رمز عبور جدید بگیرید.",
       "status": "machine"
     },
     "recovery_email.remove.confirm.title": {
@@ -8605,10 +8689,6 @@
       "text": "همه دستگاه‌های دیگر این حساب از آن خارج و حذف می‌شوند. آن‌ها گفتگوها و مخاطبان این حساب را از دست می‌دهند.",
       "status": "machine"
     },
-    "restore_identity.reset.effect_messages": {
-      "text": "گفتگوها، گروه‌ها و کانال‌ها از دستگاه‌های مخاطبانتان برمی‌گردند، همراه با پیام‌هایی که هنوز دارند، از جدیدترین.",
-      "status": "machine"
-    },
     "restore_identity.reset.effect_passkeys": {
       "text": "همه کلیدهای عبور این حساب حذف می‌شوند. بعداً می‌توانید دوباره کلید عبور اضافه کنید.",
       "status": "machine"
@@ -8647,6 +8727,18 @@
     },
     "restore_identity.reset.what_it_does": {
       "text": "چه می‌کند:",
+      "status": "machine"
+    },
+    "restore_identity.reset.sealed": {
+      "text": "گفتگوها، گروه‌ها و کانال‌های شما از دستگاه‌های مخاطبانتان برخواهند گشت، همراه با پیام‌هایی که هنوز دارند، از جدیدترین.",
+      "status": "machine"
+    },
+    "restore_identity.reset.unsealed": {
+      "text": "این بازنشانی حساب شما را از نو شروع می‌کند. گفتگوها، گروه‌ها و کانال‌هایی که مالکشان هستید برنمی‌گردند. نام کاربری‌تان را نگه می‌دارید و می‌توانید برای مخاطبانتان درخواست‌های جدید بفرستید.",
+      "status": "machine"
+    },
+    "restore_identity.reset.unsealed_use_passkey": {
+      "text": "برای برگرداندن گفتگوهایتان، از کلید عبوری استفاده کنید که آن‌ها را حفظ می‌کند.",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -9337,6 +9429,10 @@
       "text": "این دستگاه نمی‌تواند کلیدهای عبور را مدیریت کند.",
       "status": "machine"
     },
+    "settings.passkeys.no_seal": {
+      "text": "گفتگوهایتان را حفظ نمی‌کند.",
+      "status": "machine"
+    },
     "settings.password.change": {
       "text": "تغییر رمز عبور",
       "status": "machine"
@@ -9446,7 +9542,7 @@
       "status": "machine"
     },
     "settings.recovery.totp.done": {
-      "text": "برنامه احراز هویت راه‌اندازی شد. اکنون کدی از برنامه می‌تواند شما را به حسابتان برگرداند.",
+      "text": "برنامه احراز هویت راه‌اندازی شد. اکنون کدی از برنامه تأیید می‌کند که خودتان هستید.",
       "status": "machine"
     },
     "settings.recovery.totp.error.generic": {
@@ -9479,6 +9575,14 @@
     },
     "settings.recovery.totp.unavailable": {
       "text": "راه‌اندازی برنامه احراز هویت اکنون در دسترس نیست.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.open_app": {
+      "text": "باز کردن در برنامه احراز هویت",
+      "status": "machine"
+    },
+    "settings.recovery.totp.on": {
+      "text": "روشن",
       "status": "machine"
     },
     "settings.recovery.words.not_on_this_device": {

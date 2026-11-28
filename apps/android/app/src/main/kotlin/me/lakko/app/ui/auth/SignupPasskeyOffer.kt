@@ -54,6 +54,10 @@ public fun SignupPasskeyOffer(
     /** Told once the passkey exists (the "Protect your account" step marks
      *  its row done), before its keys are stored. */
     onAdded: () -> Unit = {},
+    /** The system sheet was dismissed. The "Protect your account" step goes
+     *  back to its rows with "No passkey was added." (UX 19.1a); `null`
+     *  stays on this offer. */
+    onCancelled: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -93,7 +97,8 @@ public fun SignupPasskeyOffer(
                             // added, the block appears, no error.
                             proof.onProofRefused()
                         } catch (_: WebauthnUserCancelledError) {
-                            // Dismissed: back to the offer.
+                            // Dismissed: back to the offer, or to the step.
+                            onCancelled?.invoke()
                         } catch (_: me.lakko.app.webauthn.PasskeyAlreadyExistsError) {
                             // UX 10.2: this device has one for the account
                             // already; never "cannot create passkeys".
@@ -119,7 +124,9 @@ public fun SignupPasskeyOffer(
                     onClick = add,
                 )
                 TextButton(onClick = onDone, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-                    Text(t("common.not_now"))
+                    // On the required step there is no "Not now": the way
+                    // out of this offer is back to the step's rows.
+                    Text(t(if (onCancelled != null) "common.back" else "common.not_now"))
                 }
             }
         }

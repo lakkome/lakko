@@ -283,6 +283,11 @@ public final class AuthRepository: ObservableObject {
     /// ``provideRecoveryPhrase(mnemonicPhrase:)`` reads this back.
     private var pendingRecovery: PendingRecovery?
 
+    /// The export key of a password proven in this process for an account
+    /// (``proveWithPassword(password:username:)``, or the password sign-in
+    /// that parked the restore prompt). In memory only.
+    private var provenExportKey: (accountIdB64: String, exportKey: Data)?
+
     /// The fresh phrase + completion context, parked between
     /// ``mintFreshIdentity()`` (or a guest signup) and
     /// ``confirmFreshPhraseSaved()``.
@@ -436,11 +441,12 @@ public final class AuthRepository: ObservableObject {
 
     /// The server step of a key reset (`sessionToken`, the reset grant,
     /// `seed`, the new account key):
-    /// ``AuthClient/resetAccountKeys(sessionToken:freshGrant:seed:newSignaturePubkey:)``
+    /// ``AuthClient/resetAccountKeys(sessionToken:resetGrant:seed:newSignaturePubkey:accountId:)``
     /// in the app; injectable because the OPAQUE exchange cannot be
-    /// answered by a scripted server.
+    /// answered by a scripted server. The grant is the reset FACTOR grant
+    /// (ADR-0073, amended 2026-11-26).
     typealias KeyResetOperation = (
-        _ sessionToken: String, _ freshGrant: String, _ seed: Data, _ newSignaturePubkey: Data,
+        _ sessionToken: String, _ resetGrant: String, _ seed: Data, _ newSignaturePubkey: Data,
         _ accountId: Data
     ) async throws -> KeyResetResult
 
@@ -485,6 +491,14 @@ public final class AuthRepository: ObservableObject {
     /// Whether the account behind `sessionToken` has a passkey, or `nil`
     /// when it could not be read. Injectable for tests.
     typealias PasskeyPresence = (_ sessionToken: String) async -> Bool?
+
+    /// The passkey gesture of the reset's passkey factor (`sessionToken`,
+    /// the account id): ``WebauthnClient/assertResetKeys(accountId:)`` in the
+    /// app; injectable because the system sheet cannot be driven by a test.
+    typealias ResetPasskeyAssertion = @MainActor (_ sessionToken: String, _ accountId: Data)
+        async throws -> (credentialId: Data, prfOutput: Data?)
+
+    private let resetPasskeyAssertion: ResetPasskeyAssertion
 
     private let passkeyPresence: PasskeyPresence
 
@@ -594,6 +608,28 @@ public final class AuthRepository: ObservableObject {
     private let rotationStore: KeyRotationStore
     /// One adoption run at a time.
     private var rotationAdoptInFlight = false
+    /// Alignment item A — this device is asking whether a reset of its own
+    /// account made elsewhere is sealed.
+    private var ownResetJudging = false
+    /// ADR-0101 section 10, "The account's own devices": the R.2 verdict
+    /// with rule 4 over a reset of this device's OWN account made elsewhere
+    /// (`accountId`, this device's account key, its generation). Injectable;
+    /// the live one asks the directory, the attest key and the key log.
+    /// `nil`: the live judgement over ``restoreDirectory``.
+    var judgeOwnReset: (@MainActor (_ accountId: Data, _ heldKey: Data, _ acceptedGeneration: UInt64) async
+        -> ResetVerdict)?
+
+    /// The live judgement: the account's bundle from the directory, then
+    /// the core's rule through ``ContactsClient/judgeOwnAccountReset(accountId:bundle:heldKey:acceptedGeneration:seqFloor:)``.
+    private func liveOwnResetJudge(sessionToken: String?) -> @MainActor (Data, Data, UInt64) async -> ResetVerdict {
+        let directory = restoreDirectory
+        return { accountId, heldKey, generation in
+            guard let bundle = try? await directory.fetchIdentityBundle(
+                accountId: accountId, sessionToken: sessionToken) else { return .noVerdict }
+            return await ContactsClient().judgeOwnAccountReset(
+                accountId: accountId, bundle: bundle, heldKey: heldKey, acceptedGeneration: generation, seqFloor: 0)
+        }
+    }
     /// The retry of an adoption that got no verdict.
     private var rotationAdoptRetry: Task<Void, Never>?
 
@@ -725,6 +761,7 @@ public final class AuthRepository: ObservableObject {
         protectionStore: AccountProtectionStore = AccountProtectionStore(),
         tokenProvider: SessionTokenProvider = .shared,
         keyResetOperation: KeyResetOperation? = nil,
+        resetPasskeyAssertion: ResetPasskeyAssertion? = nil,
         proofLoginOperation: ProofLoginOperation? = nil,
         firstPasswordOperation: FirstPasswordOperation? = nil,
         passkeyPresence: PasskeyPresence? = nil,
@@ -791,9 +828,9 @@ public final class AuthRepository: ObservableObject {
         self.x25519BindingMarks = x25519BindingMarks
         self.logoutOwed = logoutOwed
         self.tokenProvider = tokenProvider
-        self.keyResetOperation = keyResetOperation ?? { sessionToken, freshGrant, seed, newKey, accountId in
+        self.keyResetOperation = keyResetOperation ?? { sessionToken, resetGrant, seed, newKey, accountId in
             try await authClientFactory().resetAccountKeys(
-                sessionToken: sessionToken, freshGrant: freshGrant, seed: seed, newSignaturePubkey: newKey,
+                sessionToken: sessionToken, resetGrant: resetGrant, seed: seed, newSignaturePubkey: newKey,
                 accountId: accountId)
         }
         self.proofLoginOperation = proofLoginOperation ?? { handle, password in
@@ -801,6 +838,11 @@ public final class AuthRepository: ObservableObject {
         }
         self.firstPasswordOperation = firstPasswordOperation ?? { handle, seed, newPassword in
             try await authClientFactory().recover(handle: handle, mnemonicSeed: seed, newPassword: newPassword)
+        }
+        self.resetPasskeyAssertion = resetPasskeyAssertion ?? { sessionToken, accountId in
+            let client = WebauthnClient()
+            client.setSessionToken(sessionToken)
+            return try await client.assertResetKeys(accountId: accountId)
         }
         self.passkeyPresence = passkeyPresence ?? { sessionToken in
             let client = WebauthnClient()
@@ -1549,6 +1591,15 @@ public final class AuthRepository: ObservableObject {
         } catch {
             NSLog("export-key persist (signup) failed: \(error)")
         }
+        // ADR-0101 section 7 — the server half of the owned-channels password
+        // lock, released by this very exchange. Kept under the Keychain only
+        // until the locks exist (``OwnedChannels``; a guest makes them at
+        // its claim, with its first password).
+        if let serverHalf = result.ownedChannelsSecret {
+            _ = writes.ifNotWiped(accountIdB64) {
+                OwnedChannelsPendingSecret.put(serverHalf, accountIdB64: accountIdB64)
+            }
+        }
         // Phase 2a3b0 (ADR-0007) — ensure a random per-device
         // DeviceIdentity seed exists on this device. Distinct
         // from the deterministic AccountIdentity (the
@@ -1758,6 +1809,15 @@ public final class AuthRepository: ObservableObject {
             }
         } catch {
             NSLog("export-key persist (signupGuest) failed: \(error)")
+        }
+        // ADR-0101 section 7 — the server half of the owned-channels password
+        // lock, released by this very exchange. Kept under the Keychain only
+        // until the locks exist (``OwnedChannels``; a guest makes them at
+        // its claim, with its first password).
+        if let serverHalf = result.ownedChannelsSecret {
+            _ = writes.ifNotWiped(accountIdB64) {
+                OwnedChannelsPendingSecret.put(serverHalf, accountIdB64: accountIdB64)
+            }
         }
         do {
             try writes.ifNotWiped(accountIdB64) {
@@ -2689,13 +2749,14 @@ public final class AuthRepository: ObservableObject {
         return phrase
     }
 
-    /// ADR-0075 section 2 — the recovery phrase this device holds for the
-    /// signed-in account, for sealing the email vault at an enrolment. Not
-    /// for display: an account whose phrase was never saved keeps its words
-    /// unseen (``devicePhrase()`` is the gated read). `nil` while a key
-    /// reset's publish is owed, when the stored words are not yet the
-    /// account's published ones.
-    func heldPhraseForEmailVault() -> String? {
+    /// The recovery phrase this device holds for the signed-in account, for
+    /// the phrase seal of the account's published protection (ADR-0101
+    /// section 10) and for "Save a recovery phrase". Not for display: an
+    /// account whose phrase was never saved keeps its words unseen
+    /// (``devicePhrase()`` is the gated read). `nil` while a key reset's
+    /// publish is owed, when the stored words are not yet the account's
+    /// published ones.
+    func heldAccountPhrase() -> String? {
         guard case .session(let account) = state,
               !markers.isPublishOwed(accountIdB64: account.accountIdB64) else { return nil }
         return DevicePhrase.read(accountIdB64: account.accountIdB64)
@@ -2707,17 +2768,19 @@ public final class AuthRepository: ObservableObject {
     /// the screen down the rotation: words that are not the current seed's
     /// would save nothing.
     func heldPhraseToSave() -> String? {
-        guard let phrase = heldPhraseForEmailVault(), let secrets = identitySecrets,
+        guard let phrase = heldAccountPhrase(), let secrets = identitySecrets,
               (try? RecoveryMnemonic.fromPhrase(phrase: phrase).toSeed()) == secrets.accountIdentitySeed
         else { return nil }
         return phrase
     }
 
-    /// The account's phrase was saved: the local flag, the marker that keeps
-    /// this device from being told about its own act, and the protection
-    /// rows. The one way both "Save a recovery phrase" paths record it.
-    func notePhraseSaved(accountIdB64: String) {
-        protectionStore.setPhraseSaved(true, accountIdB64: accountIdB64)
+    /// The new words of a key reset or a key rotation were shown and
+    /// confirmed on this device (only an account whose phrase was saved is
+    /// shown them): the account's published protection lists the new phrase
+    /// at the next look at it (ADR-0101 section 10), which the protection
+    /// rows then run.
+    func newWordsConfirmed(accountIdB64: String) {
+        AccountSealsStore().setPhraseSealOwed(true, accountIdB64: accountIdB64)
         protectionStore.markOwnAction(.phraseSaved, atMs: grantNowMs(), accountIdB64: accountIdB64)
         onProtectionChanged?()
     }
@@ -2836,6 +2899,10 @@ public final class AuthRepository: ObservableObject {
         )
         newPasswordOwed = false
         ensureLoginHandleBound(name: name, sessionToken: result.sessionToken, context: "replace password")
+        // ADR-0101 sections 7 and 10 — the new password seals a reset and
+        // locks the owned channels from now: both are re-made with it (the
+        // export key just stored is the new password's).
+        onProtectionChanged?()
     }
 
     // MARK: - ADR-0076: the own-username register
@@ -3025,30 +3092,23 @@ public final class AuthRepository: ObservableObject {
 
     // MARK: - ADR-0076: changing the username
 
-    /// The `recovery_email` part of a handle change towards `handle`: the
-    /// address this device holds and, while no phrase is saved, the email
-    /// vault sealed (off the main thread) under THAT handle with a fresh
-    /// salt. `nil` when the account has no recovery email or this device
-    /// does not hold the address: the change then drops the recovery email.
+    /// The `recovery_email` part of a handle change: the address this
+    /// device holds, else the one the person typed for the change (UX 19.1c:
+    /// asked for when the email is the account's last second way in). `nil`
+    /// when the account has no recovery email or no address is at hand: the
+    /// change then drops the recovery email, and the server refuses it when
+    /// that would leave the account with none of the three.
     private func recoveryEmailCarry(
-        to handle: Data, accountIdB64: String
-    ) async throws -> LoginHandleRecoveryEmail? {
+        accountIdB64: String, typedAddress: String? = nil
+    ) -> LoginHandleRecoveryEmail? {
         let status = protectionStore.status(accountIdB64: accountIdB64)
-        let address = heldRecoveryAddress?()
+        let address = heldRecoveryAddress?() ?? typedAddress.flatMap { try? normalizeRecoveryEmail(address: $0) }
         switch UsernameRename.emailCarry(
-            recoveryEmailEnabled: status?.enabled == true, addressHeld: address != nil,
-            phraseSaved: protectionStore.phraseSaved(accountIdB64: accountIdB64)) {
+            recoveryEmailEnabled: status?.enabled == true, addressHeld: address != nil) {
         case .none:
             return nil
-        case .addressOnly:
+        case .address:
             return address.map { LoginHandleRecoveryEmail(address: $0) }
-        case .addressAndVault:
-            guard let address, let phrase = heldPhraseForEmailVault() else { throw SessionNotReady() }
-            var rng = SystemRandomNumberGenerator()
-            let salt = Data((0..<16).map { _ in UInt8.random(in: UInt8.min...UInt8.max, using: &rng) })
-            let sealed = try await EmailVaultWork.seal(
-                phrase: phrase, handle: handle, address: address, vaultSalt: salt)
-            return LoginHandleRecoveryEmail(address: address, vaultSalt: salt, sealedEntropy: sealed)
         }
     }
 
@@ -3067,7 +3127,7 @@ public final class AuthRepository: ObservableObject {
     ///
     /// Throws ``FreshAuthRequired`` (no live proof; nothing was sent) or
     /// ``UsernameRenameFailed``. Returns the canonical new name.
-    public func renameUsername(to typed: String) async throws -> String {
+    public func renameUsername(to typed: String, recoveryAddress: String? = nil) async throws -> String {
         guard case .session(let account) = state, let secrets = identitySecrets,
               !account.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw SessionNotReady()
@@ -3085,7 +3145,7 @@ public final class AuthRepository: ObservableObject {
         guard let grant = liveFreshGrant() else { throw FreshAuthRequired() }
 
         // b. The handle. The record first: a crash from here is resumed.
-        let carry = try await recoveryEmailCarry(to: new.handle, accountIdB64: accountIdB64)
+        let carry = recoveryEmailCarry(accountIdB64: accountIdB64, typedAddress: recoveryAddress)
         var record = UsernameRename.Record(
             oldName: old.canonical, newName: new.canonical, phase: .binding, startedAtMs: grantNowMs())
         protectionStore.setRenameOwed(record, accountIdB64: accountIdB64)
@@ -3148,7 +3208,7 @@ public final class AuthRepository: ObservableObject {
             do {
                 try await authClientFactory().changeLoginHandle(
                     handle: old.handle, previousHandle: new.handle, freshGrant: grant,
-                    recoveryEmail: try await recoveryEmailCarry(to: old.handle, accountIdB64: accountIdB64),
+                    recoveryEmail: recoveryEmailCarry(accountIdB64: accountIdB64),
                     sessionToken: secrets.sessionToken)
                 protectionStore.setRenameOwed(nil, accountIdB64: accountIdB64)
             } catch {
@@ -4386,12 +4446,78 @@ public final class AuthRepository: ObservableObject {
     /// record and shows "Was it you?" (``recall``); a device that never held
     /// them keeps nothing and shows the signed-out screen as before.
     func handleKeysSuperseded(accountIdB64: String) {
-        guard keysSignOut == nil, recall == nil else { return }
+        guard keysSignOut == nil, recall == nil, !ownResetJudging else { return }
         guard signedInAccountIdB64 == accountIdB64 || sessionStore.load()?.accountIdB64 == accountIdB64 else {
             return
         }
+        // Alignment item A (ADR-0101 section 10, "The account's own
+        // devices"): a device that holds the account's keys first asks
+        // whether the reset is SEALED. A sealed reset is the owner's
+        // (password and a factor): this device signs out and is wiped as for
+        // the ADR-0073 landing rule, with no "Was it you?". An unsealed one,
+        // and one that cannot be judged now, keeps ADR-0074's recall.
+        if let heldKey = heldAccountPublicKey(accountIdB64: accountIdB64), let secrets = identitySecrets {
+            ownResetJudging = true
+            // The recall record is written first, while the keys are here,
+            // so nothing is lost if the answer never comes; nothing of this
+            // account is woken or sent while it is asked.
+            _ = recallRecordForSupersededDevice(
+                accountIdB64: accountIdB64, username: signedInUsername(accountIdB64: accountIdB64))
+            let judge = judgeOwnReset ?? liveOwnResetJudge(sessionToken: secrets.sessionToken)
+            pushBinding.clear()
+            removeDeliveredNotifications()
+            tokenProvider.clear()
+            let accountId = secrets.accountId
+            let generation = secrets.session.keyGeneration
+            Task { [weak self] in
+                // At most this long (chosen, not measured): no answer keeps
+                // the recall, as an unsealed reset does.
+                let verdict = await Self.withinTimeout(nanos: Self.ownResetJudgeNanos, fallback: .noVerdict) {
+                    await judge(accountId, heldKey, generation)
+                }
+                guard let self else { return }
+                self.ownResetJudging = false
+                var sealed = false
+                if case .sealed = verdict { sealed = true }
+                NSLog("[auth] the account keys were reset on another device; %@",
+                      sealed ? "sealed by the account (no recall)" : "not sealed (recall kept)")
+                self.supersededByReset(accountIdB64: accountIdB64, sealed: sealed)
+            }
+            return
+        }
+        supersededByReset(accountIdB64: accountIdB64, sealed: false)
+    }
+
+    /// How long the own-reset judgement may take before the recall is kept.
+    static let ownResetJudgeNanos: UInt64 = 10_000_000_000
+
+    /// `work`'s answer, or `fallback` once `nanos` passed.
+    static func withinTimeout<T: Sendable>(
+        nanos: UInt64, fallback: T, _ work: @escaping @MainActor () async -> T
+    ) async -> T {
+        await withTaskGroup(of: T.self) { group in
+            group.addTask { await work() }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: nanos)
+                return fallback
+            }
+            let first = await group.next() ?? fallback
+            group.cancelAll()
+            return first
+        }
+    }
+
+    /// The rest of ``handleKeysSuperseded(accountIdB64:)`` once the seal is
+    /// judged: a sealed reset is the full sign-out wipe; any other keeps the
+    /// recall record on a device that held the keys.
+    private func supersededByReset(accountIdB64: String, sealed: Bool) {
+        guard keysSignOut == nil, recall == nil else { return }
         let username = signedInUsername(accountIdB64: accountIdB64)
-        if let record = recallRecordForSupersededDevice(accountIdB64: accountIdB64, username: username) {
+        if sealed {
+            // The owner reset the keys: nothing is to be taken back from
+            // this device, and a record left from before goes.
+            recallRecords.clear(accountIdB64: accountIdB64)
+        } else if let record = recallRecordForSupersededDevice(accountIdB64: accountIdB64, username: username) {
             NSLog("[auth] the account keys were reset on another device; deleting this device's data, keeping the recall record")
             recall = RecallScreenState(record: record)
             pushBinding.clear()
@@ -4712,7 +4838,8 @@ public final class AuthRepository: ObservableObject {
             guard let oldSeed else { return nil }
             let record = RecallRecord(
                 accountIdB64: accountIdB64, oldSeed: oldSeed, username: username, learnedAtMs: grantNowMs(),
-                phraseSaved: protectionStore.phraseSaved(accountIdB64: accountIdB64))
+                phraseSaved: protectionStore.phraseSaved(accountIdB64: accountIdB64),
+                ownedKeysLockRoot: heldOwnedKeysLockRoot(accountIdB64: accountIdB64))
             do {
                 try recallRecords.put(record)
                 return record
@@ -4721,6 +4848,22 @@ public final class AuthRepository: ObservableObject {
                 return nil
             }
         }
+    }
+
+    /// Alignment item B — the root of the owned-channels keys lock this
+    /// device's lineage identity derives, kept in the recall record so the
+    /// recall device can open the list after the account is taken back.
+    private func heldOwnedKeysLockRoot(accountIdB64: String) -> Data? {
+        var phraseSeed: Data?
+        if let secrets = identitySecrets, base64Encode(secrets.accountId) == accountIdB64 {
+            phraseSeed = secrets.accountIdentitySeed
+        } else {
+            phraseSeed = persistence.accountIdentitySeed(accountIdB64: accountIdB64)
+        }
+        guard let phraseSeed, !phraseSeed.isEmpty,
+              let lineageSeed = DeviceGroupLifecycle.lineageSeed(accountIdB64: accountIdB64, currentSeed: phraseSeed),
+              let lineage = try? Identity.fromSeed(seed: lineageSeed) else { return nil }
+        return ownedKeysLockRoot(lineageIdentity: lineage)
     }
 
     /// The 32-byte Ed25519 seed of the account identity this device holds
@@ -4978,6 +5121,11 @@ public final class AuthRepository: ObservableObject {
         // stores, and what follows writes them.
         AccountStoreGate.open(record.accountIdB64)
         freshAuth.put(landed.freshGrant, accountIdB64: record.accountIdB64)
+        // Alignment item B — the owned channels come back through the OLD
+        // keys lock, and the new password seals the account (the
+        // announcement at the landing).
+        oweRecallRetake(
+            accountIdB64: record.accountIdB64, keysRoot: record.ownedKeysLockRoot, exportKey: landed.exportKey)
         // The staged wipe removed the phrase-saved flag; the record kept it.
         // Taking the account back with the phrase is itself only possible
         // for a phrase-protected account.
@@ -5089,6 +5237,12 @@ public final class AuthRepository: ObservableObject {
         freshAuth.put(landed.freshGrant, accountIdB64: accountIdB64)
         // The account lands on this device (again): its stores are written.
         AccountStoreGate.open(accountIdB64)
+        // Alignment item B — the typed phrase is the lineage of an account
+        // that never rotated its keys: its keys lock opens the list.
+        oweRecallRetake(
+            accountIdB64: accountIdB64,
+            keysRoot: (try? Identity.fromSeed(seed: oldSeed)).map { ownedKeysLockRoot(lineageIdentity: $0) },
+            exportKey: landed.exportKey)
         accountRecalledThisSession = true
         sessionLanding = .other
         sessionStore.save(PersistedSession(accountIdB64: accountIdB64, username: offer.username))
@@ -5107,6 +5261,25 @@ public final class AuthRepository: ObservableObject {
             writes: writes,
             previousKeyB64: ResetAnnouncement.previousKey(ofEd25519Seed: record.oldSeed)
         )
+    }
+
+    /// Alignment item B (ADR-0101 section 7 item 8, ADR-0074) — after a
+    /// recall landed: the new password's export key is this run's (the
+    /// announcement and the password lock follow it), and the owned channels
+    /// are taken back through the OLD keys lock, owed under the Keychain
+    /// (``OwnedChannelsResetCarryStore``) until the channel runtime did it.
+    private func oweRecallRetake(accountIdB64: String, keysRoot: Data?, exportKey: Data?) {
+        if let exportKey {
+            do {
+                try ExportKeyStore.putExportKey(accountIdB64: accountIdB64, exportKey: exportKey)
+            } catch {
+                RunExportKey.note(accountIdB64: accountIdB64, exportKey: exportKey)
+            }
+        }
+        guard let keysRoot, keysRoot.count == 32 else { return }
+        OwnedChannelsResetCarryStore.put(
+            OwnedChannels.ResetCarry(serverHalf: nil, lock: .keys(root: keysRoot), exportKey: exportKey),
+            accountIdB64: accountIdB64)
     }
 
     /// The person dismissed the "You took your account back" line.
@@ -6054,45 +6227,25 @@ public final class AuthRepository: ObservableObject {
     /// the person confirmed the phrase. Mirror of the web
     /// `mintFreshIdentity`.
     ///
-    /// The server refuses a reset without a reset grant, which only a
-    /// password sign-in mints (amended 2026-10-04, UX 15.1a). With a live
-    /// grant held, `password` is not used. Without one, `password` runs the
-    /// password sign-in first (``obtainProofForPendingRestore(password:username:pending:)``);
-    /// with neither, ``FreshAuthRequired`` is thrown before any
-    /// network call. A wrong password throws ``FreshAuthWrongPassword``; a
-    /// `403 fresh-auth-required` from the reset drops the grant and throws
-    /// ``FreshAuthRequired``. In each case nothing was reset.
-    ///
-    /// `username` is used only when the parked account has none on this
-    /// device (a passkey sign-in that named no account): the sign-in is then
-    /// addressed by the handle of the typed name. With no name to derive a
-    /// handle from, ``FreshAuthUsernameRequired`` is thrown before any call.
-    public func mintFreshIdentity(password: Data? = nil, username: String? = nil) async throws -> String {
-        guard var pending = pendingRecovery else {
+    /// The server refuses a reset without a reset FACTOR grant (ADR-0073,
+    /// amended 2026-11-26, UX 15.1b): the password, then one second factor
+    /// the account has, both confirmed on the reset screen in the last ten
+    /// minutes (``confirmResetFactor(totpCode:)`` and its siblings).
+    /// `proof` carries that confirmation and what the device found about
+    /// the seal (``resetProof(factor:passkey:)``). A confirmation that ran
+    /// out, or a `403 reset-factor-required` from the reset, throws
+    /// ``ResetFactorRequired``: nothing was reset, and the section opens
+    /// again as it was.
+    public func mintFreshIdentity(proof: KeyResetProof) async throws -> String {
+        guard let pending = pendingRecovery else {
             throw AuthClientError.argument("no pending identity recovery — sign in first")
         }
         let writes = SignInKeyWrites()
 
-        // 0. The fresh-auth proof: the one held (a sign-in or a passkey
-        //    gesture in the last ten minutes), else a password sign-in now.
-        let grant: String
-        if let held = freshAuth.live(accountIdB64: pending.accountIdB64, nowMs: grantNowMs()) {
-            grant = held
-        } else {
-            guard let password, !password.isEmpty else { throw FreshAuthRequired() }
-            do {
-                try await proveWithPassword(password: password, username: username)
-            } catch is FreshAuthNoAccount {
-                // The restore prompt was left meanwhile (sign-out).
-                throw AuthClientError.argument("no pending identity recovery — sign in first")
-            }
-            guard let renewed = pendingRecovery, renewed.accountIdB64 == pending.accountIdB64,
-                  let minted = freshAuth.live(accountIdB64: pending.accountIdB64, nowMs: grantNowMs()) else {
-                throw AuthClientError.argument("no pending identity recovery — sign in first")
-            }
-            pending = renewed
-            grant = minted
-        }
+        // 0. The reset factor grant: the password and one second factor,
+        //    confirmed on the reset screen in the last ten minutes.
+        guard proof.factor.live(nowMs: grantNowMs()) else { throw ResetFactorRequired() }
+        let grant = proof.factor.grant
 
         // 1. A fresh 12-word phrase + seed (the client-side generation
         //    signup uses) and the identity it seeds.
@@ -6112,6 +6265,31 @@ public final class AuthRepository: ObservableObject {
             })
         guard pendingRecovery?.accountIdB64 == pending.accountIdB64 else {
             throw AuthClientError.argument("no pending identity recovery — sign in first")
+        }
+
+        // ADR-0101 section 7 item 8 — the server half of the owned-channels
+        // password lock, asked for BEFORE the reset spends the grant. A
+        // failure only means the owned channels do not come back.
+        var serverHalf: Data?
+        do {
+            serverHalf = try await authClientFactory().ownedChannelsSecret(
+                sessionToken: previousToken, resetGrant: grant)
+        } catch {
+            if ResetFactorRefusal.isFactorRequired(error) { throw ResetFactorRequired() }
+            NSLog("[auth] the owned-channels half was not released (%@); owned channels will not come back",
+                  String(describing: type(of: error)))
+        }
+        guard pendingRecovery?.accountIdB64 == pending.accountIdB64 else {
+            throw AuthClientError.argument("no pending identity recovery — sign in first")
+        }
+        // ADR-0101 section 10 — the reset seal: what was just proven signs
+        // the new key, under the announcement that lists it. Without one the
+        // reset is unsealed (the screen said so before the word was typed).
+        var resetSeal: Data?
+        if let sealed = proof.sealed {
+            resetSeal = try? sealed.key.signResetSeal(
+                accountId: pending.accountIdBytes, announcementSeq: sealed.announcementSeq,
+                fromGeneration: sealed.fromGeneration, newSignaturePubkey: newPubkey)
         }
 
         // ADR-0077 decision 3, rule 1: the phrase goes into this account's
@@ -6141,6 +6319,20 @@ public final class AuthRepository: ObservableObject {
         // taken back, but a sign-out, a wipe or another account's landing
         // while it was out changes what may be written here.
         let bound = binding.capture()
+        // What takes the owned channels back once the channel runtime runs:
+        // `S` and what sealed the reset. Written BEFORE the server step
+        // (alignment item C): `S` cannot be asked for again once the reset
+        // spent the grant, so a crash right after the answer must not lose
+        // it. Removed again when nothing was reset.
+        let carriesOwned: Bool
+        if let serverHalf, let lock = proof.ownedChannelsLock {
+            OwnedChannelsResetCarryStore.put(
+                OwnedChannels.ResetCarry(serverHalf: serverHalf, lock: lock, exportKey: proof.passwordExportKey),
+                accountIdB64: pending.accountIdB64)
+            carriesOwned = true
+        } else {
+            carriesOwned = false
+        }
         let reset: KeyResetResult
         do {
             let answered = try await keyResetOperation(
@@ -6151,13 +6343,14 @@ public final class AuthRepository: ObservableObject {
         } catch {
             // Nothing was reset: the row goes back to what it held.
             kept.undo()
+            if carriesOwned { OwnedChannelsResetCarryStore.delete(accountIdB64: pending.accountIdB64) }
             if let code = IdentityProof.refusalCode(of: error) {
                 NSLog("[auth] key reset refused: %@", code)
             }
-            if FreshAuthRefusal.isRequired(error) {
-                // The grant expired on the way (or was spent): ask again.
-                freshAuth.clear()
-                throw FreshAuthRequired()
+            if ResetFactorRefusal.isFactorRequired(error) {
+                // The confirmation expired on the way (or was spent): the
+                // section opens again.
+                throw ResetFactorRequired()
             }
             throw error
         }
@@ -6176,7 +6369,8 @@ public final class AuthRepository: ObservableObject {
             context: "key reset",
             writes: writes,
             bound: bound,
-            previousKeyB64: previousKeyB64
+            previousKeyB64: previousKeyB64,
+            resetSeal: resetSeal
         )
         // Not this device's session any more (another account signed in, or
         // the account was removed from this device): no screen of this flow
@@ -6205,7 +6399,8 @@ public final class AuthRepository: ObservableObject {
         context: String,
         writes: SignInKeyWrites,
         bound: BindingEpoch.Captured? = nil,
-        previousKeyB64: String? = nil
+        previousKeyB64: String? = nil,
+        resetSeal: Data? = nil
     ) async -> Bool {
         // The account was forgotten on this device (Forget device, Delete
         // account) while the server step was out: its stores were wiped and
@@ -6260,7 +6455,8 @@ public final class AuthRepository: ObservableObject {
             attestation: reset.attestation,
             keyGeneration: reset.session.keyGeneration,
             signedAtMs: 0,
-            newSignaturePubkey: newPubkey
+            newSignaturePubkey: newPubkey,
+            resetSeal: resetSeal
         )
         markers.markPublishOwed(record, accountIdB64: accountIdB64)
         // ADR-0101: the continuity announcement owed after the publish, the
@@ -6511,6 +6707,17 @@ public final class AuthRepository: ObservableObject {
         }
         try installProofSession(result.session, for: account, context: "proof sign-in")
         freshAuth.put(minted, accountIdB64: account.accountIdB64)
+        // ADR-0101 — the export key of the password just proven is what the
+        // password seal and the owned-channels password lock are made from.
+        // Kept for the reset this proof may be for (a device without the
+        // keys), and under the Keychain for the device's next look at the
+        // account's protection.
+        provenExportKey = (account.accountIdB64, result.exportKey)
+        do {
+            try ExportKeyStore.putExportKey(accountIdB64: account.accountIdB64, exportKey: result.exportKey)
+        } catch {
+            NSLog("export-key persist (proof sign-in) failed: \(error)")
+        }
     }
 
     /// Prove who the person is with a passkey: the passkey sign-in ceremony
@@ -6583,6 +6790,151 @@ public final class AuthRepository: ObservableObject {
         // ADR-0074 — the proof sign-in issued a pair that names no device;
         // name this one again.
         sessionLanded(accountIdB64: account.accountIdB64)
+    }
+
+    // MARK: - The reset's second factor (ADR-0073, amended 2026-11-26; UX 15.1b)
+
+    /// Whether a PASSWORD proof is live for the parked account: a password
+    /// sign-in in the last ten minutes. A passkey sign-in does not stand in
+    /// for the password on the reset.
+    public func holdsLivePasswordProofForPendingRestore() -> Bool {
+        guard let pending = pendingRecovery else { return false }
+        return freshAuth.holdsLivePassword(accountIdB64: pending.accountIdB64, nowMs: grantNowMs())
+    }
+
+    /// The second factors of the parked account, asked of the server (the
+    /// recovery email and the authenticator from `GET /recovery-email`, the
+    /// passkeys from the credential list); `nil` when either could not be
+    /// read.
+    public func resetFactorsForPendingRestore() async -> AccountFactors? {
+        guard pendingRecovery != nil else { return nil }
+        let status = await protectionForPendingRestore()
+        let passkey = await accountHasPasskey()
+        return AccountFactors.of(status: status, hasPasskey: passkey)
+    }
+
+    /// The bearer and the password-minted grant every factor route needs.
+    /// ``FreshAuthRequired`` when no password proof is live: the screen asks
+    /// for the password first, and no factor is tried.
+    private func resetFactorContext() throws -> (pending: PendingRecovery, token: String, grant: String) {
+        guard let pending = pendingRecovery else {
+            throw AuthClientError.argument("no pending identity recovery — sign in first")
+        }
+        guard let grant = freshAuth.livePassword(accountIdB64: pending.accountIdB64, nowMs: grantNowMs()) else {
+            throw FreshAuthRequired()
+        }
+        return (pending, pending.currentSession(tokenProvider).sessionToken, grant)
+    }
+
+    private func confirmation(
+        _ kind: ResetFactorKind, _ answer: ResetFactorGrantResponse
+    ) -> ResetFactorConfirmation {
+        ResetFactorConfirmation(kind: kind, grant: answer.resetGrant, expiresAtMs: answer.resetGrantExpiresAtMs)
+    }
+
+    /// Confirm the reset with a code from the authenticator app.
+    public func confirmResetFactor(totpCode: String) async throws -> ResetFactorConfirmation {
+        let context = try resetFactorContext()
+        return confirmation(.authenticator, try await authClientFactory().resetFactorTotp(
+            sessionToken: context.token, freshGrant: context.grant, code: totpCode))
+    }
+
+    /// Ask for a code at the recovery email. The answer is the same whether
+    /// or not the address is the account's. `username` is used only when
+    /// the parked account has none on this device.
+    public func startResetEmailFactor(
+        address: String, username: String? = nil, lang: String?
+    ) async throws -> EmailChallenge {
+        let context = try resetFactorContext()
+        let known = context.pending.username.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let handle = ownLoginHandle(username: known.isEmpty ? (username ?? "") : known) else {
+            throw FreshAuthUsernameRequired()
+        }
+        return try await authClientFactory().resetFactorEmailStart(
+            sessionToken: context.token, freshGrant: context.grant, handle: handle, address: address, lang: lang)
+    }
+
+    /// Confirm the reset with the mailed code.
+    public func confirmResetFactor(emailChallengeId: String, code: String) async throws -> ResetFactorConfirmation {
+        let context = try resetFactorContext()
+        return confirmation(.email, try await authClientFactory().resetFactorEmailFinish(
+            sessionToken: context.token, freshGrant: context.grant, challengeId: emailChallengeId, code: code))
+    }
+
+    /// A passkey used as the reset's factor: the confirmation, and what the
+    /// passkey gave for the reset seal (`prfOutput` is `nil` for a passkey
+    /// that does not keep the chats, and below iOS 18).
+    public struct ResetPasskeyFactor {
+        public let confirmation: ResetFactorConfirmation
+        public let credentialId: Data
+        public let prfOutput: Data?
+    }
+
+    /// Confirm the reset with one of the account's passkeys: the system's
+    /// passkey sheet (one assertion, bound to the reset of this account),
+    /// then the factor route.
+    public func confirmResetFactorWithPasskey() async throws -> ResetPasskeyFactor {
+        let context = try resetFactorContext()
+        let asserted = try await resetPasskeyAssertion(context.token, context.pending.accountIdBytes)
+        // The sheet may have been up for a while: read the grant again.
+        let after = try resetFactorContext()
+        let answer = try await authClientFactory().resetFactorPasskey(
+            sessionToken: after.token, freshGrant: after.grant)
+        return ResetPasskeyFactor(
+            confirmation: confirmation(.passkey, answer),
+            credentialId: asserted.credentialId,
+            prfOutput: PasskeyVault.usablePrfOutput(asserted.prfOutput))
+    }
+
+    /// The export key of the password proven for the parked account: from
+    /// the proof sign-in, else from the password sign-in that parked the
+    /// restore prompt.
+    private func pendingPasswordExportKey(_ pending: PendingRecovery) -> Data? {
+        if let proven = provenExportKey, proven.accountIdB64 == pending.accountIdB64 { return proven.exportKey }
+        if sessionLanding == .password, pending.exportKey.count == ExportKeyStore.exportKeyLength {
+            return pending.exportKey
+        }
+        return nil
+    }
+
+    /// UX 15.1c — whether a reset made now would be sealed, decided on the
+    /// device: the account's own announcement is read from the directory
+    /// and compared with what was just proven (the password's export key,
+    /// and `passkey` when a passkey that gave its secret was used). The
+    /// server is never asked whether the reset will be sealed.
+    ///
+    /// The proof is what ``mintFreshIdentity(proof:)`` takes.
+    public func resetProof(
+        factor: ResetFactorConfirmation, passkey: ResetPasskeyFactor? = nil
+    ) async -> KeyResetProof? {
+        guard let pending = pendingRecovery else { return nil }
+        let token = pending.currentSession(tokenProvider).sessionToken
+        let bundle = try? await restoreDirectory.fetchIdentityBundle(
+            accountId: pending.accountIdBytes, sessionToken: token)
+        guard pendingRecovery?.accountIdB64 == pending.accountIdB64 else { return nil }
+        let announcement = SealAnnouncer.currentAnnouncement(bundle ?? nil)
+        let exportKey = pendingPasswordExportKey(pending)
+        var candidates: [ResetSealPreview.Candidate] = []
+        // The passkey first: it does not depend on the password in force.
+        var passkeyLock: OwnedChannelsRules.ResetLock?
+        if let passkey, let prf = passkey.prfOutput,
+           let key = try? ResetSealKey.fromPasskeyPrf(prfOutput: prf) {
+            candidates.append(ResetSealPreview.Candidate(key: key, credentialId: passkey.credentialId))
+            passkeyLock = .passkey(prfOutput: prf)
+        }
+        if let exportKey, let key = try? ResetSealKey.fromPasswordExportKey(exportKey: exportKey) {
+            candidates.append(ResetSealPreview.Candidate(key: key, credentialId: nil))
+        }
+        let sealed = ResetSealPreview.sealed(announcement: announcement, candidates: candidates)
+        let lock: OwnedChannelsRules.ResetLock?
+        switch sealed?.key.kind() {
+        case .passkey?: lock = passkeyLock
+        case .password?: lock = exportKey.map { .password(exportKey: $0) }
+        default: lock = nil
+        }
+        return KeyResetProof(
+            factor: factor, sealed: sealed, announcesPasskey: ResetSealPreview.listsPasskey(announcement),
+            ownedChannelsLock: lock, passwordExportKey: exportKey)
     }
 
     // MARK: - Password change gate
@@ -6668,6 +7020,8 @@ public final class AuthRepository: ObservableObject {
         }
         // The phrase was shown and confirmed on this screen.
         markers.clearPhraseOwed(accountIdB64: pending.accountIdB64)
+        // ...so the account's protection lists it, at the landing below.
+        newWordsConfirmed(accountIdB64: pending.accountIdB64)
         landPendingFreshIdentity(pending)
     }
 
@@ -6821,7 +7175,8 @@ public final class AuthRepository: ObservableObject {
                             accountId: accountIdBytes,
                             sessionToken: session.sessionToken,
                             seed: accountIdentitySeed,
-                            keyResetAttest: record.attestation
+                            keyResetAttest: record.attestation,
+                            resetSeal: record.resetSeal
                         )
                     } catch {
                         switch KeyResetPublish.discoveryOutcome(error) {
@@ -6915,8 +7270,8 @@ public final class AuthRepository: ObservableObject {
             freshPublishPending = false
         }
         freshPublishNeedsSignIn = false
-        // ADR-0075 — the new keys are published: a device that holds the
-        // recovery address can put the email vault back now.
+        // The new keys are published: the account's protection can be
+        // published under them now (ADR-0101 section 10).
         onProtectionChanged?()
         // Not phrase-protected: there are no words to confirm, so the
         // session lands now.
@@ -7026,11 +7381,20 @@ public final class AuthRepository: ObservableObject {
     ///
     /// `keyResetAttest` is the ADR-0073 attestation on the upload that
     /// installs reset keys (the directory refuses an unattested key change).
+    ///
+    /// `resetSeal` is the ADR-0101 reset seal that upload carries (`nil` for
+    /// an unsealed reset). A seal the directory refuses (`400
+    /// reset-seal-invalid`: the announcement it was signed under was
+    /// replaced meanwhile) is dropped and the upload repeated without it:
+    /// the reset is then unsealed, which the server could have made it
+    /// anyway by stripping the seal, and the account is not left with keys
+    /// it cannot publish.
     private func publishFreshIdentityBundle(
         accountId: Data,
         sessionToken: String,
         seed: Data,
-        keyResetAttest: Data? = nil
+        keyResetAttest: Data? = nil,
+        resetSeal: Data? = nil
     ) async throws {
         let identity = try Identity.fromSeed(seed: seed)
         // G-30 #2 (ADR-0019): a fresh-start mint publishes a NEW key with no
@@ -7048,16 +7412,37 @@ public final class AuthRepository: ObservableObject {
             sessionToken: sessionToken,
             client: authClientFactory()
         )
-        try await accountDirectory.publishIdentityBundle(
-            accountId: accountId,
-            signaturePubkey: identity.signaturePublicKey(),
-            x25519Pubkey: identity.x25519PublicKey(),
-            x25519Binding: signX25519Binding(accountIdentity: identity),
-            leafAuth: leafAuth,
-            genesisAttest: genesisAttest,
-            keyResetAttest: keyResetAttest,
-            sessionToken: sessionToken
-        )
+        guard let keyResetAttest, let resetSeal else {
+            try await accountDirectory.publishIdentityBundle(
+                accountId: accountId,
+                signaturePubkey: identity.signaturePublicKey(),
+                x25519Pubkey: identity.x25519PublicKey(),
+                x25519Binding: signX25519Binding(accountIdentity: identity),
+                leafAuth: leafAuth,
+                genesisAttest: genesisAttest,
+                keyResetAttest: keyResetAttest,
+                sessionToken: sessionToken
+            )
+            return
+        }
+        func upload(seal: Data?) async throws {
+            try await accountDirectory.publishResetIdentityBundle(
+                accountId: accountId,
+                signaturePubkey: identity.signaturePublicKey(),
+                x25519Pubkey: identity.x25519PublicKey(),
+                x25519Binding: signX25519Binding(accountIdentity: identity),
+                leafAuth: leafAuth,
+                keyResetAttest: keyResetAttest,
+                resetSeal: seal,
+                sessionToken: sessionToken
+            )
+        }
+        do {
+            try await upload(seal: resetSeal)
+        } catch where SealUploadRefusal.isSealInvalid(error) {
+            NSLog("[auth] the directory refused the reset seal; the reset is published without one")
+            try await upload(seal: nil)
+        }
     }
 
 

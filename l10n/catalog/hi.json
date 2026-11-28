@@ -274,7 +274,7 @@
       "status": "machine"
     },
     "auth.signup.passkey.error": {
-      "text": "पासकी नहीं जोड़ी जा सकी। फिर से कोशिश करें, या \"अभी नहीं\" चुनें।",
+      "text": "पासकी नहीं जोड़ी जा सकी। फिर से कोशिश करें, या कोई और तरीका चुनें।",
       "status": "machine"
     },
     "auth.signup.passkey.lede": {
@@ -4889,6 +4889,14 @@
       "text": "फिर से पूछें",
       "status": "machine"
     },
+    "contacts.started_over.closed": {
+      "text": "{name} ने नए अकाउंट के साथ नए सिरे से शुरुआत की है। यहाँ मैसेज अब डिलीवर नहीं होते।",
+      "status": "machine"
+    },
+    "contacts.started_over.request_note": {
+      "text": "Lakko यह पुष्टि नहीं कर सका कि यह पहले वाला ही व्यक्ति है। तभी स्वीकार करें जब आपको पक्का यकीन हो कि यह वही व्यक्ति है।",
+      "status": "machine"
+    },
     "desktop.capture.body": {
       "text": "अपने सिस्टम की निजता सेटिंग में इसकी अनुमति दें, फिर दोबारा कोशिश करें।",
       "status": "machine"
@@ -7657,14 +7665,6 @@
       "text": "आपका रिकवरी ईमेल बदल दिया गया।",
       "status": "machine"
     },
-    "notice.opened_by_email.body": {
-      "text": "{date} को, किसी दूसरे डिवाइस पर।",
-      "status": "machine"
-    },
-    "notice.opened_by_email.title": {
-      "text": "आपका अकाउंट आपके रिकवरी ईमेल से खोला गया",
-      "status": "machine"
-    },
     "notice.password_by_email.body": {
       "text": "{date} को किसी ने आपके रिकवरी ईमेल से नया पासवर्ड चुना।",
       "status": "machine"
@@ -7675,10 +7675,6 @@
     },
     "notice.phrase_saved": {
       "text": "आपके अकाउंट के लिए रिकवरी फ़्रेज़ सेव की गई।",
-      "status": "machine"
-    },
-    "notice.secure.new_keys": {
-      "text": "इससे आपके अकाउंट को नई कुंजियाँ मिलती हैं, इसलिए जिसने भी इसे खोला था वह इसे खो देता है।",
       "status": "machine"
     },
     "notice.secure.password_saved": {
@@ -7854,11 +7850,75 @@
       "status": "machine"
     },
     "proof.reset.cannot.title": {
-      "text": "आपके पासवर्ड या पासकी के बिना अकाउंट की कुंजियाँ रीसेट नहीं की जा सकतीं",
+      "text": "आपके पासवर्ड के बिना अकाउंट की कुंजियाँ रीसेट नहीं की जा सकतीं",
       "status": "machine"
     },
     "proof.reset.cannot.what_you_can_do": {
       "text": "आप क्या कर सकते हैं:",
+      "status": "machine"
+    },
+    "proof.reset.factor.heading": {
+      "text": "पुष्टि करें कि यह आप ही हैं",
+      "status": "machine"
+    },
+    "proof.reset.factor.title": {
+      "text": "फिर इनमें से किसी एक से पुष्टि करें:",
+      "status": "machine"
+    },
+    "proof.reset.factor.title_no_password": {
+      "text": "इनमें से किसी एक से पुष्टि करें:",
+      "status": "machine"
+    },
+    "proof.reset.factor.totp": {
+      "text": "ऑथेंटिकेटर ऐप",
+      "status": "machine"
+    },
+    "proof.reset.factor.email": {
+      "text": "ईमेल से कोड",
+      "status": "machine"
+    },
+    "proof.reset.factor.passkey": {
+      "text": "पासकी",
+      "status": "machine"
+    },
+    "proof.reset.factor.none": {
+      "text": "मेरे लिए इनमें से कोई भी इस्तेमाल करना संभव नहीं है",
+      "status": "machine"
+    },
+    "proof.reset.factor.totp.prompt": {
+      "text": "अपने ऑथेंटिकेटर ऐप का 6 अंकों का कोड डालें।",
+      "status": "machine"
+    },
+    "proof.reset.factor.email.sent": {
+      "text": "अगर यह {username} का रिकवरी ईमेल है, तो एक कोड भेजा जा रहा है। यह 10 मिनट तक काम करता है।",
+      "status": "machine"
+    },
+    "proof.reset.factor.passkey.use": {
+      "text": "पासकी इस्तेमाल करें",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.totp": {
+      "text": "आपके ऑथेंटिकेटर ऐप से पुष्टि हो गई।",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.email": {
+      "text": "ईमेल से मिले कोड से पुष्टि हो गई।",
+      "status": "machine"
+    },
+    "proof.reset.factor.done.passkey": {
+      "text": "पासकी से पुष्टि हो गई।",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.title": {
+      "text": "अकाउंट की कुंजियाँ रीसेट नहीं की जा सकतीं",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.body": {
+      "text": "रीसेट करने के लिए आपका पासवर्ड और यह पुष्टि करने का एक और तरीका चाहिए कि यह आप ही हैं: आपका ऑथेंटिकेटर ऐप, आपका रिकवरी ईमेल या कोई पासकी।",
+      "status": "machine"
+    },
+    "proof.reset.no_factor.body_none": {
+      "text": "इस अकाउंट के पास यह पुष्टि करने का कोई दूसरा तरीका नहीं है कि यह आप ही हैं, इसलिए इसकी कुंजियाँ रीसेट नहीं की जा सकतीं।",
       "status": "machine"
     },
     "proof.save_phrase.help": {
@@ -7869,16 +7929,12 @@
       "text": "अपना यूज़रनेम बदलने के लिए पासवर्ड डालें।",
       "status": "machine"
     },
-    "protect.banner.action": {
-      "text": "सुरक्षित करें",
-      "status": "machine"
-    },
-    "protect.banner.none": {
-      "text": "इस अकाउंट में वापस आने का कोई तरीका नहीं है।",
+    "proof.add_totp.help": {
+      "text": "ऑथेंटिकेटर ऐप सेट अप करने के लिए अपना पासवर्ड डालें।",
       "status": "machine"
     },
     "protect.body": {
-      "text": "अगर आप अपना पासवर्ड भूल जाएँ या यह डिवाइस खो जाए, तो इसी तरह आप वापस आ सकते हैं।",
+      "text": "अगर आप अपना पासवर्ड भूल जाएँ या यह डिवाइस खो जाए, तो इसी तरह आप वापस आ सकते हैं। कम से कम एक चुनें।",
       "status": "machine"
     },
     "protect.continue": {
@@ -7909,28 +7965,20 @@
       "text": "पासकी बनाएँ",
       "status": "machine"
     },
+    "protect.passkey.cancelled": {
+      "text": "कोई पासकी नहीं जोड़ी गई।",
+      "status": "machine"
+    },
     "protect.phrase.body": {
       "text": "12 शब्द जो सिर्फ़ आपके पास रहते हैं। वापस आने का सबसे मज़बूत तरीका।",
       "status": "machine"
     },
     "protect.phrase.save.body": {
-      "text": "12 शब्द जो सिर्फ़ आपके पास रहते हैं। इसके बाद ईमेल से मिला कोड आपका पासवर्ड बदल सकता है, लेकिन आपका अकाउंट नहीं खोल सकता।",
-      "status": "machine"
-    },
-    "protect.phrase.save.effect": {
-      "text": "इससे आपके अकाउंट को नई कुंजियाँ मिलती हैं। आपके संपर्क और चैट जैसे हैं वैसे ही रहते हैं। आपके दूसरे डिवाइस साइन इन रहते हैं।",
+      "text": "12 शब्द जो सिर्फ़ आपके पास रहते हैं। ये नए डिवाइस पर आपकी कुंजियाँ और रीसेट के बाद आपकी चैट वापस लाते हैं।",
       "status": "machine"
     },
     "protect.phrase.save.failed": {
       "text": "हम इसे पूरा नहीं कर सके। कुछ नहीं बदला।",
-      "status": "machine"
-    },
-    "protect.phrase.save.finishing": {
-      "text": "आपके अकाउंट को नई कुंजियाँ मिल गई हैं। पूरा किया जा रहा है।",
-      "status": "machine"
-    },
-    "protect.phrase.save.progress": {
-      "text": "आपके अकाउंट की कुंजियाँ बदली जा रही हैं",
       "status": "machine"
     },
     "protect.phrase.save.show": {
@@ -7941,36 +7989,88 @@
       "text": "रिकवरी फ़्रेज़ सेव करें",
       "status": "machine"
     },
-    "protect.skip": {
-      "text": "अभी नहीं",
-      "status": "machine"
-    },
-    "protect.skip.confirm.body": {
-      "text": "अगर आप अपना पासवर्ड भूल जाएँ या यह डिवाइस खो जाए, तो आप इस खाते में वापस नहीं आ पाएँगे।",
-      "status": "machine"
-    },
-    "protect.skip.confirm.continue": {
-      "text": "बिना सुरक्षा के जारी रखें",
-      "status": "machine"
-    },
-    "protect.skip.confirm.title": {
-      "text": "बिना सुरक्षा के जारी रखें?",
-      "status": "machine"
-    },
-    "protect.status.email": {
-      "text": "आपके ईमेल से सुरक्षित",
-      "status": "machine"
-    },
-    "protect.status.none": {
-      "text": "सुरक्षित नहीं",
+    "protect.phrase.title_optional": {
+      "text": "रिकवरी फ़्रेज़ भी सेव करें",
       "status": "machine"
     },
     "protect.status.phrase": {
-      "text": "आपकी रिकवरी फ़्रेज़ से सुरक्षित",
+      "text": "आपकी चैट आपकी रिकवरी फ़्रेज़ से बनी रहती हैं",
+      "status": "machine"
+    },
+    "protect.status.passkey_seal": {
+      "text": "आपकी चैट एक पासकी से बनी रहती हैं",
+      "status": "machine"
+    },
+    "protect.status.password_only": {
+      "text": "आपकी चैट सिर्फ़ आपके पासवर्ड से बनी रहती हैं",
       "status": "machine"
     },
     "protect.title": {
       "text": "अपने अकाउंट की सुरक्षा करें",
+      "status": "machine"
+    },
+    "protect.totp.title": {
+      "text": "ऑथेंटिकेटर ऐप इस्तेमाल करें",
+      "status": "machine"
+    },
+    "protect.totp.body": {
+      "text": "आपके फ़ोन के किसी ऐप से मिला 6 अंकों का कोड। अगर ऐप सिर्फ़ इसी डिवाइस पर है, तो डिवाइस खोने पर वह भी खो जाएगा।",
+      "status": "machine"
+    },
+    "protect.optional": {
+      "text": "वैकल्पिक",
+      "status": "machine"
+    },
+    "protect.continue_needs": {
+      "text": "जारी रखने के लिए पहले तीन में से कोई एक चुनें।",
+      "status": "machine"
+    },
+    "protect.totp_only.warning": {
+      "text": "अगर आपका ऑथेंटिकेटर ऐप खो जाए, तो आप यह अकाउंट वापस नहीं पा सकेंगे। साथ में कोई ईमेल या पासकी भी जोड़ें।",
+      "status": "machine"
+    },
+    "protect.totp_only.warning_phrase": {
+      "text": "अगर आपका ऑथेंटिकेटर ऐप और रिकवरी फ़्रेज़ दोनों खो जाएँ, तो आप यह अकाउंट वापस नहीं पा सकेंगे।",
+      "status": "machine"
+    },
+    "protect.totp_only.remove_notice": {
+      "text": "यह पुष्टि करने का कि यह आप ही हैं, आपका ऑथेंटिकेटर ऐप ही एकमात्र दूसरा तरीका रह जाएगा। अगर वह खो जाए, तो आप यह अकाउंट वापस नहीं पा सकेंगे।",
+      "status": "machine"
+    },
+    "protect.totp_only.remove_notice_phrase": {
+      "text": "यह पुष्टि करने का कि यह आप ही हैं, आपका ऑथेंटिकेटर ऐप ही एकमात्र दूसरा तरीका रह जाएगा। अगर वह और आपकी रिकवरी फ़्रेज़ खो जाएँ, तो आप यह अकाउंट वापस नहीं पा सकेंगे।",
+      "status": "machine"
+    },
+    "protect.title_required": {
+      "text": "वापस आने का दूसरा तरीका जोड़ें",
+      "status": "machine"
+    },
+    "protect.last_factor": {
+      "text": "पहले वापस आने का कोई और तरीका जोड़ें। इस अकाउंट के पास यही आख़िरी तरीका है।",
+      "status": "machine"
+    },
+    "protect.username_email": {
+      "text": "आपका रिकवरी ईमेल आपके नए यूज़रनेम पर चला जाता है। इसे एक बार टाइप करें।",
+      "status": "machine"
+    },
+    "protect.password_only.title": {
+      "text": "आपकी चैट आपके पासवर्ड पर निर्भर हैं",
+      "status": "machine"
+    },
+    "protect.password_only.body": {
+      "text": "अगर आप अपना पासवर्ड भूल जाएँ और अपने डिवाइस खो दें, तो आपकी चैट वापस नहीं आएँगी। उन्हें बनाए रखने के लिए रिकवरी फ़्रेज़ सेव करें या पासकी जोड़ें।",
+      "status": "machine"
+    },
+    "protect.password_only.save_phrase": {
+      "text": "रिकवरी फ़्रेज़ सेव करें",
+      "status": "machine"
+    },
+    "protect.password_only.add_passkey": {
+      "text": "पासकी जोड़ें",
+      "status": "machine"
+    },
+    "protect.password_only.passkey_no_seal": {
+      "text": "यह पासकी आपको साइन इन कराती है, लेकिन आपकी चैट बनाए नहीं रखती।",
       "status": "machine"
     },
     "recall.phrase.changed": {
@@ -8019,14 +8119,6 @@
     },
     "recovery.email.check.title": {
       "text": "अपना ईमेल देखें",
-      "status": "machine"
-    },
-    "recovery.email.failed": {
-      "text": "हम आपका अकाउंट वापस नहीं ला सके। फिर से कोशिश करें, या कोई दूसरा तरीका चुनें।",
-      "status": "machine"
-    },
-    "recovery.email.restoring": {
-      "text": "आपका अकाउंट वापस लाया जा रहा है",
       "status": "machine"
     },
     "recovery.email.row.body": {
@@ -8269,16 +8361,8 @@
       "text": "15 मिनट के विराम से पहले {count, plural, one {# कोशिश बाकी} other {# कोशिशें बाकी}}।",
       "status": "machine"
     },
-    "recovery_email.add_again.body": {
-      "text": "आपके अकाउंट की कुंजियाँ बदल गई हैं। अपना पता फिर से टाइप करें ताकि ईमेल से मिला कोड आपका अकाउंट वापस ला सके।",
-      "status": "machine"
-    },
-    "recovery_email.add_again.title": {
-      "text": "अपना ईमेल फिर से जोड़ें",
-      "status": "machine"
-    },
     "recovery_email.body": {
-      "text": "अगर आप पासवर्ड भूल जाएँ, तो हम इस पते पर एक कोड भेजते हैं ताकि आप अकाउंट में वापस आ सकें।",
+      "text": "अगर आप पासवर्ड भूल जाएँ, तो हम इस पते पर एक कोड भेजते हैं ताकि आप नया पासवर्ड चुन सकें।",
       "status": "machine"
     },
     "recovery_email.code.expired": {
@@ -8322,7 +8406,7 @@
       "status": "machine"
     },
     "recovery_email.mailbox_warning": {
-      "text": "जो भी इस मेलबॉक्स को पढ़ सकता है, वह आपके अकाउंट में आ सकता है। इसे बदलने के लिए रिकवरी फ़्रेज़ सेव करें।",
+      "text": "जो भी इस मेलबॉक्स को पढ़ सकता है, वह आपके अकाउंट में आ सकता है।",
       "status": "machine"
     },
     "recovery_email.needs_username": {
@@ -8338,7 +8422,7 @@
       "status": "machine"
     },
     "recovery_email.remove.confirm.body": {
-      "text": "आप ईमेल से अकाउंट में वापस नहीं आ पाएँगे।",
+      "text": "आप ईमेल से नया पासवर्ड नहीं पा सकेंगे।",
       "status": "machine"
     },
     "recovery_email.remove.confirm.title": {
@@ -8605,10 +8689,6 @@
       "text": "इस अकाउंट के बाकी सभी डिवाइस लॉग आउट करके हटा दिए जाते हैं। उन पर इस अकाउंट की चैट और संपर्क खो जाते हैं।",
       "status": "machine"
     },
-    "restore_identity.reset.effect_messages": {
-      "text": "चैट, ग्रुप और चैनल आपके संपर्कों के डिवाइस से वापस आते हैं, उन मैसेज के साथ जो उनके पास अभी भी हैं, सबसे नए पहले।",
-      "status": "machine"
-    },
     "restore_identity.reset.effect_passkeys": {
       "text": "इस अकाउंट की सभी पासकी मिटा दी जाती हैं। बाद में आप पासकी फिर से जोड़ सकते हैं।",
       "status": "machine"
@@ -8647,6 +8727,18 @@
     },
     "restore_identity.reset.what_it_does": {
       "text": "यह क्या करता है:",
+      "status": "machine"
+    },
+    "restore_identity.reset.sealed": {
+      "text": "आपकी चैट, ग्रुप और चैनल आपके संपर्कों के डिवाइस से वापस आएँगे, उन मैसेज के साथ जो उनके पास अभी भी हैं, सबसे नए पहले।",
+      "status": "machine"
+    },
+    "restore_identity.reset.unsealed": {
+      "text": "यह रीसेट आपका अकाउंट नए सिरे से शुरू करता है। आपकी चैट, ग्रुप और आपके अपने चैनल वापस नहीं आएँगे। आपका यूज़रनेम आपके पास रहता है, और आप अपने संपर्कों को नए अनुरोध भेज सकते हैं।",
+      "status": "machine"
+    },
+    "restore_identity.reset.unsealed_use_passkey": {
+      "text": "चैट वापस लाने के लिए ऐसी पासकी इस्तेमाल करें जो आपकी चैट बनाए रखती है।",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -9337,6 +9429,10 @@
       "text": "यह डिवाइस पासकी प्रबंधित नहीं कर सकता।",
       "status": "machine"
     },
+    "settings.passkeys.no_seal": {
+      "text": "आपकी चैट बनाए नहीं रखती।",
+      "status": "machine"
+    },
     "settings.password.change": {
       "text": "पासवर्ड बदलें",
       "status": "machine"
@@ -9446,7 +9542,7 @@
       "status": "machine"
     },
     "settings.recovery.totp.done": {
-      "text": "ऑथेंटिकेटर सेट अप हो गया। ऐप का कोड अब आपको अपने खाते में वापस ला सकता है।",
+      "text": "ऑथेंटिकेटर सेट अप हो गया। ऐप का कोड अब पुष्टि करता है कि यह आप ही हैं।",
       "status": "machine"
     },
     "settings.recovery.totp.error.generic": {
@@ -9479,6 +9575,14 @@
     },
     "settings.recovery.totp.unavailable": {
       "text": "ऑथेंटिकेटर सेट अप अभी उपलब्ध नहीं है।",
+      "status": "machine"
+    },
+    "settings.recovery.totp.open_app": {
+      "text": "ऑथेंटिकेटर ऐप में खोलें",
+      "status": "machine"
+    },
+    "settings.recovery.totp.on": {
+      "text": "चालू",
       "status": "machine"
     },
     "settings.recovery.words.not_on_this_device": {

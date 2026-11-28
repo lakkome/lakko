@@ -97,6 +97,10 @@ export async function oneToOneSendVerdict(input: {
   readonly check: () => Promise<void>;
   /** Read after the check: the key that makes the session unrepairable. */
   readonly unrepairableKey: () => string | null;
+  /** Read after the check: the conversation takes nothing any more (its
+   *  person started over, UX 16.11): `give-up` at once, never sent, never
+   *  held. */
+  readonly closed?: () => boolean;
   /** When the message was first held (the give-up counts from then). */
   readonly heldAtMs: number;
   readonly now?: () => number;
@@ -111,6 +115,7 @@ export async function oneToOneSendVerdict(input: {
     }),
   ]);
   if (timer !== undefined) clearTimeout(timer);
+  if (input.closed?.() === true) return "give-up";
   const route = sendRoute({ kind: "chat", unrepairableKeyB64: input.unrepairableKey() });
   return heldVerdict({ route, heldAtMs: input.heldAtMs, nowMs: (input.now ?? Date.now)() });
 }

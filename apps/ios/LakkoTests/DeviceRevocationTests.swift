@@ -1050,7 +1050,10 @@ final class DeviceRevocationRepositoryTests: XCTestCase {
         let harness = restored(pair: SessionPair.fixture().naming(deviceId: ownDevice)) { _, path, _ in
             path == "/auth/genesis/attest" ? Self.genesisOK : (503, "")
         }
+        harness.repository.judgeOwnReset = { _, _, _ in .noVerdict }
         harness.repository.handleKeysSuperseded(accountIdB64: accountIdB64)
+        // Alignment item A: asked once the reset was judged (not sealed).
+        _ = await waitUntil { harness.repository.recall != nil }
         XCTAssertNotNil(harness.repository.recall, "a device with the keys asks: Was it you?")
         XCTAssertNil(harness.repository.keysSignOut)
         XCTAssertNotNil(harness.recalls.record)

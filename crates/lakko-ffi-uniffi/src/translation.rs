@@ -96,16 +96,16 @@ impl From<RustOffer> for TranslateOffer {
 }
 
 /// Inputs for one message's `Translate` row.
-// Four independent facts about one message; an enum would merge them.
-#[allow(clippy::struct_excessive_bools)]
+///
+/// The person's own messages are offered like received ones, so there is no
+/// "own" input; own messages stay out of the conversation bar by the caller
+/// passing incoming messages only.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct TranslateOfferInput {
     /// Settings: `Show Translate button`.
     pub enabled: bool,
     /// The message has text (a caption or an existing transcript).
     pub has_text: bool,
-    /// The person wrote it.
-    pub is_own: bool,
     /// What the detector found, if anything.
     pub detected: Option<DetectedLanguage>,
     /// The engine's answer for the detected language into the target.
@@ -137,7 +137,6 @@ pub fn translation_offered(
     let rust = RustOfferInput {
         enabled: input.enabled,
         has_text: input.has_text,
-        is_own: input.is_own,
         detected: input.detected.map(Into::into),
         engine_for_detected: input.engine_for_detected.into(),
         any_engine: input.any_engine,
@@ -514,7 +513,6 @@ mod tests {
         let input = TranslateOfferInput {
             enabled: true,
             has_text: true,
-            is_own: false,
             detected: Some(DetectedLanguage {
                 tag: "es".into(),
                 confidence_permille: 950,
@@ -562,7 +560,6 @@ mod tests {
         let input = TranslateOfferInput {
             enabled: true,
             has_text: true,
-            is_own: false,
             detected,
             engine_for_detected: TranslationEngineState::Ready,
             any_engine: true,

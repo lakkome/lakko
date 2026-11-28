@@ -132,7 +132,11 @@ public final class PeerPinStore {
             acceptedKeyGeneration: UInt64? = nil,
             previousKeysB64: [String]? = nil,
             supersededKeysB64: [String]? = nil,
-            resetSignedAtMs: Int64? = nil
+            resetSignedAtMs: Int64? = nil,
+            sealSeqFloor: UInt64? = nil,
+            startedOver: StartedOver? = nil,
+            startedOverKeysB64: [String]? = nil,
+            startedOverAtMs: [String: Int64]? = nil
         ) {
             self.pinnedSignaturePubkeyB64 = pinnedSignaturePubkeyB64
             self.rotationMarker = rotationMarker
@@ -143,6 +147,10 @@ public final class PeerPinStore {
             self.previousKeysB64 = previousKeysB64
             self.supersededKeysB64 = supersededKeysB64
             self.resetSignedAtMs = resetSignedAtMs
+            self.sealSeqFloor = sealSeqFloor
+            self.startedOver = startedOver
+            self.startedOverKeysB64 = startedOverKeysB64
+            self.startedOverAtMs = startedOverAtMs
         }
 
         /// ADR-0073 R.2 rule 2 - the key generation this device last
@@ -163,6 +171,42 @@ public final class PeerPinStore {
         /// The `signed_at` of the latest accepted reset, UNIX milliseconds:
         /// what "sent after the reset" is measured against (R.7 case 1).
         public var resetSignedAtMs: Int64?
+        /// ADR-0101 section 10 - the highest `seq` of a seal announcement
+        /// this device has verified under a key it trusts for the account.
+        /// A reset is sealed only under an announcement at or above it, so
+        /// the directory cannot serve an older announcement (one that still
+        /// lists a password since changed, or a removed passkey). `nil`
+        /// until one was seen.
+        public var sealSeqFloor: UInt64?
+        /// ADR-0101 section 11 - the account's latest UNSEALED reset this
+        /// device met while it still pins the key of before it: a new
+        /// account under the same username. Nothing was moved. Cleared when
+        /// the person accepts a contact request from the new keys
+        /// (``adoptStartedOver(accountIdB64:newKeyB64:)``).
+        public var startedOver: StartedOver?
+        /// Every key of this account an unsealed reset left behind: the
+        /// one-to-one with it shows the closed line (UX 16.11). Never a
+        /// superseded key: nothing is moved for it and nothing returned.
+        public var startedOverKeysB64: [String]?
+        /// When each key of ``startedOverKeysB64`` started over (the reset's
+        /// attestation mint time), UNIX milliseconds: what the pairing state
+        /// bundle carries (alignment item F). Optional so older rows decode.
+        public var startedOverAtMs: [String: Int64]?
+    }
+
+    /// An unsealed reset, as the pin remembers it.
+    public struct StartedOver: Codable, Equatable {
+        /// The key the directory serves since, standard base64.
+        public var newKeyB64: String
+        public var keyGeneration: UInt64
+        /// The attestation's mint time, UNIX milliseconds.
+        public var signedAtMs: Int64
+
+        public init(newKeyB64: String, keyGeneration: UInt64, signedAtMs: Int64) {
+            self.newKeyB64 = newKeyB64
+            self.keyGeneration = keyGeneration
+            self.signedAtMs = signedAtMs
+        }
     }
 
     /// Outcome of a ``setPin(accountIdB64:pinnedSignaturePubkeyB64:rotationMarker:)``
@@ -299,7 +343,11 @@ public final class PeerPinStore {
             acceptedKeyGeneration: keyGeneration ?? existing?.acceptedKeyGeneration,
             previousKeysB64: existing?.previousKeysB64,
             supersededKeysB64: existing?.supersededKeysB64,
-            resetSignedAtMs: existing?.resetSignedAtMs
+            resetSignedAtMs: existing?.resetSignedAtMs,
+            sealSeqFloor: existing?.sealSeqFloor,
+            startedOver: existing?.startedOver,
+            startedOverKeysB64: existing?.startedOverKeysB64,
+            startedOverAtMs: existing?.startedOverAtMs
         )
         saveMap(map)
         return .set
@@ -419,11 +467,15 @@ public final class PeerPinStore {
         public let keyGeneration: UInt64
         public let signedAtMs: Int64
         public let nowMs: Int64
+        /// ADR-0101 section 10 - the `seq` of the announcement the reset was
+        /// sealed under; the floor never goes below it afterwards.
+        public let announcementSeq: UInt64
 
         public init(
             accountIdB64: String, heldKeyB64: String, newKeyB64: String,
-            keyGeneration: UInt64, signedAtMs: Int64, nowMs: Int64
+            keyGeneration: UInt64, signedAtMs: Int64, nowMs: Int64, announcementSeq: UInt64 = 0
         ) {
+            self.announcementSeq = announcementSeq
             self.accountIdB64 = accountIdB64
             self.heldKeyB64 = heldKeyB64
             self.newKeyB64 = newKeyB64
@@ -484,9 +536,160 @@ public final class PeerPinStore {
             acceptedKeyGeneration: reset.keyGeneration,
             previousKeysB64: previous,
             supersededKeysB64: superseded,
-            resetSignedAtMs: reset.signedAtMs)
+            resetSignedAtMs: reset.signedAtMs,
+            sealSeqFloor: max(existing?.sealSeqFloor ?? 0, reset.announcementSeq),
+            // A sealed reset is the same person again: no pending
+            // started-over state survives it. The keys an earlier unsealed
+            // reset closed stay closed.
+            startedOver: nil,
+            startedOverKeysB64: existing?.startedOverKeysB64,
+            startedOverAtMs: existing?.startedOverAtMs)
         saveMap(map)
         return .accepted
+    }
+
+    // MARK: - ADR-0101 section 10: the seal announcement floor
+
+    /// The highest announcement `seq` verified for the account; 0 when none.
+    public func sealSeqFloor(accountIdB64: String) -> UInt64 {
+        loadMap()[accountIdB64]?.sealSeqFloor ?? 0
+    }
+
+    /// Raise the floor to `seq` (never lowers it). Only for an account this
+    /// device pins; returns whether it moved.
+    @discardableResult
+    public func raiseSealSeqFloor(accountIdB64: String, seq: UInt64) -> Bool {
+        guard storageKey != nil else { return false }
+        var map = loadMap()
+        guard var pin = map[accountIdB64], seq > (pin.sealSeqFloor ?? 0) else { return false }
+        pin.sealSeqFloor = seq
+        map[accountIdB64] = pin
+        saveMap(map)
+        return true
+    }
+
+    // MARK: - ADR-0101 section 11: an unsealed reset
+
+    public enum StartedOverResult: Equatable {
+        /// Recorded now: the first time this device met this reset.
+        case recorded
+        /// Already recorded for this key and generation.
+        case already
+        /// Older than what is held, or nothing to write under.
+        case ignored
+    }
+
+    /// Record an UNSEALED reset of an account this device pins: the pin
+    /// stays on the key it held (nothing is re-pinned, nothing moves), the
+    /// held key joins the keys that started over, and the new key is
+    /// remembered so a contact request from it is recognised. The accepted
+    /// generation is NOT advanced: a later sealed reset is judged from the
+    /// key this device still trusts.
+    @discardableResult
+    public func noteStartedOver(
+        accountIdB64: String, heldKeyB64: String, newKeyB64: String, keyGeneration: UInt64, signedAtMs: Int64
+    ) -> StartedOverResult {
+        guard storageKey != nil else { return .ignored }
+        var map = loadMap()
+        guard var pin = map[accountIdB64], pin.pinnedSignaturePubkeyB64 == heldKeyB64,
+              heldKeyB64 != newKeyB64 else { return .ignored }
+        if let held = pin.startedOver {
+            if held.newKeyB64 == newKeyB64, held.keyGeneration == keyGeneration { return .already }
+            if keyGeneration < held.keyGeneration { return .ignored }
+        }
+        pin.startedOver = StartedOver(newKeyB64: newKeyB64, keyGeneration: keyGeneration, signedAtMs: signedAtMs)
+        var closed = pin.startedOverKeysB64 ?? []
+        if !closed.contains(heldKeyB64) { closed.append(heldKeyB64) }
+        pin.startedOverKeysB64 = closed
+        var times = pin.startedOverAtMs ?? [:]
+        if times[heldKeyB64] == nil { times[heldKeyB64] = signedAtMs }
+        pin.startedOverAtMs = times
+        map[accountIdB64] = pin
+        saveMap(map)
+        return .recorded
+    }
+
+    /// The pending unsealed reset of the account, or `nil`.
+    public func startedOver(accountIdB64: String) -> StartedOver? {
+        loadMap()[accountIdB64]?.startedOver
+    }
+
+    /// The person accepted a contact request from the new keys of an account
+    /// that started over: the pin moves to those keys at their generation,
+    /// as a first pin would. The key it held stays closed and is NOT a
+    /// superseded key (nothing is moved or returned for it); the log verdict,
+    /// the chain floor and the announcement floor described the old account
+    /// and are cleared. Returns `false` when no such reset is pending for
+    /// exactly `newKeyB64`.
+    @discardableResult
+    public func adoptStartedOver(accountIdB64: String, newKeyB64: String, nowMs: Int64) -> Bool {
+        guard storageKey != nil else { return false }
+        var map = loadMap()
+        guard let pin = map[accountIdB64], let pending = pin.startedOver, pending.newKeyB64 == newKeyB64 else {
+            return false
+        }
+        map[accountIdB64] = AccountPubkeyPin(
+            pinnedSignaturePubkeyB64: newKeyB64,
+            rotationMarker: resetRepinMarker(heldMarker: pin.rotationMarker, nowMs: nowMs),
+            acceptedKeyGeneration: pending.keyGeneration,
+            previousKeysB64: pin.previousKeysB64,
+            supersededKeysB64: pin.supersededKeysB64,
+            resetSignedAtMs: pin.resetSignedAtMs,
+            // The account's announcements keep counting over a reset: an
+            // older one served again is still an old one.
+            sealSeqFloor: pin.sealSeqFloor,
+            startedOverKeysB64: pin.startedOverKeysB64,
+            startedOverAtMs: pin.startedOverAtMs)
+        saveMap(map)
+        return true
+    }
+
+    /// `closed key -> account id` over every pin: the keys unsealed resets
+    /// left behind. A one-to-one with such a key shows the closed line.
+    public func loadStartedOverKeys() -> [String: String] {
+        var out: [String: String] = [:]
+        for (accountIdB64, pin) in loadMap() {
+            for key in pin.startedOverKeysB64 ?? [] { out[key] = accountIdB64 }
+        }
+        return out
+    }
+
+    // MARK: - Alignment item F: what the pairing state bundle carries
+
+    /// Every closed key of every pin, with its account and when it started
+    /// over (0 when that was not recorded).
+    public func startedOverRecords() -> [(accountIdB64: String, keyB64: String, atMs: Int64)] {
+        var out: [(String, String, Int64)] = []
+        for (accountIdB64, pin) in loadMap() {
+            for key in pin.startedOverKeysB64 ?? [] {
+                out.append((accountIdB64, key, pin.startedOverAtMs?[key] ?? 0))
+            }
+        }
+        return out.sorted { ($0.0, $0.1) < ($1.0, $1.1) }
+    }
+
+    /// A closed key another device of the account recorded: added to the
+    /// account's pin when it is not there. Only under an existing pin.
+    @discardableResult
+    public func addStartedOverKey(accountIdB64: String, keyB64: String, atMs: Int64) -> Bool {
+        guard storageKey != nil, !keyB64.isEmpty else { return false }
+        var map = loadMap()
+        guard var pin = map[accountIdB64] else { return false }
+        var closed = pin.startedOverKeysB64 ?? []
+        guard !closed.contains(keyB64) else { return false }
+        closed.append(keyB64)
+        pin.startedOverKeysB64 = closed
+        var times = pin.startedOverAtMs ?? [:]
+        times[keyB64] = max(0, atMs)
+        pin.startedOverAtMs = times
+        map[accountIdB64] = pin
+        saveMap(map)
+        return true
+    }
+
+    /// Whether `keyB64` is a key an unsealed reset left behind.
+    public func isStartedOverKey(_ keyB64: String) -> Bool {
+        loadMap().values.contains { $0.startedOverKeysB64?.contains(keyB64) == true }
     }
 
     /// Every pin of the signed-in account, by account id.

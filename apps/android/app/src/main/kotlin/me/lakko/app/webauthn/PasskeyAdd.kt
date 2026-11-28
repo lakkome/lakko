@@ -24,6 +24,10 @@ public class PasskeyAddResult(
     /** base64url, no padding. */
     public val credentialIdB64: String,
     public val keys: PasskeyKeysStoreEnd,
+    /** The passkey's authenticator gave a secret of its own and the
+     *  account's published protection now lists it: this passkey keeps the
+     *  chats after a key reset (UX 19.1d, ADR-0101 section 10). */
+    public val keepsChats: Boolean = false,
 )
 
 /**
@@ -93,6 +97,16 @@ public suspend fun addPasskeyWithKeys(
 ): PasskeyAddResult {
     val added = addPasskeyForSession(context, repo, nickname, client, registration)
     onAdded()
+    // ADR-0101 section 10: a passkey that gave a seal secret is announced,
+    // and its owned-channels lock made. Below API 34 the request is dropped
+    // at creation, so such a passkey confirms a reset and never seals one.
+    val keepsChats = try {
+        repo.adoptPasskeySeal(added.credentialIdB64, added.sealPrfOutput)
+    } finally {
+        added.sealPrfOutput?.fill(0)
+    }
+    // The account's factors changed: the screens read them again.
+    repo.refreshAccountFactors()
     val keys = try {
         storeKeysForAddedPasskey(
             prfOutput = added.prfOutput,
@@ -116,7 +130,7 @@ public suspend fun addPasskeyWithKeys(
             PasskeyNoPrfStore.record(context, session.account.accountIdB64, added.credentialIdB64)
         }
     }
-    return PasskeyAddResult(added.credentialIdB64, keys)
+    return PasskeyAddResult(added.credentialIdB64, keys, keepsChats)
 }
 
 /**

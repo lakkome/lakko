@@ -23,6 +23,7 @@ import { plainStore } from "../auth/protect/local";
 import { refreshProtection } from "../auth/protect/protection-state";
 import {
   failureText,
+  renameAsksForAddress,
   renameEmailFor,
   useRenamePorts,
 } from "../auth/rename-runtime";
@@ -116,6 +117,12 @@ export default function Profile(): JSX.Element {
   const [cropSource, setCropSource] = createSignal<CropSource | null>(null);
   const [cameraOpen, setCameraOpen] = createSignal(false);
   const [leaving, setLeaving] = createSignal<BeforeLeaveEventArgs | null>(null);
+  // UX 19.1c: the recovery email is the account's last second way in and
+  // this device does not remember the address, so the username change asks
+  // for it once and carries it (the email then moves to the new name).
+  const [renameAddress, setRenameAddress] = createSignal("");
+  const asksRenameAddress = (): boolean =>
+    effectivePending().username !== undefined && renameAsksForAddress(account()?.accountIdB64 ?? null);
   let noticeTimer: ReturnType<typeof setTimeout> | null = null;
 
   const nameText = (): string => {
@@ -220,7 +227,7 @@ export default function Profile(): JSX.Element {
         oldUsername: record.oldUsername,
         newUsername: record.newUsername,
         grant,
-        email: renameEmailFor(acct.accountIdB64),
+        email: renameEmailFor(acct.accountIdB64, renameAddress()),
       });
       if (ok) {
         ports.saveOwed(null);
@@ -358,7 +365,7 @@ export default function Profile(): JSX.Element {
         oldUsername: old,
         newUsername,
         grant,
-        email: renameEmailFor(acct.accountIdB64),
+        email: renameEmailFor(acct.accountIdB64, renameAddress()),
       });
       if (outcome.kind === "done") return { kind: "done", username: outcome.username };
       const f = outcome.failure;
@@ -697,11 +704,30 @@ export default function Profile(): JSX.Element {
           </Show>
         </div>
 
+        <Show when={asksRenameAddress()}>
+          <div class="lk-profile-field">
+            <label>
+              <span class="lk-muted">{t("protect.username_email")}</span>
+              <input
+                type="email"
+                autocomplete="email"
+                inputmode="email"
+                dir="ltr"
+                aria-label={t("recovery_email.field")}
+                placeholder={t("recovery_email.field")}
+                value={renameAddress()}
+                disabled={busy()}
+                onInput={(e) => setRenameAddress(e.currentTarget.value)}
+              />
+            </label>
+          </div>
+        </Show>
+
         <div class="lk-profile-save">
           <button
             type="button"
             class="primary"
-            disabled={!canSave()}
+            disabled={!canSave() || (asksRenameAddress() && !/^[^@\s]+@[^@\s]+$/.test(renameAddress().trim()))}
             onMouseDown={(e) => {
               // Keep an open field's blur from running first: the save folds
               // it in itself.

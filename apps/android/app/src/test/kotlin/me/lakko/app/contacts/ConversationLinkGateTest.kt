@@ -62,6 +62,8 @@ class ConversationLinkGateTest {
         resetLedger = ledger,
         verifiedBindings = bindings,
         resetAttestCheck = { _, _, _ -> AttestCheck.Verified(2, 777) },
+        resetRule = CoreResetRuleDouble,
+        resetSealCheck = { SealCheck(valid = true, announcementSeq = 5) },
         resetLogCheck = { _, _ -> LogCheck(LogVerifyStatus.OFF, null) },
         conversationLinkCheck = check,
     )

@@ -63,7 +63,7 @@ final class OwnProfileDeviceSyncTests: XCTestCase {
     func testTheScreenFollowsANameFromAnotherDeviceAndKeepsWhatIsPending() throws {
         let d = try directory()
         let ports = ProfileSavePorts(
-            upload: { _ in throw CancellationError() }, rename: { $0 },
+            upload: { _ in throw CancellationError() }, rename: { name, _ in name },
             publish: { _, _ in })
         let model = ProfileEditModel(saved: ProfileSaved(name: nil, username: "valentin"), ports: ports)
         model.savedMoved(ProfileSaved(name: "Alice", username: "valentin"))

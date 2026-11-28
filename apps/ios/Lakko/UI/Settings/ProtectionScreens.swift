@@ -76,58 +76,58 @@ struct LakkoConfirmDialog: View {
 
 // MARK: - Protect your account
 
-/// "Protect your account" (UX 19.1a): `Add an email`, the passkey row,
-/// `Save a recovery phrase`; rows already done are marked. Under them `Not
-/// now` (the app's own confirmation) until something is done, then
-/// `Continue`. The step after sign-up, and the target of the banner's
-/// `Protect it`. What it shows is ``ProtectStep``.
+/// "Protect your account" (UX 19.1a): the three second ways in (a recovery
+/// email, an authenticator app, a passkey), of which one is required, and
+/// the optional recovery phrase. No `Not now`: `Continue` is the only way
+/// off the step and stays disabled until one of the three is done. The same
+/// screen is the Settings entry (no `Continue`) and the step the landing
+/// rule puts in front of the app (19.1c, `required`).
 struct ProtectAccountScreen: View {
     @ObservedObject var center: AccountProtectionCenter
-    /// The account has a username (a guest is not offered the email).
+    /// The account has a username (a guest is offered neither the email nor
+    /// a passkey).
     let hasUsername: Bool
     let onAddEmail: () -> Void
+    let onAddAuthenticator: () -> Void
     let onAddPasskey: () -> Void
     let onSavePhrase: () -> Void
-    /// Leave the step (`Not now`, confirmed, or `Continue`); `nil` for the
-    /// Settings entry.
+    /// Leave the step (`Continue`); `nil` for the Settings entry.
     var onLeave: (() -> Void)?
+    /// The landing rule put the step here: its heading says so.
+    var required = false
+    /// A plain line under the passkey row (the sheet was cancelled, or the
+    /// creation failed).
+    var passkeyNote: (text: String, isError: Bool)?
 
-    @State private var confirmingSkip = false
     @ObservedObject private var l10n = Localization.shared
-
-    private var offersEmail: Bool {
-        ProtectionRows.signupOffersEmail(
-            available: center.status?.available ?? false, hasUsername: hasUsername)
-    }
 
     private var layout: ProtectStep {
         ProtectStep.decide(
-            offersEmail: offersEmail,
+            offersEmail: ProtectStep.offersEmail(
+                available: center.status?.available ?? false, hasUsername: hasUsername),
             // Every iOS version this app runs on can use passkeys.
-            passkeysSupported: true,
-            done: ProtectStep.done(status: center.status, hasPasskey: center.hasPasskey == true),
-            leavable: onLeave != nil)
+            passkeysSupported: hasUsername,
+            done: ProtectStep.done(factors: Self.knownFactors(center), phraseSaved: center.phraseSaved),
+            keepsChats: center.keepsChats,
+            leavable: onLeave != nil,
+            required: required)
+    }
+
+    /// The factors as far as they are known: a part that was not read yet
+    /// counts as absent on this screen (a row is offered, never hidden).
+    static func knownFactors(_ center: AccountProtectionCenter) -> AccountFactors {
+        AccountFactors(
+            email: center.status?.enabled ?? false,
+            authenticator: center.status?.totp ?? false,
+            passkey: center.hasPasskey ?? false)
     }
 
     var body: some View {
         let layout = self.layout
         AuthScreen {
-            AuthTitle(title: l10n.t("protect.title"), subtitle: l10n.t("protect.body"))
+            AuthTitle(title: l10n.t(layout.titleKey), subtitle: l10n.t("protect.body"))
 
-            VStack(spacing: 0) {
-                ForEach(Array(layout.items.enumerated()), id: \.offset) { index, item in
-                    row(item)
-                    if index < layout.items.count - 1 {
-                        Divider().padding(.leading, 56)
-                    }
-                }
-            }
-            .background(Color.lakkoSurface)
-            .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
-            .overlay(
-                RoundedRectangle(cornerRadius: LakkoRadius.card)
-                    .stroke(Color.lakkoBorder, lineWidth: 1)
-            )
+            card(layout.factors)
 
             // The email needs a username. A guest account never reaches this
             // step without one (it chooses it right before, ``GuestRoot``);
@@ -135,34 +135,54 @@ struct ProtectAccountScreen: View {
             if !hasUsername, center.status?.available == true {
                 AuthHint(text: l10n.t("recovery_email.needs_username"))
             }
-
-            switch layout.footer {
-            case .notNow:
-                AuthLinkRow(title: l10n.t("protect.skip"), action: { confirmingSkip = true })
-            case .continueOn:
-                AuthPrimaryButton(title: l10n.t("protect.continue")) { onLeave?() }
-            case .none:
-                EmptyView()
+            if let passkeyNote {
+                AuthHint(text: passkeyNote.text, isError: passkeyNote.isError)
             }
-        }
-        .overlay {
-            if confirmingSkip, let onLeave {
-                LakkoConfirmDialog(
-                    title: l10n.t("protect.skip.confirm.title"),
-                    message: l10n.t("protect.skip.confirm.body"),
-                    primaryTitle: l10n.t(offersEmail ? "protect.email.title" : "protect.phrase.title"),
-                    secondaryTitle: l10n.t("protect.skip.confirm.continue"),
-                    onPrimary: {
-                        confirmingSkip = false
-                        if offersEmail { onAddEmail() } else { onSavePhrase() }
-                    },
-                    onSecondary: {
-                        confirmingSkip = false
-                        onLeave()
-                    })
+
+            Text(l10n.t("protect.optional"))
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(Color.lakkoTextMuted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityAddTraits(.isHeader)
+            card([layout.phrase])
+
+            if let warning = layout.warning {
+                ProtectWarningNote(text: l10n.t(warning.key))
+            }
+            if layout.showsPasswordOnlyNotice {
+                PasswordOnlyNoticeView(
+                    showsPasskeyNoSeal: PasswordOnlyNotice.showsPasskeyNoSeal(
+                        factors: Self.knownFactors(center), seals: center.seals),
+                    onSavePhrase: onSavePhrase,
+                    onAddPasskey: hasUsername ? onAddPasskey : nil)
+            }
+
+            if case .continueOn(let enabled) = layout.footer {
+                AuthPrimaryButton(title: l10n.t("protect.continue"), disabled: !enabled) { onLeave?() }
+                    .accessibilityHint(enabled ? "" : l10n.t("protect.continue_needs"))
+                if !enabled {
+                    AuthHint(text: l10n.t("protect.continue_needs"))
+                }
             }
         }
         .task { await center.refresh() }
+    }
+
+    private func card(_ items: [ProtectStep.Item]) -> some View {
+        VStack(spacing: 0) {
+            ForEach(Array(items.enumerated()), id: \.offset) { index, item in
+                row(item)
+                if index < items.count - 1 {
+                    Divider().padding(.leading, 56)
+                }
+            }
+        }
+        .background(Color.lakkoSurface)
+        .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
+        .overlay(
+            RoundedRectangle(cornerRadius: LakkoRadius.card)
+                .stroke(Color.lakkoBorder, lineWidth: 1)
+        )
     }
 
     @ViewBuilder
@@ -173,6 +193,11 @@ struct ProtectAccountScreen: View {
                 icon: .envelope, title: l10n.t("protect.email.title"),
                 badge: l10n.t("protect.email.badge"), detail: l10n.t("protect.email.body"),
                 done: item.done, action: onAddEmail)
+        case .authenticator:
+            option(
+                icon: .smartphone, title: l10n.t("protect.totp.title"),
+                badge: nil, detail: l10n.t("protect.totp.body"),
+                done: item.done, action: onAddAuthenticator)
         case .passkey:
             option(
                 icon: .passkey, title: l10n.t("protect.passkey.title"),
@@ -180,7 +205,7 @@ struct ProtectAccountScreen: View {
                 done: item.done, action: onAddPasskey)
         case .phrase:
             option(
-                icon: .key, title: l10n.t("protect.phrase.title"),
+                icon: .key, title: l10n.t("protect.phrase.title_optional"),
                 badge: nil, detail: l10n.t("protect.phrase.body"),
                 done: item.done, action: onSavePhrase)
         }
@@ -226,7 +251,91 @@ struct ProtectAccountScreen: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        // A row marked done is opened again only from Settings.
         .disabled(done)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(done ? "\(title), \(l10n.t("protect.done"))" : title)
+    }
+}
+
+/// A note in the warning colour with the warning icon (UX 19.1a: the
+/// authenticator as the only second way in). Not an error; announced once
+/// when it appears.
+struct ProtectWarningNote: View {
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            LkIconView(.warning, size: 18, relativeTo: .footnote)
+                .foregroundStyle(Color.lakkoWarning)
+                .accessibilityHidden(true)
+            Text(text)
+                .font(.footnote)
+                .foregroundStyle(Color.lakkoText)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(12)
+        .background(Color.lakkoWarning.opacity(0.12))
+        .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
+        .accessibilityElement(children: .combine)
+        .onAppear { UIAccessibility.post(notification: .announcement, argument: text) }
+    }
+}
+
+/// "Your chats depend on your password" (UX 19.1d): one copy, in the warning
+/// colour, with its two actions. Drawn on the sign-up step and at the top of
+/// Settings > Security > Recovery; the once-per-device dialog carries the
+/// same title and body.
+struct PasswordOnlyNoticeView: View {
+    /// The account has a passkey and none keeps the chats.
+    var showsPasskeyNoSeal = false
+    let onSavePhrase: () -> Void
+    /// `nil` where a passkey cannot be created.
+    var onAddPasskey: (() -> Void)?
+    @ObservedObject private var l10n = Localization.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 10) {
+                LkIconView(.warning, size: 18, relativeTo: .subheadline)
+                    .foregroundStyle(Color.lakkoWarning)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(l10n.t(PasswordOnlyNotice.titleKey))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.lakkoText)
+                        .accessibilityAddTraits(.isHeader)
+                    Text(l10n.t(PasswordOnlyNotice.bodyKey))
+                        .font(.footnote)
+                        .foregroundStyle(Color.lakkoText)
+                    if showsPasskeyNoSeal {
+                        Text(l10n.t(PasswordOnlyNotice.passkeyNoSealKey))
+                            .font(.footnote)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                    }
+                }
+            }
+            HStack(spacing: 16) {
+                Button(l10n.t(PasswordOnlyNotice.savePhraseKey), action: onSavePhrase)
+                    .font(.footnote.weight(.semibold))
+                    .frame(minHeight: 44)
+                if let onAddPasskey {
+                    Button(l10n.t(PasswordOnlyNotice.addPasskeyKey), action: onAddPasskey)
+                        .font(.footnote.weight(.semibold))
+                        .frame(minHeight: 44)
+                }
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.lakkoWarning.opacity(0.12))
+        .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
+        .onAppear {
+            UIAccessibility.post(
+                notification: .announcement,
+                argument: "\(l10n.t(PasswordOnlyNotice.titleKey)). \(l10n.t(PasswordOnlyNotice.bodyKey))")
+        }
     }
 }
 
@@ -247,6 +356,9 @@ struct RecoveryEmailScreen: View {
     @ObservedObject private var resend: RetryCountdown
     @ObservedObject private var wait: RetryCountdown
     @State private var confirmingRemove = false
+    /// UX 19.1c — the recovery email is the last second way in: the app's
+    /// own dialog says so, and nothing is removed.
+    @State private var lastFactor = false
     @ObservedObject private var l10n = Localization.shared
 
     init(
@@ -266,7 +378,7 @@ struct RecoveryEmailScreen: View {
             replacing: replacing,
             // A new address is typed when one is replaced; after a recall
             // the address this device holds is confirmed by a letter again.
-            prefill: EmailReseal.prefill(replacing: replacing, addressHeld: center.addressHeld))
+            prefill: replacing ? "" : (center.addressHeld ?? ""))
         self._model = StateObject(wrappedValue: model)
         self._proof = StateObject(wrappedValue: proof)
         self.resend = model.resend
@@ -297,7 +409,7 @@ struct RecoveryEmailScreen: View {
             if confirmingRemove {
                 LakkoConfirmDialog(
                     title: l10n.t("recovery_email.remove.confirm.title"),
-                    message: l10n.t("recovery_email.remove.confirm.body"),
+                    message: removeMessage,
                     primaryTitle: l10n.t("recovery_email.remove"),
                     primaryIsDestructive: true,
                     secondaryTitle: l10n.t("common.cancel"),
@@ -306,10 +418,31 @@ struct RecoveryEmailScreen: View {
                     onSecondary: { confirmingRemove = false })
             }
         }
+        .lakkoDialog(
+            isPresented: Binding(
+                get: { lastFactor },
+                set: { shown in
+                    guard !shown, lastFactor else { return }
+                    lastFactor = false
+                    // Opened only to remove: nothing else to do here.
+                    if startsRemoving { onDone() }
+                }),
+            title: l10n.t(LastFactor.messageKey)
+        ) {
+            [.primary(l10n.t("common.ok")) {
+                lastFactor = false
+                if startsRemoving { onDone() }
+            }]
+        }
         .task {
             await proof.opened()
             await center.refresh()
-            if startsRemoving { confirmingRemove = true }
+            guard startsRemoving else { return }
+            if LastFactor.refuses(removing: .email, factors: center.factors) {
+                lastFactor = true
+            } else {
+                confirmingRemove = true
+            }
         }
         .onChange(of: model.state.step) { _, step in
             if step == .done { onDone() }
@@ -415,6 +548,15 @@ struct RecoveryEmailScreen: View {
         Task { await model.confirm() }
     }
 
+    /// The confirmation's body; when the removal would leave only the
+    /// authenticator app, the note of UX 19.1c before the buttons.
+    private var removeMessage: String {
+        let body = l10n.t("recovery_email.remove.confirm.body")
+        guard let notice = AuthenticatorOnly.removalNoticeKey(
+            removing: .email, factors: center.factors, phraseSaved: center.phraseSaved) else { return body }
+        return body + "\n\n" + l10n.t(notice)
+    }
+
     private func remove() {
         guard !working else { return }
         Task {
@@ -428,6 +570,8 @@ struct RecoveryEmailScreen: View {
                 onDone()
             } else {
                 confirmingRemove = false
+                // The server refused it as the last second way in.
+                if model.state.line == .lastFactor { lastFactor = true }
             }
         }
     }
@@ -466,23 +610,14 @@ extension RecoveryEmailModel.Ports {
             },
             sessionToken: { [weak authRepository] in authRepository?.identitySecrets?.sessionToken },
             grant: { [weak authRepository] in authRepository?.liveFreshGrant() },
-            phraseSaved: { [weak center] in center?.phraseSaved ?? false },
             normalize: { try normalizeRecoveryEmail(address: $0) },
             start: { token, grant, handle, address in
                 try await AuthClient().recoveryEmailEnrolStart(
                     sessionToken: token, freshGrant: grant, handle: handle, address: address, lang: await lang())
             },
-            seal: { [weak authRepository] handle, address, salt in
-                // The phrase this device holds, sealed off the main thread.
-                guard let phrase = await authRepository?.heldPhraseForEmailVault() else {
-                    throw SessionNotReady()
-                }
-                return try await EmailVaultWork.seal(
-                    phrase: phrase, handle: handle, address: address, vaultSalt: salt)
-            },
-            finish: { token, challengeId, code, sealed in
+            finish: { token, challengeId, code in
                 try await AuthClient().recoveryEmailEnrolFinish(
-                    sessionToken: token, challengeId: challengeId, code: code, sealedEntropy: sealed)
+                    sessionToken: token, challengeId: challengeId, code: code)
             },
             remove: { token, grant in
                 try await AuthClient().recoveryEmailRemove(sessionToken: token, freshGrant: grant)
@@ -501,228 +636,67 @@ extension RecoveryEmailModel.Ports {
 
 // MARK: - Save a recovery phrase
 
-/// Which way "Save a recovery phrase" goes (ADR-0075 section 3, amended
-/// 2026-11-01), pure. A rotation exists to outrun a copy of the phrase in an
-/// email vault. A phrase that was never in one has no copy to outrun, and a
-/// rotation there would only leave the account talking under a key its phrase
-/// does not hold (ADR-0074 section 3.7).
-enum SavePhraseRoute: Equatable {
-    /// The words this device already holds: no key changes.
-    case heldWords(String)
-    /// The ADR-0074 key rotation, with new words.
-    case rotation
-
-    /// - Parameter heldPhrase: the phrase this device holds, when it is the
-    ///   account's. A device that holds none has nothing to show, so it
-    ///   rotates.
-    static func decide(rotationNeeded: Bool, heldPhrase: String?) -> SavePhraseRoute {
-        if !rotationNeeded, let heldPhrase { return .heldWords(heldPhrase) }
-        return .rotation
-    }
-}
-
-/// What the save-phrase screen shows, pure.
+/// What the save-phrase screen shows, pure (UX 19.5, amended 2026-11-26:
+/// saving a phrase changes no key, since no copy of it ever left the
+/// device).
 enum SavePhraseState: Equatable {
-    /// `GET /account/phrase` is out: nothing tells the two routes apart yet.
-    case checking
     /// The explanation and `Show my 12 words`.
     case idle
-    /// The key change is running: a progress line, no words.
-    case working
-    /// "We could not finish. Nothing changed." with `Try again`.
+    /// "We could not finish. Nothing changed." with `Try again`: this
+    /// device holds no phrase that is the account's.
     case failed
-    /// The keys were changed; publishing is still owed: the words are
-    /// withheld and `Try again` finishes it.
-    case publishOwed
-    /// The change went through: the new words.
-    case words(String)
-    /// No key changes: the words this device already holds. The account
-    /// counts as protected only once the server was told, after the
-    /// three-word check.
+    /// The words this device already holds. The account counts as protected
+    /// only once the three-word check passed and its published protection
+    /// lists the phrase.
     case heldWords(String)
-
-    /// What the rotation's result means on this screen. The words appear
-    /// only once the server step succeeded and nothing withholds them.
-    static func after(_ result: KeyRotationPlan.Result) -> SavePhraseState {
-        switch result {
-        case .rotated(let phrase): return .words(phrase)
-        case .rotatedPublishOwed: return .publishOwed
-        // Never the answer of the save-phrase flow (it always shows its
-        // words); read as owed so nothing is claimed.
-        case .rotatedNoWords: return .publishOwed
-        case .freshAuthRequired: return .idle
-        case .removedNotRotated, .notRemoved: return .failed
-        }
-    }
 }
 
-/// The flow behind ``SavePhraseScreen`` (UX 19.5), over injected ports.
+/// The flow behind ``SavePhraseScreen`` (UX 19.5), over injected ports: the
+/// words the device holds, the three-word check, then the account's
+/// protection is published again with the phrase in it (ADR-0101 section
+/// 10), which ends the notice of 19.1d.
 @MainActor
 final class SavePhraseFlow: ObservableObject {
 
     struct Ports {
-        var accountIdB64: @MainActor () -> String?
-        var sessionToken: @MainActor () -> String?
-        var freshGrant: @MainActor () -> String?
-        /// `GET /account/phrase`.
-        var readStatus: (_ sessionToken: String) async throws -> AccountPhraseStatus
         /// The phrase this device holds, when it is the account's.
         var heldPhrase: @MainActor () -> String?
-        /// This device is about to say the phrase was saved: the notice the
-        /// server writes for it is its own act.
-        var markOwnAction: @MainActor (_ accountIdB64: String) -> Void
-        /// `POST /account/phrase/saved`.
-        var markSaved: (_ sessionToken: String, _ grant: String) async throws -> Void
-        /// The server took it: the account is phrase-protected from here.
-        var phraseWasSaved: @MainActor (_ accountIdB64: String) -> Void
-        /// `KeyRotationRunner.savePhrase()`.
-        var rotate: @MainActor () async -> KeyRotationPlan.Result
-        /// What a stored rotation asks for, read again.
-        var rotationResume: @MainActor () -> KeyRotationPlan.Resume
-        /// `KeyRotationRunner.resumeOwed()`.
-        var finishRotation: @MainActor () async -> Void
-        /// `KeyRotationRunner.wordsToShow()`.
-        var rotationWords: @MainActor () -> String?
-        /// The proof ran out: the block appears again.
-        var proofExpired: @MainActor () -> Void
+        /// Publish the account's protection with the phrase in it. `false`
+        /// when it could not be published now: nothing counts as saved.
+        var publishPhraseSeal: @MainActor () async -> Bool
     }
 
-    @Published private(set) var state: SavePhraseState = .checking
-    /// The route, once the server answered. `nil` while unknown: no path is
-    /// ever guessed.
-    @Published private(set) var route: SavePhraseRoute?
-    /// `POST /account/phrase/saved` is out.
+    @Published private(set) var state: SavePhraseState = .idle
+    /// The last step is running.
     @Published private(set) var confirming = false
-    /// The three words passed and the server was not told: the screen stays,
-    /// with `Try again`.
+    /// The last step failed: `protect.phrase.save.failed` with `Try again`.
     @Published private(set) var confirmFailed = false
 
     private let ports: Ports
-    private var opened = false
-    /// The rotation needs the session's runtime (the DeviceGroup, the chats,
-    /// the reach keys), which is not up on the sign-up step. There, this is
-    /// set: the route lands in the app and the rotation runs from Settings.
-    private let rotationNeedsSession: (@MainActor () -> Void)?
 
-    init(ports: Ports, rotationNeedsSession: (@MainActor () -> Void)? = nil) {
+    init(ports: Ports) {
         self.ports = ports
-        self.rotationNeedsSession = rotationNeedsSession
     }
 
-    /// Whether this screen says the account gets new keys, and shows the
-    /// rotation's progress line.
-    var changesKeys: Bool { route == .rotation }
-
-    /// Whether the main button asks for the proof first. Finding out the
-    /// route again and finishing an owed publish do not.
-    var primaryNeedsProof: Bool { route != nil && state != .publishOwed }
-
-    /// The screen opened: a change that already went through is finished,
-    /// never started again; otherwise the server says which route this is.
-    func open() async {
-        guard !opened else { return }
-        opened = true
-        switch ports.rotationResume() {
-        case .showWords, .finishOwed, .commitLandedUnseen:
-            await finishRotation()
-        case .nothing, .removedNotRotated:
-            await readRoute()
+    /// `Show my 12 words` / `Try again`. The caller obtained the proof.
+    func primary() {
+        if let phrase = ports.heldPhrase() {
+            state = .heldWords(phrase)
+        } else {
+            state = .failed
         }
     }
 
-    /// The main button.
-    func primary() async {
-        if state == .publishOwed {
-            await finishRotation()
-            return
-        }
-        switch route {
-        case nil: await readRoute()
-        case .heldWords(let phrase): state = .heldWords(phrase)
-        case .rotation: await rotate()
-        }
-    }
-
-    /// The three words passed: tell the server. `true` when it took it; the
-    /// caller then lands where the rotation lands. On a refusal that says the
-    /// phrase needs a rotation after all (it was sealed in a vault since the
-    /// route was read) the rotation runs from here, and this screen goes on
-    /// with its states.
+    /// The three-word check passed: publish. `true` once the account's
+    /// protection lists the phrase; the screen then closes.
     func confirmHeldWords() async -> Bool {
         guard case .heldWords = state, !confirming else { return false }
         confirming = true
         confirmFailed = false
         defer { confirming = false }
-        guard let accountIdB64 = ports.accountIdB64(), let token = ports.sessionToken() else {
-            confirmFailed = true
-            return false
-        }
-        guard let grant = ports.freshGrant() else {
-            ports.proofExpired()
-            return false
-        }
-        ports.markOwnAction(accountIdB64)
-        do {
-            try await ports.markSaved(token, grant)
-        } catch {
-            NSLog("[protect] the saved phrase was not recorded: %@", String(describing: type(of: error)))
-            if PhraseSaveRefusal.needsRotation(error) {
-                route = .rotation
-                await rotate()
-            } else if FreshAuthRefusal.isRequired(error) {
-                // Not an error: the block appears, as anywhere a proof ran out.
-                ports.proofExpired()
-            } else {
-                confirmFailed = true
-            }
-            return false
-        }
-        ports.phraseWasSaved(accountIdB64)
-        return true
-    }
-
-    private func readRoute() async {
-        state = .checking
-        guard let token = ports.sessionToken() else {
-            state = .failed
-            return
-        }
-        do {
-            let status = try await ports.readStatus(token)
-            route = SavePhraseRoute.decide(
-                rotationNeeded: status.rotationNeeded, heldPhrase: ports.heldPhrase())
-            state = .idle
-            if route == .rotation { rotationNeedsSession?() }
-        } catch {
-            NSLog("[protect] whether saving a phrase changes the keys could not be read")
-            state = .failed
-        }
-    }
-
-    private func rotate() async {
-        if let rotationNeedsSession {
-            state = .idle
-            rotationNeedsSession()
-            return
-        }
-        state = .working
-        let result = await ports.rotate()
-        if result == .freshAuthRequired { ports.proofExpired() }
-        state = SavePhraseState.after(result)
-    }
-
-    /// Finish what a committed change still owes; show the words when
-    /// nothing withholds them.
-    private func finishRotation() async {
-        state = .working
-        await ports.finishRotation()
-        if let phrase = ports.rotationWords() {
-            state = .words(phrase)
-        } else if ports.rotationResume() == .nothing {
-            await readRoute()
-        } else {
-            state = .publishOwed
-        }
+        if await ports.publishPhraseSeal() { return true }
+        confirmFailed = true
+        return false
     }
 }
 
@@ -730,136 +704,62 @@ extension SavePhraseFlow.Ports {
 
     /// The production ports.
     @MainActor
-    static func live(
-        authRepository: AuthRepository, rotation: KeyRotationRunner, proof: FreshAuthProofModel
-    ) -> SavePhraseFlow.Ports {
+    static func live(authRepository: AuthRepository, center: AccountProtectionCenter) -> SavePhraseFlow.Ports {
         SavePhraseFlow.Ports(
-            accountIdB64: { [weak authRepository] in
-                authRepository?.identitySecrets.map { base64Encode($0.accountId) }
-            },
-            sessionToken: { [weak authRepository] in authRepository?.identitySecrets?.sessionToken },
-            freshGrant: { [weak authRepository] in authRepository?.liveFreshGrant() },
-            readStatus: { try await AuthClient().accountPhraseStatus(sessionToken: $0) },
             heldPhrase: { [weak authRepository] in authRepository?.heldPhraseToSave() },
-            markOwnAction: { [weak authRepository] accountIdB64 in
-                authRepository?.protectionStore.markOwnAction(
-                    .phraseSaved, atMs: Int64(Date().timeIntervalSince1970 * 1000), accountIdB64: accountIdB64)
-            },
-            markSaved: { token, grant in
-                try await AuthClient().markPhraseSaved(sessionToken: token, freshGrant: grant)
-            },
-            phraseWasSaved: { [weak authRepository] accountIdB64 in
-                authRepository?.notePhraseSaved(accountIdB64: accountIdB64)
-            },
-            rotate: { [weak rotation] in
-                await rotation?.savePhrase() ?? .removedNotRotated(nil)
-            },
-            rotationResume: { [weak rotation] in
-                rotation?.reload()
-                return rotation?.resume ?? .nothing
-            },
-            finishRotation: { [weak rotation] in await rotation?.resumeOwed() },
-            rotationWords: { [weak rotation] in rotation?.wordsToShow() },
-            proofExpired: { [weak authRepository, weak proof] in
-                authRepository?.dropFreshAuth()
-                proof?.proofExpired()
-            }
+            publishPhraseSeal: { [weak center] in await center?.savePhraseSeal() ?? false }
         )
     }
 }
 
-/// "Save a recovery phrase" (UX 19.5). Two routes behind one screen
-/// (``SavePhraseRoute``): the words the device already holds, with the
-/// three-word check and then the server told; or, for a phrase that was ever
-/// in an email vault, the ADR-0074 key rotation with no device removed.
+/// Settings > Account > Recovery phrase, and the step of 19.1a (UX 19.5):
+/// the explanation, the proof, the words this device holds, the three-word
+/// check.
 struct SavePhraseScreen: View {
     @ObservedObject var authRepository: AuthRepository
     @ObservedObject var center: AccountProtectionCenter
-    let rotation: KeyRotationRunner
-    /// The words were confirmed.
     let onDone: () -> Void
 
     @StateObject private var proof: FreshAuthProofModel
     @StateObject private var flow: SavePhraseFlow
     @ObservedObject private var l10n = Localization.shared
 
-    /// - Parameter rotationNeedsSession: set on the sign-up step, where the
-    ///   session's runtime is not up: called instead of rotating.
     init(
-        authRepository: AuthRepository, center: AccountProtectionCenter, rotation: KeyRotationRunner,
-        rotationNeedsSession: (@MainActor () -> Void)? = nil,
+        authRepository: AuthRepository, center: AccountProtectionCenter,
         onDone: @escaping () -> Void
     ) {
         self.authRepository = authRepository
         self.center = center
-        self.rotation = rotation
         self.onDone = onDone
         let proof = FreshAuthProofModel(surface: .savePhrase, repository: authRepository)
         self._proof = StateObject(wrappedValue: proof)
         self._flow = StateObject(wrappedValue: SavePhraseFlow(
-            ports: .live(authRepository: authRepository, rotation: rotation, proof: proof),
-            rotationNeedsSession: rotationNeedsSession))
+            ports: .live(authRepository: authRepository, center: center)))
     }
-
-    private var working: Bool { flow.state == .working || proof.layout.working }
 
     var body: some View {
         // One container, so the screen opens once and closes once however
         // often the state swaps what is inside it.
         ZStack {
             switch flow.state {
-            case .words(let phrase):
-                guide(phrase, onDone: {
-                    rotation.acknowledgePhrase()
-                    Task { await center.refresh() }
-                    onDone()
-                })
             case .heldWords(let phrase):
-                guide(
-                    phrase,
+                RecoveryPhraseGuide(
+                    phrase: phrase,
+                    title: l10n.t("recovery_phrase.save.title"),
+                    intro: l10n.t("recovery_phrase.save.lede"),
                     doneTitle: flow.confirmFailed ? l10n.t("common.try_again") : nil,
-                    doneBusy: flow.confirming || proof.layout.working,
-                    confirmFooter: AnyView(heldWordsFooter),
-                    onDone: confirmHeldWords)
-            case .checking, .idle, .working, .failed, .publishOwed:
+                    doneBusy: flow.confirming,
+                    confirmFooter: flow.confirmFailed
+                        ? AnyView(AuthHint(text: l10n.t("protect.phrase.save.failed"), isError: true)) : nil,
+                    extra: { AuthHint(text: l10n.t("recovery_phrase.save.anyone_with_words")) },
+                    onDone: confirmHeldWords
+                )
+            case .idle, .failed:
                 explanation
             }
         }
-        .task {
-            await proof.opened()
-            await flow.open()
-        }
+        .task { await proof.opened() }
         .onDisappear { proof.closed() }
-    }
-
-    private func guide(
-        _ phrase: String,
-        doneTitle: String? = nil,
-        doneBusy: Bool = false,
-        confirmFooter: AnyView? = nil,
-        onDone: @escaping () -> Void
-    ) -> some View {
-        RecoveryPhraseGuide(
-            phrase: phrase,
-            title: l10n.t("recovery_phrase.save.title"),
-            intro: l10n.t("recovery_phrase.save.lede"),
-            doneTitle: doneTitle,
-            doneBusy: doneBusy,
-            confirmFooter: confirmFooter,
-            extra: { AuthHint(text: l10n.t("recovery_phrase.save.anyone_with_words")) },
-            onDone: onDone
-        )
-    }
-
-    /// Under the three words of the held-words route: the proof block when
-    /// the proof ran out while the person wrote the words down, and the
-    /// failure of the last call.
-    @ViewBuilder private var heldWordsFooter: some View {
-        // No submit: the return key must not pass the three-word check by.
-        FreshAuthBlock(model: proof)
-        if flow.confirmFailed {
-            AuthHint(text: l10n.t("protect.phrase.save.failed"), isError: true)
-        }
     }
 
     private var explanation: some View {
@@ -867,24 +767,16 @@ struct SavePhraseScreen: View {
             AuthTitle(
                 title: l10n.t("protect.phrase.title"),
                 subtitle: l10n.t("protect.phrase.save.body"))
-            if flow.changesKeys {
-                AuthHint(text: l10n.t("protect.phrase.save.effect"))
-            }
-            switch flow.state {
-            case .failed:
+            if flow.state == .failed {
                 AuthHint(text: l10n.t("protect.phrase.save.failed"), isError: true)
-            case .publishOwed:
-                AuthHint(text: l10n.t("protect.phrase.save.finishing"), isError: true)
-            case .checking, .idle, .working, .words, .heldWords:
+            } else {
                 FreshAuthBlock(model: proof, onSubmit: save)
             }
             AuthPrimaryButton(
-                title: l10n.t(
-                    flow.state == .idle || flow.state == .checking
-                        ? "protect.phrase.save.show" : "common.try_again"),
-                busy: working,
-                busyTitle: l10n.t(flow.changesKeys ? "protect.phrase.save.progress" : "common.checking"),
-                disabled: flow.state == .checking || (flow.state == .idle && !proof.layout.ready),
+                title: l10n.t(flow.state == .idle ? "protect.phrase.save.show" : "common.try_again"),
+                busy: proof.layout.working,
+                busyTitle: l10n.t("common.checking"),
+                disabled: flow.state == .idle && !proof.layout.ready,
                 action: save
             )
         }
@@ -893,33 +785,27 @@ struct SavePhraseScreen: View {
     }
 
     private func save() {
-        guard !working, flow.state != .checking else { return }
+        guard !proof.layout.working else { return }
         Task {
-            if flow.primaryNeedsProof {
-                guard await proof.ensure() else { return }
-            }
-            await flow.primary()
+            guard await proof.ensure() else { return }
+            flow.primary()
         }
     }
 
-    /// The three words passed. Nothing counts as saved before the server
-    /// took it; then the screen lands where the rotation lands.
+    /// The three words passed. Nothing counts as saved before the account's
+    /// protection was published with the phrase in it.
     private func confirmHeldWords() {
-        guard !flow.confirming, !proof.layout.working else { return }
+        guard !flow.confirming else { return }
         Task {
-            guard await proof.ensure() else { return }
-            if await flow.confirmHeldWords() {
-                Task { await center.refresh() }
-                onDone()
-            }
+            if await flow.confirmHeldWords() { onDone() }
         }
     }
 }
 
 // MARK: - Settings > Account
 
-/// The protection rows of Settings > Account: the status line, the banner
-/// of an unprotected account, `Recovery email`, `Recovery phrase`.
+/// The protection rows of Settings > Account: the status line (what keeps
+/// the chats, UX 19.1c), `Recovery email`, `Recovery phrase`.
 struct AccountProtectionSection: View {
     @ObservedObject var center: AccountProtectionCenter
     let hasUsername: Bool
@@ -929,46 +815,28 @@ struct AccountProtectionSection: View {
     var body: some View {
         if let rows = center.rows {
             HStack {
-                Label(l10n.t(rows.statusKey), icon: .lockShield)
-                    .foregroundStyle(Color.lakkoText)
+                Label(l10n.t(rows.statusKey), icon: rows.statusIsWarning ? .warning : .lockShield)
+                    .foregroundStyle(rows.statusIsWarning ? Color.lakkoWarning : Color.lakkoText)
                 Spacer()
             }
-            if center.bannerVisible, let status = center.status, let copy = center.bannerCopy {
-                // UX 19.1a — one dismissible banner, here and nowhere else.
-                // After a reset, a recall or a rotation dropped the email
-                // vault it asks for the email again.
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(l10n.t(copy.titleKey))
-                        .font(.subheadline)
-                        .foregroundStyle(Color.lakkoText)
-                    if let bodyKey = copy.bodyKey {
-                        Text(l10n.t(bodyKey))
-                            .font(.footnote)
-                            .foregroundStyle(Color.lakkoTextMuted)
-                    }
-                    HStack(spacing: 16) {
-                        Button(l10n.t(copy.actionKey)) {
-                            onOpen(
-                                status.needsAddingAgain(addressHeld: center.addressHeld != nil)
-                                    ? .recoveryEmail(remove: false) : .protectAccount)
-                        }
+            if rows.statusIsWarning {
+                // UX 19.1c — the status line of an account kept by its
+                // password only carries the 19.1d actions.
+                HStack(spacing: 16) {
+                    Button(l10n.t(PasswordOnlyNotice.savePhraseKey)) { onOpen(.savePhrase) }
+                        .font(.footnote.weight(.semibold))
+                        .frame(minHeight: 44)
+                    if hasUsername {
+                        Button(l10n.t(PasswordOnlyNotice.addPasskeyKey)) { onOpen(.passkeys) }
                             .font(.footnote.weight(.semibold))
                             .frame(minHeight: 44)
-                        Button(l10n.t("common.dismiss")) { center.dismissBanner() }
-                            .font(.footnote)
-                            .frame(minHeight: 44)
                     }
-                    .buttonStyle(.borderless)
                 }
+                .buttonStyle(.borderless)
             }
             switch rows.email {
             case .absent:
                 EmptyView()
-            case .addAgain:
-                valueRow(
-                    title: l10n.t("recovery_email.title"), icon: .envelope,
-                    value: l10n.t("recovery_email.add_again.title")
-                ) { onOpen(.recoveryEmail(remove: false)) }
             case .off:
                 valueRow(
                     title: l10n.t("recovery_email.title"), icon: .envelope,
@@ -1099,7 +967,7 @@ struct SecureAccountScreen: View {
     @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
-        let actions = SecureAccountActions.offered(center.status)
+        let actions = SecureAccountActions.offered(center.status, phraseSaved: center.phraseSaved)
         AuthScreen {
             AuthTitle(title: l10n.t("notice.secure.title"))
             if authRepository.canReplacePassword {
@@ -1122,7 +990,6 @@ struct SecureAccountScreen: View {
                 AuthSecondaryButton(title: l10n.t("protect.phrase.title"), icon: .key) {
                     onOpen(.savePhrase)
                 }
-                AuthHint(text: l10n.t("notice.secure.new_keys"))
             }
         }
         .navigationTitle("")

@@ -134,6 +134,23 @@ public class TransparencyClient(
         )
     }
 
+    /**
+     * `GET /transparency/announcement/{username_hash}/{generation}` (ADR-0101
+     * section 10): the newest seal-announcement leaf the log holds for the
+     * account at [generation]. `null` on 404 (the log holds none).
+     */
+    public suspend fun fetchAnnouncement(usernameHash: ByteArray, generation: ULong): AnnouncementLeaf? {
+        val slug = base64UrlEncodeNoPad(usernameHash)
+        val wire: AnnouncementResWire =
+            getJsonOr404("/transparency/announcement/$slug/$generation") ?: return null
+        return AnnouncementLeaf(
+            idx = wire.idx,
+            keyGeneration = wire.key_generation,
+            seq = wire.seq,
+            announcement = base64Decode(wire.announcement_b64),
+        )
+    }
+
     // -----------------------------------------------------------------
     // Internals
     // -----------------------------------------------------------------
@@ -242,6 +259,16 @@ public data class SignedRoot(
         return result
     }
 }
+
+/** Decoded `GET /transparency/announcement/{username_hash}/{generation}`. */
+public class AnnouncementLeaf(
+    /** The leaf's index in the log (== the `/proof` idx). */
+    public val idx: ULong,
+    public val keyGeneration: ULong,
+    public val seq: ULong,
+    /** The announcement the leaf commits to (public, signed by the account). */
+    public val announcement: ByteArray,
+)
 
 /** Decoded `GET /transparency/latest/:account_key` response. */
 public data class LatestEntry(
@@ -381,6 +408,15 @@ private data class LatestResWire(
     // auth-attested genesis attestation, or absent for a genesis leaf
     // minted before ADR-0036 / a rotation entry.
     val genesis_attest_b64: String? = null,
+)
+
+/** Wire shape of `GET /transparency/announcement/...` (Rust `AnnouncementRes`). */
+@Serializable
+private data class AnnouncementResWire(
+    val idx: ULong,
+    val key_generation: ULong,
+    val seq: ULong,
+    val announcement_b64: String,
 )
 
 /** Wire shape of `GET /transparency/proof/:idx` (Rust `ProofRes`). */

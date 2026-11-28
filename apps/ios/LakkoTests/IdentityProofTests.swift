@@ -99,7 +99,7 @@ final class IdentityProofTests: XCTestCase {
         let host = NameRouteStub.scope { _, _, _ in (503, "") }
         do {
             _ = try await NameRouteStub.client(host).resetAccountKeys(
-                sessionToken: "tok", freshGrant: "g", seed: otherSeed,
+                sessionToken: "tok", resetGrant: "g", seed: otherSeed,
                 newSignaturePubkey: try pubkey(seed), accountId: accountId)
             XCTFail("a proof by another key is never sent")
         } catch AuthClientError.argument {}
@@ -107,7 +107,7 @@ final class IdentityProofTests: XCTestCase {
 
         // With the matching seed the proof is made and the flow starts.
         _ = try? await NameRouteStub.client(host).resetAccountKeys(
-            sessionToken: "tok", freshGrant: "g", seed: seed,
+            sessionToken: "tok", resetGrant: "g", seed: seed,
             newSignaturePubkey: try pubkey(seed), accountId: accountId)
         XCTAssertEqual(NameRouteStub.requests(host).map(\.path), ["/account/keys/reset/start"])
     }
@@ -157,7 +157,7 @@ final class IdentityProofTests: XCTestCase {
         let bodies: [[String: Any]] = [
             try json(GenesisAttestRequest(pubkeyB64: "pk", identityProofB64: "ip")),
             try json(KeyResetFinishRequest(
-                freshGrant: "g", recoveryUpload: "u", newSignaturePubkeyB64: "pk", identityProofB64: "ip")),
+                resetGrant: "g", recoveryUpload: "u", newSignaturePubkeyB64: "pk", identityProofB64: "ip")),
             try json(KeyRotateFinishRequest(
                 freshGrant: "g", recoveryUpload: "u", newSignaturePubkeyB64: "pk", supersessionProofB64: "p",
                 revokeDeviceIdsB64: [], identityProofB64: "ip")),

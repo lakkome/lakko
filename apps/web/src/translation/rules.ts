@@ -74,7 +74,6 @@ export function offerFor(
   input: {
     readonly enabled: boolean;
     readonly hasText: boolean;
-    readonly isOwn: boolean;
     readonly detected: Detection | null;
     readonly engineForDetected: EngineState;
     readonly anyEngine: boolean;
@@ -84,7 +83,6 @@ export function offerFor(
   const answer = r.translationOffered(
     input.enabled,
     input.hasText,
-    input.isOwn,
     input.detected?.tag ?? "",
     input.detected?.permille ?? 0,
     engineArg(r, input.engineForDetected),

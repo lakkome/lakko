@@ -724,19 +724,21 @@ describe("the phrase routes in AuthContext", () => {
     expect(cache).toBeLessThan(finish);
   });
 
-  it("a passkey that carries the keys and a mailed code go through the two phrase routes", () => {
+  it("a passkey that carries the keys goes through the phrase route; a mailed code restores no keys", () => {
     // A passkey's keys are opened to the phrase and handed to the phrase
     // prompt's route, on the sign-in and from the restore prompt alike.
     const start = source.indexOf("async function keysFromPasskey(");
     expect(start).toBeGreaterThan(-1);
     const passkey = code(source.slice(start, source.indexOf("\n  }\n", start)));
     expect(passkey).toMatch(/api\.provideRecoveryPhrase\(phrase, "vault"\)/);
-    // The email vault's phrase goes to the restore screen's route.
+    // ADR-0075, amended 2026-11-26: the email vault is gone. A mailed code
+    // gives a new password and never the phrase, so the email screen calls
+    // no phrase route at all.
     const email = readFileSync(
       fileURLToPath(new URL("../auth/recover/EmailRecover.tsx", import.meta.url)),
       "utf8",
     );
-    expect(email).toMatch(/await auth\.recover\(phrase, password\(\), canonicalUsername, "vault"\)/);
+    expect(code(email)).not.toMatch(/auth\.recover\(|provideRecoveryPhrase\(/);
     // Three words are checked on a device that already holds the phrase and
     // the keys (ADR-0072): nothing is restored, so no backup is fetched.
     const words = code(method("recoverWithThreeWords", "verifyPassword"));

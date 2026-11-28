@@ -36,6 +36,9 @@ enum FreshAuthSurface: Equatable {
     case savePhrase
     /// ADR-0076 — changing the username.
     case changeUsername
+    /// UX 19.1b — setting up an authenticator app (one of the reset's
+    /// factors, so a bare session must not add one).
+    case addAuthenticator
 
     /// The helper under the field, naming the action.
     var helpKey: String? {
@@ -43,6 +46,7 @@ enum FreshAuthSurface: Equatable {
         case .recoveryEmail: return "proof.recovery_email.help"
         case .savePhrase: return "proof.save_phrase.help"
         case .changeUsername: return "proof.username.help"
+        case .addAuthenticator: return "proof.add_totp.help"
         case .removeDevice: return "proof.remove_device.help"
         case .reset: return "restore_identity.reset.password_help"
         case .deleteAccount: return "proof.delete.help"
@@ -58,7 +62,8 @@ enum FreshAuthSurface: Equatable {
         switch self {
         case .reset, .addPasskey, .changePassword:
             return "restore_identity.reset.error.wrong_password"
-        case .recoveryEmail, .savePhrase, .changeUsername: return "settings.recovery.phrase.wrong_password"
+        case .recoveryEmail, .savePhrase, .changeUsername, .addAuthenticator:
+            return "settings.recovery.phrase.wrong_password"
         case .removeDevice: return "proof.remove_device.wrong_password"
         case .deleteAccount: return "proof.delete.wrong_password"
         case .addDeviceRequest: return "proof.add_device.request.wrong_password"
@@ -71,7 +76,7 @@ enum FreshAuthSurface: Equatable {
     /// surface is simply as it was.
     var cancelledKey: String? {
         switch self {
-        case .recoveryEmail, .savePhrase, .changeUsername: return nil
+        case .recoveryEmail, .savePhrase, .changeUsername, .addAuthenticator: return nil
         case .reset: return "proof.reset.cancelled"
         case .deleteAccount: return "settings.account.delete.error.cancelled"
         case .addDeviceRequest: return "proof.add_device.request.cancelled"

@@ -545,6 +545,31 @@ class OutboxTest {
         assertNull(queue.entriesNow().firstOrNull())
     }
 
+    @Test
+    fun waiting_sends_into_a_closed_one_to_one_turn_not_sent_and_never_go() = runTest {
+        // UX 16.11 (alignment 2026-11-27): the person of this one-to-one
+        // started over while two messages waited for the network.
+        val online = MutableStateFlow(false)
+        val s = Session(detachedScope(), online)
+        s.queue.restore(ACCOUNT)
+        val a = s.addText("one")
+        s.send(a)
+        val b = s.addText("two")
+        s.send(b)
+        advanceUntilIdle()
+        assertEquals(Ack.WAITING, s.rows.acks[a])
+        assertEquals(2, s.queue.failWaiting(GROUP))
+        assertEquals(Ack.FAILED, s.rows.acks[a])
+        assertEquals(Ack.FAILED, s.rows.acks[b])
+        assertEquals(listOf(OutboxState.FAILED, OutboxState.FAILED), store.load(ACCOUNT).map { it.state })
+        // The network comes back: nothing waits, nothing is sent.
+        online.value = true
+        advanceUntilIdle()
+        assertTrue(s.published.isEmpty())
+        // Nothing left to turn.
+        assertEquals(0, s.queue.failWaiting(GROUP))
+    }
+
     private companion object {
         const val ACCOUNT = "b3V0Ym94LXRlc3QtYWNjdA"
         const val GROUP = "aa11"

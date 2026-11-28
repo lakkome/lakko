@@ -40,7 +40,7 @@ import {
   type JSX,
 } from "solid-js";
 import { useAuth } from "./AuthContext";
-import { refreshProtection } from "./protect/protection-state";
+import { syncPhraseFlagFromSeals } from "./protect/protection-state";
 import { EmailRecover } from "./recover/EmailRecover";
 import { AuthLayout } from "../ui/AuthLayout";
 import { MethodHead, MethodList } from "../ui/MethodList";
@@ -75,9 +75,11 @@ import type { PairingPlace } from "../devices/device-card-runtime";
 import { loginHandleFor } from "./login-handle";
 import { UsernameField } from "./recover/UsernameField";
 import { RESET_CONFIRM_WORD, resetConfirmed } from "./reset-confirm";
-import { PROOF_COPY, resetCanSubmit, resetSurfaceView } from "./fresh-auth";
-import { createProofGate } from "./proof-gate";
-import { ProofBlock } from "./ProofBlock";
+import { resetSurfaceView } from "./fresh-auth";
+import { createResetFactors, ResetFactorSection, rowFailureOf } from "./ResetFactorSection";
+import { WaitNotice } from "./recover/FormNotices";
+import { createRetryCountdown } from "./recover/retry-countdown";
+import { ResetFactorRequiredError, resetSubmitEnabled } from "./seal/reset-factor";
 
 /** The catalog key of the prompt's first line for a restore notice. */
 const NOTICE_KEYS = {
@@ -141,11 +143,17 @@ export default function RestoreIdentityPrompt(): JSX.Element {
   // session this device holds. It decides the phrase row and the email row,
   // and keeps the device's "phrase-protected" flag in step, which is what
   // decides whether new words are shown should the keys be reset from here.
-  const [protection] = createResource(
+  const [phraseSaved] = createResource(
     () => (earlierKeys() ? null : (account()?.accountIdB64 ?? null)),
-    async (accountIdB64) => {
-      const token = auth.pendingSessionToken();
-      return token === null ? null : refreshProtection(accountIdB64, token);
+    async (accountIdB64): Promise<boolean | null> => {
+      // ADR-0075, amended 2026-11-26: "a phrase is saved" is what the
+      // account's published protection lists. It also keeps this device's
+      // per-account flag in step, which decides whether new words are shown
+      // should the keys be reset from here.
+      const facts = await auth.publishedSealFacts();
+      if (facts === null) return null;
+      syncPhraseFlagFromSeals(accountIdB64, facts);
+      return facts.phrase;
     },
   );
   const methods = (): readonly RecoverMethod[] =>
@@ -154,7 +162,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
       : restoreIdentityMethods({
       passkeysSupported: WebauthnClient.isWebauthnAvailable(),
       passkeysWithKeys: passkeysWithKeys() ?? null,
-      protection: protection() ?? null,
+      phraseSaved: phraseSaved() ?? null,
     });
   // The email flow's username field, pre-filled with the account's.
   const [emailUsername, setEmailUsername] = createSignal(account()?.username ?? "");
@@ -392,6 +400,8 @@ export default function RestoreIdentityPrompt(): JSX.Element {
       <LostEverythingPanel
         busy={busy() || passkeyBusy()}
         usernameKnown={(account()?.username.trim().length ?? 0) > 0}
+        username={account()?.username ?? ""}
+        accountIdB64={account()?.accountIdB64 ?? null}
       />
       <p class="lk-auth-foot">
         <button
@@ -408,69 +418,76 @@ export default function RestoreIdentityPrompt(): JSX.Element {
 }
 
 /**
- * "I have none of these" (docs/ux/identity-recovery.md sections 8 and 15.1,
- * ADR-0073): for a person who is signed in but has no other device, no
- * passkey that restores keys and no phrase. The one path that gives the
- * account a new identity, so it is collapsed behind a warning that states
- * what it does (other devices signed out and removed, passkeys deleted,
- * contacts re-verify, old messages unreadable, a new phrase; the password
- * and the authenticator keep working), gated by the typed word RESET, and
- * its button is not the primary action. Nothing is sent until the button is
- * tapped; a failure before anything changed is shown under the button and
- * leaves the panel open (a failure after the server step is the phrase
- * screen's, never this panel's).
+ * "I have none of these" (docs/ux/identity-recovery.md sections 8, 15.1,
+ * 15.1b and 15.1c; ADR-0073): for a person who is signed in but has no other
+ * device, no passkey that restores keys and no phrase. The one path that
+ * gives the account a new identity, so it is collapsed behind a warning that
+ * states what it does, gated by the typed word RESET, and its button is not
+ * the primary action. Nothing is sent to reset until the button is tapped; a
+ * failure before anything changed is shown under the button and leaves the
+ * panel open (a failure after the server step is the phrase screen's, never
+ * this panel's).
  *
- * Sections 15.1a and 17.2: the server refuses a reset without a fresh-auth
- * proof. While one is live (a password or passkey sign-in less than ten
- * minutes ago) the panel is exactly as above. Otherwise the shared proof
- * block sits above the confirmation word: the password, or `Use a passkey
- * instead` when the account has one this browser can use. The submit
- * obtains the proof first and resets second, under one `Resetting...`
- * state. A person who came in with the authenticator code and has no
- * usable passkey sees the "cannot reset" panel first.
+ * Since 2026-11-26 the password is not enough: the section "Confirm it is
+ * you" (`ResetFactorSection`) asks for the password, proven by a password
+ * sign-in, and one of the factors the account has. Once a factor is
+ * confirmed, one line says whether this reset brings the conversations back
+ * (15.1c), and only then are the word and the button usable. An account that
+ * has none of the three, and a person who cannot use any, see the "cannot
+ * reset" panel instead; it offers no way to add a factor.
  */
-function LostEverythingPanel(props: { busy: boolean; usernameKnown: boolean }): JSX.Element {
+function LostEverythingPanel(props: {
+  busy: boolean;
+  usernameKnown: boolean;
+  username: string;
+  accountIdB64: string | null;
+}): JSX.Element {
   const auth = useAuth();
   const [busy, setBusy] = createSignal(false);
   const [typed, setTyped] = createSignal("");
   const [error, setError] = createSignal<string | null>(null);
   const [knowsPassword, setKnowsPassword] = createSignal(false);
   const [noPassword, setNoPassword] = createSignal(false);
-  const gate = createProofGate({
+  const wait = createRetryCountdown();
+  const factors = createResetFactors({
     auth,
-    copy: PROOF_COPY.reset,
     busy: () => busy() || props.busy,
-    sessionToken: () => auth.pendingSessionToken(),
     usernameKnown: () => props.usernameKnown,
+    username: () => props.username,
+    accountIdB64: () => props.accountIdB64,
   });
+  const gate = factors.gate;
 
+  // UX 17.2, as amended: a passkey no longer stands in for the password, so
+  // the only question left of the old surface is whether the person knows
+  // the password at all.
   const surface = () =>
     resetSurfaceView({
       proofLive: gate.proofLive(),
-      passkeyUsable: gate.passkeyUsable(),
+      passkeyUsable: false,
       landing: auth.sessionLanding(),
       knowsPassword: knowsPassword(),
       noPassword: noPassword(),
     });
+  const section = () => factors.section();
+  // The word and the button wait for the confirmed factor AND for the line
+  // of 15.1c to be on screen: the person reads what the reset keeps first.
+  const wordUsable = (): boolean => section().kind === "confirmed" && factors.outlook() !== null;
   const canSubmit = (): boolean =>
-    resetCanSubmit({
-      confirmed: resetConfirmed(typed()),
-      proofReady: gate.view().ready,
-      cannot: surface().cannot,
-      blocked: busy() || props.busy,
-    });
+    resetSubmitEnabled({
+      section: section(),
+      wordTyped: resetConfirmed(typed()),
+      busy: busy() || props.busy || wait.waiting(),
+    }) && wordUsable();
 
   async function onReset(): Promise<void> {
     if (!canSubmit()) return;
     setError(null);
     setBusy(true);
-    let grant: string | null = null;
     try {
-      // The proof when none is live, the server reset, then the publish;
-      // flips the state to `save-fresh-phrase`, which the guard renders as
-      // the phrase screen.
-      grant = await gate.ensure();
-      if (grant === null) return;
+      // The owned-channels half and the seal, the server reset, then the
+      // publish; flips the state to `save-fresh-phrase`, which the guard
+      // renders as the phrase screen.
       await auth.mintFreshIdentity();
     } catch (err) {
       // Signed out, or another account landed, while the keys were being
@@ -478,18 +495,13 @@ function LostEverythingPanel(props: { busy: boolean; usernameKnown: boolean }): 
       // and their phrase are stored for this account's next sign-in on this
       // browser.
       if (isAbandoned(err)) return;
-      switch (gate.failed(err, grant).kind) {
-        case "required":
-        case "rate-limited":
-          // The block (or its countdown) says it; nothing was reset.
-          break;
-        case "offline":
-          setError(t("restore_identity.reset.error.offline"));
-          break;
-        default:
-          setError(screenText(err) ?? t("restore_identity.reset.error.generic"));
-          break;
-      }
+      // The confirmation ran out on the way: the section opens again as it
+      // was, with no error styling (nothing went wrong, nothing was reset).
+      if (err instanceof ResetFactorRequiredError) return;
+      const failure = rowFailureOf(err);
+      if (failure.kind === "rate-limited") wait.startFor(failure.retryAfterSecs);
+      else if (failure.kind === "offline") setError(t("restore_identity.reset.error.offline"));
+      else setError(screenText(err) ?? t("restore_identity.reset.error.generic"));
     } finally {
       setBusy(false);
     }
@@ -506,23 +518,16 @@ function LostEverythingPanel(props: { busy: boolean; usernameKnown: boolean }): 
             <li>{t("restore_identity.reset.effect_devices")}</li>
             <li>{t("restore_identity.reset.effect_passkeys")}</li>
             <li>{t("restore_identity.reset.effect_contacts")}</li>
-            <li>{t("restore_identity.reset.effect_messages")}</li>
             <li>{t("restore_identity.reset.effect_password")}</li>
           </ul>
         </div>
-        <Show
-          when={!surface().cannot}
-          fallback={
+        <Switch>
+          <Match when={surface().cannot}>
+            {/* UX 17.2: the person does not know the password. */}
             <div class="lk-stack">
               <strong>{t("proof.reset.cannot.title")}</strong>
               <p>{t("proof.reset.cannot.body")}</p>
-              <p>{t("proof.reset.cannot.what_you_can_do")}</p>
-              <ul>
-                <li>{t("proof.reset.cannot.option_device")}</li>
-                <li>{t("proof.reset.cannot.option_phrase")}</li>
-                <li>{t("proof.reset.cannot.option_passkey")}</li>
-              </ul>
-              <p>{t("proof.reset.cannot.otherwise")}</p>
+              <CannotResetOptions />
               <div class="lk-actions">
                 <button
                   type="button"
@@ -536,10 +541,26 @@ function LostEverythingPanel(props: { busy: boolean; usernameKnown: boolean }): 
                 </button>
               </div>
             </div>
-          }
-        >
-          <ProofBlock gate={gate}>
-            <Show when={surface().showNoPasswordLink}>
+          </Match>
+          <Match when={section().kind === "no-factor" ? (section() as { accountHasNone: boolean }) : null}>
+            {(none) => (
+              <div class="lk-stack">
+                <strong>{t("proof.reset.no_factor.title")}</strong>
+                <p>{t(none().accountHasNone ? "proof.reset.no_factor.body_none" : "proof.reset.no_factor.body")}</p>
+                <CannotResetOptions />
+                <Show when={!none().accountHasNone}>
+                  <div class="lk-actions">
+                    <button type="button" class="ghost" onClick={() => factors.backToRows()}>
+                      {t("common.back")}
+                    </button>
+                  </div>
+                </Show>
+              </div>
+            )}
+          </Match>
+          <Match when={section().kind !== "loading"}>
+            <ResetFactorSection factors={factors} />
+            <Show when={section().kind === "choose" && surface().showNoPasswordLink}>
               <div>
                 <button
                   type="button"
@@ -555,35 +576,52 @@ function LostEverythingPanel(props: { busy: boolean; usernameKnown: boolean }): 
                 </button>
               </div>
             </Show>
-          </ProofBlock>
-          <label>
-            {t("restore_identity.reset.confirm_label", { word: RESET_CONFIRM_WORD })}
-            <input
-              type="text"
-              autocomplete="off"
-              autocapitalize="off"
-              autocorrect="off"
-              spellcheck={false}
-              value={typed()}
-              onInput={(e) => setTyped(e.currentTarget.value)}
-              disabled={busy() || props.busy}
-            />
-          </label>
-          <Show when={error() !== null}>
-            <div class="form-error" role="alert">{error()}</div>
-          </Show>
-          <div class="lk-actions">
-            <button
-              type="button"
-              class="danger"
-              disabled={!canSubmit()}
-              onClick={() => void onReset()}
-            >
-              {busy() ? t("restore_identity.reset.resetting") : t("restore_identity.lost.create")}
-            </button>
-          </div>
-        </Show>
+            <label>
+              {t("restore_identity.reset.confirm_label", { word: RESET_CONFIRM_WORD })}
+              <input
+                type="text"
+                autocomplete="off"
+                autocapitalize="off"
+                autocorrect="off"
+                spellcheck={false}
+                value={typed()}
+                onInput={(e) => setTyped(e.currentTarget.value)}
+                disabled={busy() || props.busy || !wordUsable()}
+              />
+            </label>
+            <Show when={error() !== null}>
+              <div class="form-error" role="alert">{error()}</div>
+            </Show>
+            <WaitNotice remainingMs={wait.remainingMs} />
+            <div class="lk-actions">
+              <button
+                type="button"
+                class="danger"
+                disabled={!canSubmit()}
+                onClick={() => void onReset()}
+              >
+                {busy() ? t("restore_identity.reset.resetting") : t("restore_identity.lost.create")}
+              </button>
+            </div>
+          </Match>
+        </Switch>
       </div>
     </details>
+  );
+}
+
+/** The three things a person who cannot reset can still do: text, not
+ *  buttons (each is a row of the screen this panel sits on). */
+function CannotResetOptions(): JSX.Element {
+  return (
+    <>
+      <p>{t("proof.reset.cannot.what_you_can_do")}</p>
+      <ul>
+        <li>{t("proof.reset.cannot.option_device")}</li>
+        <li>{t("proof.reset.cannot.option_phrase")}</li>
+        <li>{t("proof.reset.cannot.option_passkey")}</li>
+      </ul>
+      <p>{t("proof.reset.cannot.otherwise")}</p>
+    </>
   );
 }

@@ -13,14 +13,14 @@
  * other devices); it is never written to plain storage and never logged.
  *
  * Every decision is `email-flow.ts` (the step machine and the reading of
- * the server's answers) and `enrol-run.ts` (when the email vault is sealed).
+ * the server's answers). Nothing is sealed here: the email vault was removed
+ * on 2026-11-26 (ADR-0075, second amendment), so `enrol/finish` carries the
+ * code and nothing else.
  */
 import { plainStore } from "./local";
 import { createSignal, Match, onCleanup, onMount, Show, Switch, type JSX } from "solid-js";
 
 import { useAuth } from "../AuthContext";
-import { base64Decode, base64Encode } from "../account-id";
-import { AuthHttpError } from "../client";
 import { PROOF_COPY } from "../fresh-auth";
 import { loginHandleFor } from "../login-handle";
 import { createProofGate } from "../proof-gate";
@@ -41,8 +41,7 @@ import {
   type EnrolEvent,
   type EnrolState,
 } from "./email-flow";
-import { runEmailVault } from "./email-vault";
-import { EnrolSealError, finishEnrolment } from "./enrol-run";
+import { refreshFactors } from "./factors";
 import { markOwnAction } from "./notices";
 import { protectionStatus, refreshProtection } from "./protection-state";
 import { answerOf, RecoveryEmailClient } from "./recovery-email-client";
@@ -160,7 +159,6 @@ export function RecoveryEmailForm(props: {
       dispatch({
         type: "sent",
         challengeId: sent.challengeId,
-        vaultSalt: sent.vaultSalt,
         resendAfterSecs: sent.resendAfterSecs,
         nowMs: Date.now(),
       });
@@ -182,56 +180,32 @@ export function RecoveryEmailForm(props: {
     }
     dispatch({ type: "submitted" });
     try {
-      // What the account is NOW decides whether a vault is sealed.
+      // Whether this adds or replaces decides which notice the account's
+      // other devices show; the last known status is enough for that.
       const known = (await refreshProtection(acct.accountIdB64, token)) ?? status();
-      if (known === null) {
-        dispatch({ type: "failed", failure: { kind: "offline" } });
-        return;
-      }
-      const handle = await loginHandleFor(acct.username);
       // This device is about to cause the notice: remembered first, so the
       // notice is recognised as its own action.
       markOwnAction(
         plainStore(),
         acct.accountIdB64,
-        known.enabled ? "recovery-email-replaced" : "recovery-email-added",
+        known?.enabled === true ? "recovery-email-replaced" : "recovery-email-added",
         Date.now(),
       );
-      const done = await finishEnrolment(
-        {
-          phrase: () => auth.devicePhrase(),
-          seal: runEmailVault,
-          finish: (sealed) =>
-            client.enrolFinish({
-              sessionToken: token,
-              challengeId: current.challengeId,
-              code: digits,
-              sealedEntropy: sealed === null ? null : base64Encode(sealed),
-            }),
-          isPhraseSaved: (err) =>
-            err instanceof AuthHttpError && err.status === 409 && err.errorCode === "phrase-saved",
-        },
-        {
-          phraseSaved: known.phraseSaved,
-          loginHandle: handle.bytes,
-          address: address(),
-          vaultSalt: base64Decode(current.vaultSalt),
-        },
-      );
+      await client.enrolFinish({
+        sessionToken: token,
+        challengeId: current.challengeId,
+        code: digits,
+      });
       // The address is confirmed: the account's devices keep it (the synced
-      // register), which is what lets them put the vault back by themselves
-      // after the keys change.
+      // register), so the reset's email row and a username change can
+      // pre-fill it.
       rememberAddress(acct.accountIdB64, address());
       setAddress("");
       setCode("");
-      void refreshProtection(acct.accountIdB64, token);
-      dispatch({ type: "finished", vault: done.vault });
+      void refreshFactors(acct.accountIdB64, token);
+      dispatch({ type: "finished" });
       props.onDone();
     } catch (err) {
-      if (err instanceof EnrolSealError) {
-        dispatch({ type: "failed", failure: { kind: "error" } });
-        return;
-      }
       setCode("");
       fail("enrol-finish", err, null);
       queueMicrotask(() => codeInput?.focus());
@@ -337,10 +311,8 @@ export function RecoveryEmailForm(props: {
             </p>
           </Show>
           <p class="form-info">{t("recovery_email.not_kept")}</p>
-          {/* The mailbox line is shown only while no phrase is saved. */}
-          <Show when={status()?.phraseSaved !== true}>
-            <p class="form-info">{t("recovery_email.mailbox_warning")}</p>
-          </Show>
+          {/* Shown on every account (19.2, amended 2026-11-26). */}
+          <p class="form-info">{t("recovery_email.mailbox_warning")}</p>
           {/* The account has an authenticator: its code is asked as well. */}
           <Show when={status()?.totp === true}>
             <p class="form-info">{t("recovery_email.totp_warning")}</p>

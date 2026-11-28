@@ -14,20 +14,18 @@
 import { createEffect, type JSX } from "solid-js";
 
 import { useAuth } from "./AuthContext";
-import { base64Encode } from "./account-id";
 import { handleBindLimitedMessage } from "./auth-error-copy";
 import { AuthClient, AuthHttpError } from "./client";
 import { loginHandleFor } from "./login-handle";
 import { heldAddress } from "./protect/address-register";
-import { runEmailVault } from "./protect/email-vault";
+import { accountFactors, removingLeavesNone } from "./protect/factors";
 import { plainStore } from "./protect/local";
 import { protectionStatus } from "./protect/protection-state";
-import { RESEAL_SALT_LEN } from "./protect/reseal";
 import {
   readRenameOwed,
   renameEmail,
+  renameNeedsAddress,
   renameResume,
-  renameSealsVault,
   writeRenameOwed,
   type Answer,
   type RenameFailure,
@@ -39,13 +37,33 @@ import { useProfiles } from "../profile/ProfileContext";
 
 /**
  * The recovery email a rename carries for this account, or `null` (none, or
- * this device does not hold the address: the server then drops it).
+ * this device does not hold the address and none was typed: the server then
+ * drops it, or refuses the change when it is the account's last second way
+ * in). `typedAddress` is what the person typed on the username screen when
+ * {@link renameAsksForAddress} said to ask (UX 19.1c).
  */
-export function renameEmailFor(accountIdB64: string): { address: string; sealVault: boolean } | null {
+export function renameEmailFor(accountIdB64: string, typedAddress?: string): { address: string } | null {
   const status = protectionStatus(accountIdB64);
+  if (status?.enabled !== true) return null;
   const held = heldAddress(accountIdB64);
-  if (renameEmail(status?.enabled === true, held !== null) !== "kept" || held === null) return null;
-  return { address: held, sealVault: renameSealsVault("kept", status?.phraseSaved === true) };
+  if (held !== null) return { address: held };
+  const typed = typedAddress?.trim() ?? "";
+  return typed.length > 0 ? { address: typed } : null;
+}
+
+/**
+ * Reactive: whether the username screen asks for the recovery email before
+ * the change, with the line `protect.username_email` (UX 19.1c): the email
+ * is the account's last second way in and this device holds no address.
+ */
+export function renameAsksForAddress(accountIdB64: string | null): boolean {
+  if (accountIdB64 === null) return false;
+  const status = protectionStatus(accountIdB64);
+  const factors = accountFactors(accountIdB64);
+  return renameNeedsAddress(
+    renameEmail(status?.enabled === true, heldAddress(accountIdB64) !== null),
+    factors !== null && removingLeavesNone(factors, "email"),
+  );
 }
 
 /** What the rename needs from the app, for one account. Also used by
@@ -55,31 +73,12 @@ export function useRenamePorts(): (account: { accountIdB64: string; accountId: U
   const profiles = useProfiles();
   return (account) => ({
     handleFor: (username) => loginHandleFor(username),
-    sealVault: async (handle, address) => {
-      const phrase = await auth.devicePhrase();
-      if (phrase === null) return null;
-      const salt = crypto.getRandomValues(new Uint8Array(RESEAL_SALT_LEN));
-      const sealed = await runEmailVault({ kind: "seal", phrase, loginHandle: handle, address, vaultSalt: salt });
-      return sealed.kind === "sealed" ? { salt, sealed: sealed.sealed } : null;
-    },
     bind: async (args): Promise<Answer | null> => {
       try {
         await new AuthClient().bindLoginHandle(account.token, args.handle, {
           freshGrant: args.grant,
           previousHandle: args.previousHandle,
-          ...(args.email === null
-            ? {}
-            : {
-                recoveryEmail: {
-                  address: args.email.address,
-                  ...(args.email.vault === undefined
-                    ? {}
-                    : {
-                        vaultSalt: base64Encode(args.email.vault.salt),
-                        sealedEntropy: base64Encode(args.email.vault.sealed),
-                      }),
-                },
-              }),
+          ...(args.email === null ? {} : { recoveryEmail: { address: args.email.address } }),
         });
         return null;
       } catch (err) {
@@ -193,6 +192,10 @@ export function failureText(failure: RenameFailure): string | null {
       return handleBindLimitedMessage(failure.retryAfterSecs);
     case "offline":
       return t("common.error.offline");
+    case "last-factor":
+      // The change would drop the account's last second way in: the screen
+      // asks for the recovery email (UX 19.1c).
+      return t("protect.username_email");
     case "address-mismatch":
     case "error":
       return t("recovery_phrase.fresh.error.generic");

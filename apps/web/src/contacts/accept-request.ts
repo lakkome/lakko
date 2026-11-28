@@ -21,6 +21,10 @@
  *
  * A request without an account id (a legacy wire) can found nothing: it is
  * answered with the ack alone.
+ *
+ * A request from the new account of a contact who STARTED OVER (ADR-0101
+ * section 11, UX 16.11) founds a new one-to-one with the new keys; the old
+ * one stays, closed.
  */
 import type { IdentitySecrets } from "../auth/AuthContext";
 import type { ActiveGroup } from "../chat/ChatContext";
@@ -53,7 +57,8 @@ export async function acceptContactRequest(
     readonly client: Pick<
       ContactsClient,
       "prepareGroupWith" | "recordOwedAnswer" | "settleOwedAnswer" | "sendContactAck"
-    >;
+    > &
+      Partial<Pick<ContactsClient, "adoptStartedOverRequest">>;
     readonly identity: IdentitySecrets;
     readonly accountIdB64: string;
     readonly chats: {
@@ -68,6 +73,16 @@ export async function acceptContactRequest(
   },
   req: IncomingContactRequest,
 ): Promise<AcceptOutcome> {
+  // `docs/ux/identity-recovery.md` 16.11 - the request may come from the new
+  // account of a contact who started over. This Accept is the person's
+  // decision, so the key this device trusts for the account moves to the
+  // request's key first (only when a pending started-over record names
+  // exactly that key; a no-op for every other request). The old one-to-one
+  // stays closed and nothing else follows from it. Done before anything is
+  // read from the contact list: the row is re-keyed and keeps its rename.
+  if (req.fromAccountId !== null) {
+    deps.client.adoptStartedOverRequest?.(req.fromAccountId, req.fromPubkey);
+  }
   const keyB64 = base64Encode(req.fromPubkey);
   const contact: AcceptedContact = {
     signaturePubkeyB64: keyB64,

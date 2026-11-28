@@ -619,6 +619,15 @@ private fun RequestRow(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                // UX 16.11 - the keys of a person this device knows changed
+                // and nothing they set up before confirms it is them.
+                if (req.startedOverNote) {
+                    Text(
+                        t("contacts.started_over.request_note"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = me.lakko.app.ui.auth.lakkoWarningColor(),
+                    )
+                }
                 // `docs/ux/who-can-find-me.md` 6.4 — where it came from.
                 via?.let { line ->
                     Text(
@@ -734,6 +743,15 @@ private fun SentRow(s: SentContactRequest, onDismiss: () -> Unit) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            // UX 16.11 - the new account of a person who started over: the
+            // same note as on an incoming request from it.
+            if (s.startedOverNote) {
+                Text(
+                    t("contacts.started_over.request_note"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = me.lakko.app.ui.auth.lakkoWarningColor(),
+                )
+            }
         }
         val dismissLabel = t("contacts.list.sent_dismiss")
         TextButton(

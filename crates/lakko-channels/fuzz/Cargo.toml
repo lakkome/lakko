@@ -142,7 +142,7 @@ bench = false
 # The owned-channels list (ADR-0101 section 7): opened from a vault the
 # storage service serves, so after the AEAD a hostile input needs a device of
 # the account or a rollback to an older genuine object; bounded, exact,
-# canonical, always 32 764 bytes. Whatever decodes must re-encode to itself.
+# canonical, always 65 532 bytes. Whatever decodes must re-encode to itself.
 [[bin]]
 name = "owned_channels_decode"
 path = "fuzz_targets/owned_channels_decode.rs"

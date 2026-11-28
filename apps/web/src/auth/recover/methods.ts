@@ -16,8 +16,9 @@
  *     and an authenticator code.
  *
  * Above both stands one row, "Email code" (ADR-0075, UX 19.3): a code sent
- * to the recovery email. It is in neither group because what it brings
- * depends on the account.
+ * to the recovery email. It is in neither group: it gives a new password
+ * and signs the person in, and never brings the keys (the email vault was
+ * removed on 2026-11-26).
  *
  * Nothing in the list depends on server state: before a session the server
  * must not say whether an account has other devices, a passkey, an
@@ -27,8 +28,9 @@
  * (maintainer decision 2026-10-02, `three-words.ts`) is checked on the
  * device against the recovery phrase the device holds, so it is listed only
  * on a device that holds the phrase and the keys for its cached account,
- * and only when that account is phrase-protected (ADR-0075 section 11: an
- * account whose phrase was never shown has no words to type). It is absent
+ * and only once that account's phrase was saved (ADR-0075 section 11: an
+ * account whose phrase was never shown has no words to type; the per-device
+ * flag is fed from the account's published protection). It is absent
  * everywhere else. The note under the list follows: it
  * mentions three words only where the row is.
  *
@@ -178,7 +180,8 @@ const EARLIER_KEYS_DEVICE = method(
   "restore_identity.earlier_keys.another_device.sub",
 );
 
-/** The restore prompt's email row (ADR-0075, alignment J). */
+/** The email row. The restore prompt no longer lists it (a mailed code
+ *  restores nothing); kept so `restoreMethod("email")` still resolves. */
 const RESTORE_EMAIL = EMAIL_GROUP.methods[0] as RecoverMethod;
 
 /**
@@ -192,33 +195,32 @@ const RESTORE_EMAIL = EMAIL_GROUP.methods[0] as RecoverMethod;
  * decided on web, which cannot count the passkeys a device holds: a passkey
  * that did not carry keys is not in that count.
  *
- * ADR-0075: the device is signed in, so it may read `GET /recovery-email`
- * (`protection`; `null` while it is not known, which changes nothing).
+ * Amended 2026-11-26 (ADR-0075, second amendment):
  *
- *   - The 12-word phrase row is dropped when no phrase is saved: the owner
- *     of such an account was never shown words.
- *   - `Email code` is added, first, when the account has an email AND its
- *     vault: there a mailed code brings the keys back. Without the vault it
- *     would only change the password, which restores nothing.
+ *   - `Email code` is never a row here: a mailed code gives a new password
+ *     and brings no keys, so it restores nothing.
+ *   - The 12-word phrase row is dropped only when the account's published
+ *     protection is known to list no saved phrase (`phraseSaved === false`):
+ *     the owner of such an account was never shown words. While that is not
+ *     known the row stays.
+ *
+ * `protection` (the answer of `GET /recovery-email`) is ignored since the
+ * vault went; it is still accepted so callers need not change at once.
  */
 export function restoreIdentityMethods(args: {
   readonly passkeysSupported: boolean;
   readonly passkeysWithKeys: number | null;
-  readonly protection?: {
-    readonly enabled: boolean;
-    readonly vault: boolean;
-    readonly phraseSaved: boolean;
-  } | null;
+  readonly protection?: unknown;
+  /** What the account's published protection says about a saved phrase;
+   *  `null` or absent while it is not known. */
+  readonly phraseSaved?: boolean | null;
 }): readonly RecoverMethod[] {
   const offerPasskey =
     args.passkeysSupported && (args.passkeysWithKeys === null || args.passkeysWithKeys > 0);
-  const protection = args.protection ?? null;
-  const offerPhrase = protection === null || protection.phraseSaved;
-  const offerEmail = protection !== null && protection.enabled && protection.vault;
-  const rows = RESTORE_IDENTITY_METHODS.filter(
+  const offerPhrase = args.phraseSaved !== false;
+  return RESTORE_IDENTITY_METHODS.filter(
     (m) => (m.id !== "passkey" || offerPasskey) && (m.id !== "phrase" || offerPhrase),
   );
-  return offerEmail ? [RESTORE_EMAIL, ...rows] : rows;
 }
 
 export function recoverMethod(id: RecoverMethodId): RecoverMethod {

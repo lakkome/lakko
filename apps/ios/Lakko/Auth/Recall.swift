@@ -85,18 +85,28 @@ public struct RecallRecord: Codable, Equatable {
     /// back the new words are shown only to a phrase-protected account.
     /// Optional so an older record still decodes (as not saved).
     public var phraseSaved: Bool?
+    /// ADR-0101 section 7 item 8 (alignment item B) — the root of the
+    /// account's owned-channels KEYS lock as this device's lineage seed
+    /// derived it before the staged wipe: after the account is taken back,
+    /// the recall device opens the list through it (the lock carries `R`
+    /// and `S`) and takes the owned channels back. A 32-byte root, not a
+    /// seed: it opens that one vault and nothing else. Optional so an older
+    /// record decodes (its owned channels then stay where they are).
+    public var ownedKeysLockRoot: Data?
 
     public static let seedLength = 32
     public static let accountIdLength = 16
 
     public init(
-        accountIdB64: String, oldSeed: Data, username: String, learnedAtMs: Int64, phraseSaved: Bool? = nil
+        accountIdB64: String, oldSeed: Data, username: String, learnedAtMs: Int64, phraseSaved: Bool? = nil,
+        ownedKeysLockRoot: Data? = nil
     ) {
         self.accountIdB64 = accountIdB64
         self.oldSeed = oldSeed
         self.username = username
         self.learnedAtMs = learnedAtMs
         self.phraseSaved = phraseSaved
+        self.ownedKeysLockRoot = ownedKeysLockRoot
     }
 
     enum CodingKeys: String, CodingKey {
@@ -105,6 +115,7 @@ public struct RecallRecord: Codable, Equatable {
         case username
         case learnedAtMs = "learned_at_ms"
         case phraseSaved = "phrase_saved"
+        case ownedKeysLockRoot = "owned_keys_lock_root"
     }
 
     /// The 16-byte account id, or `nil` for a record that names none.
@@ -880,10 +891,15 @@ public struct RecallAttempt {
 public struct RecallLanded {
     public let reset: KeyResetResult
     public let freshGrant: FreshAuthGrant?
+    /// The export key of the new password (its OPAQUE registration): the
+    /// account's password seal and owned-channels password lock follow it
+    /// (ADR-0101; alignment item B). `nil` when the registration gave none.
+    public let exportKey: Data?
 
-    public init(reset: KeyResetResult, freshGrant: FreshAuthGrant?) {
+    public init(reset: KeyResetResult, freshGrant: FreshAuthGrant?, exportKey: Data? = nil) {
         self.reset = reset
         self.freshGrant = freshGrant
+        self.exportKey = exportKey
     }
 }
 

@@ -14,9 +14,9 @@ import LakkoCore
 final class RecoveryEmailTests: XCTestCase {
 
     private func status(
-        available: Bool = true, enabled: Bool, vault: Bool, phraseSaved: Bool
+        available: Bool = true, enabled: Bool, totp: Bool? = false
     ) -> RecoveryEmailStatus {
-        RecoveryEmailStatus(available: available, enabled: enabled, vault: vault, phraseSaved: phraseSaved)
+        RecoveryEmailStatus(available: available, enabled: enabled, totp: totp)
     }
 
     private func defaults(_ name: String = #function) -> UserDefaults {
@@ -27,88 +27,6 @@ final class RecoveryEmailTests: XCTestCase {
 
     // MARK: - The account's mode
 
-    func testTheAccountModeIsOneRuleOverThreeFacts() {
-        // A saved phrase wins, whatever the email is.
-        XCTAssertEqual(accountProtection(enabled: false, vault: false, phraseSaved: true), .phrase)
-        XCTAssertEqual(accountProtection(enabled: true, vault: false, phraseSaved: true), .phrase)
-        XCTAssertEqual(accountProtection(enabled: true, vault: true, phraseSaved: true), .phrase)
-        // No phrase: the email protects only while the server holds the vault.
-        XCTAssertEqual(accountProtection(enabled: true, vault: true, phraseSaved: false), .email)
-        XCTAssertEqual(accountProtection(enabled: true, vault: false, phraseSaved: false), .none)
-        XCTAssertEqual(accountProtection(enabled: false, vault: false, phraseSaved: false), .none)
-        // A vault without an email does not exist; it protects nothing.
-        XCTAssertEqual(accountProtection(enabled: false, vault: true, phraseSaved: false), .none)
-    }
-
-    func testAnEmailWithoutAVaultAsksToBeAddedAgain() {
-        // After a key reset or a recall the server dropped the vault.
-        let dropped = status(enabled: true, vault: false, phraseSaved: false)
-        XCTAssertTrue(dropped.emailNeedsAddingAgain)
-        XCTAssertEqual(dropped.protection, .none)
-        XCTAssertTrue(ProtectBanner.shows(protection: dropped.protection, dismissedAtMs: nil, nowMs: 1))
-        XCTAssertEqual(ProtectionRows.decide(dropped).email, .addAgain)
-        XCTAssertEqual(ProtectBanner.copy(dropped).titleKey, "recovery_email.add_again.title")
-        XCTAssertEqual(ProtectBanner.copy(dropped).bodyKey, "recovery_email.add_again.body")
-        // Otherwise the ordinary banner.
-        let never = status(enabled: false, vault: false, phraseSaved: false)
-        XCTAssertEqual(ProtectBanner.copy(never).titleKey, "protect.banner.none")
-        XCTAssertNil(ProtectBanner.copy(never).bodyKey)
-        XCTAssertEqual(ProtectionRows.decide(never).email, .off)
-        XCTAssertEqual(
-            ProtectionRows.decide(status(enabled: true, vault: false, phraseSaved: true)).email, .on,
-            "a phrase-protected account's email never has a vault")
-        // Not for a phrase-protected account: its email never has a vault.
-        XCTAssertFalse(status(enabled: true, vault: false, phraseSaved: true).emailNeedsAddingAgain)
-        XCTAssertFalse(status(enabled: true, vault: true, phraseSaved: false).emailNeedsAddingAgain)
-    }
-
-    func testTheSettingsRowsFollowTheStatus() {
-        let none = ProtectionRows.decide(status(enabled: false, vault: false, phraseSaved: false))
-        XCTAssertEqual(none.statusKey, "protect.status.none")
-        XCTAssertEqual(none.email, .off)
-        XCTAssertEqual(none.phrase, .save)
-        XCTAssertFalse(none.showsThreeWords)
-
-        let email = ProtectionRows.decide(status(enabled: true, vault: true, phraseSaved: false))
-        XCTAssertEqual(email.statusKey, "protect.status.email")
-        XCTAssertEqual(email.email, .on)
-        XCTAssertEqual(email.phrase, .save, "no Show phrase without a saved phrase")
-        XCTAssertFalse(email.showsThreeWords)
-
-        let phrase = ProtectionRows.decide(status(enabled: false, vault: false, phraseSaved: true))
-        XCTAssertEqual(phrase.statusKey, "protect.status.phrase")
-        XCTAssertEqual(phrase.phrase, .show)
-        XCTAssertTrue(phrase.showsThreeWords)
-
-        // Mail is not set up on this server: no row, unless an email is on.
-        XCTAssertEqual(
-            ProtectionRows.decide(status(available: false, enabled: false, vault: false, phraseSaved: false)).email,
-            .absent)
-        XCTAssertEqual(
-            ProtectionRows.decide(status(available: false, enabled: true, vault: true, phraseSaved: false)).email,
-            .on)
-        // The sign-up step offers the email only with mail set up and a username.
-        XCTAssertTrue(ProtectionRows.signupOffersEmail(available: true, hasUsername: true))
-        XCTAssertFalse(ProtectionRows.signupOffersEmail(available: false, hasUsername: true))
-        XCTAssertFalse(ProtectionRows.signupOffersEmail(available: true, hasUsername: false))
-    }
-
-    func testTheBannerIsOnlyForAnUnprotectedAccountAndReturnsAfterThirtyDays() {
-        let day: Int64 = 24 * 60 * 60 * 1000
-        XCTAssertTrue(ProtectBanner.shows(protection: .none, dismissedAtMs: nil, nowMs: 0))
-        XCTAssertFalse(ProtectBanner.shows(protection: .email, dismissedAtMs: nil, nowMs: 0))
-        XCTAssertFalse(ProtectBanner.shows(protection: .phrase, dismissedAtMs: nil, nowMs: 0))
-        XCTAssertFalse(ProtectBanner.shows(protection: .none, dismissedAtMs: 1000, nowMs: 1000 + 29 * day))
-        XCTAssertTrue(ProtectBanner.shows(protection: .none, dismissedAtMs: 1000, nowMs: 1000 + 30 * day))
-        // A clock that went backwards does not bring it back.
-        XCTAssertFalse(ProtectBanner.shows(protection: .none, dismissedAtMs: 1000, nowMs: 500))
-    }
-
-    func testAVaultIsSealedOnlyWhileNoPhraseIsSaved() {
-        XCTAssertTrue(EnrolSealing.sealsVault(phraseSaved: false))
-        XCTAssertFalse(EnrolSealing.sealsVault(phraseSaved: true))
-    }
-
     func testTheStoreKeepsFlagsOnlyAndTheWipeClearsThem() {
         let defaults = defaults()
         let store = AccountProtectionStore(defaults: defaults)
@@ -116,19 +34,22 @@ final class RecoveryEmailTests: XCTestCase {
         XCTAssertNil(store.status(accountIdB64: "acct"))
         XCTAssertNil(store.noticeCursor(accountIdB64: "acct"), "a device that never kept a cursor")
 
-        store.setStatus(status(enabled: true, vault: true, phraseSaved: true), accountIdB64: "acct")
-        store.setBannerDismissed(atMs: 7, accountIdB64: "acct")
+        store.setStatus(status(enabled: true, totp: true), accountIdB64: "acct")
         store.setNoticeCursor(12, accountIdB64: "acct")
         store.markOwnAction(.emailAdded, atMs: 99, accountIdB64: "acct")
-        XCTAssertTrue(store.phraseSaved(accountIdB64: "acct"), "learned from the status")
+        // The status says nothing about the phrase any more (the server
+        // keeps no flag): only the account's published protection does.
+        XCTAssertFalse(store.phraseSaved(accountIdB64: "acct"))
+        store.setPhraseSaved(true, accountIdB64: "acct")
+        XCTAssertTrue(store.phraseSaved(accountIdB64: "acct"))
         XCTAssertEqual(store.status(accountIdB64: "acct")?.enabled, true)
-        XCTAssertEqual(store.bannerDismissedAtMs(accountIdB64: "acct"), 7)
+        XCTAssertEqual(store.status(accountIdB64: "acct")?.totp, true)
         XCTAssertEqual(store.noticeCursor(accountIdB64: "acct"), 12)
         XCTAssertEqual(store.ownActions(accountIdB64: "acct"), ["recovery-email-added": 99])
         XCTAssertFalse(store.phraseSaved(accountIdB64: "other"), "per account")
 
         // Nothing stored could hold an address: every value is a flag, a
-        // number, or the four booleans of the status.
+        // number, or the booleans of the status.
         for key in AccountProtectionStore.keys(accountIdB64: "acct") {
             let value = defaults.object(forKey: key)
             if let data = value as? Data {
@@ -234,7 +155,7 @@ final class RecoveryEmailTests: XCTestCase {
             ownActions: [AccountNoticeKind.emailAdded.rawValue: 49_000]))
         // The marker is per kind.
         XCTAssertFalse(NoticeSelection.isOwn(
-            notice(9, .accountOpenedByEmail, at: 49_000),
+            notice(9, .emailRemoved, at: 49_000),
             ownActions: [AccountNoticeKind.emailAdded.rawValue: 49_000]))
     }
 
@@ -247,18 +168,19 @@ final class RecoveryEmailTests: XCTestCase {
             }
         }
         XCTAssertNotNil(AccountNoticeCopy.of(.passwordChangedByEmail).bodyKey)
-        XCTAssertNotNil(AccountNoticeCopy.of(.accountOpenedByEmail).bodyKey)
         XCTAssertNil(AccountNoticeCopy.of(.emailAdded).bodyKey)
+        // The "account opened by email" notice went with the email vault.
+        XCTAssertNil(AccountNoticeKind(rawValue: "account-opened-by-email"))
 
         // In order: a new password, remove the email, save a phrase.
         XCTAssertEqual(
-            SecureAccountActions.offered(status(enabled: true, vault: true, phraseSaved: false)),
+            SecureAccountActions.offered(status(enabled: true), phraseSaved: false),
             [.newPassword, .removeEmail, .savePhrase])
         XCTAssertEqual(
-            SecureAccountActions.offered(status(enabled: true, vault: false, phraseSaved: true)),
+            SecureAccountActions.offered(status(enabled: true), phraseSaved: true),
             [.newPassword, .removeEmail], "no way back from a saved phrase, nothing to save")
         XCTAssertEqual(
-            SecureAccountActions.offered(status(enabled: false, vault: false, phraseSaved: false)),
+            SecureAccountActions.offered(status(enabled: false), phraseSaved: false),
             [.newPassword, .savePhrase])
     }
 
@@ -270,6 +192,12 @@ final class RecoveryEmailTests: XCTestCase {
         var now: Int64 = 1_000_000
         var statusReads = 0
         var noticeReads: [NoticeQuery] = []
+        /// The account's published protection, as a look at it answers.
+        var seals: AccountSeals? = AccountSeals.passwordOnly
+        var sealLooks: [SealChange] = []
+        var hasPasskey: Bool? = false
+        var hasUsername = true
+        var afterKeyReset = false
         init(_ status: RecoveryEmailStatus) { self.status = .success(status) }
     }
 
@@ -278,7 +206,10 @@ final class RecoveryEmailTests: XCTestCase {
     ) -> AccountProtectionCenter {
         AccountProtectionCenter(
             ports: .init(
-                session: { session ? .init(accountIdB64: "acct", sessionToken: "tok") : nil },
+                session: {
+                    session
+                        ? .init(accountIdB64: "acct", sessionToken: "tok", hasUsername: server.hasUsername) : nil
+                },
                 fetchStatus: { _ in
                     server.statusReads += 1
                     return try server.status.get()
@@ -287,61 +218,47 @@ final class RecoveryEmailTests: XCTestCase {
                     server.noticeReads.append(query)
                     return server.pages[query] ?? AccountNoticePage(notices: [], nextAfter: 0, more: false)
                 },
+                hasPasskey: { server.hasPasskey },
+                ensureSeals: { change in
+                    server.sealLooks.append(change)
+                    return server.seals
+                },
+                afterKeyReset: { server.afterKeyReset },
                 nowMs: { server.now }),
-            store: store)
+            store: store,
+            sealsStore: AccountSealsStore(defaults: defaults("seals-\(#function)")))
     }
 
     func testTheStatusIsReadAtTheLandingAndKeptForTheNextOne() async {
         let store = AccountProtectionStore(defaults: defaults())
-        let server = Server(status(enabled: true, vault: true, phraseSaved: false))
+        let server = Server(status(enabled: true, totp: false))
         let center = center(server, store: store)
         XCTAssertNil(center.rows)
 
         await center.land(accountIdB64: "acct")
-        XCTAssertEqual(center.status?.protection, .email)
-        XCTAssertEqual(store.status(accountIdB64: "acct")?.vault, true)
-        XCTAssertFalse(center.bannerVisible)
+        XCTAssertEqual(center.status?.enabled, true)
+        XCTAssertEqual(store.status(accountIdB64: "acct")?.enabled, true)
+        XCTAssertEqual(center.factors, AccountFactors(email: true, authenticator: false, passkey: false))
+        XCTAssertFalse(center.factorStepRequired)
+        XCTAssertEqual(server.sealLooks, [.landing], "the account's protection is looked at once")
 
         // The next landing shows the stored status at once; a server that
         // does not answer keeps it.
         server.status = .failure(URLError(.notConnectedToInternet))
         let next = self.center(server, store: store)
         await next.land(accountIdB64: "acct")
-        XCTAssertEqual(next.status?.protection, .email)
-    }
-
-    func testAResetDropsTheVaultAndTheBannerAsksForTheEmailAgain() async {
-        let store = AccountProtectionStore(defaults: defaults())
-        let server = Server(status(enabled: true, vault: false, phraseSaved: false))
-        let center = center(server, store: store)
-        await center.land(accountIdB64: "acct")
-
-        XCTAssertTrue(center.bannerVisible)
-        XCTAssertEqual(center.rows?.statusKey, "protect.status.none")
-        XCTAssertEqual(center.rows?.email, .addAgain)
-
-        // Dismissed: gone for thirty days, then back if nothing changed.
-        center.dismissBanner()
-        XCTAssertFalse(center.bannerVisible)
-        server.now += ProtectBanner.returnsAfterMs
-        XCTAssertTrue(center.bannerVisible)
-
-        // Enrolling again seals the vault: protected by the email.
-        center.enrolled(EmailEnrolled(enabled: true, vault: true), replaced: true)
-        XCTAssertEqual(center.status?.protection, .email)
-        XCTAssertFalse(center.bannerVisible)
-        XCTAssertNotNil(store.ownActions(accountIdB64: "acct")[AccountNoticeKind.emailReplaced.rawValue])
+        XCTAssertEqual(next.status?.enabled, true)
     }
 
     func testNoticesAreShownOnceAndAnsweredOnesAreNotFetchedAgain() async {
         let store = AccountProtectionStore(defaults: defaults())
-        let server = Server(status(enabled: true, vault: true, phraseSaved: false))
+        let server = Server(status(enabled: true))
         // A kept cursor below the notices: they are new to this device.
         store.setNoticeCursor(0, accountIdB64: "acct")
         server.pages[.after(0)] = AccountNoticePage(
             notices: [notice(1, .emailAdded), notice(2, .passwordChangedByEmail)], nextAfter: 2, more: true)
         server.pages[.after(2)] = AccountNoticePage(
-            notices: [notice(3, .accountOpenedByEmail)], nextAfter: 3, more: false)
+            notices: [notice(3, .emailRemoved)], nextAfter: 3, more: false)
         let center = center(server, store: store)
         await center.land(accountIdB64: "acct")
 
@@ -368,18 +285,17 @@ final class RecoveryEmailTests: XCTestCase {
 
     func testANewDeviceShowsNothingOlderAndKeepsTheNewestIdAsItsCursor() async {
         let store = AccountProtectionStore(defaults: defaults())
-        let server = Server(status(enabled: true, vault: true, phraseSaved: false))
+        let server = Server(status(enabled: true))
         let first = NoticeQuery.sinceMs(server.now - NoticeQuery.lookbackMs)
         server.pages[first] = AccountNoticePage(
-            notices: [notice(1, .emailAdded), notice(2, .phraseSaved)], nextAfter: 2, more: true)
+            notices: [notice(1, .emailAdded), notice(2, .emailReplaced)], nextAfter: 2, more: true)
         server.pages[.after(2)] = AccountNoticePage(
-            notices: [notice(3, .accountOpenedByEmail)], nextAfter: 3, more: false)
+            notices: [notice(3, .emailRemoved)], nextAfter: 3, more: false)
         let center = center(server, store: store)
         await center.land(accountIdB64: "acct")
 
         XCTAssertEqual(center.notices, [])
         XCTAssertEqual(store.noticeCursor(accountIdB64: "acct"), 3)
-        XCTAssertEqual(server.statusReads, 2, "a phrase saved elsewhere is still read again")
 
         // The next one after the cursor is a real notice.
         server.pages[.after(3)] = AccountNoticePage(
@@ -390,13 +306,13 @@ final class RecoveryEmailTests: XCTestCase {
 
     func testARecoveryOnAFreshDeviceIsNotToldAboutItself() async {
         let store = AccountProtectionStore(defaults: defaults())
-        let server = Server(status(enabled: true, vault: true, phraseSaved: false))
+        let server = Server(status(enabled: true))
         server.pages[.sinceMs(server.now - NoticeQuery.lookbackMs)] = AccountNoticePage(
-            notices: [notice(1, .accountOpenedByEmail, at: server.now + 2_000)], nextAfter: 1, more: false)
+            notices: [notice(1, .passwordChangedByEmail, at: server.now + 2_000)], nextAfter: 1, more: false)
         let center = center(server, store: store)
 
-        // The account is not known yet when the vault is opened.
-        center.noteOwnAction(.accountOpenedByEmail)
+        // The account is not known yet when the password is changed.
+        center.noteOwnAction(.passwordChangedByEmail)
         XCTAssertEqual(store.ownActions(accountIdB64: "acct"), [:])
         await center.land(accountIdB64: "acct")
 
@@ -405,43 +321,255 @@ final class RecoveryEmailTests: XCTestCase {
         XCTAssertEqual(store.ownActions(accountIdB64: "acct"), [:], "the marker is spent")
     }
 
-    func testAKeptDeviceLearnsThatAPhraseWasSaved() async {
+    /// UX 19.5 — the server keeps no notice for a saved phrase since
+    /// 2026-11-26: a kept device says it once when the account's published
+    /// protection first lists the phrase.
+    func testAKeptDeviceLearnsThatAPhraseWasSavedFromTheAccountsProtection() async {
         let store = AccountProtectionStore(defaults: defaults())
-        let server = Server(status(enabled: true, vault: true, phraseSaved: false))
+        let server = Server(status(enabled: true))
         let center = center(server, store: store)
         await center.land(accountIdB64: "acct")
-        XCTAssertFalse(store.phraseSaved(accountIdB64: "acct"))
         XCTAssertFalse(center.phraseSaved)
+        XCTAssertEqual(center.notices, [])
 
-        // At the next landing, from the status...
-        server.status = .success(status(enabled: true, vault: false, phraseSaved: true))
+        server.seals = AccountSeals(phraseSaved: true, passkeyTagsB64: [])
+        await center.readSeals(.landing)
+        XCTAssertTrue(center.phraseSaved)
+        XCTAssertEqual(center.notices.map(\.kind), [AccountNoticeKind.phraseSaved.rawValue])
+        // Looked at again, it is not said twice; answered, it is gone.
+        await center.readSeals(.landing)
+        XCTAssertEqual(center.notices.count, 1)
+        center.acknowledge(center.notices[0])
+        XCTAssertEqual(center.notices, [])
+    }
+
+    func testTheDeviceThatSavedThePhraseIsNotToldAboutIt() async {
+        let store = AccountProtectionStore(defaults: defaults())
+        let server = Server(status(enabled: true))
+        let center = center(server, store: store)
         await center.land(accountIdB64: "acct")
-        XCTAssertTrue(store.phraseSaved(accountIdB64: "acct"))
 
-        // ...and when the "recovery phrase saved" notice arrives, even if
-        // the status could not be read at that moment.
-        let other = AccountProtectionStore(defaults: defaults("kept-notice"))
-        let quiet = Server(status(enabled: true, vault: true, phraseSaved: false))
-        let kept = self.center(quiet, store: other)
-        await kept.land(accountIdB64: "acct")
-        quiet.status = .failure(URLError(.timedOut))
-        quiet.pages[.after(0)] = AccountNoticePage(
-            notices: [notice(5, .phraseSaved)], nextAfter: 5, more: false)
-        await kept.loadNotices()
-        XCTAssertTrue(other.phraseSaved(accountIdB64: "acct"))
-        // Opening Settings reads the status again.
-        let reads = quiet.statusReads
-        await kept.refresh()
-        XCTAssertEqual(quiet.statusReads, reads + 1)
+        // The three-word check passed; the look publishes the phrase seal.
+        server.seals = AccountSeals(phraseSaved: true, passkeyTagsB64: [])
+        let saved = await center.savePhraseSeal()
+        XCTAssertTrue(saved)
+        XCTAssertEqual(server.sealLooks.last, .phraseSaved)
+        XCTAssertTrue(store.phraseSaved(accountIdB64: "acct"))
+        XCTAssertEqual(center.notices, [], "this device did it")
+    }
+
+    func testASaveThatDidNotPublishSavedNothing() async {
+        let store = AccountProtectionStore(defaults: defaults())
+        let server = Server(status(enabled: true))
+        let center = center(server, store: store)
+        await center.land(accountIdB64: "acct")
+        // The look could not publish: the announcement still lists none.
+        server.seals = nil
+        let saved = await center.savePhraseSeal()
+        XCTAssertFalse(saved)
+        XCTAssertFalse(store.phraseSaved(accountIdB64: "acct"))
+        XCTAssertEqual(store.ownActions(accountIdB64: "acct"), [:], "no marker is left behind")
+    }
+
+    // UX 19.1c — the landing rule.
+
+    func testAnAccountWithAUsernameAndNoSecondWayInIsShownTheStepBeforeTheApp() async {
+        let server = Server(status(enabled: false, totp: false))
+        let center = center(server, store: AccountProtectionStore(defaults: defaults()))
+        await center.land(accountIdB64: "acct")
+        XCTAssertTrue(center.factorStepRequired)
+        XCTAssertFalse(center.passwordOnlyDialogDue, "the step comes first")
+
+        // `Continue` is refused while none of the three is there...
+        center.factorStepDone()
+        XCTAssertTrue(center.factorStepRequired)
+        // ...adding one does not take the step away by itself (the person
+        // may add another), `Continue` does.
+        center.authenticatorAdded()
+        XCTAssertTrue(center.factorStepRequired)
+        center.factorStepDone()
+        XCTAssertFalse(center.factorStepRequired)
+    }
+
+    /// Alignment item G — the landing settles once the factor read
+    /// answered (the app's content waits for it, at most three seconds), and
+    /// the step is decided only from an answer: a read that failed shows no
+    /// step from the stored status.
+    func testTheLandingSettlesOnTheFactorReadAndAFailedReadShowsNoStep() async {
+        let server = Server(status(enabled: false, totp: false))
+        let landing = center(server, store: AccountProtectionStore(defaults: defaults()))
+        XCTAssertNil(landing.landingSettled)
+        await landing.land(accountIdB64: "acct")
+        XCTAssertEqual(landing.landingSettled, "acct")
+        XCTAssertTrue(landing.factorStepRequired)
+
+        let store = AccountProtectionStore(defaults: defaults("stored-none"))
+        let first = center(Server(status(enabled: false, totp: false)), store: store)
+        await first.land(accountIdB64: "acct")
+        XCTAssertTrue(first.factorStepRequired, "stored: no second way in")
+        let offline = Server(status(enabled: false, totp: false))
+        offline.status = .failure(URLError(.notConnectedToInternet))
+        let second = center(offline, store: store)
+        await second.land(accountIdB64: "acct")
+        XCTAssertEqual(second.landingSettled, "acct", "a failed read settles too: the app shows")
+        XCTAssertFalse(second.factorStepRequired, "the step only on an answer")
+
+        XCTAssertLessThanOrEqual(AccountProtectionCenter.landingWaitNanos, 3_000_000_000)
+    }
+
+    func testTheStepIsNotShownToAGuestNorWhileTheFactorsAreUnknown() async {
+        let guest = Server(status(enabled: false, totp: false))
+        guest.hasUsername = false
+        let first = center(guest, store: AccountProtectionStore(defaults: defaults()))
+        await first.land(accountIdB64: "acct")
+        XCTAssertFalse(first.factorStepRequired)
+
+        // The passkey list could not be read: nothing is decided.
+        let unknown = Server(status(enabled: false, totp: false))
+        unknown.hasPasskey = nil
+        let second = center(unknown, store: AccountProtectionStore(defaults: defaults("unknown")))
+        await second.land(accountIdB64: "acct")
+        XCTAssertFalse(second.factorStepRequired)
+
+        // A passkey is one of the three.
+        let passkey = Server(status(enabled: false, totp: false))
+        passkey.hasPasskey = true
+        let third = center(passkey, store: AccountProtectionStore(defaults: defaults("passkey")))
+        await third.land(accountIdB64: "acct")
+        XCTAssertFalse(third.factorStepRequired)
+    }
+
+    // UX 19.1d place 3 — the once-per-device dialog.
+
+    func testThePasswordOnlyDialogIsDueOnceOnADeviceAndNotAfterAReset() async {
+        let seals = "dialog-seals"
+        func make(_ server: Server) -> AccountProtectionCenter {
+            AccountProtectionCenter(
+                ports: .init(
+                    session: { .init(accountIdB64: "acct", sessionToken: "tok") },
+                    fetchStatus: { _ in try server.status.get() },
+                    fetchNotices: { _, _ in AccountNoticePage(notices: [], nextAfter: 0, more: false) },
+                    hasPasskey: { server.hasPasskey },
+                    ensureSeals: { _ in server.seals },
+                    afterKeyReset: { server.afterKeyReset },
+                    nowMs: { server.now }),
+                store: AccountProtectionStore(defaults: defaults("dialog-store")),
+                sealsStore: AccountSealsStore(defaults: defaults(seals)))
+        }
+        // A second way in, no phrase, no passkey that keeps the chats.
+        let server = Server(status(enabled: true))
+        let first = make(server)
+        await first.land(accountIdB64: "acct")
+        XCTAssertTrue(first.passwordOnly)
+        XCTAssertTrue(first.passwordOnlyDialogDue)
+        first.closePasswordOnlyDialog()
+        XCTAssertFalse(first.passwordOnlyDialogDue)
+
+        // Closed for good on this device.
+        let again = AccountProtectionCenter(
+            ports: .init(
+                session: { .init(accountIdB64: "acct", sessionToken: "tok") },
+                fetchStatus: { _ in try server.status.get() },
+                fetchNotices: { _, _ in AccountNoticePage(notices: [], nextAfter: 0, more: false) },
+                hasPasskey: { server.hasPasskey },
+                ensureSeals: { _ in server.seals },
+                nowMs: { server.now }),
+            store: AccountProtectionStore(defaults: UserDefaults(suiteName: "lakko.tests.recovery-email.dialog-store")!),
+            sealsStore: AccountSealsStore(defaults: UserDefaults(suiteName: "lakko.tests.recovery-email.\(seals)")!))
+        await again.land(accountIdB64: "acct")
+        XCTAssertTrue(again.passwordOnly, "the notice in Settings stays")
+        XCTAssertFalse(again.passwordOnlyDialogDue)
+
+        // Not after a key reset: its own screens said what was kept.
+        let reset = Server(status(enabled: true))
+        reset.afterKeyReset = true
+        let afterReset = center(reset, store: AccountProtectionStore(defaults: defaults("after-reset")))
+        await afterReset.land(accountIdB64: "acct")
+        XCTAssertFalse(afterReset.passwordOnlyDialogDue)
+
+        // Not when a phrase is saved, nor when a passkey keeps the chats.
+        let kept = Server(status(enabled: true))
+        kept.seals = AccountSeals(phraseSaved: true, passkeyTagsB64: [])
+        let keptCenter = center(kept, store: AccountProtectionStore(defaults: defaults("kept")))
+        await keptCenter.land(accountIdB64: "acct")
+        XCTAssertFalse(keptCenter.passwordOnly)
+        XCTAssertFalse(keptCenter.passwordOnlyDialogDue)
+    }
+
+    func testAPasskeyThatGaveItsSecretIsPublishedAndARemovedOneIsTakenOut() async {
+        let server = Server(status(enabled: true))
+        let center = center(server, store: AccountProtectionStore(defaults: defaults()))
+        await center.land(accountIdB64: "acct")
+        let id = Data([1, 2, 3]), secret = Data(repeating: 9, count: 32)
+
+        // No secret: the passkey signs in and keeps nothing.
+        center.passkeyAdded()
+        XCTAssertEqual(center.hasPasskey, true)
+        XCTAssertEqual(server.sealLooks, [.landing])
+
+        server.seals = AccountSeals(
+            phraseSaved: false, passkeyTagsB64: [resetSealPasskeyTag(credentialId: id).base64EncodedString()])
+        center.passkeyAdded(credentialId: id, prfOutput: secret)
+        await settle { server.sealLooks.count == 2 }
+        XCTAssertEqual(server.sealLooks.last, .passkeyAdded(credentialId: id, prfOutput: secret))
+        XCTAssertTrue(center.keepsChats)
+        XCTAssertFalse(center.passwordOnly)
+
+        server.seals = AccountSeals.passwordOnly
+        center.passkeyRemoved(credentialId: id, remaining: 0)
+        await settle { server.sealLooks.count == 3 }
+        XCTAssertEqual(server.sealLooks.last, .passkeyRemoved(credentialId: id))
+        XCTAssertEqual(center.hasPasskey, false)
+        XCTAssertTrue(center.passwordOnly)
+    }
+
+    /// A secret that could not be published when the passkey gave it (the
+    /// directory was out, or the account's first row was not there yet) is
+    /// published at the next look that succeeds, once.
+    func testAPasskeySecretThatCouldNotBePublishedIsPublishedAtTheNextLook() async {
+        let server = Server(status(enabled: true))
+        let center = center(server, store: AccountProtectionStore(defaults: defaults()))
+        await center.land(accountIdB64: "acct")
+        let id = Data([5, 5]), secret = Data(repeating: 7, count: 32)
+        let added = SealChange.passkeyAdded(credentialId: id, prfOutput: secret)
+
+        server.seals = nil
+        center.passkeyAdded(credentialId: id, prfOutput: secret)
+        await settle { server.sealLooks.count == 2 }
+        XCTAssertEqual(server.sealLooks, [.landing, added])
+        XCTAssertFalse(center.keepsChats)
+
+        server.seals = AccountSeals(
+            phraseSaved: false, passkeyTagsB64: [resetSealPasskeyTag(credentialId: id).base64EncodedString()])
+        await center.readSeals(.landing)
+        XCTAssertEqual(server.sealLooks, [.landing, added, .landing, added])
+        XCTAssertTrue(center.keepsChats)
+        await center.readSeals(.landing)
+        XCTAssertEqual(server.sealLooks.filter { $0 == added }.count, 2, "published once")
+
+        // Leaving the required step looks again by itself (a sign-up's
+        // landing can run before the account's first directory row exists).
+        let looks = server.sealLooks.count
+        center.factorStepDone()
+        await settle { server.sealLooks.count == looks + 1 }
+        XCTAssertEqual(server.sealLooks.last, .landing)
+    }
+
+    private func settle(_ done: @escaping () -> Bool) async {
+        for _ in 0..<200 where !done() { await Task.yield() }
+        // One more turn: the look's result is applied after it returned.
+        for _ in 0..<20 { await Task.yield() }
     }
 
     func testWithoutASessionNothingIsAsked() async {
-        let server = Server(status(enabled: false, vault: false, phraseSaved: false))
+        let server = Server(status(enabled: false))
         let center = center(server, store: AccountProtectionStore(defaults: defaults()), session: false)
         await center.refresh()
         await center.loadNotices()
+        await center.readSeals(.landing)
         XCTAssertEqual(server.statusReads, 0)
         XCTAssertEqual(server.noticeReads, [])
+        XCTAssertEqual(server.sealLooks, [])
     }
 
     // MARK: - The recover step machine
@@ -492,41 +620,14 @@ final class RecoveryEmailTests: XCTestCase {
         let wrong = EmailRecover.ticketRouteRefused(totp, .codeRefused)
         XCTAssertEqual(wrong.step, .totp)
         XCTAssertEqual(wrong.line, .codeWrong)
-        // There is no way past it: `open` sends the person back to it.
-        let restoring = EmailRecover.saving(EmailRecover.verified(code, totpRequired: false))
-        XCTAssertEqual(EmailRecover.ticketRouteRefused(restoring, .totpRequired).step, .totp)
+        // There is no way past it: the password route sends the person
+        // back to it.
+        let saving = EmailRecover.saving(EmailRecover.verified(code, totpRequired: false))
+        XCTAssertEqual(EmailRecover.ticketRouteRefused(saving, .totpRequired).step, .totp)
         // A ticket that ran out: a new letter.
         let expired = EmailRecover.ticketRouteRefused(totp, .ticketRefused)
         XCTAssertEqual(expired.step, .start)
         XCTAssertEqual(expired.line, .codeExpired)
-    }
-
-    func testOpenIsAskedOnlyAfterTheNewPasswordStep() {
-        // start -> code -> authenticator -> NEW PASSWORD -> open.
-        var state = EmailRecover.State()
-        XCTAssertFalse(EmailRecover.mayOpen(state))
-        state = EmailRecover.started(state)
-        XCTAssertFalse(EmailRecover.mayOpen(state), "not on the code step")
-        state = EmailRecover.verified(state, totpRequired: true)
-        XCTAssertFalse(EmailRecover.mayOpen(state), "not on the authenticator step")
-        state = EmailRecover.totpAccepted(state)
-        XCTAssertEqual(state.step, .newPassword)
-        XCTAssertFalse(EmailRecover.mayOpen(state), "not before the password was submitted")
-        state = EmailRecover.saving(state)
-        XCTAssertEqual(state.step, .restoring)
-        XCTAssertTrue(EmailRecover.mayOpen(state))
-
-        // The vault did not open: the route is over, with one sentence.
-        let notOpened = EmailRecover.vaultNotOpened(state)
-        XCTAssertTrue(notOpened.leaveToList)
-        XCTAssertEqual(notOpened.line?.key, "recovery.email.failed")
-        XCTAssertEqual(notOpened.step, .start)
-
-        // A failure of the last step brings the form back.
-        let failed = EmailRecover.saveFailed(state, line: .offline)
-        XCTAssertEqual(failed.step, .newPassword)
-        XCTAssertEqual(failed.line, .offline)
-        XCTAssertEqual(EmailRecover.ticketRouteRefused(state, .offline).step, .newPassword)
     }
 
     func testEveryRefusalOfTheRoutesIsMapped() {
@@ -544,8 +645,10 @@ final class RecoveryEmailTests: XCTestCase {
         XCTAssertEqual(of(429, "too-many-attempts"), .tooManyAttempts(retryAfterSecs: nil))
         XCTAssertEqual(of(409, "handle-mismatch"), .handleMismatch)
         XCTAssertEqual(of(409, "username-required"), .usernameRequired)
-        XCTAssertEqual(of(409, "phrase-saved"), .phraseSaved)
-        XCTAssertEqual(of(409, "wrong-mode"), .wrongMode)
+        XCTAssertEqual(of(409, "last-factor"), .lastFactor)
+        // The codes of the removed email vault are no longer told apart.
+        XCTAssertEqual(of(409, "phrase-saved"), .failed)
+        XCTAssertEqual(of(409, "wrong-mode"), .failed)
         XCTAssertEqual(of(502, "mail-send-failed"), .mailSendFailed)
         XCTAssertEqual(of(503, "recovery-email-disabled"), .unavailable)
         XCTAssertEqual(of(503, "rate-limiter-unavailable"), .failed)
@@ -564,13 +667,10 @@ final class RecoveryEmailTests: XCTestCase {
         var verifyAnswer: Result<EmailTicket, Error> = .success(
             EmailTicket(ticket: "tk", totpRequired: false, expiresInSecs: 600))
         var totpError: Error?
-        var openAnswer: Result<EmailOpen, Error> = .success(.password)
-        var unsealAnswer: Result<String, Error> = .success("the twelve words")
         var saveError: Error?
         var calls: [String] = []
         var started: [(handle: Data, address: String)] = []
-        var unsealed: [(handle: Data, address: String, salt: Data, sealed: Data)] = []
-        var restored: [(phrase: String, password: Data, username: String)] = []
+        var kept: [String] = []
         var changed: [(username: String, ticket: String, password: Data)] = []
         var own: [AccountNoticeKind] = []
     }
@@ -599,26 +699,13 @@ final class RecoveryEmailTests: XCTestCase {
                     world.calls.append("totp")
                     if let error = world.totpError { throw error }
                 },
-                open: { _ in
-                    world.calls.append("open")
-                    return try world.openAnswer.get()
-                },
-                unseal: { handle, address, salt, sealed in
-                    world.calls.append("unseal")
-                    world.unsealed.append((handle, address, salt, sealed))
-                    return try world.unsealAnswer.get()
-                },
-                restoreWithPhrase: { phrase, password, username in
-                    world.calls.append("restore")
-                    if let error = world.saveError { throw error }
-                    world.restored.append((phrase, password, username))
-                },
                 changePassword: { username, ticket, password in
                     world.calls.append("password")
                     if let error = world.saveError { throw error }
                     world.changed.append((username, ticket, password))
                 },
-                noteOwnAction: { world.own.append($0) }),
+                noteOwnAction: { world.own.append($0) },
+                keepAddress: { world.kept.append($0) }),
             cachedUsername: cachedUsername,
             nowMs: { 1_000 })
     }
@@ -651,80 +738,9 @@ final class RecoveryEmailTests: XCTestCase {
         XCTAssertEqual(other.state, matched)
     }
 
-    func testTheVaultPathAsksOpenOnlyAfterThePasswordThenRunsTheExistingPhraseRestore() async {
-        let world = RecoverWorld()
-        world.openAnswer = .success(.vault(salt: Data(repeating: 2, count: 16), sealed: Data(repeating: 3, count: 44)))
-        let model = recoverModel(world)
-        await typeAndStart(model)
-        model.code = "123 456"
-        await model.verify()
-
-        // The new-password step, and nothing has asked what the code brings.
-        XCTAssertEqual(model.state.step, .newPassword)
-        XCTAssertEqual(world.calls, ["start", "verify"])
-        XCTAssertEqual(world.own, [])
-
-        model.password = "new password"
-        model.confirmPassword = "new password"
-        await model.save()
-        XCTAssertEqual(world.calls, ["start", "verify", "open", "unseal", "restore"])
-        // Opened with the typed username's handle and the typed address.
-        XCTAssertEqual(world.unsealed.first?.handle, try? loginHandle(username: "alice"))
-        XCTAssertEqual(world.unsealed.first?.address, "alice@example.com")
-        XCTAssertEqual(world.own, [.accountOpenedByEmail])
-        XCTAssertEqual(world.restored.first?.phrase, "the twelve words")
-        XCTAssertEqual(world.restored.first?.username, "alice")
-        XCTAssertEqual(world.restored.first?.password, Data("new password".utf8))
-        XCTAssertTrue(world.changed.isEmpty, "not the password-only route")
-        // Nothing typed or received is kept.
-        XCTAssertEqual(model.address, "")
-        XCTAssertEqual(model.password, "")
-        XCTAssertEqual(model.state, EmailRecover.State())
-    }
-
-    func testARestoreThatFailsAfterTheVaultOpenedIsRepeatedWithoutASecondOpen() async {
-        let world = RecoverWorld()
-        world.openAnswer = .success(.vault(salt: Data(count: 16), sealed: Data(count: 44)))
-        world.saveError = AuthClientError.network(endpoint: "/password/reset/start", underlying: URLError(.timedOut))
-        let model = recoverModel(world)
-        await typeAndStart(model)
-        model.code = "123456"
-        await model.verify()
-        model.password = "new password"
-        model.confirmPassword = "new password"
-        await model.save()
-        XCTAssertEqual(model.state.step, .newPassword)
-        XCTAssertEqual(model.state.line, .offline)
-
-        world.saveError = nil
-        await model.save()
-        XCTAssertEqual(world.calls.filter { $0 == "open" }.count, 1, "the ticket is spent: no second open")
-        XCTAssertEqual(world.restored.count, 1)
-    }
-
-    func testAVaultThatDoesNotOpenLeavesThePersonOnGetBackIn() async {
-        let world = RecoverWorld()
-        world.openAnswer = .success(.vault(salt: Data(count: 16), sealed: Data(count: 44)))
-        world.unsealAnswer = .failure(FfiError.EmailVaultNotOpened(message: "not opened"))
-        let model = recoverModel(world)
-        await typeAndStart(model)
-        model.code = "123456"
-        await model.verify()
-        model.password = "new password"
-        model.confirmPassword = "new password"
-        await model.save()
-
-        XCTAssertTrue(model.state.leaveToList)
-        XCTAssertEqual(model.state.line?.key, "recovery.email.failed")
-        // No restore, no password route; the password typed is not kept.
-        XCTAssertFalse(world.calls.contains("restore"))
-        XCTAssertFalse(world.calls.contains("password"))
-        XCTAssertEqual(model.password, "")
-        await model.save()
-        XCTAssertFalse(world.calls.contains("restore"))
-    }
-
-    func testThePasswordOnlyPathChangesThePasswordUnderTheTicket() async {
+    /// A mailed code changes the password and nothing else (the email vault
+    /// is gone since 2026-11-26): no route opens anything.
+    func testTheCodeChangesThePasswordUnderTheTicketAndBringsNoKeys() async {
         let world = RecoverWorld()
         world.verifyAnswer = .success(EmailTicket(ticket: "tk-7", totpRequired: true, expiresInSecs: 600))
         let model = recoverModel(world)
@@ -746,24 +762,23 @@ final class RecoveryEmailTests: XCTestCase {
         model.totpCode = "654321"
         await model.submitTotp()
         XCTAssertEqual(model.state.step, .newPassword)
-        XCTAssertFalse(world.calls.contains("open"), "nothing before the password step calls open")
+        XCTAssertEqual(world.calls, ["start", "verify", "totp", "totp"])
 
         // The password rule, before anything is sent.
         model.password = "short"
         model.confirmPassword = "short"
         await model.save()
         XCTAssertNotNil(model.passwordError)
-        XCTAssertFalse(world.calls.contains("open"))
+        XCTAssertFalse(world.calls.contains("password"))
 
         model.password = "long enough"
         model.confirmPassword = "long enough"
         await model.save()
-        XCTAssertEqual(Array(world.calls.suffix(2)), ["open", "password"])
-        XCTAssertFalse(world.calls.contains("unseal"))
+        XCTAssertEqual(world.calls.last, "password")
+        XCTAssertEqual(world.calls.filter { $0 == "password" }.count, 1)
         XCTAssertEqual(world.changed.first?.ticket, "tk-7")
         XCTAssertEqual(world.changed.first?.username, "alice")
         XCTAssertEqual(world.own, [.passwordChangedByEmail])
-        XCTAssertTrue(world.restored.isEmpty)
     }
 
     func testWrongCodesAndLimitsOnTheModel() async {
@@ -862,14 +877,12 @@ final class RecoveryEmailTests: XCTestCase {
     private final class EnrolWorld {
         var handle: Data? = Data(repeating: 7, count: 32)
         var grant: String? = "grant"
-        var phraseSaved = false
         var startError: Error?
         var finishErrors: [Error] = []
         var removeError: Error?
         var calls: [String] = []
         var started: [(grant: String, handle: Data, address: String)] = []
-        var sealed: [(handle: Data, address: String, salt: Data)] = []
-        var finished: [(code: String, sealed: Data?)] = []
+        var finished: [(challengeId: String, code: String)] = []
         var enrolled: [(EmailEnrolled, Bool)] = []
         var keptAddresses: [String] = []
         var removed = 0
@@ -882,26 +895,18 @@ final class RecoveryEmailTests: XCTestCase {
                 loginHandle: { world.handle },
                 sessionToken: { "tok" },
                 grant: { world.grant },
-                phraseSaved: { world.phraseSaved },
                 normalize: { try normalizeRecoveryEmail(address: $0) },
                 start: { _, grant, handle, address in
                     world.calls.append("start")
                     if let error = world.startError { throw error }
                     world.started.append((grant, handle, address))
-                    return EmailEnrolChallenge(
-                        challenge: EmailChallenge(challengeId: "ch", resendAfterSecs: 45, expiresInSecs: 600),
-                        vaultSalt: Data(repeating: 9, count: 16))
+                    return EmailChallenge(challengeId: "ch", resendAfterSecs: 45, expiresInSecs: 600)
                 },
-                seal: { handle, address, salt in
-                    world.calls.append("seal")
-                    world.sealed.append((handle, address, salt))
-                    return Data(repeating: 0x5E, count: 44)
-                },
-                finish: { _, _, code, sealed in
+                finish: { _, challengeId, code in
                     world.calls.append("finish")
                     if !world.finishErrors.isEmpty { throw world.finishErrors.removeFirst() }
-                    world.finished.append((code, sealed))
-                    return EmailEnrolled(enabled: true, vault: sealed != nil)
+                    world.finished.append((challengeId, code))
+                    return EmailEnrolled(enabled: true)
                 },
                 remove: { _, _ in
                     world.calls.append("remove")
@@ -915,66 +920,6 @@ final class RecoveryEmailTests: XCTestCase {
                 proofExpired: { world.proofExpired += 1 }),
             replacing: replacing,
             nowMs: { 1_000 })
-    }
-
-    func testAnAccountWithoutASavedPhraseSealsTheVaultAfterStartAndSendsItWithTheCode() async {
-        let world = EnrolWorld()
-        let model = enrolModel(world)
-        model.address = "Alice@Example.com"
-        await model.send()
-
-        XCTAssertEqual(model.state.step, .code)
-        XCTAssertEqual(model.sentTo, "alice@example.com", "shown back on this surface only")
-        XCTAssertEqual(world.started.first?.address, "alice@example.com")
-        XCTAssertEqual(world.started.first?.grant, "grant")
-
-        model.code = "123456"
-        await model.confirm()
-        // Sealed with THIS start's salt, bound to the address being confirmed.
-        XCTAssertEqual(world.sealed.first?.salt, Data(repeating: 9, count: 16))
-        XCTAssertEqual(world.sealed.first?.address, "alice@example.com")
-        XCTAssertEqual(world.sealed.first?.handle, world.handle)
-        XCTAssertEqual(world.finished.first?.sealed, Data(repeating: 0x5E, count: 44))
-        XCTAssertEqual(model.state.step, .done)
-        XCTAssertEqual(world.enrolled.first?.0, EmailEnrolled(enabled: true, vault: true))
-        XCTAssertEqual(world.enrolled.first?.1, false)
-        // The normalised address is handed on for the devices to keep.
-        XCTAssertEqual(world.keptAddresses, ["alice@example.com"])
-
-        // The surface closed: the address is not kept.
-        model.closed()
-        XCTAssertEqual(model.address, "")
-        XCTAssertNil(model.sentTo)
-    }
-
-    func testAPhraseProtectedAccountSendsNoVault() async {
-        let world = EnrolWorld()
-        world.phraseSaved = true
-        let model = enrolModel(world, replacing: true)
-        model.address = "alice@example.com"
-        await model.send()
-        model.code = "123456"
-        await model.confirm()
-
-        XCTAssertFalse(world.calls.contains("seal"))
-        XCTAssertEqual(world.finished.count, 1)
-        XCTAssertNil(world.finished[0].sealed)
-        XCTAssertEqual(world.enrolled.first?.1, true, "a replace")
-    }
-
-    func testAPhraseSavedElsewhereMeanwhileIsFinishedWithoutTheVault() async {
-        let world = EnrolWorld()
-        world.finishErrors = [http(409, "phrase-saved")]
-        let model = enrolModel(world)
-        model.address = "alice@example.com"
-        await model.send()
-        model.code = "123456"
-        await model.confirm()
-
-        XCTAssertEqual(world.calls.filter { $0 == "finish" }.count, 2)
-        XCTAssertEqual(world.finished.count, 1)
-        XCTAssertNil(world.finished[0].sealed)
-        XCTAssertEqual(model.state.step, .done)
     }
 
     func testEnrolStatesOnTheModel() async {
@@ -1040,6 +985,39 @@ final class RecoveryEmailTests: XCTestCase {
         XCTAssertNil(wrongModel.sentTo)
     }
 
+    /// The enrolment is two requests and nothing else: no phrase is sealed
+    /// for the address since the email vault was removed (2026-11-26).
+    func testAnEnrolmentSendsTheAddressThenTheCodeAndKeepsTheAddressOnTheDevices() async {
+        let world = EnrolWorld()
+        let model = enrolModel(world)
+        model.address = " Alice@Example.com "
+        await model.send()
+        XCTAssertEqual(world.started.first?.address, "alice@example.com")
+        XCTAssertEqual(world.started.first?.grant, "grant")
+        XCTAssertEqual(model.state.step, .code)
+        model.code = "123 456"
+        await model.confirm()
+        XCTAssertEqual(world.calls, ["start", "finish"])
+        XCTAssertEqual(world.finished.first?.challengeId, "ch")
+        XCTAssertEqual(world.finished.first?.code, "123456")
+        XCTAssertEqual(model.state.step, .done)
+        XCTAssertEqual(world.enrolled.first?.0, EmailEnrolled(enabled: true))
+        XCTAssertEqual(world.enrolled.first?.1, false)
+        XCTAssertEqual(world.keptAddresses, ["alice@example.com"])
+    }
+
+    /// UX 19.1c — the server refuses to remove the last second way in.
+    func testTheLastSecondWayInIsNotRemoved() async {
+        let world = EnrolWorld()
+        world.removeError = http(409, "last-factor")
+        let model = enrolModel(world, replacing: true)
+        let removed = await model.remove()
+        XCTAssertFalse(removed)
+        XCTAssertEqual(world.removed, 0)
+        XCTAssertEqual(model.state.line, .lastFactor)
+        XCTAssertEqual(model.state.line?.key, "protect.last_factor")
+    }
+
     func testRemovingTheEmail() async {
         let world = EnrolWorld()
         let model = enrolModel(world, replacing: true)
@@ -1052,57 +1030,6 @@ final class RecoveryEmailTests: XCTestCase {
         XCTAssertFalse(refused)
         XCTAssertEqual(world.removed, 1)
         XCTAssertEqual(world.proofExpired, 1)
-    }
-
-    // MARK: - The vault, off the main thread
-
-    func testTheVaultSealsAndOpensOffTheMainThreadWithTheUsernameAndTheAddress() async throws {
-        let mnemonic = RecoveryMnemonic.generate()
-        let handle = try loginHandle(username: "alice")
-        let salt = Data(repeating: 0x22, count: 16)
-        let address = try normalizeRecoveryEmail(address: " Alice@Example.COM ")
-        XCTAssertEqual(address, "alice@example.com")
-
-        let sealed = try await EmailVaultWork.seal(
-            phrase: mnemonic.phrase(), handle: handle, address: address, vaultSalt: salt)
-        XCTAssertEqual(sealed.count, 44)
-        let phrase = try await EmailVaultWork.open(handle: handle, address: address, vaultSalt: salt, sealed: sealed)
-        XCTAssertEqual(phrase, mnemonic.phrase())
-
-        // Another username or another address does not open it.
-        do {
-            _ = try await EmailVaultWork.open(
-                handle: try loginHandle(username: "bob"), address: address, vaultSalt: salt, sealed: sealed)
-            XCTFail("another username opened the vault")
-        } catch {}
-        do {
-            _ = try await EmailVaultWork.open(
-                handle: handle, address: "mallory@example.com", vaultSalt: salt, sealed: sealed)
-            XCTFail("another address opened the vault")
-        } catch {}
-        XCTAssertThrowsError(try normalizeRecoveryEmail(address: "no-at-sign"))
-    }
-
-    // MARK: - Save a recovery phrase
-
-    func testTheNewWordsAreShownOnlyAfterTheChangeWentThrough() {
-        XCTAssertEqual(SavePhraseState.after(.rotated(phrase: "w")), .words("w"))
-        XCTAssertEqual(SavePhraseState.after(.rotatedPublishOwed), .publishOwed, "withheld")
-        XCTAssertEqual(SavePhraseState.after(.freshAuthRequired), .idle, "the proof block again")
-        XCTAssertEqual(SavePhraseState.after(.removedNotRotated(.failed)), .failed)
-        XCTAssertEqual(SavePhraseState.after(.removedNotRotated(nil)), .failed)
-        XCTAssertEqual(SavePhraseState.after(.notRemoved(.notRevoked(.failed))), .failed)
-    }
-
-    func testTheRotationFinishCarriesPhraseSavedOnlyWhenAsked() throws {
-        func json(_ phraseSaved: Bool?) throws -> [String: Any] {
-            try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(KeyRotateFinishRequest(
-                freshGrant: "g", recoveryUpload: "u", newSignaturePubkeyB64: "k",
-                supersessionProofB64: "p", revokeDeviceIdsB64: [], phraseSaved: phraseSaved,
-                identityProofB64: "ip"))) as? [String: Any])
-        }
-        XCTAssertEqual(try json(true)["phrase_saved"] as? Bool, true)
-        XCTAssertNil(try json(nil)["phrase_saved"], "a device rotation sends no field")
     }
 
     // MARK: - Taking the account back with the phrase
@@ -1183,11 +1110,10 @@ final class RecoveryEmailTests: XCTestCase {
         // A key reset or a recall.
         XCTAssertTrue(NewWordsRule.shown(phraseProtected: true))
         XCTAssertFalse(NewWordsRule.shown(phraseProtected: false))
-        // A rotation: the save-phrase flow always, a device rotation only
-        // on a phrase-protected account.
-        XCTAssertTrue(KeyRotationPlan.showsNewWords(savesPhrase: true, phraseProtected: false))
-        XCTAssertTrue(KeyRotationPlan.showsNewWords(savesPhrase: false, phraseProtected: true))
-        XCTAssertFalse(KeyRotationPlan.showsNewWords(savesPhrase: false, phraseProtected: false))
+        // A rotation: only on a phrase-protected account (saving a phrase
+        // is no rotation since 2026-11-26).
+        XCTAssertTrue(KeyRotationPlan.showsNewWords(phraseProtected: true))
+        XCTAssertFalse(KeyRotationPlan.showsNewWords(phraseProtected: false))
         // The sheet has no state for it: it closes as done.
         XCTAssertNil(RotateSheetRules.state(for: .rotatedNoWords))
         // The recall record keeps the flag across the staged wipe; an older
@@ -1204,85 +1130,6 @@ final class RecoveryEmailTests: XCTestCase {
         XCTAssertNil(old?.phraseSaved)
     }
 
-    // MARK: - The protect step: rows, Done marks, Continue vs Not now
-
-    func testTheProtectStepRowsMarksAndFooter() {
-        // Nothing done: email, passkey, phrase; `Not now`.
-        let fresh = ProtectStep.decide(offersEmail: true, passkeysSupported: true, done: [], leavable: true)
-        XCTAssertEqual(fresh.items.map(\.row), [.email, .passkey, .phrase], "the passkey between the two")
-        XCTAssertEqual(fresh.items.map(\.done), [false, false, false])
-        XCTAssertEqual(fresh.footer, .notNow)
-
-        // The passkey row only where this device can use passkeys; the
-        // email row only with mail set up and a username.
-        XCTAssertEqual(
-            ProtectStep.decide(offersEmail: true, passkeysSupported: false, done: [], leavable: true)
-                .items.map(\.row), [.email, .phrase])
-        XCTAssertEqual(
-            ProtectStep.decide(offersEmail: false, passkeysSupported: true, done: [], leavable: true)
-                .items.map(\.row), [.passkey, .phrase])
-
-        // Any row done: it is marked, and `Continue` replaces `Not now`.
-        for row in [ProtectStep.Row.email, .passkey, .phrase] {
-            let step = ProtectStep.decide(offersEmail: true, passkeysSupported: true, done: [row], leavable: true)
-            XCTAssertEqual(step.items.filter(\.done).map(\.row), [row])
-            XCTAssertEqual(step.footer, .continueOn)
-        }
-        // An email that is on stays listed (marked) even where mail is down.
-        XCTAssertEqual(
-            ProtectStep.decide(offersEmail: false, passkeysSupported: true, done: [.email], leavable: true)
-                .items.map(\.row), [.email, .passkey, .phrase])
-        // The Settings entry has no footer of its own.
-        XCTAssertEqual(
-            ProtectStep.decide(offersEmail: true, passkeysSupported: true, done: [.email], leavable: false).footer,
-            .none)
-
-        // What the status marks done.
-        XCTAssertEqual(ProtectStep.done(status: nil, hasPasskey: false), [])
-        XCTAssertEqual(
-            ProtectStep.done(status: status(enabled: true, vault: true, phraseSaved: false), hasPasskey: true),
-            [.email, .passkey])
-        XCTAssertEqual(
-            ProtectStep.done(status: status(enabled: true, vault: false, phraseSaved: false), hasPasskey: false),
-            [], "an email waiting to be added again is not done")
-        XCTAssertEqual(
-            ProtectStep.done(status: status(enabled: false, vault: false, phraseSaved: true), hasPasskey: false),
-            [.phrase])
-        for key in ["protect.passkey.title", "protect.passkey.body", "protect.done", "protect.continue"] {
-            XCTAssertNotEqual(Localization.text(key), key, key)
-        }
-    }
-
-    func testNoBannerForAnAccountWithAPasskey() async {
-        XCTAssertTrue(ProtectBanner.shows(protection: .none, hasPasskey: false, dismissedAtMs: nil, nowMs: 0))
-        XCTAssertFalse(ProtectBanner.shows(protection: .none, hasPasskey: true, dismissedAtMs: nil, nowMs: 0))
-        // Nor its return after thirty days.
-        XCTAssertFalse(ProtectBanner.shows(
-            protection: .none, hasPasskey: true, dismissedAtMs: 0, nowMs: ProtectBanner.returnsAfterMs))
-
-        // The centre feeds the rule from the passkey list.
-        let server = Server(status(enabled: false, vault: false, phraseSaved: false))
-        var hasPasskey: Bool? = false
-        let center = AccountProtectionCenter(
-            ports: .init(
-                session: { .init(accountIdB64: "acct", sessionToken: "tok") },
-                fetchStatus: { _ in try server.status.get() },
-                fetchNotices: { _, _ in AccountNoticePage(notices: [], nextAfter: 0, more: false) },
-                hasPasskey: { hasPasskey },
-                nowMs: { server.now }),
-            store: AccountProtectionStore(defaults: defaults()))
-        await center.land(accountIdB64: "acct")
-        XCTAssertTrue(center.bannerVisible)
-        hasPasskey = true
-        await center.refresh()
-        XCTAssertFalse(center.bannerVisible)
-        // The email row still asks to be added again when its vault is gone.
-        server.status = .success(status(enabled: true, vault: false, phraseSaved: false))
-        await center.refresh()
-        XCTAssertFalse(center.bannerVisible)
-        XCTAssertEqual(center.rows?.email, .addAgain)
-    }
-
     func testThePublishOwedScreenNamesNoWordsForAnAccountWithoutASavedPhrase() {
         XCTAssertEqual(
             KeysChangedCopy.publishOwedKey(showsWords: false, needsSignIn: false), "account.keys_changed.finishing")
@@ -1297,46 +1144,44 @@ final class RecoveryEmailTests: XCTestCase {
 
     // MARK: - Restore your keys
 
-    func testRestoreYourKeysHidesThePhraseRowAndOffersTheEmailCodeByTheStatus() {
-        // No saved phrase, the server holds the vault: the email code, no phrase row.
-        let mail = RestoreKeysRows.decide(status(enabled: true, vault: true, phraseSaved: false))
-        XCTAssertFalse(mail.showsPhrase)
-        XCTAssertTrue(mail.showsEmailCode)
-        // A saved phrase: the phrase row; the mailed code brings no keys.
-        let phrase = RestoreKeysRows.decide(status(enabled: true, vault: false, phraseSaved: true))
-        XCTAssertTrue(phrase.showsPhrase)
-        XCTAssertFalse(phrase.showsEmailCode)
-        // The vault was dropped: neither.
-        let dropped = RestoreKeysRows.decide(status(enabled: true, vault: false, phraseSaved: false))
-        XCTAssertFalse(dropped.showsPhrase)
-        XCTAssertFalse(dropped.showsEmailCode)
-        // Not read yet: the phrase row stays, nothing is promised.
-        let unknown = RestoreKeysRows.decide(nil)
-        XCTAssertTrue(unknown.showsPhrase)
-        XCTAssertFalse(unknown.showsEmailCode)
-    }
-
     func testTheStatusCarriesTheAuthenticatorFlag() throws {
         let with = try JSONDecoder().decode(
             RecoveryEmailStatus.self,
-            from: Data(#"{"available":true,"enabled":true,"vault":true,"phrase_saved":false,"totp":true}"#.utf8))
+            from: Data(#"{"available":true,"enabled":true,"totp":true}"#.utf8))
         XCTAssertEqual(with.totp, true)
         let without = try JSONDecoder().decode(
             RecoveryEmailStatus.self,
-            from: Data(#"{"available":true,"enabled":true,"vault":true,"phrase_saved":false}"#.utf8))
+            from: Data(#"{"available":true,"enabled":true}"#.utf8))
         XCTAssertNil(without.totp)
+        // Unknown factors decide nothing (the landing rule, the last-factor
+        // dialog): a guess is never acted on.
+        XCTAssertNil(AccountFactors.of(status: without, hasPasskey: true))
+        XCTAssertNil(AccountFactors.of(status: with, hasPasskey: nil))
+        XCTAssertEqual(
+            AccountFactors.of(status: with, hasPasskey: false),
+            AccountFactors(email: true, authenticator: true, passkey: false))
     }
 
     // MARK: - Strings
 
     func testEveryKeyTheseScreensUseIsInTheCatalog() {
         let keys = [
-            "protect.title", "protect.body", "protect.email.title", "protect.email.badge",
-            "protect.email.body", "protect.phrase.title", "protect.phrase.body", "protect.skip",
-            "protect.skip.confirm.title", "protect.skip.confirm.body", "protect.skip.confirm.continue",
-            "protect.banner.none", "protect.banner.action", "protect.status.email", "protect.status.phrase",
-            "protect.status.none", "protect.phrase.save.body", "protect.phrase.save.effect",
+            "protect.title", "protect.title_required", "protect.body", "protect.email.title",
+            "protect.email.badge", "protect.email.body", "protect.totp.title", "protect.totp.body",
+            "protect.passkey.title", "protect.passkey.body", "protect.passkey.cancelled", "protect.optional",
+            "protect.phrase.title_optional", "protect.phrase.body", "protect.continue",
+            "protect.continue_needs", "protect.totp_only.warning", "protect.totp_only.warning_phrase",
+            "protect.totp_only.remove_notice", "protect.totp_only.remove_notice_phrase",
+            "protect.last_factor", "protect.username_email", "protect.status.phrase",
+            "protect.status.passkey_seal", "protect.status.password_only", "protect.password_only.title",
+            "protect.password_only.body", "protect.password_only.save_phrase",
+            "protect.password_only.add_passkey", "protect.password_only.passkey_no_seal",
+            "settings.passkeys.no_seal", "protect.phrase.save.body",
             "protect.phrase.save.show", "protect.phrase.save.failed",
+            "settings.recovery.totp.scan", "settings.recovery.totp.open_app",
+            "settings.recovery.totp.on", "settings.recovery.totp.done", "settings.recovery.totp.error.wrong",
+            "settings.recovery.totp.error.generic", "settings.recovery.totp.already_enabled",
+            "settings.recovery.totp.set_up", "proof.add_totp.help",
             "recovery_email.title", "recovery_email.body", "recovery_email.field", "recovery_email.invalid",
             "recovery_email.not_kept", "recovery_email.mailbox_warning", "recovery_email.send",
             "recovery_email.code.title", "recovery_email.code.wrong", "recovery_email.code.expired",
@@ -1347,327 +1192,37 @@ final class RecoveryEmailTests: XCTestCase {
             "recovery_email.remove.confirm.body",
             "recovery.email.row.title", "recovery.email.row.body", "recovery.email.start.body",
             "recovery.email.check.title", "recovery.email.check.body", "recovery.email.totp.title",
-            "recovery.email.totp.body", "recovery.email.totp.lost", "recovery.email.restoring",
-            "recovery.email.save", "notice.was_me", "notice.was_not_me", "notice.secure.new_keys",
+            "recovery.email.totp.body", "recovery.email.totp.lost",
+            "recovery.email.save", "notice.was_me", "notice.was_not_me",
             "proof.recovery_email.help", "proof.save_phrase.help", "notice.secure.title",
-            "notice.secure.password_saved", "protect.phrase.save.progress", "protect.phrase.save.finishing",
-            "recall.phrase.wrong", "recovery_email.add_again.title", "recovery_email.add_again.body",
-            "recovery.email.failed", "recovery_email.totp_warning",
+            "notice.secure.password_saved",
+            "recall.phrase.wrong", "recovery_email.totp_warning", "common.saving",
         ]
         for key in keys {
             XCTAssertNotEqual(Localization.text(key), key, "\(key) is missing from the catalog")
         }
+        // Removed with the email vault, the banner and "Not now": no screen
+        // may name them any more.
+        for key in [
+            "protect.skip", "protect.banner.none", "protect.banner.action", "protect.status.none",
+            "protect.status.email", "recovery_email.add_again.title", "recovery.email.restoring",
+            "recovery.email.failed", "notice.secure.new_keys", "protect.phrase.save.effect",
+            "protect.phrase.save.progress", "protect.phrase.save.finishing",
+            "restore_identity.reset.effect_messages",
+        ] {
+            XCTAssertEqual(Localization.text(key), key, "\(key) was removed from the catalog")
+        }
         XCTAssertTrue(Localization.text(
             "recovery_email.code.sent_to", texts: ["address": "a@b.example"]).contains("a@b.example"))
         XCTAssertTrue(Localization.text("recovery_email.code.resend_in", texts: ["time": "0:45"]).contains("0:45"))
+        XCTAssertTrue(Localization.text("settings.recovery.totp.key", texts: ["key": "ABCD"]).contains("ABCD"))
         for line in [
             RecoveryEmailLine.addressInvalid, .codeWrong, .codeExpired, .codeUsedUp,
-            .limited(retryAfterSecs: nil), .sendFailed, .unavailable, .vaultNotOpened, .needsUsername,
+            .limited(retryAfterSecs: nil), .sendFailed, .unavailable, .lastFactor, .needsUsername,
             .offline, .failed,
         ] {
             let key = try? XCTUnwrap(line.key)
             XCTAssertNotEqual(key.map { Localization.text($0) }, key, "\(line)")
         }
-    }
-}
-
-// MARK: - Save a recovery phrase: the two routes (ADR-0075 section 3, amended 2026-11-01)
-
-@MainActor
-final class SavePhraseFlowTests: XCTestCase {
-
-    private final class World {
-        var status: Result<AccountPhraseStatus, Error> = .success(
-            AccountPhraseStatus(saved: false, rotationNeeded: false))
-        var held: String? = "held words"
-        var grant: String? = "grant"
-        var markErrors: [Error] = []
-        var rotationResult: KeyRotationPlan.Result = .rotated(phrase: "new words")
-        var resume: KeyRotationPlan.Resume = .nothing
-        var rotationWords: String?
-        var onFinish: (() -> Void)?
-        private(set) var events: [String] = []
-        func note(_ event: String) { events.append(event) }
-    }
-
-    private func flow(
-        _ world: World, rotationNeedsSession: (@MainActor () -> Void)? = nil
-    ) -> SavePhraseFlow {
-        SavePhraseFlow(ports: SavePhraseFlow.Ports(
-            accountIdB64: { "acct" },
-            sessionToken: { "tok" },
-            freshGrant: { world.grant },
-            readStatus: { _ in
-                world.note("read")
-                return try world.status.get()
-            },
-            heldPhrase: { world.held },
-            markOwnAction: { _ in world.note("own-action") },
-            markSaved: { _, grant in
-                XCTAssertEqual(grant, world.grant)
-                world.note("post")
-                if !world.markErrors.isEmpty { throw world.markErrors.removeFirst() }
-            },
-            phraseWasSaved: { _ in world.note("phrase-saved") },
-            rotate: {
-                world.note("rotate")
-                return world.rotationResult
-            },
-            rotationResume: { world.resume },
-            finishRotation: {
-                world.note("finish")
-                world.onFinish?()
-            },
-            rotationWords: { world.rotationWords },
-            proofExpired: { world.note("proof-expired") }
-        ), rotationNeedsSession: rotationNeedsSession)
-    }
-
-    private func http(_ status: Int, _ body: String) -> Error {
-        AuthClientError.http(status: status, endpoint: "/account/phrase/saved", body: body)
-    }
-
-    func testTheRouteIsOneRule() {
-        XCTAssertEqual(SavePhraseRoute.decide(rotationNeeded: false, heldPhrase: "w"), .heldWords("w"))
-        XCTAssertEqual(SavePhraseRoute.decide(rotationNeeded: true, heldPhrase: "w"), .rotation)
-        XCTAssertEqual(SavePhraseRoute.decide(rotationNeeded: false, heldPhrase: nil), .rotation)
-        XCTAssertEqual(SavePhraseRoute.decide(rotationNeeded: true, heldPhrase: nil), .rotation)
-    }
-
-    /// The defect: a phrase no vault ever held rotated the keys anyway.
-    func testAPhraseNoVaultEverHeldShowsTheWordsTheDeviceHoldsAndChangesNoKey() async {
-        let world = World()
-        let flow = flow(world)
-
-        await flow.open()
-        XCTAssertEqual(flow.state, .idle)
-        XCTAssertFalse(flow.changesKeys, "no paragraph about new keys, no progress line")
-
-        await flow.primary()
-        XCTAssertEqual(flow.state, .heldWords("held words"))
-        XCTAssertEqual(world.events, ["read"], "nothing counts as saved before the three words")
-
-        let saved = await flow.confirmHeldWords()
-
-        XCTAssertTrue(saved)
-        XCTAssertEqual(
-            world.events, ["read", "own-action", "post", "phrase-saved"],
-            "the own action is marked before the server writes the notice")
-        XCTAssertFalse(world.events.contains("rotate"))
-    }
-
-    /// D40: on the sign-up step nothing of the session runs, so the rotation
-    /// cannot: the screen hands over to the app instead of failing.
-    func testOnTheSignUpStepARotationLeavesForTheApp() async {
-        let world = World()
-        world.status = .success(AccountPhraseStatus(saved: false, rotationNeeded: true))
-        var handedOver = 0
-        let flow = flow(world, rotationNeedsSession: { handedOver += 1 })
-
-        await flow.open()
-        XCTAssertEqual(handedOver, 1)
-        XCTAssertFalse(world.events.contains("rotate"))
-    }
-
-    func testOnTheSignUpStepHeldWordsStayOnTheStep() async {
-        let world = World()
-        var handedOver = 0
-        let flow = flow(world, rotationNeedsSession: { handedOver += 1 })
-
-        await flow.open()
-        await flow.primary()
-        XCTAssertEqual(flow.state, .heldWords("held words"))
-        XCTAssertEqual(handedOver, 0)
-    }
-
-    func testRotationNeededKeepsTheRotationPath() async {
-        let world = World()
-        world.status = .success(AccountPhraseStatus(saved: false, rotationNeeded: true))
-        let flow = flow(world)
-
-        await flow.open()
-        XCTAssertEqual(flow.state, .idle)
-        XCTAssertTrue(flow.changesKeys, "the paragraph about new keys stays")
-
-        await flow.primary()
-
-        XCTAssertEqual(flow.state, .words("new words"))
-        XCTAssertEqual(world.events, ["read", "rotate"])
-    }
-
-    func testADeviceThatDoesNotHoldThePhraseRotates() async {
-        let world = World()
-        world.held = nil
-        let flow = flow(world)
-
-        await flow.open()
-        XCTAssertTrue(flow.changesKeys)
-        await flow.primary()
-
-        XCTAssertEqual(flow.state, .words("new words"))
-        XCTAssertFalse(world.events.contains("post"))
-    }
-
-    func testAnAnswerThatDidNotArriveGuessesNoPath() async {
-        let world = World()
-        world.status = .failure(URLError(.notConnectedToInternet))
-        let flow = flow(world)
-
-        await flow.open()
-
-        XCTAssertEqual(flow.state, .failed)
-        XCTAssertNil(flow.route)
-        XCTAssertFalse(flow.changesKeys)
-        XCTAssertFalse(flow.primaryNeedsProof, "reading the route again asks for nothing")
-
-        // Try again reads it, and neither route has run.
-        await flow.primary()
-        XCTAssertEqual(flow.state, .failed)
-        XCTAssertEqual(world.events, ["read", "read"])
-
-        world.status = .success(AccountPhraseStatus(saved: false, rotationNeeded: false))
-        await flow.primary()
-        XCTAssertEqual(flow.state, .idle)
-        XCTAssertEqual(flow.route, .heldWords("held words"))
-        XCTAssertTrue(flow.primaryNeedsProof)
-    }
-
-    /// Nothing counts as saved before that POST, and the three-word screen
-    /// stays with `Try again`.
-    func testAFailedSaveStaysOnTheWordsAndTryAgainSends() async {
-        let world = World()
-        world.markErrors = [http(500, ""), AuthClientError.network(endpoint: "/x", underlying: URLError(.timedOut))]
-        let flow = flow(world)
-        await flow.open()
-        await flow.primary()
-
-        let first = await flow.confirmHeldWords()
-        XCTAssertFalse(first)
-        XCTAssertEqual(flow.state, .heldWords("held words"))
-        XCTAssertTrue(flow.confirmFailed)
-        XCTAssertFalse(world.events.contains("phrase-saved"))
-
-        let second = await flow.confirmHeldWords()
-        XCTAssertFalse(second, "an unanswered call is a failure too")
-        XCTAssertTrue(flow.confirmFailed)
-
-        let third = await flow.confirmHeldWords()
-        XCTAssertTrue(third)
-        XCTAssertFalse(flow.confirmFailed)
-        XCTAssertEqual(world.events.filter { $0 == "phrase-saved" }.count, 1)
-    }
-
-    /// The phrase went into a vault after the route was read.
-    func testTheServersNeedsRotationAnswerRunsTheRotation() async {
-        let world = World()
-        world.markErrors = [http(409, #"{"error":"phrase-save-needs-rotation"}"#)]
-        let flow = flow(world)
-        await flow.open()
-        await flow.primary()
-
-        let saved = await flow.confirmHeldWords()
-
-        XCTAssertFalse(saved, "the words held were not the ones saved")
-        XCTAssertEqual(flow.state, .words("new words"))
-        XCTAssertTrue(flow.changesKeys)
-        XCTAssertEqual(world.events, ["read", "own-action", "post", "rotate"])
-    }
-
-    func testAnotherConflictIsAFailureNotARotation() async {
-        let world = World()
-        world.markErrors = [http(409, #"{"error":"something-else"}"#)]
-        let flow = flow(world)
-        await flow.open()
-        await flow.primary()
-
-        _ = await flow.confirmHeldWords()
-
-        XCTAssertEqual(flow.state, .heldWords("held words"))
-        XCTAssertTrue(flow.confirmFailed)
-        XCTAssertFalse(world.events.contains("rotate"))
-    }
-
-    func testAProofThatRanOutAsksForTheProofWithoutAnError() async {
-        let world = World()
-        world.markErrors = [http(403, #"{"error":"fresh-auth-required"}"#)]
-        let flow = flow(world)
-        await flow.open()
-        await flow.primary()
-
-        let saved = await flow.confirmHeldWords()
-
-        XCTAssertFalse(saved)
-        XCTAssertEqual(flow.state, .heldWords("held words"))
-        XCTAssertFalse(flow.confirmFailed, "the block appears; nothing went wrong")
-        XCTAssertTrue(world.events.contains("proof-expired"))
-
-        // No grant at all: nothing is sent.
-        let before = world.events.filter { $0 == "post" }.count
-        world.grant = nil
-        let again = await flow.confirmHeldWords()
-        XCTAssertFalse(again)
-        XCTAssertEqual(world.events.filter { $0 == "post" }.count, before)
-    }
-
-    func testAChangeThatAlreadyWentThroughIsFinishedAndNeverStartedAgain() async {
-        let world = World()
-        world.resume = .finishOwed
-        world.onFinish = { world.rotationWords = "owed words" }
-        let flow = flow(world)
-
-        await flow.open()
-
-        XCTAssertEqual(flow.state, .words("owed words"))
-        XCTAssertEqual(world.events, ["finish"], "the route is not read and no second rotation starts")
-    }
-
-    func testAPublishStillOwedKeepsTheWordsBackAndTryAgainFinishes() async {
-        let world = World()
-        world.resume = .finishOwed
-        let flow = flow(world)
-
-        await flow.open()
-        XCTAssertEqual(flow.state, .publishOwed)
-        XCTAssertFalse(flow.primaryNeedsProof)
-
-        world.onFinish = { world.rotationWords = "owed words" }
-        await flow.primary()
-        XCTAssertEqual(flow.state, .words("owed words"))
-    }
-
-    func testAScreenOpenedTwiceRunsOnce() async {
-        let world = World()
-        let flow = flow(world)
-        await flow.open()
-        await flow.primary()
-        await flow.open()
-        XCTAssertEqual(flow.state, .heldWords("held words"))
-        XCTAssertEqual(world.events, ["read"])
-    }
-
-    func testTheRoutesOfThePhrase() async throws {
-        let host = NameRouteStub.scope { method, path, _ in
-            switch (method, path) {
-            case ("GET", "/account/phrase"): return (200, #"{"saved":false,"rotation_needed":true}"#)
-            case ("POST", "/account/phrase/saved"): return (204, "")
-            default: return (404, "")
-            }
-        }
-        let client = NameRouteStub.client(host)
-
-        let status = try await client.accountPhraseStatus(sessionToken: "tok")
-        XCTAssertEqual(status, AccountPhraseStatus(saved: false, rotationNeeded: true))
-        try await client.markPhraseSaved(sessionToken: "tok", freshGrant: "grant")
-
-        let posted = try XCTUnwrap(NameRouteStub.requests(host).last)
-        XCTAssertEqual(posted.authorization, "Bearer tok")
-        XCTAssertEqual(posted.json["fresh_grant"] as? String, "grant")
-    }
-
-    func testTheRefusalIsReadFromItsCode() {
-        XCTAssertTrue(PhraseSaveRefusal.needsRotation(http(409, #"{"error":"phrase-save-needs-rotation"}"#)))
-        XCTAssertFalse(PhraseSaveRefusal.needsRotation(http(409, #"{"error":"phrase-saved"}"#)))
-        XCTAssertFalse(PhraseSaveRefusal.needsRotation(http(403, #"{"error":"phrase-save-needs-rotation"}"#)))
-        XCTAssertFalse(PhraseSaveRefusal.needsRotation(URLError(.timedOut)))
     }
 }

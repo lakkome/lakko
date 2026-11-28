@@ -61,6 +61,18 @@ function bytesEqualCt(a: Uint8Array, b: Uint8Array): boolean {
   for (let i = 0; i < a.length; i += 1) d |= (a[i] ?? 0) ^ (b[i] ?? 0);
   return d === 0;
 }
+
+/** An optional base64 field of a fetched bundle as bytes; `null` when it is
+ *  absent, empty or not base64. */
+function optionalBytes(b64: string | undefined): Uint8Array | null {
+  if (b64 === undefined || b64.length === 0) return null;
+  try {
+    const bytes = base64Decode(b64);
+    return bytes.length > 0 ? bytes : null;
+  } catch {
+    return null;
+  }
+}
 import { forgetMintedLinkRecord, newRevocationKey, revokeMintedLink } from "./own-links";
 import {
   appendGroupInviteLinkSecret,
@@ -90,7 +102,8 @@ import { avatarFromWasm } from "../profile/avatar-model";
 import type { AccountPubkeyPin } from "./local-store";
 import { acceptableBoundKeys, devicesBoundTo, trustedBoundKeys } from "./add-member-key";
 import { contactRequestGate, requestTargetAfterFetch } from "./request-target";
-import { resetVerdict, type AttestCheck, type LogCheck } from "./reset-verdict";
+import type { ResetVerdict } from "./reset-verdict";
+import { checkResetAttestation, judgeBundleReset } from "./reset-judge";
 import { notifyResetAccepted } from "./reset-events";
 import {
   accountKeysOfBinding,
@@ -100,18 +113,22 @@ import {
   recordVerifiedBinding,
 } from "./verified-binding";
 import { carryBindingConversationKey, recordConversationLink } from "./conversation-link";
-import { fetchDeviceAttestKey } from "../auth/device-attest-key";
 import { provenSuccessorWith } from "./proven-successor";
 import { pendingAfterArrival } from "./inbox-store";
 import { spentFailureOutcome, type SpentOutcome } from "./rotation-spent";
 import { addressRecheckAllowed, lastAddressRecheckAtMs } from "./address-recheck-throttle";
 import {
   acceptReset,
+  adoptStartedOver,
   boundContactsAccount,
   accountIdB64OfKey,
   accountKeysOf,
   loadSupersededKeys,
+  moveStartedOverKey,
+  raiseSealSeqFloor,
   readPin,
+  recordStartedOver,
+  sealSeqFloorOf,
   setPin,
   recordLogStatus,
   recordLogReset,
@@ -694,6 +711,32 @@ export class IdentityCheckInconclusive extends Error {
     public readonly accountIdB64: string,
   ) {
     super("the contact's published identity could not be checked yet");
+  }
+}
+
+/**
+ * ADR-0101 section 11 (UX 16.11) - the account's keys were changed by a
+ * reset this device could NOT confirm as the same person's (an UNSEALED
+ * reset): rules 1 to 3 of ADR-0073 R.2 hold and rule 4 does not. The
+ * account is a new account under the same username.
+ *
+ * Nothing was re-pinned, moved or returned, and the fact is recorded
+ * (`local-store.ts` `recordStartedOver`). An action that was about to use
+ * the bundle for the OLD contact (a send, an add, a re-admission, a
+ * conversation's move, a return) does nothing for this account. It is not
+ * the fail-closed `SupersessionRefused` (the server-side reset is real) and
+ * not `IdentityCheckInconclusive` (the verdict is in): the old one-to-one
+ * shows its closed line, and a contact request from the new keys is listed
+ * with a note. Only the person's own Accept of such a request moves the pin
+ * ({@link ContactsClient.adoptStartedOverRequest}).
+ */
+export class ContactStartedOver extends Error {
+  override name = "ContactStartedOver";
+  constructor(
+    /** base64 of the contact's account_id. */
+    public readonly accountIdB64: string,
+  ) {
+    super("the contact started over with a new account");
   }
 }
 
@@ -1831,6 +1874,14 @@ export class ContactsClient {
       // paths) and stays the gate's refusal.
       if (!(err instanceof SupersessionRefused)) throw err;
       if (err.reason !== "proof-absent") {
+        // ADR-0101 section 11: the new account of a person who started over
+        // may have rotated its key BY PROOF before this person decided
+        // about it. The proof then verifies under the started-over record's
+        // key (never under the old pin): the record follows the key, and
+        // the answer stays "started over".
+        if (await this.startedOverFollowsRotation(accountId, bundle)) {
+          throw new ContactStartedOver(base64Encode(accountId));
+        }
         err.loggedReset = await this.loggedResetForRefusal(accountId, bundle);
         throw err;
       }
@@ -1850,10 +1901,21 @@ export class ContactsClient {
       if (verdict.kind === "no-verdict") {
         throw new IdentityCheckInconclusive(base64Encode(accountId));
       }
-      // Accepted and re-pinned: gate 2 below already ran inside the verdict.
+      // ADR-0101 section 11: an unsealed reset is a new account under the
+      // same username. Nothing was re-pinned; the caller does nothing for
+      // the old contact.
+      if (verdict.kind === "unsealed") {
+        throw new ContactStartedOver(base64Encode(accountId));
+      }
+      // Sealed and re-pinned: gate 2 below already ran inside the verdict.
       await this.recordBundleConversationLink(accountId, bundle);
       return;
     }
+
+    // ADR-0101 section 10: the account's own current announcement, when it
+    // opens under the key this device trusts, raises the `seq` floor a
+    // later reset's previous announcement must reach.
+    await this.noteSealAnnouncement(accountId, bundle);
 
     // Gate 2 (additive, best-effort). Hard-fails only on rollback.
     // G-30 #2 (ADR-0019): pass the OLD pin + the bundle's supersession
@@ -1945,7 +2007,16 @@ export class ContactsClient {
     const accountIdB64 = base64Encode(accountId);
     const recipientKeyB64 = base64Encode(recipientSignaturePubkey);
     if (contactRequestGate(readPin(accountIdB64), recipientKeyB64) === "send") return;
-    await this.checkContactIdentity(accountId);
+    try {
+      await this.checkContactIdentity(accountId);
+    } catch (err) {
+      // UX 16.11 (item D): adding the new account of someone who started
+      // over, by the keys a search result or a link carried: those keys
+      // must be exactly the new account's.
+      if (!(err instanceof ContactStartedOver)) throw err;
+      if (!this.adoptStartedOverRequest(accountId, recipientSignaturePubkey)) throw err;
+      return;
+    }
     // ADR-0074 section 3.5a rule 1 - a key that is a PROVEN predecessor of
     // the pin is the same person: the send re-fetches and seals to the
     // current keys (`currentRequestTarget`). Any other key is refused.
@@ -2146,10 +2217,14 @@ export class ContactsClient {
   }
 
   /**
-   * ADR-0073 R.2 — gather the rule's inputs for a proof-less key change and
-   * act on the verdict (`reset-verdict.ts`). On `accepted` the re-pin is
-   * written and the listeners that move the shared conversations are told;
-   * nothing is shown anywhere. Never throws.
+   * ADR-0073 R.2 with rule 4 (ADR-0101 section 10) — gather the rule's
+   * inputs for a proof-less key change and act on the verdict
+   * (`reset-verdict.ts`, the core's table).
+   *
+   * `sealed`: the re-pin is written and the listeners that move the shared
+   * conversations are told; nothing is shown anywhere. `unsealed`: nothing
+   * is re-pinned and no listener is told; the started-over fact is recorded
+   * (ADR-0101 section 11). Never throws.
    */
   private async judgeReset(
     accountId: Uint8Array,
@@ -2158,32 +2233,21 @@ export class ContactsClient {
     /** The generation last accepted for the account: the pin's, else the
      *  verified binding's baseline. */
     acceptedGeneration: number,
-  ): Promise<ReturnType<typeof resetVerdict>> {
+  ): Promise<ResetVerdict> {
     const accountIdB64 = base64Encode(accountId);
     if (heldKeyB64 === undefined) return { kind: "no-verdict" };
-    let servedPubkey: Uint8Array;
-    try {
-      servedPubkey = base64Decode(bundle.signature_pubkey);
-    } catch {
-      return { kind: "refused", why: "unconfirmed" };
-    }
-    const attest = await this.checkResetAttestation(accountId, servedPubkey, bundle);
-    let log: LogCheck;
-    try {
-      const r = await verifyIdentityInLog(accountId, servedPubkey);
-      log = { status: r.status, isReset: r.isReset };
-    } catch {
-      log = { status: "unreachable", isReset: null };
-    }
-    const verdict = resetVerdict({
+    const { verdict, log } = await judgeBundleReset({
+      accountId,
+      bundle,
       heldKeyB64,
       acceptedGeneration,
-      fetchedKeyB64: bundle.signature_pubkey,
-      bundleGeneration: bundle.key_generation,
-      attest,
-      log,
+      seqFloor: sealSeqFloorOf(accountIdB64),
     });
-    if (verdict.kind !== "accepted") return verdict;
+    if (verdict.kind === "unsealed") {
+      this.recordUnsealedReset(accountIdB64, heldKeyB64, acceptedGeneration, bundle, verdict);
+      return verdict;
+    }
+    if (verdict.kind !== "sealed") return verdict;
     // Security review 2026-11-21: the X25519 key the re-pin writes is the
     // one contacts are later sealed to, so it must be bound to the new
     // signature key. An unbound one refuses the reset; nothing is written.
@@ -2206,6 +2270,9 @@ export class ContactsClient {
     dropVerifiedBinding(accountIdB64);
     recordLogStatus(accountIdB64, log.status);
     recordLogReset(accountIdB64, log.isReset);
+    // ADR-0101 section 10: the announcement that sealed this reset is the
+    // floor for the account from here on (never lowered by the store).
+    raiseSealSeqFloor(accountIdB64, verdict.announcementSeq);
     if (written === "accepted") {
       notifyResetAccepted({
         accountIdB64,
@@ -2218,41 +2285,120 @@ export class ContactsClient {
     return verdict;
   }
 
-  /** R.2 step 1: the bundle's attestation under the trusted attest key (the
-   *  build-time pin when set, else the cached JWKS key). */
-  private async checkResetAttestation(
-    accountId: Uint8Array,
-    servedPubkey: Uint8Array,
+  /**
+   * ADR-0101 section 11 - the one write of an unsealed verdict: the
+   * started-over fact, under the account's pin. A held key that came from a
+   * verified binding (a person this device never pinned) becomes the pin
+   * first, exactly as the proven-rotation path does, so the fact has a
+   * record to sit in; the pin still names the OLD key.
+   */
+  private recordUnsealedReset(
+    accountIdB64: string,
+    heldKeyB64: string,
+    acceptedGeneration: number,
     bundle: IdentityFetchResponse,
-  ): Promise<AttestCheck> {
-    const raw = bundle.key_reset_attest;
-    if (raw === undefined || raw.length === 0) return { kind: "absent" };
-    let attestation: Uint8Array;
-    try {
-      attestation = base64Decode(raw);
-    } catch {
-      return { kind: "invalid" };
+    verdict: { readonly keyGeneration: number; readonly signedAtMs: number },
+  ): void {
+    const binding = readVerifiedBinding(accountIdB64);
+    if (readPin(accountIdB64) === undefined) {
+      if (binding === undefined || binding.keyB64 !== heldKeyB64) return;
+      setPin(accountIdB64, heldKeyB64, 0, undefined, { keyGeneration: acceptedGeneration });
+      carryBindingConversationKey(accountIdB64, binding);
+      dropVerifiedBinding(accountIdB64);
     }
-    let attestKey: Uint8Array;
-    try {
-      attestKey = await fetchDeviceAttestKey();
-    } catch {
-      return { kind: "no-key" };
-    }
+    recordStartedOver({
+      accountIdB64,
+      heldKeyB64,
+      newKeyB64: bundle.signature_pubkey,
+      keyGeneration: verdict.keyGeneration,
+      signedAtMs: verdict.signedAtMs,
+      nowMs: Date.now(),
+      ...(binding?.conversationKeyB64 !== undefined
+        ? { heldPredecessorsB64: [binding.conversationKeyB64] }
+        : {}),
+    });
+  }
+
+  /**
+   * ADR-0101 section 11 - a key change that CAME with a supersession proof
+   * the pinned (old) key did not sign, for an account with a pending
+   * started-over record: when the proof verifies under the RECORD's key for
+   * exactly the served key, the new account rotated, and the record follows
+   * it. Returns whether the account is (still) "started over" for this
+   * bundle. Never throws.
+   */
+  private async startedOverFollowsRotation(
+    accountId: Uint8Array,
+    bundle: IdentityFetchResponse,
+  ): Promise<boolean> {
+    const accountIdB64 = base64Encode(accountId);
+    const record = readPin(accountIdB64)?.startedOver;
+    if (record === undefined) return false;
+    if (record.newKeyB64 === bundle.signature_pubkey) return true;
+    const proofB64 = bundle.supersession_proof;
+    if (proofB64 === undefined || proofB64.length === 0) return false;
     try {
       const wasm = await loadWasm();
-      const verified = wasm.verifyKeyResetAttestation(attestation, attestKey, accountId, servedPubkey);
-      const keyGeneration = Number(verified.keyGeneration);
-      const signedAtMs = Number(verified.signedAtMillis);
-      try {
-        verified.free();
-      } catch {
-        // Freeing is best-effort.
-      }
-      return { kind: "verified", keyGeneration, signedAtMs };
+      const authorised = wasm.verifySupersession(
+        base64Decode(proofB64),
+        base64Decode(record.newKeyB64),
+        BigInt(Math.floor(Date.now() / 1000)),
+      );
+      if (base64Encode(authorised) !== bundle.signature_pubkey) return false;
+      moveStartedOverKey(accountIdB64, record.newKeyB64, bundle.signature_pubkey);
+      return true;
     } catch {
-      return { kind: "invalid" };
+      return false;
     }
+  }
+
+  /**
+   * ADR-0101 section 10, the peer's check 1 - raise the `seq` floor from the
+   * account's CURRENT announcement. Only for a pinned account whose
+   * published key is the pin, and only for an announcement that opens under
+   * that key and names this account; anything else is ignored. Never throws.
+   */
+  private async noteSealAnnouncement(
+    accountId: Uint8Array,
+    bundle: IdentityFetchResponse,
+  ): Promise<void> {
+    const announcement = optionalBytes(bundle.reset_seals);
+    if (announcement === null) return;
+    const accountIdB64 = base64Encode(accountId);
+    const pin = readPin(accountIdB64);
+    if (pin === undefined || pin.pinnedSignaturePubkeyB64 !== bundle.signature_pubkey) return;
+    try {
+      const wasm = await loadWasm();
+      const opened = wasm.openSealAnnouncement(announcement, base64Decode(pin.pinnedSignaturePubkeyB64));
+      let seq: bigint;
+      let named: Uint8Array;
+      try {
+        seq = opened.seq;
+        named = opened.accountRef;
+      } finally {
+        opened.free();
+      }
+      if (!bytesEqualCt(named, wasm.keyResetAccountRef(accountId))) return;
+      raiseSealSeqFloor(accountIdB64, seq);
+    } catch {
+      // Not an announcement this key signed: nothing is learned from it.
+    }
+  }
+
+  /**
+   * UX 16.11 - the person pressed Accept on a contact request from the new
+   * account of someone who started over. The pin moves to the request's key
+   * BECAUSE THE PERSON DECIDED (the device confirmed nothing): only when a
+   * pending started-over record names exactly that key, so no other caller
+   * and no other key can move it. Nothing else follows from it: no key is
+   * superseded, no conversation moves, nothing is returned; the old
+   * one-to-one stays closed. Returns whether the pin moved.
+   */
+  adoptStartedOverRequest(accountId: Uint8Array, requestSignaturePubkey: Uint8Array): boolean {
+    return (
+      adoptStartedOver(base64Encode(accountId), base64Encode(requestSignaturePubkey), Date.now()) ===
+      "adopted"
+    );
   }
 
   /**
@@ -2481,8 +2627,20 @@ export class ContactsClient {
       carryBindingConversationKey(accountIdB64, binding);
       dropVerifiedBinding(accountIdB64);
     }
+    // ADR-0101 section 10: a proven rotation moves the account to a new
+    // generation, and the next reset's seal is checked against the
+    // announcement of THAT generation. The bundle's generation is taken
+    // only when the attestation beside the proof verifies for this account
+    // and exactly this key; without one the accepted generation stays, and
+    // a later reset of this account reads as unsealed.
+    const rotatedAttest = await checkResetAttestation(accountId, authorisedNewPubkey, bundle);
+    const provenGeneration =
+      rotatedAttest.kind === "verified" && rotatedAttest.keyGeneration === bundle.key_generation
+        ? rotatedAttest.keyGeneration
+        : undefined;
     const result = setPin(accountIdB64, fetchedPubkeyB64, proofExpiresAt, undefined, {
       proven: true,
+      ...(provenGeneration !== undefined ? { provenGeneration } : {}),
     });
     if (result === "rejected-backward") {
       throw new SupersessionRefused(
@@ -2691,7 +2849,16 @@ export class ContactsClient {
     // OOB re-verify prompt. We never blind-TOFU a changed key.
     // ADR-0073 R.2: a proof-less change that is an attested reset is
     // accepted inside the gate, silently.
-    await this.verifyBundleAccountKey(recipientAccountId, bundle);
+    try {
+      await this.verifyBundleAccountKey(recipientAccountId, bundle);
+    } catch (err) {
+      // UX 16.11 (alignment of 2026-11-27, item D): the person typed the
+      // name of someone who started over. The new account becomes a new
+      // contact, as when a request from it is accepted; the old one-to-one
+      // stays closed.
+      if (!(err instanceof ContactStartedOver)) throw err;
+      if (!this.adoptStartedOverRequest(recipientAccountId, base64Decode(bundle.signature_pubkey))) throw err;
+    }
     const recipientSignaturePub = base64Decode(bundle.signature_pubkey);
     // Security review 2026-11-21: the X25519 key is used only when its
     // binding to the signature key verifies; otherwise nothing is sealed.

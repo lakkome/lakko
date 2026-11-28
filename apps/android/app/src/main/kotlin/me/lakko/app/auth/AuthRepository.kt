@@ -486,7 +486,16 @@ public class AuthRepository(
         val acct = credentials.accountIdB64
         SuspensionGate.set(true)
         if (credentials.freshGrant != null) {
-            freshAuth.put(acct, credentials.freshGrant, credentials.freshGrantExpiresAtMs, System.currentTimeMillis())
+            // Which sign-in minted it is not kept with the suspended
+            // credentials; a suspended account resets nothing, so the proof
+            // is never read as a password's.
+            freshAuth.put(
+                acct,
+                credentials.freshGrant,
+                credentials.freshGrantExpiresAtMs,
+                System.currentTimeMillis(),
+                byPassword = false,
+            )
         }
         val pair = credentials.asSessionPair()
         sessionTokenProvider.serveSuspended(credentials)
@@ -847,6 +856,8 @@ public class AuthRepository(
         val seed: ByteArray,
         val phrase: String,
         val newSignaturePubkey: ByteArray,
+        /** The new password's export key the request was made with. */
+        val exportKey: ByteArray? = null,
     )
 
     private val pendingRecallFinish = java.util.concurrent.atomic.AtomicReference<PendingRecallFinish?>(null)
@@ -942,10 +953,47 @@ public class AuthRepository(
      *  on a fresh device): account id to address (`null` = removed). */
     private val pendingAddressWrite: AtomicReference<Pair<String, String?>?> = AtomicReference(null)
 
-    /** Accounts with a re-seal in flight, and those already tried since the
-     *  last landing or register change (one attempt, never a loop). */
-    private val resealInFlight: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
-    private val resealTried: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    // ---- UX 19.1a to 19.1d: the second way in, and what keeps the chats --
+
+    /** Which of the three second ways in the signed-in account has (a
+     *  recovery email, an authenticator, a passkey); `null` until read. The
+     *  app root shows the protect step before the app while an account with
+     *  a username has none ([factorStepRequired]). */
+    private val mutableAccountFactors: MutableStateFlow<AccountFactors?> = MutableStateFlow(null)
+
+    public val accountFactors: StateFlow<AccountFactors?> = mutableAccountFactors.asStateFlow()
+
+    private val sealStateStore: SealStateStore by lazy { SealStateStore.onDevice(applicationContext) }
+
+    /** The account's seal announcement as this device last read or published
+     *  it (ADR-0101 section 10): what would bring the chats back after a key
+     *  reset. `null` until known. */
+    private val mutableSealView: MutableStateFlow<SealAnnouncementView?> = MutableStateFlow(null)
+
+    public val sealView: StateFlow<SealAnnouncementView?> = mutableSealView.asStateFlow()
+
+    /** `true` while the once-per-device dialog of UX 19.1d is due: "Your
+     *  chats depend on your password". Closed with [closePasswordOnlyDialog]. */
+    private val mutablePasswordOnlyDialog: MutableStateFlow<Boolean> = MutableStateFlow(false)
+
+    public val passwordOnlyDialog: StateFlow<Boolean> = mutablePasswordOnlyDialog.asStateFlow()
+
+    /** One announce at a time per process: two would number alike. */
+    private val sealAnnounceMutex = kotlinx.coroutines.sync.Mutex()
+
+    /** Passkey seals made on this device and not announced yet (a passkey
+     *  was just added): account id to entries. Also kept on disk
+     *  ([SealStateStore.pendingPasskeys]) until announced. */
+    private val pendingPasskeySeals: java.util.concurrent.ConcurrentHashMap<String, List<SealEntryView>> =
+        java.util.concurrent.ConcurrentHashMap()
+
+    /** The passkey seals not announced yet: this run's and those kept from
+     *  an earlier run ([SealStateStore.pendingPasskeys]), one per tag. */
+    private fun pendingPasskeySealsOf(accountIdB64: String): List<SealEntryView> {
+        val memory = pendingPasskeySeals[accountIdB64].orEmpty()
+        val kept = sealStateStore.pendingPasskeys(accountIdB64).filterNot { k -> memory.any { it.tagHex == k.tagHex } }
+        return memory + kept
+    }
 
     /** Until when "It was not me" lets this device choose a new password
      *  without another proof (UX 19.6: the device holds the keys). */
@@ -1861,7 +1909,8 @@ public class AuthRepository(
         // elsewhere, read at every landing.
         mutableProtectStepOwed.value = protectionStore.protectStepOwed(accountIdB64)
         mutableRecoveryEmail.value = null
-        resealTried.remove(accountIdB64)
+        mutableAccountFactors.value = null
+        mutableSealView.value = sealStateStore.view(accountIdB64)
         pushScope.launchBound(accountBinding) { refreshAccountProtection(accountIdB64) }
         // ADR-0074 section 3.3 - a pending key rotation whose key the
         // directory already serves is adopted at the landing.
@@ -2290,13 +2339,7 @@ public class AuthRepository(
                 // The 30-day bound counts from the mint time the attestation
                 // carries, not from when this device received it.
                 if (verified.signedAtMs != owed.signedAtMs) {
-                    keyResetOwedStore.save(
-                        accountIdB64,
-                        KeyResetOwed(
-                            owed.attestationB64, owed.keyGeneration, verified.signedAtMs,
-                            owed.newSignaturePubkeyB64, owed.discoveryPublished, owed.deviceGroupReset,
-                        ),
-                    )
+                    keyResetOwedStore.save(accountIdB64, owed.copy(signedAtMs = verified.signedAtMs))
                 }
                 // ADR-0101 - the continuity window counts from the same
                 // instant every peer counts the continuity key from.
@@ -2315,6 +2358,9 @@ public class AuthRepository(
                     accountIdBytes = accountIdBytes,
                     accountIdentitySeed = accountIdentitySeed,
                     attestation = attestation,
+                    // ADR-0101 section 10: the seal rides the attested
+                    // publish; a retry sends the same bytes.
+                    resetSeal = owed.resetSeal,
                 )
                 KeyResetStep.DeviceGroupReset -> reRootDeviceGroup(
                     accountIdBytes = accountIdBytes,
@@ -2338,6 +2384,9 @@ public class AuthRepository(
             }
             step = nextKeyResetStep(keyResetOwedStore.load(accountIdB64) ?: return)
         }
+        // The new generation's announcement is numbered above the one the
+        // reset was sealed under.
+        owed.previousSealSeq?.let { sealStateStore.raiseFloor(accountIdB64, it) }
         keyResetOwedStore.clear(accountIdB64)
         owedStore.clearPublishOwed(accountIdB64)
         mutablePublishOwedReason.value = null
@@ -2352,6 +2401,11 @@ public class AuthRepository(
             if (cause is kotlinx.coroutines.CancellationException) throw cause
             Log.w("lakko-auth", "continuity announcement failed; retried at the next session start: ${cause.javaClass.simpleName}")
         }
+        // ADR-0101 section 10: the new keys publish the account's protection
+        // again (the current password; the passkeys were deleted and the new
+        // phrase is not saved), so its NEXT reset can be sealed. Best effort;
+        // every landing retries.
+        if (secretsAreFor(accountIdB64)) announceSealsBestEffort("reset")
     }
 
     /**
@@ -2567,6 +2621,7 @@ public class AuthRepository(
                     result.freshGrantExpiresAtMs,
                     System.currentTimeMillis(),
                 )
+                keepOwnedChannelsSecret(accountIdB64, result.ownedChannelsSecret)
                 sessionLandingKind = SessionLanding.Password
                 // Claim the username FIRST, before anything is persisted on
                 // this device (web order): the login handle at auth, then the
@@ -2865,6 +2920,9 @@ public class AuthRepository(
                     result.freshGrantExpiresAtMs,
                     System.currentTimeMillis(),
                 )
+                // A guest keeps `S` from its sign-up and makes the locks at
+                // the claim, when it sets its first password.
+                keepOwnedChannelsSecret(accountIdB64, result.ownedChannelsSecret)
                 sessionLandingKind = SessionLanding.Other
                 // ADR-0032: NO username claim — the account stays username-less
                 // until a later onboarding step.
@@ -3876,34 +3934,45 @@ public class AuthRepository(
         false
     }
 
-    /** Read the account's mode with [sessionToken] and keep the flag; a
-     *  failure leaves the flag as last learned. */
-    private suspend fun learnPhraseSaved(accountIdB64: String, sessionToken: String): RecoveryEmailStatus? = try {
-        authClientFactory().use { it.recoveryEmailStatus(sessionToken) }.also {
-            protectionStore.setPhraseSaved(accountIdB64, it.phraseSaved)
+    /**
+     * Whether the account's owner saved the recovery phrase, read from the
+     * account's PUBLISHED protection: its seal announcement at the directory
+     * lists a phrase seal (ADR-0075, amended 2026-11-26: the server keeps no
+     * flag). The flag is kept; a failure leaves it as last learned and
+     * answers `null`.
+     */
+    private suspend fun learnPhraseSaved(accountIdB64: String, accountIdBytes: ByteArray): Boolean? = try {
+        val view = readPublishedSeals(accountIdBytes)?.second
+        if (view == null) {
+            null
+        } else {
+            protectionStore.setPhraseSaved(accountIdB64, view.phrase != null)
+            view.phrase != null
         }
     } catch (cause: Throwable) {
         if (cause is kotlinx.coroutines.CancellationException) throw cause
-        Log.w("lakko-auth", "account mode not read: ${cause.javaClass.simpleName}")
+        Log.w("lakko-auth", "the account's published protection was not read: ${cause.javaClass.simpleName}")
         null
     }
 
     /**
-     * "Restore your keys" (UX section 8): `GET /recovery-email` for the
-     * account that is signed in without keys, read with the parked session.
-     * `null` when nothing is parked or the server could not be asked.
+     * "Restore your keys" (UX section 8): whether the account that is signed
+     * in without keys saved its phrase (the phrase row is drawn only then).
+     * `null` when nothing is parked or the directory could not be asked (the
+     * row is then kept).
      */
-    public suspend fun restoreKeysStatus(): RecoveryEmailStatus? {
+    public suspend fun restoreKeysPhraseSaved(): Boolean? {
         val pending = pendingRecovery.get() ?: return null
-        return learnPhraseSaved(pending.accountIdB64, pending.sessionToken)
+        return learnPhraseSaved(pending.accountIdB64, pending.accountIdBytes)
     }
 
     /** Whether new words are shown on this device after its account's keys
-     *  changed (ADR-0075: only to a phrase-protected account). */
+     *  changed (ADR-0075: only to an account whose phrase is saved). */
     public fun showsNewWordsHere(): Boolean = showsNewWords(phraseProtected())
 
-    /** Whether the account on this device is phrase-protected, as last
-     *  learned (a local flag: the three-word surfaces read it). */
+    /** Whether the account's phrase is saved, as last learned (a local flag
+     *  of the account's published protection: the three-word surfaces read
+     *  it). */
     public fun phraseProtected(): Boolean {
         val accountIdB64 = signedInAccountIdB64()
             ?: pendingFreshPhrase.get()?.accountIdB64
@@ -3912,13 +3981,16 @@ public class AuthRepository(
         return protectionStore.phraseSaved(accountIdB64)
     }
 
-    /** Read `GET /recovery-email` for the signed-in account and the notices
-     *  waiting for this device. Best effort; every failure is retried at
-     *  the next landing or when Settings opens. */
+    /** Read `GET /recovery-email` and the passkey list for the signed-in
+     *  account, publish its seal announcement when one is due, and fetch the
+     *  notices waiting for this device. Best effort; every failure is
+     *  retried at the next landing or when Settings opens. */
     private suspend fun refreshAccountProtection(accountIdB64: String) {
         try {
             resumeOwedRename(accountIdB64)
             refreshRecoveryEmail()
+            refreshAccountFactors()
+            announceSealsBestEffort("landing")
             fetchAccountNotices(accountIdB64)
         } catch (cause: Throwable) {
             if (cause is kotlinx.coroutines.CancellationException) throw cause
@@ -3927,9 +3999,9 @@ public class AuthRepository(
     }
 
     /**
-     * `GET /recovery-email` for the signed-in account; updates [recoveryEmail]
-     * and the local phrase-saved flag. `null` when there is no session or
-     * the server could not be asked (the last answer stays).
+     * `GET /recovery-email` for the signed-in account; updates
+     * [recoveryEmail]. `null` when there is no session or the server could
+     * not be asked (the last answer stays).
      */
     public suspend fun refreshRecoveryEmail(): RecoveryEmailStatus? {
         // The live secrets, not the auth state: a landing publishes its
@@ -3944,11 +4016,338 @@ public class AuthRepository(
             return null
         }
         if (!secretsAreFor(accountIdB64)) return null
-        protectionStore.setPhraseSaved(accountIdB64, status.phraseSaved)
         mutableRecoveryEmail.value = status
-        // The automatic re-seal is evaluated after every read.
-        pushScope.launchBound(accountBinding) { resealIfNeeded() }
         return status
+    }
+
+    /**
+     * The account's three second ways in (UX 19.1c): `GET /recovery-email`
+     * as last read and the passkey list. Updates [accountFactors]; `null`
+     * (and no change) when either could not be read. The landing rule
+     * ([factorStepRequired]) reads the flow.
+     */
+    public suspend fun refreshAccountFactors(): AccountFactors? {
+        val accountIdB64 = mutableIdentitySecrets.value?.let { base64Encode(it.accountId) } ?: return null
+        val status = mutableRecoveryEmail.value ?: refreshRecoveryEmail()
+        val hasPasskey = accountHasPasskey()
+        val factors = accountFactors(status, hasPasskey) ?: return null
+        if (!secretsAreFor(accountIdB64)) return null
+        mutableAccountFactors.value = factors
+        return factors
+    }
+
+    // ---- ADR-0101 section 10: the account's seal announcement -------------
+
+    /** The core's seal functions; a test swaps a fake in. */
+    @Volatile
+    internal var sealCore: SealCore = NativeSealCore
+
+    /**
+     * The account's row at the directory with its CURRENT seal announcement,
+     * decoded and verified under the row's own key (both are public; anyone
+     * may read them). `null` when the account has no row; the view is `null`
+     * when the row carries no announcement that verifies.
+     */
+    private suspend fun readPublishedSeals(
+        accountIdBytes: ByteArray,
+    ): Pair<me.lakko.app.discovery.IdentityFetchResponse, SealAnnouncementView?>? {
+        val bundle = discoveryClientFactory().use { it.identityFetch(accountIdBytes) } ?: return null
+        val key = base64Decode(bundle.signature_pubkey)
+        val view = bundle.reset_seals?.takeIf { it.isNotEmpty() }?.let { sealCore.open(base64Decode(it), key) }
+        return bundle to view
+    }
+
+    /** The tags of the account's passkeys now, or `null` when the list could
+     *  not be read. */
+    private suspend fun livePasskeyTags(): Set<String>? {
+        val token = sessionTokenProvider.current() ?: return null
+        return try {
+            WebauthnClient().use { client ->
+                client.setSessionToken(token)
+                client.listCredentials().credentials.mapNotNullTo(HashSet()) { credential ->
+                    me.lakko.app.webauthn.base64UrlOrNull(credential.credentialIdB64)?.let(sealCore::passkeyTagHex)
+                }
+            }
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            null
+        }
+    }
+
+    /**
+     * Publish the account's seal announcement when it is due (ADR-0101
+     * section 10): at every landing of a device that holds the account keys,
+     * after the password changed on it, after a passkey was added or
+     * removed, after a phrase was saved, after a rotation and after a reset.
+     * Only a device with the keys announces (the announcement is signed by
+     * the account key). Returns what happened; throws what the directory
+     * threw.
+     *
+     * [withPhrase] is the phrase being saved now ([savePhraseKeepingKeys]):
+     * the phrase seal is added although the local flag is not set yet.
+     */
+    private suspend fun announceSeals(reason: String, withPhrase: Boolean = false): AnnounceOutcome =
+        sealAnnounceMutex.withLock {
+            val secrets = mutableIdentitySecrets.value ?: throw AuthClientArgError("not signed in")
+            val accountIdB64 = base64Encode(secrets.accountId)
+            // A reset's or a rotation's publish comes first: until it landed
+            // the directory's row is not this key's.
+            if (publishOwed()) return@withLock AnnounceOutcome.NotThisKey
+            val pair = sessionTokenProvider.peek() ?: secrets.session
+            val core = sealCore
+            val accountSeed = secrets.accountIdentitySeed.copyOf()
+            try {
+                val accountKey = Identity.fromSeed(accountSeed).use { it.signaturePublicKey() }
+                val exportKey = try {
+                    ExportKeyStore.getExportKey(applicationContext, accountIdB64)
+                } catch (_: Throwable) {
+                    null
+                }
+                val phrase = if (withPhrase || protectionStore.phraseSaved(accountIdB64)) {
+                    DevicePhrase.read(applicationContext, accountIdB64)
+                } else {
+                    null
+                }
+                if (withPhrase && phrase == null) throw AuthClientArgError("this device holds no phrase to save")
+                val material = try {
+                    SealMaterial(
+                        passwordPkB64 = exportKey?.let { core.entryOf(SealSecret.Password(it)).sealPkB64 },
+                        phrasePkB64 = phrase?.let { core.entryOf(SealSecret.Phrase(it)).sealPkB64 },
+                        newPasskeys = pendingPasskeySealsOf(accountIdB64),
+                        livePasskeyTagsHex = livePasskeyTags(),
+                        passwordFromThisRun = ExportKeyStore.producedThisRun(accountIdB64),
+                    )
+                } finally {
+                    exportKey?.fill(0)
+                }
+                val directory = object : SealDirectoryPorts {
+                    override suspend fun fetchOwn(): OwnSealBundle? =
+                        discoveryClientFactory().use { it.identityFetch(secrets.accountId) }?.let { bundle ->
+                            OwnSealBundle(
+                                signaturePubkey = base64Decode(bundle.signature_pubkey),
+                                keyGeneration = bundle.key_generation,
+                                resetSeals = bundle.reset_seals?.takeIf { it.isNotEmpty() }?.let { base64Decode(it) },
+                                previousResetSeals = bundle.previous_reset_seals?.takeIf { it.isNotEmpty() }
+                                    ?.let { base64Decode(it) },
+                            )
+                        }
+
+                    override suspend fun upload(announcement: ByteArray) {
+                        val token = sessionTokenProvider.current() ?: pair.accessToken
+                        val discovery = discoveryClientFactory()
+                        try {
+                            discovery.setSessionToken(token)
+                            Identity.fromSeed(accountSeed).use { identity ->
+                                discovery.uploadIdentityBundle(
+                                    accountId = secrets.accountId,
+                                    signaturePubkey = identity.signaturePublicKey(),
+                                    x25519Pubkey = identity.x25519PublicKey(),
+                                    x25519Binding = uniffi.lakko_ffi_uniffi.signX25519Binding(identity),
+                                    resetSeals = announcement,
+                                )
+                            }
+                        } catch (err: me.lakko.app.discovery.DiscoveryHttpError) {
+                            if (err.status == SEAL_HTTP_CONFLICT && err.code == RESET_SEALS_STALE) throw SealAnnouncementStale()
+                            throw err
+                        } finally {
+                            discovery.close()
+                        }
+                    }
+                }
+                val outcome = announceSeals(
+                    account = SealAccount(
+                        accountId = secrets.accountId,
+                        accountKey = accountKey,
+                        accountSeed = accountSeed,
+                        keyGeneration = pair.keyGeneration,
+                    ),
+                    material = material,
+                    core = core,
+                    directory = directory,
+                    seqFloor = sealStateStore.seqFloor(accountIdB64),
+                    nowMs = System.currentTimeMillis(),
+                )
+                val view = when (outcome) {
+                    is AnnounceOutcome.Published -> outcome.view
+                    is AnnounceOutcome.Current -> outcome.view
+                    AnnounceOutcome.NoPasswordSeal, AnnounceOutcome.NotThisKey -> null
+                }
+                if (view != null && secretsAreFor(accountIdB64)) {
+                    // UX 19.5: "A recovery phrase was saved for your
+                    // account.", read off the account's published protection
+                    // on the devices that did not save it.
+                    if (phraseSavedElsewhere(sealStateStore.view(accountIdB64), view, savedHere = withPhrase)) {
+                        mutableAccountNotices.value = mutableAccountNotices.value + AccountNotice(
+                            id = -view.seq,
+                            kind = AccountNoticeKind.PhraseSaved,
+                            atMs = view.issuedAtMs,
+                        )
+                    }
+                    sealStateStore.keep(accountIdB64, view)
+                    mutableSealView.value = view
+                    // What "a phrase is saved" means: the announcement lists it.
+                    protectionStore.setPhraseSaved(accountIdB64, view.phrase != null)
+                    // Announced now: nothing is pending for these passkeys.
+                    val announcedTags = view.passkeys.mapTo(HashSet()) { it.tagHex }
+                    pendingPasskeySeals.computeIfPresent(accountIdB64) { _, held ->
+                        held.filterNot { it.tagHex in announcedTags }.takeIf { it.isNotEmpty() }
+                    }
+                    sealStateStore.keepPendingPasskeys(
+                        accountIdB64,
+                        sealStateStore.pendingPasskeys(accountIdB64).filterNot { it.tagHex in announcedTags },
+                    )
+                    evaluatePasswordOnlyDialog(accountIdB64, view)
+                }
+                if (outcome is AnnounceOutcome.Published) {
+                    Log.i("lakko-auth", "ADR-0101: the account's seal announcement was published ($reason)")
+                }
+                outcome
+            } finally {
+                accountSeed.fill(0)
+            }
+        }
+
+    /** [announceSeals], never throwing: a failure is retried at the next
+     *  landing. Then the owned-channels locks follow the same facts. */
+    private suspend fun announceSealsBestEffort(reason: String) {
+        try {
+            announceSeals(reason)
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            Log.w("lakko-auth", "the account's seal announcement was not published ($reason): ${cause.javaClass.simpleName}")
+        }
+        try {
+            ownedChannelsDuty?.invoke(reason)
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            Log.w("lakko-auth", "the owned-channels locks were not refreshed ($reason): ${cause.javaClass.simpleName}")
+        }
+    }
+
+    /**
+     * ADR-0101 section 7: told whenever the facts the owned-channels locks
+     * hang on may have changed (a landing, a password learned or changed, a
+     * passkey added or removed, a reset published). Set by the app root,
+     * which owns the channel state.
+     */
+    @Volatile
+    public var ownedChannelsDuty: (suspend (reason: String) -> Unit)? = null
+
+    /**
+     * ADR-0101 section 10 "The account's own devices": the verdict on this
+     * account's own reset made elsewhere, from the key this device holds, its
+     * session's generation and the highest announcement number it has seen.
+     * Wired by the activity to the contacts client (the same rule a contact
+     * runs); `null` until wired, which keeps the recall (the old behaviour).
+     */
+    @Volatile
+    public var ownResetVerdict: (
+        suspend (accountId: ByteArray, heldKeyB64: String, acceptedGeneration: Long, seqFloor: Long) -> me.lakko.app.contacts.ResetVerdict
+    )? = null
+
+    /** A passkey was added on this device and gave a seal key: announce it
+     *  (ADR-0101 section 10). [entry] is public; the PRF output stays with
+     *  the caller. `true` when the announcement now lists it. */
+    public suspend fun announcePasskeySeal(entry: SealEntryView): Boolean {
+        val accountIdB64 = signedInAccountIdB64() ?: return false
+        pendingPasskeySeals.merge(accountIdB64, listOf(entry)) { held, added ->
+            (held.filterNot { h -> added.any { it.tagHex == h.tagHex } } + added)
+        }
+        // Kept (public) until announced, so a failed announce is retried at
+        // the next landing after a restart too (alignment 2026-11-27, C).
+        sealStateStore.keepPendingPasskeys(
+            accountIdB64,
+            sealStateStore.pendingPasskeys(accountIdB64).filterNot { it.tagHex == entry.tagHex } + entry,
+        )
+        return try {
+            when (val outcome = announceSeals("passkey-added")) {
+                is AnnounceOutcome.Published -> entry in outcome.view.entries
+                is AnnounceOutcome.Current -> entry in outcome.view.entries
+                else -> false
+            }
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            Log.w("lakko-auth", "a passkey's seal was not announced: ${cause.javaClass.simpleName}")
+            false
+        }
+    }
+
+    /**
+     * A passkey of this account just gave its seal secret on this device (at
+     * creation, or at "Restore keys with this passkey"): announce its seal
+     * key and have its owned-channels lock made (ADR-0101 sections 7 and
+     * 10). `true` when the account's announcement now lists it, so the
+     * passkey keeps the chats. [sealPrfOutput] is not kept by this call
+     * beyond the lock that is made from it; never throws but for
+     * cancellation.
+     */
+    public suspend fun adoptPasskeySeal(credentialIdB64Url: String, sealPrfOutput: ByteArray?): Boolean {
+        if (sealPrfOutput == null) return false
+        val accountIdB64 = signedInAccountIdB64() ?: return false
+        val credentialId = try {
+            base64UrlDecodeNoPad(credentialIdB64Url)
+        } catch (_: Throwable) {
+            return false
+        }
+        val entry = passkeySealEntry(sealPrfOutput, credentialId) ?: return false
+        me.lakko.app.channels.OwnedChannelsRuntime.passkeyAdded(accountIdB64, entry.tagHex, sealPrfOutput, applicationContext)
+        return announcePasskeySeal(entry)
+    }
+
+    /** A passkey was removed, or the password changed on this device: the
+     *  announcement and the locks follow. Best effort. */
+    public suspend fun refreshSealsAfter(reason: String) {
+        if (mutableIdentitySecrets.value == null) return
+        mutableAccountFactors.value = null
+        refreshAccountFactors()
+        announceSealsBestEffort(reason)
+    }
+
+    /**
+     * ADR-0101 section 7: `S`, the server half of the owned-channels
+     * password lock, as the sign-up's answer carried it. Kept under the
+     * device key until the first channel pass put it under the keys lock,
+     * then removed. Wiped here. Never throws.
+     */
+    private fun keepOwnedChannelsSecret(accountIdB64: String, serverHalf: ByteArray?) {
+        if (serverHalf == null) return
+        try {
+            me.lakko.app.channels.OwnedChannelsRuntime.keepServerHalf(applicationContext, accountIdB64, serverHalf)
+        } finally {
+            serverHalf.fill(0)
+        }
+    }
+
+    /** The seal key entry a passkey's PRF output gives (ADR-0101 section
+     *  10), or `null` when the core refuses it. */
+    public fun passkeySealEntry(prfOutput: ByteArray, credentialId: ByteArray): SealEntryView? = try {
+        sealCore.entryOf(SealSecret.Passkey(prfOutput, credentialId))
+    } catch (_: Throwable) {
+        null
+    }
+
+    /** Whether the announcement as last read lists a seal for the passkey
+     *  [credentialId]: it keeps the chats (UX 19.1d). `null` when no
+     *  announcement was read. */
+    public fun passkeyKeepsChats(credentialId: ByteArray): Boolean? {
+        val view = mutableSealView.value ?: return null
+        val tag = try {
+            sealCore.passkeyTagHex(credentialId)
+        } catch (_: Throwable) {
+            return null
+        }
+        return view.passkeys.any { it.tagHex == tag }
+    }
+
+    /** UX 19.1d, place 3: the once-per-device dialog, the first time the app
+     *  opens after a sign-in on a device, never after a key reset. */
+    private fun evaluatePasswordOnlyDialog(accountIdB64: String, view: SealAnnouncementView) {
+        val hasFactor = mutableAccountFactors.value?.any ?: return
+        mutablePasswordOnlyDialog.value = passwordOnlyDialogDue(
+            noticeShown = passwordOnlyNoticeShown(hasFactor, view.keptBy),
+            shownBefore = protectionStore.passwordOnlyDialogShown(accountIdB64),
+            afterKeyReset = mutableResetThisSession.value,
+        )
     }
 
     private suspend fun fetchAccountNotices(accountIdB64: String) {
@@ -3975,9 +4374,6 @@ public class AuthRepository(
         val selection = selectAccountNotices(rows, nextAfter, cursor, noticeStore.ownActions(accountIdB64))
         noticeStore.setCursor(accountIdB64, selection.cursor)
         noticeStore.clearOwn(accountIdB64, selection.spentOwn)
-        // A phrase was saved for the account (here or elsewhere): this
-        // device's phrase-saved flag is read again.
-        if (rows.any { it.kind == AccountNoticeKind.PhraseSaved.wire }) refreshRecoveryEmail()
         if (!secretsAreFor(accountIdB64) || selection.show.isEmpty()) return
         mutableAccountNotices.value = mutableAccountNotices.value + selection.show
     }
@@ -3998,86 +4394,108 @@ public class AuthRepository(
         noticePasswordUnlockUntilMs[accountIdB64] = System.currentTimeMillis() + FRESH_AUTH_WINDOW_MS
     }
 
-    /** The "Protect your account" step was answered (any of its outcomes). */
-    public fun finishProtectStep() {
-        signedInAccountIdB64()?.let { protectionStore.setProtectStepOwed(it, false) }
-        mutableProtectStepOwed.value = false
-    }
-
-    /** When the no-protection banner was dismissed on this device, or `null`. */
-    public fun protectBannerDismissedAtMs(): Long? =
-        signedInAccountIdB64()?.let { protectionStore.bannerDismissedAtMs(it) }
-
-    public fun dismissProtectBanner() {
-        signedInAccountIdB64()?.let { protectionStore.dismissBanner(it, System.currentTimeMillis()) }
-    }
-
     /**
-     * "Save a recovery phrase" (UX 19.5): `GET /account/phrase` and which way
-     * the screen goes ([phraseSavePath]). Asked before any word is shown; a
-     * failure throws and no path is guessed.
+     * `Continue` on the "Protect your account" step (UX 19.1a): the only way
+     * off it, and only once the account has one of the three. `false` (and
+     * the step stays) while it has none, or while that could not be read.
      */
-    public suspend fun phraseSavePath(): PhraseSavePath {
-        val accountIdB64 = signedInAccountIdB64()
-            ?: throw AuthClientArgError("not signed in", me.lakko.app.l10n.UiText("common.error.session_not_ready"))
-        val token = sessionTokenProvider.current()
-            ?: throw AuthClientArgError("not signed in", me.lakko.app.l10n.UiText("common.error.session_not_ready"))
-        val status = authClientFactory().use { it.accountPhraseStatus(token) }
-        return withContext(Dispatchers.IO) {
-            val owed = rotationOwedStore.load(accountIdB64)
-            me.lakko.app.auth.phraseSavePath(
-                rotationNeeded = status.rotationNeeded,
-                holdsPhrase = devicePhrase() != null,
-                rotationInFlight = owed != null && !me.lakko.app.devices.rotationCanBeAbandoned(owed),
-            )
+    public suspend fun finishProtectStep(): Boolean {
+        val accountIdB64 = signedInAccountIdB64() ?: return false
+        val factors = refreshAccountFactors() ?: mutableAccountFactors.value
+        if (factors?.any != true) return false
+        protectionStore.setProtectStepOwed(accountIdB64, false)
+        mutableProtectStepOwed.value = false
+        // ADR-0101 section 10: a sign-up's landing can run before the
+        // account's first directory row exists, and then announces nothing.
+        // By `Continue` the row is there: the account leaves the step with
+        // its protection published (the password seal at least), in the
+        // background so the app is not kept waiting.
+        pushScope.launchBound(accountBinding) {
+            if (signedInAccountIdB64() == accountIdB64) announceSealsBestEffort("protect-step")
         }
+        return true
+    }
+
+    /** The once-per-device dialog of UX 19.1d was closed (`Not now`, or one
+     *  of its actions): never shown on this device again. */
+    public fun closePasswordOnlyDialog() {
+        signedInAccountIdB64()?.let { protectionStore.markPasswordOnlyDialogShown(it) }
+        mutablePasswordOnlyDialog.value = false
     }
 
     /**
-     * The last step of "Save a recovery phrase" with the keys kept: tell the
-     * server, under the live proof. Marked as this device's own first, as a
-     * rotation's is, so the acting device is not asked "It was me".
+     * The last step of "Save a recovery phrase" (UX 19.5, amended
+     * 2026-11-26), after the three words passed: publish the account's seal
+     * announcement with the phrase seal in it. No key changes: the words are
+     * the ones this device already holds. Nothing counts as saved before the
+     * announcement landed.
      */
     public suspend fun savePhraseKeepingKeys(): PhraseSavedOutcome {
         val accountIdB64 = signedInAccountIdB64() ?: return PhraseSavedOutcome.Failed
         val outcome = me.lakko.app.auth.savePhraseKeepingKeys(
             object : PhraseKeptPorts {
-                override fun freshGrant(): String? = this@AuthRepository.freshGrant()
+                override fun proofLive(): Boolean = freshProofLive()
 
-                override fun markOwnAction() =
-                    noticeStore.markOwn(accountIdB64, AccountNoticeKind.PhraseSaved, System.currentTimeMillis())
-
-                override suspend fun markSaved(freshGrant: String) {
-                    val token = sessionTokenProvider.current()
-                        ?: throw AuthClientArgError("not signed in")
-                    authClientFactory().use { it.markPhraseSaved(token, freshGrant) }
+                override suspend fun publishWithPhrase() {
+                    when (announceSeals(reason = "phrase-saved", withPhrase = true)) {
+                        is AnnounceOutcome.Published, is AnnounceOutcome.Current -> Unit
+                        else -> throw AuthClientArgError("the account's protection was not published")
+                    }
                 }
 
                 override fun storeSaved() {
                     protectionStore.setPhraseSaved(accountIdB64, true)
-                    mutableRecoveryEmail.value = mutableRecoveryEmail.value?.copy(vault = false, phraseSaved = true)
                 }
             },
         )
-        when (outcome) {
-            // An earlier attempt on the rotation path that never reached the
-            // server is finished with: its sealed new entropy goes too.
-            PhraseSavedOutcome.Saved -> dropUnstartedPhraseRotation(accountIdB64)
-            PhraseSavedOutcome.ProofRequired -> dropFreshProof()
-            PhraseSavedOutcome.NeedsRotation, PhraseSavedOutcome.Failed -> Unit
-        }
         return outcome
     }
 
-    private fun dropUnstartedPhraseRotation(accountIdB64: String) {
-        try {
-            val owed = rotationOwedStore.load(accountIdB64) ?: return
-            if (!owed.phraseSaved || !me.lakko.app.devices.rotationCanBeAbandoned(owed)) return
-            rotationOwedStore.clear(accountIdB64)
-            rotationDiscardPrepared()
-        } catch (cause: Throwable) {
-            Log.w("lakko-auth", "unstarted rotation not dropped: ${cause.javaClass.simpleName}")
+    /**
+     * `POST /totp/enroll/start` for the signed-in account (UX 19.1b): the
+     * setup link and the key. An authenticator is one of the reset's
+     * factors, so this needs the 17.1 proof.
+     *
+     * @throws FreshAuthRequired without a live proof (nothing was started).
+     */
+    public suspend fun totpEnrolStart(): TotpEnrollStartResult {
+        val grant = freshGrant() ?: throw FreshAuthRequired()
+        val token = sessionTokenProvider.current()
+            ?: throw AuthClientArgError("not signed in", me.lakko.app.l10n.UiText("common.error.session_not_ready"))
+        return try {
+            authClientFactory().use { it.totpEnrollStart(token, grant) }
+        } catch (err: AuthHttpError) {
+            if (isFreshAuthRequired(err)) {
+                dropFreshProof()
+                throw FreshAuthRequired()
+            }
+            throw err
         }
+    }
+
+    /** `POST /totp/enroll/finish`: the first code the app showed. On success
+     *  the account has an authenticator and the screens read it. */
+    public suspend fun totpEnrolFinish(code: String) {
+        val grant = freshGrant() ?: throw FreshAuthRequired()
+        val token = sessionTokenProvider.current()
+            ?: throw AuthClientArgError("not signed in", me.lakko.app.l10n.UiText("common.error.session_not_ready"))
+        try {
+            authClientFactory().use { it.totpEnrollFinish(token, code, grant) }
+        } catch (err: AuthHttpError) {
+            if (isFreshAuthRequired(err)) {
+                dropFreshProof()
+                throw FreshAuthRequired()
+            }
+            throw err
+        }
+        noteTotpEnabled()
+    }
+
+    /** The account has a confirmed authenticator (set up here, or the
+     *  server said "already set up"). */
+    public fun noteTotpEnabled() {
+        mutableRecoveryEmail.value = mutableRecoveryEmail.value?.copy(totp = true)
+        mutableAccountFactors.value = mutableAccountFactors.value?.copy(totp = true)
     }
 
     /**
@@ -4111,12 +4529,9 @@ public class AuthRepository(
     }
 
     /**
-     * `POST /recovery-email/enrol/finish`: the mailed [code], and - only
-     * while no phrase is saved ([enrolSealsVault]) - the email vault sealed
-     * under the username and [address] with the start's salt. The seal runs
-     * 64 MiB Argon2id and is done off the main thread here. An account whose
-     * phrase was saved meanwhile (`409 phrase-saved`) is finished again
-     * without a vault.
+     * `POST /recovery-email/enrol/finish`: the mailed [code]. The address is
+     * kept by the account's devices (their synced state), never by the
+     * server.
      */
     public suspend fun recoveryEmailEnrolFinish(start: RecoveryEmailEnrolStart, address: String, code: String) {
         val session = mutableState.value as? AuthState.Session
@@ -4125,43 +4540,20 @@ public class AuthRepository(
         val token = sessionTokenProvider.current()
             ?: throw AuthClientArgError("not signed in", me.lakko.app.l10n.UiText("common.error.session_not_ready"))
         val before = mutableRecoveryEmail.value ?: refreshRecoveryEmail()
-        val phraseSaved = before?.phraseSaved ?: protectionStore.phraseSaved(accountIdB64)
-        val sealed: ByteArray? = if (enrolSealsVault(phraseSaved)) {
-            val named = resolveNamedSignIn(null, session.account.username, loginHandleSource)
-            withContext(Dispatchers.Default) {
-                val phrase = DevicePhrase.read(applicationContext, accountIdB64)
-                    ?: throw AuthClientArgError("this device holds no phrase to seal")
-                RecoveryMnemonic.fromPhrase(phrase).use {
-                    uniffi.lakko_ffi_uniffi.emailVaultSeal(it, named.handle, address, start.vaultSalt)
-                }
-            }
-        } else {
-            null
-        }
         val kind = if (before?.enabled == true) AccountNoticeKind.EmailReplaced else AccountNoticeKind.EmailAdded
         noticeStore.markOwn(accountIdB64, kind, System.currentTimeMillis())
-        val vault = authClientFactory().use { client ->
-            try {
-                client.recoveryEmailEnrolFinish(token, start.challengeId, code, sealed)
-            } catch (err: AuthHttpError) {
-                if (err.code != "phrase-saved" || sealed == null) throw err
-                protectionStore.setPhraseSaved(accountIdB64, true)
-                client.recoveryEmailEnrolFinish(token, start.challengeId, code, null)
-            }
-        }
-        mutableRecoveryEmail.value = RecoveryEmailStatus(
-            available = true,
-            enabled = true,
-            vault = vault,
-            phraseSaved = protectionStore.phraseSaved(accountIdB64),
-            totp = before?.totp == true,
-        )
+        authClientFactory().use { it.recoveryEmailEnrolFinish(token, start.challengeId, code) }
+        mutableRecoveryEmail.value = RecoveryEmailStatus(available = true, enabled = true, totp = before?.totp == true)
+        mutableAccountFactors.value = (mutableAccountFactors.value ?: AccountFactors(false, before?.totp == true, false))
+            .copy(email = true)
         // The confirmed address is kept by the account's devices.
         keepRecoveryAddress(accountIdB64, address)
     }
 
     /** `DELETE /recovery-email` for the signed-in account.
-     *  @throws FreshAuthRequired without a live proof. */
+     *  @throws FreshAuthRequired without a live proof.
+     *  @throws AuthHttpError `409 last-factor` ([isLastFactor]) when it is
+     *    the account's only second way in: nothing was removed. */
     public suspend fun recoveryEmailRemove() {
         val accountIdB64 = signedInAccountIdB64()
             ?: throw AuthClientArgError("not signed in", me.lakko.app.l10n.UiText("common.error.session_not_ready"))
@@ -4178,7 +4570,8 @@ public class AuthRepository(
             }
             throw err
         }
-        mutableRecoveryEmail.value = mutableRecoveryEmail.value?.copy(enabled = false, vault = false)
+        mutableRecoveryEmail.value = mutableRecoveryEmail.value?.copy(enabled = false)
+        mutableAccountFactors.value = mutableAccountFactors.value?.copy(email = false)
         keepRecoveryAddress(accountIdB64, null)
     }
 
@@ -4208,7 +4601,7 @@ public class AuthRepository(
     /**
      * The register changed or became readable (the app root calls this on
      * every emission of the sync runtime's register): a parked write is
-     * flushed, Settings is told, and the re-seal rule is evaluated again.
+     * flushed and Settings is told.
      */
     public suspend fun onRecoveryAddressState() {
         val port = recoveryAddressPort ?: return
@@ -4231,62 +4624,7 @@ public class AuthRepository(
             }
         }
         val held = port.state().address
-        if (held != mutableRecoveryAddress.value) {
-            mutableRecoveryAddress.value = held
-            resealTried.remove(accountIdB64)
-        }
-        resealIfNeeded()
-    }
-
-    /**
-     * The automatic re-seal ([resealNeeded]): seal the CURRENT phrase under
-     * the held address with a fresh random salt, off the main thread, and
-     * `PUT /recovery-email/vault`. Silent. One attempt in flight per
-     * account and one per landing or register change; `vault-exists` and
-     * `phrase-saved` read the status again; `address-mismatch` clears the
-     * register (it is stale); anything else waits for the next landing.
-     */
-    private suspend fun resealIfNeeded() {
-        val status = mutableRecoveryEmail.value ?: return
-        val session = mutableState.value as? AuthState.Session ?: return
-        val accountIdB64 = session.account.accountIdB64
-        if (!secretsAreFor(accountIdB64) || session.account.username.isBlank()) return
-        val port = recoveryAddressPort ?: return
-        val held = port.state().takeIf { it.ready }?.address
-        if (!resealNeeded(status.enabled, status.vault, status.phraseSaved, addressHeld = held != null)) return
-        val address = held ?: return
-        // The new words must be on this device: not while a reset's or a
-        // rotation's publish is still owed.
-        if (publishOwed()) return
-        if (!resealTried.add(accountIdB64) || !resealInFlight.add(accountIdB64)) return
-        val failure: Throwable? = try {
-            val token = sessionTokenProvider.current() ?: return
-            val named = resolveNamedSignIn(null, session.account.username, loginHandleSource)
-            val salt = ByteArray(EMAIL_VAULT_SALT_LEN).also { SecureRandom().nextBytes(it) }
-            val sealed = withContext(Dispatchers.Default) {
-                val phrase = DevicePhrase.read(applicationContext, accountIdB64)
-                    ?: throw AuthClientArgError("this device holds no phrase to seal")
-                RecoveryMnemonic.fromPhrase(phrase).use {
-                    uniffi.lakko_ffi_uniffi.emailVaultSeal(it, named.handle, address, salt)
-                }
-            }
-            authClientFactory().use { it.recoveryEmailVaultPut(token, named.handle, address, salt, sealed) }
-            null
-        } catch (cause: Throwable) {
-            if (cause is kotlinx.coroutines.CancellationException) throw cause
-            cause
-        } finally {
-            resealInFlight.remove(accountIdB64)
-        }
-        when (resealOutcomeOf(failure)) {
-            ResealOutcome.Settled -> refreshRecoveryEmail()
-            ResealOutcome.AddressStale -> {
-                Log.w("lakko-auth", "the held recovery address is not the account's any more; cleared")
-                keepRecoveryAddress(accountIdB64, null)
-            }
-            ResealOutcome.RetryLater ->
-                Log.w("lakko-auth", "recovery email vault not re-sealed: ${failure?.javaClass?.simpleName}")
-        }
+        if (held != mutableRecoveryAddress.value) mutableRecoveryAddress.value = held
     }
 
     // ---- the own-username register and a rename (ADR-0076) ---------------
@@ -4387,30 +4725,20 @@ public class AuthRepository(
         val target = namedHandleOrRefuse(loginHandleSource, to)
         val previous = namedHandleOrRefuse(loginHandleSource, from)
         val status = mutableRecoveryEmail.value ?: refreshRecoveryEmail()
-        val address = recoveryAddressPort?.state()?.takeIf { it.ready }?.address
+        val address = renameTypedAddress?.takeIf { it.isNotBlank() }
+            ?: recoveryAddressPort?.state()?.takeIf { it.ready }?.address
+        val factors = mutableAccountFactors.value ?: refreshAccountFactors()
         val plan = renameRecoveryEmail(
             hasRecoveryEmail = status?.enabled == true,
             addressHeld = address != null,
-            phraseSaved = status?.phraseSaved ?: protectionStore.phraseSaved(accountIdB64),
+            // Not known reads as "the last one": asking for the address once
+            // is cheaper than a change the server refuses.
+            emailIsLastFactor = factors == null || (factors.email && !factors.totp && !factors.passkey),
         )
         val carried: LoginHandleRecoveryEmail? = when (plan) {
             RenameRecoveryEmail.None -> null
-            RenameRecoveryEmail.AddressOnly -> LoginHandleRecoveryEmail(address = address.orEmpty())
-            RenameRecoveryEmail.AddressAndVault -> {
-                val salt = ByteArray(EMAIL_VAULT_SALT_LEN).also { SecureRandom().nextBytes(it) }
-                val sealed = withContext(Dispatchers.Default) {
-                    val phrase = DevicePhrase.read(applicationContext, accountIdB64)
-                        ?: throw AuthClientArgError("this device holds no phrase to seal")
-                    RecoveryMnemonic.fromPhrase(phrase).use {
-                        uniffi.lakko_ffi_uniffi.emailVaultSeal(it, target.handle, address.orEmpty(), salt)
-                    }
-                }
-                LoginHandleRecoveryEmail(
-                    address = address.orEmpty(),
-                    vault_salt = base64Encode(salt),
-                    sealed_entropy = base64Encode(sealed),
-                )
-            }
+            RenameRecoveryEmail.Address -> LoginHandleRecoveryEmail(address = address.orEmpty())
+            RenameRecoveryEmail.AskAddress -> throw RenameNeedsRecoveryAddress()
         }
         val outcome = try {
             authClientFactory().use {
@@ -4444,7 +4772,14 @@ public class AuthRepository(
      * the name at discovery (a refusal binds the old handle back), then the
      * marker, the session state, the register and the re-publish.
      */
-    public suspend fun changeUsername(newUsername: String): RenameResult {
+    public suspend fun changeUsername(
+        newUsername: String,
+        /** UX 19.1c: the recovery address typed on the username screen when
+         *  the email is the account's last second way in and this device
+         *  holds no address. Passed through; kept only by the account's
+         *  synced state once the change went through. */
+        recoveryAddress: String? = null,
+    ): RenameResult {
         val session = mutableState.value as? AuthState.Session
         if (session == null || session.account.username.isBlank() || !secretsAreFor(session.account.accountIdB64)) {
             return RenameResult.Refused(me.lakko.app.l10n.UiText("common.error.session_not_ready"))
@@ -4458,12 +4793,24 @@ public class AuthRepository(
             return RenameResult.Refused(err.text ?: me.lakko.app.l10n.UiText("username.error.unknown"))
         }
         renaming = true
+        renameTypedAddress = recoveryAddress?.trim()?.takeIf { it.isNotEmpty() }
         return try {
-            renameRunner(session.account.accountIdB64).start(session.account.username, named.username)
+            val result = renameRunner(session.account.accountIdB64).start(session.account.username, named.username)
+            // The typed address moved with the name: the devices keep it.
+            if (result is RenameResult.Done) {
+                renameTypedAddress?.let { keepRecoveryAddress(session.account.accountIdB64, it) }
+            }
+            result
         } finally {
+            renameTypedAddress = null
             renaming = false
         }
     }
+
+    /** The address typed for the rename in flight ([changeUsername]). Memory
+     *  only, cleared when the call returns; never logged. */
+    @Volatile
+    private var renameTypedAddress: String? = null
 
     /** A rename a crash left between its steps is finished or rolled back
      *  at the landing. Best effort; a record that cannot be settled stays. */
@@ -4803,28 +5150,23 @@ public class AuthRepository(
 
     /** How [emailRecoverFinish] ended. */
     public enum class EmailRecoverOutcome {
-        /** The vault opened and the phrase restore landed the session. */
-        Restored,
-
         /** The new password was set and the session landed (a device
          *  without keys shows "Restore your keys" next). */
         PasswordSet,
-
-        /** The vault did not open under the typed username and address. The
-         *  ticket is spent; nothing changed on the server. */
-        VaultNotOpened,
     }
 
     /**
-     * Step 4 onward: ask `recover/open` under [ticket] and do what it says
-     * ([emailRecoverAction]).
+     * Step 4 onward (UX 19.3, amended 2026-11-26): `password/start|finish`
+     * under [ticket], then the usual ACCESS landing. A mailed code never
+     * brings keys, for any account.
      *
-     *   - the vault: opened with the login handle of [username] and
-     *     [address] off the main thread (64 MiB Argon2id), the phrase is
-     *     rebuilt and the EXISTING phrase restore runs with [newPassword]
-     *     ([recover]: bundle check, recovery login, backup restore);
-     *   - the password mode: `password/start|finish` under the ticket, then
-     *     the usual ACCESS landing.
+     * The new password's export key is kept under the device key
+     * ([ExportKeyStore]): on a device with the account's keys it seals the
+     * next reset and locks the owned channels at once (the landing duties);
+     * on a device without them it waits there until this device holds the
+     * keys (ADR-0101 section 7 item 7, section 10). Until a device with the
+     * keys takes the password over, a reset is unsealed unless a passkey
+     * keeps the chats.
      */
     public suspend fun emailRecoverFinish(
         username: String,
@@ -4834,83 +5176,54 @@ public class AuthRepository(
     ): EmailRecoverOutcome {
         val named = resolveNamedSignIn(null, username, loginHandleSource)
         val candidate = candidateAccount(named.username)
-        val opened = authClientFactory().use { it.emailRecoverOpen(ticket) }
-        return when (emailRecoverAction(opened)) {
-            EmailRecoverAction.RestoreFromVault -> {
-                opened as EmailRecoverOpen.Vault
-                val phrase = try {
-                    withContext(Dispatchers.Default) {
-                        uniffi.lakko_ffi_uniffi.emailVaultOpen(
-                            named.handle,
-                            address,
-                            opened.vaultSalt,
-                            opened.sealedEntropy,
-                        ).use { it.phrase() }
-                    }
-                } catch (_: FfiException) {
-                    return EmailRecoverOutcome.VaultNotOpened
-                } finally {
-                    opened.sealedEntropy.fill(0)
-                }
-                // The server recorded "account opened by email" at `open`:
-                // this device's own action.
-                // Before the landing, so a marker of an account still sealed
-                // from its last sign-out is not refused.
-                candidate?.let {
-                    noticeStore.markOwnBeforeLanding(it, AccountNoticeKind.AccountOpenedByEmail, System.currentTimeMillis())
-                }
-                // Opened from the email vault: never typed, never shown.
-                recover(phrase, newPassword, named.username, phraseHeldByPerson = false)
-                // Reached from "Restore your keys": the parked sign-in without
-                // keys is answered by the session that just landed.
-                if (pendingRecovery.get() != null) clearPendingRecovery()
-                signedInAccountIdB64()?.let { accountIdB64 ->
-                    noticeStore.markOwn(accountIdB64, AccountNoticeKind.AccountOpenedByEmail, System.currentTimeMillis())
-                    protectionStore.setPhraseSaved(accountIdB64, false)
-                    // The person typed the address: this device keeps it.
-                    keepRecoveryAddress(accountIdB64, address)
-                }
-                EmailRecoverOutcome.Restored
+        val start = signInStart()
+        val result = try {
+            authClientFactory().use {
+                it.emailRecoverSetPassword(ticket, newPassword, landingDeviceId(candidate, start.wipes))
             }
-            EmailRecoverAction.SetPassword -> {
-                val start = signInStart()
-                val result = try {
-                    authClientFactory().use {
-                        it.emailRecoverSetPassword(ticket, newPassword, landingDeviceId(candidate, start.wipes))
-                    }
-                } catch (err: AuthHttpError) {
-                    // ADR-0099 section 4 - the account is suspended.
-                    landSuspended(err.suspended ?: throw err, named.username)
-                    return EmailRecoverOutcome.PasswordSet
-                }
-                // Overtaken while the round trip was out: nothing lands.
-                start.standDownIfOvertaken()
-                val accountIdB64 = base64Encode(result.accountId)
-                openStoresFor(accountIdB64)
-                noticeStore.markOwn(accountIdB64, AccountNoticeKind.PasswordChangedByEmail, System.currentTimeMillis())
-                protectionStore.setPhraseSaved(accountIdB64, true)
-                mutableRestoreNotice.value = null
-                // A mailed code proves the mailbox, nothing more (the answer
-                // carries no fresh-auth grant).
-                freshAuth.onSignInWithoutProof(accountIdB64)
-                sessionLandingKind = SessionLanding.Other
-                // The password was just chosen: no new-password step is owed.
-                mutableNewPasswordOwed.value = false
-                rebindLoginHandleInBackground(result.sessionToken, named.handle)
-                landAfterAccessRecovery(
-                    username = named.username,
-                    accountIdBytes = result.accountId,
-                    accountIdB64 = accountIdB64,
-                    session = result.session,
-                    pushContext = "email-recover",
-                    wipes = start.wipes,
-                )
-                // The person typed the address: this device keeps it (the
-                // write is parked until the synced state is open).
-                keepRecoveryAddress(accountIdB64, address)
-                EmailRecoverOutcome.PasswordSet
-            }
+        } catch (err: AuthHttpError) {
+            // ADR-0099 section 4 - the account is suspended.
+            landSuspended(err.suspended ?: throw err, named.username)
+            return EmailRecoverOutcome.PasswordSet
         }
+        try {
+            // Overtaken while the round trip was out: nothing lands.
+            start.standDownIfOvertaken()
+            val accountIdB64 = base64Encode(result.accountId)
+            openStoresFor(accountIdB64)
+            noticeStore.markOwn(accountIdB64, AccountNoticeKind.PasswordChangedByEmail, System.currentTimeMillis())
+            result.exportKey?.takeIf { it.size == ExportKeyStore.EXPORT_KEY_LENGTH }?.let { exportKey ->
+                try {
+                    SignInKeyWrites.ifNotWiped(start.wipes, accountIdB64) {
+                        ExportKeyStore.putExportKey(applicationContext, accountIdB64, exportKey)
+                    }
+                } catch (cause: Throwable) {
+                    Log.w("lakko-auth", "the new password's export key was not kept: ${cause.javaClass.simpleName}")
+                }
+            }
+            mutableRestoreNotice.value = null
+            // A mailed code proves the mailbox, nothing more (the answer
+            // carries no fresh-auth grant).
+            freshAuth.onSignInWithoutProof(accountIdB64)
+            sessionLandingKind = SessionLanding.Other
+            // The password was just chosen: no new-password step is owed.
+            mutableNewPasswordOwed.value = false
+            rebindLoginHandleInBackground(result.sessionToken, named.handle)
+            landAfterAccessRecovery(
+                username = named.username,
+                accountIdBytes = result.accountId,
+                accountIdB64 = accountIdB64,
+                session = result.session,
+                pushContext = "email-recover",
+                wipes = start.wipes,
+            )
+            // The person typed the address: this device keeps it (the
+            // write is parked until the synced state is open).
+            keepRecoveryAddress(accountIdB64, address)
+        } finally {
+            result.exportKey?.fill(0)
+        }
+        return EmailRecoverOutcome.PasswordSet
     }
 
     // ---- taking the account back with the phrase (UX 19.7) ----------------
@@ -5174,6 +5487,9 @@ public class AuthRepository(
                     wipes = wipes,
                 )
                 mutableNewPasswordOwed.value = false
+                // ADR-0101 sections 7 and 10: the password seal and the
+                // owned-channels password lock follow the new password.
+                announceSealsBestEffort("password-changed")
             } finally {
                 result.exportKey.fill(0)
             }
@@ -5648,16 +5964,21 @@ public class AuthRepository(
      * binding re-signed by the NEW account key
      * ([SessionIdentities.deviceIdentity]).
      *
-     * Proven now (UX 15.1a as amended 2026-10-06, section 17.2): both server
-     * calls carry the fresh-auth proof a password or passkey sign-in mints.
-     * This function never obtains one: the warning screen's proof block does
-     * ([proveWithPassword] / [proveWithPasskey]) before it is called, or the
-     * person signed in with the password or a passkey less than ten minutes
-     * ago. With no live proof nothing is sent.
+     * Proven now (ADR-0073 amended 2026-11-26, UX 15.1b): both server calls
+     * carry the reset factor grant: the password AND one second factor the
+     * account has (authenticator code, mailed code, passkey). This function
+     * never obtains one: the warning screen's factor section does
+     * ([resetConfirmTotp] / [resetEmailFinish] / [resetConfirmPasskey])
+     * before it is called. With no live confirmation nothing is sent.
+     *
+     * Sealed or not (ADR-0101 section 10, UX 15.1c): when one of this
+     * device's seal keys is announced by the account, the reset carries a
+     * reset seal and contacts bring the chats back; otherwise it is unsealed
+     * and starts the account over. The screen said which before the word.
      *
      * @throws AuthClientArgError when there is no pending recovery.
-     * @throws FreshAuthRequired no live proof, or the server refused the
-     *   proof (`403 fresh-auth-required`). Nothing was reset.
+     * @throws ResetFactorRequired no live confirmation, or the server
+     *   refused it (`403 reset-factor-required`). Nothing was reset.
      */
     public suspend fun mintFreshIdentity(): String {
         // The new phrase is staged in the account's row before the server
@@ -5666,18 +5987,21 @@ public class AuthRepository(
         val wipes = me.lakko.app.account.AccountStoreGate.wipeMark()
         val pending = pendingRecovery.get()
             ?: throw AuthClientArgError("no pending identity recovery — sign in first")
-        val proof = freshAuth.live(pending.accountIdB64, System.currentTimeMillis())
-            ?: throw FreshAuthRequired()
+        // ADR-0073, amended 2026-11-26: the password AND one second factor,
+        // confirmed on the warning screen. With no live confirmation nothing
+        // is sent.
+        val factor = resetFactor.get()
+            ?.takeIf { it.accountIdB64 == pending.accountIdB64 && resetFactorLive(it.confirmed, System.currentTimeMillis()) }
+            ?: throw ResetFactorRequired()
         val bound = accountBinding.capture()
         // Own copies: the reset below must name this account whatever
         // happens to the parked context meanwhile (a sign-out drops it).
         val accountIdBytes = pending.accountIdBytes.copyOf()
         val accountIdB64 = pending.accountIdB64
         val username = pending.username
-        // ADR-0075 - whether the new words will be shown depends on the
-        // account's mode, read with the parked session before the reset
-        // (best effort: the flag as last learned otherwise).
-        learnPhraseSaved(accountIdB64, pending.sessionToken)
+        // After a reset the new phrase is not saved (ADR-0101 section 10):
+        // no words are shown; the person saves a phrase from Settings.
+        protectionStore.setPhraseSaved(accountIdB64, false)
 
         // Generate a fresh 12-word recovery phrase + its seed (same client-
         // side generation signup uses), and the identity it seeds.
@@ -5694,6 +6018,55 @@ public class AuthRepository(
         // read now, while the directory and the log still name it. Without it
         // nothing a peer returns is accepted silently.
         val previousKeyB64 = readPreviousOwnKey(accountIdBytes, base64Encode(newSignaturePubkey))
+
+        // ADR-0101 section 10: the reset seal, signed BEFORE the server step
+        // by a seal key the account announced under its old keys (the
+        // password just proven, the passkey just used, or the phrase). None
+        // listed: the reset is unsealed and starts the account over, which
+        // the screen said before the word was typed (UX 15.1c).
+        val sealOption = chosenSealOption(factor.confirmed.prediction, factor.options)
+        val announced = factor.announcement
+        val resetSeal: ByteArray? = if (sealOption != null && announced != null) {
+            try {
+                sealCore.signResetSeal(
+                    secret = sealOption.secret,
+                    accountId = accountIdBytes,
+                    announcementSeq = announced.seq,
+                    fromGeneration = announced.keyGeneration,
+                    newSignaturePubkey = newSignaturePubkey,
+                )
+            } catch (cause: Throwable) {
+                Log.w("lakko-auth", "the reset seal was not signed; the reset is unsealed: ${cause.javaClass.simpleName}")
+                null
+            }
+        } else {
+            null
+        }
+        // ADR-0101 section 7 item 8: before the reset spends the factor
+        // grant, the server half of the owned-channels lock, then the lock
+        // of what sealed the reset and the list. Kept for the channel pass
+        // of the session that follows. An unsealed reset opens nothing.
+        if (resetSeal != null && sealOption != null) {
+            try {
+                val serverHalf = authClientFactory().use {
+                    it.ownedChannelsSecret(sessionTokenProvider.current() ?: pending.sessionToken, factor.grant.grant)
+                }
+                try {
+                    me.lakko.app.channels.OwnedChannelsRetake.prepare(
+                        context = applicationContext,
+                        accountIdB64 = accountIdB64,
+                        sealedBy = sealOption.secret,
+                        serverHalf = serverHalf,
+                    )
+                } finally {
+                    serverHalf.fill(0)
+                }
+            } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                // The channels then stay where they are; the reset goes on.
+                Log.w("lakko-auth", "the owned channels were not prepared for the reset: ${cause.javaClass.simpleName}")
+            }
+        }
 
         // The phrase goes into this account's own protected row BEFORE the
         // server step. From that step on it is the account's only way back,
@@ -5724,7 +6097,7 @@ public class AuthRepository(
                 authClientFactory().use {
                     it.resetAccountKeys(
                         sessionToken = sessionTokenProvider.current() ?: pending.sessionToken,
-                        freshGrant = proof.grant,
+                        resetGrant = factor.grant.grant,
                         seed = seedCopy,
                         newSignaturePubkey = newSignaturePubkey,
                         // ADR-0099 F3: the NEW key proves itself for this account.
@@ -5740,18 +6113,38 @@ public class AuthRepository(
                 Log.w("lakko-auth", "account keys not reset, and the phrase row could not be put back")
             }
             staged.close()
-            if (isFreshAuthRequired(cause)) {
-                // The proof expired between opening the screen and pressing
-                // the button: nothing was reset; the screen shows the block.
-                freshAuth.clear()
-                throw FreshAuthRequired()
+            me.lakko.app.channels.OwnedChannelsRetake.discard(applicationContext, accountIdB64)
+            if (isResetFactorRequired(cause)) {
+                // The confirmation ran out between opening the screen and
+                // pressing the button: nothing was reset; the section opens
+                // again as it was.
+                dropResetFactor()
+                throw ResetFactorRequired()
             }
             throw cause
         }
         staged.close()
-        // A key reset spends every proof of the old generation, and the pair
-        // it returns carries none.
+        // The password the reset was made with is the account's password
+        // after it (the envelope is kept): its export key is what the new
+        // keys' announcement and password lock are made from.
+        val proven = proofExportKey.get()?.takeIf { it.accountIdB64 == accountIdB64 }?.exportKey
+        (proven ?: pending.exportKey.takeIf { it.size == ExportKeyStore.EXPORT_KEY_LENGTH })?.let { exportKey ->
+            try {
+                SignInKeyWrites.ifNotWiped(wipes, accountIdB64) {
+                    // Only the password typed into the proof block in this run
+                    // may put a password seal forward (ADR-0101 section 10).
+                    ExportKeyStore.putExportKey(applicationContext, accountIdB64, exportKey, producedNow = proven != null)
+                }
+            } catch (cause: Throwable) {
+                Log.w("lakko-auth", "the export key was not kept after the reset: ${cause.javaClass.simpleName}")
+            }
+        }
+        // A key reset spends every proof and every confirmation of the old
+        // generation, and the pair it returns carries none.
         freshAuth.clear()
+        proofExportKey.getAndSet(null)?.wipe()
+        resetFactor.getAndSet(null)?.wipe()
+        sealStateStore.dropView(accountIdB64)
         // The reset cannot be taken back. What follows is decided by where
         // the device is NOW: the reset's screen is never put over another
         // account's session; then everything the account needs to finish
@@ -5774,6 +6167,8 @@ public class AuthRepository(
             wipes = wipes,
             landHere = after != FreshIdentityAfterPublish.KEEP_OWED,
             previousKeyB64 = previousKeyB64,
+            resetSeal = resetSeal,
+            previousSealSeq = announced?.seq,
         )
         return phrase
     }
@@ -5843,6 +6238,11 @@ public class AuthRepository(
         /** ADR-0101 sections 7 and 8: the account key of before the reset
          *  (standard base64), or `null` when it could not be established. */
         previousKeyB64: String? = null,
+        /** ADR-0101 section 10: the reset seal signed before the server
+         *  step, `null` for an unsealed reset and for a recall. */
+        resetSeal: ByteArray? = null,
+        /** The number of the announcement the device read before the reset. */
+        previousSealSeq: Long? = null,
     ) {
         // Its stores are written from here on, whatever sealed them before.
         openStoresFor(accountIdB64)
@@ -5876,6 +6276,8 @@ public class AuthRepository(
                 // verified below; the response time is the fallback.
                 signedAtMs = System.currentTimeMillis(),
                 newSignaturePubkeyB64 = base64Encode(newSignaturePubkey),
+                resetSealB64 = resetSeal?.let { base64Encode(it) },
+                previousSealSeq = previousSealSeq,
             ),
         )
         // ADR-0101: the continuity announcement owed after the publish, the
@@ -6011,7 +6413,16 @@ public class AuthRepository(
     /** The server refused the proof (`403 fresh-auth-required`): it is gone. */
     public fun dropFreshProof() {
         freshAuth.clear()
+        proofExportKey.getAndSet(null)?.wipe()
     }
+
+    /** The export key of the password a proof was made with
+     *  ([proveWithPassword]), for the account it was made for. Memory only. */
+    private class ProofExportKey(val accountIdB64: String, val exportKey: ByteArray) {
+        fun wipe() = exportKey.fill(0)
+    }
+
+    private val proofExportKey: AtomicReference<ProofExportKey?> = AtomicReference(null)
 
     /** How this session was landed (UX 17.6). */
     public fun sessionLanding(): SessionLanding = sessionLandingKind
@@ -6020,6 +6431,10 @@ public class AuthRepository(
      *  (a passkey sign-in that named no account does not): without it the
      *  proof block shows the sign-in screen's username field too. */
     public fun proofUsernameKnown(): Boolean = proofTarget()?.username?.isNotBlank() == true
+
+    /** The username of the account a proof would be for, when this device
+     *  knows it. */
+    public fun proofUsername(): String? = proofTarget()?.username?.takeIf { it.isNotBlank() }
 
     /** Whether the reset warning screen must show the proof block (UX
      *  17.2): no live fresh-auth proof is held for the parked account. */
@@ -6104,6 +6519,10 @@ public class AuthRepository(
             if (!freshAuth.hasLive(accountIdB64, System.currentTimeMillis())) {
                 throw AuthHttpError(200, "/login/finish", "no fresh-auth proof in the password login's answer")
             }
+            // ADR-0101 sections 7 and 10: the password just proven is what
+            // seals a reset and locks the owned channels. Its export key is
+            // kept for this account while the proof lasts, in memory only.
+            proofExportKey.getAndSet(ProofExportKey(accountIdB64, result.exportKey.copyOf()))?.wipe()
         } finally {
             result.exportKey.fill(0)
             result.sessionKey.fill(0)
@@ -6151,6 +6570,7 @@ public class AuthRepository(
                 assertion.freshGrant,
                 assertion.freshGrantExpiresAtMs,
                 System.currentTimeMillis(),
+                byPassword = false,
             )
             if (!freshAuth.hasLive(target.accountIdB64, System.currentTimeMillis())) {
                 throw AuthClientArgError(
@@ -6208,6 +6628,226 @@ public class AuthRepository(
         persistSessionPairBestEffort(accountIdB64, pair)
         installSessionPair(accountIdB64, pair)
         mutableIdentitySecrets.value = live.copy(session = pair)
+    }
+
+    // -----------------------------------------------------------------
+    // The reset's second factor (ADR-0073 amended 2026-11-26, UX 15.1b/c)
+    // -----------------------------------------------------------------
+
+    /** What the reset holds between the confirmed factor and the button.
+     *  Memory only; wiped when it is used, replaced or dropped. */
+    private class ResetFactorHeld(
+        val accountIdB64: String,
+        val grant: ResetFactorGrant,
+        val confirmed: ResetFactorConfirmed,
+        /** The account's announcement the prediction was made from. */
+        val announcement: SealAnnouncementView?,
+        /** The seal keys this device can sign with, in order. */
+        val options: List<ResetSealOption>,
+    ) {
+        fun wipe() = options.forEach { it.secret.wipe() }
+    }
+
+    private val resetFactor: AtomicReference<ResetFactorHeld?> = AtomicReference(null)
+
+    /** The confirmed factor of the parked account while it stands, else
+     *  `null` (never confirmed, run out, or another account). */
+    public fun resetFactorConfirmed(): ResetFactorConfirmed? {
+        val target = proofTarget() ?: return null
+        val held = resetFactor.get() ?: return null
+        if (held.accountIdB64 != target.accountIdB64) return null
+        return held.confirmed.takeIf { resetFactorLive(it, System.currentTimeMillis()) }
+    }
+
+    /** The reset panel closed, or the server refused the confirmation: it is
+     *  gone. */
+    public fun dropResetFactor() {
+        resetFactor.getAndSet(null)?.wipe()
+    }
+
+    /** Whether a PASSWORD proof is live for the account a reset would be
+     *  for: the factor section then draws no password block (UX 15.1b). A
+     *  passkey sign-in does not stand in for the password here. */
+    public fun resetPasswordProofLive(): Boolean {
+        val target = proofTarget() ?: return false
+        return freshAuth.livePassword(target.accountIdB64, System.currentTimeMillis()) != null
+    }
+
+    /**
+     * The three second ways in of the account a reset would be for (UX
+     * 15.1b: "the rows are the factors this account has; the device is
+     * signed in and asks the server"), read with its session. `null` when
+     * the server could not be asked.
+     */
+    public suspend fun resetAccountFactors(): AccountFactors? {
+        val token = sessionTokenProvider.current() ?: pendingRecovery.get()?.sessionToken ?: return null
+        val status = try {
+            authClientFactory().use { it.recoveryEmailStatus(token) }
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            Log.w("lakko-auth", "the account's factors were not read: ${cause.javaClass.simpleName}")
+            return null
+        }
+        return accountFactors(status, accountHasPasskey())
+    }
+
+    /**
+     * The password, checked FIRST (UX 15.1b): a live password proof, else a
+     * sign-in with [password] (which makes one). A wrong password stops
+     * here: the factor is not tried and an authenticator code is not used
+     * up. Returns the account and the password proof's grant.
+     *
+     * @throws FreshAuthWrongPassword wrong password.
+     * @throws FreshAuthRequired no live password proof and no password typed.
+     */
+    private suspend fun resetPasswordGrant(password: ByteArray?, typedUsername: String?): Pair<ProofTarget, String> {
+        val target = proofTarget() ?: throw AuthClientArgError(
+            "no account to reset",
+            me.lakko.app.l10n.UiText("common.error.session_not_ready"),
+        )
+        freshAuth.livePassword(target.accountIdB64, System.currentTimeMillis())?.let { return target to it.grant }
+        if (password == null || password.isEmpty()) throw FreshAuthRequired()
+        proveWithPassword(password, typedUsername)
+        val proof = freshAuth.livePassword(target.accountIdB64, System.currentTimeMillis()) ?: throw FreshAuthRequired()
+        return target to proof.grant
+    }
+
+    private suspend fun resetSessionToken(): String =
+        sessionTokenProvider.current() ?: pendingRecovery.get()?.sessionToken
+            ?: throw AuthClientArgError("no session", me.lakko.app.l10n.UiText("common.error.session_not_ready"))
+
+    /**
+     * A factor was confirmed: decide on THIS device whether the reset would
+     * be sealed (UX 15.1c, ADR-0101 section 10) and hold everything the
+     * reset needs. The account's current announcement is read from the
+     * directory (public); the server is never asked whether the reset will
+     * be sealed. A directory that cannot be read gives an unsealed
+     * prediction: the screen never promises a return it cannot check.
+     */
+    private suspend fun holdResetFactor(
+        target: ProofTarget,
+        grant: ResetFactorGrant,
+        factor: FactorKind,
+        passkey: SealSecret.Passkey?,
+    ): ResetFactorConfirmed {
+        val announcement = try {
+            readPublishedSeals(target.accountIdBytes)?.second
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            Log.w("lakko-auth", "the account's published protection was not read: ${cause.javaClass.simpleName}")
+            null
+        }
+        val exportKey = proofExportKey.get()?.takeIf { it.accountIdB64 == target.accountIdB64 }?.exportKey?.copyOf()
+            ?: pendingRecovery.get()?.takeIf { it.accountIdB64 == target.accountIdB64 }?.exportKey
+                ?.takeIf { it.size == ExportKeyStore.EXPORT_KEY_LENGTH }?.copyOf()
+            ?: try {
+                ExportKeyStore.getExportKey(applicationContext, target.accountIdB64)
+            } catch (_: Throwable) {
+                null
+            }
+        val phrase = try {
+            DevicePhrase.read(applicationContext, target.accountIdB64)
+        } catch (_: Throwable) {
+            null
+        }
+        val options = resetSealOptions(sealCore, exportKey, passkey, phrase)
+        val prediction = predictSeal(announcement, options.map { SealCandidate(it.entry) })
+        val confirmed = ResetFactorConfirmed(factor = factor, expiresAtMs = grant.expiresAtMs, prediction = prediction)
+        resetFactor.getAndSet(ResetFactorHeld(target.accountIdB64, grant, confirmed, announcement, options))?.wipe()
+        return confirmed
+    }
+
+    /**
+     * Confirm the reset with the authenticator's six digits. The password is
+     * checked first ([resetPasswordGrant]).
+     *
+     * @throws FreshAuthWrongPassword / [FreshAuthRequired] the password.
+     * @throws AuthHttpError `401 factor-refused` (a wrong code), `429`.
+     */
+    public suspend fun resetConfirmTotp(
+        code: String,
+        password: ByteArray? = null,
+        typedUsername: String? = null,
+    ): ResetFactorConfirmed {
+        val (target, passwordGrant) = resetPasswordGrant(password, typedUsername)
+        val grant = try {
+            authClientFactory().use { it.resetFactorTotp(resetSessionToken(), passwordGrant, code) }
+        } catch (err: AuthHttpError) {
+            if (isFreshAuthRequired(err)) dropFreshProof()
+            throw err
+        }
+        return holdResetFactor(target, grant, FactorKind.Totp, passkey = null)
+    }
+
+    /** `Send code` of the reset's email row: the same answer whether or not
+     *  [address] is the account's (UX 15.1b). The password is checked first. */
+    public suspend fun resetEmailStart(
+        address: String,
+        password: ByteArray? = null,
+        typedUsername: String? = null,
+    ): EmailRecoverStartResponse {
+        val (target, passwordGrant) = resetPasswordGrant(password, typedUsername)
+        val named = resolveNamedSignIn(null, proofSignInName(target.username, typedUsername), loginHandleSource)
+        return try {
+            authClientFactory().use {
+                it.resetFactorEmailStart(resetSessionToken(), passwordGrant, named.handle, address, deviceLanguageTag())
+            }
+        } catch (err: AuthHttpError) {
+            if (isFreshAuthRequired(err)) dropFreshProof()
+            throw err
+        }
+    }
+
+    /** The mailed code of the reset's email row (five tries per code). */
+    public suspend fun resetEmailFinish(challengeId: String, code: String): ResetFactorConfirmed {
+        val (target, passwordGrant) = resetPasswordGrant(null, null)
+        val grant = try {
+            authClientFactory().use { it.resetFactorEmailFinish(resetSessionToken(), passwordGrant, challengeId, code) }
+        } catch (err: AuthHttpError) {
+            if (isFreshAuthRequired(err)) dropFreshProof()
+            throw err
+        }
+        return holdResetFactor(target, grant, FactorKind.Email, passkey = null)
+    }
+
+    /**
+     * Confirm the reset with one of the account's passkeys: the action
+     * ceremony bound to "reset this account's keys", asking the passkey for
+     * its reset-seal secret in the same gesture (ADR-0101 section 10). A
+     * passkey that gives none still confirms the reset; it then does not
+     * seal it (on Android below API 34 the request for the secret is dropped
+     * by the system at creation, so such a passkey never does).
+     *
+     * @throws PasskeyCancelled the sheet was dismissed.
+     */
+    public suspend fun resetConfirmPasskey(
+        activityContext: Context,
+        password: ByteArray? = null,
+        typedUsername: String? = null,
+    ): ResetFactorConfirmed {
+        val (target, passwordGrant) = resetPasswordGrant(password, typedUsername)
+        val token = resetSessionToken()
+        val extras = try {
+            WebauthnClient().use { client ->
+                client.setSessionToken(token)
+                client.assertResetKeys(activityContext, target.accountIdBytes)
+            }
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (_: WebauthnUserCancelledError) {
+            throw PasskeyCancelled()
+        }
+        val secret = extras.sealPrfOutput?.let { prf ->
+            me.lakko.app.webauthn.base64UrlOrNull(extras.credentialIdB64)?.let { SealSecret.Passkey(prf, it) }
+        }
+        val grant = try {
+            authClientFactory().use { it.resetFactorPasskey(token, passwordGrant) }
+        } catch (err: Throwable) {
+            secret?.wipe()
+            if (err is AuthHttpError && isFreshAuthRequired(err)) dropFreshProof()
+            throw err
+        }
+        return holdResetFactor(target, grant, FactorKind.Passkey, passkey = secret)
     }
 
     // -----------------------------------------------------------------
@@ -6320,6 +6960,7 @@ public class AuthRepository(
         accountIdBytes: ByteArray,
         accountIdentitySeed: ByteArray,
         attestation: ByteArray,
+        resetSeal: ByteArray? = null,
     ): KeyResetStepOutcome {
         val sessionToken = sessionTokenProvider.current()
             ?: mutableIdentitySecrets.value?.sessionToken
@@ -6340,6 +6981,7 @@ public class AuthRepository(
                         leafAuth = signLeafGenesis(identity.ed25519Seed(), transparencyAccountKey(accountIdBytes)),
                         genesisAttest = mintGenesisAttestBestEffort(sessionToken, identity, accountIdBytes),
                         keyResetAttest = attestation,
+                        resetSeal = resetSeal,
                     )
                 }
             } finally {
@@ -7244,6 +7886,7 @@ public class AuthRepository(
             assertion.freshGrant,
             assertion.freshGrantExpiresAtMs,
             System.currentTimeMillis(),
+            byPassword = false,
         )
         sessionLandingKind = SessionLanding.Passkey
         mutableRestoreNotice.value = null
@@ -7382,6 +8025,14 @@ public class AuthRepository(
                 WebauthnClient().use { client ->
                     client.setSessionToken(secrets.sessionToken)
                     client.evaluatePrfFor(activityContext, credentialIdB64)
+                }.also { extras ->
+                    // ADR-0101 section 10: the same sheet gave the passkey's
+                    // seal secret, so the passkey keeps the chats from now on.
+                    try {
+                        adoptPasskeySeal(extras.credentialIdB64, extras.sealPrfOutput)
+                    } finally {
+                        extras.sealPrfOutput?.fill(0)
+                    }
                 }
             },
             sealAndStore = { phrase, prfOutput ->
@@ -7727,7 +8378,32 @@ public class AuthRepository(
         signOutForKeyReset(accountIdB64, KeyResetSignOut.Kind.Removed)
     }
 
-    private fun signOutForKeyReset(accountIdB64: String, kind: KeyResetSignOut.Kind) {
+    /**
+     * ADR-0101 section 10 "The account's own devices": whether the reset
+     * this device just learned of is SEALED (signed by a seal key the account
+     * announced before it), which makes it the owner's: no "Was it you?",
+     * the wipe as for a reset made here. Anything that cannot be decided
+     * (unwired, offline, no verdict) is `false`: the recall is kept.
+     */
+    private suspend fun ownResetSealed(secrets: IdentitySecrets): Boolean {
+        val check = ownResetVerdict ?: return false
+        val accountIdB64 = base64Encode(secrets.accountId)
+        val seed = secrets.accountIdentitySeed.copyOf()
+        return try {
+            val heldKeyB64 = Identity.fromSeed(seed).use { base64Encode(it.signaturePublicKey()) }
+            val generation = (sessionTokenProvider.peek() ?: secrets.session).keyGeneration
+            ownResetIsSealed(check(secrets.accountId, heldKeyB64, generation, sealStateStore.seqFloor(accountIdB64)))
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "own reset verdict not read: ${cause.javaClass.simpleName}")
+            false
+        } finally {
+            seed.fill(0)
+        }
+    }
+
+    private fun signOutForKeyReset(accountIdB64: String, kind: KeyResetSignOut.Kind, sealed: Boolean = false) {
         // A key reset spends every fresh-auth proof of the old generation.
         if (freshAuth.hasLive(accountIdB64, System.currentTimeMillis())) freshAuth.clear()
         val ownAccount = signedInAccountIdB64()
@@ -7748,7 +8424,7 @@ public class AuthRepository(
         // and a REMOVED device, keep nothing.
         val holdsKeys = mutableIdentitySecrets.value?.let { base64Encode(it.accountId) == accountIdB64 } == true ||
             pendingFreshPhrase.get()?.accountIdB64 == accountIdB64
-        val wipe = supersededWipeFor(kind, holdsKeys)
+        val wipe = supersededWipeFor(kind, holdsKeys, sealed)
         Log.w("lakko-auth", "this device's keys are no longer the account's ($kind, $wipe): signing out and wiping")
         mutableKeyResetSignOut.value = KeyResetSignOut(
             accountIdB64 = accountIdB64,
@@ -7964,8 +8640,6 @@ public class AuthRepository(
     public suspend fun rotationCommit(
         freshGrant: String,
         revokeDeviceId: ByteArray?,
-        /** ADR-0075 section 3: this rotation is "Save a recovery phrase". */
-        phraseSaved: Boolean = false,
     ): me.lakko.app.devices.CommitAnswer.Committed {
         val secrets = rotationSecrets()
         val accountIdB64 = base64Encode(secrets.accountId)
@@ -7984,15 +8658,7 @@ public class AuthRepository(
                     revokeDeviceIds = listOfNotNull(revokeDeviceId),
                     // ADR-0099 F3: the NEW key proves itself for this account.
                     identityProof = identityProofFor(newSeed, secrets.accountId),
-                    phraseSaved = phraseSaved,
                 )
-            }
-            if (phraseSaved) {
-                // The account is phrase-protected from this answer on, and
-                // the notice it causes is this device's own action.
-                protectionStore.setPhraseSaved(accountIdB64, true)
-                noticeStore.markOwn(accountIdB64, AccountNoticeKind.PhraseSaved, System.currentTimeMillis())
-                mutableRecoveryEmail.value = mutableRecoveryEmail.value?.copy(vault = false, phraseSaved = true)
             }
             // The grant the rotation used is of the previous generation and
             // is spent; the answer carries none.
@@ -8361,20 +9027,12 @@ public class AuthRepository(
 
     /**
      * The account keys changed (a rotation ran, here or on another device):
-     * the server dropped the email vault, so the status is read again and
-     * the automatic re-seal evaluated with the NEW phrase.
+     * the account's seal announcement is published again under the NEW key,
+     * its numbering continued (ADR-0101 section 10).
      */
     private fun reevaluateRecoveryEmail() {
-        val accountIdB64 = mutableIdentitySecrets.value?.let { base64Encode(it.accountId) } ?: return
-        resealTried.remove(accountIdB64)
-        pushScope.launchBound(accountBinding) {
-            try {
-                refreshRecoveryEmail()
-            } catch (cause: Throwable) {
-                if (cause is kotlinx.coroutines.CancellationException) throw cause
-                Log.w("lakko-auth", "recovery email not re-read: ${cause.javaClass.simpleName}")
-            }
-        }
+        if (mutableIdentitySecrets.value == null) return
+        pushScope.launchBound(accountBinding) { announceSealsBestEffort("rotation") }
     }
 
     public fun rotationDiscardPrepared() {
@@ -8541,7 +9199,7 @@ public class AuthRepository(
                                 // decides nothing.
                                 if (candidates != null) return
                                 if (journalRead) {
-                                    signOutForKeyReset(accountIdB64, KeyResetSignOut.Kind.Reset)
+                                    signOutForKeyReset(accountIdB64, KeyResetSignOut.Kind.Reset, sealed = ownResetSealed(secrets))
                                     return
                                 }
                                 if (journalReadStep(readDeviceGroupJournalOnce(secrets.accountId, accountIdB64)) ==
@@ -8573,7 +9231,7 @@ public class AuthRepository(
                         }
                     }
                     KeptDeviceVerdict.TreatAsReset -> {
-                        signOutForKeyReset(accountIdB64, KeyResetSignOut.Kind.Reset)
+                        signOutForKeyReset(accountIdB64, KeyResetSignOut.Kind.Reset, sealed = ownResetSealed(secrets))
                         return
                     }
                     KeptDeviceVerdict.Nothing -> return
@@ -8859,11 +9517,27 @@ public class AuthRepository(
             ?: return null
         return try {
             val signingSeed = Identity.fromSeed(phraseSeed).use { it.ed25519Seed() }
+            // ADR-0101 section 7 item 8: the OLD keys lock is named by the
+            // lineage identity, read now (the wipe takes the predecessors).
+            val keysLockRoot = try {
+                me.lakko.app.devices.DeviceGroupLifecycle.lineageSeed(applicationContext, accountIdB64, phraseSeed)
+                    ?.let { lineage ->
+                        try {
+                            Identity.fromSeed(lineage).use { uniffi.lakko_ffi_uniffi.ownedKeysLockRoot(it) }
+                        } finally {
+                            lineage.fill(0)
+                        }
+                    }
+            } catch (cause: Throwable) {
+                Log.w("lakko-auth", "the owned-channels keys lock root was not kept: ${cause.javaClass.simpleName}")
+                null
+            }
             val record = RecallRecord(
                 accountId = base64Decode(accountIdB64),
                 oldAccountSeed = signingSeed,
                 username = username,
                 learnedAtMs = System.currentTimeMillis(),
+                ownedKeysLockRoot = keysLockRoot,
             )
             if (recallStore.save(record)) {
                 record
@@ -9052,13 +9726,14 @@ public class AuthRepository(
             if (!recallFinishReplayable(parked.firstSentAtMs, System.currentTimeMillis())) {
                 pendingRecallFinish.compareAndSet(parked, null)
                 parked.seed.fill(0)
+                parked.exportKey?.fill(0)
             } else {
                 try {
                     val again = authClientFactory().use { it.recallFinishResend(parked.request) }
                     pendingRecallFinish.compareAndSet(parked, null)
                     phrase = parked.phrase
                     seed = parked.seed
-                    result = parked.newSignaturePubkey to again
+                    result = parked.newSignaturePubkey to again.withExportKey(parked.exportKey)
                 } catch (cause: Throwable) {
                     if (cause is kotlinx.coroutines.CancellationException) {
                         record.zero()
@@ -9080,6 +9755,7 @@ public class AuthRepository(
                     Log.w("lakko-auth", "the unanswered recall finish did not land: ${cause.javaClass.simpleName}")
                     pendingRecallFinish.compareAndSet(parked, null)
                     parked.seed.fill(0)
+                    parked.exportKey?.fill(0)
                 }
             }
         }
@@ -9128,8 +9804,12 @@ public class AuthRepository(
                             seed = newSeed,
                             phrase = newPhrase,
                             newSignaturePubkey = pubkey,
+                            exportKey = cause.exportKey,
                         ),
-                    )?.seed?.fill(0)
+                    )?.let {
+                        it.seed.fill(0)
+                        it.exportKey?.fill(0)
+                    }
                     Log.w("lakko-auth", "the recall finish was sent and not answered; it is asked again on the next try")
                     applyRecallStep(
                         recallAfterFailure(working, RecallFailure.Offline, null, System.currentTimeMillis()),
@@ -9160,6 +9840,7 @@ public class AuthRepository(
         // ADR-0101: a recall takes the account back from the key this device
         // held: that key is the previous one, known without asking anyone.
         val recallPreviousKeyB64 = previousKeyOfSeed(record.oldAccountSeed)
+        val oldKeysLockRoot = record.ownedKeysLockRoot?.copyOf()
         // `finish` answered: the account is this device's again and the
         // record has done its work.
         record.zero()
@@ -9171,6 +9852,33 @@ public class AuthRepository(
         // staged wipe sealed them).
         openStoresFor(ui.accountIdB64)
         protectionStore.setPhraseSaved(ui.accountIdB64, open.status.phraseArm)
+        // ADR-0101 section 10: the new password, typed now, makes the
+        // account's password seal once the new keys are published (the
+        // announcement after the publish).
+        recalled.exportKey?.takeIf { it.size == ExportKeyStore.EXPORT_KEY_LENGTH }?.let { exportKey ->
+            try {
+                SignInKeyWrites.ifNotWiped(wipes, ui.accountIdB64) {
+                    ExportKeyStore.putExportKey(applicationContext, ui.accountIdB64, exportKey, producedNow = true)
+                }
+            } catch (cause: Throwable) {
+                Log.w("lakko-auth", "the export key was not kept after the recall: ${cause.javaClass.simpleName}")
+            } finally {
+                exportKey.fill(0)
+            }
+        }
+        // ADR-0101 section 7 item 8: the owned channels come back through
+        // the OLD keys lock, which only the old seed names; the channel pass
+        // opens it (retried until it answers).
+        oldKeysLockRoot?.let { root ->
+            try {
+                me.lakko.app.channels.OwnedChannelsSecretStore.onDevice(applicationContext)
+                    .keepRetakeRoot(ui.accountIdB64, root)
+            } catch (cause: Throwable) {
+                Log.w("lakko-auth", "the owned-channels retake was not recorded: ${cause.javaClass.simpleName}")
+            } finally {
+                root.fill(0)
+            }
+        }
         val nowMs = System.currentTimeMillis()
         freshAuth.put(ui.accountIdB64, recalled.freshGrant, recalled.freshGrantExpiresAtMs, nowMs)
         sessionLandingKind = SessionLanding.Password

@@ -351,6 +351,9 @@ public object ChannelAdmissionKeys {
         ChannelKeyStore.encryptedPrefs(context).edit()
             .putString(key(account, channelId, version, seed), Base64.encodeToString(seed, Base64.NO_WRAP))
             .commit()
+        // ADR-0101 section 7 - an owned channel's admission seeds are in the
+        // owned-channels list: the next pass writes it.
+        OwnedChannelsRuntime.channelChanged(channelId)
     }
 
     /** The newest version, minting version 0 when none is held (the owner);

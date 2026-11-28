@@ -16,6 +16,7 @@ import { getDeviceKey } from "./key-store";
 import { enableAttestedRemovalsIfNeeded } from "../devices/attested-removal-policy";
 import { passkeyAddOutcome, PASSKEY_PRF_SALT, type PasskeyAddOutcome } from "../recovery/passkey-vault";
 import type { WebauthnClient } from "./webauthn-client";
+import { loadWasm } from "../wasm";
 
 export interface AddedPasskey {
   readonly credentialIdB64: string;
@@ -23,6 +24,10 @@ export interface AddedPasskey {
   readonly prfOutput: Uint8Array | null;
   /** Whether storing the keys follows, or the passkey signs in only. */
   readonly outcome: PasskeyAddOutcome;
+  /** ADR-0101 section 10: what the creation gave for the reset-seal salt,
+   *  or `null` when the authenticator evaluates nothing at creation. Handed
+   *  to `auth.passkeySealAdded`, never stored. */
+  readonly sealPrfOutput: Uint8Array | null;
 }
 
 export async function addPasskey(args: {
@@ -35,9 +40,12 @@ export async function addPasskey(args: {
   /** The signed-in account, for the attested-removal policy. */
   readonly account: { readonly accountIdBytes: Uint8Array; readonly accountIdB64: string } | null;
 }): Promise<AddedPasskey> {
+  // ADR-0101 section 10: the same gesture is asked for the reset-seal
+  // secret (its own salt), so a passkey that can give one keeps the chats.
+  const sealPrfSalt = (await loadWasm()).resetSealPasskeyPrfSalt();
   const registered = await args.client.registerPasskey(
     { user_name: args.username, nickname: args.nickname, fresh_grant: args.freshGrant },
-    { prfSalt: PASSKEY_PRF_SALT },
+    { prfSalt: PASSKEY_PRF_SALT, sealPrfSalt },
   );
   // G-13 (ADR-0015): now that the account has a passkey, enable attested
   // removals so device removals require a peer-verified passkey gesture.
@@ -64,5 +72,6 @@ export async function addPasskey(args: {
       prfOutput: registered.prfOutput !== null,
       prfEnabled: registered.prfEnabled,
     }),
+    sealPrfOutput: registered.sealPrfOutput ?? null,
   };
 }

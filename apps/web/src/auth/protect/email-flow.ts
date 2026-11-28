@@ -5,10 +5,11 @@
  * The recovery email's two flows as pure step machines (ADR-0075 sections 6
  * and 7, `docs/ux/identity-recovery.md` 19.2 and 19.3):
  *
- *   - enrol: address -> code -> done, with the rule for when the email
- *     vault is sealed ({@link enrolSealsVault});
+ *   - enrol: address -> code -> done;
  *   - recover: username and address -> code -> (authenticator code) -> new
- *     password -> the vault or the password-only path.
+ *     password -> the session. A mailed code never brings keys (the email
+ *     vault was removed on 2026-11-26): on a device without them "Restore
+ *     your keys" follows the landing.
  *
  * Every answer of the server is read by {@link emailFailure}; the screens
  * draw the state and never branch on a status themselves. Nothing here holds
@@ -40,13 +41,15 @@ export type EmailFailure =
   | { readonly kind: "proof-required" }
   /** `409 username-required`: a guest account. */
   | { readonly kind: "username-required" }
-  /** `401 ticket-refused` / `403 totp-required` / `409 wrong-mode`: the
-   *  ticket is gone or out of step; the flow starts over. */
+  /** `401 ticket-refused` / `403 totp-required`: the ticket is gone or out
+   *  of step; the flow starts over. */
   | { readonly kind: "start-over" }
   /** No answer. */
   | { readonly kind: "offline" }
-  /** Anything else (`400`, `409 handle-mismatch`, `409 phrase-saved`, a
-   *  server error). */
+  /** `409 last-factor` (remove): the email is the account's last second
+   *  way in; the app's own dialog says so. */
+  | { readonly kind: "last-factor" }
+  /** Anything else (`400`, `409 handle-mismatch`, a server error). */
   | { readonly kind: "error" };
 
 /** Which request the answer belongs to: the same status means different
@@ -58,7 +61,6 @@ export type EmailRequest =
   | "recover-start"
   | "recover-verify"
   | "recover-totp"
-  | "recover-open"
   | "recover-password";
 
 /** Read one answer. `status` is `null` when none arrived. */
@@ -77,10 +79,10 @@ export function emailFailure(
   if (status === 410) return { kind: "code-expired" };
   if (status === 403 && errorCode === "fresh-auth-required") return { kind: "proof-required" };
   if (status === 409 && errorCode === "username-required") return { kind: "username-required" };
+  if (status === 409 && errorCode === "last-factor") return { kind: "last-factor" };
   if (
     (status === 401 && errorCode === "ticket-refused") ||
-    (status === 403 && errorCode === "totp-required") ||
-    (status === 409 && errorCode === "wrong-mode")
+    (status === 403 && errorCode === "totp-required")
   ) {
     return { kind: "start-over" };
   }
@@ -122,6 +124,8 @@ export function emailFailureKey(failure: EmailFailure): string | null {
       // A limit that names no wait has no countdown to show.
       return failure.retryAfterSecs === null ? "common.error.too_many_attempts" : null;
     case "proof-required":
+    // The app's own dialog says it (`protect.last_factor`), not a line.
+    case "last-factor":
       return null;
   }
 }
@@ -150,15 +154,6 @@ export function resendRemainingMs(resendAtMs: number, nowMs: number): number {
 // Enrol
 // ---------------------------------------------------------------------------
 
-/**
- * Whether the email vault is sealed and sent with `enrol/finish`: only for
- * an account WITHOUT a saved phrase (ADR-0075 section 2). A phrase-protected
- * account never gets a vault; the server refuses one (`409 phrase-saved`).
- */
-export function enrolSealsVault(phraseSaved: boolean): boolean {
-  return !phraseSaved;
-}
-
 export type EnrolState =
   | { readonly step: "address"; readonly working: boolean; readonly failure: EmailFailure | null }
   | {
@@ -166,26 +161,23 @@ export type EnrolState =
       readonly working: boolean;
       readonly failure: EmailFailure | null;
       readonly challengeId: string;
-      /** Standard base64 of the 16-byte salt the vault is sealed with. */
-      readonly vaultSalt: string;
       readonly resendAtMs: number;
       /** Wrong codes typed for this code so far. */
       readonly wrong: number;
     }
-  | { readonly step: "done"; readonly vault: boolean };
+  | { readonly step: "done" };
 
 export type EnrolEvent =
   | { readonly type: "submitted" }
   | {
       readonly type: "sent";
       readonly challengeId: string;
-      readonly vaultSalt: string;
       readonly resendAfterSecs: number;
       readonly nowMs: number;
     }
   | { readonly type: "failed"; readonly failure: EmailFailure }
   | { readonly type: "other-address" }
-  | { readonly type: "finished"; readonly vault: boolean };
+  | { readonly type: "finished" };
 
 export const ENROL_START: EnrolState = { step: "address", working: false, failure: null };
 
@@ -200,14 +192,13 @@ export function enrolReduce(state: EnrolState, event: EnrolEvent): EnrolState {
         working: false,
         failure: null,
         challengeId: event.challengeId,
-        vaultSalt: event.vaultSalt,
         resendAtMs: event.nowMs + event.resendAfterSecs * 1000,
         wrong: 0,
       };
     case "other-address":
       return ENROL_START;
     case "finished":
-      return { step: "done", vault: event.vault };
+      return { step: "done" };
     case "failed": {
       const failure = event.failure;
       // The code's tries are spent: a new code is needed, from the address
@@ -249,22 +240,13 @@ export type RecoverState =
       readonly failure: EmailFailure | null;
       readonly ticket: string;
     }
-  /** Step 4: the new password. `phase` is what the progress line says once
-   *  it was submitted. */
+  /** Step 4: the new password, saved under the ticket. */
   | {
       readonly step: "password";
       readonly working: boolean;
       readonly failure: EmailFailure | null;
       readonly ticket: string;
-      readonly phase: "idle" | "opening" | "restoring";
-      /** The vault was released and opened: the ticket is spent and a retry
-       *  repeats only the phrase restore. */
-      readonly vaultOpened: boolean;
     }
-  /** The vault did not open (a spent ticket, a damaged copy, an address
-   *  that differs): `recovery.email.failed`, back on Get back in.
-   *  Nothing was changed on the server. */
-  | { readonly step: "not-opened" }
   /** Mail is not set up on this server. */
   | { readonly step: "unavailable" }
   /** The session landed. */
@@ -283,13 +265,6 @@ export type RecoverEvent =
     }
   | { readonly type: "verified"; readonly ticket: string; readonly totpRequired: boolean }
   | { readonly type: "totp-passed" }
-  /** `open` answered: which path the account takes. */
-  | { readonly type: "opening" }
-  | { readonly type: "vault-opened" }
-  | { readonly type: "vault-not-opened" }
-  /** The vault opened but the phrase restore did not finish (offline, a
-   *  limit): the form is back, and a retry repeats only the restore. */
-  | { readonly type: "restore-failed" }
   | { readonly type: "landed" }
   | { readonly type: "failed"; readonly failure: EmailFailure }
   | { readonly type: "back" };
@@ -297,9 +272,7 @@ export type RecoverEvent =
 export const RECOVER_START: RecoverState = { step: "address", working: false, failure: null };
 
 export function recoverReduce(state: RecoverState, event: RecoverEvent): RecoverState {
-  if (state.step === "landed" || state.step === "not-opened" || state.step === "unavailable") {
-    return state;
-  }
+  if (state.step === "landed" || state.step === "unavailable") return state;
   switch (event.type) {
     case "submitted":
       return { ...state, working: true, failure: null };
@@ -316,34 +289,10 @@ export function recoverReduce(state: RecoverState, event: RecoverEvent): Recover
       if (state.step !== "code") return state;
       return event.totpRequired
         ? { step: "totp", working: false, failure: null, ticket: event.ticket }
-        : {
-            step: "password",
-            working: false,
-            failure: null,
-            ticket: event.ticket,
-            phase: "idle",
-            vaultOpened: false,
-          };
+        : { step: "password", working: false, failure: null, ticket: event.ticket };
     case "totp-passed":
       if (state.step !== "totp") return state;
-      return {
-        step: "password",
-        working: false,
-        failure: null,
-        ticket: state.ticket,
-        phase: "idle",
-        vaultOpened: false,
-      };
-    case "opening":
-      return state.step === "password" ? { ...state, working: true, failure: null, phase: "opening" } : state;
-    case "vault-opened":
-      return state.step === "password"
-        ? { ...state, working: true, phase: "restoring", vaultOpened: true }
-        : state;
-    case "vault-not-opened":
-      return state.step === "password" ? { step: "not-opened" } : state;
-    case "restore-failed":
-      return state.step === "password" ? { ...state, working: false, failure: null, phase: "idle" } : state;
+      return { step: "password", working: false, failure: null, ticket: state.ticket };
     case "landed":
       return { step: "landed" };
     case "back":
@@ -360,9 +309,6 @@ export function recoverReduce(state: RecoverState, event: RecoverEvent): Recover
         const wrong = state.wrong + 1;
         if (wrong >= CODE_TRIES) return { step: "address", working: false, failure: { kind: "used-up" } };
         return { ...state, working: false, failure, wrong };
-      }
-      if (state.step === "password") {
-        return { ...state, working: false, failure, phase: "idle" };
       }
       return { ...state, working: false, failure };
     }

@@ -426,7 +426,8 @@ public final class ContactsRepository: ObservableObject {
             recipientAccountIdB64: base64Encode(result.recipientAccountId),
             messageId: result.messageId,
             createdAt: result.createdAt,
-            intro: SentRequests.storedIntro(introMessage)
+            intro: SentRequests.storedIntro(introMessage),
+            startedOver: result.startedOver ? true : nil
         )
         state = state.with(sent: SentRequests.adding(sent, to: state.sent))
         return result
@@ -451,7 +452,7 @@ public final class ContactsRepository: ObservableObject {
         }
         let client = clientFactory()
         let bound = binding.capture()
-        let bundle = try await client.resolveVerifiedBundle(accountId: accountId)
+        let bundle = try await client.resolveVerifiedBundleForAdd(accountId: accountId)
         // ADR-0074 section 3.5a — the search may have found the person under
         // a key they have since rotated away BY PROOF (the gate above just
         // recorded it): the same person. An unproven mismatch is refused.
@@ -495,9 +496,12 @@ public final class ContactsRepository: ObservableObject {
                 createdAt: result.createdAt,
                 intro: SentRequests.storedIntro(introMessage),
                 recipientName: person.displayName,
-                recipientKeyB64: base64Encode(person.accountKey)),
+                recipientKeyB64: base64Encode(person.accountKey),
+                startedOver: bundle.startedOver ? true : nil),
             to: state.sent))
-        return result
+        var answered = result
+        answered.startedOver = bundle.startedOver
+        return answered
     }
 
     /// Stop waiting for a request that was not answered: the row under Sent
@@ -1847,6 +1851,22 @@ public final class ContactsRepository: ObservableObject {
             declineContactRequest(messageId: request.messageId)
             return .deletedAccount
         }
+        // UX 16.11 — accepting a request from the new keys of an account
+        // that started over takes those keys as the account's, the way a
+        // first pin would: the person decided, here, that it is them. The
+        // one-to-one with the old keys stays closed; nothing is moved.
+        if let accountId = request.fromAccountId {
+            let pins = PeerPinStore()
+            let accountIdB64 = base64Encode(accountId)
+            let requestKeyB64 = base64Encode(request.fromPubkey)
+            if StartedOverRequest.adoptsNewKeys(
+                requestKeyB64: requestKeyB64,
+                pendingNewKeyB64: pins.startedOver(accountIdB64: accountIdB64)?.newKeyB64) {
+                pins.adoptStartedOver(
+                    accountIdB64: accountIdB64, newKeyB64: requestKeyB64,
+                    nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+            }
+        }
         return await ContactAccept.run(request: request, ports: ContactAccept.Ports(
             found: { [weak self] request, accountId in
                 guard let chat = self?.chatRepository else { throw ContactAccept.Unavailable() }
@@ -2228,11 +2248,17 @@ public final class ContactsRepository: ObservableObject {
     /// `request`, marked as asking for a chat when the known-contact check
     /// listed it for want of a one-to-one.
     private func markingAsksForChat(_ request: IncomingContactRequest) -> IncomingContactRequest {
-        guard asksForChatIds.remove(request.messageId) != nil else { return request }
         var marked = request
+        if startedOverIds.remove(request.messageId) != nil { marked.startedOver = true }
+        guard asksForChatIds.remove(request.messageId) != nil else { return marked }
         marked.asksForChat = true
         return marked
     }
+
+    /// UX 16.11 — the requests ``handleKnownContactRequest(_:client:)`` listed
+    /// because they come from the new keys of an account that started over;
+    /// marked ``IncomingContactRequest/startedOver`` as listed.
+    private var startedOverIds: Set<Int64> = []
 
     /// Returns `true` when `request` came from an account that is already an
     /// established contact and was dealt with here (answered, dropped or
@@ -2253,6 +2279,20 @@ public final class ContactsRepository: ObservableObject {
             check = try await client.checkContactIdentity(accountId: fromAccountId) != nil
                 ? .current : .inconclusive
         } catch is SupersessionRefused {
+            check = .refused
+        } catch let startedOver as ContactStartedOver {
+            // ADR-0101 section 11 / UX 16.11: the account's reset carried no
+            // seal. A request from its NEW keys is an ordinary request with
+            // a note: nothing is answered silently and nothing is moved. One
+            // from any other key of that account is from devices that are
+            // gone.
+            guard boundAccountIdB64 == accountIdB64 else { return true }
+            if StartedOverRequest.isFromNewKeys(
+                requestKeyB64: base64Encode(request.fromPubkey), newKeyB64: startedOver.newKeyB64) {
+                startedOverIds.insert(request.messageId)
+                KnownRequestWaitingStore().drop(messageId: request.messageId, accountIdB64: accountIdB64)
+                return false
+            }
             check = .refused
         } catch {
             check = .inconclusive
@@ -4038,6 +4078,10 @@ public struct SentContactRequest: Equatable, Codable {
     /// Welcome of the one-to-one they found is matched to this row by. The ack
     /// makes no contact; joining that Welcome does (2026-11-04).
     public var ackedKeyB64: String?
+    /// Alignment item D (UX 16.11) — the person started over and the request
+    /// went to their new account: the row says Lakko could not confirm it is
+    /// the same person. Optional so a row written before decodes.
+    public var startedOver: Bool?
 
     public init(
         recipientUsername: String,
@@ -4047,9 +4091,11 @@ public struct SentContactRequest: Equatable, Codable {
         intro: String = "",
         recipientName: String? = nil,
         recipientKeyB64: String? = nil,
-        ackedKeyB64: String? = nil
+        ackedKeyB64: String? = nil,
+        startedOver: Bool? = nil
     ) {
         self.ackedKeyB64 = ackedKeyB64
+        self.startedOver = startedOver
         self.recipientUsername = recipientUsername
         self.recipientAccountIdB64 = recipientAccountIdB64
         self.messageId = messageId

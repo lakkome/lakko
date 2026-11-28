@@ -614,15 +614,6 @@ internal fun EmailCodeForm(
                     onClick = viewModel::onSubmitEmailPassword,
                 )
             }
-            me.lakko.app.auth.EmailRecoverStep.Restoring -> {
-                androidx.compose.foundation.layout.Row(
-                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                    horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp),
-                ) {
-                    androidx.compose.material3.CircularProgressIndicator()
-                    Text(t("recovery.email.restoring"))
-                }
-            }
         }
         Spacer(Modifier.height(16.dp))
     }

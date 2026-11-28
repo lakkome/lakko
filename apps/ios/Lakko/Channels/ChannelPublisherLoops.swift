@@ -78,6 +78,7 @@ final class ChannelPublisherLoops {
         ChannelAccountReaderKey.reset()
         ChannelDeviceAdmission.reset()
         ChannelVaultHead.reset()
+        OwnedChannels.shared.reset()
         ChannelEntry.reset()
         PublisherCommitRetry.shared.reset()
         SubscriberAdmission.retry.reset()

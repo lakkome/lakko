@@ -7,9 +7,14 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import kotlinx.coroutines.async
+import kotlinx.coroutines.test.advanceTimeBy
 import org.junit.Test
 
-/** ADR-0075 / UX 19.1 - the account's mode and what the screens draw from it. */
+/**
+ * ADR-0075 (amended 2026-11-26) / UX 19.1 to 19.1d - one kind of account,
+ * its three second ways in, and what the screens draw from them.
+ */
 class AccountProtectionTest {
 
     private class MapStorage : MarkerStorage {
@@ -23,199 +28,237 @@ class AccountProtectionTest {
         }
     }
 
-    private fun status(available: Boolean = true, enabled: Boolean, vault: Boolean, phraseSaved: Boolean) =
-        RecoveryEmailStatus(available = available, enabled = enabled, vault = vault, phraseSaved = phraseSaved)
+    private fun factors(email: Boolean = false, totp: Boolean = false, passkey: Boolean = false) =
+        AccountFactors(email = email, totp = totp, passkey = passkey)
 
     @Test
-    fun `the mode is phrase, email or none`() {
-        assertEquals(AccountProtection.None, accountProtection(enabled = false, vault = false, phraseSaved = false))
-        assertEquals(AccountProtection.Email, accountProtection(enabled = true, vault = true, phraseSaved = false))
-        // A saved phrase wins whatever else is true.
-        assertEquals(AccountProtection.Phrase, accountProtection(enabled = false, vault = false, phraseSaved = true))
-        assertEquals(AccountProtection.Phrase, accountProtection(enabled = true, vault = false, phraseSaved = true))
-        assertEquals(AccountProtection.Phrase, accountProtection(enabled = true, vault = true, phraseSaved = true))
-    }
-
-    @Test
-    fun `an email without a vault and without a phrase protects nothing`() {
-        // After a key reset or a recall the server dropped the vault.
-        val dropped = status(enabled = true, vault = false, phraseSaved = false)
-        assertEquals(AccountProtection.None, accountProtection(dropped))
-        assertEquals(RecoveryEmailRow.AddAgain, recoveryEmailRow(dropped))
-        assertTrue(protectBannerVisible(accountProtection(dropped), dismissedAtMs = null, nowMs = 0L))
-    }
-
-    @Test
-    fun `new words are shown only to a phrase-protected account`() {
-        // After a rotation, a key reset or a recall.
+    fun `new words are shown only to an account whose phrase is saved`() {
+        // After a rotation or a recall. After a key reset the new phrase is
+        // not saved, so no words are shown.
         assertTrue(showsNewWords(phraseSaved = true))
         assertFalse(showsNewWords(phraseSaved = false))
     }
 
     @Test
-    fun `after the keys changed the banner and the row ask for the address again`() {
-        val dropped = status(enabled = true, vault = false, phraseSaved = false)
-        assertEquals(
-            ProtectPrompt("recovery_email.add_again.title", "recovery_email.add_again.body"),
-            protectPrompt(dropped),
-        )
-        // Never protected: the ordinary banner.
-        assertEquals(
-            ProtectPrompt("protect.banner.none", null),
-            protectPrompt(status(enabled = false, vault = false, phraseSaved = false)),
-        )
-        // A phrase-protected account with an email and no vault is not "add again".
-        assertEquals(RecoveryEmailRow.On, recoveryEmailRow(status(enabled = true, vault = false, phraseSaved = true)))
+    fun `restore your keys lists the phrase only when one is saved, and keeps it while not known`() {
+        assertTrue(restoreKeysRows(phraseSaved = true).phrase)
+        assertFalse(restoreKeysRows(phraseSaved = false).phrase)
+        // The account's published protection could not be read: the words
+        // may exist, so the row stays.
+        assertTrue(restoreKeysRows(phraseSaved = null).phrase)
+    }
+
+    // ---- the three second ways in ------------------------------------------
+
+    @Test
+    fun `the factors come from the server's status and the passkey list, or are not known`() {
+        val status = RecoveryEmailStatus(available = true, enabled = true, totp = false)
+        assertEquals(factors(email = true, passkey = true), accountFactors(status, hasPasskey = true))
+        assertEquals(factors(email = true), accountFactors(status, hasPasskey = false))
+        assertNull("nothing is decided from a guess", accountFactors(null, hasPasskey = true))
+        assertNull(accountFactors(status, hasPasskey = null))
     }
 
     @Test
-    fun `restore your keys hides the phrase without a saved one and offers the email code with a vault`() {
-        // Mail-protected: no phrase row, the email code row.
+    fun `the factors are listed in the reset panel's fixed order`() {
         assertEquals(
-            RestoreKeysRows(phrase = false, emailCode = true),
-            restoreKeysRows(status(enabled = true, vault = true, phraseSaved = false)),
+            listOf(FactorKind.Totp, FactorKind.Email, FactorKind.Passkey),
+            factors(email = true, totp = true, passkey = true).inOrder,
         )
-        // Phrase-protected, with or without an email: the phrase row only.
-        assertEquals(
-            RestoreKeysRows(phrase = true, emailCode = false),
-            restoreKeysRows(status(enabled = true, vault = false, phraseSaved = true)),
-        )
-        // Not protected, or the vault dropped: neither.
-        assertEquals(
-            RestoreKeysRows(phrase = false, emailCode = false),
-            restoreKeysRows(status(enabled = true, vault = false, phraseSaved = false)),
-        )
-        assertEquals(
-            RestoreKeysRows(phrase = false, emailCode = false),
-            restoreKeysRows(status(enabled = false, vault = false, phraseSaved = false)),
-        )
-        // Mail not set up: no email row even with a vault.
-        assertFalse(restoreKeysRows(status(available = false, enabled = true, vault = true, phraseSaved = false)).emailCode)
-        // Not read: the phrase row stays, no email row.
-        assertEquals(RestoreKeysRows(phrase = true, emailCode = false), restoreKeysRows(null))
+        assertEquals(listOf(FactorKind.Email), factors(email = true).inOrder)
+        assertTrue(factors().inOrder.isEmpty())
     }
 
     @Test
-    fun `the status line has one key per mode`() {
-        assertEquals("protect.status.email", protectionStatusKey(AccountProtection.Email))
-        assertEquals("protect.status.phrase", protectionStatusKey(AccountProtection.Phrase))
-        assertEquals("protect.status.none", protectionStatusKey(AccountProtection.None))
+    fun `an account with a username and none of the three is shown the step before the app`() {
+        assertTrue(factorStepRequired(hasUsername = true, factors = factors()))
+        for (one in listOf(factors(email = true), factors(totp = true), factors(passkey = true))) {
+            assertFalse(factorStepRequired(hasUsername = true, factors = one))
+        }
+        // A guest has no username and sees none of this.
+        assertFalse(factorStepRequired(hasUsername = false, factors = factors()))
+        // Factors that could not be read decide nothing.
+        assertFalse(factorStepRequired(hasUsername = true, factors = null))
     }
 
     @Test
-    fun `the recovery email row is absent when the server cannot send mail`() {
+    fun `the step's heading says sign-up or a second way to get back in`() {
+        assertEquals("protect.title", protectStepTitleKey(afterSignup = true))
+        assertEquals("protect.title_required", protectStepTitleKey(afterSignup = false))
+    }
+
+    @Test
+    fun `the server's last-factor refusal is recognised from auth and from the passkey routes`() {
+        assertTrue(isLastFactor(AuthHttpError(409, "/recovery-email", "{}", code = "last-factor")))
+        assertFalse(isLastFactor(AuthHttpError(409, "/recovery-email", "{}", code = "handle-taken")))
+        assertFalse(isLastFactor(AuthHttpError(403, "/recovery-email", "{}", code = "last-factor")))
+        assertFalse(isLastFactor(IllegalStateException("x")))
+    }
+
+    @Test
+    fun `the last of the three cannot be removed`() {
+        assertTrue(removalLeavesNoFactor(factors(email = true), FactorKind.Email, passkeyCount = 0))
+        assertFalse(removalLeavesNoFactor(factors(email = true, totp = true), FactorKind.Email, passkeyCount = 0))
+        // The last passkey of an account with nothing else.
+        assertTrue(removalLeavesNoFactor(factors(passkey = true), FactorKind.Passkey, passkeyCount = 1))
+        // One of two passkeys: a passkey stays.
+        assertFalse(removalLeavesNoFactor(factors(passkey = true), FactorKind.Passkey, passkeyCount = 2))
+        assertFalse(removalLeavesNoFactor(factors(passkey = true, email = true), FactorKind.Passkey, passkeyCount = 1))
+    }
+
+    @Test
+    fun `a removal that leaves only the authenticator says so, with or without a phrase`() {
+        val both = factors(email = true, totp = true)
         assertEquals(
-            RecoveryEmailRow.Absent,
-            recoveryEmailRow(status(available = false, enabled = true, vault = true, phraseSaved = false)),
+            "protect.totp_only.remove_notice",
+            removalTotpOnlyNoticeKey(both, FactorKind.Email, passkeyCount = 0, phraseSaved = false),
         )
-        assertEquals(RecoveryEmailRow.Off, recoveryEmailRow(status(enabled = false, vault = false, phraseSaved = false)))
-        assertEquals(RecoveryEmailRow.On, recoveryEmailRow(status(enabled = true, vault = true, phraseSaved = false)))
-        // Phrase-protected with an email: on, and it never has a vault.
-        assertEquals(RecoveryEmailRow.On, recoveryEmailRow(status(enabled = true, vault = false, phraseSaved = true)))
+        assertEquals(
+            "protect.totp_only.remove_notice_phrase",
+            removalTotpOnlyNoticeKey(both, FactorKind.Email, passkeyCount = 0, phraseSaved = true),
+        )
+        // The last passkey beside an authenticator.
+        assertEquals(
+            "protect.totp_only.remove_notice",
+            removalTotpOnlyNoticeKey(factors(totp = true, passkey = true), FactorKind.Passkey, 1, phraseSaved = false),
+        )
+        // One of two passkeys: a passkey stays, nothing is said.
+        assertNull(removalTotpOnlyNoticeKey(factors(totp = true, passkey = true), FactorKind.Passkey, 2, false))
+        // An email stays beside the authenticator.
+        assertNull(
+            removalTotpOnlyNoticeKey(factors(email = true, totp = true, passkey = true), FactorKind.Passkey, 1, false),
+        )
+        // No authenticator: the refusal of the last factor applies instead.
+        assertNull(removalTotpOnlyNoticeKey(factors(email = true), FactorKind.Email, 0, false))
     }
 
     @Test
-    fun `show phrase exists only for a phrase-protected account`() {
+    fun `the authenticator-only warning stands while it is the only one of the three`() {
+        assertEquals("protect.totp_only.warning", totpOnlyWarningKey(factors(totp = true), phraseSaved = false))
+        assertEquals("protect.totp_only.warning_phrase", totpOnlyWarningKey(factors(totp = true), phraseSaved = true))
+        // It goes as soon as an email or a passkey is added.
+        assertNull(totpOnlyWarningKey(factors(totp = true, email = true), phraseSaved = false))
+        assertNull(totpOnlyWarningKey(factors(totp = true, passkey = true), phraseSaved = false))
+        assertNull(totpOnlyWarningKey(factors(email = true), phraseSaved = false))
+        assertNull(totpOnlyWarningKey(factors(), phraseSaved = false))
+    }
+
+    // ---- what keeps the chats ----------------------------------------------
+
+    @Test
+    fun `the chats are kept by the phrase, else a passkey, else the password only`() {
+        assertEquals(ChatsKeptBy.Phrase, chatsKeptBy(phraseSeal = true, passkeySeal = false))
+        assertEquals(ChatsKeptBy.Phrase, chatsKeptBy(phraseSeal = true, passkeySeal = true))
+        assertEquals(ChatsKeptBy.PasskeySeal, chatsKeptBy(phraseSeal = false, passkeySeal = true))
+        assertEquals(ChatsKeptBy.PasswordOnly, chatsKeptBy(phraseSeal = false, passkeySeal = false))
+    }
+
+    @Test
+    fun `the status line has one key per answer`() {
+        assertEquals("protect.status.phrase", protectionStatusKey(ChatsKeptBy.Phrase))
+        assertEquals("protect.status.passkey_seal", protectionStatusKey(ChatsKeptBy.PasskeySeal))
+        assertEquals("protect.status.password_only", protectionStatusKey(ChatsKeptBy.PasswordOnly))
+    }
+
+    @Test
+    fun `the honest notice is for an account with a second way in kept by the password only`() {
+        assertTrue(passwordOnlyNoticeShown(hasFactor = true, kept = ChatsKeptBy.PasswordOnly))
+        assertFalse(passwordOnlyNoticeShown(hasFactor = true, kept = ChatsKeptBy.Phrase))
+        assertFalse(passwordOnlyNoticeShown(hasFactor = true, kept = ChatsKeptBy.PasskeySeal))
+        // No factor yet: the step of 19.1a is what is shown.
+        assertFalse(passwordOnlyNoticeShown(hasFactor = false, kept = ChatsKeptBy.PasswordOnly))
+        // The account's protection could not be read: nothing is shown.
+        assertFalse(passwordOnlyNoticeShown(hasFactor = true, kept = null))
+    }
+
+    @Test
+    fun `the dialog is shown once per device after a sign-in and never after a key reset`() {
+        assertTrue(passwordOnlyDialogDue(noticeShown = true, shownBefore = false, afterKeyReset = false))
+        assertFalse(passwordOnlyDialogDue(noticeShown = true, shownBefore = true, afterKeyReset = false))
+        assertFalse(passwordOnlyDialogDue(noticeShown = true, shownBefore = false, afterKeyReset = true))
+        assertFalse(passwordOnlyDialogDue(noticeShown = false, shownBefore = false, afterKeyReset = false))
+    }
+
+    // ---- Settings rows -----------------------------------------------------
+
+    @Test
+    fun `the recovery email row is absent without mail, else On or Off`() {
+        assertEquals(RecoveryEmailRow.Absent, recoveryEmailRow(RecoveryEmailStatus(available = false, enabled = false)))
+        assertEquals(RecoveryEmailRow.Off, recoveryEmailRow(RecoveryEmailStatus(available = true, enabled = false)))
+        assertEquals(RecoveryEmailRow.On, recoveryEmailRow(RecoveryEmailStatus(available = true, enabled = true)))
+    }
+
+    @Test
+    fun `show phrase exists only for a saved phrase this device holds`() {
         assertEquals(RecoveryPhraseRow.Save, recoveryPhraseRow(phraseSaved = false, phraseOnDevice = true))
-        assertEquals(RecoveryPhraseRow.Save, recoveryPhraseRow(phraseSaved = false, phraseOnDevice = false))
         assertEquals(RecoveryPhraseRow.Show, recoveryPhraseRow(phraseSaved = true, phraseOnDevice = true))
         assertEquals(RecoveryPhraseRow.SavedElsewhere, recoveryPhraseRow(phraseSaved = true, phraseOnDevice = false))
     }
 
     @Test
-    fun `three words are offered only to a phrase-protected account`() {
-        assertFalse(threeWordsSurfaceOffered(phraseSaved = false))
+    fun `three words are offered only to an account whose phrase is saved`() {
         assertTrue(threeWordsSurfaceOffered(phraseSaved = true))
-        // The Get back in row: every other condition met, no saved phrase.
-        assertFalse(
-            offersThreeWords("alice", phraseOnDevice = true, keysOnDevice = true, suspended = false, phraseSaved = false),
-        )
-        assertTrue(
-            offersThreeWords("alice", phraseOnDevice = true, keysOnDevice = true, suspended = false, phraseSaved = true),
-        )
+        assertFalse(threeWordsSurfaceOffered(phraseSaved = false))
     }
 
     @Test
-    fun `the vault is sealed only while no phrase is saved`() {
-        assertTrue(enrolSealsVault(phraseSaved = false))
-        assertFalse(enrolSealsVault(phraseSaved = true))
+    fun `the add form is pre-filled after a recall and empty for a replacement`() {
+        // After a recall the server dropped the stored value (`enabled` false).
+        assertEquals("name@example.com", enrolPrefill(enabled = false, heldAddress = "name@example.com"))
+        assertEquals("", enrolPrefill(enabled = false, heldAddress = null))
+        // Replace: a new address is being typed.
+        assertEquals("", enrolPrefill(enabled = true, heldAddress = "name@example.com"))
+    }
+
+    // ---- the required step -------------------------------------------------
+
+    @Test
+    fun `the step always has the authenticator and the phrase rows`() {
+        val bare = protectStepRows(mailAvailable = false, hasUsername = false, passkeysSupported = false)
+        assertEquals(ProtectStepRows(email = false, totp = true, passkey = false, phrase = true), bare)
+        // The email row needs mail on the server and a username.
+        assertFalse(protectStepRows(mailAvailable = true, hasUsername = false).email)
+        assertFalse(protectStepRows(mailAvailable = false, hasUsername = true).email)
+        assertTrue(protectStepRows(mailAvailable = true, hasUsername = true).email)
+        // The passkey row only where this device can use passkeys, for an
+        // account with a username.
+        assertTrue(protectStepRows(true, hasUsername = true, passkeysSupported = true).passkey)
+        assertFalse(protectStepRows(true, hasUsername = true, passkeysSupported = false).passkey)
+        assertFalse(protectStepRows(true, hasUsername = false, passkeysSupported = true).passkey)
     }
 
     @Test
-    fun `the protect step drops the email row without mail or without a username`() {
-        assertEquals(
-            ProtectStepRows(email = true, passkey = true, phrase = true),
-            protectStepRows(mailAvailable = true, hasUsername = true, passkeysSupported = true),
-        )
-        assertEquals(
-            ProtectStepRows(email = false, passkey = true, phrase = true),
-            protectStepRows(mailAvailable = false, hasUsername = true, passkeysSupported = true),
-        )
-        // A guest: neither the email nor the passkey row.
-        assertEquals(
-            ProtectStepRows(email = false, passkey = false, phrase = true),
-            protectStepRows(mailAvailable = true, hasUsername = false, passkeysSupported = true),
-        )
+    fun `a row is done when finished here or already true of the account`() {
+        val status = RecoveryEmailStatus(available = true, enabled = true, totp = true)
+        val fromAccount = protectStepDone(ProtectStepDone(), status, hasPasskey = true, phraseSaved = true)
+        assertEquals(ProtectStepDone(email = true, totp = true, passkey = true, phrase = true), fromAccount)
+        val here = protectStepDone(ProtectStepDone(totp = true), status = null)
+        assertEquals(ProtectStepDone(totp = true), here)
+        assertEquals(AccountFactors(email = false, totp = true, passkey = false), here.factors)
     }
 
     @Test
-    fun `the passkey row is shown only where this device can use passkeys`() {
-        assertTrue(protectStepRows(mailAvailable = true, hasUsername = true, passkeysSupported = true).passkey)
-        assertFalse(protectStepRows(mailAvailable = true, hasUsername = true, passkeysSupported = false).passkey)
+    fun `Continue needs one of the first three, and a saved phrase alone does not enable it`() {
+        assertFalse(protectContinueEnabled(ProtectStepDone()))
+        assertFalse(protectContinueEnabled(ProtectStepDone(phrase = true)))
+        assertTrue(protectContinueEnabled(ProtectStepDone(email = true)))
+        assertTrue(protectContinueEnabled(ProtectStepDone(totp = true)))
+        assertTrue(protectContinueEnabled(ProtectStepDone(passkey = true)))
     }
 
     @Test
-    fun `a finished row is marked done, here or already true of the account`() {
-        assertEquals(ProtectStepDone(), protectStepDone(ProtectStepDone(), null))
-        assertEquals(
-            ProtectStepDone(passkey = true),
-            protectStepDone(ProtectStepDone(passkey = true), status(enabled = false, vault = false, phraseSaved = false)),
-        )
-        // The email is done when `enabled && (vault || phraseSaved)`.
-        assertTrue(protectStepDone(ProtectStepDone(), status(enabled = true, vault = true, phraseSaved = false)).email)
-        assertTrue(protectStepDone(ProtectStepDone(), status(enabled = true, vault = false, phraseSaved = true)).email)
-        assertFalse(protectStepDone(ProtectStepDone(), status(enabled = true, vault = false, phraseSaved = false)).email)
-        assertFalse(protectStepDone(ProtectStepDone(), status(enabled = false, vault = false, phraseSaved = true)).email)
-        assertFalse(protectStepDone(ProtectStepDone(), null).email)
-        // The passkey: created here, or the account already has one.
-        assertTrue(protectStepDone(ProtectStepDone(), null, hasPasskey = true).passkey)
-        assertFalse(protectStepDone(ProtectStepDone(), null, hasPasskey = false).passkey)
-        assertTrue(protectStepDone(ProtectStepDone(), status(enabled = false, vault = false, phraseSaved = true)).phrase)
+    fun `the notice on the step shows once a factor is done and nothing keeps the chats but the password`() {
+        assertFalse(protectStepNoticeShown(ProtectStepDone(), passkeyKeepsChats = false))
+        assertTrue(protectStepNoticeShown(ProtectStepDone(email = true), passkeyKeepsChats = false))
+        // A passkey that does not keep the chats does not end it.
+        assertTrue(protectStepNoticeShown(ProtectStepDone(passkey = true), passkeyKeepsChats = false))
+        assertFalse(protectStepNoticeShown(ProtectStepDone(passkey = true), passkeyKeepsChats = true))
+        assertFalse(protectStepNoticeShown(ProtectStepDone(email = true, phrase = true), passkeyKeepsChats = false))
+        // A phrase alone: `Continue` is still disabled and nothing is said.
+        assertFalse(protectStepNoticeShown(ProtectStepDone(phrase = true), passkeyKeepsChats = false))
     }
 
-    @Test
-    fun `once a row is done Not now becomes Continue`() {
-        assertEquals(ProtectStepExit.NotNow, protectStepExit(ProtectStepDone()))
-        assertEquals(ProtectStepExit.Continue, protectStepExit(ProtectStepDone(email = true)))
-        assertEquals(ProtectStepExit.Continue, protectStepExit(ProtectStepDone(passkey = true)))
-        assertEquals(ProtectStepExit.Continue, protectStepExit(ProtectStepDone(phrase = true)))
-    }
-
-    @Test
-    fun `an account with a passkey gets no banner, now or after 30 days`() {
-        val day = 24L * 60L * 60L * 1000L
-        val now = 1_000L * day
-        assertTrue(protectBannerVisible(AccountProtection.None, null, now, hasPasskey = false))
-        assertFalse(protectBannerVisible(AccountProtection.None, null, now, hasPasskey = true))
-        assertFalse(protectBannerVisible(AccountProtection.None, now - 31 * day, now, hasPasskey = true))
-        // Without a passkey the 30-day return still holds.
-        assertTrue(protectBannerVisible(AccountProtection.None, now - 31 * day, now, hasPasskey = false))
-    }
-
-    @Test
-    fun `the banner shows for an unprotected account and returns after 30 days`() {
-        val day = 24L * 60L * 60L * 1000L
-        val now = 1_000L * day
-        assertTrue(protectBannerVisible(AccountProtection.None, dismissedAtMs = null, nowMs = now))
-        assertFalse(protectBannerVisible(AccountProtection.None, dismissedAtMs = now - day, nowMs = now))
-        assertFalse(protectBannerVisible(AccountProtection.None, dismissedAtMs = now - 29 * day, nowMs = now))
-        assertTrue(protectBannerVisible(AccountProtection.None, dismissedAtMs = now - 30 * day, nowMs = now))
-        // A clock set back never hides it longer.
-        assertTrue(protectBannerVisible(AccountProtection.None, dismissedAtMs = now + day, nowMs = now))
-        // Never for a protected account.
-        assertFalse(protectBannerVisible(AccountProtection.Email, dismissedAtMs = null, nowMs = now))
-        assertFalse(protectBannerVisible(AccountProtection.Phrase, dismissedAtMs = null, nowMs = now))
-    }
+    // ---- typed values ------------------------------------------------------
 
     @Test
     fun `an address is plausible by the core's rule`() {
@@ -241,76 +284,31 @@ class AccountProtectionTest {
         assertNull(normalizeEmailCode("12345a"))
     }
 
+    // ---- what the device remembers -----------------------------------------
+
     @Test
     fun `the store keeps flags per account and never an address`() {
         val storage = MapStorage()
         val store = AccountProtectionStore(storage)
         assertFalse(store.phraseSaved("a"))
-        assertNull(store.bannerDismissedAtMs("a"))
+        assertFalse(store.passwordOnlyDialogShown("a"))
         assertFalse(store.protectStepOwed("a"))
         store.setPhraseSaved("a", true)
-        store.dismissBanner("a", 42L)
+        store.markPasswordOnlyDialogShown("a")
         store.setProtectStepOwed("a", true)
         store.setPhraseSaved("b", true)
         assertTrue(AccountProtectionStore(storage).phraseSaved("a"))
-        assertEquals(42L, store.bannerDismissedAtMs("a"))
+        assertTrue("the dialog is not shown again on this device", store.passwordOnlyDialogShown("a"))
+        assertFalse(store.passwordOnlyDialogShown("b"))
         assertTrue(store.protectStepOwed("a"))
         store.setProtectStepOwed("a", false)
         assertFalse(store.protectStepOwed("a"))
         store.clearAccount("a")
         assertFalse(store.phraseSaved("a"))
-        assertNull(store.bannerDismissedAtMs("a"))
+        assertFalse(store.passwordOnlyDialogShown("a"))
         assertTrue("another account's rows stay", store.phraseSaved("b"))
-        // Only flags and times were ever written.
-        assertTrue(storage.rows.values.all { it == "1" || it.toLongOrNull() != null })
-    }
-
-    // ---- the devices keep the address (amended 2026-10-13) -----------------
-
-    @Test
-    fun `the re-seal runs only with an address value, no vault, no phrase and a held address`() {
-        assertTrue(resealNeeded(enabled = true, vault = false, phraseSaved = false, addressHeld = true))
-        assertFalse(resealNeeded(enabled = false, vault = false, phraseSaved = false, addressHeld = true))
-        assertFalse(resealNeeded(enabled = true, vault = true, phraseSaved = false, addressHeld = true))
-        assertFalse(resealNeeded(enabled = true, vault = false, phraseSaved = true, addressHeld = true))
-        assertFalse(resealNeeded(enabled = true, vault = false, phraseSaved = false, addressHeld = false))
-    }
-
-    @Test
-    fun `add your email again is shown only where no held address can re-seal`() {
-        assertTrue(addAgainShown(enabled = true, vault = false, phraseSaved = false, addressHeld = false))
-        assertFalse(addAgainShown(enabled = true, vault = false, phraseSaved = false, addressHeld = true))
-        assertFalse(addAgainShown(enabled = false, vault = false, phraseSaved = false, addressHeld = false))
-        // Exactly one of the two holds in the dropped-vault state.
-        for (held in listOf(true, false)) {
-            assertTrue(resealNeeded(true, false, false, held) != addAgainShown(true, false, false, held))
-        }
-        val dropped = status(enabled = true, vault = false, phraseSaved = false)
-        assertEquals(RecoveryEmailRow.AddAgain, recoveryEmailRow(dropped, addressHeld = false))
-        assertEquals(RecoveryEmailRow.On, recoveryEmailRow(dropped, addressHeld = true))
-        assertEquals(ProtectPrompt("protect.banner.none", null), protectPrompt(dropped, addressHeld = true))
-    }
-
-    @Test
-    fun `the add form is pre-filled after a recall and empty for a replacement`() {
-        // After a recall the server dropped the stored value (`enabled` false).
-        assertEquals("name@example.com", enrolPrefill(enabled = false, heldAddress = "name@example.com"))
-        assertEquals("", enrolPrefill(enabled = false, heldAddress = null))
-        // Replace: a new address is being typed.
-        assertEquals("", enrolPrefill(enabled = true, heldAddress = "name@example.com"))
-    }
-
-    @Test
-    fun `a re-seal answer settles, clears a stale address, or waits for the next landing`() {
-        fun http(status: Int, code: String) = AuthHttpError(status, "/recovery-email/vault", "", code = code)
-        assertEquals(ResealOutcome.Settled, resealOutcomeOf(null))
-        assertEquals(ResealOutcome.Settled, resealOutcomeOf(http(409, "vault-exists")))
-        assertEquals(ResealOutcome.Settled, resealOutcomeOf(http(409, "phrase-saved")))
-        assertEquals(ResealOutcome.AddressStale, resealOutcomeOf(http(403, "address-mismatch")))
-        for (code in listOf("too-many-attempts", "no-recovery-email", "handle-mismatch", "recovery-email-disabled")) {
-            assertEquals(code, ResealOutcome.RetryLater, resealOutcomeOf(http(429, code)))
-        }
-        assertEquals(ResealOutcome.RetryLater, resealOutcomeOf(AuthNetworkError("/x", java.io.IOException("down"))))
+        // Only flags were ever written.
+        assertTrue(storage.rows.values.all { it == "1" })
     }
 
     @Test
@@ -318,8 +316,6 @@ class AccountProtectionTest {
         val text = RecoveryAddressState(ready = true, address = "name@example.com").toString()
         assertFalse(text.contains("name@example.com"))
     }
-
-    // ---- a guest's first password ------------------------------------------
 
     @Test
     fun `the first-password debt survives a restart and goes with the account`() {
@@ -333,5 +329,36 @@ class AccountProtectionTest {
         store.setFirstPasswordOwed("a", true)
         store.clearAccount("a")
         assertFalse(store.firstPasswordOwed("a"))
+    }
+
+    // ---- the landing rule without a flash (alignment 2026-11-27) -------------
+
+    @Test
+    fun `the landing waits for the factor read and takes its answer`() = kotlinx.coroutines.test.runTest {
+        val flow = kotlinx.coroutines.flow.MutableStateFlow<AccountFactors?>(null)
+        val waiting = async { awaitFactorRead(flow) }
+        advanceTimeBy(1_000)
+        assertFalse(waiting.isCompleted)
+        flow.value = AccountFactors(email = false, totp = false, passkey = false)
+        assertEquals(AccountFactors(email = false, totp = false, passkey = false), waiting.await())
+        // Answered with no factor: the step is shown.
+        assertTrue(factorStepRequired(hasUsername = true, factors = waiting.await()))
+    }
+
+    @Test
+    fun `the landing shows the app after three seconds without an answer, and no step`() = kotlinx.coroutines.test.runTest {
+        val flow = kotlinx.coroutines.flow.MutableStateFlow<AccountFactors?>(null)
+        val waiting = async { awaitFactorRead(flow) }
+        advanceTimeBy(FACTOR_READ_WAIT_MS + 1)
+        assertNull(waiting.await())
+        assertFalse(factorStepRequired(hasUsername = true, factors = null))
+        assertEquals(3_000L, FACTOR_READ_WAIT_MS)
+    }
+
+    @Test
+    fun `the cover hides the app only while the read is awaited and no step is drawn`() {
+        assertTrue(landingCoverShown(waited = false, protectStepShown = false))
+        assertFalse(landingCoverShown(waited = true, protectStepShown = false))
+        assertFalse(landingCoverShown(waited = false, protectStepShown = true))
     }
 }

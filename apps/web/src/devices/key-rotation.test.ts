@@ -8,7 +8,6 @@ import {
   directoryRotationOutcome,
   directoryUploadMode,
   newRotation,
-  newSavePhraseRotation,
   nextRotationStep,
   pendingFor,
   readRotation,
@@ -18,7 +17,6 @@ import {
   rotationIntake,
   rotationResumesByItself,
   rotationRevokedDeviceIds,
-  rotationSavesPhrase,
   rotationStepLine,
   rotationWithholdsPhrase,
   runRotation,
@@ -456,65 +454,31 @@ describe("a kept device: superseded (ADR-0074 section 3.3)", () => {
   });
 });
 
-// ADR-0075 section 3 (UX 19.5): "Save a recovery phrase" is this rotation
-// with no device to remove.
-describe("the rotation that saves a recovery phrase", () => {
-  it("removes no device: the remove step is done from the start and never runs", async () => {
-    const h = harness();
-    const start = newSavePhraseRotation(1);
-    expect(rotationSavesPhrase(start)).toBe(true);
-    expect(nextRotationStep(start)).toBe("prepare");
-    const out = await runRotation(start, h.ports, { grant: "g" });
-    expect(out).toEqual({ kind: "complete" });
-    expect(h.calls.some((c) => c.startsWith("remove"))).toBe(false);
-    expect(h.calls.slice(0, 3)).toEqual(["prepare", "commit", "directory"]);
-    // Every later step of the ordinary rotation still runs, in order.
-    expect(h.calls.slice(3)).toEqual(ROTATION_STEPS.slice(4));
-  });
-
-  it("revokes no device with its commit; the ordinary rotation revokes the removed one", () => {
-    expect(rotationRevokedDeviceIds(newSavePhraseRotation(1))).toEqual([]);
+// ADR-0075, second amendment (2026-11-26; UX 19.5): "Save a recovery
+// phrase" no longer rotates the keys, so no rotation exists without a
+// removed device.
+describe("no rotation saves a recovery phrase any more", () => {
+  it("every rotation follows a removal and revokes the removed device", () => {
     expect(rotationRevokedDeviceIds(newRotation(DEVICE, 1))).toEqual([DEVICE]);
-    expect(rotationSavesPhrase(newRotation(DEVICE, 1))).toBe(false);
   });
 
-  it("without a proof nothing is sent and nothing changed", async () => {
-    const h = harness();
-    const out = await runRotation(newSavePhraseRotation(1), h.ports, { grant: null });
-    expect(out).toEqual({ kind: "not-started", reason: "proof-required" });
-    expect(h.calls).toEqual(["prepare"]);
-    expect(rotationCommitted(last(h.saved) as RotationOwed)).toBe(false);
-  });
-
-  it("a refused commit changed nothing; the words stay withheld until every step landed", async () => {
-    const refused = harness({ commit: [{ status: 403, errorCode: "fresh-auth-required" }] });
-    expect(await runRotation(newSavePhraseRotation(1), refused.ports, { grant: "g" })).toEqual({
-      kind: "not-started",
-      reason: "proof-required",
-    });
-    const owed = harness({ later: ["journals"] });
-    const out = await runRotation(newSavePhraseRotation(1), owed.ports, { grant: "g" });
-    expect(out.kind).toBe("publishing");
-    const record = last(owed.saved) as RotationOwed;
-    expect(rotationSavesPhrase(record)).toBe(true);
-    expect(rotationWithholdsPhrase(record)).toBe(true);
-    expect(rotationResumesByItself(record)).toBe(true);
-  });
-
-  it("its record survives a reload, and a damaged one cannot drive a retry", () => {
+  it("a record left by the old save-phrase rotation cannot drive a retry", () => {
     const storage = memoryStorage();
-    const record = newSavePhraseRotation(5);
-    writeRotation(storage, "acct", record);
-    expect(readRotation(storage, "acct")).toEqual(record);
-    // A save-phrase record that claims a device, or lost its done step.
-    writeRotation(storage, "acct", { ...record, deviceIdB64: DEVICE });
+    storage.setItem(
+      "lakko:key-rotation-owed:acct",
+      JSON.stringify({ v: 1, deviceIdB64: "", purpose: "save-phrase", startedAtMs: 5, done: ["remove"] }),
+    );
     expect(readRotation(storage, "acct")).toBeNull();
-    writeRotation(storage, "acct", { ...record, done: [] });
+    // Nor one that carries a purpose beside a device id.
+    storage.setItem(
+      "lakko:key-rotation-owed:acct",
+      JSON.stringify({ ...newRotation(DEVICE, 1), purpose: "save-phrase" }),
+    );
     expect(readRotation(storage, "acct")).toBeNull();
-    // An ordinary record with no device id is still refused.
+    // An ordinary record with no device id is still refused; a whole one is read.
     writeRotation(storage, "acct", { ...newRotation(DEVICE, 1), deviceIdB64: "" });
     expect(readRotation(storage, "acct")).toBeNull();
-    storage.setItem("lakko:key-rotation-owed:acct", JSON.stringify({ ...record, purpose: "other" }));
-    expect(readRotation(storage, "acct")).toBeNull();
+    writeRotation(storage, "acct", newRotation(DEVICE, 1));
+    expect(readRotation(storage, "acct")).toEqual(newRotation(DEVICE, 1));
   });
 });

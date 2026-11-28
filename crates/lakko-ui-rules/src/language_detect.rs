@@ -1067,7 +1067,6 @@ mod tests {
                 &TranslateOfferInput {
                     enabled: true,
                     has_text: true,
-                    is_own: false,
                     detected: detect_text_language(text),
                     engine_for_detected: EngineState::Ready,
                     any_engine: true,

@@ -264,13 +264,19 @@ final class MessageTranslationCenter: ObservableObject {
                 }
                 continue
             }
-            guard message.direction == .incoming, !message.text.isEmpty, message.messageId > 0 else { continue }
+            guard message.direction != .system, !message.text.isEmpty, message.messageId > 0 else { continue }
             let key = Self.key(conversation, message.messageId)
             let detected = detection(key: key, text: message.text)?.detected
-            if recent.count < window, let detected { recent.append(detected) }
-            if let detected, detected.confidencePermille >= translationDetectionConfidentPermille() {
-                languages = conversationLanguagesWithDetection(
-                    languages: languages, messageId: message.messageId, tag: detected.tag)
+            // UX 3.6: own messages do not count toward the bar, nor toward
+            // the conversation's languages (the language the others write
+            // in); automatic translation applies to them all the same (3.7,
+            // amended 2026-11-27).
+            if message.direction == .incoming {
+                if recent.count < window, let detected { recent.append(detected) }
+                if let detected, detected.confidencePermille >= translationDetectionConfidentPermille() {
+                    languages = conversationLanguagesWithDetection(
+                        languages: languages, messageId: message.messageId, tag: detected.tag)
+                }
             }
             if prefs.autoTranslate, phases[key] == nil, !autoAttempted.contains(key),
                wantsAutoTranslation(detected) {
@@ -370,7 +376,7 @@ final class MessageTranslationCenter: ObservableObject {
             conversation: conversation, messageId: message.messageId, key: key, text: message.text)
         else { return nil }
         return Self.languageLine(
-            resolution: resolution, isOwn: message.direction == .outgoing, enabled: settings.showTranslate,
+            resolution: resolution, enabled: settings.showTranslate,
             readingLanguages: settings.readingLanguages)
     }
 
@@ -380,15 +386,16 @@ final class MessageTranslationCenter: ObservableObject {
     /// Catalan on a device that translates Spanish shows `Spanish ·
     /// Translate`. The menu row's shared rule (`translationOffered`), asked
     /// with the engine set to "can translate", then decides whether that
-    /// language is one to name (not own, has text, setting on, not a reading
-    /// language). No line when the rule names none: no detection, or an
+    /// language is one to name (has text, setting on, not a reading
+    /// language); own messages are treated like received ones (UX 3.1,
+    /// amended 2026-11-27). No line when the rule names none: no detection, or an
     /// unsure one with no candidate the device can translate from.
     static func languageLine(
-        resolution: TranslationSourceResolution, isOwn: Bool, enabled: Bool, readingLanguages: [String]
+        resolution: TranslationSourceResolution, enabled: Bool, readingLanguages: [String]
     ) -> Phase? {
         guard let tag = resolution.lineTag else { return nil }
         let input = TranslateOfferInput(
-            enabled: enabled, hasText: true, isOwn: isOwn,
+            enabled: enabled, hasText: true,
             detected: DetectedLanguage(tag: tag, confidencePermille: resolution.lineConfidencePermille),
             engineForDetected: .ready, anyEngine: true)
         guard translationOffered(input: input, readingLanguages: readingLanguages) != TranslateOffer.none
@@ -494,7 +501,6 @@ final class MessageTranslationCenter: ObservableObject {
         let input = TranslateOfferInput(
             enabled: settings.showTranslate,
             hasText: true,
-            isOwn: message.direction == .outgoing,
             detected: detected,
             engineForDetected: engine,
             anyEngine: anyTranslation ?? false)

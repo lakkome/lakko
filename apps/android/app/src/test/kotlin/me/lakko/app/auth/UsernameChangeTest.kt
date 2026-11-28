@@ -183,11 +183,18 @@ class UsernameChangeTest {
     }
 
     @Test
-    fun `the bind carries the address, and a vault only while no phrase is saved`() {
-        assertEquals(RenameRecoveryEmail.AddressAndVault, renameRecoveryEmail(true, addressHeld = true, phraseSaved = false))
-        assertEquals(RenameRecoveryEmail.AddressOnly, renameRecoveryEmail(true, addressHeld = true, phraseSaved = true))
-        assertEquals(RenameRecoveryEmail.None, renameRecoveryEmail(true, addressHeld = false, phraseSaved = false))
-        assertEquals(RenameRecoveryEmail.None, renameRecoveryEmail(false, addressHeld = true, phraseSaved = false))
+    fun `the bind carries the address, and asks for it only when the email is the last second way in`() {
+        // Held (kept by this device, or just typed): the email moves.
+        assertEquals(RenameRecoveryEmail.Address, renameRecoveryEmail(true, addressHeld = true, emailIsLastFactor = true))
+        assertEquals(RenameRecoveryEmail.Address, renameRecoveryEmail(true, addressHeld = true, emailIsLastFactor = false))
+        // Not held and the last of the three: typed once before the change.
+        assertEquals(
+            RenameRecoveryEmail.AskAddress,
+            renameRecoveryEmail(true, addressHeld = false, emailIsLastFactor = true),
+        )
+        // Not held and another way in exists: the email is dropped, as before.
+        assertEquals(RenameRecoveryEmail.None, renameRecoveryEmail(true, addressHeld = false, emailIsLastFactor = false))
+        assertEquals(RenameRecoveryEmail.None, renameRecoveryEmail(false, addressHeld = true, emailIsLastFactor = true))
     }
 
     // ---- the rename machine -------------------------------------------------

@@ -40,6 +40,8 @@ import { createProofGate } from "./proof-gate";
 import { ProofBlock } from "./ProofBlock";
 import { addedPasskeyMessage, storeKeysForPasskey, type StoreKeysOutcome } from "./passkey-keys-store";
 import { addNoPrfPasskey } from "./passkey-no-prf";
+import { accountFactors, notePasskeyCount, refreshFactors } from "./protect/factors";
+import { notePasskeyAdded } from "./protect/password-only-state";
 import { useWebauthnClient } from "./use-webauthn-client";
 import {
   WebauthnCredentialExistsError,
@@ -100,6 +102,10 @@ export function PasskeyOffer(props: {
   /** A passkey now exists for the account (whatever storing its keys
    *  then comes to). */
   readonly onAdded?: () => void;
+  /** The system passkey sheet was closed: nothing was added (UX 19.1a: back
+   *  on the step with `protect.passkey.cancelled`). Without it the offer
+   *  simply stays as it was. */
+  readonly onCancelled?: () => void;
 }): JSX.Element {
   const auth = useAuth();
   const { client, username } = useWebauthnClient();
@@ -151,6 +157,19 @@ export function PasskeyOffer(props: {
             : null,
       });
       props.onAdded?.();
+      // ADR-0101 section 10 (UX 19.1d): the account's protection is published
+      // with this passkey in it when it gave a secret for that; whether it
+      // keeps the chats is what the notice and the passkey's row then say.
+      if (st.kind === "session") {
+        const keepsChats = await auth.passkeySealAdded({
+          credentialIdB64: passkey.credentialIdB64,
+          sealPrfOutput: passkey.sealPrfOutput,
+        });
+        notePasskeyAdded(st.account.accountId, keepsChats);
+        const current = accountFactors(st.account.accountId);
+        notePasskeyCount(st.account.accountId, (current?.passkeys ?? 0) + 1);
+        if (secrets !== null) void refreshFactors(st.account.accountId, secrets.sessionToken);
+      }
       let outcome: StoreKeysOutcome = "no-prf";
       if (passkey.outcome === "store-keys") {
         outcome =
@@ -180,7 +199,9 @@ export function PasskeyOffer(props: {
       setResult(addedPasskeyMessage(outcome));
     } catch (err) {
       const failure = gate.failed(err, grant).kind;
-      if (err instanceof WebauthnCredentialExistsError) {
+      if (err instanceof WebauthnUserCancelledError) {
+        props.onCancelled?.();
+      } else if (err instanceof WebauthnCredentialExistsError) {
         // The provider already holds a passkey for this account (UX 10.2).
         setError(t("settings.passkeys.error.already_exists"));
       } else if (

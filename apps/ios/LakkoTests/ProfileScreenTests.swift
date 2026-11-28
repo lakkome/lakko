@@ -42,7 +42,7 @@ final class ProfileScreenTests: XCTestCase {
                 if recorder.uploadFails { throw CancellationError() }
                 return avatar
             },
-            rename: { name in
+            rename: { name, _ in
                 recorder.renames.append(name)
                 if let error = recorder.renameError { throw error }
                 return name
@@ -314,7 +314,7 @@ final class ProfileScreenTests: XCTestCase {
         var finishes = 0
         var stillOwedAfter = true
         let ports = ProfileSavePorts(
-            upload: { _ in throw CancellationError() }, rename: { $0 },
+            upload: { _ in throw CancellationError() }, rename: { name, _ in name },
             publish: { _, _ in },
             renameOwed: { owed },
             finishOwedRename: {
@@ -341,7 +341,7 @@ final class ProfileScreenTests: XCTestCase {
     @MainActor
     func testTheRecoveryEmailWarningComesFromThePort() {
         let ports = ProfileSavePorts(
-            upload: { _ in throw CancellationError() }, rename: { $0 },
+            upload: { _ in throw CancellationError() }, rename: { name, _ in name },
             publish: { _, _ in },
             renameTurnsOffRecoveryEmail: { true })
         XCTAssertTrue(ProfileEditModel(saved: ProfileSaved(), ports: ports).renameTurnsOffRecoveryEmail)

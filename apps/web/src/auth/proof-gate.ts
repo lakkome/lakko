@@ -81,6 +81,10 @@ export interface ProofGateOptions {
   /** Whether the surface offers a passkey route at all (the delete dialog
    *  of an account without a passkey does not). Default `true`. */
   readonly offerPasskey?: boolean;
+  /** ADR-0073, amended 2026-11-26 (the reset): only a proof a PASSWORD
+   *  sign-in minted counts; a passkey sign-in's does not, and the block is
+   *  drawn although one is live. Implies no passkey button. */
+  readonly passwordOnly?: boolean;
   /** Keep the block folded away until the main button is first pressed
    *  without a proof (see `ProofBlockInput.collapsed`). */
   readonly collapsed?: boolean;
@@ -152,11 +156,13 @@ export function createProofGate(options: ProofGateOptions): ProofGate {
 
   // Whether a proof is live depends on the clock, so it is polled: the
   // block appears on its own when the ten minutes run out.
-  const [proofLive, setProofLive] = createSignal(auth.freshProofLive());
+  const passwordOnly = options.passwordOnly === true;
+  const liveNow = (): boolean => (passwordOnly ? auth.resetFactor.passwordProofLive() : auth.freshProofLive());
+  const [proofLive, setProofLive] = createSignal(liveNow());
   const collapsed = options.collapsed === true;
   const [revealed, setRevealed] = createSignal(!collapsed && !proofLive());
   const poll = setInterval(() => {
-    const live = auth.freshProofLive();
+    const live = liveNow();
     setProofLive(live);
     if (!live && !collapsed) setRevealed(true);
   }, 1000);
@@ -180,7 +186,7 @@ export function createProofGate(options: ProofGateOptions): ProofGate {
     return n === undefined || n === null ? null : n > 0;
   };
   const passkeyUsable = (): boolean =>
-    options.offerPasskey !== false && passkeysSupported && hasPasskey() === true;
+    !passwordOnly && options.offerPasskey !== false && passkeysSupported && hasPasskey() === true;
 
   const phase = (): ProofPhase => {
     const own = ownPhase();
@@ -277,7 +283,7 @@ export function createProofGate(options: ProofGateOptions): ProofGate {
     hasPasskey,
     lastFailure,
     async ensure() {
-      const live = auth.freshProof();
+      const live = liveNow() ? auth.freshProof() : null;
       if (live !== null) {
         setProofLive(true);
         return live;
@@ -312,7 +318,7 @@ export function createProofGate(options: ProofGateOptions): ProofGate {
       const failure = proofFailureFromError(err);
       if (failure.kind === "required") {
         if (grant !== null) auth.dropFreshProof(grant);
-        setProofLive(auth.freshProofLive());
+        setProofLive(liveNow());
         setRevealed(true);
         setLastFailure(failure);
         setLine(null);

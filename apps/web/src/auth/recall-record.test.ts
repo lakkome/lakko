@@ -53,8 +53,21 @@ describe("what the record holds", () => {
     expect(Array.from(plain.slice(9, 41))).toEqual(new Array(32).fill(7));
     expect(new TextDecoder().decode(plain.slice(41))).toBe("alice");
     const back = decodeRecallPlaintext(ACCOUNT, plain);
-    expect(back).toEqual(record());
-    expect(Object.keys(back ?? {}).sort()).toEqual(["accountIdB64", "learnedAtMs", "oldSeed", "username"]);
+    expect(back).toEqual({ ...record(), ownedKeysRoot: null });
+    expect(Object.keys(back ?? {}).sort()).toEqual(["accountIdB64", "learnedAtMs", "oldSeed", "ownedKeysRoot", "username"]);
+  });
+
+  it("version 2 also holds the owned-channels keys-lock root of the old keys (ADR-0101 section 7 item 8)", () => {
+    const root = new Uint8Array(32).fill(0x33);
+    const plain = encodeRecallPlaintext(record({ ownedKeysRoot: root }));
+    expect(plain).toHaveLength(1 + 8 + 32 + 32 + "alice".length);
+    expect(plain[0]).toBe(2);
+    const back = decodeRecallPlaintext(ACCOUNT, plain);
+    expect(Array.from(back?.ownedKeysRoot ?? [])).toEqual(Array.from(root));
+    expect(back?.username).toBe("alice");
+    expect(Array.from(back?.oldSeed ?? [])).toEqual(new Array(32).fill(7));
+    expect(() => encodeRecallPlaintext(record({ ownedKeysRoot: new Uint8Array(31) }))).toThrow();
+    expect(decodeRecallPlaintext(ACCOUNT, plain.slice(0, 72))).toBeNull();
   });
 
   it("holds an account without a username", () => {
@@ -85,7 +98,7 @@ describe("the store", () => {
     await putRecallRecord(record(), key);
     expect(await listRecallAccounts()).toEqual([ACCOUNT]);
     expect(await hasRecallRecord(ACCOUNT)).toBe(true);
-    expect(await getRecallRecord(ACCOUNT, key)).toEqual(record());
+    expect(await getRecallRecord(ACCOUNT, key)).toEqual({ ...record(), ownedKeysRoot: null });
   });
 
   it("stores ciphertext: neither the seed nor the username is in the row", async () => {

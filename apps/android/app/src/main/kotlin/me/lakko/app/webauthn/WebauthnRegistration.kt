@@ -80,6 +80,9 @@ public class WebauthnRegistration {
         public val prfOutput: ByteArray?,
         /** What a registration reported about PRF support (see [PrfResult]). */
         public val prfEnabled: Boolean?,
+        /** The PRF output at the ceremony's second salt (the reset seal's),
+         *  or `null`. Stays on this device. */
+        public val prfSecondOutput: ByteArray? = null,
     )
 
     private fun ceremonyOf(responseJson: String): Ceremony {
@@ -90,6 +93,7 @@ public class WebauthnRegistration {
             credentialId = credentialIdOf(parsed),
             prfOutput = prf.output,
             prfEnabled = prf.enabled,
+            prfSecondOutput = prf.second,
         )
     }
 
@@ -119,8 +123,10 @@ public class WebauthnRegistration {
         context: Context,
         optionsPublicKey: JsonElement,
         prfSalt: ByteArray? = null,
+        prfSecondSalt: ByteArray? = null,
     ): Outcome<Ceremony> {
-        val options = if (prfSalt != null) withPrfExtension(optionsPublicKey, prfSalt) else optionsPublicKey
+        val options =
+            if (prfSalt != null) withPrfExtension(optionsPublicKey, prfSalt, prfSecondSalt) else optionsPublicKey
         val requestJson = json.encodeToString(JsonElement.serializer(), options)
         return try {
             val manager = CredentialManager.create(context)
@@ -156,10 +162,11 @@ public class WebauthnRegistration {
         optionsPublicKey: JsonElement,
         prfSalt: ByteArray? = null,
         onlyCredentialIdB64: String? = null,
+        prfSecondSalt: ByteArray? = null,
     ): Outcome<Ceremony> {
         var options = optionsPublicKey
         if (onlyCredentialIdB64 != null) options = onlyCredential(options, onlyCredentialIdB64)
-        if (prfSalt != null) options = withPrfExtension(options, prfSalt)
+        if (prfSalt != null) options = withPrfExtension(options, prfSalt, prfSecondSalt)
         val requestJson = json.encodeToString(JsonElement.serializer(), options)
         return try {
             val manager = CredentialManager.create(context)

@@ -804,6 +804,8 @@ private data class StoredPendingRequest(
     val asksForChat: Boolean = false,
     /** Base scenario 7 — [IncomingContactRequest.asksPastChatHex]. */
     val asksPastChatHex: String? = null,
+    /** UX 16.11 — [IncomingContactRequest.startedOverNote]. */
+    val startedOverNote: Boolean = false,
 )
 
 /** JSON for [pending]; `java.util.Base64` for the byte fields so the codec
@@ -823,6 +825,7 @@ internal fun encodePendingRequests(pending: List<IncomingContactRequest>): Strin
                 wireB64 = r.wire?.let { base64Encode(it) },
                 asksForChat = r.asksForChat,
                 asksPastChatHex = r.asksPastChatHex,
+                startedOverNote = r.startedOverNote,
             )
         },
     )
@@ -843,6 +846,7 @@ internal fun decodePendingRequests(raw: String): List<IncomingContactRequest>? =
                 wire = s.wireB64?.let { base64Decode(it) },
                 asksForChat = s.asksForChat,
                 asksPastChatHex = s.asksPastChatHex,
+                startedOverNote = s.startedOverNote,
             )
         }
     } catch (_: Exception) {

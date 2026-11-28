@@ -246,15 +246,30 @@ final class RecoveryFlowTests: XCTestCase {
         var nowMs: Int64 = 1_000_000
     }
 
-    /// Reset the keys the way the warning screen does when no grant is
-    /// held: with the password, for the account parked on the prompt.
+    /// The grant of a confirmed second factor, as a factor route answers it
+    /// (ADR-0073, amended 2026-11-26). `expiresAtMs` is read against the
+    /// harness clock.
+    static let factorGrant = "factor-1"
+
+    private func proof(
+        _ h: Harness, expiresAtMs: Int64 = 1_600_000
+    ) -> KeyResetProof {
+        KeyResetProof(
+            factor: ResetFactorConfirmation(kind: .authenticator, grant: Self.factorGrant, expiresAtMs: expiresAtMs),
+            sealed: nil, announcesPasskey: false, ownedChannelsLock: nil, passwordExportKey: nil)
+    }
+
+    /// Reset the keys the way the warning screen does: the password first
+    /// (the section's password block), then the reset under a confirmed
+    /// second factor, for the account parked on the prompt.
     @discardableResult
     private func mint(_ h: Harness, password: String = "correct horse") async throws -> String {
         if case .needsRecoveryPhrase(let account) = h.repository.state,
            let bytes = base64Decode(account.accountIdB64) {
             h.reset.loginAccount = bytes
         }
-        return try await h.repository.mintFreshIdentity(password: Data(password.utf8))
+        try await h.repository.proveWithPassword(password: Data(password.utf8))
+        return try await h.repository.mintFreshIdentity(proof: proof(h))
     }
 
     private final class WipeLog {
@@ -398,7 +413,7 @@ final class RecoveryFlowTests: XCTestCase {
         // The device keeps the phrase (it seals the email vault and is what
         // a phrase typed later is checked against)...
         XCTAssertEqual(DevicePhrase.read(accountIdB64: account.b64), mnemonic.phrase())
-        XCTAssertEqual(h.repository.heldPhraseForEmailVault(), mnemonic.phrase())
+        XCTAssertEqual(h.repository.heldAccountPhrase(), mnemonic.phrase())
         // ...but ADR-0075 D2: it is not shown at sign-up, and `Show recovery
         // phrase` has nothing to show until the person saved one.
         XCTAssertNil(h.repository.devicePhrase(), "no saved phrase, nothing to show")
@@ -1098,26 +1113,50 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertEqual(NameRouteStub.requests(host).map(\.path), ["/auth/backup/head"], "no legacy write")
     }
 
-    // MARK: - The password-fresh reset grant (ADR-0073, amended 2026-10-04)
+    // MARK: - The reset's proof: the password, then one second factor
+    // (ADR-0073, amended 2026-10-04 and 2026-11-26)
 
-    func testAResetWithoutAGrantOrAPasswordAsksForThePasswordBeforeAnyCall() async throws {
+    func testAResetWithoutALiveFactorConfirmationSendsNothing() async throws {
         let account = newAccount()
         let h = harness(routes: totpRoute(account.bytes))
         try await parkWithoutKeys(h)
         XCTAssertFalse(h.repository.holdsLiveFreshAuthForPendingRestore(), "an authenticator sign-in mints none")
+        XCTAssertFalse(h.repository.holdsLivePasswordProofForPendingRestore())
 
         do {
-            _ = try await h.repository.mintFreshIdentity()
-            XCTFail("no grant and no password")
+            // The confirmation ran out (ten minutes): the section opens again.
+            _ = try await h.repository.mintFreshIdentity(proof: proof(h, expiresAtMs: h.clock.nowMs))
+            XCTFail("no live confirmation")
         } catch {
-            XCTAssertTrue(error is FreshAuthRequired, "\(error)")
+            XCTAssertTrue(error is ResetFactorRequired, "\(error)")
         }
         XCTAssertTrue(h.reset.loginCalls.isEmpty)
         XCTAssertTrue(h.reset.resetCalls.isEmpty)
         XCTAssertTrue(isNeedsKeys(h.repository))
     }
 
-    func testAPasswordOnTheWarningScreenSignsInInstallsThePairAndResetsWithTheGrant() async throws {
+    /// No factor route is tried before the password was proven.
+    func testAFactorIsNotTriedWithoutAPasswordProof() async throws {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        let before = NameRouteStub.requests(h.host).count
+        do {
+            _ = try await h.repository.confirmResetFactor(totpCode: "123456")
+            XCTFail("no password proof")
+        } catch {
+            XCTAssertTrue(error is FreshAuthRequired, "\(error)")
+        }
+        do {
+            _ = try await h.repository.confirmResetFactor(emailChallengeId: "ch", code: "123456")
+            XCTFail("no password proof")
+        } catch {
+            XCTAssertTrue(error is FreshAuthRequired, "\(error)")
+        }
+        XCTAssertEqual(NameRouteStub.requests(h.host).count, before, "nothing was sent")
+    }
+
+    func testAPasswordOnTheWarningScreenSignsInInstallsThePairAndResetsWithTheFactorGrant() async throws {
         let account = newAccount()
         let h = harness(routes: totpRoute(account.bytes))
         try await parkWithoutKeys(h)
@@ -1135,7 +1174,7 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertEqual(h.reset.loginCalls[0].handle, try loginHandle(username: "alice"))
         XCTAssertEqual(h.reset.loginCalls[0].password, Data("correct horse".utf8))
         XCTAssertEqual(h.reset.resetCalls.count, 1)
-        XCTAssertEqual(h.reset.resetCalls[0].grant, "grant-1")
+        XCTAssertEqual(h.reset.resetCalls[0].grant, Self.factorGrant, "the confirmed factor's grant, not the sign-in's")
         XCTAssertEqual(h.reset.resetCalls[0].token, "tok-relogin", "the reset runs on the re-login's pair")
         XCTAssertEqual(tokenAtReset, "tok-relogin", "installed before the reset")
         XCTAssertTrue(stateAtReset, "the re-login lands no session: still on the restore prompt")
@@ -1170,7 +1209,7 @@ final class RecoveryFlowTests: XCTestCase {
         h.reset.loginSession = .fixture(access: "tok-other")
 
         do {
-            _ = try await h.repository.mintFreshIdentity(password: Data("pw".utf8))
+            try await h.repository.proveWithPassword(password: Data("pw".utf8))
             XCTFail("the scripted sign-in names no account of this prompt")
         } catch {
             XCTAssertTrue(error is FreshAuthWrongPassword, "\(error)")
@@ -1195,25 +1234,24 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertTrue(h.reset.resetCalls.isEmpty)
     }
 
-    func testA403FromTheResetDropsTheGrantAndAsksForThePassword() async throws {
+    func testA403FromTheResetOpensTheFactorSectionAgainAndResetsNothing() async throws {
         let account = newAccount()
         let h = harness(routes: totpRoute(account.bytes))
         try await parkWithoutKeys(h)
         h.reset.resetError = AuthClientError.http(
-            status: 403, endpoint: "/account/keys/reset/start", body: #"{"error":"fresh-auth-required"}"#)
+            status: 403, endpoint: "/account/keys/reset/start", body: #"{"error":"reset-factor-required"}"#)
 
         do {
             try await mint(h)
-            XCTFail("the server refused the grant")
+            XCTFail("the server refused the confirmation")
         } catch {
-            XCTAssertTrue(error is FreshAuthRequired, "\(error)")
+            XCTAssertTrue(error is ResetFactorRequired, "\(error)")
         }
-        XCTAssertFalse(h.repository.holdsLiveFreshAuthForPendingRestore(), "the refused grant is dropped")
         XCTAssertTrue(isNeedsKeys(h.repository))
         XCTAssertFalse(h.markers.isPublishOwed(accountIdB64: account.b64))
     }
 
-    func testAGrantKeptAfterAFailedResetServesTheNextAttemptWithoutASecondSignIn() async throws {
+    func testAConfirmationKeptAfterAFailedResetServesTheNextAttemptWithoutASecondSignIn() async throws {
         let account = newAccount()
         let h = harness(routes: totpRoute(account.bytes))
         try await parkWithoutKeys(h)
@@ -1223,14 +1261,14 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertTrue(h.repository.holdsLiveFreshAuthForPendingRestore())
 
         h.reset.resetError = nil
-        _ = try await h.repository.mintFreshIdentity()
+        _ = try await h.repository.mintFreshIdentity(proof: proof(h))
 
         XCTAssertEqual(h.reset.loginCalls.count, 1, "one sign-in")
-        XCTAssertEqual(h.reset.resetCalls.map(\.grant), ["grant-1", "grant-1"])
+        XCTAssertEqual(h.reset.resetCalls.map(\.grant), [Self.factorGrant, Self.factorGrant])
         XCTAssertFalse(h.repository.holdsLiveFreshAuthForPendingRestore(), "a successful reset spends the grant")
     }
 
-    func testAnExpiredGrantIsNotSent() async throws {
+    func testAnExpiredConfirmationIsNotSent() async throws {
         let account = newAccount()
         let h = harness(routes: totpRoute(account.bytes))
         try await parkWithoutKeys(h)
@@ -1242,12 +1280,12 @@ final class RecoveryFlowTests: XCTestCase {
         h.clock.nowMs = 1_600_000
         XCTAssertFalse(h.repository.holdsLiveFreshAuthForPendingRestore())
         do {
-            _ = try await h.repository.mintFreshIdentity()
-            XCTFail("the grant expired")
+            _ = try await h.repository.mintFreshIdentity(proof: proof(h))
+            XCTFail("the confirmation expired")
         } catch {
-            XCTAssertTrue(error is FreshAuthRequired, "\(error)")
+            XCTAssertTrue(error is ResetFactorRequired, "\(error)")
         }
-        XCTAssertEqual(h.reset.resetCalls.count, 1, "nothing sent with the expired grant")
+        XCTAssertEqual(h.reset.resetCalls.count, 1, "nothing sent with the expired confirmation")
     }
 
     func testSigningOutDropsTheGrant() async throws {
@@ -1286,11 +1324,12 @@ final class RecoveryFlowTests: XCTestCase {
         h.reset.loginAccount = account.bytes
         h.reset.loginSession = .fixture(access: "tok-relogin", refresh: "r1.relogin")
 
-        _ = try await h.repository.mintFreshIdentity(password: Data("pw".utf8), username: " @Alice ")
+        try await h.repository.proveWithPassword(password: Data("pw".utf8), username: " @Alice ")
+        _ = try await h.repository.mintFreshIdentity(proof: proof(h))
 
         XCTAssertEqual(h.reset.loginCalls.count, 1)
         XCTAssertEqual(h.reset.loginCalls[0].handle, try loginHandle(username: "alice"))
-        XCTAssertEqual(h.reset.resetCalls.map(\.grant), ["grant-1"])
+        XCTAssertEqual(h.reset.resetCalls.map(\.grant), [Self.factorGrant])
         XCTAssertEqual(h.reset.resetCalls[0].token, "tok-relogin")
     }
 
@@ -1301,7 +1340,7 @@ final class RecoveryFlowTests: XCTestCase {
 
         for typed in [nil, "", "   ", "no"] as [String?] {
             do {
-                _ = try await h.repository.mintFreshIdentity(password: Data("pw".utf8), username: typed)
+                try await h.repository.proveWithPassword(password: Data("pw".utf8), username: typed)
                 XCTFail("no usable name: \(String(describing: typed))")
             } catch {
                 XCTAssertTrue(error is FreshAuthUsernameRequired, "\(error)")
@@ -1321,7 +1360,7 @@ final class RecoveryFlowTests: XCTestCase {
         h.reset.loginSession = .fixture(access: "tok-other", refresh: "r1.other")
 
         do {
-            _ = try await h.repository.mintFreshIdentity(password: Data("pw".utf8), username: "bob")
+            try await h.repository.proveWithPassword(password: Data("pw".utf8), username: "bob")
             XCTFail("the typed name signs in to another account")
         } catch {
             XCTAssertTrue(error is FreshAuthWrongPassword, "\(error)")
@@ -1340,7 +1379,7 @@ final class RecoveryFlowTests: XCTestCase {
         try await parkWithoutKeys(h)
         h.reset.loginAccount = account.bytes
 
-        _ = try await h.repository.mintFreshIdentity(password: Data("pw".utf8), username: "mallory")
+        try await h.repository.proveWithPassword(password: Data("pw".utf8), username: "mallory")
 
         XCTAssertEqual(h.reset.loginCalls.map(\.handle), [try loginHandle(username: "alice")])
     }
@@ -2372,9 +2411,10 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertNil(h.repository.sessionLanding)
     }
 
-    /// UX 17.2 — a passkey gesture on the warning screen qualifies for the
-    /// reset; no password is asked.
-    func testAPasskeyProofQualifiesForTheReset() async throws {
+    /// UX 15.1b — a passkey sign-in is a proof for the other gated actions
+    /// and does NOT stand in for the password on the reset: the section
+    /// still asks for the password, and no factor route is tried.
+    func testAPasskeyProofDoesNotStandInForThePasswordOnTheReset() async throws {
         let account = newAccount()
         let h = harness(routes: totpRoute(account.bytes))
         try await parkWithoutKeys(h)
@@ -2386,12 +2426,14 @@ final class RecoveryFlowTests: XCTestCase {
         try await h.repository.proveWithPasskey()
         XCTAssertTrue(h.repository.holdsLiveFreshAuthForPendingRestore())
         XCTAssertTrue(isNeedsKeys(h.repository), "still on the restore prompt")
-        _ = try await h.repository.mintFreshIdentity()
-
-        XCTAssertTrue(h.reset.loginCalls.isEmpty, "no password sign-in")
-        XCTAssertEqual(h.reset.resetCalls.map(\.grant), ["grant-passkey"])
-        XCTAssertEqual(h.reset.resetCalls.map(\.token), ["tok-passkey"])
-        XCTAssertFalse(h.repository.holdsLiveFreshAuth(), "a reset spends every grant")
+        XCTAssertFalse(h.repository.holdsLivePasswordProofForPendingRestore())
+        do {
+            _ = try await h.repository.confirmResetFactor(totpCode: "123456")
+            XCTFail("a passkey sign-in is not a password proof")
+        } catch {
+            XCTAssertTrue(error is FreshAuthRequired, "\(error)")
+        }
+        XCTAssertTrue(h.reset.resetCalls.isEmpty)
     }
 
     func testThePasskeyRowOfTheRestorePromptIsAProofToo() async throws {

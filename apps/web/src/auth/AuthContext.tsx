@@ -76,6 +76,7 @@ import {
   onMount,
   type Accessor,
   type JSX,
+  untrack,
   useContext,
 } from "solid-js";
 
@@ -241,6 +242,39 @@ import { clearLeaveRequestedForAccount } from "../chat/membership-ended";
 import { clearBeaconObservationsForAccount } from "../chat/committer-beacon";
 import { rehydrateMlsState } from "../chat/rehydrate";
 import { retireOwnPublisherLeaves } from "../channels/publisher-devices";
+import {
+  addOwnedPasskeyLock,
+  dropOwnedChannelsSession,
+  ensureOwnedPasswordLock,
+  makeOwnedChannelsVaults,
+  removeOwnedPasskeyLock,
+  retakeOwnedChannelsAfterReset,
+} from "../channels/owned";
+import { createSealJobs, type ResetSealedBy } from "./seal/account-seal-jobs";
+import { keptAnnouncementSeq } from "./seal/seal-runtime";
+import { judgeOwnReset, type OwnResetJudgement } from "./own-reset-verdict";
+import { judgeBundleReset } from "../contacts/reset-judge";
+import type { OwnSealFacts } from "./seal/own-seals";
+import {
+  chooseSealSecret,
+  readSeals,
+  resetOutlook,
+  sealFactsOf,
+  signResetSeal,
+  type OpenedSeals,
+  type ResetOutlook,
+  type SealSecret,
+} from "./seal/seal-announcement";
+import {
+  CODE_RESET_FACTOR_REQUIRED,
+  createResetGrantHolder,
+  ResetFactorRefusedError,
+  ResetFactorRequiredError,
+  CODE_FACTOR_REFUSED,
+  type ResetFactorKind,
+} from "./seal/reset-factor";
+import { refreshFactors, type AccountFactors } from "./protect/factors";
+import { actionHashForResetKeys } from "./webauthn-client";
 import { subscribeToPush, unsubscribeFromPush } from "../push/subscribe";
 import { SessionBinding, StaleBindingError } from "./binding-epoch";
 import { releaseWakeBinding } from "../push/wake-binding";
@@ -394,6 +428,13 @@ import {
   newWordsShown,
   setPhraseProtected,
 } from "./protect/account-protection";
+import { accountFactors } from "./protect/factors";
+import {
+  LANDING_FACTORS_WAIT_MS,
+  landingWaitsForFactors,
+  protectStepCanContinue,
+  protectStepShown,
+} from "./protect/protect-step";
 import {
   clearFirstPasswordOwed,
   isFirstPasswordOwed,
@@ -439,6 +480,7 @@ import {
 } from "../backup/restored-known-groups";
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 import { KeyedError } from "../l10n/keyed-error";
+import { currentLanguage } from "../l10n";
 
 /** Account record exposed to the UI when a session is active. */
 export interface SessionAccount {
@@ -771,6 +813,9 @@ export interface AuthApi {
    *  owed. While `true` both route guards render that step instead of any
    *  route; it survives a reload (a marker in storage). */
   readonly protectStepOwed: Accessor<boolean>;
+  /** UX 19.1c (alignment item G): a landing still waits, at most a few
+   *  seconds, for the factor read before the app is shown. */
+  readonly factorsPending: Accessor<boolean>;
   /** The person chose on the "Protect your account" step (an email was
    *  added, a phrase is being saved, or "Continue without"). */
   finishProtectStep(): void;
@@ -832,6 +877,12 @@ export interface AuthApi {
     accountId: Uint8Array,
     session: SessionPair,
     whenOpened?: () => void,
+    /** The export key of the password the mailed code set. On a device that
+     *  holds the keys it takes the password over at once; on one that does
+     *  not it is kept in memory until the keys arrive on this page (ADR-0101
+     *  section 7 item 7), and is otherwise taken over by the next password
+     *  sign-in on a device with the keys. */
+    exportKey?: Uint8Array,
   ): Promise<void>;
   /** URL-safe base64 of this device's id for a landing of `username`'s
    *  account, when this device already holds its keys; else `undefined`. */
@@ -1081,10 +1132,6 @@ export interface AuthApi {
     commit(
       grant: string,
       revokeDeviceIds: readonly Uint8Array[],
-      /** ADR-0075 section 3: `phraseSaved` makes the account
-       *  phrase-protected in the same transaction ("Save a recovery
-       *  phrase"); the server deletes the email vault with it. */
-      options?: { readonly phraseSaved?: boolean },
     ): Promise<{
       readonly keyGeneration: bigint;
       readonly attestationB64Url: string;
@@ -1299,13 +1346,57 @@ export interface AuthApi {
    *  owed. Returns the new 12-word phrase. The contacts see a changed key
    *  and re-verify out of band.
    *
-   *  The server refuses a reset without a fresh-auth grant (UX 17.2). The
-   *  caller obtains one first (`proveWithPassword` / `proveWithPasskey`, or
-   *  a sign-in by password or passkey in the last ten minutes on this
-   *  page). Throws `FreshAuthRequiredError` when no live grant is held, or
-   *  when the server answers `403 fresh-auth-required` (nothing was reset;
-   *  the screen shows the proof block). */
+   *  ADR-0073, amended 2026-11-26 (UX 15.1b): the server refuses a reset
+   *  without a reset factor grant: the password, proven by a password
+   *  sign-in, and one second factor (`resetFactor` below). Throws
+   *  `ResetFactorRequiredError` when no live one is held, or when the server
+   *  answers `403 reset-factor-required` (nothing was reset; the section
+   *  opens again).
+   *
+   *  ADR-0101 sections 7 and 10: before the server step the device asks for
+   *  the owned-channels server half and makes the reset seal from what
+   *  confirmed the reset (the password's export key, or the passkey's seal
+   *  secret), when the account's published protection lists it. A reset
+   *  with no seal still works: it starts the account over (UX 15.1c). */
   mintFreshIdentity(): Promise<string>;
+  /** The reset's second factor (ADR-0073, amended 2026-11-26; UX 15.1b and
+   *  15.1c), for the account on the restore prompt. Every confirming call
+   *  needs a live PASSWORD proof (`proveWithPassword`, or a password sign-in
+   *  in the last ten minutes) and throws `FreshAuthRequiredError` without
+   *  one, `ResetFactorRefusedError` for a wrong code or a factor the
+   *  account lacks, the proof block's errors for a passkey gesture, and
+   *  `AuthHttpError` / `AuthNetworkError` otherwise (`reset-factor.ts`
+   *  maps them). */
+  readonly resetFactor: {
+    /** A password sign-in of this page is less than ten minutes old. */
+    passwordProofLive(): boolean;
+    /** The factor that is confirmed and still live. Reactive on the
+     *  confirming calls; the ten minutes are checked at each read. */
+    confirmed(): ResetFactorKind | null;
+    /** The factors the account has (`GET /recovery-email` and the passkey
+     *  list); `null` when they could not be read. */
+    factors(): Promise<AccountFactors | null>;
+    confirmTotp(code: string): Promise<void>;
+    emailStart(
+      address: string,
+    ): Promise<{ readonly challengeId: string; readonly resendAfterSecs: number; readonly expiresInSecs: number }>;
+    emailFinish(challengeId: string, code: string): Promise<void>;
+    confirmPasskey(): Promise<void>;
+    /** UX 15.1c: whether a reset made now brings the conversations back.
+     *  Decided on this device from the account's published protection and
+     *  what confirmed the reset; the server is never asked. `null` when the
+     *  directory could not be read. */
+    outlook(): Promise<ResetOutlook | null>;
+    /** Forget the confirmation (the panel was closed). */
+    clear(): void;
+  };
+  /** What the published protection of the account on the restore prompt
+   *  lists (ADR-0101 section 10), read from the directory and opened under
+   *  the key the directory publishes: this device holds no keys to check it
+   *  against, so it decides display only (the phrase row, whether new words
+   *  are shown after a reset). `null` when none is published or the
+   *  directory could not be read. Never throws. */
+  publishedSealFacts(): Promise<OwnSealFacts | null>;
   /** Whether a live fresh-auth proof is held for the account of this
    *  session (signed in, or parked in `needs-recovery-phrase`). Not
    *  reactive: it depends on the clock, so a surface reads it when it
@@ -1344,6 +1435,26 @@ export interface AuthApi {
   /** Whether `replacePassword` may run right now: a live proof, or a local
    *  phrase check in the last ten minutes on this page. */
   passwordChangeAllowed(): boolean;
+  /** ADR-0101 section 10 (UX 19.5): the person checked three words of the
+   *  phrase this device holds, so the account's protection is published
+   *  again with the phrase in it. `"published"` once discovery took the
+   *  announcement (then `ownSealFacts(...).phrase` is true); `"retry"` when
+   *  it could not be published (offline, a refusal): nothing changed and
+   *  the caller offers `Try again`. Never throws. */
+  savePhraseSeal(): Promise<"published" | "retry">;
+  /** A passkey was just added on this device. `sealPrfOutput` is what its
+   *  creation gave for the seal salt (`addPasskey`), or `null` when the
+   *  authenticator gave none. Publishes the account's protection with this
+   *  passkey in it and makes its lock of the owned-channels list. Resolves
+   *  whether the passkey keeps the chats (UX 19.1d). Never throws. */
+  passkeySealAdded(input: {
+    readonly credentialIdB64: string;
+    readonly sealPrfOutput: Uint8Array | null;
+  }): Promise<boolean>;
+  /** A passkey was just deleted: its seal leaves the account's published
+   *  protection and its lock of the owned-channels list is deleted. Never
+   *  throws. */
+  passkeySealRemoved(credentialIdB64: string): Promise<void>;
   /** ADR-0017 lost-everything fallback, step 2 — only valid while the
    *  state is `save-fresh-phrase`. The user has saved the freshly-minted
    *  recovery phrase; this lands the canonical session from the stashed
@@ -1539,10 +1650,35 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // ADR-0075 (UX 19.1a): bumped when the "Protect your account" marker of
   // the signed-in account is written or cleared.
   const [protectVersion, setProtectVersion] = createSignal(0);
+  // Since 2026-11-26 (UX 19.1c) the step is also shown at every session
+  // landing to an account with a username and none of the three second ways
+  // in; the rule is `protectStepShown` (`protect/protect-step.ts`).
   const protectStepOwed = (): boolean => {
     protectVersion();
     const s = state();
-    return s.kind === "session" && isProtectStepOwed(plainStorage(), s.account.accountId);
+    if (s.kind !== "session") return false;
+    return protectStepShown({
+      hasUsername: s.account.username.trim().length > 0,
+      guest: guestAccountState(plainStorage(), s.account.accountId) !== null,
+      markerOwed: isProtectStepOwed(plainStorage(), s.account.accountId),
+      factors: accountFactors(s.account.accountId),
+    });
+  };
+  // UX 19.1c (alignment item G): the landing whose factor read is over
+  // (answered, failed, or past LANDING_FACTORS_WAIT_MS); keyed like
+  // `sealLanding` below.
+  const [factorWaitOverFor, setFactorWaitOverFor] = createSignal<string | null>(null);
+  const factorsPending = (): boolean => {
+    protectVersion();
+    const s = state();
+    if (s.kind !== "session") return false;
+    return landingWaitsForFactors({
+      hasUsername: s.account.username.trim().length > 0,
+      guest: guestAccountState(plainStorage(), s.account.accountId) !== null,
+      markerOwed: isProtectStepOwed(plainStorage(), s.account.accountId),
+      factors: accountFactors(s.account.accountId),
+      waitOver: factorWaitOverFor() === `${s.account.accountId}:${s.account.username.trim().length > 0 ? "named" : "unnamed"}`,
+    });
   };
   // UX spec section 8: why the restore prompt is up after a passkey sign-in.
   const [restoreNotice, setRestoreNotice] = createSignal<RestoreNotice | null>(null);
@@ -1615,7 +1751,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // ADR-0074 part 1: the recall record this page holds open (the "Was it
   // you?" screen), with the device key that seals it; and whether the
   // account was taken back in this page session.
-  let recallHeld: { readonly record: RecallRecord; readonly deviceKey: DeviceCipher } | null = null;
+  let recallHeld: {
+    readonly record: RecallRecord;
+    readonly deviceKey: DeviceCipher;
+    /** The key generation this device's session was of, when this page
+     *  learned of the reset (not kept in the record). */
+    readonly heldGeneration?: bigint | null;
+  } | null = null;
   const [recallDone, setRecallDone] = createSignal(false);
   // ADR-0073 section 4.2, last paragraph: an attestation older than the
   // client-side bound is applied only after an explicit sign-in in this page
@@ -1763,6 +1905,224 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // ADR-0073 (amended 2026-10-06): the fresh-auth proof. Memory only, never
   // persisted, never logged (`fresh-auth.ts`).
   const freshGrants = createFreshGrantHolder();
+  // ADR-0073, amended 2026-11-26: the grant string a PASSWORD sign-in of
+  // this page minted (sign-up, sign-in, the proof block). The reset's factor
+  // routes accept only such a grant; a passkey sign-in's does not count.
+  let passwordGrant: string | null = null;
+  // The reset factor grant (the password and one second factor), and what
+  // the confirming steps of this page left for sealing the reset: the export
+  // key of the password sign-in that proved the password, and the passkey's
+  // seal secret when a passkey confirmed. Memory only; zeroed on sign-out.
+  const resetGrants = createResetGrantHolder();
+  const [resetFactorVersion, setResetFactorVersion] = createSignal(0);
+  let proofExportKey: { accountIdB64: string; exportKey: Uint8Array } | null = null;
+  let resetPasskeySecret: {
+    accountIdB64: string;
+    prfOutput: Uint8Array;
+    credentialId: Uint8Array;
+  } | null = null;
+  function dropResetProof(): void {
+    resetGrants.clear();
+    proofExportKey?.exportKey.fill(0);
+    proofExportKey = null;
+    resetPasskeySecret?.prfOutput.fill(0);
+    resetPasskeySecret = null;
+    setResetFactorVersion((v) => v + 1);
+  }
+  /** Whether the live fresh-auth grant of the account is one a password
+   *  sign-in of this page minted. */
+  function passwordProofLiveFor(accountIdB64: string | null): boolean {
+    if (accountIdB64 === null || passwordGrant === null) return false;
+    return freshGrants.live(accountIdB64, Date.now()) === passwordGrant;
+  }
+  /** The bearer of the account the proof surfaces act for. */
+  function proofToken(): string | null {
+    return sessionTokens.peek() ?? pendingRecovery()?.session.sessionToken ?? null;
+  }
+  interface ResetFactorContext {
+    readonly accountIdB64: string;
+    readonly username: string;
+    readonly token: string;
+    /** The password-minted fresh-auth grant. */
+    readonly grant: string;
+  }
+  /** What every factor route needs; throws `FreshAuthRequiredError` when no
+   *  password proof is live (the section draws the password block). */
+  function resetFactorContext(): ResetFactorContext {
+    const account = proofAccount();
+    const token = proofToken();
+    if (account === null || token === null) throw new KeyedError("common.error.session_not_ready");
+    if (!passwordProofLiveFor(account.accountIdB64) || passwordGrant === null) throw new FreshAuthRequiredError();
+    return { accountIdB64: account.accountIdB64, username: account.username, token, grant: passwordGrant };
+  }
+  /** Run one factor route and translate the two answers that are not
+   *  failures of the request: a refused factor, and a password proof the
+   *  server no longer takes (dropped, so the block is drawn again). */
+  async function resetFactorCall<T>(ctx: ResetFactorContext, run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (err) {
+      if (err instanceof AuthHttpError) {
+        if (err.status === 401 && err.errorCode === CODE_FACTOR_REFUSED) throw new ResetFactorRefusedError();
+        if (isFreshAuthRequired({ status: err.status, errorCode: err.errorCode })) {
+          freshGrants.spend(ctx.grant);
+          passwordGrant = null;
+          throw new FreshAuthRequiredError();
+        }
+      }
+      throw err;
+    }
+  }
+  function keepResetGrant(
+    accountIdB64: string,
+    granted: { readonly grant: string; readonly expiresAtMs: number },
+    factor: ResetFactorKind,
+  ): void {
+    resetGrants.put(accountIdB64, { grant: granted.grant, factor, expiresAtMs: granted.expiresAtMs });
+    setResetFactorVersion((v) => v + 1);
+  }
+  /** The secrets this page holds that may seal a reset of the account: the
+   *  export key of the password sign-in that proved the password (the proof
+   *  block's, else the sign-in that parked the account while its proof is
+   *  live), and the seal secret of the passkey that confirmed. */
+  function resetSealSecrets(accountIdB64: string): SealSecret[] {
+    const held: SealSecret[] = [];
+    const parked = pendingRecovery();
+    if (proofExportKey !== null && proofExportKey.accountIdB64 === accountIdB64) {
+      held.push({ kind: "password", exportKey: proofExportKey.exportKey });
+    } else if (
+      parked !== null &&
+      parked.accountIdB64 === accountIdB64 &&
+      parked.exportKey.length === 64 &&
+      passwordProofLiveFor(accountIdB64)
+    ) {
+      held.push({ kind: "password", exportKey: parked.exportKey });
+    }
+    if (resetPasskeySecret !== null && resetPasskeySecret.accountIdB64 === accountIdB64) {
+      held.push({
+        kind: "passkey",
+        prfOutput: resetPasskeySecret.prfOutput,
+        credentialId: resetPasskeySecret.credentialId,
+      });
+    }
+    return held;
+  }
+  /** The account's current seal announcement as the directory serves it,
+   *  opened under the key the directory publishes for the account (a device
+   *  that lost everything holds no other). `null` when it serves none that
+   *  opens. Throws when the directory cannot be reached. */
+  async function ownPublishedSeals(wasm: Wasm, accountId: Uint8Array): Promise<OpenedSeals | null> {
+    const bundle = await ownBundleSeals(accountId);
+    if (bundle === null || bundle.resetSeals === null) return null;
+    const seals = readSeals(wasm, bundle.resetSeals, bundle.signaturePubkey, accountId);
+    return seals !== null && seals.keyGeneration === BigInt(bundle.keyGeneration) ? seals : null;
+  }
+  // ADR-0101 sections 7 and 10: the account's published protection and its
+  // owned-channels locks, on a device that holds the keys
+  // (`seal/account-seal-jobs.ts`). Events are reported where they happen
+  // and settled after the landing (the effect further down).
+  const [sealTick, setSealTick] = createSignal(0);
+  async function ownBundleSeals(accountId: Uint8Array) {
+    const bundle = await discovery.identityFetch(accountId);
+    if (bundle === null) return null;
+    const bytes = (b64: string | undefined): Uint8Array | null => {
+      if (b64 === undefined || b64.length === 0) return null;
+      try {
+        return base64Decode(b64);
+      } catch {
+        return null;
+      }
+    };
+    return {
+      signaturePubkey: base64Decode(bundle.signature_pubkey),
+      keyGeneration: bundle.key_generation,
+      resetSeals: bytes(bundle.reset_seals),
+      previousResetSeals: bytes(bundle.previous_reset_seals),
+    };
+  }
+  const sealJobs = createSealJobs({
+    wasm: () => loadWasm(),
+    ports: {
+      fetchOwn: ownBundleSeals,
+      upload: async (accountId, identity, resetSeals) => {
+        const wasm = await loadWasm();
+        await discovery.uploadIdentityBundle(
+          accountId,
+          identity.signaturePublicKey,
+          identity.x25519PublicKey,
+          wasm.signX25519Binding(identity),
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          { resetSeals },
+        );
+      },
+      storage: plainStorage(),
+      nowMs: () => Date.now(),
+    },
+    owned: {
+      make: makeOwnedChannelsVaults,
+      ensurePasswordLock: ensureOwnedPasswordLock,
+      addPasskeyLock: addOwnedPasskeyLock,
+      removePasskeyLock: removeOwnedPasskeyLock,
+      retake: retakeOwnedChannelsAfterReset,
+    },
+    account: () => {
+      const st = state();
+      const secrets = identitySecrets();
+      // A suspended account sends nothing; an account parked without its
+      // keys has nothing to sign with.
+      if (st.kind !== "session" || secrets === null || suspension() !== null) return null;
+      if (base64Encode(secrets.accountId) !== st.account.accountId) return null;
+      return {
+        accountIdB64: st.account.accountId,
+        accountId: secrets.accountId,
+        accountIdentitySeed: secrets.accountIdentitySeed,
+        lineageSeed: conversationSeedOf(secrets),
+        keyGeneration: secrets.keyGeneration,
+      };
+    },
+    deviceKey: (accountIdB64) => getDeviceKey(accountIdB64),
+    devicePhrase: (accountIdB64) => readDevicePhrase(accountIdB64),
+    previousAccountKeys: async (accountIdB64) => {
+      // The predecessors of an ADR-0074 rotation this device holds, newest
+      // first: the keys an announcement it kept may have been signed by.
+      const deviceKey = await getDeviceKey(accountIdB64);
+      if (deviceKey === null) return [];
+      const held = await getKeyRotationState(accountIdB64, deviceKey);
+      const wasm = await loadWasm();
+      const keys: Uint8Array[] = [];
+      for (const seedB64 of [...held.predecessorSeedsB64].reverse()) {
+        try {
+          const identity = wasm.Identity.fromSeed(base64Decode(seedB64));
+          try {
+            keys.push(identity.signaturePublicKey);
+          } finally {
+            identity.free();
+          }
+        } catch {
+          // A row that is not a seed names no key.
+        }
+      }
+      return keys;
+    },
+    cachedExportKey: (accountIdB64) => {
+      const secrets = identitySecrets();
+      return secrets !== null && base64Encode(secrets.accountId) === accountIdB64 && secrets.exportKey.length === 64
+        ? secrets.exportKey
+        : null;
+    },
+    storage: plainStorage(),
+  });
+  /** A password registration or sign-in ran on this page: what the seal
+   *  announcement and the password lock are made from, settled once the
+   *  session with the keys is on screen. */
+  function notePasswordEvent(accountIdB64: string, exportKey: Uint8Array): void {
+    sealJobs.notePassword(accountIdB64, exportKey);
+    setSealTick((v) => v + 1);
+  }
   // How this page's session was landed (UX 17.6); with the session, in
   // memory.
   let sessionLanding: SessionLanding = "other";
@@ -1819,6 +2179,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     // Sign-out and the account wipe both pass through here.
     moveSuspension({ kind: "ended" });
     freshGrants.clear();
+    passwordGrant = null;
+    dropResetProof();
+    // The seal secrets and the owned-channels list key leave memory.
+    sealJobs.drop();
+    dropOwnedChannelsSession();
     sessionLanding = "other";
     phraseCheckedAtMs = null;
     sessionTokens.clear();
@@ -2276,6 +2641,56 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // 1.16e5: drop active groups on logout/forgetDevice so MLS
   // state doesn't bleed across user sessions on the same tab.
   const chats = useChats();
+
+  // ADR-0101 sections 7 and 10: whenever a session with the keys is on
+  // screen (a landing, a generation change, a password event of this page)
+  // the seal jobs settle what is owed: the announcement published or read,
+  // the owned-channels locks made, a retake after a reset continued. In the
+  // background; it shows nothing and never throws. The factors are read with
+  // it (UX 19.1c), so the landing rule knows them without a route mounted.
+  // One value that changes only when there is something new to settle: the
+  // account on screen, its key generation (a reset or a rotation), and
+  // whether it has a username. A refreshed session token changes nothing
+  // here, so the directory is not asked again every fifteen minutes.
+  const sealLanding = createMemo((): string | null => {
+    const st = state();
+    const secrets = identitySecrets();
+    if (st.kind !== "session" || secrets === null) return null;
+    return `${st.account.accountId}:${secrets.keyGeneration.toString()}:${st.account.username.trim().length > 0 ? "named" : "unnamed"}`;
+  });
+  createEffect(() => {
+    sealTick();
+    const landing = sealLanding();
+    if (landing === null) return;
+    untrack(() => {
+      const st = state();
+      const secrets = identitySecrets();
+      if (st.kind !== "session" || secrets === null) return;
+      void sealJobs.settle();
+      if (st.account.username.trim().length > 0) {
+        // UX 19.1c (item G): the app stays off the screen until this read
+        // answers, at most LANDING_FACTORS_WAIT_MS.
+        const waitKey = `${st.account.accountId}:named`;
+        void refreshFactors(st.account.accountId, secrets.sessionToken).finally(() => {
+          setFactorWaitOverFor(waitKey);
+        });
+      }
+    });
+  });
+
+  // UX 19.1c (item G): whatever happens to the read (no keys in memory, no
+  // answer), the app is shown LANDING_FACTORS_WAIT_MS after a landing.
+  const factorWaitKey = createMemo((): string | null => {
+    const st = state();
+    if (st.kind !== "session" || st.account.username.trim().length === 0) return null;
+    return `${st.account.accountId}:named`;
+  });
+  createEffect(() => {
+    const key = factorWaitKey();
+    if (key === null) return;
+    const timer = setTimeout(() => setFactorWaitOverFor(key), LANDING_FACTORS_WAIT_MS);
+    onCleanup(() => clearTimeout(timer));
+  });
 
   // ADR-0074 section 0.4: a landing may hand the secrets the pair it was
   // given while `bind-device` has already replaced it. Every reader of
@@ -3385,7 +3800,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       for (const step of remainingKeyResetSteps(record.done)) {
         try {
           if (step === "directory") {
-            await publishResetIdentity(canonical, ctx.accountIdBytes, attestation);
+            let resetSeal: Uint8Array | null = null;
+            if (record.resetSealB64 !== undefined) {
+              try {
+                resetSeal = base64Decode(record.resetSealB64);
+              } catch {
+                resetSeal = null;
+              }
+            }
+            await publishResetIdentity(canonical, ctx.accountIdBytes, attestation, resetSeal);
           } else {
             await refoundDeviceGroupAfterReset(ctx);
           }
@@ -3412,6 +3835,23 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       setRotationVersion((v) => v + 1);
     } finally {
       canonical.free();
+    }
+    // ADR-0101 section 10: the new generation's seal announcement (the
+    // password alone: the passkeys were deleted and the new phrase is not
+    // saved), so the account's next reset can be sealed. Never fails the
+    // publish; without the password's export key in memory it is published
+    // at the next password sign-in instead.
+    try {
+      await sealJobs.announceAfterReset({
+        accountIdB64: ctx.accountIdB64,
+        accountId: ctx.accountIdBytes,
+        accountIdentitySeed: ctx.seed,
+        lineageSeed: ctx.seed,
+        keyGeneration: BigInt(ctx.record.keyGeneration),
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("seal announcement after a reset failed; published at the next password sign-in", err instanceof Error ? err.name : "unknown");
     }
     // ADR-0101: the keys are published, the continuity mailbox is announced.
     // Its failure does not fail the publish (the words are not withheld for
@@ -3510,6 +3950,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     canonical: WasmIdentity,
     accountIdBytes: Uint8Array,
     attestation: Uint8Array,
+    /** ADR-0101 section 10: the reset seal, when the reset is sealed. The
+     *  directory refuses an invalid one (`400 reset-seal-invalid`), which
+     *  the retry below answers by publishing unsealed: an unsealed reset is
+     *  an availability loss, a publish that never lands is worse. */
+    resetSeal: Uint8Array | null,
   ): Promise<void> {
     // G-30 #2 (ADR-0019): a new key is a NEW transparency-log binding, so
     // the genesis self-signature authorises it, plus the ADR-0036
@@ -3523,16 +3968,37 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       sessionTokens.peek() ?? "",
       canonical,
     );
-    try {
-      await uploadIdentityBundle(
-        discovery,
+    const wasm = await loadWasm();
+    const upload = (seal: Uint8Array | null): Promise<void> =>
+      discovery.uploadIdentityBundle(
         accountIdBytes,
-        canonical,
+        canonical.signaturePublicKey,
+        canonical.x25519PublicKey,
+        wasm.signX25519Binding(canonical),
         undefined,
         leafAuth,
         genesisAttest,
         attestation,
+        undefined,
+        seal !== null ? { resetSeal: seal } : undefined,
       );
+    try {
+      try {
+        await upload(resetSeal);
+      } catch (err) {
+        if (
+          resetSeal !== null &&
+          err instanceof DiscoveryHttpError &&
+          err.status === 400 &&
+          err.errorCode === "reset-seal-invalid"
+        ) {
+          // eslint-disable-next-line no-console
+          console.warn("the directory refused the reset seal; the new keys are published without it");
+          await upload(null);
+        } else {
+          throw err;
+        }
+      }
     } catch (err) {
       if (err instanceof DiscoveryHttpError) {
         const outcome = directoryResetOutcome({ status: err.status, errorCode: err.errorCode });
@@ -3688,6 +4154,29 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     setState({ kind: "anon" });
   }
 
+  /** ADR-0101 section 10: this device's verdict on a reset of its own
+   *  account made elsewhere (`own-reset-verdict.ts`). Never throws. */
+  async function ownResetJudgementOf(
+    accountIdB64: string,
+    heldKey: Uint8Array,
+    heldGeneration: bigint | null,
+  ): Promise<OwnResetJudgement> {
+    try {
+      const wasm = await loadWasm();
+      return await judgeOwnReset(
+        {
+          accountId: base64Decode(accountIdB64),
+          heldKey,
+          heldGeneration: heldGeneration === null ? null : Number(heldGeneration),
+          seqFloor: keptAnnouncementSeq(wasm, plainStorage(), accountIdB64) ?? 0n,
+        },
+        { fetchBundle: (id) => discovery.identityFetch(id), judge: judgeBundleReset },
+      );
+    } catch {
+      return "unknown";
+    }
+  }
+
   /**
    * The recall record a superseded device keeps (ADR-0074 section 1.1), or
    * `null` when it keeps none: no device key, no account key on this device,
@@ -3695,10 +4184,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
    * this account wrote it, or an earlier page) is used as it is, unless it
    * has outlived the window. Must run BEFORE the wipe: the account seed the
    * record is made from is among what the wipe deletes.
+   *
+   * ADR-0101 section 10, "The account's own devices": a reset this device
+   * judges SEALED (`own-reset-verdict.ts`) is the owner's: no record, no
+   * "Was it you?", the full wipe as for its own reset.
    */
   async function prepareRecallRecord(
     accountIdB64: string,
     username: string,
+    heldGeneration: bigint | null = null,
   ): Promise<{ readonly record: RecallRecord; readonly deviceKey: DeviceCipher } | null> {
     let deviceKey: DeviceCipher | null = null;
     try {
@@ -3718,11 +4212,17 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // An unreadable row is replaced below, or wiped with everything else.
     }
     const secrets = identitySecrets();
+    const ownSecrets = secrets !== null && base64Encode(secrets.accountId) === accountIdB64 ? secrets : null;
     let seed: Uint8Array | null =
-      secrets !== null &&
-      base64Encode(secrets.accountId) === accountIdB64 &&
-      secrets.accountIdentitySeed.length === ACCOUNT_IDENTITY_SEED_LENGTH
-        ? secrets.accountIdentitySeed.slice()
+      ownSecrets !== null && ownSecrets.accountIdentitySeed.length === ACCOUNT_IDENTITY_SEED_LENGTH
+        ? ownSecrets.accountIdentitySeed.slice()
+        : null;
+    // The lineage seed names the owned-channels keys lock (ADR-0101 section
+    // 7): the conversation seed when the page holds it, else the account
+    // seed (the same for an account that never rotated).
+    const lineageSeed =
+      ownSecrets !== null && conversationSeedOf(ownSecrets).length === ACCOUNT_IDENTITY_SEED_LENGTH
+        ? conversationSeedOf(ownSecrets).slice()
         : null;
     if (seed === null) {
       try {
@@ -3742,12 +4242,29 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const wasm = await loadWasm();
       const identity = wasm.Identity.fromSeed(seed);
       let oldSeed: Uint8Array;
+      let heldKey: Uint8Array;
       try {
         oldSeed = identity.ed25519Seed;
+        heldKey = identity.signaturePublicKey;
       } finally {
         identity.free();
       }
-      const record: RecallRecord = { accountIdB64, oldSeed, username, learnedAtMs: Date.now() };
+      if ((await ownResetJudgementOf(accountIdB64, heldKey, heldGeneration)) === "sealed") {
+        oldSeed.fill(0);
+        return null;
+      }
+      let ownedKeysRoot: Uint8Array | null = null;
+      try {
+        const lineage = wasm.Identity.fromSeed(lineageSeed ?? seed);
+        try {
+          ownedKeysRoot = wasm.ownedKeysLockRoot(lineage);
+        } finally {
+          lineage.free();
+        }
+      } catch {
+        ownedKeysRoot = null;
+      }
+      const record: RecallRecord = { accountIdB64, oldSeed, username, learnedAtMs: Date.now(), ownedKeysRoot };
       await putRecallRecord(record, deviceKey);
       return { record, deviceKey };
     } catch (err) {
@@ -3759,6 +4276,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       return null;
     } finally {
       seed.fill(0);
+      lineageSeed?.fill(0);
     }
   }
 
@@ -3834,11 +4352,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     }
     let kept: Awaited<ReturnType<typeof prepareRecallRecord>> = null;
     try {
-      kept = await prepareRecallRecord(accountIdB64, username);
+      kept = await prepareRecallRecord(accountIdB64, username, supersededGeneration);
       await wipeAfterSignOut(accountIdB64, kept === null ? "full" : "staged");
     } finally {
       if (kept !== null) {
-        recallHeld = kept;
+        recallHeld = { ...kept, heldGeneration: supersededGeneration };
         setSignedOut({
           reason: "recall",
           username: kept.record.username,
@@ -3918,6 +4436,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     if (recallExpired(held.record.learnedAtMs, Date.now())) return { kind: "closed" };
     try {
       const wasm = await loadWasm();
+      // ADR-0101 section 10: a reset judged sealed only now (it could not be
+      // read when this device was signed out) is the owner's: the screen
+      // ends without saying why and the wipe finishes. The record keeps the
+      // 32-byte Ed25519 seed; its public key is the old account key.
+      const owner = await ownResetJudgementOf(
+        held.record.accountIdB64,
+        wasm.handleWritePublicKey(held.record.oldSeed),
+        held.heldGeneration ?? null,
+      );
+      if (owner === "sealed") return { kind: "closed" };
       const accountIdBytes = base64Decode(held.record.accountIdB64);
       // T5 item 24: `statement-stale` is re-signed at the server's time; it
       // never closes the record.
@@ -3988,6 +4516,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         username: held.record.username,
         oldSeed: held.record.oldSeed,
         deviceKey: held.deviceKey,
+        ownedKeysRoot: held.record.ownedKeysRoot ?? null,
         check: recallCheck,
         isCurrent: () => recallHeld === held,
         afterPersist: async () => {
@@ -4027,6 +4556,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     /** Whether the target is still the one to act on. */
     readonly isCurrent: () => boolean;
     readonly afterPersist: () => Promise<void>;
+    /** ADR-0101 section 7 item 8: the root of the owned-channels keys lock
+     *  of the OLD keys, when known; the recall takes the owned channels
+     *  back through it. */
+    readonly ownedKeysRoot: Uint8Array | null;
   }
 
   /** The 64-byte seed of a typed phrase, or `null` when the words are not a
@@ -4113,6 +4646,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         }
       };
       let reset: RecallResult | null = null;
+      // The NEW password's export key (ADR-0101): the recall's seal
+      // announcement and owned-channels password lock.
+      let newExportKey: Uint8Array | null = null;
       let seed: Uint8Array;
       let phrase: string;
       let newPubkey: Uint8Array;
@@ -4143,6 +4679,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         }
       }
       if (reset !== null && earlier !== null) {
+        newExportKey = earlier.finish.exportKey.slice();
         seed = earlier.seed.slice();
         phrase = earlier.phrase;
         newPubkey = earlier.newPubkey;
@@ -4243,6 +4780,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           }
           return failureOf(err);
         }
+        newExportKey = prepared.exportKey.slice();
         landedKey = staged.deviceKey;
         await dropPending(false);
       }
@@ -4255,6 +4793,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       savePersisted({ v: 1, accountIdB64, username: target.username });
       explicitSignInThisPage = true;
       if (reset.freshGrant !== null) freshGrants.put(accountIdB64, reset.freshGrant);
+      // ADR-0101 sections 7 and 10: a recall is a reset made here. Its seal
+      // announcement (the new password) is published with the new keys, and
+      // the owned channels come back through the OLD keys lock.
+      sealJobs.noteReset({
+        accountIdB64,
+        sealedBy: null,
+        exportKey: newExportKey,
+        oldKeysRoot: target.ownedKeysRoot,
+      });
+      newExportKey?.fill(0);
       await adoptKeyResetOutcome({
         accountIdB64,
         accountIdBytes,
@@ -4319,12 +4867,26 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   async function phraseRecallInputs(
     username: string,
     phrase: string,
-  ): Promise<{ target: NameTarget; oldSeed: Uint8Array } | null> {
+  ): Promise<{ target: NameTarget; oldSeed: Uint8Array; ownedKeysRoot: Uint8Array | null } | null> {
     const seed = await seedOfTypedPhrase(phrase);
     if (seed === null) return null;
     try {
       const wasm = await loadWasm();
-      return { target: await nameTargetFor(username), oldSeed: ed25519SeedOf(wasm, seed) };
+      // ADR-0101 section 7 item 1: the phrase opens the keys lock through
+      // the identity it derives (the lineage one for an account that never
+      // rotated its keys).
+      let ownedKeysRoot: Uint8Array | null = null;
+      try {
+        const identity = wasm.Identity.fromSeed(seed);
+        try {
+          ownedKeysRoot = wasm.ownedKeysLockRoot(identity);
+        } finally {
+          identity.free();
+        }
+      } catch {
+        ownedKeysRoot = null;
+      }
+      return { target: await nameTargetFor(username), oldSeed: ed25519SeedOf(wasm, seed), ownedKeysRoot };
     } catch {
       return null;
     } finally {
@@ -4388,6 +4950,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           username: inputs.target.username,
           oldSeed: inputs.oldSeed,
           deviceKey,
+          ownedKeysRoot: inputs.ownedKeysRoot,
           check,
           isCurrent: () => true,
           afterPersist: async () => {
@@ -5683,6 +6246,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     /** ADR-0101 sections 7 and 8: the account key of before the reset
      *  (standard base64), or `null` when it could not be established. */
     readonly previousKeyB64: string | null;
+    /** ADR-0101 section 10: the reset seal this device made before the
+     *  server step (standard base64), or absent for an unsealed reset. */
+    readonly resetSealB64?: string;
   }): Promise<void> {
     // 3. Persist immediately, before any further network call: the new
     // pair (the old one is superseded by the same transaction), the seed
@@ -5753,6 +6319,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       newSignaturePubkeyB64: base64Encode(ctx.newPubkey),
       signedAtMs: keyResetAttestationSignedAtMs(ctx.reset.attestation),
       done: { directory: false, deviceGroup: false },
+      ...(ctx.resetSealB64 !== undefined ? { resetSealB64: ctx.resetSealB64 } : {}),
     };
     writeKeyResetOwed(plainStorage(), ctx.accountIdB64, record);
     // ADR-0101: the continuity announcement owed after the publish, the
@@ -6415,7 +6982,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         preparedAtMs: prepared.preparedAtMs,
       };
     },
-    async commit(grant, revokeDeviceIds, options) {
+    async commit(grant, revokeDeviceIds) {
       const { accountIdB64, accountIdBytes, secrets } = rotationSession();
       const deviceKey = await rotationDeviceKey(accountIdB64);
       const prepared = (await getKeyRotationState(accountIdB64, deviceKey)).prepared;
@@ -6435,7 +7002,6 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           accountId: accountIdBytes,
           proof: base64Decode(prepared.proofB64),
           revokeDeviceIds,
-          phraseSaved: options?.phraseSaved === true,
         });
       } catch (err) {
         seed.fill(0);
@@ -6566,6 +7132,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           attestation,
           conversationLink,
         );
+        // ADR-0101 section 10: the seal announcement follows the account to
+        // its new key (settled once the session carries the new generation;
+        // any device of the account that lands after the rotation does it).
+        setSealTick((v) => v + 1);
       } finally {
         canonical.free();
       }
@@ -6746,6 +7316,26 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const s = state();
       return s.kind === "session" && isFirstPasswordOwed(plainStorage(), s.account.accountId);
     },
+    // ADR-0101 section 10 (`seal/account-seal-jobs.ts`).
+    savePhraseSeal: () => sealJobs.savePhrase(),
+    passkeySealAdded: async (input) => {
+      let credentialId: Uint8Array;
+      try {
+        credentialId = base64UrlDecodeNoPad(input.credentialIdB64);
+      } catch {
+        return false;
+      }
+      return sealJobs.passkeyAdded({ credentialId, sealPrfOutput: input.sealPrfOutput });
+    },
+    passkeySealRemoved: async (credentialIdB64) => {
+      let credentialId: Uint8Array;
+      try {
+        credentialId = base64UrlDecodeNoPad(credentialIdB64);
+      } catch {
+        return;
+      }
+      await sealJobs.passkeyRemoved(credentialId);
+    },
     offerProtectStep() {
       const s = state();
       if (s.kind !== "session") return;
@@ -6753,12 +7343,17 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       setProtectVersion((v) => v + 1);
     },
     protectStepOwed,
+    factorsPending,
     finishProtectStep() {
       const s = state();
-      if (s.kind === "session") clearProtectStepOwed(plainStorage(), s.account.accountId);
+      if (s.kind !== "session") return;
+      // UX 19.1a / 19.1c: `Continue` is the only way off the step and it
+      // needs one of the three. Unknown factors keep the step up.
+      if (!protectStepCanContinue(accountFactors(s.account.accountId))) return;
+      clearProtectStepOwed(plainStorage(), s.account.accountId);
       setProtectVersion((v) => v + 1);
     },
-    async landEmailPasswordRecovery(username, accountId, session, whenOpened) {
+    async landEmailPasswordRecovery(username, accountId, session, whenOpened, exportKey) {
       // Called with the session a mailed code just returned; from here the
       // landing is overtaken like any other sign-in.
       const flow = startFlow();
@@ -6774,6 +7369,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // A mailed code is not a fresh-auth proof (the finish mints none).
       sessionLanding = "other";
       freshGrants.clear();
+      if (exportKey !== undefined) sealJobs.notePassword(accountIdB64, exportKey);
       await landAfterAccessRecovery(username, accountId, accountIdB64, session, flow);
     },
     landingDeviceIdFor(username) {
@@ -6936,6 +7532,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       sessionLanding = "password";
       if (result.freshGrant !== null) freshGrants.put(accountIdB64, result.freshGrant);
       else freshGrants.clear();
+      passwordGrant = result.freshGrant?.grant ?? null;
+      // ADR-0101 sections 7 and 10: the export key and the server half of
+      // this registration are what the first seal announcement and the
+      // owned-channels locks are made from, once the session has landed.
+      sealJobs.notePassword(accountIdB64, result.exportKey);
+      if (result.ownedChannelsSecret !== null) {
+        void sealJobs.noteServerHalf(accountIdB64, result.ownedChannelsSecret);
+      }
 
       // 1.16d2 + ADR-0054 S5: claim the username server-side, AFTER the
       // OPAQUE flow commits, in the load-bearing order: bind the login
@@ -7226,6 +7830,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // anything for a guest, and its delete needs none.
       sessionLanding = "other";
       freshGrants.clear();
+      // ADR-0101 section 7 item 4: a guest keeps the server half from its
+      // sign-up (under its device key) and makes the owned-channels locks at
+      // the claim, when it sets its first password. Its random password is
+      // announced nowhere.
+      if (result.ownedChannelsSecret !== null) {
+        void sealJobs.noteServerHalf(accountIdB64, result.ownedChannelsSecret);
+      }
 
       if (result.recoveryPhrase === undefined) {
         throw new Error(
@@ -7412,6 +8023,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       sessionLanding = "password";
       if (result.freshGrant !== null) freshGrants.put(accountIdB64, result.freshGrant);
       else freshGrants.clear();
+      passwordGrant = result.freshGrant?.grant ?? null;
+      // ADR-0101 section 10: a password sign-in on a device that holds the
+      // keys takes the password over (the seal announcement and the
+      // owned-channels password lock); settled after the landing, and not at
+      // all when the device turns out to hold no keys.
+      sealJobs.notePassword(accountIdB64, result.exportKey);
 
       // ADR-0018: PREFER an already-stored device root key over
       // re-deriving from the export key. On a password-bootstrapped
@@ -7690,6 +8307,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           sessionExpiresAtMs: result.session.sessionExpiresAtMs,
           keyGeneration: result.session.keyGeneration,
         });
+        // ADR-0101 sections 7 and 10: this device holds the keys and the new
+        // password's export key, so it publishes the password's seal again
+        // and makes the owned-channels password lock again (for a guest's
+        // first password: the first announcement and the locks themselves).
+        notePasswordEvent(accountIdB64, result.exportKey);
         setNewPasswordOwed(false);
         if (guestPhrase !== null) {
           await keepGuestAccount({
@@ -8218,6 +8840,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       }
       if (signedIn.freshGrant === null) throw new FreshAuthRequiredError();
       freshGrants.put(account.accountIdB64, signedIn.freshGrant);
+      passwordGrant = signedIn.freshGrant.grant;
+      // ADR-0101 section 10: the export key of this sign-in is what a reset
+      // confirmed from here is sealed with (memory only), and on a device
+      // that holds the keys it is a password sign-in like any other.
+      proofExportKey?.exportKey.fill(0);
+      proofExportKey = { accountIdB64: account.accountIdB64, exportKey: signedIn.exportKey.slice() };
+      notePasswordEvent(account.accountIdB64, signedIn.exportKey);
       await adoptProofSession(account.accountIdB64, signedIn.session);
     },
     async proveWithPasskey() {
@@ -8298,11 +8927,17 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const wasm = await loadWasm();
       requireStillParked(pending, flow);
 
-      // 0. The proof (UX 17.2): the server refuses a reset without a
-      // fresh-auth grant. The screen obtained one (password or passkey)
-      // before calling this; without a live one nothing is sent.
-      const grant = freshGrants.live(pending.accountIdB64, Date.now());
-      if (grant === null) throw new FreshAuthRequiredError();
+      // 0. The proof (UX 15.1b): the server refuses a reset without a reset
+      // factor grant (the password and one second factor). The section
+      // obtained one before calling this; without a live one nothing is sent.
+      const heldGrant = resetGrants.live(pending.accountIdB64, Date.now());
+      if (heldGrant === null) {
+        setResetFactorVersion((v) => v + 1);
+        throw new ResetFactorRequiredError();
+      }
+      const grant = heldGrant.grant;
+      const refusedGrant = (err: unknown): boolean =>
+        err instanceof AuthHttpError && err.status === 403 && err.errorCode === CODE_RESET_FACTOR_REQUIRED;
 
       // 1. A BRAND-NEW recovery phrase, its 64-byte BIP39 seed, and the
       // identity derived from it: a fresh random identity for the SAME
@@ -8319,6 +8954,54 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // read now, while the directory and the log still name it. Without it
       // nothing a peer returns is accepted silently.
       const previousKeyB64 = await readPreviousOwnKey(pending.accountIdBytes, base64Encode(newPubkey));
+      requireStillParked(pending, flow);
+
+      // 1c. ADR-0101 section 7: the owned-channels server half, asked for
+      // while the grant is still unspent (the reset spends it). Nothing has
+      // changed yet, so a failure here is a failed reset with nothing done.
+      let serverHalf: Uint8Array;
+      try {
+        serverHalf = await client.ownedChannelsSecret(pending.session.sessionToken, grant);
+      } catch (err) {
+        accountIdentitySeed.fill(0);
+        if (refusedGrant(err)) {
+          resetGrants.spend(grant);
+          setResetFactorVersion((v) => v + 1);
+          throw new ResetFactorRequiredError();
+        }
+        throw err;
+      }
+      requireStillParked(pending, flow);
+
+      // 1d. ADR-0101 section 10: the reset seal, from what confirmed the
+      // reset, over the next generation and the new key. `null` when the
+      // account's published protection lists none of it: the reset is then
+      // unsealed and starts the account over (UX 15.1c told the person).
+      let sealing: { readonly sealB64: string; readonly secret: SealSecret } | null;
+      const heldSecrets = resetSealSecrets(pending.accountIdB64);
+      try {
+        const seals = await ownPublishedSeals(wasm, pending.accountIdBytes);
+        const secret = chooseSealSecret(wasm, seals, heldSecrets);
+        sealing =
+          secret !== null && seals !== null && seals.keyGeneration === pending.session.keyGeneration
+            ? {
+                secret,
+                sealB64: base64Encode(
+                  signResetSeal(wasm, {
+                    secret,
+                    accountId: pending.accountIdBytes,
+                    announcementSeq: seals.seq,
+                    fromGeneration: seals.keyGeneration,
+                    newSignaturePubkey: newPubkey,
+                  }),
+                ),
+              }
+            : null;
+      } catch (err) {
+        accountIdentitySeed.fill(0);
+        serverHalf.fill(0);
+        throw err;
+      }
       requireStillParked(pending, flow);
 
       // 2. The phrase goes into this account's own row of the phrase store
@@ -8360,18 +9043,17 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         );
       } catch (err) {
         accountIdentitySeed.fill(0);
+        serverHalf.fill(0);
         if ((await staged.rollback()) === "failed") {
           // eslint-disable-next-line no-console
           console.warn("account keys not reset, and the phrase row could not be put back");
         }
-        if (
-          err instanceof AuthHttpError &&
-          isFreshAuthRequired({ status: err.status, errorCode: err.errorCode })
-        ) {
+        if (refusedGrant(err)) {
           // The grant expired (or was otherwise refused) on the way: nothing
-          // was reset. Drop it; the screen asks for a proof.
-          freshGrants.spend(grant);
-          throw new FreshAuthRequiredError();
+          // was reset. Drop it; the section opens again.
+          resetGrants.spend(grant);
+          setResetFactorVersion((v) => v + 1);
+          throw new ResetFactorRequiredError();
         }
         throw err;
       }
@@ -8379,6 +9061,31 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // A successful reset spends every grant of the old generation, and the
       // pair it returns carries none.
       freshGrants.clear();
+      passwordGrant = null;
+      // ADR-0101 sections 7 and 10: what the new account still needs from
+      // this page, kept by the seal jobs until it has landed: the server
+      // half, what sealed the reset (it opens the owned-channels list) and
+      // the export key of the password in force (the new announcement and
+      // the password lock). Then the confirmation itself is forgotten.
+      const passwordKey = heldSecrets.find((h) => h.kind === "password");
+      await sealJobs.noteServerHalf(pending.accountIdB64, serverHalf);
+      serverHalf.fill(0);
+      const sealedBy: ResetSealedBy | null =
+        sealing === null || sealing.secret.kind === "phrase"
+          ? null
+          : sealing.secret.kind === "password"
+            ? { kind: "password", exportKey: sealing.secret.exportKey }
+            : {
+                kind: "passkey",
+                prfOutput: sealing.secret.prfOutput,
+                credentialTag: wasm.resetSealPasskeyTag(sealing.secret.credentialId),
+              };
+      sealJobs.noteReset({
+        accountIdB64: pending.accountIdB64,
+        sealedBy,
+        exportKey: passwordKey !== undefined && passwordKey.kind === "password" ? passwordKey.exportKey : null,
+      });
+      dropResetProof();
 
       // 4-6. Persist, then publish: the one path a recall shares.
       await adoptKeyResetOutcome({
@@ -8391,9 +9098,116 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         newPubkey,
         reset,
         previousKeyB64,
+        ...(sealing !== null ? { resetSealB64: sealing.sealB64 } : {}),
         wipes,
       });
       return phrase;
+    },
+    resetFactor: {
+      passwordProofLive: () => passwordProofLiveFor(proofAccount()?.accountIdB64 ?? null),
+      confirmed() {
+        resetFactorVersion();
+        const account = proofAccount();
+        return account === null ? null : (resetGrants.live(account.accountIdB64, Date.now())?.factor ?? null);
+      },
+      async factors() {
+        const account = proofAccount();
+        const token = proofToken();
+        if (account === null || token === null) return null;
+        return refreshFactors(account.accountIdB64, token);
+      },
+      async confirmTotp(code) {
+        const ctx = resetFactorContext();
+        const granted = await resetFactorCall(ctx, () => client.resetFactorTotp(ctx.token, ctx.grant, code));
+        keepResetGrant(ctx.accountIdB64, granted, "totp");
+      },
+      async emailStart(address) {
+        const ctx = resetFactorContext();
+        if (ctx.username.trim().length === 0) throw new KeyedError("recovery.username_required");
+        const handle = await loginHandleFor(ctx.username);
+        return resetFactorCall(ctx, () =>
+          client.resetFactorEmailStart({
+            sessionToken: ctx.token,
+            freshGrant: ctx.grant,
+            handle: handle.wire,
+            address: address.trim(),
+            lang: currentLanguage(),
+          }),
+        );
+      },
+      async emailFinish(challengeId, code) {
+        const ctx = resetFactorContext();
+        const granted = await resetFactorCall(ctx, () =>
+          client.resetFactorEmailFinish({
+            sessionToken: ctx.token,
+            freshGrant: ctx.grant,
+            challengeId,
+            code,
+          }),
+        );
+        keepResetGrant(ctx.accountIdB64, granted, "email");
+      },
+      async confirmPasskey() {
+        const ctx = resetFactorContext();
+        const wasm = await loadWasm();
+        const accountIdBytes = base64Decode(ctx.accountIdB64);
+        let assertion;
+        try {
+          const webauthn = new WebauthnClient();
+          webauthn.setSessionToken(ctx.token);
+          // One gesture: the assertion that confirms the reset, and the
+          // passkey's seal secret (ADR-0101 section 10), which never leaves
+          // this device.
+          assertion = await webauthn.assertAction(await actionHashForResetKeys(accountIdBytes), {
+            sealPrfSalt: wasm.resetSealPasskeyPrfSalt(),
+          });
+        } catch (err) {
+          if (err instanceof WebauthnUserCancelledError) throw new ProofCancelledError();
+          if (err instanceof WebauthnNetworkError) throw err;
+          if (err instanceof WebauthnHttpError && err.status === 429) throw err;
+          // eslint-disable-next-line no-console
+          console.warn(
+            "passkey confirmation of a reset failed",
+            err instanceof WebauthnHttpError ? err.status : err instanceof Error ? err.name : "unknown",
+          );
+          throw new ProofPasskeyFailedError();
+        }
+        const granted = await resetFactorCall(ctx, () => client.resetFactorPasskey(ctx.token, ctx.grant));
+        resetPasskeySecret?.prfOutput.fill(0);
+        resetPasskeySecret =
+          assertion.sealPrfOutput !== null
+            ? {
+                accountIdB64: ctx.accountIdB64,
+                prfOutput: assertion.sealPrfOutput,
+                credentialId: assertion.credentialId,
+              }
+            : null;
+        keepResetGrant(ctx.accountIdB64, granted, "passkey");
+      },
+      async outlook() {
+        const account = proofAccount();
+        if (account === null) return null;
+        try {
+          const wasm = await loadWasm();
+          const seals = await ownPublishedSeals(wasm, base64Decode(account.accountIdB64));
+          return resetOutlook(wasm, seals, resetSealSecrets(account.accountIdB64));
+        } catch {
+          return null;
+        }
+      },
+      clear() {
+        dropResetProof();
+      },
+    },
+    async publishedSealFacts() {
+      const account = proofAccount();
+      if (account === null) return null;
+      try {
+        const seals = await ownPublishedSeals(await loadWasm(), base64Decode(account.accountIdB64));
+        return seals === null ? null : sealFactsOf(seals);
+      } catch {
+        return null;
+      }
     },
     async confirmFreshPhraseSaved() {
       // Step 2 of the reset (and of a guest signup). Only valid while a
@@ -8518,6 +9332,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // Refused when the account was wiped since this recovery began.
         flow.openStores(accountIdB64);
         installFlowSession(accountIdB64, result.session);
+        // ADR-0101 sections 7 and 10: the phrase gives this device the keys
+        // and this call the new password's export key, so the password's
+        // seal and the owned-channels password lock follow the landing.
+        sealJobs.notePassword(accountIdB64, result.exportKey);
         // Re-derive the device root key from the NEW export key.
         // The previous device key (if any) is no longer reachable
         // from the new password; the upsert in IDB drops it.

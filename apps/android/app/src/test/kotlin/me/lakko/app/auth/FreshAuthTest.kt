@@ -55,6 +55,22 @@ class FreshAuthTest {
     }
 
     @Test
+    fun `a passkey's proof does not stand in for the password where a key reset asks for it`() {
+        // ADR-0073, amended 2026-11-26: the reset's factor routes need a
+        // PASSWORD proof; a passkey is one of the second factors there.
+        val holder = FreshAuthHolder()
+        holder.put("acct-a", "PASSKEY-GRANT", expiresAtMs = 10_000L, nowMs = 1_000L, byPassword = false)
+        assertEquals("PASSKEY-GRANT", holder.live("acct-a", 2_000L)?.grant)
+        assertNull(holder.livePassword("acct-a", 2_000L))
+        // Delete account, add a device and add a passkey accept either.
+        assertTrue(holder.hasLive("acct-a", 2_000L))
+        holder.put("acct-a", "PASSWORD-GRANT", expiresAtMs = 10_000L, nowMs = 1_000L)
+        assertEquals("PASSWORD-GRANT", holder.livePassword("acct-a", 2_000L)?.grant)
+        assertNull("bound to its account", holder.livePassword("acct-b", 2_000L))
+        assertNull("and to its lifetime", holder.livePassword("acct-a", 10_000L))
+    }
+
+    @Test
     fun `a proof is bound to the account it was issued for`() {
         val holder = FreshAuthHolder()
         holder.put("acct-a", "GRANT", expiresAtMs = 10_000L, nowMs = 1_000L)
@@ -181,20 +197,23 @@ class FreshAuthTest {
     }
 
     @Test
-    fun `both reset calls carry the proof in the body`() {
+    fun `both reset calls carry the reset factor grant in the body`() {
+        // ADR-0073, amended 2026-11-26: the password AND one second factor;
+        // a fresh-auth grant alone no longer resets.
         val start = json.parseToJsonElement(
             json.encodeToString(KeyResetStartRequest.serializer(), KeyResetStartRequest("GRANT", "REQ")),
         ).jsonObject
-        assertEquals("GRANT", start["fresh_grant"]?.jsonPrimitive?.content)
+        assertEquals("GRANT", start["reset_grant"]?.jsonPrimitive?.content)
         assertEquals("REQ", start["recovery_request"]?.jsonPrimitive?.content)
-        assertNull(start["reset_grant"])
+        assertNull(start["fresh_grant"])
         val finish = json.parseToJsonElement(
             json.encodeToString(
                 KeyResetFinishRequest.serializer(),
                 KeyResetFinishRequest("GRANT", "UPLOAD", "PUBKEY", "PROOF"),
             ),
         ).jsonObject
-        assertEquals("GRANT", finish["fresh_grant"]?.jsonPrimitive?.content)
+        assertEquals("GRANT", finish["reset_grant"]?.jsonPrimitive?.content)
+        assertNull(finish["fresh_grant"])
         assertEquals("UPLOAD", finish["recovery_upload"]?.jsonPrimitive?.content)
         assertEquals("PUBKEY", finish["new_signature_pubkey_b64"]?.jsonPrimitive?.content)
         assertEquals("PROOF", finish["identity_proof_b64"]?.jsonPrimitive?.content)

@@ -233,7 +233,50 @@ public class ContactsRepository(
     /** R.5 / R.6 - every key an accepted reset retired, mapped to the account
      *  id it belonged to (standard base64 on both sides). A row or a claim
      *  from a leaf bound to one of these is dropped. */
+    /** ADR-0101 section 10 "The account's own devices" - the verdict on
+     *  this account's own reset made elsewhere ([ContactsClient.ownResetVerdict]). */
+    public suspend fun ownResetVerdict(
+        accountId: ByteArray,
+        heldKeyB64: String,
+        acceptedGeneration: Long,
+        seqFloor: Long,
+    ): ResetVerdict = clientFactory().use { it.ownResetVerdict(accountId, heldKeyB64, acceptedGeneration, seqFloor) }
+
     public fun supersededKeys(): Map<String, String> = supersededKeysOf(resetLedgerRows())
+
+    // -----------------------------------------------------------------
+    // ADR-0101 section 11 / UX 16.11 - a contact started over (an unsealed
+    // reset). The only place a contact's reset shows anything.
+    // -----------------------------------------------------------------
+
+    private val mutableStartedOverKeys: MutableStateFlow<Set<String>> = MutableStateFlow(emptySet())
+
+    /**
+     * The account keys (standard base64) whose one-to-one is closed because
+     * their account started over: the composer is replaced by one line and
+     * the call buttons are hidden. Read again whenever an unsealed reset is
+     * recorded and at every account bind.
+     */
+    public val startedOverKeys: StateFlow<Set<String>> = mutableStartedOverKeys.asStateFlow()
+
+    /** Read the ledger again (an unsealed reset was recorded, or the account
+     *  was bound). */
+    public fun noteStartedOver() {
+        mutableStartedOverKeys.value = try {
+            startedOverKeysOf(resetLedgerRows()).keys
+        } catch (_: Throwable) {
+            emptySet()
+        }
+    }
+
+    /** The key of the new account recorded for [accountIdB64] while the
+     *  person has not accepted it, or `null`. */
+    private fun startedOverKeyOf(accountIdB64: String): String? =
+        try {
+            resetLedgerRows()[accountIdB64]?.startedOver?.newKeyB64
+        } catch (_: Throwable) {
+            null
+        }
 
     /** R.4 - the account and generation behind [currentKeyB64] when an
      *  ACCEPTED RESET re-pinned this device to it, or `null`. */
@@ -402,6 +445,9 @@ public class ContactsRepository(
             if (served == null) KnownRequestCheck.INCONCLUSIVE else KnownRequestCheck.CURRENT
         } catch (_: SupersessionRefused) {
             KnownRequestCheck.REFUSED
+        } catch (_: ContactStartedOver) {
+            noteStartedOver()
+            KnownRequestCheck.STARTED_OVER
         } catch (_: IdentityCheckInconclusive) {
             KnownRequestCheck.INCONCLUSIVE
         } catch (cause: kotlinx.coroutines.CancellationException) {
@@ -899,6 +945,8 @@ public class ContactsRepository(
         if (sentStore != null && mutableState.value.sent.isNotEmpty()) persistSent()
         // The key aliases are the account's too.
         pushAliasesToDirectory()
+        // UX 16.11: the one-to-ones closed because their account started over.
+        noteStartedOver()
     }
 
     // ---- ADR-0073 R.7 case 1 / UX 16.6: a request from an existing contact --
@@ -937,6 +985,11 @@ public class ContactsRepository(
      *  them, with the chat their row named; marked
      *  [IncomingContactRequest.asksForChat] as they are listed. */
     private val asksForChatIds: MutableMap<Long, String?> = java.util.Collections.synchronizedMap(HashMap())
+
+    /** UX 16.11 — the requests [handleKnownContactRequest] listed because
+     *  they are from the new keys of an account that started over; marked
+     *  [IncomingContactRequest.startedOverNote] as they are listed. */
+    private val startedOverRequestIds: MutableSet<Long> = java.util.Collections.synchronizedSet(HashSet())
 
     private suspend fun handleKnownContactRequest(request: IncomingContactRequest): Boolean {
         val fromAccountId = request.fromAccountId ?: return false
@@ -977,8 +1030,17 @@ public class ContactsRepository(
                 request.createdAt,
                 System.currentTimeMillis(),
             ),
+            startedOverKeyB64 = startedOverKeyOf(base64Encode(fromAccountId)),
         )
         when (verdict) {
+            KnownRequestVerdict.SHOW_STARTED_OVER -> {
+                // UX 16.11: an ordinary request row with the note. Never
+                // answered silently: the device could not confirm it is the
+                // same person.
+                startedOverRequestIds.add(request.messageId)
+                dropWaiting(request.messageId)
+                return false
+            }
             KnownRequestVerdict.SHOW -> {
                 if (!holdsOneToOne) {
                     // Listed as a request row ([asksForChat]) although they
@@ -1822,10 +1884,12 @@ public class ContactsRepository(
                         createdAt = result.createdAt,
                         introMessage = introMessage.toByteArray(Charsets.UTF_8),
                         recipientKeyB64 = result.recipientSignaturePubkey?.let { base64Encode(it) },
+                        startedOverNote = result.startedOver,
                     ),
                 )
             }
             persistSent()
+            if (result.startedOver) noteStartedOver()
             result
         }
     }
@@ -2172,6 +2236,8 @@ public class ContactsRepository(
                     ).map {
                         if (asksForChatIds.containsKey(it.messageId)) {
                             it.copy(asksForChat = true, asksPastChatHex = asksForChatIds.remove(it.messageId))
+                        } else if (startedOverRequestIds.remove(it.messageId)) {
+                            it.copy(startedOverNote = true)
                         } else {
                             it
                         }
@@ -2599,7 +2665,36 @@ public class ContactsRepository(
             declineContactRequest(messageId)
             return AcceptOutcome.ACCOUNT_DELETED
         }
+        // UX 16.11 — a request from the new keys of an account that started
+        // over: the person's Accept is what makes those keys the account's
+        // here, as for any new contact. The old one-to-one stays closed and
+        // nothing of it is moved.
+        if (request.startedOverNote && !adoptStartedOverFor(request)) return AcceptOutcome.FAILED
         return acceptMutex.withLock { answerRequest(request, accountB64) }
+    }
+
+    /**
+     * Pin the new account's key for [request]'s account (UX 16.11). `true`
+     * when the pin now names exactly the key that sent the request: adopted
+     * here, or already the pin (a retried Accept). `false` leaves everything
+     * as it was and the request listed.
+     */
+    private suspend fun adoptStartedOverFor(request: IncomingContactRequest): Boolean {
+        val accountId = request.fromAccountId ?: return false
+        val secrets = authRepo.identitySecrets.value ?: return false
+        val accountIdB64 = base64Encode(accountId)
+        val requestKeyB64 = base64Encode(request.fromPubkey)
+        if (pinnedKeyOf(accountIdB64) == requestKeyB64) return true
+        val adopted = try {
+            useClientWith(secrets) { client, _ -> client.adoptStartedOverAccount(accountIdB64, requestKeyB64) }
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            Log.w(TAG, "ADR-0101: the new account was not accepted: ${cause.javaClass.simpleName}")
+            null
+        }
+        noteStartedOver()
+        return adopted == requestKeyB64
     }
 
     /**
@@ -4816,6 +4911,9 @@ public data class SentContactRequest(
     val recipientKeyB64: String? = null,
     /** The name the person was found under. Not part of the entry's identity. */
     val recipientName: String? = null,
+    /** UX 16.11 - sent to the new account of a person who started over: the
+     *  row carries the same note as an incoming request from it. */
+    val startedOverNote: Boolean = false,
 ) {
     override fun equals(other: Any?): Boolean =
         other is SentContactRequest &&

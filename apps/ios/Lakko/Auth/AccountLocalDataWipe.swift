@@ -245,7 +245,17 @@ enum AccountLocalDataWipe {
         step("group-pending-handles") {
             PendingGroupHandleStore.clear(accountIdB64: accountIdB64)
         }
-        step("export-key") { ExportKeyStore.deleteExportKey(accountIdB64: accountIdB64) }
+        step("export-key") {
+            ExportKeyStore.deleteExportKey(accountIdB64: accountIdB64)
+            Task { @MainActor in RunExportKey.clear(accountIdB64: accountIdB64) }
+        }
+        // ADR-0101 section 7 — the server half of the owned-channels password
+        // lock, when the locks were never made on this device.
+        step("owned-channels-secret") {
+            OwnedChannelsPendingSecret.delete(accountIdB64: accountIdB64)
+            OwnedChannelsResetCarryStore.delete(accountIdB64: accountIdB64)
+            OwnedChannelsOwed.deleteAll(accountIdB64: accountIdB64)
+        }
         step("account-identity-seed") {
             AccountIdentitySeedStore.deleteAccountIdentitySeed(accountIdB64: accountIdB64)
         }

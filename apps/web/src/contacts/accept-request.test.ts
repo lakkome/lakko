@@ -89,6 +89,27 @@ afterEach(() => {
 });
 
 describe("acceptContactRequest", () => {
+  it("UX 16.11: the person's Accept adopts the new account BEFORE the chat is founded", async () => {
+    const adoptStartedOverRequest = vi.fn(() => true);
+    const s = setup({ adoptStartedOverRequest });
+    const req = request();
+    const outcome = await acceptContactRequest(s.deps, req);
+    expect(outcome.status).toBe("done");
+    expect(adoptStartedOverRequest).toHaveBeenCalledTimes(1);
+    expect(adoptStartedOverRequest).toHaveBeenCalledWith(req.fromAccountId, req.fromPubkey);
+    // The identity gate inside the founding must see the moved pin.
+    expect(adoptStartedOverRequest.mock.invocationCallOrder[0]).toBeLessThan(
+      s.client.prepareGroupWith.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("a request with no account id adopts nothing", async () => {
+    const adoptStartedOverRequest = vi.fn(() => true);
+    const s = setup({ adoptStartedOverRequest });
+    await acceptContactRequest(s.deps, request({ fromAccountId: null }));
+    expect(adoptStartedOverRequest).not.toHaveBeenCalled();
+  });
+
   it("keeps the answer owed before the group is shown, and is done when it landed", async () => {
     const s = setup();
     const outcome = await acceptContactRequest(s.deps, request());

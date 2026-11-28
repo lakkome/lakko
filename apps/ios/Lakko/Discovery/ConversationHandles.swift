@@ -224,6 +224,27 @@ enum ConversationHandles {
         return Written(handle: name, isPublic: false, certificate: answer.certificate, leaseUntilMs: answer.leaseUntilMs)
     }
 
+    /// Alignment item H — the same `rekey` from a handle write seed given
+    /// directly: the one an owned-channels list entry carried for a channel
+    /// whose owner key went with a reset (ADR-0101 section 7 item 4). The
+    /// caller keeps `oldHandleSeed` owed until this returns.
+    static func rekey(
+        discovery: DiscoveryClient, oldHandleSeed: Data, newAccountSeed: Data, journalId: Data,
+        handle typed: String
+    ) async throws -> Written {
+        let name = canonical(typed)
+        let pair = try await evaluateOwn(discovery: discovery, names: [name], facts: nil).names[0]
+        var new = try seed(accountSeed: newAccountSeed, journalId: journalId)
+        defer { RootHandover.wipe(&new) }
+        let statement = try signHandleStatement(
+            handleSeed: oldHandleSeed, lookupKey: pair.lookupKey,
+            body: .rekey(newWritePk: try handleWritePublicKey(handleSeed: new)))
+        guard let answer = try await discovery.handleWrite(route: .rekey, statementB64: statement) else {
+            throw DiscoveryClientError.http(status: 200, endpoint: "/discovery/handle/rekey", body: "no certificate")
+        }
+        return Written(handle: name, isPublic: false, certificate: answer.certificate, leaseUntilMs: answer.leaseUntilMs)
+    }
+
     /// Move to a new name; the old one is held 30 days (one
     /// `discovery-register` token).
     static func replace(

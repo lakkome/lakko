@@ -90,8 +90,10 @@ import { channelIdForHandle, forgetClaimedHandle } from "./claimed-handles";
 import { LegacyChannelError } from "./legacy-v1";
 import { composerSeedFor, outgoingPublisherSeed, readsPublicSeeds } from "./publisher-seed";
 import { deleteChannelVault } from "./channel-vault-head";
+import { noteOwnedChannelDeleted, noteOwnedChannelsChanged } from "./owned/owned-wake";
 import { listedStamp, nextListingStamp } from "../discover/listing";
 import { channelsActions, channelsState, awaitChannelsHydration } from "../state/channels-state";
+import { boundContactsAccount } from "../contacts/local-store";
 import {
   channelSubscriptionOf,
   clearChannelIntent,
@@ -576,6 +578,9 @@ export async function createChannelFull(
     // pass (`settleOwedRecord`), composed from this access record.
     recordOwed: true,
   }));
+  // ADR-0101 section 7 items 5 and 6: the new channel registers its recovery
+  // key and enters the account's owned-channels list.
+  noteOwnedChannelsChanged();
   // ADR-0090: the founded group lives in the device provider; on disk now.
   await channelsActions.persistPublisherGroupDurable().catch((err: unknown) => {
     // eslint-disable-next-line no-console
@@ -708,6 +713,10 @@ export async function runOwedChannelType(lineage: WasmIdentity, current: WasmIde
       handle: owed.handle,
       isPublic,
       facts,
+      // The read key this device uses for the channel (a channel taken back
+      // after a key reset keeps the one it had), never re-derived from the
+      // lineage seed alone.
+      readKey: isPublic ? await channelReadKeyHere(lineage, idHex) : null,
     };
     written =
       a.handle !== null && a.handle !== owed.handle
@@ -764,6 +773,8 @@ export async function runOwedChannelType(lineage: WasmIdentity, current: WasmIde
               ? r.admissionSeeds
               : [{ version: 1, seedB64: bytesToB64(wasm.generateChannelAdmissionSeed()) }],
         }));
+        // ADR-0101 section 7 item 6: a minted admission seed is listed.
+        noteOwnedChannelsChanged();
       } else {
         await channelsActions.updateAccessDurable(idHex, (r) => ({ ...r, visibility: "private" }));
       }
@@ -1302,6 +1313,9 @@ export async function deleteChannel(lineage: WasmIdentity, current: WasmIdentity
   } catch (err) {
     throw new ChannelError(serviceErrorCode(err), { cause: err });
   }
+  // ADR-0101 section 7 item 6: its entry leaves the owned-channels list
+  // (owed across a reload until the list write lands).
+  noteOwnedChannelDeleted(boundContactsAccount(), idHex);
   await revokeOwnLinks(lineage, idHex);
   // ADR-0064 section 1: the channel's saved copy (section 7) goes with it.
   // Best effort; the channel is already deleted.
@@ -1388,6 +1402,8 @@ export function noteChannelRotated(idHex: string, epoch: number, seed: Uint8Arra
 export function notePublisherCommitLanded(idHex: string, newEpoch: number, newSeed: Uint8Array): void {
   notePublisherSeedAt(idHex, newEpoch, newSeed);
   channelsActions.setEpoch(idHex, newEpoch);
+  // ADR-0101 section 7 item 6: the new epoch's seed is listed.
+  noteOwnedChannelsChanged();
 }
 
 /**

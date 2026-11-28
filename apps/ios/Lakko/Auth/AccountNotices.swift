@@ -15,7 +15,6 @@ import Foundation
 
 public enum AccountNoticeKind: String, CaseIterable, Equatable, Sendable {
     case passwordChangedByEmail = "password-changed-by-email"
-    case accountOpenedByEmail = "account-opened-by-email"
     case emailAdded = "recovery-email-added"
     case emailReplaced = "recovery-email-replaced"
     case emailRemoved = "recovery-email-removed"
@@ -61,9 +60,6 @@ public struct AccountNoticeCopy: Equatable {
         case .passwordChangedByEmail:
             return AccountNoticeCopy(
                 titleKey: "notice.password_by_email.title", bodyKey: "notice.password_by_email.body")
-        case .accountOpenedByEmail:
-            return AccountNoticeCopy(
-                titleKey: "notice.opened_by_email.title", bodyKey: "notice.opened_by_email.body")
         case .emailAdded: return AccountNoticeCopy(titleKey: "notice.email_added", bodyKey: nil)
         case .emailReplaced: return AccountNoticeCopy(titleKey: "notice.email_replaced", bodyKey: nil)
         case .emailRemoved: return AccountNoticeCopy(titleKey: "notice.email_removed", bodyKey: nil)
@@ -164,10 +160,10 @@ public enum SecureAccountActions: Equatable {
     case removeEmail
     case savePhrase
 
-    public static func offered(_ status: RecoveryEmailStatus?) -> [SecureAccountActions] {
+    public static func offered(_ status: RecoveryEmailStatus?, phraseSaved: Bool) -> [SecureAccountActions] {
         var actions: [SecureAccountActions] = [.newPassword]
         if status?.enabled != false { actions.append(.removeEmail) }
-        if status?.phraseSaved != true { actions.append(.savePhrase) }
+        if !phraseSaved { actions.append(.savePhrase) }
         return actions
     }
 }

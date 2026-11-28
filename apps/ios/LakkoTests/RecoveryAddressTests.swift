@@ -5,18 +5,17 @@ import XCTest
 import LakkoCore
 @testable import Lakko
 
-// ADR-0075, amended 2026-10-13 — the account's devices keep the recovery
-// address and put the email vault back by themselves; and a guest chooses a
-// username and its first password. Scripted ports only: nothing here
-// reaches a server.
+// ADR-0075, amended 2026-10-13 and 2026-11-26 — the account's devices keep
+// the recovery address (it moves the email to a new username, and pre-fills
+// the form after a recall). The email vault they used to put back with it is
+// gone: nothing derived from the phrase is ever sealed for the address.
+// Scripted ports only: nothing here reaches a server.
 
 @MainActor
 final class RecoveryAddressTests: XCTestCase {
 
-    private func status(
-        enabled: Bool, vault: Bool, phraseSaved: Bool
-    ) -> RecoveryEmailStatus {
-        RecoveryEmailStatus(available: true, enabled: enabled, vault: vault, phraseSaved: phraseSaved)
+    private func status(enabled: Bool, totp: Bool? = false) -> RecoveryEmailStatus {
+        RecoveryEmailStatus(available: true, enabled: enabled, totp: totp)
     }
 
     private func defaults(_ name: String = #function) -> UserDefaults {
@@ -27,58 +26,17 @@ final class RecoveryAddressTests: XCTestCase {
 
     // MARK: - The rules
 
-    func testTheResealRule() {
-        typealias R = EmailReseal
-        XCTAssertTrue(R.resealNeeded(enabled: true, vault: false, phraseSaved: false, addressHeld: true))
-        // Each condition alone stops it.
-        XCTAssertFalse(R.resealNeeded(enabled: false, vault: false, phraseSaved: false, addressHeld: true))
-        XCTAssertFalse(R.resealNeeded(enabled: true, vault: true, phraseSaved: false, addressHeld: true))
-        XCTAssertFalse(R.resealNeeded(enabled: true, vault: false, phraseSaved: true, addressHeld: true))
-        XCTAssertFalse(R.resealNeeded(enabled: true, vault: false, phraseSaved: false, addressHeld: false))
-    }
-
-    func testWhatAResealAttemptCameTo() {
-        func of(_ status: Int, _ code: String) -> EmailReseal.Outcome {
-            EmailReseal.outcome(status: status, body: #"{"error":"\#(code)"}"#)
-        }
-        XCTAssertEqual(EmailReseal.outcome(of: nil), .done)
-        // As good as stored: the status is read again.
-        XCTAssertEqual(of(409, "vault-exists"), .done)
-        XCTAssertEqual(of(409, "phrase-saved"), .done)
-        // The address held here is stale.
-        XCTAssertEqual(of(403, "address-mismatch"), .addressStale)
-        // Everything else waits for the next landing.
-        for (status, code) in [
-            (400, "address-invalid"), (429, "too-many-attempts"), (409, "username-required"),
-            (409, "handle-mismatch"), (409, "no-recovery-email"), (503, "recovery-email-disabled"), (500, "x"),
-        ] {
-            XCTAssertEqual(of(status, code), .retryAtNextLanding, code)
-        }
+    /// The email row is absent, off or on; there is no "add again" (it
+    /// existed for the vault).
+    func testTheEmailRowFollowsTheStatusAlone() {
+        XCTAssertEqual(ProtectionRows.decide(status(enabled: true), seals: nil).email, .on)
+        XCTAssertEqual(ProtectionRows.decide(status(enabled: false), seals: nil).email, .off)
         XCTAssertEqual(
-            EmailReseal.outcome(of: AuthClientError.network(endpoint: "/v", underlying: URLError(.timedOut))),
-            .retryAtNextLanding)
-    }
-
-    func testAddAgainOnlyWhereNoDeviceHoldsTheAddress() {
-        let dropped = status(enabled: true, vault: false, phraseSaved: false)
-        XCTAssertEqual(ProtectionRows.decide(dropped, addressHeld: false).email, .addAgain)
-        XCTAssertEqual(ProtectBanner.copy(dropped, addressHeld: false).titleKey, "recovery_email.add_again.title")
-        // A device that holds it re-seals by itself: the row reads On and
-        // nothing is asked.
-        XCTAssertEqual(ProtectionRows.decide(dropped, addressHeld: true).email, .on)
-        XCTAssertFalse(ProtectBanner.shows(
-            protection: dropped.protection, resealing: true, dismissedAtMs: nil, nowMs: 0))
-        XCTAssertTrue(ProtectBanner.shows(
-            protection: dropped.protection, resealing: false, dismissedAtMs: nil, nowMs: 0))
-
-        // After a recall the stored key is gone (`enabled` false): the
-        // ordinary add-email state, the field pre-filled when held.
-        let recalled = status(enabled: false, vault: false, phraseSaved: false)
-        XCTAssertEqual(ProtectionRows.decide(recalled, addressHeld: true).email, .off)
-        XCTAssertEqual(EmailReseal.prefill(replacing: false, addressHeld: "a@b.example"), "a@b.example")
-        XCTAssertEqual(EmailReseal.prefill(replacing: false, addressHeld: nil), "")
-        // Replace: a new address is being typed.
-        XCTAssertEqual(EmailReseal.prefill(replacing: true, addressHeld: "a@b.example"), "")
+            ProtectionRows.decide(RecoveryEmailStatus(available: false, enabled: false), seals: nil).email,
+            .absent)
+        XCTAssertEqual(
+            ProtectionRows.decide(RecoveryEmailStatus(available: false, enabled: true), seals: nil).email, .on,
+            "an email that is on is shown even where mail is not set up")
     }
 
     // MARK: - The register (lakko-sync, through the FFI)
@@ -122,29 +80,20 @@ final class RecoveryAddressTests: XCTestCase {
         XCTAssertThrowsError(try a.setRecoveryEmail(hlc: 30, address: "no-at-sign"))
     }
 
-    func testTheVaultPutWire() throws {
-        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(EmailVaultPutRequest(
-            handle: "hd", address: "a@b.example", vaultSalt: "c2FsdA==", sealedEntropy: "c2VhbGVk"))) as? [String: Any])
-        XCTAssertEqual(Set(json.keys), ["handle", "address", "vault_salt", "sealed_entropy"])
-        XCTAssertNil(json["fresh_grant"], "no fresh-auth grant")
-    }
-
-    // MARK: - The centre: keeping the address, the automatic re-seal
+    // MARK: - The centre: keeping the address
 
     private final class World {
         var status: RecoveryEmailStatus
         var register: String?
         var syncReady = true
         var stored: [String?] = []
-        var resealError: Error?
-        var resealed: [String] = []
-        var statusAfterReseal: RecoveryEmailStatus?
         var statusReads = 0
         init(_ status: RecoveryEmailStatus) { self.status = status }
     }
 
     private func center(_ world: World) -> AccountProtectionCenter {
-        AccountProtectionCenter(
+        let name = "centre-\(UUID().uuidString)"
+        return AccountProtectionCenter(
             ports: .init(
                 session: { .init(accountIdB64: "acct", sessionToken: "tok") },
                 fetchStatus: { _ in
@@ -160,115 +109,33 @@ final class RecoveryAddressTests: XCTestCase {
                     world.register = address
                     return true
                 },
-                reseal: { _, address in
-                    world.resealed.append(address)
-                    if let error = world.resealError { throw error }
-                    if let after = world.statusAfterReseal { world.status = after }
-                },
                 nowMs: { 1_000_000 }),
-            store: AccountProtectionStore(defaults: defaults("centre-\(UUID().uuidString)")))
+            store: AccountProtectionStore(defaults: defaults(name)),
+            sealsStore: AccountSealsStore(defaults: defaults("seals-" + name)))
     }
 
-    func testADeviceThatHoldsTheAddressPutsTheVaultBackSilently() async {
-        // After a key reset: the email is on, the vault is gone.
-        let world = World(status(enabled: true, vault: false, phraseSaved: false))
+    func testTheAddressHeldIsShownAndNothingIsSentForIt() async {
+        let world = World(status(enabled: true))
         world.register = "alice@example.com"
-        world.statusAfterReseal = status(enabled: true, vault: true, phraseSaved: false)
         let center = center(world)
-
         await center.land(accountIdB64: "acct")
-
-        XCTAssertEqual(world.resealed, ["alice@example.com"], "sealed and put back, once")
-        XCTAssertEqual(center.status?.protection, .email, "the status was read again")
-        XCTAssertFalse(center.bannerVisible)
-        XCTAssertEqual(center.rows?.email, .on)
         XCTAssertEqual(center.addressHeld, "alice@example.com", "shown in Settings on this device")
-    }
-
-    func testNoResealWithoutTheAddressOrWhereNoneIsWanted() async {
-        // No device holds the address: "add your email again".
-        let none = World(status(enabled: true, vault: false, phraseSaved: false))
-        let noAddress = center(none)
-        await noAddress.land(accountIdB64: "acct")
-        XCTAssertEqual(none.resealed, [])
-        XCTAssertEqual(noAddress.rows?.email, .addAgain)
-        XCTAssertTrue(noAddress.bannerVisible)
-
-        // A phrase-protected account never gets a vault.
-        let phrase = World(status(enabled: true, vault: false, phraseSaved: true))
-        phrase.register = "alice@example.com"
-        await center(phrase).land(accountIdB64: "acct")
-        XCTAssertEqual(phrase.resealed, [])
-
-        // The vault is there: nothing to do.
-        let whole = World(status(enabled: true, vault: true, phraseSaved: false))
-        whole.register = "alice@example.com"
-        await center(whole).land(accountIdB64: "acct")
-        XCTAssertEqual(whole.resealed, [])
-    }
-
-    func testAFailedResealIsTriedAgainAtTheNextLandingNeverInALoop() async {
-        let world = World(status(enabled: true, vault: false, phraseSaved: false))
-        world.register = "alice@example.com"
-        world.resealError = AuthClientError.http(
-            status: 429, endpoint: "/recovery-email/vault", body: #"{"error":"too-many-attempts"}"#)
-        let center = center(world)
-        await center.land(accountIdB64: "acct")
-        XCTAssertEqual(world.resealed.count, 1)
-
-        // Reading the status again (Settings opening) does not try again.
-        await center.refresh()
-        await center.refresh()
-        XCTAssertEqual(world.resealed.count, 1, "every request spends one of ten per day")
-        XCTAssertFalse(center.bannerVisible, "still silent: this device will try again")
-
-        // The next landing does.
-        world.resealError = nil
-        world.statusAfterReseal = status(enabled: true, vault: true, phraseSaved: false)
-        await center.land(accountIdB64: "acct")
-        XCTAssertEqual(world.resealed.count, 2)
-        XCTAssertEqual(center.status?.vault, true)
-    }
-
-    func testVaultExistsAndPhraseSavedAreAsGoodAsDone() async {
-        for code in ["vault-exists", "phrase-saved"] {
-            let world = World(status(enabled: true, vault: false, phraseSaved: false))
-            world.register = "alice@example.com"
-            world.resealError = AuthClientError.http(
-                status: 409, endpoint: "/recovery-email/vault", body: #"{"error":"\#(code)"}"#)
-            let center = center(world)
-            await center.land(accountIdB64: "acct")
-            let readsAfterLanding = world.statusReads
-            XCTAssertGreaterThanOrEqual(readsAfterLanding, 2, "\(code): the status is read again")
-            XCTAssertEqual(world.register, "alice@example.com", "\(code): the address is kept")
-        }
-    }
-
-    func testAStaleAddressIsClearedAndAddAgainTakesOver() async {
-        let world = World(status(enabled: true, vault: false, phraseSaved: false))
-        world.register = "old@example.com"
-        world.resealError = AuthClientError.http(
-            status: 403, endpoint: "/recovery-email/vault", body: #"{"error":"address-mismatch"}"#)
-        let center = center(world)
-        await center.land(accountIdB64: "acct")
-
-        XCTAssertEqual(world.stored, [nil], "the register is cleared")
-        XCTAssertNil(center.addressHeld)
-        XCTAssertEqual(center.rows?.email, .addAgain)
-        XCTAssertTrue(center.bannerVisible)
+        XCTAssertEqual(center.rows?.email, .on)
+        XCTAssertEqual(world.stored, [], "a landing writes nothing")
     }
 
     func testTheAddressIsKeptOnEnrolRemovedOnRemoveAndWaitsForTheSyncedState() async {
-        let world = World(status(enabled: false, vault: false, phraseSaved: false))
+        let world = World(status(enabled: false))
         let center = center(world)
         await center.land(accountIdB64: "acct")
 
         // Enrol finish: the normalised address goes to the register.
-        center.enrolled(EmailEnrolled(enabled: true, vault: true), replaced: false, address: "alice@example.com")
+        center.enrolled(EmailEnrolled(enabled: true), replaced: false, address: "alice@example.com")
+        XCTAssertEqual(center.status?.enabled, true, "the row reads On at once")
         await center.flushPendingAddress()
         XCTAssertEqual(world.stored, ["alice@example.com"])
         // Replace: the register takes the new address.
-        center.enrolled(EmailEnrolled(enabled: true, vault: true), replaced: true, address: "new@example.com")
+        center.enrolled(EmailEnrolled(enabled: true), replaced: true, address: "new@example.com")
         await center.flushPendingAddress()
         XCTAssertEqual(world.register, "new@example.com")
         // Removing the recovery email writes the empty value.
@@ -276,10 +143,11 @@ final class RecoveryAddressTests: XCTestCase {
         await center.flushPendingAddress()
         XCTAssertNil(world.register)
         XCTAssertEqual(world.stored.last ?? "x", nil)
+        XCTAssertEqual(center.status?.enabled, false)
 
         // Got back in by email before the synced state is loaded: the write
         // waits for it.
-        let late = World(status(enabled: true, vault: true, phraseSaved: false))
+        let late = World(status(enabled: true))
         late.syncReady = false
         let fresh = self.center(late)
         fresh.keepAddress("alice@example.com")
@@ -292,21 +160,28 @@ final class RecoveryAddressTests: XCTestCase {
         XCTAssertEqual(late.stored.count, 1, "written once")
     }
 
-    func testTheEnrolFormIsPrefilledOnlyWhenNothingIsBeingReplaced() {
-        func model(replacing: Bool, held: String?) -> RecoveryEmailModel {
-            RecoveryEmailModel(
-                ports: .init(
-                    loginHandle: { Data(repeating: 1, count: 32) }, sessionToken: { "tok" }, grant: { "g" },
-                    phraseSaved: { false }, normalize: { try normalizeRecoveryEmail(address: $0) },
-                    start: { _, _, _, _ in throw URLError(.badURL) },
-                    seal: { _, _, _ in Data() },
-                    finish: { _, _, _, _ in throw URLError(.badURL) },
-                    remove: { _, _ in }, enrolled: { _, _, _ in }, removed: {}, proofExpired: {}),
-                replacing: replacing,
-                prefill: EmailReseal.prefill(replacing: replacing, addressHeld: held))
-        }
-        XCTAssertEqual(model(replacing: false, held: "alice@example.com").address, "alice@example.com")
-        XCTAssertEqual(model(replacing: true, held: "alice@example.com").address, "")
-        XCTAssertEqual(model(replacing: false, held: nil).address, "")
+    /// ADR-0076 section 2 / UX 19.1c — what a username change carries for
+    /// the recovery email, and when the screen asks for the address.
+    func testAUsernameChangeCarriesTheAddressOrAsksForIt() {
+        XCTAssertEqual(UsernameRename.emailCarry(recoveryEmailEnabled: true, addressHeld: true), .address)
+        XCTAssertEqual(UsernameRename.emailCarry(recoveryEmailEnabled: true, addressHeld: false), .none)
+        XCTAssertEqual(UsernameRename.emailCarry(recoveryEmailEnabled: false, addressHeld: true), .none)
+
+        let emailOnly = AccountFactors(email: true, authenticator: false, passkey: false)
+        // The email is the last second way in and no address is here: the
+        // change would be refused, so the address is asked for first.
+        XCTAssertTrue(UsernameRename.asksForAddress(factors: emailOnly, addressHeld: false))
+        XCTAssertFalse(UsernameRename.asksForAddress(factors: emailOnly, addressHeld: true))
+        // Another way in remains: the email may be dropped (with its warning).
+        XCTAssertFalse(UsernameRename.asksForAddress(
+            factors: AccountFactors(email: true, authenticator: true, passkey: false), addressHeld: false))
+        XCTAssertFalse(UsernameRename.asksForAddress(
+            factors: AccountFactors(email: false, authenticator: true, passkey: false), addressHeld: false))
+        XCTAssertFalse(UsernameRename.asksForAddress(factors: nil, addressHeld: false), "unknown: not asked")
+
+        // The bind's body names the address only.
+        let json = try? JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(LoginHandleRecoveryEmail(address: "a@b.example"))) as? [String: Any]
+        XCTAssertEqual(json.map { Set($0.keys) }, ["address"])
     }
 }

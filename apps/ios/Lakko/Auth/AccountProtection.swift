@@ -3,140 +3,305 @@
 
 import Foundation
 
-// ADR-0075 / docs/ux/identity-recovery.md section 19 — what protects an
-// account: a recovery email, a saved recovery phrase, or nothing.
+// ADR-0075 (amended 2026-11-26) / docs/ux/identity-recovery.md section 19 —
+// what protects an account.
+//
+// Since 2026-11-26 there is one kind of account. Every account with a
+// username has at least one SECOND FACTOR (a recovery email, an
+// authenticator app, a passkey): a key reset asks for the password and one
+// of them. The 12-word phrase is an optional extra and is not one of the
+// three. The email vault is gone: a mailed code gives a new password and
+// confirms a reset, never the keys.
+//
+// Separately, the account's published protection (ADR-0101 section 10,
+// ``AccountSeals``) says what brings the chats back after a reset: the
+// phrase once saved, a passkey that keeps the chats, or the password alone.
 //
 // This file is the pure part and the per-device record:
 //
 //   * `RecoveryEmailStatus`     what `GET /recovery-email` answers;
-//   * `AccountProtection`       the account's mode;
-//   * `ProtectionRows`          what Settings > Account draws from it;
-//   * `ProtectBanner`           when the no-protection banner is on screen;
-//   * `EnrolSealing`            whether an enrolment seals a vault;
+//   * `AccountFactors`          the three second factors of the account;
+//   * `ProtectStep`             the "Protect your account" step (19.1a);
+//   * `FactorLanding`           the landing rule (19.1c);
+//   * `LastFactor`              the last one cannot be removed (19.1c);
+//   * `AuthenticatorOnly`       the warning when it is the only one;
+//   * `PasswordOnlyNotice`      "Your chats depend on your password" (19.1d);
+//   * `ProtectionRows`          what Settings > Account draws;
 //   * `AccountProtectionStore`  the per-account flags kept on the device.
 //
 // The address itself is never part of any of it: it is typed, used and
 // dropped, and nothing here could store it.
 
-/// `GET /recovery-email`.
+/// `GET /recovery-email`: `{available, enabled, totp}`.
 public struct RecoveryEmailStatus: Codable, Equatable, Sendable {
     /// Whether this server can send a recovery code.
     public let available: Bool
     /// The account has a recovery email. Never the address.
     public let enabled: Bool
-    /// The account has an email vault: a mailed code brings its keys back.
-    public let vault: Bool
-    /// The owner saved a recovery phrase.
-    public let phraseSaved: Bool
-    /// The account has an authenticator: its code is asked for as well as
-    /// the mailed one. `nil` from a server that does not say.
+    /// The account has a confirmed authenticator. `nil` from a server that
+    /// does not say.
     public let totp: Bool?
 
-    public init(available: Bool, enabled: Bool, vault: Bool, phraseSaved: Bool, totp: Bool? = nil) {
+    public init(available: Bool, enabled: Bool, totp: Bool? = nil) {
         self.available = available
         self.enabled = enabled
-        self.vault = vault
-        self.phraseSaved = phraseSaved
         self.totp = totp
     }
+}
 
-    enum CodingKeys: String, CodingKey {
-        case available, enabled, vault, totp
-        case phraseSaved = "phrase_saved"
+/// The account's second factors (UX 19.1a): what a key reset accepts after
+/// the password.
+public struct AccountFactors: Equatable, Sendable {
+    public var email: Bool
+    public var authenticator: Bool
+    public var passkey: Bool
+
+    public init(email: Bool, authenticator: Bool, passkey: Bool) {
+        self.email = email
+        self.authenticator = authenticator
+        self.passkey = passkey
+    }
+
+    public var count: Int { [email, authenticator, passkey].filter { $0 }.count }
+    public var any: Bool { count > 0 }
+    /// The authenticator is the only one of the three.
+    public var authenticatorOnly: Bool { authenticator && !email && !passkey }
+
+    /// The factors as the server's status and the passkey list say them;
+    /// `nil` while either is unknown (nothing is decided on a guess).
+    public static func of(status: RecoveryEmailStatus?, hasPasskey: Bool?) -> AccountFactors? {
+        guard let status, let totp = status.totp, let hasPasskey else { return nil }
+        return AccountFactors(email: status.enabled, authenticator: totp, passkey: hasPasskey)
     }
 }
 
-/// The account's mode (UX 19.1).
-public enum AccountProtection: Equatable, Sendable {
-    /// No phrase saved, and a mailed code brings everything back.
-    case email
-    /// A recovery phrase was saved.
-    case phrase
-    /// Neither: the account rests on the password and its devices.
-    case none
-}
+/// The "Protect your account" step (UX 19.1a), pure: which rows it has,
+/// which are done, whether `Continue` is enabled, and what stands under the
+/// rows.
+public struct ProtectStep: Equatable {
 
-/// The one rule. A saved phrase wins. Without one the account is protected
-/// by its email only while the server holds the vault: an email without a
-/// vault (the keys were reset or the account was taken back, and the server
-/// dropped the vault) changes the password and brings nothing back, so the
-/// account reads as unprotected until the email is added again.
-public func accountProtection(enabled: Bool, vault: Bool, phraseSaved: Bool) -> AccountProtection {
-    if phraseSaved { return .phrase }
-    return enabled && vault ? .email : .none
-}
+    public enum Row: Hashable, Sendable {
+        case email
+        case authenticator
+        case passkey
+        /// The optional extra: it does not count as one of the three.
+        case phrase
 
-public extension RecoveryEmailStatus {
-    var protection: AccountProtection {
-        accountProtection(enabled: enabled, vault: vault, phraseSaved: phraseSaved)
+        /// One of the three second factors.
+        public var isFactor: Bool { self != .phrase }
     }
 
-    /// The email is on but the server holds no vault for an account without
-    /// a saved phrase (a key reset, a rotation or a recall dropped it).
-    var vaultMissing: Bool { enabled && !vault && !phraseSaved }
+    public struct Item: Equatable {
+        public let row: Row
+        /// Marked `protect.done`.
+        public let done: Bool
+    }
 
-    /// `vaultMissing` with no device of the account holding the address:
-    /// the person adds the email again. (A device that holds the address
-    /// re-seals by itself: ``EmailReseal``.)
-    var emailNeedsAddingAgain: Bool { needsAddingAgain(addressHeld: false) }
+    /// The note in the warning colour between the rows and `Continue`.
+    public enum Warning: Equatable {
+        /// `protect.totp_only.warning`.
+        case authenticatorOnly
+        /// `protect.totp_only.warning_phrase`: a phrase was saved as well.
+        case authenticatorOnlyWithPhrase
 
-    func needsAddingAgain(addressHeld: Bool) -> Bool { vaultMissing && !addressHeld }
+        public var key: String {
+            switch self {
+            case .authenticatorOnly: return "protect.totp_only.warning"
+            case .authenticatorOnlyWithPhrase: return "protect.totp_only.warning_phrase"
+            }
+        }
+    }
+
+    public enum Footer: Equatable {
+        /// `protect.continue`, enabled or drawn disabled with
+        /// `protect.continue_needs` under it. Never hidden, never `Not now`.
+        case continueOn(enabled: Bool)
+        /// Nothing (the Settings entry, which the back button leaves).
+        case none
+    }
+
+    /// Email, authenticator, passkey: the three, in that order.
+    public let factors: [Item]
+    /// The optional phrase row, under the `protect.optional` caption.
+    public let phrase: Item
+    public let warning: Warning?
+    /// The honest notice of 19.1d stands under the rows.
+    public let showsPasswordOnlyNotice: Bool
+    public let footer: Footer
+    /// `protect.title`, or `protect.title_required` when the landing rule
+    /// put the step in front of the app.
+    public let titleKey: String
+
+    /// - Parameters:
+    ///   - offersEmail: mail is set up and the account has a username.
+    ///   - passkeysSupported: this device can use passkeys and the account
+    ///     has a username.
+    ///   - done: the rows already done.
+    ///   - keepsChats: a phrase is saved or a passkey keeps the chats
+    ///     (``AccountSeals/keptBy`` is not the password alone).
+    ///   - leavable: the step has its own `Continue` (after sign-up, and
+    ///     at a landing); `false` for the Settings entry.
+    ///   - required: shown by the landing rule (19.1c).
+    public static func decide(
+        offersEmail: Bool, passkeysSupported: Bool, done: Set<Row>, keepsChats: Bool,
+        leavable: Bool, required: Bool = false
+    ) -> ProtectStep {
+        var rows: [Row] = []
+        if offersEmail || done.contains(.email) { rows.append(.email) }
+        // Always offered: the server refuses to start without it.
+        rows.append(.authenticator)
+        if passkeysSupported || done.contains(.passkey) { rows.append(.passkey) }
+        let factors = rows.map { Item(row: $0, done: done.contains($0)) }
+        let doneFactors = Set(factors.filter(\.done).map(\.row))
+        let phraseDone = done.contains(.phrase)
+        let warning: Warning?
+        if doneFactors == [.authenticator] {
+            warning = phraseDone ? .authenticatorOnlyWithPhrase : .authenticatorOnly
+        } else {
+            warning = nil
+        }
+        return ProtectStep(
+            factors: factors,
+            phrase: Item(row: .phrase, done: phraseDone),
+            warning: warning,
+            showsPasswordOnlyNotice: !doneFactors.isEmpty && !keepsChats && !phraseDone,
+            footer: leavable ? .continueOn(enabled: !doneFactors.isEmpty) : .none,
+            titleKey: required ? "protect.title_required" : "protect.title")
+    }
+
+    /// The rows the account's state marks done.
+    public static func done(factors: AccountFactors?, phraseSaved: Bool) -> Set<Row> {
+        var done: Set<Row> = []
+        if factors?.email == true { done.insert(.email) }
+        if factors?.authenticator == true { done.insert(.authenticator) }
+        if factors?.passkey == true { done.insert(.passkey) }
+        if phraseSaved { done.insert(.phrase) }
+        return done
+    }
+
+    /// Whether the sign-up step offers `Add an email`.
+    public static func offersEmail(available: Bool, hasUsername: Bool) -> Bool {
+        available && hasUsername
+    }
 }
 
-/// ADR-0075, amended 2026-10-13 — the automatic re-seal: a device that
-/// holds the address puts the email vault back by itself, silently.
-public enum EmailReseal {
+/// UX 19.1c — at every session landing an account with a username and none
+/// of the three is shown the step before the app.
+public enum FactorLanding {
+    /// `nil` factors (not yet read, or the read failed) never put the step
+    /// up: the question is asked again at the next landing. A guest account
+    /// (no username) sees none of this.
+    public static func needsStep(hasUsername: Bool, factors: AccountFactors?) -> Bool {
+        guard hasUsername, let factors else { return false }
+        return !factors.any
+    }
+}
 
-    /// The one rule, evaluated after every read of `GET /recovery-email`.
-    public static func resealNeeded(
-        enabled: Bool, vault: Bool, phraseSaved: Bool, addressHeld: Bool
+/// UX 19.1c — the last of the three cannot be removed. The server refuses
+/// it too (`409 last-factor`); the app's own dialog says
+/// `protect.last_factor` first.
+public enum LastFactor {
+
+    public static let code = "last-factor"
+    public static let messageKey = "protect.last_factor"
+
+    /// Whether removing `row` would leave the account with none. Unknown
+    /// factors refuse nothing here (the server still does).
+    public static func refuses(removing row: ProtectStep.Row, factors: AccountFactors?) -> Bool {
+        guard let factors, factors.count == 1 else { return false }
+        switch row {
+        case .email: return factors.email
+        case .authenticator: return factors.authenticator
+        case .passkey: return factors.passkey
+        case .phrase: return false
+        }
+    }
+
+    /// Removing the last PASSKEY of several is a removal of the factor;
+    /// removing one of two passkeys is not.
+    public static func refusesPasskeyRemoval(passkeyCount: Int, factors: AccountFactors?) -> Bool {
+        passkeyCount <= 1 && refuses(removing: .passkey, factors: factors)
+    }
+
+    /// `409 {"error":"last-factor"}` from any service client.
+    public static func isRefusal(_ error: Error) -> Bool {
+        let status: Int
+        let body: String
+        if case .http(let s, _, let b) = error as? AuthClientError {
+            (status, body) = (s, b)
+        } else if case .http(let s, _, let b) = error as? WebauthnClientError {
+            (status, body) = (s, b)
+        } else {
+            return false
+        }
+        guard status == 409 else { return false }
+        let json = (try? JSONSerialization.jsonObject(with: Data(body.utf8))) as? [String: Any]
+        return json?["error"] as? String == code
+    }
+}
+
+/// UX 19.1a / 19.1c — the authenticator as the account's only second way
+/// in.
+public enum AuthenticatorOnly {
+
+    /// The note at the top of Settings > Security > Recovery, for as long as
+    /// the authenticator is the only one; it cannot be dismissed.
+    public static func settingsWarning(factors: AccountFactors?, phraseSaved: Bool) -> ProtectStep.Warning? {
+        guard factors?.authenticatorOnly == true else { return nil }
+        return phraseSaved ? .authenticatorOnlyWithPhrase : .authenticatorOnly
+    }
+
+    /// The line a removal's confirmation adds before its buttons when the
+    /// removal would leave only the authenticator; `nil` otherwise.
+    public static func removalNoticeKey(
+        removing row: ProtectStep.Row, passkeyCount: Int = 1, factors: AccountFactors?, phraseSaved: Bool
+    ) -> String? {
+        guard let factors, factors.authenticator else { return nil }
+        var after = factors
+        switch row {
+        case .email: after.email = false
+        case .passkey: if passkeyCount <= 1 { after.passkey = false }
+        case .authenticator, .phrase: return nil
+        }
+        guard after != factors, after.authenticatorOnly else { return nil }
+        return phraseSaved ? "protect.totp_only.remove_notice_phrase" : "protect.totp_only.remove_notice"
+    }
+}
+
+/// UX 19.1d — "Your chats depend on your password": the account has a
+/// second way in but no saved phrase and no passkey that keeps the chats.
+public enum PasswordOnlyNotice {
+
+    public static let titleKey = "protect.password_only.title"
+    public static let bodyKey = "protect.password_only.body"
+    public static let savePhraseKey = "protect.password_only.save_phrase"
+    public static let addPasskeyKey = "protect.password_only.add_passkey"
+    public static let passkeyNoSealKey = "protect.password_only.passkey_no_seal"
+
+    /// Whether the account is kept by the password only. `nil` seals (the
+    /// account's protection was never read on this device) show nothing.
+    public static func applies(factors: AccountFactors?, seals: AccountSeals?) -> Bool {
+        guard let factors, factors.any, let seals else { return false }
+        return seals.keptBy == .passwordOnly
+    }
+
+    /// Place 3: once after a sign-in on a device, the first time the app
+    /// opens there. Not after a key reset (its own screens said what was
+    /// kept), and never again once closed on this device.
+    public static func showsDialog(
+        applies: Bool, closedOnThisDevice: Bool, afterKeyReset: Bool
     ) -> Bool {
-        enabled && !vault && !phraseSaved && addressHeld
+        applies && !closedOnThisDevice && !afterKeyReset
     }
 
-    /// What one `PUT /recovery-email/vault` came to.
-    public enum Outcome: Equatable {
-        /// Stored, or as good as: a vault exists already, or a phrase was
-        /// saved (no vault is wanted). The status is read again.
-        case done
-        /// `403 address-mismatch`: the address this device holds is not the
-        /// account's any more. The register is cleared; "add your email
-        /// again" takes over.
-        case addressStale
-        /// Anything else: tried again at the next landing, never in a loop
-        /// (every well-formed request spends one of ten per day).
-        case retryAtNextLanding
-    }
-
-    public static func outcome(status: Int, body: String) -> Outcome {
-        let code = ((try? JSONSerialization.jsonObject(with: Data(body.utf8))) as? [String: Any])?["error"]
-            as? String
-        switch (status, code) {
-        case (200..<300, _): return .done
-        case (409, "vault-exists"), (409, "phrase-saved"): return .done
-        case (403, "address-mismatch"): return .addressStale
-        default: return .retryAtNextLanding
-        }
-    }
-
-    public static func outcome(of error: Error?) -> Outcome {
-        guard let error else { return .done }
-        if case .http(let status, _, let body) = error as? AuthClientError {
-            return outcome(status: status, body: body)
-        }
-        return .retryAtNextLanding
-    }
-
-    /// The address the enrol form starts with: nothing when an address is
-    /// being replaced (a new one is typed), else the one this device holds
-    /// (after a recall the stored key is gone and the same address is
-    /// confirmed by a letter again).
-    public static func prefill(replacing: Bool, addressHeld: String?) -> String {
-        replacing ? "" : (addressHeld ?? "")
+    /// The extra line: the account has a passkey and none keeps the chats.
+    public static func showsPasskeyNoSeal(factors: AccountFactors?, seals: AccountSeals?) -> Bool {
+        guard let factors, let seals else { return false }
+        return factors.passkey && seals.passkeyTagsB64.isEmpty
     }
 }
 
-/// What Settings > Account draws (UX 19.1, 19.2, 19.5), pure.
+/// What Settings > Account draws (UX 19.1c, 19.2, 19.5), pure.
 public struct ProtectionRows: Equatable {
 
     public enum EmailRow: Equatable {
@@ -147,178 +312,63 @@ public struct ProtectionRows: Equatable {
         case off
         /// `Recovery email: On` with `Replace` and `Remove`.
         case on
-        /// The email is on but the server dropped its vault (a key reset, a
-        /// recall or a rotation on an account without a saved phrase):
-        /// `recovery_email.add_again.*`, opening the enrolment.
-        case addAgain
     }
 
     public enum PhraseRow: Equatable {
         /// `Save a recovery phrase`.
         case save
-        /// `Show recovery phrase`: only a phrase-protected account has it.
+        /// `Show recovery phrase`: only once it was saved.
         case show
     }
 
-    /// `protect.status.*`.
+    /// `protect.status.phrase` / `.passkey_seal` / `.password_only`.
     public let statusKey: String
+    /// The status line is drawn in the warning colour with the 19.1d
+    /// actions.
+    public let statusIsWarning: Bool
     public let email: EmailRow
     public let phrase: PhraseRow
     /// Whether any "three words" surface exists for this account.
     public let showsThreeWords: Bool
 
-    public static func decide(_ status: RecoveryEmailStatus, addressHeld: Bool = false) -> ProtectionRows {
+    public static func decide(_ status: RecoveryEmailStatus, seals: AccountSeals?) -> ProtectionRows {
+        let kept = seals?.keptBy ?? .passwordOnly
         let statusKey: String
-        switch status.protection {
-        case .email: statusKey = "protect.status.email"
+        switch kept {
         case .phrase: statusKey = "protect.status.phrase"
-        case .none: statusKey = "protect.status.none"
+        case .passkey: statusKey = "protect.status.passkey_seal"
+        case .passwordOnly: statusKey = "protect.status.password_only"
         }
         let email: EmailRow
-        if status.needsAddingAgain(addressHeld: addressHeld) {
-            email = .addAgain
-        } else if status.enabled {
+        if status.enabled {
             email = .on
         } else {
             email = status.available ? .off : .absent
         }
+        let phraseSaved = seals?.phraseSaved ?? false
         return ProtectionRows(
             statusKey: statusKey,
+            // Unknown seals warn about nothing.
+            statusIsWarning: seals != nil && kept == .passwordOnly,
             email: email,
-            phrase: status.phraseSaved ? .show : .save,
-            showsThreeWords: status.phraseSaved)
-    }
-
-    /// Whether the sign-up step (19.1a) offers `Add an email`.
-    public static func signupOffersEmail(available: Bool, hasUsername: Bool) -> Bool {
-        available && hasUsername
-    }
-}
-
-/// The "Protect your account" step (UX 19.1a), pure: which rows it has,
-/// which are already done, and what stands under them.
-public struct ProtectStep: Equatable {
-
-    public enum Row: Hashable, Sendable {
-        case email
-        case passkey
-        case phrase
-    }
-
-    public struct Item: Equatable {
-        public let row: Row
-        /// Marked `protect.done`.
-        public let done: Bool
-    }
-
-    public enum Footer: Equatable {
-        /// The plain `Not now` (with the app's own confirmation).
-        case notNow
-        /// The primary `protect.continue`: something was done.
-        case continueOn
-        /// Nothing (the Settings entry, which the back button leaves).
-        case none
-    }
-
-    /// Email, passkey, phrase, in that order.
-    public let items: [Item]
-    public let footer: Footer
-
-    /// - Parameters:
-    ///   - offersEmail: mail is set up and the account has a username.
-    ///   - passkeysSupported: this device can use passkeys.
-    ///   - done: the rows already done.
-    ///   - leavable: the step has its own way out (after sign-up).
-    public static func decide(
-        offersEmail: Bool, passkeysSupported: Bool, done: Set<Row>, leavable: Bool
-    ) -> ProtectStep {
-        var rows: [Row] = []
-        if offersEmail || done.contains(.email) { rows.append(.email) }
-        if passkeysSupported { rows.append(.passkey) }
-        rows.append(.phrase)
-        let items = rows.map { Item(row: $0, done: done.contains($0)) }
-        let footer: Footer
-        if !leavable {
-            footer = .none
-        } else {
-            footer = items.contains(where: \.done) ? .continueOn : .notNow
-        }
-        return ProtectStep(items: items, footer: footer)
-    }
-
-    /// The rows the account's status marks done: the email while it
-    /// protects (on, and not waiting to be added again), the phrase once
-    /// saved, the passkey when the account has one.
-    public static func done(status: RecoveryEmailStatus?, hasPasskey: Bool) -> Set<Row> {
-        var done: Set<Row> = []
-        if let status, status.enabled, !status.vaultMissing { done.insert(.email) }
-        if status?.phraseSaved == true { done.insert(.phrase) }
-        if hasPasskey { done.insert(.passkey) }
-        return done
+            phrase: phraseSaved ? .show : .save,
+            showsThreeWords: phraseSaved)
     }
 }
 
 /// What "Restore your keys" (UX section 8: signed in, no keys on this
-/// device) offers besides another device and a passkey, pure (ADR-0075).
+/// device) offers besides another device and a passkey, pure. Since
+/// 2026-11-26 a mailed code never brings the keys: there is no email row.
 public struct RestoreKeysRows: Equatable {
-    /// The 12-word phrase row: hidden for an account whose phrase was never
-    /// saved (nobody has words to type). Kept while the status is unknown.
+    /// The 12-word phrase row. Always offered: whether the phrase was saved
+    /// is told by the account's announcement, which a device without the
+    /// keys may not have read, and hiding the row would strand a person who
+    /// holds the words.
     public let showsPhrase: Bool
-    /// The `Email code` row: only while the server holds the email vault,
-    /// since only then does a mailed code bring the keys.
-    public let showsEmailCode: Bool
 
-    public static func decide(_ status: RecoveryEmailStatus?) -> RestoreKeysRows {
-        guard let status else { return RestoreKeysRows(showsPhrase: true, showsEmailCode: false) }
-        return RestoreKeysRows(
-            showsPhrase: status.phraseSaved,
-            showsEmailCode: status.enabled && status.vault)
+    public static func decide() -> RestoreKeysRows {
+        RestoreKeysRows(showsPhrase: true)
     }
-}
-
-/// The dismissible "This account has no way back in." banner (UX 19.1a):
-/// only for an unprotected account, and back 30 days after a dismissal if
-/// nothing changed.
-public enum ProtectBanner {
-
-    public static let returnsAfterMs: Int64 = 30 * 24 * 60 * 60 * 1000
-
-    /// What the banner says: the add-again copy when the email is on and its
-    /// vault is gone, otherwise the ordinary "no way back in" line.
-    public struct Copy: Equatable {
-        public let titleKey: String
-        public let bodyKey: String?
-        public let actionKey: String
-    }
-
-    public static func copy(_ status: RecoveryEmailStatus, addressHeld: Bool = false) -> Copy {
-        status.needsAddingAgain(addressHeld: addressHeld)
-            ? Copy(
-                titleKey: "recovery_email.add_again.title", bodyKey: "recovery_email.add_again.body",
-                actionKey: "protect.email.title")
-            : Copy(titleKey: "protect.banner.none", bodyKey: nil, actionKey: "protect.banner.action")
-    }
-
-    /// - Parameter hasPasskey: the account has at least one passkey: it has
-    ///   a way back in, so the banner (and its 30-day return) is not shown.
-    /// - Parameter resealing: the vault is missing and this device holds the
-    ///   address, so it is putting the vault back by itself: nothing to ask.
-    public static func shows(
-        protection: AccountProtection, hasPasskey: Bool = false, resealing: Bool = false,
-        dismissedAtMs: Int64?, nowMs: Int64
-    ) -> Bool {
-        guard protection == .none, !hasPasskey, !resealing else { return false }
-        guard let dismissedAtMs else { return true }
-        // A clock that went backwards reads as "not yet".
-        return nowMs >= dismissedAtMs && nowMs - dismissedAtMs >= returnsAfterMs
-    }
-}
-
-/// Whether an enrolment seals the email vault (ADR-0075 section 6): only
-/// while no phrase is saved. With a saved phrase the mailed code changes the
-/// password and nothing else, and the server never gets a vault.
-public enum EnrolSealing {
-    public static func sealsVault(phraseSaved: Bool) -> Bool { !phraseSaved }
 }
 
 /// What this device keeps about the protection of one account, in
@@ -339,16 +389,22 @@ public struct AccountProtectionStore {
 
     /// Every key of `accountIdB64`, for the wipe.
     static func keys(accountIdB64: String) -> [String] {
+        // ("banner-dismissed" is no longer written; the wipe still clears
+        // what an earlier build left.)
         ["phrase-saved", "status", "banner-dismissed", "notice-cursor", "own-actions",
-         "rename-owed", "username-register-owed"]
+         "rename-owed", "username-register-owed", "seals", "password-only-notice",
+         "phrase-seal-owed"]
             .map { key($0, accountIdB64: accountIdB64) }
     }
 
     // MARK: The phrase-saved flag
 
-    /// Whether the account's recovery phrase was saved (on this device, or
-    /// on another one and learned at a landing). The three-word surfaces and
-    /// `Show recovery phrase` exist only then.
+    /// Whether the account's recovery phrase was saved: its published
+    /// protection lists a phrase seal (ADR-0075, amended 2026-11-26: the
+    /// server keeps no flag). Written from the announcement at every look
+    /// at the account's own protection, and at once when the phrase is
+    /// saved here. The three-word surfaces and `Show recovery phrase` exist
+    /// only then.
     public func phraseSaved(accountIdB64: String) -> Bool {
         defaults.bool(forKey: Self.key("phrase-saved", accountIdB64: accountIdB64))
     }
@@ -405,19 +461,6 @@ public struct AccountProtectionStore {
         defer { gate.leave() }
         guard let data = try? JSONEncoder().encode(status) else { return }
         defaults.set(data, forKey: Self.key("status", accountIdB64: accountIdB64))
-        setPhraseSaved(status.phraseSaved, accountIdB64: accountIdB64)
-    }
-
-    // MARK: The banner
-
-    public func bannerDismissedAtMs(accountIdB64: String) -> Int64? {
-        defaults.object(forKey: Self.key("banner-dismissed", accountIdB64: accountIdB64)) as? Int64
-    }
-
-    public func setBannerDismissed(atMs: Int64, accountIdB64: String) {
-        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
-        defer { gate.leave() }
-        defaults.set(atMs, forKey: Self.key("banner-dismissed", accountIdB64: accountIdB64))
     }
 
     // MARK: Notices
@@ -469,7 +512,8 @@ public struct AccountProtectionStore {
 }
 
 /// ADR-0075 — whether the new words of a key reset or a recall are shown:
-/// only to a phrase-protected account. (A rotation asks
+/// only to an account whose phrase was saved before it (it had words to
+/// replace). (A rotation asks
 /// ``KeyRotationPlan/showsNewWords(savesPhrase:phraseProtected:)``.)
 public enum NewWordsRule {
     public static func shown(phraseProtected: Bool) -> Bool { phraseProtected }

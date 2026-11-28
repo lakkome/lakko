@@ -1,122 +1,95 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-/**
- * Which way "Save a recovery phrase" goes (ADR-0075 section 3 as amended
- * 2026-11-01), and what the last call's answer means.
- */
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 
-import { AuthHttpError, AuthNetworkError } from "../client";
-import {
-  phraseOpensAccount,
-  phraseSavedLeftNoNotice,
-  phraseSavedVerdict,
-  readSavePath,
-} from "./save-phrase";
+import { phraseOpensAccount, savePhraseOutcome, wordsToSave, type PhraseWasm } from "./save-phrase";
 
-const PHRASE = "one two three";
+const read = (rel: string): string => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
 
-describe("readSavePath", () => {
-  it("rotation_needed keeps the rotation, and the held phrase is not even read", async () => {
-    const heldPhrase = vi.fn(async () => PHRASE);
-    const path = await readSavePath({
-      status: async () => ({ saved: false, rotationNeeded: true }),
-      heldPhrase,
-    });
-    expect(path).toEqual({ kind: "rotation" });
-    expect(heldPhrase).not.toHaveBeenCalled();
-  });
-
-  it("no rotation needed and the device holds the phrase: its words", async () => {
-    await expect(
-      readSavePath({
-        status: async () => ({ saved: false, rotationNeeded: false }),
-        heldPhrase: async () => PHRASE,
-      }),
-    ).resolves.toEqual({ kind: "words", phrase: PHRASE });
-  });
-
-  it("a device that does not hold the phrase rotates", async () => {
-    await expect(
-      readSavePath({
-        status: async () => ({ saved: false, rotationNeeded: false }),
-        heldPhrase: async () => null,
-      }),
-    ).resolves.toEqual({ kind: "rotation" });
-  });
-
-  it("a failed read is a failure, never a guess", async () => {
-    await expect(
-      readSavePath({
-        status: async () => {
-          throw new Error("offline");
-        },
-        heldPhrase: async () => PHRASE,
-      }),
-    ).rejects.toThrow("offline");
-  });
-});
-
-describe("phraseSavedVerdict", () => {
-  const http = (status: number, error?: string): AuthHttpError =>
-    new AuthHttpError(
-      status,
-      "/account/phrase/saved",
-      error === undefined ? "" : JSON.stringify({ error }),
-    );
-
-  it("an answer saved it", () => {
-    expect(phraseSavedVerdict(null)).toBe("saved");
-  });
-
-  it("409 phrase-save-needs-rotation hands over to the rotation", () => {
-    expect(phraseSavedVerdict(http(409, "phrase-save-needs-rotation"))).toBe("needs-rotation");
-  });
-
-  it("another 409 is a refusal", () => {
-    expect(phraseSavedVerdict(http(409, "something-else"))).toBe("refused");
-  });
-
-  it("the proof block answers a 403 and a limit", () => {
-    expect(phraseSavedVerdict(http(403, "fresh-auth-required"))).toBe("proof");
-    expect(phraseSavedVerdict(http(429, "too-many-attempts"))).toBe("proof");
-  });
-
-  it("no answer, or a server failure, may have landed", () => {
-    expect(phraseSavedVerdict(new AuthNetworkError("/account/phrase/saved", new Error("x")))).toBe("unknown");
-    expect(phraseSavedVerdict(http(503))).toBe("unknown");
-  });
-
-  it("only an answer that wrote nothing gives up the own-action mark", () => {
-    expect(phraseSavedLeftNoNotice("needs-rotation")).toBe(true);
-    expect(phraseSavedLeftNoNotice("proof")).toBe(true);
-    expect(phraseSavedLeftNoNotice("refused")).toBe(true);
-    expect(phraseSavedLeftNoNotice("unknown")).toBe(false);
-    expect(phraseSavedLeftNoNotice("saved")).toBe(false);
-  });
-});
-
-describe("phraseOpensAccount", () => {
-  const wasmOf = (seed: Uint8Array) => ({
-    RecoveryMnemonic: {
-      fromPhrase: (phrase: string) => {
-        if (phrase !== PHRASE) throw new Error("bad phrase");
-        return { toSeed: () => seed.slice(), free: () => undefined };
-      },
+/** A core whose "seed" of a phrase is its bytes. */
+const wasm: PhraseWasm = {
+  RecoveryMnemonic: {
+    fromPhrase(phrase: string) {
+      if (phrase === "not a phrase") throw new Error("invalid");
+      return { toSeed: () => new TextEncoder().encode(phrase), free: () => undefined };
     },
-  });
-  const seed = new Uint8Array(64).fill(7);
+  },
+};
+const seedOf = (phrase: string): Uint8Array => new TextEncoder().encode(phrase);
 
-  it("is true for the words of the account's seed", () => {
-    expect(phraseOpensAccount(wasmOf(seed), PHRASE, seed)).toBe(true);
+describe("the words a device shows (UX 19.5, amended 2026-11-26)", () => {
+  it("are the phrase it holds when that phrase opens the account", async () => {
+    expect(
+      await wordsToSave({ heldPhrase: async () => "alpha beta", opensAccount: async () => true }),
+    ).toBe("alpha beta");
   });
 
-  it("is false for another seed: words a rotation left behind are not shown", () => {
-    expect(phraseOpensAccount(wasmOf(seed), PHRASE, new Uint8Array(64).fill(8))).toBe(false);
+  it("are none when the device holds no phrase: nothing can be saved here", async () => {
+    const opens = vi.fn(async () => true);
+    expect(await wordsToSave({ heldPhrase: async () => null, opensAccount: opens })).toBeNull();
+    expect(opens).not.toHaveBeenCalled();
   });
 
-  it("is false for a phrase that does not parse", () => {
-    expect(phraseOpensAccount(wasmOf(seed), "nonsense", seed)).toBe(false);
+  it("are none when the held phrase does not open the account as it is now", async () => {
+    expect(
+      await wordsToSave({ heldPhrase: async () => "old words", opensAccount: async () => false }),
+    ).toBeNull();
+  });
+
+  it("a phrase opens the account only when it derives the account's seed", () => {
+    expect(phraseOpensAccount(wasm, "alpha beta", seedOf("alpha beta"))).toBe(true);
+    expect(phraseOpensAccount(wasm, "alpha beta", seedOf("alpha beti"))).toBe(false);
+    expect(phraseOpensAccount(wasm, "alpha beta", seedOf("alpha"))).toBe(false);
+    expect(phraseOpensAccount(wasm, "not a phrase", seedOf("not a phrase"))).toBe(false);
+  });
+});
+
+describe("what counts as saved", () => {
+  it("only a published protection: a failed publish saved nothing", () => {
+    expect(savePhraseOutcome("published")).toBe("saved");
+    expect(savePhraseOutcome("retry")).toBe("failed");
+  });
+});
+
+describe("the panel", () => {
+  const panel = read("./SavePhrasePanel.tsx");
+
+  it("changes no key and tells no server that a phrase was saved", () => {
+    expect(panel.includes("useKeyRotation")).toBe(false);
+    expect(panel.includes("rotation.")).toBe(false);
+    expect(panel.includes("markPhraseSaved")).toBe(false);
+    expect(panel.includes("RecoveryEmailClient")).toBe(false);
+  });
+
+  it("publishes only after the three-word check, and marks the phrase saved only on its success", () => {
+    const confirmed = panel.slice(panel.indexOf("async function onWordsConfirmed()"));
+    const body = confirmed.slice(0, confirmed.indexOf("\n  }\n"));
+    const publish = body.indexOf("await auth.savePhraseSeal()");
+    const failed = body.indexOf("setSaveFailed(true);", publish);
+    const noted = body.indexOf("notePhraseSaved(acct);");
+    const closed = body.indexOf("props.onSaved();");
+    expect(publish).toBeGreaterThan(0);
+    expect(failed).toBeGreaterThan(publish);
+    expect(noted).toBeGreaterThan(failed);
+    expect(closed).toBeGreaterThan(noted);
+    // The check form is what calls it.
+    expect(panel.includes("onConfirmed={() => void onWordsConfirmed()}")).toBe(true);
+  });
+
+  it("a failed publish stays on the three-word screen with the line and Try again", () => {
+    expect(panel.includes('submitLabel={saveFailed() ? t("common.try_again") : t("common.done")}')).toBe(true);
+    expect(panel.includes('failure={saveFailed() ? t("protect.phrase.save.failed") : null}')).toBe(true);
+  });
+
+  it("shows the words only behind the proof, and no progress line of a key change", () => {
+    const show = panel.slice(panel.indexOf("async function onShowWords()"));
+    const body = show.slice(0, show.indexOf("\n  }\n"));
+    expect(body.indexOf("await gate.ensure()")).toBeLessThan(body.indexOf("setPhrase(words);"));
+    expect(panel.includes("protect.phrase.save.effect")).toBe(false);
+    expect(panel.includes("protect.phrase.save.progress")).toBe(false);
+    expect(panel.includes("protect.phrase.save.finishing")).toBe(false);
   });
 });

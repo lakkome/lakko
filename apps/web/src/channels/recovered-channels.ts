@@ -2,25 +2,31 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0101 section 7 - a channel this account took back with its recovery
- * key after a key reset, until its PublisherGroup is founded again and its
- * type is known again.
+ * ADR-0101 section 7 item 8 - a channel this account took back from its
+ * owned-channels list after a key reset (`owned/owned-runtime.ts`), until
+ * its PublisherGroup is founded again here.
  *
- * The reset lost everything the owner's devices kept about the channel: the
- * admission seeds (which only VERIFY the tickets of future private
- * subscribers), the read key, the type. Who reads the channel is still on
- * the channels service. So at recovery the owner's device records the
- * service's highest subscriber row (`throughSeq`) and treats every row up to
- * it as let in: the re-founding's reseal (ADR-0090 decision A) seals the new
- * epoch seed to each of those keys, and every later rotation does too. A
- * fresh admission seed is minted for invitations made from now on; a row
- * above the mark needs a ticket under it, as for any private channel. Cost,
- * stated: a row the service itself added before the recovery is let in too
- * (the device cannot tell it from a genuine reader without the lost seeds).
+ * The reset lost what the owner's devices kept about the channel; the list
+ * entry brings back its read key (a public channel), its admission seeds
+ * (a private one) and its newest epoch seeds. Who reads the channel is
+ * still on the channels service. At the retake the device records which
+ * subscriber rows stay let in (`throughSeq`), and the re-founding (ADR-0090
+ * decision A, `publisher-devices.ts`) reads it as the channel's admission
+ * mark, set by this device:
  *
- * Once the channel's newest metadata record says its type, the access record
- * takes it (a public channel's new read key is the one the new account seed
- * derives) and the mark goes.
+ * - a private channel with listed admission seeds: `0`. Every row is judged
+ *   again by its ticket under those seeds; a row with no valid ticket is
+ *   not resealed to and the admission pass removes it. A reader let in
+ *   before the channel went private carries no ticket and goes the same
+ *   way: the list does not carry the old admission mark.
+ * - any other channel (public, or of unknown type with nothing listed to
+ *   judge a row with): the service's highest subscriber row at the retake.
+ *   Every row up to it stays a reader and the reseal reaches each of them.
+ *   Cost, stated: a row the service itself added before the retake is let
+ *   in too.
+ *
+ * The mark goes once the group is founded again and the channel's type is
+ * known (`settleRecoveredChannels`).
  */
 
 interface KeyValueStorage {
@@ -43,7 +49,9 @@ function keyOf(accountIdB64: string): string {
 
 /** One recovered channel. */
 export interface RecoveredChannel {
-  /** The highest subscriber row the service listed at recovery. */
+  /** The admission mark the re-founding starts from: the highest subscriber
+   *  row the service listed at the retake, or 0 when every row is judged
+   *  again by its ticket. */
   readonly throughSeq: number;
 }
 

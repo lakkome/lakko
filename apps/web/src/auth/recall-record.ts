@@ -31,7 +31,12 @@
  * ```
  *
  * The plaintext is `version(1) ‖ learned_at_ms(8 BE) ‖ seed(32) ‖
- * username (UTF-8, the rest)`.
+ * username (UTF-8, the rest)` (version 1), or, since 2026-11-27,
+ * `version(1)=2 ‖ learned_at_ms(8 BE) ‖ seed(32) ‖ owned_keys_root(32) ‖
+ * username`: the root of the account's owned-channels keys lock under the
+ * OLD keys (ADR-0101 section 7 item 8), so a recall takes the owned
+ * channels back. Both are read; version 2 is written when the root is
+ * known.
  */
 
 import type { DeviceCipher } from "./device-cipher";
@@ -44,7 +49,9 @@ const STORE = "records";
 /** The old account identity's Ed25519 seed length. */
 export const RECALL_SEED_LENGTH = 32;
 const PLAINTEXT_VERSION = 1;
+const PLAINTEXT_VERSION_WITH_ROOT = 2;
 const HEADER_LEN = 1 + 8 + RECALL_SEED_LENGTH;
+const ROOT_LEN = 32;
 /** A username is at most 32 characters of `[a-z0-9_]`; a guest has none. */
 const MAX_USERNAME_BYTES = 128;
 
@@ -57,6 +64,10 @@ export interface RecallRecord {
   readonly username: string;
   /** When this device learned of the reset, unix ms. */
   readonly learnedAtMs: number;
+  /** The root of the owned-channels keys lock of the OLD keys
+   *  (`ownedKeysLockRoot` of the old lineage identity); absent or `null`
+   *  when not known (a version-1 record). */
+  readonly ownedKeysRoot?: Uint8Array | null;
 }
 
 /** The record's plaintext. Throws on a seed of the wrong length. */
@@ -69,24 +80,30 @@ export function encodeRecallPlaintext(record: RecallRecord): Uint8Array {
   }
   const name = new TextEncoder().encode(record.username);
   if (name.length > MAX_USERNAME_BYTES) throw new Error("recall record username is too long");
-  const out = new Uint8Array(HEADER_LEN + name.length);
-  out[0] = PLAINTEXT_VERSION;
+  const root = record.ownedKeysRoot ?? null;
+  if (root !== null && root.length !== ROOT_LEN) throw new Error("recall record keys-lock root length");
+  const header = root === null ? HEADER_LEN : HEADER_LEN + ROOT_LEN;
+  const out = new Uint8Array(header + name.length);
+  out[0] = root === null ? PLAINTEXT_VERSION : PLAINTEXT_VERSION_WITH_ROOT;
   new DataView(out.buffer).setBigUint64(1, BigInt(record.learnedAtMs), false);
   out.set(record.oldSeed, 9);
-  out.set(name, HEADER_LEN);
+  if (root !== null) out.set(root, HEADER_LEN);
+  out.set(name, header);
   return out;
 }
 
 /** The record of `accountIdB64` from its plaintext, or `null` when the bytes
  *  are not a record this build reads (never a partial one). */
 export function decodeRecallPlaintext(accountIdB64: string, plain: Uint8Array): RecallRecord | null {
-  if (plain.length < HEADER_LEN || plain.length > HEADER_LEN + MAX_USERNAME_BYTES) return null;
-  if (plain[0] !== PLAINTEXT_VERSION) return null;
+  const withRoot = plain[0] === PLAINTEXT_VERSION_WITH_ROOT;
+  if (plain[0] !== PLAINTEXT_VERSION && !withRoot) return null;
+  const header = withRoot ? HEADER_LEN + ROOT_LEN : HEADER_LEN;
+  if (plain.length < header || plain.length > header + MAX_USERNAME_BYTES) return null;
   const at = new DataView(plain.buffer, plain.byteOffset, plain.byteLength).getBigUint64(1, false);
   if (at > BigInt(Number.MAX_SAFE_INTEGER)) return null;
   let username: string;
   try {
-    username = new TextDecoder("utf-8", { fatal: true }).decode(plain.subarray(HEADER_LEN));
+    username = new TextDecoder("utf-8", { fatal: true }).decode(plain.subarray(header));
   } catch {
     return null;
   }
@@ -95,6 +112,7 @@ export function decodeRecallPlaintext(accountIdB64: string, plain: Uint8Array): 
     oldSeed: plain.slice(9, HEADER_LEN),
     username,
     learnedAtMs: Number(at),
+    ownedKeysRoot: withRoot ? plain.slice(HEADER_LEN, header) : null,
   };
 }
 

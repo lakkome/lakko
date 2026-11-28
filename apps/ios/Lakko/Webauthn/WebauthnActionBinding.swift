@@ -3,6 +3,7 @@
 
 import CryptoKit
 import Foundation
+import LakkoCore
 
 /// WebAuthn action binding (G-13, ADR-0014) — iOS surface.
 ///
@@ -46,6 +47,9 @@ public let actionDomainDeleteAccount = "lakko/action/delete-account/v1"
 /// restore keys": the in-session ceremony that yields one passkey's PRF
 /// output. Kept in lockstep with the web client.
 public let actionDomainPasskeyRestoresKeys = "lakko/action/passkey-restores-keys/v1"
+/// Confirming a key reset with a passkey (ADR-0073, amended 2026-11-26):
+/// `services/auth`'s `ACTION_DOMAIN_RESET_KEYS`, over the account id.
+public let actionDomainResetKeys = "lakko/action/reset-keys/v1"
 
 // MARK: - Wire shapes (mirror server-side `auth/action`)
 
@@ -135,12 +139,35 @@ extension WebauthnClient {
     public func evaluatePrf(
         credentialIdB64: String,
         prfSalt: Data
-    ) async throws -> (credentialId: Data, prfOutput: Data?) {
+    ) async throws -> (credentialId: Data, prfOutput: Data?, sealPrfOutput: Data?) {
         let credentialId = try base64UrlDecode(credentialIdB64)
+        // The same gesture gives the passkey's secret for the reset seal
+        // (ADR-0101 section 10), at a salt of its own.
         let ceremony = try await assertActionCeremony(
             actionHashB64: actionHashForPasskeyRestoresKeys(credentialId: credentialId),
             onlyCredentialId: credentialId,
-            prfSalt: prfSalt
+            prfSalt: prfSalt,
+            secondPrfSalt: resetSealPasskeyPrfSalt()
+        )
+        return (ceremony.asserted.credentialId, ceremony.asserted.prfOutput, ceremony.asserted.secondPrfOutput)
+    }
+
+    /// ADR-0073, amended 2026-11-26 — the passkey as the second factor of a
+    /// key reset: one assertion by any passkey of the signed-in account,
+    /// bound to `SHA-256("lakko/action/reset-keys/v1" ‖ account_id)`. The
+    /// server keeps an action grant that
+    /// `POST /account/keys/reset/factor/passkey` consumes.
+    ///
+    /// The same gesture asks the passkey for its secret at the reset-seal
+    /// salt (ADR-0101 section 10): `prfOutput` is what a passkey that keeps
+    /// the chats signs the reset seal with, `nil` for one that does not (or
+    /// below iOS 18, which has no such API). It never leaves this device.
+    @MainActor
+    public func assertResetKeys(accountId: Data) async throws -> (credentialId: Data, prfOutput: Data?) {
+        let ceremony = try await assertActionCeremony(
+            actionHashB64: actionHashForResetKeys(accountId: accountId),
+            onlyCredentialId: nil,
+            prfSalt: resetSealPasskeyPrfSalt()
         )
         return (ceremony.asserted.credentialId, ceremony.asserted.prfOutput)
     }
@@ -149,7 +176,8 @@ extension WebauthnClient {
     private func assertActionCeremony(
         actionHashB64: String,
         onlyCredentialId: Data?,
-        prfSalt: Data?
+        prfSalt: Data?,
+        secondPrfSalt: Data? = nil
     ) async throws -> (finish: ActionFinishResponse, asserted: WebauthnAssertion.Result) {
         let start: ActionStartResponse = try await postJsonAuthed(
             endpoint: "/auth/action/start",
@@ -174,6 +202,7 @@ extension WebauthnClient {
             challenge: challenge,
             allowedCredentials: allowedCredentials,
             prfSalt: prfSalt,
+            secondPrfSalt: secondPrfSalt,
             presentationAnchor: currentPresentationAnchor()
         )
         let finish: ActionFinishResponse = try await postJsonAuthed(
@@ -222,6 +251,13 @@ public func actionHashForRemoveDevice(signaturePublicKey: Data) -> String {
 /// `delete_account_action_hash`.
 public func actionHashForDeleteAccount(accountId: Data) -> String {
     deriveActionHash(domain: actionDomainDeleteAccount, identifier: accountId)
+}
+
+/// Action hash for confirming a key reset of the account `accountId` with a
+/// passkey (ADR-0073, amended 2026-11-26). Matches `services/auth`'s
+/// `reset_keys_action_hash`.
+public func actionHashForResetKeys(accountId: Data) -> String {
+    deriveActionHash(domain: actionDomainResetKeys, identifier: accountId)
 }
 
 /// Action hash for "let the passkey `credentialId` restore keys": the

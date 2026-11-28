@@ -84,6 +84,10 @@ export interface SignupFinishResponse extends SessionPairWire {
   /** The fresh-auth grant (the password was typed just now). */
   fresh_grant?: string;
   fresh_grant_expires_at_ms?: number;
+  /** ADR-0101 section 7: URL-safe base64 (no pad) of the account's 32-byte
+   *  server half `S` of the owned-channels password lock. Released here and
+   *  against a reset factor grant only. */
+  owned_channels_secret?: string;
 }
 
 // ----------------------------------------------------------------------------
@@ -278,11 +282,32 @@ export type SessionRefreshResponse = SessionPairWire;
 /** `POST /account/keys/reset/start` request body. Bearer. Built exactly as
  *  signup builds its recovery half, from the NEW phrase seed. */
 export interface KeyResetStartRequest {
-  /** The fresh-auth grant (`fresh-auth.ts`). Without a usable one the
-   *  server answers `403 {"error":"fresh-auth-required"}`. */
-  fresh_grant: string;
+  /** ADR-0073, amended 2026-11-26: the reset factor grant (the password and
+   *  one second factor, `seal/reset-factor.ts`). Without a usable one the
+   *  server answers `403 {"error":"reset-factor-required"}`. */
+  reset_grant: string;
   /** base64(RegistrationRequest) from `OpaqueRegister.startRecovery(newSeed)`. */
   recovery_request: string;
+}
+
+/** `POST /account/keys/rotate/start` request body (ADR-0074): the rotation
+ *  keeps the fresh-auth grant. */
+export interface KeyRotateStartRequest {
+  fresh_grant: string;
+  recovery_request: string;
+}
+
+/** The answer of every reset factor route (ADR-0073, amended 2026-11-26). */
+export interface ResetFactorGrantResponse {
+  /** Opaque; sent back as `reset_grant`. */
+  reset_grant: string;
+  reset_grant_expires_at_ms: number;
+}
+
+/** `POST /account/owned-channels-secret` response body. */
+export interface OwnedChannelsSecretResponse {
+  /** URL-safe base64 (no pad) of the 32-byte `S`. */
+  owned_channels_secret: string;
 }
 
 /** `POST /account/keys/reset/start` response body. */
@@ -296,9 +321,9 @@ export interface KeyResetStartResponse {
  *  deletes every passkey, vault, action grant, device grant and device
  *  request of the account, mints the attestation and issues the new pair. */
 export interface KeyResetFinishRequest {
-  /** The same grant the start carried; a successful finish spends every
-   *  grant of the old generation. */
-  fresh_grant: string;
+  /** The same reset factor grant the start carried; a successful finish
+   *  spends every grant of the old generation. */
+  reset_grant: string;
   /** base64(RegistrationUpload) for the new recovery seed. */
   recovery_upload: string;
   /** URL-safe base64 (no pad) of the NEW account identity's 32-byte Ed25519
@@ -322,15 +347,14 @@ export interface KeyResetFinishResponse extends SessionPairWire {
 
 /** `POST /account/keys/rotate/finish` request body (ADR-0074 section 3.4):
  *  the reset's, plus the proof and the devices to revoke. */
-export interface KeyRotateFinishRequest extends KeyResetFinishRequest {
+export interface KeyRotateFinishRequest extends Omit<KeyResetFinishRequest, "reset_grant"> {
+  /** The fresh-auth grant the rotation's start carried. */
+  fresh_grant: string;
   /** URL-safe base64 (no pad) of the 145-byte supersession proof signed by
    *  the OLD account key for the new one. */
   supersession_proof_b64: string;
   /** URL-safe base64 (no pad) device ids, at most 8; may be empty. */
   revoke_device_ids_b64: string[];
-  /** ADR-0075 section 3: the account becomes phrase-protected with this
-   *  rotation ("Save a recovery phrase"). Absent otherwise. */
-  phrase_saved?: true;
 }
 
 /** `POST /auth/session/refresh` with the session-upgrade statement. */
@@ -558,10 +582,10 @@ export interface LoginHandlePutRequest {
   fresh_grant?: string;
   /** The handle the account holds now (base64url, no pad), on a change. */
   previous_handle?: string;
-  /** Re-key the stored recovery email to the new handle. `vault_salt` and
-   *  `sealed_entropy` (standard base64) only when no phrase is saved. Without
-   *  this field a change drops the recovery email. */
-  recovery_email?: { address: string; vault_salt?: string; sealed_entropy?: string };
+  /** Re-key the stored recovery email to the new handle. Without this field
+   *  a change drops the recovery email, and is refused `409 last-factor`
+   *  when the email is the account's last second factor. */
+  recovery_email?: { address: string };
 }
 
 /** `PUT /auth/login-handle` response body. */

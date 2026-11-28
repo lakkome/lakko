@@ -625,6 +625,8 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 // endorsement that could not be made; never a refusal.
                 is FfiException.KeyRotation,
                 is FfiException.SupportersList,
+                is FfiException.ResetSeal,
+                is FfiException.OwnedChannels,
                 -> null
             }
         }

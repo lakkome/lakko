@@ -53,7 +53,9 @@ export type GuardView =
   /** New recovery words (the account keys were changed on this device),
    *  not yet acknowledged. */
   | "save-signup-phrase"
-  /** ADR-0075 (UX 19.1a): the sign-up's "Protect your account" step. */
+  /** ADR-0075 (UX 19.1a, 19.1c): the "Protect your account" step: after
+   *  sign-up, and at every landing of an account with a username and no
+   *  second way in (`protect/protect-step.ts`, `protectStepShown`). */
   | "protect-account"
   /** docs/ux/identity-recovery.md 7.1 — a forgot-password route succeeded
    *  on a device that holds the keys: choose a new password, or "Not now". */
@@ -117,16 +119,20 @@ export function sessionGuardView(
   newPasswordOffered = false,
   protectStepOwed = false,
   guest = false,
+  /** UX 19.1c (item G): the landing still waits for the factor read. */
+  factorsPending = false,
 ): GuardView {
   // Owed new words still come first. Then the guest screen, before the
   // steps of a kept account: a guest that chose to keep its account leaves
   // this branch the moment its marker is cleared, and lands on "Protect
   // your account" (which is marked owed before the marker goes).
   if (kind === "session" && guest && !signupPhrasePending) return "guest";
-  return (
-    sharedView(kind, signupPhrasePending, newPasswordOffered, protectStepOwed) ??
-    (kind === "session" ? "children" : "redirect-login")
-  );
+  const shared = sharedView(kind, signupPhrasePending, newPasswordOffered, protectStepOwed);
+  if (shared !== null) return shared;
+  if (kind !== "session") return "redirect-login";
+  // The app waits for the factor read (at most a few seconds), so the
+  // "Protect your account" step never replaces it a moment after it shows.
+  return factorsPending ? "loading" : "children";
 }
 
 /** The guard around the public auth pages (`<RequireAnonymous>`). */
@@ -250,8 +256,8 @@ export type PhraseSource =
   /** This device's own row: the phrase a fresh identity still owes its
    *  screen (`completeParkFromOwedPhrase`), or a guest's own phrase. */
   | "device"
-  /** Opened from a vault the person never saw the words of: a passkey's,
-   *  or the recovery email's. */
+  /** Opened from a vault the person never saw the words of: a passkey's
+   *  (the recovery email's vault was removed on 2026-11-26). */
   | "vault";
 
 /**

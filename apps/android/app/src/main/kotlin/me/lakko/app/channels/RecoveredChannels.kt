@@ -35,7 +35,30 @@ import me.lakko.app.auth.MarkerStorage
 public data class RecoveredChannel(
     /** The highest subscriber row the service listed at recovery. */
     val throughSeq: Long,
+    /** A private channel retaken with its listed admission seeds: every row
+     *  is judged by its ticket (mark 0), never let in for an unknown type. */
+    val judgedByTickets: Boolean = false,
 )
+
+/** Which subscriber rows stay let in when a channel is retaken from the
+ *  owned-channels list (ADR-0101 section 7 item 8, web `retakenChannel`). */
+public enum class RetakeAdmission {
+    /** A private channel with listed admission seeds: every row is judged
+     *  again by its ticket under those seeds; a row with no valid ticket is
+     *  removed. */
+    TICKETS,
+
+    /** Every row the service lists at the retake stays a reader (a public
+     *  channel, or an entry with nothing to judge a row with). */
+    EVERYONE_LISTED,
+}
+
+/** The rule above, from the list entry alone. */
+public fun retakeAdmission(entry: OwnedEntry): RetakeAdmission = when {
+    entry.readKey != null -> RetakeAdmission.EVERYONE_LISTED
+    entry.admission.isNotEmpty() -> RetakeAdmission.TICKETS
+    else -> RetakeAdmission.EVERYONE_LISTED
+}
 
 /** The admission mark a re-founding keeps: the recovery's mark for a
  *  recovered channel, else 0 (a channel this device simply lost judges every
@@ -69,9 +92,13 @@ public class RecoveredChannelsStore(private val storage: MarkerStorage) {
     }
 
     /** Record one (a later recovery of the same channel raises the mark). */
-    public fun mark(account: String, channelIdHex: String, throughSeq: Long) {
+    public fun mark(account: String, channelIdHex: String, throughSeq: Long, judgedByTickets: Boolean = false) {
         val all = read(account).toMutableMap()
-        all[channelIdHex] = RecoveredChannel(maxOf(throughSeq, all[channelIdHex]?.throughSeq ?: 0L))
+        val held = all[channelIdHex]
+        all[channelIdHex] = RecoveredChannel(
+            maxOf(throughSeq, held?.throughSeq ?: 0L),
+            judgedByTickets = judgedByTickets || held?.judgedByTickets == true,
+        )
         save(account, all)
     }
 

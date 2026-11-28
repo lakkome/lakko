@@ -18,13 +18,19 @@
  */
 import type { MarkerStorage } from "../phrase-gate";
 
+/**
+ * The kinds the server writes. Amended 2026-11-26 (ADR-0075, second
+ * amendment): "account opened by email" is gone with the email vault (a
+ * mailed code no longer opens an account with its keys), and "a recovery
+ * phrase was saved" is no server notice any more: a device learns it from
+ * the account's published protection ({@link phraseSavedElsewhere}). A
+ * stored notice of either kind is dropped like any unknown kind.
+ */
 export const NOTICE_KINDS = [
   "password-changed-by-email",
-  "account-opened-by-email",
   "recovery-email-added",
   "recovery-email-replaced",
   "recovery-email-removed",
-  "recovery-phrase-saved",
 ] as const;
 export type NoticeKind = (typeof NOTICE_KINDS)[number];
 
@@ -219,21 +225,40 @@ export function noticeView(kind: NoticeKind): NoticeView {
         bodyKey: "notice.password_by_email.body",
         dated: true,
       };
-    case "account-opened-by-email":
-      return {
-        titleKey: "notice.opened_by_email.title",
-        bodyKey: "notice.opened_by_email.body",
-        dated: true,
-      };
     case "recovery-email-added":
       return { titleKey: null, bodyKey: "notice.email_added", dated: false };
     case "recovery-email-replaced":
       return { titleKey: null, bodyKey: "notice.email_replaced", dated: false };
     case "recovery-email-removed":
       return { titleKey: null, bodyKey: "notice.email_removed", dated: false };
-    case "recovery-phrase-saved":
-      return { titleKey: null, bodyKey: "notice.phrase_saved", dated: false };
   }
+}
+
+/** The one-line notice "A recovery phrase was saved for your account."
+ *  (UX 19.5), shown from the published protection, not from the server. */
+export const PHRASE_SAVED_NOTICE: NoticeView = {
+  titleKey: null,
+  bodyKey: "notice.phrase_saved",
+  dated: false,
+};
+
+/**
+ * Whether this device tells the person that a recovery phrase was saved for
+ * the account: its published protection lists a phrase now, this device had
+ * looked before and it listed none, and the phrase was not saved here (a
+ * device is not told about its own action; saving here sets the flag at
+ * once, so `flag` is already true). A device that never looked is new and is
+ * told nothing.
+ */
+export function phraseSavedElsewhere(args: {
+  /** This device read the account's protection at least once before. */
+  readonly lookedBefore: boolean;
+  /** The per-device "phrase saved" flag before this read. */
+  readonly flag: boolean;
+  /** What the protection lists now; `null` while unknown. */
+  readonly phraseListed: boolean | null;
+}): boolean {
+  return args.lookedBefore && !args.flag && args.phraseListed === true;
 }
 
 /** What "It was not me" offers, in order (UX 19.6). */

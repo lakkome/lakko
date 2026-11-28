@@ -165,7 +165,7 @@ class SealedAccountStoresTest {
     @Test
     fun `the email route's own-action marker survives an earlier sign-out but not a wipe`() {
         val notices = me.lakko.app.auth.AccountNoticeStore.onDevice(context)
-        val kind = me.lakko.app.auth.AccountNoticeKind.AccountOpenedByEmail
+        val kind = me.lakko.app.auth.AccountNoticeKind.PasswordChangedByEmail
         // Signed out earlier in this process: the marker written before the
         // landing is kept, so the landing does not show the person their own
         // action as a stranger's.
@@ -183,10 +183,14 @@ class SealedAccountStoresTest {
         notices.markOwnBeforeLanding(account, kind, 3_000L)
         assertNull(notices.ownActions(account)[kind])
 
+        // The email route (a new password, never the keys, since 2026-11-26)
+        // opens the account's stores before it marks its own action, so the
+        // ordinary marker is not refused for an account sealed earlier.
         val auth = java.io.File("src/main/kotlin/me/lakko/app/auth/AuthRepository.kt").readText()
         val email = auth.substringAfter("    public suspend fun emailRecoverFinish(").substringBefore("\n    }\n")
-        val preMark = email.indexOf("noticeStore.markOwnBeforeLanding(it, AccountNoticeKind.AccountOpenedByEmail")
-        assertTrue(preMark in 0 until email.indexOf("recover(phrase, newPassword"))
+        val opened = email.indexOf("openStoresFor(accountIdB64)")
+        val marked = email.indexOf("noticeStore.markOwn(accountIdB64, AccountNoticeKind.PasswordChangedByEmail")
+        assertTrue(opened in 0 until marked)
     }
 
     @Test

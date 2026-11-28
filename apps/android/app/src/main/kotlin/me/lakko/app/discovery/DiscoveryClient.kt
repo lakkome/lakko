@@ -1682,6 +1682,12 @@ public class DiscoveryClient(
         /** ADR-0074 section 3.7: the raw 201-byte conversation link of a
          *  rotation's publish; `null` for every other upload. */
         conversationLink: ByteArray? = null,
+        /** ADR-0101 section 10: the account's signed seal announcement, when
+         *  this upload publishes one; `null` keeps the stored one. */
+        resetSeals: ByteArray? = null,
+        /** ADR-0101 section 10: the reset seal of a reset's attested
+         *  publish; `null` for every other upload and for an unsealed reset. */
+        resetSeal: ByteArray? = null,
     ) {
         if (accountId.size != ACCOUNT_ID_LEN) {
             throw DiscoveryClientArgError("accountId must be $ACCOUNT_ID_LEN bytes")
@@ -1717,6 +1723,8 @@ public class DiscoveryClient(
                 // sidecars above (re-encoded from the server's base64url).
                 key_reset_attest = keyResetAttest?.let { base64Encode(it) },
                 conversation_link = conversationLink?.let { base64Encode(it) },
+                reset_seals = resetSeals?.let { base64Encode(it) },
+                reset_seal = resetSeal?.let { base64Encode(it) },
             ),
         )
         if (!resp.ok) {

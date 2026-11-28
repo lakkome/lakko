@@ -44,21 +44,30 @@ public class RecallRecord(
     public val username: String,
     /** When this device learned of the reset (unix ms). */
     public val learnedAtMs: Long,
+    /** ADR-0101 section 7 item 8: the root of the account's OLD keys lock
+     *  (from its lineage identity, read before the wipe), through which a
+     *  recall takes the owned channels back; `null` when it could not be
+     *  read. Secret: it opens the lock. */
+    public val ownedKeysLockRoot: ByteArray? = null,
 ) {
     public val accountIdB64: String get() = base64Encode(accountId)
 
-    /** Overwrite the seed this instance holds. */
+    /** Overwrite the secrets this instance holds. */
     public fun zero() {
         oldAccountSeed.fill(0)
+        ownedKeysLockRoot?.fill(0)
     }
 
     override fun toString(): String = "RecallRecord(<redacted>)"
 }
 
 /** The record's layout: `version(1) | account_id(16) | seed(32) |
- *  learned_at_ms(8 BE) | username_len(2 BE) | username (UTF-8)`. */
+ *  learned_at_ms(8 BE) | username_len(2 BE) | username (UTF-8) |
+ *  root_len(1, 0 or 32) | owned keys lock root`. Version 2 (2026-11-27);
+ *  version 1 is not read (nothing was deployed for users). */
 public object RecallRecordCodec {
-    public const val VERSION: Byte = 1
+    public const val VERSION: Byte = 2
+    public const val ROOT_LEN: Int = 32
     public const val ACCOUNT_ID_LEN: Int = 16
     public const val SEED_LEN: Int = 32
 
@@ -72,30 +81,40 @@ public object RecallRecordCodec {
         require(record.oldAccountSeed.size == SEED_LEN) { "account seed must be $SEED_LEN bytes" }
         val name = record.username.toByteArray(Charsets.UTF_8)
         require(name.size <= MAX_USERNAME_BYTES) { "username too long" }
-        return ByteBuffer.allocate(FIXED_LEN + name.size)
+        val root = record.ownedKeysLockRoot
+        require(root == null || root.size == ROOT_LEN) { "keys lock root must be $ROOT_LEN bytes" }
+        return ByteBuffer.allocate(FIXED_LEN + name.size + 1 + (root?.size ?: 0))
             .put(VERSION)
             .put(record.accountId)
             .put(record.oldAccountSeed)
             .putLong(record.learnedAtMs)
             .putShort(name.size.toShort())
             .put(name)
+            .put((root?.size ?: 0).toByte())
+            .apply { root?.let { put(it) } }
             .array()
     }
 
     /** `null` for anything that is not exactly one record. */
     public fun decode(bytes: ByteArray): RecallRecord? {
-        if (bytes.size < FIXED_LEN || bytes[0] != VERSION) return null
+        if (bytes.size < FIXED_LEN + 1 || bytes[0] != VERSION) return null
         val buf = ByteBuffer.wrap(bytes, 1, bytes.size - 1)
         val accountId = ByteArray(ACCOUNT_ID_LEN).also { buf.get(it) }
         val seed = ByteArray(SEED_LEN).also { buf.get(it) }
         val learnedAtMs = buf.long
         val nameLen = buf.short.toInt() and 0xFFFF
-        if (nameLen > MAX_USERNAME_BYTES || buf.remaining() != nameLen) {
+        if (nameLen > MAX_USERNAME_BYTES || buf.remaining() < nameLen + 1) {
             seed.fill(0)
             return null
         }
         val name = ByteArray(nameLen).also { buf.get(it) }
-        return RecallRecord(accountId, seed, String(name, Charsets.UTF_8), learnedAtMs)
+        val rootLen = buf.get().toInt() and 0xFF
+        if ((rootLen != 0 && rootLen != ROOT_LEN) || buf.remaining() != rootLen) {
+            seed.fill(0)
+            return null
+        }
+        val root = if (rootLen == 0) null else ByteArray(ROOT_LEN).also { buf.get(it) }
+        return RecallRecord(accountId, seed, String(name, Charsets.UTF_8), learnedAtMs, root)
     }
 }
 
@@ -305,11 +324,23 @@ public enum class SupersededWipe {
  *     back;
  *   * the same-generation mismatch -> the full wipe on the person's tap.
  */
-public fun supersededWipeFor(kind: KeyResetSignOut.Kind, holdsAccountKeys: Boolean): SupersededWipe = when (kind) {
+public fun supersededWipeFor(
+    kind: KeyResetSignOut.Kind,
+    holdsAccountKeys: Boolean,
+    /** ADR-0101 section 10 "The account's own devices": the reset is SEALED
+     *  (a seal key the account announced before it signed it): the owner's,
+     *  so the device wipes as for a reset made here, no "Was it you?". */
+    sealed: Boolean = false,
+): SupersededWipe = when (kind) {
     KeyResetSignOut.Kind.Reset ->
-        if (holdsAccountKeys) SupersededWipe.StagedKeepingRecall else SupersededWipe.Full
+        if (holdsAccountKeys && !sealed) SupersededWipe.StagedKeepingRecall else SupersededWipe.Full
     KeyResetSignOut.Kind.Removed, KeyResetSignOut.Kind.Mismatch -> SupersededWipe.Full
 }
+
+/** Only a SEALED verdict makes a reset elsewhere the owner's; unsealed,
+ *  refused and no verdict keep the recall. */
+public fun ownResetIsSealed(verdict: me.lakko.app.contacts.ResetVerdict): Boolean =
+    verdict is me.lakko.app.contacts.ResetVerdict.Sealed
 
 /** A record is used for at most this long after the device learned of the
  *  reset (the server's window is 30 days; the server is the authority, this
