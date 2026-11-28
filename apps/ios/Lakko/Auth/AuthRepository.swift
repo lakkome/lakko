@@ -341,7 +341,19 @@ public final class AuthRepository: ObservableObject {
     /// composition root reads the account's protection and its notices
     /// (``AccountProtectionCenter``). `nil` in a repository nobody wired, so
     /// no request leaves it.
-    var onProtectedSessionLanded: (@MainActor (_ accountIdB64: String) -> Void)?
+    ///
+    /// A session restored at launch lands in ``init`` (``rehydrate(nowMs:)``),
+    /// before the composition root can set this hook: setting it while such
+    /// a session already stands runs it once for that session, so the
+    /// landing rule (UX 19.1c) applies to a relaunch like any other landing.
+    var onProtectedSessionLanded: (@MainActor (_ accountIdB64: String) -> Void)? {
+        didSet {
+            guard oldValue == nil, let hook = onProtectedSessionLanded,
+                  case .session(let account) = state,
+                  guestMarker.state(accountIdB64: account.accountIdB64) == nil else { return }
+            hook(account.accountIdB64)
+        }
+    }
 
     /// A guest account chose a username on this device: the composition
     /// root fetches the username certificate and re-publishes the profile.

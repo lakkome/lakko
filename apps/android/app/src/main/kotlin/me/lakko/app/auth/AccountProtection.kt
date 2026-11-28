@@ -92,6 +92,14 @@ public fun accountFactors(status: RecoveryEmailStatus?, hasPasskey: Boolean?): A
 public fun factorStepRequired(hasUsername: Boolean, factors: AccountFactors?): Boolean =
     hasUsername && factors != null && !factors.any
 
+/**
+ * Whether the landing's step stays up (19.1c): once shown it is latched until
+ * its `Continue`, so adding the first way in marks that row Done instead of
+ * closing the step, and the person may add another before going on.
+ */
+public fun factorStepLatched(open: Boolean, hasUsername: Boolean, factors: AccountFactors?): Boolean =
+    open || factorStepRequired(hasUsername, factors)
+
 /** The landing rule without a flash (alignment 2026-11-27): how long the app
  *  waits for the factor read before it shows the app anyway. Chosen, not
  *  measured. */

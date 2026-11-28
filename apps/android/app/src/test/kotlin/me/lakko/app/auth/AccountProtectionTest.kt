@@ -82,6 +82,14 @@ class AccountProtectionTest {
     }
 
     @Test
+    fun `once shown, adding the first way in does not close the step until Continue`() {
+        assertTrue(factorStepLatched(open = false, hasUsername = true, factors = factors()))
+        assertTrue(factorStepLatched(open = true, hasUsername = true, factors = factors(totp = true)))
+        assertTrue(factorStepLatched(open = true, hasUsername = true, factors = null))
+        assertFalse(factorStepLatched(open = false, hasUsername = true, factors = factors(totp = true)))
+    }
+
+    @Test
     fun `the step's heading says sign-up or a second way to get back in`() {
         assertEquals("protect.title", protectStepTitleKey(afterSignup = true))
         assertEquals("protect.title_required", protectStepTitleKey(afterSignup = false))

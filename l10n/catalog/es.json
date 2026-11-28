@@ -8946,11 +8946,11 @@
       "status": "machine"
     },
     "settings.account.forget_device.body": {
-      "text": "Perderás la cuenta guardada en este navegador. La forma de volver es otro dispositivo, una llave de acceso que restaure claves o la frase de recuperación de 12 palabras que anotaste al registrarte.",
+      "text": "Se borra todo lo que hay en este navegador y el navegador sale de tu cuenta. Para volver a usar esta cuenta aquí necesitarás otro dispositivo, una llave de acceso que restaure claves o tu frase de recuperación si la guardaste. Si no, tu contraseña junto con tu correo de recuperación, una app de autenticación o una llave de acceso pueden restablecer las claves de la cuenta.",
       "status": "machine"
     },
     "settings.account.forget_device.body_device": {
-      "text": "Se borra todo lo que hay en este dispositivo y el dispositivo sale de tu cuenta. Para volver a usar esta cuenta aquí necesitarás otro dispositivo, una llave de acceso que restaure claves o tu frase de recuperación de 12 palabras.",
+      "text": "Se borra todo lo que hay en este dispositivo y el dispositivo sale de tu cuenta. Para volver a usar esta cuenta aquí necesitarás otro dispositivo, una llave de acceso que restaure claves o tu frase de recuperación si la guardaste. Si no, tu contraseña junto con tu correo de recuperación, una app de autenticación o una llave de acceso pueden restablecer las claves de la cuenta.",
       "status": "machine"
     },
     "settings.account.forget_device.confirm": {
@@ -8962,11 +8962,11 @@
       "status": "machine"
     },
     "settings.account.forget_device.sub": {
-      "text": "Quita los datos de tu cuenta de este navegador. Tus mensajes siguen en tus otros dispositivos; para volver aquí necesitarás otro dispositivo, una llave de acceso que restaure claves o tu frase de recuperación.",
+      "text": "Quita los datos de tu cuenta de este navegador. Tus mensajes siguen en tus otros dispositivos; para volver aquí necesitarás otro dispositivo, una llave de acceso que restaure claves, tu frase de recuperación si la guardaste, o tu contraseña con una segunda forma de entrar para restablecer las claves.",
       "status": "machine"
     },
     "settings.account.forget_device.sub_desktop": {
-      "text": "Quita los datos de tu cuenta de este dispositivo. Tus mensajes siguen en tus otros dispositivos; para volver aquí necesitarás otro dispositivo, una llave de acceso que restaure claves o tu frase de recuperación.",
+      "text": "Quita los datos de tu cuenta de este dispositivo. Tus mensajes siguen en tus otros dispositivos; para volver aquí necesitarás otro dispositivo, una llave de acceso que restaure claves, tu frase de recuperación si la guardaste, o tu contraseña con una segunda forma de entrar para restablecer las claves.",
       "status": "machine"
     },
     "settings.account.forget_device.title": {
@@ -9478,7 +9478,7 @@
       "status": "machine"
     },
     "settings.recovery.passkeys.sub": {
-      "text": "Una llave de acceso inicia tu sesión. También puede restaurar tus claves si lo activas.",
+      "text": "Una llave de acceso te permite iniciar sesión y, cuando puede, también restaura tus claves en un dispositivo nuevo.",
       "status": "machine"
     },
     "settings.recovery.phrase.confirm_show": {
@@ -9522,7 +9522,7 @@
       "status": "machine"
     },
     "settings.recovery.phrase.sub": {
-      "text": "Las 12 palabras que anotaste al registrarte restauran tus claves y contactos en un dispositivo nuevo.",
+      "text": "Tu frase de recuperación de 12 palabras restaura tus claves y contactos en un dispositivo nuevo.",
       "status": "machine"
     },
     "settings.recovery.phrase.wrong_password": {

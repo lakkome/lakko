@@ -171,6 +171,37 @@ final class SessionRestoreTests: XCTestCase {
         XCTAssertTrue(persistence.deletedTokens.isEmpty)
     }
 
+    /// UX 19.1c — a session restored at launch lands before the composition
+    /// root wires the protection hook; wiring it then runs the landing once,
+    /// so an account with no second way in gets the step at a relaunch.
+    func testARestoredSessionRunsTheProtectionLandingOnceTheHookIsWired() {
+        let repo = AuthRepository.offline(
+            sessionStore: makeSessionStore(with: marker),
+            authClientFactory: { NameRouteStub.client(NameRouteStub.scope { _, _, _ in (503, "") }) },
+            persistence: FakePersistence(),
+            nowMs: { self.now }
+        )
+        XCTAssertEqual(repo.state, .session(SessionAccount(accountIdB64: accountIdB64, username: "alice")))
+        var landed: [String] = []
+        repo.onProtectedSessionLanded = { landed.append($0) }
+        XCTAssertEqual(landed, [accountIdB64])
+        // Setting it again does not run the landing a second time.
+        repo.onProtectedSessionLanded = { landed.append($0) }
+        XCTAssertEqual(landed, [accountIdB64])
+    }
+
+    func testNoHookRunsWithoutASession() {
+        let repo = AuthRepository.offline(
+            sessionStore: makeSessionStore(with: nil),
+            authClientFactory: { NameRouteStub.client(NameRouteStub.scope { _, _, _ in (503, "") }) },
+            persistence: FakePersistence(),
+            nowMs: { self.now }
+        )
+        var landed: [String] = []
+        repo.onProtectedSessionLanded = { landed.append($0) }
+        XCTAssertTrue(landed.isEmpty)
+    }
+
     func testLaunchWithMarkerAndDeviceKeyButNoTokenIsLoggedOut() {
         // The exact on-device state that used to produce the dead session.
         let persistence = FakePersistence()

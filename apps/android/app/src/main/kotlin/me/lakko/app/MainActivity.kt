@@ -1119,8 +1119,10 @@ private fun AppRoot(
         val hasUsername = sessionAccount.username.isNotBlank()
         // Latched: the step stays until `Continue`, so the person may add a
         // second factor after the first before going on.
-        var factorStepOpen by remember(sessionAccount.accountIdB64) { mutableStateOf(false) }
-        if (me.lakko.app.auth.factorStepRequired(hasUsername, accountFactors)) factorStepOpen = true
+        var factorStepOpen by rememberSaveable(sessionAccount.accountIdB64) { mutableStateOf(false) }
+        if (!factorStepOpen && me.lakko.app.auth.factorStepLatched(false, hasUsername, accountFactors)) {
+            factorStepOpen = true
+        }
         // UX 19.1c without a flash (alignment 2026-11-27): once per landing
         // the app is not shown until the factor read answers, at most 3 s.
         var factorReadWaited by remember(sessionAccount.accountIdB64) { mutableStateOf(false) }

@@ -8946,11 +8946,11 @@
       "status": "machine"
     },
     "settings.account.forget_device.body": {
-      "text": "你将失去此浏览器上缓存的账号。找回的途径是另一台设备、可恢复账号密钥的通行密钥，或你注册时抄写的 12 词恢复短语。",
+      "text": "此浏览器上的所有内容都会被删除，此浏览器也会离开你的账户。要在这里再次使用此账户，你需要另一台设备、一个可恢复密钥的通行密钥，或者你保存过的恢复短语。否则，你的密码加上恢复邮箱、身份验证器应用或通行密钥，可以重置账户密钥。",
       "status": "machine"
     },
     "settings.account.forget_device.body_device": {
-      "text": "此设备上的所有内容都会被移除，此设备也会退出你的账号。要在这里再次使用此账号，你需要另一台设备、可恢复账号密钥的通行密钥，或你的 12 词恢复短语。",
+      "text": "此设备上的所有内容都会被删除，此设备也会离开你的账户。要在这里再次使用此账户，你需要另一台设备、一个可恢复密钥的通行密钥，或者你保存过的恢复短语。否则，你的密码加上恢复邮箱、身份验证器应用或通行密钥，可以重置账户密钥。",
       "status": "machine"
     },
     "settings.account.forget_device.confirm": {
@@ -8962,11 +8962,11 @@
       "status": "machine"
     },
     "settings.account.forget_device.sub": {
-      "text": "从此浏览器中移除你的账号数据。你的消息仍保留在你的其他设备上；要回到这里，你需要另一台设备、可恢复账号密钥的通行密钥，或恢复短语。",
+      "text": "从此浏览器删除你的账户数据。你的消息会保留在你的其他设备上；要回到这里，你需要另一台设备、一个可恢复密钥的通行密钥、你保存过的恢复短语，或者用你的密码加上第二种登录方式来重置密钥。",
       "status": "machine"
     },
     "settings.account.forget_device.sub_desktop": {
-      "text": "从此设备中移除你的账号数据。你的消息仍保留在你的其他设备上；要回到这里，你需要另一台设备、可恢复账号密钥的通行密钥，或恢复短语。",
+      "text": "从此设备删除你的账户数据。你的消息会保留在你的其他设备上；要回到这里，你需要另一台设备、一个可恢复密钥的通行密钥、你保存过的恢复短语，或者用你的密码加上第二种登录方式来重置密钥。",
       "status": "machine"
     },
     "settings.account.forget_device.title": {
@@ -9478,7 +9478,7 @@
       "status": "machine"
     },
     "settings.recovery.passkeys.sub": {
-      "text": "通行密钥可让你登录。如果你开启该功能，它还能恢复你的账号密钥。",
+      "text": "通行密钥用于登录，并在条件允许时在新设备上恢复你的密钥。",
       "status": "machine"
     },
     "settings.recovery.phrase.confirm_show": {
@@ -9522,7 +9522,7 @@
       "status": "machine"
     },
     "settings.recovery.phrase.sub": {
-      "text": "你注册时抄写的 12 个词可以在新设备上恢复你的账号密钥和联系人。",
+      "text": "你的 12 词恢复短语可在新设备上恢复你的密钥和联系人。",
       "status": "machine"
     },
     "settings.recovery.phrase.wrong_password": {

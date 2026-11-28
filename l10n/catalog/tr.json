@@ -8946,11 +8946,11 @@
       "status": "machine"
     },
     "settings.account.forget_device.body": {
-      "text": "Bu tarayıcıdaki önbelleğe alınmış hesabı kaybedersiniz. Geri dönüş yolu başka bir cihaz, hesap anahtarlarını geri yükleyen bir geçiş anahtarı veya kaydolurken not aldığınız 12 kelimelik kurtarma ifadesidir.",
+      "text": "Bu tarayıcıdaki her şey silinir ve tarayıcı hesabınızdan çıkar. Bu hesabı burada yeniden kullanmak için başka bir cihaza, anahtarları geri yükleyen bir geçiş anahtarına ya da kaydettiyseniz kurtarma ifadenize ihtiyacınız olacak. Aksi halde şifreniz ile kurtarma e-postanız, kimlik doğrulama uygulamanız veya bir geçiş anahtarınız birlikte hesap anahtarlarını sıfırlamanızı sağlar.",
       "status": "machine"
     },
     "settings.account.forget_device.body_device": {
-      "text": "Bu cihazdaki her şey kaldırılır ve cihaz hesabınızdan çıkar. Bu hesabı burada yeniden kullanmak için başka bir cihaza, hesap anahtarlarını geri yükleyen bir geçiş anahtarına veya 12 kelimelik kurtarma ifadenize ihtiyacınız olacak.",
+      "text": "Bu cihazdaki her şey silinir ve cihaz hesabınızdan çıkar. Bu hesabı burada yeniden kullanmak için başka bir cihaza, anahtarları geri yükleyen bir geçiş anahtarına ya da kaydettiyseniz kurtarma ifadenize ihtiyacınız olacak. Aksi halde şifreniz ile kurtarma e-postanız, kimlik doğrulama uygulamanız veya bir geçiş anahtarınız birlikte hesap anahtarlarını sıfırlamanızı sağlar.",
       "status": "machine"
     },
     "settings.account.forget_device.confirm": {
@@ -8962,11 +8962,11 @@
       "status": "machine"
     },
     "settings.account.forget_device.sub": {
-      "text": "Hesap verilerinizi bu tarayıcıdan kaldırır. Mesajlarınız diğer cihazlarınızda kalır; buraya geri dönmek için başka bir cihaza, hesap anahtarlarını geri yükleyen bir geçiş anahtarına veya kurtarma ifadenize ihtiyacınız olacak.",
+      "text": "Hesap verilerinizi bu tarayıcıdan kaldırır. Mesajlarınız diğer cihazlarınızda kalır; buraya geri dönmek için başka bir cihaza, anahtarları geri yükleyen bir geçiş anahtarına, kaydettiyseniz kurtarma ifadenize ya da anahtarları sıfırlamak için şifrenize ve ikinci bir giriş yoluna ihtiyacınız olacak.",
       "status": "machine"
     },
     "settings.account.forget_device.sub_desktop": {
-      "text": "Hesap verilerinizi bu cihazdan kaldırır. Mesajlarınız diğer cihazlarınızda kalır; buraya geri dönmek için başka bir cihaza, hesap anahtarlarını geri yükleyen bir geçiş anahtarına veya kurtarma ifadenize ihtiyacınız olacak.",
+      "text": "Hesap verilerinizi bu cihazdan kaldırır. Mesajlarınız diğer cihazlarınızda kalır; buraya geri dönmek için başka bir cihaza, anahtarları geri yükleyen bir geçiş anahtarına, kaydettiyseniz kurtarma ifadenize ya da anahtarları sıfırlamak için şifrenize ve ikinci bir giriş yoluna ihtiyacınız olacak.",
       "status": "machine"
     },
     "settings.account.forget_device.title": {
@@ -9478,7 +9478,7 @@
       "status": "machine"
     },
     "settings.recovery.passkeys.sub": {
-      "text": "Geçiş anahtarı giriş yapmanızı sağlar. Açarsanız hesap anahtarlarınızı da geri yükleyebilir.",
+      "text": "Geçiş anahtarı giriş yapmanızı sağlar ve mümkün olduğunda yeni bir cihazda anahtarlarınızı da geri yükler.",
       "status": "machine"
     },
     "settings.recovery.phrase.confirm_show": {
@@ -9522,7 +9522,7 @@
       "status": "machine"
     },
     "settings.recovery.phrase.sub": {
-      "text": "Kaydolurken not aldığınız 12 kelime, hesap anahtarlarınızı ve kişilerinizi yeni bir cihazda geri yükler.",
+      "text": "12 kelimelik kurtarma ifadeniz, anahtarlarınızı ve kişilerinizi yeni bir cihazda geri yükler.",
       "status": "machine"
     },
     "settings.recovery.phrase.wrong_password": {

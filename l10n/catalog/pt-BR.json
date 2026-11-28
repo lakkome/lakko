@@ -8946,11 +8946,11 @@
       "status": "machine"
     },
     "settings.account.forget_device.body": {
-      "text": "Você vai perder a conta salva neste navegador. O caminho de volta é outro dispositivo, uma chave de acesso que restaura as chaves da conta ou a frase de recuperação de 12 palavras que você anotou no cadastro.",
+      "text": "Tudo neste navegador é removido e o navegador sai da sua conta. Para usar esta conta aqui de novo, você vai precisar de outro dispositivo, de uma chave de acesso que restaure as chaves ou da sua frase de recuperação, se você a salvou. Caso contrário, sua senha junto com seu e-mail de recuperação, um app autenticador ou uma chave de acesso pode redefinir as chaves da conta.",
       "status": "machine"
     },
     "settings.account.forget_device.body_device": {
-      "text": "Tudo neste dispositivo é removido e o dispositivo sai da sua conta. Para usar esta conta aqui novamente, você vai precisar de outro dispositivo, de uma chave de acesso que restaura as chaves da conta ou da sua frase de recuperação de 12 palavras.",
+      "text": "Tudo neste dispositivo é removido e o dispositivo sai da sua conta. Para usar esta conta aqui de novo, você vai precisar de outro dispositivo, de uma chave de acesso que restaure as chaves ou da sua frase de recuperação, se você a salvou. Caso contrário, sua senha junto com seu e-mail de recuperação, um app autenticador ou uma chave de acesso pode redefinir as chaves da conta.",
       "status": "machine"
     },
     "settings.account.forget_device.confirm": {
@@ -8962,11 +8962,11 @@
       "status": "machine"
     },
     "settings.account.forget_device.sub": {
-      "text": "Remove os dados da sua conta deste navegador. Suas mensagens continuam nos seus outros dispositivos; para voltar aqui, você vai precisar de outro dispositivo, de uma chave de acesso que restaura as chaves da conta ou da frase de recuperação.",
+      "text": "Remove os dados da sua conta deste navegador. Suas mensagens continuam nos seus outros dispositivos; para voltar aqui, você vai precisar de outro dispositivo, de uma chave de acesso que restaure as chaves, da sua frase de recuperação, se você a salvou, ou da sua senha com uma segunda forma de entrar para redefinir as chaves.",
       "status": "machine"
     },
     "settings.account.forget_device.sub_desktop": {
-      "text": "Remove os dados da sua conta deste dispositivo. Suas mensagens continuam nos seus outros dispositivos; para voltar aqui, você vai precisar de outro dispositivo, de uma chave de acesso que restaura as chaves da conta ou da frase de recuperação.",
+      "text": "Remove os dados da sua conta deste dispositivo. Suas mensagens continuam nos seus outros dispositivos; para voltar aqui, você vai precisar de outro dispositivo, de uma chave de acesso que restaure as chaves, da sua frase de recuperação, se você a salvou, ou da sua senha com uma segunda forma de entrar para redefinir as chaves.",
       "status": "machine"
     },
     "settings.account.forget_device.title": {
@@ -9478,7 +9478,7 @@
       "status": "machine"
     },
     "settings.recovery.passkeys.sub": {
-      "text": "Uma chave de acesso faz você entrar. Ela também pode restaurar as chaves da sua conta se você ativar isso.",
+      "text": "Uma chave de acesso faz seu login e, quando pode, também restaura suas chaves em um dispositivo novo.",
       "status": "machine"
     },
     "settings.recovery.phrase.confirm_show": {
@@ -9522,7 +9522,7 @@
       "status": "machine"
     },
     "settings.recovery.phrase.sub": {
-      "text": "As 12 palavras que você anotou no cadastro restauram as chaves da sua conta e seus contatos em um novo dispositivo.",
+      "text": "Sua frase de recuperação de 12 palavras restaura suas chaves e contatos em um dispositivo novo.",
       "status": "machine"
     },
     "settings.recovery.phrase.wrong_password": {

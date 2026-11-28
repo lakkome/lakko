@@ -10543,13 +10543,13 @@
       "comment": "Label of the Delete account button while the account is being deleted."
     },
     "settings.account.forget_device.body": {
-      "text": "You'll lose the cached account on this browser. The way back is another device, a passkey that restores keys, or the 12-word recovery phrase you wrote down at signup.",
-      "comment": "Confirmation dialog body: the one fact that decides whether to press the button.",
+      "text": "Everything on this browser is removed and the browser leaves your account. To use this account here again you will need another device, a passkey that restores keys, or your recovery phrase if you saved one. Otherwise, your password together with your recovery email, authenticator app or passkey can reset the account keys.",
+      "comment": "Confirmation dialog body (web): what forgetting removes and every way back on this browser: another device, a passkey that restores keys, the recovery phrase if one was saved, otherwise the password with a second way in, which resets the account keys.",
       "security_critical": true
     },
     "settings.account.forget_device.body_device": {
-      "text": "Everything on this device is removed and the device leaves your account. To use this account here again you will need another device, a passkey that restores keys, or your 12-word recovery phrase.",
-      "comment": "Body of the Forget this device confirmation in the phone apps (the web wording speaks of a browser). Names the three ways back: another device, a passkey that restores keys, the recovery phrase.",
+      "text": "Everything on this device is removed and the device leaves your account. To use this account here again you will need another device, a passkey that restores keys, or your recovery phrase if you saved one. Otherwise, your password together with your recovery email, authenticator app or passkey can reset the account keys.",
+      "comment": "Body of the Forget this device confirmation in the phone and desktop apps (the web wording speaks of a browser). Names every way back: another device, a passkey that restores keys, the recovery phrase if one was saved, otherwise the password with a second way in, which resets the account keys.",
       "security_critical": true
     },
     "settings.account.forget_device.confirm": {
@@ -10563,12 +10563,12 @@
       "security_critical": true
     },
     "settings.account.forget_device.sub": {
-      "text": "Removes your account data from this browser. Your messages stay on your other devices; to come back here you will need another device, a passkey that restores keys, or your recovery phrase.",
+      "text": "Removes your account data from this browser. Your messages stay on your other devices; to come back here you will need another device, a passkey that restores keys, your recovery phrase if you saved one, or your password with a second way in to reset the keys.",
       "comment": "What forgetting this device removes and how to come back.",
       "security_critical": true
     },
     "settings.account.forget_device.sub_desktop": {
-      "text": "Removes your account data from this device. Your messages stay on your other devices; to come back here you will need another device, a passkey that restores keys, or your recovery phrase.",
+      "text": "Removes your account data from this device. Your messages stay on your other devices; to come back here you will need another device, a passkey that restores keys, your recovery phrase if you saved one, or your password with a second way in to reset the keys.",
       "comment": "Desktop app: what forgetting this device removes and how to come back.",
       "security_critical": true
     },
@@ -11182,8 +11182,8 @@
       "security_critical": true
     },
     "settings.recovery.passkeys.sub": {
-      "text": "A passkey logs you in. It can also restore your keys if you turn that on.",
-      "comment": "Recovery page, passkeys row, while the number of passkeys is not known."
+      "text": "A passkey signs you in, and where it can it also restores your keys on a new device.",
+      "comment": "Recovery page, passkeys row, while the number of passkeys is not known. Every passkey restores keys where the passkey can; there is nothing to turn on."
     },
     "settings.recovery.phrase.confirm_show": {
       "text": "Make sure nobody else can see your screen.",
@@ -11231,7 +11231,7 @@
       "security_critical": true
     },
     "settings.recovery.phrase.sub": {
-      "text": "The 12 words you wrote down at signup restore your keys and contacts on a new device.",
+      "text": "Your 12-word recovery phrase restores your keys and contacts on a new device.",
       "comment": "Recovery page: what the recovery phrase restores.",
       "security_critical": true
     },

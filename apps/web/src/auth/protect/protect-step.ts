@@ -88,15 +88,23 @@ export function protectStepTotpWarning(factors: AccountFactors | null, phraseSav
  *     recall, or an account made before the rule. While the factors are not
  *     known the step is NOT shown: it never flashes in front of an account
  *     that turns out to have one.
+ *   - Once the landing rule has put the step up (`latched`), it stays up
+ *     until `Continue`, like the sign-up's: adding the first way in marks
+ *     that row Done and shows the authenticator-only note, and the person
+ *     may add another before going on. Without the latch the step would
+ *     close by itself the moment the factor read saw the new way in.
  */
 export function protectStepShown(args: {
   readonly hasUsername: boolean;
   readonly guest: boolean;
   readonly markerOwed: boolean;
   readonly factors: AccountFactors | null;
+  /** The landing rule already showed the step in this session and
+   *  `Continue` was not pressed since. */
+  readonly latched?: boolean;
 }): boolean {
   if (!args.hasUsername || args.guest) return false;
-  if (args.markerOwed) return true;
+  if (args.markerOwed || args.latched === true) return true;
   return args.factors !== null && !hasSecondFactor(args.factors);
 }
 
@@ -127,7 +135,8 @@ export function landingWaitsForFactors(args: {
   readonly markerOwed: boolean;
   readonly factors: AccountFactors | null;
   readonly waitOver: boolean;
+  readonly latched?: boolean;
 }): boolean {
-  if (!args.hasUsername || args.guest || args.markerOwed) return false;
+  if (!args.hasUsername || args.guest || args.markerOwed || args.latched === true) return false;
   return args.factors === null && !args.waitOver;
 }

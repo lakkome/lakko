@@ -1653,6 +1653,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // Since 2026-11-26 (UX 19.1c) the step is also shown at every session
   // landing to an account with a username and none of the three second ways
   // in; the rule is `protectStepShown` (`protect/protect-step.ts`).
+  // UX 19.1c: the account whose step the landing rule put up, until its
+  // `Continue`. In memory: after a reload an account that now has a way in
+  // is not shown the step again.
+  const [protectLatchedFor, setProtectLatchedFor] = createSignal<string | null>(null);
   const protectStepOwed = (): boolean => {
     protectVersion();
     const s = state();
@@ -1662,8 +1666,20 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       guest: guestAccountState(plainStorage(), s.account.accountId) !== null,
       markerOwed: isProtectStepOwed(plainStorage(), s.account.accountId),
       factors: accountFactors(s.account.accountId),
+      latched: protectLatchedFor() === s.account.accountId,
     });
   };
+  // Latch the step the moment it is shown, so adding the first way in on it
+  // does not close it by itself (it waits for `Continue`, like sign-up's).
+  createEffect(() => {
+    const s = state();
+    if (s.kind !== "session") {
+      if (protectLatchedFor() !== null) setProtectLatchedFor(null);
+      return;
+    }
+    const id = s.account.accountId;
+    if (protectLatchedFor() !== id && protectStepOwed()) setProtectLatchedFor(id);
+  });
   // UX 19.1c (alignment item G): the landing whose factor read is over
   // (answered, failed, or past LANDING_FACTORS_WAIT_MS); keyed like
   // `sealLanding` below.
@@ -1677,6 +1693,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       guest: guestAccountState(plainStorage(), s.account.accountId) !== null,
       markerOwed: isProtectStepOwed(plainStorage(), s.account.accountId),
       factors: accountFactors(s.account.accountId),
+      latched: protectLatchedFor() === s.account.accountId,
       waitOver: factorWaitOverFor() === `${s.account.accountId}:${s.account.username.trim().length > 0 ? "named" : "unnamed"}`,
     });
   };
@@ -7351,6 +7368,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // needs one of the three. Unknown factors keep the step up.
       if (!protectStepCanContinue(accountFactors(s.account.accountId))) return;
       clearProtectStepOwed(plainStorage(), s.account.accountId);
+      setProtectLatchedFor(null);
       setProtectVersion((v) => v + 1);
     },
     async landEmailPasswordRecovery(username, accountId, session, whenOpened, exportKey) {

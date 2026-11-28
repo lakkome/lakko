@@ -127,6 +127,23 @@ describe("the landing rule (UX 19.1c)", () => {
     expect(protectStepShown({ ...base, markerOwed: true, factors: factors({ email: true }) })).toBe(true);
   });
 
+  it("once the landing put it up, adding the first way in does not close it: it waits for Continue", () => {
+    expect(protectStepShown({ ...base, factors: factors({ totp: true }), latched: true })).toBe(true);
+    expect(protectStepShown({ ...base, factors: factors({ email: true, passkeys: 2 }), latched: true })).toBe(true);
+    expect(protectStepShown({ ...base, factors: factors({ totp: true }), latched: false })).toBe(false);
+    expect(protectStepShown({ hasUsername: true, guest: true, markerOwed: false, factors: factors(), latched: true })).toBe(false);
+  });
+
+  it("the auth context latches the step when it is shown and lets it go only at Continue", () => {
+    const ctx = read("../AuthContext.tsx");
+    const owed = ctx.slice(ctx.indexOf("const protectStepOwed = (): boolean => {"));
+    expect(owed.slice(0, owed.indexOf("\n  };")).includes("latched: protectLatchedFor() === s.account.accountId")).toBe(true);
+    expect(ctx.includes("if (protectLatchedFor() !== id && protectStepOwed()) setProtectLatchedFor(id);")).toBe(true);
+    const finish = ctx.slice(ctx.indexOf("    finishProtectStep() {"));
+    const body = finish.slice(0, finish.indexOf("\n    },"));
+    expect(body.indexOf("setProtectLatchedFor(null)")).toBeGreaterThan(body.indexOf("protectStepCanContinue("));
+  });
+
   it("a guest account, and an account without a username, never see it", () => {
     expect(protectStepShown({ hasUsername: true, guest: true, markerOwed: true, factors: factors() })).toBe(false);
     expect(protectStepShown({ hasUsername: false, guest: false, markerOwed: true, factors: factors() })).toBe(false);
@@ -298,5 +315,6 @@ describe("the landing waits for the factor read (UX 19.1c, item G)", () => {
     expect(landingWaitsForFactors({ ...base, hasUsername: false })).toBe(false);
     expect(landingWaitsForFactors({ ...base, guest: true })).toBe(false);
     expect(landingWaitsForFactors({ ...base, markerOwed: true })).toBe(false);
+    expect(landingWaitsForFactors({ ...base, latched: true })).toBe(false);
   });
 });

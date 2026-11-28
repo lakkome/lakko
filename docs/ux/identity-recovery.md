@@ -630,9 +630,9 @@ step is done.
 Recovery
 
 Brings back your chats on a new device
-  Recovery phrase     The 12 words you wrote down at signup
-                      restore your keys and contacts on a new
-                      device. Saved on this device.
+  Recovery phrase     Your 12-word recovery phrase restores your
+                      keys and contacts on a new device. Saved
+                      on this device.
                                          [ Show recovery phrase ]
   Passkeys            2 passkeys. 1 restores keys.     [ Manage ]
   Other devices                                        [ Manage ]
@@ -759,9 +759,12 @@ Copy still to be changed in the catalog (not done by this spec):
 - `restore_identity.lede_no_words`, `settings.recovery.lede`,
   `settings.recovery.section.{access,identity}` look unused by the new
   screens; whether they can be retired was not checked.
-- `settings.account.forget_device.body_device` and `.sub` name "your
-  recovery phrase or another signed-in device" and leave out a passkey that
-  restores keys.
+- ~~`settings.account.forget_device.body_device` and `.sub` leave out a
+  passkey that restores keys.~~ Done 2026-11-28: the four forget-device lines
+  (web, desktop, phones) name another device, a passkey that restores keys,
+  the recovery phrase if one was saved, and otherwise the password with a
+  second way in, which resets the account keys; `settings.recovery.passkeys.sub`
+  no longer speaks of turning restoring on.
 
 ## 12. Data the UI needs
 

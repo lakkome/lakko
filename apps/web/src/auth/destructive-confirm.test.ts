@@ -68,10 +68,15 @@ describe("the forget-device confirmation", () => {
     // pinned as a literal rather than merely referenced. ADR-0072: the phrase
     // is no longer the only way back; another device and a passkey that
     // restores keys come first.
+    // Since 2026-11-28 the phrase is optional (no longer shown at sign-up),
+    // so it is named "if you saved one", and the last way back is named too:
+    // the password with a second way in resets the account keys.
     expect(forgetDeviceConfirmation().body).toBe(
-      "You'll lose the cached account on this browser. The way back is another " +
-        "device, a passkey that restores keys, or the 12-word recovery phrase " +
-        "you wrote down at signup.",
+      "Everything on this browser is removed and the browser leaves your account. " +
+        "To use this account here again you will need another device, a passkey " +
+        "that restores keys, or your recovery phrase if you saved one. Otherwise, " +
+        "your password together with your recovery email, authenticator app or " +
+        "passkey can reset the account keys.",
     );
   });
 });
